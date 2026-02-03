@@ -4,11 +4,13 @@ import argparse
 import csv
 import functools
 import json
+import logging
 import operator
 import os
 import random
 import uuid
 import warnings
+from datetime import datetime
 
 import faiss
 import numpy as np
@@ -31,9 +33,42 @@ import dci
 import utils
 from encoders import TextEncoder2D
 from infinite_iterator import InfiniteIterator
-from losses import infonce_loss
+from losses import infonce_loss, BaurLoss
+import vae
 
 device_ids = [0]
+
+
+def setup_logging(save_dir, log_level=logging.INFO):
+    """Setup logging to both console and file."""
+    # Create logger
+    logger = logging.getLogger('multiview_crl')
+    logger.setLevel(log_level)
+    logger.handlers = []  # Clear existing handlers
+    
+    # Create formatters
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_formatter = logging.Formatter('%(levelname)-8s | %(message)s')
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler (if save_dir exists)
+    if save_dir and os.path.exists(save_dir):
+        log_file = os.path.join(save_dir, f'training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(detailed_formatter)
+        logger.addHandler(file_handler)
+        logger.info(f"Logging to file: {log_file}")
+    
+    return logger
 
 
 # ---------------------------- parser & args --------------------------
@@ -46,13 +81,12 @@ def parse_args():
         argparse.Namespace: Parsed arguments.
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataroot", type=str, required=True)
+    parser.add_argument("--dataroot", type=str, default='/data/natalia/ADNI_registered/')
     parser.add_argument(
         "--dataset_name",
         type=str,
-        required=True,
-        default="multimpdal3di",
-        choices=["mpi3d", "independent3di", "causal3di", "multimodal3di"],
+        default="independent3di",
+        choices=["mpi3d", "independent3di", "causal3di", "multimodal3di", "adni", "custom"],
     )
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default="0")
@@ -82,7 +116,7 @@ def parse_args():
         choices=["ground_truth", "gumbel_softmax", "concat", "soft"],
     )
 
-    parser.add_argument("--n-views", default=3, type=int)
+    parser.add_argument("--n-views", default=2, type=int)
     parser.add_argument(
         "--change-lists", default=[[4, 5, 6, 8, 9, 10]]
     )  # list of latent indices we want to perturb in the augmented views
@@ -104,15 +138,21 @@ def update_args(args):
     Returns:
         argparse.Namespace: The updated arguments.
     """
+    logger = logging.getLogger('multiview_crl')
+    logger.info(f"Configuring dataset: {args.dataset_name}")
+    
     if args.dataset_name == "independent3di":
         args.DATASETCLASS = datasets.Indepdenent3DIdent
         setattr(args, "modalities", ["image"])
+        logger.info("  -> Using Independent3DIdent dataset (image only)")
     elif args.dataset_name == "causal3di":
         args.DATASETCLASS = datasets.Causal3DIdent
         setattr(args, "modalities", ["image"])
+        logger.info("  -> Using Causal3DIdent dataset (image only)")
     elif args.dataset_name == "multimodal3di":
         args.DATASETCLASS = datasets.Multimodal3DIdent
         setattr(args, "modalities", ["image", "text"])
+        logger.info("  -> Using Multimodal3DIdent dataset (image + text)")
     elif args.dataset_name == "mpi3d":
         args.DATASETCLASS = datasets.MPI3D
         setattr(args, "modalities", ["image"])
@@ -122,12 +162,21 @@ def update_args(args):
         setattr(args, "subsets", [(0, 1)])
         setattr(args, "change_lists", [])
         setattr(args, "collate_random_pair", True)
+    elif args.dataset_name == "custom":
+        args.DATASETCLASS = datasets.MyCustomDataset
+        setattr(args, "modalities", ["image"])
+        setattr(args, "n_views", 2)
+        setattr(args, "subsets", [(0, 1)])
+        logger.info("  -> Using custom dataset (image only, 2 views)")
     else:
         raise f"{args.dataset_name=} not supported."
 
     if len(args.subsets) == 1 or args.n_views == 2:  # Train content encoders
         setattr(args, "subsets", [tuple(range(args.n_views))])
         setattr(args, "content_indices", [list(range(args.encoding_size))])
+        logger.info(f"  -> Training content encoders with {args.n_views} views")
+        logger.info(f"  -> Subsets: {args.subsets}")
+        logger.info(f"  -> Content indices: {args.content_indices}")
     else:
         # Train view-specific encoders
         if not hasattr(args, "subsets"):
@@ -205,7 +254,7 @@ def compute_gt_idx(args):
         raise f"No ground truth content computed for {args.dataset_name=} yet!"
 
 
-def train_step(data, fs: List[Callable], loss_func, optimizer, params, args):
+def train_step(data, encoders, decoders, loss_func, optimizer, params, args):
     """
     Perform a single training step.
 
@@ -229,7 +278,7 @@ def train_step(data, fs: List[Callable], loss_func, optimizer, params, args):
     n_views = int(0)
     for m_midx, m in enumerate(args.modalities):
         samples = data[m]
-        hz_m = fs[m_midx](torch.concat(samples, 0))
+        hz_m = encoders[m_midx](torch.concat(samples, 0))
         hz += [hz_m]
         n_views += len(samples)
 
@@ -238,7 +287,16 @@ def train_step(data, fs: List[Callable], loss_func, optimizer, params, args):
         0,
     )
 
-    avg_logits = hz.mean(0)[None]
+    # Flatten encoder output for contrastive loss and decoder
+    hz_flat = hz.view(hz.size(0), -1)  # (batch, 512)
+
+    # decode the image
+    decoded_images = decoders[0](hz_flat)
+    ground_truth_images = torch.concat(data["image"], 0)
+
+    recon_loss = BaurLoss()(decoded_images, ground_truth_images)
+
+    avg_logits = hz_flat.mean(0)[None]
     if "content_indices" not in data:
         data["content_indices"] = args.content_indices
     content_size = [len(content) for content in data["content_indices"]]  # (batch_size, )
@@ -262,7 +320,8 @@ def train_step(data, fs: List[Callable], loss_func, optimizer, params, args):
             c_ind = torch.where(c_mask)[-1].tolist()
             estimated_content_indices += [c_ind]
 
-    loss_value = loss_func(hz.reshape(n_views, -1, hz.shape[-1]), estimated_content_indices, args.subsets)
+    loss_value = loss_func(hz_flat.reshape(n_views, -1, hz_flat.shape[-1]), estimated_content_indices, args.subsets)
+    loss_value += recon_loss
 
     # backprop
     if optimizer is not None:
@@ -373,6 +432,23 @@ def main(args: argparse.Namespace):
     args.save_dir = os.path.join(args.model_dir, args.model_id)
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
+    
+    # Setup logging
+    logger = setup_logging(args.save_dir)
+    logger.info("="*60)
+    logger.info("MULTIVIEW CONTRASTIVE REPRESENTATION LEARNING")
+    logger.info("="*60)
+    logger.info(f"Run started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Mode: {'EVALUATION' if args.evaluate else 'TRAINING'}")
+    logger.info("")
+    
+    # Log paths
+    logger.info("[PATHS]")
+    logger.info(f"  Data root:     {args.dataroot}")
+    logger.info(f"  Data path:     {args.datapath}")
+    logger.info(f"  Model dir:     {args.model_dir}")
+    logger.info(f"  Save dir:      {args.save_dir}")
+    logger.info(f"  Model ID:      {args.model_id}")
 
     # optionally, reuse existing arguments from settings.json (only for evaluation)
     if args.evaluate and args.load_args:
@@ -384,7 +460,23 @@ def main(args: argparse.Namespace):
 
     args = update_args(args)
 
-    # print args
+    # Log configuration
+    logger.info("")
+    logger.info("[CONFIGURATION]")
+    logger.info(f"  Dataset:       {args.dataset_name}")
+    logger.info(f"  Modalities:    {args.modalities}")
+    logger.info(f"  Num views:     {args.n_views}")
+    logger.info(f"  Encoding size: {args.encoding_size}")
+    logger.info(f"  Hidden size:   {args.hidden_size}")
+    logger.info(f"  Batch size:    {args.batch_size}")
+    logger.info(f"  Learning rate: {args.lr}")
+    logger.info(f"  Temperature:   {args.tau}")
+    logger.info(f"  Train steps:   {args.train_steps}")
+    logger.info(f"  Selection:     {args.selection}")
+    logger.info(f"  Change lists:  {args.change_lists}")
+    logger.info(f"  Subsets:       {args.subsets}")
+    
+    # print args (keep original for backwards compatibility)
     print("Arguments:")
     for k, v in vars(args).items():
         print(f"\t{k}: {v}")
@@ -394,20 +486,33 @@ def main(args: argparse.Namespace):
         np.random.seed(args.seed)
         random.seed(args.seed)
         torch.manual_seed(args.seed)
+        logger.info(f"")
+        logger.info(f"[RANDOM SEED]")
+        logger.info(f"  Seed set to: {args.seed}")
 
     # save args to disk (only for training)
     if not args.evaluate:
         settings_dict = args.__dict__.copy()
         settings_dict.pop("DATASETCLASS")
+        settings_path = os.path.join(args.save_dir, "settings.json")
         # writing to file
-        with open(os.path.join(args.save_dir, "settings.json"), "w") as f:
+        with open(settings_path, "w") as f:
             json.dump(settings_dict, f, indent=4)
+        logger.info(f"")
+        logger.info(f"[SETTINGS SAVED]")
+        logger.info(f"  Settings file: {settings_path}")
 
     # set device
+    logger.info("")
+    logger.info("[DEVICE CONFIGURATION]")
     if torch.cuda.is_available() and not args.no_cuda:
         device = f"cuda:{device_ids[0]}"
+        logger.info(f"  Using GPU: {device}")
+        logger.info(f"  GPU Name: {torch.cuda.get_device_name(device_ids[0])}")
+        logger.info(f"  GPU Memory: {torch.cuda.get_device_properties(device_ids[0]).total_memory / 1e9:.2f} GB")
     else:
         device = "cpu"
+        logger.warning("  Using CPU (CUDA not available or --no-cuda was set)")
         warnings.warn("cuda is not available or --no-cuda was set.")
 
     # define similarity metric and loss function
@@ -444,22 +549,31 @@ def main(args: argparse.Namespace):
         "num_workers": args.workers,
         "pin_memory": True,
     }
+    logger.info("")
+    logger.info("[LOADING DATASETS]")
+    logger.info(f"  Loading training dataset from: {args.datapath}")
+    
     train_dataset = args.DATASETCLASS(
         data_dir=args.datapath,
         mode="train",
         change_lists=args.change_lists,
         **dataset_kwargs,
     )
+    logger.info(f"  Training dataset loaded: {len(train_dataset)} samples")
+    
     if args.dataset_name == "multimodal3di":
         dataset_kwargs["vocab_filepath"] = train_dataset.vocab_filepath
+        logger.info(f"  Vocabulary loaded from: {train_dataset.vocab_filepath}")
     if args.dataset_name in ["mpi3d"]:
         dataset_kwargs["collate_random_pair"] = True
         train_dataset.collate_random_pair = True
         if args.collate_random_pair:
             dataloader_kwargs["collate_fn"] = train_dataset.__collate_fn__random_pair__
+            logger.info("  Using random pair collation for MPI3D")
 
     # define datasets and dataloaders
     if args.evaluate:
+        logger.info(f"  Loading validation dataset...")
         val_dataset = args.DATASETCLASS(
             data_dir=args.datapath,
             mode="val",
@@ -475,19 +589,36 @@ def main(args: argparse.Namespace):
     else:
         train_loader = DataLoader(train_dataset, **dataloader_kwargs)
         train_iterator = InfiniteIterator(train_loader)
-
+    print(f'Train dataset shape: {train_dataset.data_shape if hasattr(train_dataset, "data_shape") else "N/A"}')
+    print(f"Train dataset size: {len(train_dataset)} samples.")
+    
+    # Log dataloader config
+    logger.info("")
+    logger.info("[DATALOADER CONFIGURATION]")
+    logger.info(f"  Batch size:    {dataloader_kwargs['batch_size']}")
+    logger.info(f"  Num workers:   {dataloader_kwargs['num_workers']}")
+    logger.info(f"  Shuffle:       {dataloader_kwargs['shuffle']}")
+    logger.info(f"  Drop last:     {dataloader_kwargs['drop_last']}")
+    
     # define image encoder
-    encoder_img = torch.nn.Sequential(
-        resnet18(num_classes=args.hidden_size),
-        torch.nn.LeakyReLU(),
-        torch.nn.Linear(args.hidden_size, args.encoding_size),
-    )
+    logger.info("")
+    logger.info("[MODEL ARCHITECTURE]")
+    logger.info("  Building image encoder (VAE Encoder)...")
+    # encoder_img = torch.nn.Sequential(
+    #     resnet18(num_classes=args.hidden_size),
+    #     torch.nn.LeakyReLU(),
+    #     torch.nn.Linear(args.hidden_size, args.encoding_size),
+    # )
+    encoder_img = vae.Encoder()
     encoder_img = torch.nn.DataParallel(encoder_img, device_ids=device_ids)
     encoder_img.to(device)
+    num_params_encoder = sum(p.numel() for p in encoder_img.parameters())
+    logger.info(f"    Encoder parameters: {num_params_encoder:,}")
 
     encoders = [encoder_img]
 
     if "text" in args.modalities:
+        logger.info("  Building text encoder...")
         # define text encoder
         sequence_length = train_dataset.max_sequence_length
         encoder_txt = TextEncoder2D(
@@ -499,29 +630,63 @@ def main(args: argparse.Namespace):
         encoder_txt.to(device)
         encoders += [encoder_txt]
 
+    # Decoder takes the flattened encoder output (512) as latent_dim
+    logger.info("  Building decoder (VAE Decoder)...")
+    decoder = vae.Decoder(latent_dim=512)
+    decoder = torch.nn.DataParallel(decoder, device_ids=device_ids)
+    decoder.to(device)
+    decoders = [decoder]
+    num_params_decoder = sum(p.numel() for p in decoder.parameters())
+    logger.info(f"    Decoder parameters: {num_params_decoder:,}")
+    
+    total_params = sum(sum(p.numel() for p in m.parameters()) for m in encoders + decoders)
+    logger.info(f"  Total trainable parameters: {total_params:,}")
+
     # for evaluation, always load saved encoders
     if args.evaluate:
+        logger.info("")
+        logger.info("[LOADING PRETRAINED MODELS]")
         for m_idx, m in enumerate(args.modalities):
             path = os.path.join(args.save_dir, f"encoder_{m}.pt")
+            logger.info(f"  Loading encoder_{m} from: {path}")
             encoders[m_idx].load_state_dict(torch.load(path, map_location=device))
+        logger.info("  All models loaded successfully!")
 
-    # define the optimizer
+    # define the optimizer (include both encoder and decoder parameters)
     params = []
     for f in encoders:
         params += list(f.parameters())
+    for d in decoders:
+        params += list(d.parameters())
     optimizer = torch.optim.Adam(params, lr=args.lr)
+    
+    logger.info("")
+    logger.info("[OPTIMIZER]")
+    logger.info(f"  Optimizer: Adam")
+    logger.info(f"  Learning rate: {args.lr}")
+    logger.info(f"  Total parameters to optimize: {sum(p.numel() for p in params):,}")
 
     # training
     # --------
     file_name = os.path.join(args.save_dir, "Training.csv")  # record the training loss
     if not args.evaluate:
+        logger.info("")
+        logger.info("="*60)
+        logger.info("STARTING TRAINING")
+        logger.info("="*60)
+        logger.info(f"  Training CSV log: {file_name}")
+        logger.info(f"  Total steps: {args.train_steps}")
+        logger.info(f"  Log interval: every {args.log_steps} steps")
+        logger.info(f"  Checkpoint interval: every {args.checkpoint_steps} steps")
+        logger.info("")
+        
         # training loop
         step = 1
         loss_values = []  # list to keep track of loss values
         while step <= args.train_steps:
             # training step
             data = next(train_iterator)  # contains images, texts, and labels
-            loss_value, _ = train_step(data, encoders, loss_func, optimizer, params, args=args)
+            loss_value, _ = train_step(data, encoders, decoders, loss_func, optimizer, params, args=args)
             loss_values.append(loss_value)
 
             # print average loss value
@@ -545,22 +710,43 @@ def main(args: argparse.Namespace):
             # save models and intermediate checkpoints
             if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
                 for m_idx, m in enumerate(args.modalities):
+                    checkpoint_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
                     torch.save(
                         encoders[m_idx].state_dict(),
-                        os.path.join(args.save_dir, f"encoder_{m}.pt"),
+                        checkpoint_path,
                     )
+                logger.info(f"[CHECKPOINT] Step {step}: Saved encoder to {args.save_dir}")
 
                 if args.save_all_checkpoints:
+                    versioned_path = os.path.join(args.save_dir, f"encoder_{m}_%d.pt" % step)
                     torch.save(
                         encoders[m_idx].state_dict(),
-                        os.path.join(args.save_dir, f"encoder_{m}_%d.pt" % step),
+                        versioned_path,
                     )
+                    logger.info(f"[CHECKPOINT] Step {step}: Saved versioned checkpoint to {versioned_path}")
             step += 1
+        
+        logger.info("")
+        logger.info("="*60)
+        logger.info("TRAINING COMPLETE")
+        logger.info("="*60)
+        logger.info(f"  Final loss: {loss_values[-1]:.4f}")
+        logger.info(f"  Average loss (last {args.log_steps} steps): {np.mean(loss_values[-args.log_steps:]):.4f}")
+        logger.info(f"  Models saved to: {args.save_dir}")
 
     # evaluation
     # ----------
     if args.evaluate:
+        logger.info("")
+        logger.info("="*60)
+        logger.info("STARTING EVALUATION")
+        logger.info("="*60)
+        logger.info(f"  Validation samples: {args.val_size}")
+        logger.info(f"  Test samples: {args.test_size}")
+        logger.info("")
+        
         # collect encodings and labels from the validation and test data
+        logger.info("[EVALUATION] Collecting validation data encodings...")
         val_dict = get_data(
             val_dataset,
             encoders,
@@ -569,6 +755,7 @@ def main(args: argparse.Namespace):
             args=args,
             num_samples=args.val_size,
         )
+        logger.info("[EVALUATION] Collecting test data encodings...")
         test_dict = get_data(
             test_dataset,
             encoders,
@@ -579,6 +766,10 @@ def main(args: argparse.Namespace):
         )
 
         # print average loss values
+        logger.info("")
+        logger.info("[EVALUATION RESULTS]")
+        logger.info(f"  Validation Loss: {np.mean(val_dict['loss_values']):.4f}")
+        logger.info(f"  Test Loss: {np.mean(test_dict['loss_values']):.4f}")
         print(f"<Val Loss>: {np.mean(val_dict['loss_values']):.4f}")
         print(f"<Test Loss>: {np.mean(test_dict['loss_values']):.4f}")
 
@@ -668,7 +859,14 @@ def main(args: argparse.Namespace):
             "acc_mlp",
         ]
         df_results = pd.DataFrame(results, columns=columns)
-        df_results.to_csv(os.path.join(args.save_dir, "results.csv"))
+        results_path = os.path.join(args.save_dir, "results.csv")
+        df_results.to_csv(results_path)
+        
+        logger.info("")
+        logger.info("[EVALUATION COMPLETE]")
+        logger.info(f"  Results saved to: {results_path}")
+        logger.info("")
+        logger.info("Results summary:")
         print(df_results.to_string())
 
 

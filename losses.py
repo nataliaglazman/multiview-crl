@@ -5,6 +5,12 @@ from abc import ABC, abstractmethod
 import numpy as np
 import torch
 
+from torch import cat
+from torch import tensor
+from torch import reshape
+from torch.nn import PairwiseDistance
+
+
 
 # for numerical experiment
 class CLLoss(ABC):
@@ -280,3 +286,104 @@ def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, project
                 targets = torch.arange(2 * d, dtype=torch.long, device=raw_scores.device)
                 total_loss_value += criterion(raw_scores, targets)
     return total_loss_value
+
+
+
+class BaurLoss(object):
+    def __init__(self, lambda_reconstruction=1):
+        super(BaurLoss).__init__()
+
+        self.lambda_reconstruction = lambda_reconstruction
+        self.lambda_gdl = 0
+
+        self.l1_loss = lambda x, y: PairwiseDistance(p=1)(
+            x.view(x.shape[0], -1), y.view(y.shape[0], -1)
+        ).sum()
+        self.l2_loss = lambda x, y: PairwiseDistance(p=2)(
+            x.view(x.shape[0], -1), y.view(y.shape[0], -1)
+        ).sum()
+
+    def __call__(self, originals, reconstructions):
+
+        summaries = {}
+
+        loss_total = None
+
+        l1_reconstruction = (
+            self.l1_loss(originals, reconstructions) * self.lambda_reconstruction
+        )
+        l2_reconstruction = (
+            self.l2_loss(originals, reconstructions) * self.lambda_reconstruction
+        )
+
+        summaries[("summaries", "scalar", "L1-Reconstruction-Loss")] = l1_reconstruction.item()
+        summaries[("summaries", "scalar", "L2-Reconstruction-Loss")] = l2_reconstruction.item()
+        summaries[
+            ("summaries", "scalar", "Lambda-Reconstruction")
+        ] = self.lambda_reconstruction
+
+        originals_gradients = self.__image_gradients(originals)
+        reconstructions_gradients = self.__image_gradients(reconstructions)
+
+        l1_gdl = (
+            self.l1_loss(originals_gradients[0], reconstructions_gradients[0])
+            + self.l1_loss(originals_gradients[1], reconstructions_gradients[1])
+            + self.l1_loss(originals_gradients[2], reconstructions_gradients[2])
+        ) * self.lambda_gdl
+
+        l2_gdl = (
+            self.l2_loss(originals_gradients[0], reconstructions_gradients[0])
+            + self.l2_loss(originals_gradients[1], reconstructions_gradients[1])
+            + self.l2_loss(originals_gradients[2], reconstructions_gradients[2])
+        ) * self.lambda_gdl
+
+        summaries[("summaries", "scalar", "L1-Image_Gradient-Loss")] = l1_gdl.item()
+        summaries[("summaries", "scalar", "L2-Image_Gradient-Loss")] = l2_gdl.item()
+        summaries[("summaries", "scalar", "Lambda-Image_Gradient")] = self.lambda_gdl
+
+        loss_total += l1_reconstruction + l2_reconstruction + l1_gdl + l2_gdl
+
+        summaries[("summaries", "scalar", "Total_Loss")] = loss_total.item()
+
+        return loss_total, summaries
+
+    def set_lambda_reconstruction(self, lambda_reconstruction):
+        self.lambda_reconstruction = lambda_reconstruction
+        return self.lambda_reconstruction
+
+    def set_lambda_gdl(self, lambda_gdl):
+        self.lambda_gdl = lambda_gdl
+        return self.lambda_gdl
+
+    @staticmethod
+    def __image_gradients(image):
+        input_shape = image.shape
+        batch_size, features, depth, height, width = input_shape
+
+        dz = image[:, :, 1:, :, :] - image[:, :, :-1, :, :]
+        dy = image[:, :, :, 1:, :] - image[:, :, :, :-1, :]
+        dx = image[:, :, :, :, 1:] - image[:, :, :, :, :-1]
+
+        dzz = tensor(()).new_zeros(
+            (batch_size, features, 1, height, width),
+            device=image.device,
+            dtype=dz.dtype,
+        )
+        dz = cat([dz, dzz], 2)
+        dz = reshape(dz, input_shape)
+
+        dyz = tensor(()).new_zeros(
+            (batch_size, features, depth, 1, width), device=image.device, dtype=dy.dtype
+        )
+        dy = cat([dy, dyz], 3)
+        dy = reshape(dy, input_shape)
+
+        dxz = tensor(()).new_zeros(
+            (batch_size, features, depth, height, 1),
+            device=image.device,
+            dtype=dx.dtype,
+        )
+        dx = cat([dx, dxz], 4)
+        dx = reshape(dx, input_shape)
+
+        return dx, dy, dz

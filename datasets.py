@@ -18,6 +18,8 @@ from torchvision.datasets.folder import pil_loader
 
 import spaces
 from spaces import NBoxSpace
+from utils import load_data
+from utils import transforms
 
 
 class OrderedCounter(Counter, OrderedDict):
@@ -716,10 +718,10 @@ class Causal3DIdent(MultiviewDataset):
         Randomly sample a view.
 
         Args:
-            item (int): Index of the view.
+            item: The item index.
 
         Returns:
-            tuple: A tuple containing the item index, latent vector, latent dictionary, and transformed image.
+            The index, latent vector, and image of the sampled view.
         """
         class_id = item // len(self.latent_classes[0])
         in_class_id = item % len(self.latent_classes[0])
@@ -811,13 +813,8 @@ class Multimodal3DIdent(MultiviewDataset):
             1: "object_ypos",
             2: "object_xpos",
             3: "object_zpos",  # is constant
-            4: "object_alpharot",
-            5: "object_betarot",
-            6: "object_gammarot",
-            7: "spotlight_pos",
-            8: "object_color",
-            9: "spotlight_color",
-            10: "background_color",
+            4: "object_color",
+            5: "text_phrasing",
         },
         "text": {
             0: "object_shape",
@@ -1196,3 +1193,141 @@ class Multimodal3DIdent(MultiviewDataset):
         Returns the number of samples in the dataset.
         """
         return self.num_samples
+
+
+class MyCustomDataset(MultiviewDataset):
+    """
+    Custom multiview dataset for 2 image views.
+    
+    This dataset expects paired images where view 2 is an augmented/different 
+    view of the same underlying content as view 1.
+    """
+    
+    # Define your latent factors (modify based on your data)
+    FACTORS = {
+        "image": {
+            0: "factor_1",
+            1: "factor_2", 
+            2: "factor_3",
+            # Add more factors as needed
+        }
+    }
+    DISCRETE_FACTORS = {"image": {}}  # Add indices of discrete factors here
+    
+    # Define latent spaces for each factor
+    LATENT_SPACES = {"image": {}}
+    for i, v in FACTORS["image"].items():
+        LATENT_SPACES["image"][i] = NBoxSpace(n=1, min_=0.0, max_=1.0)
+    
+    # Normalization constants (compute from your data)
+    mean_per_channel = [0.5, 0.5, 0.5]
+    std_per_channel = [0.5, 0.5, 0.5]
+
+    def __init__(
+        self,
+        data_dir: str,
+        change_lists=None,
+        mode="train",
+        transform=None,
+        **kwargs,
+    ):
+        super().__init__()
+        self.mode = mode
+        self.data_dir = data_dir
+        self.change_lists = change_lists or []
+        self.transform = transform or (lambda x: x)
+        
+        # TODO: Load your data here
+        # Example: load image paths and labels from CSV
+        # self.df = pd.read_csv(os.path.join(data_dir, f'{mode}_labels.csv'))
+        # self.image_paths = self.df['image_path'].tolist()
+        # self.latents = self.df[['factor_1', 'factor_2', 'factor_3']].values
+        
+        # Placeholder - replace with your actual data loading
+        self.image_paths = []
+        self.latents = np.array([])
+        self.num_samples = 0
+        
+    def __len__(self):
+        return self.num_samples
+
+    def __getview__(self, item):
+        """
+        Get a single view from the dataset.
+        
+        Returns:
+            tuple: (index, latent_dict, image_tensor)
+        """
+        # TODO: Implement based on your data format
+        # Example:
+        # img_path = self.image_paths[item]
+        # img = self.transform(load_your_image(img_path))
+        # z = self.latents[item]
+        # z_dict = {self.FACTORS["image"][i]: z[i] for i in range(len(z))}
+        # return item, z_dict, img
+        raise NotImplementedError("Implement __getview__ for your data format")
+
+    def __get_augmented_view__(self, idx, z, change_list):
+        """
+        Get an augmented view with modified latents.
+        
+        For 2-view setup, this returns the second view of the pair.
+        
+        Returns:
+            tuple: (index, latent_dict, image_tensor)
+        """
+        # TODO: Implement based on your augmentation strategy
+        # Option 1: If you have pre-computed paired views
+        # Option 2: Apply data augmentation to create view 2
+        # Option 3: Use FAISS nearest neighbor search like other datasets
+        raise NotImplementedError("Implement __get_augmented_view__ for your data format")
+
+    def __getitem__(self, item):
+        """
+        Return dict with original + augmented views for training.
+        
+        Returns:
+            dict with keys:
+                - "image": list of 2 image tensors [view1, view2]
+                - "z_image": list of 2 latent dicts [{factor: value}, {factor: value}]
+                - "index": sample index
+        """
+        # Get first view
+        idx1, z1_dict, img1 = self.__getview__(item)
+        
+        # Get second (augmented) view
+        change_list = self.change_lists[0] if self.change_lists else []
+        idx2, z2_dict, img2 = self.__get_augmented_view__(item, z1_dict, change_list)
+        
+        # Convert z2_dict keys to match expected format if needed
+        z2_formatted = {self.FACTORS["image"][i]: z2_dict.get(self.FACTORS["image"][i], 0) 
+                        for i in self.FACTORS["image"]}
+        
+        return {
+            "image": [img1, img2],
+            "z_image": [z1_dict, z2_formatted],
+            "index": item,
+        }
+
+    def sample(self, size, random_state=None):
+        """
+        Sample random views for DCI evaluation.
+        
+        Returns:
+            tuple: (latents, images) where latents has shape (num_factors, size)
+        """
+        if random_state is None:
+            random_state = np.random.RandomState()
+            
+        indices = random_state.choice(len(self), size, replace=False)
+        
+        latents = []
+        images = []
+        for i in indices:
+            _, z_dict, img = self.__getview__(i)
+            latents.append([z_dict[k] for k in self.FACTORS["image"].values()])
+            images.append(img)
+            
+        return np.array(latents).T, torch.stack(images)
+
+

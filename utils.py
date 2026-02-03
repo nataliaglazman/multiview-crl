@@ -5,6 +5,16 @@ from typing import List
 import numpy as np
 import torch
 
+import logging
+import os
+from monai.transforms import (Compose, LoadImaged, EnsureChannelFirstd, ScaleIntensityd, Orientationd, ResizeWithPadOrCropd,
+                              RandRotate90d, ToTensord, RandFlipd, RandAffined, Spacingd, RandZoomd, RandGaussianSmoothd, RandShiftIntensityd,
+                              RandSimulateLowResolutiond, NormalizeIntensityd)
+import torch
+import torch.nn.functional as F
+
+
+
 EPSILON = np.finfo(np.float32).tiny
 
 
@@ -302,3 +312,86 @@ def generate_batch_factor_code(ground_truth_data, representation_function, num_p
             representations = np.vstack((representations, representation_function(current_observations)))
         i += num_points_iter
     return np.transpose(representations), np.transpose(factors)
+
+def load_data(df_filtered, data_dir, label_map):
+    exts = ['.nii.gz', '.nii', '.mha', '.mhd', '.nrrd', '.npy']
+    types = ['t1', 't2']
+    images_t1 = []
+    images_t2 = []
+    labels = []
+    missing = []
+    items = []
+    for _, row in df_filtered.iterrows():
+        subj = str(row['Subject'])
+        found_t1 = None
+        found_t2 = None
+        
+        # Find T1 image
+        for ext in exts:
+            candidate = os.path.join(data_dir, subj, 't1')
+            if os.path.exists(candidate):
+                candidate_files = os.listdir(candidate)
+                for file in candidate_files:
+                    if file.endswith(ext):
+                        break
+            if found_t1:
+                break
+        
+        # Find T2 image
+        for ext in exts:
+            candidate = os.path.join(data_dir, subj, 't2')
+            if os.path.exists(candidate):
+                candidate_files = os.listdir(candidate)
+                for file in candidate_files:
+                    if file.endswith(ext) and 'FLAIR' in file:
+                        found_t2 = os.path.join(candidate, file)
+                        break
+            if found_t2:
+                break
+        
+        # Only include subjects that have BOTH T1 and T2
+        if found_t1 and found_t2:
+            items.append({
+                'image': found_t1,
+                'z_image': found_t2,
+                'label': label_map[row['Group']]
+            })
+        else:
+            missing.append(subj)
+            if not found_t1:
+                logging.warning(f"Missing T1 for subject {subj}")
+            if not found_t2:
+                logging.warning(f"Missing T2 for subject {subj}")
+                # remove subj from items if present
+                items = [item for item in items if item['image_t1'].split(os.sep)[-2] != subj]
+        pass
+    return items, missing
+
+
+def transforms():
+    train_transforms = Compose([
+    LoadImaged(keys=['image_t1', 'image_t2']),
+    EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
+    Spacingd(keys=['image_t1', 'image_t2'], pixdim=(1.0, 1.0, 1.0), mode="nearest"),
+    Orientationd(keys=['image_t1', 'image_t2'], axcodes="RAS"),
+    # ScaleIntensityd(keys=['image_t1', 'image_t2'], minv=-1, maxv=1),
+    NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
+    RandAffined(keys=['image_t1', 'image_t2'], rotate_range=[-0.05, 0.05],
+                shear_range=[0.001, 0.05], scale_range=[0, 0.05],
+                prob=0.85),
+    ResizeWithPadOrCropd(keys=['image_t1', 'image_t2'], spatial_size=(181, 217, 181)),
+    RandShiftIntensityd(keys=['image_t1', 'image_t2'], offsets=(-0.5, 0.5), prob=0.2),
+    ToTensord(keys=['image_t1', 'image_t2', 'label']),
+    ])
+
+    val_transforms = Compose([
+        LoadImaged(keys=['image_t1', 'image_t2']),
+        EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
+        Spacingd(keys=['image_t1', 'image_t2'], pixdim=(1.0, 1.0, 1.0), mode="nearest"),
+        Orientationd(keys=['image_t1', 'image_t2'], axcodes="RAS"),
+        # ScaleIntensityd(keys=['image_t1', 'image_t2'], minv=-1, maxv=1),
+        NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
+        ResizeWithPadOrCropd(keys=['image_t1', 'image_t2'], spatial_size=(181, 217, 181)),
+        ToTensord(keys=['image_t1', 'image_t2', 'label']),
+    ])
+    return train_transforms, val_transforms
