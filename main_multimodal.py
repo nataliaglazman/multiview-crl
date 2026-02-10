@@ -115,6 +115,7 @@ def parse_args():
     parser.add_argument("--load-args", action="store_true")
     parser.add_argument("--collate-random-pair", action="store_true")
     parser.add_argument("--modalities", default=["image"], choices=[["image"], ["image", "text"]])
+    parser.add_argument("--scale-recon-loss", type=float, default=0.00001, help="Scale factor for the reconstruction loss to balance with contrastive loss")
     parser.add_argument(
         "--selection",
         type=str,
@@ -364,7 +365,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
         ground_truth_images = torch.concat(data["image"], 0).to(decoded_images.device)
 
         recon_loss, _ = BaurLoss()(decoded_images, ground_truth_images)
-        recon_loss = recon_loss * 0.00001  # scale down the recon loss to balance with contrastive loss
+        recon_loss = recon_loss * args.scale_recon_loss  # scale down the recon loss to balance with contrastive loss
 
         avg_logits = hz_flat.mean(0)[None]
         if "content_indices" not in data:
@@ -555,6 +556,7 @@ def main(args: argparse.Namespace):
     logger.info(f"  Selection:     {args.selection}")
     logger.info(f"  Change lists:  {args.change_lists}")
     logger.info(f"  Subsets:       {args.subsets}")
+    logger.info(f"  Scale Recon Loss: {args.scale_recon_loss}")
     
     # print args (keep original for backwards compatibility)
     print("Arguments:")
