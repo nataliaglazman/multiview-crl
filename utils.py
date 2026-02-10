@@ -315,10 +315,6 @@ def generate_batch_factor_code(ground_truth_data, representation_function, num_p
 
 def load_data(df_filtered, data_dir, label_map):
     exts = ['.nii.gz', '.nii', '.mha', '.mhd', '.nrrd', '.npy']
-    types = ['t1', 't2']
-    images_t1 = []
-    images_t2 = []
-    labels = []
     missing = []
     items = []
     for _, row in df_filtered.iterrows():
@@ -333,6 +329,7 @@ def load_data(df_filtered, data_dir, label_map):
                 candidate_files = os.listdir(candidate)
                 for file in candidate_files:
                     if file.endswith(ext):
+                        found_t1 = os.path.join(candidate, file)
                         break
             if found_t1:
                 break
@@ -362,24 +359,26 @@ def load_data(df_filtered, data_dir, label_map):
                 logging.warning(f"Missing T1 for subject {subj}")
             if not found_t2:
                 logging.warning(f"Missing T2 for subject {subj}")
-                # remove subj from items if present
-                items = [item for item in items if item['image_t1'].split(os.sep)[-2] != subj]
-        pass
+    
+    logging.info(f"Loaded {len(items)} subjects with both T1 and T2. Missing: {len(missing)}")
     return items, missing
 
 
 def transforms():
+    # Target spatial size for 2mm spacing (approximately half of 181x217x181)
+    spatial_size = (96, 112, 96)
+    
     train_transforms = Compose([
     LoadImaged(keys=['image_t1', 'image_t2']),
     EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
-    Spacingd(keys=['image_t1', 'image_t2'], pixdim=(1.0, 1.0, 1.0), mode="nearest"),
+    Spacingd(keys=['image_t1', 'image_t2'], pixdim=(2.0, 2.0, 2.0), mode="bilinear"),
     Orientationd(keys=['image_t1', 'image_t2'], axcodes="RAS"),
     # ScaleIntensityd(keys=['image_t1', 'image_t2'], minv=-1, maxv=1),
     NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
     RandAffined(keys=['image_t1', 'image_t2'], rotate_range=[-0.05, 0.05],
                 shear_range=[0.001, 0.05], scale_range=[0, 0.05],
                 prob=0.85),
-    ResizeWithPadOrCropd(keys=['image_t1', 'image_t2'], spatial_size=(181, 217, 181)),
+    ResizeWithPadOrCropd(keys=['image_t1', 'image_t2'], spatial_size=spatial_size),
     RandShiftIntensityd(keys=['image_t1', 'image_t2'], offsets=(-0.5, 0.5), prob=0.2),
     ToTensord(keys=['image_t1', 'image_t2', 'label']),
     ])
@@ -387,11 +386,11 @@ def transforms():
     val_transforms = Compose([
         LoadImaged(keys=['image_t1', 'image_t2']),
         EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
-        Spacingd(keys=['image_t1', 'image_t2'], pixdim=(1.0, 1.0, 1.0), mode="nearest"),
+        Spacingd(keys=['image_t1', 'image_t2'], pixdim=(2.0, 2.0, 2.0), mode="bilinear"),
         Orientationd(keys=['image_t1', 'image_t2'], axcodes="RAS"),
         # ScaleIntensityd(keys=['image_t1', 'image_t2'], minv=-1, maxv=1),
         NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
-        ResizeWithPadOrCropd(keys=['image_t1', 'image_t2'], spatial_size=(181, 217, 181)),
+        ResizeWithPadOrCropd(keys=['image_t1', 'image_t2'], spatial_size=spatial_size),
         ToTensord(keys=['image_t1', 'image_t2', 'label']),
     ])
     return train_transforms, val_transforms

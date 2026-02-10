@@ -9,7 +9,11 @@ from abc import abstractmethod
 from collections import Counter, OrderedDict
 from typing import Callable, Optional
 
-import faiss
+try:
+    import faiss
+    HAS_FAISS = True
+except ImportError:
+    HAS_FAISS = False
 import numpy as np
 import pandas as pd
 import torch
@@ -65,6 +69,8 @@ class MultiviewDataset(torch.utils.data.Dataset):
         Returns:
             faiss.Index: The constructed index.
         """
+        if not HAS_FAISS:
+            raise ImportError("faiss is required for nearest neighbor search")
         if approximate_mode:
             _index = faiss.index_factory(latents.shape[1], "IVF1024_HNSW32,Flat")
             _index.efSearch = 8
@@ -343,7 +349,7 @@ class MPI3D(MultiviewDataset):
             int(space.uniform(original=idx[i], size=1).item()) if i in change_list else idx[i]
             for i, space in MPI3D.LATENT_SPACES["image"].items()
         )
-        return aug_idx, aug_idx, self.transform(self.data[*aug_idx])  # idx, z, x
+        return aug_idx, aug_idx, self.transform(self.data[aug_idx])  # idx, z, x
 
     def __getitem__(self, idx):
         """
@@ -1196,32 +1202,16 @@ class Multimodal3DIdent(MultiviewDataset):
 
 
 class MyCustomDataset(MultiviewDataset):
-    """
-    Custom multiview dataset for 2 image views.
+    """ADNI dataset with T1 and T2 as two views."""
     
-    This dataset expects paired images where view 2 is an augmented/different 
-    view of the same underlying content as view 1.
-    """
+    # Not used for 3D medical images, but required by parent class
+    mean_per_channel = [0.0]
+    std_per_channel = [1.0]
     
-    # Define your latent factors (modify based on your data)
-    FACTORS = {
-        "image": {
-            0: "factor_1",
-            1: "factor_2", 
-            2: "factor_3",
-            # Add more factors as needed
-        }
-    }
-    DISCRETE_FACTORS = {"image": {}}  # Add indices of discrete factors here
-    
-    # Define latent spaces for each factor
+    # Minimal factors definition (not used for training, only for compatibility)
+    FACTORS = {"image": {0: "view"}}
+    DISCRETE_FACTORS = {"image": {}}
     LATENT_SPACES = {"image": {}}
-    for i, v in FACTORS["image"].items():
-        LATENT_SPACES["image"][i] = NBoxSpace(n=1, min_=0.0, max_=1.0)
-    
-    # Normalization constants (compute from your data)
-    mean_per_channel = [0.5, 0.5, 0.5]
-    std_per_channel = [0.5, 0.5, 0.5]
 
     def __init__(
         self,
@@ -1235,99 +1225,62 @@ class MyCustomDataset(MultiviewDataset):
         self.mode = mode
         self.data_dir = data_dir
         self.change_lists = change_lists or []
-        self.transform = transform or (lambda x: x)
         
-        # TODO: Load your data here
-        # Example: load image paths and labels from CSV
-        # self.df = pd.read_csv(os.path.join(data_dir, f'{mode}_labels.csv'))
-        # self.image_paths = self.df['image_path'].tolist()
-        # self.latents = self.df[['factor_1', 'factor_2', 'factor_3']].values
+        # Load CSV and build item list
+        csv_path = '/home/ng24/projects/crl/cluster_vae/labels_cleaned_3class.csv'
+        df = pd.read_csv(csv_path)
+        label_values = sorted(df['Group'].unique())
+        label_map = {v: i for i, v in enumerate(label_values)}
         
-        # Placeholder - replace with your actual data loading
-        self.image_paths = []
-        self.latents = np.array([])
-        self.num_samples = 0
+        # Load data using utils.load_data
+        self.items, missing = load_data(df, data_dir, label_map)
+        self.num_samples = len(self.items)
         
+        # Get MONAI transforms
+        from utils import transforms as get_transforms
+        train_transforms, val_transforms = get_transforms()
+        self.monai_transform = train_transforms if mode == "train" else val_transforms
+
     def __len__(self):
         return self.num_samples
 
     def __getview__(self, item):
-        """
-        Get a single view from the dataset.
-        
-        Returns:
-            tuple: (index, latent_dict, image_tensor)
-        """
-        # TODO: Implement based on your data format
-        # Example:
-        # img_path = self.image_paths[item]
-        # img = self.transform(load_your_image(img_path))
-        # z = self.latents[item]
-        # z_dict = {self.FACTORS["image"][i]: z[i] for i in range(len(z))}
-        # return item, z_dict, img
-        raise NotImplementedError("Implement __getview__ for your data format")
+        """Not used - we override __getitem__ directly."""
+        pass
 
     def __get_augmented_view__(self, idx, z, change_list):
-        """
-        Get an augmented view with modified latents.
-        
-        For 2-view setup, this returns the second view of the pair.
-        
-        Returns:
-            tuple: (index, latent_dict, image_tensor)
-        """
-        # TODO: Implement based on your augmentation strategy
-        # Option 1: If you have pre-computed paired views
-        # Option 2: Apply data augmentation to create view 2
-        # Option 3: Use FAISS nearest neighbor search like other datasets
-        raise NotImplementedError("Implement __get_augmented_view__ for your data format")
-
-    def __getitem__(self, item):
-        """
-        Return dict with original + augmented views for training.
-        
-        Returns:
-            dict with keys:
-                - "image": list of 2 image tensors [view1, view2]
-                - "z_image": list of 2 latent dicts [{factor: value}, {factor: value}]
-                - "index": sample index
-        """
-        # Get first view
-        idx1, z1_dict, img1 = self.__getview__(item)
-        
-        # Get second (augmented) view
-        change_list = self.change_lists[0] if self.change_lists else []
-        idx2, z2_dict, img2 = self.__get_augmented_view__(item, z1_dict, change_list)
-        
-        # Convert z2_dict keys to match expected format if needed
-        z2_formatted = {self.FACTORS["image"][i]: z2_dict.get(self.FACTORS["image"][i], 0) 
-                        for i in self.FACTORS["image"]}
-        
-        return {
-            "image": [img1, img2],
-            "z_image": [z1_dict, z2_formatted],
-            "index": item,
-        }
-
+        """Not used - T2 is our second view."""
+        pass
+    
     def sample(self, size, random_state=None):
-        """
-        Sample random views for DCI evaluation.
-        
-        Returns:
-            tuple: (latents, images) where latents has shape (num_factors, size)
-        """
-        if random_state is None:
-            random_state = np.random.RandomState()
-            
-        indices = random_state.choice(len(self), size, replace=False)
-        
-        latents = []
-        images = []
-        for i in indices:
-            _, z_dict, img = self.__getview__(i)
-            latents.append([z_dict[k] for k in self.FACTORS["image"].values()])
-            images.append(img)
-            
-        return np.array(latents).T, torch.stack(images)
+        """Sample for DCI evaluation - returns empty since we don't have latent factors."""
+        return np.array([[]]), []
 
+    def __getitem__(self, idx):
+        """Return dict with T1 and T2 as two views."""
+        item = self.items[idx]
+        
+        # Apply MONAI transforms
+        data_dict = {
+            'image_t1': item['image'],
+            'image_t2': item['z_image'],
+            'label': item['label']
+        }
+        transformed = self.monai_transform(data_dict)
+        
+        img_t1 = transformed['image_t1']  # View 1
+        img_t2 = transformed['image_t2']  # View 2
+        
+        # Print dimensions on first sample only
+        if idx == 0:
+            print(f"[Dataset] Image dimensions after transforms:")
+            print(f"  T1 shape: {img_t1.shape}")
+            print(f"  T2 shape: {img_t2.shape}")
+        
+        # Return in expected format: list of views
+        return {
+            "image": [img_t1, img_t2],
+            "z_image": [{}, {}],  # Empty dicts - no latent factors
+            "index": idx,
+        }
 

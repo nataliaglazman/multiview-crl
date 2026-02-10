@@ -307,8 +307,6 @@ class BaurLoss(object):
 
         summaries = {}
 
-        loss_total = None
-
         l1_reconstruction = (
             self.l1_loss(originals, reconstructions) * self.lambda_reconstruction
         )
@@ -341,7 +339,7 @@ class BaurLoss(object):
         summaries[("summaries", "scalar", "L2-Image_Gradient-Loss")] = l2_gdl.item()
         summaries[("summaries", "scalar", "Lambda-Image_Gradient")] = self.lambda_gdl
 
-        loss_total += l1_reconstruction + l2_reconstruction + l1_gdl + l2_gdl
+        loss_total = l1_reconstruction + l2_reconstruction + l1_gdl + l2_gdl
 
         summaries[("summaries", "scalar", "Total_Loss")] = loss_total.item()
 

@@ -12,7 +12,11 @@ import uuid
 import warnings
 from datetime import datetime
 
-import faiss
+try:
+    import faiss
+    HAS_FAISS = True
+except ImportError:
+    HAS_FAISS = False
 import numpy as np
 import pandas as pd
 import torch
@@ -24,6 +28,7 @@ from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.preprocessing import StandardScaler
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 from torchvision import transforms
 from torchvision.models import resnet18
 from typing_extensions import Callable, List
@@ -81,20 +86,20 @@ def parse_args():
         argparse.Namespace: Parsed arguments.
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataroot", type=str, default='/data/natalia/ADNI_registered/')
+    parser.add_argument("--dataroot", type=str, default='/data/natalia/')
     parser.add_argument(
         "--dataset_name",
         type=str,
-        default="independent3di",
-        choices=["mpi3d", "independent3di", "causal3di", "multimodal3di", "adni", "custom"],
+        default="ADNI_registered",
+        choices=["mpi3d", "independent3di", "causal3di", "multimodal3di", "adni", "ADNI_registered", "custom"],
     )
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default="0")
-    parser.add_argument("--encoding-size", type=int, default=32)
+    parser.add_argument("--encoding-size", type=int, default=512)
     parser.add_argument("--hidden-size", type=int, default=100)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--train-steps", type=int, default=300001)
     parser.add_argument("--log-steps", type=int, default=100)
     parser.add_argument("--checkpoint-steps", type=int, default=1000)
@@ -104,6 +109,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=np.random.randint(32**2 - 1))
     parser.add_argument("--workers", type=int, default=24)
     parser.add_argument("--no-cuda", action="store_true")
+    parser.add_argument("--use-amp", action="store_true", help="Use automatic mixed precision (fp16) to reduce memory")
     parser.add_argument("--save-all-checkpoints", action="store_true")
     parser.add_argument("--resume-training", action="store_false")
     parser.add_argument("--load-args", action="store_true")
@@ -168,8 +174,14 @@ def update_args(args):
         setattr(args, "n_views", 2)
         setattr(args, "subsets", [(0, 1)])
         logger.info("  -> Using custom dataset (image only, 2 views)")
+    elif args.dataset_name in ["adni", "ADNI_registered"]:
+        args.DATASETCLASS = datasets.MyCustomDataset
+        setattr(args, "modalities", ["image"])
+        setattr(args, "n_views", 2)
+        setattr(args, "subsets", [(0, 1)])
+        logger.info("  -> Using ADNI dataset (image only, 2 views)")
     else:
-        raise f"{args.dataset_name=} not supported."
+        raise ValueError(f"{args.dataset_name=} not supported.")
 
     if len(args.subsets) == 1 or args.n_views == 2:  # Train content encoders
         setattr(args, "subsets", [tuple(range(args.n_views))])
@@ -251,10 +263,10 @@ def compute_gt_idx(args):
         print(content_dict)
         return list(content_dict.values())
     else:
-        raise f"No ground truth content computed for {args.dataset_name=} yet!"
+        raise ValueError(f"No ground truth content computed for {args.dataset_name=} yet!")
 
 
-def train_step(data, encoders, decoders, loss_func, optimizer, params, args):
+def train_step(data, encoders, decoders, loss_func, optimizer, params, args, scaler=None):
     """
     Perform a single training step.
 
@@ -265,6 +277,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args):
         optimizer (torch.optim.Optimizer): The optimizer to update the model parameters.
         params (Iterable[torch.Tensor]): The model parameters to be optimized.
         args (argparse.Namespace): Command-line arguments.
+        scaler: GradScaler for mixed precision training (optional).
 
     Returns:
         tuple: A tuple containing the loss value and the estimated content indices.
@@ -273,88 +286,103 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args):
     if optimizer is not None:
         optimizer.zero_grad()
 
-    # compute loss
-    hz = []  # concat the learned reprentation for all views
-    n_views = int(0)
-    for m_midx, m in enumerate(args.modalities):
-        samples = data[m]
-        hz_m = encoders[m_midx](torch.concat(samples, 0))
-        hz += [hz_m]
-        n_views += len(samples)
+    # Use autocast for mixed precision if scaler is provided
+    use_amp = scaler is not None
+    
+    with autocast(enabled=use_amp):
+        # compute loss
+        hz = []  # concat the learned reprentation for all views
+        n_views = int(0)
+        for m_midx, m in enumerate(args.modalities):
+            samples = data[m]
+            hz_m = encoders[m_midx](torch.concat(samples, 0))
+            hz += [hz_m]
+            n_views += len(samples)
 
-    hz = torch.concat(
-        hz,
-        0,
-    )
+        hz = torch.concat(
+            hz,
+            0,
+        )
 
-    # Flatten encoder output for contrastive loss and decoder
-    hz_flat = hz.view(hz.size(0), -1)  # (batch, 512)
+        # Flatten encoder output for contrastive loss and decoder
+        hz_flat = hz.view(hz.size(0), -1)  # (batch, 512)
 
-    # decode the image
-    decoded_images = decoders[0](hz_flat)
-    ground_truth_images = torch.concat(data["image"], 0)
+        # decode the image
+        decoded_images = decoders[0](hz_flat)
+        ground_truth_images = torch.concat(data["image"], 0).to(decoded_images.device)
 
-    recon_loss = BaurLoss()(decoded_images, ground_truth_images)
+        recon_loss, _ = BaurLoss()(decoded_images, ground_truth_images)
 
-    avg_logits = hz_flat.mean(0)[None]
-    if "content_indices" not in data:
-        data["content_indices"] = args.content_indices
-    content_size = [len(content) for content in data["content_indices"]]  # (batch_size, )
+        avg_logits = hz_flat.mean(0)[None]
+        if "content_indices" not in data:
+            data["content_indices"] = args.content_indices
+        content_size = [len(content) for content in data["content_indices"]]  # (batch_size, )
 
-    if args.selection in ["ground_truth", "concat"]:
-        estimated_content_indices = args.content_indices  # len = len(subsets)
-    else:
-        if args.subsets[-1] == list(range(args.n_views)) and content_size[-1] > 0:
-            # when the joint intersection is not empty,
-            # we use the fact that the joint intersection will be in all smaller subsets
-            content_masks = utils.smart_gumbel_softmax_mask(
-                avg_logits=avg_logits, content_sizes=content_size, subsets=args.subsets
-            )
+        if args.selection in ["ground_truth", "concat"]:
+            estimated_content_indices = args.content_indices  # len = len(subsets)
         else:
-            content_masks = utils.gumbel_softmax_mask(
-                avg_logits=avg_logits, content_sizes=content_size, subsets=args.subsets
-            )
+            if args.subsets[-1] == list(range(args.n_views)) and content_size[-1] > 0:
+                # when the joint intersection is not empty,
+                # we use the fact that the joint intersection will be in all smaller subsets
+                content_masks = utils.smart_gumbel_softmax_mask(
+                    avg_logits=avg_logits, content_sizes=content_size, subsets=args.subsets
+                )
+            else:
+                content_masks = utils.gumbel_softmax_mask(
+                    avg_logits=avg_logits, content_sizes=content_size, subsets=args.subsets
+                )
 
-        estimated_content_indices = []
-        for c_mask in content_masks:
-            c_ind = torch.where(c_mask)[-1].tolist()
-            estimated_content_indices += [c_ind]
+            estimated_content_indices = []
+            for c_mask in content_masks:
+                c_ind = torch.where(c_mask)[-1].tolist()
+                estimated_content_indices += [c_ind]
 
-    loss_value = loss_func(hz_flat.reshape(n_views, -1, hz_flat.shape[-1]), estimated_content_indices, args.subsets)
-    loss_value += recon_loss
+        loss_value = loss_func(hz_flat.reshape(n_views, -1, hz_flat.shape[-1]), estimated_content_indices, args.subsets)
+        print(f"Contrastive Loss: {loss_value.item():.4f}, Recon Loss: {recon_loss.item():.4f}")
+        loss_value += recon_loss
 
     # backprop
     if optimizer is not None:
-        loss_value.backward()
-        clip_grad_norm_(params, max_norm=2.0, norm_type=2)  # stabilizes training
-        optimizer.step()
+        if use_amp:
+            scaler.scale(loss_value).backward()
+            scaler.unscale_(optimizer)
+            clip_grad_norm_(params, max_norm=2.0, norm_type=2)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss_value.backward()
+            clip_grad_norm_(params, max_norm=2.0, norm_type=2)  # stabilizes training
+            optimizer.step()
 
     return loss_value.item(), estimated_content_indices
 
 
-def val_step(data, fs, loss_func, args):
+def val_step(data, encoders, decoders, loss_func, args):
     """
     Perform a validation step.
 
     Args:
         data: The input data for the validation step.
-        fs: The feature set for the validation step.
+        encoders: The encoder models.
+        decoders: The decoder models.
         loss_func: The loss function to be used.
         args: Additional arguments for the validation step.
 
     Returns:
         The result of the validation step.
     """
-    return train_step(data, fs, loss_func, optimizer=None, params=None, args=args)
+    with torch.no_grad():
+        return train_step(data, encoders, decoders, loss_func, optimizer=None, params=None, args=args)
 
 
-def get_data(dataset, fs, loss_func, dataloader_kwargs, num_samples=None, args=None):
+def get_data(dataset, encoders, decoders, loss_func, dataloader_kwargs, num_samples=None, args=None):
     """
     Get data from the dataset and compute loss values and representations for each modality.
 
     Args:
         dataset (torch.utils.data.Dataset): The dataset to get data from.
-        fs (list): List of functions to compute representations for each modality.
+        encoders (list): List of encoder models for each modality.
+        decoders (list): List of decoder models.
         loss_func: The loss function to compute the loss value.
         dataloader_kwargs (dict): Additional keyword arguments to pass to the DataLoader.
         num_samples (int, optional): The number of samples to process. If None, process all samples in the dataset.
@@ -382,14 +410,14 @@ def get_data(dataset, fs, loss_func, dataloader_kwargs, num_samples=None, args=N
             data = next(iterator)  # contains images, texts, and labels
 
             # compute loss
-            loss_value, estimated_content_indices = val_step(data, fs, loss_func, args=args)
+            loss_value, estimated_content_indices = val_step(data, encoders, decoders, loss_func, args=args)
 
             rdict["loss_values"].append([loss_value])
 
             # collect representations
             for m_midx, m in enumerate(args.modalities):
                 samples = data[m]  # Shape: [n_views, batch_size, ...]
-                hz_m = fs[m_midx](torch.concat(samples, 0)).detach().cpu().numpy()
+                hz_m = encoders[m_midx](torch.concat(samples, 0)).detach().cpu().numpy()
                 rdict[f"hz_{m}"].append(hz_m)  # [n_views*batch_size, *text_dims]
 
                 # collect image labels
@@ -532,7 +560,8 @@ def main(args: argparse.Namespace):
         )
 
     # define augmentations (only normalization of the input images)
-    faiss.omp_set_num_threads(args.faiss_omp_threads)
+    if HAS_FAISS:
+        faiss.omp_set_num_threads(args.faiss_omp_threads)
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -559,7 +588,6 @@ def main(args: argparse.Namespace):
         change_lists=args.change_lists,
         **dataset_kwargs,
     )
-    logger.info(f"  Training dataset loaded: {len(train_dataset)} samples")
     
     if args.dataset_name == "multimodal3di":
         dataset_kwargs["vocab_filepath"] = train_dataset.vocab_filepath
@@ -665,6 +693,11 @@ def main(args: argparse.Namespace):
     logger.info(f"  Optimizer: Adam")
     logger.info(f"  Learning rate: {args.lr}")
     logger.info(f"  Total parameters to optimize: {sum(p.numel() for p in params):,}")
+    
+    # Setup AMP scaler for mixed precision
+    scaler = GradScaler() if args.use_amp else None
+    if args.use_amp:
+        logger.info(f"  Mixed Precision: Enabled (AMP)")
 
     # training
     # --------
@@ -686,7 +719,7 @@ def main(args: argparse.Namespace):
         while step <= args.train_steps:
             # training step
             data = next(train_iterator)  # contains images, texts, and labels
-            loss_value, _ = train_step(data, encoders, decoders, loss_func, optimizer, params, args=args)
+            loss_value, _ = train_step(data, encoders, decoders, loss_func, optimizer, params, args=args, scaler=scaler)
             loss_values.append(loss_value)
 
             # print average loss value
@@ -750,6 +783,7 @@ def main(args: argparse.Namespace):
         val_dict = get_data(
             val_dataset,
             encoders,
+            decoders,
             loss_func,
             dataloader_kwargs,
             args=args,
@@ -759,6 +793,7 @@ def main(args: argparse.Namespace):
         test_dict = get_data(
             test_dataset,
             encoders,
+            decoders,
             loss_func,
             dataloader_kwargs,
             args=args,

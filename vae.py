@@ -161,7 +161,7 @@ class Decoder(nn.Module):
             nn.Conv3d(8, 1, kernel_size=3, padding=1),
         )
 
-        self.final_upsample = nn.Upsample(size=(181, 217, 181), mode='trilinear', align_corners=False)
+        self.final_upsample = nn.Upsample(size=(96, 112, 96), mode='trilinear', align_corners=False)
 
         self.reset_parameters()
       
