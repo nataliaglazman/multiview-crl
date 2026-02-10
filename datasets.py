@@ -1277,6 +1277,24 @@ class MyCustomDataset(MultiviewDataset):
             print(f"  T1 shape: {img_t1.shape}")
             print(f"  T2 shape: {img_t2.shape}")
         
+        # Save first two samples for visualization
+        if idx < 2:
+            import nibabel as nib
+            import os
+            save_dir = "results/ADNI_registered/0"
+            os.makedirs(save_dir, exist_ok=True)
+            
+            # Convert to numpy and save as NIfTI with correct 2mm spacing
+            t1_np = img_t1.squeeze().cpu().numpy() if hasattr(img_t1, 'cpu') else img_t1.squeeze().numpy()
+            t2_np = img_t2.squeeze().cpu().numpy() if hasattr(img_t2, 'cpu') else img_t2.squeeze().numpy()
+            
+            # Create affine with 2mm voxel spacing
+            affine_2mm = np.diag([2.0, 2.0, 2.0, 1.0])
+            
+            nib.save(nib.Nifti1Image(t1_np, affine=affine_2mm), f"{save_dir}/sample_{idx}_T1_resampled.nii.gz")
+            nib.save(nib.Nifti1Image(t2_np, affine=affine_2mm), f"{save_dir}/sample_{idx}_T2_resampled.nii.gz")
+            print(f"[Dataset] Saved sample {idx} T1 and T2 to {save_dir}/")
+        
         # Return in expected format: list of views
         return {
             "image": [img_t1, img_t2],

@@ -9,9 +9,45 @@ import logging
 import os
 from monai.transforms import (Compose, LoadImaged, EnsureChannelFirstd, ScaleIntensityd, Orientationd, ResizeWithPadOrCropd,
                               RandRotate90d, ToTensord, RandFlipd, RandAffined, Spacingd, RandZoomd, RandGaussianSmoothd, RandShiftIntensityd,
-                              RandSimulateLowResolutiond, NormalizeIntensityd)
+                              RandSimulateLowResolutiond, NormalizeIntensityd, ThresholdIntensityd, MaskIntensityd, Lambda, Lambdad,
+                              CopyItemsd, MapTransform)
 import torch
 import torch.nn.functional as F
+
+
+class CreateBrainMaskd(MapTransform):
+    """Create a binary brain mask from the image (nonzero voxels) before resampling."""
+    def __init__(self, keys, mask_keys, threshold=50):
+        super().__init__(keys)
+        self.mask_keys = mask_keys
+        self.threshold = threshold  # Threshold for brain vs background
+        
+    def __call__(self, data):
+        d = dict(data)
+        for key, mask_key in zip(self.keys, self.mask_keys):
+            # Create mask where image > threshold - handle both numpy and MetaTensor
+            img = d[key]
+            if hasattr(img, 'cpu'):  # PyTorch tensor
+                mask = (img > self.threshold).float()
+            else:  # numpy array
+                mask = (np.array(img) > self.threshold).astype(np.float32)
+            d[mask_key] = mask
+        return d
+
+
+class ApplyBrainMaskd(MapTransform):
+    """Apply brain mask to zero out background after normalization."""
+    def __init__(self, keys, mask_keys, threshold=0.5):
+        super().__init__(keys)
+        self.mask_keys = mask_keys
+        self.threshold = threshold
+        
+    def __call__(self, data):
+        d = dict(data)
+        for key, mask_key in zip(self.keys, self.mask_keys):
+            mask = d[mask_key] > self.threshold  # After resampling, threshold at 0.5
+            d[key] = d[key] * mask
+        return d
 
 
 
@@ -365,32 +401,48 @@ def load_data(df_filtered, data_dir, label_map):
 
 
 def transforms():
-    # Target spatial size for 2mm spacing (approximately half of 181x217x181)
-    spatial_size = (96, 112, 96)
+    # Target spatial size for 2mm spacing (half of 181x217x181 = 90x108x90)
+    # Using exact size to avoid padding/border
+    spatial_size = (91, 109, 91)  # Slightly larger to avoid cropping any brain
     
     train_transforms = Compose([
     LoadImaged(keys=['image_t1', 'image_t2']),
     EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
+    # Create brain mask BEFORE resampling (where original > 0)
+    CreateBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2']),
+    # Resample image with bilinear, mask with nearest
     Spacingd(keys=['image_t1', 'image_t2'], pixdim=(2.0, 2.0, 2.0), mode="bilinear"),
-    Orientationd(keys=['image_t1', 'image_t2'], axcodes="RAS"),
-    # ScaleIntensityd(keys=['image_t1', 'image_t2'], minv=-1, maxv=1),
+    Spacingd(keys=['mask_t1', 'mask_t2'], pixdim=(2.0, 2.0, 2.0), mode="nearest"),
+    Orientationd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], axcodes="RAS"),
+    ResizeWithPadOrCropd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], spatial_size=spatial_size),
+    # Normalize
     NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
-    RandAffined(keys=['image_t1', 'image_t2'], rotate_range=[-0.05, 0.05],
-                shear_range=[0.001, 0.05], scale_range=[0, 0.05],
-                prob=0.85),
-    ResizeWithPadOrCropd(keys=['image_t1', 'image_t2'], spatial_size=spatial_size),
-    RandShiftIntensityd(keys=['image_t1', 'image_t2'], offsets=(-0.5, 0.5), prob=0.2),
+    # Apply mask to zero out background
+    ApplyBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2'], threshold=0.5),
+    # Augmentations
+    RandAffined(keys=['image_t1', 'image_t2'], 
+                rotate_range=[-0.05, 0.05],
+                shear_range=[0.001, 0.05], 
+                scale_range=[0, 0.05],
+                mode='bilinear',
+                padding_mode='zeros',  # Fill outside regions with zeros
+                prob=0.5),
+    RandShiftIntensityd(keys=['image_t1', 'image_t2'], offsets=(-0.1, 0.1), prob=0.2),
     ToTensord(keys=['image_t1', 'image_t2', 'label']),
     ])
 
     val_transforms = Compose([
         LoadImaged(keys=['image_t1', 'image_t2']),
         EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
+        # Create brain mask BEFORE resampling
+        CreateBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2']),
+        # Resample image with bilinear, mask with nearest
         Spacingd(keys=['image_t1', 'image_t2'], pixdim=(2.0, 2.0, 2.0), mode="bilinear"),
-        Orientationd(keys=['image_t1', 'image_t2'], axcodes="RAS"),
-        # ScaleIntensityd(keys=['image_t1', 'image_t2'], minv=-1, maxv=1),
+        Spacingd(keys=['mask_t1', 'mask_t2'], pixdim=(2.0, 2.0, 2.0), mode="nearest"),
+        Orientationd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], axcodes="RAS"),
+        ResizeWithPadOrCropd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], spatial_size=spatial_size),
         NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
-        ResizeWithPadOrCropd(keys=['image_t1', 'image_t2'], spatial_size=spatial_size),
+        ApplyBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2'], threshold=0.5),
         ToTensord(keys=['image_t1', 'image_t2', 'label']),
     ])
     return train_transforms, val_transforms

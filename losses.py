@@ -296,12 +296,13 @@ class BaurLoss(object):
         self.lambda_reconstruction = lambda_reconstruction
         self.lambda_gdl = 0
 
+        # Use mean instead of sum for proper scaling with 3D images
         self.l1_loss = lambda x, y: PairwiseDistance(p=1)(
             x.view(x.shape[0], -1), y.view(y.shape[0], -1)
-        ).sum()
+        ).mean()
         self.l2_loss = lambda x, y: PairwiseDistance(p=2)(
             x.view(x.shape[0], -1), y.view(y.shape[0], -1)
-        ).sum()
+        ).mean()
 
     def __call__(self, originals, reconstructions):
 

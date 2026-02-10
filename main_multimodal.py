@@ -94,11 +94,11 @@ def parse_args():
         choices=["mpi3d", "independent3di", "causal3di", "multimodal3di", "adni", "ADNI_registered", "custom"],
     )
     parser.add_argument("--model-dir", type=str, default="results")
-    parser.add_argument("--model-id", type=str, default="0")
-    parser.add_argument("--encoding-size", type=int, default=512)
+    parser.add_argument("--model-id", type=str, default="2")
+    parser.add_argument("--encoding-size", type=int, default=256)
     parser.add_argument("--hidden-size", type=int, default=100)
     parser.add_argument("--tau", type=float, default=1.0)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--train-steps", type=int, default=300001)
     parser.add_argument("--log-steps", type=int, default=100)
@@ -118,7 +118,7 @@ def parse_args():
     parser.add_argument(
         "--selection",
         type=str,
-        default="concat",
+        default="gumbel_softmax",
         choices=["ground_truth", "gumbel_softmax", "concat", "soft"],
     )
 
@@ -179,16 +179,24 @@ def update_args(args):
         setattr(args, "modalities", ["image"])
         setattr(args, "n_views", 2)
         setattr(args, "subsets", [(0, 1)])
+        # Split 512 latent dims: first 256 = content (shared), last 256 = style (view-specific)
+        content_dim = 256  # Dimensions used for contrastive loss (shared between T1/T2)
+        setattr(args, "content_indices", [list(range(content_dim))])  # [0, 1, ..., 255]
+        setattr(args, "style_indices", list(range(content_dim, 512)))  # [256, 257, ..., 511]
         logger.info("  -> Using ADNI dataset (image only, 2 views)")
+        logger.info(f"  -> Content dimensions: 0-{content_dim-1} ({content_dim} dims)")
+        logger.info(f"  -> Style dimensions: {content_dim}-511 ({512-content_dim} dims)")
     else:
         raise ValueError(f"{args.dataset_name=} not supported.")
 
     if len(args.subsets) == 1 or args.n_views == 2:  # Train content encoders
         setattr(args, "subsets", [tuple(range(args.n_views))])
-        setattr(args, "content_indices", [list(range(args.encoding_size))])
+        # Only set content_indices if not already set (e.g., by ADNI config above)
+        if not hasattr(args, "content_indices") or args.content_indices is None:
+            setattr(args, "content_indices", [list(range(args.encoding_size))])
         logger.info(f"  -> Training content encoders with {args.n_views} views")
         logger.info(f"  -> Subsets: {args.subsets}")
-        logger.info(f"  -> Content indices: {args.content_indices}")
+        logger.info(f"  -> Content indices: {len(args.content_indices[0])} dimensions")
     else:
         # Train view-specific encoders
         if not hasattr(args, "subsets"):
@@ -266,6 +274,50 @@ def compute_gt_idx(args):
         raise ValueError(f"No ground truth content computed for {args.dataset_name=} yet!")
 
 
+def save_decoded_images(encoders, decoders, data, args, step):
+    """
+    Save decoded images for visualization.
+    
+    Args:
+        encoders: List of encoder models.
+        decoders: List of decoder models.
+        data: Batch of input data.
+        args: Arguments namespace.
+        step: Current training step.
+    """
+    import nibabel as nib
+    
+    with torch.no_grad():
+        # Encode the first image from the batch
+        samples = data["image"]
+        img = samples[0][0:1]  # Take first sample from first view (T1)
+        
+        # Encode
+        hz = encoders[0](img)
+        hz_flat = hz.view(hz.size(0), -1)
+        
+        # Decode
+        decoded = decoders[0](hz_flat)
+        
+        # Convert to numpy
+        decoded_np = decoded.squeeze().cpu().numpy()
+        original_np = img.squeeze().cpu().numpy()
+        
+        # Create affine with 2mm spacing
+        affine_2mm = np.diag([2.0, 2.0, 2.0, 1.0])
+        
+        # Save both original and decoded
+        save_dir = os.path.join(args.save_dir, "decoded_images")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        nib.save(nib.Nifti1Image(original_np, affine=affine_2mm), 
+                 f"{save_dir}/step_{step:05d}_original.nii.gz")
+        nib.save(nib.Nifti1Image(decoded_np, affine=affine_2mm), 
+                 f"{save_dir}/step_{step:05d}_decoded.nii.gz")
+        
+        print(f"[SAVED] Decoded images at step {step} to {save_dir}/", flush=True)
+
+
 def train_step(data, encoders, decoders, loss_func, optimizer, params, args, scaler=None):
     """
     Perform a single training step.
@@ -312,6 +364,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
         ground_truth_images = torch.concat(data["image"], 0).to(decoded_images.device)
 
         recon_loss, _ = BaurLoss()(decoded_images, ground_truth_images)
+        recon_loss = recon_loss * 0.00001  # scale down the recon loss to balance with contrastive loss
 
         avg_logits = hz_flat.mean(0)[None]
         if "content_indices" not in data:
@@ -338,23 +391,22 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                 estimated_content_indices += [c_ind]
 
         loss_value = loss_func(hz_flat.reshape(n_views, -1, hz_flat.shape[-1]), estimated_content_indices, args.subsets)
-        print(f"Contrastive Loss: {loss_value.item():.4f}, Recon Loss: {recon_loss.item():.4f}")
-        loss_value += recon_loss
+        total_loss = loss_value + recon_loss
 
     # backprop
     if optimizer is not None:
         if use_amp:
-            scaler.scale(loss_value).backward()
+            scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
             clip_grad_norm_(params, max_norm=2.0, norm_type=2)
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss_value.backward()
+            total_loss.backward()
             clip_grad_norm_(params, max_norm=2.0, norm_type=2)  # stabilizes training
             optimizer.step()
 
-    return loss_value.item(), estimated_content_indices
+    return total_loss.item(), loss_value.item(), recon_loss.item(), estimated_content_indices
 
 
 def val_step(data, encoders, decoders, loss_func, args):
@@ -716,29 +768,34 @@ def main(args: argparse.Namespace):
         # training loop
         step = 1
         loss_values = []  # list to keep track of loss values
+        contrastive_losses = []
+        recon_losses = []
         while step <= args.train_steps:
             # training step
             data = next(train_iterator)  # contains images, texts, and labels
-            loss_value, _ = train_step(data, encoders, decoders, loss_func, optimizer, params, args=args, scaler=scaler)
-            loss_values.append(loss_value)
+            total_loss, contrastive_loss, recon_loss, _ = train_step(data, encoders, decoders, loss_func, optimizer, params, args=args, scaler=scaler)
+            loss_values.append(total_loss)
+            contrastive_losses.append(contrastive_loss)
+            recon_losses.append(recon_loss)
 
-            # print average loss value
+            # print loss values every step
+            print(f"Step {step}: Total={total_loss:.4f} | Contrastive={contrastive_loss:.4f} | Recon={recon_loss:.4f}", flush=True)
+
+            # log to file at intervals
             if step % args.log_steps == 1 or step == args.train_steps:
-                print(
-                    f"Step: {step} \t",
-                    f"Loss: {loss_value:.4f} \t",
-                    f"<Loss>: {np.mean(loss_values[-args.log_steps:]):.4f} \t",
-                )
                 with open(f"{file_name}", "a+") as fileobj:
                     writer = csv.writer(fileobj)
                     wri = [
-                        "Step",
-                        f"{step}",
-                        "<Loss>",
-                        f"{np.mean(loss_values[-args.log_steps:]):.3f}",
+                        "Step", f"{step}",
+                        "Total", f"{np.mean(loss_values[-args.log_steps:]):.3f}",
+                        "Contrastive", f"{np.mean(contrastive_losses[-args.log_steps:]):.3f}",
+                        "Recon", f"{np.mean(recon_losses[-args.log_steps:]):.3f}",
                     ]
                     writer.writerow(wri)
-                # fileobj.close()
+
+            # save decoded images every 200 steps
+            if step % 200 == 0 or step == 1:
+                save_decoded_images(encoders, decoders, data, args, step)
 
             # save models and intermediate checkpoints
             if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
@@ -763,8 +820,12 @@ def main(args: argparse.Namespace):
         logger.info("="*60)
         logger.info("TRAINING COMPLETE")
         logger.info("="*60)
-        logger.info(f"  Final loss: {loss_values[-1]:.4f}")
-        logger.info(f"  Average loss (last {args.log_steps} steps): {np.mean(loss_values[-args.log_steps:]):.4f}")
+        logger.info(f"  Final total loss: {loss_values[-1]:.4f}")
+        logger.info(f"  Final contrastive loss: {contrastive_losses[-1]:.4f}")
+        logger.info(f"  Final recon loss: {recon_losses[-1]:.4f}")
+        logger.info(f"  Avg total (last {args.log_steps}): {np.mean(loss_values[-args.log_steps:]):.4f}")
+        logger.info(f"  Avg contrastive (last {args.log_steps}): {np.mean(contrastive_losses[-args.log_steps:]):.4f}")
+        logger.info(f"  Avg recon (last {args.log_steps}): {np.mean(recon_losses[-args.log_steps:]):.4f}")
         logger.info(f"  Models saved to: {args.save_dir}")
 
     # evaluation
