@@ -40,6 +40,7 @@ from encoders import TextEncoder2D
 from infinite_iterator import InfiniteIterator
 from losses import infonce_loss, BaurLoss
 import vae
+import vqvae
 
 device_ids = [0]
 
@@ -94,7 +95,7 @@ def parse_args():
         choices=["mpi3d", "independent3di", "causal3di", "multimodal3di", "adni", "ADNI_registered", "custom"],
     )
     parser.add_argument("--model-dir", type=str, default="results")
-    parser.add_argument("--model-id", type=str, default="2")
+    parser.add_argument("--model-id", type=str, default="vqvae")
     parser.add_argument("--encoding-size", type=int, default=256)
     parser.add_argument("--hidden-size", type=int, default=100)
     parser.add_argument("--tau", type=float, default=1.0)
@@ -116,6 +117,15 @@ def parse_args():
     parser.add_argument("--collate-random-pair", action="store_true")
     parser.add_argument("--modalities", default=["image"], choices=[["image"], ["image", "text"]])
     parser.add_argument("--scale-recon-loss", type=float, default=0.00001, help="Scale factor for the reconstruction loss to balance with contrastive loss")
+    parser.add_argument("--encoder-type", type=str, default="vqvae", choices=["vae", "vqvae"], help="Encoder architecture: vae or vqvae")
+    # VQ-VAE-2 specific arguments
+    parser.add_argument("--vqvae-hidden-channels", type=int, default=64, help="Hidden channels in VQ-VAE")
+    parser.add_argument("--vqvae-res-channels", type=int, default=32, help="Residual block channels in VQ-VAE")
+    parser.add_argument("--vqvae-nb-levels", type=int, default=3, help="Number of hierarchical levels in VQ-VAE-2")
+    parser.add_argument("--vqvae-embed-dim", type=int, default=32, help="Embedding dimension for VQ codebook")
+    parser.add_argument("--vqvae-nb-entries", type=int, default=512, help="Number of entries in VQ codebook")
+    parser.add_argument("--vqvae-scaling-rates", type=int, nargs="+", default=[4, 2, 2], help="Downscaling rates per level")
+    parser.add_argument("--vq-commitment-weight", type=float, default=0.25, help="Weight for VQ commitment loss")
     parser.add_argument(
         "--selection",
         type=str,
@@ -319,13 +329,55 @@ def save_decoded_images(encoders, decoders, data, args, step):
         print(f"[SAVED] Decoded images at step {step} to {save_dir}/", flush=True)
 
 
+def save_vqvae_decoded_images(vqvae_model, data, args, step):
+    """
+    Save decoded images from VQ-VAE-2 for visualization.
+    
+    Args:
+        vqvae_model: The VQ-VAE-2 model.
+        data: Batch of input data.
+        args: Arguments namespace.
+        step: Current training step.
+    """
+    import nibabel as nib
+    
+    with torch.no_grad():
+        # Take first image from first view
+        samples = data["image"]
+        img = samples[0][0:1]  # (1, 1, D, H, W)
+        
+        # Forward through VQ-VAE-2
+        recon, diffs, encoder_outputs, decoder_outputs, id_outputs = vqvae_model(img)
+        
+        # Convert to numpy
+        decoded_np = recon.squeeze().cpu().numpy()
+        original_np = img.squeeze().cpu().numpy()
+        
+        # Create affine with 2mm spacing
+        affine_2mm = np.diag([2.0, 2.0, 2.0, 1.0])
+        
+        # Save both original and decoded
+        save_dir = os.path.join(args.save_dir, "decoded_images")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        nib.save(nib.Nifti1Image(original_np, affine=affine_2mm), 
+                 f"{save_dir}/step_{step:05d}_original.nii.gz")
+        nib.save(nib.Nifti1Image(decoded_np, affine=affine_2mm), 
+                 f"{save_dir}/step_{step:05d}_decoded.nii.gz")
+        
+        # Also log VQ losses per level
+        vq_losses_str = ", ".join([f"L{i}:{d.item():.4f}" for i, d in enumerate(diffs)])
+        print(f"[SAVED] VQ-VAE decoded at step {step} | VQ losses: {vq_losses_str}", flush=True)
+
+
 def train_step(data, encoders, decoders, loss_func, optimizer, params, args, scaler=None):
     """
     Perform a single training step.
 
     Args:
         data (dict): A dictionary containing the input data for each modality.
-        fs (List[Callable]): A list of functions representing the feature extractors for each modality.
+        encoders: Encoder models (or VQVAE model for vqvae mode).
+        decoders: Decoder models (unused for vqvae mode, integrated in VQVAE).
         loss_func (Callable): The loss function to compute the loss.
         optimizer (torch.optim.Optimizer): The optimizer to update the model parameters.
         params (Iterable[torch.Tensor]): The model parameters to be optimized.
@@ -342,57 +394,111 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
     # Use autocast for mixed precision if scaler is provided
     use_amp = scaler is not None
     
+    # Determine device
+    device = next(encoders[0].parameters()).device
+    
     with autocast(enabled=use_amp):
-        # compute loss
-        hz = []  # concat the learned reprentation for all views
-        n_views = int(0)
-        for m_midx, m in enumerate(args.modalities):
-            samples = data[m]
-            hz_m = encoders[m_midx](torch.concat(samples, 0))
-            hz += [hz_m]
-            n_views += len(samples)
-
-        hz = torch.concat(
-            hz,
-            0,
-        )
-
-        # Flatten encoder output for contrastive loss and decoder
-        hz_flat = hz.view(hz.size(0), -1)  # (batch, 512)
-
-        # decode the image
-        decoded_images = decoders[0](hz_flat)
-        ground_truth_images = torch.concat(data["image"], 0).to(decoded_images.device)
-
-        recon_loss, _ = BaurLoss()(decoded_images, ground_truth_images)
-        recon_loss = recon_loss * args.scale_recon_loss  # scale down the recon loss to balance with contrastive loss
-
-        avg_logits = hz_flat.mean(0)[None]
-        if "content_indices" not in data:
-            data["content_indices"] = args.content_indices
-        content_size = [len(content) for content in data["content_indices"]]  # (batch_size, )
-
-        if args.selection in ["ground_truth", "concat"]:
-            estimated_content_indices = args.content_indices  # len = len(subsets)
+        samples = data["image"]
+        n_views = len(samples)
+        images = torch.concat(samples, 0).to(device)  # (n_views * batch, 1, D, H, W)
+        
+        if args.encoder_type == 'vqvae':
+            # VQ-VAE-2: encoders[0] is the VQVAE model
+            vqvae_model = encoders[0]
+            
+            # Forward pass through VQ-VAE-2
+            recon, diffs, encoder_outputs, decoder_outputs, id_outputs = vqvae_model(images)
+            
+            # Reconstruction loss
+            recon_loss, _ = BaurLoss()(recon, images)
+            recon_loss = recon_loss * args.scale_recon_loss
+            
+            # VQ commitment loss (sum of all levels)
+            vq_loss = sum(diffs) * args.vq_commitment_weight
+            
+            # Hierarchical contrastive loss across all encoder levels
+            # Each encoder_output is (n_views * batch, channels, d, h, w)
+            total_contrastive_loss = torch.zeros(1, device=images.device)
+            level_losses = []
+            
+            for level_idx, enc_out in enumerate(encoder_outputs):
+                # Global average pool to get feature vector per image
+                # enc_out: (n_views * batch, C, D, H, W) -> (n_views * batch, C)
+                hz_level = enc_out.mean(dim=[2, 3, 4])  # Global average pooling
+                
+                # Reshape for contrastive loss: (n_views, batch, C)
+                hz_level = hz_level.reshape(n_views, -1, hz_level.shape[-1])
+                
+                # Use all dimensions as content for each level
+                level_content_indices = list(range(hz_level.shape[-1]))
+                
+                # Compute contrastive loss for this level
+                level_loss = loss_func(
+                    hz_level, 
+                    [level_content_indices],  # All dims as content
+                    args.subsets
+                )
+                level_losses.append(level_loss.item())
+                total_contrastive_loss = total_contrastive_loss + level_loss
+            
+            # Average contrastive loss across levels
+            contrastive_loss = total_contrastive_loss
+            
+            # Total loss
+            total_loss = contrastive_loss + recon_loss + vq_loss
+            
+            # For logging, combine VQ loss into recon_loss
+            recon_loss_value = recon_loss.item() + vq_loss.item()
+            contrastive_loss_value = contrastive_loss.item()
+            estimated_content_indices = args.content_indices
+            
         else:
-            if args.subsets[-1] == list(range(args.n_views)) and content_size[-1] > 0:
-                # when the joint intersection is not empty,
-                # we use the fact that the joint intersection will be in all smaller subsets
-                content_masks = utils.smart_gumbel_softmax_mask(
-                    avg_logits=avg_logits, content_sizes=content_size, subsets=args.subsets
-                )
+            # Original VAE path
+            hz = []  # concat the learned representation for all views
+            for m_midx, m in enumerate(args.modalities):
+                samples = data[m]
+                hz_m = encoders[m_midx](torch.concat(samples, 0))
+                hz += [hz_m]
+
+            hz = torch.concat(hz, 0)
+
+            # Flatten encoder output for contrastive loss and decoder
+            hz_flat = hz.view(hz.size(0), -1)  # (batch, 512)
+
+            # decode the image
+            decoded_images = decoders[0](hz_flat)
+            ground_truth_images = torch.concat(data["image"], 0).to(decoded_images.device)
+
+            recon_loss, _ = BaurLoss()(decoded_images, ground_truth_images)
+            recon_loss = recon_loss * args.scale_recon_loss
+
+            avg_logits = hz_flat.mean(0)[None]
+            if "content_indices" not in data:
+                data["content_indices"] = args.content_indices
+            content_size = [len(content) for content in data["content_indices"]]
+
+            if args.selection in ["ground_truth", "concat"]:
+                estimated_content_indices = args.content_indices
             else:
-                content_masks = utils.gumbel_softmax_mask(
-                    avg_logits=avg_logits, content_sizes=content_size, subsets=args.subsets
-                )
+                if args.subsets[-1] == list(range(args.n_views)) and content_size[-1] > 0:
+                    content_masks = utils.smart_gumbel_softmax_mask(
+                        avg_logits=avg_logits, content_sizes=content_size, subsets=args.subsets
+                    )
+                else:
+                    content_masks = utils.gumbel_softmax_mask(
+                        avg_logits=avg_logits, content_sizes=content_size, subsets=args.subsets
+                    )
 
-            estimated_content_indices = []
-            for c_mask in content_masks:
-                c_ind = torch.where(c_mask)[-1].tolist()
-                estimated_content_indices += [c_ind]
+                estimated_content_indices = []
+                for c_mask in content_masks:
+                    c_ind = torch.where(c_mask)[-1].tolist()
+                    estimated_content_indices += [c_ind]
 
-        loss_value = loss_func(hz_flat.reshape(n_views, -1, hz_flat.shape[-1]), estimated_content_indices, args.subsets)
-        total_loss = loss_value + recon_loss
+            contrastive_loss = loss_func(hz_flat.reshape(n_views, -1, hz_flat.shape[-1]), estimated_content_indices, args.subsets)
+            total_loss = contrastive_loss + recon_loss
+            
+            recon_loss_value = recon_loss.item()
+            contrastive_loss_value = contrastive_loss.item()
 
     # backprop
     if optimizer is not None:
@@ -404,10 +510,10 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             scaler.update()
         else:
             total_loss.backward()
-            clip_grad_norm_(params, max_norm=2.0, norm_type=2)  # stabilizes training
+            clip_grad_norm_(params, max_norm=2.0, norm_type=2)
             optimizer.step()
 
-    return total_loss.item(), loss_value.item(), recon_loss.item(), estimated_content_indices
+    return total_loss.item(), contrastive_loss_value, recon_loss_value, estimated_content_indices
 
 
 def val_step(data, encoders, decoders, loss_func, args):
@@ -685,43 +791,74 @@ def main(args: argparse.Namespace):
     # define image encoder
     logger.info("")
     logger.info("[MODEL ARCHITECTURE]")
-    logger.info("  Building image encoder (VAE Encoder)...")
-    # encoder_img = torch.nn.Sequential(
-    #     resnet18(num_classes=args.hidden_size),
-    #     torch.nn.LeakyReLU(),
-    #     torch.nn.Linear(args.hidden_size, args.encoding_size),
-    # )
-    encoder_img = vae.Encoder()
-    encoder_img = torch.nn.DataParallel(encoder_img, device_ids=device_ids)
-    encoder_img.to(device)
-    num_params_encoder = sum(p.numel() for p in encoder_img.parameters())
-    logger.info(f"    Encoder parameters: {num_params_encoder:,}")
-
-    encoders = [encoder_img]
-
-    if "text" in args.modalities:
-        logger.info("  Building text encoder...")
-        # define text encoder
-        sequence_length = train_dataset.max_sequence_length
-        encoder_txt = TextEncoder2D(
-            input_size=train_dataset.vocab_size,
-            output_size=args.encoding_size,
-            sequence_length=sequence_length,
-        )
-        encoder_txt = torch.nn.DataParallel(encoder_txt, device_ids=device_ids)
-        encoder_txt.to(device)
-        encoders += [encoder_txt]
-
-    # Decoder takes the flattened encoder output (512) as latent_dim
-    logger.info("  Building decoder (VAE Decoder)...")
-    decoder = vae.Decoder(latent_dim=512)
-    decoder = torch.nn.DataParallel(decoder, device_ids=device_ids)
-    decoder.to(device)
-    decoders = [decoder]
-    num_params_decoder = sum(p.numel() for p in decoder.parameters())
-    logger.info(f"    Decoder parameters: {num_params_decoder:,}")
     
-    total_params = sum(sum(p.numel() for p in m.parameters()) for m in encoders + decoders)
+    if args.encoder_type == 'vqvae':
+        logger.info("  Building VQ-VAE-2 model...")
+        logger.info(f"    Hidden channels: {args.vqvae_hidden_channels}")
+        logger.info(f"    Res channels: {args.vqvae_res_channels}")
+        logger.info(f"    Num levels: {args.vqvae_nb_levels}")
+        logger.info(f"    Embed dim: {args.vqvae_embed_dim}")
+        logger.info(f"    Codebook entries: {args.vqvae_nb_entries}")
+        logger.info(f"    Scaling rates: {args.vqvae_scaling_rates}")
+        
+        vqvae_model = vqvae.VQVAE(
+            in_channels=1,  # Grayscale MRI
+            hidden_channels=args.vqvae_hidden_channels,
+            res_channels=args.vqvae_res_channels,
+            nb_res_layers=2,
+            nb_levels=args.vqvae_nb_levels,
+            embed_dim=args.vqvae_embed_dim,
+            nb_entries=args.vqvae_nb_entries,
+            scaling_rates=args.vqvae_scaling_rates,
+        )
+        vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
+        vqvae_model.to(device)
+        
+        num_params = sum(p.numel() for p in vqvae_model.parameters())
+        logger.info(f"    VQ-VAE-2 parameters: {num_params:,}")
+        
+        # For VQVAE, we use encoders list to hold the model, decoders is empty
+        encoders = [vqvae_model]
+        decoders = []
+        
+        total_params = num_params
+        
+    else:
+        logger.info("  Building image encoder (VAE Encoder)...")
+        encoder_img = vae.Encoder()
+        encoder_img = torch.nn.DataParallel(encoder_img, device_ids=device_ids)
+        encoder_img.to(device)
+
+
+        num_params_encoder = sum(p.numel() for p in encoder_img.parameters())
+        logger.info(f"    Encoder parameters: {num_params_encoder:,}")
+
+        encoders = [encoder_img]
+
+        if "text" in args.modalities:
+            logger.info("  Building text encoder...")
+            # define text encoder
+            sequence_length = train_dataset.max_sequence_length
+            encoder_txt = TextEncoder2D(
+                input_size=train_dataset.vocab_size,
+                output_size=args.encoding_size,
+                sequence_length=sequence_length,
+            )
+            encoder_txt = torch.nn.DataParallel(encoder_txt, device_ids=device_ids)
+            encoder_txt.to(device)
+            encoders += [encoder_txt]
+
+        # Decoder takes the flattened encoder output (512) as latent_dim
+        logger.info("  Building decoder (VAE Decoder)...")
+        decoder = vae.Decoder(latent_dim=512)
+        decoder = torch.nn.DataParallel(decoder, device_ids=device_ids)
+        decoder.to(device)
+        decoders = [decoder]
+        num_params_decoder = sum(p.numel() for p in decoder.parameters())
+        logger.info(f"    Decoder parameters: {num_params_decoder:,}")
+        
+        total_params = sum(sum(p.numel() for p in m.parameters()) for m in encoders + decoders)
+    
     logger.info(f"  Total trainable parameters: {total_params:,}")
 
     # for evaluation, always load saved encoders
@@ -795,19 +932,28 @@ def main(args: argparse.Namespace):
                     ]
                     writer.writerow(wri)
 
-            # save decoded images every 200 steps
-            if step % 200 == 0 or step == 1:
+            # save decoded images every 200 steps (only for VAE mode)
+            if (step % 200 == 0 or step == 1) and args.encoder_type != 'vqvae':
                 save_decoded_images(encoders, decoders, data, args, step)
+            
+            # save VQVAE decoded images
+            if (step % 200 == 0 or step == 1) and args.encoder_type == 'vqvae':
+                save_vqvae_decoded_images(encoders[0], data, args, step)
 
             # save models and intermediate checkpoints
             if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
-                for m_idx, m in enumerate(args.modalities):
-                    checkpoint_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
-                    torch.save(
-                        encoders[m_idx].state_dict(),
-                        checkpoint_path,
-                    )
-                logger.info(f"[CHECKPOINT] Step {step}: Saved encoder to {args.save_dir}")
+                if args.encoder_type == 'vqvae':
+                    checkpoint_path = os.path.join(args.save_dir, "vqvae_model.pt")
+                    torch.save(encoders[0].state_dict(), checkpoint_path)
+                    logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
+                else:
+                    for m_idx, m in enumerate(args.modalities):
+                        checkpoint_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
+                        torch.save(
+                            encoders[m_idx].state_dict(),
+                            checkpoint_path,
+                        )
+                    logger.info(f"[CHECKPOINT] Step {step}: Saved encoder to {args.save_dir}")
 
                 if args.save_all_checkpoints:
                     versioned_path = os.path.join(args.save_dir, f"encoder_{m}_%d.pt" % step)
