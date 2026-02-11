@@ -112,7 +112,7 @@ def parse_args():
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument("--use-amp", action="store_true", help="Use automatic mixed precision (fp16) to reduce memory")
     parser.add_argument("--save-all-checkpoints", action="store_true")
-    parser.add_argument("--resume-training", action="store_false")
+    parser.add_argument("--resume-training", action="store_true", help="Resume training from last checkpoint if available")
     parser.add_argument("--load-args", action="store_true")
     parser.add_argument("--collate-random-pair", action="store_true")
     parser.add_argument("--modalities", default=["image"], choices=[["image"], ["image", "text"]])
@@ -417,9 +417,11 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             vq_loss = sum(diffs) * args.vq_commitment_weight
             
             # Hierarchical contrastive loss across all encoder levels
+            # Content indices are selected at level 0, then propagated to higher levels
             # Each encoder_output is (n_views * batch, channels, d, h, w)
             total_contrastive_loss = torch.zeros(1, device=images.device)
             level_losses = []
+            estimated_content_indices = None  # Will be set at level 0
             
             for level_idx, enc_out in enumerate(encoder_outputs):
                 # Global average pool to get feature vector per image
@@ -428,14 +430,51 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                 
                 # Reshape for contrastive loss: (n_views, batch, C)
                 hz_level = hz_level.reshape(n_views, -1, hz_level.shape[-1])
+                n_channels = hz_level.shape[-1]
                 
-                # Use all dimensions as content for each level
-                level_content_indices = list(range(hz_level.shape[-1]))
+                if level_idx == 0:
+                    # Level 0: Select content indices using Gumbel-Softmax
+                    # This determines which dimensions are "content" (shared across views)
+                    # avg_logits shape: (batch, C) for gumbel_softmax functions
+                    avg_logits = hz_level.mean(0)  # (batch, C)
+                    
+                    # Scale content size to match encoder channels (args.content_indices is for 512-dim VAE)
+                    # Use the same ratio: e.g., 256/512 = 0.5 → use 50% of channels as content
+                    original_content_size = len(args.content_indices[0])
+                    original_total_size = original_content_size + len(args.style_indices)
+                    content_ratio = original_content_size / original_total_size
+                    content_size = max(1, int(content_ratio * n_channels))
+                    
+                    if args.subsets[-1] == list(range(args.n_views)) and content_size > 0:
+                        content_masks = utils.smart_gumbel_softmax_mask(
+                            avg_logits=avg_logits, content_sizes=[content_size], subsets=args.subsets
+                        )
+                    else:
+                        content_masks = utils.gumbel_softmax_mask(
+                            avg_logits=avg_logits, content_sizes=[content_size], subsets=args.subsets
+                        )
+                    
+                    # Extract content indices from masks
+                    estimated_content_indices = []
+                    for c_mask in content_masks:
+                        c_ind = torch.where(c_mask)[-1].tolist()
+                        estimated_content_indices.append(c_ind)
+                    
+                    level_content_indices = estimated_content_indices
+                    
+                else:
+                    # Higher levels: Use proportional content indices based on level 0's selection
+                    # Scale the content size proportionally to this level's channel count
+                    scaled_content_size = max(1, int(content_ratio * n_channels))
+                    
+                    # For higher levels, use the first `scaled_content_size` dimensions as content
+                    # This maintains the content/style split ratio learned at level 0
+                    level_content_indices = [list(range(scaled_content_size))]
                 
-                # Compute contrastive loss for this level
+                # Compute contrastive loss for this level using selected content indices
                 level_loss = loss_func(
                     hz_level, 
-                    [level_content_indices],  # All dims as content
+                    level_content_indices,
                     args.subsets
                 )
                 level_losses.append(level_loss.item())
@@ -903,12 +942,44 @@ def main(args: argparse.Namespace):
         logger.info(f"  Log interval: every {args.log_steps} steps")
         logger.info(f"  Checkpoint interval: every {args.checkpoint_steps} steps")
         logger.info("")
-        
+
         # training loop
         step = 1
         loss_values = []  # list to keep track of loss values
         contrastive_losses = []
         recon_losses = []
+        # check for existing model checkpoints and load if available (for resuming training)
+        if args.resume_training and os.path.exists(args.save_dir):
+            if args.encoder_type == 'vqvae':
+                # VQ-VAE checkpoint
+                checkpoint_path = os.path.join(args.save_dir, "vqvae_model.pt")
+                if os.path.exists(checkpoint_path):
+                    logger.info(f"  Resuming VQ-VAE training from checkpoint: {checkpoint_path}")
+                    checkpoint = torch.load(checkpoint_path, map_location=device)
+                    encoders[0].load_state_dict(checkpoint['encoders'])
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    step = checkpoint['step'] + 1  # Start from next step
+                    logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
+                    logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")
+                else:
+                    logger.info("  No VQ-VAE checkpoint found, starting fresh training.")
+            else:
+                # VAE checkpoint - look for encoder files
+                checkpoint_path = os.path.join(args.save_dir, "checkpoint.pt")
+                if os.path.exists(checkpoint_path):
+                    logger.info(f"  Resuming VAE training from checkpoint: {checkpoint_path}")
+                    checkpoint = torch.load(checkpoint_path, map_location=device)
+                    for m_idx, m in enumerate(args.modalities):
+                        encoders[m_idx].load_state_dict(checkpoint[f'encoder_{m}'])
+                    decoders[0].load_state_dict(checkpoint['decoder'])
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    step = checkpoint['step'] + 1  # Start from next step
+                    logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
+                    logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")
+                else:
+                    logger.info("  No VAE checkpoint found, starting fresh training.")
+        
+
         while step <= args.train_steps:
             # training step
             data = next(train_iterator)  # contains images, texts, and labels
@@ -944,16 +1015,34 @@ def main(args: argparse.Namespace):
             if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
                 if args.encoder_type == 'vqvae':
                     checkpoint_path = os.path.join(args.save_dir, "vqvae_model.pt")
-                    torch.save(encoders[0].state_dict(), checkpoint_path)
+                    checkpoint = {
+                        'encoders': encoders[0].state_dict(),
+                        'step': step,
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'loss': total_loss,
+                        'contrastive_loss': contrastive_loss,
+                        'recon_loss': recon_loss,
+                    }
+                    torch.save(checkpoint, checkpoint_path)
                     logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
                 else:
+                    # Save full checkpoint for VAE mode (for resuming)
+                    checkpoint_path = os.path.join(args.save_dir, "checkpoint.pt")
+                    checkpoint = {
+                        'step': step,
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'decoder': decoders[0].state_dict(),
+                        'loss': total_loss,
+                        'contrastive_loss': contrastive_loss,
+                        'recon_loss': recon_loss,
+                    }
                     for m_idx, m in enumerate(args.modalities):
-                        checkpoint_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
-                        torch.save(
-                            encoders[m_idx].state_dict(),
-                            checkpoint_path,
-                        )
-                    logger.info(f"[CHECKPOINT] Step {step}: Saved encoder to {args.save_dir}")
+                        checkpoint[f'encoder_{m}'] = encoders[m_idx].state_dict()
+                        # Also save standalone encoder file for evaluation compatibility
+                        encoder_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
+                        torch.save(encoders[m_idx].state_dict(), encoder_path)
+                    torch.save(checkpoint, checkpoint_path)
+                    logger.info(f"[CHECKPOINT] Step {step}: Saved checkpoint to {args.save_dir}")
 
                 if args.save_all_checkpoints:
                     versioned_path = os.path.join(args.save_dir, f"encoder_{m}_%d.pt" % step)
