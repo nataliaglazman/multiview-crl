@@ -4,11 +4,16 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import torch
+from typing import Dict, List, Tuple
+import torch.nn.functional as F
 
 from torch import cat
 from torch import tensor
 from torch import reshape
 from torch.nn import PairwiseDistance
+from lpips import LPIPS
+from torch.fft import fftn
+from utils import TBSummaryTypes
 
 
 
@@ -386,3 +391,143 @@ class BaurLoss(object):
         dx = reshape(dx, input_shape)
 
         return dx, dy, dz
+
+class BaselineLoss(torch.nn.Module):
+    def __init__(self):
+        super(BaselineLoss, self).__init__()
+
+        self.pixel_factor = 1.0
+
+        self.perceptual_factor = 0.002
+        self.n_slices = 512
+        self.perceptual_function = LPIPS(net="squeeze")
+
+        self.fft_factor = 1.0
+
+        self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
+
+    def forward(
+        self, network_output: Dict[str, List[torch.Tensor]], y: torch.Tensor
+    ) -> torch.Tensor:
+        # Unpacking elements
+        x = y.float()
+        y = network_output["reconstruction"][0].float()
+        q_losses = network_output["quantization_losses"]
+
+        loss = (
+            self._calculate_pixel_loss(x, y)
+            + self._calculate_frequency_loss(x, y)
+            + self._calculate_perceptual_loss(x, y)
+        )
+
+        for idx, q_loss in enumerate(q_losses):
+            q_loss = q_loss.float()
+
+            self.summaries[TBSummaryTypes.SCALAR][
+                f"Loss-MSE-VQ{idx}_Commitment_Cost"
+            ] = q_loss
+
+            loss = loss + q_loss
+
+        return loss
+
+    def _calculate_frequency_loss(self, x, y) -> torch.Tensor:
+        def fft_abs(t):
+            img_torch = (t + 1.0) / 2.0
+            fft = fftn(img_torch, norm="ortho")
+            return torch.abs(fft)
+
+        loss = F.mse_loss(fft_abs(x), fft_abs(y))
+        loss = loss * self.fft_factor
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss
+
+        return loss
+
+    def _calculate_pixel_loss(self, x, y) -> torch.Tensor:
+        loss = F.l1_loss(x, y)
+        loss = loss * self.pixel_factor
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-MAE-Reconstruction"] = loss
+
+        return loss
+
+    def _calculate_perceptual_loss(self, x, y) -> torch.Tensor:
+        # Sagital
+        x_2d = (
+            x.permute(0, 2, 1, 3, 4)
+            .contiguous()
+            .view(-1, x.shape[1], x.shape[3], x.shape[4])
+        )
+        y_2d = (
+            y.permute(0, 2, 1, 3, 4)
+            .contiguous()
+            .view(-1, y.shape[1], y.shape[3], y.shape[4])
+        )
+        indices = torch.randperm(x_2d.size(0))[: self.n_slices]
+        selected_x_2d = x_2d[indices]
+        selected_y_2d = y_2d[indices]
+
+        p_loss_sagital = torch.mean(
+            self.perceptual_function.forward(
+                selected_x_2d.float(), selected_y_2d.float()
+            )
+        )
+        self.summaries[TBSummaryTypes.SCALAR][
+            "Loss-Perceptual_Sagittal-Reconstruction"
+        ] = p_loss_sagital
+
+        # Axial
+        x_2d = (
+            x.permute(0, 4, 1, 2, 3)
+            .contiguous()
+            .view(-1, x.shape[1], x.shape[2], x.shape[3])
+        )
+        y_2d = (
+            y.permute(0, 4, 1, 2, 3)
+            .contiguous()
+            .view(-1, y.shape[1], y.shape[2], y.shape[3])
+        )
+        indices = torch.randperm(x_2d.size(0))[: self.n_slices]
+        selected_x_2d = x_2d[indices]
+        selected_y_2d = y_2d[indices]
+
+        p_loss_axial = torch.mean(
+            self.perceptual_function.forward(
+                selected_x_2d.float(), selected_y_2d.float()
+            )
+        )
+        self.summaries[TBSummaryTypes.SCALAR][
+            "Loss-Perceptual_Axial-Reconstruction"
+        ] = p_loss_axial
+
+        # Coronal
+        x_2d = (
+            x.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .view(-1, x.shape[1], x.shape[2], x.shape[4])
+        )
+        y_2d = (
+            y.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .view(-1, y.shape[1], y.shape[2], y.shape[4])
+        )
+        indices = torch.randperm(x_2d.size(0))[: self.n_slices]
+        selected_x_2d = x_2d[indices]
+        selected_y_2d = y_2d[indices]
+
+        p_loss_coronal = torch.mean(
+            self.perceptual_function.forward(
+                selected_x_2d.float(), selected_y_2d.float()
+            )
+        )
+        self.summaries[TBSummaryTypes.SCALAR][
+            "Loss-Perceptual_Coronal-Reconstruction"
+        ] = p_loss_coronal
+
+        loss = p_loss_sagital + p_loss_axial + p_loss_coronal
+        loss = loss * self.perceptual_factor
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = loss
+
+        return loss
+
+    def get_summaries(self) -> Dict[str, torch.Tensor]:
+        return self.summaries

@@ -38,7 +38,7 @@ import dci
 import utils
 from encoders import TextEncoder2D
 from infinite_iterator import InfiniteIterator
-from losses import infonce_loss, BaurLoss
+from losses import infonce_loss, BaselineLoss
 import vae
 import vqvae
 
@@ -124,7 +124,7 @@ def parse_args():
     parser.add_argument("--vqvae-nb-levels", type=int, default=3, help="Number of hierarchical levels in VQ-VAE-2")
     parser.add_argument("--vqvae-embed-dim", type=int, default=32, help="Embedding dimension for VQ codebook")
     parser.add_argument("--vqvae-nb-entries", type=int, default=512, help="Number of entries in VQ codebook")
-    parser.add_argument("--vqvae-scaling-rates", type=int, nargs="+", default=[4, 2, 2], help="Downscaling rates per level")
+    parser.add_argument("--vqvae-scaling-rates", type=int, nargs="+", default=[2, 2, 2], help="Downscaling rates per level")
     parser.add_argument("--vq-commitment-weight", type=float, default=0.25, help="Weight for VQ commitment loss")
     parser.add_argument(
         "--selection",
@@ -255,7 +255,6 @@ def compute_gt_idx(args):
         indicators = [[True] * len(factors)]
         for view, change in enumerate(args.change_lists):
             indicators.append([z not in change for z in factors])
-        # content_indices = [[0, 1, 2, 3, 4, 5, 6, 7], [0, 8, 9, 10], [0], [0]]
         for s in args.subsets:
             content_dict[s] = np.where(list(functools.reduce(operator.eq, [np.array(indicators[k]) for k in s])))[
                 0
@@ -370,7 +369,7 @@ def save_vqvae_decoded_images(vqvae_model, data, args, step):
         print(f"[SAVED] VQ-VAE decoded at step {step} | VQ losses: {vq_losses_str}", flush=True)
 
 
-def train_step(data, encoders, decoders, loss_func, optimizer, params, args, scaler=None):
+def train_step(data, encoders, decoders, loss_func, optimizer, params, args, scaler=None, recon_loss_fn=None):
     """
     Perform a single training step.
 
@@ -391,6 +390,9 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
     if optimizer is not None:
         optimizer.zero_grad()
 
+    if recon_loss_fn is None:
+        recon_loss_fn = BaselineLoss().to(next(encoders[0].parameters()).device)
+
     # Use autocast for mixed precision if scaler is provided
     use_amp = scaler is not None
     
@@ -410,7 +412,10 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             recon, diffs, encoder_outputs, decoder_outputs, id_outputs = vqvae_model(images)
             
             # Reconstruction loss
-            recon_loss, _ = BaurLoss()(recon, images)
+            recon_loss = recon_loss_fn(
+                {"reconstruction": [recon], "quantization_losses": diffs},
+                images,
+            )
             recon_loss = recon_loss * args.scale_recon_loss
             
             # VQ commitment loss (sum of all levels)
@@ -508,7 +513,10 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             decoded_images = decoders[0](hz_flat)
             ground_truth_images = torch.concat(data["image"], 0).to(decoded_images.device)
 
-            recon_loss, _ = BaurLoss()(decoded_images, ground_truth_images)
+            recon_loss = recon_loss_fn(
+                {"reconstruction": [decoded_images], "quantization_losses": []},
+                ground_truth_images,
+            )
             recon_loss = recon_loss * args.scale_recon_loss
 
             avg_logits = hz_flat.mean(0)[None]
@@ -555,7 +563,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
     return total_loss.item(), contrastive_loss_value, recon_loss_value, estimated_content_indices
 
 
-def val_step(data, encoders, decoders, loss_func, args):
+def val_step(data, encoders, decoders, loss_func, args, recon_loss_fn=None):
     """
     Perform a validation step.
 
@@ -570,10 +578,19 @@ def val_step(data, encoders, decoders, loss_func, args):
         The result of the validation step.
     """
     with torch.no_grad():
-        return train_step(data, encoders, decoders, loss_func, optimizer=None, params=None, args=args)
+        return train_step(
+            data,
+            encoders,
+            decoders,
+            loss_func,
+            optimizer=None,
+            params=None,
+            args=args,
+            recon_loss_fn=recon_loss_fn,
+        )
 
 
-def get_data(dataset, encoders, decoders, loss_func, dataloader_kwargs, num_samples=None, args=None):
+def get_data(dataset, encoders, decoders, loss_func, dataloader_kwargs, num_samples=None, args=None, recon_loss_fn=None):
     """
     Get data from the dataset and compute loss values and representations for each modality.
 
@@ -608,7 +625,14 @@ def get_data(dataset, encoders, decoders, loss_func, dataloader_kwargs, num_samp
             data = next(iterator)  # contains images, texts, and labels
 
             # compute loss
-            loss_value, estimated_content_indices = val_step(data, encoders, decoders, loss_func, args=args)
+            loss_value, _, _, estimated_content_indices = val_step(
+                data,
+                encoders,
+                decoders,
+                loss_func,
+                args=args,
+                recon_loss_fn=recon_loss_fn,
+            )
 
             rdict["loss_values"].append([loss_value])
 
@@ -929,6 +953,9 @@ def main(args: argparse.Namespace):
     if args.use_amp:
         logger.info(f"  Mixed Precision: Enabled (AMP)")
 
+    # Reconstruction loss (BaselineLoss) shared across steps
+    recon_loss_fn = BaselineLoss().to(device)
+
     # training
     # --------
     file_name = os.path.join(args.save_dir, "Training.csv")  # record the training loss
@@ -959,6 +986,9 @@ def main(args: argparse.Namespace):
                     encoders[0].load_state_dict(checkpoint['encoders'])
                     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                     step = checkpoint['step'] + 1  # Start from next step
+                    loss_values.append(checkpoint.get('loss', 0))
+                    contrastive_losses.append(checkpoint.get('contrastive_loss', 0))
+                    recon_losses.append(checkpoint.get('recon_loss', 0))
                     logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
                     logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")
                 else:
@@ -974,6 +1004,7 @@ def main(args: argparse.Namespace):
                     decoders[0].load_state_dict(checkpoint['decoder'])
                     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                     step = checkpoint['step'] + 1  # Start from next step
+                    
                     logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
                     logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")
                 else:
@@ -983,7 +1014,17 @@ def main(args: argparse.Namespace):
         while step <= args.train_steps:
             # training step
             data = next(train_iterator)  # contains images, texts, and labels
-            total_loss, contrastive_loss, recon_loss, _ = train_step(data, encoders, decoders, loss_func, optimizer, params, args=args, scaler=scaler)
+            total_loss, contrastive_loss, recon_loss, _ = train_step(
+                data,
+                encoders,
+                decoders,
+                loss_func,
+                optimizer,
+                params,
+                args=args,
+                scaler=scaler,
+                recon_loss_fn=recon_loss_fn,
+            )
             loss_values.append(total_loss)
             contrastive_losses.append(contrastive_loss)
             recon_losses.append(recon_loss)
@@ -1086,6 +1127,7 @@ def main(args: argparse.Namespace):
             dataloader_kwargs,
             args=args,
             num_samples=args.val_size,
+            recon_loss_fn=recon_loss_fn,
         )
         logger.info("[EVALUATION] Collecting test data encodings...")
         test_dict = get_data(
@@ -1096,6 +1138,7 @@ def main(args: argparse.Namespace):
             dataloader_kwargs,
             args=args,
             num_samples=args.test_size,
+            recon_loss_fn=recon_loss_fn,
         )
 
         # print average loss values

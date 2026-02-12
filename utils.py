@@ -13,6 +13,7 @@ from monai.transforms import (Compose, LoadImaged, EnsureChannelFirstd, ScaleInt
                               CopyItemsd, MapTransform)
 import torch
 import torch.nn.functional as F
+from enum import Enum
 
 
 class CreateBrainMaskd(MapTransform):
@@ -446,3 +447,22 @@ def transforms():
         ToTensord(keys=['image_t1', 'image_t2', 'label']),
     ])
     return train_transforms, val_transforms
+
+class TBSummaryTypes(Enum):
+    SCALAR = "scalar"
+    SCALARS = "scalars"
+    HISTOGRAM = "histogram"
+    IMAGE = "image"
+    IMAGE_AXIAL = "image_axial"
+    IMAGE_CORONAL = "image_coronal"
+    IMAGE_SAGITTAL = "image_sagittal"
+    IMAGE3_AXIAL = "image3_axial"
+    IMAGE3_CORONAL = "image3_coronal"
+    IMAGE3_SAGITTAL = "image3_sagittal"
+    IMAGE3 = "image3"
+    IMAGES = "images"
+    IMAGE_WITH_BOXES = "image_with_boxes"
+    FIGURE = "figure"
+    VIDEO = "video"
+    AUDIO = "audio"
+    TEXT = "text"
