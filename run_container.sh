@@ -13,8 +13,12 @@ runai submit --name multiview-crl-upsample\
                              --vqvae-nb-levels 3 \
                              --vqvae-scaling-rates 2 2 2 \
                              --train-steps 50000 \
-                             --batch-size 4 \
+                             --vqvae-hidden-channels 48 \
+                             --vqvae-embed-dim 24 \
+                             --batch-size 2 \
                              --use-amp \
                              --workers 4 \
                              --model-id vqvae_upsample \
-                             --image-spacing 1.0
+                             --skip-recon-ratio 0.3 \
+                             --image-spacing 1.0 \
+                             --crop-margin  4

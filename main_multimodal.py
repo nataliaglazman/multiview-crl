@@ -131,6 +131,7 @@ def parse_args():
     parser.add_argument("--skip-recon-ratio", type=float, default=0.0, help="Fraction of steps to skip reconstruction (0-1, saves memory). E.g., 0.5 means 50% of steps skip decoder.")
     # Image preprocessing
     parser.add_argument("--image-spacing", type=float, default=2.0, help="Isotropic voxel spacing in mm (e.g., 1.0 for original, 2.0 for downsampled)")
+    parser.add_argument("--crop-margin", type=int, default=0, help="Number of voxels to crop from each edge (e.g., 4 removes 4 voxels from all 6 sides)")
     parser.add_argument(
         "--selection",
         type=str,
@@ -832,6 +833,7 @@ def main(args: argparse.Namespace):
         mode="train",
         change_lists=args.change_lists,
         spacing=getattr(args, 'image_spacing', 2.0),
+        crop_margin=getattr(args, 'crop_margin', 0),
         **dataset_kwargs,
     )
     
@@ -853,6 +855,7 @@ def main(args: argparse.Namespace):
             mode="val",
             change_lists=args.change_lists,
             spacing=getattr(args, 'image_spacing', 2.0),
+            crop_margin=getattr(args, 'crop_margin', 0),
             **dataset_kwargs,
         )
         test_dataset = args.DATASETCLASS(
@@ -860,6 +863,7 @@ def main(args: argparse.Namespace):
             mode="test",
             change_lists=args.change_lists,
             spacing=getattr(args, 'image_spacing', 2.0),
+            crop_margin=getattr(args, 'crop_margin', 0),
             **dataset_kwargs,
         )
     else:

@@ -1220,6 +1220,7 @@ class MyCustomDataset(MultiviewDataset):
         mode="train",
         transform=None,
         spacing=2.0,
+        crop_margin=0,
         **kwargs,
     ):
         super().__init__()
@@ -1227,6 +1228,7 @@ class MyCustomDataset(MultiviewDataset):
         self.data_dir = data_dir
         self.change_lists = change_lists or []
         self.spacing = spacing
+        self.crop_margin = crop_margin
         
         # Load CSV and build item list
         csv_path = '/nfs/home/nglazman/cluster/labels_cleaned_3class.csv'
@@ -1238,9 +1240,9 @@ class MyCustomDataset(MultiviewDataset):
         self.items, missing = load_data(df, data_dir, label_map)
         self.num_samples = len(self.items)
         
-        # Get MONAI transforms with specified spacing
+        # Get MONAI transforms with specified spacing and cropping
         from utils import transforms as get_transforms
-        train_transforms, val_transforms = get_transforms(spacing=self.spacing)
+        train_transforms, val_transforms = get_transforms(spacing=self.spacing, crop_margin=self.crop_margin)
         self.monai_transform = train_transforms if mode == "train" else val_transforms
 
     def __len__(self):
