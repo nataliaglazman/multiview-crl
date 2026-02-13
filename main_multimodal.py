@@ -20,6 +20,7 @@ except ImportError:
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from sklearn.kernel_ridge import KernelRidge
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import accuracy_score, r2_score
@@ -116,7 +117,7 @@ def parse_args():
     parser.add_argument("--load-args", action="store_true")
     parser.add_argument("--collate-random-pair", action="store_true")
     parser.add_argument("--modalities", default=["image"], choices=[["image"], ["image", "text"]])
-    parser.add_argument("--scale-recon-loss", type=float, default=0.00001, help="Scale factor for the reconstruction loss to balance with contrastive loss")
+    parser.add_argument("--scale-recon-loss", type=float, default=1, help="Scale factor for the reconstruction loss to balance with contrastive loss")
     parser.add_argument("--encoder-type", type=str, default="vqvae", choices=["vae", "vqvae"], help="Encoder architecture: vae or vqvae")
     # VQ-VAE-2 specific arguments
     parser.add_argument("--vqvae-hidden-channels", type=int, default=64, help="Hidden channels in VQ-VAE")
@@ -126,6 +127,10 @@ def parse_args():
     parser.add_argument("--vqvae-nb-entries", type=int, default=512, help="Number of entries in VQ codebook")
     parser.add_argument("--vqvae-scaling-rates", type=int, nargs="+", default=[2, 2, 2], help="Downscaling rates per level")
     parser.add_argument("--vq-commitment-weight", type=float, default=0.25, help="Weight for VQ commitment loss")
+    parser.add_argument("--gradient-checkpointing", action="store_true", help="Use gradient checkpointing to reduce memory (trades compute for memory)")
+    parser.add_argument("--skip-recon-ratio", type=float, default=0.0, help="Fraction of steps to skip reconstruction (0-1, saves memory). E.g., 0.5 means 50% of steps skip decoder.")
+    # Image preprocessing
+    parser.add_argument("--image-spacing", type=float, default=2.0, help="Isotropic voxel spacing in mm (e.g., 1.0 for original, 2.0 for downsampled)")
     parser.add_argument(
         "--selection",
         type=str,
@@ -403,20 +408,31 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
         samples = data["image"]
         n_views = len(samples)
         images = torch.concat(samples, 0).to(device)  # (n_views * batch, 1, D, H, W)
+        input_shape = images.shape[2:]  # Save for reconstruction size matching
         
         if args.encoder_type == 'vqvae':
             # VQ-VAE-2: encoders[0] is the VQVAE model
             vqvae_model = encoders[0]
             
-            # Forward pass through VQ-VAE-2
-            recon, diffs, encoder_outputs, decoder_outputs, id_outputs = vqvae_model(images)
+            # Decide whether to compute reconstruction this step (memory saving)
+            skip_recon_ratio = getattr(args, 'skip_recon_ratio', 0.0)
+            compute_recon = (skip_recon_ratio == 0.0) or (torch.rand(1).item() > skip_recon_ratio)
             
-            # Reconstruction loss
-            recon_loss = recon_loss_fn(
-                {"reconstruction": [recon], "quantization_losses": diffs},
-                images,
-            )
-            recon_loss = recon_loss * args.scale_recon_loss
+            # Forward pass through VQ-VAE-2
+            recon, diffs, encoder_outputs, decoder_outputs, id_outputs = vqvae_model(images, return_recon=compute_recon)
+            
+            # Reconstruction loss (only if we computed reconstruction)
+            if compute_recon and recon is not None:
+                # Ensure recon matches input size
+                if recon.shape[2:] != input_shape:
+                    recon = F.interpolate(recon, size=input_shape, mode='trilinear', align_corners=False)
+                recon_loss = recon_loss_fn(
+                    {"reconstruction": [recon], "quantization_losses": diffs},
+                    images,
+                )
+                recon_loss = recon_loss * args.scale_recon_loss
+            else:
+                recon_loss = torch.zeros(1, device=device)
             
             # VQ commitment loss (sum of all levels)
             vq_loss = sum(diffs) * args.vq_commitment_weight
@@ -491,8 +507,9 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             # Total loss
             total_loss = contrastive_loss + recon_loss + vq_loss
             
-            # For logging, combine VQ loss into recon_loss
-            recon_loss_value = recon_loss.item() + vq_loss.item()
+            # For logging, track baseline recon and VQ losses separately
+            recon_loss_value = recon_loss.item()
+            vq_loss_value = vq_loss.item()
             contrastive_loss_value = contrastive_loss.item()
             estimated_content_indices = args.content_indices
             
@@ -545,6 +562,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             total_loss = contrastive_loss + recon_loss
             
             recon_loss_value = recon_loss.item()
+            vq_loss_value = 0.0
             contrastive_loss_value = contrastive_loss.item()
 
     # backprop
@@ -559,8 +577,12 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             total_loss.backward()
             clip_grad_norm_(params, max_norm=2.0, norm_type=2)
             optimizer.step()
+        
+        # Clear cache periodically to prevent memory fragmentation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    return total_loss.item(), contrastive_loss_value, recon_loss_value, estimated_content_indices
+    return total_loss.item(), contrastive_loss_value, recon_loss_value, vq_loss_value, estimated_content_indices
 
 
 def val_step(data, encoders, decoders, loss_func, args, recon_loss_fn=None):
@@ -625,7 +647,7 @@ def get_data(dataset, encoders, decoders, loss_func, dataloader_kwargs, num_samp
             data = next(iterator)  # contains images, texts, and labels
 
             # compute loss
-            loss_value, _, _, estimated_content_indices = val_step(
+            loss_value, _, _, _, estimated_content_indices = val_step(
                 data,
                 encoders,
                 decoders,
@@ -809,6 +831,7 @@ def main(args: argparse.Namespace):
         data_dir=args.datapath,
         mode="train",
         change_lists=args.change_lists,
+        spacing=getattr(args, 'image_spacing', 2.0),
         **dataset_kwargs,
     )
     
@@ -829,12 +852,14 @@ def main(args: argparse.Namespace):
             data_dir=args.datapath,
             mode="val",
             change_lists=args.change_lists,
+            spacing=getattr(args, 'image_spacing', 2.0),
             **dataset_kwargs,
         )
         test_dataset = args.DATASETCLASS(
             data_dir=args.datapath,
             mode="test",
             change_lists=args.change_lists,
+            spacing=getattr(args, 'image_spacing', 2.0),
             **dataset_kwargs,
         )
     else:
@@ -863,6 +888,8 @@ def main(args: argparse.Namespace):
         logger.info(f"    Embed dim: {args.vqvae_embed_dim}")
         logger.info(f"    Codebook entries: {args.vqvae_nb_entries}")
         logger.info(f"    Scaling rates: {args.vqvae_scaling_rates}")
+        use_checkpoint = getattr(args, 'gradient_checkpointing', False)
+        logger.info(f"    Gradient checkpointing: {use_checkpoint}")
         
         vqvae_model = vqvae.VQVAE(
             in_channels=1,  # Grayscale MRI
@@ -873,6 +900,7 @@ def main(args: argparse.Namespace):
             embed_dim=args.vqvae_embed_dim,
             nb_entries=args.vqvae_nb_entries,
             scaling_rates=args.vqvae_scaling_rates,
+            use_checkpoint=use_checkpoint,
         )
         vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
         vqvae_model.to(device)
@@ -975,6 +1003,7 @@ def main(args: argparse.Namespace):
         loss_values = []  # list to keep track of loss values
         contrastive_losses = []
         recon_losses = []
+        vq_losses = []
         # check for existing model checkpoints and load if available (for resuming training)
         if args.resume_training and os.path.exists(args.save_dir):
             if args.encoder_type == 'vqvae':
@@ -989,6 +1018,7 @@ def main(args: argparse.Namespace):
                     loss_values.append(checkpoint.get('loss', 0))
                     contrastive_losses.append(checkpoint.get('contrastive_loss', 0))
                     recon_losses.append(checkpoint.get('recon_loss', 0))
+                    vq_losses.append(checkpoint.get('vq_loss', 0))
                     logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
                     logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")
                 else:
@@ -1014,7 +1044,7 @@ def main(args: argparse.Namespace):
         while step <= args.train_steps:
             # training step
             data = next(train_iterator)  # contains images, texts, and labels
-            total_loss, contrastive_loss, recon_loss, _ = train_step(
+            total_loss, contrastive_loss, recon_loss, vq_loss, _ = train_step(
                 data,
                 encoders,
                 decoders,
@@ -1028,9 +1058,13 @@ def main(args: argparse.Namespace):
             loss_values.append(total_loss)
             contrastive_losses.append(contrastive_loss)
             recon_losses.append(recon_loss)
+            vq_losses.append(vq_loss)
 
             # print loss values every step
-            print(f"Step {step}: Total={total_loss:.4f} | Contrastive={contrastive_loss:.4f} | Recon={recon_loss:.4f}", flush=True)
+            print(
+                f"Step {step}: Total={total_loss:.4f} | Contrastive={contrastive_loss:.4f} | Recon={recon_loss:.4f} | VQ={vq_loss:.4f}",
+                flush=True,
+            )
 
             # log to file at intervals
             if step % args.log_steps == 1 or step == args.train_steps:
@@ -1041,6 +1075,7 @@ def main(args: argparse.Namespace):
                         "Total", f"{np.mean(loss_values[-args.log_steps:]):.3f}",
                         "Contrastive", f"{np.mean(contrastive_losses[-args.log_steps:]):.3f}",
                         "Recon", f"{np.mean(recon_losses[-args.log_steps:]):.3f}",
+                        "VQ", f"{np.mean(vq_losses[-args.log_steps:]):.3f}",
                     ]
                     writer.writerow(wri)
 
@@ -1063,6 +1098,7 @@ def main(args: argparse.Namespace):
                         'loss': total_loss,
                         'contrastive_loss': contrastive_loss,
                         'recon_loss': recon_loss,
+                        'vq_loss': vq_loss,
                     }
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
@@ -1076,6 +1112,7 @@ def main(args: argparse.Namespace):
                         'loss': total_loss,
                         'contrastive_loss': contrastive_loss,
                         'recon_loss': recon_loss,
+                        'vq_loss': vq_loss,
                     }
                     for m_idx, m in enumerate(args.modalities):
                         checkpoint[f'encoder_{m}'] = encoders[m_idx].state_dict()
@@ -1101,9 +1138,11 @@ def main(args: argparse.Namespace):
         logger.info(f"  Final total loss: {loss_values[-1]:.4f}")
         logger.info(f"  Final contrastive loss: {contrastive_losses[-1]:.4f}")
         logger.info(f"  Final recon loss: {recon_losses[-1]:.4f}")
+        logger.info(f"  Final VQ loss: {vq_losses[-1]:.4f}")
         logger.info(f"  Avg total (last {args.log_steps}): {np.mean(loss_values[-args.log_steps:]):.4f}")
         logger.info(f"  Avg contrastive (last {args.log_steps}): {np.mean(contrastive_losses[-args.log_steps:]):.4f}")
         logger.info(f"  Avg recon (last {args.log_steps}): {np.mean(recon_losses[-args.log_steps:]):.4f}")
+        logger.info(f"  Avg VQ (last {args.log_steps}): {np.mean(vq_losses[-args.log_steps:]):.4f}")
         logger.info(f"  Models saved to: {args.save_dir}")
 
     # evaluation

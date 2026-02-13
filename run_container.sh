@@ -1,0 +1,20 @@
+runai submit --name multiview-crl-upsample\
+ -i aicregistry:5000/nglazman:multiview-crl-vqvae \
+ --node-type A100 \
+ --run-as-user \
+ --gpu 1 \
+ --cpu 16 \
+ --cpu-limit 32 \
+ --memory 64G --memory-limit 128G --project nglazman \
+ -v /nfs:/nfs --large-shm --command -- python multiview-crl/main_multimodal.py \
+                             --dataroot /nfs/home/nglazman \
+                             --dataset_name ADNI_registered \
+                             --encoder-type vqvae \
+                             --vqvae-nb-levels 3 \
+                             --vqvae-scaling-rates 2 2 2 \
+                             --train-steps 50000 \
+                             --batch-size 4 \
+                             --use-amp \
+                             --workers 4 \
+                             --model-id vqvae_upsample \
+                             --image-spacing 1.0

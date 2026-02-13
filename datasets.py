@@ -1219,15 +1219,17 @@ class MyCustomDataset(MultiviewDataset):
         change_lists=None,
         mode="train",
         transform=None,
+        spacing=2.0,
         **kwargs,
     ):
         super().__init__()
         self.mode = mode
         self.data_dir = data_dir
         self.change_lists = change_lists or []
+        self.spacing = spacing
         
         # Load CSV and build item list
-        csv_path = '/home/ng24/projects/crl/cluster_vae/labels_cleaned_3class.csv'
+        csv_path = '/nfs/home/nglazman/cluster/labels_cleaned_3class.csv'
         df = pd.read_csv(csv_path)
         label_values = sorted(df['Group'].unique())
         label_map = {v: i for i, v in enumerate(label_values)}
@@ -1236,9 +1238,9 @@ class MyCustomDataset(MultiviewDataset):
         self.items, missing = load_data(df, data_dir, label_map)
         self.num_samples = len(self.items)
         
-        # Get MONAI transforms
+        # Get MONAI transforms with specified spacing
         from utils import transforms as get_transforms
-        train_transforms, val_transforms = get_transforms()
+        train_transforms, val_transforms = get_transforms(spacing=self.spacing)
         self.monai_transform = train_transforms if mode == "train" else val_transforms
 
     def __len__(self):

@@ -401,51 +401,72 @@ def load_data(df_filtered, data_dir, label_map):
     return items, missing
 
 
-def transforms():
-    # Target spatial size for 2mm spacing (half of 181x217x181 = 90x108x90)
-    # Using exact size to avoid padding/border
-    spatial_size = (91, 109, 91)  # Slightly larger to avoid cropping any brain
+def transforms(spacing=2.0):
+    """
+    Create training and validation transforms for brain MRI images.
     
-    train_transforms = Compose([
-    LoadImaged(keys=['image_t1', 'image_t2']),
-    EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
-    # Create brain mask BEFORE resampling (where original > 0)
-    CreateBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2']),
-    # Resample image with bilinear, mask with nearest
-    Spacingd(keys=['image_t1', 'image_t2'], pixdim=(2.0, 2.0, 2.0), mode="bilinear"),
-    Spacingd(keys=['mask_t1', 'mask_t2'], pixdim=(2.0, 2.0, 2.0), mode="nearest"),
-    Orientationd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], axcodes="RAS"),
-    ResizeWithPadOrCropd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], spatial_size=spatial_size),
-    # Normalize
-    NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
-    # Apply mask to zero out background
-    ApplyBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2'], threshold=0.5),
-    # Augmentations
-    RandAffined(keys=['image_t1', 'image_t2'], 
-                rotate_range=[-0.05, 0.05],
-                shear_range=[0.001, 0.05], 
-                scale_range=[0, 0.05],
-                mode='bilinear',
-                padding_mode='zeros',  # Fill outside regions with zeros
-                prob=0.5),
-    RandShiftIntensityd(keys=['image_t1', 'image_t2'], offsets=(-0.1, 0.1), prob=0.2),
-    ToTensord(keys=['image_t1', 'image_t2', 'label']),
-    ])
-
-    val_transforms = Compose([
-        LoadImaged(keys=['image_t1', 'image_t2']),
-        EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
-        # Create brain mask BEFORE resampling
-        CreateBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2']),
-        # Resample image with bilinear, mask with nearest
-        Spacingd(keys=['image_t1', 'image_t2'], pixdim=(2.0, 2.0, 2.0), mode="bilinear"),
-        Spacingd(keys=['mask_t1', 'mask_t2'], pixdim=(2.0, 2.0, 2.0), mode="nearest"),
-        Orientationd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], axcodes="RAS"),
-        ResizeWithPadOrCropd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], spatial_size=spatial_size),
-        NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
-        ApplyBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2'], threshold=0.5),
-        ToTensord(keys=['image_t1', 'image_t2', 'label']),
-    ])
+    Args:
+        spacing: Isotropic voxel spacing in mm.
+                 - 1.0: Original resolution (~182x218x182)
+                 - 2.0: Downsampled (~91x109x91)
+    
+    Returns:
+        train_transforms, val_transforms
+    """
+    # Calculate spatial size based on spacing
+    # Original 1mm images are approximately 182x218x182
+    if spacing == 1.0:
+        spatial_size = (182, 218, 182)
+    elif spacing == 2.0:
+        spatial_size = (91, 109, 91)
+    else:
+        # Calculate proportionally from 1mm reference
+        spatial_size = tuple(int(s / spacing) for s in (182, 218, 182))
+    
+    logging.info(f"Using voxel spacing: {spacing}mm, spatial size: {spatial_size}")
+    
+    # Common transforms list builder
+    def build_transforms(is_training=False):
+        transforms_list = [
+            LoadImaged(keys=['image_t1', 'image_t2']),
+            EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
+            # Create brain mask BEFORE resampling (where original > 0)
+            CreateBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2']),
+        ]
+        
+        # Only add spacing transforms if not using original 1mm
+        if spacing != 1.0:
+            transforms_list.extend([
+                Spacingd(keys=['image_t1', 'image_t2'], pixdim=(spacing, spacing, spacing), mode="bilinear"),
+                Spacingd(keys=['mask_t1', 'mask_t2'], pixdim=(spacing, spacing, spacing), mode="nearest"),
+            ])
+        
+        transforms_list.extend([
+            Orientationd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], axcodes="RAS"),
+            ResizeWithPadOrCropd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], spatial_size=spatial_size),
+            NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
+            ApplyBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2'], threshold=0.5),
+        ])
+        
+        # Add augmentations for training only
+        if is_training:
+            transforms_list.extend([
+                RandAffined(keys=['image_t1', 'image_t2'], 
+                            rotate_range=[-0.05, 0.05],
+                            shear_range=[0.001, 0.05], 
+                            scale_range=[0, 0.05],
+                            mode='bilinear',
+                            padding_mode='zeros',
+                            prob=0.5),
+                RandShiftIntensityd(keys=['image_t1', 'image_t2'], offsets=(-0.1, 0.1), prob=0.2),
+            ])
+        
+        transforms_list.append(ToTensord(keys=['image_t1', 'image_t2', 'label']))
+        return Compose(transforms_list)
+    
+    train_transforms = build_transforms(is_training=True)
+    val_transforms = build_transforms(is_training=False)
+    
     return train_transforms, val_transforms
 
 class TBSummaryTypes(Enum):

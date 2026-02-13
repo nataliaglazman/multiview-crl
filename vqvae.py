@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from math import log2
 from typing import Tuple
@@ -25,14 +26,20 @@ class ReZero(HelperModule):
         return self.layers(x) * self.alpha + x
 
 class ResidualStack(HelperModule):
-    """Stack of 3D ReZero residual blocks."""
-    def build(self, in_channels: int, res_channels: int, nb_layers: int):
-        self.stack = nn.Sequential(*[ReZero(in_channels, res_channels) 
+    """Stack of 3D ReZero residual blocks with optional gradient checkpointing."""
+    def build(self, in_channels: int, res_channels: int, nb_layers: int, use_checkpoint: bool = True):
+        self.blocks = nn.ModuleList([ReZero(in_channels, res_channels) 
                         for _ in range(nb_layers)
                     ])
+        self.use_checkpoint = use_checkpoint
 
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        return self.stack(x)
+        for block in self.blocks:
+            if self.use_checkpoint and self.training:
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
+        return x
 
 class Encoder(HelperModule):
     """3D Encoder with strided convolutions for downsampling."""
@@ -40,6 +47,7 @@ class Encoder(HelperModule):
             in_channels: int, hidden_channels: int, 
             res_channels: int, nb_res_layers: int,
             downscale_factor: int,
+            use_checkpoint: bool = True,
         ):
         assert log2(downscale_factor) % 1 == 0, "Downscale must be a power of 2"
         downscale_steps = int(log2(downscale_factor))
@@ -54,7 +62,7 @@ class Encoder(HelperModule):
             c_channel, n_channel = n_channel, hidden_channels
         layers.append(nn.Conv3d(c_channel, n_channel, 3, stride=1, padding=1))
         layers.append(nn.BatchNorm3d(n_channel))
-        layers.append(ResidualStack(n_channel, res_channels, nb_res_layers))
+        layers.append(ResidualStack(n_channel, res_channels, nb_res_layers, use_checkpoint=use_checkpoint))
 
         self.layers = nn.Sequential(*layers)
 
@@ -67,11 +75,12 @@ class Decoder(HelperModule):
             in_channels: int, hidden_channels: int, out_channels: int,
             res_channels: int, nb_res_layers: int,
             upscale_factor: int,
+            use_checkpoint: bool = True,
         ):
         assert log2(upscale_factor) % 1 == 0, "Upscale must be a power of 2"
         upscale_steps = int(log2(upscale_factor))
         layers = [nn.Conv3d(in_channels, hidden_channels, 3, stride=1, padding=1)]
-        layers.append(ResidualStack(hidden_channels, res_channels, nb_res_layers))
+        layers.append(ResidualStack(hidden_channels, res_channels, nb_res_layers, use_checkpoint=use_checkpoint))
         c_channel, n_channel = hidden_channels, hidden_channels // 2
         for _ in range(upscale_steps):
             layers.append(nn.Sequential(
@@ -191,29 +200,43 @@ class VQVAE(HelperModule):
             nb_levels: int                  = 3,
             embed_dim: int                  = 64,
             nb_entries: int                 = 512,
-            scaling_rates: list[int]        = [8, 4, 2]
+            scaling_rates: list[int]        = [8, 4, 2],
+            use_checkpoint: bool            = True,     # Gradient checkpointing to save memory
         ):
         self.nb_levels = nb_levels
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
 
-        self.encoders = nn.ModuleList([Encoder(in_channels, hidden_channels, res_channels, nb_res_layers, scaling_rates[0])])
+        self.encoders = nn.ModuleList([Encoder(in_channels, hidden_channels, res_channels, nb_res_layers, scaling_rates[0], use_checkpoint)])
         for i, sr in enumerate(scaling_rates[1:]):
-            self.encoders.append(Encoder(hidden_channels, hidden_channels, res_channels, nb_res_layers, sr))
+            self.encoders.append(Encoder(hidden_channels, hidden_channels, res_channels, nb_res_layers, sr, use_checkpoint))
 
         self.codebooks = nn.ModuleList()
         for i in range(nb_levels - 1):
             self.codebooks.append(CodeLayer(hidden_channels+embed_dim, embed_dim, nb_entries))
         self.codebooks.append(CodeLayer(hidden_channels, embed_dim, nb_entries))
 
-        self.decoders = nn.ModuleList([Decoder(embed_dim*nb_levels, hidden_channels, in_channels, res_channels, nb_res_layers, scaling_rates[0])])
+        self.decoders = nn.ModuleList([Decoder(embed_dim*nb_levels, hidden_channels, in_channels, res_channels, nb_res_layers, scaling_rates[0], use_checkpoint)])
         for i, sr in enumerate(scaling_rates[1:]):
-            self.decoders.append(Decoder(embed_dim*(nb_levels-1-i), hidden_channels, embed_dim, res_channels, nb_res_layers, sr))
+            self.decoders.append(Decoder(embed_dim*(nb_levels-1-i), hidden_channels, embed_dim, res_channels, nb_res_layers, sr, use_checkpoint))
 
         self.upscalers = nn.ModuleList()
         for i in range(nb_levels - 1):
             self.upscalers.append(Upscaler(embed_dim, scaling_rates[1:len(scaling_rates) - i][::-1]))
 
-    def forward(self, x):
+    def forward(self, x, return_recon=True):
+        """Forward pass through VQ-VAE-2.
+        
+        Args:
+            x: Input tensor (B, C, D, H, W)
+            return_recon: If False, skip decoder for memory efficiency (contrastive-only mode)
+        
+        Returns:
+            final_output: Reconstruction (or None if return_recon=False)
+            diffs: VQ commitment losses per level
+            encoder_outputs: Encoder features per level (for contrastive loss)
+            decoder_outputs: Decoder features per level (or empty list)
+            id_outputs: Codebook indices per level
+        """
         encoder_outputs = []
         code_outputs = []
         decoder_outputs = []
@@ -221,16 +244,20 @@ class VQVAE(HelperModule):
         id_outputs = []
         diffs = []
 
+        # Encoder forward pass
         for enc in self.encoders:
             if len(encoder_outputs):
                 encoder_outputs.append(enc(encoder_outputs[-1]))
             else:
                 encoder_outputs.append(enc(x))
+        
+        # Free input tensor early
+        del x
 
         for l in range(self.nb_levels-1, -1, -1):
-            codebook, decoder = self.codebooks[l], self.decoders[l]
+            codebook = self.codebooks[l]
 
-            if len(decoder_outputs): # if we have previous levels to condition on
+            if len(decoder_outputs) and return_recon:
                 # Interpolate decoder output to match encoder output size if needed
                 dec_out = decoder_outputs[-1]
                 enc_out = encoder_outputs[l]
@@ -239,29 +266,37 @@ class VQVAE(HelperModule):
                 code_q, code_d, emb_id = codebook(torch.cat([enc_out, dec_out], axis=1))
             else:
                 code_q, code_d, emb_id = codebook(encoder_outputs[l])
+            
             diffs.append(code_d)
             id_outputs.append(emb_id)
 
-            # Upscale previous code outputs and interpolate to match current level size
-            upscaled_codes = []
-            target_size = code_q.shape[2:]  # Target spatial size for this level
-            for i, c in enumerate(code_outputs):
-                upscaled = self.upscalers[i](c, upscale_counts[i])
-                if upscaled.shape[2:] != target_size:
-                    upscaled = F.interpolate(upscaled, size=target_size, mode='trilinear', align_corners=False)
-                upscaled_codes.append(upscaled)
-            code_outputs = upscaled_codes
-            upscale_counts = [u+1 for u in upscale_counts]
-            
-            decoder_outputs.append(decoder(torch.cat([code_q, *code_outputs], axis=1)))
+            if return_recon:
+                decoder = self.decoders[l]
+                # Upscale previous code outputs and interpolate to match current level size
+                upscaled_codes = []
+                target_size = code_q.shape[2:]
+                for i, c in enumerate(code_outputs):
+                    upscaled = self.upscalers[i](c, upscale_counts[i])
+                    if upscaled.shape[2:] != target_size:
+                        upscaled = F.interpolate(upscaled, size=target_size, mode='trilinear', align_corners=False)
+                    upscaled_codes.append(upscaled)
+                code_outputs = upscaled_codes
+                upscale_counts = [u+1 for u in upscale_counts]
+                
+                decoder_outputs.append(decoder(torch.cat([code_q, *code_outputs], axis=1)))
 
-            code_outputs.append(code_q)
-            upscale_counts.append(0)
+                code_outputs.append(code_q)
+                upscale_counts.append(0)
 
-        # Interpolate final output to match input size if needed
-        final_output = decoder_outputs[-1]
-        if final_output.shape[2:] != x.shape[2:]:
-            final_output = F.interpolate(final_output, size=x.shape[2:], mode='trilinear', align_corners=False)
+        if return_recon:
+            # Interpolate final output to match input size if needed  
+            final_output = decoder_outputs[-1]
+            # Note: we don't have x anymore, so we use encoder_outputs[0] input size
+            # The first encoder output has been downscaled, so we need original input size
+            # We'll handle this in the calling code by passing input shape
+        else:
+            final_output = None
+            decoder_outputs = []
 
         return final_output, diffs, encoder_outputs, decoder_outputs, id_outputs
 
