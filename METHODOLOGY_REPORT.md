@@ -200,26 +200,25 @@ Reconstructed Image (91, 109, 91)
 | `--vqvae-nb-levels` | 3 | Number of hierarchical levels |
 | `--vqvae-embed-dim` | 32 | Codebook embedding dimension |
 | `--vqvae-nb-entries` | 512 | Codebook size (number of codes) |
-| `--vqvae-scaling-rates` | [4, 2, 2] | Downscale factor per level |
+| `--vqvae-scaling-rates` | [2, 2, 2] | Downscale factor per level |
 | `--vq-commitment-weight` | 0.25 | VQ commitment loss weight |
 
 ### 3.3.3 Encoder Details (Per Level)
 
-Each encoder uses strided 3D convolutions for downsampling:
+Each encoder uses strided 3D convolutions for downsampling. Output sizes depend on input volume shape and `--vqvae-scaling-rates`.
 
 | Level | Input Channels | Downscale | Output Channels | Output Size (approx) |
 |-------|---------------|-----------|-----------------|---------------------|
-| 0 | 1 (image) | 4× | 64 | (23, 27, 23) |
-| 1 | 64 | 2× | 64 | (12, 14, 12) |
-| 2 | 64 | 2× | 64 | (6, 7, 6) |
+| 0 | 1 (image) | 2× | 64 | (45, 54, 45) |
+| 1 | 64 | 2× | 64 | (22, 27, 22) |
+| 2 | 64 | 2× | 64 | (11, 13, 11) |
 
 **Internal Encoder Structure:**
 ```
-For encoder with 4× downscale:
-  Conv3d(in, 32, k=4, s=2)  → BatchNorm → ReLU   (2× down)
-  Conv3d(32, 64, k=4, s=2)  → BatchNorm → ReLU   (2× down)
-  Conv3d(64, 64, k=3, s=1)  → BatchNorm          (refine)
-  ResidualStack(64, 32, 2)                        (2 ReZero blocks)
+For encoder with 2× downscale:
+      Conv3d(in, 32, k=4, s=2)  → BatchNorm → ReLU   (2× down)
+      Conv3d(32, 64, k=3, s=1)  → BatchNorm          (refine)
+      ResidualStack(64, 32, 2)                        (2 ReZero blocks)
 ```
 
 ### 3.3.4 Vector Quantization Layer
@@ -253,6 +252,16 @@ Each decoder receives concatenated codes from current and all higher levels:
 
 With default configuration:
 - **Total VQ-VAE-2 Parameters:** ~2.9M (much smaller than VAE)
+
+### 3.3.7 Reconstruction Loss (BaselineLoss)
+
+We replaced Baur loss with a baseline reconstruction loss that combines:
+
+- **Pixel loss (L1)**
+- **Frequency loss (FFT magnitude MSE)**
+- **Perceptual loss (LPIPS)**
+
+For VQ-VAE, VQ commitment losses are tracked separately from reconstruction loss to make scaling effects visible in logs.
 
 ---
 

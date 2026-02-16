@@ -129,6 +129,7 @@ def parse_args():
     parser.add_argument("--vq-commitment-weight", type=float, default=0.25, help="Weight for VQ commitment loss")
     parser.add_argument("--gradient-checkpointing", action="store_true", help="Use gradient checkpointing to reduce memory (trades compute for memory)")
     parser.add_argument("--skip-recon-ratio", type=float, default=0.0, help="Fraction of steps to skip reconstruction (0-1, saves memory). E.g., 0.5 means 50% of steps skip decoder.")
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1, help="Accumulate gradients over N steps before updating (effective batch = batch_size * N)")
     # Image preprocessing
     parser.add_argument("--image-spacing", type=float, default=2.0, help="Isotropic voxel spacing in mm (e.g., 1.0 for original, 2.0 for downsampled)")
     parser.add_argument("--crop-margin", type=int, default=0, help="Number of voxels to crop from each edge (e.g., 4 removes 4 voxels from all 6 sides)")
@@ -375,9 +376,10 @@ def save_vqvae_decoded_images(vqvae_model, data, args, step):
         print(f"[SAVED] VQ-VAE decoded at step {step} | VQ losses: {vq_losses_str}", flush=True)
 
 
-def train_step(data, encoders, decoders, loss_func, optimizer, params, args, scaler=None, recon_loss_fn=None):
+def train_step(data, encoders, decoders, loss_func, optimizer, params, args, scaler=None, recon_loss_fn=None, 
+               accumulation_step=0, total_accumulation_steps=1):
     """
-    Perform a single training step.
+    Perform a single training step with optional gradient accumulation.
 
     Args:
         data (dict): A dictionary containing the input data for each modality.
@@ -388,12 +390,14 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
         params (Iterable[torch.Tensor]): The model parameters to be optimized.
         args (argparse.Namespace): Command-line arguments.
         scaler: GradScaler for mixed precision training (optional).
+        accumulation_step: Current accumulation step (0 to total_accumulation_steps-1).
+        total_accumulation_steps: Total number of steps to accumulate gradients.
 
     Returns:
         tuple: A tuple containing the loss value and the estimated content indices.
     """
-    # reset grad
-    if optimizer is not None:
+    # Only zero gradients on first accumulation step
+    if optimizer is not None and accumulation_step == 0:
         optimizer.zero_grad()
 
     if recon_loss_fn is None:
@@ -566,21 +570,30 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             vq_loss_value = 0.0
             contrastive_loss_value = contrastive_loss.item()
 
-    # backprop
+    # backprop with gradient accumulation support
     if optimizer is not None:
+        # Scale loss by accumulation steps for proper gradient averaging
+        scaled_loss = total_loss / total_accumulation_steps
+        
         if use_amp:
-            scaler.scale(total_loss).backward()
-            scaler.unscale_(optimizer)
-            clip_grad_norm_(params, max_norm=2.0, norm_type=2)
-            scaler.step(optimizer)
-            scaler.update()
+            scaler.scale(scaled_loss).backward()
+            
+            # Only step optimizer on last accumulation step
+            if accumulation_step == total_accumulation_steps - 1:
+                scaler.unscale_(optimizer)
+                clip_grad_norm_(params, max_norm=2.0, norm_type=2)
+                scaler.step(optimizer)
+                scaler.update()
         else:
-            total_loss.backward()
-            clip_grad_norm_(params, max_norm=2.0, norm_type=2)
-            optimizer.step()
+            scaled_loss.backward()
+            
+            # Only step optimizer on last accumulation step
+            if accumulation_step == total_accumulation_steps - 1:
+                clip_grad_norm_(params, max_norm=2.0, norm_type=2)
+                optimizer.step()
         
         # Clear cache periodically to prevent memory fragmentation
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and accumulation_step == total_accumulation_steps - 1:
             torch.cuda.empty_cache()
 
     return total_loss.item(), contrastive_loss_value, recon_loss_value, vq_loss_value, estimated_content_indices
@@ -692,6 +705,17 @@ def get_data(dataset, encoders, decoders, loss_func, dataloader_kwargs, num_samp
 
 
 def main(args: argparse.Namespace):
+    # Memory optimization settings
+    if torch.cuda.is_available():
+        # Enable memory-efficient CUDA settings
+        torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 for faster matmul
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True  # Optimize conv algorithms
+        # Set memory allocation strategy to reduce fragmentation
+        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
+            pass  # Don't limit, just use efficient allocation
+        torch.cuda.empty_cache()
+    
     # create save_dir, where the model/results are or will be saved
     if args.dataset_name != "mpi3d":
         args.datapath = os.path.join(args.dataroot, args.dataset_name)
@@ -1046,27 +1070,42 @@ def main(args: argparse.Namespace):
         
 
         while step <= args.train_steps:
-            # training step
-            data = next(train_iterator)  # contains images, texts, and labels
-            total_loss, contrastive_loss, recon_loss, vq_loss, _ = train_step(
-                data,
-                encoders,
-                decoders,
-                loss_func,
-                optimizer,
-                params,
-                args=args,
-                scaler=scaler,
-                recon_loss_fn=recon_loss_fn,
-            )
-            loss_values.append(total_loss)
-            contrastive_losses.append(contrastive_loss)
-            recon_losses.append(recon_loss)
-            vq_losses.append(vq_loss)
+            # Gradient accumulation settings
+            accum_steps = getattr(args, 'gradient_accumulation_steps', 1)
+            accum_total_loss = 0.0
+            accum_contrastive_loss = 0.0
+            accum_recon_loss = 0.0
+            accum_vq_loss = 0.0
+            
+            # Accumulate gradients over multiple mini-batches
+            for accum_idx in range(accum_steps):
+                data = next(train_iterator)  # contains images, texts, and labels
+                total_loss, contrastive_loss, recon_loss, vq_loss, _ = train_step(
+                    data,
+                    encoders,
+                    decoders,
+                    loss_func,
+                    optimizer,
+                    params,
+                    args=args,
+                    scaler=scaler,
+                    recon_loss_fn=recon_loss_fn,
+                    accumulation_step=accum_idx,
+                    total_accumulation_steps=accum_steps,
+                )
+                accum_total_loss += total_loss / accum_steps
+                accum_contrastive_loss += contrastive_loss / accum_steps
+                accum_recon_loss += recon_loss / accum_steps
+                accum_vq_loss += vq_loss / accum_steps
+            
+            loss_values.append(accum_total_loss)
+            contrastive_losses.append(accum_contrastive_loss)
+            recon_losses.append(accum_recon_loss)
+            vq_losses.append(accum_vq_loss)
 
             # print loss values every step
             print(
-                f"Step {step}: Total={total_loss:.4f} | Contrastive={contrastive_loss:.4f} | Recon={recon_loss:.4f} | VQ={vq_loss:.4f}",
+                f"Step {step}: Total={accum_total_loss:.4f} | Contrastive={accum_contrastive_loss:.4f} | Recon={accum_recon_loss:.4f} | VQ={accum_vq_loss:.4f}",
                 flush=True,
             )
 
