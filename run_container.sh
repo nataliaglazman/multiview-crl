@@ -19,6 +19,8 @@ runai submit --name multiview-crl-upsample\
                              --use-amp \
                              --workers 4 \
                              --model-id vqvae_upsample \
+                             --gradient-accumulation-steps 4 \
+                             --gradient-checkpointing \
                              --skip-recon-ratio 0.3 \
                              --image-spacing 1.0 \
-                             --crop-margin  4
+                             --crop-margin  10

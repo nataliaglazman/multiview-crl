@@ -33,6 +33,7 @@ from torch.cuda.amp import autocast, GradScaler
 from torchvision import transforms
 from torchvision.models import resnet18
 from typing_extensions import Callable, List
+from torch.utils.tensorboard import SummaryWriter
 
 import datasets
 import dci
@@ -124,7 +125,7 @@ def parse_args():
     parser.add_argument("--vqvae-res-channels", type=int, default=32, help="Residual block channels in VQ-VAE")
     parser.add_argument("--vqvae-nb-levels", type=int, default=3, help="Number of hierarchical levels in VQ-VAE-2")
     parser.add_argument("--vqvae-embed-dim", type=int, default=32, help="Embedding dimension for VQ codebook")
-    parser.add_argument("--vqvae-nb-entries", type=int, default=512, help="Number of entries in VQ codebook")
+    parser.add_argument("--vqvae-nb-entries", type=int, default=384, help="Number of entries in VQ codebook")
     parser.add_argument("--vqvae-scaling-rates", type=int, nargs="+", default=[2, 2, 2], help="Downscaling rates per level")
     parser.add_argument("--vq-commitment-weight", type=float, default=0.25, help="Weight for VQ commitment loss")
     parser.add_argument("--gradient-checkpointing", action="store_true", help="Use gradient checkpointing to reduce memory (trades compute for memory)")
@@ -1012,6 +1013,13 @@ def main(args: argparse.Namespace):
     # Reconstruction loss (BaselineLoss) shared across steps
     recon_loss_fn = BaselineLoss().to(device)
 
+    # TensorBoard writer for training visualization
+    tb_writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "tensorboard"))
+    logger.info("")
+    logger.info("[TENSORBOARD]")
+    logger.info(f"  TensorBoard logs: {os.path.join(args.save_dir, 'tensorboard')}")
+    logger.info(f"  View with: tensorboard --logdir {os.path.join(args.save_dir, 'tensorboard')}")
+
     # training
     # --------
     file_name = os.path.join(args.save_dir, "Training.csv")  # record the training loss
@@ -1109,7 +1117,7 @@ def main(args: argparse.Namespace):
                 flush=True,
             )
 
-            # log to file at intervals
+            # log to file and TensorBoard at intervals
             if step % args.log_steps == 1 or step == args.train_steps:
                 with open(f"{file_name}", "a+") as fileobj:
                     writer = csv.writer(fileobj)
@@ -1121,6 +1129,13 @@ def main(args: argparse.Namespace):
                         "VQ", f"{np.mean(vq_losses[-args.log_steps:]):.3f}",
                     ]
                     writer.writerow(wri)
+                
+                # Log to TensorBoard
+                tb_writer.add_scalar("Loss/Total", np.mean(loss_values[-args.log_steps:]), step)
+                tb_writer.add_scalar("Loss/Contrastive", np.mean(contrastive_losses[-args.log_steps:]), step)
+                tb_writer.add_scalar("Loss/Recon", np.mean(recon_losses[-args.log_steps:]), step)
+                tb_writer.add_scalar("Loss/VQ", np.mean(vq_losses[-args.log_steps:]), step)
+                tb_writer.flush()
 
             # save decoded images every 200 steps (only for VAE mode)
             if (step % 200 == 0 or step == 1) and args.encoder_type != 'vqvae':
@@ -1187,6 +1202,10 @@ def main(args: argparse.Namespace):
         logger.info(f"  Avg recon (last {args.log_steps}): {np.mean(recon_losses[-args.log_steps:]):.4f}")
         logger.info(f"  Avg VQ (last {args.log_steps}): {np.mean(vq_losses[-args.log_steps:]):.4f}")
         logger.info(f"  Models saved to: {args.save_dir}")
+        
+        # Close TensorBoard writer
+        tb_writer.close()
+        logger.info(f"  TensorBoard logs saved to: {os.path.join(args.save_dir, 'tensorboard')}")
 
     # evaluation
     # ----------

@@ -265,7 +265,20 @@ class VQVAE(HelperModule):
                     dec_out = F.interpolate(dec_out, size=enc_out.shape[2:], mode='trilinear', align_corners=False)
                 code_q, code_d, emb_id = codebook(torch.cat([enc_out, dec_out], axis=1))
             else:
-                code_q, code_d, emb_id = codebook(encoder_outputs[l])
+                enc_out = encoder_outputs[l]
+                # If this codebook expects conditioning channels, pad with zeros when reconstruction is skipped
+                expected_in = codebook.conv_in.in_channels
+                if expected_in > enc_out.shape[1]:
+                    cond_channels = expected_in - enc_out.shape[1]
+                    zeros = torch.zeros(
+                        enc_out.shape[0],
+                        cond_channels,
+                        *enc_out.shape[2:],
+                        device=enc_out.device,
+                        dtype=enc_out.dtype,
+                    )
+                    enc_out = torch.cat([enc_out, zeros], dim=1)
+                code_q, code_d, emb_id = codebook(enc_out)
             
             diffs.append(code_d)
             id_outputs.append(emb_id)
