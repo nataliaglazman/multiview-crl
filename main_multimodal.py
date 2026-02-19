@@ -119,6 +119,7 @@ def parse_args():
     parser.add_argument("--collate-random-pair", action="store_true")
     parser.add_argument("--modalities", default=["image"], choices=[["image"], ["image", "text"]])
     parser.add_argument("--scale-recon-loss", type=float, default=1, help="Scale factor for the reconstruction loss to balance with contrastive loss")
+    parser.add_argument("--scale-contrastive-loss", type =float, default = 1)
     parser.add_argument("--encoder-type", type=str, default="vqvae", choices=["vae", "vqvae"], help="Encoder architecture: vae or vqvae")
     # VQ-VAE-2 specific arguments
     parser.add_argument("--vqvae-hidden-channels", type=int, default=64, help="Hidden channels in VQ-VAE")
@@ -505,7 +506,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                     args.subsets
                 )
                 level_losses.append(level_loss.item())
-                total_contrastive_loss = total_contrastive_loss + level_loss
+                total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_constrastive_loss
             
             # Average contrastive loss across levels
             contrastive_loss = total_contrastive_loss

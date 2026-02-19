@@ -27,18 +27,17 @@ class ReZero(HelperModule):
 
 class ResidualStack(HelperModule):
     """Stack of 3D ReZero residual blocks with optional gradient checkpointing."""
-    def build(self, in_channels: int, res_channels: int, nb_layers: int, use_checkpoint: bool = True):
-        self.blocks = nn.ModuleList([ReZero(in_channels, res_channels) 
+    def build(self, in_channels: int, res_channels: int, nb_layers: int, use_checkpoint: bool = True, use_depthwise: bool = False):
+        self.stack = nn.Sequential(*[ReZero(in_channels, res_channels, use_depthwise=use_depthwise) 
                         for _ in range(nb_layers)
                     ])
         self.use_checkpoint = use_checkpoint
 
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        for block in self.blocks:
-            if self.use_checkpoint and self.training:
-                x = checkpoint(block, x, use_reentrant=False)
-            else:
-                x = block(x)
+        if self.use_checkpoint and self.training:
+            x = checkpoint(self.stack, x, use_reentrant=False)
+        else:
+            x = self.stack(x)
         return x
 
 class Encoder(HelperModule):
@@ -48,6 +47,7 @@ class Encoder(HelperModule):
             res_channels: int, nb_res_layers: int,
             downscale_factor: int,
             use_checkpoint: bool = True,
+            use_depthwise: bool = False,
         ):
         assert log2(downscale_factor) % 1 == 0, "Downscale must be a power of 2"
         downscale_steps = int(log2(downscale_factor))
@@ -62,7 +62,7 @@ class Encoder(HelperModule):
             c_channel, n_channel = n_channel, hidden_channels
         layers.append(nn.Conv3d(c_channel, n_channel, 3, stride=1, padding=1))
         layers.append(nn.BatchNorm3d(n_channel))
-        layers.append(ResidualStack(n_channel, res_channels, nb_res_layers, use_checkpoint=use_checkpoint))
+        layers.append(ResidualStack(n_channel, res_channels, nb_res_layers, use_checkpoint=use_checkpoint, use_depthwise=use_depthwise))
 
         self.layers = nn.Sequential(*layers)
 
@@ -76,11 +76,12 @@ class Decoder(HelperModule):
             res_channels: int, nb_res_layers: int,
             upscale_factor: int,
             use_checkpoint: bool = True,
+            use_depthwise: bool = False,
         ):
         assert log2(upscale_factor) % 1 == 0, "Upscale must be a power of 2"
         upscale_steps = int(log2(upscale_factor))
         layers = [nn.Conv3d(in_channels, hidden_channels, 3, stride=1, padding=1)]
-        layers.append(ResidualStack(hidden_channels, res_channels, nb_res_layers, use_checkpoint=use_checkpoint))
+        layers.append(ResidualStack(hidden_channels, res_channels, nb_res_layers, use_checkpoint=use_checkpoint, use_depthwise=use_depthwise))
         c_channel, n_channel = hidden_channels, hidden_channels // 2
         for _ in range(upscale_steps):
             layers.append(nn.Sequential(
