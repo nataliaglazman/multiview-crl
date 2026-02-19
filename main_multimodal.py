@@ -8,6 +8,7 @@ import logging
 import operator
 import os
 import random
+import traceback
 import uuid
 import warnings
 from datetime import datetime
@@ -458,6 +459,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                 # Reshape for contrastive loss: (n_views, batch, C)
                 hz_level = enc_pooled.reshape(n_views, -1, enc_pooled.shape[-1])
                 n_channels = hz_level.shape[-1]
+                
                 
                 if level_idx == 0:
                     # Level 0: Select content indices using Gumbel-Softmax
@@ -1077,118 +1079,206 @@ def main(args: argparse.Namespace):
                     logger.info("  No VAE checkpoint found, starting fresh training.")
         
 
-        while step <= args.train_steps:
-            # Gradient accumulation settings
-            accum_steps = getattr(args, 'gradient_accumulation_steps', 1)
-            accum_total_loss = 0.0
-            accum_contrastive_loss = 0.0
-            accum_recon_loss = 0.0
-            accum_vq_loss = 0.0
-            
-            # Accumulate gradients over multiple mini-batches
-            for accum_idx in range(accum_steps):
-                data = next(train_iterator)  # contains images, texts, and labels
-                total_loss, contrastive_loss, recon_loss, vq_loss, _ = train_step(
-                    data,
-                    encoders,
-                    decoders,
-                    loss_func,
-                    optimizer,
-                    params,
-                    args=args,
-                    scaler=scaler,
-                    recon_loss_fn=recon_loss_fn,
-                    accumulation_step=accum_idx,
-                    total_accumulation_steps=accum_steps,
-                )
-                accum_total_loss += total_loss / accum_steps
-                accum_contrastive_loss += contrastive_loss / accum_steps
-                accum_recon_loss += recon_loss / accum_steps
-                accum_vq_loss += vq_loss / accum_steps
-            
-            loss_values.append(accum_total_loss)
-            contrastive_losses.append(accum_contrastive_loss)
-            recon_losses.append(accum_recon_loss)
-            vq_losses.append(accum_vq_loss)
-
-            # print loss values every step
-            print(
-                f"Step {step}: Total={accum_total_loss:.4f} | Contrastive={accum_contrastive_loss:.4f} | Recon={accum_recon_loss:.4f} | VQ={accum_vq_loss:.4f}",
-                flush=True,
-            )
-
-            # Log per-step values to TensorBoard (scalars are cheap)
-            tb_writer.add_scalar("Loss/Total", accum_total_loss, step)
-            tb_writer.add_scalar("Loss/Contrastive", accum_contrastive_loss, step)
-            tb_writer.add_scalar("Loss/Recon", accum_recon_loss, step)
-            tb_writer.add_scalar("Loss/VQ", accum_vq_loss, step)
-            tb_writer.add_scalar("LR", optimizer.param_groups[0]['lr'], step)
-
-            # Log smoothed averages to CSV at intervals
-            if step % args.log_steps == 1 or step == args.train_steps:
-                with open(f"{file_name}", "a+") as fileobj:
-                    writer = csv.writer(fileobj)
-                    wri = [
-                        "Step", f"{step}",
-                        "Total", f"{np.mean(loss_values[-args.log_steps:]):.3f}",
-                        "Contrastive", f"{np.mean(contrastive_losses[-args.log_steps:]):.3f}",
-                        "Recon", f"{np.mean(recon_losses[-args.log_steps:]):.3f}",
-                        "VQ", f"{np.mean(vq_losses[-args.log_steps:]):.3f}",
-                    ]
-                    writer.writerow(wri)
-                tb_writer.flush()
-
-            # save decoded images every 200 steps (only for VAE mode)
-            if (step % 200 == 0 or step == 1) and args.encoder_type != 'vqvae':
-                save_decoded_images(encoders, decoders, data, args, step)
-            
-            # save VQVAE decoded images
-            if (step % 200 == 0 or step == 1) and args.encoder_type == 'vqvae':
-                save_vqvae_decoded_images(encoders[0], data, args, step)
-
-            # save models and intermediate checkpoints
-            if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
+        # Helper to save emergency checkpoint on errors
+        def save_emergency_checkpoint(reason="unknown"):
+            """Save model state on unexpected interruption."""
+            try:
+                emergency_path = os.path.join(args.save_dir, "emergency_checkpoint.pt")
                 if args.encoder_type == 'vqvae':
-                    checkpoint_path = os.path.join(args.save_dir, "vqvae_model.pt")
-                    checkpoint = {
+                    ckpt = {
                         'encoders': encoders[0].state_dict(),
                         'step': step,
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'loss': total_loss,
-                        'contrastive_loss': contrastive_loss,
-                        'recon_loss': recon_loss,
-                        'vq_loss': vq_loss,
+                        'reason': reason,
                     }
-                    torch.save(checkpoint, checkpoint_path)
-                    logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
                 else:
-                    # Save full checkpoint for VAE mode (for resuming)
-                    checkpoint_path = os.path.join(args.save_dir, "checkpoint.pt")
-                    checkpoint = {
+                    ckpt = {
                         'step': step,
                         'optimizer_state_dict': optimizer.state_dict(),
                         'decoder': decoders[0].state_dict(),
-                        'loss': total_loss,
-                        'contrastive_loss': contrastive_loss,
-                        'recon_loss': recon_loss,
-                        'vq_loss': vq_loss,
+                        'reason': reason,
                     }
                     for m_idx, m in enumerate(args.modalities):
-                        checkpoint[f'encoder_{m}'] = encoders[m_idx].state_dict()
-                        # Also save standalone encoder file for evaluation compatibility
-                        encoder_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
-                        torch.save(encoders[m_idx].state_dict(), encoder_path)
-                    torch.save(checkpoint, checkpoint_path)
-                    logger.info(f"[CHECKPOINT] Step {step}: Saved checkpoint to {args.save_dir}")
+                        ckpt[f'encoder_{m}'] = encoders[m_idx].state_dict()
+                torch.save(ckpt, emergency_path)
+                logger.warning(f"[EMERGENCY] Saved emergency checkpoint to {emergency_path} (reason: {reason})")
+            except Exception as save_err:
+                logger.error(f"[EMERGENCY] Failed to save emergency checkpoint: {save_err}")
 
-                if args.save_all_checkpoints:
-                    versioned_path = os.path.join(args.save_dir, f"encoder_{m}_%d.pt" % step)
-                    torch.save(
-                        encoders[m_idx].state_dict(),
-                        versioned_path,
+        oom_count = 0  # Track consecutive OOM errors
+        MAX_OOM_RETRIES = 5  # Abort after this many consecutive OOMs
+
+        try:
+          while step <= args.train_steps:
+            try:
+                # Gradient accumulation settings
+                accum_steps = getattr(args, 'gradient_accumulation_steps', 1)
+                accum_total_loss = 0.0
+                accum_contrastive_loss = 0.0
+                accum_recon_loss = 0.0
+                accum_vq_loss = 0.0
+                
+                # Accumulate gradients over multiple mini-batches
+                for accum_idx in range(accum_steps):
+                    data = next(train_iterator)  # contains images, texts, and labels
+                    total_loss, contrastive_loss, recon_loss, vq_loss, _ = train_step(
+                        data,
+                        encoders,
+                        decoders,
+                        loss_func,
+                        optimizer,
+                        params,
+                        args=args,
+                        scaler=scaler,
+                        recon_loss_fn=recon_loss_fn,
+                        accumulation_step=accum_idx,
+                        total_accumulation_steps=accum_steps,
                     )
-                    logger.info(f"[CHECKPOINT] Step {step}: Saved versioned checkpoint to {versioned_path}")
-            step += 1
+                    accum_total_loss += total_loss / accum_steps
+                    accum_contrastive_loss += contrastive_loss / accum_steps
+                    accum_recon_loss += recon_loss / accum_steps
+                    accum_vq_loss += vq_loss / accum_steps
+                
+                # Reset OOM counter on successful step
+                oom_count = 0
+                
+                loss_values.append(accum_total_loss)
+                contrastive_losses.append(accum_contrastive_loss)
+                recon_losses.append(accum_recon_loss)
+                vq_losses.append(accum_vq_loss)
+
+                # print loss values every step
+                print(
+                    f"Step {step}: Total={accum_total_loss:.4f} | Contrastive={accum_contrastive_loss:.4f} | Recon={accum_recon_loss:.4f} | VQ={accum_vq_loss:.4f}",
+                    flush=True,
+                )
+
+                # Log per-step values to TensorBoard (scalars are cheap)
+                tb_writer.add_scalar("Loss/Total", accum_total_loss, step)
+                tb_writer.add_scalar("Loss/Contrastive", accum_contrastive_loss, step)
+                tb_writer.add_scalar("Loss/Recon", accum_recon_loss, step)
+                tb_writer.add_scalar("Loss/VQ", accum_vq_loss, step)
+                tb_writer.add_scalar("LR", optimizer.param_groups[0]['lr'], step)
+
+                # Log smoothed averages to CSV at intervals
+                if step % args.log_steps == 1 or step == args.train_steps:
+                    with open(f"{file_name}", "a+") as fileobj:
+                        writer = csv.writer(fileobj)
+                        wri = [
+                            "Step", f"{step}",
+                            "Total", f"{np.mean(loss_values[-args.log_steps:]):.3f}",
+                            "Contrastive", f"{np.mean(contrastive_losses[-args.log_steps:]):.3f}",
+                            "Recon", f"{np.mean(recon_losses[-args.log_steps:]):.3f}",
+                            "VQ", f"{np.mean(vq_losses[-args.log_steps:]):.3f}",
+                        ]
+                        writer.writerow(wri)
+                    tb_writer.flush()
+
+                # save decoded images every 200 steps (only for VAE mode)
+                if (step % 200 == 0 or step == 1) and args.encoder_type != 'vqvae':
+                    save_decoded_images(encoders, decoders, data, args, step)
+                
+                # save VQVAE decoded images
+                if (step % 200 == 0 or step == 1) and args.encoder_type == 'vqvae':
+                    save_vqvae_decoded_images(encoders[0], data, args, step)
+
+                # save models and intermediate checkpoints
+                if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
+                    if args.encoder_type == 'vqvae':
+                        checkpoint_path = os.path.join(args.save_dir, "vqvae_model.pt")
+                        checkpoint = {
+                            'encoders': encoders[0].state_dict(),
+                            'step': step,
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'loss': total_loss,
+                            'contrastive_loss': contrastive_loss,
+                            'recon_loss': recon_loss,
+                            'vq_loss': vq_loss,
+                        }
+                        torch.save(checkpoint, checkpoint_path)
+                        logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
+                    else:
+                        # Save full checkpoint for VAE mode (for resuming)
+                        checkpoint_path = os.path.join(args.save_dir, "checkpoint.pt")
+                        checkpoint = {
+                            'step': step,
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'decoder': decoders[0].state_dict(),
+                            'loss': total_loss,
+                            'contrastive_loss': contrastive_loss,
+                            'recon_loss': recon_loss,
+                            'vq_loss': vq_loss,
+                        }
+                        for m_idx, m in enumerate(args.modalities):
+                            checkpoint[f'encoder_{m}'] = encoders[m_idx].state_dict()
+                            # Also save standalone encoder file for evaluation compatibility
+                            encoder_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
+                            torch.save(encoders[m_idx].state_dict(), encoder_path)
+                        torch.save(checkpoint, checkpoint_path)
+                        logger.info(f"[CHECKPOINT] Step {step}: Saved checkpoint to {args.save_dir}")
+
+                    if args.save_all_checkpoints:
+                        versioned_path = os.path.join(args.save_dir, f"encoder_{m}_%d.pt" % step)
+                        torch.save(
+                            encoders[m_idx].state_dict(),
+                            versioned_path,
+                        )
+                        logger.info(f"[CHECKPOINT] Step {step}: Saved versioned checkpoint to {versioned_path}")
+                step += 1
+
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    oom_count += 1
+                    # Log GPU memory state
+                    if torch.cuda.is_available():
+                        allocated = torch.cuda.memory_allocated() / 1024**3
+                        reserved = torch.cuda.memory_reserved() / 1024**3
+                        max_allocated = torch.cuda.max_memory_allocated() / 1024**3
+                        logger.error(
+                            f"[OOM] Step {step}: CUDA out of memory! "
+                            f"(allocated: {allocated:.2f}GB, reserved: {reserved:.2f}GB, "
+                            f"peak: {max_allocated:.2f}GB, OOM count: {oom_count}/{MAX_OOM_RETRIES})"
+                        )
+                    else:
+                        logger.error(f"[OOM] Step {step}: Out of memory! (OOM count: {oom_count}/{MAX_OOM_RETRIES})")
+                    
+                    # Clear CUDA cache and collected garbage
+                    torch.cuda.empty_cache()
+                    import gc; gc.collect()
+                    
+                    # Zero gradients to free computation graph memory
+                    if optimizer is not None:
+                        optimizer.zero_grad(set_to_none=True)
+                    
+                    if oom_count >= MAX_OOM_RETRIES:
+                        logger.error(f"[OOM] {MAX_OOM_RETRIES} consecutive OOM errors — aborting training.")
+                        save_emergency_checkpoint(reason=f"oom_x{oom_count}")
+                        raise
+                    
+                    logger.warning(f"[OOM] Skipping step {step}, attempting to continue...")
+                    step += 1
+                    continue
+                else:
+                    # Non-OOM RuntimeError
+                    logger.error(f"[ERROR] Step {step}: RuntimeError — {e}")
+                    logger.error(f"[ERROR] Traceback:\n{traceback.format_exc()}")
+                    save_emergency_checkpoint(reason=f"runtime_error_step{step}")
+                    raise
+
+            except Exception as e:
+                logger.error(f"[ERROR] Step {step}: Unexpected {type(e).__name__} — {e}")
+                logger.error(f"[ERROR] Traceback:\n{traceback.format_exc()}")
+                save_emergency_checkpoint(reason=f"{type(e).__name__}_step{step}")
+                raise
+
+        except KeyboardInterrupt:
+            logger.warning(f"\n[INTERRUPTED] Training interrupted at step {step}")
+            save_emergency_checkpoint(reason=f"keyboard_interrupt_step{step}")
+            logger.info("Exiting gracefully.")
+            # Still close TB writer and print summary
+            if 'tb_writer' in dir():
+                tb_writer.close()
+            return
         
         logger.info("")
         logger.info("="*60)

@@ -220,7 +220,6 @@ class VQVAE(HelperModule):
         self.upscalers = nn.ModuleList()
         for i in range(nb_levels - 1):
             self.upscalers.append(Upscaler(embed_dim, scaling_rates[1:len(scaling_rates) - i][::-1]))
-
     def forward(self, x, return_recon=True, pool_only=False):
         """Forward pass through VQ-VAE-2.
         
@@ -316,6 +315,7 @@ class VQVAE(HelperModule):
         encoder_features = encoder_pools if pool_only else encoder_outputs
 
         return final_output, diffs, encoder_features, decoder_outputs, id_outputs
+
 
     def decode_codes(self, *cs):
         decoder_outputs = []
