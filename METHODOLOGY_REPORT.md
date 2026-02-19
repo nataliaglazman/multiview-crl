@@ -5,7 +5,14 @@
 **Project:** `multiview-crl`  
 **Dataset:** ADNI (Alzheimer's Disease Neuroimaging Initiative) - Registered T1 and T2 MRI scans  
 **Date:** February 2026  
-**Last Updated:** 11 February 2026
+**Last Updated:** 19 February 2026
+
+### Changelog
+
+| Date | Changes |
+|------|--------|
+| 19 Feb 2026 | Removed unused `use_depthwise` parameter from residual blocks; added gradient checkpointing to `ResidualStack`; moved TensorBoard writer inside training block, now logs per-step scalars + learning rate; documented gradient accumulation, skip-recon-ratio, image spacing/cropping options; updated `BaselineLoss` documentation (L1 + FFT + LPIPS); added `view_latents.ipynb` to file structure; updated default `--vqvae-nb-entries` to 384; added checkpoint compatibility notes |
+| 11 Feb 2026 | Initial report |
 
 ---
 
@@ -199,9 +206,12 @@ Reconstructed Image (91, 109, 91)
 | `--vqvae-res-channels` | 32 | Residual block channels |
 | `--vqvae-nb-levels` | 3 | Number of hierarchical levels |
 | `--vqvae-embed-dim` | 32 | Codebook embedding dimension |
-| `--vqvae-nb-entries` | 512 | Codebook size (number of codes) |
+| `--vqvae-nb-entries` | 384 | Codebook size (number of codes) |
 | `--vqvae-scaling-rates` | [2, 2, 2] | Downscale factor per level |
 | `--vq-commitment-weight` | 0.25 | VQ commitment loss weight |
+| `--gradient-checkpointing` | False | Trade compute for memory in residual blocks |
+| `--skip-recon-ratio` | 0.0 | Fraction of steps to skip decoder (0–1) |
+| `--gradient-accumulation-steps` | 1 | Accumulate gradients over N mini-batches |
 
 ### 3.3.3 Encoder Details (Per Level)
 
@@ -220,6 +230,8 @@ For encoder with 2× downscale:
       Conv3d(32, 64, k=3, s=1)  → BatchNorm          (refine)
       ResidualStack(64, 32, 2)                        (2 ReZero blocks)
 ```
+
+**Gradient Checkpointing:** The `ResidualStack` supports optional gradient checkpointing (`use_checkpoint=True` by default). During training, the entire stack is wrapped with `torch.utils.checkpoint.checkpoint()`, trading recomputation for memory savings. This is controlled via `--gradient-checkpointing` at the command line, which passes through `VQVAE → Encoder/Decoder → ResidualStack`.
 
 ### 3.3.4 Vector Quantization Layer
 
@@ -255,13 +267,17 @@ With default configuration:
 
 ### 3.3.7 Reconstruction Loss (BaselineLoss)
 
-We replaced Baur loss with a baseline reconstruction loss that combines:
+The reconstruction loss (`BaselineLoss` in `losses.py`) combines three complementary terms:
 
-- **Pixel loss (L1)**
-- **Frequency loss (FFT magnitude MSE)**
-- **Perceptual loss (LPIPS)**
+$$\mathcal{L}_{recon} = \underbrace{\mathcal{L}_{pixel}}_{\lambda_p=1.0} + \underbrace{\mathcal{L}_{FFT}}_{\lambda_f=1.0} + \underbrace{\mathcal{L}_{LPIPS}}_{\lambda_{perc}=0.002}$$
 
-For VQ-VAE, VQ commitment losses are tracked separately from reconstruction loss to make scaling effects visible in logs.
+| Component | Implementation | Purpose |
+|-----------|---------------|----------|
+| **Pixel loss** | L1 distance | Voxel-level accuracy |
+| **Frequency loss** | MSE on FFT magnitudes (ortho-normalized) | Penalize missing high-frequency detail |
+| **Perceptual loss** | LPIPS (SqueezeNet backbone, 512 random axial slices) | Structural/feature-level similarity |
+
+For VQ-VAE, VQ commitment losses per codebook level are added *on top* of this reconstruction loss and logged separately.
 
 ---
 
@@ -329,7 +345,7 @@ $$\mathcal{L}_{total} = \sum_{l=0}^{2} \mathcal{L}_{contrastive}^{(l)} + \lambda
 
 Where:
 - $\mathcal{L}_{contrastive}^{(l)}$: InfoNCE loss at encoder level $l$
-- $\mathcal{L}_{recon}$: Reconstruction loss (BaurLoss: L1 + L2)
+- $\mathcal{L}_{recon}$: Reconstruction loss (BaselineLoss: L1 + FFT + LPIPS)
 - $\mathcal{L}_{VQ}^{(l)}$: VQ commitment loss at level $l$
 - $\lambda_r = 0.00001$ (scale_recon_loss)
 - $\lambda_c = 0.25$ (vq_commitment_weight)
@@ -367,18 +383,19 @@ $$\mathcal{L}_{InfoNCE} = -\log \frac{\exp(\text{sim}(z^{(1)}_c, z^{(2)}_c) / \t
 3. Compute pairwise similarities within batch
 4. Apply cross-entropy loss treating matched pairs as positives
 
-### 4.3 Reconstruction Loss (BaurLoss)
+### 4.3 Reconstruction Loss (BaselineLoss)
 
-Implemented in `losses.py` as `BaurLoss`:
+Implemented in `losses.py` as `BaselineLoss`:
 
-$$\mathcal{L}_{recon} = \text{L1}(\hat{x}, x) + \text{L2}(\hat{x}, x)$$
+$$\mathcal{L}_{recon} = \mathcal{L}_{L1}(\hat{x}, x) + \mathcal{L}_{FFT}(\hat{x}, x) + 0.002 \cdot \mathcal{L}_{LPIPS}(\hat{x}, x)$$
 
 Where:
 - $\hat{x} = g_\phi(z)$ is the decoded image
-- L1 uses `PairwiseDistance(p=1)` with `.mean()` reduction
-- L2 uses `PairwiseDistance(p=2)` with `.mean()` reduction
+- $\mathcal{L}_{L1}$: Mean absolute pixel error
+- $\mathcal{L}_{FFT}$: MSE on ortho-normalized FFT magnitudes
+- $\mathcal{L}_{LPIPS}$: Perceptual loss using SqueezeNet on 512 random 2D slices
 
-**Note:** Both T1 and T2 images are reconstructed through the shared decoder.
+**Note:** Both T1 and T2 images are reconstructed through the shared decoder. The previous `BaurLoss` (L1 + L2 pairwise distance) has been replaced by this more comprehensive loss.
 
 ### 4.4 VQ Commitment Loss
 
@@ -404,8 +421,19 @@ The codebook is updated via EMA (Exponential Moving Average) rather than gradien
 | **Optimizer** | Adam |
 | **Learning Rate** | 1e-5 |
 | **Gradient Clipping** | max_norm=2.0, L2 norm |
-| **Mixed Precision (AMP)** | Enabled (fp16) |
-| **Batch Size** | 4 (effective: 8 images = 4 T1 + 4 T2) |
+| **Mixed Precision (AMP)** | Enabled (fp16) via `--use-amp` |
+| **Batch Size** | Configurable (default 2, effective = batch_size × n_views) |
+| **Gradient Accumulation** | `--gradient-accumulation-steps N` (effective batch = batch_size × N) |
+| **Skip Reconstruction** | `--skip-recon-ratio R` — fraction of steps that skip the decoder (saves memory) |
+
+### 5.1.1 Image Preprocessing Options
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--image-spacing` | 2.0 | Isotropic voxel spacing in mm |
+| `--crop-margin` | 0 | Voxels to crop from each edge |
+
+These are passed to the dataset class and affect the spatial dimensions of the input volumes.
 
 ### 5.2 Training Loop
 
@@ -423,12 +451,30 @@ For each step:
 
 ### 5.3 Logging and Checkpoints
 
-| Event | Frequency |
-|-------|-----------|
-| Loss printing (console) | Every step |
-| CSV logging | Every 100 steps |
-| Decoded image saving | Every 200 steps |
-| Model checkpointing | Every 1000 steps |
+| Event | Frequency | Destination |
+|-------|-----------|-------------|
+| Loss printing (console) | Every step | stdout |
+| TensorBoard scalars | Every step | `{save_dir}/tensorboard/` |
+| CSV logging (smoothed avg) | Every `--log-steps` steps (default 100) | `{save_dir}/Training.csv` |
+| Decoded image saving | Every 200 steps | `{save_dir}/decoded_images/` |
+| Model checkpointing | Every `--checkpoint-steps` steps (default 1000) | `{save_dir}/vqvae_model.pt` |
+
+**TensorBoard Metrics (per step):**
+- `Loss/Total` — total training loss
+- `Loss/Contrastive` — InfoNCE contrastive loss
+- `Loss/Recon` — reconstruction loss (BaselineLoss)
+- `Loss/VQ` — VQ commitment loss
+- `LR` — current learning rate
+
+**Viewing TensorBoard from a headless cluster:**
+```bash
+# On the cluster:
+tensorboard --logdir results/ADNI_registered/<model_id>/tensorboard --port 6006 --bind_all
+
+# On your local machine:
+ssh -N -L 6006:localhost:6006 <user>@<cluster-hostname>
+# Then open http://localhost:6006
+```
 
 ---
 
@@ -473,25 +519,28 @@ multiview-crl/
 ├── vae.py                  # VAE Encoder and Decoder architectures
 ├── vqvae.py                # VQ-VAE-2 hierarchical architecture
 ├── helper.py               # Helper classes for VQ-VAE-2
-├── losses.py               # InfoNCE and BaurLoss implementations
+├── losses.py               # InfoNCE, BaurLoss, and BaselineLoss implementations
 ├── datasets.py             # Dataset classes (MyCustomDataset for ADNI)
 ├── utils.py                # MONAI transforms, Gumbel-Softmax, utilities
 ├── encoders.py             # Additional encoder architectures (text)
+├── view_latents.ipynb      # Notebook: load checkpoint, extract & visualize latents
 ├── METHODOLOGY_REPORT.md   # This documentation
 ├── results/
 │   └── ADNI_registered/
 │       ├── {vae_model_id}/
 │       │   ├── settings.json           # Training configuration
-│       │   ├── Training.csv            # Loss history
+│       │   ├── Training.csv            # Loss history (CSV)
 │       │   ├── checkpoint.pt           # Full checkpoint (for resume)
 │       │   ├── encoder_image.pt        # Encoder weights only
+│       │   ├── tensorboard/            # TensorBoard event files
 │       │   └── decoded_images/
 │       │       ├── step_00001_original.nii.gz
 │       │       └── step_00001_decoded.nii.gz
 │       └── {vqvae_model_id}/
 │           ├── settings.json           # Training configuration
-│           ├── Training.csv            # Loss history
+│           ├── Training.csv            # Loss history (CSV)
 │           ├── vqvae_model.pt          # Full VQ-VAE-2 checkpoint
+│           ├── tensorboard/            # TensorBoard event files
 │           └── decoded_images/
 │               ├── step_00001_original.nii.gz
 │               └── step_00001_decoded.nii.gz
@@ -553,10 +602,15 @@ python main_multimodal.py \
 | `--lr` | 1e-5 | Learning rate |
 | `--train-steps` | 300001 | Total training steps |
 | `--tau` | 1.0 | Temperature for InfoNCE |
-| `--scale-recon-loss` | 0.00001 | Weight for reconstruction loss |
+| `--scale-recon-loss` | 1.0 | Weight for reconstruction loss |
+| `--scale-contrastive-loss` | 1.0 | Weight for contrastive loss |
 | `--use-amp` | False | Enable mixed precision |
 | `--model-id` | Auto | Experiment identifier |
 | `--resume-training` | False | Resume from last checkpoint |
+| `--image-spacing` | 2.0 | Isotropic voxel spacing (mm) |
+| `--crop-margin` | 0 | Voxels to crop from each edge |
+| `--gradient-accumulation-steps` | 1 | Accumulate N mini-batches before optimizer step |
+| `--skip-recon-ratio` | 0.0 | Fraction of steps that skip decoder (0–1) |
 
 **VQ-VAE-2 Specific Arguments:**
 
@@ -566,9 +620,10 @@ python main_multimodal.py \
 | `--vqvae-res-channels` | 32 | Residual block channels |
 | `--vqvae-nb-levels` | 3 | Number of hierarchical levels |
 | `--vqvae-embed-dim` | 32 | Codebook embedding dimension |
-| `--vqvae-nb-entries` | 512 | Codebook size |
-| `--vqvae-scaling-rates` | [4, 2, 2] | Downscale factor per level |
+| `--vqvae-nb-entries` | 384 | Codebook size |
+| `--vqvae-scaling-rates` | [2, 2, 2] | Downscale factor per level |
 | `--vq-commitment-weight` | 0.25 | VQ commitment loss weight |
+| `--gradient-checkpointing` | False | Trade compute for memory in residual blocks |
 
 ---
 
@@ -605,7 +660,46 @@ Based on `results/ADNI_registered/2/Training.csv`:
 
 ---
 
-## 10. Future Work and Considerations
+## 10. Checkpoint Compatibility
+
+### 10.1 VQ-VAE-2 State Dict Keys
+
+The `ResidualStack` module stores its layers as `self.stack` (an `nn.Sequential`). Checkpoint state dict keys follow the pattern:
+
+```
+module.encoders.0.layers.3.stack.0.alpha
+module.encoders.0.layers.3.stack.0.layers.0.weight
+...
+```
+
+Older checkpoints may use `.blocks.` instead of `.stack.` (from a prior refactor that used `nn.ModuleList`). The `view_latents.ipynb` notebook handles this automatically by converting `.blocks.` → `.stack.` when loading:
+
+```python
+for key, val in state_dict.items():
+    new_key = key.replace('.blocks.', '.stack.')
+    new_state_dict[new_key] = val
+```
+
+### 10.2 DataParallel Prefix
+
+All checkpoints are saved from a `DataParallel`-wrapped model, so keys start with `module.`. The notebook wraps the model in `DataParallel` before loading to match.
+
+---
+
+## 11. Latent Visualization (`view_latents.ipynb`)
+
+The notebook extracts and visualizes latent representations from trained VQ-VAE-2 models:
+
+1. **Load checkpoint** — handles `.blocks.` → `.stack.` key conversion for backward compatibility
+2. **Load ADNI data** — supports both original resolution and 2mm downsampled modes
+3. **Extract encoder features** — global average pooling of each hierarchical level
+4. **Dimensionality reduction** — PCA and t-SNE on pooled features
+5. **Visualization** — scatter plots colored by diagnostic label (AD, MCI, CN)
+6. **Paired distance analysis** — compare T1 vs T2 latent distances per subject
+
+---
+
+## 12. Future Work and Considerations
 
 1. **VQ-VAE-2 Improvements:**
    - Increase codebook size for more expressivity
@@ -626,9 +720,14 @@ Based on `results/ADNI_registered/2/Training.csv`:
    - Content/style ratio exploration
    - Temperature scheduling for contrastive loss
 
+5. **Memory Optimization (available now):**
+   - Gradient checkpointing (`--gradient-checkpointing`)
+   - Gradient accumulation (`--gradient-accumulation-steps N`)
+   - Skip reconstruction (`--skip-recon-ratio R`)
+
 ---
 
-## 11. Summary
+## 13. Summary
 
 This implementation provides a framework for learning disentangled representations from paired multimodal brain MRI data using two architectures:
 

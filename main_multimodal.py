@@ -506,7 +506,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                     args.subsets
                 )
                 level_losses.append(level_loss.item())
-                total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_constrastive_loss
+                total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss
             
             # Average contrastive loss across levels
             contrastive_loss = total_contrastive_loss
@@ -1014,17 +1014,17 @@ def main(args: argparse.Namespace):
     # Reconstruction loss (BaselineLoss) shared across steps
     recon_loss_fn = BaselineLoss().to(device)
 
-    # TensorBoard writer for training visualization
-    tb_writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "tensorboard"))
-    logger.info("")
-    logger.info("[TENSORBOARD]")
-    logger.info(f"  TensorBoard logs: {os.path.join(args.save_dir, 'tensorboard')}")
-    logger.info(f"  View with: tensorboard --logdir {os.path.join(args.save_dir, 'tensorboard')}")
-
     # training
     # --------
     file_name = os.path.join(args.save_dir, "Training.csv")  # record the training loss
     if not args.evaluate:
+        # TensorBoard writer for training visualization
+        tb_writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "tensorboard"))
+        logger.info("")
+        logger.info("[TENSORBOARD]")
+        logger.info(f"  TensorBoard logs: {os.path.join(args.save_dir, 'tensorboard')}")
+        logger.info(f"  View with: tensorboard --logdir {os.path.join(args.save_dir, 'tensorboard')}")
+        logger.info("")
         logger.info("")
         logger.info("="*60)
         logger.info("STARTING TRAINING")
@@ -1118,7 +1118,14 @@ def main(args: argparse.Namespace):
                 flush=True,
             )
 
-            # log to file and TensorBoard at intervals
+            # Log per-step values to TensorBoard (scalars are cheap)
+            tb_writer.add_scalar("Loss/Total", accum_total_loss, step)
+            tb_writer.add_scalar("Loss/Contrastive", accum_contrastive_loss, step)
+            tb_writer.add_scalar("Loss/Recon", accum_recon_loss, step)
+            tb_writer.add_scalar("Loss/VQ", accum_vq_loss, step)
+            tb_writer.add_scalar("LR", optimizer.param_groups[0]['lr'], step)
+
+            # Log smoothed averages to CSV at intervals
             if step % args.log_steps == 1 or step == args.train_steps:
                 with open(f"{file_name}", "a+") as fileobj:
                     writer = csv.writer(fileobj)
@@ -1130,12 +1137,6 @@ def main(args: argparse.Namespace):
                         "VQ", f"{np.mean(vq_losses[-args.log_steps:]):.3f}",
                     ]
                     writer.writerow(wri)
-                
-                # Log to TensorBoard
-                tb_writer.add_scalar("Loss/Total", np.mean(loss_values[-args.log_steps:]), step)
-                tb_writer.add_scalar("Loss/Contrastive", np.mean(contrastive_losses[-args.log_steps:]), step)
-                tb_writer.add_scalar("Loss/Recon", np.mean(recon_losses[-args.log_steps:]), step)
-                tb_writer.add_scalar("Loss/VQ", np.mean(vq_losses[-args.log_steps:]), step)
                 tb_writer.flush()
 
             # save decoded images every 200 steps (only for VAE mode)

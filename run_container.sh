@@ -1,5 +1,5 @@
-runai submit --name multiview-crl-upsample\
- -i aicregistry:5000/nglazman:multiview-crl-vqvae \
+runai submit --name multiview-crl-cl-10\
+ -i aicregistry:5000/nglazman:multiview-crl-vqvae-latest \
  --node-type A100 \
  --run-as-user \
  --gpu 1 \
@@ -18,6 +18,7 @@ runai submit --name multiview-crl-upsample\
                              --batch-size 2 \
                              --use-amp \
                              --workers 4 \
+                             --scale-contrastive-loss 10 \
                              --model-id vqvae_upsample \
                              --gradient-accumulation-steps 4 \
                              --gradient-checkpointing \
