@@ -425,8 +425,8 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             skip_recon_ratio = getattr(args, 'skip_recon_ratio', 0.0)
             compute_recon = (skip_recon_ratio == 0.0) or (torch.rand(1).item() > skip_recon_ratio)
             
-            # Forward pass through VQ-VAE-2
-            recon, diffs, encoder_outputs, decoder_outputs, id_outputs = vqvae_model(images, return_recon=compute_recon)
+            # Forward pass through VQ-VAE-2 (pool_only=True saves memory by not returning full spatial maps)
+            recon, diffs, encoder_outputs, decoder_outputs, id_outputs = vqvae_model(images, return_recon=compute_recon, pool_only=True)
             
             # Reconstruction loss (only if we computed reconstruction)
             if compute_recon and recon is not None:
@@ -438,26 +438,25 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                     images,
                 )
                 recon_loss = recon_loss * args.scale_recon_loss
+                # Free reconstruction and input tensors after loss computation
+                del recon, images
             else:
                 recon_loss = torch.zeros(1, device=device)
+                del images
             
             # VQ commitment loss (sum of all levels)
             vq_loss = sum(diffs) * args.vq_commitment_weight
             
             # Hierarchical contrastive loss across all encoder levels
-            # Content indices are selected at level 0, then propagated to higher levels
-            # Each encoder_output is (n_views * batch, channels, d, h, w)
-            total_contrastive_loss = torch.zeros(1, device=images.device)
+            # encoder_outputs are now pre-pooled: (n_views * batch, C) per level
+            total_contrastive_loss = torch.zeros(1, device=device)
             level_losses = []
             estimated_content_indices = None  # Will be set at level 0
             
-            for level_idx, enc_out in enumerate(encoder_outputs):
-                # Global average pool to get feature vector per image
-                # enc_out: (n_views * batch, C, D, H, W) -> (n_views * batch, C)
-                hz_level = enc_out.mean(dim=[2, 3, 4])  # Global average pooling
-                
+            for level_idx, enc_pooled in enumerate(encoder_outputs):
+                # enc_pooled is already (n_views * batch, C) from global avg pool in VQVAE
                 # Reshape for contrastive loss: (n_views, batch, C)
-                hz_level = hz_level.reshape(n_views, -1, hz_level.shape[-1])
+                hz_level = enc_pooled.reshape(n_views, -1, enc_pooled.shape[-1])
                 n_channels = hz_level.shape[-1]
                 
                 if level_idx == 0:

@@ -90,7 +90,6 @@ class Decoder(HelperModule):
             c_channel, n_channel = n_channel, out_channels
         layers.append(nn.Conv3d(c_channel, n_channel, 3, stride=1, padding=1))
         layers.append(nn.BatchNorm3d(n_channel))
-        # layers.append(nn.ReLU(inplace=True))
 
         self.layers = nn.Sequential(*layers)
 
@@ -222,21 +221,26 @@ class VQVAE(HelperModule):
         for i in range(nb_levels - 1):
             self.upscalers.append(Upscaler(embed_dim, scaling_rates[1:len(scaling_rates) - i][::-1]))
 
-    def forward(self, x, return_recon=True):
+    def forward(self, x, return_recon=True, pool_only=False):
         """Forward pass through VQ-VAE-2.
         
         Args:
             x: Input tensor (B, C, D, H, W)
             return_recon: If False, skip decoder for memory efficiency (contrastive-only mode)
+            pool_only: If True, return pooled (B, C) encoder features instead of full spatial maps.
+                       Saves significant memory when you only need global features (e.g. contrastive loss).
         
         Returns:
             final_output: Reconstruction (or None if return_recon=False)
             diffs: VQ commitment losses per level
-            encoder_outputs: Encoder features per level (for contrastive loss)
+            encoder_features: Per-level encoder features. 
+                              If pool_only=True:  list of (B, C) pooled vectors
+                              If pool_only=False: list of (B, C, D, H, W) spatial maps
             decoder_outputs: Decoder features per level (or empty list)
             id_outputs: Codebook indices per level
         """
         encoder_outputs = []
+        encoder_pools = []  # Global-average-pooled encoder features
         code_outputs = []
         decoder_outputs = []
         upscale_counts = []
@@ -249,6 +253,8 @@ class VQVAE(HelperModule):
                 encoder_outputs.append(enc(encoder_outputs[-1]))
             else:
                 encoder_outputs.append(enc(x))
+            # Pre-compute pooled features while spatial map is still in memory
+            encoder_pools.append(encoder_outputs[-1].mean(dim=[2, 3, 4]))
         
         # Free input tensor early
         del x
@@ -301,16 +307,15 @@ class VQVAE(HelperModule):
                 upscale_counts.append(0)
 
         if return_recon:
-            # Interpolate final output to match input size if needed  
             final_output = decoder_outputs[-1]
-            # Note: we don't have x anymore, so we use encoder_outputs[0] input size
-            # The first encoder output has been downscaled, so we need original input size
-            # We'll handle this in the calling code by passing input shape
         else:
             final_output = None
             decoder_outputs = []
 
-        return final_output, diffs, encoder_outputs, decoder_outputs, id_outputs
+        # Return pooled features (memory-efficient) or full spatial maps
+        encoder_features = encoder_pools if pool_only else encoder_outputs
+
+        return final_output, diffs, encoder_features, decoder_outputs, id_outputs
 
     def decode_codes(self, *cs):
         decoder_outputs = []

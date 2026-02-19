@@ -1,4 +1,4 @@
-runai submit --name multiview-crl-cl-10\
+runai submit --name multiview-crl-memsave\
  -i aicregistry:5000/nglazman:multiview-crl-vqvae-latest \
  --node-type A100 \
  --run-as-user \
@@ -19,7 +19,7 @@ runai submit --name multiview-crl-cl-10\
                              --use-amp \
                              --workers 4 \
                              --scale-contrastive-loss 10 \
-                             --model-id vqvae_upsample \
+                             --model-id vqvae-memsave \
                              --gradient-accumulation-steps 4 \
                              --gradient-checkpointing \
                              --skip-recon-ratio 0.3 \

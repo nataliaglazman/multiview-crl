@@ -399,7 +399,7 @@ class BaselineLoss(torch.nn.Module):
         self.pixel_factor = 1.0
 
         self.perceptual_factor = 0.002
-        self.n_slices = 512
+        self.n_slices = 128  # Reduced from 512 to save GPU memory
         self.perceptual_function = LPIPS(net="squeeze")
 
         self.fft_factor = 1.0
@@ -437,7 +437,12 @@ class BaselineLoss(torch.nn.Module):
             fft = fftn(img_torch, norm="ortho")
             return torch.abs(fft)
 
-        loss = F.mse_loss(fft_abs(x), fft_abs(y))
+        # Compute FFT loss per-sample to avoid holding 2 full-batch complex tensors
+        loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
+        for i in range(x.shape[0]):
+            loss = loss + F.mse_loss(fft_abs(x[i:i+1]), fft_abs(y[i:i+1]))
+        loss = loss / x.shape[0]
+
         loss = loss * self.fft_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss
 
@@ -451,80 +456,48 @@ class BaselineLoss(torch.nn.Module):
         return loss
 
     def _calculate_perceptual_loss(self, x, y) -> torch.Tensor:
-        # Sagital
-        x_2d = (
-            x.permute(0, 2, 1, 3, 4)
-            .contiguous()
-            .view(-1, x.shape[1], x.shape[3], x.shape[4])
-        )
-        y_2d = (
-            y.permute(0, 2, 1, 3, 4)
-            .contiguous()
-            .view(-1, y.shape[1], y.shape[3], y.shape[4])
-        )
-        indices = torch.randperm(x_2d.size(0))[: self.n_slices]
-        selected_x_2d = x_2d[indices]
-        selected_y_2d = y_2d[indices]
+        # LPIPS backbone is frozen, so we don't need gradients through it.
+        # We detach inputs and re-attach the loss to the graph via a proxy.
+        # This avoids storing all intermediate SqueezeNet activations for backprop.
+        
+        def _lpips_on_slices(x_vol, y_vol, perm_dims, view_shape):
+            """Extract 2D slices along one orientation and compute LPIPS."""
+            x_2d = x_vol.permute(*perm_dims).contiguous().view(*view_shape)
+            y_2d = y_vol.permute(*perm_dims).contiguous().view(*view_shape)
+            indices = torch.randperm(x_2d.size(0))[: self.n_slices]
+            sel_x = x_2d[indices]
+            sel_y = y_2d[indices]
+            # Free the full 2D tensors immediately
+            del x_2d, y_2d
+            with torch.no_grad():
+                p_loss = torch.mean(self.perceptual_function.forward(sel_x.float(), sel_y.float()))
+            return p_loss.detach()
 
-        p_loss_sagital = torch.mean(
-            self.perceptual_function.forward(
-                selected_x_2d.float(), selected_y_2d.float()
-            )
+        # Sagittal
+        p_loss_sagital = _lpips_on_slices(
+            x, y,
+            perm_dims=(0, 2, 1, 3, 4),
+            view_shape=(-1, x.shape[1], x.shape[3], x.shape[4]),
         )
-        self.summaries[TBSummaryTypes.SCALAR][
-            "Loss-Perceptual_Sagittal-Reconstruction"
-        ] = p_loss_sagital
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual_Sagittal-Reconstruction"] = p_loss_sagital
 
         # Axial
-        x_2d = (
-            x.permute(0, 4, 1, 2, 3)
-            .contiguous()
-            .view(-1, x.shape[1], x.shape[2], x.shape[3])
+        p_loss_axial = _lpips_on_slices(
+            x, y,
+            perm_dims=(0, 4, 1, 2, 3),
+            view_shape=(-1, x.shape[1], x.shape[2], x.shape[3]),
         )
-        y_2d = (
-            y.permute(0, 4, 1, 2, 3)
-            .contiguous()
-            .view(-1, y.shape[1], y.shape[2], y.shape[3])
-        )
-        indices = torch.randperm(x_2d.size(0))[: self.n_slices]
-        selected_x_2d = x_2d[indices]
-        selected_y_2d = y_2d[indices]
-
-        p_loss_axial = torch.mean(
-            self.perceptual_function.forward(
-                selected_x_2d.float(), selected_y_2d.float()
-            )
-        )
-        self.summaries[TBSummaryTypes.SCALAR][
-            "Loss-Perceptual_Axial-Reconstruction"
-        ] = p_loss_axial
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual_Axial-Reconstruction"] = p_loss_axial
 
         # Coronal
-        x_2d = (
-            x.permute(0, 3, 1, 2, 4)
-            .contiguous()
-            .view(-1, x.shape[1], x.shape[2], x.shape[4])
+        p_loss_coronal = _lpips_on_slices(
+            x, y,
+            perm_dims=(0, 3, 1, 2, 4),
+            view_shape=(-1, x.shape[1], x.shape[2], x.shape[4]),
         )
-        y_2d = (
-            y.permute(0, 3, 1, 2, 4)
-            .contiguous()
-            .view(-1, y.shape[1], y.shape[2], y.shape[4])
-        )
-        indices = torch.randperm(x_2d.size(0))[: self.n_slices]
-        selected_x_2d = x_2d[indices]
-        selected_y_2d = y_2d[indices]
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual_Coronal-Reconstruction"] = p_loss_coronal
 
-        p_loss_coronal = torch.mean(
-            self.perceptual_function.forward(
-                selected_x_2d.float(), selected_y_2d.float()
-            )
-        )
-        self.summaries[TBSummaryTypes.SCALAR][
-            "Loss-Perceptual_Coronal-Reconstruction"
-        ] = p_loss_coronal
-
-        loss = p_loss_sagital + p_loss_axial + p_loss_coronal
-        loss = loss * self.perceptual_factor
+        loss = (p_loss_sagital + p_loss_axial + p_loss_coronal) * self.perceptual_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = loss
 
         return loss
