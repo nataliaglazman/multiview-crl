@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import utils
 from torch.utils.checkpoint import checkpoint
 
 from math import log2
@@ -201,9 +202,9 @@ class VQVAE(HelperModule):
             scaling_rates: list[int]        = [8, 4, 2],
             use_checkpoint: bool            = True,     # Gradient checkpointing to save memory
         ):
-        self.nb_levels = nb_levels
-        assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
 
+        assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
+        self.nb_levels = nb_levels
         self.encoders = nn.ModuleList([Encoder(in_channels, hidden_channels, res_channels, nb_res_layers, scaling_rates[0], use_checkpoint)])
         for i, sr in enumerate(scaling_rates[1:]):
             self.encoders.append(Encoder(hidden_channels, hidden_channels, res_channels, nb_res_layers, sr, use_checkpoint))
@@ -220,7 +221,8 @@ class VQVAE(HelperModule):
         self.upscalers = nn.ModuleList()
         for i in range(nb_levels - 1):
             self.upscalers.append(Upscaler(embed_dim, scaling_rates[1:len(scaling_rates) - i][::-1]))
-    def forward(self, x, return_recon=True, pool_only=False):
+
+    def forward(self, x,  content_size, style_size, n_views, subsets, return_recon=True, pool_only=False,):
         """Forward pass through VQ-VAE-2.
         
         Args:
@@ -247,11 +249,43 @@ class VQVAE(HelperModule):
         diffs = []
 
         # Encoder forward pass
-        for enc in self.encoders:
-            if len(encoder_outputs):
-                encoder_outputs.append(enc(encoder_outputs[-1]))
+        for i, enc in enumerate(self.encoders):
+            if i == 0:
+                first_layer = enc(x)
+                print(f'First encoder layer output shape: {first_layer.shape}')
+                first_latent = first_layer.mean(dim=[2, 3, 4])
+                first_latent = first_latent.reshape(n_views, -1, first_latent.shape[-1])  # (n_views, batch_per_view, C)
+                n_channels = first_latent.shape[-1]
+
+                avg_logits = first_layer.mean(0)  # (batch, C)
+
+                original_content_size = content_size
+                original_total_size = original_content_size + style_size
+                content_ratio = original_content_size / original_total_size
+                content_size = max(1, int(content_ratio * n_channels))
+
+                if subsets[-1] == list(range(n_views)) and content_size > 0:
+                    content_masks = utils.smart_gumbel_softmax_mask(
+                        avg_logits=avg_logits, content_sizes=[content_size], subsets=subsets
+                    )
+                else:
+                    content_masks = utils.gumbel_softmax_mask(
+                        avg_logits=avg_logits, content_sizes=[content_size], subsets=subsets
+                    )
+
+                # Extract content indices from masks
+                estimated_content_indices = []
+                for c_mask in content_masks:
+                    c_ind = torch.where(c_mask)[-1].tolist()
+                    estimated_content_indices.append(c_ind)
+
+                print(f'Shape before masking: {first_layer.shape}, content indices: {estimated_content_indices}')
+                first_layer_content = first_latent[:,:, estimated_content_indices]
+                print(f'Shape after masking: {first_layer_content.shape}')
+                encoder_outputs.append(first_layer_content)
             else:
-                encoder_outputs.append(enc(x))
+                encoder_outputs.append(enc(encoder_outputs[-1]))
+
             # Pre-compute pooled features while spatial map is still in memory
             encoder_pools.append(encoder_outputs[-1].mean(dim=[2, 3, 4]))
         
@@ -314,7 +348,7 @@ class VQVAE(HelperModule):
         # Return pooled features (memory-efficient) or full spatial maps
         encoder_features = encoder_pools if pool_only else encoder_outputs
 
-        return final_output, diffs, encoder_features, decoder_outputs, id_outputs
+        return final_output, diffs, encoder_features, estimated_content_indices, decoder_outputs, id_outputs
 
 
     def decode_codes(self, *cs):

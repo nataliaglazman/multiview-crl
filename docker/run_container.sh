@@ -1,4 +1,4 @@
-runai submit --name multiview-crl-memsave\
+runai submit --name multiview-crl-corrected\
  -i aicregistry:5000/nglazman:multiview-crl-vqvae-latest \
  --node-type A100 \
  --run-as-user \
@@ -15,11 +15,11 @@ runai submit --name multiview-crl-memsave\
                              --train-steps 50000 \
                              --vqvae-hidden-channels 48 \
                              --vqvae-embed-dim 24 \
-                             --batch-size 2 \
+                             --batch-size 4 \
                              --use-amp \
                              --workers 4 \
                              --scale-contrastive-loss 10 \
-                             --model-id vqvae-memsave \
+                             --model-id vqvae-corrected \
                              --gradient-accumulation-steps 4 \
                              --gradient-checkpointing \
                              --skip-recon-ratio 0.3 \

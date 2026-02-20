@@ -426,8 +426,14 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             skip_recon_ratio = getattr(args, 'skip_recon_ratio', 0.0)
             compute_recon = (skip_recon_ratio == 0.0) or (torch.rand(1).item() > skip_recon_ratio)
             
-            # Forward pass through VQ-VAE-2 (pool_only=True saves memory by not returning full spatial maps)
-            recon, diffs, encoder_outputs, decoder_outputs, id_outputs = vqvae_model(images, return_recon=compute_recon, pool_only=True)
+
+            recon, diffs, encoder_outputs, estimated_content_indices, _, _ = vqvae_model(images, 
+                                                              content_size=len(args.content_indices),
+                                                              style_size=len(args.style_indices),
+                                                              n_views=args.n_views,
+                                                              subsets=args.subsets,
+                                                              return_recon=compute_recon,
+                                                              pool_only=True,)
             
             # Reconstruction loss (only if we computed reconstruction)
             if compute_recon and recon is not None:
@@ -462,50 +468,52 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                 
                 
                 if level_idx == 0:
-                    avg_logits = hz_level.mean(0)  # (batch, C)
+
+                #     avg_logits = hz_level.mean(0)  # (batch, C)
+
+                                    
+                #     # Scale content size to match encoder channels (args.content_indices is for 512-dim VAE)
+                #     # Use the same ratio: e.g., 256/512 = 0.5 → use 50% of channels as content
+                #     original_content_size = len(args.content_indices[0])
+                #     original_total_size = original_content_size + len(args.style_indices)
+                #     content_ratio = original_content_size / original_total_size
+                #     content_size = max(1, int(content_ratio * n_channels))
                     
-                    # Scale content size to match encoder channels (args.content_indices is for 512-dim VAE)
-                    # Use the same ratio: e.g., 256/512 = 0.5 → use 50% of channels as content
-                    original_content_size = len(args.content_indices[0])
-                    original_total_size = original_content_size + len(args.style_indices)
-                    content_ratio = original_content_size / original_total_size
-                    content_size = max(1, int(content_ratio * n_channels))
+                #     if args.subsets[-1] == list(range(args.n_views)) and content_size > 0:
+                #         content_masks = utils.smart_gumbel_softmax_mask(
+                #             avg_logits=avg_logits, content_sizes=[content_size], subsets=args.subsets
+                #         )
+                #     else:
+                #         content_masks = utils.gumbel_softmax_mask(
+                #             avg_logits=avg_logits, content_sizes=[content_size], subsets=args.subsets
+                #         )
                     
-                    if args.subsets[-1] == list(range(args.n_views)) and content_size > 0:
-                        content_masks = utils.smart_gumbel_softmax_mask(
-                            avg_logits=avg_logits, content_sizes=[content_size], subsets=args.subsets
-                        )
-                    else:
-                        content_masks = utils.gumbel_softmax_mask(
-                            avg_logits=avg_logits, content_sizes=[content_size], subsets=args.subsets
-                        )
+                #     # Extract content indices from masks
+                #     estimated_content_indices = []
+                #     for c_mask in content_masks:
+                #         c_ind = torch.where(c_mask)[-1].tolist()
+                #         estimated_content_indices.append(c_ind)
                     
-                    # Extract content indices from masks
-                    estimated_content_indices = []
-                    for c_mask in content_masks:
-                        c_ind = torch.where(c_mask)[-1].tolist()
-                        estimated_content_indices.append(c_ind)
+                #     level_content_indices = estimated_content_indices
                     
-                    level_content_indices = estimated_content_indices
+                # else:
+                #     # Higher levels: Use proportional content indices based on level 0's selection
+                #     # Scale the content size proportionally to this level's channel count
+                #     scaled_content_size = max(1, int(content_ratio * n_channels))
                     
-                else:
-                    # Higher levels: Use proportional content indices based on level 0's selection
-                    # Scale the content size proportionally to this level's channel count
-                    scaled_content_size = max(1, int(content_ratio * n_channels))
-                    
-                    # For higher levels, use the first `scaled_content_size` dimensions as content
-                    # This maintains the content/style split ratio learned at level 0
-                    level_content_indices = [list(range(scaled_content_size))]
+                #     # For higher levels, use the first `scaled_content_size` dimensions as content
+                #     # This maintains the content/style split ratio learned at level 0
+                #     level_content_indices = [list(range(scaled_content_size))]
                 
                 # Compute contrastive loss for this level using selected content indices
-                level_loss = loss_func(
-                    hz_level, 
-                    level_content_indices,
-                    args.subsets
-                )
-                level_losses.append(level_loss.item())
-                total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss
-            
+                    level_loss = loss_func(
+                        hz_level, 
+                        estimated_content_indices,
+                        args.subsets
+                    )
+                    level_losses.append(level_loss.item())
+                    total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss
+                
             # Average contrastive loss across levels
             contrastive_loss = total_contrastive_loss
             
