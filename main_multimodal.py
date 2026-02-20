@@ -1,6 +1,7 @@
 # Experiment with multimodal (image/text) data.
 
 import argparse
+import collections
 import csv
 import functools
 import json
@@ -1008,10 +1009,11 @@ def main(args: argparse.Namespace):
 
         # training loop
         step = 1
-        loss_values = []  # list to keep track of loss values
-        contrastive_losses = []
-        recon_losses = []
-        vq_losses = []
+        # Fixed-size deques: only the last log_steps values are ever needed
+        loss_values = collections.deque(maxlen=args.log_steps)
+        contrastive_losses = collections.deque(maxlen=args.log_steps)
+        recon_losses = collections.deque(maxlen=args.log_steps)
+        vq_losses = collections.deque(maxlen=args.log_steps)
         # check for existing model checkpoints and load if available (for resuming training)
         if args.resume_training and os.path.exists(args.save_dir):
             if args.encoder_type == 'vqvae':

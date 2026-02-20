@@ -252,27 +252,12 @@ def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, project
     for i in range(n_view):
         for j in range(n_view):
             if j >= i:
-                # compute similarity matrix using projected latents
+                # Similarity computed only on content dimensions
+                hz_i = hz_subset[i][..., content_indices]  # (batch, content_dims)
+                hz_j = hz_subset[j][..., content_indices]
                 sim_ij = (
-                    sim_metric(  # (hz[i]: n_views, n_latent_dim)
-                        projector(hz_subset[i].unsqueeze(-2)),
-                        projector(
-                            hz_subset[j].unsqueeze(-3)
-                        ),  # (bs, 1, n_latent_dim) and (1, bs n_latent_dim) -> bs , bs
-                    )
-                    / tau
+                    sim_metric(hz_i.unsqueeze(-2), hz_j.unsqueeze(-3)) / tau
                 ).type_as(hz_subset)
-                # compute positive pairs using (diagonal elements) only the content dimensions
-                pos_sim_ij = (
-                    sim_metric(  # (hz[i]: n_views, n_latent_dim)
-                        hz_subset[i].unsqueeze(-2)[..., content_indices],
-                        hz_subset[j].unsqueeze(-3)[
-                            ..., content_indices
-                        ],  # (bs, 1, n_latent_dim) and (1, bs n_latent_dim) -> bs , bs
-                    )
-                    / tau
-                ).type_as(hz_subset)
-                sim_ij = pos_sim_ij
                 if i == j:
                     d = sim_ij.shape[-1]  # batch size
                     sim_ij[..., range(d), range(d)] = float("-inf")
@@ -432,16 +417,15 @@ class BaselineLoss(torch.nn.Module):
         return loss
 
     def _calculate_frequency_loss(self, x, y) -> torch.Tensor:
-        def fft_abs(t):
-            img_torch = (t + 1.0) / 2.0
-            fft = fftn(img_torch, norm="ortho")
-            return torch.abs(fft)
-
-        # Compute FFT loss per-sample to avoid holding 2 full-batch complex tensors
-        loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
-        for i in range(x.shape[0]):
-            loss = loss + F.mse_loss(fft_abs(x[i:i+1]), fft_abs(y[i:i+1]))
-        loss = loss / x.shape[0]
+        # Compute FFT on the full batch at once — cheaper than a per-sample loop
+        # that builds a long autograd chain. Complex tensors are freed immediately
+        # after mse_loss since we don't store them.
+        with torch.cuda.amp.autocast(enabled=False):
+            # fftn requires float32; x/y may be float16 under AMP
+            x_f = (x.float() + 1.0) / 2.0
+            y_f = (y.float() + 1.0) / 2.0
+            loss = F.mse_loss(torch.abs(fftn(x_f, norm="ortho")),
+                              torch.abs(fftn(y_f, norm="ortho"))).to(x.dtype)
 
         loss = loss * self.fft_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss
@@ -460,41 +444,32 @@ class BaselineLoss(torch.nn.Module):
         # We detach inputs and re-attach the loss to the graph via a proxy.
         # This avoids storing all intermediate SqueezeNet activations for backprop.
         
-        def _lpips_on_slices(x_vol, y_vol, perm_dims, view_shape):
+        def _lpips_on_slices(x_vol, y_vol, perm_dims):
             """Extract 2D slices along one orientation and compute LPIPS."""
-            x_2d = x_vol.permute(*perm_dims).contiguous().view(*view_shape)
-            y_2d = y_vol.permute(*perm_dims).contiguous().view(*view_shape)
-            indices = torch.randperm(x_2d.size(0))[: self.n_slices]
-            sel_x = x_2d[indices]
-            sel_y = y_2d[indices]
-            # Free the full 2D tensors immediately
-            del x_2d, y_2d
+            # Permute so the slice axis is dim=1: (B, n_slices, C, H, W)
+            # Then index along dim=1 BEFORE flattening, so we never materialise
+            # the full (B*n_slices_total, C, H, W) intermediate tensor.
+            x_p = x_vol.permute(*perm_dims)        # (B, n_slices_total, C, H, W)
+            n_slices_total = x_p.shape[1]
+            indices = torch.randperm(n_slices_total, device=x_vol.device)[: self.n_slices]
+            # (B, self.n_slices, C, H, W) -> (B * self.n_slices, C, H, W)
+            sel_x = x_p[:, indices].contiguous().flatten(0, 1)
+            del x_p
+            sel_y = y_vol.permute(*perm_dims)[:, indices].contiguous().flatten(0, 1)
             with torch.no_grad():
                 p_loss = torch.mean(self.perceptual_function.forward(sel_x.float(), sel_y.float()))
             return p_loss.detach()
 
         # Sagittal
-        p_loss_sagital = _lpips_on_slices(
-            x, y,
-            perm_dims=(0, 2, 1, 3, 4),
-            view_shape=(-1, x.shape[1], x.shape[3], x.shape[4]),
-        )
+        p_loss_sagital = _lpips_on_slices(x, y, perm_dims=(0, 2, 1, 3, 4))
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual_Sagittal-Reconstruction"] = p_loss_sagital
 
         # Axial
-        p_loss_axial = _lpips_on_slices(
-            x, y,
-            perm_dims=(0, 4, 1, 2, 3),
-            view_shape=(-1, x.shape[1], x.shape[2], x.shape[3]),
-        )
+        p_loss_axial = _lpips_on_slices(x, y, perm_dims=(0, 4, 1, 2, 3))
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual_Axial-Reconstruction"] = p_loss_axial
 
         # Coronal
-        p_loss_coronal = _lpips_on_slices(
-            x, y,
-            perm_dims=(0, 3, 1, 2, 4),
-            view_shape=(-1, x.shape[1], x.shape[2], x.shape[4]),
-        )
+        p_loss_coronal = _lpips_on_slices(x, y, perm_dims=(0, 3, 1, 2, 4))
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual_Coronal-Reconstruction"] = p_loss_coronal
 
         loss = (p_loss_sagital + p_loss_axial + p_loss_coronal) * self.perceptual_factor
