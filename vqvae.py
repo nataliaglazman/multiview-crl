@@ -286,8 +286,9 @@ class VQVAE(HelperModule):
                 print(f'Shape before masking: {first_layer.shape}, content indices: {estimated_content_indices}')
 
                 # Spatial content-only map: (B, content_channels, D, H, W)
-                # Used as input to subsequent encoders and stored for codebook loop
-                next_enc_input = first_layer[:, content_indices_flat, :, :, :]
+                # Clone so first_layer (full hidden_channels) can be freed immediately
+                next_enc_input = first_layer[:, content_indices_flat, :, :, :].clone()
+                del first_layer
                 encoder_outputs.append(next_enc_input)
 
                 # Pooled content-only latent: flat (n_views * batch_per_view, content_channels)
@@ -295,6 +296,7 @@ class VQVAE(HelperModule):
                 first_layer_content = first_latent[:, :, content_indices_flat]
                 print(f'Shape after masking: {first_layer_content.shape}')
                 encoder_pools.append(first_layer_content.reshape(-1, len(content_indices_flat)))
+                del first_latent
             else:
                 spatial_out = enc(next_enc_input)
                 next_enc_input = spatial_out
@@ -310,6 +312,7 @@ class VQVAE(HelperModule):
             codebook = self.codebooks[l]
 
             enc_out = encoder_outputs[l]
+            encoder_outputs[l] = None  # free reference so GC can reclaim spatial map
             expected_in = codebook.conv_in.in_channels
 
             if len(decoder_outputs) and return_recon:
@@ -318,6 +321,7 @@ class VQVAE(HelperModule):
                 if dec_out.shape[2:] != enc_out.shape[2:]:
                     dec_out = F.interpolate(dec_out, size=enc_out.shape[2:], mode='trilinear', align_corners=False)
                 combined = torch.cat([enc_out, dec_out], dim=1)
+                del enc_out
                 # Pad if enc channels < expected (e.g. content-only level 0 has fewer channels)
                 if expected_in > combined.shape[1]:
                     pad_channels = expected_in - combined.shape[1]
@@ -327,6 +331,7 @@ class VQVAE(HelperModule):
                     )
                     combined = torch.cat([combined, zeros], dim=1)
                 code_q, code_d, emb_id = codebook(combined)
+                del combined
             else:
                 # If this codebook expects conditioning channels, pad with zeros when reconstruction is skipped
                 if expected_in > enc_out.shape[1]:
@@ -337,6 +342,7 @@ class VQVAE(HelperModule):
                     )
                     enc_out = torch.cat([enc_out, zeros], dim=1)
                 code_q, code_d, emb_id = codebook(enc_out)
+                del enc_out
             
             diffs.append(code_d)
             id_outputs.append(emb_id)
