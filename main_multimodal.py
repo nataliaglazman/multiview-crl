@@ -112,7 +112,10 @@ def parse_args():
     parser.add_argument("--val-size", default=25000, type=int)
     parser.add_argument("--test-size", default=25000, type=int)
     parser.add_argument("--seed", type=int, default=np.random.randint(32**2 - 1))
-    parser.add_argument("--workers", type=int, default=24)
+    parser.add_argument("--workers", type=int, default=4,
+                        help="DataLoader workers. For 3D MRI with pin_memory, each worker holds "
+                             "prefetch_factor batches in pinned memory (~330MB each). "
+                             "24 workers × 2 prefetch = ~15 GB pinned memory. Keep this low (4-8).")
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument("--use-amp", action="store_true", help="Use automatic mixed precision (fp16) to reduce memory")
     parser.add_argument("--save-all-checkpoints", action="store_true")
@@ -400,9 +403,11 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
     Returns:
         tuple: A tuple containing the loss value and the estimated content indices.
     """
-    # Only zero gradients on first accumulation step
+    # Only zero gradients on first accumulation step.
+    # set_to_none=True frees the gradient tensors entirely rather than zeroing them,
+    # saving 1x parameter memory between steps.
     if optimizer is not None and accumulation_step == 0:
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
     if recon_loss_fn is None:
         recon_loss_fn = BaselineLoss().to(next(encoders[0].parameters()).device)
@@ -564,9 +569,10 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                 clip_grad_norm_(params, max_norm=2.0, norm_type=2)
                 optimizer.step()
         
-        # Clear cache periodically to prevent memory fragmentation
-        if torch.cuda.is_available() and accumulation_step == total_accumulation_steps - 1:
-            torch.cuda.empty_cache()
+        # NOTE: torch.cuda.empty_cache() is intentionally NOT called here.
+        # Calling it every step forces the allocator to release and re-request
+        # memory from CUDA, which increases fragmentation rather than reducing it.
+        # The allocator manages its cache more efficiently on its own.
 
     return total_loss.item(), contrastive_loss_value, recon_loss_value, vq_loss_value, estimated_content_indices
 
@@ -683,9 +689,11 @@ def main(args: argparse.Namespace):
         torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 for faster matmul
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True  # Optimize conv algorithms
-        # Set memory allocation strategy to reduce fragmentation
-        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-            pass  # Don't limit, just use efficient allocation
+        # expandable_segments: instead of fixed-size blocks, the allocator grows/shrinks
+        # segments on demand. This directly fixes the "X GiB reserved but unallocated"
+        # fragmentation shown in OOM messages. Must be set before any CUDA allocation.
+        import os as _os
+        _os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         torch.cuda.empty_cache()
     
     # create save_dir, where the model/results are or will be saved
@@ -819,6 +827,12 @@ def main(args: argparse.Namespace):
         "drop_last": True,
         "num_workers": args.workers,
         "pin_memory": True,
+        # prefetch_factor=2 caps each worker to 2 batches in its queue (default is 2 already,
+        # but being explicit guards against library version differences).
+        # With 24 workers × 2 batches × ~330 MB each = ~15 GB pinned memory — still large.
+        # persistent_workers avoids worker respawn overhead without extra queue growth.
+        "prefetch_factor": 2,
+        "persistent_workers": True,
     }
     logger.info("")
     logger.info("[LOADING DATASETS]")
@@ -970,11 +984,15 @@ def main(args: argparse.Namespace):
         params += list(f.parameters())
     for d in decoders:
         params += list(d.parameters())
-    optimizer = torch.optim.Adam(params, lr=args.lr)
-    
+    # Use fused AdamW: the fused CUDA kernel updates parameters in-place,
+    # avoiding a separate unscaled-gradient copy during the optimizer step (~1x param memory saved).
+    # Falls back to standard AdamW if fused is unavailable (e.g. CPU).
+    use_fused = torch.cuda.is_available()
+    optimizer = torch.optim.AdamW(params, lr=args.lr, fused=use_fused)
+
     logger.info("")
     logger.info("[OPTIMIZER]")
-    logger.info(f"  Optimizer: Adam")
+    logger.info(f"  Optimizer: AdamW (fused={use_fused})")
     logger.info(f"  Learning rate: {args.lr}")
     logger.info(f"  Total parameters to optimize: {sum(p.numel() for p in params):,}")
     
