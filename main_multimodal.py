@@ -478,7 +478,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                     # This is the same operation that was previously inside the VQVAE,
                     # but here it operates on already-pooled (B, C) vectors so there's no
                     # spatial memory overhead, and the gradient path to the encoder is clean.
-                    avg_logits = hz_level.mean(0, keepdim=True)  # (1, C), averaged over views
+                    avg_logits = hz_level.mean(dim=[0, 1], keepdim=False).unsqueeze(0)  # (1, C), averaged over views and batch
                     # smart_gumbel_softmax_mask iterates subsets[:-1], so with a single subset
                 # (the common 2-view case) it returns an empty list and the loss is always 0.
                 # Use it only when there are multiple subsets; fall back to gumbel_softmax_mask
