@@ -240,8 +240,8 @@ class VQVAE(HelperModule):
             decoder_outputs: Decoder features per level (or empty list)
             id_outputs: Codebook indices per level
         """
-        encoder_outputs = []
-        encoder_pools = []  # Global-average-pooled encoder features
+        encoder_outputs = []  # Spatial (5D) feature maps used by codebook/decoder loop
+        encoder_pools = []   # Pooled (3D) content-only features used for contrastive loss
         code_outputs = []
         decoder_outputs = []
         upscale_counts = []
@@ -249,6 +249,7 @@ class VQVAE(HelperModule):
         diffs = []
 
         # Encoder forward pass
+        next_enc_input = None  # Spatial content-only feature map passed to subsequent encoders
         for i, enc in enumerate(self.encoders):
             if i == 0:
                 first_layer = enc(x)
@@ -279,41 +280,60 @@ class VQVAE(HelperModule):
                     c_ind = torch.where(c_mask)[-1].tolist()
                     estimated_content_indices.append(c_ind)
 
-                print(f'Shape before masking: {first_layer.shape}, content indices: {estimated_content_indices}')
-                first_layer_content = first_latent[:,:, estimated_content_indices]
-                print(f'Shape after masking: {first_layer_content.shape}')
-                encoder_outputs.append(first_layer_content)
-            else:
-                encoder_outputs.append(enc(encoder_outputs[-1]))
+                # Content indices to use for channel selection (use first mask's indices)
+                content_indices_flat = estimated_content_indices[0] if estimated_content_indices else list(range(n_channels))
 
-            # Pre-compute pooled features while spatial map is still in memory
-            encoder_pools.append(encoder_outputs[-1].mean(dim=[2, 3, 4]))
-        
+                print(f'Shape before masking: {first_layer.shape}, content indices: {estimated_content_indices}')
+
+                # Spatial content-only map: (B, content_channels, D, H, W)
+                # Used as input to subsequent encoders and stored for codebook loop
+                next_enc_input = first_layer[:, content_indices_flat, :, :, :]
+                encoder_outputs.append(next_enc_input)
+
+                # Pooled content-only latent: flat (n_views * batch_per_view, content_channels)
+                # Used for contrastive loss; main_multimodal.py reshapes this to (n_views, batch, C)
+                first_layer_content = first_latent[:, :, content_indices_flat]
+                print(f'Shape after masking: {first_layer_content.shape}')
+                encoder_pools.append(first_layer_content.reshape(-1, len(content_indices_flat)))
+            else:
+                spatial_out = enc(next_enc_input)
+                next_enc_input = spatial_out
+                encoder_outputs.append(spatial_out)
+
+                # Pool for contrastive loss: flat (n_views * batch_per_view, C)
+                encoder_pools.append(spatial_out.mean(dim=[2, 3, 4]))
+
         # Free input tensor early
         del x
 
         for l in range(self.nb_levels-1, -1, -1):
             codebook = self.codebooks[l]
 
+            enc_out = encoder_outputs[l]
+            expected_in = codebook.conv_in.in_channels
+
             if len(decoder_outputs) and return_recon:
                 # Interpolate decoder output to match encoder output size if needed
                 dec_out = decoder_outputs[-1]
-                enc_out = encoder_outputs[l]
                 if dec_out.shape[2:] != enc_out.shape[2:]:
                     dec_out = F.interpolate(dec_out, size=enc_out.shape[2:], mode='trilinear', align_corners=False)
-                code_q, code_d, emb_id = codebook(torch.cat([enc_out, dec_out], axis=1))
+                combined = torch.cat([enc_out, dec_out], dim=1)
+                # Pad if enc channels < expected (e.g. content-only level 0 has fewer channels)
+                if expected_in > combined.shape[1]:
+                    pad_channels = expected_in - combined.shape[1]
+                    zeros = torch.zeros(
+                        combined.shape[0], pad_channels, *combined.shape[2:],
+                        device=combined.device, dtype=combined.dtype,
+                    )
+                    combined = torch.cat([combined, zeros], dim=1)
+                code_q, code_d, emb_id = codebook(combined)
             else:
-                enc_out = encoder_outputs[l]
                 # If this codebook expects conditioning channels, pad with zeros when reconstruction is skipped
-                expected_in = codebook.conv_in.in_channels
                 if expected_in > enc_out.shape[1]:
                     cond_channels = expected_in - enc_out.shape[1]
                     zeros = torch.zeros(
-                        enc_out.shape[0],
-                        cond_channels,
-                        *enc_out.shape[2:],
-                        device=enc_out.device,
-                        dtype=enc_out.dtype,
+                        enc_out.shape[0], cond_channels, *enc_out.shape[2:],
+                        device=enc_out.device, dtype=enc_out.dtype,
                     )
                     enc_out = torch.cat([enc_out, zeros], dim=1)
                 code_q, code_d, emb_id = codebook(enc_out)
