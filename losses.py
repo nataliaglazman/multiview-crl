@@ -243,9 +243,8 @@ def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, project
     """
 
     n_view = len(hz_subset)
-    SIM = [
-        [torch.Tensor().type_as(hz_subset) for _ in range(n_view)] for _ in range(n_view)
-    ]  # n_views x n_view x batch_size (d) x batch_size (d)
+    d = hz_subset.shape[1]  # batch size — defined here so it's always available
+    SIM = [[None] * n_view for _ in range(n_view)]
 
     projector = projector or (lambda x: x)
 
@@ -259,20 +258,22 @@ def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, project
                     sim_metric(hz_i.unsqueeze(-2), hz_j.unsqueeze(-3)) / tau
                 ).type_as(hz_subset)
                 if i == j:
-                    d = sim_ij.shape[-1]  # batch size
-                    sim_ij[..., range(d), range(d)] = float("-inf")
+                    # Mask self-similarity on the diagonal.
+                    # Use out-of-place fill to avoid corrupting the autograd graph.
+                    mask = torch.zeros_like(sim_ij, dtype=torch.bool)
+                    mask[..., range(d), range(d)] = True
+                    sim_ij = sim_ij.masked_fill(mask, float("-inf"))
                 SIM[i][j] = sim_ij
             else:
-                SIM[i][j] = SIM[j][i].transpose(-1, -2).type_as(hz_subset)
+                SIM[i][j] = SIM[j][i].transpose(-1, -2)
 
-    total_loss_value = torch.zeros(1).type_as(hz_subset)
+    total_loss_value = torch.zeros(1, device=hz_subset.device, dtype=hz_subset.dtype)
     for i in range(n_view):
         for j in range(n_view):
             if i < j:
-                raw_scores = []
-                raw_scores1 = torch.cat([SIM[i][j], SIM[i][i]], dim=-1).type_as(hz_subset)
-                raw_scores2 = torch.cat([SIM[j][j], SIM[j][i]], dim=-1).type_as(hz_subset)
-                raw_scores = torch.cat([raw_scores1, raw_scores2], dim=-2)  # d, 2d
+                raw_scores1 = torch.cat([SIM[i][j], SIM[i][i]], dim=-1)
+                raw_scores2 = torch.cat([SIM[j][j], SIM[j][i]], dim=-1)
+                raw_scores = torch.cat([raw_scores1, raw_scores2], dim=-2)  # (2d, 2d)
                 targets = torch.arange(2 * d, dtype=torch.long, device=raw_scores.device)
                 total_loss_value += criterion(raw_scores, targets)
     return total_loss_value

@@ -460,9 +460,10 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             # VQ commitment loss (sum of all levels)
             vq_loss = sum(diffs) * args.vq_commitment_weight
 
-            # Hierarchical contrastive loss across all encoder levels
-            # encoder_outputs are pre-pooled: (n_views * batch, C) per level
-            # Level 0: content_channels dims (masked by VQVAE); levels 1+: hidden_channels dims
+            # Hierarchical contrastive loss across all encoder levels.
+            # encoder_outputs are pre-pooled: (n_views * batch, C) per level — full hidden_channels.
+            # The Gumbel mask is applied here (on cheap pooled vectors) so gradients flow cleanly
+            # from the loss all the way back through the mean pooling to the encoder weights.
             total_contrastive_loss = torch.zeros(1, device=device)
             level_losses = []
             content_ratio = len(args.content_indices[0]) / (len(args.content_indices[0]) + len(args.style_indices))
@@ -470,15 +471,31 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             for level_idx, enc_pooled in enumerate(encoder_outputs):
                 hz_level = enc_pooled.reshape(n_views, -1, enc_pooled.shape[-1])
                 n_channels = hz_level.shape[-1]
+                content_size = max(1, int(content_ratio * n_channels))
 
                 if level_idx == 0:
-                    # The VQVAE already filtered level-0 pooled features to content channels only,
-                    # so hz_level has exactly content_channels dims. Tell the loss all dims are content.
-                    level_content_indices = [list(range(n_channels))]
+                    # Compute Gumbel mask on the mean pooled level-0 features.
+                    # This is the same operation that was previously inside the VQVAE,
+                    # but here it operates on already-pooled (B, C) vectors so there's no
+                    # spatial memory overhead, and the gradient path to the encoder is clean.
+                    avg_logits = hz_level.mean(0, keepdim=True)  # (1, C), averaged over views
+                    # smart_gumbel_softmax_mask iterates subsets[:-1], so with a single subset
+                # (the common 2-view case) it returns an empty list and the loss is always 0.
+                # Use it only when there are multiple subsets; fall back to gumbel_softmax_mask
+                # (one mask per subset) otherwise.
+                    if len(args.subsets) > 1 and content_size > 0:
+                        content_masks = utils.smart_gumbel_softmax_mask(
+                            avg_logits=avg_logits, content_sizes=[content_size], subsets=args.subsets
+                        )
+                    else:
+                        content_masks = utils.gumbel_softmax_mask(
+                            avg_logits=avg_logits, content_sizes=[content_size], subsets=args.subsets
+                        )
+                    estimated_content_indices = [torch.where(m)[-1].tolist() for m in content_masks]
+                    level_content_indices = estimated_content_indices
                 else:
                     # Higher levels: use proportional content size, fixed to first N dims
-                    scaled_content_size = max(1, int(content_ratio * n_channels))
-                    level_content_indices = [list(range(scaled_content_size))]
+                    level_content_indices = [list(range(content_size))]
 
                 level_loss = loss_func(hz_level, level_content_indices, args.subsets)
                 level_losses.append(level_loss.item())

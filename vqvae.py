@@ -274,30 +274,34 @@ class VQVAE(HelperModule):
 
             if i == 0 and self.content_proj is not None:
                 # --- Content selection on level-0 output ---
-                # Compute a single Gumbel mask from the mean pooled level-0 features.
-                # avg_logits must be (1, C) so torch.where returns exactly content_channels indices.
+                # Pool the FULL spatial output — gradients flow cleanly back through mean pooling.
+                # The training loop applies the Gumbel mask to these pooled vectors to select
+                # content channels for the contrastive loss. We don't do channel selection here
+                # so the encoder receives a clean gradient from the loss on all channels.
                 pooled = spatial_out.mean(dim=[2, 3, 4])                              # (B, hidden_channels)
-                avg_logits = pooled.mean(0, keepdim=True)                             # (1, hidden_channels)
-
-                content_mask = utils.topk_gumbel_softmax(
-                    k=self.content_channels, logits=avg_logits, tau=1.0, hard=True
-                )                                                                      # (1, hidden_channels)
-                content_idx = torch.where(content_mask)[-1].tolist()                  # exactly content_channels ints
-                estimated_content_indices = [content_idx]                             # one mask, consistent with training loop
-
-                # Apply mask spatially: keep only content channels, project back to hidden_channels
-                # content_spatial: (B, content_channels, D, H, W) — no clone needed, proj makes a new tensor
-                content_spatial = spatial_out[:, content_idx, :, :, :]
-
-                # Pool content-only features for contrastive loss (level 0)
                 if pool_only:
-                    encoder_pools.append(content_spatial.mean(dim=[2, 3, 4]))  # (B, content_channels)
+                    encoder_pools.append(pooled)
 
-                # Project content channels back to hidden_channels for next encoder
+                # For the spatial path into encoder 1+, we still want to pass only content
+                # channels. Compute the mask from a detached mean (the mask selection itself
+                # isn't differentiable anyway since we use discrete indices).
+                with torch.no_grad():
+                    avg_logits = pooled.detach().mean(0, keepdim=True)                # (1, hidden_channels)
+                    content_mask = utils.topk_gumbel_softmax(
+                        k=self.content_channels, logits=avg_logits, tau=1.0, hard=True
+                    )
+                    content_idx = torch.where(content_mask)[-1].tolist()              # exactly content_channels ints
+
+                estimated_content_indices = [content_idx]
+
+                # Apply mask spatially and project back to hidden_channels for next encoder.
+                # The projection itself is differentiable; the index selection is not, but that's
+                # intentional — we want the spatial path to carry content-only information forward.
+                content_spatial = spatial_out[:, content_idx, :, :, :]
                 enc_input = self.content_proj(content_spatial)
                 del content_spatial, spatial_out
 
-                # Store projected spatial map for codebook loop (full hidden_channels, content-only info)
+                # Store projected spatial map for codebook loop
                 encoder_outputs.append(enc_input)
             else:
                 enc_input = spatial_out
