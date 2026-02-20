@@ -462,9 +462,6 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                 
                 
                 if level_idx == 0:
-                    # Level 0: Select content indices using Gumbel-Softmax
-                    # This determines which dimensions are "content" (shared across views)
-                    # avg_logits shape: (batch, C) for gumbel_softmax functions
                     avg_logits = hz_level.mean(0)  # (batch, C)
                     
                     # Scale content size to match encoder channels (args.content_indices is for 512-dim VAE)
