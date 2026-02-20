@@ -201,6 +201,8 @@ class VQVAE(HelperModule):
             nb_entries: int                 = 512,
             scaling_rates: list[int]        = [8, 4, 2],
             use_checkpoint: bool            = True,     # Gradient checkpointing to save memory
+            content_size: int               = 0,        # # of content dims in original latent space
+            style_size: int                 = 0,        # # of style dims in original latent space
         ):
 
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
@@ -208,6 +210,17 @@ class VQVAE(HelperModule):
         self.encoders = nn.ModuleList([Encoder(in_channels, hidden_channels, res_channels, nb_res_layers, scaling_rates[0], use_checkpoint)])
         for i, sr in enumerate(scaling_rates[1:]):
             self.encoders.append(Encoder(hidden_channels, hidden_channels, res_channels, nb_res_layers, sr, use_checkpoint))
+
+        # Optional content projection: projects content-only channels back to hidden_channels
+        # so deeper encoders always receive a full hidden_channels spatial map.
+        # Only built when content_size and style_size are both provided.
+        if content_size > 0 and style_size > 0:
+            total_size = content_size + style_size
+            self.content_channels = max(1, round(content_size / total_size * hidden_channels))
+            self.content_proj = nn.Conv3d(self.content_channels, hidden_channels, kernel_size=1, bias=False)
+        else:
+            self.content_channels = None
+            self.content_proj = None
 
         self.codebooks = nn.ModuleList()
         for i in range(nb_levels - 1):
@@ -222,97 +235,88 @@ class VQVAE(HelperModule):
         for i in range(nb_levels - 1):
             self.upscalers.append(Upscaler(embed_dim, scaling_rates[1:len(scaling_rates) - i][::-1]))
 
-    def forward(self, x,  content_size, style_size, n_views, subsets, return_recon=True, pool_only=False,):
+    def forward(self, x, return_recon=True, pool_only=False, n_views=1, subsets=None):
         """Forward pass through VQ-VAE-2.
-        
+
         Args:
             x: Input tensor (B, C, D, H, W)
             return_recon: If False, skip decoder for memory efficiency (contrastive-only mode)
-            pool_only: If True, return pooled (B, C) encoder features instead of full spatial maps.
-                       Saves significant memory when you only need global features (e.g. contrastive loss).
-        
+            pool_only: If True, return per-level pooled (B, C) vectors instead of spatial maps.
+            n_views: Number of views (required when content_proj is active).
+            subsets: View subsets for Gumbel mask (required when content_proj is active).
+
         Returns:
             final_output: Reconstruction (or None if return_recon=False)
             diffs: VQ commitment losses per level
-            encoder_features: Per-level encoder features. 
+            encoder_features: Per-level encoder features.
                               If pool_only=True:  list of (B, C) pooled vectors
+                                  Level 0 has content_channels dims (masked),
+                                  levels 1+ have hidden_channels dims.
                               If pool_only=False: list of (B, C, D, H, W) spatial maps
+            estimated_content_indices: Content channel indices from the Gumbel mask
+                                       (None if content_proj not configured)
             decoder_outputs: Decoder features per level (or empty list)
             id_outputs: Codebook indices per level
         """
-        encoder_outputs = []  # Spatial (5D) feature maps used by codebook/decoder loop
-        encoder_pools = []   # Pooled (3D) content-only features used for contrastive loss
+        encoder_outputs = []  # Spatial (5D) feature maps, consumed by codebook/decoder loop
+        encoder_pools = []    # Pooled (B, C) vectors, returned for contrastive loss
         code_outputs = []
         decoder_outputs = []
         upscale_counts = []
         id_outputs = []
         diffs = []
+        estimated_content_indices = None
 
         # Encoder forward pass
-        next_enc_input = None  # Spatial content-only feature map passed to subsequent encoders
+        enc_input = x
         for i, enc in enumerate(self.encoders):
-            if i == 0:
-                first_layer = enc(x)
-                print(f'First encoder layer output shape: {first_layer.shape}')
-                first_latent = first_layer.mean(dim=[2, 3, 4])
-                first_latent = first_latent.reshape(n_views, -1, first_latent.shape[-1])  # (n_views, batch_per_view, C)
-                n_channels = first_latent.shape[-1]
+            spatial_out = enc(enc_input)
 
-                avg_logits = first_layer.mean(0)  # (batch, C)
+            if i == 0 and self.content_proj is not None:
+                # --- Content selection on level-0 output ---
+                # Compute Gumbel mask from pooled level-0 features (cheap: no extra spatial alloc)
+                pooled = spatial_out.mean(dim=[2, 3, 4])         # (B, hidden_channels)
+                avg_logits = pooled.reshape(n_views, -1, pooled.shape[-1]).mean(0)  # (batch, C)
 
-                original_content_size = content_size
-                original_total_size = original_content_size + style_size
-                content_ratio = original_content_size / original_total_size
-                content_size = max(1, int(content_ratio * n_channels))
-
-                if subsets[-1] == list(range(n_views)) and content_size > 0:
+                if subsets[-1] == list(range(n_views)) and self.content_channels > 0:
                     content_masks = utils.smart_gumbel_softmax_mask(
-                        avg_logits=avg_logits, content_sizes=[content_size], subsets=subsets
+                        avg_logits=avg_logits, content_sizes=[self.content_channels], subsets=subsets
                     )
                 else:
                     content_masks = utils.gumbel_softmax_mask(
-                        avg_logits=avg_logits, content_sizes=[content_size], subsets=subsets
+                        avg_logits=avg_logits, content_sizes=[self.content_channels], subsets=subsets
                     )
 
-                # Extract content indices from masks
-                estimated_content_indices = []
-                for c_mask in content_masks:
-                    c_ind = torch.where(c_mask)[-1].tolist()
-                    estimated_content_indices.append(c_ind)
+                estimated_content_indices = [torch.where(m)[-1].tolist() for m in content_masks]
+                content_idx = estimated_content_indices[0]
 
-                # Content indices to use for channel selection (use first mask's indices)
-                content_indices_flat = estimated_content_indices[0] if estimated_content_indices else list(range(n_channels))
+                # Apply mask spatially: keep only content channels, project back to hidden_channels
+                # content_spatial: (B, content_channels, D, H, W) — no clone needed, proj makes a new tensor
+                content_spatial = spatial_out[:, content_idx, :, :, :]
 
-                print(f'Shape before masking: {first_layer.shape}, content indices: {estimated_content_indices}')
+                # Pool content-only features for contrastive loss (level 0)
+                if pool_only:
+                    encoder_pools.append(content_spatial.mean(dim=[2, 3, 4]))  # (B, content_channels)
 
-                # Spatial content-only map: (B, content_channels, D, H, W)
-                # Clone so first_layer (full hidden_channels) can be freed immediately
-                next_enc_input = first_layer[:, content_indices_flat, :, :, :].clone()
-                del first_layer
-                encoder_outputs.append(next_enc_input)
+                # Project content channels back to hidden_channels for next encoder
+                enc_input = self.content_proj(content_spatial)
+                del content_spatial, spatial_out
 
-                # Pooled content-only latent: flat (n_views * batch_per_view, content_channels)
-                # Used for contrastive loss; main_multimodal.py reshapes this to (n_views, batch, C)
-                first_layer_content = first_latent[:, :, content_indices_flat]
-                print(f'Shape after masking: {first_layer_content.shape}')
-                encoder_pools.append(first_layer_content.reshape(-1, len(content_indices_flat)))
-                del first_latent
+                # Store projected spatial map for codebook loop (full hidden_channels, content-only info)
+                encoder_outputs.append(enc_input)
             else:
-                spatial_out = enc(next_enc_input)
-                next_enc_input = spatial_out
+                enc_input = spatial_out
                 encoder_outputs.append(spatial_out)
+                if pool_only:
+                    encoder_pools.append(spatial_out.mean(dim=[2, 3, 4]))
 
-                # Pool for contrastive loss: flat (n_views * batch_per_view, C)
-                encoder_pools.append(spatial_out.mean(dim=[2, 3, 4]))
-
-        # Free input tensor early
-        del x
+        del x, enc_input
 
         for l in range(self.nb_levels-1, -1, -1):
             codebook = self.codebooks[l]
 
             enc_out = encoder_outputs[l]
-            encoder_outputs[l] = None  # free reference so GC can reclaim spatial map
+            encoder_outputs[l] = None  # release spatial map reference as soon as consumed
             expected_in = codebook.conv_in.in_channels
 
             if len(decoder_outputs) and return_recon:
@@ -322,14 +326,6 @@ class VQVAE(HelperModule):
                     dec_out = F.interpolate(dec_out, size=enc_out.shape[2:], mode='trilinear', align_corners=False)
                 combined = torch.cat([enc_out, dec_out], dim=1)
                 del enc_out
-                # Pad if enc channels < expected (e.g. content-only level 0 has fewer channels)
-                if expected_in > combined.shape[1]:
-                    pad_channels = expected_in - combined.shape[1]
-                    zeros = torch.zeros(
-                        combined.shape[0], pad_channels, *combined.shape[2:],
-                        device=combined.device, dtype=combined.dtype,
-                    )
-                    combined = torch.cat([combined, zeros], dim=1)
                 code_q, code_d, emb_id = codebook(combined)
                 del combined
             else:
