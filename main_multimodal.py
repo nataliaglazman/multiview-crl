@@ -1138,10 +1138,10 @@ def main(args: argparse.Namespace):
                         writer = csv.writer(fileobj)
                         wri = [
                             "Step", f"{step}",
-                            "Total", f"{np.mean(loss_values[-args.log_steps:]):.3f}",
-                            "Contrastive", f"{np.mean(contrastive_losses[-args.log_steps:]):.3f}",
-                            "Recon", f"{np.mean(recon_losses[-args.log_steps:]):.3f}",
-                            "VQ", f"{np.mean(vq_losses[-args.log_steps:]):.3f}",
+                            "Total", f"{np.mean(loss_values):.3f}",
+                            "Contrastive", f"{np.mean(contrastive_losses):.3f}",
+                            "Recon", f"{np.mean(recon_losses):.3f}",
+                            "VQ", f"{np.mean(vq_losses):.3f}",
                         ]
                         writer.writerow(wri)
                     tb_writer.flush()
@@ -1256,14 +1256,14 @@ def main(args: argparse.Namespace):
         logger.info("="*60)
         logger.info("TRAINING COMPLETE")
         logger.info("="*60)
-        logger.info(f"  Final total loss: {loss_values[-1]:.4f}")
-        logger.info(f"  Final contrastive loss: {contrastive_losses[-1]:.4f}")
-        logger.info(f"  Final recon loss: {recon_losses[-1]:.4f}")
-        logger.info(f"  Final VQ loss: {vq_losses[-1]:.4f}")
-        logger.info(f"  Avg total (last {args.log_steps}): {np.mean(loss_values[-args.log_steps:]):.4f}")
-        logger.info(f"  Avg contrastive (last {args.log_steps}): {np.mean(contrastive_losses[-args.log_steps:]):.4f}")
-        logger.info(f"  Avg recon (last {args.log_steps}): {np.mean(recon_losses[-args.log_steps:]):.4f}")
-        logger.info(f"  Avg VQ (last {args.log_steps}): {np.mean(vq_losses[-args.log_steps:]):.4f}")
+        logger.info(f"  Final total loss: {loss_values[-1]:.4f}" if loss_values else "  No loss values recorded")
+        logger.info(f"  Final contrastive loss: {contrastive_losses[-1]:.4f}" if contrastive_losses else "")
+        logger.info(f"  Final recon loss: {recon_losses[-1]:.4f}" if recon_losses else "")
+        logger.info(f"  Final VQ loss: {vq_losses[-1]:.4f}" if vq_losses else "")
+        logger.info(f"  Avg total (last {args.log_steps}): {np.mean(loss_values):.4f}" if loss_values else "")
+        logger.info(f"  Avg contrastive (last {args.log_steps}): {np.mean(contrastive_losses):.4f}" if contrastive_losses else "")
+        logger.info(f"  Avg recon (last {args.log_steps}): {np.mean(recon_losses):.4f}" if recon_losses else "")
+        logger.info(f"  Avg VQ (last {args.log_steps}): {np.mean(vq_losses):.4f}" if vq_losses else "")
         logger.info(f"  Models saved to: {args.save_dir}")
         
         # Close TensorBoard writer
