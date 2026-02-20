@@ -274,21 +274,16 @@ class VQVAE(HelperModule):
 
             if i == 0 and self.content_proj is not None:
                 # --- Content selection on level-0 output ---
-                # Compute Gumbel mask from pooled level-0 features (cheap: no extra spatial alloc)
-                pooled = spatial_out.mean(dim=[2, 3, 4])         # (B, hidden_channels)
-                avg_logits = pooled.reshape(n_views, -1, pooled.shape[-1]).mean(0)  # (batch, C)
+                # Compute a single Gumbel mask from the mean pooled level-0 features.
+                # avg_logits must be (1, C) so torch.where returns exactly content_channels indices.
+                pooled = spatial_out.mean(dim=[2, 3, 4])                              # (B, hidden_channels)
+                avg_logits = pooled.mean(0, keepdim=True)                             # (1, hidden_channels)
 
-                if subsets[-1] == list(range(n_views)) and self.content_channels > 0:
-                    content_masks = utils.smart_gumbel_softmax_mask(
-                        avg_logits=avg_logits, content_sizes=[self.content_channels], subsets=subsets
-                    )
-                else:
-                    content_masks = utils.gumbel_softmax_mask(
-                        avg_logits=avg_logits, content_sizes=[self.content_channels], subsets=subsets
-                    )
-
-                estimated_content_indices = [torch.where(m)[-1].tolist() for m in content_masks]
-                content_idx = estimated_content_indices[0]
+                content_mask = utils.topk_gumbel_softmax(
+                    k=self.content_channels, logits=avg_logits, tau=1.0, hard=True
+                )                                                                      # (1, hidden_channels)
+                content_idx = torch.where(content_mask)[-1].tolist()                  # exactly content_channels ints
+                estimated_content_indices = [content_idx]                             # one mask, consistent with training loop
 
                 # Apply mask spatially: keep only content channels, project back to hidden_channels
                 # content_spatial: (B, content_channels, D, H, W) — no clone needed, proj makes a new tensor
