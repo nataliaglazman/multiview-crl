@@ -466,8 +466,9 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                 n_channels = hz_level.shape[-1]
 
                 if level_idx == 0:
-                    # Content indices already computed by VQVAE (from Gumbel mask on level-0 pooled features)
-                    level_content_indices = estimated_content_indices
+                    # The VQVAE already filtered level-0 pooled features to content channels only,
+                    # so hz_level has exactly content_channels dims. Tell the loss all dims are content.
+                    level_content_indices = [list(range(n_channels))]
                 else:
                     # Higher levels: use proportional content size, fixed to first N dims
                     scaled_content_size = max(1, int(content_ratio * n_channels))
