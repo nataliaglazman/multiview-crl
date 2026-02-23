@@ -1,20 +1,17 @@
 """Definition of loss functions."""
 
 from abc import ABC, abstractmethod
+from typing import Dict, List
 
 import numpy as np
 import torch
-from typing import Dict, List, Tuple
 import torch.nn.functional as F
-
-from torch import cat
-from torch import tensor
-from torch import reshape
-from torch.nn import PairwiseDistance
 from lpips import LPIPS
+from torch import cat, reshape, tensor
 from torch.fft import fftn
-from utils import TBSummaryTypes
+from torch.nn import PairwiseDistance
 
+from utils.utils import TBSummaryTypes
 
 
 # for numerical experiment
@@ -197,7 +194,15 @@ class UnifiedCLLoss(CLLoss):
 
 
 # for multimodal experiment
-def infonce_loss(hz, sim_metric, criterion, projector=None, tau=1.0, estimated_content_indices=None, subsets=None):
+def infonce_loss(
+    hz,
+    sim_metric,
+    criterion,
+    projector=None,
+    tau=1.0,
+    estimated_content_indices=None,
+    subsets=None,
+):
     """
     Calculates the sum of InfoNCE loss for a given input tensor `hz`, over all subsets.
 
@@ -220,7 +225,12 @@ def infonce_loss(hz, sim_metric, criterion, projector=None, tau=1.0, estimated_c
         total_loss = torch.zeros(1).type_as(hz)
         for est_content_indices, subset in zip(estimated_content_indices, subsets):
             total_loss += infonce_base_loss(
-                hz[list(subset), ...], est_content_indices, sim_metric, criterion, projector, tau
+                hz[list(subset), ...],
+                est_content_indices,
+                sim_metric,
+                criterion,
+                projector,
+                tau,
             )
         return total_loss
 
@@ -254,9 +264,7 @@ def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, project
                 # Similarity computed only on content dimensions
                 hz_i = hz_subset[i][..., content_indices]  # (batch, content_dims)
                 hz_j = hz_subset[j][..., content_indices]
-                sim_ij = (
-                    sim_metric(hz_i.unsqueeze(-2), hz_j.unsqueeze(-3)) / tau
-                ).type_as(hz_subset)
+                sim_ij = (sim_metric(hz_i.unsqueeze(-2), hz_j.unsqueeze(-3)) / tau).type_as(hz_subset)
                 if i == j:
                     # Mask self-similarity on the diagonal.
                     # Use out-of-place fill to avoid corrupting the autograd graph.
@@ -277,7 +285,6 @@ def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, project
                 targets = torch.arange(2 * d, dtype=torch.long, device=raw_scores.device)
                 total_loss_value += criterion(raw_scores, targets)
     return total_loss_value
-
 
 
 def moco_infonce_loss(q, k, queue, content_indices, tau=1.0):
@@ -302,25 +309,25 @@ def moco_infonce_loss(q, k, queue, content_indices, tau=1.0):
     total_loss = torch.zeros(1, device=q.device, dtype=q.dtype)
 
     # Project to content dimensions and L2-normalise
-    q_c = F.normalize(q[..., content_indices], dim=-1)          # (n_views, B, d)
-    k_c = F.normalize(k[..., content_indices], dim=-1)          # (n_views, B, d)
-    queue_c = F.normalize(queue[content_indices, :], dim=0)     # (d, Q)
+    q_c = F.normalize(q[..., content_indices], dim=-1)  # (n_views, B, d)
+    k_c = F.normalize(k[..., content_indices], dim=-1)  # (n_views, B, d)
+    queue_c = F.normalize(queue[content_indices, :], dim=0)  # (d, Q)
 
     for i in range(n_view):
         for j in range(n_view):
             if i >= j:
                 continue
             # q[i] → positive k[j], negatives from queue
-            pos_ij = (q_c[i] * k_c[j]).sum(dim=-1, keepdim=True)   # (B, 1)
-            neg_ij = q_c[i] @ queue_c                               # (B, Q)
-            logits_ij = torch.cat([pos_ij, neg_ij], dim=1) / tau    # (B, Q+1)
+            pos_ij = (q_c[i] * k_c[j]).sum(dim=-1, keepdim=True)  # (B, 1)
+            neg_ij = q_c[i] @ queue_c  # (B, Q)
+            logits_ij = torch.cat([pos_ij, neg_ij], dim=1) / tau  # (B, Q+1)
             targets = torch.zeros(logits_ij.shape[0], dtype=torch.long, device=q.device)
             total_loss = total_loss + F.cross_entropy(logits_ij, targets)
 
             # Symmetric: q[j] → positive k[i]
-            pos_ji = (q_c[j] * k_c[i]).sum(dim=-1, keepdim=True)   # (B, 1)
-            neg_ji = q_c[j] @ queue_c                               # (B, Q)
-            logits_ji = torch.cat([pos_ji, neg_ji], dim=1) / tau    # (B, Q+1)
+            pos_ji = (q_c[j] * k_c[i]).sum(dim=-1, keepdim=True)  # (B, 1)
+            neg_ji = q_c[j] @ queue_c  # (B, Q)
+            logits_ji = torch.cat([pos_ji, neg_ji], dim=1) / tau  # (B, Q+1)
             total_loss = total_loss + F.cross_entropy(logits_ji, targets)
 
     return total_loss
@@ -365,29 +372,18 @@ class BaurLoss(object):
         self.lambda_gdl = 0
 
         # Use mean instead of sum for proper scaling with 3D images
-        self.l1_loss = lambda x, y: PairwiseDistance(p=1)(
-            x.view(x.shape[0], -1), y.view(y.shape[0], -1)
-        ).mean()
-        self.l2_loss = lambda x, y: PairwiseDistance(p=2)(
-            x.view(x.shape[0], -1), y.view(y.shape[0], -1)
-        ).mean()
+        self.l1_loss = lambda x, y: PairwiseDistance(p=1)(x.view(x.shape[0], -1), y.view(y.shape[0], -1)).mean()
+        self.l2_loss = lambda x, y: PairwiseDistance(p=2)(x.view(x.shape[0], -1), y.view(y.shape[0], -1)).mean()
 
     def __call__(self, originals, reconstructions):
-
         summaries = {}
 
-        l1_reconstruction = (
-            self.l1_loss(originals, reconstructions) * self.lambda_reconstruction
-        )
-        l2_reconstruction = (
-            self.l2_loss(originals, reconstructions) * self.lambda_reconstruction
-        )
+        l1_reconstruction = self.l1_loss(originals, reconstructions) * self.lambda_reconstruction
+        l2_reconstruction = self.l2_loss(originals, reconstructions) * self.lambda_reconstruction
 
         summaries[("summaries", "scalar", "L1-Reconstruction-Loss")] = l1_reconstruction.item()
         summaries[("summaries", "scalar", "L2-Reconstruction-Loss")] = l2_reconstruction.item()
-        summaries[
-            ("summaries", "scalar", "Lambda-Reconstruction")
-        ] = self.lambda_reconstruction
+        summaries[("summaries", "scalar", "Lambda-Reconstruction")] = self.lambda_reconstruction
 
         originals_gradients = self.__image_gradients(originals)
         reconstructions_gradients = self.__image_gradients(reconstructions)
@@ -439,9 +435,7 @@ class BaurLoss(object):
         dz = cat([dz, dzz], 2)
         dz = reshape(dz, input_shape)
 
-        dyz = tensor(()).new_zeros(
-            (batch_size, features, depth, 1, width), device=image.device, dtype=dy.dtype
-        )
+        dyz = tensor(()).new_zeros((batch_size, features, depth, 1, width), device=image.device, dtype=dy.dtype)
         dy = cat([dy, dyz], 3)
         dy = reshape(dy, input_shape)
 
@@ -454,6 +448,7 @@ class BaurLoss(object):
         dx = reshape(dx, input_shape)
 
         return dx, dy, dz
+
 
 class BaselineLoss(torch.nn.Module):
     def __init__(self):
@@ -469,9 +464,7 @@ class BaselineLoss(torch.nn.Module):
 
         self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
 
-    def forward(
-        self, network_output: Dict[str, List[torch.Tensor]], y: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, network_output: Dict[str, List[torch.Tensor]], y: torch.Tensor) -> torch.Tensor:
         # Unpacking elements
         x = y.float()
         y = network_output["reconstruction"][0].float()
@@ -486,9 +479,7 @@ class BaselineLoss(torch.nn.Module):
         for idx, q_loss in enumerate(q_losses):
             q_loss = q_loss.float()
 
-            self.summaries[TBSummaryTypes.SCALAR][
-                f"Loss-MSE-VQ{idx}_Commitment_Cost"
-            ] = q_loss
+            self.summaries[TBSummaryTypes.SCALAR][f"Loss-MSE-VQ{idx}_Commitment_Cost"] = q_loss
 
             loss = loss + q_loss
 
@@ -502,8 +493,7 @@ class BaselineLoss(torch.nn.Module):
             # fftn requires float32; x/y may be float16 under AMP
             x_f = (x.float() + 1.0) / 2.0
             y_f = (y.float() + 1.0) / 2.0
-            loss = F.mse_loss(torch.abs(fftn(x_f, norm="ortho")),
-                              torch.abs(fftn(y_f, norm="ortho"))).to(x.dtype)
+            loss = F.mse_loss(torch.abs(fftn(x_f, norm="ortho")), torch.abs(fftn(y_f, norm="ortho"))).to(x.dtype)
 
         loss = loss * self.fft_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss
@@ -521,13 +511,13 @@ class BaselineLoss(torch.nn.Module):
         # LPIPS backbone is frozen, so we don't need gradients through it.
         # We detach inputs and re-attach the loss to the graph via a proxy.
         # This avoids storing all intermediate SqueezeNet activations for backprop.
-        
+
         def _lpips_on_slices(x_vol, y_vol, perm_dims):
             """Extract 2D slices along one orientation and compute LPIPS."""
             # Permute so the slice axis is dim=1: (B, n_slices, C, H, W)
             # Then index along dim=1 BEFORE flattening, so we never materialise
             # the full (B*n_slices_total, C, H, W) intermediate tensor.
-            x_p = x_vol.permute(*perm_dims)        # (B, n_slices_total, C, H, W)
+            x_p = x_vol.permute(*perm_dims)  # (B, n_slices_total, C, H, W)
             n_slices_total = x_p.shape[1]
             indices = torch.randperm(n_slices_total, device=x_vol.device)[: self.n_slices]
             # (B, self.n_slices, C, H, W) -> (B * self.n_slices, C, H, W)

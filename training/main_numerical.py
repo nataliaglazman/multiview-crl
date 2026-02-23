@@ -18,12 +18,12 @@ from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 
-import encoders
-import invertible_network_utils
-import latent_spaces
 import losses
-import spaces
-import utils
+import models.encoders as encoders
+import utils.invertible_network_utils as invertible_network_utils
+import utils.latent_spaces as latent_spaces
+import utils.spaces as spaces
+import utils.utils as utils
 
 if torch.cuda.is_available():
     device = "cuda"
@@ -626,7 +626,9 @@ def evaluate(models, latent_space, args):
                 predicted_content_idx = hz_dict[k]["est_c_ind"][subset][i]
                 batch_size = hz_dict[k]["hz"][i].shape[0]
                 inputs = np.take_along_axis(
-                    hz_dict[k]["hz"][i], np.tile(predicted_content_idx[None], (batch_size, 1)), axis=-1
+                    hz_dict[k]["hz"][i],
+                    np.tile(predicted_content_idx[None], (batch_size, 1)),
+                    axis=-1,
                 )
                 for latent_idx in range(args.latent_dim):
                     # labels = StandardScaler().fit_transform(data_dict[subset][k][keyword])
@@ -657,7 +659,7 @@ def evaluate(models, latent_space, args):
                     "latent_idx",
                     latent_idx,
                     "linear mean",
-                    f"{np.mean(scores[latent_idx]['linear']):.3f} +- {np.std(scores[latent_idx]['linear']) :.3f}",
+                    f"{np.mean(scores[latent_idx]['linear']):.3f} +- {np.std(scores[latent_idx]['linear']):.3f}",
                     "nonlinear mean",
                     f"{np.mean(scores[latent_idx]['nonlinear']):.3f} +- {np.std(scores[latent_idx]['nonlinear']):.3f}",
                 ]
@@ -695,7 +697,9 @@ def main():
     """Initialisation"""
     mixing_fns = init_or_load_mixing_fns(device, args)  # mixing function always gives S_k
     encoders = init_or_load_encoder_models(
-        device, args, encoding_size=args.encoding_size if args.selection == "concat" else None
+        device,
+        args,
+        encoding_size=args.encoding_size if args.selection == "concat" else None,
     )
     models = init_or_load_training_models(mixing_fns=mixing_fns, encoderes=encoders, device=device, args=args)
     params, optimizer = init_or_load_optimizer(models=models, args=args)

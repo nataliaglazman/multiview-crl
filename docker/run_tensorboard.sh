@@ -4,4 +4,4 @@ runai submit --name multiview-crl-cl-10 --interactive --attach\
  --cpu 16 \
  --cpu-limit 32 \
  --memory 64G --memory-limit 128G --project nglazman \
- -v /nfs:/nfs --large-shm 
+ -v /nfs:/nfs --large-shm

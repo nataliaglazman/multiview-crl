@@ -40,7 +40,10 @@ class DiscreteSpace(Space):
         if isinstance(original, int):
             assert original < self.n_choices
             return torch.from_numpy(
-                np.random.choice(np.delete(np.asarray(range(self.n_choices)), int(original)), size=size)
+                np.random.choice(
+                    np.delete(np.asarray(range(self.n_choices)), int(original)),
+                    size=size,
+                )
             ).float()
         else:
             return torch.from_numpy(np.random.choice(np.asarray(range(self.n_choices)), size=size)).float()

@@ -2,9 +2,9 @@
 
 ## Technical Report for Supervisor Review
 
-**Project:** `multiview-crl`  
-**Dataset:** ADNI (Alzheimer's Disease Neuroimaging Initiative) - Registered T1 and T2 MRI scans  
-**Date:** February 2026  
+**Project:** `multiview-crl`
+**Dataset:** ADNI (Alzheimer's Disease Neuroimaging Initiative) - Registered T1 and T2 MRI scans
+**Date:** February 2026
 **Last Updated:** 19 February 2026
 
 ### Changelog
@@ -318,10 +318,10 @@ level_2_content = 32 dims
 for level_idx, encoder_output in enumerate(encoder_outputs):
     # Global average pool: (B, 64, D, H, W) → (B, 64)
     hz = encoder_output.mean(dim=[2,3,4])
-    
+
     # Reshape for contrastive: (n_views, batch, channels)
     hz = hz.reshape(2, batch_size, 64)
-    
+
     if level_idx == 0:
         # Select content indices via Gumbel-Softmax
         content_indices = gumbel_select(hz, k=32)
@@ -330,7 +330,7 @@ for level_idx, encoder_output in enumerate(encoder_outputs):
         # Proportional content for higher levels
         content_size = int(content_ratio * n_channels)
         content_indices = range(content_size)
-    
+
     # Contrastive loss on content dims only
     level_loss = infonce_loss(hz, content_indices)
     total_contrastive_loss += level_loss

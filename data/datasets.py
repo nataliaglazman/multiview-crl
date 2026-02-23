@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 try:
     import faiss
+
     HAS_FAISS = True
 except ImportError:
     HAS_FAISS = False
@@ -20,10 +21,9 @@ import torch
 from nltk.tokenize import sent_tokenize, word_tokenize
 from torchvision.datasets.folder import pil_loader
 
-import spaces
-from spaces import NBoxSpace
-from utils import load_data
-from utils import transforms
+import utils.spaces as spaces
+from utils.spaces import NBoxSpace
+from utils.utils import load_data
 
 
 class OrderedCounter(Counter, OrderedDict):
@@ -84,7 +84,16 @@ class MultiviewDataset(torch.utils.data.Dataset):
         return _index
 
     @staticmethod
-    def __search_view__(z, _index, latents, image_paths, transform, loader, augment=False, idx_original=None):
+    def __search_view__(
+        z,
+        _index,
+        latents,
+        image_paths,
+        transform,
+        loader,
+        augment=False,
+        idx_original=None,
+    ):
         """
         Search for a view in the dataset.
 
@@ -269,7 +278,15 @@ class MPI3D(MultiviewDataset):
     DISCRETE_FACTORS = FACTORS.copy()  # all latents are discretized
 
     # define latent spaces for each component
-    FACTOR_SIZES = [4, 4, 2, 3, 3, 40, 40]  # first 7 latent factors, last 3 img # (460,800, 64, 64, 3)
+    FACTOR_SIZES = [
+        4,
+        4,
+        2,
+        3,
+        3,
+        40,
+        40,
+    ]  # first 7 latent factors, last 3 img # (460,800, 64, 64, 3)
     LATENT_SPACES = {"image": {}}
     for i, v in FACTORS["image"].items():
         LATENT_SPACES["image"][i] = spaces.DiscreteSpace(FACTOR_SIZES[i])
@@ -702,7 +719,11 @@ class Causal3DIdent(MultiviewDataset):
             max_length = int(np.ceil(np.log10(len(self.latent_classes[i]))))
             self.image_paths_classes.append(
                 [
-                    os.path.join(self.root, "images_{}".format(i), f"{str(j).zfill(max_length)}.png")
+                    os.path.join(
+                        self.root,
+                        "images_{}".format(i),
+                        f"{str(j).zfill(max_length)}.png",
+                    )
                     for j in range(self.latent_classes[i].shape[0])
                 ]
             )
@@ -1203,11 +1224,11 @@ class Multimodal3DIdent(MultiviewDataset):
 
 class MyCustomDataset(MultiviewDataset):
     """ADNI dataset with T1 and T2 as two views."""
-    
+
     # Not used for 3D medical images, but required by parent class
     mean_per_channel = [0.0]
     std_per_channel = [1.0]
-    
+
     # Minimal factors definition (not used for training, only for compatibility)
     FACTORS = {"image": {0: "view"}}
     DISCRETE_FACTORS = {"image": {}}
@@ -1229,19 +1250,20 @@ class MyCustomDataset(MultiviewDataset):
         self.change_lists = change_lists or []
         self.spacing = spacing
         self.crop_margin = crop_margin
-        
+
         # Load CSV and build item list
-        csv_path = '/nfs/home/nglazman/cluster/labels_cleaned_3class.csv'
+        csv_path = "/nfs/home/nglazman/cluster/labels_cleaned_3class.csv"
         df = pd.read_csv(csv_path)
-        label_values = sorted(df['Group'].unique())
+        label_values = sorted(df["Group"].unique())
         label_map = {v: i for i, v in enumerate(label_values)}
-        
+
         # Load data using utils.load_data
         self.items, missing = load_data(df, data_dir, label_map)
         self.num_samples = len(self.items)
-        
+
         # Get MONAI transforms with specified spacing and cropping
-        from utils import transforms as get_transforms
+        from utils.utils import transforms as get_transforms
+
         train_transforms, val_transforms = get_transforms(spacing=self.spacing, crop_margin=self.crop_margin)
         self.monai_transform = train_transforms if mode == "train" else val_transforms
 
@@ -1250,12 +1272,10 @@ class MyCustomDataset(MultiviewDataset):
 
     def __getview__(self, item):
         """Not used - we override __getitem__ directly."""
-        pass
 
     def __get_augmented_view__(self, idx, z, change_list):
         """Not used - T2 is our second view."""
-        pass
-    
+
     def sample(self, size, random_state=None):
         """Sample for DCI evaluation - returns empty since we don't have latent factors."""
         return np.array([[]]), []
@@ -1263,46 +1283,53 @@ class MyCustomDataset(MultiviewDataset):
     def __getitem__(self, idx):
         """Return dict with T1 and T2 as two views."""
         item = self.items[idx]
-        
+
         # Apply MONAI transforms
         data_dict = {
-            'image_t1': item['image'],
-            'image_t2': item['z_image'],
-            'label': item['label']
+            "image_t1": item["image"],
+            "image_t2": item["z_image"],
+            "label": item["label"],
         }
         transformed = self.monai_transform(data_dict)
-        
-        img_t1 = transformed['image_t1']  # View 1
-        img_t2 = transformed['image_t2']  # View 2
-        
+
+        img_t1 = transformed["image_t1"]  # View 1
+        img_t2 = transformed["image_t2"]  # View 2
+
         # Print dimensions on first sample only
         if idx == 0:
-            print(f"[Dataset] Image dimensions after transforms:")
+            print("[Dataset] Image dimensions after transforms:")
             print(f"  T1 shape: {img_t1.shape}")
             print(f"  T2 shape: {img_t2.shape}")
-        
+
         # Save first two samples for visualization
         if idx < 2:
-            import nibabel as nib
             import os
+
+            import nibabel as nib
+
             save_dir = "results/ADNI_registered/0"
             os.makedirs(save_dir, exist_ok=True)
-            
+
             # Convert to numpy and save as NIfTI with correct 2mm spacing
-            t1_np = img_t1.squeeze().cpu().numpy() if hasattr(img_t1, 'cpu') else img_t1.squeeze().numpy()
-            t2_np = img_t2.squeeze().cpu().numpy() if hasattr(img_t2, 'cpu') else img_t2.squeeze().numpy()
-            
+            t1_np = img_t1.squeeze().cpu().numpy() if hasattr(img_t1, "cpu") else img_t1.squeeze().numpy()
+            t2_np = img_t2.squeeze().cpu().numpy() if hasattr(img_t2, "cpu") else img_t2.squeeze().numpy()
+
             # Create affine with 2mm voxel spacing
             affine_2mm = np.diag([2.0, 2.0, 2.0, 1.0])
-            
-            nib.save(nib.Nifti1Image(t1_np, affine=affine_2mm), f"{save_dir}/sample_{idx}_T1_resampled.nii.gz")
-            nib.save(nib.Nifti1Image(t2_np, affine=affine_2mm), f"{save_dir}/sample_{idx}_T2_resampled.nii.gz")
+
+            nib.save(
+                nib.Nifti1Image(t1_np, affine=affine_2mm),
+                f"{save_dir}/sample_{idx}_T1_resampled.nii.gz",
+            )
+            nib.save(
+                nib.Nifti1Image(t2_np, affine=affine_2mm),
+                f"{save_dir}/sample_{idx}_T2_resampled.nii.gz",
+            )
             print(f"[Dataset] Saved sample {idx} T1 and T2 to {save_dir}/")
-        
+
         # Return in expected format: list of views
         return {
             "image": [img_t1, img_t2],
             "z_image": [{}, {}],  # Empty dicts - no latent factors
             "index": idx,
         }
-

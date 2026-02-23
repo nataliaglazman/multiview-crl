@@ -1,34 +1,41 @@
+import logging
+import os
 import string
+from enum import Enum
 from itertools import chain, combinations
 from typing import List
 
 import numpy as np
 import torch
-
-import logging
-import os
-from monai.transforms import (Compose, LoadImaged, EnsureChannelFirstd, ScaleIntensityd, Orientationd, ResizeWithPadOrCropd,
-                              RandRotate90d, ToTensord, RandFlipd, RandAffined, Spacingd, RandZoomd, RandGaussianSmoothd, RandShiftIntensityd,
-                              RandSimulateLowResolutiond, NormalizeIntensityd, ThresholdIntensityd, MaskIntensityd, Lambda, Lambdad,
-                              CopyItemsd, MapTransform)
-import torch
-import torch.nn.functional as F
-from enum import Enum
+from monai.transforms import (
+    Compose,
+    EnsureChannelFirstd,
+    LoadImaged,
+    MapTransform,
+    NormalizeIntensityd,
+    Orientationd,
+    RandAffined,
+    RandShiftIntensityd,
+    ResizeWithPadOrCropd,
+    Spacingd,
+    ToTensord,
+)
 
 
 class CreateBrainMaskd(MapTransform):
     """Create a binary brain mask from the image (nonzero voxels) before resampling."""
+
     def __init__(self, keys, mask_keys, threshold=50):
         super().__init__(keys)
         self.mask_keys = mask_keys
         self.threshold = threshold  # Threshold for brain vs background
-        
+
     def __call__(self, data):
         d = dict(data)
         for key, mask_key in zip(self.keys, self.mask_keys):
             # Create mask where image > threshold - handle both numpy and MetaTensor
             img = d[key]
-            if hasattr(img, 'cpu'):  # PyTorch tensor
+            if hasattr(img, "cpu"):  # PyTorch tensor
                 mask = (img > self.threshold).float()
             else:  # numpy array
                 mask = (np.array(img) > self.threshold).astype(np.float32)
@@ -38,18 +45,18 @@ class CreateBrainMaskd(MapTransform):
 
 class ApplyBrainMaskd(MapTransform):
     """Apply brain mask to zero out background after normalization."""
+
     def __init__(self, keys, mask_keys, threshold=0.5):
         super().__init__(keys)
         self.mask_keys = mask_keys
         self.threshold = threshold
-        
+
     def __call__(self, data):
         d = dict(data)
         for key, mask_key in zip(self.keys, self.mask_keys):
             mask = d[mask_key] > self.threshold  # After resampling, threshold at 0.5
             d[key] = d[key] * mask
         return d
-
 
 
 EPSILON = np.finfo(np.float32).tiny
@@ -350,18 +357,19 @@ def generate_batch_factor_code(ground_truth_data, representation_function, num_p
         i += num_points_iter
     return np.transpose(representations), np.transpose(factors)
 
+
 def load_data(df_filtered, data_dir, label_map):
-    exts = ['.nii.gz', '.nii', '.mha', '.mhd', '.nrrd', '.npy']
+    exts = [".nii.gz", ".nii", ".mha", ".mhd", ".nrrd", ".npy"]
     missing = []
     items = []
     for _, row in df_filtered.iterrows():
-        subj = str(row['Subject'])
+        subj = str(row["Subject"])
         found_t1 = None
         found_t2 = None
-        
+
         # Find T1 image
         for ext in exts:
-            candidate = os.path.join(data_dir, subj, 't1')
+            candidate = os.path.join(data_dir, subj, "t1")
             if os.path.exists(candidate):
                 candidate_files = os.listdir(candidate)
                 for file in candidate_files:
@@ -370,33 +378,35 @@ def load_data(df_filtered, data_dir, label_map):
                         break
             if found_t1:
                 break
-        
+
         # Find T2 image
         for ext in exts:
-            candidate = os.path.join(data_dir, subj, 't2')
+            candidate = os.path.join(data_dir, subj, "t2")
             if os.path.exists(candidate):
                 candidate_files = os.listdir(candidate)
                 for file in candidate_files:
-                    if file.endswith(ext) and 'FLAIR' in file:
+                    if file.endswith(ext) and "FLAIR" in file:
                         found_t2 = os.path.join(candidate, file)
                         break
             if found_t2:
                 break
-        
+
         # Only include subjects that have BOTH T1 and T2
         if found_t1 and found_t2:
-            items.append({
-                'image': found_t1,
-                'z_image': found_t2,
-                'label': label_map[row['Group']]
-            })
+            items.append(
+                {
+                    "image": found_t1,
+                    "z_image": found_t2,
+                    "label": label_map[row["Group"]],
+                }
+            )
         else:
             missing.append(subj)
             if not found_t1:
                 logging.warning(f"Missing T1 for subject {subj}")
             if not found_t2:
                 logging.warning(f"Missing T2 for subject {subj}")
-    
+
     logging.info(f"Loaded {len(items)} subjects with both T1 and T2. Missing: {len(missing)}")
     return items, missing
 
@@ -404,7 +414,7 @@ def load_data(df_filtered, data_dir, label_map):
 def transforms(spacing=2.0, crop_margin=0):
     """
     Create training and validation transforms for brain MRI images.
-    
+
     Args:
         spacing: Isotropic voxel spacing in mm.
                  - 1.0: Original resolution (~182x218x182)
@@ -412,7 +422,7 @@ def transforms(spacing=2.0, crop_margin=0):
         crop_margin: Number of voxels to crop from each edge (all 6 sides).
                      E.g., crop_margin=4 removes 4 voxels from each side,
                      reducing each dimension by 8.
-    
+
     Returns:
         train_transforms, val_transforms
     """
@@ -425,57 +435,81 @@ def transforms(spacing=2.0, crop_margin=0):
     else:
         # Calculate proportionally from 1mm reference
         spatial_size = tuple(int(s / spacing) for s in (182, 218, 182))
-    
+
     # Apply cropping: reduce each dimension by 2*crop_margin
     if crop_margin > 0:
         spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
         logging.info(f"Cropping {crop_margin} voxels from each edge")
-    
+
     logging.info(f"Using voxel spacing: {spacing}mm, spatial size: {spatial_size}")
-    
+
     # Common transforms list builder
     def build_transforms(is_training=False):
         transforms_list = [
-            LoadImaged(keys=['image_t1', 'image_t2']),
-            EnsureChannelFirstd(keys=['image_t1', 'image_t2'], channel_dim="no_channel"),
+            LoadImaged(keys=["image_t1", "image_t2"]),
+            EnsureChannelFirstd(keys=["image_t1", "image_t2"], channel_dim="no_channel"),
             # Create brain mask BEFORE resampling (where original > 0)
-            CreateBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2']),
+            CreateBrainMaskd(keys=["image_t1", "image_t2"], mask_keys=["mask_t1", "mask_t2"]),
         ]
-        
+
         # Only add spacing transforms if not using original 1mm
         if spacing != 1.0:
-            transforms_list.extend([
-                Spacingd(keys=['image_t1', 'image_t2'], pixdim=(spacing, spacing, spacing), mode="bilinear"),
-                Spacingd(keys=['mask_t1', 'mask_t2'], pixdim=(spacing, spacing, spacing), mode="nearest"),
-            ])
-        
-        transforms_list.extend([
-            Orientationd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], axcodes="RAS"),
-            ResizeWithPadOrCropd(keys=['image_t1', 'image_t2', 'mask_t1', 'mask_t2'], spatial_size=spatial_size),
-            NormalizeIntensityd(keys=['image_t1', 'image_t2'], nonzero=True, channel_wise=True),
-            ApplyBrainMaskd(keys=['image_t1', 'image_t2'], mask_keys=['mask_t1', 'mask_t2'], threshold=0.5),
-        ])
-        
+            transforms_list.extend(
+                [
+                    Spacingd(
+                        keys=["image_t1", "image_t2"],
+                        pixdim=(spacing, spacing, spacing),
+                        mode="bilinear",
+                    ),
+                    Spacingd(
+                        keys=["mask_t1", "mask_t2"],
+                        pixdim=(spacing, spacing, spacing),
+                        mode="nearest",
+                    ),
+                ]
+            )
+
+        transforms_list.extend(
+            [
+                Orientationd(keys=["image_t1", "image_t2", "mask_t1", "mask_t2"], axcodes="RAS"),
+                ResizeWithPadOrCropd(
+                    keys=["image_t1", "image_t2", "mask_t1", "mask_t2"],
+                    spatial_size=spatial_size,
+                ),
+                NormalizeIntensityd(keys=["image_t1", "image_t2"], nonzero=True, channel_wise=True),
+                ApplyBrainMaskd(
+                    keys=["image_t1", "image_t2"],
+                    mask_keys=["mask_t1", "mask_t2"],
+                    threshold=0.5,
+                ),
+            ]
+        )
+
         # Add augmentations for training only
         if is_training:
-            transforms_list.extend([
-                RandAffined(keys=['image_t1', 'image_t2'], 
-                            rotate_range=[-0.05, 0.05],
-                            shear_range=[0.001, 0.05], 
-                            scale_range=[0, 0.05],
-                            mode='bilinear',
-                            padding_mode='zeros',
-                            prob=0.5),
-                RandShiftIntensityd(keys=['image_t1', 'image_t2'], offsets=(-0.1, 0.1), prob=0.2),
-            ])
-        
-        transforms_list.append(ToTensord(keys=['image_t1', 'image_t2', 'label']))
+            transforms_list.extend(
+                [
+                    RandAffined(
+                        keys=["image_t1", "image_t2"],
+                        rotate_range=[-0.05, 0.05],
+                        shear_range=[0.001, 0.05],
+                        scale_range=[0, 0.05],
+                        mode="bilinear",
+                        padding_mode="zeros",
+                        prob=0.5,
+                    ),
+                    RandShiftIntensityd(keys=["image_t1", "image_t2"], offsets=(-0.1, 0.1), prob=0.2),
+                ]
+            )
+
+        transforms_list.append(ToTensord(keys=["image_t1", "image_t2", "label"]))
         return Compose(transforms_list)
-    
+
     train_transforms = build_transforms(is_training=True)
     val_transforms = build_transforms(is_training=False)
-    
+
     return train_transforms, val_transforms
+
 
 class TBSummaryTypes(Enum):
     SCALAR = "scalar"

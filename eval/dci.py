@@ -25,7 +25,7 @@ import scipy
 from six.moves import range
 from sklearn import ensemble
 
-import utils
+import utils.utils as utils
 
 
 def compute_dci(
