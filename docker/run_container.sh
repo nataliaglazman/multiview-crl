@@ -1,4 +1,4 @@
-runai submit --name multiview-crl-corrected\
+runai submit --name multiview-crl-moco \
  -i aicregistry:5000/nglazman:multiview-crl-vqvae-latest \
  --node-type A100 \
  --run-as-user \
@@ -10,6 +10,9 @@ runai submit --name multiview-crl-corrected\
                              --dataroot /nfs/home/nglazman \
                              --dataset_name ADNI_registered \
                              --encoder-type vqvae \
+                             --use-moco \
+                             --moco-queue-size 4096 \
+                             --moco-momentum 0.999 \
                              --vqvae-nb-levels 3 \
                              --vqvae-scaling-rates 2 2 2 \
                              --train-steps 50000 \
@@ -19,7 +22,7 @@ runai submit --name multiview-crl-corrected\
                              --use-amp \
                              --workers 4 \
                              --scale-contrastive-loss 1 \
-                             --model-id vqvae-corrected \
+                             --model-id vqvae-moco \
                              --gradient-accumulation-steps 4 \
                              --gradient-checkpointing \
                              --skip-recon-ratio 0.3 \
