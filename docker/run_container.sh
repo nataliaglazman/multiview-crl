@@ -18,7 +18,7 @@ runai submit --name multiview-crl-corrected\
                              --batch-size 4 \
                              --use-amp \
                              --workers 4 \
-                             --scale-contrastive-loss 10 \
+                             --scale-contrastive-loss 1 \
                              --model-id vqvae-corrected \
                              --gradient-accumulation-steps 4 \
                              --gradient-checkpointing \

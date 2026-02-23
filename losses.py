@@ -280,6 +280,83 @@ def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, project
 
 
 
+def moco_infonce_loss(q, k, queue, content_indices, tau=1.0):
+    """
+    MoCo-style InfoNCE loss for a single view pair using a queue of negatives.
+
+    For each ordered pair (i, j) with i < j we treat q[i] as query matched to k[j]
+    as the positive key, and all queue columns as negatives (and vice versa for j→i).
+
+    Args:
+        q  (torch.Tensor): Online (query) embeddings,   shape (n_views, B, C).
+        k  (torch.Tensor): Momentum (key) embeddings,   shape (n_views, B, C).
+                           Must already be detached from the computation graph.
+        queue (torch.Tensor): Negative key queue,        shape (C, queue_size).
+        content_indices (list[int]): Channel indices to use for the contrastive objective.
+        tau (float): Temperature scaling factor.
+
+    Returns:
+        torch.Tensor: Scalar loss value.
+    """
+    n_view = q.shape[0]
+    total_loss = torch.zeros(1, device=q.device, dtype=q.dtype)
+
+    # Project to content dimensions and L2-normalise
+    q_c = F.normalize(q[..., content_indices], dim=-1)          # (n_views, B, d)
+    k_c = F.normalize(k[..., content_indices], dim=-1)          # (n_views, B, d)
+    queue_c = F.normalize(queue[content_indices, :], dim=0)     # (d, Q)
+
+    for i in range(n_view):
+        for j in range(n_view):
+            if i >= j:
+                continue
+            # q[i] → positive k[j], negatives from queue
+            pos_ij = (q_c[i] * k_c[j]).sum(dim=-1, keepdim=True)   # (B, 1)
+            neg_ij = q_c[i] @ queue_c                               # (B, Q)
+            logits_ij = torch.cat([pos_ij, neg_ij], dim=1) / tau    # (B, Q+1)
+            targets = torch.zeros(logits_ij.shape[0], dtype=torch.long, device=q.device)
+            total_loss = total_loss + F.cross_entropy(logits_ij, targets)
+
+            # Symmetric: q[j] → positive k[i]
+            pos_ji = (q_c[j] * k_c[i]).sum(dim=-1, keepdim=True)   # (B, 1)
+            neg_ji = q_c[j] @ queue_c                               # (B, Q)
+            logits_ji = torch.cat([pos_ji, neg_ji], dim=1) / tau    # (B, Q+1)
+            total_loss = total_loss + F.cross_entropy(logits_ji, targets)
+
+    return total_loss
+
+
+def moco_loss(q, k, queue, sim_metric, tau=1.0, estimated_content_indices=None, subsets=None):
+    """
+    Top-level MoCo loss that mirrors the ``infonce_loss`` signature.
+
+    Iterates over all (subset, content_indices) pairs and sums the per-subset
+    ``moco_infonce_loss`` values.
+
+    Args:
+        q  (torch.Tensor): Online embeddings,    shape (n_views, B, C).
+        k  (torch.Tensor): Momentum embeddings,  shape (n_views, B, C).
+        queue (torch.Tensor): Negative queue,    shape (C, queue_size).
+        sim_metric: Unused — kept for API compatibility with ``infonce_loss``.
+        tau (float): Temperature.
+        estimated_content_indices (list[list[int]]): Content channel indices per subset.
+        subsets (list[tuple]): View subsets (same length as estimated_content_indices).
+
+    Returns:
+        torch.Tensor: Scalar loss value.
+    """
+    if estimated_content_indices is None or subsets is None:
+        # Fall back to using all channels
+        return moco_infonce_loss(q, k, queue, list(range(q.shape[-1])), tau)
+
+    total_loss = torch.zeros(1, device=q.device, dtype=q.dtype)
+    for content_indices, subset in zip(estimated_content_indices, subsets):
+        q_sub = q[list(subset), ...]
+        k_sub = k[list(subset), ...]
+        total_loss = total_loss + moco_infonce_loss(q_sub, k_sub, queue, content_indices, tau)
+    return total_loss
+
+
 class BaurLoss(object):
     def __init__(self, lambda_reconstruction=1):
         super(BaurLoss).__init__()

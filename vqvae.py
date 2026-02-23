@@ -1,3 +1,5 @@
+import copy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -388,6 +390,174 @@ class VQVAE(HelperModule):
             upscale_counts.append(0)
 
         return decoder_outputs[-1]
+
+class MoCoEncoder(nn.Module):
+    """
+    MoCo (Momentum Contrast) wrapper around a VQVAE model.
+
+    Maintains:
+    - An *online* VQVAE (updated normally by the optimizer).
+    - A *momentum* copy of only the encoder stack (EMA-updated, no gradients).
+    - One FIFO circular queue per encoder level filled with past momentum-key
+      embeddings.  The queues act as cheap, decoupled negatives for the
+      contrastive loss, so the effective negative count is ``queue_size``
+      regardless of the per-step batch size.
+
+    Args:
+        vqvae_model (VQVAE): The online VQVAE instance (already on device).
+        queue_size  (int):   Number of negatives stored per level queue.
+        momentum    (float): EMA coefficient for the momentum encoder update.
+                             Typical value: 0.999.
+        nb_levels   (int):   Number of VQ-VAE encoder levels (must match
+                             ``vqvae_model.nb_levels``).
+    """
+
+    def __init__(self, vqvae_model, queue_size: int = 4096,
+                 momentum: float = 0.999, nb_levels: int = 3):
+        super().__init__()
+        self.online = vqvae_model
+        self.momentum = momentum
+        self.queue_size = queue_size
+        self.nb_levels = nb_levels
+
+        # Unwrap DataParallel if present to access the underlying VQVAE attributes
+        raw_vqvae = vqvae_model.module if hasattr(vqvae_model, 'module') else vqvae_model
+
+        # ---- Momentum encoder: a deep copy of the encoder stack only --------
+        # We do NOT copy codebooks or decoders — keys are pre-quantisation
+        # global-average-pooled feature vectors.
+        self.momentum_encoders = nn.ModuleList(
+            [copy.deepcopy(enc) for enc in raw_vqvae.encoders]
+        )
+        for enc in self.momentum_encoders:
+            for p in enc.parameters():
+                p.requires_grad = False
+
+        # ---- Per-level queues -----------------------------------------------
+        # Infer channel width from the first encoder's output channels.
+        # VQVAE.encoders[i] is an Encoder whose last layer outputs hidden_channels.
+        hidden_channels = self._infer_hidden_channels(raw_vqvae)
+
+        # Queues are buffers (not parameters) so the optimizer ignores them.
+        for lvl in range(nb_levels):
+            q = F.normalize(torch.randn(hidden_channels, queue_size), dim=0)
+            self.register_buffer(f"queue_{lvl}", q)
+
+        self.queue_ptrs = [0] * nb_levels
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _infer_hidden_channels(vqvae_model: VQVAE) -> int:
+        """Return the hidden_channels width by inspecting the encoder stack."""
+        enc0 = vqvae_model.encoders[0]
+        # The last nn.Conv3d in Encoder.layers outputs hidden_channels
+        for m in reversed(list(enc0.layers.modules())):
+            if isinstance(m, nn.Conv3d):
+                return m.out_channels
+        raise RuntimeError("Could not infer hidden_channels from encoder.")
+
+    def _get_queue(self, level: int) -> torch.Tensor:
+        return getattr(self, f"queue_{level}")
+
+    # ------------------------------------------------------------------
+    # Momentum update (EMA)
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _momentum_update(self):
+        """EMA-update all momentum encoder parameters from the online encoder."""
+        raw_vqvae = self.online.module if hasattr(self.online, 'module') else self.online
+        for online_enc, mom_enc in zip(raw_vqvae.encoders, self.momentum_encoders):
+            for p_online, p_mom in zip(online_enc.parameters(), mom_enc.parameters()):
+                p_mom.data.mul_(self.momentum).add_(p_online.data, alpha=1.0 - self.momentum)
+
+    # ------------------------------------------------------------------
+    # Key encoding
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def encode_keys(self, x: torch.Tensor):
+        """
+        Encode ``x`` with the momentum encoder stack and return per-level
+        global-average-pooled feature vectors.
+
+        The momentum encoder mirrors the hierarchy of the online encoder:
+        level 0 processes raw input; each subsequent level processes the
+        output of the previous momentum encoder.
+
+        Args:
+            x (torch.Tensor): Input batch, shape ``(B, C, D, H, W)``.
+
+        Returns:
+            list[torch.Tensor]: Length ``nb_levels``.  Each element has shape
+                ``(B, hidden_channels)``.
+        """
+        key_pools = []
+        enc_input = x
+        for mom_enc in self.momentum_encoders:
+            out = mom_enc(enc_input)                        # (B, C, D, H, W)
+            key_pools.append(out.mean(dim=[2, 3, 4]))       # (B, C)
+            enc_input = out
+        return key_pools
+
+    # ------------------------------------------------------------------
+    # Queue management
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def enqueue(self, keys: list):
+        """
+        Write new keys into the per-level circular queues.
+
+        Args:
+            keys (list[torch.Tensor]): One tensor per level, shape ``(B, C)``.
+                                       Must be detached.
+        """
+        for lvl, k in enumerate(keys):
+            queue = self._get_queue(lvl)        # (C, Q)
+            batch = k.shape[0]
+            ptr = self.queue_ptrs[lvl]
+
+            # Wrap-around write
+            if ptr + batch <= self.queue_size:
+                queue[:, ptr: ptr + batch] = k.T
+            else:
+                # Split write across the boundary
+                tail = self.queue_size - ptr
+                queue[:, ptr:] = k[:tail].T
+                queue[:, : batch - tail] = k[tail:].T
+
+            self.queue_ptrs[lvl] = (ptr + batch) % self.queue_size
+
+    # ------------------------------------------------------------------
+    # Forward (delegates to online VQVAE)
+    # ------------------------------------------------------------------
+
+    def forward(self, x, **kwargs):
+        """
+        Forward pass through the *online* VQVAE, then EMA-update the momentum
+        encoder.  The queue is updated externally (in the training loop) after
+        ``encode_keys`` has been called, so that the snapshot passed to the loss
+        function is consistent with the keys generated this step.
+
+        Returns the same outputs as ``VQVAE.forward``.
+        """
+        outputs = self.online(x, **kwargs)
+        self._momentum_update()
+        return outputs
+
+    # ------------------------------------------------------------------
+    # Convenience: expose queue snapshots as a list
+    # ------------------------------------------------------------------
+
+    @property
+    def queues(self):
+        """Return all queues as an ordered list (level 0 first)."""
+        return [self._get_queue(lvl) for lvl in range(self.nb_levels)]
+
 
 if __name__ == '__main__':
     from helper import get_parameter_count

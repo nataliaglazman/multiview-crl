@@ -42,7 +42,7 @@ import dci
 import utils
 from encoders import TextEncoder2D
 from infinite_iterator import InfiniteIterator
-from losses import infonce_loss, BaselineLoss
+from losses import infonce_loss, moco_loss, BaselineLoss
 import vae
 import vqvae
 
@@ -153,6 +153,12 @@ def parse_args():
     )  # list of latent indices we want to perturb in the augmented views
     parser.add_argument("--faiss-omp-threads", type=int, default=16)
     parser.add_argument("--subsets", default=[(0, 1), (0, 2), (1, 2), (0, 1, 2)])
+    parser.add_argument("--use-moco", action="store_true",
+                        help="Use MoCo momentum-contrast training for the VQ-VAE encoder")
+    parser.add_argument("--moco-queue-size", type=int, default=4096,
+                        help="Number of negatives stored per level in the MoCo queue")
+    parser.add_argument("--moco-momentum", type=float, default=0.999,
+                        help="EMA momentum coefficient for the MoCo momentum encoder")
     parser.add_argument("--eval-dci", action="store_true")
     parser.add_argument("--eval-style", action="store_true")
     parser.add_argument("--grid-search-eval", action="store_true")
@@ -468,6 +474,19 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
             level_losses = []
             content_ratio = len(args.content_indices[0]) / (len(args.content_indices[0]) + len(args.style_indices))
 
+            # When MoCo is active, compute key embeddings from the momentum encoder.
+            # encode_keys mirrors the online encoder hierarchy but runs under no_grad.
+            use_moco = getattr(args, 'use_moco', False)
+            if use_moco:
+                from vqvae import MoCoEncoder
+                assert isinstance(vqvae_model, MoCoEncoder), \
+                    "MoCo requested but encoders[0] is not a MoCoEncoder instance."
+                with torch.no_grad():
+                    # images was deleted above if recon was computed — re-fetch from data
+                    _imgs_for_keys = torch.concat(data["image"], 0).to(device)
+                    key_outputs = vqvae_model.encode_keys(_imgs_for_keys)
+                    del _imgs_for_keys
+
             for level_idx, enc_pooled in enumerate(encoder_outputs):
                 hz_level = enc_pooled.reshape(n_views, -1, enc_pooled.shape[-1])
                 n_channels = hz_level.shape[-1]
@@ -480,9 +499,9 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                     # spatial memory overhead, and the gradient path to the encoder is clean.
                     avg_logits = hz_level.mean(dim=[0, 1], keepdim=False).unsqueeze(0)  # (1, C), averaged over views and batch
                     # smart_gumbel_softmax_mask iterates subsets[:-1], so with a single subset
-                # (the common 2-view case) it returns an empty list and the loss is always 0.
-                # Use it only when there are multiple subsets; fall back to gumbel_softmax_mask
-                # (one mask per subset) otherwise.
+                    # (the common 2-view case) it returns an empty list and the loss is always 0.
+                    # Use it only when there are multiple subsets; fall back to gumbel_softmax_mask
+                    # (one mask per subset) otherwise.
                     if len(args.subsets) > 1 and content_size > 0:
                         content_masks = utils.smart_gumbel_softmax_mask(
                             avg_logits=avg_logits, content_sizes=[content_size], subsets=args.subsets
@@ -497,9 +516,26 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
                     # Higher levels: use proportional content size, fixed to first N dims
                     level_content_indices = [list(range(content_size))]
 
-                level_loss = loss_func(hz_level, level_content_indices, args.subsets)
+                if use_moco:
+                    # MoCo path: query = online features, key = momentum features, negatives from queue
+                    key_pooled = key_outputs[level_idx]                          # (n_views*B, C)
+                    k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])  # (n_views, B, C)
+                    queue_snapshot = vqvae_model.queues[level_idx].clone().detach()  # (C, Q)
+                    level_loss = moco_loss_func(hz_level, k_level, queue_snapshot,
+                                               level_content_indices, args.subsets)
+                else:
+                    # Standard in-batch InfoNCE
+                    level_loss = loss_func(hz_level, level_content_indices, args.subsets)
+
                 level_losses.append(level_loss.item())
                 total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss
+
+            # After computing all level losses, enqueue momentum keys for all levels at once.
+            # This must happen outside the loop so each level's key is written to the
+            # correct queue slot (enqueue zips over all levels simultaneously).
+            if use_moco:
+                with torch.no_grad():
+                    vqvae_model.enqueue([k.detach() for k in key_outputs])
 
             contrastive_loss = total_contrastive_loss
             
@@ -826,6 +862,15 @@ def main(args: argparse.Namespace):
             subsets=subsets,
         )
 
+    def moco_loss_func(q, k, queue, estimated_content_indices, subsets):
+        return moco_loss(
+            q, k, queue,
+            sim_metric=sim_metric,
+            tau=args.tau,
+            estimated_content_indices=estimated_content_indices,
+            subsets=subsets,
+        )
+
     # define augmentations (only normalization of the input images)
     if HAS_FAISS:
         faiss.omp_set_num_threads(args.faiss_omp_threads)
@@ -944,7 +989,20 @@ def main(args: argparse.Namespace):
         # For VQVAE, we use encoders list to hold the model, decoders is empty
         encoders = [vqvae_model]
         decoders = []
-        
+
+        # Wrap with MoCo if requested
+        if getattr(args, 'use_moco', False):
+            from vqvae import MoCoEncoder
+            moco_model = MoCoEncoder(
+                vqvae_model,
+                queue_size=getattr(args, 'moco_queue_size', 4096),
+                momentum=getattr(args, 'moco_momentum', 0.999),
+                nb_levels=args.vqvae_nb_levels,
+            )
+            moco_model.to(device)
+            encoders = [moco_model]
+            logger.info(f"    MoCo enabled: queue_size={args.moco_queue_size}, momentum={args.moco_momentum}")
+
         total_params = num_params
         
     else:
@@ -1064,6 +1122,14 @@ def main(args: argparse.Namespace):
                     contrastive_losses.append(checkpoint.get('contrastive_loss', 0))
                     recon_losses.append(checkpoint.get('recon_loss', 0))
                     vq_losses.append(checkpoint.get('vq_loss', 0))
+                    # Restore MoCo queue state if present (graceful fallback for old checkpoints)
+                    if getattr(args, 'use_moco', False) and 'moco_queues' in checkpoint:
+                        from vqvae import MoCoEncoder
+                        if isinstance(encoders[0], MoCoEncoder):
+                            for lvl, q_cpu in enumerate(checkpoint['moco_queues']):
+                                encoders[0]._get_queue(lvl).copy_(q_cpu.to(device))
+                            encoders[0].queue_ptrs = list(checkpoint['moco_queue_ptrs'])
+                            logger.info("  MoCo queue state restored from checkpoint.")
                     logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
                     logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")
                 else:
@@ -1202,6 +1268,14 @@ def main(args: argparse.Namespace):
                             'recon_loss': recon_loss,
                             'vq_loss': vq_loss,
                         }
+                        # Persist MoCo queue state so training can resume seamlessly
+                        if getattr(args, 'use_moco', False):
+                            from vqvae import MoCoEncoder
+                            if isinstance(encoders[0], MoCoEncoder):
+                                checkpoint['moco_queues'] = [
+                                    q.cpu() for q in encoders[0].queues
+                                ]
+                                checkpoint['moco_queue_ptrs'] = list(encoders[0].queue_ptrs)
                         torch.save(checkpoint, checkpoint_path)
                         logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
                     else:
