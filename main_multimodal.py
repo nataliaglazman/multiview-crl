@@ -389,8 +389,8 @@ def save_vqvae_decoded_images(vqvae_model, data, args, step):
         print(f"[SAVED] VQ-VAE decoded at step {step} | VQ losses: {vq_losses_str}", flush=True)
 
 
-def train_step(data, encoders, decoders, loss_func, optimizer, params, args, scaler=None, recon_loss_fn=None, 
-               accumulation_step=0, total_accumulation_steps=1):
+def train_step(data, encoders, decoders, loss_func, optimizer, params, args, scaler=None, recon_loss_fn=None,
+               accumulation_step=0, total_accumulation_steps=1, moco_loss_func=None):
     """
     Perform a single training step with optional gradient accumulation.
 
@@ -405,6 +405,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
         scaler: GradScaler for mixed precision training (optional).
         accumulation_step: Current accumulation step (0 to total_accumulation_steps-1).
         total_accumulation_steps: Total number of steps to accumulate gradients.
+        moco_loss_func: MoCo loss function (optional, only used when --use-moco is set).
 
     Returns:
         tuple: A tuple containing the loss value and the estimated content indices.
@@ -630,7 +631,7 @@ def train_step(data, encoders, decoders, loss_func, optimizer, params, args, sca
     return total_loss.item(), contrastive_loss_value, recon_loss_value, vq_loss_value, estimated_content_indices
 
 
-def val_step(data, encoders, decoders, loss_func, args, recon_loss_fn=None):
+def val_step(data, encoders, decoders, loss_func, args, recon_loss_fn=None, moco_loss_func=None):
     """
     Perform a validation step.
 
@@ -640,6 +641,8 @@ def val_step(data, encoders, decoders, loss_func, args, recon_loss_fn=None):
         decoders: The decoder models.
         loss_func: The loss function to be used.
         args: Additional arguments for the validation step.
+        recon_loss_fn: Reconstruction loss function (optional).
+        moco_loss_func: MoCo loss function (optional, only used when --use-moco is set).
 
     Returns:
         The result of the validation step.
@@ -654,10 +657,11 @@ def val_step(data, encoders, decoders, loss_func, args, recon_loss_fn=None):
             params=None,
             args=args,
             recon_loss_fn=recon_loss_fn,
+            moco_loss_func=moco_loss_func,
         )
 
 
-def get_data(dataset, encoders, decoders, loss_func, dataloader_kwargs, num_samples=None, args=None, recon_loss_fn=None):
+def get_data(dataset, encoders, decoders, loss_func, dataloader_kwargs, num_samples=None, args=None, recon_loss_fn=None, moco_loss_func=None):
     """
     Get data from the dataset and compute loss values and representations for each modality.
 
@@ -699,6 +703,7 @@ def get_data(dataset, encoders, decoders, loss_func, dataloader_kwargs, num_samp
                 loss_func,
                 args=args,
                 recon_loss_fn=recon_loss_fn,
+                moco_loss_func=moco_loss_func,
             )
 
             rdict["loss_values"].append([loss_value])
@@ -1206,6 +1211,7 @@ def main(args: argparse.Namespace):
                         recon_loss_fn=recon_loss_fn,
                         accumulation_step=accum_idx,
                         total_accumulation_steps=accum_steps,
+                        moco_loss_func=moco_loss_func,
                     )
                     accum_total_loss += total_loss / accum_steps
                     accum_contrastive_loss += contrastive_loss / accum_steps
@@ -1401,6 +1407,7 @@ def main(args: argparse.Namespace):
             args=args,
             num_samples=args.val_size,
             recon_loss_fn=recon_loss_fn,
+            moco_loss_func=moco_loss_func,
         )
         logger.info("[EVALUATION] Collecting test data encodings...")
         test_dict = get_data(
@@ -1412,6 +1419,7 @@ def main(args: argparse.Namespace):
             args=args,
             num_samples=args.test_size,
             recon_loss_fn=recon_loss_fn,
+            moco_loss_func=moco_loss_func,
         )
 
         # print average loss values
