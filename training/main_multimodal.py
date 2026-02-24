@@ -515,6 +515,7 @@ def main(args):
             use_checkpoint=use_checkpoint,
             content_size=len(args.content_indices[0]),
             style_size=len(args.style_indices),
+            inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
         )
         vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
         vqvae_model.to(device)

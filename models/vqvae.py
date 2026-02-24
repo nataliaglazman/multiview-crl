@@ -86,7 +86,13 @@ class Encoder(HelperModule):
 
 
 class Decoder(HelperModule):
-    """3D Decoder with transposed convolutions for upsampling."""
+    """3D Decoder with transposed convolutions for upsampling.
+
+    When ``style_channels > 0`` the final Conv3d is held in a separate
+    ``self.final_conv`` attribute so that style features can be concatenated
+    onto the penultimate feature map before the output projection.  All other
+    layers live in ``self.layers`` as before.
+    """
 
     def build(
         self,
@@ -97,9 +103,12 @@ class Decoder(HelperModule):
         nb_res_layers: int,
         upscale_factor: int,
         use_checkpoint: bool = True,
+        style_channels: int = 0,
     ):
         assert log2(upscale_factor) % 1 == 0, "Upscale must be a power of 2"
         upscale_steps = int(log2(upscale_factor))
+        self.style_channels = style_channels
+
         layers = [nn.Conv3d(in_channels, hidden_channels, 3, stride=1, padding=1)]
         layers.append(
             ResidualStack(
@@ -119,13 +128,50 @@ class Decoder(HelperModule):
                 )
             )
             c_channel, n_channel = n_channel, out_channels
-        layers.append(nn.Conv3d(c_channel, n_channel, 3, stride=1, padding=1))
-        layers.append(nn.BatchNorm3d(n_channel))
 
-        self.layers = nn.Sequential(*layers)
+        if style_channels > 0:
+            # Keep the body (everything up to the final conv) in self.layers;
+            # the final conv is stored separately so we can insert style features
+            # between them at forward time.
+            self.layers = nn.Sequential(*layers)
+            # The penultimate feature map has c_channel channels; style is
+            # concatenated before projecting to out_channels.
+            self.final_conv = nn.Sequential(
+                nn.Conv3d(c_channel + style_channels, out_channels, 3, stride=1, padding=1),
+                nn.BatchNorm3d(out_channels),
+            )
+        else:
+            layers.append(nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1))
+            layers.append(nn.BatchNorm3d(out_channels))
+            self.layers = nn.Sequential(*layers)
+            self.final_conv = None
 
-    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        return self.layers(x)
+    def forward(
+        self,
+        x: torch.FloatTensor,
+        style: torch.FloatTensor | None = None,
+    ) -> torch.FloatTensor:
+        """Forward pass.
+
+        Args:
+            x: Input feature map ``(B, in_channels, D, H, W)``.
+            style: Optional style tensor ``(B, style_channels, D', H', W')``.
+                   Required when ``self.style_channels > 0``.  Will be
+                   trilinearly upsampled to match ``x``'s spatial dims before
+                   concatenation.
+
+        Returns:
+            Decoded output ``(B, out_channels, D_out, H_out, W_out)``.
+        """
+        feat = self.layers(x)
+        if self.final_conv is not None:
+            if style is None:
+                raise ValueError("Decoder was built with style_channels > 0 but no style tensor was provided.")
+            if style.shape[2:] != feat.shape[2:]:
+                style = F.interpolate(style, size=feat.shape[2:], mode="trilinear", align_corners=False)
+            feat = torch.cat([feat, style], dim=1)
+            feat = self.final_conv(feat)
+        return feat
 
 
 # Almost directly taken from https://github.com/rosinality/vq-vae-2-pytorch/blob/master/vqvae.py
@@ -231,6 +277,7 @@ class VQVAE(HelperModule):
         use_checkpoint: bool = True,  # Gradient checkpointing to save memory
         content_size: int = 0,  # # of content dims in original latent space
         style_size: int = 0,  # # of style dims in original latent space
+        inject_style_to_decoder: bool = False,  # Append style latent from encoder-0 to final decoder layer
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -269,6 +316,18 @@ class VQVAE(HelperModule):
             self.content_channels = None
             self.content_proj = None
 
+        # Optional style injection: when enabled, style_spatial from encoder level-0
+        # (the channels NOT selected as content by the Gumbel mask) is upsampled to
+        # full resolution and concatenated onto the penultimate feature map of
+        # decoders[0] before the final output conv.
+        # style_channels is the complement of content_channels within hidden_channels.
+        self.inject_style_to_decoder = inject_style_to_decoder and (self.content_proj is not None)
+        if self.inject_style_to_decoder:
+            style_ch = hidden_channels - self.content_channels
+            self.style_channels = style_ch
+        else:
+            self.style_channels = 0
+
         self.codebooks = nn.ModuleList()
         for i in range(nb_levels - 1):
             self.codebooks.append(CodeLayer(hidden_channels + embed_dim, embed_dim, nb_entries))
@@ -284,6 +343,7 @@ class VQVAE(HelperModule):
                     nb_res_layers,
                     scaling_rates[0],
                     use_checkpoint,
+                    style_channels=self.style_channels,
                 )
             ]
         )
@@ -336,6 +396,7 @@ class VQVAE(HelperModule):
         id_outputs = []
         diffs = []
         estimated_content_indices = None
+        style_spatial = None  # style channels from encoder level-0; used for decoder injection
 
         # Encoder forward pass
         enc_input = x
@@ -361,13 +422,19 @@ class VQVAE(HelperModule):
                         k=self.content_channels, logits=avg_logits, tau=1.0, hard=True
                     )
                     content_idx = torch.where(content_mask)[-1].tolist()  # exactly content_channels ints
+                    style_idx = torch.where(~content_mask)[-1].tolist()
 
                 estimated_content_indices = [content_idx]
-
                 # Apply mask spatially and project back to hidden_channels for next encoder.
                 # The projection itself is differentiable; the index selection is not, but that's
                 # intentional — we want the spatial path to carry content-only information forward.
                 content_spatial = spatial_out[:, content_idx, :, :, :]
+                if self.inject_style_to_decoder and return_recon:
+                    # Retain the style spatial map for injection into decoders[0].
+                    # Detach so that the reconstruction path does not create a second
+                    # gradient route back through the encoder's style channels
+                    # (the contrastive loss already provides that signal).
+                    style_spatial = spatial_out[:, style_idx, :, :, :].detach()
                 enc_input = self.content_proj(content_spatial)
                 del content_spatial, spatial_out
 
@@ -438,7 +505,13 @@ class VQVAE(HelperModule):
                 code_outputs = upscaled_codes
                 upscale_counts = [u + 1 for u in upscale_counts]
 
-                decoder_outputs.append(decoder(torch.cat([code_q, *code_outputs], axis=1)))
+                decoder_in = torch.cat([code_q, *code_outputs], axis=1)
+                if l == 0 and self.inject_style_to_decoder and style_spatial is not None:
+                    # decoders[0] was built with style_channels > 0; pass style_spatial
+                    # so it can be concatenated onto the penultimate feature map.
+                    decoder_outputs.append(decoder(decoder_in, style=style_spatial))
+                else:
+                    decoder_outputs.append(decoder(decoder_in))
 
                 code_outputs.append(code_q)
                 upscale_counts.append(0)

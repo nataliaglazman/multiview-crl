@@ -123,6 +123,16 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--subsets", default=[(0, 1), (0, 2), (1, 2), (0, 1, 2)])
     # MoCo
     parser.add_argument(
+        "--inject-style-to-decoder",
+        action="store_true",
+        help=(
+            "Append style latent embeddings from encoder level-0 (channels not selected "
+            "as content by the Gumbel mask) to the final decoder layer before the output "
+            "conv.  Requires --content-size / --style-size to be set (i.e. content_proj "
+            "must be active).  Has no effect when content_proj is not configured."
+        ),
+    )
+    parser.add_argument(
         "--use-moco",
         action="store_true",
         help="Use MoCo momentum-contrast training for the VQ-VAE encoder",
