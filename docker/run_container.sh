@@ -1,4 +1,4 @@
-runai submit --name multiview-crl-moco \
+runai submit --name multiview-crl-mod \
  -i aicregistry:5000/nglazman:multiview-crl-vqvae-latest \
  --node-type A100 \
  --run-as-user \
@@ -6,7 +6,7 @@ runai submit --name multiview-crl-moco \
  --cpu 16 \
  --cpu-limit 32 \
  --memory 64G --memory-limit 128G --project nglazman \
- -v /nfs:/nfs --large-shm --command -- python multiview-crl/main_multimodal.py \
+ -v /nfs:/nfs --large-shm --command -- bash -c 'PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl' python /nfs/home/nglazman/crl-2/multiview-crl/training/main_multimodal.py \
                              --dataroot /nfs/home/nglazman \
                              --dataset_name ADNI_registered \
                              --encoder-type vqvae \
@@ -20,9 +20,11 @@ runai submit --name multiview-crl-moco \
                              --vqvae-embed-dim 24 \
                              --batch-size 4 \
                              --use-amp \
+			     --resume-training \
+			     --inject-style-to-decoder \
                              --workers 4 \
                              --scale-contrastive-loss 1 \
-                             --model-id vqvae-moco \
+                             --model-id vqvae-mod \
                              --gradient-accumulation-steps 4 \
                              --gradient-checkpointing \
                              --skip-recon-ratio 0.3 \
