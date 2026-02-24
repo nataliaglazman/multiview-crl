@@ -5,12 +5,13 @@
 **Project:** `multiview-crl`
 **Dataset:** ADNI (Alzheimer's Disease Neuroimaging Initiative) - Registered T1 and T2 MRI scans
 **Date:** February 2026
-**Last Updated:** 19 February 2026
+**Last Updated:** 23 February 2026
 
 ### Changelog
 
 | Date | Changes |
 |------|--------|
+| 23 Feb 2026 | Added MoCo contrastive training scheme (momentum encoder, per-level queues, `moco_infonce_loss`); refactored `main_multimodal.py` into six focused modules (`utils/config.py`, `utils/logging_setup.py`, `utils/checkpointing.py`, `utils/visualisation.py`, `eval/evaluation.py`, `training/main_multimodal.py`); updated file structure diagram; updated all CLI argument tables with MoCo args; resolved all pre-commit hook failures (flake8, isort/black conflict, check-docstring-first); added `pyproject.toml` with isort profile |
 | 19 Feb 2026 | Removed unused `use_depthwise` parameter from residual blocks; added gradient checkpointing to `ResidualStack`; moved TensorBoard writer inside training block, now logs per-step scalars + learning rate; documented gradient accumulation, skip-recon-ratio, image spacing/cropping options; updated `BaselineLoss` documentation (L1 + FFT + LPIPS); added `view_latents.ipynb` to file structure; updated default `--vqvae-nb-entries` to 384; added checkpoint compatibility notes |
 | 11 Feb 2026 | Initial report |
 
@@ -53,7 +54,7 @@ The project supports two encoder architectures:
 
 ### 2.2 Preprocessing Pipeline (MONAI Transforms)
 
-The preprocessing is implemented in `utils.py` using MONAI transforms:
+The preprocessing is implemented in `utils/utils.py` using MONAI transforms:
 
 ```
 1. LoadImaged           → Load NIfTI files
@@ -86,7 +87,7 @@ The encoder type is selected via command-line argument:
 
 ---
 
-## 3.2 VAE Architecture (`vae.py`)
+## 3.2 VAE Architecture (`models/vae.py`)
 
 #### 3.2.1 Encoder
 
@@ -140,7 +141,7 @@ A symmetric decoder using transposed convolutions for sharper reconstructions:
 
 ---
 
-## 3.3 VQ-VAE-2 Architecture (`vqvae.py`)
+## 3.3 VQ-VAE-2 Architecture (`models/vqvae.py`)
 
 The VQ-VAE-2 is a **hierarchical Vector Quantized Variational Autoencoder** adapted for 3D brain MRI. It uses discrete codebook representations at multiple scales, enabling multi-resolution feature learning.
 
@@ -245,7 +246,7 @@ commitment_loss = ||z_e - sg[z_q]||²    # Straight-through gradient
 ```
 
 **Key Properties:**
-- **Codebook Size:** 512 discrete codes
+- **Codebook Size:** 384 discrete codes (default)
 - **Embedding Dimension:** 32
 - **Update Method:** EMA (no codebook gradient, more stable than loss-based)
 - **Decay Rate:** 0.99
@@ -267,7 +268,7 @@ With default configuration:
 
 ### 3.3.7 Reconstruction Loss (BaselineLoss)
 
-The reconstruction loss (`BaselineLoss` in `losses.py`) combines three complementary terms:
+The reconstruction loss (`BaselineLoss` in `training/losses.py`) combines three complementary terms:
 
 $$\mathcal{L}_{recon} = \underbrace{\mathcal{L}_{pixel}}_{\lambda_p=1.0} + \underbrace{\mathcal{L}_{FFT}}_{\lambda_f=1.0} + \underbrace{\mathcal{L}_{LPIPS}}_{\lambda_{perc}=0.002}$$
 
@@ -344,7 +345,7 @@ total_loss = contrastive_loss + recon_loss * scale + vq_commitment_loss
 $$\mathcal{L}_{total} = \sum_{l=0}^{2} \mathcal{L}_{contrastive}^{(l)} + \lambda_r \cdot \mathcal{L}_{recon} + \lambda_c \cdot \sum_{l=0}^{2} \mathcal{L}_{VQ}^{(l)}$$
 
 Where:
-- $\mathcal{L}_{contrastive}^{(l)}$: InfoNCE loss at encoder level $l$
+- $\mathcal{L}_{contrastive}^{(l)}$: InfoNCE loss at encoder level $l$ (or MoCo InfoNCE if `--use-moco` is enabled)
 - $\mathcal{L}_{recon}$: Reconstruction loss (BaselineLoss: L1 + FFT + LPIPS)
 - $\mathcal{L}_{VQ}^{(l)}$: VQ commitment loss at level $l$
 - $\lambda_r = 0.00001$ (scale_recon_loss)
@@ -364,28 +365,90 @@ $$\mathcal{L}_{total} = \sum_{l=0}^{2} \mathcal{L}_{contrastive}^{(l)} + \lambda
 
 Where $\lambda_r$ = `scale_recon_loss` (default: 0.00001), $\lambda_c$ = `vq_commitment_weight` (default: 0.25)
 
-### 4.2 Contrastive Loss (InfoNCE)
+### 4.2 Standard Contrastive Loss (InfoNCE)
 
-Implemented in `losses.py` as `infonce_loss`:
+Implemented in `training/losses.py` as `infonce_loss`. Used by default when `--use-moco` is not set.
 
 $$\mathcal{L}_{InfoNCE} = -\log \frac{\exp(\text{sim}(z^{(1)}_c, z^{(2)}_c) / \tau)}{\sum_{k} \exp(\text{sim}(z^{(1)}_c, z^{(k)}_c) / \tau)}$$
 
 **Key Properties:**
 - **Similarity Metric:** Cosine similarity
 - **Temperature ($\tau$):** 1.0 (default)
-- **Content-Only Similarity:** Only `content_indices` (first 256 dims) are used for similarity computation
+- **Content-Only Similarity:** Only `content_indices` dimensions are used for similarity computation
 - **Positive Pairs:** Same subject, different views (T1, T2)
 - **Negative Pairs:** Different subjects within the batch
 
-**Mechanism:**
-1. Encode both views: $z^{(1)} = f_\theta(x^{(1)}), z^{(2)} = f_\theta(x^{(2)})$
-2. Extract content: $z^{(1)}_c = z^{(1)}[0:256], z^{(2)}_c = z^{(2)}[0:256]$
-3. Compute pairwise similarities within batch
-4. Apply cross-entropy loss treating matched pairs as positives
+**Limitation:** With small batches (batch size 2–4), the number of in-batch negatives is very small, which weakens the contrastive signal. MoCo addresses this (see Section 4.3).
 
-### 4.3 Reconstruction Loss (BaselineLoss)
+### 4.3 MoCo Contrastive Loss (`--use-moco`)
 
-Implemented in `losses.py` as `BaselineLoss`:
+Implemented in `training/losses.py` as `moco_infonce_loss` and `moco_loss`. Enabled via `--use-moco`. This extends the standard InfoNCE with a large external **queue of negatives** produced by a slowly-updated **momentum encoder**, decoupling the number of negatives from the batch size.
+
+#### 4.3.1 Momentum Encoder (`MoCoEncoder` in `models/vqvae.py`)
+
+A `MoCoEncoder` wraps the online VQ-VAE-2 and maintains:
+
+- **Momentum encoder stack** — a frozen copy of the encoder stack (no decoder, no codebooks), updated via EMA:
+  $$\theta_k \leftarrow m \cdot \theta_k + (1 - m) \cdot \theta_q$$
+  where $m$ is `--moco-momentum` (default 0.999).
+
+- **Per-level FIFO queues** — one circular buffer of keys per encoder level, each of shape $(C, Q)$ where $Q$ is `--moco-queue-size` (default 4096).
+
+The key design choices:
+- The momentum encoder mirrors **only the encoder stack**, not the decoder or codebooks — avoiding the memory cost of duplicating the full VQ-VAE-2.
+- Keys are encoded **without gradients** (`torch.no_grad()`) and stored as L2-normalised vectors.
+- Queues are stored as non-parameter buffers so they are saved/restored in checkpoints automatically.
+
+#### 4.3.2 MoCo Training Loop
+
+```python
+# 1. Encode queries with online encoder (forward pass, gradients flow)
+online_outputs = vqvae_model(images)       # (B, C, D, H, W) per level
+
+# 2. Encode keys with momentum encoder (no gradients)
+key_outputs = vqvae_model.encode_keys(images)  # [(B, C), ...] per level
+
+# 3. Per-level MoCo loss
+for level_idx in range(nb_levels):
+    hz_level = online_enc_features[level_idx]     # (n_views*B, C)
+    k_level  = key_outputs[level_idx]             # (B, C)
+    queue    = vqvae_model.queues[level_idx]      # (C, Q) snapshot
+
+    level_loss = moco_loss(hz_level, k_level, queue,
+                           content_indices, args.subsets)
+    total_contrastive_loss += level_loss
+
+# 4. Enqueue new keys (all levels in one call, after the loss loop)
+vqvae_model.enqueue([k.detach() for k in key_outputs])
+
+# 5. EMA update of momentum encoder happens inside vqvae_model.forward()
+```
+
+#### 4.3.3 MoCo InfoNCE Loss
+
+For each view-pair $(q, k^+)$:
+
+$$\mathcal{L}_{MoCo} = -\log \frac{\exp(q \cdot k^+ / \tau)}{\exp(q \cdot k^+ / \tau) + \sum_{k^- \in \mathcal{Q}} \exp(q \cdot k^- / \tau)}$$
+
+where $\mathcal{Q}$ is the queue of past keys (negatives). The positive key $k^+$ is placed at index 0; all queue entries are treated as negatives. The loss is symmetric (computed for both view directions) and averaged over content dimensions.
+
+#### 4.3.4 MoCo vs Standard InfoNCE
+
+| Property | Standard InfoNCE | MoCo |
+|----------|-----------------|------|
+| **Negatives** | In-batch only (batch_size − 1) | Queue + in-batch (up to 4096) |
+| **Memory overhead** | None | Queue buffers + momentum encoder |
+| **Gradient through negatives** | Yes (costly) | No (queue is detached) |
+| **Consistency of negatives** | Varies per batch | Maintained by EMA encoder |
+| **Best for** | Large batches | Small batches (≤4 common in 3D MRI) |
+
+#### 4.3.5 Queue Cold-Start
+
+For the first `queue_size / batch_size` steps, the queue contains random L2-normalised noise rather than real encoder features. During this warm-up period the contrastive loss is meaningful but not yet fully representative. Mitigation: start with a smaller `--moco-queue-size` (e.g. 256–512) and increase as training stabilises.
+
+### 4.4 Reconstruction Loss (BaselineLoss)
+
+Implemented in `training/losses.py` as `BaselineLoss`:
 
 $$\mathcal{L}_{recon} = \mathcal{L}_{L1}(\hat{x}, x) + \mathcal{L}_{FFT}(\hat{x}, x) + 0.002 \cdot \mathcal{L}_{LPIPS}(\hat{x}, x)$$
 
@@ -395,9 +458,7 @@ Where:
 - $\mathcal{L}_{FFT}$: MSE on ortho-normalized FFT magnitudes
 - $\mathcal{L}_{LPIPS}$: Perceptual loss using SqueezeNet on 512 random 2D slices
 
-**Note:** Both T1 and T2 images are reconstructed through the shared decoder. The previous `BaurLoss` (L1 + L2 pairwise distance) has been replaced by this more comprehensive loss.
-
-### 4.4 VQ Commitment Loss
+### 4.5 VQ Commitment Loss
 
 For VQ-VAE-2 mode, each codebook level has a commitment loss:
 
@@ -418,7 +479,7 @@ The codebook is updated via EMA (Exponential Moving Average) rather than gradien
 
 | Parameter | Value |
 |-----------|-------|
-| **Optimizer** | Adam |
+| **Optimizer** | AdamW (fused when CUDA available) |
 | **Learning Rate** | 1e-5 |
 | **Gradient Clipping** | max_norm=2.0, L2 norm |
 | **Mixed Precision (AMP)** | Enabled (fp16) via `--use-amp` |
@@ -441,12 +502,15 @@ These are passed to the dataset class and affect the spatial dimensions of the i
 For each step:
     1. Load batch: {T1: (B, 1, 91, 109, 91), T2: (B, 1, 91, 109, 91)}
     2. Concatenate views: (2B, 1, 91, 109, 91)
-    3. Encode: z = encoder(images) → (2B, 512)
-    4. Decode: x_hat = decoder(z) → (2B, 1, 91, 109, 91)
-    5. Compute contrastive loss on z[:, 0:256] (content only)
-    6. Compute reconstruction loss on (x_hat, images)
-    7. Backpropagate total_loss with AMP scaling
-    8. Clip gradients and update parameters
+    3. Encode: z = encoder(images) → per-level features
+    4. [MoCo only] Encode keys with momentum encoder (no_grad)
+    5. Decode: x_hat = decoder(z) → (2B, 1, 91, 109, 91)  [if not skipped]
+    6. Compute contrastive loss (InfoNCE or MoCo) per encoder level
+    7. [MoCo only] Enqueue new keys into per-level queues
+    8. Compute reconstruction loss on (x_hat, images)
+    9. Backpropagate total_loss with AMP scaling
+   10. Clip gradients and update parameters
+   11. [MoCo] EMA update of momentum encoder happens inside forward()
 ```
 
 ### 5.3 Logging and Checkpoints
@@ -461,10 +525,16 @@ For each step:
 
 **TensorBoard Metrics (per step):**
 - `Loss/Total` — total training loss
-- `Loss/Contrastive` — InfoNCE contrastive loss
+- `Loss/Contrastive` — InfoNCE or MoCo contrastive loss
 - `Loss/Recon` — reconstruction loss (BaselineLoss)
 - `Loss/VQ` — VQ commitment loss
 - `LR` — current learning rate
+
+**Checkpoint Contents:**
+- Model weights (`vqvae_model.pt` or `checkpoint.pt`)
+- Optimizer state
+- Current step
+- If `--use-moco`: MoCo queue state (per-level buffers + queue pointers) is saved automatically as part of the model state dict
 
 **Viewing TensorBoard from a headless cluster:**
 ```bash
@@ -515,35 +585,55 @@ After training:
 
 ```
 multiview-crl/
-├── main_multimodal.py      # Main training script (VAE + VQ-VAE-2)
-├── vae.py                  # VAE Encoder and Decoder architectures
-├── vqvae.py                # VQ-VAE-2 hierarchical architecture
-├── helper.py               # Helper classes for VQ-VAE-2
-├── losses.py               # InfoNCE, BaurLoss, and BaselineLoss implementations
-├── datasets.py             # Dataset classes (MyCustomDataset for ADNI)
-├── utils.py                # MONAI transforms, Gumbel-Softmax, utilities
-├── encoders.py             # Additional encoder architectures (text)
-├── view_latents.ipynb      # Notebook: load checkpoint, extract & visualize latents
-├── METHODOLOGY_REPORT.md   # This documentation
-├── results/
-│   └── ADNI_registered/
-│       ├── {vae_model_id}/
-│       │   ├── settings.json           # Training configuration
-│       │   ├── Training.csv            # Loss history (CSV)
-│       │   ├── checkpoint.pt           # Full checkpoint (for resume)
-│       │   ├── encoder_image.pt        # Encoder weights only
-│       │   ├── tensorboard/            # TensorBoard event files
-│       │   └── decoded_images/
-│       │       ├── step_00001_original.nii.gz
-│       │       └── step_00001_decoded.nii.gz
-│       └── {vqvae_model_id}/
-│           ├── settings.json           # Training configuration
-│           ├── Training.csv            # Loss history (CSV)
-│           ├── vqvae_model.pt          # Full VQ-VAE-2 checkpoint
-│           ├── tensorboard/            # TensorBoard event files
-│           └── decoded_images/
-│               ├── step_00001_original.nii.gz
-│               └── step_00001_decoded.nii.gz
+├── pyproject.toml              # isort / black configuration
+├── .pre-commit-config.yaml     # Pre-commit hooks (flake8, black, isort, autoflake, …)
+├── METHODOLOGY_REPORT.md       # This documentation
+├── data/
+│   ├── datasets.py             # Dataset classes (MyCustomDataset for ADNI)
+│   └── infinite_iterator.py    # Infinite data loader wrapper
+├── eval/
+│   ├── dci.py                  # DCI disentanglement metric
+│   ├── evaluation.py           # val_step / get_data / eval_step
+│   └── view_latents.ipynb      # Load checkpoint, extract & visualize latents
+├── models/
+│   ├── encoders.py             # Additional encoder architectures (text)
+│   ├── pixelsnail.py           # PixelSNAIL autoregressive prior
+│   ├── vae.py                  # VAE Encoder and Decoder architectures
+│   └── vqvae.py                # VQ-VAE-2 + MoCoEncoder
+├── training/
+│   ├── losses.py               # InfoNCE, MoCo InfoNCE, and BaselineLoss
+│   ├── main_multimodal.py      # train_step + main (VQ-VAE-2 / VAE)
+│   ├── main_numerical.py       # Numerical experiment training script
+│   └── trainer.py              # PixelSNAIL prior trainer
+└── utils/
+    ├── checkpointing.py        # save/load checkpoint, emergency checkpoint
+    ├── config.py               # parse_args / update_args / compute_gt_idx
+    ├── helper.py               # HelperModule base class
+    ├── latent_spaces.py        # Latent space utilities
+    ├── logging_setup.py        # setup_logging (file + console handlers)
+    ├── spaces.py               # Space definitions
+    ├── utils.py                # MONAI transforms, Gumbel-Softmax, utilities
+    └── visualisation.py        # save_decoded_images / save_vqvae_decoded_images
+
+results/
+└── ADNI_registered/
+    ├── {vae_model_id}/
+    │   ├── settings.json           # Training configuration
+    │   ├── Training.csv            # Loss history (CSV)
+    │   ├── checkpoint.pt           # Full checkpoint (for resume)
+    │   ├── encoder_image.pt        # Encoder weights only
+    │   ├── tensorboard/            # TensorBoard event files
+    │   └── decoded_images/
+    │       ├── step_00001_original.nii.gz
+    │       └── step_00001_decoded.nii.gz
+    └── {vqvae_model_id}/
+        ├── settings.json           # Training configuration
+        ├── Training.csv            # Loss history (CSV)
+        ├── vqvae_model.pt          # Full VQ-VAE-2 checkpoint (incl. MoCo queues if used)
+        ├── tensorboard/            # TensorBoard event files
+        └── decoded_images/
+            ├── step_00001_original.nii.gz
+            └── step_00001_decoded.nii.gz
 ```
 
 ---
@@ -552,9 +642,9 @@ multiview-crl/
 
 ### 8.1 Training Commands
 
-**VQ-VAE-2 (Recommended):**
+**VQ-VAE-2 with standard InfoNCE (Recommended):**
 ```bash
-conda run -n monai_env python main_multimodal.py \
+conda run -n monai_env python training/main_multimodal.py \
     --dataroot /data/natalia \
     --dataset_name ADNI_registered \
     --encoder-type vqvae \
@@ -567,9 +657,26 @@ conda run -n monai_env python main_multimodal.py \
     --model-id vqvae_experiment
 ```
 
+**VQ-VAE-2 with MoCo (recommended for small batches):**
+```bash
+conda run -n monai_env python training/main_multimodal.py \
+    --dataroot /data/natalia \
+    --dataset_name ADNI_registered \
+    --encoder-type vqvae \
+    --vqvae-nb-levels 3 \
+    --vqvae-scaling-rates 4 2 2 \
+    --use-moco \
+    --moco-queue-size 4096 \
+    --moco-momentum 0.999 \
+    --train-steps 10000 \
+    --batch-size 4 \
+    --use-amp \
+    --model-id vqvae_moco_experiment
+```
+
 **VAE (Baseline):**
 ```bash
-conda run -n monai_env python main_multimodal.py \
+conda run -n monai_env python training/main_multimodal.py \
     --dataroot /data/natalia \
     --dataset_name ADNI_registered \
     --encoder-type vae \
@@ -581,8 +688,7 @@ conda run -n monai_env python main_multimodal.py \
 
 **Resume Training:**
 ```bash
-# Add --resume-training flag to continue from last checkpoint
-python main_multimodal.py \
+python training/main_multimodal.py \
     --dataroot /data/natalia \
     --dataset_name ADNI_registered \
     --encoder-type vqvae \
@@ -601,7 +707,7 @@ python main_multimodal.py \
 | `--batch-size` | 2 | Samples per view per batch |
 | `--lr` | 1e-5 | Learning rate |
 | `--train-steps` | 300001 | Total training steps |
-| `--tau` | 1.0 | Temperature for InfoNCE |
+| `--tau` | 1.0 | Temperature for InfoNCE / MoCo |
 | `--scale-recon-loss` | 1.0 | Weight for reconstruction loss |
 | `--scale-contrastive-loss` | 1.0 | Weight for contrastive loss |
 | `--use-amp` | False | Enable mixed precision |
@@ -624,6 +730,14 @@ python main_multimodal.py \
 | `--vqvae-scaling-rates` | [2, 2, 2] | Downscale factor per level |
 | `--vq-commitment-weight` | 0.25 | VQ commitment loss weight |
 | `--gradient-checkpointing` | False | Trade compute for memory in residual blocks |
+
+**MoCo Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--use-moco` | False | Enable MoCo contrastive training (replaces standard InfoNCE) |
+| `--moco-queue-size` | 4096 | Number of negative keys stored per encoder level |
+| `--moco-momentum` | 0.999 | EMA momentum for momentum encoder updates |
 
 ---
 
@@ -672,7 +786,7 @@ module.encoders.0.layers.3.stack.0.layers.0.weight
 ...
 ```
 
-Older checkpoints may use `.blocks.` instead of `.stack.` (from a prior refactor that used `nn.ModuleList`). The `view_latents.ipynb` notebook handles this automatically by converting `.blocks.` → `.stack.` when loading:
+Older checkpoints may use `.blocks.` instead of `.stack.` (from a prior refactor that used `nn.ModuleList`). The `eval/view_latents.ipynb` notebook handles this automatically by converting `.blocks.` → `.stack.` when loading:
 
 ```python
 for key, val in state_dict.items():
@@ -684,9 +798,13 @@ for key, val in state_dict.items():
 
 All checkpoints are saved from a `DataParallel`-wrapped model, so keys start with `module.`. The notebook wraps the model in `DataParallel` before loading to match.
 
+### 10.3 MoCo Queue State
+
+When `--use-moco` is active, the per-level queues and queue pointers are registered as PyTorch buffers on `MoCoEncoder`. They are saved and restored automatically as part of the standard `state_dict()` / `load_state_dict()` cycle. No extra handling is required when resuming MoCo training.
+
 ---
 
-## 11. Latent Visualization (`view_latents.ipynb`)
+## 11. Latent Visualization (`eval/view_latents.ipynb`)
 
 The notebook extracts and visualizes latent representations from trained VQ-VAE-2 models:
 
@@ -701,29 +819,35 @@ The notebook extracts and visualizes latent representations from trained VQ-VAE-
 
 ## 12. Future Work and Considerations
 
-1. **VQ-VAE-2 Improvements:**
+1. **MoCo Tuning:**
+   - Experiment with different queue sizes (256 → 8192) and momentum values (0.99 → 0.9999)
+   - Implement a warm-up phase for the queue to reduce cold-start noise
+   - Compare MoCo vs standard InfoNCE on downstream classification tasks
+
+2. **VQ-VAE-2 Improvements:**
    - Increase codebook size for more expressivity
    - Add PixelSNAIL prior for generative sampling
    - Experiment with different scaling rates
 
-2. **Evaluation Metrics:** Implement:
+3. **Evaluation Metrics:** Implement:
    - DCI (Disentanglement, Completeness, Informativeness) scores
    - Downstream classification (e.g., Alzheimer's vs. healthy)
    - Cross-view reconstruction (encode T1, decode T2)
 
-3. **Content/Style Analysis:**
+4. **Content/Style Analysis:**
    - Visualize learned content vs style dimensions
    - Perform style transfer experiments (apply T1 style to T2 content)
 
-4. **Hyperparameter Tuning:**
+5. **Hyperparameter Tuning:**
    - VQ commitment weight optimization
    - Content/style ratio exploration
    - Temperature scheduling for contrastive loss
 
-5. **Memory Optimization (available now):**
+6. **Memory Optimization (available now):**
    - Gradient checkpointing (`--gradient-checkpointing`)
    - Gradient accumulation (`--gradient-accumulation-steps N`)
    - Skip reconstruction (`--skip-recon-ratio R`)
+   - MoCo removes the need for large batches, directly reducing GPU memory pressure
 
 ---
 
@@ -738,8 +862,9 @@ This implementation provides a framework for learning disentangled representatio
 
 ### VQ-VAE-2 Mode (Recommended):
 - **Hierarchical 3D VQ-VAE-2** with 3 levels (~2.9M params total)
-- **Discrete codebook representations** (512 codes × 32 dims per level)
-- **Hierarchical contrastive loss** at all encoder levels
+- **Discrete codebook representations** (384 codes × 32 dims per level)
+- **Hierarchical contrastive loss** at all encoder levels — either standard InfoNCE or MoCo
+- **MoCo option** (`--use-moco`): momentum encoder + per-level queues (4096 negatives per level) for effective contrastive learning with small batches
 - **Content selection at Level 0** propagated proportionally to higher levels
 - **EMA codebook updates** for stable training
 
