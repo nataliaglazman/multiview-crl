@@ -2,7 +2,7 @@ from typing import Callable, List
 
 import torch
 
-from spaces import Space
+from utils.spaces import Space
 
 
 class LatentSpace:
