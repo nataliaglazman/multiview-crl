@@ -421,8 +421,9 @@ class VQVAE(HelperModule):
                     content_mask = utils.topk_gumbel_softmax(
                         k=self.content_channels, logits=avg_logits, tau=1.0, hard=True
                     )
-                    content_idx = torch.where(content_mask)[-1].tolist()  # exactly content_channels ints
-                    style_idx = torch.where(~content_mask)[-1].tolist()
+                    content_mask_bool = content_mask.bool()
+                    content_idx = torch.where(content_mask_bool)[-1].tolist()  # exactly content_channels ints
+                    style_idx = torch.where(~content_mask_bool)[-1].tolist()
 
                 estimated_content_indices = [content_idx]
                 # Apply mask spatially and project back to hidden_channels for next encoder.
