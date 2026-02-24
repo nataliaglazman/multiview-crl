@@ -136,6 +136,30 @@ def save_emergency_checkpoint(
 # ---------------------------------------------------------------------------
 
 
+def _state_dicts_compatible(model: torch.nn.Module, saved_state_dict: dict) -> bool:
+    """
+    Return True when *saved_state_dict* is compatible with *model*.
+
+    Compatibility requires:
+    - Identical parameter names (keys).
+    - Identical tensor shapes for every parameter.
+
+    Args:
+        model: The instantiated model to compare against.
+        saved_state_dict: The ``state_dict`` loaded from disk.
+
+    Returns:
+        bool: ``True`` if every key and shape matches, ``False`` otherwise.
+    """
+    model_sd = model.state_dict()
+    if set(model_sd.keys()) != set(saved_state_dict.keys()):
+        return False
+    for key in model_sd:
+        if model_sd[key].shape != saved_state_dict[key].shape:
+            return False
+    return True
+
+
 def load_checkpoint(
     args,
     encoders: list,
@@ -146,6 +170,12 @@ def load_checkpoint(
 ) -> int:
     """
     Restore training state from the most recent checkpoint, if one exists.
+
+    Resuming is attempted automatically whenever a matching checkpoint file is
+    found in ``args.save_dir``, regardless of whether ``--resume-training`` was
+    passed.  "Matching" means that every parameter name **and** shape in the
+    checkpoint agrees with the current model.  If the checkpoint exists but the
+    architecture has changed, a warning is logged and training starts fresh.
 
     Args:
         args: Parsed argument namespace.
@@ -158,9 +188,10 @@ def load_checkpoint(
                      ``'loss'``, ``'contrastive_loss'``, ``'recon_loss'``, ``'vq_loss'``.
 
     Returns:
-        int: The step to resume from (``saved_step + 1``), or ``1`` if no checkpoint found.
+        int: The step to resume from (``saved_step + 1``), or ``1`` if no
+             compatible checkpoint is found.
     """
-    if not (args.resume_training and os.path.exists(args.save_dir)):
+    if not os.path.exists(args.save_dir):
         return 1
 
     if args.encoder_type == "vqvae":
@@ -169,8 +200,16 @@ def load_checkpoint(
             logger.info("  No VQ-VAE checkpoint found, starting fresh training.")
             return 1
 
-        logger.info(f"  Resuming VQ-VAE training from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device)
+
+        if not _state_dicts_compatible(encoders[0], checkpoint["encoders"]):
+            logger.warning(
+                "  VQ-VAE checkpoint found but model architecture does not match "
+                f"(checkpoint: {checkpoint_path}). Starting fresh training."
+            )
+            return 1
+
+        logger.info(f"  Auto-resuming VQ-VAE training from checkpoint: {checkpoint_path}")
         encoders[0].load_state_dict(checkpoint["encoders"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         step = checkpoint["step"] + 1
@@ -197,13 +236,34 @@ def load_checkpoint(
             logger.info("  No VAE checkpoint found, starting fresh training.")
             return 1
 
-        logger.info(f"  Resuming VAE training from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device)
+
+        # Verify all encoders and the decoder are compatible before loading anything.
+        for m_idx, m in enumerate(args.modalities):
+            key = f"encoder_{m}"
+            if key not in checkpoint or not _state_dicts_compatible(encoders[m_idx], checkpoint[key]):
+                logger.warning(
+                    f"  VAE checkpoint found but encoder '{m}' architecture does not match "
+                    f"(checkpoint: {checkpoint_path}). Starting fresh training."
+                )
+                return 1
+        if not _state_dicts_compatible(decoders[0], checkpoint["decoder"]):
+            logger.warning(
+                "  VAE checkpoint found but decoder architecture does not match "
+                f"(checkpoint: {checkpoint_path}). Starting fresh training."
+            )
+            return 1
+
+        logger.info(f"  Auto-resuming VAE training from checkpoint: {checkpoint_path}")
         for m_idx, m in enumerate(args.modalities):
             encoders[m_idx].load_state_dict(checkpoint[f"encoder_{m}"])
         decoders[0].load_state_dict(checkpoint["decoder"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         step = checkpoint["step"] + 1
+
+        for key, deque in loss_deques.items():
+            deque.append(checkpoint.get(key, 0))
+
         logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
         logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")
         return step
