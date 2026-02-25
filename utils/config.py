@@ -1,3 +1,4 @@
+# flake8: noqa
 """Argument parsing and dataset-specific configuration for multiview-CRL."""
 
 import argparse
@@ -153,6 +154,8 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--eval-dci", action="store_true")
     parser.add_argument("--eval-style", action="store_true")
     parser.add_argument("--grid-search-eval", action="store_true")
+    parser.add_argument("--content-dim", type=int, default=128, help="Number of content dimensions (for content_proj)")
+    parser.add_argument("--total-dim", type=int, default=512, help="Total number of dimensions (for content_proj)")
     return parser
 
 
@@ -202,12 +205,13 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         setattr(args, "modalities", ["image"])
         setattr(args, "n_views", 2)
         setattr(args, "subsets", [(0, 1)])
-        content_dim = 256
-        setattr(args, "content_indices", [list(range(content_dim))])
-        setattr(args, "style_indices", list(range(content_dim, 512)))
+        setattr(args, "content_indices", [list(range(args.content_dim))])
+        setattr(args, "style_indices", list(range(args.content_dim, args.total_dim)))
         logger.info("  -> Using ADNI dataset (image only, 2 views)")
-        logger.info(f"  -> Content dimensions: 0-{content_dim - 1} ({content_dim} dims)")
-        logger.info(f"  -> Style dimensions: {content_dim}-511 ({512 - content_dim} dims)")
+        logger.info(f"  -> Content dimensions: 0-{args.content_dim - 1} ({args.content_dim} dims)")
+        logger.info(
+            f"  -> Style dimensions: {args.content_dim}-{args.total_dim - 1} ({args.total_dim - args.content_dim} dims)"
+        )
     else:
         raise ValueError(f"{args.dataset_name=} not supported.")
 
