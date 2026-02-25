@@ -1,4 +1,4 @@
-runai submit --name multiview-crl-mod \
+runai submit --name multiview-crl-change-content-size \
  -i aicregistry:5000/nglazman:multiview-crl-vqvae-latest \
  --node-type A100 \
  --run-as-user \

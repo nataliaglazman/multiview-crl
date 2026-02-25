@@ -10,6 +10,9 @@ python /nfs/home/nglazman/crl-2/multiview-crl/training/main_multimodal.py \
     --moco-queue-size 4096 \
     --moco-momentum 0.999 \
     --vqvae-nb-levels 3 \
+    --lr 0.00001 \
+    --content-dim 384 \
+    --total-dim 512 \
     --vqvae-scaling-rates 2 2 2 \
     --train-steps 50000 \
     --vqvae-hidden-channels 48 \
@@ -20,7 +23,7 @@ python /nfs/home/nglazman/crl-2/multiview-crl/training/main_multimodal.py \
     --inject-style-to-decoder \
     --workers 4 \
     --scale-contrastive-loss 1 \
-    --model-id vqvae-mod \
+    --model-id vqvae-384-128 \
     --gradient-accumulation-steps 4 \
     --gradient-checkpointing \
     --skip-recon-ratio 0.3 \
