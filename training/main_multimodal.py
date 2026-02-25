@@ -170,26 +170,51 @@ def train_step(
                     key_outputs = vqvae_model.encode_keys(_imgs)
                     del _imgs
 
+            # Unwrap DataParallel / MoCoEncoder to reach the bare VQVAE so we
+            # can read channel_logits (fix #1 / #4).
+            _raw_vqvae = vqvae_model.online if hasattr(vqvae_model, "online") else vqvae_model
+            _raw_vqvae = _raw_vqvae.module if hasattr(_raw_vqvae, "module") else _raw_vqvae
+
             for level_idx, enc_pooled in enumerate(encoder_outputs):
                 hz_level = enc_pooled.reshape(n_views, -1, enc_pooled.shape[-1])
                 n_channels = hz_level.shape[-1]
                 content_size = max(1, int(content_ratio * n_channels))
 
                 if level_idx == 0:
-                    avg_logits = hz_level.mean(dim=[0, 1], keepdim=False).unsqueeze(0)
-                    if len(args.subsets) > 1 and content_size > 0:
-                        content_masks = utils.smart_gumbel_softmax_mask(
-                            avg_logits=avg_logits,
-                            content_sizes=[content_size],
-                            subsets=args.subsets,
-                        )
+                    if _raw_vqvae.channel_logits is not None:
+                        # Fix #1: use learnable channel_logits instead of batch-derived
+                        # statistics — consistent across batches and co-trained with the
+                        # model via reconstruction gradients through the soft Gumbel mask.
+                        # Fix #4: eval mode gets deterministic top-k (no Gumbel noise)
+                        # so content_idx is identical for every evaluation batch.
+                        logits = _raw_vqvae.channel_logits.detach().unsqueeze(0)
+                        if _raw_vqvae.training:
+                            content_masks = utils.gumbel_softmax_mask(
+                                avg_logits=logits,
+                                content_sizes=[content_size],
+                                subsets=args.subsets,
+                            )
+                        else:
+                            hard_mask = torch.zeros_like(logits)
+                            topk_idx = torch.topk(logits, content_size, dim=1).indices
+                            hard_mask.scatter_(1, topk_idx, 1.0)
+                            content_masks = [hard_mask] * len(args.subsets)
                     else:
-                        content_masks = utils.gumbel_softmax_mask(
-                            avg_logits=avg_logits,
-                            content_sizes=[content_size],
-                            subsets=args.subsets,
-                        )
-                    estimated_content_indices = [torch.where(m)[-1].tolist() for m in content_masks]
+                        # Fallback: no content_proj configured, use batch statistics.
+                        avg_logits = hz_level.mean(dim=[0, 1], keepdim=False).unsqueeze(0)
+                        if len(args.subsets) > 1 and content_size > 0:
+                            content_masks = utils.smart_gumbel_softmax_mask(
+                                avg_logits=avg_logits,
+                                content_sizes=[content_size],
+                                subsets=args.subsets,
+                            )
+                        else:
+                            content_masks = utils.gumbel_softmax_mask(
+                                avg_logits=avg_logits,
+                                content_sizes=[content_size],
+                                subsets=args.subsets,
+                            )
+                    estimated_content_indices = [torch.where(m.bool())[-1].tolist() for m in content_masks]
                     level_content_indices = estimated_content_indices
                 else:
                     level_content_indices = [list(range(content_size))]

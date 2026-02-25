@@ -312,9 +312,13 @@ class VQVAE(HelperModule):
             total_size = content_size + style_size
             self.content_channels = max(1, round(content_size / total_size * hidden_channels))
             self.content_proj = nn.Conv3d(self.content_channels, hidden_channels, kernel_size=1, bias=False)
+            # Learnable logits that determine which channels are selected as content.
+            # Trained via reconstruction gradients flowing back through the soft Gumbel mask.
+            self.channel_logits = nn.Parameter(torch.zeros(hidden_channels))
         else:
             self.content_channels = None
             self.content_proj = None
+            self.channel_logits = None
 
         # Optional style injection: when enabled, style_spatial from encoder level-0
         # (the channels NOT selected as content by the Gumbel mask) is upsampled to
@@ -404,40 +408,50 @@ class VQVAE(HelperModule):
             spatial_out = enc(enc_input)
 
             if i == 0 and self.content_proj is not None:
-                # --- Content selection on level-0 output ---
-                # Pool the FULL spatial output — gradients flow cleanly back through mean pooling.
-                # The training loop applies the Gumbel mask to these pooled vectors to select
-                # content channels for the contrastive loss. We don't do channel selection here
-                # so the encoder receives a clean gradient from the loss on all channels.
                 pooled = spatial_out.mean(dim=[2, 3, 4])  # (B, hidden_channels)
                 if pool_only:
                     encoder_pools.append(pooled)
 
-                # For the spatial path into encoder 1+, we still want to pass only content
-                # channels. Compute the mask from a detached mean (the mask selection itself
-                # isn't differentiable anyway since we use discrete indices).
-                with torch.no_grad():
-                    avg_logits = pooled.detach().mean(0, keepdim=True)  # (1, hidden_channels)
-                    content_mask = utils.topk_gumbel_softmax(
-                        k=self.content_channels, logits=avg_logits, tau=1.0, hard=True
-                    )
-                    content_mask_bool = content_mask.bool()
-                    content_idx = torch.where(content_mask_bool)[-1].tolist()  # exactly content_channels ints
-                    style_idx = torch.where(~content_mask_bool)[-1].tolist()
+                # --- Content channel selection via learnable channel_logits ---
+                #
+                # Fix #1: channel_logits is an nn.Parameter, so the soft Gumbel mask
+                # is in the computation graph.  Reconstruction gradients flow back
+                # through:  recon → decoder → content_proj → masked_spatial → logits.
+                # Previously this block was inside torch.no_grad() with batch-derived
+                # logits, so channel_logits had no gradient path at all.
+                #
+                # Fix #4: eval mode uses deterministic top-k (no Gumbel noise), giving
+                # identical content_idx for every batch — consistent feature extraction.
+                logits = self.channel_logits.unsqueeze(0)  # (1, hidden_channels)
+                if self.training:
+                    # Straight-through Gumbel-Softmax: forward = hard 0/1,
+                    # backward = soft khot, so channel_logits receives gradients.
+                    soft_mask = utils.topk_gumbel_softmax(k=self.content_channels, logits=logits, tau=1.0, hard=True)
+                else:
+                    hard_mask = torch.zeros_like(logits)
+                    topk_idx = torch.topk(logits, self.content_channels, dim=1).indices
+                    hard_mask.scatter_(1, topk_idx, 1.0)
+                    soft_mask = hard_mask
 
+                content_mask_bool = soft_mask.bool()
+                content_idx = torch.where(content_mask_bool)[-1].tolist()
+                style_idx = torch.where(~content_mask_bool)[-1].tolist()
                 estimated_content_indices = [content_idx]
-                # Apply mask spatially and project back to hidden_channels for next encoder.
-                # The projection itself is differentiable; the index selection is not, but that's
-                # intentional — we want the spatial path to carry content-only information forward.
-                content_spatial = spatial_out[:, content_idx, :, :, :]
+
+                # Multiply by soft_mask before slicing so the gradient w.r.t.
+                # channel_logits flows back through masked_spatial → soft_mask.
+                masked_spatial = spatial_out * soft_mask.view(1, -1, 1, 1, 1)
+                content_spatial = masked_spatial[:, content_idx, :, :, :]
+
                 if self.inject_style_to_decoder and return_recon:
-                    # Retain the style spatial map for injection into decoders[0].
-                    # Detach so that the reconstruction path does not create a second
-                    # gradient route back through the encoder's style channels
-                    # (the contrastive loss already provides that signal).
-                    style_spatial = spatial_out[:, style_idx, :, :, :].detach()
+                    # Fix #2: style channels must NOT be detached.  The contrastive
+                    # loss is applied only to content_idx, so reconstruction is the
+                    # sole learning signal for style encoder weights.  Detaching them
+                    # (as before) left those weights with zero gradient entirely.
+                    style_spatial = spatial_out[:, style_idx, :, :, :]
+
                 enc_input = self.content_proj(content_spatial)
-                del content_spatial, spatial_out
+                del content_spatial, masked_spatial, spatial_out
 
                 # Store projected spatial map for codebook loop
                 encoder_outputs.append(enc_input)
@@ -598,6 +612,18 @@ class MoCoEncoder(nn.Module):
             for p in enc.parameters():
                 p.requires_grad = False
 
+        # Fix #3: mirror content_proj so keys at levels 1+ are produced by the
+        # same content-only spatial path as the online encoder.  Without this,
+        # the key encoder passes all hidden_channels to level 1+, while the
+        # online encoder passes only content_channels — the two feature spaces
+        # are semantically different, breaking MoCo's key/query consistency.
+        if raw_vqvae.content_proj is not None:
+            self.momentum_content_proj = copy.deepcopy(raw_vqvae.content_proj)
+            for p in self.momentum_content_proj.parameters():
+                p.requires_grad = False
+        else:
+            self.momentum_content_proj = None
+
         # ---- Per-level queues -----------------------------------------------
         # Infer channel width from the first encoder's output channels.
         # VQVAE.encoders[i] is an Encoder whose last layer outputs hidden_channels.
@@ -633,10 +659,16 @@ class MoCoEncoder(nn.Module):
 
     @torch.no_grad()
     def _momentum_update(self):
-        """EMA-update all momentum encoder parameters from the online encoder."""
+        """EMA-update momentum encoders and momentum_content_proj from the online model."""
         raw_vqvae = self.online.module if hasattr(self.online, "module") else self.online
         for online_enc, mom_enc in zip(raw_vqvae.encoders, self.momentum_encoders):
             for p_online, p_mom in zip(online_enc.parameters(), mom_enc.parameters()):
+                p_mom.data.mul_(self.momentum).add_(p_online.data, alpha=1.0 - self.momentum)
+        if self.momentum_content_proj is not None and raw_vqvae.content_proj is not None:
+            for p_online, p_mom in zip(
+                raw_vqvae.content_proj.parameters(),
+                self.momentum_content_proj.parameters(),
+            ):
                 p_mom.data.mul_(self.momentum).add_(p_online.data, alpha=1.0 - self.momentum)
 
     # ------------------------------------------------------------------
@@ -649,9 +681,11 @@ class MoCoEncoder(nn.Module):
         Encode ``x`` with the momentum encoder stack and return per-level
         global-average-pooled feature vectors.
 
-        The momentum encoder mirrors the hierarchy of the online encoder:
-        level 0 processes raw input; each subsequent level processes the
-        output of the previous momentum encoder.
+        When ``content_proj`` is active, the same deterministic content-channel
+        selection (via ``channel_logits`` top-k) is applied between levels 0
+        and 1 using ``momentum_content_proj``, so that key features at levels
+        1+ are produced from content-only spatial maps — symmetric with the
+        online encoder path (fix #3).
 
         Args:
             x (torch.Tensor): Input batch, shape ``(B, C, D, H, W)``.
@@ -662,10 +696,21 @@ class MoCoEncoder(nn.Module):
         """
         key_pools = []
         enc_input = x
-        for mom_enc in self.momentum_encoders:
-            out = mom_enc(enc_input)  # (B, C, D, H, W)
-            key_pools.append(out.mean(dim=[2, 3, 4]))  # (B, C)
-            enc_input = out
+        raw_vqvae = self.online.module if hasattr(self.online, "module") else self.online
+        for lvl, mom_enc in enumerate(self.momentum_encoders):
+            out = mom_enc(enc_input)  # (B, hidden_channels, D, H, W)
+            key_pools.append(out.mean(dim=[2, 3, 4]))  # (B, hidden_channels)
+            if lvl == 0 and self.momentum_content_proj is not None:
+                # Deterministic top-k — no Gumbel noise so keys are stable.
+                logits = raw_vqvae.channel_logits.unsqueeze(0)  # (1, hidden_channels)
+                hard_mask = torch.zeros_like(logits)
+                topk_idx = torch.topk(logits, raw_vqvae.content_channels, dim=1).indices
+                hard_mask.scatter_(1, topk_idx, 1.0)
+                content_idx = torch.where(hard_mask.bool())[-1].tolist()
+                content_spatial = out[:, content_idx, :, :, :]
+                enc_input = self.momentum_content_proj(content_spatial)
+            else:
+                enc_input = out
         return key_pools
 
     # ------------------------------------------------------------------
