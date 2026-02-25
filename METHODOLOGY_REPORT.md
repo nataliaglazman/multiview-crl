@@ -5,12 +5,13 @@
 **Project:** `multiview-crl`
 **Dataset:** ADNI (Alzheimer's Disease Neuroimaging Initiative) - Registered T1 and T2 MRI scans
 **Date:** February 2026
-**Last Updated:** 23 February 2026
+**Last Updated:** 25 February 2026
 
 ### Changelog
 
 | Date | Changes |
 |------|--------|
+| 25 Feb 2026 | Added style injection to decoder (`--inject-style-to-decoder`): style channels from encoder level-0 concatenated to penultimate decoder feature map before final conv; added `--content-dim` / `--total-dim` CLI args replacing hardcoded 256/256 content-style split; improved checkpointing with auto-resume and architecture compatibility check; added Docker/RunAI cluster scripts (`docker/`); fixed Gumbel mask bool-cast bug in `models/vqvae.py`; updated `eval/view_latents.ipynb` imports to match project package structure; disabled flake8 pre-commit hook |
 | 23 Feb 2026 | Added MoCo contrastive training scheme (momentum encoder, per-level queues, `moco_infonce_loss`); refactored `main_multimodal.py` into six focused modules (`utils/config.py`, `utils/logging_setup.py`, `utils/checkpointing.py`, `utils/visualisation.py`, `eval/evaluation.py`, `training/main_multimodal.py`); updated file structure diagram; updated all CLI argument tables with MoCo args; resolved all pre-commit hook failures (flake8, isort/black conflict, check-docstring-first); added `pyproject.toml` with isort profile |
 | 19 Feb 2026 | Removed unused `use_depthwise` parameter from residual blocks; added gradient checkpointing to `ResidualStack`; moved TensorBoard writer inside training block, now logs per-step scalars + learning rate; documented gradient accumulation, skip-recon-ratio, image spacing/cropping options; updated `BaselineLoss` documentation (L1 + FFT + LPIPS); added `view_latents.ipynb` to file structure; updated default `--vqvae-nb-entries` to 384; added checkpoint compatibility notes |
 | 11 Feb 2026 | Initial report |
@@ -213,6 +214,9 @@ Reconstructed Image (91, 109, 91)
 | `--gradient-checkpointing` | False | Trade compute for memory in residual blocks |
 | `--skip-recon-ratio` | 0.0 | Fraction of steps to skip decoder (0–1) |
 | `--gradient-accumulation-steps` | 1 | Accumulate gradients over N mini-batches |
+| `--content-dim` | 128 | Content dimensions for `content_proj` (must match training when loading checkpoint) |
+| `--total-dim` | 512 | Total latent dims (`content_dim + style_dim`) for `content_proj` |
+| `--inject-style-to-decoder` | False | Feed style channels from encoder level-0 into the final decoder layer |
 
 ### 3.3.3 Encoder Details (Per Level)
 
@@ -261,12 +265,40 @@ Each decoder receives concatenated codes from current and all higher levels:
 | 1 | 64 (2 codes) | 2× | 32 (embed_dim) |
 | 0 (bottom) | 96 (3 codes) | 4× | 1 (image) |
 
-### 3.3.6 Total Parameters
+### 3.3.6 Style Injection to Decoder (`--inject-style-to-decoder`)
+
+By default, only the **content channels** (selected by the Gumbel mask) are passed forward through `content_proj` to deeper encoders and the decoder chain. The **style channels** (the complement within `hidden_channels`) are discarded after level-0, so the decoder has no signal about modality-specific features.
+
+When `--inject-style-to-decoder` is enabled, the style channels are instead captured and fed back into the bottom decoder (`decoders[0]`) before the final output conv:
+
+```
+Encoder level-0 output  (B, hidden_channels, D, H, W)
+         │
+         ├─ content_idx channels ──► content_proj ──► deeper encoders / codebooks
+         │
+         └─ style_idx channels ──► detach ──────────────────────────────────┐
+                                                                             ▼
+                                                          decoders[0] penultimate feat
+                                                          trilinear upsample to match
+                                                          cat([feat, style], dim=1)
+                                                                             ▼
+                                                               final_conv ──► output
+```
+
+**Implementation details:**
+- `Decoder` is built with `style_channels = hidden_channels − content_channels` when injection is active; a separate `self.final_conv` (replacing the original merged last layer) accepts the concatenated feature map.
+- The style tensor is **detached** before concatenation so the reconstruction gradient does not flow back through the encoder's style channels a second time (the contrastive loss already provides that signal).
+- If the spatial size of the style map differs from the penultimate decoder feature map, trilinear interpolation is applied automatically.
+- Has **no effect** unless `content_proj` is active (i.e. `--content-dim` and `--total-dim` must be set).
+
+**Motivation:** Giving the decoder access to style (modality-specific) channels should improve reconstruction quality for T2 scans, whose contrast differs markedly from T1, without weakening the contrastive signal on content dimensions.
+
+### 3.3.7 Total Parameters
 
 With default configuration:
 - **Total VQ-VAE-2 Parameters:** ~2.9M (much smaller than VAE)
 
-### 3.3.7 Reconstruction Loss (BaselineLoss)
+### 3.3.8 Reconstruction Loss (BaselineLoss)
 
 The reconstruction loss (`BaselineLoss` in `training/losses.py`) combines three complementary terms:
 
@@ -533,8 +565,19 @@ For each step:
 **Checkpoint Contents:**
 - Model weights (`vqvae_model.pt` or `checkpoint.pt`)
 - Optimizer state
-- Current step
-- If `--use-moco`: MoCo queue state (per-level buffers + queue pointers) is saved automatically as part of the model state dict
+- Current step and last loss values (total, contrastive, recon, VQ)
+- If `--use-moco`: per-level queue tensors and queue pointers (explicit `moco_queues` / `moco_queue_ptrs` keys)
+
+**Auto-Resume with Architecture Compatibility Check:**
+
+`load_checkpoint` now automatically resumes from the checkpoint in `args.save_dir` if one exists, regardless of whether `--resume-training` was passed. Before loading, it runs `_state_dicts_compatible()` which verifies that every parameter name **and** tensor shape in the checkpoint matches the current model. If there is a mismatch (e.g. architecture was changed between runs), it logs a warning and starts fresh rather than crashing:
+
+```
+[CHECKPOINT] VQ-VAE checkpoint found but model architecture does not match
+             (checkpoint: results/.../vqvae_model.pt). Starting fresh training.
+```
+
+This makes it safe to rerun a training command after changing architecture flags — the old checkpoint is preserved on disk but not loaded.
 
 **Viewing TensorBoard from a headless cluster:**
 ```bash
@@ -562,22 +605,33 @@ By applying contrastive loss **only on content dimensions**, the model is encour
 
 ### 6.2 Implementation
 
-```python
-# Content dimensions (used for contrastive loss)
-content_indices = list(range(256))      # [0, 1, ..., 255]
+The content/style split is configured via `--content-dim` and `--total-dim` (replacing the earlier hardcoded 256/256 values):
 
-# Style dimensions (NOT used for contrastive loss)
-style_indices = list(range(256, 512))   # [256, 257, ..., 511]
+```bash
+--content-dim 384   # first 384 dims are content
+--total-dim   512   # dims 384–511 are style
+```
+
+```python
+# Set in update_args() for ADNI/custom datasets:
+content_indices = list(range(args.content_dim))           # [0, …, content_dim-1]
+style_indices   = list(range(args.content_dim, args.total_dim))  # [content_dim, …, total_dim-1]
 
 # Contrastive similarity computed ONLY on content
 sim = cosine_similarity(z1[content_indices], z2[content_indices])
 ```
 
+The `content_channels` in the VQ-VAE-2 is derived proportionally:
+```python
+content_channels = round(content_dim / total_dim * hidden_channels)
+```
+So with `--content-dim 384 --total-dim 512 --vqvae-hidden-channels 48`, `content_channels = round(0.75 × 48) = 36`.
+
 ### 6.3 Expected Outcomes
 
 After training:
-- `z[0:256]` (content) should encode: brain structure, ventricle size, atrophy patterns
-- `z[256:512]` (style) should encode: T1 vs T2 contrast, intensity characteristics
+- `z[0:content_dim]` (content) should encode: brain structure, ventricle size, atrophy patterns
+- `z[content_dim:total_dim]` (style) should encode: T1 vs T2 contrast, intensity characteristics
 
 ---
 
@@ -586,8 +640,15 @@ After training:
 ```
 multiview-crl/
 ├── pyproject.toml              # isort / black configuration
-├── .pre-commit-config.yaml     # Pre-commit hooks (flake8, black, isort, autoflake, …)
+├── .pre-commit-config.yaml     # Pre-commit hooks (black, isort, autoflake, …; flake8 disabled)
 ├── METHODOLOGY_REPORT.md       # This documentation
+├── docker/
+│   ├── dockerfile              # Docker image definition
+│   ├── run_docker.sh           # RunAI submit command (A100, 1 GPU)
+│   ├── run_training.sh         # Training invocation inside the container
+│   ├── run_container.sh        # Interactive container launch
+│   ├── run_interactive.sh      # Shell into running container
+│   └── run_tensorboard.sh      # TensorBoard port-forward helper
 ├── data/
 │   ├── datasets.py             # Dataset classes (MyCustomDataset for ADNI)
 │   └── infinite_iterator.py    # Infinite data loader wrapper
@@ -642,14 +703,45 @@ results/
 
 ### 8.1 Training Commands
 
-**VQ-VAE-2 with standard InfoNCE (Recommended):**
+**Current production run (A100, via RunAI — `docker/run_training.sh`):**
 ```bash
-conda run -n monai_env python training/main_multimodal.py \
+python training/main_multimodal.py \
+    --dataroot /nfs/home/nglazman \
+    --dataset_name ADNI_registered \
+    --encoder-type vqvae \
+    --use-moco \
+    --moco-queue-size 4096 \
+    --moco-momentum 0.999 \
+    --vqvae-nb-levels 3 \
+    --vqvae-scaling-rates 2 2 2 \
+    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 24 \
+    --content-dim 384 \
+    --total-dim 512 \
+    --inject-style-to-decoder \
+    --lr 0.00001 \
+    --train-steps 50000 \
+    --batch-size 4 \
+    --gradient-accumulation-steps 4 \
+    --gradient-checkpointing \
+    --skip-recon-ratio 0.3 \
+    --image-spacing 1.0 \
+    --crop-margin 10 \
+    --use-amp \
+    --resume-training \
+    --model-id vqvae-384-128
+```
+*(Submitted via `docker/run_docker.sh` using RunAI — see Section 8.3)*
+
+**VQ-VAE-2 with standard InfoNCE:**
+```bash
+python training/main_multimodal.py \
     --dataroot /data/natalia \
     --dataset_name ADNI_registered \
     --encoder-type vqvae \
     --vqvae-nb-levels 3 \
     --vqvae-scaling-rates 4 2 2 \
+    --content-dim 256 --total-dim 512 \
     --train-steps 10000 \
     --batch-size 4 \
     --use-amp \
@@ -657,26 +749,9 @@ conda run -n monai_env python training/main_multimodal.py \
     --model-id vqvae_experiment
 ```
 
-**VQ-VAE-2 with MoCo (recommended for small batches):**
-```bash
-conda run -n monai_env python training/main_multimodal.py \
-    --dataroot /data/natalia \
-    --dataset_name ADNI_registered \
-    --encoder-type vqvae \
-    --vqvae-nb-levels 3 \
-    --vqvae-scaling-rates 4 2 2 \
-    --use-moco \
-    --moco-queue-size 4096 \
-    --moco-momentum 0.999 \
-    --train-steps 10000 \
-    --batch-size 4 \
-    --use-amp \
-    --model-id vqvae_moco_experiment
-```
-
 **VAE (Baseline):**
 ```bash
-conda run -n monai_env python training/main_multimodal.py \
+python training/main_multimodal.py \
     --dataroot /data/natalia \
     --dataset_name ADNI_registered \
     --encoder-type vae \
@@ -687,6 +762,8 @@ conda run -n monai_env python training/main_multimodal.py \
 ```
 
 **Resume Training:**
+
+Training now auto-resumes whenever a compatible checkpoint exists in the save directory, so `--resume-training` is technically optional. Pass it explicitly for clarity:
 ```bash
 python training/main_multimodal.py \
     --dataroot /data/natalia \
@@ -696,6 +773,20 @@ python training/main_multimodal.py \
     --resume-training \
     --train-steps 20000
 ```
+
+### 8.3 RunAI Cluster Submission
+
+Jobs are submitted to a NVIDIA A100 GPU via RunAI using the scripts in `docker/`:
+
+```bash
+# Submit training job (runs docker/run_training.sh inside the container)
+bash docker/run_docker.sh
+```
+
+`run_docker.sh` calls `runai submit` with:
+- Image: `aicregistry:5000/nglazman:multiview-crl-vqvae-latest`
+- Node type: A100, 1 GPU, 16–32 CPU cores, 64–128 GB RAM
+- NFS mount: `/nfs` for data and code access
 
 ### 8.2 Key Command-Line Arguments
 
@@ -730,6 +821,9 @@ python training/main_multimodal.py \
 | `--vqvae-scaling-rates` | [2, 2, 2] | Downscale factor per level |
 | `--vq-commitment-weight` | 0.25 | VQ commitment loss weight |
 | `--gradient-checkpointing` | False | Trade compute for memory in residual blocks |
+| `--content-dim` | 128 | Content dimensions for `content_proj` split |
+| `--total-dim` | 512 | Total dims (`content_dim + style_dim`) for `content_proj` |
+| `--inject-style-to-decoder` | False | Feed style channels from encoder level-0 into the bottom decoder's final layer |
 
 **MoCo Arguments:**
 
@@ -800,7 +894,24 @@ All checkpoints are saved from a `DataParallel`-wrapped model, so keys start wit
 
 ### 10.3 MoCo Queue State
 
-When `--use-moco` is active, the per-level queues and queue pointers are registered as PyTorch buffers on `MoCoEncoder`. They are saved and restored automatically as part of the standard `state_dict()` / `load_state_dict()` cycle. No extra handling is required when resuming MoCo training.
+When `--use-moco` is active, the per-level queues and queue pointers are saved as explicit `moco_queues` / `moco_queue_ptrs` keys in `vqvae_model.pt` and restored by `load_checkpoint`. The restore path checks for the presence of these keys before attempting restoration (so non-MoCo checkpoints can be loaded into a MoCo-enabled model without error — queues start cold).
+
+### 10.4 Gumbel Mask Bool-Cast Fix
+
+A bug was fixed where `content_mask` (output of `topk_gumbel_softmax`) was passed directly to `torch.where()` without an explicit `.bool()` cast. On some PyTorch versions this produced incorrect index selection. The fix:
+
+```python
+# Before (buggy):
+content_idx = torch.where(content_mask)[-1].tolist()
+style_idx   = torch.where(~content_mask)[-1].tolist()
+
+# After (correct):
+content_mask_bool = content_mask.bool()
+content_idx = torch.where(content_mask_bool)[-1].tolist()
+style_idx   = torch.where(~content_mask_bool)[-1].tolist()
+```
+
+This affects all checkpoints trained after commit `d968f53` (24 Feb 2026). Checkpoints trained before this fix may have had unreliable content/style channel splits.
 
 ---
 
@@ -814,6 +925,23 @@ The notebook extracts and visualizes latent representations from trained VQ-VAE-
 4. **Dimensionality reduction** — PCA and t-SNE on pooled features
 5. **Visualization** — scatter plots colored by diagnostic label (AD, MCI, CN)
 6. **Paired distance analysis** — compare T1 vs T2 latent distances per subject
+7. **Diagnostic prediction** — 5-fold CV logistic regression and random forest per feature set
+8. **Reconstruction visualization** — mid-sagittal slice comparison of originals vs reconstructed
+
+**Import structure (updated 25 Feb 2026):**
+
+The notebook lives in `eval/` but imports from the project root packages. The first cell now adds the project root to `sys.path` and uses fully-qualified module paths:
+
+```python
+import sys, os
+sys.path.insert(0, os.path.abspath('..'))   # project root
+
+import models.vqvae as vqvae                 # was: import vqvae
+import utils.utils as utils                  # was: import utils
+from utils.utils import load_data, CreateBrainMaskd, ApplyBrainMaskd
+```
+
+The transforms cell maps `RESAMPLE_MODE` to a `spacing` float (`1.0` or `2.0`) consistent with `--image-spacing` used during training.
 
 ---
 
@@ -865,7 +993,10 @@ This implementation provides a framework for learning disentangled representatio
 - **Discrete codebook representations** (384 codes × 32 dims per level)
 - **Hierarchical contrastive loss** at all encoder levels — either standard InfoNCE or MoCo
 - **MoCo option** (`--use-moco`): momentum encoder + per-level queues (4096 negatives per level) for effective contrastive learning with small batches
+- **Content/style split** controlled via `--content-dim` / `--total-dim` (no longer hardcoded)
+- **Style injection** (`--inject-style-to-decoder`): style channels fed back into the bottom decoder for better modality-specific reconstruction
 - **Content selection at Level 0** propagated proportionally to higher levels
 - **EMA codebook updates** for stable training
+- **Auto-resume** with architecture compatibility check — safe to rerun after changing architecture flags
 
 Both models learn to encode shared anatomical information in content dimensions while allowing style dimensions to capture modality-specific (T1 vs T2) characteristics.
