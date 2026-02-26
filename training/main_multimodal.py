@@ -246,7 +246,13 @@ def train_step(
             recon_loss_value = recon_loss.item()
             vq_loss_value = vq_loss.item()
             contrastive_loss_value = contrastive_loss.item()
-            estimated_content_indices = args.content_indices
+            # NOTE: estimated_content_indices was already set to the dynamically
+            # computed indices from channel_logits inside the level loop above
+            # (line: estimated_content_indices = [torch.where(m.bool())[-1].tolist()
+            # for m in content_masks]).  Do NOT overwrite it here with
+            # args.content_indices — that would replace the learned channel
+            # selection with the static config-based indices and break evaluation
+            # in get_data() for any run that uses content_proj.
 
         # ------------------------------------------------------------------
         # VAE path

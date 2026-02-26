@@ -508,25 +508,37 @@ class BaselineLoss(torch.nn.Module):
         return loss
 
     def _calculate_perceptual_loss(self, x, y) -> torch.Tensor:
-        # LPIPS backbone is frozen, so we don't need gradients through it.
-        # We detach inputs and re-attach the loss to the graph via a proxy.
-        # This avoids storing all intermediate SqueezeNet activations for backprop.
+        # LPIPS backbone weights are frozen (requires_grad=False), so autograd
+        # will not accumulate gradients into the backbone parameters.  However,
+        # gradients DO need to flow back through the LPIPS computation to the
+        # reconstruction tensor `y` so that the decoder is trained by the
+        # perceptual objective.
+        #
+        # Previously this was wrapped in torch.no_grad() + .detach(), which
+        # made the perceptual loss completely non-trainable (zero gradient to
+        # the decoder).  The wrapper and detach have been removed to restore
+        # the correct gradient path: LPIPS → sel_y → decoder.
+        #
+        # Memory note: SqueezeNet activations for `self.n_slices` (128) slices
+        # per orientation are retained for backprop.  With perceptual_factor=0.002
+        # this is acceptable; reduce n_slices if memory is tight.
 
         def _lpips_on_slices(x_vol, y_vol, perm_dims):
             """Extract 2D slices along one orientation and compute LPIPS."""
-            # Permute so the slice axis is dim=1: (B, n_slices, C, H, W)
+            # Permute so the slice axis is dim=1: (B, n_slices_total, C, H, W)
             # Then index along dim=1 BEFORE flattening, so we never materialise
             # the full (B*n_slices_total, C, H, W) intermediate tensor.
             x_p = x_vol.permute(*perm_dims)  # (B, n_slices_total, C, H, W)
             n_slices_total = x_p.shape[1]
             indices = torch.randperm(n_slices_total, device=x_vol.device)[: self.n_slices]
             # (B, self.n_slices, C, H, W) -> (B * self.n_slices, C, H, W)
-            sel_x = x_p[:, indices].contiguous().flatten(0, 1)
+            # x (ground truth) does not require grad; detach to avoid storing
+            # its graph.  y (reconstruction) keeps its computation graph intact.
+            sel_x = x_p[:, indices].contiguous().flatten(0, 1).detach()
             del x_p
             sel_y = y_vol.permute(*perm_dims)[:, indices].contiguous().flatten(0, 1)
-            with torch.no_grad():
-                p_loss = torch.mean(self.perceptual_function.forward(sel_x.float(), sel_y.float()))
-            return p_loss.detach()
+            p_loss = torch.mean(self.perceptual_function.forward(sel_x.float(), sel_y.float()))
+            return p_loss
 
         # Sagittal
         p_loss_sagital = _lpips_on_slices(x, y, perm_dims=(0, 2, 1, 3, 4))

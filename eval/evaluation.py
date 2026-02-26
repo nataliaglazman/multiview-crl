@@ -19,6 +19,14 @@ def val_step(data, encoders, decoders, loss_func, args, recon_loss_fn=None, moco
 
     Thin wrapper around ``train_step`` with ``optimizer=None``.
 
+    Models are temporarily switched to ``eval()`` mode so that:
+    - BatchNorm uses its running statistics (not per-batch stats).
+    - ``CodeLayer`` skips the EMA codebook update (``if self.training:``),
+      preventing codebook corruption from validation batches.
+    - ``VQVAE.forward()`` uses the deterministic top-k mask instead of the
+      stochastic Gumbel-Softmax mask, giving consistent content indices across
+      all evaluation batches.
+
     Args:
         data: Batch dictionary.
         encoders: List of encoder models.
@@ -34,18 +42,31 @@ def val_step(data, encoders, decoders, loss_func, args, recon_loss_fn=None, moco
     # Import here to avoid a circular dependency — train_step lives in main_multimodal.
     from main_multimodal import train_step
 
-    with torch.no_grad():
-        return train_step(
-            data,
-            encoders,
-            decoders,
-            loss_func,
-            optimizer=None,
-            params=None,
-            args=args,
-            recon_loss_fn=recon_loss_fn,
-            moco_loss_func=moco_loss_func,
-        )
+    all_models = list(encoders) + list(decoders)
+
+    # Record which models were in training mode so we can restore them afterwards.
+    was_training = [m.training for m in all_models]
+
+    try:
+        for m in all_models:
+            m.eval()
+
+        with torch.no_grad():
+            return train_step(
+                data,
+                encoders,
+                decoders,
+                loss_func,
+                optimizer=None,
+                params=None,
+                args=args,
+                recon_loss_fn=recon_loss_fn,
+                moco_loss_func=moco_loss_func,
+            )
+    finally:
+        # Always restore the original training/eval state, even on exception.
+        for m, was_train in zip(all_models, was_training):
+            m.train(was_train)
 
 
 def get_data(
