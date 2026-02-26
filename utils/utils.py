@@ -398,6 +398,7 @@ def load_data(df_filtered, data_dir, label_map):
                     "image": found_t1,
                     "z_image": found_t2,
                     "label": label_map[row["Group"]],
+                    "subject": subj,
                 }
             )
         else:
