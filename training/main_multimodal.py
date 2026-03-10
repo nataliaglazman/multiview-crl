@@ -547,13 +547,6 @@ def main(args):
             style_size=len(args.style_indices),
             inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
         )
-        # torch.compile fuses ops in the encoder/decoder for ~15-30% speedup
-        if hasattr(torch, "compile") and not args.no_cuda:
-            try:
-                vqvae_model = torch.compile(vqvae_model, mode="reduce-overhead")
-                logger.info("  torch.compile enabled (reduce-overhead)")
-            except Exception as compile_err:
-                logger.warning(f"  torch.compile unavailable ({compile_err}), using eager mode")
         vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
         vqvae_model.to(device)
         logger.info(f"  Parameters: {sum(p.numel() for p in vqvae_model.parameters()):,}")
