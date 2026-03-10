@@ -136,6 +136,17 @@ def train_step(
                 subsets=args.subsets,
             )
 
+            # Compute momentum-encoder key embeddings BEFORE deleting images
+            use_moco = getattr(args, "use_moco", False)
+            if use_moco:
+                from models.vqvae import MoCoEncoder
+
+                assert isinstance(
+                    vqvae_model, MoCoEncoder
+                ), "MoCo requested but encoders[0] is not a MoCoEncoder instance."
+                with torch.no_grad():
+                    key_outputs = vqvae_model.encode_keys(images)
+
             if compute_recon and recon is not None:
                 if recon.shape[2:] != input_shape:
                     recon = F.interpolate(recon, size=input_shape, mode="trilinear", align_corners=False)
@@ -156,18 +167,6 @@ def train_step(
             total_contrastive_loss = torch.zeros(1, device=device)
             level_losses = []
             content_ratio = len(args.content_indices[0]) / (len(args.content_indices[0]) + len(args.style_indices))
-
-            # Compute momentum-encoder key embeddings once (outside the level loop)
-            use_moco = getattr(args, "use_moco", False)
-            if use_moco:
-                from models.vqvae import MoCoEncoder
-
-                assert isinstance(
-                    vqvae_model, MoCoEncoder
-                ), "MoCo requested but encoders[0] is not a MoCoEncoder instance."
-                with torch.no_grad():
-                    # Reuse `images` already on device (line 112) instead of re-concat + re-transfer
-                    key_outputs = vqvae_model.encode_keys(images)
 
             # Unwrap DataParallel / MoCoEncoder to reach the bare VQVAE so we
             # can read channel_logits (fix #1 / #4).
