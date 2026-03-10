@@ -169,7 +169,7 @@ def init_or_load_mixing_fns(device, args):
         F.append(f_i)
     if args.evaluate:
         F = torch.nn.ModuleList()
-        mixing_fn_state_dict = torch.load(os.path.join(args.save_dir, "mixing_fns.pt"))
+        mixing_fn_state_dict = torch.load(os.path.join(args.save_dir, "mixing_fns.pt"), weights_only=False)
         for i, param_dict in mixing_fn_state_dict.items():
             f_i = invertible_network_utils.construct_invertible_mlp(
                 n=len(args.S_k[i]),
@@ -221,7 +221,7 @@ def init_or_load_encoder_models(device, args, encoding_size=None):
         G = torch.nn.ModuleList()
 
         save_path = os.path.join(args.save_dir, "model.pt")
-        ckpt = torch.load(save_path)
+        ckpt = torch.load(save_path, weights_only=False)
 
         for i in range(args.n_views):
             g_i = encoders.get_mlp(
@@ -349,7 +349,7 @@ def load_models(models, optimizer, args):
         tuple: A tuple containing the loaded models and optimizer.
     """
     save_path = os.path.join(args.save_dir, "model.pt")
-    ckpt = torch.load(save_path)
+    ckpt = torch.load(save_path, weights_only=False)
 
     for k in range(args.n_views):
         models["backbone"].encoders[k].load_state_dict(ckpt[f"encoder_{k}_state_dict"])

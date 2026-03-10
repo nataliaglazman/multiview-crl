@@ -220,7 +220,9 @@ def infonce_loss(
 
     """
     if estimated_content_indices is None:
-        return infonce_base_loss(hz, sim_metric, criterion, projector, tau)
+        # Use all feature dimensions as content when no content indices are provided
+        content_indices = list(range(hz.shape[-1]))
+        return infonce_base_loss(hz, content_indices, sim_metric, criterion, projector, tau)
     else:
         total_loss = torch.zeros(1).type_as(hz)
         for est_content_indices, subset in zip(estimated_content_indices, subsets):
@@ -366,7 +368,7 @@ def moco_loss(q, k, queue, sim_metric, tau=1.0, estimated_content_indices=None, 
 
 class BaurLoss(object):
     def __init__(self, lambda_reconstruction=1):
-        super(BaurLoss).__init__()
+        super().__init__()
 
         self.lambda_reconstruction = lambda_reconstruction
         self.lambda_gdl = 0
@@ -457,7 +459,7 @@ class BaselineLoss(torch.nn.Module):
         self.pixel_factor = 1.0
 
         self.perceptual_factor = 0.002
-        self.n_slices = 32  # Reduced from 512 to save GPU memory
+        self.n_slices = 8  # Reduced from 32 — 4× fewer SqueezeNet passes per orientation
         self.perceptual_function = LPIPS(net="squeeze")
 
         self.fft_factor = 1.0
@@ -489,7 +491,7 @@ class BaselineLoss(torch.nn.Module):
         # Compute FFT on the full batch at once — cheaper than a per-sample loop
         # that builds a long autograd chain. Complex tensors are freed immediately
         # after mse_loss since we don't store them.
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             # fftn requires float32; x/y may be float16 under AMP
             x_f = (x.float() + 1.0) / 2.0
             y_f = (y.float() + 1.0) / 2.0

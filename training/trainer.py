@@ -27,14 +27,14 @@ class VQVAETrainer:
         self.opt.zero_grad()
 
         self.beta = cfg.beta
-        self.scaler = torch.cuda.amp.GradScaler(enabled=not args.no_amp)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=not args.no_amp)
 
         self.update_frequency = math.ceil(cfg.batch_size / cfg.mini_batch_size)
         self.train_steps = 0
 
     def _calculate_loss(self, x: torch.FloatTensor):
         x = x.to(self.device)
-        y, d, _, _, _ = self.net(x)
+        y, d, _, _, _, _ = self.net(x)
         r_loss, l_loss = y.sub(x).pow(2).mean(), sum(d)
         loss = r_loss + self.beta * l_loss
         return loss, r_loss, l_loss, y
@@ -42,7 +42,7 @@ class VQVAETrainer:
     # another function can then call step
     def train(self, x: torch.FloatTensor):
         self.net.train()
-        with torch.cuda.amp.autocast(enabled=self.scaler.is_enabled()):
+        with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
             loss, r_loss, l_loss, y = self._calculate_loss(x)
         self.scaler.scale(loss / self.update_frequency).backward()
 
@@ -72,7 +72,7 @@ class VQVAETrainer:
         torch.save(self.net.state_dict(), path)
 
     def load_checkpoint(self, path):
-        self.net.load_state_dict(torch.load(path))
+        self.net.load_state_dict(torch.load(path, weights_only=False))
 
 
 class PixelTrainer:
@@ -111,7 +111,7 @@ class PixelTrainer:
             scaling_rates=cfg_vqvae.scaling_rates,
         ).to(self.device)
 
-        self.vqvae.load_state_dict(torch.load(args.vqvae_path))
+        self.vqvae.load_state_dict(torch.load(args.vqvae_path, weights_only=False))
         self.vqvae.eval()
 
         self.update_frequency = math.ceil(cfg_pixel.batch_size / cfg_pixel.mini_batch_size)
@@ -169,4 +169,4 @@ class PixelTrainer:
         torch.save(self.prior.state_dict(), path)
 
     def load_checkpoint(self, path):
-        self.prior.load_state_dict(torch.load(path))
+        self.prior.load_state_dict(torch.load(path, weights_only=False))

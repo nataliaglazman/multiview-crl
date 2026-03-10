@@ -169,16 +169,11 @@ def load_checkpoint(
     loss_deques: dict,
 ) -> int:
     """
-    Restore training state from the most recent checkpoint, if one exists.
-
-    Resuming is attempted automatically whenever a matching checkpoint file is
-    found in ``args.save_dir``, regardless of whether ``--resume-training`` was
-    passed.  "Matching" means that every parameter name **and** shape in the
-    checkpoint agrees with the current model.  If the checkpoint exists but the
-    architecture has changed, a warning is logged and training starts fresh.
+    Restore training state from the most recent checkpoint, if one exists
+    and ``--resume-training`` was passed.
 
     Args:
-        args: Parsed argument namespace.
+        args: Parsed argument namespace.  Must have ``resume_training`` attribute.
         encoders: List of encoder models (weights updated in-place).
         decoders: List of decoder models (weights updated in-place).
         optimizer: Optimizer (state updated in-place).
@@ -189,8 +184,12 @@ def load_checkpoint(
 
     Returns:
         int: The step to resume from (``saved_step + 1``), or ``1`` if no
-             compatible checkpoint is found.
+             compatible checkpoint is found or resuming was not requested.
     """
+    if not getattr(args, "resume_training", False):
+        logger.info("  --resume-training not set, starting fresh.")
+        return 1
+
     if not os.path.exists(args.save_dir):
         return 1
 
@@ -200,7 +199,7 @@ def load_checkpoint(
             logger.info("  No VQ-VAE checkpoint found, starting fresh training.")
             return 1
 
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
         if not _state_dicts_compatible(encoders[0], checkpoint["encoders"]):
             logger.warning(
@@ -236,7 +235,7 @@ def load_checkpoint(
             logger.info("  No VAE checkpoint found, starting fresh training.")
             return 1
 
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
         # Verify all encoders and the decoder are compatible before loading anything.
         for m_idx, m in enumerate(args.modalities):

@@ -35,7 +35,7 @@ def parse_args() -> argparse.ArgumentParser:
         ],
     )
     parser.add_argument("--model-dir", type=str, default="results")
-    parser.add_argument("--model-id", type=str, default="vqvae")
+    parser.add_argument("--model-id", type=str, default=None)
     parser.add_argument("--encoding-size", type=int, default=256)
     parser.add_argument("--hidden-size", type=int, default=100)
     parser.add_argument("--tau", type=float, default=1.0)
@@ -47,7 +47,7 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--evaluate", action="store_true")
     parser.add_argument("--val-size", default=25000, type=int)
     parser.add_argument("--test-size", default=25000, type=int)
-    parser.add_argument("--seed", type=int, default=np.random.randint(32**2 - 1))
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--workers",
         type=int,

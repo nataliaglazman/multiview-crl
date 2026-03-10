@@ -199,7 +199,7 @@ class CodeLayer(HelperModule):
         self.register_buffer("cluster_size", torch.zeros(nb_entries, dtype=torch.float32))
         self.register_buffer("embed_avg", embed.clone())
 
-    @torch.cuda.amp.autocast(enabled=False)
+    @torch.amp.autocast("cuda", enabled=False)
     def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, float, torch.LongTensor]:
         # x: (B, C, D, H, W) -> (B, D, H, W, embed_dim)
         x = self.conv_in(x.float()).permute(0, 2, 3, 4, 1)
@@ -549,7 +549,15 @@ class VQVAE(HelperModule):
             id_outputs,
         )
 
-    def decode_codes(self, *cs):
+    def decode_codes(self, *cs, style=None):
+        """Decode from discrete codes back to the input space.
+
+        Args:
+            *cs: Per-level codebook indices.
+            style: Optional style tensor for decoder-0 when
+                   ``inject_style_to_decoder`` is enabled.  If ``None`` and
+                   style injection is configured, a zero tensor is used.
+        """
         decoder_outputs = []
         code_outputs = []
         upscale_counts = []
@@ -559,7 +567,23 @@ class VQVAE(HelperModule):
             code_q = codebook.embed_code(cs[l]).permute(0, 3, 1, 2)
             code_outputs = [self.upscalers[i](c, upscale_counts[i]) for i, c in enumerate(code_outputs)]
             upscale_counts = [u + 1 for u in upscale_counts]
-            decoder_outputs.append(decoder(torch.cat([code_q, *code_outputs], axis=1)))
+
+            decoder_in = torch.cat([code_q, *code_outputs], axis=1)
+            if l == 0 and self.inject_style_to_decoder:
+                if style is None:
+                    # Provide a zero placeholder so the decoder's final_conv
+                    # receives the expected number of channels.
+                    dec_feat = decoder.layers(decoder_in)
+                    style = torch.zeros(
+                        dec_feat.shape[0],
+                        self.style_channels,
+                        *dec_feat.shape[2:],
+                        device=dec_feat.device,
+                        dtype=dec_feat.dtype,
+                    )
+                decoder_outputs.append(decoder(decoder_in, style=style))
+            else:
+                decoder_outputs.append(decoder(decoder_in))
 
             code_outputs.append(code_q)
             upscale_counts.append(0)
@@ -794,7 +818,7 @@ if __name__ == "__main__":
     x = torch.randn(1, 1, 96, 112, 96).to(device)
     print(f"Input shape: {x.shape}")
 
-    recon, diffs, enc_out, dec_out, id_out = net(x)
+    recon, diffs, enc_out, est_content_idx, dec_out, id_out = net(x)
     print(f"\nReconstruction shape: {recon.shape}")
     print("\nEncoder outputs:")
     print("\n".join(f"  Level {i}: {y.shape}" for i, y in enumerate(enc_out)))

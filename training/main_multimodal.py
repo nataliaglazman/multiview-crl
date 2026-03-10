@@ -32,7 +32,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from sklearn.preprocessing import StandardScaler
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -106,10 +106,10 @@ def train_step(
     use_amp = scaler is not None
     device = next(encoders[0].parameters()).device
 
-    with autocast(enabled=use_amp):
+    with autocast("cuda", enabled=use_amp):
         samples = data["image"]
         n_views = len(samples)
-        images = torch.concat(samples, 0).to(device)  # (n_views * B, 1, D, H, W)
+        images = torch.concat(samples, 0).to(device, non_blocking=True)  # (n_views * B, 1, D, H, W)
         input_shape = images.shape[2:]
 
         # ------------------------------------------------------------------
@@ -166,9 +166,8 @@ def train_step(
                     vqvae_model, MoCoEncoder
                 ), "MoCo requested but encoders[0] is not a MoCoEncoder instance."
                 with torch.no_grad():
-                    _imgs = torch.concat(data["image"], 0).to(device)
-                    key_outputs = vqvae_model.encode_keys(_imgs)
-                    del _imgs
+                    # Reuse `images` already on device (line 112) instead of re-concat + re-transfer
+                    key_outputs = vqvae_model.encode_keys(images)
 
             # Unwrap DataParallel / MoCoEncoder to reach the bare VQVAE so we
             # can read channel_logits (fix #1 / #4).
@@ -548,6 +547,10 @@ def main(args):
             style_size=len(args.style_indices),
             inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
         )
+        # torch.compile fuses ops in the encoder/decoder for ~15-30% speedup
+        if hasattr(torch, "compile") and not args.no_cuda:
+            vqvae_model = torch.compile(vqvae_model, mode="reduce-overhead")
+            logger.info("  torch.compile enabled (reduce-overhead)")
         vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
         vqvae_model.to(device)
         logger.info(f"  Parameters: {sum(p.numel() for p in vqvae_model.parameters()):,}")
@@ -584,7 +587,20 @@ def main(args):
             encoder_txt = torch.nn.DataParallel(encoder_txt, device_ids=device_ids).to(device)
             encoders += [encoder_txt]
 
-        decoder = torch.nn.DataParallel(vae.Decoder(latent_dim=512), device_ids=device_ids).to(device)
+        # Compute spatial size from spacing/crop settings to match the encoder's output
+        spacing = getattr(args, "image_spacing", 2.0)
+        crop_margin = getattr(args, "crop_margin", 0)
+        if spacing == 1.0:
+            spatial_size = (182, 218, 182)
+        elif spacing == 2.0:
+            spatial_size = (91, 109, 91)
+        else:
+            spatial_size = tuple(int(s / spacing) for s in (182, 218, 182))
+        if crop_margin > 0:
+            spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
+        decoder = torch.nn.DataParallel(
+            vae.Decoder(latent_dim=512, spatial_size=spatial_size), device_ids=device_ids
+        ).to(device)
         decoders = [decoder]
         total_params = sum(sum(p.numel() for p in m.parameters()) for m in encoders + decoders)
 
@@ -594,10 +610,23 @@ def main(args):
     if args.evaluate:
         logger.info("")
         logger.info("[LOADING PRETRAINED MODELS]")
-        for m_idx, m in enumerate(args.modalities):
-            path = os.path.join(args.save_dir, f"encoder_{m}.pt")
-            encoders[m_idx].load_state_dict(torch.load(path, map_location=device))
-            logger.info(f"  Loaded encoder_{m} from {path}")
+        if args.encoder_type == "vqvae":
+            path = os.path.join(args.save_dir, "vqvae_model.pt")
+            checkpoint = torch.load(path, map_location=device, weights_only=False)
+            encoders[0].load_state_dict(checkpoint["encoders"])
+            if getattr(args, "use_moco", False) and "moco_queues" in checkpoint:
+                from models.vqvae import MoCoEncoder
+
+                if isinstance(encoders[0], MoCoEncoder):
+                    for lvl, q_cpu in enumerate(checkpoint["moco_queues"]):
+                        encoders[0]._get_queue(lvl).copy_(q_cpu.to(device))
+                    encoders[0].queue_ptrs = list(checkpoint["moco_queue_ptrs"])
+            logger.info(f"  Loaded VQ-VAE-2 from {path}")
+        else:
+            for m_idx, m in enumerate(args.modalities):
+                path = os.path.join(args.save_dir, f"encoder_{m}.pt")
+                encoders[m_idx].load_state_dict(torch.load(path, map_location=device, weights_only=False))
+                logger.info(f"  Loaded encoder_{m} from {path}")
 
     # Optimizer
     params = []
@@ -610,7 +639,7 @@ def main(args):
     logger.info("")
     logger.info(f"[OPTIMIZER] AdamW (fused={use_fused}) lr={args.lr} " f"params={sum(p.numel() for p in params):,}")
 
-    scaler = GradScaler() if args.use_amp else None
+    scaler = GradScaler("cuda") if args.use_amp else None
     if args.use_amp:
         logger.info("  Mixed precision: enabled (AMP)")
 

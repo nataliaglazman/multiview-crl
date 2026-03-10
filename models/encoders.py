@@ -28,6 +28,8 @@ def get_mlp(
         output_normalization: (Optional) Normalization applied to output of network.
         output_normalization_kwargs: Arguments passed to the output normalization, e.g., the radius for the sphere.
     """
+    # Work on a copy so we don't mutate the caller's list
+    layers = list(layers)
     modules: List[nn.Module] = []
 
     def add_module(n_layer_in: int, n_layer_out: int, last_layer: bool = False):
@@ -46,7 +48,7 @@ def get_mlp(
         n_out_last_layer = n_in
     else:
         assert n_in == n_out, "Network with no layers must have matching n_in and n_out"
-        modules.append(layers.Lambda(lambda x: x))
+        modules.append(nn.Identity())
 
     layers.append(n_out)
 

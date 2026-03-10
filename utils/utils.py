@@ -268,27 +268,46 @@ def smart_gumbel_softmax_mask(avg_logits: torch.Tensor, subsets: List, content_s
     """
     Generates masks using smart Gumbel softmax for each subset.
 
+    For the joint subset (last in *subsets*) a deterministic top-k mask is used.
+    For every other subset, a Gumbel-softmax mask is generated for the
+    subset-specific extra content dimensions, then concatenated with the joint mask.
+
     Args:
-        avg_logits (torch.Tensor): Average logits.
+        avg_logits (torch.Tensor): Average logits, shape ``(1, encoding_size)``.
         subsets (List): List of subsets.
-        conten_sizes (List): List of content sizes.
+        content_sizes (List): Per-subset content size.  The last element is the
+            joint content size shared across all subsets.
 
     Returns:
-        List: List of masks for each subset.
+        List: One mask per subset (same length as *subsets*).
     """
     masks = []
-    joint_content_size = content_sizes[-1]
-    joint_content_mask = torch.eye(avg_logits.shape[-1])[:2].type_as(avg_logits)
+    joint_content_size = content_sizes[-1] if len(content_sizes) > 1 else content_sizes[0]
+
+    # Deterministic joint-content mask via top-k (no Gumbel noise)
+    joint_content_mask = topk_gumbel_softmax(
+        k=joint_content_size,
+        logits=avg_logits,
+        tau=1.0,
+        hard=True,
+    )
 
     for i, subset in enumerate(subsets[:-1]):
-        m = topk_gumbel_softmax(
-            k=content_sizes[i] - joint_content_size,
-            logits=avg_logits,
-            tau=1.0,
-            hard=True,
-        )
-        m = torch.concat([joint_content_mask, m], 0)
-        masks += [m]
+        extra_k = content_sizes[min(i, len(content_sizes) - 1)] - joint_content_size
+        if extra_k > 0:
+            m = topk_gumbel_softmax(
+                k=extra_k,
+                logits=avg_logits,
+                tau=1.0,
+                hard=True,
+            )
+            m = torch.concat([joint_content_mask, m], 0)
+        else:
+            m = joint_content_mask
+        masks.append(m)
+
+    # Joint subset mask (last subset)
+    masks.append(joint_content_mask)
     return masks
 
 

@@ -128,7 +128,23 @@ def get_data(
 
             for m_midx, m in enumerate(args.modalities):
                 samples = data[m]
-                hz_m = encoders[m_midx](torch.concat(samples, 0)).detach().cpu().numpy()
+                enc_input = torch.concat(samples, 0)
+                enc_out = encoders[m_midx](enc_input)
+                # VQ-VAE / MoCoEncoder returns a tuple; extract pooled features
+                if isinstance(enc_out, tuple):
+                    # forward returns (recon, diffs, encoder_features, content_idx, dec_out, id_out)
+                    # encoder_features[0] is the level-0 pooled vector when pool_only=True,
+                    # but here we call without pool_only so we get spatial maps — pool them.
+                    encoder_features = enc_out[2]
+                    if len(encoder_features) > 0 and encoder_features[0].dim() == 5:
+                        hz_m = encoder_features[0].mean(dim=[2, 3, 4]).detach().cpu().numpy()
+                    elif len(encoder_features) > 0:
+                        hz_m = encoder_features[0].detach().cpu().numpy()
+                    else:
+                        hz_m = enc_input.view(enc_input.size(0), -1).detach().cpu().numpy()
+                else:
+                    hz_m = enc_out.detach().cpu().numpy()
+                del enc_input, enc_out
                 rdict[f"hz_{m}"].append(hz_m)
 
                 for k in rdict[f"labels_{m}"]:

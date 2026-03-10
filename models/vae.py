@@ -144,9 +144,10 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     """Decoder Module with transposed convolutions for sharper output"""
 
-    def __init__(self, latent_dim):
+    def __init__(self, latent_dim, spatial_size=(91, 109, 91)):
         super(Decoder, self).__init__()
         self.latent_dim = latent_dim
+        self.spatial_size = spatial_size
         self.linear_up = nn.Linear(latent_dim, 512 * 2 * 2 * 2)  # Start from 2x2x2 spatial
         self.relu = nn.ReLU()
 
@@ -175,7 +176,7 @@ class Decoder(nn.Module):
             nn.Conv3d(8, 1, kernel_size=3, padding=1),
         )
 
-        self.final_upsample = nn.Upsample(size=(91, 109, 91), mode="trilinear", align_corners=False)
+        self.final_upsample = nn.Upsample(size=spatial_size, mode="trilinear", align_corners=False)
 
         self.reset_parameters()
 
@@ -215,15 +216,13 @@ class Decoder(nn.Module):
 
 
 class VAE(nn.Module):
-    def __init__(self, latent_dim=256):
+    def __init__(self, latent_dim=256, spatial_size=(91, 109, 91)):
         super(VAE, self).__init__()
-        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         self.latent_dim = latent_dim
         self.z_mean = nn.Linear(512, latent_dim)
         self.z_log_sigma = nn.Linear(512, latent_dim)
-        self.epsilon = torch.normal(size=(1, latent_dim), mean=0, std=1.0, device=self.device)
         self.encoder = Encoder()
-        self.decoder = Decoder(latent_dim)
+        self.decoder = Decoder(latent_dim, spatial_size=spatial_size)
 
         self.reset_parameters()
 
