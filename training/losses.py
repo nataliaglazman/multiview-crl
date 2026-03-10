@@ -457,7 +457,7 @@ class BaselineLoss(torch.nn.Module):
         self.pixel_factor = 1.0
 
         self.perceptual_factor = 0.002
-        self.n_slices = 128  # Reduced from 512 to save GPU memory
+        self.n_slices = 32  # Reduced from 512 to save GPU memory
         self.perceptual_function = LPIPS(net="squeeze")
 
         self.fft_factor = 1.0
