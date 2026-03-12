@@ -17,10 +17,10 @@ class ReZero(HelperModule):
     def build(self, in_channels: int, res_channels: int):
         self.layers = nn.Sequential(
             nn.Conv3d(in_channels, res_channels, 3, stride=1, padding=1, bias=False),
-            nn.BatchNorm3d(res_channels),
+            nn.GroupNorm(res_channels),
             nn.ReLU(inplace=True),
             nn.Conv3d(res_channels, in_channels, 3, stride=1, padding=1, bias=False),
-            nn.BatchNorm3d(in_channels),
+            nn.GroupNorm(in_channels),
             nn.ReLU(inplace=True),
         )
         self.alpha = nn.Parameter(torch.tensor(0.0))
@@ -70,13 +70,13 @@ class Encoder(HelperModule):
             layers.append(
                 nn.Sequential(
                     nn.Conv3d(c_channel, n_channel, 4, stride=2, padding=1),
-                    nn.BatchNorm3d(n_channel),
+                    nn.GroupNorm(n_channel),
                     nn.ReLU(inplace=True),
                 )
             )
             c_channel, n_channel = n_channel, hidden_channels
         layers.append(nn.Conv3d(c_channel, n_channel, 3, stride=1, padding=1))
-        layers.append(nn.BatchNorm3d(n_channel))
+        layers.append(nn.GroupNorm(n_channel))
         layers.append(ResidualStack(n_channel, res_channels, nb_res_layers, use_checkpoint=use_checkpoint))
 
         self.layers = nn.Sequential(*layers)
@@ -123,7 +123,7 @@ class Decoder(HelperModule):
             layers.append(
                 nn.Sequential(
                     nn.ConvTranspose3d(c_channel, n_channel, 4, stride=2, padding=1),
-                    nn.BatchNorm3d(n_channel),
+                    nn.GroupNorm(n_channel),
                     nn.ReLU(inplace=True),
                 )
             )
@@ -138,11 +138,11 @@ class Decoder(HelperModule):
             # concatenated before projecting to out_channels.
             self.final_conv = nn.Sequential(
                 nn.Conv3d(c_channel + style_channels, out_channels, 3, stride=1, padding=1),
-                nn.BatchNorm3d(out_channels),
+                nn.GroupNorm(out_channels),
             )
         else:
             layers.append(nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1))
-            layers.append(nn.BatchNorm3d(out_channels))
+            layers.append(nn.GroupNorm(out_channels))
             self.layers = nn.Sequential(*layers)
             self.final_conv = None
 
@@ -248,7 +248,7 @@ class Upscaler(HelperModule):
             layers = []
             for _ in range(upscale_steps):
                 layers.append(nn.ConvTranspose3d(embed_dim, embed_dim, 4, stride=2, padding=1))
-                layers.append(nn.BatchNorm3d(embed_dim))
+                layers.append(nn.GroupNorm(embed_dim))
                 layers.append(nn.ReLU(inplace=True))
             self.stages.append(nn.Sequential(*layers))
 
