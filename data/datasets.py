@@ -1223,7 +1223,13 @@ class Multimodal3DIdent(MultiviewDataset):
 
 
 class MyCustomDataset(MultiviewDataset):
-    """ADNI dataset with T1 and T2 as two views."""
+    """ADNI dataset with T1 and T2 as two views.
+
+    When ``cache=True`` all volumes are loaded, preprocessed, and stored in RAM
+    during ``__init__``.  Subsequent ``__getitem__`` calls only apply stochastic
+    augmentations (``RandAffined``, ``RandShiftIntensityd``) on the cached
+    tensors, completely avoiding repeated NIfTI disk I/O and resampling.
+    """
 
     # Not used for 3D medical images, but required by parent class
     mean_per_channel = [0.0]
@@ -1242,6 +1248,7 @@ class MyCustomDataset(MultiviewDataset):
         transform=None,
         spacing=2.0,
         crop_margin=0,
+        cache=False,
         **kwargs,
     ):
         super().__init__()
@@ -1265,7 +1272,78 @@ class MyCustomDataset(MultiviewDataset):
         from utils.utils import transforms as get_transforms
 
         train_transforms, val_transforms = get_transforms(spacing=self.spacing, crop_margin=self.crop_margin)
-        self.monai_transform = train_transforms if mode == "train" else val_transforms
+
+        if cache:
+            self._build_cache(val_transforms)
+            # Augmentation-only pipeline for training (parameters mirror
+            # those in utils.utils.transforms — keep in sync).
+            if mode == "train":
+                from monai.transforms import Compose, RandAffined, RandShiftIntensityd
+
+                self._aug_transform = Compose(
+                    [
+                        RandAffined(
+                            keys=["image_t1", "image_t2"],
+                            rotate_range=[-0.05, 0.05],
+                            shear_range=[0.001, 0.05],
+                            scale_range=[0, 0.05],
+                            mode="bilinear",
+                            padding_mode="zeros",
+                            prob=0.5,
+                        ),
+                        RandShiftIntensityd(keys=["image_t1", "image_t2"], offsets=(-0.1, 0.1), prob=0.2),
+                    ]
+                )
+            else:
+                self._aug_transform = None
+            self.monai_transform = None  # not used when cached
+        else:
+            self._cache = None
+            self._aug_transform = None
+            self.monai_transform = train_transforms if mode == "train" else val_transforms
+
+    # ------------------------------------------------------------------
+    # Caching helpers
+    # ------------------------------------------------------------------
+
+    def _build_cache(self, deterministic_transform):
+        """Pre-process all volumes through deterministic transforms and store in RAM."""
+        import logging
+        import sys
+
+        logger = logging.getLogger("multiview_crl")
+        logger.info(f"Caching {self.num_samples} volumes in memory (this may take a few minutes)...")
+
+        self._cache = []
+        mem_bytes = 0
+        for i in range(self.num_samples):
+            data_dict = {
+                "image_t1": self.items[i]["image"],
+                "image_t2": self.items[i]["z_image"],
+                "label": self.items[i]["label"],
+            }
+            transformed = deterministic_transform(data_dict)
+            # Keep only the tensors we need (drop intermediate masks etc.)
+            cached = {
+                "image_t1": transformed["image_t1"],
+                "image_t2": transformed["image_t2"],
+                "label": transformed["label"],
+            }
+            for v in cached.values():
+                if hasattr(v, "nelement"):
+                    mem_bytes += v.nelement() * v.element_size()
+            self._cache.append(cached)
+
+            if (i + 1) % 50 == 0 or i == self.num_samples - 1:
+                print(
+                    f"  Cached {i + 1}/{self.num_samples} " f"({mem_bytes / 1e9:.2f} GB)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        logger.info(f"Dataset caching complete: {self.num_samples} samples, {mem_bytes / 1e9:.2f} GB")
+
+    # ------------------------------------------------------------------
 
     def __len__(self):
         return self.num_samples
@@ -1282,22 +1360,27 @@ class MyCustomDataset(MultiviewDataset):
 
     def __getitem__(self, idx):
         """Return dict with T1 and T2 as two views."""
-        item = self.items[idx]
+        if self._cache is not None:
+            cached = self._cache[idx]
+            # Clone tensors so augmentations don't mutate the cache
+            data_dict = {k: v.clone() if hasattr(v, "clone") else v for k, v in cached.items()}
+            if self._aug_transform is not None:
+                data_dict = self._aug_transform(data_dict)
+            img_t1 = data_dict["image_t1"]
+            img_t2 = data_dict["image_t2"]
+        else:
+            item = self.items[idx]
+            data_dict = {
+                "image_t1": item["image"],
+                "image_t2": item["z_image"],
+                "label": item["label"],
+            }
+            transformed = self.monai_transform(data_dict)
+            img_t1 = transformed["image_t1"]
+            img_t2 = transformed["image_t2"]
 
-        # Apply MONAI transforms
-        data_dict = {
-            "image_t1": item["image"],
-            "image_t2": item["z_image"],
-            "label": item["label"],
-        }
-        transformed = self.monai_transform(data_dict)
-
-        img_t1 = transformed["image_t1"]  # View 1
-        img_t2 = transformed["image_t2"]  # View 2
-
-        # Return in expected format: list of views
         return {
             "image": [img_t1, img_t2],
-            "z_image": [{}, {}],  # Empty dicts - no latent factors
+            "z_image": [{}, {}],
             "index": idx,
         }

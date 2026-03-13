@@ -23,6 +23,7 @@ def save_checkpoint(
     contrastive_loss,
     recon_loss,
     vq_loss,
+    scheduler=None,
 ) -> None:
     """
     Save a training checkpoint to ``args.save_dir``.
@@ -41,6 +42,7 @@ def save_checkpoint(
         contrastive_loss: Scalar contrastive loss value.
         recon_loss: Scalar reconstruction loss value.
         vq_loss: Scalar VQ commitment loss value.
+        scheduler: Optional LR scheduler whose state should be saved.
     """
     if args.encoder_type == "vqvae":
         checkpoint_path = os.path.join(args.save_dir, "vqvae_model.pt")
@@ -53,6 +55,8 @@ def save_checkpoint(
             "recon_loss": recon_loss,
             "vq_loss": vq_loss,
         }
+        if scheduler is not None:
+            checkpoint["scheduler_state_dict"] = scheduler.state_dict()
         if getattr(args, "use_moco", False):
             from models.vqvae import MoCoEncoder
 
@@ -73,6 +77,8 @@ def save_checkpoint(
             "recon_loss": recon_loss,
             "vq_loss": vq_loss,
         }
+        if scheduler is not None:
+            checkpoint["scheduler_state_dict"] = scheduler.state_dict()
         for m_idx, m in enumerate(args.modalities):
             checkpoint[f"encoder_{m}"] = encoders[m_idx].state_dict()
             encoder_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
@@ -95,6 +101,7 @@ def save_emergency_checkpoint(
     decoders: list,
     optimizer: torch.optim.Optimizer,
     reason: str = "unknown",
+    scheduler=None,
 ) -> None:
     """
     Best-effort checkpoint written on unexpected interruption (OOM, crash, KeyboardInterrupt).
@@ -125,6 +132,8 @@ def save_emergency_checkpoint(
             }
             for m_idx, m in enumerate(args.modalities):
                 ckpt[f"encoder_{m}"] = encoders[m_idx].state_dict()
+        if scheduler is not None:
+            ckpt["scheduler_state_dict"] = scheduler.state_dict()
         torch.save(ckpt, emergency_path)
         logger.warning(f"[EMERGENCY] Saved emergency checkpoint to {emergency_path} (reason: {reason})")
     except Exception as save_err:
@@ -167,6 +176,7 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     device,
     loss_deques: dict,
+    scheduler=None,
 ) -> int:
     """
     Restore training state from the most recent checkpoint, if one exists
@@ -181,6 +191,7 @@ def load_checkpoint(
         loss_deques: Dict mapping loss name → ``collections.deque`` to pre-fill
                      with the last saved value.  Expected keys:
                      ``'loss'``, ``'contrastive_loss'``, ``'recon_loss'``, ``'vq_loss'``.
+        scheduler: Optional LR scheduler to restore state into.
 
     Returns:
         int: The step to resume from (``saved_step + 1``), or ``1`` if no
@@ -212,6 +223,16 @@ def load_checkpoint(
         encoders[0].load_state_dict(checkpoint["encoders"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         step = checkpoint["step"] + 1
+
+        if scheduler is not None:
+            if "scheduler_state_dict" in checkpoint:
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                logger.info("  LR scheduler state restored from checkpoint.")
+            else:
+                # Old checkpoint without scheduler state — fast-forward to current step
+                scheduler.last_epoch = step - 2
+                scheduler.step()
+                logger.info(f"  LR scheduler fast-forwarded to step {step - 1} (no saved state).")
 
         for key, deque in loss_deques.items():
             deque.append(checkpoint.get(key, 0))
@@ -259,6 +280,15 @@ def load_checkpoint(
         decoders[0].load_state_dict(checkpoint["decoder"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         step = checkpoint["step"] + 1
+
+        if scheduler is not None:
+            if "scheduler_state_dict" in checkpoint:
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                logger.info("  LR scheduler state restored from checkpoint.")
+            else:
+                scheduler.last_epoch = step - 2
+                scheduler.step()
+                logger.info(f"  LR scheduler fast-forwarded to step {step - 1} (no saved state).")
 
         for key, deque in loss_deques.items():
             deque.append(checkpoint.get(key, 0))

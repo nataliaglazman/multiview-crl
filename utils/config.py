@@ -98,6 +98,16 @@ def parse_args() -> argparse.ArgumentParser:
         help="Trade compute for memory in residual blocks",
     )
     parser.add_argument(
+        "--compile-model",
+        action="store_true",
+        help="Use torch.compile for kernel fusion (requires PyTorch 2.0+)",
+    )
+    parser.add_argument(
+        "--cache-dataset",
+        action="store_true",
+        help="Pre-process and cache all volumes in RAM (avoids repeated disk I/O)",
+    )
+    parser.add_argument(
         "--skip-recon-ratio",
         type=float,
         default=0.0,
@@ -108,6 +118,26 @@ def parse_args() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Accumulate gradients over N steps (effective batch = batch_size × N)",
+    )
+    # Learning rate schedule
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=1000,
+        help="Linear LR warmup steps (0 to disable warmup)",
+    )
+    parser.add_argument(
+        "--lr-schedule",
+        type=str,
+        default="cosine",
+        choices=["cosine", "constant"],
+        help="LR schedule after warmup: cosine annealing or constant",
+    )
+    parser.add_argument(
+        "--lr-min",
+        type=float,
+        default=0.0,
+        help="Minimum LR for cosine annealing (default: decay to zero)",
     )
     # Image preprocessing
     parser.add_argument("--image-spacing", type=float, default=2.0, help="Isotropic voxel spacing in mm")

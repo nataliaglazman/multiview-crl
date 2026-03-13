@@ -516,45 +516,35 @@ class BaselineLoss(torch.nn.Module):
         # reconstruction tensor `y` so that the decoder is trained by the
         # perceptual objective.
         #
-        # Previously this was wrapped in torch.no_grad() + .detach(), which
-        # made the perceptual loss completely non-trainable (zero gradient to
-        # the decoder).  The wrapper and detach have been removed to restore
-        # the correct gradient path: LPIPS → sel_y → decoder.
-        #
-        # Memory note: SqueezeNet activations for `self.n_slices` (128) slices
-        # per orientation are retained for backprop.  With perceptual_factor=0.002
-        # this is acceptable; reduce n_slices if memory is tight.
+        # Speed optimisation: instead of computing LPIPS on all 3 orientations
+        # every step (3× SqueezeNet passes), we randomly sample ONE orientation
+        # per step and multiply by 3.  The expected gradient is identical, but
+        # each step is ~3× cheaper for the perceptual component.
 
         def _lpips_on_slices(x_vol, y_vol, perm_dims):
             """Extract 2D slices along one orientation and compute LPIPS."""
-            # Permute so the slice axis is dim=1: (B, n_slices_total, C, H, W)
-            # Then index along dim=1 BEFORE flattening, so we never materialise
-            # the full (B*n_slices_total, C, H, W) intermediate tensor.
             x_p = x_vol.permute(*perm_dims)  # (B, n_slices_total, C, H, W)
             n_slices_total = x_p.shape[1]
             indices = torch.randperm(n_slices_total, device=x_vol.device)[: self.n_slices]
-            # (B, self.n_slices, C, H, W) -> (B * self.n_slices, C, H, W)
-            # x (ground truth) does not require grad; detach to avoid storing
-            # its graph.  y (reconstruction) keeps its computation graph intact.
             sel_x = x_p[:, indices].contiguous().flatten(0, 1).detach()
             del x_p
             sel_y = y_vol.permute(*perm_dims)[:, indices].contiguous().flatten(0, 1)
             p_loss = torch.mean(self.perceptual_function.forward(sel_x.float(), sel_y.float()))
             return p_loss
 
-        # Sagittal
-        p_loss_sagital = _lpips_on_slices(x, y, perm_dims=(0, 2, 1, 3, 4))
-        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual_Sagittal-Reconstruction"] = p_loss_sagital
+        orientations = [
+            ("Sagittal", (0, 2, 1, 3, 4)),
+            ("Axial", (0, 4, 1, 2, 3)),
+            ("Coronal", (0, 3, 1, 2, 4)),
+        ]
 
-        # Axial
-        p_loss_axial = _lpips_on_slices(x, y, perm_dims=(0, 4, 1, 2, 3))
-        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual_Axial-Reconstruction"] = p_loss_axial
+        # Randomly pick one orientation; multiply by 3 to keep expected value
+        chosen_idx = torch.randint(len(orientations), (1,)).item()
+        name, perm_dims = orientations[chosen_idx]
+        p_loss = _lpips_on_slices(x, y, perm_dims=perm_dims)
+        self.summaries[TBSummaryTypes.SCALAR][f"Loss-Perceptual_{name}-Reconstruction"] = p_loss
 
-        # Coronal
-        p_loss_coronal = _lpips_on_slices(x, y, perm_dims=(0, 3, 1, 2, 4))
-        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual_Coronal-Reconstruction"] = p_loss_coronal
-
-        loss = (p_loss_sagital + p_loss_axial + p_loss_coronal) * self.perceptual_factor
+        loss = p_loss * 3.0 * self.perceptual_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = loss
 
         return loss

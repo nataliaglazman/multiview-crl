@@ -28,4 +28,6 @@ python /nfs/home/nglazman/crl-2/multiview-crl/training/main_multimodal.py \
     --gradient-checkpointing \
     --skip-recon-ratio 0.3 \
     --image-spacing 1.0 \
-    --crop-margin 10
+    --crop-margin 10 \
+    --cache-dataset \
+    --compile-model \

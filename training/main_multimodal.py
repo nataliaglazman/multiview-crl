@@ -13,6 +13,7 @@
 import collections
 import csv
 import json
+import math
 import os
 import random
 import traceback
@@ -487,6 +488,7 @@ def main(args):
         change_lists=args.change_lists,
         spacing=getattr(args, "image_spacing", 2.0),
         crop_margin=getattr(args, "crop_margin", 0),
+        cache=getattr(args, "cache_dataset", False),
         **dataset_kwargs,
     )
     logger.info(f"  Train: {len(train_dataset)} samples from {args.datapath}")
@@ -546,6 +548,9 @@ def main(args):
             style_size=len(args.style_indices),
             inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
         )
+        if getattr(args, "compile_model", False):
+            logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
+            vqvae_model = torch.compile(vqvae_model)
         vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
         vqvae_model.to(device)
         logger.info(f"  Parameters: {sum(p.numel() for p in vqvae_model.parameters()):,}")
@@ -634,6 +639,27 @@ def main(args):
     logger.info("")
     logger.info(f"[OPTIMIZER] AdamW (fused={use_fused}) lr={args.lr} " f"params={sum(p.numel() for p in params):,}")
 
+    # LR schedule: linear warmup then cosine annealing (or constant)
+    warmup_steps = getattr(args, "warmup_steps", 0)
+    lr_schedule = getattr(args, "lr_schedule", "constant")
+    lr_min = getattr(args, "lr_min", 0.0)
+    lr_min_ratio = lr_min / args.lr if args.lr > 0 else 0.0
+    total_steps = args.train_steps
+
+    def _lr_lambda(current_step):
+        if warmup_steps > 0 and current_step < warmup_steps:
+            return (current_step + 1) / warmup_steps
+        if lr_schedule == "constant":
+            return 1.0
+        # Cosine annealing
+        progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return lr_min_ratio + (1.0 - lr_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda)
+    logger.info(
+        f"[LR SCHEDULE] {lr_schedule} | warmup={warmup_steps} steps | " f"lr_min={lr_min} | total={total_steps} steps"
+    )
+
     scaler = GradScaler("cuda") if args.use_amp else None
     if args.use_amp:
         logger.info("  Mixed precision: enabled (AMP)")
@@ -668,7 +694,7 @@ def main(args):
             "recon_loss": recon_losses,
             "vq_loss": vq_losses,
         }
-        step = load_checkpoint(args, encoders, decoders, optimizer, device, loss_deques)
+        step = load_checkpoint(args, encoders, decoders, optimizer, device, loss_deques, scheduler=scheduler)
 
         oom_count = 0
         MAX_OOM_RETRIES = 5
@@ -706,6 +732,7 @@ def main(args):
                         accum_recon += recon_loss / accum_steps
                         accum_vq += vq_loss / accum_steps
 
+                    scheduler.step()
                     oom_count = 0
                     loss_values.append(accum_total)
                     contrastive_losses.append(accum_contrastive)
@@ -759,6 +786,7 @@ def main(args):
                             contrastive_loss,
                             recon_loss,
                             vq_loss,
+                            scheduler=scheduler,
                         )
 
                     step += 1
@@ -790,6 +818,7 @@ def main(args):
                                 decoders,
                                 optimizer,
                                 reason=f"oom_x{oom_count}",
+                                scheduler=scheduler,
                             )
                             raise
                         logger.warning(f"[OOM] Skipping step {step}, continuing...")
@@ -803,6 +832,7 @@ def main(args):
                             decoders,
                             optimizer,
                             reason=f"runtime_error_step{step}",
+                            scheduler=scheduler,
                         )
                         raise
 
@@ -815,6 +845,7 @@ def main(args):
                         decoders,
                         optimizer,
                         reason=f"{type(e).__name__}_step{step}",
+                        scheduler=scheduler,
                     )
                     raise
 
@@ -827,6 +858,7 @@ def main(args):
                 decoders,
                 optimizer,
                 reason=f"keyboard_interrupt_step{step}",
+                scheduler=scheduler,
             )
             tb_writer.close()
             return
