@@ -11,16 +11,30 @@ import utils.utils as utils
 from utils.helper import HelperModule
 
 
+def get_group_norm(channels, target_groups=32):
+    """
+    Finds the largest divisor of 'channels' that is <= 'target_groups'.
+    Ensures num_groups is always valid for nn.GroupNorm.
+    """
+    # Start at target_groups and work downwards to find the first divisor
+    for g in range(target_groups, 0, -1):
+        if channels % g == 0:
+            return nn.GroupNorm(g, channels)
+
+    # Fallback (should theoretically never be reached as 1 divides everything)
+    return nn.GroupNorm(1, channels)
+
+
 class ReZero(HelperModule):
     """3D ReZero residual block with learnable scaling parameter."""
 
     def build(self, in_channels: int, res_channels: int):
         self.layers = nn.Sequential(
             nn.Conv3d(in_channels, res_channels, 3, stride=1, padding=1, bias=False),
-            nn.GroupNorm(res_channels),
+            get_group_norm(res_channels),
             nn.ReLU(inplace=True),
             nn.Conv3d(res_channels, in_channels, 3, stride=1, padding=1, bias=False),
-            nn.GroupNorm(in_channels),
+            get_group_norm(in_channels),
             nn.ReLU(inplace=True),
         )
         self.alpha = nn.Parameter(torch.tensor(0.0))
@@ -70,13 +84,13 @@ class Encoder(HelperModule):
             layers.append(
                 nn.Sequential(
                     nn.Conv3d(c_channel, n_channel, 4, stride=2, padding=1),
-                    nn.GroupNorm(n_channel),
+                    get_group_norm(n_channel),
                     nn.ReLU(inplace=True),
                 )
             )
             c_channel, n_channel = n_channel, hidden_channels
         layers.append(nn.Conv3d(c_channel, n_channel, 3, stride=1, padding=1))
-        layers.append(nn.GroupNorm(n_channel))
+        layers.append(get_group_norm(n_channel))
         layers.append(ResidualStack(n_channel, res_channels, nb_res_layers, use_checkpoint=use_checkpoint))
 
         self.layers = nn.Sequential(*layers)
@@ -123,7 +137,7 @@ class Decoder(HelperModule):
             layers.append(
                 nn.Sequential(
                     nn.ConvTranspose3d(c_channel, n_channel, 4, stride=2, padding=1),
-                    nn.GroupNorm(n_channel),
+                    get_group_norm(n_channel),
                     nn.ReLU(inplace=True),
                 )
             )
@@ -138,11 +152,11 @@ class Decoder(HelperModule):
             # concatenated before projecting to out_channels.
             self.final_conv = nn.Sequential(
                 nn.Conv3d(c_channel + style_channels, out_channels, 3, stride=1, padding=1),
-                nn.GroupNorm(out_channels),
+                get_group_norm(out_channels),
             )
         else:
             layers.append(nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1))
-            layers.append(nn.GroupNorm(out_channels))
+            layers.append(get_group_norm(out_channels))
             self.layers = nn.Sequential(*layers)
             self.final_conv = None
 
@@ -248,7 +262,7 @@ class Upscaler(HelperModule):
             layers = []
             for _ in range(upscale_steps):
                 layers.append(nn.ConvTranspose3d(embed_dim, embed_dim, 4, stride=2, padding=1))
-                layers.append(nn.GroupNorm(embed_dim))
+                layers.append(get_group_norm(embed_dim))
                 layers.append(nn.ReLU(inplace=True))
             self.stages.append(nn.Sequential(*layers))
 
