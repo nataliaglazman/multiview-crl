@@ -1306,40 +1306,88 @@ class MyCustomDataset(MultiviewDataset):
     # Caching helpers
     # ------------------------------------------------------------------
 
-    def _build_cache(self, deterministic_transform):
-        """Pre-process all volumes through deterministic transforms and store in RAM."""
+    @staticmethod
+    def _transform_one(args):
+        """Process a single subject through the deterministic transform pipeline.
+
+        This is a module-level-compatible static method so it can be pickled by
+        multiprocessing workers.
+        """
+        idx, item, deterministic_transform = args
+        data_dict = {
+            "image_t1": item["image"],
+            "image_t2": item["z_image"],
+            "label": item["label"],
+        }
+        transformed = deterministic_transform(data_dict)
+        cached = {
+            "image_t1": transformed["image_t1"],
+            "image_t2": transformed["image_t2"],
+            "label": transformed["label"],
+        }
+        return idx, cached
+
+    def _build_cache(self, deterministic_transform, num_workers=None):
+        """Pre-process all volumes through deterministic transforms and store in RAM.
+
+        Uses multiprocessing to parallelise the heavy resampling/loading work
+        across CPU cores.  Falls back to sequential processing if ``num_workers``
+        is explicitly set to 0 or if the process pool fails to start.
+
+        Args:
+            deterministic_transform: MONAI ``Compose`` of deterministic transforms.
+            num_workers: Number of parallel workers.  Defaults to
+                ``min(os.cpu_count(), 8)`` — capped at 8 to avoid excessive RAM
+                pressure from too many volumes being processed simultaneously.
+        """
         import logging
+        import os
         import sys
+        from multiprocessing import Pool
 
         logger = logging.getLogger("multiview_crl")
-        logger.info(f"Caching {self.num_samples} volumes in memory (this may take a few minutes)...")
 
-        self._cache = []
+        if num_workers is None:
+            num_workers = min(os.cpu_count() or 1, 8)
+
+        logger.info(f"Caching {self.num_samples} volumes in memory " f"({num_workers} workers)...")
+
+        # Prepare arguments for each worker
+        work_args = [(i, self.items[i], deterministic_transform) for i in range(self.num_samples)]
+
+        self._cache = [None] * self.num_samples
         mem_bytes = 0
-        for i in range(self.num_samples):
-            data_dict = {
-                "image_t1": self.items[i]["image"],
-                "image_t2": self.items[i]["z_image"],
-                "label": self.items[i]["label"],
-            }
-            transformed = deterministic_transform(data_dict)
-            # Keep only the tensors we need (drop intermediate masks etc.)
-            cached = {
-                "image_t1": transformed["image_t1"],
-                "image_t2": transformed["image_t2"],
-                "label": transformed["label"],
-            }
-            for v in cached.values():
-                if hasattr(v, "nelement"):
-                    mem_bytes += v.nelement() * v.element_size()
-            self._cache.append(cached)
+        done = 0
 
-            if (i + 1) % 50 == 0 or i == self.num_samples - 1:
-                print(
-                    f"  Cached {i + 1}/{self.num_samples} " f"({mem_bytes / 1e9:.2f} GB)",
-                    file=sys.stderr,
-                    flush=True,
-                )
+        if num_workers > 0:
+            # imap_unordered lets us report progress as results arrive
+            with Pool(processes=num_workers) as pool:
+                for idx, cached in pool.imap_unordered(MyCustomDataset._transform_one, work_args, chunksize=2):
+                    self._cache[idx] = cached
+                    for v in cached.values():
+                        if hasattr(v, "nelement"):
+                            mem_bytes += v.nelement() * v.element_size()
+                    done += 1
+                    if done % 50 == 0 or done == self.num_samples:
+                        print(
+                            f"  Cached {done}/{self.num_samples} " f"({mem_bytes / 1e9:.2f} GB)",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+        else:
+            # Sequential fallback
+            for idx, cached in map(MyCustomDataset._transform_one, work_args):
+                self._cache[idx] = cached
+                for v in cached.values():
+                    if hasattr(v, "nelement"):
+                        mem_bytes += v.nelement() * v.element_size()
+                done += 1
+                if done % 50 == 0 or done == self.num_samples:
+                    print(
+                        f"  Cached {done}/{self.num_samples} " f"({mem_bytes / 1e9:.2f} GB)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
         logger.info(f"Dataset caching complete: {self.num_samples} samples, {mem_bytes / 1e9:.2f} GB")
 
