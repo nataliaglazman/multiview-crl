@@ -578,7 +578,7 @@ class VQVAE(HelperModule):
 
         for l in range(self.nb_levels - 1, -1, -1):
             codebook, decoder = self.codebooks[l], self.decoders[l]
-            code_q = codebook.embed_code(cs[l]).permute(0, 3, 1, 2)
+            code_q = codebook.embed_code(cs[l]).permute(0, 4, 1, 2, 3)
             code_outputs = [self.upscalers[i](c, upscale_counts[i]) for i, c in enumerate(code_outputs)]
             upscale_counts = [u + 1 for u in upscale_counts]
 
