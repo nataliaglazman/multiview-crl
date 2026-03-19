@@ -579,7 +579,19 @@ class VQVAE(HelperModule):
         for l in range(self.nb_levels - 1, -1, -1):
             codebook, decoder = self.codebooks[l], self.decoders[l]
             code_q = codebook.embed_code(cs[l]).permute(0, 4, 1, 2, 3)
-            code_outputs = [self.upscalers[i](c, upscale_counts[i]) for i, c in enumerate(code_outputs)]
+            target_size = code_q.shape[2:]
+            upscaled_codes = []
+            for i, c in enumerate(code_outputs):
+                upscaled = self.upscalers[i](c, upscale_counts[i])
+                if upscaled.shape[2:] != target_size:
+                    upscaled = F.interpolate(
+                        upscaled,
+                        size=target_size,
+                        mode="trilinear",
+                        align_corners=False,
+                    )
+                upscaled_codes.append(upscaled)
+            code_outputs = upscaled_codes
             upscale_counts = [u + 1 for u in upscale_counts]
 
             decoder_in = torch.cat([code_q, *code_outputs], axis=1)
