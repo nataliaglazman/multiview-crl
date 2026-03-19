@@ -24,6 +24,7 @@ def save_checkpoint(
     recon_loss,
     vq_loss,
     scheduler=None,
+    best_loss=None,
 ) -> None:
     """
     Save a training checkpoint to ``args.save_dir``.
@@ -43,6 +44,7 @@ def save_checkpoint(
         recon_loss: Scalar reconstruction loss value.
         vq_loss: Scalar VQ commitment loss value.
         scheduler: Optional LR scheduler whose state should be saved.
+        best_loss: When not None, also saves a ``*_best.pt`` copy of the checkpoint.
     """
     if args.encoder_type == "vqvae":
         checkpoint_path = os.path.join(args.save_dir, "vqvae_model.pt")
@@ -85,6 +87,13 @@ def save_checkpoint(
             torch.save(encoders[m_idx].state_dict(), encoder_path)
         torch.save(checkpoint, checkpoint_path)
         logger.info(f"[CHECKPOINT] Step {step}: Saved checkpoint to {args.save_dir}")
+
+    # ── Best-model tracking ─────────────────────────────────────────────
+    if best_loss is not None:
+        suffix = "vqvae_best.pt" if args.encoder_type == "vqvae" else "checkpoint_best.pt"
+        best_path = os.path.join(args.save_dir, suffix)
+        torch.save(checkpoint, best_path)
+        logger.info(f"[CHECKPOINT] Step {step}: New best model (loss={best_loss:.4f}) → {best_path}")
 
     if args.save_all_checkpoints:
         m_idx = len(args.modalities) - 1

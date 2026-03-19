@@ -696,6 +696,17 @@ def main(args):
         }
         step = load_checkpoint(args, encoders, decoders, optimizer, device, loss_deques, scheduler=scheduler)
 
+        # Restore best loss from best checkpoint if resuming
+        best_total_loss = float("inf")
+        best_ckpt_path = os.path.join(
+            args.save_dir, "vqvae_best.pt" if args.encoder_type == "vqvae" else "checkpoint_best.pt"
+        )
+        if getattr(args, "resume_training", False) and os.path.exists(best_ckpt_path):
+            best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
+            best_total_loss = best_ckpt.get("loss", float("inf"))
+            logger.info(f"  Restored best loss: {best_total_loss:.4f} from {best_ckpt_path}")
+            del best_ckpt
+
         oom_count = 0
         MAX_OOM_RETRIES = 5
 
@@ -776,6 +787,13 @@ def main(args):
                         save_vqvae_decoded_images(encoders[0], data, args, step)
 
                     if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
+                        # Check if rolling average loss is a new best
+                        rolling_loss = np.mean(loss_values) if len(loss_values) == loss_values.maxlen else None
+                        new_best = None
+                        if rolling_loss is not None and rolling_loss < best_total_loss:
+                            best_total_loss = rolling_loss
+                            new_best = rolling_loss
+
                         save_checkpoint(
                             args,
                             step,
@@ -787,6 +805,7 @@ def main(args):
                             recon_loss,
                             vq_loss,
                             scheduler=scheduler,
+                            best_loss=new_best,
                         )
 
                     step += 1
