@@ -421,7 +421,7 @@ class VQVAE(HelperModule):
         for i, enc in enumerate(self.encoders):
             spatial_out = enc(enc_input)
 
-            if i == 0 and self.content_proj is not None:
+            if self.content_proj is not None:
                 pooled = spatial_out.mean(dim=[2, 3, 4])  # (B, hidden_channels)
                 if pool_only:
                     encoder_pools.append(pooled)
@@ -535,7 +535,7 @@ class VQVAE(HelperModule):
                 upscale_counts = [u + 1 for u in upscale_counts]
 
                 decoder_in = torch.cat([code_q, *code_outputs], axis=1)
-                if l == 0 and self.inject_style_to_decoder and style_spatial is not None:
+                if self.inject_style_to_decoder and style_spatial is not None:
                     # decoders[0] was built with style_channels > 0; pass style_spatial
                     # so it can be concatenated onto the penultimate feature map.
                     decoder_outputs.append(decoder(decoder_in, style=style_spatial))
@@ -595,7 +595,7 @@ class VQVAE(HelperModule):
             upscale_counts = [u + 1 for u in upscale_counts]
 
             decoder_in = torch.cat([code_q, *code_outputs], axis=1)
-            if l == 0 and self.inject_style_to_decoder:
+            if self.inject_style_to_decoder:
                 if style is None:
                     # Provide a zero placeholder so the decoder's final_conv
                     # receives the expected number of channels.
