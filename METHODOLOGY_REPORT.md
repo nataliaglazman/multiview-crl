@@ -5,12 +5,13 @@
 **Project:** `multiview-crl`
 **Dataset:** ADNI (Alzheimer's Disease Neuroimaging Initiative) - Registered T1 and T2 MRI scans
 **Date:** February 2026
-**Last Updated:** 25 February 2026
+**Last Updated:** 20 March 2026
 
 ### Changelog
 
 | Date | Changes |
 |------|--------|
+| 20 Mar 2026 | Added best-model checkpointing (`vqvae_best.pt`) with rolling-average loss tracking; fixed `decode_codes` 2D→3D permute bug (`permute(0,3,1,2)` → `permute(0,4,1,2,3)` for 3D volumes); added codebook analysis to evaluation notebook (Sections 11–16): codebook usage histograms by diagnosis, mutual information & chi-squared discriminativeness, PCA/t-SNE of codebook usage, code replacement & reconstruction with CN vs AD comparison; added NIfTI export of reconstructed volumes with correct post-transform affine; fixed t-SNE content-only filtering at level 0; fixed `last_id_outputs` leaked loop variable bug |
 | 25 Feb 2026 | Added style injection to decoder (`--inject-style-to-decoder`): style channels from encoder level-0 concatenated to penultimate decoder feature map before final conv; added `--content-dim` / `--total-dim` CLI args replacing hardcoded 256/256 content-style split; improved checkpointing with auto-resume and architecture compatibility check; added Docker/RunAI cluster scripts (`docker/`); fixed Gumbel mask bool-cast bug in `models/vqvae.py`; updated `eval/view_latents.ipynb` imports to match project package structure; disabled flake8 pre-commit hook |
 | 23 Feb 2026 | Added MoCo contrastive training scheme (momentum encoder, per-level queues, `moco_infonce_loss`); refactored `main_multimodal.py` into six focused modules (`utils/config.py`, `utils/logging_setup.py`, `utils/checkpointing.py`, `utils/visualisation.py`, `eval/evaluation.py`, `training/main_multimodal.py`); updated file structure diagram; updated all CLI argument tables with MoCo args; resolved all pre-commit hook failures (flake8, isort/black conflict, check-docstring-first); added `pyproject.toml` with isort profile |
 | 19 Feb 2026 | Removed unused `use_depthwise` parameter from residual blocks; added gradient checkpointing to `ResidualStack`; moved TensorBoard writer inside training block, now logs per-step scalars + learning rate; documented gradient accumulation, skip-recon-ratio, image spacing/cropping options; updated `BaselineLoss` documentation (L1 + FFT + LPIPS); added `view_latents.ipynb` to file structure; updated default `--vqvae-nb-entries` to 384; added checkpoint compatibility notes |
@@ -554,6 +555,19 @@ For each step:
 | CSV logging (smoothed avg) | Every `--log-steps` steps (default 100) | `{save_dir}/Training.csv` |
 | Decoded image saving | Every 200 steps | `{save_dir}/decoded_images/` |
 | Model checkpointing | Every `--checkpoint-steps` steps (default 1000) | `{save_dir}/vqvae_model.pt` |
+| Best-model checkpoint | When rolling avg loss improves | `{save_dir}/vqvae_best.pt` |
+
+**Best-Model Tracking:**
+
+The checkpointing system tracks the best model via a rolling average of the total loss. At each checkpoint step, if `len(loss_values) == maxlen` (the rolling window is full), the current rolling average is compared against the historical best. If improved, the checkpoint is saved to `vqvae_best.pt` (or `checkpoint_best.pt` for VAE mode). When resuming training, the best loss is restored from the existing best checkpoint if present.
+
+```python
+# In main_multimodal.py:
+rolling_loss = np.mean(loss_values) if len(loss_values) == loss_values.maxlen else None
+if rolling_loss is not None and rolling_loss < best_total_loss:
+    best_total_loss = rolling_loss
+    save_checkpoint(..., best_loss=rolling_loss)  # → vqvae_best.pt
+```
 
 **TensorBoard Metrics (per step):**
 - `Loss/Total` — total training loss
@@ -563,10 +577,11 @@ For each step:
 - `LR` — current learning rate
 
 **Checkpoint Contents:**
-- Model weights (`vqvae_model.pt` or `checkpoint.pt`)
+- Model weights (`vqvae_model.pt` or `checkpoint.pt`; best model in `vqvae_best.pt` or `checkpoint_best.pt`)
 - Optimizer state
 - Current step and last loss values (total, contrastive, recon, VQ)
 - If `--use-moco`: per-level queue tensors and queue pointers (explicit `moco_queues` / `moco_queue_ptrs` keys)
+- Best-model checkpoint includes `best_loss` field for resume tracking
 
 **Auto-Resume with Architecture Compatibility Check:**
 
@@ -690,7 +705,8 @@ results/
     └── {vqvae_model_id}/
         ├── settings.json           # Training configuration
         ├── Training.csv            # Loss history (CSV)
-        ├── vqvae_model.pt          # Full VQ-VAE-2 checkpoint (incl. MoCo queues if used)
+        ├── vqvae_model.pt          # Full VQ-VAE-2 checkpoint — latest (incl. MoCo queues if used)
+        ├── vqvae_best.pt           # Best VQ-VAE-2 checkpoint (by rolling avg total loss)
         ├── tensorboard/            # TensorBoard event files
         └── decoded_images/
             ├── step_00001_original.nii.gz
@@ -913,24 +929,51 @@ style_idx   = torch.where(~content_mask_bool)[-1].tolist()
 
 This affects all checkpoints trained after commit `d968f53` (24 Feb 2026). Checkpoints trained before this fix may have had unreliable content/style channel splits.
 
+### 10.5 `decode_codes` 3D Volume Fix
+
+The `decode_codes` method in `models/vqvae.py` (used for decoding from raw codebook indices without a forward pass) contained a 2D→3D adaptation bug. The `embed_code` call on 3D spatial indices `(B, D, H, W)` returns a 5D tensor `(B, D, H, W, embed_dim)`, but the permute call used 4D indices:
+
+```python
+# Before (buggy — line 581):
+code_q = codebook.embed_code(cs[l]).permute(0, 3, 1, 2)  # 4D permute on 5D tensor
+
+# After (correct):
+code_q = codebook.embed_code(cs[l]).permute(0, 4, 1, 2, 3)  # channels-first for 3D
+```
+
+This only affects the `decode_codes` path (used in evaluation for code replacement experiments). The standard `forward()` path was unaffected because it uses `quantize()` which handles the permutation correctly.
+
 ---
 
 ## 11. Latent Visualization (`eval/view_latents.ipynb`)
 
-The notebook extracts and visualizes latent representations from trained VQ-VAE-2 models:
+The notebook extracts and visualizes latent representations from trained VQ-VAE-2 models. It is organized into 16 sections:
 
-1. **Load checkpoint** — handles `.blocks.` → `.stack.` key conversion for backward compatibility
-2. **Load ADNI data** — supports both original resolution and 2mm downsampled modes
-3. **Extract encoder features** — global average pooling of each hierarchical level
-4. **Dimensionality reduction** — PCA and t-SNE on pooled features
-5. **Visualization** — scatter plots colored by diagnostic label (AD, MCI, CN)
-6. **Paired distance analysis** — compare T1 vs T2 latent distances per subject
-7. **Diagnostic prediction** — 5-fold CV logistic regression and random forest per feature set
-8. **Reconstruction visualization** — mid-sagittal slice comparison of originals vs reconstructed
+### 11.1 Core Analysis (Sections 1–10)
 
-**Import structure (updated 25 Feb 2026):**
+1. **Configuration & imports** — checkpoint path (supports `vqvae_best.pt` or `vqvae_model.pt`), data paths, device setup
+2. **Load checkpoint** — handles `.blocks.` → `.stack.` key conversion for backward compatibility
+3. **Load ADNI data** — supports both original resolution and 2mm downsampled modes
+4. **Extract encoder features** — global average pooling of each hierarchical level
+5. **PCA** — content-only filtering at level 0 (uses Gumbel mask `content_idx`), coloured by diagnosis (AD, MCI, CN) and modality (T1, T2)
+6. **t-SNE** — same content-only filtering as PCA to prevent style channels from dominating the embedding
+7. **Paired distance analysis** — compare T1 vs T2 latent distances per subject
+8. **Diagnostic prediction** — 5-fold CV logistic regression and random forest per feature set (content-only, style-only, all, per-level)
+9. **Reconstruction visualization** — mid-sagittal slice comparison of originals vs reconstructed
+10. **Content/style embedding statistics** — norm distributions, correlation matrices
 
-The notebook lives in `eval/` but imports from the project root packages. The first cell now adds the project root to `sys.path` and uses fully-qualified module paths:
+### 11.2 Codebook Analysis (Sections 11–16)
+
+11. **Codebook index extraction** — extracts discrete codebook indices at all levels for every subject (T1 + T2); stores per-subject normalized usage histograms; keeps one T1 example per diagnosis class (CN, AD, MCI) for code-replacement demo; captures MONAI MetaTensor affine for NIfTI export
+12. **Codebook usage by diagnosis** — per-level bar charts showing mean code frequency by class (CN, MCI, AD) and stacked heatmaps; identifies class-specific code utilisation patterns
+13. **Mutual information & chi-squared discriminativeness** — for each code at each level, computes MI(code_present, diagnosis_label) and chi-squared test of independence; ranks codes by discriminative power; prints top-10 most discriminative codes per level
+14. **PCA & t-SNE of codebook usage histograms** — treats each subject's codebook histogram as a feature vector; produces per-level and combined (concatenated across levels) embeddings; coloured by diagnosis and modality
+15. **Code replacement & reconstruction (CN vs AD)** — replaces the most common code at a target level with the least common; decodes back to image space using `decode_codes`; compares the effect on a healthy (CN) vs diseased (AD) subject side by side; prints embedding diagnostics (L2 distance, cosine similarity between swapped codes); shared intensity scales for direct visual comparison
+16. **NIfTI export** — saves original input, reconstruction, code-modified reconstruction, and absolute difference map as `.nii.gz` files for each class; uses post-transform affine from MONAI MetaTensor (or constructs fallback from preprocessing params); files can be viewed in FSLeyes / ITK-SNAP / 3D Slicer
+
+### 11.3 Import Structure
+
+The notebook lives in `eval/` but imports from the project root packages. The first cell adds the project root to `sys.path` and uses fully-qualified module paths:
 
 ```python
 import sys, os
@@ -947,35 +990,61 @@ The transforms cell maps `RESAMPLE_MODE` to a `spacing` float (`1.0` or `2.0`) c
 
 ## 12. Future Work and Considerations
 
-1. **MoCo Tuning:**
-   - Experiment with different queue sizes (256 → 8192) and momentum values (0.99 → 0.9999)
-   - Implement a warm-up phase for the queue to reduce cold-start noise
-   - Compare MoCo vs standard InfoNCE on downstream classification tasks
+### 12.1 Preventing Modality Leakage into Content
 
-2. **VQ-VAE-2 Improvements:**
-   - Increase codebook size for more expressivity
-   - Add PixelSNAIL prior for generative sampling
-   - Experiment with different scaling rates
+Current observation: content latents at deeper levels may still carry some modality (T1 vs T2) information despite the contrastive objective. Approaches under consideration:
 
-3. **Evaluation Metrics:** Implement:
-   - DCI (Disentanglement, Completeness, Informativeness) scores
-   - Downstream classification (e.g., Alzheimer's vs. healthy)
-   - Cross-view reconstruction (encode T1, decode T2)
+1. **Adversarial modality prediction (gradient reversal)** — Add an MLP head that predicts modality from content features, trained with a gradient reversal layer (GRL). The encoder learns to make content features that fool the modality discriminator. Most established approach (Ganin et al., DANN).
 
-4. **Content/Style Analysis:**
-   - Visualize learned content vs style dimensions
-   - Perform style transfer experiments (apply T1 style to T2 content)
+2. **HSIC regularization** — Add a kernel-based penalty (Hilbert-Schmidt Independence Criterion) that directly measures and penalizes statistical dependence between content features and modality labels. Simpler than adversarial training (no minimax instability).
 
-5. **Hyperparameter Tuning:**
-   - VQ commitment weight optimization
-   - Content/style ratio exploration
-   - Temperature scheduling for contrastive loss
+3. **Tighter information bottleneck at `content_proj`** — Reduce output dimension, add noise injection (variational information bottleneck), or apply channel-wise dropout at the content projection layer.
 
-6. **Memory Optimization (available now):**
-   - Gradient checkpointing (`--gradient-checkpointing`)
-   - Gradient accumulation (`--gradient-accumulation-steps N`)
-   - Skip reconstruction (`--skip-recon-ratio R`)
-   - MoCo removes the need for large batches, directly reducing GPU memory pressure
+4. **Modality-specific normalization at level 0** — Use separate Instance Norm / Batch Norm statistics for T1 and T2 at the first encoder level, absorbing modality-specific intensity distributions before features enter `content_proj`.
+
+### 12.2 Identifiability Evaluation
+
+Further evaluations to demonstrate that learned latents are identifiable:
+
+1. **DCI (Disentanglement, Completeness, Informativeness) scores** — already partially implemented in `eval/dci.py`
+2. **Downstream classification** — Alzheimer's vs. healthy using content-only features (5-fold CV logistic regression and random forest already in notebook)
+3. **Cross-view reconstruction** — encode T1, decode with T2 style channels (and vice versa)
+4. **Style transfer experiments** — apply T1 style to T2 content to verify separation
+5. **Position-wise codebook pair analysis** — for each spatial position at each level, identify the most common code pairs across subjects and assess whether they carry class-discriminative information
+
+### 12.3 Codebook Analysis (Completed)
+
+The following analyses have been implemented in `eval/view_latents.ipynb` (Sections 11–16):
+- Codebook usage histograms by diagnosis class
+- Mutual information and chi-squared tests for code discriminativeness
+- PCA/t-SNE of codebook usage histograms
+- Code replacement & reconstruction with CN vs AD comparison
+- NIfTI export for interactive 3D inspection
+
+### 12.4 MoCo Tuning
+
+- Experiment with different queue sizes (256 → 8192) and momentum values (0.99 → 0.9999)
+- Implement a warm-up phase for the queue to reduce cold-start noise
+- Compare MoCo vs standard InfoNCE on downstream classification tasks
+
+### 12.5 VQ-VAE-2 Improvements
+
+- Increase codebook size for more expressivity
+- Add PixelSNAIL prior for generative sampling
+- Experiment with different scaling rates
+
+### 12.6 Hyperparameter Tuning
+
+- VQ commitment weight optimization
+- Content/style ratio exploration
+- Temperature scheduling for contrastive loss
+
+### 12.7 Memory Optimization (available now)
+
+- Gradient checkpointing (`--gradient-checkpointing`)
+- Gradient accumulation (`--gradient-accumulation-steps N`)
+- Skip reconstruction (`--skip-recon-ratio R`)
+- MoCo removes the need for large batches, directly reducing GPU memory pressure
 
 ---
 
@@ -998,5 +1067,12 @@ This implementation provides a framework for learning disentangled representatio
 - **Content selection at Level 0** propagated proportionally to higher levels
 - **EMA codebook updates** for stable training
 - **Auto-resume** with architecture compatibility check — safe to rerun after changing architecture flags
+- **Best-model tracking** via rolling average total loss (`vqvae_best.pt`)
+
+### Evaluation:
+- **Codebook analysis** — usage histograms, MI/chi-squared discriminativeness, PCA/t-SNE of codebook usage per diagnosis class
+- **Code replacement** — swap codebook entries and compare reconstructions between CN and AD subjects
+- **NIfTI export** — save reconstructed volumes with correct affine for 3D inspection in FSLeyes / ITK-SNAP
+- **Downstream classification** — logistic regression and random forest on content-only, style-only, and combined features
 
 Both models learn to encode shared anatomical information in content dimensions while allowing style dimensions to capture modality-specific (T1 vs T2) characteristics.
