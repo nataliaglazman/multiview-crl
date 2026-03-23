@@ -1342,6 +1342,8 @@ class MyCustomDataset(MultiviewDataset):
         # Skip if already cached on disk from a previous (possibly interrupted) run
         if os.path.exists(save_path):
             return idx, save_path
+        # Ensure parent dir exists — NFS workers may not see it immediately
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         data_dict = {
             "image_t1": item["image"],
             "image_t2": item["z_image"],
