@@ -1562,25 +1562,28 @@ class MyCustomDataset(MultiviewDataset):
         return np.array([[]]), []
 
     def _load_cached(self, idx):
-        """Return the cached dict for sample *idx*, loading from disk if needed."""
-        cached = self._cache[idx]
-        if cached is not None:
-            return cached
-        # Persistent disk cache: lazy-load and mmap the tensor file.
-        # weights_only=True is safe here — we only saved our own tensors.
+        """Return the cached dict for sample *idx*.
+
+        RAM-only cache: direct lookup.
+        Persistent disk cache: load from .pt file each time without retaining
+        in ``self._cache`` — the OS page cache keeps hot files in memory, so
+        repeated reads are fast without duplicating tensors on the Python heap.
+        """
+        # RAM-only cache path
+        if not self._cache_persistent:
+            return self._cache[idx]
+
+        # Persistent disk cache path — load and release, no accumulation
         import torch as _torch
 
         try:
-            cached = _torch.load(self._cache_paths[idx], map_location="cpu", weights_only=True)
+            return _torch.load(self._cache_paths[idx], map_location="cpu", weights_only=True)
         except Exception:
-            # Old cache files may contain MONAI MetaTensors with numpy globals;
-            # fall back to weights_only=False and convert to plain tensors.
+            # Old cache files may contain MONAI MetaTensors with numpy globals
             cached = _torch.load(self._cache_paths[idx], map_location="cpu", weights_only=False)
-            cached = {
+            return {
                 k: _torch.as_tensor(v).clone() if hasattr(v, "__torch_function__") else v for k, v in cached.items()
             }
-        self._cache[idx] = cached
-        return cached
 
     def __getitem__(self, idx):
         """Return dict with T1 and T2 as two views."""
