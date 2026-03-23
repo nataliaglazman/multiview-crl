@@ -1350,10 +1350,15 @@ class MyCustomDataset(MultiviewDataset):
             "label": item["label"],
         }
         transformed = deterministic_transform(data_dict)
+        # Convert to plain torch tensors — MONAI MetaTensors carry numpy
+        # internals that torch.load(weights_only=True) rejects.
+        t1 = _torch.as_tensor(transformed["image_t1"]).clone().contiguous()
+        t2 = _torch.as_tensor(transformed["image_t2"]).clone().contiguous()
+        lbl = int(transformed["label"]) if not isinstance(transformed["label"], int) else transformed["label"]
         cached = {
-            "image_t1": transformed["image_t1"].contiguous(),
-            "image_t2": transformed["image_t2"].contiguous(),
-            "label": transformed["label"],
+            "image_t1": t1,
+            "image_t2": t2,
+            "label": lbl,
         }
         # Atomic write: save to a temp file then rename, so a crash never
         # leaves a half-written .pt that would be mistaken for a valid cache.
@@ -1565,7 +1570,15 @@ class MyCustomDataset(MultiviewDataset):
         # weights_only=True is safe here — we only saved our own tensors.
         import torch as _torch
 
-        cached = _torch.load(self._cache_paths[idx], map_location="cpu", weights_only=True)
+        try:
+            cached = _torch.load(self._cache_paths[idx], map_location="cpu", weights_only=True)
+        except Exception:
+            # Old cache files may contain MONAI MetaTensors with numpy globals;
+            # fall back to weights_only=False and convert to plain tensors.
+            cached = _torch.load(self._cache_paths[idx], map_location="cpu", weights_only=False)
+            cached = {
+                k: _torch.as_tensor(v).clone() if hasattr(v, "__torch_function__") else v for k, v in cached.items()
+            }
         self._cache[idx] = cached
         return cached
 
