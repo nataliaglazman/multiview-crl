@@ -179,12 +179,10 @@ def train_step(
                 n_channels = hz_level.shape[-1]
                 content_size = max(1, int(content_ratio * n_channels))
 
-                if _raw_vqvae.channel_logits is not None:
-                    # Fix #1: use learnable channel_logits instead of batch-derived
-                    # statistics — consistent across batches and co-trained with the
-                    # model via reconstruction gradients through the soft Gumbel mask.
-                    # Fix #4: eval mode gets deterministic top-k (no Gumbel noise)
-                    # so content_idx is identical for every evaluation batch.
+                if _raw_vqvae.channel_logits is not None and level_idx == 0:
+                    # Level 0 pools from embed_dim — use learnable channel_logits
+                    # for the content/style mask.  Levels 1+ pool from
+                    # hidden_channels and fall through to batch-statistics below.
                     logits = _raw_vqvae.channel_logits.detach().unsqueeze(0)
                     if _raw_vqvae.training:
                         content_masks = utils.gumbel_softmax_mask(

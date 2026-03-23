@@ -423,11 +423,15 @@ class VQVAE(HelperModule):
         # Encoder forward pass — no content masking here; masking happens
         # after the codebook projection in the embed_dim space.
         enc_input = x
+        encoder_outputs_for_pool = {}  # level → (B, hidden_channels) pool for levels 1+
         for i, enc in enumerate(self.encoders):
             enc_input = enc(enc_input)
             encoder_outputs.append(enc_input)
             if pool_only and self.channel_logits is None:
                 encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
+            elif pool_only and self.channel_logits is not None and i > 0:
+                # Save hidden_channels pool for levels 1+ (used in codebook loop)
+                encoder_outputs_for_pool[i] = enc_input.mean(dim=[2, 3, 4])
 
         del x, enc_input
 
@@ -502,7 +506,10 @@ class VQVAE(HelperModule):
                 del masked
             else:
                 if pool_only and self.channel_logits is not None:
-                    codebook_pools.append((l, projected.mean(dim=[2, 3, 4])))
+                    # Levels 1+ pool from hidden_channels (encoder output) —
+                    # NOT from the codebook projection, which expects decoder
+                    # conditioning we don't have in the key encoder path.
+                    codebook_pools.append((l, encoder_outputs_for_pool[l]))
                 code_q, code_d, emb_id = codebook.quantize(projected)
 
             del projected
@@ -663,16 +670,18 @@ class MoCoEncoder(nn.Module):
             for p in enc.parameters():
                 p.requires_grad = False
 
-        # ---- Momentum codebook projections (conv_in only, no quantization) --
+        # ---- Momentum level-0 codebook projection (conv_in only) -----------
         # When channel_logits is active, level-0 keys must be pooled from the
-        # embed_dim space (matching the online encoder).  We deep-copy the
-        # codebook conv_in layers for this purpose.
-        self.momentum_codebook_projs = nn.ModuleList()
-        for cb in raw_vqvae.codebooks:
-            proj = copy.deepcopy(cb.conv_in)
-            for p in proj.parameters():
+        # embed_dim space (matching the online encoder).  Only level 0's
+        # conv_in accepts raw encoder output (hidden_channels); levels 1+
+        # expect encoder+decoder concatenated input, so we pool those from
+        # hidden_channels directly.
+        if raw_vqvae.channel_logits is not None:
+            self.momentum_level0_proj = copy.deepcopy(raw_vqvae.codebooks[-1].conv_in)
+            for p in self.momentum_level0_proj.parameters():
                 p.requires_grad = False
-            self.momentum_codebook_projs.append(proj)
+        else:
+            self.momentum_level0_proj = None
 
         # ---- Per-level queues -----------------------------------------------
         hidden_channels = self._infer_hidden_channels(raw_vqvae)
@@ -680,8 +689,8 @@ class MoCoEncoder(nn.Module):
 
         for lvl in range(nb_levels):
             # Level 0 pools from embed_dim when channel_logits is active;
-            # other levels pool from embed_dim too (codebook projection).
-            if raw_vqvae.channel_logits is not None:
+            # levels 1+ always pool from hidden_channels.
+            if lvl == 0 and raw_vqvae.channel_logits is not None:
                 q = F.normalize(torch.randn(embed_dim, queue_size), dim=0)
             else:
                 q = F.normalize(torch.randn(hidden_channels, queue_size), dim=0)
@@ -717,8 +726,10 @@ class MoCoEncoder(nn.Module):
         for online_enc, mom_enc in zip(raw_vqvae.encoders, self.momentum_encoders):
             for p_online, p_mom in zip(online_enc.parameters(), mom_enc.parameters()):
                 p_mom.data.mul_(self.momentum).add_(p_online.data, alpha=1.0 - self.momentum)
-        for online_cb, mom_proj in zip(raw_vqvae.codebooks, self.momentum_codebook_projs):
-            for p_online, p_mom in zip(online_cb.conv_in.parameters(), mom_proj.parameters()):
+        if self.momentum_level0_proj is not None:
+            # Level-0 codebook is the last in the ModuleList (bottom level)
+            level0_cb = raw_vqvae.codebooks[-1]
+            for p_online, p_mom in zip(level0_cb.conv_in.parameters(), self.momentum_level0_proj.parameters()):
                 p_mom.data.mul_(self.momentum).add_(p_online.data, alpha=1.0 - self.momentum)
 
     # ------------------------------------------------------------------
@@ -756,13 +767,12 @@ class MoCoEncoder(nn.Module):
         if not use_embed_pool:
             return [out.mean(dim=[2, 3, 4]) for out in encoder_outputs]
 
-        # Pool from embed_dim space via momentum codebook projections
-        # (mirrors the online encoder's codebook-loop pooling)
+        # Level 0: pool from embed_dim via momentum conv_in projection
+        # Levels 1+: pool from hidden_channels (no decoder conditioning available)
         key_pools = [None] * self.nb_levels
-        for lvl in range(self.nb_levels):
-            proj = self.momentum_codebook_projs[lvl]
-            projected = proj(encoder_outputs[lvl])
-            key_pools[lvl] = projected.mean(dim=[2, 3, 4])
+        key_pools[0] = self.momentum_level0_proj(encoder_outputs[0]).mean(dim=[2, 3, 4])
+        for lvl in range(1, self.nb_levels):
+            key_pools[lvl] = encoder_outputs[lvl].mean(dim=[2, 3, 4])
 
         return key_pools
 
