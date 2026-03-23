@@ -486,6 +486,7 @@ def main(args):
         spacing=getattr(args, "image_spacing", 2.0),
         crop_margin=getattr(args, "crop_margin", 0),
         cache=getattr(args, "cache_dataset", False),
+        cache_dir=getattr(args, "cache_dir", None),
         **dataset_kwargs,
     )
     logger.info(f"  Train: {len(train_dataset)} samples from {args.datapath}")

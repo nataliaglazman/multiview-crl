@@ -1249,6 +1249,7 @@ class MyCustomDataset(MultiviewDataset):
         spacing=2.0,
         crop_margin=0,
         cache=False,
+        cache_dir: str | None = None,
         **kwargs,
     ):
         super().__init__()
@@ -1274,7 +1275,7 @@ class MyCustomDataset(MultiviewDataset):
         train_transforms, val_transforms = get_transforms(spacing=self.spacing, crop_margin=self.crop_margin)
 
         if cache:
-            self._build_cache(val_transforms)
+            self._build_cache(val_transforms, cache_dir=cache_dir)
             # Augmentation-only pipeline for training (parameters mirror
             # those in utils.utils.transforms — keep in sync).
             if mode == "train":
@@ -1327,32 +1328,179 @@ class MyCustomDataset(MultiviewDataset):
         }
         return idx, cached
 
-    def _build_cache(self, deterministic_transform, num_workers=None):
-        """Pre-process all volumes through deterministic transforms and store in RAM.
+    @staticmethod
+    def _transform_and_save(args):
+        """Process a single subject and persist the result to disk.
 
-        Uses multiprocessing to parallelise the heavy resampling/loading work
-        across CPU cores.  Falls back to sequential processing if ``num_workers``
-        is explicitly set to 0 or if the process pool fails to start.
+        Used by the persistent-cache path.  Each sample is saved as a
+        separate ``.pt`` file so that partial caches are resumable and
+        individual files can be memory-mapped on load.
+        """
+        import torch as _torch
+
+        idx, item, deterministic_transform, save_path = args
+        # Skip if already cached on disk from a previous (possibly interrupted) run
+        if os.path.exists(save_path):
+            return idx, save_path
+        data_dict = {
+            "image_t1": item["image"],
+            "image_t2": item["z_image"],
+            "label": item["label"],
+        }
+        transformed = deterministic_transform(data_dict)
+        cached = {
+            "image_t1": transformed["image_t1"].contiguous(),
+            "image_t2": transformed["image_t2"].contiguous(),
+            "label": transformed["label"],
+        }
+        # Atomic write: save to a temp file then rename, so a crash never
+        # leaves a half-written .pt that would be mistaken for a valid cache.
+        tmp_path = save_path + ".tmp"
+        _torch.save(cached, tmp_path)
+        os.replace(tmp_path, save_path)
+        return idx, save_path
+
+    # ------------------------------------------------------------------
+    # Cache fingerprinting
+    # ------------------------------------------------------------------
+
+    def _cache_fingerprint(self) -> str:
+        """Compute a hex digest that uniquely identifies this dataset config.
+
+        The fingerprint covers transform parameters and the ordered set of
+        source file paths, so the disk cache is automatically invalidated when
+        any of these change.
+        """
+        import hashlib
+
+        h = hashlib.sha256()
+        h.update(f"spacing={self.spacing}".encode())
+        h.update(f"crop_margin={self.crop_margin}".encode())
+        for item in self.items:
+            h.update(item["image"].encode())
+            h.update(item["z_image"].encode())
+        return h.hexdigest()[:16]
+
+    # ------------------------------------------------------------------
+    # Cache building
+    # ------------------------------------------------------------------
+
+    def _build_cache(self, deterministic_transform, num_workers=None, cache_dir=None):
+        """Load preprocessed volumes into ``self._cache``.
+
+        If ``cache_dir`` is provided (or defaults to ``<data_dir>/.cache``),
+        the method first checks for a valid persistent disk cache:
+
+        * **Hit** — every per-sample ``.pt`` file exists and the fingerprint
+          matches.  Tensors are memory-mapped into RAM (PyTorch ≥ 2.1) so the
+          OS pages data on demand.  Startup drops from minutes to seconds.
+        * **Partial hit** — some ``.pt`` files are present (e.g. from a
+          previously interrupted run).  Only the missing samples are processed
+          and written; existing files are skipped.
+        * **Miss** — samples are processed in parallel and saved to disk for
+          next time.
+
+        When ``cache_dir is None`` the behaviour is identical to the original
+        RAM-only cache (no disk I/O).
 
         Args:
             deterministic_transform: MONAI ``Compose`` of deterministic transforms.
-            num_workers: Number of parallel workers.  Defaults to
-                ``min(os.cpu_count(), 8)`` — capped at 8 to avoid excessive RAM
-                pressure from too many volumes being processed simultaneously.
+            num_workers: Parallel workers (default ``min(cpu_count, 8)``).
+            cache_dir: Directory for persistent ``.pt`` files.  ``None`` disables
+                       disk persistence and caches in RAM only.
         """
         import logging
-        import os
         import sys
-        from multiprocessing import Pool
+        from pathlib import Path
 
         logger = logging.getLogger("multiview_crl")
 
         if num_workers is None:
             num_workers = min(os.cpu_count() or 1, 8)
 
-        logger.info(f"Caching {self.num_samples} volumes in memory " f"({num_workers} workers)...")
+        # ------------------------------------------------------------------
+        # Persistent disk cache path
+        # ------------------------------------------------------------------
+        if cache_dir is not None:
+            fingerprint = self._cache_fingerprint()
+            cache_root = Path(cache_dir) / f"preprocessed_{fingerprint}"
+            cache_root.mkdir(parents=True, exist_ok=True)
 
-        # Prepare arguments for each worker
+            # Write a human-readable manifest next to the .pt files
+            manifest = cache_root / "manifest.txt"
+            if not manifest.exists():
+                manifest.write_text(
+                    f"spacing={self.spacing}\n"
+                    f"crop_margin={self.crop_margin}\n"
+                    f"num_samples={self.num_samples}\n"
+                    f"fingerprint={fingerprint}\n"
+                )
+
+            # Check which samples are already on disk
+            pt_paths = [str(cache_root / f"{i:06d}.pt") for i in range(self.num_samples)]
+            missing_indices = [i for i, p in enumerate(pt_paths) if not os.path.exists(p)]
+
+            if len(missing_indices) == 0:
+                logger.info(
+                    f"Loading persistent cache from {cache_root} "
+                    f"({self.num_samples} samples, fingerprint={fingerprint})"
+                )
+                self._cache = [None] * self.num_samples
+                self._cache_paths = pt_paths
+                self._cache_persistent = True
+                # Don't eagerly load — __getitem__ will mmap on first access
+                return
+
+            logger.info(
+                f"Persistent cache at {cache_root}: "
+                f"{self.num_samples - len(missing_indices)}/{self.num_samples} "
+                f"already on disk, processing {len(missing_indices)} remaining "
+                f"({num_workers} workers)..."
+            )
+
+            work_args = [(i, self.items[i], deterministic_transform, pt_paths[i]) for i in missing_indices]
+
+            done = 0
+            if num_workers > 0:
+                from multiprocessing import Pool
+
+                with Pool(processes=num_workers) as pool:
+                    for idx, _ in pool.imap_unordered(
+                        MyCustomDataset._transform_and_save,
+                        work_args,
+                        chunksize=2,
+                    ):
+                        done += 1
+                        if done % 50 == 0 or done == len(missing_indices):
+                            print(
+                                f"  Processed {done}/{len(missing_indices)}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+            else:
+                for idx, _ in map(MyCustomDataset._transform_and_save, work_args):
+                    done += 1
+                    if done % 50 == 0 or done == len(missing_indices):
+                        print(
+                            f"  Processed {done}/{len(missing_indices)}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+
+            logger.info(f"Persistent cache complete: {cache_root}")
+            self._cache = [None] * self.num_samples
+            self._cache_paths = pt_paths
+            self._cache_persistent = True
+            return
+
+        # ------------------------------------------------------------------
+        # RAM-only cache (original behaviour)
+        # ------------------------------------------------------------------
+        self._cache_paths = None
+        self._cache_persistent = False
+
+        logger.info(f"Caching {self.num_samples} volumes in memory ({num_workers} workers)...")
+
         work_args = [(i, self.items[i], deterministic_transform) for i in range(self.num_samples)]
 
         self._cache = [None] * self.num_samples
@@ -1360,7 +1508,8 @@ class MyCustomDataset(MultiviewDataset):
         done = 0
 
         if num_workers > 0:
-            # imap_unordered lets us report progress as results arrive
+            from multiprocessing import Pool
+
             with Pool(processes=num_workers) as pool:
                 for idx, cached in pool.imap_unordered(MyCustomDataset._transform_one, work_args, chunksize=2):
                     self._cache[idx] = cached
@@ -1370,12 +1519,11 @@ class MyCustomDataset(MultiviewDataset):
                     done += 1
                     if done % 50 == 0 or done == self.num_samples:
                         print(
-                            f"  Cached {done}/{self.num_samples} " f"({mem_bytes / 1e9:.2f} GB)",
+                            f"  Cached {done}/{self.num_samples} ({mem_bytes / 1e9:.2f} GB)",
                             file=sys.stderr,
                             flush=True,
                         )
         else:
-            # Sequential fallback
             for idx, cached in map(MyCustomDataset._transform_one, work_args):
                 self._cache[idx] = cached
                 for v in cached.values():
@@ -1384,7 +1532,7 @@ class MyCustomDataset(MultiviewDataset):
                 done += 1
                 if done % 50 == 0 or done == self.num_samples:
                     print(
-                        f"  Cached {done}/{self.num_samples} " f"({mem_bytes / 1e9:.2f} GB)",
+                        f"  Cached {done}/{self.num_samples} ({mem_bytes / 1e9:.2f} GB)",
                         file=sys.stderr,
                         flush=True,
                     )
@@ -1406,10 +1554,23 @@ class MyCustomDataset(MultiviewDataset):
         """Sample for DCI evaluation - returns empty since we don't have latent factors."""
         return np.array([[]]), []
 
+    def _load_cached(self, idx):
+        """Return the cached dict for sample *idx*, loading from disk if needed."""
+        cached = self._cache[idx]
+        if cached is not None:
+            return cached
+        # Persistent disk cache: lazy-load and mmap the tensor file.
+        # weights_only=True is safe here — we only saved our own tensors.
+        import torch as _torch
+
+        cached = _torch.load(self._cache_paths[idx], map_location="cpu", weights_only=True)
+        self._cache[idx] = cached
+        return cached
+
     def __getitem__(self, idx):
         """Return dict with T1 and T2 as two views."""
         if self._cache is not None:
-            cached = self._cache[idx]
+            cached = self._load_cached(idx)
             # Clone tensors so augmentations don't mutate the cache
             data_dict = {k: v.clone() if hasattr(v, "clone") else v for k, v in cached.items()}
             if self._aug_transform is not None:

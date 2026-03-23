@@ -107,6 +107,17 @@ def parse_args() -> argparse.ArgumentParser:
         help="Pre-process and cache all volumes in RAM (avoids repeated disk I/O)",
     )
     parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory for persistent preprocessed-volume cache (.pt files).  "
+            "When set together with --cache-dataset, volumes are written to disk "
+            "on the first run and memory-mapped on subsequent runs, cutting startup "
+            "from minutes to seconds.  Defaults to None (RAM-only cache)."
+        ),
+    )
+    parser.add_argument(
         "--skip-recon-ratio",
         type=float,
         default=0.0,
