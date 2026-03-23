@@ -213,10 +213,14 @@ class CodeLayer(HelperModule):
         self.register_buffer("cluster_size", torch.zeros(nb_entries, dtype=torch.float32))
         self.register_buffer("embed_avg", embed.clone())
 
+    def project(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        """Project input to embed_dim via conv_in. Returns (B, embed_dim, D, H, W)."""
+        return self.conv_in(x.float())
+
     @torch.amp.autocast("cuda", enabled=False)
-    def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, float, torch.LongTensor]:
-        # x: (B, C, D, H, W) -> (B, D, H, W, embed_dim)
-        x = self.conv_in(x.float()).permute(0, 2, 3, 4, 1)
+    def quantize(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, float, torch.LongTensor]:
+        """Quantize a pre-projected (B, embed_dim, D, H, W) tensor."""
+        x = x.float().permute(0, 2, 3, 4, 1)
         flatten = x.reshape(-1, self.dim)
         dist = flatten.pow(2).sum(1, keepdim=True) - 2 * flatten @ self.embed + self.embed.pow(2).sum(0, keepdim=True)
         _, embed_ind = (-dist).max(1)
@@ -243,6 +247,10 @@ class CodeLayer(HelperModule):
         quantize = x + (quantize - x).detach()
 
         return quantize.permute(0, 4, 1, 2, 3), diff, embed_ind
+
+    @torch.amp.autocast("cuda", enabled=False)
+    def forward(self, x: torch.FloatTensor) -> Tuple[torch.FloatTensor, float, torch.LongTensor]:
+        return self.quantize(self.project(x))
 
     def embed_code(self, embed_id: torch.LongTensor) -> torch.FloatTensor:
         return F.embedding(embed_id, self.embed.transpose(0, 1))
@@ -319,30 +327,23 @@ class VQVAE(HelperModule):
                 )
             )
 
-        # Optional content projection: projects content-only channels back to hidden_channels
-        # so deeper encoders always receive a full hidden_channels spatial map.
-        # Only built when content_size and style_size are both provided.
+        # Optional content/style separation in the embed_dim space.
+        # The Gumbel mask is applied *after* the codebook projection (conv_in)
+        # so it operates directly on the embed_dim-sized representation.
         if content_size > 0 and style_size > 0:
             total_size = content_size + style_size
-            self.content_channels = max(1, round(content_size / total_size * hidden_channels))
-            self.content_proj = nn.Conv3d(self.content_channels, hidden_channels, kernel_size=1, bias=False)
-            # Learnable logits that determine which channels are selected as content.
-            # Trained via reconstruction gradients flowing back through the soft Gumbel mask.
-            self.channel_logits = nn.Parameter(torch.zeros(hidden_channels))
+            self.content_channels = max(1, round(content_size / total_size * embed_dim))
+            # Learnable logits that determine which embedding dims are content.
+            self.channel_logits = nn.Parameter(torch.zeros(embed_dim))
         else:
             self.content_channels = None
-            self.content_proj = None
             self.channel_logits = None
 
-        # Optional style injection: when enabled, style_spatial from encoder level-0
-        # (the channels NOT selected as content by the Gumbel mask) is upsampled to
-        # full resolution and concatenated onto the penultimate feature map of
-        # decoders[0] before the final output conv.
-        # style_channels is the complement of content_channels within hidden_channels.
-        self.inject_style_to_decoder = inject_style_to_decoder and (self.content_proj is not None)
+        # Optional style injection: style dims from the embed_dim space are
+        # upsampled and concatenated onto the penultimate decoder-0 feature map.
+        self.inject_style_to_decoder = inject_style_to_decoder and (self.channel_logits is not None)
         if self.inject_style_to_decoder:
-            style_ch = hidden_channels - self.content_channels
-            self.style_channels = style_ch
+            self.style_channels = embed_dim - self.content_channels
         else:
             self.style_channels = 0
 
@@ -390,24 +391,27 @@ class VQVAE(HelperModule):
             x: Input tensor (B, C, D, H, W)
             return_recon: If False, skip decoder for memory efficiency (contrastive-only mode)
             pool_only: If True, return per-level pooled (B, C) vectors instead of spatial maps.
-            n_views: Number of views (required when content_proj is active).
-            subsets: View subsets for Gumbel mask (required when content_proj is active).
+            n_views: Number of views (unused, kept for API compat).
+            subsets: View subsets (unused, kept for API compat).
 
         Returns:
             final_output: Reconstruction (or None if return_recon=False)
             diffs: VQ commitment losses per level
             encoder_features: Per-level encoder features.
-                              If pool_only=True:  list of (B, C) pooled vectors
-                                  Level 0 has content_channels dims (masked),
-                                  levels 1+ have hidden_channels dims.
+                              If pool_only=True:  list of (B, embed_dim) pooled vectors
+                                  (level 0 is pooled from the embed_dim projection;
+                                   other levels are pooled from their codebook projections).
+                                  When channel_logits is None, pools are (B, hidden_channels).
                               If pool_only=False: list of (B, C, D, H, W) spatial maps
-            estimated_content_indices: Content channel indices from the Gumbel mask
-                                       (None if content_proj not configured)
+            estimated_content_indices: Content embedding indices from the Gumbel mask
+                                       (None if channel_logits not configured)
             decoder_outputs: Decoder features per level (or empty list)
             id_outputs: Codebook indices per level
         """
         encoder_outputs = []  # Spatial (5D) feature maps, consumed by codebook/decoder loop
         encoder_pools = []  # Pooled (B, C) vectors, returned for contrastive loss
+        codebook_pools = []  # (level, pool) pairs from codebook loop, assembled at end
+        embed_pool_level0 = None  # Level-0 pool from embed_dim space (set if channel_logits)
         code_outputs = []
         decoder_outputs = []
         upscale_counts = []
@@ -416,31 +420,62 @@ class VQVAE(HelperModule):
         estimated_content_indices = None
         style_spatial = None  # style channels from encoder level-0; used for decoder injection
 
-        # Encoder forward pass
+        # Encoder forward pass — no content masking here; masking happens
+        # after the codebook projection in the embed_dim space.
         enc_input = x
         for i, enc in enumerate(self.encoders):
-            spatial_out = enc(enc_input)
+            enc_input = enc(enc_input)
+            encoder_outputs.append(enc_input)
+            if pool_only and self.channel_logits is None:
+                encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
 
-            if self.content_proj is not None:
-                pooled = spatial_out.mean(dim=[2, 3, 4])  # (B, hidden_channels)
-                if pool_only:
-                    encoder_pools.append(pooled)
+        del x, enc_input
 
-                # --- Content channel selection via learnable channel_logits ---
-                #
-                # Fix #1: channel_logits is an nn.Parameter, so the soft Gumbel mask
-                # is in the computation graph.  Reconstruction gradients flow back
-                # through:  recon → decoder → content_proj → masked_spatial → logits.
-                # Previously this block was inside torch.no_grad() with batch-derived
-                # logits, so channel_logits had no gradient path at all.
-                #
-                # Fix #4: eval mode uses deterministic top-k (no Gumbel noise), giving
-                # identical content_idx for every batch — consistent feature extraction.
-                logits = self.channel_logits.unsqueeze(0)  # (1, hidden_channels)
+        for l in range(self.nb_levels - 1, -1, -1):
+            codebook = self.codebooks[l]
+
+            enc_out = encoder_outputs[l]
+            encoder_outputs[l] = None  # release spatial map reference as soon as consumed
+            expected_in = codebook.conv_in.in_channels
+
+            # Project encoder output (+ decoder conditioning) to embed_dim
+            if len(decoder_outputs) and return_recon:
+                dec_out = decoder_outputs[-1]
+                if dec_out.shape[2:] != enc_out.shape[2:]:
+                    dec_out = F.interpolate(
+                        dec_out,
+                        size=enc_out.shape[2:],
+                        mode="trilinear",
+                        align_corners=False,
+                    )
+                combined = torch.cat([enc_out, dec_out], dim=1)
+                del enc_out
+                projected = codebook.project(combined)
+                del combined
+            else:
+                if expected_in > enc_out.shape[1]:
+                    cond_channels = expected_in - enc_out.shape[1]
+                    zeros = torch.zeros(
+                        enc_out.shape[0],
+                        cond_channels,
+                        *enc_out.shape[2:],
+                        device=enc_out.device,
+                        dtype=enc_out.dtype,
+                    )
+                    enc_out = torch.cat([enc_out, zeros], dim=1)
+                projected = codebook.project(enc_out)
+                del enc_out
+
+            # Apply content/style mask on the embed_dim-sized projection (level 0 only)
+            if self.channel_logits is not None and l == 0:
+                logits = self.channel_logits.unsqueeze(0)  # (1, embed_dim)
                 if self.training:
-                    # Straight-through Gumbel-Softmax: forward = hard 0/1,
-                    # backward = soft khot, so channel_logits receives gradients.
-                    soft_mask = utils.topk_gumbel_softmax(k=self.content_channels, logits=logits, tau=1.0, hard=True)
+                    soft_mask = utils.topk_gumbel_softmax(
+                        k=self.content_channels,
+                        logits=logits,
+                        tau=1.0,
+                        hard=True,
+                    )
                 else:
                     hard_mask = torch.zeros_like(logits)
                     topk_idx = torch.topk(logits, self.content_channels, dim=1).indices
@@ -452,67 +487,25 @@ class VQVAE(HelperModule):
                 style_idx = torch.where(~content_mask_bool)[-1].tolist()
                 estimated_content_indices = [content_idx]
 
-                # Multiply by soft_mask before slicing so the gradient w.r.t.
-                # channel_logits flows back through masked_spatial → soft_mask.
-                masked_spatial = spatial_out * soft_mask.view(1, -1, 1, 1, 1)
-                content_spatial = masked_spatial[:, content_idx, :, :, :]
-
-                if self.inject_style_to_decoder and return_recon:
-                    # Fix #2: style channels must NOT be detached.  The contrastive
-                    # loss is applied only to content_idx, so reconstruction is the
-                    # sole learning signal for style encoder weights.  Detaching them
-                    # (as before) left those weights with zero gradient entirely.
-                    style_spatial = spatial_out[:, style_idx, :, :, :]
-
-                enc_input = self.content_proj(content_spatial)
-                del content_spatial, masked_spatial, spatial_out
-
-                # Store projected spatial map for codebook loop
-                encoder_outputs.append(enc_input)
-            else:
-                enc_input = spatial_out
-                encoder_outputs.append(spatial_out)
+                # Pool full embed_dim features (training code applies its own
+                # contrastive mask via channel_logits — we return all dims).
                 if pool_only:
-                    encoder_pools.append(spatial_out.mean(dim=[2, 3, 4]))
+                    embed_pool_level0 = projected.mean(dim=[2, 3, 4])
 
-        del x, enc_input
+                # Extract style spatial for decoder injection
+                if self.inject_style_to_decoder and return_recon:
+                    style_spatial = projected[:, style_idx, :, :, :]
 
-        for l in range(self.nb_levels - 1, -1, -1):
-            codebook = self.codebooks[l]
-
-            enc_out = encoder_outputs[l]
-            encoder_outputs[l] = None  # release spatial map reference as soon as consumed
-            expected_in = codebook.conv_in.in_channels
-
-            if len(decoder_outputs) and return_recon:
-                # Interpolate decoder output to match encoder output size if needed
-                dec_out = decoder_outputs[-1]
-                if dec_out.shape[2:] != enc_out.shape[2:]:
-                    dec_out = F.interpolate(
-                        dec_out,
-                        size=enc_out.shape[2:],
-                        mode="trilinear",
-                        align_corners=False,
-                    )
-                combined = torch.cat([enc_out, dec_out], dim=1)
-                del enc_out
-                code_q, code_d, emb_id = codebook(combined)
-                del combined
+                # Quantize the masked projection (style dims zeroed)
+                masked = projected * soft_mask.view(1, -1, 1, 1, 1)
+                code_q, code_d, emb_id = codebook.quantize(masked)
+                del masked
             else:
-                # If this codebook expects conditioning channels, pad with zeros when reconstruction is skipped
-                if expected_in > enc_out.shape[1]:
-                    cond_channels = expected_in - enc_out.shape[1]
-                    zeros = torch.zeros(
-                        enc_out.shape[0],
-                        cond_channels,
-                        *enc_out.shape[2:],
-                        device=enc_out.device,
-                        dtype=enc_out.dtype,
-                    )
-                    enc_out = torch.cat([enc_out, zeros], dim=1)
-                code_q, code_d, emb_id = codebook(enc_out)
-                del enc_out
+                if pool_only and self.channel_logits is not None:
+                    codebook_pools.append((l, projected.mean(dim=[2, 3, 4])))
+                code_q, code_d, emb_id = codebook.quantize(projected)
 
+            del projected
             diffs.append(code_d)
             id_outputs.append(emb_id)
 
@@ -536,8 +529,6 @@ class VQVAE(HelperModule):
 
                 decoder_in = torch.cat([code_q, *code_outputs], axis=1)
                 if self.inject_style_to_decoder and style_spatial is not None:
-                    # decoders[0] was built with style_channels > 0; pass style_spatial
-                    # so it can be concatenated onto the penultimate feature map.
                     decoder_outputs.append(decoder(decoder_in, style=style_spatial))
                 else:
                     decoder_outputs.append(decoder(decoder_in))
@@ -550,6 +541,16 @@ class VQVAE(HelperModule):
         else:
             final_output = None
             decoder_outputs = []
+
+        # Assemble pooled features in level order (0, 1, ..., N-1).
+        # When channel_logits is active, pools come from the codebook loop
+        # (which runs in reverse) and level 0 is stored separately.
+        if pool_only and self.channel_logits is not None:
+            encoder_pools = [None] * self.nb_levels
+            if embed_pool_level0 is not None:
+                encoder_pools[0] = embed_pool_level0
+            for lvl, pool in codebook_pools:
+                encoder_pools[lvl] = pool
 
         # Return pooled features (memory-efficient) or full spatial maps
         encoder_features = encoder_pools if pool_only else encoder_outputs
@@ -662,26 +663,28 @@ class MoCoEncoder(nn.Module):
             for p in enc.parameters():
                 p.requires_grad = False
 
-        # Fix #3: mirror content_proj so keys at levels 1+ are produced by the
-        # same content-only spatial path as the online encoder.  Without this,
-        # the key encoder passes all hidden_channels to level 1+, while the
-        # online encoder passes only content_channels — the two feature spaces
-        # are semantically different, breaking MoCo's key/query consistency.
-        if raw_vqvae.content_proj is not None:
-            self.momentum_content_proj = copy.deepcopy(raw_vqvae.content_proj)
-            for p in self.momentum_content_proj.parameters():
+        # ---- Momentum codebook projections (conv_in only, no quantization) --
+        # When channel_logits is active, level-0 keys must be pooled from the
+        # embed_dim space (matching the online encoder).  We deep-copy the
+        # codebook conv_in layers for this purpose.
+        self.momentum_codebook_projs = nn.ModuleList()
+        for cb in raw_vqvae.codebooks:
+            proj = copy.deepcopy(cb.conv_in)
+            for p in proj.parameters():
                 p.requires_grad = False
-        else:
-            self.momentum_content_proj = None
+            self.momentum_codebook_projs.append(proj)
 
         # ---- Per-level queues -----------------------------------------------
-        # Infer channel width from the first encoder's output channels.
-        # VQVAE.encoders[i] is an Encoder whose last layer outputs hidden_channels.
         hidden_channels = self._infer_hidden_channels(raw_vqvae)
+        embed_dim = raw_vqvae.codebooks[0].dim
 
-        # Queues are buffers (not parameters) so the optimizer ignores them.
         for lvl in range(nb_levels):
-            q = F.normalize(torch.randn(hidden_channels, queue_size), dim=0)
+            # Level 0 pools from embed_dim when channel_logits is active;
+            # other levels pool from embed_dim too (codebook projection).
+            if raw_vqvae.channel_logits is not None:
+                q = F.normalize(torch.randn(embed_dim, queue_size), dim=0)
+            else:
+                q = F.normalize(torch.randn(hidden_channels, queue_size), dim=0)
             self.register_buffer(f"queue_{lvl}", q)
 
         self.queue_ptrs = [0] * nb_levels
@@ -709,16 +712,13 @@ class MoCoEncoder(nn.Module):
 
     @torch.no_grad()
     def _momentum_update(self):
-        """EMA-update momentum encoders and momentum_content_proj from the online model."""
+        """EMA-update momentum encoders and codebook projections from the online model."""
         raw_vqvae = self.online.module if hasattr(self.online, "module") else self.online
         for online_enc, mom_enc in zip(raw_vqvae.encoders, self.momentum_encoders):
             for p_online, p_mom in zip(online_enc.parameters(), mom_enc.parameters()):
                 p_mom.data.mul_(self.momentum).add_(p_online.data, alpha=1.0 - self.momentum)
-        if self.momentum_content_proj is not None and raw_vqvae.content_proj is not None:
-            for p_online, p_mom in zip(
-                raw_vqvae.content_proj.parameters(),
-                self.momentum_content_proj.parameters(),
-            ):
+        for online_cb, mom_proj in zip(raw_vqvae.codebooks, self.momentum_codebook_projs):
+            for p_online, p_mom in zip(online_cb.conv_in.parameters(), mom_proj.parameters()):
                 p_mom.data.mul_(self.momentum).add_(p_online.data, alpha=1.0 - self.momentum)
 
     # ------------------------------------------------------------------
@@ -731,36 +731,39 @@ class MoCoEncoder(nn.Module):
         Encode ``x`` with the momentum encoder stack and return per-level
         global-average-pooled feature vectors.
 
-        When ``content_proj`` is active, the same deterministic content-channel
-        selection (via ``channel_logits`` top-k) is applied between levels 0
-        and 1 using ``momentum_content_proj``, so that key features at levels
-        1+ are produced from content-only spatial maps — symmetric with the
-        online encoder path (fix #3).
+        When ``channel_logits`` is active, keys are pooled from the
+        embed_dim space (via momentum codebook projections) to match the
+        online encoder's pooled features.
 
         Args:
             x (torch.Tensor): Input batch, shape ``(B, C, D, H, W)``.
 
         Returns:
             list[torch.Tensor]: Length ``nb_levels``.  Each element has shape
+                ``(B, embed_dim)`` when channel_logits is active, else
                 ``(B, hidden_channels)``.
         """
-        key_pools = []
-        enc_input = x
         raw_vqvae = self.online.module if hasattr(self.online, "module") else self.online
-        for lvl, mom_enc in enumerate(self.momentum_encoders):
-            out = mom_enc(enc_input)  # (B, hidden_channels, D, H, W)
-            key_pools.append(out.mean(dim=[2, 3, 4]))  # (B, hidden_channels)
-            if lvl == 0 and self.momentum_content_proj is not None:
-                # Deterministic top-k — no Gumbel noise so keys are stable.
-                logits = raw_vqvae.channel_logits.unsqueeze(0)  # (1, hidden_channels)
-                hard_mask = torch.zeros_like(logits)
-                topk_idx = torch.topk(logits, raw_vqvae.content_channels, dim=1).indices
-                hard_mask.scatter_(1, topk_idx, 1.0)
-                content_idx = torch.where(hard_mask.bool())[-1].tolist()
-                content_spatial = out[:, content_idx, :, :, :]
-                enc_input = self.momentum_content_proj(content_spatial)
-            else:
-                enc_input = out
+        use_embed_pool = raw_vqvae.channel_logits is not None
+
+        # Run all momentum encoders
+        encoder_outputs = []
+        enc_input = x
+        for mom_enc in self.momentum_encoders:
+            enc_input = mom_enc(enc_input)
+            encoder_outputs.append(enc_input)
+
+        if not use_embed_pool:
+            return [out.mean(dim=[2, 3, 4]) for out in encoder_outputs]
+
+        # Pool from embed_dim space via momentum codebook projections
+        # (mirrors the online encoder's codebook-loop pooling)
+        key_pools = [None] * self.nb_levels
+        for lvl in range(self.nb_levels):
+            proj = self.momentum_codebook_projs[lvl]
+            projected = proj(encoder_outputs[lvl])
+            key_pools[lvl] = projected.mean(dim=[2, 3, 4])
+
         return key_pools
 
     # ------------------------------------------------------------------

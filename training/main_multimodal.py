@@ -198,7 +198,7 @@ def train_step(
                         hard_mask.scatter_(1, topk_idx, 1.0)
                         content_masks = [hard_mask] * len(args.subsets)
                 else:
-                    # Fallback: no content_proj configured, use batch statistics.
+                    # Fallback: no channel_logits configured, use batch statistics.
                     avg_logits = hz_level.mean(dim=[0, 1], keepdim=False).unsqueeze(0)
                     if len(args.subsets) > 1 and content_size > 0:
                         content_masks = utils.smart_gumbel_softmax_mask(
@@ -248,7 +248,7 @@ def train_step(
             # for m in content_masks]).  Do NOT overwrite it here with
             # args.content_indices — that would replace the learned channel
             # selection with the static config-based indices and break evaluation
-            # in get_data() for any run that uses content_proj.
+            # in get_data() for any run that uses channel_logits.
 
         # ------------------------------------------------------------------
         # VAE path

@@ -37,7 +37,6 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default=None)
     parser.add_argument("--encoding-size", type=int, default=256)
-    parser.add_argument("--hidden-size", type=int, default=100)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--batch-size", type=int, default=2)
@@ -157,10 +156,10 @@ def parse_args() -> argparse.ArgumentParser:
         "--inject-style-to-decoder",
         action="store_true",
         help=(
-            "Append style latent embeddings from encoder level-0 (channels not selected "
-            "as content by the Gumbel mask) to the final decoder layer before the output "
-            "conv.  Requires --content-size / --style-size to be set (i.e. content_proj "
-            "must be active).  Has no effect when content_proj is not configured."
+            "Append style embedding dims (those not selected as content by the Gumbel mask "
+            "in the embed_dim space) to the final decoder layer before the output conv.  "
+            "Requires --content-dim / --total-dim to be set.  Has no effect when "
+            "content/style separation is not configured."
         ),
     )
     parser.add_argument(
@@ -184,8 +183,18 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--eval-dci", action="store_true")
     parser.add_argument("--eval-style", action="store_true")
     parser.add_argument("--grid-search-eval", action="store_true")
-    parser.add_argument("--content-dim", type=int, default=128, help="Number of content dimensions (for content_proj)")
-    parser.add_argument("--total-dim", type=int, default=512, help="Total number of dimensions (for content_proj)")
+    parser.add_argument(
+        "--content-dim",
+        type=int,
+        default=128,
+        help="Number of content dimensions (ratio with total-dim determines embed_dim split)",
+    )
+    parser.add_argument(
+        "--total-dim",
+        type=int,
+        default=512,
+        help="Total number of dimensions (ratio with content-dim determines embed_dim split)",
+    )
     return parser
 
 
