@@ -180,9 +180,9 @@ def train_step(
                 content_size = max(1, int(content_ratio * n_channels))
 
                 if _raw_vqvae.channel_logits is not None and level_idx == 0:
-                    # Level 0 pools from embed_dim — use learnable channel_logits
-                    # for the content/style mask.  Levels 1+ pool from
-                    # hidden_channels and fall through to batch-statistics below.
+                    # Level 0: use learnable channel_logits for the content/style
+                    # mask on hidden_channels.  Levels 1+ fall through to
+                    # batch-statistics below.
                     logits = _raw_vqvae.channel_logits.detach().unsqueeze(0)
                     if _raw_vqvae.training:
                         content_masks = utils.gumbel_softmax_mask(
