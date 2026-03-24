@@ -1,4 +1,4 @@
-runai submit --name multiview-crl-corrected-tau \
+runai submit --name multiview-crl-fix-gradients \
  -i aicregistry:5000/nglazman:multiview-crl-vqvae-latest \
  --node-type A100 \
  --run-as-user \

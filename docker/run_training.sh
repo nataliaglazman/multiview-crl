@@ -10,7 +10,7 @@ python /nfs/home/nglazman/crl-2/multiview-crl/training/main_multimodal.py \
     --moco-queue-size 4096 \
     --moco-momentum 0.999 \
     --vqvae-nb-levels 3 \
-    --lr 0.00001 \
+    --lr 0.0003 \
     --content-dim 384 \
     --total-dim 512 \
     --vqvae-scaling-rates 2 2 2 \
@@ -24,10 +24,11 @@ python /nfs/home/nglazman/crl-2/multiview-crl/training/main_multimodal.py \
     --workers 8 \
     --tau 0.07 \
     --scale-contrastive-loss 0.03 \
-    --model-id multiview-corrected-tau-scaled-loss \
+    --model-id multiview-gradient-corrected \
     --gradient-accumulation-steps 4 \
     --gradient-checkpointing \
     --skip-recon-ratio 0.3 \
     --image-spacing 1.0 \
     --crop-margin 10 \
     --cache-dataset \
+    --cache-dir /nfs/home/nglazman/cache/multiview \
