@@ -349,15 +349,17 @@ class VQVAE(HelperModule):
             self.style_channels = 0
 
         self.codebooks = nn.ModuleList()
-        for i in range(nb_levels - 1):
-            self.codebooks.append(CodeLayer(hidden_channels + embed_dim, embed_dim, nb_entries))
-        # Level-0 codebook: when content masking is active, it receives only
-        # content_channels (not full hidden_channels).  Without masking or when
-        # there is decoder conditioning, it receives hidden_channels as before.
+        # Index 0 = finest level (l=0 in forward): has decoder conditioning.
+        # When content masking is active, encoder input is content_channels only.
         if self.channel_logits is not None:
             self.codebooks.append(CodeLayer(self.content_channels + embed_dim, embed_dim, nb_entries))
         else:
-            self.codebooks.append(CodeLayer(hidden_channels, embed_dim, nb_entries))
+            self.codebooks.append(CodeLayer(hidden_channels + embed_dim, embed_dim, nb_entries))
+        # Indices 1..nb_levels-2: middle levels with decoder conditioning
+        for i in range(1, nb_levels - 1):
+            self.codebooks.append(CodeLayer(hidden_channels + embed_dim, embed_dim, nb_entries))
+        # Index nb_levels-1 = coarsest level: no decoder conditioning
+        self.codebooks.append(CodeLayer(hidden_channels, embed_dim, nb_entries))
 
         self.decoders = nn.ModuleList(
             [
