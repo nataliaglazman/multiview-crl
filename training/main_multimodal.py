@@ -179,22 +179,32 @@ def train_step(
                 n_channels = hz_level.shape[-1]
                 content_size = max(1, int(content_ratio * n_channels))
 
+                # soft_content_mask: differentiable (0/1) mask for the contrastive
+                # loss, shape (1, C).  Only set for level 0 when channel_logits is
+                # active — the Gumbel straight-through gradient flows from the
+                # contrastive loss back through this mask to channel_logits, so
+                # the mask learns which channels should be content.
+                soft_content_mask = None
+
                 if _raw_vqvae.channel_logits is not None and level_idx == 0:
                     # Level 0: use learnable channel_logits for the content/style
-                    # mask on hidden_channels.  Levels 1+ fall through to
-                    # batch-statistics below.
-                    logits = _raw_vqvae.channel_logits.detach().unsqueeze(0)
+                    # mask on hidden_channels.  NO .detach() so the contrastive
+                    # loss can guide channel_logits.
+                    logits = _raw_vqvae.channel_logits.unsqueeze(0)
                     if _raw_vqvae.training:
-                        content_masks = utils.gumbel_softmax_mask(
-                            avg_logits=logits,
-                            content_sizes=[content_size],
-                            subsets=args.subsets,
-                        )
+                        soft_content_mask = utils.topk_gumbel_softmax(
+                            k=content_size,
+                            logits=logits,
+                            tau=1.0,
+                            hard=True,
+                        )  # (1, hidden_channels), straight-through differentiable
                     else:
                         hard_mask = torch.zeros_like(logits)
                         topk_idx = torch.topk(logits, content_size, dim=1).indices
                         hard_mask.scatter_(1, topk_idx, 1.0)
-                        content_masks = [hard_mask] * len(args.subsets)
+                        soft_content_mask = hard_mask
+
+                    content_masks = [soft_content_mask] * len(args.subsets)
                 else:
                     # Fallback: no channel_logits configured, use batch statistics.
                     avg_logits = hz_level.mean(dim=[0, 1], keepdim=False).unsqueeze(0)
@@ -210,6 +220,7 @@ def train_step(
                             content_sizes=[content_size],
                             subsets=args.subsets,
                         )
+
                 estimated_content_indices = [torch.where(m.bool())[-1].tolist() for m in content_masks]
                 level_content_indices = estimated_content_indices
 
@@ -223,9 +234,15 @@ def train_step(
                         queue_snapshot,
                         level_content_indices,
                         args.subsets,
+                        soft_content_mask=soft_content_mask,
                     )
                 else:
-                    level_loss = loss_func(hz_level, level_content_indices, args.subsets)
+                    level_loss = loss_func(
+                        hz_level,
+                        level_content_indices,
+                        args.subsets,
+                        soft_content_mask=soft_content_mask,
+                    )
 
                 level_losses.append(level_loss.item())
                 total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss
@@ -428,7 +445,7 @@ def main(args):
     sim_metric = torch.nn.CosineSimilarity(dim=-1)
     criterion = torch.nn.CrossEntropyLoss()
 
-    def loss_func(z_rec_tuple, estimated_content_indices, subsets):
+    def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
         return infonce_loss(
             z_rec_tuple,
             sim_metric=sim_metric,
@@ -437,9 +454,10 @@ def main(args):
             projector=(lambda x: x),
             estimated_content_indices=estimated_content_indices,
             subsets=subsets,
+            soft_content_mask=soft_content_mask,
         )
 
-    def moco_loss_func(q, k, queue, estimated_content_indices, subsets):
+    def moco_loss_func(q, k, queue, estimated_content_indices, subsets, soft_content_mask=None):
         return moco_loss(
             q,
             k,
@@ -448,6 +466,7 @@ def main(args):
             tau=args.tau,
             estimated_content_indices=estimated_content_indices,
             subsets=subsets,
+            soft_content_mask=soft_content_mask,
         )
 
     # Augmentations / transforms

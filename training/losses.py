@@ -202,18 +202,22 @@ def infonce_loss(
     tau=1.0,
     estimated_content_indices=None,
     subsets=None,
+    soft_content_mask=None,
 ):
     """
     Calculates the sum of InfoNCE loss for a given input tensor `hz`, over all subsets.
 
     Args:
-        hz (torch.Tensor): The input tensor of shape (batch_size, ..., num_features).
+        hz (torch.Tensor): The input tensor of shape (n_views, batch_size, num_features).
         sim_metric: The similarity metric used for calculating the loss.
         criterion: The loss criterion used for calculating the loss.
         projector: The projector used for projecting the input tensor (optional).
         tau (float): The temperature parameter for the loss calculation (default: 1.0).
         estimated_content_indices: The estimated content indices (optional).
         subsets: The subsets of indices used for calculating the loss (optional).
+        soft_content_mask: Differentiable (0/1) mask, shape (1, C), from Gumbel
+            straight-through.  When provided, features are masked via
+            ``hz * mask`` so gradients flow back to channel_logits.
 
     Returns:
         torch.Tensor: The calculated InfoNCE loss.
@@ -233,29 +237,38 @@ def infonce_loss(
                 criterion,
                 projector,
                 tau,
+                soft_content_mask=soft_content_mask,
             )
         return total_loss
 
 
-def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, projector=None, tau=1.0):
+def infonce_base_loss(
+    hz_subset, content_indices, sim_metric, criterion, projector=None, tau=1.0, soft_content_mask=None
+):
     """
     Computes the InfoNCE (Normalized Cross Entropy) loss for multi-view data.
 
+    When ``soft_content_mask`` is provided (a differentiable 0/1 tensor from
+    Gumbel straight-through), the content selection is done via element-wise
+    multiplication so that gradients flow back to ``channel_logits``.
+    Otherwise falls back to integer-index selection (non-differentiable w.r.t. the mask).
+
     Args:
-        hz_subset (list): List of tensors representing the latent space of each view.
-        content_indices (list): List of indices representing the content dimensions.
-        sim_metric (function): Similarity metric function to compute pairwise similarities.
-        criterion (function): Loss criterion function.
-        projector (function, optional): Projection function to project the latent space. Defaults to None.
-        tau (float, optional): Temperature parameter for similarity computation. Defaults to 1.0.
+        hz_subset: Latent features, shape (n_views, batch_size, C).
+        content_indices (list): Integer indices of content dimensions (used when
+            soft_content_mask is None).
+        sim_metric: Pairwise similarity function.
+        criterion: Loss criterion (CrossEntropyLoss).
+        projector: Optional projection function.
+        tau (float): Temperature.
+        soft_content_mask: Optional differentiable mask, shape (1, C).
 
     Returns:
         torch.Tensor: Total loss value.
-
     """
 
     n_view = len(hz_subset)
-    d = hz_subset.shape[1]  # batch size — defined here so it's always available
+    d = hz_subset.shape[1]  # batch size
     SIM = [[None] * n_view for _ in range(n_view)]
 
     projector = projector or (lambda x: x)
@@ -263,13 +276,15 @@ def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, project
     for i in range(n_view):
         for j in range(n_view):
             if j >= i:
-                # Similarity computed only on content dimensions
-                hz_i = hz_subset[i][..., content_indices]  # (batch, content_dims)
-                hz_j = hz_subset[j][..., content_indices]
+                if soft_content_mask is not None:
+                    # Differentiable masking: gradients flow to channel_logits
+                    hz_i = hz_subset[i] * soft_content_mask  # (batch, C)
+                    hz_j = hz_subset[j] * soft_content_mask
+                else:
+                    hz_i = hz_subset[i][..., content_indices]  # (batch, content_dims)
+                    hz_j = hz_subset[j][..., content_indices]
                 sim_ij = (sim_metric(hz_i.unsqueeze(-2), hz_j.unsqueeze(-3)) / tau).type_as(hz_subset)
                 if i == j:
-                    # Mask self-similarity on the diagonal.
-                    # Use out-of-place fill to avoid corrupting the autograd graph.
                     mask = torch.zeros_like(sim_ij, dtype=torch.bool)
                     mask[..., range(d), range(d)] = True
                     sim_ij = sim_ij.masked_fill(mask, float("-inf"))
@@ -289,7 +304,7 @@ def infonce_base_loss(hz_subset, content_indices, sim_metric, criterion, project
     return total_loss_value
 
 
-def moco_infonce_loss(q, k, queue, content_indices, tau=1.0):
+def moco_infonce_loss(q, k, queue, content_indices, tau=1.0, soft_content_mask=None):
     """
     MoCo-style InfoNCE loss for a single view pair using a queue of negatives.
 
@@ -301,8 +316,12 @@ def moco_infonce_loss(q, k, queue, content_indices, tau=1.0):
         k  (torch.Tensor): Momentum (key) embeddings,   shape (n_views, B, C).
                            Must already be detached from the computation graph.
         queue (torch.Tensor): Negative key queue,        shape (C, queue_size).
-        content_indices (list[int]): Channel indices to use for the contrastive objective.
+        content_indices (list[int]): Channel indices to use (fallback when
+            soft_content_mask is None).
         tau (float): Temperature scaling factor.
+        soft_content_mask: Optional differentiable (0/1) mask, shape (1, C).
+            When provided, content selection uses ``features * mask`` so
+            gradients flow back to channel_logits via Gumbel straight-through.
 
     Returns:
         torch.Tensor: Scalar loss value.
@@ -311,9 +330,16 @@ def moco_infonce_loss(q, k, queue, content_indices, tau=1.0):
     total_loss = torch.zeros(1, device=q.device, dtype=q.dtype)
 
     # Project to content dimensions and L2-normalise
-    q_c = F.normalize(q[..., content_indices], dim=-1)  # (n_views, B, d)
-    k_c = F.normalize(k[..., content_indices], dim=-1)  # (n_views, B, d)
-    queue_c = F.normalize(queue[content_indices, :], dim=0)  # (d, Q)
+    if soft_content_mask is not None:
+        # Differentiable masking — gradients flow to channel_logits
+        q_c = F.normalize(q * soft_content_mask, dim=-1)  # (n_views, B, C)
+        k_c = F.normalize(k * soft_content_mask, dim=-1)  # (n_views, B, C)
+        # queue shape is (C, Q) — mask along dim 0
+        queue_c = F.normalize(queue * soft_content_mask.squeeze(0).unsqueeze(-1), dim=0)
+    else:
+        q_c = F.normalize(q[..., content_indices], dim=-1)  # (n_views, B, d)
+        k_c = F.normalize(k[..., content_indices], dim=-1)  # (n_views, B, d)
+        queue_c = F.normalize(queue[content_indices, :], dim=0)  # (d, Q)
 
     for i in range(n_view):
         for j in range(n_view):
@@ -335,7 +361,7 @@ def moco_infonce_loss(q, k, queue, content_indices, tau=1.0):
     return total_loss
 
 
-def moco_loss(q, k, queue, sim_metric, tau=1.0, estimated_content_indices=None, subsets=None):
+def moco_loss(q, k, queue, sim_metric, tau=1.0, estimated_content_indices=None, subsets=None, soft_content_mask=None):
     """
     Top-level MoCo loss that mirrors the ``infonce_loss`` signature.
 
@@ -350,6 +376,7 @@ def moco_loss(q, k, queue, sim_metric, tau=1.0, estimated_content_indices=None, 
         tau (float): Temperature.
         estimated_content_indices (list[list[int]]): Content channel indices per subset.
         subsets (list[tuple]): View subsets (same length as estimated_content_indices).
+        soft_content_mask: Optional differentiable mask from Gumbel straight-through.
 
     Returns:
         torch.Tensor: Scalar loss value.
@@ -362,7 +389,14 @@ def moco_loss(q, k, queue, sim_metric, tau=1.0, estimated_content_indices=None, 
     for content_indices, subset in zip(estimated_content_indices, subsets):
         q_sub = q[list(subset), ...]
         k_sub = k[list(subset), ...]
-        total_loss = total_loss + moco_infonce_loss(q_sub, k_sub, queue, content_indices, tau)
+        total_loss = total_loss + moco_infonce_loss(
+            q_sub,
+            k_sub,
+            queue,
+            content_indices,
+            tau,
+            soft_content_mask=soft_content_mask,
+        )
     return total_loss
 
 
