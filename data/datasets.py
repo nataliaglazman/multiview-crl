@@ -1443,9 +1443,31 @@ class MyCustomDataset(MultiviewDataset):
                     f"fingerprint={fingerprint}\n"
                 )
 
-            # Check which samples are already on disk
+            # Check which samples are already on disk and are not corrupted.
+            # A previous interrupted run may leave truncated .pt files that pass
+            # an existence check but fail on torch.load.
             pt_paths = [str(cache_root / f"{i:06d}.pt") for i in range(self.num_samples)]
-            missing_indices = [i for i, p in enumerate(pt_paths) if not os.path.exists(p)]
+
+            # Clean up leftover .tmp files from interrupted writes
+            for tmp in cache_root.glob("*.tmp"):
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+            def _is_valid_pt(path):
+                """Quick check: file exists and has a plausible size (> 1 KB).
+
+                A truly corrupted file that passes this check will be caught by
+                ``_load_cached`` at training time — see the ``except`` branch
+                there which deletes and re-raises.
+                """
+                try:
+                    return os.path.getsize(path) > 1024
+                except OSError:
+                    return False
+
+            missing_indices = [i for i, p in enumerate(pt_paths) if not _is_valid_pt(p)]
 
             if len(missing_indices) == 0:
                 logger.info(
@@ -1576,14 +1598,39 @@ class MyCustomDataset(MultiviewDataset):
         # Persistent disk cache path — load and release, no accumulation
         import torch as _torch
 
+        path = self._cache_paths[idx]
         try:
-            return _torch.load(self._cache_paths[idx], map_location="cpu", weights_only=True)
+            return _torch.load(path, map_location="cpu", weights_only=True)
+        except RuntimeError as e:
+            if "unexpected pos" in str(e) or "invalid load" in str(e).lower():
+                # Corrupted file — delete so next run regenerates it
+                logger.warning(f"Corrupted cache file (deleting): {path}")
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"Cache file {path} is corrupted and has been deleted. "
+                    f"Please restart training to regenerate it."
+                ) from e
+            raise
         except Exception:
             # Old cache files may contain MONAI MetaTensors with numpy globals
-            cached = _torch.load(self._cache_paths[idx], map_location="cpu", weights_only=False)
-            return {
-                k: _torch.as_tensor(v).clone() if hasattr(v, "__torch_function__") else v for k, v in cached.items()
-            }
+            try:
+                cached = _torch.load(path, map_location="cpu", weights_only=False)
+                return {
+                    k: _torch.as_tensor(v).clone() if hasattr(v, "__torch_function__") else v for k, v in cached.items()
+                }
+            except Exception:
+                logger.warning(f"Corrupted cache file (deleting): {path}")
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"Cache file {path} is corrupted and has been deleted. "
+                    f"Please restart training to regenerate it."
+                )
 
     def __getitem__(self, idx):
         """Return dict with T1 and T2 as two views."""
