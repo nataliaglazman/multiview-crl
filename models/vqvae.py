@@ -422,6 +422,7 @@ class VQVAE(HelperModule):
         id_outputs = []
         diffs = []
         estimated_content_indices = None
+        soft_content_mask = None  # differentiable Gumbel mask, returned for contrastive loss
         style_spatial = None  # style channels from encoder level-0; used for decoder injection
 
         # Encoder forward pass
@@ -456,6 +457,7 @@ class VQVAE(HelperModule):
                 hard_mask.scatter_(1, topk_idx, 1.0)
                 soft_mask = hard_mask
 
+            soft_content_mask = soft_mask  # preserve for contrastive loss
             content_mask_bool = soft_mask.bool()
             content_idx = torch.where(content_mask_bool)[-1].tolist()
             style_idx = torch.where(~content_mask_bool)[-1].tolist()
@@ -560,6 +562,7 @@ class VQVAE(HelperModule):
             estimated_content_indices,
             decoder_outputs,
             id_outputs,
+            soft_content_mask,
         )
 
     def decode_codes(self, *cs, style=None):

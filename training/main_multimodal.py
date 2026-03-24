@@ -129,6 +129,7 @@ def train_step(
                 estimated_content_indices,
                 _,
                 _,
+                fwd_soft_content_mask,
             ) = vqvae_model(
                 images,
                 return_recon=compute_recon,
@@ -180,30 +181,19 @@ def train_step(
                 content_size = max(1, int(content_ratio * n_channels))
 
                 # soft_content_mask: differentiable (0/1) mask for the contrastive
-                # loss, shape (1, C).  Only set for level 0 when channel_logits is
-                # active — the Gumbel straight-through gradient flows from the
-                # contrastive loss back through this mask to channel_logits, so
-                # the mask learns which channels should be content.
+                # loss, shape (1, C).  Reused from the forward pass so the
+                # reconstruction and contrastive losses share the SAME Gumbel
+                # sample — no conflicting channel selections.
                 soft_content_mask = None
 
                 if _raw_vqvae.channel_logits is not None and level_idx == 0:
-                    # Level 0: use learnable channel_logits for the content/style
-                    # mask on hidden_channels.  NO .detach() so the contrastive
-                    # loss can guide channel_logits.
-                    logits = _raw_vqvae.channel_logits.unsqueeze(0)
-                    if _raw_vqvae.training:
-                        soft_content_mask = utils.topk_gumbel_softmax(
-                            k=content_size,
-                            logits=logits,
-                            tau=1.0,
-                            hard=True,
-                        )  # (1, hidden_channels), straight-through differentiable
-                    else:
-                        hard_mask = torch.zeros_like(logits)
-                        topk_idx = torch.topk(logits, content_size, dim=1).indices
-                        hard_mask.scatter_(1, topk_idx, 1.0)
-                        soft_content_mask = hard_mask
-
+                    # Reuse the mask that the forward pass already sampled.
+                    # This is the same differentiable Gumbel straight-through
+                    # mask used for the codebook, so gradients from the
+                    # contrastive loss flow back to channel_logits AND the
+                    # reconstruction and contrastive paths agree on which
+                    # channels are content.
+                    soft_content_mask = fwd_soft_content_mask
                     content_masks = [soft_content_mask] * len(args.subsets)
                 else:
                     # Fallback: no channel_logits configured, use batch statistics.
