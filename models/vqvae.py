@@ -302,32 +302,46 @@ class VQVAE(HelperModule):
         inject_style_to_decoder: bool = False,  # Append style latent from encoder-0 to final decoder layer
         content_style_levels: list[int] | None = None,  # Levels with learnable Gumbel mask
         content_ratios: list[float] | None = None,  # Per-level content ratio (fraction of hidden_channels)
+        separate_encoders: bool = False,  # If True, create a second encoder stack for view 1
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
-        self.encoders = nn.ModuleList(
-            [
-                Encoder(
-                    in_channels,
-                    hidden_channels,
-                    res_channels,
-                    nb_res_layers,
-                    scaling_rates[0],
-                    use_checkpoint,
-                )
-            ]
-        )
-        for i, sr in enumerate(scaling_rates[1:]):
-            self.encoders.append(
-                Encoder(
-                    hidden_channels,
-                    hidden_channels,
-                    res_channels,
-                    nb_res_layers,
-                    sr,
-                    use_checkpoint,
-                )
+        self.separate_encoders = separate_encoders
+
+        def _make_encoder_stack():
+            stack = nn.ModuleList(
+                [
+                    Encoder(
+                        in_channels,
+                        hidden_channels,
+                        res_channels,
+                        nb_res_layers,
+                        scaling_rates[0],
+                        use_checkpoint,
+                    )
+                ]
             )
+            for _i, sr in enumerate(scaling_rates[1:]):
+                stack.append(
+                    Encoder(
+                        hidden_channels,
+                        hidden_channels,
+                        res_channels,
+                        nb_res_layers,
+                        sr,
+                        use_checkpoint,
+                    )
+                )
+            return stack
+
+        self.encoders = _make_encoder_stack()
+
+        # Second (view-1) encoder stack: independent weights, same architecture.
+        # Codebooks, decoders, and Gumbel masks remain shared.
+        if separate_encoders:
+            self.encoders_v1 = _make_encoder_stack()
+        else:
+            self.encoders_v1 = None
 
         # --- Per-level content/style separation ---
         # Each level in content_style_levels gets its own learnable Gumbel mask
@@ -468,14 +482,33 @@ class VQVAE(HelperModule):
         style_spatials = {}  # level → style channels for decoder injection
 
         # Encoder forward pass
-        enc_input = x
-        for i, enc in enumerate(self.encoders):
-            enc_input = enc(enc_input)
-            encoder_outputs.append(enc_input)
-            if pool_only:
-                encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
+        if self.separate_encoders and self.encoders_v1 is not None and n_views == 2:
+            # View-specific encoders: split batch, encode through separate stacks,
+            # then re-concatenate so the rest of the forward pass is unchanged.
+            B = x.shape[0] // 2
+            x_v0, x_v1 = x[:B], x[B:]
+            del x
 
-        del x, enc_input
+            enc_in_v0 = x_v0
+            enc_in_v1 = x_v1
+            del x_v0, x_v1
+            for i, (enc_v0, enc_v1) in enumerate(zip(self.encoders, self.encoders_v1)):
+                enc_in_v0 = enc_v0(enc_in_v0)
+                enc_in_v1 = enc_v1(enc_in_v1)
+                encoder_outputs.append(torch.cat([enc_in_v0, enc_in_v1], dim=0))
+                if pool_only:
+                    pool_v0 = enc_in_v0.mean(dim=[2, 3, 4])
+                    pool_v1 = enc_in_v1.mean(dim=[2, 3, 4])
+                    encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
+            del enc_in_v0, enc_in_v1
+        else:
+            enc_input = x
+            for i, enc in enumerate(self.encoders):
+                enc_input = enc(enc_input)
+                encoder_outputs.append(enc_input)
+                if pool_only:
+                    encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
+            del x, enc_input
 
         # --- Content/style masks on encoder outputs (hidden_channels) ---
         # Applied BEFORE the codebook projection so the mask operates on raw
@@ -723,6 +756,15 @@ class MoCoEncoder(nn.Module):
             for p in enc.parameters():
                 p.requires_grad = False
 
+        # Second momentum encoder stack for view-specific encoders
+        if getattr(raw_vqvae, "separate_encoders", False) and raw_vqvae.encoders_v1 is not None:
+            self.momentum_encoders_v1 = nn.ModuleList([copy.deepcopy(enc) for enc in raw_vqvae.encoders_v1])
+            for enc in self.momentum_encoders_v1:
+                for p in enc.parameters():
+                    p.requires_grad = False
+        else:
+            self.momentum_encoders_v1 = None
+
         # ---- Per-level queues -----------------------------------------------
         # All levels pool from hidden_channels (the mask is on encoder output,
         # not on the codebook projection).
@@ -762,23 +804,43 @@ class MoCoEncoder(nn.Module):
         for online_enc, mom_enc in zip(raw_vqvae.encoders, self.momentum_encoders):
             for p_online, p_mom in zip(online_enc.parameters(), mom_enc.parameters()):
                 p_mom.data.mul_(self.momentum).add_(p_online.data, alpha=1.0 - self.momentum)
+        # EMA-update the second encoder stack if present
+        if self.momentum_encoders_v1 is not None and raw_vqvae.encoders_v1 is not None:
+            for online_enc, mom_enc in zip(raw_vqvae.encoders_v1, self.momentum_encoders_v1):
+                for p_online, p_mom in zip(online_enc.parameters(), mom_enc.parameters()):
+                    p_mom.data.mul_(self.momentum).add_(p_online.data, alpha=1.0 - self.momentum)
 
     # ------------------------------------------------------------------
     # Key encoding
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def encode_keys(self, x: torch.Tensor):
+    def encode_keys(self, x: torch.Tensor, n_views: int = 1):
         """
         Encode ``x`` with the momentum encoder stack and return per-level
         global-average-pooled feature vectors ``(B, hidden_channels)``.
+
+        When ``separate_encoders`` is active and ``n_views == 2``, the first
+        half of the batch is routed through the view-0 momentum encoders and
+        the second half through the view-1 momentum encoders, then
+        re-concatenated — mirroring the online encoder split.
         """
-        key_pools = []
-        enc_input = x
-        for mom_enc in self.momentum_encoders:
-            enc_input = mom_enc(enc_input)
-            key_pools.append(enc_input.mean(dim=[2, 3, 4]))
-        return key_pools
+        if self.momentum_encoders_v1 is not None and n_views == 2:
+            B = x.shape[0] // 2
+            key_pools = []
+            enc_v0, enc_v1 = x[:B], x[B:]
+            for mom_enc_v0, mom_enc_v1 in zip(self.momentum_encoders, self.momentum_encoders_v1):
+                enc_v0 = mom_enc_v0(enc_v0)
+                enc_v1 = mom_enc_v1(enc_v1)
+                key_pools.append(torch.cat([enc_v0.mean(dim=[2, 3, 4]), enc_v1.mean(dim=[2, 3, 4])], dim=0))
+            return key_pools
+        else:
+            key_pools = []
+            enc_input = x
+            for mom_enc in self.momentum_encoders:
+                enc_input = mom_enc(enc_input)
+                key_pools.append(enc_input.mean(dim=[2, 3, 4]))
+            return key_pools
 
     # ------------------------------------------------------------------
     # Queue management

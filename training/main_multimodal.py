@@ -147,7 +147,7 @@ def train_step(
                     vqvae_model, MoCoEncoder
                 ), "MoCo requested but encoders[0] is not a MoCoEncoder instance."
                 with torch.no_grad():
-                    key_outputs = vqvae_model.encode_keys(images)
+                    key_outputs = vqvae_model.encode_keys(images, n_views=n_views)
 
             if compute_recon and recon is not None:
                 if recon.shape[2:] != input_shape:
@@ -650,6 +650,7 @@ def main(args):
             inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
             content_style_levels=getattr(args, "content_style_levels", [0]),
             content_ratios=getattr(args, "content_ratios", None),
+            separate_encoders=getattr(args, "separate_encoders", False),
         )
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
@@ -662,6 +663,8 @@ def main(args):
         logger.info(f"  Content/style mask levels: {cs_levels}")
         if cs_ratios is not None:
             logger.info(f"  Per-level content ratios: {dict(zip(cs_levels, cs_ratios))}")
+        if getattr(args, "separate_encoders", False):
+            logger.info("  Separate encoders: ENABLED (one encoder stack per view)")
 
         encoders = [vqvae_model]
         decoders = []

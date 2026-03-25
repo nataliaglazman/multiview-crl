@@ -2,6 +2,7 @@
 
 import numpy as np
 import torch
+import torch.nn as nn
 from sklearn.kernel_ridge import KernelRidge
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import accuracy_score, r2_score
@@ -129,12 +130,20 @@ def get_data(
             for m_midx, m in enumerate(args.modalities):
                 samples = data[m]
                 enc_input = torch.concat(samples, 0)
-                enc_out = encoders[m_midx](enc_input)
+                # For VQVAE / MoCoEncoder, pass n_views so that separate
+                # encoders (if enabled) route each view through its own stack.
+                _is_vqvae = isinstance(enc_out_raw := encoders[m_midx], nn.Module) and (
+                    hasattr(enc_out_raw, "online")
+                    or hasattr(enc_out_raw, "encoders")
+                    or (hasattr(enc_out_raw, "module") and hasattr(enc_out_raw.module, "encoders"))
+                )
+                if _is_vqvae:
+                    enc_out = encoders[m_midx](enc_input, pool_only=True, n_views=len(samples))
+                else:
+                    enc_out = encoders[m_midx](enc_input)
                 # VQ-VAE / MoCoEncoder returns a tuple; extract pooled features
                 if isinstance(enc_out, tuple):
-                    # forward returns (recon, diffs, encoder_features, content_idx, dec_out, id_out)
-                    # encoder_features[0] is the level-0 pooled vector when pool_only=True,
-                    # but here we call without pool_only so we get spatial maps — pool them.
+                    # forward returns (recon, diffs, encoder_features, content_idx, dec_out, id_out, ...)
                     encoder_features = enc_out[2]
                     if len(encoder_features) > 0 and encoder_features[0].dim() == 5:
                         hz_m = encoder_features[0].mean(dim=[2, 3, 4]).detach().cpu().numpy()

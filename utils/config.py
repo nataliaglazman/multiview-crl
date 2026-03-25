@@ -111,6 +111,14 @@ def parse_args() -> argparse.ArgumentParser:
         "If omitted, all levels use the global ratio from --content-dim / --total-dim.",
     )
     parser.add_argument(
+        "--separate-encoders",
+        action="store_true",
+        default=False,
+        help="Use separate encoder stacks per view (one VQVAE encoder per modality). "
+        "Codebooks, decoders, and Gumbel content masks remain shared. "
+        "Consistent with the view-specific encoder identifiability theory (Yao et al., 2024).",
+    )
+    parser.add_argument(
         "--contrastive-level-weights",
         type=float,
         nargs="+",
