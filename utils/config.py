@@ -111,6 +111,15 @@ def parse_args() -> argparse.ArgumentParser:
         "If omitted, all levels use the global ratio from --content-dim / --total-dim.",
     )
     parser.add_argument(
+        "--contrastive-level-weights",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Per-level weight for the contrastive loss, one per VQ-VAE level. "
+        "E.g. '--contrastive-level-weights 3.0 1.0 1.0' upweights level 0 by 3x. "
+        "If omitted, all levels are weighted equally (1.0).",
+    )
+    parser.add_argument(
         "--gradient-checkpointing",
         action="store_true",
         help="Trade compute for memory in residual blocks",

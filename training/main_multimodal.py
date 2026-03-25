@@ -241,7 +241,9 @@ def train_step(
                     )
 
                 level_losses.append(level_loss.item())
-                total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss
+                _lvl_weights = getattr(args, "contrastive_level_weights", None)
+                _lvl_w = _lvl_weights[level_idx] if _lvl_weights and level_idx < len(_lvl_weights) else 1.0
+                total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss * _lvl_w
 
             # Enqueue all levels in one call after the loss loop
             if use_moco:
@@ -314,6 +316,7 @@ def train_step(
             recon_loss_value = recon_loss.item()
             vq_loss_value = 0.0
             contrastive_loss_value = contrastive_loss.item()
+            level_losses = [contrastive_loss_value]
 
     # ------------------------------------------------------------------
     # Backward pass
@@ -339,6 +342,7 @@ def train_step(
         recon_loss_value,
         vq_loss_value,
         estimated_content_indices,
+        level_losses,
     )
 
 
@@ -820,6 +824,7 @@ def main(args):
                     accum_steps = getattr(args, "gradient_accumulation_steps", 1)
                     accum_total = accum_contrastive = accum_recon = accum_vq = 0.0
 
+                    accum_level_losses = None
                     for accum_idx in range(accum_steps):
                         data = next(train_iterator)
                         (
@@ -828,6 +833,7 @@ def main(args):
                             recon_loss,
                             vq_loss,
                             _,
+                            step_level_losses,
                         ) = train_step(
                             data,
                             encoders,
@@ -846,6 +852,12 @@ def main(args):
                         accum_contrastive += contrastive_loss / accum_steps
                         accum_recon += recon_loss / accum_steps
                         accum_vq += vq_loss / accum_steps
+                        if accum_level_losses is None:
+                            accum_level_losses = [v / accum_steps for v in step_level_losses]
+                        else:
+                            accum_level_losses = [
+                                a + v / accum_steps for a, v in zip(accum_level_losses, step_level_losses)
+                            ]
 
                     scheduler.step()
                     oom_count = 0
@@ -866,6 +878,11 @@ def main(args):
                     tb_writer.add_scalar("Loss/Recon", accum_recon, step)
                     tb_writer.add_scalar("Loss/VQ", accum_vq, step)
                     tb_writer.add_scalar("LR", optimizer.param_groups[0]["lr"], step)
+
+                    # Per-level contrastive losses
+                    if accum_level_losses:
+                        for _li, _lv in enumerate(accum_level_losses):
+                            tb_writer.add_scalar(f"Loss/Contrastive_L{_li}", _lv, step)
 
                     # Log Gumbel mask diagnostics per level
                     _raw = encoders[0]
