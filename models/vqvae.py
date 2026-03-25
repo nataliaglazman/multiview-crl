@@ -300,6 +300,8 @@ class VQVAE(HelperModule):
         content_size: int = 0,  # # of content dims in original latent space
         style_size: int = 0,  # # of style dims in original latent space
         inject_style_to_decoder: bool = False,  # Append style latent from encoder-0 to final decoder layer
+        content_style_levels: list[int] | None = None,  # Levels with learnable Gumbel mask
+        content_ratios: list[float] | None = None,  # Per-level content ratio (fraction of hidden_channels)
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -327,64 +329,102 @@ class VQVAE(HelperModule):
                 )
             )
 
-        # Optional content/style separation on the encoder's hidden_channels.
-        # The Gumbel mask is applied to raw encoder output at level 0,
-        # BEFORE the codebook projection, so it operates in a space where
-        # individual channels tend to specialise and are more separable.
-        if content_size > 0 and style_size > 0:
+        # --- Per-level content/style separation ---
+        # Each level in content_style_levels gets its own learnable Gumbel mask
+        # (channel_logits) on the hidden_channels encoder output.
+        if content_style_levels is None:
+            content_style_levels = [0]
+        self.content_style_levels = sorted(set(content_style_levels))
+
+        # Per-level content_channels: each masked level can have a different
+        # number of content channels.  Stored as a dict: level → int.
+        # Also keep self.content_channels as the value for the first masked
+        # level, for backward-compat (notebook, contrastive loss ratio, etc.).
+        has_content_style = content_size > 0 and style_size > 0 and len(self.content_style_levels) > 0
+
+        if has_content_style:
             total_size = content_size + style_size
-            self.content_channels = max(1, round(content_size / total_size * hidden_channels))
-            # Learnable logits over hidden_channels (one per encoder channel).
-            self.channel_logits = nn.Parameter(torch.zeros(hidden_channels))
+            default_ratio = content_size / total_size
+
+            # Build per-level ratios
+            if content_ratios is not None:
+                assert len(content_ratios) == len(self.content_style_levels), (
+                    f"content_ratios has {len(content_ratios)} entries but "
+                    f"content_style_levels has {len(self.content_style_levels)}"
+                )
+                level_ratios = {lvl: r for lvl, r in zip(self.content_style_levels, content_ratios)}
+            else:
+                level_ratios = {lvl: default_ratio for lvl in self.content_style_levels}
+
+            self.content_channels_per_level = {
+                lvl: max(1, round(r * hidden_channels)) for lvl, r in level_ratios.items()
+            }
+            # Backward compat: single value from first masked level
+            self.content_channels = self.content_channels_per_level[self.content_style_levels[0]]
+
+            # One learnable logits vector per masked level
+            self.channel_logits = nn.ParameterDict(
+                {str(lvl): nn.Parameter(torch.zeros(hidden_channels)) for lvl in self.content_style_levels}
+            )
         else:
             self.content_channels = None
-            self.channel_logits = None
+            self.content_channels_per_level = {}
+            self.channel_logits = nn.ParameterDict()  # empty
 
-        # Optional style injection: style channels from the hidden_channels space
-        # are upsampled and concatenated onto the penultimate decoder-0 feature map.
-        self.inject_style_to_decoder = inject_style_to_decoder and (self.channel_logits is not None)
+        has_any_mask = self.content_channels is not None and len(self.channel_logits) > 0
+
+        # Optional style injection: style channels from each masked level's
+        # encoder output are fed into the corresponding decoder.
+        # style_channels_per_level: level → int (complement of content_channels).
+        self.inject_style_to_decoder = inject_style_to_decoder and has_any_mask
         if self.inject_style_to_decoder:
-            self.style_channels = hidden_channels - self.content_channels
+            self.style_channels_per_level = {
+                lvl: hidden_channels - cc for lvl, cc in self.content_channels_per_level.items()
+            }
+            # Backward compat
+            self.style_channels = self.style_channels_per_level.get(self.content_style_levels[0], 0)
         else:
+            self.style_channels_per_level = {}
             self.style_channels = 0
 
+        # --- Codebooks ---
+        # Each level's codebook input channels depend on whether the level is
+        # masked (content_channels for that level) or not (hidden_channels),
+        # and whether it has decoder conditioning (+embed_dim) from above.
         self.codebooks = nn.ModuleList()
-        # Index 0 = finest level (l=0 in forward): has decoder conditioning.
-        # When content masking is active, encoder input is content_channels only.
-        if self.channel_logits is not None:
-            self.codebooks.append(CodeLayer(self.content_channels + embed_dim, embed_dim, nb_entries))
-        else:
-            self.codebooks.append(CodeLayer(hidden_channels + embed_dim, embed_dim, nb_entries))
-        # Indices 1..nb_levels-2: middle levels with decoder conditioning
-        for i in range(1, nb_levels - 1):
-            self.codebooks.append(CodeLayer(hidden_channels + embed_dim, embed_dim, nb_entries))
-        # Index nb_levels-1 = coarsest level: no decoder conditioning
-        self.codebooks.append(CodeLayer(hidden_channels, embed_dim, nb_entries))
+        for lvl in range(nb_levels):
+            if has_any_mask and lvl in self.content_channels_per_level:
+                enc_ch = self.content_channels_per_level[lvl]
+            else:
+                enc_ch = hidden_channels
 
-        self.decoders = nn.ModuleList(
-            [
-                Decoder(
-                    embed_dim * nb_levels,
-                    hidden_channels,
-                    in_channels,
-                    res_channels,
-                    nb_res_layers,
-                    scaling_rates[0],
-                    use_checkpoint,
-                    style_channels=self.style_channels,
-                )
-            ]
-        )
-        for i, sr in enumerate(scaling_rates[1:]):
+            if lvl == nb_levels - 1:
+                # Coarsest level: no decoder conditioning from above
+                self.codebooks.append(CodeLayer(enc_ch, embed_dim, nb_entries))
+            else:
+                # Has decoder conditioning from the level above
+                self.codebooks.append(CodeLayer(enc_ch + embed_dim, embed_dim, nb_entries))
+
+        # Decoders: each decoder at a masked level receives its own style_channels.
+        self.decoders = nn.ModuleList()
+        for lvl in range(nb_levels):
+            if lvl == 0:
+                dec_in = embed_dim * nb_levels
+                dec_out = in_channels
+            else:
+                dec_in = embed_dim * (nb_levels - lvl)
+                dec_out = embed_dim
+            sc = self.style_channels_per_level.get(lvl, 0) if self.inject_style_to_decoder else 0
             self.decoders.append(
                 Decoder(
-                    embed_dim * (nb_levels - 1 - i),
+                    dec_in,
                     hidden_channels,
-                    embed_dim,
+                    dec_out,
                     res_channels,
                     nb_res_layers,
-                    sr,
+                    scaling_rates[lvl],
                     use_checkpoint,
+                    style_channels=sc,
                 )
             )
 
@@ -422,8 +462,10 @@ class VQVAE(HelperModule):
         id_outputs = []
         diffs = []
         estimated_content_indices = None
-        soft_content_mask = None  # differentiable Gumbel mask, returned for contrastive loss
-        style_spatial = None  # style channels from encoder level-0; used for decoder injection
+        # Per-level differentiable Gumbel masks, returned for contrastive loss.
+        # Keys are level indices (int); only populated for levels in content_style_levels.
+        soft_content_masks = {}
+        style_spatials = {}  # level → style channels for decoder injection
 
         # Encoder forward pass
         enc_input = x
@@ -435,42 +477,51 @@ class VQVAE(HelperModule):
 
         del x, enc_input
 
-        # --- Content/style mask on level-0 encoder output (hidden_channels) ---
+        # --- Content/style masks on encoder outputs (hidden_channels) ---
         # Applied BEFORE the codebook projection so the mask operates on raw
         # encoder channels, which tend to specialise and are more separable
         # than the compressed embed_dim projection.
-        content_enc_out = None  # content-only spatial map for level-0 codebook
-        if self.channel_logits is not None:
-            enc_out_l0 = encoder_outputs[0]
+        # One mask per level in self.content_style_levels.
+        content_enc_outs = {}  # level → content-only spatial map
+        has_any_mask = self.content_channels is not None and len(self.channel_logits) > 0
 
-            logits = self.channel_logits.unsqueeze(0)  # (1, hidden_channels)
-            if self.training:
-                soft_mask = utils.topk_gumbel_softmax(
-                    k=self.content_channels,
-                    logits=logits,
-                    tau=1.0,
-                    hard=True,
-                )
-            else:
-                hard_mask = torch.zeros_like(logits)
-                topk_idx = torch.topk(logits, self.content_channels, dim=1).indices
-                hard_mask.scatter_(1, topk_idx, 1.0)
-                soft_mask = hard_mask
+        if has_any_mask:
+            for lvl in self.content_style_levels:
+                enc_out_lvl = encoder_outputs[lvl]
+                logits = self.channel_logits[str(lvl)].unsqueeze(0)  # (1, hidden_channels)
 
-            soft_content_mask = soft_mask  # preserve for contrastive loss
-            content_mask_bool = soft_mask.bool()
-            content_idx = torch.where(content_mask_bool)[-1].tolist()
-            style_idx = torch.where(~content_mask_bool)[-1].tolist()
-            estimated_content_indices = [content_idx]
+                k_lvl = self.content_channels_per_level.get(lvl, self.content_channels)
 
-            # Extract style spatial for decoder injection
-            if self.inject_style_to_decoder and return_recon:
-                style_spatial = enc_out_l0[:, style_idx, :, :, :]
+                if self.training:
+                    soft_mask = utils.topk_gumbel_softmax(
+                        k=k_lvl,
+                        logits=logits,
+                        tau=1.0,
+                        hard=True,
+                    )
+                else:
+                    hard_mask = torch.zeros_like(logits)
+                    topk_idx = torch.topk(logits, k_lvl, dim=1).indices
+                    hard_mask.scatter_(1, topk_idx, 1.0)
+                    soft_mask = hard_mask
 
-            # Soft-masked content channels (gradient flows through soft_mask)
-            masked_l0 = enc_out_l0 * soft_mask.view(1, -1, 1, 1, 1)
-            content_enc_out = masked_l0[:, content_idx, :, :, :]
-            del masked_l0
+                soft_content_masks[lvl] = soft_mask
+                content_mask_bool = soft_mask.bool()
+                content_idx = torch.where(content_mask_bool)[-1].tolist()
+
+                # Store content indices from the first masked level for backward compat
+                if estimated_content_indices is None:
+                    estimated_content_indices = [content_idx]
+
+                # Extract style spatial for decoder injection at this level
+                if self.inject_style_to_decoder and return_recon:
+                    style_idx = torch.where(~content_mask_bool)[-1].tolist()
+                    style_spatials[lvl] = enc_out_lvl[:, style_idx, :, :, :]
+
+                # Soft-masked content channels (gradient flows through soft_mask)
+                masked = enc_out_lvl * soft_mask.view(1, -1, 1, 1, 1)
+                content_enc_outs[lvl] = masked[:, content_idx, :, :, :]
+                del masked
 
         # --- Codebook + decoder loop (top-down: coarsest → finest) ---
         for l in range(self.nb_levels - 1, -1, -1):
@@ -479,10 +530,9 @@ class VQVAE(HelperModule):
             enc_out = encoder_outputs[l]
             encoder_outputs[l] = None  # free memory
 
-            if l == 0 and content_enc_out is not None:
-                # Level 0 with content masking: codebook sees only content channels
-                enc_for_codebook = content_enc_out
-                del content_enc_out
+            if l in content_enc_outs:
+                # This level has content masking: codebook sees only content channels
+                enc_for_codebook = content_enc_outs.pop(l)
             else:
                 enc_for_codebook = enc_out
             del enc_out
@@ -539,8 +589,8 @@ class VQVAE(HelperModule):
                 upscale_counts = [u + 1 for u in upscale_counts]
 
                 decoder_in = torch.cat([code_q, *code_outputs], axis=1)
-                if self.inject_style_to_decoder and style_spatial is not None:
-                    decoder_outputs.append(decoder(decoder_in, style=style_spatial))
+                if self.inject_style_to_decoder and l in style_spatials:
+                    decoder_outputs.append(decoder(decoder_in, style=style_spatials[l]))
                 else:
                     decoder_outputs.append(decoder(decoder_in))
 
@@ -562,18 +612,26 @@ class VQVAE(HelperModule):
             estimated_content_indices,
             decoder_outputs,
             id_outputs,
-            soft_content_mask,
+            soft_content_masks,
         )
 
-    def decode_codes(self, *cs, style=None):
+    def decode_codes(self, *cs, style=None, styles=None):
         """Decode from discrete codes back to the input space.
 
         Args:
             *cs: Per-level codebook indices.
-            style: Optional style tensor for decoder-0 when
-                   ``inject_style_to_decoder`` is enabled.  If ``None`` and
-                   style injection is configured, a zero tensor is used.
+            style: Optional style tensor for decoder-0 (legacy single-level API).
+                   If ``None`` and style injection is configured, zeros are used.
+            styles: Optional dict mapping level index → style tensor for that
+                    decoder.  Takes precedence over ``style`` when both are given.
+                    Pass ``{0: style_l0, 1: style_l1, ...}`` for per-level style.
         """
+        if styles is None:
+            styles = {}
+        # Legacy compat: if only `style` is provided, use it for level 0
+        if style is not None and 0 not in styles:
+            styles[0] = style
+
         decoder_outputs = []
         code_outputs = []
         upscale_counts = []
@@ -597,19 +655,20 @@ class VQVAE(HelperModule):
             upscale_counts = [u + 1 for u in upscale_counts]
 
             decoder_in = torch.cat([code_q, *code_outputs], axis=1)
-            if self.inject_style_to_decoder:
-                if style is None:
+            if decoder.style_channels > 0:
+                lvl_style = styles.get(l, None)
+                if lvl_style is None:
                     # Provide a zero placeholder so the decoder's final_conv
                     # receives the expected number of channels.
                     dec_feat = decoder.layers(decoder_in)
-                    style = torch.zeros(
+                    lvl_style = torch.zeros(
                         dec_feat.shape[0],
-                        self.style_channels,
+                        decoder.style_channels,
                         *dec_feat.shape[2:],
                         device=dec_feat.device,
                         dtype=dec_feat.dtype,
                     )
-                decoder_outputs.append(decoder(decoder_in, style=style))
+                decoder_outputs.append(decoder(decoder_in, style=lvl_style))
             else:
                 decoder_outputs.append(decoder(decoder_in))
 

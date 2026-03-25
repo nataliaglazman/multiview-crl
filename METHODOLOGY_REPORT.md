@@ -5,12 +5,13 @@
 **Project:** `multiview-crl`
 **Dataset:** ADNI (Alzheimer's Disease Neuroimaging Initiative) - Registered T1 and T2 MRI scans
 **Date:** February 2026
-**Last Updated:** 20 March 2026
+**Last Updated:** 24 March 2026
 
 ### Changelog
 
 | Date | Changes |
 |------|--------|
+| 24 Mar 2026 | **Content/style mask architecture overhaul:** moved Gumbel mask from embed_dim (32) back to hidden_channels (64) to prevent modality leakage through the `conv_in` projection; removed `content_proj` round-trip — level-0 codebook now receives only content channels directly. **Contrastive loss gradient fix:** removed `.detach()` from `channel_logits` in the contrastive path and switched from non-differentiable integer-index selection (`hz[..., indices]`) to differentiable soft masking (`hz * mask`) so Gumbel straight-through gradients flow from contrastive loss back to `channel_logits`. **Shared Gumbel mask:** forward pass now returns the soft content mask as a 7th output; the contrastive loss reuses this same mask instead of drawing an independent Gumbel sample, eliminating conflicting channel selections between reconstruction and contrastive objectives. **Persistent disk caching:** added `--cache-dir` for NFS-safe per-sample `.pt` caching with SHA-256 fingerprint invalidation, atomic writes, corruption detection (validates file size on startup, auto-deletes corrupt files at load time), and `.tmp` cleanup. **Periodic validation:** added `--val-every N` to run a short no-grad validation pass every N training steps, logging `Val/Total`, `Val/Contrastive`, `Val/Recon`, `Val/VQ` to TensorBoard. **Codebook indexing fix:** content-channels-aware codebook is now at index 0 (finest level, where the mask applies), not index `nb_levels-1`. Updated notebook (3 cells) and `visualisation.py` for 7-tuple return signature. |
 | 20 Mar 2026 | Added best-model checkpointing (`vqvae_best.pt`) with rolling-average loss tracking; fixed `decode_codes` 2D→3D permute bug (`permute(0,3,1,2)` → `permute(0,4,1,2,3)` for 3D volumes); added codebook analysis to evaluation notebook (Sections 11–16): codebook usage histograms by diagnosis, mutual information & chi-squared discriminativeness, PCA/t-SNE of codebook usage, code replacement & reconstruction with CN vs AD comparison; added NIfTI export of reconstructed volumes with correct post-transform affine; fixed t-SNE content-only filtering at level 0; fixed `last_id_outputs` leaked loop variable bug |
 | 25 Feb 2026 | Added style injection to decoder (`--inject-style-to-decoder`): style channels from encoder level-0 concatenated to penultimate decoder feature map before final conv; added `--content-dim` / `--total-dim` CLI args replacing hardcoded 256/256 content-style split; improved checkpointing with auto-resume and architecture compatibility check; added Docker/RunAI cluster scripts (`docker/`); fixed Gumbel mask bool-cast bug in `models/vqvae.py`; updated `eval/view_latents.ipynb` imports to match project package structure; disabled flake8 pre-commit hook |
 | 23 Feb 2026 | Added MoCo contrastive training scheme (momentum encoder, per-level queues, `moco_infonce_loss`); refactored `main_multimodal.py` into six focused modules (`utils/config.py`, `utils/logging_setup.py`, `utils/checkpointing.py`, `utils/visualisation.py`, `eval/evaluation.py`, `training/main_multimodal.py`); updated file structure diagram; updated all CLI argument tables with MoCo args; resolved all pre-commit hook failures (flake8, isort/black conflict, check-docstring-first); added `pyproject.toml` with isort profile |
@@ -73,6 +74,29 @@ The preprocessing is implemented in `utils/utils.py` using MONAI transforms:
 - **2mm resolution** reduces memory footprint while preserving anatomically relevant features
 - **Brain masking** eliminates spurious non-zero background values caused by interpolation
 - **Z-score normalization** standardizes intensity distributions across subjects
+
+### 2.3 Persistent Disk Caching (`--cache-dir`)
+
+Preprocessing brain MRI volumes (loading NIfTI, resampling, brain masking) is I/O-bound and takes ~30+ minutes for the full ADNI dataset. The persistent caching system pre-processes each volume once and saves it as a `.pt` file for instant loading on subsequent runs.
+
+**Mechanism:**
+1. A **SHA-256 fingerprint** is computed from `(spacing, crop_margin, sorted file paths)`. The cache directory is `<cache_dir>/preprocessed_<fingerprint>/`.
+2. Each sample is saved as `<idx>.pt` containing plain tensors (`image_t1`, `image_t2`, `label`).
+3. **Atomic writes**: saves to `.tmp` then `os.replace()` to prevent half-written files.
+4. **Resumable**: on startup, only missing samples are processed (supports interrupted runs).
+5. **NFS-safe**: `os.makedirs()` in worker processes handles NFS visibility delays.
+
+**Corruption resilience:**
+- Leftover `.tmp` files are cleaned up on startup
+- Files smaller than 1 KB are treated as corrupted and re-generated
+- At load time, if `torch.load` fails with a corruption error, the file is auto-deleted and a clear error message instructs to restart (the next run regenerates just that sample)
+
+**Memory efficiency:**
+- The persistent path does **not** retain loaded tensors in `self._cache` — each `__getitem__` loads from disk and releases. The OS page cache keeps hot files in memory transparently, avoiding Python-heap duplication that previously caused OOM after ~200 steps.
+
+```bash
+--cache-dir /data/natalia/cache  # Enable persistent disk caching
+```
 
 ---
 
@@ -215,8 +239,8 @@ Reconstructed Image (91, 109, 91)
 | `--gradient-checkpointing` | False | Trade compute for memory in residual blocks |
 | `--skip-recon-ratio` | 0.0 | Fraction of steps to skip decoder (0–1) |
 | `--gradient-accumulation-steps` | 1 | Accumulate gradients over N mini-batches |
-| `--content-dim` | 128 | Content dimensions for `content_proj` (must match training when loading checkpoint) |
-| `--total-dim` | 512 | Total latent dims (`content_dim + style_dim`) for `content_proj` |
+| `--content-dim` | 128 | Content dimensions (ratio `content_dim/total_dim` determines `content_channels` on `hidden_channels`) |
+| `--total-dim` | 512 | Total latent dims (`content_dim + style_dim`) |
 | `--inject-style-to-decoder` | False | Feed style channels from encoder level-0 into the final decoder layer |
 
 ### 3.3.3 Encoder Details (Per Level)
@@ -241,14 +265,24 @@ For encoder with 2× downscale:
 
 ### 3.3.4 Vector Quantization Layer
 
-The `CodeLayer` implements EMA (Exponential Moving Average) codebook updates:
+The `CodeLayer` implements EMA (Exponential Moving Average) codebook updates. Each codebook has a `conv_in` projection (1×1×1 Conv3d) that maps from the input channels to `embed_dim`, followed by nearest-neighbour lookup in the codebook:
 
 ```python
 # Discrete bottleneck
-z_e = encoder_output                    # (B, 64, D, H, W)
-z_q = nearest_codebook_entry(z_e)       # (B, 32, D, H, W)
+z_e = conv_in(encoder_output)           # (B, hidden_channels, ...) → (B, embed_dim, ...)
+z_q = nearest_codebook_entry(z_e)       # (B, embed_dim, D, H, W)
 commitment_loss = ||z_e - sg[z_q]||²    # Straight-through gradient
 ```
+
+**Codebook input channels vary by level:**
+
+| Level | Input to `conv_in` | In Channels | Description |
+|-------|-------------------|-------------|-------------|
+| 0 (finest) | `content_channels + embed_dim` | ~86 | Content-only encoder output + decoder conditioning |
+| 1 (middle) | `hidden_channels + embed_dim` | ~96 | Full encoder output + decoder conditioning |
+| 2 (coarsest) | `hidden_channels` | 64 | Full encoder output only (no decoder above) |
+
+Level 0 receives only the content channels (selected by the Gumbel mask) rather than all `hidden_channels`. This ensures the finest-level codebook encodes only content information.
 
 **Key Properties:**
 - **Codebook Size:** 384 discrete codes (default)
@@ -268,29 +302,28 @@ Each decoder receives concatenated codes from current and all higher levels:
 
 ### 3.3.6 Style Injection to Decoder (`--inject-style-to-decoder`)
 
-By default, only the **content channels** (selected by the Gumbel mask) are passed forward through `content_proj` to deeper encoders and the decoder chain. The **style channels** (the complement within `hidden_channels`) are discarded after level-0, so the decoder has no signal about modality-specific features.
+By default, only the **content channels** (selected by the Gumbel mask) are passed forward to the level-0 codebook and decoder chain. The **style channels** (the complement within `hidden_channels`) are discarded after level-0, so the decoder has no signal about modality-specific features.
 
 When `--inject-style-to-decoder` is enabled, the style channels are instead captured and fed back into the bottom decoder (`decoders[0]`) before the final output conv:
 
 ```
 Encoder level-0 output  (B, hidden_channels, D, H, W)
          │
-         ├─ content_idx channels ──► content_proj ──► deeper encoders / codebooks
+         ├─ content_idx channels ──► level-0 codebook ──► decoder chain
          │
-         └─ style_idx channels ──► detach ──────────────────────────────────┐
-                                                                             ▼
-                                                          decoders[0] penultimate feat
-                                                          trilinear upsample to match
-                                                          cat([feat, style], dim=1)
-                                                                             ▼
-                                                               final_conv ──► output
+         └─ style_idx channels ──────────────────────────────────────────┐
+                                                                         ▼
+                                                      decoders[0] penultimate feat
+                                                      trilinear upsample to match
+                                                      cat([feat, style], dim=1)
+                                                                         ▼
+                                                           final_conv ──► output
 ```
 
 **Implementation details:**
 - `Decoder` is built with `style_channels = hidden_channels − content_channels` when injection is active; a separate `self.final_conv` (replacing the original merged last layer) accepts the concatenated feature map.
-- The style tensor is **detached** before concatenation so the reconstruction gradient does not flow back through the encoder's style channels a second time (the contrastive loss already provides that signal).
 - If the spatial size of the style map differs from the penultimate decoder feature map, trilinear interpolation is applied automatically.
-- Has **no effect** unless `content_proj` is active (i.e. `--content-dim` and `--total-dim` must be set).
+- Has **no effect** unless `channel_logits` is active (i.e. `content_size > 0` and `style_size > 0`).
 
 **Motivation:** Giving the decoder access to style (modality-specific) channels should improve reconstruction quality for T2 scans, whose contrast differs markedly from T1, without weakening the contrastive signal on content dimensions.
 
@@ -330,46 +363,62 @@ By applying contrastive loss at each level, we enforce content/style disentangle
 
 ### 3.4.2 Content Selection Strategy
 
-Content indices are selected **only at Level 0**, then propagated proportionally to higher levels:
+Content indices at **Level 0** are selected by learnable `channel_logits` via Gumbel-Softmax, applied on the full `hidden_channels` (64-dim) encoder output. Higher levels use batch-statistics-based Gumbel masks with the same content ratio.
+
+**Critical design: shared Gumbel mask.** The forward pass samples a single Gumbel mask from `channel_logits` and uses it for both (a) selecting content channels for the level-0 codebook, and (b) soft-masking pooled features for the contrastive loss. This ensures both losses agree on which channels are content on every step. Previously, two independent Gumbel samples were drawn, causing the reconstruction and contrastive objectives to work on different channel subsets and preventing convergence.
 
 ```python
-# Level 0: Learn content/style split via Gumbel-Softmax
-content_ratio = 256/512 = 0.5  # From args.content_indices
-n_channels = 64               # Encoder output channels
-content_size = int(0.5 * 64) = 32  # 50% of channels as content
+# In VQVAE.forward():
+soft_mask = topk_gumbel_softmax(k=content_channels, logits=channel_logits)
+content_enc_out = (enc_out * soft_mask)[:, content_idx, ...]  # → codebook
 
-# Use Gumbel-Softmax to dynamically select which 32 dims are content
-content_masks = gumbel_softmax_mask(logits, content_size)
+# Returned as 7th output, reused for contrastive loss:
+# In training loop (no second Gumbel sample):
+soft_content_mask = fwd_soft_content_mask  # reuse from forward pass
+level_loss = moco_loss(..., soft_content_mask=soft_content_mask)
+```
 
-# Higher levels: Use same 50% ratio
-level_1_content = 32 dims
-level_2_content = 32 dims
+**Differentiable masking for contrastive loss.** The contrastive loss uses `hz * soft_mask` (element-wise multiplication) instead of `hz[..., content_indices]` (integer indexing). This preserves the Gumbel straight-through gradient path from the contrastive loss back to `channel_logits`, so both reconstruction and contrastive objectives jointly guide which channels should be content vs style.
+
+```python
+# Level 0: Learnable content/style split via Gumbel-Softmax
+content_ratio = content_dim / total_dim  # e.g. 0.75
+n_channels = 64                          # hidden_channels
+content_size = int(0.75 * 64) = 48       # content channels
+
+# Higher levels: Use same ratio, batch-statistics mask
+level_1_content = 48 dims
+level_2_content = 48 dims
 ```
 
 ### 3.4.3 Training Loop for VQ-VAE-2
 
 ```python
-for level_idx, encoder_output in enumerate(encoder_outputs):
-    # Global average pool: (B, 64, D, H, W) → (B, 64)
-    hz = encoder_output.mean(dim=[2,3,4])
+# Forward pass returns shared mask
+recon, diffs, encoder_pools, est_indices, _, _, fwd_soft_content_mask = \
+    vqvae_model(images, return_recon=True, pool_only=True)
 
-    # Reshape for contrastive: (n_views, batch, channels)
-    hz = hz.reshape(2, batch_size, 64)
+for level_idx, enc_pooled in enumerate(encoder_pools):
+    # enc_pooled: (B, hidden_channels) — already spatially pooled
+    hz = enc_pooled.reshape(n_views, batch_size, hidden_channels)
 
-    if level_idx == 0:
-        # Select content indices via Gumbel-Softmax
-        content_indices = gumbel_select(hz, k=32)
-        content_ratio = 32/64
+    if level_idx == 0 and channel_logits is not None:
+        # Reuse the same mask from the forward pass
+        soft_content_mask = fwd_soft_content_mask  # (1, 64)
     else:
-        # Proportional content for higher levels
-        content_size = int(content_ratio * n_channels)
-        content_indices = range(content_size)
+        # Batch-statistics Gumbel mask for higher levels
+        soft_content_mask = None  # falls back to integer indices
 
-    # Contrastive loss on content dims only
-    level_loss = infonce_loss(hz, content_indices)
+    # Contrastive loss: soft masking (differentiable) or index selection
+    if use_moco:
+        level_loss = moco_loss(hz, keys, queue, content_indices,
+                               soft_content_mask=soft_content_mask)
+    else:
+        level_loss = infonce_loss(hz, content_indices,
+                                  soft_content_mask=soft_content_mask)
+
     total_contrastive_loss += level_loss
 
-# Total loss
 total_loss = contrastive_loss + recon_loss * scale + vq_commitment_loss
 ```
 
@@ -576,6 +625,14 @@ if rolling_loss is not None and rolling_loss < best_total_loss:
 - `Loss/VQ` — VQ commitment loss
 - `LR` — current learning rate
 
+**Validation Metrics (every `--val-every` steps, if > 0):**
+- `Val/Total` — validation total loss (no-grad, eval mode)
+- `Val/Contrastive` — validation contrastive loss
+- `Val/Recon` — validation reconstruction loss
+- `Val/VQ` — validation VQ commitment loss
+
+Validation runs a short pass (up to 20 batches) over the validation split with the model in `eval()` mode and no gradient computation. This provides an overfitting signal without significant training slowdown.
+
 **Checkpoint Contents:**
 - Model weights (`vqvae_model.pt` or `checkpoint.pt`; best model in `vqvae_best.pt` or `checkpoint_best.pt`)
 - Optimizer state
@@ -620,27 +677,33 @@ By applying contrastive loss **only on content dimensions**, the model is encour
 
 ### 6.2 Implementation
 
-The content/style split is configured via `--content-dim` and `--total-dim` (replacing the earlier hardcoded 256/256 values):
+The content/style split is configured via `--content-dim` and `--total-dim`:
 
 ```bash
---content-dim 384   # first 384 dims are content
---total-dim   512   # dims 384–511 are style
+--content-dim 384   # determines content ratio
+--total-dim   512   # determines style ratio
 ```
 
-```python
-# Set in update_args() for ADNI/custom datasets:
-content_indices = list(range(args.content_dim))           # [0, …, content_dim-1]
-style_indices   = list(range(args.content_dim, args.total_dim))  # [content_dim, …, total_dim-1]
-
-# Contrastive similarity computed ONLY on content
-sim = cosine_similarity(z1[content_indices], z2[content_indices])
-```
-
-The `content_channels` in the VQ-VAE-2 is derived proportionally:
+The `content_channels` in VQ-VAE-2's encoder output is derived proportionally from the `hidden_channels`:
 ```python
 content_channels = round(content_dim / total_dim * hidden_channels)
+# e.g. round(384/512 * 64) = 48 content channels out of 64
 ```
-So with `--content-dim 384 --total-dim 512 --vqvae-hidden-channels 48`, `content_channels = round(0.75 × 48) = 36`.
+
+A learnable parameter `channel_logits` (size `hidden_channels`) is trained with Gumbel-Softmax to select which specific channels are content vs style. The selection is:
+1. **Differentiable** — Gumbel straight-through estimator allows gradients from both reconstruction and contrastive losses to flow back to `channel_logits`
+2. **Shared** — a single Gumbel sample is drawn per step and used for both the codebook (reconstruction) and the contrastive loss
+3. **Applied on hidden_channels** — the mask operates on the raw 64-dim encoder output, not on the compressed 32-dim codebook embedding, because the `conv_in` projection would mix all channels and leak modality information
+
+```python
+# In VQVAE.forward():
+soft_mask = topk_gumbel_softmax(k=content_channels, logits=channel_logits)
+content_enc_out = (enc_l0 * soft_mask)[:, content_idx, :]  # → level-0 codebook
+
+# In contrastive loss (differentiable masking):
+hz_content = hz * soft_mask  # NOT hz[..., content_indices]
+sim = cosine_similarity(hz_content_view1, hz_content_view2)
+```
 
 ### 6.3 Expected Outcomes
 
@@ -837,9 +900,11 @@ bash docker/run_docker.sh
 | `--vqvae-scaling-rates` | [2, 2, 2] | Downscale factor per level |
 | `--vq-commitment-weight` | 0.25 | VQ commitment loss weight |
 | `--gradient-checkpointing` | False | Trade compute for memory in residual blocks |
-| `--content-dim` | 128 | Content dimensions for `content_proj` split |
-| `--total-dim` | 512 | Total dims (`content_dim + style_dim`) for `content_proj` |
+| `--content-dim` | 128 | Content dimensions (determines `content_channels` ratio on `hidden_channels`) |
+| `--total-dim` | 512 | Total dims (`content_dim + style_dim`); ratio `content_dim/total_dim` sets channel split |
 | `--inject-style-to-decoder` | False | Feed style channels from encoder level-0 into the bottom decoder's final layer |
+| `--cache-dir` | None | Directory for persistent preprocessed `.pt` cache (NFS-safe, fingerprinted) |
+| `--val-every` | 0 | Run validation every N steps (0 disables periodic validation) |
 
 **MoCo Arguments:**
 

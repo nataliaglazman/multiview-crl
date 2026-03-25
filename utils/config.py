@@ -92,6 +92,25 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--vqvae-scaling-rates", type=int, nargs="+", default=[2, 2, 2])
     parser.add_argument("--vq-commitment-weight", type=float, default=0.25)
     parser.add_argument(
+        "--content-style-levels",
+        type=int,
+        nargs="+",
+        default=[0],
+        help="Encoder levels at which to apply the learnable content/style Gumbel mask. "
+        "Default: [0] (finest level only). Use e.g. '0 1 2' for all levels.",
+    )
+    parser.add_argument(
+        "--content-ratios",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Per-level content ratio (fraction of hidden_channels that are content). "
+        "One float per entry in --content-style-levels, same order. "
+        "E.g. '--content-style-levels 0 1 2 --content-ratios 0.5 0.75 0.9' gives "
+        "level 0 → 50%% content, level 1 → 75%%, level 2 → 90%%. "
+        "If omitted, all levels use the global ratio from --content-dim / --total-dim.",
+    )
+    parser.add_argument(
         "--gradient-checkpointing",
         action="store_true",
         help="Trade compute for memory in residual blocks",
@@ -122,6 +141,13 @@ def parse_args() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Fraction of steps to skip reconstruction (0–1)",
+    )
+    parser.add_argument(
+        "--val-every",
+        type=int,
+        default=0,
+        help="Run validation every N training steps and log Val/ losses to TensorBoard. "
+        "0 disables periodic validation (default).",
     )
     parser.add_argument(
         "--gradient-accumulation-steps",

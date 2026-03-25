@@ -129,7 +129,7 @@ def train_step(
                 estimated_content_indices,
                 _,
                 _,
-                fwd_soft_content_mask,
+                fwd_soft_content_masks,
             ) = vqvae_model(
                 images,
                 return_recon=compute_recon,
@@ -168,17 +168,26 @@ def train_step(
 
             total_contrastive_loss = torch.zeros(1, device=device)
             level_losses = []
-            content_ratio = len(args.content_indices[0]) / (len(args.content_indices[0]) + len(args.style_indices))
+            default_content_ratio = len(args.content_indices[0]) / (
+                len(args.content_indices[0]) + len(args.style_indices)
+            )
 
             # Unwrap DataParallel / MoCoEncoder to reach the bare VQVAE so we
             # can read channel_logits (fix #1 / #4).
             _raw_vqvae = vqvae_model.online if hasattr(vqvae_model, "online") else vqvae_model
             _raw_vqvae = _raw_vqvae.module if hasattr(_raw_vqvae, "module") else _raw_vqvae
 
+            # Per-level content channel counts from the model (set by --content-ratios)
+            _content_ch_per_level = getattr(_raw_vqvae, "content_channels_per_level", {})
+
             for level_idx, enc_pooled in enumerate(encoder_outputs):
                 hz_level = enc_pooled.reshape(n_views, -1, enc_pooled.shape[-1])
                 n_channels = hz_level.shape[-1]
-                content_size = max(1, int(content_ratio * n_channels))
+                # Use per-level content_channels if available, otherwise fall back to ratio
+                if level_idx in _content_ch_per_level:
+                    content_size = _content_ch_per_level[level_idx]
+                else:
+                    content_size = max(1, int(default_content_ratio * n_channels))
 
                 # soft_content_mask: differentiable (0/1) mask for the contrastive
                 # loss, shape (1, C).  Reused from the forward pass so the
@@ -186,14 +195,11 @@ def train_step(
                 # sample — no conflicting channel selections.
                 soft_content_mask = None
 
-                if _raw_vqvae.channel_logits is not None and level_idx == 0:
-                    # Reuse the mask that the forward pass already sampled.
-                    # This is the same differentiable Gumbel straight-through
-                    # mask used for the codebook, so gradients from the
-                    # contrastive loss flow back to channel_logits AND the
-                    # reconstruction and contrastive paths agree on which
-                    # channels are content.
-                    soft_content_mask = fwd_soft_content_mask
+                if level_idx in fwd_soft_content_masks:
+                    # This level has a learnable Gumbel mask — reuse the same
+                    # mask the forward pass sampled for the codebook.  Gradients
+                    # from the contrastive loss flow back to channel_logits.
+                    soft_content_mask = fwd_soft_content_masks[level_idx]
                     content_masks = [soft_content_mask] * len(args.subsets)
                 else:
                     # Fallback: no channel_logits configured, use batch statistics.
@@ -333,6 +339,86 @@ def train_step(
         recon_loss_value,
         vq_loss_value,
         estimated_content_indices,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Periodic validation
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def _run_validation(
+    val_dataset,
+    encoders,
+    decoders,
+    loss_func,
+    dataloader_kwargs,
+    args,
+    recon_loss_fn,
+    moco_loss_func,
+    device,
+    max_batches=20,
+):
+    """Run a short validation pass and return averaged (total, contrastive, recon, vq) losses."""
+    # Temporarily switch to eval mode
+    was_training = {}
+    for i, enc in enumerate(encoders):
+        was_training[f"enc_{i}"] = enc.training
+        enc.eval()
+    for i, dec in enumerate(decoders):
+        was_training[f"dec_{i}"] = dec.training
+        dec.eval()
+
+    val_kwargs = dict(dataloader_kwargs)
+    val_kwargs["shuffle"] = False
+    val_kwargs.pop("collate_fn", None)  # avoid custom collate issues
+    val_loader = DataLoader(val_dataset, **val_kwargs)
+
+    totals, cons, recs, vqs = [], [], [], []
+
+    for batch_idx, data in enumerate(val_loader):
+        if batch_idx >= max_batches:
+            break
+        try:
+            total_loss, contrastive_loss, recon_loss, vq_loss, _ = train_step(
+                data,
+                encoders,
+                decoders,
+                loss_func,
+                optimizer=None,  # no backward
+                params=[],
+                args=args,
+                scaler=None,
+                recon_loss_fn=recon_loss_fn,
+                moco_loss_func=moco_loss_func,
+            )
+            totals.append(total_loss)
+            cons.append(contrastive_loss)
+            recs.append(recon_loss)
+            vqs.append(vq_loss)
+        except RuntimeError:
+            # Skip OOM or shape errors on val batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            continue
+
+    # Restore training mode
+    for i, enc in enumerate(encoders):
+        if was_training[f"enc_{i}"]:
+            enc.train()
+    for i, dec in enumerate(decoders):
+        if was_training[f"dec_{i}"]:
+            dec.train()
+
+    if not totals:
+        return 0.0, 0.0, 0.0, 0.0
+    return (
+        np.mean(totals),
+        np.mean(cons),
+        np.mean(recs),
+        np.mean(vqs),
     )
 
 
@@ -506,7 +592,10 @@ def main(args):
         if args.collate_random_pair:
             dataloader_kwargs["collate_fn"] = train_dataset.__collate_fn__random_pair__
 
-    if args.evaluate:
+    # Always create val_dataset for periodic validation during training
+    val_every = getattr(args, "val_every", 0)
+    need_val_dataset = args.evaluate or val_every > 0
+    if need_val_dataset:
         val_dataset = args.DATASETCLASS(
             data_dir=args.datapath,
             mode="val",
@@ -515,6 +604,10 @@ def main(args):
             crop_margin=getattr(args, "crop_margin", 0),
             **dataset_kwargs,
         )
+    else:
+        val_dataset = None
+
+    if args.evaluate:
         test_dataset = args.DATASETCLASS(
             data_dir=args.datapath,
             mode="test",
@@ -552,6 +645,8 @@ def main(args):
             content_size=len(args.content_indices[0]),
             style_size=len(args.style_indices),
             inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
+            content_style_levels=getattr(args, "content_style_levels", [0]),
+            content_ratios=getattr(args, "content_ratios", None),
         )
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
@@ -559,6 +654,11 @@ def main(args):
         vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
         vqvae_model.to(device)
         logger.info(f"  Parameters: {sum(p.numel() for p in vqvae_model.parameters()):,}")
+        cs_levels = getattr(args, "content_style_levels", [0])
+        cs_ratios = getattr(args, "content_ratios", None)
+        logger.info(f"  Content/style mask levels: {cs_levels}")
+        if cs_ratios is not None:
+            logger.info(f"  Per-level content ratios: {dict(zip(cs_levels, cs_ratios))}")
 
         encoders = [vqvae_model]
         decoders = []
@@ -811,6 +911,30 @@ def main(args):
                             vq_loss,
                             scheduler=scheduler,
                             best_loss=new_best,
+                        )
+
+                    # --- Periodic validation ---
+                    if val_every > 0 and val_dataset is not None and step % val_every == 0:
+                        val_total, val_con, val_rec, val_vq = _run_validation(
+                            val_dataset,
+                            encoders,
+                            decoders,
+                            loss_func,
+                            dataloader_kwargs,
+                            args,
+                            recon_loss_fn,
+                            moco_loss_func,
+                            device,
+                        )
+                        tb_writer.add_scalar("Val/Total", val_total, step)
+                        tb_writer.add_scalar("Val/Contrastive", val_con, step)
+                        tb_writer.add_scalar("Val/Recon", val_rec, step)
+                        tb_writer.add_scalar("Val/VQ", val_vq, step)
+                        tb_writer.flush()
+                        logger.info(
+                            f"  [Val @ step {step}] Total={val_total:.4f} | "
+                            f"Contrastive={val_con:.4f} | Recon={val_rec:.4f} | "
+                            f"VQ={val_vq:.4f}"
                         )
 
                     step += 1
