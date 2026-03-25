@@ -350,11 +350,10 @@ def train_step(
 
 @torch.no_grad()
 def _run_validation(
-    val_dataset,
+    val_loader,
     encoders,
     decoders,
     loss_func,
-    dataloader_kwargs,
     args,
     recon_loss_fn,
     moco_loss_func,
@@ -370,11 +369,6 @@ def _run_validation(
     for i, dec in enumerate(decoders):
         was_training[f"dec_{i}"] = dec.training
         dec.eval()
-
-    val_kwargs = dict(dataloader_kwargs)
-    val_kwargs["shuffle"] = False
-    val_kwargs.pop("collate_fn", None)  # avoid custom collate issues
-    val_loader = DataLoader(val_dataset, **val_kwargs)
 
     totals, cons, recs, vqs = [], [], [], []
 
@@ -604,8 +598,13 @@ def main(args):
             crop_margin=getattr(args, "crop_margin", 0),
             **dataset_kwargs,
         )
+        val_kwargs = dict(dataloader_kwargs)
+        val_kwargs["shuffle"] = False
+        val_kwargs.pop("collate_fn", None)
+        val_loader = DataLoader(val_dataset, **val_kwargs)
     else:
         val_dataset = None
+        val_loader = None
 
     if args.evaluate:
         test_dataset = args.DATASETCLASS(
@@ -868,6 +867,28 @@ def main(args):
                     tb_writer.add_scalar("Loss/VQ", accum_vq, step)
                     tb_writer.add_scalar("LR", optimizer.param_groups[0]["lr"], step)
 
+                    # Log Gumbel mask diagnostics per level
+                    _raw = encoders[0]
+                    if hasattr(_raw, "online"):
+                        _raw = _raw.online
+                    if hasattr(_raw, "module"):
+                        _raw = _raw.module
+                    if hasattr(_raw, "channel_logits"):
+                        for lvl_key, logits_param in _raw.channel_logits.items():
+                            probs = torch.softmax(logits_param.detach(), dim=0)
+                            entropy = -(probs * probs.log().clamp(min=-100)).sum().item()
+                            max_entropy = np.log(probs.numel())
+                            tb_writer.add_scalar(f"Mask/Entropy_L{lvl_key}", entropy, step)
+                            tb_writer.add_scalar(f"Mask/NormEntropy_L{lvl_key}", entropy / max_entropy, step)
+                            # How spread out the logits are (higher = more decisive)
+                            tb_writer.add_scalar(f"Mask/LogitStd_L{lvl_key}", logits_param.detach().std().item(), step)
+                            # Top-k vs bottom-k gap: mean of selected minus mean of not selected
+                            k_lvl = _raw.content_channels_per_level.get(int(lvl_key), _raw.content_channels)
+                            sorted_logits = logits_param.detach().sort(descending=True).values
+                            top_mean = sorted_logits[:k_lvl].mean().item()
+                            bot_mean = sorted_logits[k_lvl:].mean().item()
+                            tb_writer.add_scalar(f"Mask/TopBotGap_L{lvl_key}", top_mean - bot_mean, step)
+
                     if step % args.log_steps == 1 or step == args.train_steps:
                         with open(file_name, "a+") as f:
                             csv.writer(f).writerow(
@@ -914,13 +935,12 @@ def main(args):
                         )
 
                     # --- Periodic validation ---
-                    if val_every > 0 and val_dataset is not None and step % val_every == 0:
+                    if val_every > 0 and val_loader is not None and step % val_every == 0:
                         val_total, val_con, val_rec, val_vq = _run_validation(
-                            val_dataset,
+                            val_loader,
                             encoders,
                             decoders,
                             loss_func,
-                            dataloader_kwargs,
                             args,
                             recon_loss_fn,
                             moco_loss_func,
