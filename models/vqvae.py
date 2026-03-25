@@ -447,15 +447,20 @@ class VQVAE(HelperModule):
             rates = scaling_rates[1 : len(scaling_rates) - i][::-1]  # noqa: E203
             self.upscalers.append(Upscaler(embed_dim, rates))
 
-    def forward(self, x, return_recon=True, pool_only=False, n_views=1, subsets=None):
+    def forward(self, x, return_recon=True, pool_only=False, n_views=1, subsets=None, view_idx=None):
         """Forward pass through VQ-VAE-2.
 
         Args:
             x: Input tensor (B, C, D, H, W)
             return_recon: If False, skip decoder for memory efficiency (contrastive-only mode)
             pool_only: If True, return per-level pooled (B, C) vectors instead of spatial maps.
-            n_views: Number of views (unused, kept for API compat).
+            n_views: Number of views. When 2 and separate_encoders is active, the
+                     batch is split in half (view 0 | view 1) and routed through
+                     the respective encoder stacks.
             subsets: View subsets (unused, kept for API compat).
+            view_idx: When separate_encoders is active and n_views=1, selects which
+                      encoder stack to use (0 → self.encoders, 1 → self.encoders_v1).
+                      Defaults to 0 if not specified.  Ignored when n_views=2.
 
         Returns:
             final_output: Reconstruction (or None if return_recon=False)
@@ -502,8 +507,14 @@ class VQVAE(HelperModule):
                     encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
             del enc_in_v0, enc_in_v1
         else:
+            # Single-view path.  When separate_encoders is active, view_idx
+            # selects which encoder stack to use (0 or 1).
+            enc_stack = self.encoders
+            if self.separate_encoders and self.encoders_v1 is not None and view_idx == 1:
+                enc_stack = self.encoders_v1
+
             enc_input = x
-            for i, enc in enumerate(self.encoders):
+            for i, enc in enumerate(enc_stack):
                 enc_input = enc(enc_input)
                 encoder_outputs.append(enc_input)
                 if pool_only:
