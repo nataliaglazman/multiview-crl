@@ -196,11 +196,85 @@ def train_step(
                 soft_content_mask = None
 
                 if level_idx in fwd_soft_content_masks:
-                    # This level has a learnable Gumbel mask — reuse the same
-                    # mask the forward pass sampled for the codebook.  Gradients
-                    # from the contrastive loss flow back to channel_logits.
-                    soft_content_mask = fwd_soft_content_masks[level_idx]
-                    content_masks = [soft_content_mask] * len(args.subsets)
+                    mask_or_tuple = fwd_soft_content_masks[level_idx]
+
+                    if isinstance(mask_or_tuple, tuple):
+                        # --- Per-view content selectors (Def 3.5, Yao et al.) ---
+                        # Each view has its own Gumbel mask selecting potentially
+                        # different channels.  We pre-apply the masks and extract
+                        # k-dim content features so the loss operates on aligned
+                        # k-dimensional vectors.  Gradients still flow back to
+                        # channel_logits / channel_logits_v1 through the soft mask
+                        # multiplication.
+                        mask_v0, mask_v1 = mask_or_tuple
+                        idx_v0 = torch.where(mask_v0.bool())[-1]
+                        idx_v1 = torch.where(mask_v1.bool())[-1]
+                        k_content = int(mask_v0.sum().item())
+
+                        # Pre-mask and extract k-dim content per view
+                        hz_v0_content = (hz_level[0] * mask_v0)[:, idx_v0]  # (B, k)
+                        hz_v1_content = (hz_level[1] * mask_v1)[:, idx_v1]  # (B, k)
+                        hz_content = torch.stack([hz_v0_content, hz_v1_content], dim=0)  # (2, B, k)
+
+                        # All k dims are now content (already selected)
+                        level_content_indices = [list(range(k_content))] * len(args.subsets)
+                        estimated_content_indices = [idx_v0.tolist()]  # view-0 for backward compat
+
+                        if use_moco:
+                            key_pooled = key_outputs[level_idx]
+                            k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])
+                            # Pre-mask momentum keys the same way
+                            k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
+                            k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
+                            k_content_level = torch.stack([k_v0_content, k_v1_content], dim=0)
+                            queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
+                            # Queue stores full C-dim features; select view-0 content
+                            # channels as a reasonable approximation for negatives.
+                            queue_content = queue_snapshot[idx_v0, :]
+                            level_loss = moco_loss_func(
+                                hz_content,
+                                k_content_level,
+                                queue_content,
+                                level_content_indices,
+                                args.subsets,
+                                soft_content_mask=None,
+                            )
+                        else:
+                            level_loss = loss_func(
+                                hz_content,
+                                level_content_indices,
+                                args.subsets,
+                                soft_content_mask=None,
+                            )
+                    else:
+                        # --- Shared mask (original path) ---
+                        # This level has a learnable Gumbel mask — reuse the same
+                        # mask the forward pass sampled for the codebook.  Gradients
+                        # from the contrastive loss flow back to channel_logits.
+                        soft_content_mask = mask_or_tuple
+                        content_masks = [soft_content_mask] * len(args.subsets)
+                        estimated_content_indices = [torch.where(m.bool())[-1].tolist() for m in content_masks]
+                        level_content_indices = estimated_content_indices
+
+                        if use_moco:
+                            key_pooled = key_outputs[level_idx]
+                            k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])
+                            queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
+                            level_loss = moco_loss_func(
+                                hz_level,
+                                k_level,
+                                queue_snapshot,
+                                level_content_indices,
+                                args.subsets,
+                                soft_content_mask=soft_content_mask,
+                            )
+                        else:
+                            level_loss = loss_func(
+                                hz_level,
+                                level_content_indices,
+                                args.subsets,
+                                soft_content_mask=soft_content_mask,
+                            )
                 else:
                     # Fallback: no channel_logits configured, use batch statistics.
                     avg_logits = hz_level.mean(dim=[0, 1], keepdim=False).unsqueeze(0)
@@ -217,28 +291,28 @@ def train_step(
                             subsets=args.subsets,
                         )
 
-                estimated_content_indices = [torch.where(m.bool())[-1].tolist() for m in content_masks]
-                level_content_indices = estimated_content_indices
+                    estimated_content_indices = [torch.where(m.bool())[-1].tolist() for m in content_masks]
+                    level_content_indices = estimated_content_indices
 
-                if use_moco:
-                    key_pooled = key_outputs[level_idx]
-                    k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])
-                    queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
-                    level_loss = moco_loss_func(
-                        hz_level,
-                        k_level,
-                        queue_snapshot,
-                        level_content_indices,
-                        args.subsets,
-                        soft_content_mask=soft_content_mask,
-                    )
-                else:
-                    level_loss = loss_func(
-                        hz_level,
-                        level_content_indices,
-                        args.subsets,
-                        soft_content_mask=soft_content_mask,
-                    )
+                    if use_moco:
+                        key_pooled = key_outputs[level_idx]
+                        k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])
+                        queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
+                        level_loss = moco_loss_func(
+                            hz_level,
+                            k_level,
+                            queue_snapshot,
+                            level_content_indices,
+                            args.subsets,
+                            soft_content_mask=soft_content_mask,
+                        )
+                    else:
+                        level_loss = loss_func(
+                            hz_level,
+                            level_content_indices,
+                            args.subsets,
+                            soft_content_mask=soft_content_mask,
+                        )
 
                 level_losses.append(level_loss.item())
                 _lvl_weights = getattr(args, "contrastive_level_weights", None)
@@ -651,6 +725,7 @@ def main(args):
             content_style_levels=getattr(args, "content_style_levels", [0]),
             content_ratios=getattr(args, "content_ratios", None),
             separate_encoders=getattr(args, "separate_encoders", False),
+            mask_mode=getattr(args, "mask_mode", "onthefly"),
         )
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
@@ -665,6 +740,15 @@ def main(args):
             logger.info(f"  Per-level content ratios: {dict(zip(cs_levels, cs_ratios))}")
         if getattr(args, "separate_encoders", False):
             logger.info("  Separate encoders: ENABLED (one encoder stack per view)")
+        mask_mode = getattr(args, "mask_mode", "onthefly")
+        logger.info(
+            f"  Mask mode: {mask_mode}"
+            + (
+                " (on-the-fly from avg activations, shared across views)"
+                if mask_mode == "onthefly"
+                else " (learnable nn.Parameter per level)"
+            )
+        )
 
         encoders = [vqvae_model]
         decoders = []

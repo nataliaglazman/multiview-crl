@@ -303,6 +303,7 @@ class VQVAE(HelperModule):
         content_style_levels: list[int] | None = None,  # Levels with learnable Gumbel mask
         content_ratios: list[float] | None = None,  # Per-level content ratio (fraction of hidden_channels)
         separate_encoders: bool = False,  # If True, create a second encoder stack for view 1
+        mask_mode: str = "onthefly",  # "learned" or "onthefly"
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -376,16 +377,38 @@ class VQVAE(HelperModule):
             # Backward compat: single value from first masked level
             self.content_channels = self.content_channels_per_level[self.content_style_levels[0]]
 
-            # One learnable logits vector per masked level
-            self.channel_logits = nn.ParameterDict(
-                {str(lvl): nn.Parameter(torch.zeros(hidden_channels)) for lvl in self.content_style_levels}
-            )
+            # --- Mask logits source ---
+            # "learned":  persistent nn.Parameter per level (optionally per view).
+            # "onthefly": logits computed from average encoder activations each
+            #             forward pass, shared across views.  Matches the original
+            #             multiview-crl repo (Yao et al., 2024).
+            self.mask_mode = mask_mode
+
+            if mask_mode == "learned":
+                self.channel_logits = nn.ParameterDict(
+                    {str(lvl): nn.Parameter(torch.zeros(hidden_channels)) for lvl in self.content_style_levels}
+                )
+                # Per-view content selectors (Def 3.5, Yao et al.):
+                # When separate_encoders is active, view-1 gets its own logits.
+                if separate_encoders:
+                    self.channel_logits_v1 = nn.ParameterDict(
+                        {str(lvl): nn.Parameter(torch.zeros(hidden_channels)) for lvl in self.content_style_levels}
+                    )
+                else:
+                    self.channel_logits_v1 = None
+            else:
+                # "onthefly" — no learnable mask parameters; logits are derived
+                # from encoder outputs at runtime.
+                self.channel_logits = nn.ParameterDict()  # empty (no learnable params)
+                self.channel_logits_v1 = None
         else:
             self.content_channels = None
             self.content_channels_per_level = {}
             self.channel_logits = nn.ParameterDict()  # empty
+            self.mask_mode = mask_mode
+            self.channel_logits_v1 = None
 
-        has_any_mask = self.content_channels is not None and len(self.channel_logits) > 0
+        has_any_mask = self.content_channels is not None and len(self.content_channels_per_level) > 0
 
         # Optional style injection: style channels from each masked level's
         # encoder output are fed into the corresponding decoder.
@@ -525,47 +548,110 @@ class VQVAE(HelperModule):
         # Applied BEFORE the codebook projection so the mask operates on raw
         # encoder channels, which tend to specialise and are more separable
         # than the compressed embed_dim projection.
-        # One mask per level in self.content_style_levels.
+        #
+        # Two mask modes:
+        #   "onthefly" — logits = avg activation per channel (shared across
+        #                views, no learnable params).  Matches the original
+        #                multiview-crl repo (Yao et al., 2024).
+        #   "learned"  — logits from persistent nn.Parameter channel_logits
+        #                (optionally per-view with channel_logits_v1).
         content_enc_outs = {}  # level → content-only spatial map
-        has_any_mask = self.content_channels is not None and len(self.channel_logits) > 0
+        has_any_mask = self.content_channels is not None and len(self.content_channels_per_level) > 0
+
+        # Determine if per-view learned masks are active
+        use_per_view_masks = (
+            has_any_mask
+            and getattr(self, "mask_mode", "onthefly") == "learned"
+            and self.separate_encoders
+            and getattr(self, "channel_logits_v1", None) is not None
+            and n_views == 2
+        )
 
         if has_any_mask:
             for lvl in self.content_style_levels:
-                enc_out_lvl = encoder_outputs[lvl]
-                logits = self.channel_logits[str(lvl)].unsqueeze(0)  # (1, hidden_channels)
-
+                enc_out_lvl = encoder_outputs[lvl]  # (n_views*B, C, D, H, W)
                 k_lvl = self.content_channels_per_level.get(lvl, self.content_channels)
 
-                if self.training:
-                    soft_mask = utils.topk_gumbel_softmax(
-                        k=k_lvl,
-                        logits=logits,
-                        tau=1.0,
-                        hard=True,
+                # ---- Determine logits source ----
+                if use_per_view_masks:
+                    # --- Per-view learned masks ---
+                    B = enc_out_lvl.shape[0] // 2
+                    enc_v0, enc_v1 = enc_out_lvl[:B], enc_out_lvl[B:]
+
+                    logits_v0 = self.channel_logits[str(lvl)].unsqueeze(0)
+                    logits_v1 = self.channel_logits_v1[str(lvl)].unsqueeze(0)
+
+                    if self.training:
+                        mask_v0 = utils.topk_gumbel_softmax(k=k_lvl, logits=logits_v0, tau=1.0, hard=True)
+                        mask_v1 = utils.topk_gumbel_softmax(k=k_lvl, logits=logits_v1, tau=1.0, hard=True)
+                    else:
+                        hard_v0 = torch.zeros_like(logits_v0)
+                        hard_v0.scatter_(1, torch.topk(logits_v0, k_lvl, dim=1).indices, 1.0)
+                        mask_v0 = hard_v0
+                        hard_v1 = torch.zeros_like(logits_v1)
+                        hard_v1.scatter_(1, torch.topk(logits_v1, k_lvl, dim=1).indices, 1.0)
+                        mask_v1 = hard_v1
+
+                    soft_content_masks[lvl] = (mask_v0, mask_v1)
+                    idx_v0 = torch.where(mask_v0.bool())[-1].tolist()
+                    idx_v1 = torch.where(mask_v1.bool())[-1].tolist()
+
+                    if estimated_content_indices is None:
+                        estimated_content_indices = [idx_v0]
+
+                    if self.inject_style_to_decoder and return_recon:
+                        style_idx_v0 = torch.where(~mask_v0.bool())[-1].tolist()
+                        style_idx_v1 = torch.where(~mask_v1.bool())[-1].tolist()
+                        style_spatials[lvl] = torch.cat(
+                            [enc_v0[:, style_idx_v0, :, :, :], enc_v1[:, style_idx_v1, :, :, :]],
+                            dim=0,
+                        )
+
+                    masked_v0 = enc_v0 * mask_v0.view(1, -1, 1, 1, 1)
+                    masked_v1 = enc_v1 * mask_v1.view(1, -1, 1, 1, 1)
+                    content_enc_outs[lvl] = torch.cat(
+                        [masked_v0[:, idx_v0, :, :, :], masked_v1[:, idx_v1, :, :, :]],
+                        dim=0,
                     )
+                    del masked_v0, masked_v1
+
                 else:
-                    hard_mask = torch.zeros_like(logits)
-                    topk_idx = torch.topk(logits, k_lvl, dim=1).indices
-                    hard_mask.scatter_(1, topk_idx, 1.0)
-                    soft_mask = hard_mask
+                    # --- Shared mask (on-the-fly OR single learned) ---
+                    if getattr(self, "mask_mode", "onthefly") == "onthefly":
+                        # On-the-fly: logits = mean activation per channel,
+                        # averaged across batch (and all views if concatenated).
+                        logits = enc_out_lvl.mean(dim=[0, 2, 3, 4]).unsqueeze(0)  # (1, C)
+                    else:
+                        # Learned: logits from persistent nn.Parameter
+                        logits = self.channel_logits[str(lvl)].unsqueeze(0)  # (1, C)
 
-                soft_content_masks[lvl] = soft_mask
-                content_mask_bool = soft_mask.bool()
-                content_idx = torch.where(content_mask_bool)[-1].tolist()
+                    if self.training:
+                        soft_mask = utils.topk_gumbel_softmax(
+                            k=k_lvl,
+                            logits=logits,
+                            tau=1.0,
+                            hard=True,
+                        )
+                    else:
+                        hard_mask = torch.zeros_like(logits)
+                        topk_idx = torch.topk(logits, k_lvl, dim=1).indices
+                        hard_mask.scatter_(1, topk_idx, 1.0)
+                        soft_mask = hard_mask
 
-                # Store content indices from the first masked level for backward compat
-                if estimated_content_indices is None:
-                    estimated_content_indices = [content_idx]
+                    soft_content_masks[lvl] = soft_mask
+                    content_mask_bool = soft_mask.bool()
+                    content_idx = torch.where(content_mask_bool)[-1].tolist()
 
-                # Extract style spatial for decoder injection at this level
-                if self.inject_style_to_decoder and return_recon:
-                    style_idx = torch.where(~content_mask_bool)[-1].tolist()
-                    style_spatials[lvl] = enc_out_lvl[:, style_idx, :, :, :]
+                    if estimated_content_indices is None:
+                        estimated_content_indices = [content_idx]
 
-                # Soft-masked content channels (gradient flows through soft_mask)
-                masked = enc_out_lvl * soft_mask.view(1, -1, 1, 1, 1)
-                content_enc_outs[lvl] = masked[:, content_idx, :, :, :]
-                del masked
+                    if self.inject_style_to_decoder and return_recon:
+                        style_idx = torch.where(~content_mask_bool)[-1].tolist()
+                        style_spatials[lvl] = enc_out_lvl[:, style_idx, :, :, :]
+
+                    masked = enc_out_lvl * soft_mask.view(1, -1, 1, 1, 1)
+                    content_enc_outs[lvl] = masked[:, content_idx, :, :, :]
+                    del masked
 
         # --- Codebook + decoder loop (top-down: coarsest → finest) ---
         for l in range(self.nb_levels - 1, -1, -1):

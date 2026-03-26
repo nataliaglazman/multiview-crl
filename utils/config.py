@@ -119,6 +119,16 @@ def parse_args() -> argparse.ArgumentParser:
         "Consistent with the view-specific encoder identifiability theory (Yao et al., 2024).",
     )
     parser.add_argument(
+        "--mask-mode",
+        type=str,
+        default="onthefly",
+        choices=["learned", "onthefly"],
+        help="How the content/style Gumbel mask logits are determined. "
+        "'learned': learnable nn.Parameter per level (and per view when --separate-encoders is set). "
+        "'onthefly': mask logits computed on-the-fly from average encoder activations, "
+        "shared across views (matches the original multiview-crl repo). Default: onthefly.",
+    )
+    parser.add_argument(
         "--contrastive-level-weights",
         type=float,
         nargs="+",
