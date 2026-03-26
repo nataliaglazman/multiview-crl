@@ -630,7 +630,10 @@ def main(args):
         ]
     )
 
-    dataset_kwargs = {"transform": transform}
+    dataset_kwargs = {
+        "transform": transform,
+        "labels_path": getattr(args, "labels_path", None),
+    }
     dataloader_kwargs = {
         "batch_size": args.batch_size,
         "shuffle": True,

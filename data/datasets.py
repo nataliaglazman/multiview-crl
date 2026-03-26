@@ -1250,6 +1250,7 @@ class MyCustomDataset(MultiviewDataset):
         crop_margin=0,
         cache=False,
         cache_dir: str | None = None,
+        labels_path: str | None = None,
         **kwargs,
     ):
         super().__init__()
@@ -1260,8 +1261,9 @@ class MyCustomDataset(MultiviewDataset):
         self.crop_margin = crop_margin
 
         # Load CSV and build item list
-        csv_path = "/nfs/home/nglazman/cluster/labels_cleaned_3class.csv"
-        df = pd.read_csv(csv_path)
+        if labels_path is None:
+            raise ValueError("labels_path is required. Pass --labels-path <path> on the command line.")
+        df = pd.read_csv(labels_path)
         label_values = sorted(df["Group"].unique())
         label_map = {v: i for i, v in enumerate(label_values)}
 

@@ -21,6 +21,12 @@ def parse_args() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataroot", type=str, default="/data/natalia/")
     parser.add_argument(
+        "--labels-path",
+        type=str,
+        default=None,
+        help="Path to the labels CSV file (e.g. labels_cleaned_3class.csv). " "Required for ADNI / custom datasets.",
+    )
+    parser.add_argument(
         "--dataset_name",
         type=str,
         default="ADNI_registered",
