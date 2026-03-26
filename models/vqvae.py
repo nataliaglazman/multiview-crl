@@ -871,7 +871,8 @@ class MoCoEncoder(nn.Module):
             q = F.normalize(torch.randn(hidden_channels, queue_size), dim=0)
             self.register_buffer(f"queue_{lvl}", q)
 
-        self.queue_ptrs = [0] * nb_levels
+        # Registered buffer so queue pointers survive state_dict / .to(device)
+        self.register_buffer("queue_ptrs", torch.zeros(nb_levels, dtype=torch.long))
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -955,7 +956,7 @@ class MoCoEncoder(nn.Module):
         for lvl, k in enumerate(keys):
             queue = self._get_queue(lvl)  # (C, Q)
             batch = k.shape[0]
-            ptr = self.queue_ptrs[lvl]
+            ptr = int(self.queue_ptrs[lvl].item())
 
             # Wrap-around write
             if ptr + batch <= self.queue_size:
@@ -974,16 +975,21 @@ class MoCoEncoder(nn.Module):
 
     def forward(self, x, **kwargs):
         """
-        Forward pass through the *online* VQVAE, then EMA-update the momentum
-        encoder.  The queue is updated externally (in the training loop) after
-        ``encode_keys`` has been called, so that the snapshot passed to the loss
-        function is consistent with the keys generated this step.
+        Forward pass through the *online* VQVAE.  The momentum encoder is NOT
+        updated here — call ``momentum_update()`` explicitly after the backward
+        pass so that the momentum encoder stays consistent with the keys used
+        in the contrastive loss this step.
 
         Returns the same outputs as ``VQVAE.forward``.
         """
-        outputs = self.online(x, **kwargs)
+        return self.online(x, **kwargs)
+
+    def momentum_update(self):
+        """Public wrapper: EMA-update momentum encoders from the online model.
+
+        Should be called once per training step, **after** ``optimizer.step()``.
+        """
         self._momentum_update()
-        return outputs
 
     # ------------------------------------------------------------------
     # Convenience: expose queue snapshots as a list
@@ -1020,7 +1026,7 @@ if __name__ == "__main__":
     x = torch.randn(1, 1, 96, 112, 96).to(device)
     print(f"Input shape: {x.shape}")
 
-    recon, diffs, enc_out, est_content_idx, dec_out, id_out = net(x)
+    recon, diffs, enc_out, est_content_idx, dec_out, id_out, soft_masks = net(x)
     print(f"\nReconstruction shape: {recon.shape}")
     print("\nEncoder outputs:")
     print("\n".join(f"  Level {i}: {y.shape}" for i, y in enumerate(enc_out)))

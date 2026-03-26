@@ -64,7 +64,7 @@ def save_checkpoint(
 
             if isinstance(encoders[0], MoCoEncoder):
                 checkpoint["moco_queues"] = [q.cpu() for q in encoders[0].queues]
-                checkpoint["moco_queue_ptrs"] = list(encoders[0].queue_ptrs)
+                checkpoint["moco_queue_ptrs"] = encoders[0].queue_ptrs.tolist()
         torch.save(checkpoint, checkpoint_path)
         logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
 
@@ -252,7 +252,7 @@ def load_checkpoint(
             if isinstance(encoders[0], MoCoEncoder):
                 for lvl, q_cpu in enumerate(checkpoint["moco_queues"]):
                     encoders[0]._get_queue(lvl).copy_(q_cpu.to(device))
-                encoders[0].queue_ptrs = list(checkpoint["moco_queue_ptrs"])
+                encoders[0].queue_ptrs.copy_(torch.tensor(checkpoint["moco_queue_ptrs"], dtype=torch.long))
                 logger.info("  MoCo queue state restored from checkpoint.")
 
         logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")

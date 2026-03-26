@@ -218,7 +218,10 @@ def train_step(
 
                         # All k dims are now content (already selected)
                         level_content_indices = [list(range(k_content))] * len(args.subsets)
-                        estimated_content_indices = [idx_v0.tolist()]  # view-0 for backward compat
+                        # Only set estimated_content_indices on the first masked
+                        # level so later levels don't overwrite it (fix #6).
+                        if estimated_content_indices is None:
+                            estimated_content_indices = [idx_v0.tolist()]  # view-0 for backward compat
 
                         if use_moco:
                             key_pooled = key_outputs[level_idx]
@@ -226,19 +229,26 @@ def train_step(
                             # Pre-mask momentum keys the same way
                             k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
                             k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
-                            k_content_level = torch.stack([k_v0_content, k_v1_content], dim=0)
                             queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
-                            # Queue stores full C-dim features; select view-0 content
-                            # channels as a reasonable approximation for negatives.
-                            queue_content = queue_snapshot[idx_v0, :]
-                            level_loss = moco_loss_func(
-                                hz_content,
-                                k_content_level,
-                                queue_content,
-                                level_content_indices,
-                                args.subsets,
-                                soft_content_mask=None,
-                            )
+                            # Per-view queue slices: each view's queries must be
+                            # compared against negatives from its OWN content
+                            # channels, not the other view's.
+                            queue_v0 = F.normalize(queue_snapshot[idx_v0, :], dim=0)
+                            queue_v1 = F.normalize(queue_snapshot[idx_v1, :], dim=0)
+                            q_v0 = F.normalize(hz_v0_content, dim=-1)
+                            q_v1 = F.normalize(hz_v1_content, dim=-1)
+                            k_v0_n = F.normalize(k_v0_content, dim=-1)
+                            k_v1_n = F.normalize(k_v1_content, dim=-1)
+                            _tau = args.tau
+                            B_moco = q_v0.shape[0]
+                            _targets = torch.zeros(B_moco, dtype=torch.long, device=device)
+                            # view-0 query → view-1 key positive, view-0 queue negatives
+                            pos_01 = (q_v0 * k_v1_n).sum(dim=-1, keepdim=True)
+                            logits_01 = torch.cat([pos_01, q_v0 @ queue_v0], dim=1) / _tau
+                            # view-1 query → view-0 key positive, view-1 queue negatives
+                            pos_10 = (q_v1 * k_v0_n).sum(dim=-1, keepdim=True)
+                            logits_10 = torch.cat([pos_10, q_v1 @ queue_v1], dim=1) / _tau
+                            level_loss = F.cross_entropy(logits_01, _targets) + F.cross_entropy(logits_10, _targets)
                         else:
                             level_loss = loss_func(
                                 hz_content,
@@ -253,8 +263,10 @@ def train_step(
                         # from the contrastive loss flow back to channel_logits.
                         soft_content_mask = mask_or_tuple
                         content_masks = [soft_content_mask] * len(args.subsets)
-                        estimated_content_indices = [torch.where(m.bool())[-1].tolist() for m in content_masks]
-                        level_content_indices = estimated_content_indices
+                        _level_ci = [torch.where(m.bool())[-1].tolist() for m in content_masks]
+                        level_content_indices = _level_ci
+                        if estimated_content_indices is None:
+                            estimated_content_indices = _level_ci
 
                         if use_moco:
                             key_pooled = key_outputs[level_idx]
@@ -291,8 +303,10 @@ def train_step(
                             subsets=args.subsets,
                         )
 
-                    estimated_content_indices = [torch.where(m.bool())[-1].tolist() for m in content_masks]
-                    level_content_indices = estimated_content_indices
+                    _level_ci = [torch.where(m.bool())[-1].tolist() for m in content_masks]
+                    level_content_indices = _level_ci
+                    if estimated_content_indices is None:
+                        estimated_content_indices = _level_ci
 
                     if use_moco:
                         key_pooled = key_outputs[level_idx]
@@ -410,6 +424,14 @@ def train_step(
                 clip_grad_norm_(params, max_norm=2.0, norm_type=2)
                 optimizer.step()
 
+        # MoCo momentum update: must happen AFTER optimizer.step() so the
+        # momentum encoder trails the online encoder by one step.
+        if use_moco and accumulation_step == total_accumulation_steps - 1:
+            from models.vqvae import MoCoEncoder
+
+            if isinstance(vqvae_model, MoCoEncoder):
+                vqvae_model.momentum_update()
+
     return (
         total_loss.item(),
         contrastive_loss_value,
@@ -454,7 +476,7 @@ def _run_validation(
         if batch_idx >= max_batches:
             break
         try:
-            total_loss, contrastive_loss, recon_loss, vq_loss, _ = train_step(
+            total_loss, contrastive_loss, recon_loss, vq_loss, _, _ = train_step(
                 data,
                 encoders,
                 decoders,
@@ -818,7 +840,7 @@ def main(args):
                 if isinstance(encoders[0], MoCoEncoder):
                     for lvl, q_cpu in enumerate(checkpoint["moco_queues"]):
                         encoders[0]._get_queue(lvl).copy_(q_cpu.to(device))
-                    encoders[0].queue_ptrs = list(checkpoint["moco_queue_ptrs"])
+                    encoders[0].queue_ptrs.copy_(torch.tensor(checkpoint["moco_queue_ptrs"], dtype=torch.long))
             logger.info(f"  Loaded VQ-VAE-2 from {path}")
         else:
             for m_idx, m in enumerate(args.modalities):
