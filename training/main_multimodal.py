@@ -250,7 +250,7 @@ def train_step(
                             # the SAME view as the positive key, so the query can
                             # only succeed by learning content — not by detecting
                             # which encoder produced the features.
-                            if _cross_view_negs:
+                            if getattr(args, "cross_view_negs_only", False):
                                 neg_queue_for_v0, neg_queue_for_v1 = queue_v1, queue_v0
                             else:
                                 neg_queue_for_v0, neg_queue_for_v1 = queue_v0, queue_v1
