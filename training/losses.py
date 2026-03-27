@@ -304,7 +304,7 @@ def infonce_base_loss(
     return total_loss_value
 
 
-def moco_infonce_loss(q, k, queue, content_indices, tau=1.0, soft_content_mask=None):
+def moco_infonce_loss(q, k, queue, content_indices, tau=1.0, soft_content_mask=None, queue_v1=None):
     """
     MoCo-style InfoNCE loss for a single view pair using a queue of negatives.
 
@@ -315,13 +315,18 @@ def moco_infonce_loss(q, k, queue, content_indices, tau=1.0, soft_content_mask=N
         q  (torch.Tensor): Online (query) embeddings,   shape (n_views, B, C).
         k  (torch.Tensor): Momentum (key) embeddings,   shape (n_views, B, C).
                            Must already be detached from the computation graph.
-        queue (torch.Tensor): Negative key queue,        shape (C, queue_size).
+        queue (torch.Tensor): Negative key queue for view 0, shape (C, queue_size).
         content_indices (list[int]): Channel indices to use (fallback when
             soft_content_mask is None).
         tau (float): Temperature scaling factor.
         soft_content_mask: Optional differentiable (0/1) mask, shape (1, C).
             When provided, content selection uses ``features * mask`` so
             gradients flow back to channel_logits via Gumbel straight-through.
+        queue_v1 (torch.Tensor | None): Separate negative queue for view 1,
+            shape (C, queue_size).  When provided (typically with separate
+            encoders), view-1 queries use this queue for negatives instead of
+            ``queue``.  This prevents trivially easy negatives when the two
+            encoders produce features in different subspaces.
 
     Returns:
         torch.Tensor: Scalar loss value.
@@ -334,34 +339,49 @@ def moco_infonce_loss(q, k, queue, content_indices, tau=1.0, soft_content_mask=N
         # Differentiable masking — gradients flow to channel_logits
         q_c = F.normalize(q * soft_content_mask, dim=-1)  # (n_views, B, C)
         k_c = F.normalize(k * soft_content_mask, dim=-1)  # (n_views, B, C)
-        # queue shape is (C, Q) — mask along dim 0
-        queue_c = F.normalize(queue * soft_content_mask.squeeze(0).unsqueeze(-1), dim=0)
+        mask_col = soft_content_mask.squeeze(0).unsqueeze(-1)  # (C, 1)
+        queue_c = F.normalize(queue * mask_col, dim=0)
+        queue_v1_c = F.normalize(queue_v1 * mask_col, dim=0) if queue_v1 is not None else queue_c
     else:
         q_c = F.normalize(q[..., content_indices], dim=-1)  # (n_views, B, d)
         k_c = F.normalize(k[..., content_indices], dim=-1)  # (n_views, B, d)
         queue_c = F.normalize(queue[content_indices, :], dim=0)  # (d, Q)
+        queue_v1_c = F.normalize(queue_v1[content_indices, :], dim=0) if queue_v1 is not None else queue_c
+
+    # Per-view queue lookup: view index → its queue of negatives
+    _queue_for_view = [queue_c, queue_v1_c] if n_view == 2 else [queue_c] * n_view
 
     for i in range(n_view):
         for j in range(n_view):
             if i >= j:
                 continue
-            # q[i] → positive k[j], negatives from queue
+            # q[i] → positive k[j], negatives from view-i's queue
             pos_ij = (q_c[i] * k_c[j]).sum(dim=-1, keepdim=True)  # (B, 1)
-            neg_ij = q_c[i] @ queue_c  # (B, Q)
+            neg_ij = q_c[i] @ _queue_for_view[i]  # (B, Q)
             logits_ij = torch.cat([pos_ij, neg_ij], dim=1) / tau  # (B, Q+1)
             targets = torch.zeros(logits_ij.shape[0], dtype=torch.long, device=q.device)
             total_loss = total_loss + F.cross_entropy(logits_ij, targets)
 
-            # Symmetric: q[j] → positive k[i]
+            # Symmetric: q[j] → positive k[i], negatives from view-j's queue
             pos_ji = (q_c[j] * k_c[i]).sum(dim=-1, keepdim=True)  # (B, 1)
-            neg_ji = q_c[j] @ queue_c  # (B, Q)
+            neg_ji = q_c[j] @ _queue_for_view[j]  # (B, Q)
             logits_ji = torch.cat([pos_ji, neg_ji], dim=1) / tau  # (B, Q+1)
             total_loss = total_loss + F.cross_entropy(logits_ji, targets)
 
     return total_loss
 
 
-def moco_loss(q, k, queue, sim_metric, tau=1.0, estimated_content_indices=None, subsets=None, soft_content_mask=None):
+def moco_loss(
+    q,
+    k,
+    queue,
+    sim_metric,
+    tau=1.0,
+    estimated_content_indices=None,
+    subsets=None,
+    soft_content_mask=None,
+    queue_v1=None,
+):
     """
     Top-level MoCo loss that mirrors the ``infonce_loss`` signature.
 
@@ -371,19 +391,21 @@ def moco_loss(q, k, queue, sim_metric, tau=1.0, estimated_content_indices=None, 
     Args:
         q  (torch.Tensor): Online embeddings,    shape (n_views, B, C).
         k  (torch.Tensor): Momentum embeddings,  shape (n_views, B, C).
-        queue (torch.Tensor): Negative queue,    shape (C, queue_size).
+        queue (torch.Tensor): Negative queue for view 0, shape (C, queue_size).
         sim_metric: Unused — kept for API compatibility with ``infonce_loss``.
         tau (float): Temperature.
         estimated_content_indices (list[list[int]]): Content channel indices per subset.
         subsets (list[tuple]): View subsets (same length as estimated_content_indices).
         soft_content_mask: Optional differentiable mask from Gumbel straight-through.
+        queue_v1 (torch.Tensor | None): Separate negative queue for view 1.
+            When provided, view-1 queries use this queue for negatives.
 
     Returns:
         torch.Tensor: Scalar loss value.
     """
     if estimated_content_indices is None or subsets is None:
         # Fall back to using all channels
-        return moco_infonce_loss(q, k, queue, list(range(q.shape[-1])), tau)
+        return moco_infonce_loss(q, k, queue, list(range(q.shape[-1])), tau, queue_v1=queue_v1)
 
     total_loss = torch.zeros(1, device=q.device, dtype=q.dtype)
     for content_indices, subset in zip(estimated_content_indices, subsets):
@@ -396,6 +418,7 @@ def moco_loss(q, k, queue, sim_metric, tau=1.0, estimated_content_indices=None, 
             content_indices,
             tau,
             soft_content_mask=soft_content_mask,
+            queue_v1=queue_v1,
         )
     return total_loss
 

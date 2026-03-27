@@ -275,6 +275,11 @@ def train_step(
                             key_pooled = key_outputs[level_idx]
                             k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])
                             queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
+                            _qv1 = (
+                                vqvae_model.queues_v1[level_idx].clone().detach()
+                                if hasattr(vqvae_model, "queues_v1")
+                                else None
+                            )
                             level_loss = moco_loss_func(
                                 hz_level,
                                 k_level,
@@ -282,6 +287,7 @@ def train_step(
                                 level_content_indices,
                                 args.subsets,
                                 soft_content_mask=soft_content_mask,
+                                queue_v1=_qv1,
                             )
                         else:
                             level_loss = loss_func(
@@ -315,6 +321,11 @@ def train_step(
                         key_pooled = key_outputs[level_idx]
                         k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])
                         queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
+                        _qv1 = (
+                            vqvae_model.queues_v1[level_idx].clone().detach()
+                            if hasattr(vqvae_model, "queues_v1")
+                            else None
+                        )
                         level_loss = moco_loss_func(
                             hz_level,
                             k_level,
@@ -322,6 +333,7 @@ def train_step(
                             level_content_indices,
                             args.subsets,
                             soft_content_mask=soft_content_mask,
+                            queue_v1=_qv1,
                         )
                     else:
                         level_loss = loss_func(
@@ -630,7 +642,7 @@ def main(args):
             soft_content_mask=soft_content_mask,
         )
 
-    def moco_loss_func(q, k, queue, estimated_content_indices, subsets, soft_content_mask=None):
+    def moco_loss_func(q, k, queue, estimated_content_indices, subsets, soft_content_mask=None, queue_v1=None):
         return moco_loss(
             q,
             k,
@@ -640,6 +652,7 @@ def main(args):
             estimated_content_indices=estimated_content_indices,
             subsets=subsets,
             soft_content_mask=soft_content_mask,
+            queue_v1=queue_v1,
         )
 
     # Augmentations / transforms
