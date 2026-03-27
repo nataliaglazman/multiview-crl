@@ -597,7 +597,7 @@ class VQVAE(HelperModule):
                     idx_v1 = torch.where(mask_v1.bool())[-1].tolist()
 
                     if estimated_content_indices is None:
-                        estimated_content_indices = [idx_v0]
+                        estimated_content_indices = [idx_v0, idx_v1]
 
                     if self.inject_style_to_decoder and return_recon:
                         style_idx_v0 = torch.where(~mask_v0.bool())[-1].tolist()
@@ -622,8 +622,14 @@ class VQVAE(HelperModule):
                         # averaged across batch (and all views if concatenated).
                         logits = enc_out_lvl.mean(dim=[0, 2, 3, 4]).unsqueeze(0)  # (1, C)
                     else:
-                        # Learned: logits from persistent nn.Parameter
-                        logits = self.channel_logits[str(lvl)].unsqueeze(0)  # (1, C)
+                        # Learned: logits from persistent nn.Parameter.
+                        # In single-view mode (n_views=1) with per-view masks,
+                        # select the correct logits based on view_idx.
+                        _has_v1_logits = getattr(self, "channel_logits_v1", None) is not None
+                        if self.separate_encoders and _has_v1_logits and view_idx == 1:
+                            logits = self.channel_logits_v1[str(lvl)].unsqueeze(0)  # (1, C)
+                        else:
+                            logits = self.channel_logits[str(lvl)].unsqueeze(0)  # (1, C)
 
                     if self.training:
                         soft_mask = utils.topk_gumbel_softmax(
