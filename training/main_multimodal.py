@@ -630,6 +630,8 @@ def main(args):
     sim_metric = torch.nn.CosineSimilarity(dim=-1)
     criterion = torch.nn.CrossEntropyLoss()
 
+    _cross_view_negs = getattr(args, "cross_view_negs_only", False)
+
     def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
         return infonce_loss(
             z_rec_tuple,
@@ -640,6 +642,7 @@ def main(args):
             estimated_content_indices=estimated_content_indices,
             subsets=subsets,
             soft_content_mask=soft_content_mask,
+            cross_view_negs_only=_cross_view_negs,
         )
 
     def moco_loss_func(q, k, queue, estimated_content_indices, subsets, soft_content_mask=None, queue_v1=None):
@@ -653,6 +656,7 @@ def main(args):
             subsets=subsets,
             soft_content_mask=soft_content_mask,
             queue_v1=queue_v1,
+            cross_view_negs_only=_cross_view_negs,
         )
 
     # Augmentations / transforms

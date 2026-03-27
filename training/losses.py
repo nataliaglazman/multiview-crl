@@ -203,6 +203,7 @@ def infonce_loss(
     estimated_content_indices=None,
     subsets=None,
     soft_content_mask=None,
+    cross_view_negs_only=False,
 ):
     """
     Calculates the sum of InfoNCE loss for a given input tensor `hz`, over all subsets.
@@ -218,6 +219,8 @@ def infonce_loss(
         soft_content_mask: Differentiable (0/1) mask, shape (1, C), from Gumbel
             straight-through.  When provided, features are masked via
             ``hz * mask`` so gradients flow back to channel_logits.
+        cross_view_negs_only (bool): When True, negatives come only from the
+            other view (no same-view negatives).
 
     Returns:
         torch.Tensor: The calculated InfoNCE loss.
@@ -226,7 +229,9 @@ def infonce_loss(
     if estimated_content_indices is None:
         # Use all feature dimensions as content when no content indices are provided
         content_indices = list(range(hz.shape[-1]))
-        return infonce_base_loss(hz, content_indices, sim_metric, criterion, projector, tau)
+        return infonce_base_loss(
+            hz, content_indices, sim_metric, criterion, projector, tau, cross_view_negs_only=cross_view_negs_only
+        )
     else:
         total_loss = torch.zeros(1).type_as(hz)
         for est_content_indices, subset in zip(estimated_content_indices, subsets):
@@ -238,12 +243,20 @@ def infonce_loss(
                 projector,
                 tau,
                 soft_content_mask=soft_content_mask,
+                cross_view_negs_only=cross_view_negs_only,
             )
         return total_loss
 
 
 def infonce_base_loss(
-    hz_subset, content_indices, sim_metric, criterion, projector=None, tau=1.0, soft_content_mask=None
+    hz_subset,
+    content_indices,
+    sim_metric,
+    criterion,
+    projector=None,
+    tau=1.0,
+    soft_content_mask=None,
+    cross_view_negs_only=False,
 ):
     """
     Computes the InfoNCE (Normalized Cross Entropy) loss for multi-view data.
@@ -262,6 +275,11 @@ def infonce_base_loss(
         projector: Optional projection function.
         tau (float): Temperature.
         soft_content_mask: Optional differentiable mask, shape (1, C).
+        cross_view_negs_only (bool): When True, negatives come only from the
+            other view (no same-view negatives).  This prevents the loss from
+            decreasing via within-view instance discrimination alone, which is
+            important when separate encoders produce features in different
+            subspaces.
 
     Returns:
         torch.Tensor: Total loss value.
@@ -269,19 +287,50 @@ def infonce_base_loss(
 
     n_view = len(hz_subset)
     d = hz_subset.shape[1]  # batch size
-    SIM = [[None] * n_view for _ in range(n_view)]
 
     projector = projector or (lambda x: x)
+
+    if cross_view_negs_only:
+        # Only cross-view similarities — forces the model to align views.
+        SIM_cross = {}
+        for i in range(n_view):
+            for j in range(n_view):
+                if i == j:
+                    continue
+                if (j, i) in SIM_cross:
+                    SIM_cross[(i, j)] = SIM_cross[(j, i)].transpose(-1, -2)
+                    continue
+                if soft_content_mask is not None:
+                    hz_i = hz_subset[i] * soft_content_mask
+                    hz_j = hz_subset[j] * soft_content_mask
+                else:
+                    hz_i = hz_subset[i][..., content_indices]
+                    hz_j = hz_subset[j][..., content_indices]
+                SIM_cross[(i, j)] = (sim_metric(hz_i.unsqueeze(-2), hz_j.unsqueeze(-3)) / tau).type_as(hz_subset)
+
+        total_loss_value = torch.zeros(1, device=hz_subset.device, dtype=hz_subset.dtype)
+        for i in range(n_view):
+            for j in range(n_view):
+                if i >= j:
+                    continue
+                scores_ij = SIM_cross[(i, j)]  # (d, d)
+                scores_ji = SIM_cross[(j, i)]  # (d, d)
+                targets = torch.arange(d, dtype=torch.long, device=hz_subset.device)
+                total_loss_value += criterion(scores_ij, targets)
+                total_loss_value += criterion(scores_ji, targets)
+        return total_loss_value
+
+    # Default: include both cross-view and same-view negatives.
+    SIM = [[None] * n_view for _ in range(n_view)]
 
     for i in range(n_view):
         for j in range(n_view):
             if j >= i:
                 if soft_content_mask is not None:
-                    # Differentiable masking: gradients flow to channel_logits
-                    hz_i = hz_subset[i] * soft_content_mask  # (batch, C)
+                    hz_i = hz_subset[i] * soft_content_mask
                     hz_j = hz_subset[j] * soft_content_mask
                 else:
-                    hz_i = hz_subset[i][..., content_indices]  # (batch, content_dims)
+                    hz_i = hz_subset[i][..., content_indices]
                     hz_j = hz_subset[j][..., content_indices]
                 sim_ij = (sim_metric(hz_i.unsqueeze(-2), hz_j.unsqueeze(-3)) / tau).type_as(hz_subset)
                 if i == j:
@@ -304,7 +353,9 @@ def infonce_base_loss(
     return total_loss_value
 
 
-def moco_infonce_loss(q, k, queue, content_indices, tau=1.0, soft_content_mask=None, queue_v1=None):
+def moco_infonce_loss(
+    q, k, queue, content_indices, tau=1.0, soft_content_mask=None, queue_v1=None, cross_view_negs_only=False
+):
     """
     MoCo-style InfoNCE loss for a single view pair using a queue of negatives.
 
@@ -327,6 +378,8 @@ def moco_infonce_loss(q, k, queue, content_indices, tau=1.0, soft_content_mask=N
             encoders), view-1 queries use this queue for negatives instead of
             ``queue``.  This prevents trivially easy negatives when the two
             encoders produce features in different subspaces.
+        cross_view_negs_only (bool): When True, each view's queries use the
+            OTHER view's queue for negatives instead of their own.
 
     Returns:
         torch.Tensor: Scalar loss value.
@@ -348,21 +401,26 @@ def moco_infonce_loss(q, k, queue, content_indices, tau=1.0, soft_content_mask=N
         queue_c = F.normalize(queue[content_indices, :], dim=0)  # (d, Q)
         queue_v1_c = F.normalize(queue_v1[content_indices, :], dim=0) if queue_v1 is not None else queue_c
 
-    # Per-view queue lookup: view index → its queue of negatives
-    _queue_for_view = [queue_c, queue_v1_c] if n_view == 2 else [queue_c] * n_view
+    # Per-view queue lookup.
+    # cross_view_negs_only: view-i queries use view-j's queue (other view).
+    # Default: view-i queries use view-i's queue (same view).
+    if cross_view_negs_only and n_view == 2:
+        _queue_for_view = [queue_v1_c, queue_c]  # view-0 uses view-1's queue, vice versa
+    else:
+        _queue_for_view = [queue_c, queue_v1_c] if n_view == 2 else [queue_c] * n_view
 
     for i in range(n_view):
         for j in range(n_view):
             if i >= j:
                 continue
-            # q[i] → positive k[j], negatives from view-i's queue
+            # q[i] → positive k[j], negatives from queue
             pos_ij = (q_c[i] * k_c[j]).sum(dim=-1, keepdim=True)  # (B, 1)
             neg_ij = q_c[i] @ _queue_for_view[i]  # (B, Q)
             logits_ij = torch.cat([pos_ij, neg_ij], dim=1) / tau  # (B, Q+1)
             targets = torch.zeros(logits_ij.shape[0], dtype=torch.long, device=q.device)
             total_loss = total_loss + F.cross_entropy(logits_ij, targets)
 
-            # Symmetric: q[j] → positive k[i], negatives from view-j's queue
+            # Symmetric: q[j] → positive k[i], negatives from queue
             pos_ji = (q_c[j] * k_c[i]).sum(dim=-1, keepdim=True)  # (B, 1)
             neg_ji = q_c[j] @ _queue_for_view[j]  # (B, Q)
             logits_ji = torch.cat([pos_ji, neg_ji], dim=1) / tau  # (B, Q+1)
@@ -381,6 +439,7 @@ def moco_loss(
     subsets=None,
     soft_content_mask=None,
     queue_v1=None,
+    cross_view_negs_only=False,
 ):
     """
     Top-level MoCo loss that mirrors the ``infonce_loss`` signature.
@@ -399,13 +458,17 @@ def moco_loss(
         soft_content_mask: Optional differentiable mask from Gumbel straight-through.
         queue_v1 (torch.Tensor | None): Separate negative queue for view 1.
             When provided, view-1 queries use this queue for negatives.
+        cross_view_negs_only (bool): When True, each view's queries use the
+            OTHER view's queue for negatives instead of their own.
 
     Returns:
         torch.Tensor: Scalar loss value.
     """
     if estimated_content_indices is None or subsets is None:
         # Fall back to using all channels
-        return moco_infonce_loss(q, k, queue, list(range(q.shape[-1])), tau, queue_v1=queue_v1)
+        return moco_infonce_loss(
+            q, k, queue, list(range(q.shape[-1])), tau, queue_v1=queue_v1, cross_view_negs_only=cross_view_negs_only
+        )
 
     total_loss = torch.zeros(1, device=q.device, dtype=q.dtype)
     for content_indices, subset in zip(estimated_content_indices, subsets):
@@ -419,6 +482,7 @@ def moco_loss(
             tau,
             soft_content_mask=soft_content_mask,
             queue_v1=queue_v1,
+            cross_view_negs_only=cross_view_negs_only,
         )
     return total_loss
 

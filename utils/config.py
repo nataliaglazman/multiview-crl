@@ -135,6 +135,15 @@ def parse_args() -> argparse.ArgumentParser:
         "shared across views (matches the original multiview-crl repo). Default: onthefly.",
     )
     parser.add_argument(
+        "--cross-view-negs-only",
+        action="store_true",
+        default=False,
+        help="Use only cross-view negatives in the contrastive loss (InfoNCE and MoCo). "
+        "When set, same-view samples are excluded from the negative set, forcing the "
+        "model to align representations across views rather than relying on within-view "
+        "instance discrimination. Recommended when using --separate-encoders.",
+    )
+    parser.add_argument(
         "--contrastive-level-weights",
         type=float,
         nargs="+",
