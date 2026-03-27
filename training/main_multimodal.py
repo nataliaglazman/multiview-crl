@@ -229,11 +229,12 @@ def train_step(
                             # Pre-mask momentum keys the same way
                             k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
                             k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
-                            # Use per-view queues so negatives come from the
-                            # SAME encoder as the query.  Mixing both views in
-                            # one queue gives trivially easy negatives (the
-                            # model can distinguish encoders without learning
-                            # any content alignment).
+                            # Per-view queues: view-0 momentum features in
+                            # queues[lvl], view-1 in queues_v1[lvl].  Which
+                            # queue each query uses depends on cross_view_negs:
+                            # when True, negatives come from the OTHER view
+                            # (same distribution as the positive key), forcing
+                            # the model to learn content alignment.
                             q_snap_v0 = vqvae_model.queues[level_idx].clone().detach()
                             q_snap_v1 = vqvae_model.queues_v1[level_idx].clone().detach()
                             queue_v0 = F.normalize(q_snap_v0[idx_v0, :], dim=0)
@@ -245,12 +246,20 @@ def train_step(
                             _tau = args.tau
                             B_moco = q_v0.shape[0]
                             _targets = torch.zeros(B_moco, dtype=torch.long, device=device)
-                            # view-0 query → view-1 key positive, view-0 queue negatives
+                            # When cross_view_negs_only: negatives must come from
+                            # the SAME view as the positive key, so the query can
+                            # only succeed by learning content — not by detecting
+                            # which encoder produced the features.
+                            if _cross_view_negs:
+                                neg_queue_for_v0, neg_queue_for_v1 = queue_v1, queue_v0
+                            else:
+                                neg_queue_for_v0, neg_queue_for_v1 = queue_v0, queue_v1
+                            # view-0 query → view-1 key positive
                             pos_01 = (q_v0 * k_v1_n).sum(dim=-1, keepdim=True)
-                            logits_01 = torch.cat([pos_01, q_v0 @ queue_v0], dim=1) / _tau
-                            # view-1 query → view-0 key positive, view-1 queue negatives
+                            logits_01 = torch.cat([pos_01, q_v0 @ neg_queue_for_v0], dim=1) / _tau
+                            # view-1 query → view-0 key positive
                             pos_10 = (q_v1 * k_v0_n).sum(dim=-1, keepdim=True)
-                            logits_10 = torch.cat([pos_10, q_v1 @ queue_v1], dim=1) / _tau
+                            logits_10 = torch.cat([pos_10, q_v1 @ neg_queue_for_v1], dim=1) / _tau
                             level_loss = F.cross_entropy(logits_01, _targets) + F.cross_entropy(logits_10, _targets)
                         else:
                             level_loss = loss_func(
