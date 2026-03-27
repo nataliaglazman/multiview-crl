@@ -229,12 +229,15 @@ def train_step(
                             # Pre-mask momentum keys the same way
                             k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
                             k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
-                            queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
-                            # Per-view queue slices: each view's queries must be
-                            # compared against negatives from its OWN content
-                            # channels, not the other view's.
-                            queue_v0 = F.normalize(queue_snapshot[idx_v0, :], dim=0)
-                            queue_v1 = F.normalize(queue_snapshot[idx_v1, :], dim=0)
+                            # Use per-view queues so negatives come from the
+                            # SAME encoder as the query.  Mixing both views in
+                            # one queue gives trivially easy negatives (the
+                            # model can distinguish encoders without learning
+                            # any content alignment).
+                            q_snap_v0 = vqvae_model.queues[level_idx].clone().detach()
+                            q_snap_v1 = vqvae_model.queues_v1[level_idx].clone().detach()
+                            queue_v0 = F.normalize(q_snap_v0[idx_v0, :], dim=0)
+                            queue_v1 = F.normalize(q_snap_v1[idx_v1, :], dim=0)
                             q_v0 = F.normalize(hz_v0_content, dim=-1)
                             q_v1 = F.normalize(hz_v1_content, dim=-1)
                             k_v0_n = F.normalize(k_v0_content, dim=-1)
@@ -334,9 +337,9 @@ def train_step(
                 total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss * _lvl_w
 
             # Enqueue all levels in one call after the loss loop
-            if use_moco:
+            if use_moco and optimizer is not None:
                 with torch.no_grad():
-                    vqvae_model.enqueue([k.detach() for k in key_outputs])
+                    vqvae_model.enqueue([k.detach() for k in key_outputs], n_views=n_views)
 
             contrastive_loss = total_contrastive_loss
             total_loss = contrastive_loss + recon_loss + vq_loss

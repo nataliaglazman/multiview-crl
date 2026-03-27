@@ -872,10 +872,22 @@ class MoCoEncoder(nn.Module):
         # All levels pool from hidden_channels (the mask is on encoder output,
         # not on the codebook projection).
         hidden_channels = self._infer_hidden_channels(raw_vqvae)
+        self._separate_queues = self.momentum_encoders_v1 is not None
 
         for lvl in range(nb_levels):
             q = F.normalize(torch.randn(hidden_channels, queue_size), dim=0)
             self.register_buffer(f"queue_{lvl}", q)
+
+        # When using separate encoders, maintain per-view queues so that
+        # negatives for view-0 queries come only from view-0 samples (and
+        # vice versa).  Without this, the queue mixes features from both
+        # encoders, giving trivially easy negatives and preventing
+        # cross-view alignment.
+        if self._separate_queues:
+            for lvl in range(nb_levels):
+                q_v1 = F.normalize(torch.randn(hidden_channels, queue_size), dim=0)
+                self.register_buffer(f"queue_v1_{lvl}", q_v1)
+            self.register_buffer("queue_v1_ptrs", torch.zeros(nb_levels, dtype=torch.long))
 
         # Registered buffer so queue pointers survive state_dict / .to(device)
         self.register_buffer("queue_ptrs", torch.zeros(nb_levels, dtype=torch.long))
@@ -894,7 +906,9 @@ class MoCoEncoder(nn.Module):
                 return m.out_channels
         raise RuntimeError("Could not infer hidden_channels from encoder.")
 
-    def _get_queue(self, level: int) -> torch.Tensor:
+    def _get_queue(self, level: int, view: int = 0) -> torch.Tensor:
+        if view == 1 and self._separate_queues:
+            return getattr(self, f"queue_v1_{level}")
         return getattr(self, f"queue_{level}")
 
     # ------------------------------------------------------------------
@@ -951,29 +965,46 @@ class MoCoEncoder(nn.Module):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def enqueue(self, keys: list):
+    def enqueue(self, keys: list, n_views: int = 1):
         """
         Write new keys into the per-level circular queues.
+
+        When ``n_views == 2`` and separate per-view queues are active, the
+        first half of each key tensor is written to the view-0 queue and
+        the second half to the view-1 queue.  Otherwise all keys go into
+        a single shared queue (backward compatible).
 
         Args:
             keys (list[torch.Tensor]): One tensor per level, shape ``(B, C)``.
                                        Must be detached.
+            n_views (int): Number of views concatenated in each key tensor.
         """
         for lvl, k in enumerate(keys):
-            queue = self._get_queue(lvl)  # (C, Q)
-            batch = k.shape[0]
-            ptr = int(self.queue_ptrs[lvl].item())
-
-            # Wrap-around write
-            if ptr + batch <= self.queue_size:
-                queue[:, ptr : ptr + batch] = k.T  # noqa: E203
+            if self._separate_queues and n_views == 2:
+                B = k.shape[0] // 2
+                k_v0, k_v1 = k[:B], k[B:]
+                self._enqueue_single(lvl, k_v0, view=0)
+                self._enqueue_single(lvl, k_v1, view=1)
             else:
-                # Split write across the boundary
-                tail = self.queue_size - ptr
-                queue[:, ptr:] = k[:tail].T
-                queue[:, : batch - tail] = k[tail:].T
+                self._enqueue_single(lvl, k, view=0)
 
-            self.queue_ptrs[lvl] = (ptr + batch) % self.queue_size
+    @torch.no_grad()
+    def _enqueue_single(self, lvl: int, k: torch.Tensor, view: int = 0):
+        """Write ``k`` into the queue for ``(lvl, view)``."""
+        queue = self._get_queue(lvl, view)  # (C, Q)
+        ptrs = self.queue_v1_ptrs if (view == 1 and self._separate_queues) else self.queue_ptrs
+        batch = k.shape[0]
+        ptr = int(ptrs[lvl].item())
+
+        # Wrap-around write
+        if ptr + batch <= self.queue_size:
+            queue[:, ptr : ptr + batch] = k.T  # noqa: E203
+        else:
+            tail = self.queue_size - ptr
+            queue[:, ptr:] = k[:tail].T
+            queue[:, : batch - tail] = k[tail:].T
+
+        ptrs[lvl] = (ptr + batch) % self.queue_size
 
     # ------------------------------------------------------------------
     # Forward (delegates to online VQVAE)
@@ -1003,8 +1034,15 @@ class MoCoEncoder(nn.Module):
 
     @property
     def queues(self):
-        """Return all queues as an ordered list (level 0 first)."""
-        return [self._get_queue(lvl) for lvl in range(self.nb_levels)]
+        """Return all view-0 (or shared) queues as an ordered list (level 0 first)."""
+        return [self._get_queue(lvl, view=0) for lvl in range(self.nb_levels)]
+
+    @property
+    def queues_v1(self):
+        """Return all view-1 queues (only available with separate encoders)."""
+        if not self._separate_queues:
+            return self.queues  # fallback: same as view-0
+        return [self._get_queue(lvl, view=1) for lvl in range(self.nb_levels)]
 
 
 if __name__ == "__main__":
