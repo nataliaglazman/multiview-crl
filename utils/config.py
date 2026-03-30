@@ -230,6 +230,12 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--change-lists", default=[[4, 5, 6, 8, 9, 10]])
     parser.add_argument("--faiss-omp-threads", type=int, default=16)
     parser.add_argument("--subsets", default=[(0, 1), (0, 2), (1, 2), (0, 1, 2)])
+    parser.add_argument(
+        "--recon-loss-start-step",
+        type=int,
+        default=0,
+        help="Training step at which to start applying the reconstruction loss",
+    )
     # MoCo
     parser.add_argument(
         "--inject-style-to-decoder",

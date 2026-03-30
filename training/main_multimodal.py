@@ -76,6 +76,7 @@ def train_step(
     accumulation_step=0,
     total_accumulation_steps=1,
     moco_loss_func=None,
+    step=0,
 ):
     """
     Perform a single forward + (optionally) backward pass.
@@ -151,7 +152,7 @@ def train_step(
                 with torch.no_grad():
                     key_outputs = vqvae_model.encode_keys(images, n_views=n_views)
 
-            if compute_recon and recon is not None:
+            if compute_recon and recon is not None and step >= getattr(args, "recon_loss_start_step", 0):
                 if recon.shape[2:] != input_shape:
                     recon = F.interpolate(recon, size=input_shape, mode="trilinear", align_corners=False)
                 recon_loss = (
@@ -995,6 +996,7 @@ def main(args):
                             accumulation_step=accum_idx,
                             total_accumulation_steps=accum_steps,
                             moco_loss_func=moco_loss_func,
+                            step=step,
                         )
                         accum_total += total_loss / accum_steps
                         accum_contrastive += contrastive_loss / accum_steps
