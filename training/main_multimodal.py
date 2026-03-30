@@ -191,23 +191,12 @@ def train_step(
                 else:
                     content_size = max(1, int(default_content_ratio * n_channels))
 
-                # soft_content_mask: differentiable (0/1) mask for the contrastive
-                # loss, shape (1, C).  Reused from the forward pass so the
-                # reconstruction and contrastive losses share the SAME Gumbel
-                # sample — no conflicting channel selections.
                 soft_content_mask = None
 
                 if level_idx in fwd_soft_content_masks:
                     mask_or_tuple = fwd_soft_content_masks[level_idx]
 
                     if isinstance(mask_or_tuple, tuple):
-                        # --- Per-view content selectors (Def 3.5, Yao et al.) ---
-                        # Each view has its own Gumbel mask selecting potentially
-                        # different channels.  We pre-apply the masks and extract
-                        # k-dim content features so the loss operates on aligned
-                        # k-dimensional vectors.  Gradients still flow back to
-                        # channel_logits / channel_logits_v1 through the soft mask
-                        # multiplication.
                         mask_v0, mask_v1 = mask_or_tuple
                         idx_v0 = torch.where(mask_v0.bool())[-1]
                         idx_v1 = torch.where(mask_v1.bool())[-1]
@@ -231,12 +220,7 @@ def train_step(
                             # Pre-mask momentum keys the same way
                             k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
                             k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
-                            # Per-view queues: view-0 momentum features in
-                            # queues[lvl], view-1 in queues_v1[lvl].  Which
-                            # queue each query uses depends on cross_view_negs:
-                            # when True, negatives come from the OTHER view
-                            # (same distribution as the positive key), forcing
-                            # the model to learn content alignment.
+
                             q_snap_v0 = vqvae_model.queues[level_idx].clone().detach()
                             q_snap_v1 = vqvae_model.queues_v1[level_idx].clone().detach()
                             queue_v0 = F.normalize(q_snap_v0[idx_v0, :], dim=0)
@@ -248,10 +232,7 @@ def train_step(
                             _tau = args.tau
                             B_moco = q_v0.shape[0]
                             _targets = torch.zeros(B_moco, dtype=torch.long, device=device)
-                            # When cross_view_negs_only: negatives must come from
-                            # the SAME view as the positive key, so the query can
-                            # only succeed by learning content — not by detecting
-                            # which encoder produced the features.
+
                             if getattr(args, "cross_view_negs_only", False):
                                 neg_queue_for_v0, neg_queue_for_v1 = queue_v1, queue_v0
                             else:

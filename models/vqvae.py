@@ -337,10 +337,13 @@ class VQVAE(HelperModule):
 
         self.encoders = _make_encoder_stack()
 
-        # Second (view-1) encoder stack: independent weights, same architecture.
-        # Codebooks, decoders, and Gumbel masks remain shared.
+        # Second (view-1) encoder stack: deep copy of view-0 so both start
+        # in the same feature space.  This is critical for cross-view
+        # contrastive learning — random init puts the two encoders in
+        # incompatible subspaces where cosine similarity ≈ 0 for everything,
+        # creating a flat loss landscape that prevents bootstrapping.
         if separate_encoders:
-            self.encoders_v1 = _make_encoder_stack()
+            self.encoders_v1 = copy.deepcopy(self.encoders)
         else:
             self.encoders_v1 = None
 
