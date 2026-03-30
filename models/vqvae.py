@@ -413,6 +413,19 @@ class VQVAE(HelperModule):
 
         has_any_mask = self.content_channels is not None and len(self.content_channels_per_level) > 0
 
+        # --- Contrastive projection head ---
+        # MoCo v2 / SimCLR-style: projects pooled encoder features into a
+        # space where the contrastive loss operates.  Keeps the encoder
+        # representation richer by decoupling it from the contrastive
+        # objective.  The projection head output is discarded at eval time.
+        proj_dim = 128
+        self.contrastive_proj = nn.Sequential(
+            nn.Linear(hidden_channels, proj_dim),
+            nn.BatchNorm1d(proj_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(proj_dim, proj_dim),
+        )
+
         # Optional style injection: style channels from each masked level's
         # encoder output are fed into the corresponding decoder.
         # style_channels_per_level: level → int (complement of content_channels).

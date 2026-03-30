@@ -246,7 +246,7 @@ def train_step(
                             level_loss = F.cross_entropy(logits_01, _targets) + F.cross_entropy(logits_10, _targets)
 
                             # --- Stale-queue diagnostic (cheap, no grad) ---
-                            if level_idx == 0 and optimizer is not None and accumulation_step == 0:
+                            if level_idx == 0 and optimizer is not None:
                                 with torch.no_grad():
                                     # 1. Positive vs negative similarity gap
                                     #    Healthy: pos >> mean(neg).  Stale queue: gap shrinks.
