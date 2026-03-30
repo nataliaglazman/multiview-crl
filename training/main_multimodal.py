@@ -350,6 +350,22 @@ def train_step(
                             soft_content_mask=soft_content_mask,
                             queue_v1=_qv1,
                         )
+
+                        # --- Stale-queue diagnostic for shared-mask / onthefly path ---
+                        if level_idx == 0 and optimizer is not None and accumulation_step == 0:
+                            with torch.no_grad():
+                                _ci = level_content_indices[0]
+                                _q = F.normalize(hz_level[0, :, _ci], dim=-1)
+                                _k = F.normalize(k_level[1, :, _ci], dim=-1)
+                                _queue_neg = F.normalize(queue_snapshot[_ci, :], dim=0)
+                                _pos = (_q * _k).sum(-1).mean().item()
+                                _neg = (_q @ _queue_neg).mean().item()
+                                _diag = {
+                                    "MoCo/pos_sim": _pos,
+                                    "MoCo/neg_sim_v0": _neg,
+                                    "MoCo/pos_neg_gap": _pos - _neg,
+                                    "MoCo/queue_raw_norm": queue_snapshot[_ci, :].norm(dim=0).mean().item(),
+                                }
                     else:
                         level_loss = loss_func(
                             hz_level,
