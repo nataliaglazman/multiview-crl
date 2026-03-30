@@ -97,6 +97,8 @@ def train_step(
     Returns:
         tuple: ``(total_loss, contrastive_loss, recon_loss, vq_loss, estimated_content_indices)``
     """
+    _diag = {}  # MoCo stale-queue diagnostics (populated below when applicable)
+
     if optimizer is not None and accumulation_step == 0:
         # set_to_none=True frees gradient tensors rather than zeroing them (~1× param memory saved)
         optimizer.zero_grad(set_to_none=True)
@@ -261,6 +263,28 @@ def train_step(
                             pos_10 = (q_v1 * k_v0_n).sum(dim=-1, keepdim=True)
                             logits_10 = torch.cat([pos_10, q_v1 @ neg_queue_for_v1], dim=1) / _tau
                             level_loss = F.cross_entropy(logits_01, _targets) + F.cross_entropy(logits_10, _targets)
+
+                            # --- Stale-queue diagnostic (cheap, no grad) ---
+                            if level_idx == 0 and optimizer is not None and accumulation_step == 0:
+                                with torch.no_grad():
+                                    # 1. Positive vs negative similarity gap
+                                    #    Healthy: pos >> mean(neg).  Stale queue: gap shrinks.
+                                    neg_sim_v0 = (q_v0 @ neg_queue_for_v0).mean().item()
+                                    neg_sim_v1 = (q_v1 @ neg_queue_for_v1).mean().item()
+                                    pos_sim = (
+                                        (q_v0 * k_v1_n).sum(-1).mean().item() + (q_v1 * k_v0_n).sum(-1).mean().item()
+                                    ) / 2
+                                    # 2. Queue feature norm BEFORE L2-norm (detects dead channels)
+                                    raw_norm_v0 = q_snap_v0[idx_v0, :].norm(dim=0).mean().item()
+                                    raw_norm_v1 = q_snap_v1[idx_v1, :].norm(dim=0).mean().item()
+                                    _diag = {
+                                        "MoCo/pos_sim": pos_sim,
+                                        "MoCo/neg_sim_v0": neg_sim_v0,
+                                        "MoCo/neg_sim_v1": neg_sim_v1,
+                                        "MoCo/pos_neg_gap": pos_sim - (neg_sim_v0 + neg_sim_v1) / 2,
+                                        "MoCo/queue_raw_norm_v0": raw_norm_v0,
+                                        "MoCo/queue_raw_norm_v1": raw_norm_v1,
+                                    }
                         else:
                             level_loss = loss_func(
                                 hz_content,
@@ -463,6 +487,7 @@ def train_step(
         vq_loss_value,
         estimated_content_indices,
         level_losses,
+        _diag,
     )
 
 
@@ -500,7 +525,7 @@ def _run_validation(
         if batch_idx >= max_batches:
             break
         try:
-            total_loss, contrastive_loss, recon_loss, vq_loss, _, _ = train_step(
+            total_loss, contrastive_loss, recon_loss, vq_loss, _, _, _ = train_step(
                 data,
                 encoders,
                 decoders,
@@ -975,6 +1000,7 @@ def main(args):
                             vq_loss,
                             _,
                             step_level_losses,
+                            step_moco_diag,
                         ) = train_step(
                             data,
                             encoders,
@@ -1046,6 +1072,11 @@ def main(args):
                             top_mean = sorted_logits[:k_lvl].mean().item()
                             bot_mean = sorted_logits[k_lvl:].mean().item()
                             tb_writer.add_scalar(f"Mask/TopBotGap_L{lvl_key}", top_mean - bot_mean, step)
+
+                    # Log MoCo stale-queue diagnostics
+                    if step_moco_diag:
+                        for diag_key, diag_val in step_moco_diag.items():
+                            tb_writer.add_scalar(diag_key, diag_val, step)
 
                     if step % args.log_steps == 1 or step == args.train_steps:
                         with open(file_name, "a+") as f:
