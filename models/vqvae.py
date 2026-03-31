@@ -509,41 +509,6 @@ class VQVAE(HelperModule):
         soft_content_masks = {}
         style_spatials = {}  # level → style channels for decoder injection
 
-        # Encoder forward pass
-        if self.separate_encoders and self.encoders_v1 is not None and n_views == 2:
-            # View-specific encoders: split batch, encode through separate stacks,
-            # then re-concatenate so the rest of the forward pass is unchanged.
-            B = x.shape[0] // 2
-            x_v0, x_v1 = x[:B], x[B:]
-            del x
-
-            enc_in_v0 = x_v0
-            enc_in_v1 = x_v1
-            del x_v0, x_v1
-            for i, (enc_v0, enc_v1) in enumerate(zip(self.encoders, self.encoders_v1)):
-                enc_in_v0 = enc_v0(enc_in_v0)
-                enc_in_v1 = enc_v1(enc_in_v1)
-                encoder_outputs.append(torch.cat([enc_in_v0, enc_in_v1], dim=0))
-                if pool_only:
-                    pool_v0 = enc_in_v0.mean(dim=[2, 3, 4])
-                    pool_v1 = enc_in_v1.mean(dim=[2, 3, 4])
-                    encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
-            del enc_in_v0, enc_in_v1
-        else:
-            # Single-view path.  When separate_encoders is active, view_idx
-            # selects which encoder stack to use (0 or 1).
-            enc_stack = self.encoders
-            if self.separate_encoders and self.encoders_v1 is not None and view_idx == 1:
-                enc_stack = self.encoders_v1
-
-            enc_input = x
-            for i, enc in enumerate(enc_stack):
-                enc_input = enc(enc_input)
-                encoder_outputs.append(enc_input)
-                if pool_only:
-                    encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
-            del x, enc_input
-
         # --- Content/style masks on encoder outputs (hidden_channels) ---
         # Applied BEFORE the codebook projection so the mask operates on raw
         # encoder channels, which tend to specialise and are more separable
@@ -567,97 +532,142 @@ class VQVAE(HelperModule):
             and n_views == 2
         )
 
-        if has_any_mask:
-            for lvl in self.content_style_levels:
-                enc_out_lvl = encoder_outputs[lvl]  # (n_views*B, C, D, H, W)
-                k_lvl = self.content_channels_per_level.get(lvl, self.content_channels)
+        # Helper function to apply mask to encoder output at a specific level
+        def apply_mask_to_level(enc_out_lvl, lvl, use_per_view_masks):
+            """Apply content/style mask to encoder output and return masked version and metadata."""
+            k_lvl = self.content_channels_per_level.get(lvl, self.content_channels)
 
-                # ---- Determine logits source ----
-                if use_per_view_masks:
-                    # --- Per-view learned masks ---
-                    B = enc_out_lvl.shape[0] // 2
-                    enc_v0, enc_v1 = enc_out_lvl[:B], enc_out_lvl[B:]
+            if use_per_view_masks:
+                # --- Per-view learned masks ---
+                B = enc_out_lvl.shape[0] // 2
+                enc_v0, enc_v1 = enc_out_lvl[:B], enc_out_lvl[B:]
 
-                    logits_v0 = self.channel_logits[str(lvl)].unsqueeze(0)
-                    logits_v1 = self.channel_logits_v1[str(lvl)].unsqueeze(0)
+                logits_v0 = self.channel_logits[str(lvl)].unsqueeze(0)
+                logits_v1 = self.channel_logits_v1[str(lvl)].unsqueeze(0)
 
-                    if self.training:
-                        mask_v0 = utils.topk_gumbel_softmax(k=k_lvl, logits=logits_v0, tau=1.0, hard=True)
-                        mask_v1 = utils.topk_gumbel_softmax(k=k_lvl, logits=logits_v1, tau=1.0, hard=True)
-                    else:
-                        hard_v0 = torch.zeros_like(logits_v0)
-                        hard_v0.scatter_(1, torch.topk(logits_v0, k_lvl, dim=1).indices, 1.0)
-                        mask_v0 = hard_v0
-                        hard_v1 = torch.zeros_like(logits_v1)
-                        hard_v1.scatter_(1, torch.topk(logits_v1, k_lvl, dim=1).indices, 1.0)
-                        mask_v1 = hard_v1
+                if self.training:
+                    mask_v0 = utils.topk_gumbel_softmax(k=k_lvl, logits=logits_v0, tau=1.0, hard=True)
+                    mask_v1 = utils.topk_gumbel_softmax(k=k_lvl, logits=logits_v1, tau=1.0, hard=True)
+                else:
+                    hard_v0 = torch.zeros_like(logits_v0)
+                    hard_v0.scatter_(1, torch.topk(logits_v0, k_lvl, dim=1).indices, 1.0)
+                    mask_v0 = hard_v0
+                    hard_v1 = torch.zeros_like(logits_v1)
+                    hard_v1.scatter_(1, torch.topk(logits_v1, k_lvl, dim=1).indices, 1.0)
+                    mask_v1 = hard_v1
 
-                    soft_content_masks[lvl] = (mask_v0, mask_v1)
-                    idx_v0 = torch.where(mask_v0.bool())[-1].tolist()
-                    idx_v1 = torch.where(mask_v1.bool())[-1].tolist()
+                soft_content_masks[lvl] = (mask_v0, mask_v1)
+                idx_v0 = torch.where(mask_v0.bool())[-1].tolist()
+                idx_v1 = torch.where(mask_v1.bool())[-1].tolist()
 
-                    if estimated_content_indices is None:
-                        estimated_content_indices = [idx_v0, idx_v1]
+                if estimated_content_indices is None:
+                    estimated_content_indices = [idx_v0, idx_v1]
 
-                    if self.inject_style_to_decoder and return_recon:
-                        style_idx_v0 = torch.where(~mask_v0.bool())[-1].tolist()
-                        style_idx_v1 = torch.where(~mask_v1.bool())[-1].tolist()
-                        style_spatials[lvl] = torch.cat(
-                            [enc_v0[:, style_idx_v0, :, :, :], enc_v1[:, style_idx_v1, :, :, :]],
-                            dim=0,
-                        )
-
-                    masked_v0 = enc_v0 * mask_v0.view(1, -1, 1, 1, 1)
-                    masked_v1 = enc_v1 * mask_v1.view(1, -1, 1, 1, 1)
-                    content_enc_outs[lvl] = torch.cat(
-                        [masked_v0[:, idx_v0, :, :, :], masked_v1[:, idx_v1, :, :, :]],
+                if self.inject_style_to_decoder and return_recon:
+                    style_idx_v0 = torch.where(~mask_v0.bool())[-1].tolist()
+                    style_idx_v1 = torch.where(~mask_v1.bool())[-1].tolist()
+                    style_spatials[lvl] = torch.cat(
+                        [enc_v0[:, style_idx_v0, :, :, :], enc_v1[:, style_idx_v1, :, :, :]],
                         dim=0,
                     )
-                    del masked_v0, masked_v1
 
+                masked_v0 = enc_v0 * mask_v0.view(1, -1, 1, 1, 1)
+                masked_v1 = enc_v1 * mask_v1.view(1, -1, 1, 1, 1)
+                content_enc_outs[lvl] = torch.cat(
+                    [masked_v0[:, idx_v0, :, :, :], masked_v1[:, idx_v1, :, :, :]],
+                    dim=0,
+                )
+                del masked_v0, masked_v1
+
+            else:
+                # --- Shared mask (on-the-fly OR single learned) ---
+                if getattr(self, "mask_mode", "onthefly") == "onthefly":
+                    # On-the-fly: logits = mean activation per channel,
+                    # averaged across batch (and all views if concatenated).
+                    logits = enc_out_lvl.mean(dim=[0, 2, 3, 4]).unsqueeze(0)  # (1, C)
                 else:
-                    # --- Shared mask (on-the-fly OR single learned) ---
-                    if getattr(self, "mask_mode", "onthefly") == "onthefly":
-                        # On-the-fly: logits = mean activation per channel,
-                        # averaged across batch (and all views if concatenated).
-                        logits = enc_out_lvl.mean(dim=[0, 2, 3, 4]).unsqueeze(0)  # (1, C)
+                    # Learned: logits from persistent nn.Parameter.
+                    # In single-view mode (n_views=1) with per-view masks,
+                    # select the correct logits based on view_idx.
+                    _has_v1_logits = getattr(self, "channel_logits_v1", None) is not None
+                    if self.separate_encoders and _has_v1_logits and view_idx == 1:
+                        logits = self.channel_logits_v1[str(lvl)].unsqueeze(0)  # (1, C)
                     else:
-                        # Learned: logits from persistent nn.Parameter.
-                        # In single-view mode (n_views=1) with per-view masks,
-                        # select the correct logits based on view_idx.
-                        _has_v1_logits = getattr(self, "channel_logits_v1", None) is not None
-                        if self.separate_encoders and _has_v1_logits and view_idx == 1:
-                            logits = self.channel_logits_v1[str(lvl)].unsqueeze(0)  # (1, C)
-                        else:
-                            logits = self.channel_logits[str(lvl)].unsqueeze(0)  # (1, C)
+                        logits = self.channel_logits[str(lvl)].unsqueeze(0)  # (1, C)
 
-                    if self.training:
-                        soft_mask = utils.topk_gumbel_softmax(
-                            k=k_lvl,
-                            logits=logits,
-                            tau=1.0,
-                            hard=True,
-                        )
-                    else:
-                        hard_mask = torch.zeros_like(logits)
-                        topk_idx = torch.topk(logits, k_lvl, dim=1).indices
-                        hard_mask.scatter_(1, topk_idx, 1.0)
-                        soft_mask = hard_mask
+                if self.training:
+                    soft_mask = utils.topk_gumbel_softmax(
+                        k=k_lvl,
+                        logits=logits,
+                        tau=1.0,
+                        hard=True,
+                    )
+                else:
+                    hard_mask = torch.zeros_like(logits)
+                    topk_idx = torch.topk(logits, k_lvl, dim=1).indices
+                    hard_mask.scatter_(1, topk_idx, 1.0)
+                    soft_mask = hard_mask
 
-                    soft_content_masks[lvl] = soft_mask
-                    content_mask_bool = soft_mask.bool()
-                    content_idx = torch.where(content_mask_bool)[-1].tolist()
+                soft_content_masks[lvl] = soft_mask
+                content_mask_bool = soft_mask.bool()
+                content_idx = torch.where(content_mask_bool)[-1].tolist()
 
-                    if estimated_content_indices is None:
-                        estimated_content_indices = [content_idx]
+                if estimated_content_indices is None:
+                    estimated_content_indices = [content_idx]
 
-                    if self.inject_style_to_decoder and return_recon:
-                        style_idx = torch.where(~content_mask_bool)[-1].tolist()
-                        style_spatials[lvl] = enc_out_lvl[:, style_idx, :, :, :]
+                if self.inject_style_to_decoder and return_recon:
+                    style_idx = torch.where(~content_mask_bool)[-1].tolist()
+                    style_spatials[lvl] = enc_out_lvl[:, style_idx, :, :, :]
 
-                    masked = enc_out_lvl * soft_mask.view(1, -1, 1, 1, 1)
-                    content_enc_outs[lvl] = masked[:, content_idx, :, :, :]
-                    del masked
+                masked = enc_out_lvl * soft_mask.view(1, -1, 1, 1, 1)
+                content_enc_outs[lvl] = masked[:, content_idx, :, :, :]
+                del masked
+
+        # Encoder forward pass
+        if self.separate_encoders and self.encoders_v1 is not None and n_views == 2:
+            # View-specific encoders: split batch, encode through separate stacks,
+            # then re-concatenate so the rest of the forward pass is unchanged.
+            B = x.shape[0] // 2
+            x_v0, x_v1 = x[:B], x[B:]
+            del x
+
+            enc_in_v0 = x_v0
+            enc_in_v1 = x_v1
+            del x_v0, x_v1
+            for i, (enc_v0, enc_v1) in enumerate(zip(self.encoders, self.encoders_v1)):
+                enc_in_v0 = enc_v0(enc_in_v0)
+                enc_in_v1 = enc_v1(enc_in_v1)
+                enc_out = torch.cat([enc_in_v0, enc_in_v1], dim=0)
+                
+                # Apply mask immediately if this level has content/style separation
+                if i in self.content_style_levels:
+                    apply_mask_to_level(enc_out, i, use_per_view_masks)
+                
+                encoder_outputs.append(enc_out)
+                if pool_only:
+                    pool_v0 = enc_in_v0.mean(dim=[2, 3, 4])
+                    pool_v1 = enc_in_v1.mean(dim=[2, 3, 4])
+                    encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
+            del enc_in_v0, enc_in_v1
+        else:
+            # Single-view path.  When separate_encoders is active, view_idx
+            # selects which encoder stack to use (0 or 1).
+            enc_stack = self.encoders
+            if self.separate_encoders and self.encoders_v1 is not None and view_idx == 1:
+                enc_stack = self.encoders_v1
+
+            enc_input = x
+            for i, enc in enumerate(enc_stack):
+                enc_input = enc(enc_input)
+                
+                # Apply mask immediately if this level has content/style separation
+                if i in self.content_style_levels:
+                    apply_mask_to_level(enc_input, i, use_per_view_masks)
+                
+                encoder_outputs.append(enc_input)
+                if pool_only:
+                    encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
+            del x, enc_input
 
         # --- Codebook + decoder loop (top-down: coarsest → finest) ---
         for l in range(self.nb_levels - 1, -1, -1):
