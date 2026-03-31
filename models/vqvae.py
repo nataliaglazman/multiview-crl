@@ -697,6 +697,12 @@ class VQVAE(HelperModule):
                     content_enc_outs[lvl] = masked[:, content_idx, :, :, :]
                     del masked
 
+        # --- Codebook + decoder loop (top-down: coarsest → finest) ---
+        # When we only need pooled encoder features (contrastive-only), skip the
+        # codebook entirely — its commitment loss conflicts with contrastive learning
+        # and the zero-padded input produces meaningless gradients.
+        skip_codebook = pool_only and not return_recon
+
         # --- Style quantization (independent codebooks, no cross-level conditioning) ---
         style_id_outputs = {}
         if self.quantize_style and return_recon and not skip_codebook:
@@ -707,12 +713,6 @@ class VQVAE(HelperModule):
                     style_spatials[lvl] = style_q  # replace raw with quantized
                     diffs.append(style_d)
                     style_id_outputs[lvl] = style_emb_id
-
-        # --- Codebook + decoder loop (top-down: coarsest → finest) ---
-        # When we only need pooled encoder features (contrastive-only), skip the
-        # codebook entirely — its commitment loss conflicts with contrastive learning
-        # and the zero-padded input produces meaningless gradients.
-        skip_codebook = pool_only and not return_recon
         for l in range(self.nb_levels - 1, -1, -1):
             codebook = self.codebooks[l]
 
