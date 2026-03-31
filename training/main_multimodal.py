@@ -76,6 +76,7 @@ def train_step(
     accumulation_step=0,
     total_accumulation_steps=1,
     moco_loss_func=None,
+    step=0,
 ):
     """
     Perform a single forward + (optionally) backward pass.
@@ -97,6 +98,8 @@ def train_step(
     Returns:
         tuple: ``(total_loss, contrastive_loss, recon_loss, vq_loss, estimated_content_indices)``
     """
+    _diag = {}  # MoCo stale-queue diagnostics (populated below when applicable)
+
     if optimizer is not None and accumulation_step == 0:
         # set_to_none=True frees gradient tensors rather than zeroing them (~1× param memory saved)
         optimizer.zero_grad(set_to_none=True)
@@ -130,6 +133,7 @@ def train_step(
                 _,
                 _,
                 fwd_soft_content_masks,
+                _,  # style_id_outputs
             ) = vqvae_model(
                 images,
                 return_recon=compute_recon,
@@ -149,7 +153,7 @@ def train_step(
                 with torch.no_grad():
                     key_outputs = vqvae_model.encode_keys(images, n_views=n_views)
 
-            if compute_recon and recon is not None:
+            if compute_recon and recon is not None and step >= getattr(args, "recon_loss_start_step", 0):
                 if recon.shape[2:] != input_shape:
                     recon = F.interpolate(recon, size=input_shape, mode="trilinear", align_corners=False)
                 recon_loss = (
@@ -189,23 +193,12 @@ def train_step(
                 else:
                     content_size = max(1, int(default_content_ratio * n_channels))
 
-                # soft_content_mask: differentiable (0/1) mask for the contrastive
-                # loss, shape (1, C).  Reused from the forward pass so the
-                # reconstruction and contrastive losses share the SAME Gumbel
-                # sample — no conflicting channel selections.
                 soft_content_mask = None
 
                 if level_idx in fwd_soft_content_masks:
                     mask_or_tuple = fwd_soft_content_masks[level_idx]
 
                     if isinstance(mask_or_tuple, tuple):
-                        # --- Per-view content selectors (Def 3.5, Yao et al.) ---
-                        # Each view has its own Gumbel mask selecting potentially
-                        # different channels.  We pre-apply the masks and extract
-                        # k-dim content features so the loss operates on aligned
-                        # k-dimensional vectors.  Gradients still flow back to
-                        # channel_logits / channel_logits_v1 through the soft mask
-                        # multiplication.
                         mask_v0, mask_v1 = mask_or_tuple
                         idx_v0 = torch.where(mask_v0.bool())[-1]
                         idx_v1 = torch.where(mask_v1.bool())[-1]
@@ -229,12 +222,7 @@ def train_step(
                             # Pre-mask momentum keys the same way
                             k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
                             k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
-                            # Per-view queues: view-0 momentum features in
-                            # queues[lvl], view-1 in queues_v1[lvl].  Which
-                            # queue each query uses depends on cross_view_negs:
-                            # when True, negatives come from the OTHER view
-                            # (same distribution as the positive key), forcing
-                            # the model to learn content alignment.
+
                             q_snap_v0 = vqvae_model.queues[level_idx].clone().detach()
                             q_snap_v1 = vqvae_model.queues_v1[level_idx].clone().detach()
                             queue_v0 = F.normalize(q_snap_v0[idx_v0, :], dim=0)
@@ -246,10 +234,7 @@ def train_step(
                             _tau = args.tau
                             B_moco = q_v0.shape[0]
                             _targets = torch.zeros(B_moco, dtype=torch.long, device=device)
-                            # When cross_view_negs_only: negatives must come from
-                            # the SAME view as the positive key, so the query can
-                            # only succeed by learning content — not by detecting
-                            # which encoder produced the features.
+
                             if getattr(args, "cross_view_negs_only", False):
                                 neg_queue_for_v0, neg_queue_for_v1 = queue_v1, queue_v0
                             else:
@@ -261,6 +246,28 @@ def train_step(
                             pos_10 = (q_v1 * k_v0_n).sum(dim=-1, keepdim=True)
                             logits_10 = torch.cat([pos_10, q_v1 @ neg_queue_for_v1], dim=1) / _tau
                             level_loss = F.cross_entropy(logits_01, _targets) + F.cross_entropy(logits_10, _targets)
+
+                            # --- Stale-queue diagnostic (cheap, no grad) ---
+                            if level_idx == 0 and optimizer is not None:
+                                with torch.no_grad():
+                                    # 1. Positive vs negative similarity gap
+                                    #    Healthy: pos >> mean(neg).  Stale queue: gap shrinks.
+                                    neg_sim_v0 = (q_v0 @ neg_queue_for_v0).mean().item()
+                                    neg_sim_v1 = (q_v1 @ neg_queue_for_v1).mean().item()
+                                    pos_sim = (
+                                        (q_v0 * k_v1_n).sum(-1).mean().item() + (q_v1 * k_v0_n).sum(-1).mean().item()
+                                    ) / 2
+                                    # 2. Queue feature norm BEFORE L2-norm (detects dead channels)
+                                    raw_norm_v0 = q_snap_v0[idx_v0, :].norm(dim=0).mean().item()
+                                    raw_norm_v1 = q_snap_v1[idx_v1, :].norm(dim=0).mean().item()
+                                    _diag = {
+                                        "MoCo/pos_sim": pos_sim,
+                                        "MoCo/neg_sim_v0": neg_sim_v0,
+                                        "MoCo/neg_sim_v1": neg_sim_v1,
+                                        "MoCo/pos_neg_gap": pos_sim - (neg_sim_v0 + neg_sim_v1) / 2,
+                                        "MoCo/queue_raw_norm_v0": raw_norm_v0,
+                                        "MoCo/queue_raw_norm_v1": raw_norm_v1,
+                                    }
                         else:
                             level_loss = loss_func(
                                 hz_content,
@@ -344,6 +351,22 @@ def train_step(
                             soft_content_mask=soft_content_mask,
                             queue_v1=_qv1,
                         )
+
+                        # --- Stale-queue diagnostic for shared-mask / onthefly path ---
+                        if level_idx == 0 and optimizer is not None and accumulation_step == 0:
+                            with torch.no_grad():
+                                _ci = level_content_indices[0]
+                                _q = F.normalize(hz_level[0, :, _ci], dim=-1)
+                                _k = F.normalize(k_level[1, :, _ci], dim=-1)
+                                _queue_neg = F.normalize(queue_snapshot[_ci, :], dim=0)
+                                _pos = (_q * _k).sum(-1).mean().item()
+                                _neg = (_q @ _queue_neg).mean().item()
+                                _diag = {
+                                    "MoCo/pos_sim": _pos,
+                                    "MoCo/neg_sim_v0": _neg,
+                                    "MoCo/pos_neg_gap": _pos - _neg,
+                                    "MoCo/queue_raw_norm": queue_snapshot[_ci, :].norm(dim=0).mean().item(),
+                                }
                     else:
                         level_loss = loss_func(
                             hz_level,
@@ -353,6 +376,10 @@ def train_step(
                         )
 
                 level_losses.append(level_loss.item())
+                # Collect contrastive diagnostics (top-1 acc, sim distributions)
+                if hasattr(level_loss, "_contrastive_diag"):
+                    for _dk, _dv in level_loss._contrastive_diag.items():
+                        _diag[f"Contrastive/{_dk}_L{level_idx}"] = _dv
                 _lvl_weights = getattr(args, "contrastive_level_weights", None)
                 _lvl_w = _lvl_weights[level_idx] if _lvl_weights and level_idx < len(_lvl_weights) else 1.0
                 total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss * _lvl_w
@@ -463,6 +490,7 @@ def train_step(
         vq_loss_value,
         estimated_content_indices,
         level_losses,
+        _diag,
     )
 
 
@@ -500,7 +528,7 @@ def _run_validation(
         if batch_idx >= max_batches:
             break
         try:
-            total_loss, contrastive_loss, recon_loss, vq_loss, _, _ = train_step(
+            total_loss, contrastive_loss, recon_loss, vq_loss, _, _, _ = train_step(
                 data,
                 encoders,
                 decoders,
@@ -780,6 +808,9 @@ def main(args):
             content_ratios=getattr(args, "content_ratios", None),
             separate_encoders=getattr(args, "separate_encoders", False),
             mask_mode=getattr(args, "mask_mode", "onthefly"),
+            quantize_style=getattr(args, "quantize_style", False),
+            style_embed_dim=getattr(args, "style_embed_dim", None),
+            style_nb_entries=getattr(args, "style_nb_entries", None),
         )
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
@@ -803,6 +834,10 @@ def main(args):
                 else " (learnable nn.Parameter per level)"
             )
         )
+        if getattr(args, "quantize_style", False):
+            _se = getattr(args, "style_embed_dim", None) or args.vqvae_embed_dim
+            _sn = getattr(args, "style_nb_entries", None) or args.vqvae_nb_entries
+            logger.info(f"  Style quantization: ENABLED (embed_dim={_se}, nb_entries={_sn})")
 
         encoders = [vqvae_model]
         decoders = []
@@ -975,6 +1010,7 @@ def main(args):
                             vq_loss,
                             _,
                             step_level_losses,
+                            step_moco_diag,
                         ) = train_step(
                             data,
                             encoders,
@@ -988,6 +1024,7 @@ def main(args):
                             accumulation_step=accum_idx,
                             total_accumulation_steps=accum_steps,
                             moco_loss_func=moco_loss_func,
+                            step=step,
                         )
                         accum_total += total_loss / accum_steps
                         accum_contrastive += contrastive_loss / accum_steps
@@ -1007,10 +1044,19 @@ def main(args):
                     recon_losses.append(accum_recon)
                     vq_losses.append(accum_vq)
 
+                    _acc_str = ""
+                    if step_moco_diag:
+                        _acc_parts = []
+                        for _li in range(args.vqvae_nb_levels):
+                            _ak = f"Contrastive/top1_acc_L{_li}"
+                            if _ak in step_moco_diag:
+                                _acc_parts.append(f"L{_li}={step_moco_diag[_ak]:.1%}")
+                        if _acc_parts:
+                            _acc_str = f" | Top1Acc: {', '.join(_acc_parts)}"
                     print(
                         f"Step {step}: Total={accum_total:.4f} | "
                         f"Contrastive={accum_contrastive:.4f} | "
-                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}",
+                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}",
                         flush=True,
                     )
 
@@ -1046,6 +1092,11 @@ def main(args):
                             top_mean = sorted_logits[:k_lvl].mean().item()
                             bot_mean = sorted_logits[k_lvl:].mean().item()
                             tb_writer.add_scalar(f"Mask/TopBotGap_L{lvl_key}", top_mean - bot_mean, step)
+
+                    # Log MoCo stale-queue diagnostics
+                    if step_moco_diag:
+                        for diag_key, diag_val in step_moco_diag.items():
+                            tb_writer.add_scalar(diag_key, diag_val, step)
 
                     if step % args.log_steps == 1 or step == args.train_steps:
                         with open(file_name, "a+") as f:

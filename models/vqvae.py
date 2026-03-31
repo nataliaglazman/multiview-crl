@@ -304,6 +304,9 @@ class VQVAE(HelperModule):
         content_ratios: list[float] | None = None,  # Per-level content ratio (fraction of hidden_channels)
         separate_encoders: bool = False,  # If True, create a second encoder stack for view 1
         mask_mode: str = "onthefly",  # "learned" or "onthefly"
+        quantize_style: bool = False,  # If True, style channels get their own independent codebook per level
+        style_embed_dim: int | None = None,  # Embedding dim for style codebooks (defaults to embed_dim)
+        style_nb_entries: int | None = None,  # Codebook size for style codebooks (defaults to nb_entries)
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -337,10 +340,13 @@ class VQVAE(HelperModule):
 
         self.encoders = _make_encoder_stack()
 
-        # Second (view-1) encoder stack: independent weights, same architecture.
-        # Codebooks, decoders, and Gumbel masks remain shared.
+        # Second (view-1) encoder stack: deep copy of view-0 so both start
+        # in the same feature space.  This is critical for cross-view
+        # contrastive learning — random init puts the two encoders in
+        # incompatible subspaces where cosine similarity ≈ 0 for everything,
+        # creating a flat loss landscape that prevents bootstrapping.
         if separate_encoders:
-            self.encoders_v1 = _make_encoder_stack()
+            self.encoders_v1 = copy.deepcopy(self.encoders)
         else:
             self.encoders_v1 = None
 
@@ -410,6 +416,33 @@ class VQVAE(HelperModule):
 
         has_any_mask = self.content_channels is not None and len(self.content_channels_per_level) > 0
 
+        # --- Style codebooks (Option A: fully independent, no cross-level conditioning) ---
+        self.quantize_style = quantize_style and has_any_mask and inject_style_to_decoder
+        if self.quantize_style:
+            _style_embed = style_embed_dim if style_embed_dim is not None else embed_dim
+            _style_entries = style_nb_entries if style_nb_entries is not None else nb_entries
+            self.style_embed_dim = _style_embed
+            self.style_codebooks = nn.ModuleDict()
+            for lvl in self.content_style_levels:
+                sc = hidden_channels - self.content_channels_per_level[lvl]
+                self.style_codebooks[str(lvl)] = CodeLayer(sc, _style_embed, _style_entries)
+        else:
+            self.style_embed_dim = None
+            self.style_codebooks = nn.ModuleDict()
+
+        # --- Contrastive projection head ---
+        # MoCo v2 / SimCLR-style: projects pooled encoder features into a
+        # space where the contrastive loss operates.  Keeps the encoder
+        # representation richer by decoupling it from the contrastive
+        # objective.  The projection head output is discarded at eval time.
+        proj_dim = 128
+        self.contrastive_proj = nn.Sequential(
+            nn.Linear(hidden_channels, proj_dim),
+            nn.BatchNorm1d(proj_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(proj_dim, proj_dim),
+        )
+
         # Optional style injection: style channels from each masked level's
         # encoder output are fed into the corresponding decoder.
         # style_channels_per_level: level → int (complement of content_channels).
@@ -451,7 +484,12 @@ class VQVAE(HelperModule):
             else:
                 dec_in = embed_dim * (nb_levels - lvl)
                 dec_out = embed_dim
-            sc = self.style_channels_per_level.get(lvl, 0) if self.inject_style_to_decoder else 0
+            if self.quantize_style and lvl in self.style_channels_per_level:
+                sc = self.style_embed_dim
+            elif self.inject_style_to_decoder:
+                sc = self.style_channels_per_level.get(lvl, 0)
+            else:
+                sc = 0
             self.decoders.append(
                 Decoder(
                     dec_in,
@@ -670,6 +708,21 @@ class VQVAE(HelperModule):
             del x, enc_input
 
         # --- Codebook + decoder loop (top-down: coarsest → finest) ---
+        # When we only need pooled encoder features (contrastive-only), skip the
+        # codebook entirely — its commitment loss conflicts with contrastive learning
+        # and the zero-padded input produces meaningless gradients.
+        skip_codebook = pool_only and not return_recon
+
+        # --- Style quantization (independent codebooks, no cross-level conditioning) ---
+        style_id_outputs = {}
+        if self.quantize_style and return_recon and not skip_codebook:
+            for lvl in self.content_style_levels:
+                if lvl in style_spatials:
+                    style_cb = self.style_codebooks[str(lvl)]
+                    style_q, style_d, style_emb_id = style_cb(style_spatials[lvl])
+                    style_spatials[lvl] = style_q  # replace raw with quantized
+                    diffs.append(style_d)
+                    style_id_outputs[lvl] = style_emb_id
         for l in range(self.nb_levels - 1, -1, -1):
             codebook = self.codebooks[l]
 
@@ -682,6 +735,14 @@ class VQVAE(HelperModule):
             else:
                 enc_for_codebook = enc_out
             del enc_out
+
+            if skip_codebook:
+                # No codebook forward — avoids commitment loss that conflicts
+                # with contrastive learning and saves compute.
+                diffs.append(torch.zeros(1, device=enc_for_codebook.device))
+                id_outputs.append(None)
+                del enc_for_codebook
+                continue
 
             expected_in = codebook.conv_in.in_channels
 
@@ -759,9 +820,10 @@ class VQVAE(HelperModule):
             decoder_outputs,
             id_outputs,
             soft_content_masks,
+            style_id_outputs,
         )
 
-    def decode_codes(self, *cs, style=None, styles=None):
+    def decode_codes(self, *cs, style=None, styles=None, style_codes=None):
         """Decode from discrete codes back to the input space.
 
         Args:
@@ -771,12 +833,26 @@ class VQVAE(HelperModule):
             styles: Optional dict mapping level index → style tensor for that
                     decoder.  Takes precedence over ``style`` when both are given.
                     Pass ``{0: style_l0, 1: style_l1, ...}`` for per-level style.
+            style_codes: Optional dict mapping level index → style codebook indices
+                         (LongTensor).  Only used when ``quantize_style`` is active.
+                         Decoded through the style codebook and passed to the decoder.
+                         Takes precedence over ``styles`` for levels that have entries.
         """
         if styles is None:
             styles = {}
+        if style_codes is None:
+            style_codes = {}
         # Legacy compat: if only `style` is provided, use it for level 0
         if style is not None and 0 not in styles:
             styles[0] = style
+
+        # Decode style codes through style codebooks
+        if self.quantize_style:
+            for lvl_str, style_cb in self.style_codebooks.items():
+                lvl = int(lvl_str)
+                if lvl in style_codes:
+                    style_q = style_cb.embed_code(style_codes[lvl]).permute(0, 4, 1, 2, 3)
+                    styles[lvl] = style_q
 
         decoder_outputs = []
         code_outputs = []

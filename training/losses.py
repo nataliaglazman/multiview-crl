@@ -14,6 +14,15 @@ from torch.nn import PairwiseDistance
 from utils.utils import TBSummaryTypes
 
 
+def _merge_diags(diags: list[dict]) -> dict:
+    """Average contrastive diagnostics across subsets."""
+    merged = {}
+    for key in diags[0]:
+        vals = [d[key] for d in diags if key in d]
+        merged[key] = sum(vals) / len(vals) if vals else 0.0
+    return merged
+
+
 # for numerical experiment
 class CLLoss(ABC):
     """Abstract class to define losses in the CL framework that use one
@@ -234,8 +243,9 @@ def infonce_loss(
         )
     else:
         total_loss = torch.zeros(1).type_as(hz)
+        sub_diags = []
         for est_content_indices, subset in zip(estimated_content_indices, subsets):
-            total_loss += infonce_base_loss(
+            sub_loss = infonce_base_loss(
                 hz[list(subset), ...],
                 est_content_indices,
                 sim_metric,
@@ -245,6 +255,11 @@ def infonce_loss(
                 soft_content_mask=soft_content_mask,
                 cross_view_negs_only=cross_view_negs_only,
             )
+            total_loss = total_loss + sub_loss
+            if hasattr(sub_loss, "_contrastive_diag"):
+                sub_diags.append(sub_loss._contrastive_diag)
+        if sub_diags:
+            total_loss._contrastive_diag = _merge_diags(sub_diags)
         return total_loss
 
 
@@ -309,6 +324,10 @@ def infonce_base_loss(
                 SIM_cross[(i, j)] = (sim_metric(hz_i.unsqueeze(-2), hz_j.unsqueeze(-3)) / tau).type_as(hz_subset)
 
         total_loss_value = torch.zeros(1, device=hz_subset.device, dtype=hz_subset.dtype)
+        n_correct = 0
+        n_total = 0
+        pos_sims = []
+        neg_sims = []
         for i in range(n_view):
             for j in range(n_view):
                 if i >= j:
@@ -318,6 +337,25 @@ def infonce_base_loss(
                 targets = torch.arange(d, dtype=torch.long, device=hz_subset.device)
                 total_loss_value += criterion(scores_ij, targets)
                 total_loss_value += criterion(scores_ji, targets)
+                with torch.no_grad():
+                    n_correct += (scores_ij.argmax(dim=1) == targets).sum().item()
+                    n_correct += (scores_ji.argmax(dim=1) == targets).sum().item()
+                    n_total += 2 * d
+                    # Positive sims are the diagonals (in tau-scaled space, undo /tau)
+                    pos_sims.append(scores_ij.diag() * tau)
+                    pos_sims.append(scores_ji.diag() * tau)
+                    # Negative sims: off-diagonal entries
+                    mask_offdiag = ~torch.eye(d, dtype=torch.bool, device=hz_subset.device)
+                    neg_sims.append(scores_ij[mask_offdiag] * tau)
+                    neg_sims.append(scores_ji[mask_offdiag] * tau)
+        with torch.no_grad():
+            total_loss_value._contrastive_diag = {
+                "top1_acc": n_correct / max(n_total, 1),
+                "pos_sim_mean": torch.cat(pos_sims).mean().item(),
+                "pos_sim_std": torch.cat(pos_sims).std().item(),
+                "neg_sim_mean": torch.cat(neg_sims).mean().item(),
+                "neg_sim_std": torch.cat(neg_sims).std().item(),
+            }
         return total_loss_value
 
     # Default: include both cross-view and same-view negatives.
@@ -342,6 +380,10 @@ def infonce_base_loss(
                 SIM[i][j] = SIM[j][i].transpose(-1, -2)
 
     total_loss_value = torch.zeros(1, device=hz_subset.device, dtype=hz_subset.dtype)
+    n_correct = 0
+    n_total = 0
+    pos_sims = []
+    neg_sims = []
     for i in range(n_view):
         for j in range(n_view):
             if i < j:
@@ -350,6 +392,26 @@ def infonce_base_loss(
                 raw_scores = torch.cat([raw_scores1, raw_scores2], dim=-2)  # (2d, 2d)
                 targets = torch.arange(2 * d, dtype=torch.long, device=raw_scores.device)
                 total_loss_value += criterion(raw_scores, targets)
+                with torch.no_grad():
+                    n_correct += (raw_scores.argmax(dim=1) == targets).sum().item()
+                    n_total += 2 * d
+                    # Positive sims: diagonal of cross-view blocks SIM[i][j] and SIM[j][i]
+                    pos_sims.append(SIM[i][j].diag() * tau)
+                    pos_sims.append(SIM[j][i].diag() * tau)
+                    # Negative sims: off-diagonal of cross-view block
+                    mask_offdiag = ~torch.eye(d, dtype=torch.bool, device=hz_subset.device)
+                    neg_sims.append(SIM[i][j][mask_offdiag] * tau)
+    with torch.no_grad():
+        _diag = {
+            "top1_acc": n_correct / max(n_total, 1),
+            "pos_sim_mean": torch.cat(pos_sims).mean().item(),
+            "pos_sim_std": torch.cat(pos_sims).std().item(),
+        }
+        if neg_sims:
+            _neg = torch.cat(neg_sims)
+            _diag["neg_sim_mean"] = _neg.mean().item()
+            _diag["neg_sim_std"] = _neg.std().item()
+        total_loss_value._contrastive_diag = _diag
     return total_loss_value
 
 
@@ -409,6 +471,11 @@ def moco_infonce_loss(
     else:
         _queue_for_view = [queue_c, queue_v1_c] if n_view == 2 else [queue_c] * n_view
 
+    all_pos_sims = []
+    all_neg_sims = []
+    n_correct = 0
+    n_total = 0
+
     for i in range(n_view):
         for j in range(n_view):
             if i >= j:
@@ -425,6 +492,26 @@ def moco_infonce_loss(
             neg_ji = q_c[j] @ _queue_for_view[j]  # (B, Q)
             logits_ji = torch.cat([pos_ji, neg_ji], dim=1) / tau  # (B, Q+1)
             total_loss = total_loss + F.cross_entropy(logits_ji, targets)
+
+            # --- Diagnostics (detached) ---
+            with torch.no_grad():
+                all_pos_sims.append(pos_ij.squeeze(-1))  # raw cosine sim (before /tau)
+                all_pos_sims.append(pos_ji.squeeze(-1))
+                all_neg_sims.append(neg_ij)
+                all_neg_sims.append(neg_ji)
+                n_correct += (logits_ij.argmax(dim=1) == 0).sum().item()
+                n_correct += (logits_ji.argmax(dim=1) == 0).sum().item()
+                n_total += logits_ij.shape[0] + logits_ji.shape[0]
+
+    # Attach diagnostics dict to the loss tensor (non-persistent, won't affect .backward())
+    with torch.no_grad():
+        total_loss._contrastive_diag = {
+            "top1_acc": n_correct / max(n_total, 1),
+            "pos_sim_mean": torch.cat(all_pos_sims).mean().item(),
+            "pos_sim_std": torch.cat(all_pos_sims).std().item(),
+            "neg_sim_mean": torch.cat(all_neg_sims).mean().item(),
+            "neg_sim_std": torch.cat(all_neg_sims).std().item(),
+        }
 
     return total_loss
 
@@ -471,10 +558,11 @@ def moco_loss(
         )
 
     total_loss = torch.zeros(1, device=q.device, dtype=q.dtype)
+    sub_diags = []
     for content_indices, subset in zip(estimated_content_indices, subsets):
         q_sub = q[list(subset), ...]
         k_sub = k[list(subset), ...]
-        total_loss = total_loss + moco_infonce_loss(
+        sub_loss = moco_infonce_loss(
             q_sub,
             k_sub,
             queue,
@@ -484,6 +572,11 @@ def moco_loss(
             queue_v1=queue_v1,
             cross_view_negs_only=cross_view_negs_only,
         )
+        total_loss = total_loss + sub_loss
+        if hasattr(sub_loss, "_contrastive_diag"):
+            sub_diags.append(sub_loss._contrastive_diag)
+    if sub_diags:
+        total_loss._contrastive_diag = _merge_diags(sub_diags)
     return total_loss
 
 

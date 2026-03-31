@@ -115,7 +115,7 @@ def get_data(
             i += loader.batch_size
             data = next(iterator)
 
-            loss_value, _, _, _, estimated_content_indices, _ = val_step(
+            loss_value, _, _, _, estimated_content_indices, _, _ = val_step(
                 data,
                 encoders,
                 decoders,
