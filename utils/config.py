@@ -135,6 +135,26 @@ def parse_args() -> argparse.ArgumentParser:
         "shared across views (matches the original multiview-crl repo). Default: onthefly.",
     )
     parser.add_argument(
+        "--quantize-style",
+        action="store_true",
+        default=False,
+        help="Quantize style channels through independent per-level codebooks (Option A). "
+        "Requires --inject-style-to-decoder. When active, style channels are vector-quantized "
+        "before injection into the decoder, giving style its own discrete bottleneck.",
+    )
+    parser.add_argument(
+        "--style-embed-dim",
+        type=int,
+        default=None,
+        help="Embedding dimension for style codebooks. Defaults to the main --embed-dim.",
+    )
+    parser.add_argument(
+        "--style-nb-entries",
+        type=int,
+        default=None,
+        help="Number of codebook entries for style codebooks. Defaults to the main --nb-entries.",
+    )
+    parser.add_argument(
         "--cross-view-negs-only",
         action="store_true",
         default=False,

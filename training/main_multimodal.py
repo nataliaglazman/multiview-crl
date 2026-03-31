@@ -133,6 +133,7 @@ def train_step(
                 _,
                 _,
                 fwd_soft_content_masks,
+                _,  # style_id_outputs
             ) = vqvae_model(
                 images,
                 return_recon=compute_recon,
@@ -803,6 +804,9 @@ def main(args):
             content_ratios=getattr(args, "content_ratios", None),
             separate_encoders=getattr(args, "separate_encoders", False),
             mask_mode=getattr(args, "mask_mode", "onthefly"),
+            quantize_style=getattr(args, "quantize_style", False),
+            style_embed_dim=getattr(args, "style_embed_dim", None),
+            style_nb_entries=getattr(args, "style_nb_entries", None),
         )
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
@@ -826,6 +830,10 @@ def main(args):
                 else " (learnable nn.Parameter per level)"
             )
         )
+        if getattr(args, "quantize_style", False):
+            _se = getattr(args, "style_embed_dim", None) or args.vqvae_embed_dim
+            _sn = getattr(args, "style_nb_entries", None) or args.vqvae_nb_entries
+            logger.info(f"  Style quantization: ENABLED (embed_dim={_se}, nb_entries={_sn})")
 
         encoders = [vqvae_model]
         decoders = []
