@@ -573,6 +573,7 @@ class VQVAE(HelperModule):
         # Helper function to apply mask to encoder output at a specific level
         def apply_mask_to_level(enc_out_lvl, lvl, use_per_view_masks):
             """Apply content/style mask to encoder output and return masked version and metadata."""
+            nonlocal estimated_content_indices
             k_lvl = self.content_channels_per_level.get(lvl, self.content_channels)
 
             if use_per_view_masks:
