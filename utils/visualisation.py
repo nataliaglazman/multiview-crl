@@ -63,7 +63,7 @@ def save_vqvae_decoded_images(vqvae_model, data, args, step: int) -> None:
         samples = data["image"]
         img = samples[0][0:1]  # (1, 1, D, H, W)
 
-        recon, diffs, _, _, _, _, _ = vqvae_model(img)
+        recon, diffs, _, _, _, _, _, _ = vqvae_model(img)
 
         decoded_np = recon.squeeze().cpu().numpy()
         original_np = img.squeeze().cpu().numpy()
