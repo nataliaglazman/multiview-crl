@@ -376,6 +376,10 @@ def train_step(
                         )
 
                 level_losses.append(level_loss.item())
+                # Collect contrastive diagnostics (top-1 acc, sim distributions)
+                if hasattr(level_loss, "_contrastive_diag"):
+                    for _dk, _dv in level_loss._contrastive_diag.items():
+                        _diag[f"Contrastive/{_dk}_L{level_idx}"] = _dv
                 _lvl_weights = getattr(args, "contrastive_level_weights", None)
                 _lvl_w = _lvl_weights[level_idx] if _lvl_weights and level_idx < len(_lvl_weights) else 1.0
                 total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss * _lvl_w
@@ -1040,10 +1044,19 @@ def main(args):
                     recon_losses.append(accum_recon)
                     vq_losses.append(accum_vq)
 
+                    _acc_str = ""
+                    if step_moco_diag:
+                        _acc_parts = []
+                        for _li in range(args.vqvae_nb_levels):
+                            _ak = f"Contrastive/top1_acc_L{_li}"
+                            if _ak in step_moco_diag:
+                                _acc_parts.append(f"L{_li}={step_moco_diag[_ak]:.1%}")
+                        if _acc_parts:
+                            _acc_str = f" | Top1Acc: {', '.join(_acc_parts)}"
                     print(
                         f"Step {step}: Total={accum_total:.4f} | "
                         f"Contrastive={accum_contrastive:.4f} | "
-                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}",
+                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}",
                         flush=True,
                     )
 

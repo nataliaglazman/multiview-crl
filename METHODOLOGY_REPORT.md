@@ -5,12 +5,13 @@
 **Project:** `multiview-crl`
 **Dataset:** ADNI (Alzheimer's Disease Neuroimaging Initiative) - Registered T1 and T2 MRI scans
 **Date:** February 2026
-**Last Updated:** 24 March 2026
+**Last Updated:** 31 March 2026
 
 ### Changelog
 
 | Date | Changes |
 |------|--------|
+| 31 Mar 2026 | **Style quantization (Option A):** added independent per-level style codebooks (`--quantize-style`) that vector-quantize style channels before decoder injection, giving style its own discrete bottleneck; configurable via `--style-embed-dim` and `--style-nb-entries` (default to main codebook settings). **Contrastive diagnostics:** both `moco_infonce_loss` and `infonce_base_loss` now compute and return top-1 accuracy, positive/negative cosine similarity distributions (mean, std) as detached side-outputs; logged to TensorBoard per level (`Contrastive/top1_acc_L{i}`, `Contrastive/pos_sim_mean_L{i}`, etc.) and printed to console. **8-tuple forward return:** `VQVAE.forward()` now returns `style_id_outputs` (dict: level → style codebook indices) as the 8th element; updated all callers (training loop, visualisation, eval notebook). |
 | 24 Mar 2026 | **Content/style mask architecture overhaul:** moved Gumbel mask from embed_dim (32) back to hidden_channels (64) to prevent modality leakage through the `conv_in` projection; removed `content_proj` round-trip — level-0 codebook now receives only content channels directly. **Contrastive loss gradient fix:** removed `.detach()` from `channel_logits` in the contrastive path and switched from non-differentiable integer-index selection (`hz[..., indices]`) to differentiable soft masking (`hz * mask`) so Gumbel straight-through gradients flow from contrastive loss back to `channel_logits`. **Shared Gumbel mask:** forward pass now returns the soft content mask as a 7th output; the contrastive loss reuses this same mask instead of drawing an independent Gumbel sample, eliminating conflicting channel selections between reconstruction and contrastive objectives. **Persistent disk caching:** added `--cache-dir` for NFS-safe per-sample `.pt` caching with SHA-256 fingerprint invalidation, atomic writes, corruption detection (validates file size on startup, auto-deletes corrupt files at load time), and `.tmp` cleanup. **Periodic validation:** added `--val-every N` to run a short no-grad validation pass every N training steps, logging `Val/Total`, `Val/Contrastive`, `Val/Recon`, `Val/VQ` to TensorBoard. **Codebook indexing fix:** content-channels-aware codebook is now at index 0 (finest level, where the mask applies), not index `nb_levels-1`. Updated notebook (3 cells) and `visualisation.py` for 7-tuple return signature. |
 | 20 Mar 2026 | Added best-model checkpointing (`vqvae_best.pt`) with rolling-average loss tracking; fixed `decode_codes` 2D→3D permute bug (`permute(0,3,1,2)` → `permute(0,4,1,2,3)` for 3D volumes); added codebook analysis to evaluation notebook (Sections 11–16): codebook usage histograms by diagnosis, mutual information & chi-squared discriminativeness, PCA/t-SNE of codebook usage, code replacement & reconstruction with CN vs AD comparison; added NIfTI export of reconstructed volumes with correct post-transform affine; fixed t-SNE content-only filtering at level 0; fixed `last_id_outputs` leaked loop variable bug |
 | 25 Feb 2026 | Added style injection to decoder (`--inject-style-to-decoder`): style channels from encoder level-0 concatenated to penultimate decoder feature map before final conv; added `--content-dim` / `--total-dim` CLI args replacing hardcoded 256/256 content-style split; improved checkpointing with auto-resume and architecture compatibility check; added Docker/RunAI cluster scripts (`docker/`); fixed Gumbel mask bool-cast bug in `models/vqvae.py`; updated `eval/view_latents.ipynb` imports to match project package structure; disabled flake8 pre-commit hook |
@@ -242,6 +243,9 @@ Reconstructed Image (91, 109, 91)
 | `--content-dim` | 128 | Content dimensions (ratio `content_dim/total_dim` determines `content_channels` on `hidden_channels`) |
 | `--total-dim` | 512 | Total latent dims (`content_dim + style_dim`) |
 | `--inject-style-to-decoder` | False | Feed style channels from encoder level-0 into the final decoder layer |
+| `--quantize-style` | False | Vector-quantize style channels through independent per-level codebooks |
+| `--style-embed-dim` | None | Style codebook embedding dim (defaults to `embed_dim`) |
+| `--style-nb-entries` | None | Style codebook size (defaults to `nb_entries`) |
 
 ### 3.3.3 Encoder Details (Per Level)
 
@@ -327,7 +331,39 @@ Encoder level-0 output  (B, hidden_channels, D, H, W)
 
 **Motivation:** Giving the decoder access to style (modality-specific) channels should improve reconstruction quality for T2 scans, whose contrast differs markedly from T1, without weakening the contrastive signal on content dimensions.
 
-### 3.3.7 Total Parameters
+### 3.3.7 Style Quantization (`--quantize-style`)
+
+By default, style channels are injected into the decoder as raw encoder activations (continuous). When `--quantize-style` is enabled, each masked level gets an **independent style codebook** that vector-quantizes the style channels before decoder injection. This is "Option A" — fully independent codebooks with no cross-level conditioning.
+
+```
+Encoder level-l output  (B, hidden_channels, D, H, W)
+         │
+         ├─ content_idx channels ──► content codebook ──► decoder body
+         │
+         └─ style_idx channels ──► style codebook ──► quantized ──► decoder final layer
+```
+
+**Architecture details:**
+- One `CodeLayer` per masked level, with `in_channels = style_channels_per_level[lvl]`
+- Embedding dimension and codebook size are configurable independently from the main codebooks via `--style-embed-dim` and `--style-nb-entries` (default to the main `--vqvae-embed-dim` and `--vqvae-nb-entries`)
+- The decoder's `style_channels` input becomes `style_embed_dim` (the style codebook's embedding dimension) rather than the raw `hidden_channels - content_channels`
+- Style commitment losses are appended to `diffs` and flow through `vq_commitment_weight` automatically
+
+**Inference (`decode_codes`):** accepts a `style_codes` dict (level → LongTensor of style codebook indices) that are decoded through the style codebooks before being passed to the decoder. This enables style transfer by swapping style codes between subjects.
+
+**Design rationale (Option A vs alternatives):**
+- **Option A (implemented):** Fully independent style codebooks per level. No cross-level conditioning. Maximally disentangled — style codes cannot encode content through hierarchical dependencies. Simplest implementation.
+- **Option B (not implemented):** Style codebooks with their own top-down chain. More expressive (coarse→fine style hierarchy) but requires style upscalers and risks content leakage through the style conditioning path.
+- **Option C (not implemented):** Style conditioned on content. Better reconstruction but weaker disentanglement since style becomes content-dependent.
+
+```bash
+--inject-style-to-decoder \
+--quantize-style \
+--style-embed-dim 32 \    # defaults to --vqvae-embed-dim
+--style-nb-entries 256    # defaults to --vqvae-nb-entries
+```
+
+### 3.3.8 Total Parameters
 
 With default configuration:
 - **Total VQ-VAE-2 Parameters:** ~2.9M (much smaller than VAE)
@@ -372,7 +408,7 @@ Content indices at **Level 0** are selected by learnable `channel_logits` via Gu
 soft_mask = topk_gumbel_softmax(k=content_channels, logits=channel_logits)
 content_enc_out = (enc_out * soft_mask)[:, content_idx, ...]  # → codebook
 
-# Returned as 7th output, reused for contrastive loss:
+# Returned as 7th output (8th is style_id_outputs), reused for contrastive loss:
 # In training loop (no second Gumbel sample):
 soft_content_mask = fwd_soft_content_mask  # reuse from forward pass
 level_loss = moco_loss(..., soft_content_mask=soft_content_mask)
@@ -394,8 +430,8 @@ level_2_content = 48 dims
 ### 3.4.3 Training Loop for VQ-VAE-2
 
 ```python
-# Forward pass returns shared mask
-recon, diffs, encoder_pools, est_indices, _, _, fwd_soft_content_mask = \
+# Forward pass returns shared mask (8-tuple)
+recon, diffs, encoder_pools, est_indices, _, _, fwd_soft_content_mask, style_ids = \
     vqvae_model(images, return_recon=True, pool_only=True)
 
 for level_idx, enc_pooled in enumerate(encoder_pools):
@@ -553,6 +589,8 @@ Where:
 
 The codebook is updated via EMA (Exponential Moving Average) rather than gradient descent.
 
+When `--quantize-style` is active, style codebook commitment losses are also included in $\sum \mathcal{L}_{VQ}$ (appended to `diffs` alongside the content codebook losses).
+
 ---
 
 ## 5. Training Configuration
@@ -599,7 +637,7 @@ For each step:
 
 | Event | Frequency | Destination |
 |-------|-----------|-------------|
-| Loss printing (console) | Every step | stdout |
+| Loss + top-1 acc printing (console) | Every step | stdout |
 | TensorBoard scalars | Every step | `{save_dir}/tensorboard/` |
 | CSV logging (smoothed avg) | Every `--log-steps` steps (default 100) | `{save_dir}/Training.csv` |
 | Decoded image saving | Every 200 steps | `{save_dir}/decoded_images/` |
@@ -621,9 +659,13 @@ if rolling_loss is not None and rolling_loss < best_total_loss:
 **TensorBoard Metrics (per step):**
 - `Loss/Total` — total training loss
 - `Loss/Contrastive` — InfoNCE or MoCo contrastive loss
+- `Loss/Contrastive_L{i}` — per-level contrastive loss
 - `Loss/Recon` — reconstruction loss (BaselineLoss)
-- `Loss/VQ` — VQ commitment loss
+- `Loss/VQ` — VQ commitment loss (includes style codebook commitment if `--quantize-style`)
 - `LR` — current learning rate
+- `Contrastive/top1_acc_L{i}` — fraction of times the positive is ranked #1 at level i
+- `Contrastive/pos_sim_mean_L{i}` / `pos_sim_std_L{i}` — cosine similarity distribution for positive pairs
+- `Contrastive/neg_sim_mean_L{i}` / `neg_sim_std_L{i}` — cosine similarity distribution for negatives
 
 **Validation Metrics (every `--val-every` steps, if > 0):**
 - `Val/Total` — validation total loss (no-grad, eval mode)
@@ -903,6 +945,9 @@ bash docker/run_docker.sh
 | `--content-dim` | 128 | Content dimensions (determines `content_channels` ratio on `hidden_channels`) |
 | `--total-dim` | 512 | Total dims (`content_dim + style_dim`); ratio `content_dim/total_dim` sets channel split |
 | `--inject-style-to-decoder` | False | Feed style channels from encoder level-0 into the bottom decoder's final layer |
+| `--quantize-style` | False | Quantize style channels through independent per-level codebooks (requires `--inject-style-to-decoder`) |
+| `--style-embed-dim` | None | Embedding dimension for style codebooks (defaults to `--vqvae-embed-dim`) |
+| `--style-nb-entries` | None | Codebook size for style codebooks (defaults to `--vqvae-nb-entries`) |
 | `--cache-dir` | None | Directory for persistent preprocessed `.pt` cache (NFS-safe, fingerprinted) |
 | `--val-every` | 0 | Run validation every N steps (0 disables periodic validation) |
 
