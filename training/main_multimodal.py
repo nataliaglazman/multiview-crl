@@ -844,14 +844,12 @@ def main(args):
         if getattr(args, "separate_encoders", False):
             logger.info("  Separate encoders: ENABLED (one encoder stack per view)")
         mask_mode = getattr(args, "mask_mode", "onthefly")
-        logger.info(
-            f"  Mask mode: {mask_mode}"
-            + (
-                " (on-the-fly from avg activations, shared across views)"
-                if mask_mode == "onthefly"
-                else " (learnable nn.Parameter per level)"
-            )
-        )
+        _mask_desc = {
+            "onthefly": " (on-the-fly from avg activations, shared across views)",
+            "learned": " (learnable nn.Parameter per level)",
+            "fixed": " (static first-K-channels = content, no Gumbel noise)",
+        }
+        logger.info(f"  Mask mode: {mask_mode}" + _mask_desc.get(mask_mode, ""))
         if getattr(args, "quantize_style", False):
             _se = getattr(args, "style_embed_dim", None) or args.vqvae_embed_dim
             _sn = getattr(args, "style_nb_entries", None) or args.vqvae_nb_entries
@@ -1089,13 +1087,13 @@ def main(args):
                         for _li, _lv in enumerate(accum_level_losses):
                             tb_writer.add_scalar(f"Loss/Contrastive_L{_li}", _lv, step)
 
-                    # Log Gumbel mask diagnostics per level
+                    # Log Gumbel mask diagnostics per level (skip for fixed mode — no logits)
                     _raw = encoders[0]
                     if hasattr(_raw, "online"):
                         _raw = _raw.online
                     if hasattr(_raw, "module"):
                         _raw = _raw.module
-                    if hasattr(_raw, "channel_logits"):
+                    if hasattr(_raw, "channel_logits") and getattr(_raw, "mask_mode", "onthefly") != "fixed":
                         for lvl_key, logits_param in _raw.channel_logits.items():
                             probs = torch.softmax(logits_param.detach(), dim=0)
                             entropy = -(probs * probs.log().clamp(min=-100)).sum().item()

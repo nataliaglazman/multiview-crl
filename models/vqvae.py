@@ -402,6 +402,21 @@ class VQVAE(HelperModule):
                     )
                 else:
                     self.channel_logits_v1 = None
+            elif mask_mode == "fixed":
+                # Fixed channel assignment: first content_channels are content,
+                # the rest are style.  No learnable mask parameters — the
+                # contrastive loss drives the encoder to put shared information
+                # in the content channels and modality-specific information in
+                # the style channels.
+                self.channel_logits = nn.ParameterDict()  # empty
+                self.channel_logits_v1 = None
+                # Pre-compute fixed masks per level (registered as buffers so
+                # they move with .to(device) and appear in state_dict).
+                for lvl in self.content_style_levels:
+                    k_lvl = self.content_channels_per_level[lvl]
+                    fixed_mask = torch.zeros(1, hidden_channels)
+                    fixed_mask[0, :k_lvl] = 1.0
+                    self.register_buffer(f"fixed_mask_{lvl}", fixed_mask)
             else:
                 # "onthefly" — no learnable mask parameters; logits are derived
                 # from encoder outputs at runtime.
@@ -562,6 +577,8 @@ class VQVAE(HelperModule):
         has_any_mask = self.content_channels is not None and len(self.content_channels_per_level) > 0
 
         # Determine if per-view learned masks are active
+        # (only for "learned" mode with separate encoders — "fixed" and
+        # "onthefly" always use a single shared mask across views)
         use_per_view_masks = (
             has_any_mask
             and getattr(self, "mask_mode", "onthefly") == "learned"
@@ -626,8 +643,14 @@ class VQVAE(HelperModule):
                 return (mask_v0, mask_v1)
 
             else:
-                # --- Shared mask (on-the-fly OR single learned) ---
-                if getattr(self, "mask_mode", "onthefly") == "onthefly":
+                # --- Shared mask (fixed / on-the-fly / single learned) ---
+                _mode = getattr(self, "mask_mode", "onthefly")
+
+                if _mode == "fixed":
+                    # Deterministic: first k channels = content, rest = style.
+                    # No Gumbel noise, no learnable params.
+                    soft_mask = getattr(self, f"fixed_mask_{lvl}").to(enc_out_lvl.device)
+                elif _mode == "onthefly":
                     # On-the-fly: logits = mean activation per channel,
                     # averaged across batch (and all views if concatenated).
                     logits = enc_out_lvl.mean(dim=[0, 2, 3, 4]).unsqueeze(0)  # (1, C)
@@ -641,18 +664,19 @@ class VQVAE(HelperModule):
                     else:
                         logits = self.channel_logits[str(lvl)].unsqueeze(0)  # (1, C)
 
-                if self.training:
-                    soft_mask = utils.topk_gumbel_softmax(
-                        k=k_lvl,
-                        logits=logits,
-                        tau=1.0,
-                        hard=True,
-                    )
-                else:
-                    hard_mask = torch.zeros_like(logits)
-                    topk_idx = torch.topk(logits, k_lvl, dim=1).indices
-                    hard_mask.scatter_(1, topk_idx, 1.0)
-                    soft_mask = hard_mask
+                if _mode != "fixed":
+                    if self.training:
+                        soft_mask = utils.topk_gumbel_softmax(
+                            k=k_lvl,
+                            logits=logits,
+                            tau=1.0,
+                            hard=True,
+                        )
+                    else:
+                        hard_mask = torch.zeros_like(logits)
+                        topk_idx = torch.topk(logits, k_lvl, dim=1).indices
+                        hard_mask.scatter_(1, topk_idx, 1.0)
+                        soft_mask = hard_mask
 
                 soft_content_masks[lvl] = soft_mask
                 content_mask_bool = soft_mask.bool()

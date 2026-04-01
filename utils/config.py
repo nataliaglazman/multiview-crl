@@ -128,11 +128,13 @@ def parse_args() -> argparse.ArgumentParser:
         "--mask-mode",
         type=str,
         default="onthefly",
-        choices=["learned", "onthefly"],
+        choices=["learned", "onthefly", "fixed"],
         help="How the content/style Gumbel mask logits are determined. "
         "'learned': learnable nn.Parameter per level (and per view when --separate-encoders is set). "
         "'onthefly': mask logits computed on-the-fly from average encoder activations, "
-        "shared across views (matches the original multiview-crl repo). Default: onthefly.",
+        "shared across views (matches the original multiview-crl repo). "
+        "'fixed': first K channels are content, rest are style — no learning, no Gumbel noise. "
+        "Eliminates mask instability and MoCo queue inconsistency. Default: onthefly.",
     )
     parser.add_argument(
         "--quantize-style",
