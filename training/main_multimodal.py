@@ -247,6 +247,24 @@ def train_step(
                             logits_10 = torch.cat([pos_10, q_v1 @ neg_queue_for_v1], dim=1) / _tau
                             level_loss = F.cross_entropy(logits_01, _targets) + F.cross_entropy(logits_10, _targets)
 
+                            # --- Contrastive diagnostics for per-view path ---
+                            with torch.no_grad():
+                                _pv_correct = (logits_01.argmax(dim=1) == 0).sum().item() + (
+                                    logits_10.argmax(dim=1) == 0
+                                ).sum().item()
+                                _pv_total = logits_01.shape[0] + logits_10.shape[0]
+                                level_loss._contrastive_diag = {
+                                    "top1_acc": _pv_correct / max(_pv_total, 1),
+                                    "pos_sim_mean": torch.cat([pos_01.squeeze(-1), pos_10.squeeze(-1)]).mean().item(),
+                                    "pos_sim_std": torch.cat([pos_01.squeeze(-1), pos_10.squeeze(-1)]).std().item(),
+                                    "neg_sim_mean": torch.cat([q_v0 @ neg_queue_for_v0, q_v1 @ neg_queue_for_v1])
+                                    .mean()
+                                    .item(),
+                                    "neg_sim_std": torch.cat([q_v0 @ neg_queue_for_v0, q_v1 @ neg_queue_for_v1])
+                                    .std()
+                                    .item(),
+                                }
+
                             # --- Stale-queue diagnostic (cheap, no grad) ---
                             if level_idx == 0 and optimizer is not None:
                                 with torch.no_grad():

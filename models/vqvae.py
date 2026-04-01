@@ -572,7 +572,13 @@ class VQVAE(HelperModule):
 
         # Helper function to apply mask to encoder output at a specific level
         def apply_mask_to_level(enc_out_lvl, lvl, use_per_view_masks):
-            """Apply content/style mask to encoder output and return masked version and metadata."""
+            """Apply content/style mask to encoder output and return masked version and metadata.
+
+            Returns:
+                Per-view masks as a tuple (mask_v0, mask_v1) for per-view mode,
+                or a single mask tensor for shared mode.  Returns None if the
+                level is not in content_style_levels.
+            """
             nonlocal estimated_content_indices
             k_lvl = self.content_channels_per_level.get(lvl, self.content_channels)
 
@@ -617,6 +623,7 @@ class VQVAE(HelperModule):
                     dim=0,
                 )
                 del masked_v0, masked_v1
+                return (mask_v0, mask_v1)
 
             else:
                 # --- Shared mask (on-the-fly OR single learned) ---
@@ -661,6 +668,7 @@ class VQVAE(HelperModule):
                 masked = enc_out_lvl * soft_mask.view(1, -1, 1, 1, 1)
                 content_enc_outs[lvl] = masked[:, content_idx, :, :, :]
                 del masked
+                return soft_mask
 
         # Encoder forward pass
         if self.separate_encoders and self.encoders_v1 is not None and n_views == 2:
@@ -677,16 +685,26 @@ class VQVAE(HelperModule):
                 enc_in_v0 = enc_v0(enc_in_v0)
                 enc_in_v1 = enc_v1(enc_in_v1)
                 enc_out = torch.cat([enc_in_v0, enc_in_v1], dim=0)
-                
-                # Apply mask immediately if this level has content/style separation
-                if i in self.content_style_levels:
-                    apply_mask_to_level(enc_out, i, use_per_view_masks)
-                
+
                 encoder_outputs.append(enc_out)
+                # Pool BEFORE masking so contrastive loss sees full channels
+                # and can apply its own differentiable soft mask.
                 if pool_only:
                     pool_v0 = enc_in_v0.mean(dim=[2, 3, 4])
                     pool_v1 = enc_in_v1.mean(dim=[2, 3, 4])
                     encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
+
+                # Apply mask and zero out style channels so the next encoder
+                # only sees content. Keeps tensor shape at hidden_channels.
+                if i in self.content_style_levels:
+                    masks = apply_mask_to_level(enc_out, i, use_per_view_masks)
+                    if isinstance(masks, tuple):
+                        mask_v0, mask_v1 = masks
+                        enc_in_v0 = enc_in_v0 * mask_v0.view(1, -1, 1, 1, 1)
+                        enc_in_v1 = enc_in_v1 * mask_v1.view(1, -1, 1, 1, 1)
+                    else:
+                        enc_in_v0 = enc_in_v0 * masks.view(1, -1, 1, 1, 1)
+                        enc_in_v1 = enc_in_v1 * masks.view(1, -1, 1, 1, 1)
             del enc_in_v0, enc_in_v1
         else:
             # Single-view path.  When separate_encoders is active, view_idx
@@ -698,14 +716,20 @@ class VQVAE(HelperModule):
             enc_input = x
             for i, enc in enumerate(enc_stack):
                 enc_input = enc(enc_input)
-                
-                # Apply mask immediately if this level has content/style separation
-                if i in self.content_style_levels:
-                    apply_mask_to_level(enc_input, i, use_per_view_masks)
-                
+
                 encoder_outputs.append(enc_input)
+                # Pool BEFORE masking (same reason as dual-view path).
                 if pool_only:
                     encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
+
+                # Apply mask and zero out style for next encoder.
+                if i in self.content_style_levels:
+                    masks = apply_mask_to_level(enc_input, i, use_per_view_masks)
+                    if masks is not None:
+                        if isinstance(masks, tuple):
+                            enc_input = enc_input * masks[0].view(1, -1, 1, 1, 1)
+                        else:
+                            enc_input = enc_input * masks.view(1, -1, 1, 1, 1)
             del x, enc_input
 
         # --- Codebook + decoder loop (top-down: coarsest → finest) ---
