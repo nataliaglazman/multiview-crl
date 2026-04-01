@@ -1060,6 +1060,13 @@ def main(args):
                     recon_losses.append(accum_recon)
                     vq_losses.append(accum_vq)
 
+                    # Resolve underlying VQVAE module (unwrap MoCo / DataParallel)
+                    _raw = encoders[0]
+                    if hasattr(_raw, "online"):
+                        _raw = _raw.online
+                    if hasattr(_raw, "module"):
+                        _raw = _raw.module
+
                     _acc_str = ""
                     if step_moco_diag:
                         _acc_parts = []
@@ -1093,11 +1100,6 @@ def main(args):
                             tb_writer.add_scalar(f"Loss/Contrastive_L{_li}", _lv, step)
 
                     # Log Gumbel mask diagnostics per level (skip for fixed mode — no logits)
-                    _raw = encoders[0]
-                    if hasattr(_raw, "online"):
-                        _raw = _raw.online
-                    if hasattr(_raw, "module"):
-                        _raw = _raw.module
                     if hasattr(_raw, "channel_logits") and getattr(_raw, "mask_mode", "onthefly") != "fixed":
                         for lvl_key, logits_param in _raw.channel_logits.items():
                             probs = torch.softmax(logits_param.detach(), dim=0)
