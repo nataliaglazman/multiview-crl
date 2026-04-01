@@ -1069,10 +1069,15 @@ def main(args):
                                 _acc_parts.append(f"L{_li}={step_moco_diag[_ak]:.1%}")
                         if _acc_parts:
                             _acc_str = f" | Top1Acc: {', '.join(_acc_parts)}"
+                    _cb_parts = []
+                    for _cb_lvl, _cb in enumerate(_raw.codebooks):
+                        _alive = (_cb.cluster_size > 1.0).sum().item()
+                        _cb_parts.append(f"L{_cb_lvl}={_alive:.0f}/{_cb.n_embed}")
+                    _cb_str = f" | CB: {', '.join(_cb_parts)}" if _cb_parts else ""
                     print(
                         f"Step {step}: Total={accum_total:.4f} | "
                         f"Contrastive={accum_contrastive:.4f} | "
-                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}",
+                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}{_cb_str}",
                         flush=True,
                     )
 
@@ -1108,6 +1113,20 @@ def main(args):
                             top_mean = sorted_logits[:k_lvl].mean().item()
                             bot_mean = sorted_logits[k_lvl:].mean().item()
                             tb_writer.add_scalar(f"Mask/TopBotGap_L{lvl_key}", top_mean - bot_mean, step)
+
+                    # Log codebook utilization per level
+                    for _cb_lvl, _cb in enumerate(_raw.codebooks):
+                        _alive = (_cb.cluster_size > 1.0).sum().item()
+                        _total = _cb.n_embed
+                        tb_writer.add_scalar(f"Codebook/Active_L{_cb_lvl}", _alive, step)
+                        tb_writer.add_scalar(f"Codebook/Utilization_L{_cb_lvl}", _alive / _total, step)
+                    # Style codebook utilization (if active)
+                    if hasattr(_raw, "style_codebooks") and _raw.style_codebooks:
+                        for _sc_key, _sc_cb in _raw.style_codebooks.items():
+                            _s_alive = (_sc_cb.cluster_size > 1.0).sum().item()
+                            _s_total = _sc_cb.n_embed
+                            tb_writer.add_scalar(f"Codebook/StyleActive_L{_sc_key}", _s_alive, step)
+                            tb_writer.add_scalar(f"Codebook/StyleUtil_L{_sc_key}", _s_alive / _s_total, step)
 
                     # Log MoCo stale-queue diagnostics
                     if step_moco_diag:
