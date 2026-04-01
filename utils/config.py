@@ -157,6 +157,20 @@ def parse_args() -> argparse.ArgumentParser:
         help="Number of codebook entries for style codebooks. Defaults to the main --nb-entries.",
     )
     parser.add_argument(
+        "--cb-reset-every",
+        type=int,
+        default=100,
+        help="Reset dead codebook entries every N forward passes per codebook. "
+        "Dead entries are those with EMA cluster_size below --cb-reset-threshold. "
+        "Set to 0 to disable. Default: 100.",
+    )
+    parser.add_argument(
+        "--cb-reset-threshold",
+        type=float,
+        default=1.0,
+        help="EMA cluster_size below this value marks a codebook entry as dead. Default: 1.0.",
+    )
+    parser.add_argument(
         "--cross-view-negs-only",
         action="store_true",
         default=False,

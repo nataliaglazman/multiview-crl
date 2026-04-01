@@ -198,9 +198,16 @@ class Decoder(HelperModule):
 
 
 class CodeLayer(HelperModule):
-    """3D Vector Quantization layer with EMA codebook updates."""
+    """3D Vector Quantization layer with EMA codebook updates and dead-entry reset."""
 
-    def build(self, in_channels: int, embed_dim: int, nb_entries: int):
+    def build(
+        self,
+        in_channels: int,
+        embed_dim: int,
+        nb_entries: int,
+        reset_threshold: float = 1.0,
+        reset_every: int = 100,
+    ):
         self.conv_in = nn.Conv3d(in_channels, embed_dim, 1)
 
         self.dim = embed_dim
@@ -208,10 +215,15 @@ class CodeLayer(HelperModule):
         self.decay = 0.99
         self.eps = 1e-5
 
+        # Dead-entry reset hyperparams
+        self.reset_threshold = reset_threshold  # cluster_size below this → dead
+        self.reset_every = reset_every  # check every N forward passes
+
         embed = torch.randn(embed_dim, nb_entries, dtype=torch.float32)
         self.register_buffer("embed", embed)
         self.register_buffer("cluster_size", torch.zeros(nb_entries, dtype=torch.float32))
         self.register_buffer("embed_avg", embed.clone())
+        self.register_buffer("_fwd_count", torch.tensor(0, dtype=torch.long))
 
     def project(self, x: torch.FloatTensor) -> torch.FloatTensor:
         """Project input to embed_dim via conv_in. Returns (B, embed_dim, D, H, W)."""
@@ -232,16 +244,30 @@ class CodeLayer(HelperModule):
             embed_onehot_sum = embed_onehot.sum(0)
             embed_sum = flatten.transpose(0, 1) @ embed_onehot
 
-            # TODO: Replace this? Or can we simply comment out?
-            # dist_fn.all_reduce(embed_onehot_sum)
-            # dist_fn.all_reduce(embed_sum)
-
             self.cluster_size.data.mul_(self.decay).add_(embed_onehot_sum, alpha=1 - self.decay)
             self.embed_avg.data.mul_(self.decay).add_(embed_sum, alpha=1 - self.decay)
             n = self.cluster_size.sum()
             cluster_size = (self.cluster_size + self.eps) / (n + self.n_embed * self.eps) * n
             embed_normalized = self.embed_avg / cluster_size.unsqueeze(0)
             self.embed.data.copy_(embed_normalized)
+
+            # ── Dead-entry reset ─────────────────────────────────────────
+            # Periodically replace codebook entries that have near-zero
+            # cluster_size with randomly sampled encoder outputs + noise.
+            self._fwd_count += 1
+            if self.reset_every > 0 and self._fwd_count % self.reset_every == 0:
+                dead = self.cluster_size < self.reset_threshold  # (n_embed,)
+                n_dead = dead.sum().item()
+                if n_dead > 0:
+                    # Sample replacements from the current batch of encoder outputs
+                    n_flat = flatten.shape[0]
+                    replace_idx = torch.randint(0, n_flat, (n_dead,), device=flatten.device)
+                    new_embeds = flatten[replace_idx].T  # (dim, n_dead)
+                    # Add small noise to break symmetry
+                    new_embeds = new_embeds + torch.randn_like(new_embeds) * 0.01
+                    self.embed.data[:, dead] = new_embeds
+                    self.embed_avg.data[:, dead] = new_embeds
+                    self.cluster_size.data[dead] = self.reset_threshold  # warm-start the EMA count
 
         diff = (quantize.detach() - x).pow(2).mean()
         quantize = x + (quantize - x).detach()
@@ -307,10 +333,14 @@ class VQVAE(HelperModule):
         quantize_style: bool = False,  # If True, style channels get their own independent codebook per level
         style_embed_dim: int | None = None,  # Embedding dim for style codebooks (defaults to embed_dim)
         style_nb_entries: int | None = None,  # Codebook size for style codebooks (defaults to nb_entries)
+        cb_reset_every: int = 100,  # Reset dead codebook entries every N forwards (0 = disable)
+        cb_reset_threshold: float = 1.0,  # EMA cluster_size below this → dead
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
         self.separate_encoders = separate_encoders
+        self._cb_reset_every = cb_reset_every
+        self._cb_reset_threshold = cb_reset_threshold
 
         def _make_encoder_stack():
             stack = nn.ModuleList(
@@ -440,7 +470,9 @@ class VQVAE(HelperModule):
             self.style_codebooks = nn.ModuleDict()
             for lvl in self.content_style_levels:
                 sc = hidden_channels - self.content_channels_per_level[lvl]
-                self.style_codebooks[str(lvl)] = CodeLayer(sc, _style_embed, _style_entries)
+                self.style_codebooks[str(lvl)] = CodeLayer(
+                    sc, _style_embed, _style_entries, reset_threshold=cb_reset_threshold, reset_every=cb_reset_every
+                )
         else:
             self.style_embed_dim = None
             self.style_codebooks = nn.ModuleDict()
@@ -485,10 +517,22 @@ class VQVAE(HelperModule):
 
             if lvl == nb_levels - 1:
                 # Coarsest level: no decoder conditioning from above
-                self.codebooks.append(CodeLayer(enc_ch, embed_dim, nb_entries))
+                self.codebooks.append(
+                    CodeLayer(
+                        enc_ch, embed_dim, nb_entries, reset_threshold=cb_reset_threshold, reset_every=cb_reset_every
+                    )
+                )
             else:
                 # Has decoder conditioning from the level above
-                self.codebooks.append(CodeLayer(enc_ch + embed_dim, embed_dim, nb_entries))
+                self.codebooks.append(
+                    CodeLayer(
+                        enc_ch + embed_dim,
+                        embed_dim,
+                        nb_entries,
+                        reset_threshold=cb_reset_threshold,
+                        reset_every=cb_reset_every,
+                    )
+                )
 
         # Decoders: each decoder at a masked level receives its own style_channels.
         self.decoders = nn.ModuleList()

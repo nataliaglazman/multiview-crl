@@ -829,6 +829,8 @@ def main(args):
             quantize_style=getattr(args, "quantize_style", False),
             style_embed_dim=getattr(args, "style_embed_dim", None),
             style_nb_entries=getattr(args, "style_nb_entries", None),
+            cb_reset_every=getattr(args, "cb_reset_every", 100),
+            cb_reset_threshold=getattr(args, "cb_reset_threshold", 1.0),
         )
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
