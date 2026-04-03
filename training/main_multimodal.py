@@ -225,12 +225,13 @@ def train_step(
 
                             q_snap_v0 = vqvae_model.queues[level_idx].clone().detach()
                             q_snap_v1 = vqvae_model.queues_v1[level_idx].clone().detach()
-                            queue_v0 = F.normalize(q_snap_v0[idx_v0, :], dim=0)
-                            queue_v1 = F.normalize(q_snap_v1[idx_v1, :], dim=0)
-                            q_v0 = F.normalize(hz_v0_content, dim=-1)
-                            q_v1 = F.normalize(hz_v1_content, dim=-1)
-                            k_v0_n = F.normalize(k_v0_content, dim=-1)
-                            k_v1_n = F.normalize(k_v1_content, dim=-1)
+                            _norm_eps = 1e-6  # avoid NaN when masked features have zero norm
+                            queue_v0 = F.normalize(q_snap_v0[idx_v0, :], dim=0, eps=_norm_eps)
+                            queue_v1 = F.normalize(q_snap_v1[idx_v1, :], dim=0, eps=_norm_eps)
+                            q_v0 = F.normalize(hz_v0_content, dim=-1, eps=_norm_eps)
+                            q_v1 = F.normalize(hz_v1_content, dim=-1, eps=_norm_eps)
+                            k_v0_n = F.normalize(k_v0_content, dim=-1, eps=_norm_eps)
+                            k_v1_n = F.normalize(k_v1_content, dim=-1, eps=_norm_eps)
                             _tau = args.tau
                             B_moco = q_v0.shape[0]
                             _targets = torch.zeros(B_moco, dtype=torch.long, device=device)
@@ -480,6 +481,27 @@ def train_step(
     # ------------------------------------------------------------------
     if optimizer is not None:
         scaled_loss = total_loss / total_accumulation_steps
+
+        # Guard against NaN: skip the entire backward + step to avoid
+        # corrupting model parameters and optimizer state.
+        if torch.isnan(scaled_loss) or torch.isinf(scaled_loss):
+            print(
+                f"  ⚠ NaN/Inf detected in loss (contrastive={contrastive_loss_value:.4f}, "
+                f"recon={recon_loss_value:.4f}, vq={vq_loss_value:.4f}). "
+                f"Skipping backward pass for this step.",
+                flush=True,
+            )
+            optimizer.zero_grad(set_to_none=True)
+            return (
+                0.0,
+                contrastive_loss_value,
+                recon_loss_value,
+                vq_loss_value,
+                estimated_content_indices,
+                level_losses,
+                _diag,
+            )
+
         if use_amp:
             scaler.scale(scaled_loss).backward()
             if accumulation_step == total_accumulation_steps - 1:
@@ -829,6 +851,7 @@ def main(args):
             quantize_style=getattr(args, "quantize_style", False),
             style_embed_dim=getattr(args, "style_embed_dim", None),
             style_nb_entries=getattr(args, "style_nb_entries", None),
+            style_injection_mode=getattr(args, "style_injection_mode", "concat"),
             cb_reset_every=getattr(args, "cb_reset_every", 100),
             cb_reset_threshold=getattr(args, "cb_reset_threshold", 1.0),
         )

@@ -285,6 +285,22 @@ def parse_args() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--style-injection-mode",
+        type=str,
+        default="concat",
+        choices=["concat", "film"],
+        help=(
+            "How style features are injected into the decoder.  "
+            "'concat' (default): style is concatenated onto the penultimate feature map "
+            "before the final conv — simple but style only influences the last layer.  "
+            "'film': Spatial FiLM (Feature-wise Linear Modulation) — style modulates "
+            "the decoder feature map via learned per-location scale and shift after every "
+            "decoder stage (residual block + each upsampling step), giving the decoder "
+            "access to style information at every resolution.  "
+            "Requires --inject-style-to-decoder."
+        ),
+    )
+    parser.add_argument(
         "--use-moco",
         action="store_true",
         help="Use MoCo momentum-contrast training for the VQ-VAE encoder",

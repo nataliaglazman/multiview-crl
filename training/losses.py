@@ -449,19 +449,24 @@ def moco_infonce_loss(
     n_view = q.shape[0]
     total_loss = torch.zeros(1, device=q.device, dtype=q.dtype)
 
-    # Project to content dimensions and L2-normalise
+    # Project to content dimensions and L2-normalise.
+    # Use eps=1e-6 to avoid NaN when the Gumbel mask zeros out all channels
+    # for a sample (norm → 0 → division by zero in F.normalize).
+    _norm_eps = 1e-6
     if soft_content_mask is not None:
         # Differentiable masking — gradients flow to channel_logits
-        q_c = F.normalize(q * soft_content_mask, dim=-1)  # (n_views, B, C)
-        k_c = F.normalize(k * soft_content_mask, dim=-1)  # (n_views, B, C)
+        q_c = F.normalize(q * soft_content_mask, dim=-1, eps=_norm_eps)  # (n_views, B, C)
+        k_c = F.normalize(k * soft_content_mask, dim=-1, eps=_norm_eps)  # (n_views, B, C)
         mask_col = soft_content_mask.squeeze(0).unsqueeze(-1)  # (C, 1)
-        queue_c = F.normalize(queue * mask_col, dim=0)
-        queue_v1_c = F.normalize(queue_v1 * mask_col, dim=0) if queue_v1 is not None else queue_c
+        queue_c = F.normalize(queue * mask_col, dim=0, eps=_norm_eps)
+        queue_v1_c = F.normalize(queue_v1 * mask_col, dim=0, eps=_norm_eps) if queue_v1 is not None else queue_c
     else:
-        q_c = F.normalize(q[..., content_indices], dim=-1)  # (n_views, B, d)
-        k_c = F.normalize(k[..., content_indices], dim=-1)  # (n_views, B, d)
-        queue_c = F.normalize(queue[content_indices, :], dim=0)  # (d, Q)
-        queue_v1_c = F.normalize(queue_v1[content_indices, :], dim=0) if queue_v1 is not None else queue_c
+        q_c = F.normalize(q[..., content_indices], dim=-1, eps=_norm_eps)  # (n_views, B, d)
+        k_c = F.normalize(k[..., content_indices], dim=-1, eps=_norm_eps)  # (n_views, B, d)
+        queue_c = F.normalize(queue[content_indices, :], dim=0, eps=_norm_eps)  # (d, Q)
+        queue_v1_c = (
+            F.normalize(queue_v1[content_indices, :], dim=0, eps=_norm_eps) if queue_v1 is not None else queue_c
+        )
 
     # Per-view queue lookup.
     # cross_view_negs_only: view-i queries use view-j's queue (other view).
