@@ -156,7 +156,9 @@ def train_step(
                 with torch.no_grad():
                     key_outputs = vqvae_model.encode_keys(images, n_views=n_views, patch_grid=_patch_grid)
 
-            if compute_recon and recon is not None and step >= getattr(args, "recon_loss_start_step", 0):
+            _recon_start = getattr(args, "recon_loss_start_step", 0)
+            _recon_active = step >= _recon_start or getattr(args, "_resumed_past_recon_start", False)
+            if compute_recon and recon is not None and _recon_active:
                 if recon.shape[2:] != input_shape:
                     recon = F.interpolate(recon, size=input_shape, mode="trilinear", align_corners=False)
                 recon_loss = (
@@ -630,6 +632,7 @@ def _run_validation(
                 scaler=None,
                 recon_loss_fn=recon_loss_fn,
                 moco_loss_func=moco_loss_func,
+                step=getattr(args, "recon_loss_start_step", 0),  # ensure recon is always active in val
             )
             totals.append(total_loss)
             cons.append(contrastive_loss)
@@ -1103,6 +1106,16 @@ def main(args):
         step = load_checkpoint(
             args, encoders, decoders, optimizer, device, loss_deques, scheduler=scheduler, scaler=scaler
         )
+
+        # If we successfully resumed from a checkpoint, the model is already
+        # warm — skip the recon_loss_start_step delay.
+        _recon_start = getattr(args, "recon_loss_start_step", 0)
+        args._resumed_past_recon_start = step > 1
+        if args._resumed_past_recon_start and _recon_start > 0:
+            logger.info(
+                f"  Resumed at step {step}: recon loss active immediately "
+                f"(skipping --recon-loss-start-step {_recon_start} warmup)."
+            )
 
         # Restore best loss from best checkpoint if resuming
         best_total_loss = float("inf")
