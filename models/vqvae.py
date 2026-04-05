@@ -297,12 +297,13 @@ class CodeLayer(HelperModule):
         nb_entries: int,
         reset_threshold: float = 1.0,
         reset_every: int = 100,
+        ema_decay: float = 0.999,
     ):
         self.conv_in = nn.Conv3d(in_channels, embed_dim, 1)
 
         self.dim = embed_dim
         self.n_embed = nb_entries
-        self.decay = 0.99
+        self.decay = ema_decay
         self.eps = 1e-5
 
         # Dead-entry reset hyperparams
@@ -424,6 +425,7 @@ class VQVAE(HelperModule):
         style_embed_dim: int | None = None,  # Embedding dim for style codebooks (defaults to embed_dim)
         style_nb_entries: int | None = None,  # Codebook size for style codebooks (defaults to nb_entries)
         style_injection_mode: str = "concat",  # "concat" (legacy) or "film" (Spatial FiLM at every decoder stage)
+        cb_ema_decay: float = 0.999,  # EMA momentum for codebook running averages
         cb_reset_every: int = 100,  # Reset dead codebook entries every N forwards (0 = disable)
         cb_reset_threshold: float = 1.0,  # EMA cluster_size below this → dead
     ):
@@ -562,7 +564,12 @@ class VQVAE(HelperModule):
             for lvl in self.content_style_levels:
                 sc = hidden_channels - self.content_channels_per_level[lvl]
                 self.style_codebooks[str(lvl)] = CodeLayer(
-                    sc, _style_embed, _style_entries, reset_threshold=cb_reset_threshold, reset_every=cb_reset_every
+                    sc,
+                    _style_embed,
+                    _style_entries,
+                    reset_threshold=cb_reset_threshold,
+                    reset_every=cb_reset_every,
+                    ema_decay=cb_ema_decay,
                 )
         else:
             self.style_embed_dim = None
@@ -610,7 +617,12 @@ class VQVAE(HelperModule):
                 # Coarsest level: no decoder conditioning from above
                 self.codebooks.append(
                     CodeLayer(
-                        enc_ch, embed_dim, nb_entries, reset_threshold=cb_reset_threshold, reset_every=cb_reset_every
+                        enc_ch,
+                        embed_dim,
+                        nb_entries,
+                        reset_threshold=cb_reset_threshold,
+                        reset_every=cb_reset_every,
+                        ema_decay=cb_ema_decay,
                     )
                 )
             else:
@@ -622,6 +634,7 @@ class VQVAE(HelperModule):
                         nb_entries,
                         reset_threshold=cb_reset_threshold,
                         reset_every=cb_reset_every,
+                        ema_decay=cb_ema_decay,
                     )
                 )
 
@@ -660,7 +673,7 @@ class VQVAE(HelperModule):
             rates = scaling_rates[1 : len(scaling_rates) - i][::-1]  # noqa: E203
             self.upscalers.append(Upscaler(embed_dim, rates))
 
-    def forward(self, x, return_recon=True, pool_only=False, n_views=1, subsets=None, view_idx=None):
+    def forward(self, x, return_recon=True, pool_only=False, n_views=1, subsets=None, view_idx=None, patch_grid=None):
         """Forward pass through VQ-VAE-2.
 
         Args:
@@ -674,12 +687,16 @@ class VQVAE(HelperModule):
             view_idx: When separate_encoders is active and n_views=1, selects which
                       encoder stack to use (0 → self.encoders, 1 → self.encoders_v1).
                       Defaults to 0 if not specified.  Ignored when n_views=2.
+            patch_grid: Optional tuple (D, H, W) for patch-level pooling. When set
+                        and pool_only=True, features are pooled to this spatial grid
+                        instead of globally, returning (B, C, D*H*W) per level.
 
         Returns:
             final_output: Reconstruction (or None if return_recon=False)
             diffs: VQ commitment losses per level
             encoder_features: Per-level encoder features.
-                              If pool_only=True:  list of (B, hidden_channels) pooled vectors
+                              If pool_only=True and patch_grid=None:  list of (B, hidden_channels) pooled vectors
+                              If pool_only=True and patch_grid set:   list of (B, hidden_channels, n_patches) tensors
                               If pool_only=False: list of (B, C, D, H, W) spatial maps
             estimated_content_indices: Content channel indices from the Gumbel mask
                                        (None if channel_logits not configured)
@@ -851,8 +868,13 @@ class VQVAE(HelperModule):
                 # Pool BEFORE masking so contrastive loss sees full channels
                 # and can apply its own differentiable soft mask.
                 if pool_only:
-                    pool_v0 = enc_in_v0.mean(dim=[2, 3, 4])
-                    pool_v1 = enc_in_v1.mean(dim=[2, 3, 4])
+                    if patch_grid is not None:
+                        # Patch-level pooling: (B, C, D, H, W) → (B, C, Pd*Ph*Pw)
+                        pool_v0 = F.adaptive_avg_pool3d(enc_in_v0, patch_grid).flatten(2)
+                        pool_v1 = F.adaptive_avg_pool3d(enc_in_v1, patch_grid).flatten(2)
+                    else:
+                        pool_v0 = enc_in_v0.mean(dim=[2, 3, 4])
+                        pool_v1 = enc_in_v1.mean(dim=[2, 3, 4])
                     encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
 
                 # Apply mask and zero out style channels so the next encoder
@@ -881,7 +903,10 @@ class VQVAE(HelperModule):
                 encoder_outputs.append(enc_input)
                 # Pool BEFORE masking (same reason as dual-view path).
                 if pool_only:
-                    encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
+                    if patch_grid is not None:
+                        encoder_pools.append(F.adaptive_avg_pool3d(enc_input, patch_grid).flatten(2))
+                    else:
+                        encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
 
                 # Apply mask and zero out style for next encoder.
                 if i in self.content_style_levels:
@@ -1205,16 +1230,26 @@ class MoCoEncoder(nn.Module):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def encode_keys(self, x: torch.Tensor, n_views: int = 1):
+    def encode_keys(self, x: torch.Tensor, n_views: int = 1, patch_grid=None):
         """
         Encode ``x`` with the momentum encoder stack and return per-level
-        global-average-pooled feature vectors ``(B, hidden_channels)``.
+        pooled feature vectors.
+
+        When ``patch_grid`` is set (a tuple of 3 ints), uses adaptive average
+        pooling to that grid instead of global average pooling, returning
+        ``(B, hidden_channels, n_patches)`` per level.
 
         When ``separate_encoders`` is active and ``n_views == 2``, the first
         half of the batch is routed through the view-0 momentum encoders and
         the second half through the view-1 momentum encoders, then
         re-concatenated — mirroring the online encoder split.
         """
+
+        def _pool(t):
+            if patch_grid is not None:
+                return F.adaptive_avg_pool3d(t, patch_grid).flatten(2)
+            return t.mean(dim=[2, 3, 4])
+
         if self.momentum_encoders_v1 is not None and n_views == 2:
             B = x.shape[0] // 2
             key_pools = []
@@ -1222,14 +1257,14 @@ class MoCoEncoder(nn.Module):
             for mom_enc_v0, mom_enc_v1 in zip(self.momentum_encoders, self.momentum_encoders_v1):
                 enc_v0 = mom_enc_v0(enc_v0)
                 enc_v1 = mom_enc_v1(enc_v1)
-                key_pools.append(torch.cat([enc_v0.mean(dim=[2, 3, 4]), enc_v1.mean(dim=[2, 3, 4])], dim=0))
+                key_pools.append(torch.cat([_pool(enc_v0), _pool(enc_v1)], dim=0))
             return key_pools
         else:
             key_pools = []
             enc_input = x
             for mom_enc in self.momentum_encoders:
                 enc_input = mom_enc(enc_input)
-                key_pools.append(enc_input.mean(dim=[2, 3, 4]))
+                key_pools.append(_pool(enc_input))
             return key_pools
 
     # ------------------------------------------------------------------

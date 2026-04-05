@@ -415,6 +415,193 @@ def infonce_base_loss(
     return total_loss_value
 
 
+def patch_infonce_loss(
+    hz,
+    sim_metric,
+    criterion,
+    projector=None,
+    tau=1.0,
+    estimated_content_indices=None,
+    subsets=None,
+    soft_content_mask=None,
+    cross_view_negs_only=False,
+):
+    """
+    Patch-level InfoNCE: aligns corresponding spatial patches across views.
+
+    Same interface as ``infonce_loss`` but expects ``hz`` with shape
+    ``(n_views, B, C, P)`` where P is the number of spatial patches.
+    Computes InfoNCE independently per patch position and averages.
+
+    This preserves spatial correspondence between views — patches at the
+    same anatomical location should align, providing a much richer training
+    signal than global average pooling.
+    """
+    if estimated_content_indices is None:
+        content_indices = list(range(hz.shape[2]))
+        return _patch_infonce_base(
+            hz,
+            content_indices,
+            criterion,
+            tau,
+            soft_content_mask=soft_content_mask,
+            cross_view_negs_only=cross_view_negs_only,
+        )
+    else:
+        total_loss = torch.zeros(1).type_as(hz)
+        sub_diags = []
+        for est_content_indices, subset in zip(estimated_content_indices, subsets):
+            sub_loss = _patch_infonce_base(
+                hz[list(subset), ...],
+                est_content_indices,
+                criterion,
+                tau,
+                soft_content_mask=soft_content_mask,
+                cross_view_negs_only=cross_view_negs_only,
+            )
+            total_loss = total_loss + sub_loss
+            if hasattr(sub_loss, "_contrastive_diag"):
+                sub_diags.append(sub_loss._contrastive_diag)
+        if sub_diags:
+            total_loss._contrastive_diag = _merge_diags(sub_diags)
+        return total_loss
+
+
+def _patch_infonce_base(
+    hz_subset,
+    content_indices,
+    criterion,
+    tau=1.0,
+    soft_content_mask=None,
+    cross_view_negs_only=False,
+):
+    """
+    Core patch-level InfoNCE computation.
+
+    Args:
+        hz_subset: (n_views, B, C, P) patch-pooled features.
+        content_indices: Channel indices for content (fallback when mask is None).
+        criterion: CrossEntropyLoss instance.
+        tau: Temperature.
+        soft_content_mask: Optional (1, C) differentiable mask.
+        cross_view_negs_only: Only use cross-view negatives.
+    """
+    n_view, B, C, P = hz_subset.shape
+
+    # Apply content selection
+    if soft_content_mask is not None:
+        # (1, C) → (1, 1, C, 1) for broadcasting with (n_views, B, C, P)
+        hz_c = hz_subset * soft_content_mask.view(1, 1, -1, 1)
+    else:
+        hz_c = hz_subset[:, :, content_indices, :]
+
+    # L2-normalize along channel dimension
+    hz_n = F.normalize(hz_c, dim=2, eps=1e-6)  # (n_views, B, C', P)
+
+    if cross_view_negs_only:
+        total_loss = torch.zeros(1, device=hz_subset.device, dtype=hz_subset.dtype)
+        all_pos_sims = []
+        all_neg_sims = []
+        n_correct = 0
+        n_total = 0
+
+        for i in range(n_view):
+            for j in range(n_view):
+                if i >= j:
+                    continue
+                # Per-patch cosine similarity: (P, B, B)
+                scores = torch.einsum("bcp,dcp->pbd", hz_n[i], hz_n[j]) / tau
+
+                targets = torch.arange(B, device=hz_subset.device)
+                # Reshape to (P*B, B) for batched cross-entropy
+                loss_ij = criterion(scores.reshape(P * B, B), targets.repeat(P))
+
+                scores_ji = scores.transpose(-1, -2)
+                loss_ji = criterion(scores_ji.reshape(P * B, B), targets.repeat(P))
+
+                total_loss = total_loss + loss_ij + loss_ji
+
+                with torch.no_grad():
+                    # Diagnostics (aggregated across patches)
+                    preds_ij = scores.reshape(P * B, B).argmax(dim=1)
+                    preds_ji = scores_ji.reshape(P * B, B).argmax(dim=1)
+                    tgt_rep = targets.repeat(P)
+                    n_correct += (preds_ij == tgt_rep).sum().item()
+                    n_correct += (preds_ji == tgt_rep).sum().item()
+                    n_total += 2 * P * B
+                    # Positive sims: diagonals across all patches
+                    diag_sims = torch.diagonal(scores, dim1=-2, dim2=-1)  # (P, B)
+                    all_pos_sims.append(diag_sims.reshape(-1) * tau)
+                    # Negative sims: off-diagonals
+                    mask_offdiag = ~torch.eye(B, dtype=torch.bool, device=hz_subset.device)
+                    all_neg_sims.append(scores[:, mask_offdiag].reshape(-1) * tau)
+
+        with torch.no_grad():
+            total_loss._contrastive_diag = {
+                "top1_acc": n_correct / max(n_total, 1),
+                "pos_sim_mean": torch.cat(all_pos_sims).mean().item(),
+                "pos_sim_std": torch.cat(all_pos_sims).std().item(),
+                "neg_sim_mean": torch.cat(all_neg_sims).mean().item(),
+                "neg_sim_std": torch.cat(all_neg_sims).std().item(),
+            }
+        return total_loss
+
+    # Default: cross-view + same-view negatives
+    # Build per-patch similarity matrices across all view pairs
+    SIM = [[None] * n_view for _ in range(n_view)]
+    for i in range(n_view):
+        for j in range(n_view):
+            if j >= i:
+                # (P, B, B) cosine similarity per patch
+                sim_ij = torch.einsum("bcp,dcp->pbd", hz_n[i], hz_n[j]) / tau
+                if i == j:
+                    # Mask self-similarity diagonal
+                    eye_mask = torch.eye(B, dtype=torch.bool, device=hz_subset.device)
+                    sim_ij[:, eye_mask] = float("-inf")
+                SIM[i][j] = sim_ij
+            else:
+                SIM[i][j] = SIM[j][i].transpose(-1, -2)
+
+    total_loss = torch.zeros(1, device=hz_subset.device, dtype=hz_subset.dtype)
+    n_correct = 0
+    n_total = 0
+    pos_sims = []
+    neg_sims = []
+    targets = torch.arange(2 * B, dtype=torch.long, device=hz_subset.device)
+    for i in range(n_view):
+        for j in range(n_view):
+            if i < j:
+                # (P, B, B) blocks → (P, 2B, 2B) combined matrix
+                raw1 = torch.cat([SIM[i][j], SIM[i][i]], dim=-1)  # (P, B, 2B)
+                raw2 = torch.cat([SIM[j][j], SIM[j][i]], dim=-1)  # (P, B, 2B)
+                raw_scores = torch.cat([raw1, raw2], dim=-2)  # (P, 2B, 2B)
+
+                loss = criterion(raw_scores.reshape(P * 2 * B, 2 * B), targets.repeat(P))
+                total_loss = total_loss + loss
+
+                with torch.no_grad():
+                    preds = raw_scores.reshape(P * 2 * B, 2 * B).argmax(dim=1)
+                    n_correct += (preds == targets.repeat(P)).sum().item()
+                    n_total += P * 2 * B
+                    diag_ij = torch.diagonal(SIM[i][j], dim1=-2, dim2=-1)  # (P, B)
+                    pos_sims.append(diag_ij.reshape(-1) * tau)
+                    mask_offdiag = ~torch.eye(B, dtype=torch.bool, device=hz_subset.device)
+                    neg_sims.append(SIM[i][j][:, mask_offdiag].reshape(-1) * tau)
+
+    with torch.no_grad():
+        _diag = {
+            "top1_acc": n_correct / max(n_total, 1),
+            "pos_sim_mean": torch.cat(pos_sims).mean().item(),
+            "pos_sim_std": torch.cat(pos_sims).std().item(),
+        }
+        if neg_sims:
+            _neg = torch.cat(neg_sims)
+            _diag["neg_sim_mean"] = _neg.mean().item()
+            _diag["neg_sim_std"] = _neg.std().item()
+        total_loss._contrastive_diag = _diag
+    return total_loss
+
+
 def moco_infonce_loss(
     q, k, queue, content_indices, tau=1.0, soft_content_mask=None, queue_v1=None, cross_view_negs_only=False
 ):

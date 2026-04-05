@@ -44,7 +44,7 @@ import models.vqvae as vqvae
 import utils.utils as utils
 from data.infinite_iterator import InfiniteIterator
 from eval.evaluation import eval_step, get_data
-from losses import BaselineLoss, infonce_loss, moco_loss
+from losses import BaselineLoss, infonce_loss, moco_loss, patch_infonce_loss
 from models.encoders import TextEncoder2D
 from utils.checkpointing import (
     load_checkpoint,
@@ -125,6 +125,8 @@ def train_step(
             skip_recon_ratio = getattr(args, "skip_recon_ratio", 0.0)
             compute_recon = (skip_recon_ratio == 0.0) or (torch.rand(1).item() > skip_recon_ratio)
 
+            _patch_grid = tuple(args.patch_grid) if getattr(args, "patch_contrastive", False) else None
+
             (
                 recon,
                 diffs,
@@ -140,6 +142,7 @@ def train_step(
                 pool_only=True,
                 n_views=n_views,
                 subsets=args.subsets,
+                patch_grid=_patch_grid,
             )
 
             # Compute momentum-encoder key embeddings BEFORE deleting images
@@ -150,6 +153,10 @@ def train_step(
                 assert isinstance(
                     vqvae_model, MoCoEncoder
                 ), "MoCo requested but encoders[0] is not a MoCoEncoder instance."
+                assert _patch_grid is None, (
+                    "--patch-contrastive is not supported with --use-moco. "
+                    "Patch-level features are incompatible with the MoCo queue."
+                )
                 with torch.no_grad():
                     key_outputs = vqvae_model.encode_keys(images, n_views=n_views)
 
@@ -185,8 +192,11 @@ def train_step(
             _content_ch_per_level = getattr(_raw_vqvae, "content_channels_per_level", {})
 
             for level_idx, enc_pooled in enumerate(encoder_outputs):
-                hz_level = enc_pooled.reshape(n_views, -1, enc_pooled.shape[-1])
-                n_channels = hz_level.shape[-1]
+                # Global pool: enc_pooled is (2B, C) → hz_level (n_views, B, C)
+                # Patch pool:  enc_pooled is (2B, C, P) → hz_level (n_views, B, C, P)
+                hz_level = enc_pooled.reshape(n_views, -1, *enc_pooled.shape[1:])
+                _is_patch = hz_level.ndim == 4  # has patch dimension
+                n_channels = hz_level.shape[2] if _is_patch else hz_level.shape[-1]
                 # Use per-level content_channels if available, otherwise fall back to ratio
                 if level_idx in _content_ch_per_level:
                     content_size = _content_ch_per_level[level_idx]
@@ -205,9 +215,14 @@ def train_step(
                         k_content = int(mask_v0.sum().item())
 
                         # Pre-mask and extract k-dim content per view
-                        hz_v0_content = (hz_level[0] * mask_v0)[:, idx_v0]  # (B, k)
-                        hz_v1_content = (hz_level[1] * mask_v1)[:, idx_v1]  # (B, k)
-                        hz_content = torch.stack([hz_v0_content, hz_v1_content], dim=0)  # (2, B, k)
+                        if _is_patch:
+                            # hz_level: (n_views, B, C, P), mask: (1, C)
+                            hz_v0_content = (hz_level[0] * mask_v0.unsqueeze(-1))[:, idx_v0, :]  # (B, k, P)
+                            hz_v1_content = (hz_level[1] * mask_v1.unsqueeze(-1))[:, idx_v1, :]  # (B, k, P)
+                        else:
+                            hz_v0_content = (hz_level[0] * mask_v0)[:, idx_v0]  # (B, k)
+                            hz_v1_content = (hz_level[1] * mask_v1)[:, idx_v1]  # (B, k)
+                        hz_content = torch.stack([hz_v0_content, hz_v1_content], dim=0)
 
                         # All k dims are now content (already selected)
                         level_content_indices = [list(range(k_content))] * len(args.subsets)
@@ -288,7 +303,8 @@ def train_step(
                                         "MoCo/queue_raw_norm_v1": raw_norm_v1,
                                     }
                         else:
-                            level_loss = loss_func(
+                            _lf = patch_loss_func if _is_patch else loss_func
+                            level_loss = _lf(
                                 hz_content,
                                 level_content_indices,
                                 args.subsets,
@@ -325,7 +341,8 @@ def train_step(
                                 queue_v1=_qv1,
                             )
                         else:
-                            level_loss = loss_func(
+                            _lf = patch_loss_func if _is_patch else loss_func
+                            level_loss = _lf(
                                 hz_level,
                                 level_content_indices,
                                 args.subsets,
@@ -333,7 +350,9 @@ def train_step(
                             )
                 else:
                     # Fallback: no channel_logits configured, use batch statistics.
-                    avg_logits = hz_level.mean(dim=[0, 1], keepdim=False).unsqueeze(0)
+                    # For patch mode, average over the patch dim to get per-channel logits.
+                    _hz_for_logits = hz_level.mean(dim=-1) if _is_patch else hz_level
+                    avg_logits = _hz_for_logits.mean(dim=[0, 1], keepdim=False).unsqueeze(0)
                     if len(args.subsets) > 1 and content_size > 0:
                         content_masks = utils.smart_gumbel_softmax_mask(
                             avg_logits=avg_logits,
@@ -387,7 +406,8 @@ def train_step(
                                     "MoCo/queue_raw_norm": queue_snapshot[_ci, :].norm(dim=0).mean().item(),
                                 }
                     else:
-                        level_loss = loss_func(
+                        _lf = patch_loss_func if _is_patch else loss_func
+                        level_loss = _lf(
                             hz_level,
                             level_content_indices,
                             args.subsets,
@@ -722,6 +742,18 @@ def main(args):
             cross_view_negs_only=_cross_view_negs,
         )
 
+    def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+        return patch_infonce_loss(
+            z_rec_tuple,
+            sim_metric=sim_metric,
+            criterion=criterion,
+            tau=args.tau,
+            estimated_content_indices=estimated_content_indices,
+            subsets=subsets,
+            soft_content_mask=soft_content_mask,
+            cross_view_negs_only=_cross_view_negs,
+        )
+
     def moco_loss_func(q, k, queue, estimated_content_indices, subsets, soft_content_mask=None, queue_v1=None):
         return moco_loss(
             q,
@@ -852,6 +884,7 @@ def main(args):
             style_embed_dim=getattr(args, "style_embed_dim", None),
             style_nb_entries=getattr(args, "style_nb_entries", None),
             style_injection_mode=getattr(args, "style_injection_mode", "concat"),
+            cb_ema_decay=getattr(args, "cb_ema_decay", 0.999),
             cb_reset_every=getattr(args, "cb_reset_every", 100),
             cb_reset_threshold=getattr(args, "cb_reset_threshold", 1.0),
         )
@@ -953,16 +986,33 @@ def main(args):
                 encoders[m_idx].load_state_dict(torch.load(path, map_location=device, weights_only=False))
                 logger.info(f"  Loaded encoder_{m} from {path}")
 
-    # Optimizer
-    params = []
-    for f in encoders:
-        params += list(f.parameters())
-    for d in decoders:
-        params += list(d.parameters())
+    # Optimizer — separate param groups so weight decay skips biases & norms
+    _wd = getattr(args, "weight_decay", 0.01)
+    decay_params = []
+    no_decay_params = []
+    for module in encoders + decoders:
+        for name, param in module.named_parameters():
+            if not param.requires_grad:
+                continue
+            # Skip weight decay for biases, LayerNorm/GroupNorm weights, and
+            # ReZero alpha scalars — these should not be regularised.
+            if name.endswith(".bias") or "norm" in name.lower() or name.endswith(".alpha"):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+    param_groups = [
+        {"params": decay_params, "weight_decay": _wd},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
     use_fused = torch.cuda.is_available()
-    optimizer = torch.optim.AdamW(params, lr=args.lr, fused=use_fused)
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, fused=use_fused)
+    params = decay_params + no_decay_params  # flat list for gradient clipping
     logger.info("")
-    logger.info(f"[OPTIMIZER] AdamW (fused={use_fused}) lr={args.lr} " f"params={sum(p.numel() for p in params):,}")
+    logger.info(
+        f"[OPTIMIZER] AdamW (fused={use_fused}) lr={args.lr} wd={_wd} "
+        f"params={sum(p.numel() for p in params):,} "
+        f"(decay={len(decay_params)}, no_decay={len(no_decay_params)})"
+    )
 
     # LR schedule: linear warmup then cosine annealing (or constant)
     warmup_steps = getattr(args, "warmup_steps", 0)

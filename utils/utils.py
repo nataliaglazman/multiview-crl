@@ -59,7 +59,7 @@ class ApplyBrainMaskd(MapTransform):
         return d
 
 
-EPSILON = np.finfo(np.float32).tiny
+EPSILON = 1e-8  # was np.finfo(np.float32).tiny ≈ 1e-45; too small for AMP float16
 
 
 class ConfigDict(object):

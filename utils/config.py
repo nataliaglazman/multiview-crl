@@ -46,10 +46,16 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--encoding-size", type=int, default=256)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.01,
+        help="AdamW weight decay (applied to all params except biases, norms, and ReZero alphas)",
+    )
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--train-steps", type=int, default=300001)
     parser.add_argument("--log-steps", type=int, default=100)
-    parser.add_argument("--checkpoint-steps", type=int, default=1000)
+    parser.add_argument("--checkpoint-steps", type=int, default=200)
     parser.add_argument("--evaluate", action="store_true")
     parser.add_argument("--val-size", default=25000, type=int)
     parser.add_argument("--test-size", default=25000, type=int)
@@ -158,6 +164,14 @@ def parse_args() -> argparse.ArgumentParser:
         help="Number of codebook entries for style codebooks. Defaults to the main --nb-entries.",
     )
     parser.add_argument(
+        "--cb-ema-decay",
+        type=float,
+        default=0.999,
+        help="EMA momentum for codebook running averages (cluster_size and embed_avg). "
+        "Higher values (e.g. 0.999) give smoother updates suited for small batches. "
+        "Lower values (e.g. 0.99) adapt faster but can be noisy. Default: 0.999.",
+    )
+    parser.add_argument(
         "--cb-reset-every",
         type=int,
         default=100,
@@ -179,6 +193,22 @@ def parse_args() -> argparse.ArgumentParser:
         "When set, same-view samples are excluded from the negative set, forcing the "
         "model to align representations across views rather than relying on within-view "
         "instance discrimination. Recommended when using --separate-encoders.",
+    )
+    parser.add_argument(
+        "--patch-contrastive",
+        action="store_true",
+        default=False,
+        help="Use patch-level (dense) contrastive alignment instead of global average "
+        "pooling. Pools spatial maps into a grid of patches and aligns corresponding "
+        "patches across views, preserving spatial correspondence.",
+    )
+    parser.add_argument(
+        "--patch-grid",
+        type=int,
+        nargs=3,
+        default=[4, 5, 4],
+        help="Spatial grid size (D, H, W) for patch-level contrastive loss. "
+        "Only used when --patch-contrastive is set. Default: 4 5 4 (~80 patches).",
     )
     parser.add_argument(
         "--contrastive-level-weights",
