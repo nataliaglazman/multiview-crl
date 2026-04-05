@@ -1100,7 +1100,9 @@ def main(args):
             "recon_loss": recon_losses,
             "vq_loss": vq_losses,
         }
-        step = load_checkpoint(args, encoders, decoders, optimizer, device, loss_deques, scheduler=scheduler)
+        step = load_checkpoint(
+            args, encoders, decoders, optimizer, device, loss_deques, scheduler=scheduler, scaler=scaler
+        )
 
         # Restore best loss from best checkpoint if resuming
         best_total_loss = float("inf")
@@ -1284,6 +1286,7 @@ def main(args):
                             vq_loss,
                             scheduler=scheduler,
                             best_loss=new_best,
+                            scaler=scaler,
                         )
 
                     # --- Periodic validation ---

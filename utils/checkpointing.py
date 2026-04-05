@@ -25,6 +25,7 @@ def save_checkpoint(
     vq_loss,
     scheduler=None,
     best_loss=None,
+    scaler=None,
 ) -> None:
     """
     Save a training checkpoint to ``args.save_dir``.
@@ -59,12 +60,18 @@ def save_checkpoint(
         }
         if scheduler is not None:
             checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+        if scaler is not None:
+            checkpoint["scaler_state_dict"] = scaler.state_dict()
         if getattr(args, "use_moco", False):
             from models.vqvae import MoCoEncoder
 
             if isinstance(encoders[0], MoCoEncoder):
                 checkpoint["moco_queues"] = [q.cpu() for q in encoders[0].queues]
                 checkpoint["moco_queue_ptrs"] = encoders[0].queue_ptrs.tolist()
+                # Save view-1 queues when separate encoders are active
+                if encoders[0]._separate_queues:
+                    checkpoint["moco_queues_v1"] = [q.cpu() for q in encoders[0].queues_v1]
+                    checkpoint["moco_queue_v1_ptrs"] = encoders[0].queue_v1_ptrs.tolist()
         torch.save(checkpoint, checkpoint_path)
         logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
 
@@ -186,6 +193,7 @@ def load_checkpoint(
     device,
     loss_deques: dict,
     scheduler=None,
+    scaler=None,
 ) -> int:
     """
     Restore training state from the most recent checkpoint, if one exists
@@ -246,14 +254,53 @@ def load_checkpoint(
         for key, deque in loss_deques.items():
             deque.append(checkpoint.get(key, 0))
 
+        if scaler is not None and "scaler_state_dict" in checkpoint:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
+            logger.info("  AMP GradScaler state restored from checkpoint.")
+
         if getattr(args, "use_moco", False) and "moco_queues" in checkpoint:
             from models.vqvae import MoCoEncoder
 
             if isinstance(encoders[0], MoCoEncoder):
+                _restored = True
                 for lvl, q_cpu in enumerate(checkpoint["moco_queues"]):
-                    encoders[0]._get_queue(lvl).copy_(q_cpu.to(device))
-                encoders[0].queue_ptrs.copy_(torch.tensor(checkpoint["moco_queue_ptrs"], dtype=torch.long))
-                logger.info("  MoCo queue state restored from checkpoint.")
+                    target_queue = encoders[0]._get_queue(lvl)
+                    if target_queue.shape != q_cpu.shape:
+                        logger.warning(
+                            f"  MoCo queue shape mismatch at level {lvl}: "
+                            f"checkpoint {q_cpu.shape} vs model {target_queue.shape}. "
+                            f"Queues will be re-initialized (not restored)."
+                        )
+                        _restored = False
+                        break
+                    target_queue.copy_(q_cpu.to(device))
+                if _restored:
+                    encoders[0].queue_ptrs.copy_(torch.tensor(checkpoint["moco_queue_ptrs"], dtype=torch.long))
+                    logger.info("  MoCo view-0 queue state restored from checkpoint.")
+
+                # Restore view-1 queues (separate encoders)
+                if _restored and encoders[0]._separate_queues and "moco_queues_v1" in checkpoint:
+                    _v1_ok = True
+                    for lvl, q_cpu in enumerate(checkpoint["moco_queues_v1"]):
+                        target_queue = encoders[0]._get_queue(lvl, view=1)
+                        if target_queue.shape != q_cpu.shape:
+                            logger.warning(
+                                f"  MoCo view-1 queue shape mismatch at level {lvl}. "
+                                f"View-1 queues will be re-initialized."
+                            )
+                            _v1_ok = False
+                            break
+                        target_queue.copy_(q_cpu.to(device))
+                    if _v1_ok:
+                        encoders[0].queue_v1_ptrs.copy_(
+                            torch.tensor(checkpoint["moco_queue_v1_ptrs"], dtype=torch.long)
+                        )
+                        logger.info("  MoCo view-1 queue state restored from checkpoint.")
+                elif _restored and encoders[0]._separate_queues:
+                    logger.warning(
+                        "  Checkpoint has no view-1 queue data (old format). "
+                        "View-1 queues start from random initialization."
+                    )
 
         logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
         logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")
