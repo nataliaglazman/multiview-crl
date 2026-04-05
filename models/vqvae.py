@@ -325,8 +325,25 @@ class CodeLayer(HelperModule):
         """Quantize a pre-projected (B, embed_dim, D, H, W) tensor."""
         x = x.float().permute(0, 2, 3, 4, 1)
         flatten = x.reshape(-1, self.dim)
-        dist = flatten.pow(2).sum(1, keepdim=True) - 2 * flatten @ self.embed + self.embed.pow(2).sum(0, keepdim=True)
-        _, embed_ind = (-dist).max(1)
+        # Chunk the distance computation to avoid a single (N, n_embed) allocation
+        # that can exceed 2 GB for large 3D volumes at coarse levels.
+        _CHUNK = 65536  # ~65K voxels × 384 entries × 4B ≈ 100 MB per chunk
+        embed_sq = self.embed.pow(2).sum(0, keepdim=True)  # (1, n_embed)
+        if flatten.shape[0] <= _CHUNK:
+            dist = flatten.pow(2).sum(1, keepdim=True) - 2 * flatten @ self.embed + embed_sq
+            _, embed_ind = (-dist).max(1)
+            del dist
+        else:
+            embed_ind_parts = []
+            for _start in range(0, flatten.shape[0], _CHUNK):
+                _chunk = flatten[_start : _start + _CHUNK]
+                _dist = _chunk.pow(2).sum(1, keepdim=True) - 2 * _chunk @ self.embed + embed_sq
+                _, _ind = (-_dist).max(1)
+                embed_ind_parts.append(_ind)
+                del _dist, _chunk
+            embed_ind = torch.cat(embed_ind_parts)
+            del embed_ind_parts
+        del embed_sq
         embed_onehot = F.one_hot(embed_ind, self.n_embed).type(flatten.dtype)
         embed_ind = embed_ind.view(*x.shape[:-1])
         quantize = self.embed_code(embed_ind)

@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from lpips import LPIPS
 from torch import cat, reshape, tensor
-from torch.fft import fftn
+from torch.fft import rfftn
 from torch.nn import PairwiseDistance
 
 from utils.utils import TBSummaryTypes
@@ -887,30 +887,40 @@ class BaselineLoss(torch.nn.Module):
         for idx, q_loss in enumerate(q_losses):
             q_loss = q_loss.float()
 
-            self.summaries[TBSummaryTypes.SCALAR][f"Loss-MSE-VQ{idx}_Commitment_Cost"] = q_loss
+            self.summaries[TBSummaryTypes.SCALAR][f"Loss-MSE-VQ{idx}_Commitment_Cost"] = q_loss.detach()
 
             loss = loss + q_loss
 
         return loss
 
     def _calculate_frequency_loss(self, x, y) -> torch.Tensor:
-        # Compute FFT magnitudes sequentially to avoid holding both complex
-        # tensors in memory simultaneously (~50% peak reduction).
+        # rfftn exploits conjugate symmetry of real inputs → output is ~half
+        # the size of fftn along the last dim, cutting peak memory ~50%.
+        # Per-sample loop keeps only one sample's FFT pair alive at a time,
+        # further reducing peak VRAM for large 3D volumes.
         with torch.amp.autocast("cuda", enabled=False):
-            x_mag = torch.abs(fftn((x.float() + 1.0) / 2.0, norm="ortho"))
-            y_mag = torch.abs(fftn((y.float() + 1.0) / 2.0, norm="ortho"))
-            loss = F.mse_loss(x_mag, y_mag).to(x.dtype)
-            del x_mag, y_mag
+            loss = torch.tensor(0.0, device=x.device, dtype=torch.float32)
+            B = x.shape[0]
+            for i in range(B):
+                xi = (x[i : i + 1].float() + 1.0) / 2.0
+                yi = (y[i : i + 1].float() + 1.0) / 2.0
+                x_mag = torch.abs(rfftn(xi, norm="ortho"))
+                del xi
+                y_mag = torch.abs(rfftn(yi, norm="ortho"))
+                del yi
+                loss = loss + F.mse_loss(x_mag, y_mag)
+                del x_mag, y_mag
+            loss = (loss / B).to(x.dtype)
 
         loss = loss * self.fft_factor
-        self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss.detach()
 
         return loss
 
     def _calculate_pixel_loss(self, x, y) -> torch.Tensor:
         loss = F.l1_loss(x, y)
         loss = loss * self.pixel_factor
-        self.summaries[TBSummaryTypes.SCALAR]["Loss-MAE-Reconstruction"] = loss
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-MAE-Reconstruction"] = loss.detach()
 
         return loss
 
@@ -952,11 +962,11 @@ class BaselineLoss(torch.nn.Module):
         chosen_idx = torch.randint(len(orientations), (1,)).item()
         name, perm_dims = orientations[chosen_idx]
         p_loss = _lpips_on_slices(x, y, perm_dims=perm_dims)
-        self.summaries[TBSummaryTypes.SCALAR][f"Loss-Perceptual_{name}-Reconstruction"] = p_loss
+        self.summaries[TBSummaryTypes.SCALAR][f"Loss-Perceptual_{name}-Reconstruction"] = p_loss.detach()
 
         # 3× for random orientation (1 of 3), 2× for halved slices (4 vs original 8)
         loss = p_loss * 6.0 * self.perceptual_factor
-        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = loss
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = loss.detach()
 
         return loss
 

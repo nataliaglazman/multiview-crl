@@ -1339,7 +1339,10 @@ def main(args):
                         )
 
                     # Periodic CUDA cache cleanup to reduce fragmentation-induced OOM
-                    if step % 50 == 0 and torch.cuda.is_available():
+                    if step % 20 == 0 and torch.cuda.is_available():
+                        import gc
+
+                        gc.collect()
                         torch.cuda.empty_cache()
 
                     step += 1

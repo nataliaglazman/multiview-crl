@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Expandable segments dramatically reduce CUDA memory fragmentation for
+# workloads with varying allocation patterns (e.g. skip_recon_ratio).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl \
 python /nfs/home/nglazman/crl-2/multiview-crl/training/main_multimodal.py \
     --dataroot /nfs/home/nglazman \
