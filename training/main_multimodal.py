@@ -153,12 +153,8 @@ def train_step(
                 assert isinstance(
                     vqvae_model, MoCoEncoder
                 ), "MoCo requested but encoders[0] is not a MoCoEncoder instance."
-                assert _patch_grid is None, (
-                    "--patch-contrastive is not supported with --use-moco. "
-                    "Patch-level features are incompatible with the MoCo queue."
-                )
                 with torch.no_grad():
-                    key_outputs = vqvae_model.encode_keys(images, n_views=n_views)
+                    key_outputs = vqvae_model.encode_keys(images, n_views=n_views, patch_grid=_patch_grid)
 
             if compute_recon and recon is not None and step >= getattr(args, "recon_loss_start_step", 0):
                 if recon.shape[2:] != input_shape:
@@ -232,8 +228,12 @@ def train_step(
                             estimated_content_indices = [idx_v0.tolist()]  # view-0 for backward compat
 
                         if use_moco:
+                            assert not _is_patch, (
+                                "Per-view mask MoCo path does not support patch-contrastive yet. "
+                                "Use --mask-mode fixed or --mask-mode learned (without per-view masks) instead."
+                            )
                             key_pooled = key_outputs[level_idx]
-                            k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])
+                            k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
                             # Pre-mask momentum keys the same way
                             k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
                             k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
@@ -324,16 +324,30 @@ def train_step(
 
                         if use_moco:
                             key_pooled = key_outputs[level_idx]
-                            k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])
+                            k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
                             queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
                             _qv1 = (
                                 vqvae_model.queues_v1[level_idx].clone().detach()
                                 if hasattr(vqvae_model, "queues_v1")
                                 else None
                             )
+                            # Patch MoCo: flatten (n_views, B, C, P) → (n_views, B*P, C)
+                            # so each patch becomes an independent query/key in the queue.
+                            # Positives: same subject + same patch position across views.
+                            # Negatives: queue entries from all subjects × all patches.
+                            _hz_moco = (
+                                hz_level.permute(0, 1, 3, 2).reshape(n_views, -1, hz_level.shape[2])
+                                if _is_patch
+                                else hz_level
+                            )
+                            _k_moco = (
+                                k_level.permute(0, 1, 3, 2).reshape(n_views, -1, k_level.shape[2])
+                                if _is_patch
+                                else k_level
+                            )
                             level_loss = moco_loss_func(
-                                hz_level,
-                                k_level,
+                                _hz_moco,
+                                _k_moco,
                                 queue_snapshot,
                                 level_content_indices,
                                 args.subsets,
@@ -373,16 +387,25 @@ def train_step(
 
                     if use_moco:
                         key_pooled = key_outputs[level_idx]
-                        k_level = key_pooled.reshape(n_views, -1, key_pooled.shape[-1])
+                        k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
                         queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
                         _qv1 = (
                             vqvae_model.queues_v1[level_idx].clone().detach()
                             if hasattr(vqvae_model, "queues_v1")
                             else None
                         )
+                        # Patch MoCo: flatten (n_views, B, C, P) → (n_views, B*P, C)
+                        _hz_moco = (
+                            hz_level.permute(0, 1, 3, 2).reshape(n_views, -1, hz_level.shape[2])
+                            if _is_patch
+                            else hz_level
+                        )
+                        _k_moco = (
+                            k_level.permute(0, 1, 3, 2).reshape(n_views, -1, k_level.shape[2]) if _is_patch else k_level
+                        )
                         level_loss = moco_loss_func(
-                            hz_level,
-                            k_level,
+                            _hz_moco,
+                            _k_moco,
                             queue_snapshot,
                             level_content_indices,
                             args.subsets,
@@ -394,8 +417,8 @@ def train_step(
                         if level_idx == 0 and optimizer is not None and accumulation_step == 0:
                             with torch.no_grad():
                                 _ci = level_content_indices[0]
-                                _q = F.normalize(hz_level[0, :, _ci], dim=-1)
-                                _k = F.normalize(k_level[1, :, _ci], dim=-1)
+                                _q = F.normalize(_hz_moco[0, :, _ci], dim=-1)
+                                _k = F.normalize(_k_moco[1, :, _ci], dim=-1)
                                 _queue_neg = F.normalize(queue_snapshot[_ci, :], dim=0)
                                 _pos = (_q * _k).sum(-1).mean().item()
                                 _neg = (_q @ _queue_neg).mean().item()
@@ -426,7 +449,12 @@ def train_step(
             # Enqueue all levels in one call after the loss loop
             if use_moco and optimizer is not None:
                 with torch.no_grad():
-                    vqvae_model.enqueue([k.detach() for k in key_outputs], n_views=n_views)
+                    if _patch_grid is not None:
+                        # Flatten patches into batch dim: (2B, C, P) → (2B*P, C)
+                        _keys = [k.detach().permute(0, 2, 1).reshape(-1, k.shape[1]) for k in key_outputs]
+                    else:
+                        _keys = [k.detach() for k in key_outputs]
+                    vqvae_model.enqueue(_keys, n_views=n_views)
 
             contrastive_loss = total_contrastive_loss
             total_loss = contrastive_loss + recon_loss + vq_loss
