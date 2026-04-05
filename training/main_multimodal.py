@@ -170,8 +170,11 @@ def train_step(
             else:
                 recon_loss = torch.zeros(1, device=device)
                 del images
+                if recon is not None:
+                    del recon
 
             vq_loss = sum(diffs) * args.vq_commitment_weight
+            del diffs
 
             total_contrastive_loss = torch.zeros(1, device=device)
             level_losses = []

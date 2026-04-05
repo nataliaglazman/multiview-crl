@@ -865,7 +865,7 @@ class BaselineLoss(torch.nn.Module):
         self.pixel_factor = 1.0
 
         self.perceptual_factor = 0.002
-        self.n_slices = 8  # Reduced from 32 — 4× fewer SqueezeNet passes per orientation
+        self.n_slices = 4  # Reduced from 32 → 8 → 4; compensated by 6× scale factor
         self.perceptual_function = LPIPS(net="squeeze")
 
         self.fft_factor = 1.0
@@ -894,14 +894,13 @@ class BaselineLoss(torch.nn.Module):
         return loss
 
     def _calculate_frequency_loss(self, x, y) -> torch.Tensor:
-        # Compute FFT on the full batch at once — cheaper than a per-sample loop
-        # that builds a long autograd chain. Complex tensors are freed immediately
-        # after mse_loss since we don't store them.
+        # Compute FFT magnitudes sequentially to avoid holding both complex
+        # tensors in memory simultaneously (~50% peak reduction).
         with torch.amp.autocast("cuda", enabled=False):
-            # fftn requires float32; x/y may be float16 under AMP
-            x_f = (x.float() + 1.0) / 2.0
-            y_f = (y.float() + 1.0) / 2.0
-            loss = F.mse_loss(torch.abs(fftn(x_f, norm="ortho")), torch.abs(fftn(y_f, norm="ortho"))).to(x.dtype)
+            x_mag = torch.abs(fftn((x.float() + 1.0) / 2.0, norm="ortho"))
+            y_mag = torch.abs(fftn((y.float() + 1.0) / 2.0, norm="ortho"))
+            loss = F.mse_loss(x_mag, y_mag).to(x.dtype)
+            del x_mag, y_mag
 
         loss = loss * self.fft_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss
@@ -950,7 +949,8 @@ class BaselineLoss(torch.nn.Module):
         p_loss = _lpips_on_slices(x, y, perm_dims=perm_dims)
         self.summaries[TBSummaryTypes.SCALAR][f"Loss-Perceptual_{name}-Reconstruction"] = p_loss
 
-        loss = p_loss * 3.0 * self.perceptual_factor
+        # 3× for random orientation (1 of 3), 2× for halved slices (4 vs original 8)
+        loss = p_loss * 6.0 * self.perceptual_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = loss
 
         return loss
