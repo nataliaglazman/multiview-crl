@@ -77,6 +77,7 @@ def train_step(
     total_accumulation_steps=1,
     moco_loss_func=None,
     step=0,
+    force_compute_recon=None,
 ):
     """
     Perform a single forward + (optionally) backward pass.
@@ -94,6 +95,8 @@ def train_step(
         accumulation_step: Index within the current accumulation window (0-based).
         total_accumulation_steps: Total number of mini-steps per optimizer update.
         moco_loss_func: MoCo loss callable (``None`` → standard in-batch InfoNCE).
+        force_compute_recon: If not None, overrides the skip_recon_ratio dice roll
+            (used to keep memory consistent across gradient accumulation micro-steps).
 
     Returns:
         tuple: ``(total_loss, contrastive_loss, recon_loss, vq_loss, estimated_content_indices)``
@@ -122,8 +125,11 @@ def train_step(
         if args.encoder_type == "vqvae":
             vqvae_model = encoders[0]
 
-            skip_recon_ratio = getattr(args, "skip_recon_ratio", 0.0)
-            compute_recon = (skip_recon_ratio == 0.0) or (torch.rand(1).item() > skip_recon_ratio)
+            if force_compute_recon is not None:
+                compute_recon = force_compute_recon
+            else:
+                skip_recon_ratio = getattr(args, "skip_recon_ratio", 0.0)
+                compute_recon = (skip_recon_ratio == 0.0) or (torch.rand(1).item() > skip_recon_ratio)
 
             _patch_grid = tuple(args.patch_grid) if getattr(args, "patch_contrastive", False) else None
 
@@ -1137,6 +1143,12 @@ def main(args):
                     accum_steps = getattr(args, "gradient_accumulation_steps", 1)
                     accum_total = accum_contrastive = accum_recon = accum_vq = 0.0
 
+                    # Roll skip_recon dice ONCE per accumulation window so all
+                    # micro-steps have the same memory profile (avoids worst-case
+                    # where all micro-steps happen to compute recon simultaneously).
+                    _skip_ratio = getattr(args, "skip_recon_ratio", 0.0)
+                    _window_compute_recon = (_skip_ratio == 0.0) or (torch.rand(1).item() > _skip_ratio)
+
                     accum_level_losses = None
                     for accum_idx in range(accum_steps):
                         data = next(train_iterator)
@@ -1162,6 +1174,7 @@ def main(args):
                             total_accumulation_steps=accum_steps,
                             moco_loss_func=moco_loss_func,
                             step=step,
+                            force_compute_recon=_window_compute_recon,
                         )
                         accum_total += total_loss / accum_steps
                         accum_contrastive += contrastive_loss / accum_steps
@@ -1324,6 +1337,10 @@ def main(args):
                             f"Contrastive={val_con:.4f} | Recon={val_rec:.4f} | "
                             f"VQ={val_vq:.4f}"
                         )
+
+                    # Periodic CUDA cache cleanup to reduce fragmentation-induced OOM
+                    if step % 50 == 0 and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
                     step += 1
 

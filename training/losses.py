@@ -934,6 +934,11 @@ class BaselineLoss(torch.nn.Module):
             sel_x = x_p[:, indices].contiguous().flatten(0, 1).detach()
             del x_p
             sel_y = y_vol.permute(*perm_dims)[:, indices].contiguous().flatten(0, 1)
+            # Cap spatial size to 96×96 to normalize memory across orientations
+            if sel_x.shape[-1] > 96 or sel_x.shape[-2] > 96:
+                _target = (min(sel_x.shape[-2], 96), min(sel_x.shape[-1], 96))
+                sel_x = F.adaptive_avg_pool2d(sel_x, _target)
+                sel_y = F.adaptive_avg_pool2d(sel_y, _target)
             p_loss = torch.mean(self.perceptual_function.forward(sel_x.float(), sel_y.float()))
             return p_loss
 
