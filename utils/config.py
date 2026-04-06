@@ -363,6 +363,15 @@ def parse_args() -> argparse.ArgumentParser:
         default=512,
         help="Total number of dimensions (ratio with content-dim determines embed_dim split)",
     )
+    parser.add_argument(
+        "--content-size",
+        type=int,
+        default=None,
+        help="Directly set the number of content channels (out of --vqvae-hidden-channels). "
+        "Overrides the ratio derived from --content-dim / --total-dim. "
+        "E.g. '--content-size 48 --vqvae-hidden-channels 64' → 48 content, 16 style channels. "
+        "Useful for tuning spatial map alignment.",
+    )
     return parser
 
 
@@ -380,6 +389,23 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
 
     logger = logging.getLogger("multiview_crl")
     logger.info(f"Configuring dataset: {args.dataset_name}")
+
+    # --content-size: directly set content channels, override ratio-based defaults
+    if getattr(args, "content_size", None) is not None:
+        hidden_ch = args.vqvae_hidden_channels
+        cs = args.content_size
+        assert 1 <= cs < hidden_ch, f"--content-size must be in [1, {hidden_ch - 1}], got {cs}"
+        ratio = cs / hidden_ch
+        # Override content_dim / total_dim to be consistent with the chosen ratio
+        args.content_dim = cs
+        args.total_dim = hidden_ch
+        # Set content_ratios for all content_style_levels
+        cs_levels = getattr(args, "content_style_levels", [0])
+        args.content_ratios = [ratio] * len(cs_levels)
+        logger.info(
+            f"  --content-size={cs}: content_ratio={ratio:.3f} "
+            f"({cs}/{hidden_ch} channels) applied to levels {cs_levels}"
+        )
 
     if args.dataset_name == "independent3di":
         args.DATASETCLASS = datasets.Indepdenent3DIdent

@@ -602,24 +602,6 @@ class VQVAE(HelperModule):
         # representation richer by decoupling it from the contrastive
         # objective.  The projection head output is discarded at eval time.
         #
-        # IMPORTANT: This is a SHARED head for both encoders.  With
-        # --separate-encoders the two encoder stacks have no shared params;
-        # the projection head is the only component that learns a common
-        # mapping, which is essential for cross-modal alignment.
-        #
-        # Uses LayerNorm instead of BatchNorm1d so it works with arbitrary
-        # leading dimensions (patch features, etc.) without reshaping.
-        proj_dim = 128
-        # Input dim = content_channels (features are content-selected before
-        # projection).  Falls back to hidden_channels if no masking is active.
-        _proj_in = self.content_channels if self.content_channels is not None else hidden_channels
-        self.contrastive_proj = nn.Sequential(
-            nn.Linear(_proj_in, proj_dim),
-            nn.LayerNorm(proj_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(proj_dim, proj_dim),
-        )
-
         # Optional style injection: style channels from each masked level's
         # encoder output are fed into the corresponding decoder.
         # style_channels_per_level: level → int (complement of content_channels).
@@ -1203,17 +1185,7 @@ class MoCoEncoder(nn.Module):
         # (hidden_channels), so queries, keys, and queue all share the
         # same feature space.
         hidden_channels = self._infer_hidden_channels(raw_vqvae)
-        _proj = getattr(raw_vqvae, "contrastive_proj", None)
-        if _proj is not None:
-            # Infer proj_dim from the last Linear layer in the projection head
-            for m in reversed(list(_proj.modules())):
-                if isinstance(m, nn.Linear):
-                    queue_dim = m.out_features
-                    break
-            else:
-                queue_dim = hidden_channels
-        else:
-            queue_dim = hidden_channels
+        queue_dim = hidden_channels
         self._separate_queues = self.momentum_encoders_v1 is not None
 
         for lvl in range(nb_levels):
