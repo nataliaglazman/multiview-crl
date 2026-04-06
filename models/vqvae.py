@@ -610,8 +610,11 @@ class VQVAE(HelperModule):
         # Uses LayerNorm instead of BatchNorm1d so it works with arbitrary
         # leading dimensions (patch features, etc.) without reshaping.
         proj_dim = 128
+        # Input dim = content_channels (features are content-selected before
+        # projection).  Falls back to hidden_channels if no masking is active.
+        _proj_in = self.content_channels if self.content_channels is not None else hidden_channels
         self.contrastive_proj = nn.Sequential(
-            nn.Linear(hidden_channels, proj_dim),
+            nn.Linear(_proj_in, proj_dim),
             nn.LayerNorm(proj_dim),
             nn.ReLU(inplace=True),
             nn.Linear(proj_dim, proj_dim),
