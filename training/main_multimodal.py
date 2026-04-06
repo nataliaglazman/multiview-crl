@@ -356,15 +356,43 @@ def train_step(
                                 if _is_patch
                                 else k_level
                             )
-                            level_loss = moco_loss_func(
-                                _hz_moco,
-                                _k_moco,
-                                queue_snapshot,
-                                level_content_indices,
-                                args.subsets,
-                                soft_content_mask=soft_content_mask,
-                                queue_v1=_qv1,
-                            )
+
+                            # --- Shared projection head for cross-encoder alignment ---
+                            # With separate encoders, the two encoder stacks have no
+                            # shared parameters.  The projection head is the only
+                            # component that maps both into a common space.
+                            # Select content channels, project, then pass ALL projected
+                            # dims to the loss (no further content masking needed).
+                            # The queue already stores projected features (enqueued
+                            # after projection), so only queries and keys are projected
+                            # here.
+                            _proj = getattr(_raw_vqvae, "contrastive_proj", None)
+                            if _proj is not None:
+                                _ci = level_content_indices[0]
+                                # Project content-selected features through shared head
+                                _hz_moco = _proj(_hz_moco[..., _ci])  # (n_views, B*P, proj_dim)
+                                _k_moco = _proj(_k_moco[..., _ci])  # (n_views, B*P, proj_dim)
+                                # Queue already stores projected features — use all dims
+                                _proj_ci = [list(range(_hz_moco.shape[-1]))]
+                                level_loss = moco_loss_func(
+                                    _hz_moco,
+                                    _k_moco,
+                                    queue_snapshot,
+                                    _proj_ci,
+                                    args.subsets,
+                                    soft_content_mask=None,
+                                    queue_v1=_qv1,
+                                )
+                            else:
+                                level_loss = moco_loss_func(
+                                    _hz_moco,
+                                    _k_moco,
+                                    queue_snapshot,
+                                    level_content_indices,
+                                    args.subsets,
+                                    soft_content_mask=soft_content_mask,
+                                    queue_v1=_qv1,
+                                )
                         else:
                             _lf = patch_loss_func if _is_patch else loss_func
                             level_loss = _lf(
@@ -414,30 +442,54 @@ def train_step(
                         _k_moco = (
                             k_level.permute(0, 1, 3, 2).reshape(n_views, -1, k_level.shape[2]) if _is_patch else k_level
                         )
-                        level_loss = moco_loss_func(
-                            _hz_moco,
-                            _k_moco,
-                            queue_snapshot,
-                            level_content_indices,
-                            args.subsets,
-                            soft_content_mask=soft_content_mask,
-                            queue_v1=_qv1,
-                        )
+
+                        # Apply shared projection head if available
+                        _proj = getattr(_raw_vqvae, "contrastive_proj", None)
+                        if _proj is not None:
+                            _ci = level_content_indices[0]
+                            _hz_moco = _proj(_hz_moco[..., _ci])
+                            _k_moco = _proj(_k_moco[..., _ci])
+                            _proj_ci = [list(range(_hz_moco.shape[-1]))]
+                            level_loss = moco_loss_func(
+                                _hz_moco,
+                                _k_moco,
+                                queue_snapshot,
+                                _proj_ci,
+                                args.subsets,
+                                soft_content_mask=None,
+                                queue_v1=_qv1,
+                            )
+                        else:
+                            level_loss = moco_loss_func(
+                                _hz_moco,
+                                _k_moco,
+                                queue_snapshot,
+                                level_content_indices,
+                                args.subsets,
+                                soft_content_mask=soft_content_mask,
+                                queue_v1=_qv1,
+                            )
 
                         # --- Stale-queue diagnostic for shared-mask / onthefly path ---
                         if level_idx == 0 and optimizer is not None and accumulation_step == 0:
                             with torch.no_grad():
-                                _ci = level_content_indices[0]
-                                _q = F.normalize(_hz_moco[0, :, _ci], dim=-1)
-                                _k = F.normalize(_k_moco[1, :, _ci], dim=-1)
-                                _queue_neg = F.normalize(queue_snapshot[_ci, :], dim=0)
+                                if _proj is not None:
+                                    # Already projected: use all dims
+                                    _q = F.normalize(_hz_moco[0], dim=-1)
+                                    _k = F.normalize(_k_moco[1], dim=-1)
+                                    _queue_neg = F.normalize(queue_snapshot, dim=0)
+                                else:
+                                    _ci = level_content_indices[0]
+                                    _q = F.normalize(_hz_moco[0, :, _ci], dim=-1)
+                                    _k = F.normalize(_k_moco[1, :, _ci], dim=-1)
+                                    _queue_neg = F.normalize(queue_snapshot[_ci, :], dim=0)
                                 _pos = (_q * _k).sum(-1).mean().item()
                                 _neg = (_q @ _queue_neg).mean().item()
                                 _diag = {
                                     "MoCo/pos_sim": _pos,
                                     "MoCo/neg_sim_v0": _neg,
                                     "MoCo/pos_neg_gap": _pos - _neg,
-                                    "MoCo/queue_raw_norm": queue_snapshot[_ci, :].norm(dim=0).mean().item(),
+                                    "MoCo/queue_raw_norm": queue_snapshot.norm(dim=0).mean().item(),
                                 }
                     else:
                         _lf = patch_loss_func if _is_patch else loss_func
@@ -457,14 +509,23 @@ def train_step(
                 _lvl_w = _lvl_weights[level_idx] if _lvl_weights and level_idx < len(_lvl_weights) else 1.0
                 total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss * _lvl_w
 
-            # Enqueue all levels in one call after the loss loop
+            # Enqueue all levels in one call after the loss loop.
+            # When a contrastive projection head is active, enqueue the
+            # PROJECTED content features so the queue lives in the same
+            # space as queries and keys.
             if use_moco and optimizer is not None:
                 with torch.no_grad():
-                    if _patch_grid is not None:
-                        # Flatten patches into batch dim: (2B, C, P) → (2B*P, C)
-                        _keys = [k.detach().permute(0, 2, 1).reshape(-1, k.shape[1]) for k in key_outputs]
-                    else:
-                        _keys = [k.detach() for k in key_outputs]
+                    _proj = getattr(_raw_vqvae, "contrastive_proj", None)
+                    _keys = []
+                    for _lvl_idx, k in enumerate(key_outputs):
+                        if _patch_grid is not None:
+                            _k_flat = k.detach().permute(0, 2, 1).reshape(-1, k.shape[1])
+                        else:
+                            _k_flat = k.detach()
+                        if _proj is not None and _lvl_idx in _content_ch_per_level:
+                            _ci = list(range(_content_ch_per_level[_lvl_idx]))
+                            _k_flat = _proj(_k_flat[:, _ci])
+                        _keys.append(_k_flat)
                     vqvae_model.enqueue(_keys, n_views=n_views)
 
             contrastive_loss = total_contrastive_loss

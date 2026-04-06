@@ -349,21 +349,25 @@ class CodeLayer(HelperModule):
         quantize = self.embed_code(embed_ind)
 
         if self.training:
-            embed_onehot_sum = embed_onehot.sum(0)
-            embed_sum = flatten.transpose(0, 1) @ embed_onehot
+            # Guard: skip EMA update if encoder outputs contain NaN/Inf to
+            # prevent permanent codebook corruption (common under AMP).
+            if torch.isfinite(flatten).all():
+                embed_onehot_sum = embed_onehot.sum(0)
+                embed_sum = flatten.transpose(0, 1) @ embed_onehot
 
-            self.cluster_size.data.mul_(self.decay).add_(embed_onehot_sum, alpha=1 - self.decay)
-            self.embed_avg.data.mul_(self.decay).add_(embed_sum, alpha=1 - self.decay)
-            n = self.cluster_size.sum()
-            cluster_size = (self.cluster_size + self.eps) / (n + self.n_embed * self.eps) * n
-            embed_normalized = self.embed_avg / cluster_size.unsqueeze(0)
-            self.embed.data.copy_(embed_normalized)
+                self.cluster_size.data.mul_(self.decay).add_(embed_onehot_sum, alpha=1 - self.decay)
+                self.embed_avg.data.mul_(self.decay).add_(embed_sum, alpha=1 - self.decay)
+                n = self.cluster_size.sum()
+                cluster_size = (self.cluster_size + self.eps) / (n + self.n_embed * self.eps) * n
+                embed_normalized = self.embed_avg / cluster_size.unsqueeze(0)
+                self.embed.data.copy_(embed_normalized)
 
             # ── Dead-entry reset ─────────────────────────────────────────
             # Periodically replace codebook entries that have near-zero
             # cluster_size with randomly sampled encoder outputs + noise.
+            # (runs even when EMA update was skipped due to NaN)
             self._fwd_count += 1
-            if self.reset_every > 0 and self._fwd_count % self.reset_every == 0:
+            if torch.isfinite(flatten).all() and self.reset_every > 0 and self._fwd_count % self.reset_every == 0:
                 dead = self.cluster_size < self.reset_threshold  # (n_embed,)
                 n_dead = dead.sum().item()
                 if n_dead > 0:
@@ -375,7 +379,7 @@ class CodeLayer(HelperModule):
                     new_embeds = new_embeds + torch.randn_like(new_embeds) * 0.01
                     self.embed.data[:, dead] = new_embeds
                     self.embed_avg.data[:, dead] = new_embeds
-                    self.cluster_size.data[dead] = self.reset_threshold  # warm-start the EMA count
+                    self.cluster_size.data[dead] = self.reset_threshold
 
         diff = (quantize.detach() - x).pow(2).mean()
         quantize = x + (quantize - x).detach()
@@ -597,10 +601,18 @@ class VQVAE(HelperModule):
         # space where the contrastive loss operates.  Keeps the encoder
         # representation richer by decoupling it from the contrastive
         # objective.  The projection head output is discarded at eval time.
+        #
+        # IMPORTANT: This is a SHARED head for both encoders.  With
+        # --separate-encoders the two encoder stacks have no shared params;
+        # the projection head is the only component that learns a common
+        # mapping, which is essential for cross-modal alignment.
+        #
+        # Uses LayerNorm instead of BatchNorm1d so it works with arbitrary
+        # leading dimensions (patch features, etc.) without reshaping.
         proj_dim = 128
         self.contrastive_proj = nn.Sequential(
             nn.Linear(hidden_channels, proj_dim),
-            nn.BatchNorm1d(proj_dim),
+            nn.LayerNorm(proj_dim),
             nn.ReLU(inplace=True),
             nn.Linear(proj_dim, proj_dim),
         )
@@ -1183,13 +1195,26 @@ class MoCoEncoder(nn.Module):
             self.momentum_encoders_v1 = None
 
         # ---- Per-level queues -----------------------------------------------
-        # All levels pool from hidden_channels (the mask is on encoder output,
-        # not on the codebook projection).
+        # When a contrastive projection head is active, the queue stores
+        # projected features (proj_dim) instead of raw encoder features
+        # (hidden_channels), so queries, keys, and queue all share the
+        # same feature space.
         hidden_channels = self._infer_hidden_channels(raw_vqvae)
+        _proj = getattr(raw_vqvae, "contrastive_proj", None)
+        if _proj is not None:
+            # Infer proj_dim from the last Linear layer in the projection head
+            for m in reversed(list(_proj.modules())):
+                if isinstance(m, nn.Linear):
+                    queue_dim = m.out_features
+                    break
+            else:
+                queue_dim = hidden_channels
+        else:
+            queue_dim = hidden_channels
         self._separate_queues = self.momentum_encoders_v1 is not None
 
         for lvl in range(nb_levels):
-            q = F.normalize(torch.randn(hidden_channels, queue_size), dim=0)
+            q = F.normalize(torch.randn(queue_dim, queue_size), dim=0)
             self.register_buffer(f"queue_{lvl}", q)
 
         # When using separate encoders, maintain per-view queues so that
@@ -1199,7 +1224,7 @@ class MoCoEncoder(nn.Module):
         # cross-view alignment.
         if self._separate_queues:
             for lvl in range(nb_levels):
-                q_v1 = F.normalize(torch.randn(hidden_channels, queue_size), dim=0)
+                q_v1 = F.normalize(torch.randn(queue_dim, queue_size), dim=0)
                 self.register_buffer(f"queue_v1_{lvl}", q_v1)
             self.register_buffer("queue_v1_ptrs", torch.zeros(nb_levels, dtype=torch.long))
 
