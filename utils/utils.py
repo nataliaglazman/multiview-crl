@@ -431,7 +431,7 @@ def load_data(df_filtered, data_dir, label_map):
     return items, missing
 
 
-def transforms(spacing=2.0, crop_margin=0):
+def transforms(spacing=2.0, crop_margin=0, spatial_size=None):
     """
     Create training and validation transforms for brain MRI images.
 
@@ -442,24 +442,29 @@ def transforms(spacing=2.0, crop_margin=0):
         crop_margin: Number of voxels to crop from each edge (all 6 sides).
                      E.g., crop_margin=4 removes 4 voxels from each side,
                      reducing each dimension by 8.
+        spatial_size: Explicit (D, H, W) tuple.  When provided, overrides the
+                      size derived from *spacing* and *crop_margin*.
 
     Returns:
         train_transforms, val_transforms
     """
-    # Calculate spatial size based on spacing
-    # Original 1mm images are approximately 182x218x182
-    if spacing == 1.0:
-        spatial_size = (182, 218, 182)
-    elif spacing == 2.0:
-        spatial_size = (91, 109, 91)
+    if spatial_size is not None:
+        spatial_size = tuple(spatial_size)
     else:
-        # Calculate proportionally from 1mm reference
-        spatial_size = tuple(int(s / spacing) for s in (182, 218, 182))
+        # Calculate spatial size based on spacing
+        # Original 1mm images are approximately 182x218x182
+        if spacing == 1.0:
+            spatial_size = (182, 218, 182)
+        elif spacing == 2.0:
+            spatial_size = (91, 109, 91)
+        else:
+            # Calculate proportionally from 1mm reference
+            spatial_size = tuple(int(s / spacing) for s in (182, 218, 182))
 
-    # Apply cropping: reduce each dimension by 2*crop_margin
-    if crop_margin > 0:
-        spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
-        logging.info(f"Cropping {crop_margin} voxels from each edge")
+        # Apply cropping: reduce each dimension by 2*crop_margin
+        if crop_margin > 0:
+            spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
+            logging.info(f"Cropping {crop_margin} voxels from each edge")
 
     logging.info(f"Using voxel spacing: {spacing}mm, spatial size: {spatial_size}")
 

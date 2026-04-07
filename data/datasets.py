@@ -1248,6 +1248,7 @@ class MyCustomDataset(MultiviewDataset):
         transform=None,
         spacing=2.0,
         crop_margin=0,
+        spatial_size=None,
         cache=False,
         cache_dir: str | None = None,
         labels_path: str | None = None,
@@ -1259,6 +1260,7 @@ class MyCustomDataset(MultiviewDataset):
         self.change_lists = change_lists or []
         self.spacing = spacing
         self.crop_margin = crop_margin
+        self.spatial_size = tuple(spatial_size) if spatial_size is not None else None
 
         # Load CSV and build item list
         if labels_path is None:
@@ -1274,7 +1276,9 @@ class MyCustomDataset(MultiviewDataset):
         # Get MONAI transforms with specified spacing and cropping
         from utils.utils import transforms as get_transforms
 
-        train_transforms, val_transforms = get_transforms(spacing=self.spacing, crop_margin=self.crop_margin)
+        train_transforms, val_transforms = get_transforms(
+            spacing=self.spacing, crop_margin=self.crop_margin, spatial_size=self.spatial_size
+        )
 
         if cache:
             self._build_cache(val_transforms, cache_dir=cache_dir)
@@ -1385,6 +1389,7 @@ class MyCustomDataset(MultiviewDataset):
         h = hashlib.sha256()
         h.update(f"spacing={self.spacing}".encode())
         h.update(f"crop_margin={self.crop_margin}".encode())
+        h.update(f"spatial_size={self.spatial_size}".encode())
         for item in self.items:
             h.update(item["image"].encode())
             h.update(item["z_image"].encode())
@@ -1441,6 +1446,7 @@ class MyCustomDataset(MultiviewDataset):
                 manifest.write_text(
                     f"spacing={self.spacing}\n"
                     f"crop_margin={self.crop_margin}\n"
+                    f"spatial_size={self.spatial_size}\n"
                     f"num_samples={self.num_samples}\n"
                     f"fingerprint={fingerprint}\n"
                 )

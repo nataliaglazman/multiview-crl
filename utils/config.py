@@ -292,6 +292,16 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--image-spacing", type=float, default=2.0, help="Isotropic voxel spacing in mm")
     parser.add_argument("--crop-margin", type=int, default=0, help="Voxels to crop from each edge")
     parser.add_argument(
+        "--spatial-size",
+        type=int,
+        nargs=3,
+        default=None,
+        metavar=("D", "H", "W"),
+        help="Explicit spatial size (D H W) for input volumes after resampling. "
+        "Overrides the size derived from --image-spacing and --crop-margin. "
+        "Example: --spatial-size 80 96 80",
+    )
+    parser.add_argument(
         "--selection",
         type=str,
         default="gumbel_softmax",

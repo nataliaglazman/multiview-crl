@@ -861,6 +861,7 @@ def main(args):
         change_lists=args.change_lists,
         spacing=getattr(args, "image_spacing", 2.0),
         crop_margin=getattr(args, "crop_margin", 0),
+        spatial_size=getattr(args, "spatial_size", None),
         cache=getattr(args, "cache_dataset", False),
         cache_dir=getattr(args, "cache_dir", None),
         **dataset_kwargs,
@@ -885,6 +886,7 @@ def main(args):
             change_lists=args.change_lists,
             spacing=getattr(args, "image_spacing", 2.0),
             crop_margin=getattr(args, "crop_margin", 0),
+            spatial_size=getattr(args, "spatial_size", None),
             **dataset_kwargs,
         )
         val_kwargs = dict(dataloader_kwargs)
@@ -902,6 +904,7 @@ def main(args):
             change_lists=args.change_lists,
             spacing=getattr(args, "image_spacing", 2.0),
             crop_margin=getattr(args, "crop_margin", 0),
+            spatial_size=getattr(args, "spatial_size", None),
             **dataset_kwargs,
         )
     else:
@@ -1003,16 +1006,20 @@ def main(args):
             encoders += [encoder_txt]
 
         # Compute spatial size from spacing/crop settings to match the encoder's output
-        spacing = getattr(args, "image_spacing", 2.0)
-        crop_margin = getattr(args, "crop_margin", 0)
-        if spacing == 1.0:
-            spatial_size = (182, 218, 182)
-        elif spacing == 2.0:
-            spatial_size = (91, 109, 91)
+        _custom_spatial = getattr(args, "spatial_size", None)
+        if _custom_spatial is not None:
+            spatial_size = tuple(_custom_spatial)
         else:
-            spatial_size = tuple(int(s / spacing) for s in (182, 218, 182))
-        if crop_margin > 0:
-            spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
+            spacing = getattr(args, "image_spacing", 2.0)
+            crop_margin = getattr(args, "crop_margin", 0)
+            if spacing == 1.0:
+                spatial_size = (182, 218, 182)
+            elif spacing == 2.0:
+                spatial_size = (91, 109, 91)
+            else:
+                spatial_size = tuple(int(s / spacing) for s in (182, 218, 182))
+            if crop_margin > 0:
+                spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
         decoder = torch.nn.DataParallel(
             vae.Decoder(latent_dim=512, spatial_size=spatial_size), device_ids=device_ids
         ).to(device)
