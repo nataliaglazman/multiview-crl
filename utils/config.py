@@ -90,6 +90,42 @@ def parse_args() -> argparse.ArgumentParser:
     )
     parser.add_argument("--scale-contrastive-loss", type=float, default=1)
     parser.add_argument(
+        "--contrastive-loss-type",
+        type=str,
+        default="infonce",
+        choices=["infonce", "barlow_twins", "vicreg"],
+        help="Contrastive objective: 'infonce' (default, uses negatives — pair with "
+        "--use-moco for small batches), 'barlow_twins' (negative-free, redundancy "
+        "reduction — works well at any batch size), or 'vicreg' (negative-free, "
+        "variance-invariance-covariance — more stable than Barlow Twins at very small "
+        "batch sizes).",
+    )
+    parser.add_argument(
+        "--bt-lambda",
+        type=float,
+        default=0.005,
+        help="Barlow Twins off-diagonal weight (redundancy reduction). "
+        "Only used when --contrastive-loss-type barlow_twins. Default: 0.005.",
+    )
+    parser.add_argument(
+        "--vicreg-sim-coeff",
+        type=float,
+        default=25.0,
+        help="VICReg invariance (MSE) coefficient. Default: 25.0.",
+    )
+    parser.add_argument(
+        "--vicreg-std-coeff",
+        type=float,
+        default=25.0,
+        help="VICReg variance (hinge) coefficient. Default: 25.0.",
+    )
+    parser.add_argument(
+        "--vicreg-cov-coeff",
+        type=float,
+        default=1.0,
+        help="VICReg covariance (decorrelation) coefficient. Default: 1.0.",
+    )
+    parser.add_argument(
         "--encoder-type",
         type=str,
         default="vqvae",
@@ -431,6 +467,15 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             "because the number of style channels varies per forward pass. "
             "Use --mask-mode fixed or learned instead."
         )
+
+    # Warn if MoCo is enabled with a negative-free loss (it'll be ignored)
+    _cl_type = getattr(args, "contrastive_loss_type", "infonce")
+    if _cl_type in ("barlow_twins", "vicreg") and getattr(args, "use_moco", False):
+        logger.warning(
+            f"--use-moco is set but --contrastive-loss-type is '{_cl_type}' which does not "
+            f"use negatives.  MoCo queue and momentum encoder will be disabled."
+        )
+        args.use_moco = False
 
     # --content-size: directly set content channels, override ratio-based defaults
     if getattr(args, "content_size", None) is not None:

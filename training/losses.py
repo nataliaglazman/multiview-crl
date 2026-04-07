@@ -772,6 +772,178 @@ def moco_loss(
     return total_loss
 
 
+# ---------------------------------------------------------------------------
+# Barlow Twins & VICReg — negative-free contrastive objectives
+# ---------------------------------------------------------------------------
+
+
+def barlow_twins_loss(
+    hz,
+    estimated_content_indices=None,
+    subsets=None,
+    soft_content_mask=None,
+    lambd=0.005,
+    **_kwargs,
+):
+    """Barlow Twins loss over content channels of paired views.
+
+    Computes the cross-correlation matrix between the two views' content
+    embeddings (batch-normalised) and pushes it toward the identity matrix.
+
+    Args:
+        hz: Encoder features, shape ``(n_views, B, C)``.
+        estimated_content_indices: Per-subset content channel indices.
+        subsets: View subsets (same length as *estimated_content_indices*).
+        soft_content_mask: Optional differentiable ``(1, C)`` mask.
+        lambd: Weight on the off-diagonal (redundancy-reduction) term.
+
+    Returns:
+        Scalar loss with ``._contrastive_diag`` attached.
+    """
+    if subsets is None or estimated_content_indices is None:
+        subsets = [list(range(hz.shape[0]))]
+        estimated_content_indices = [list(range(hz.shape[-1]))]
+
+    total_loss = torch.zeros(1, device=hz.device, dtype=hz.dtype)
+    sub_diags = []
+
+    for content_indices, subset in zip(estimated_content_indices, subsets):
+        hz_sub = hz[list(subset)]  # (n_views_sub, B, C)
+        n_view = hz_sub.shape[0]
+
+        for i in range(n_view):
+            for j in range(i + 1, n_view):
+                # Select content features
+                if soft_content_mask is not None:
+                    z_i = hz_sub[i] * soft_content_mask  # (B, C)
+                    z_j = hz_sub[j] * soft_content_mask
+                else:
+                    z_i = hz_sub[i][:, content_indices]  # (B, d)
+                    z_j = hz_sub[j][:, content_indices]
+
+                B, d = z_i.shape
+
+                # Batch-normalise (zero mean, unit std per dimension)
+                z_i = (z_i - z_i.mean(dim=0)) / (z_i.std(dim=0) + 1e-6)
+                z_j = (z_j - z_j.mean(dim=0)) / (z_j.std(dim=0) + 1e-6)
+
+                # Cross-correlation matrix  (d, d)
+                c = (z_i.T @ z_j) / B
+
+                # Loss: push diagonal toward 1, off-diagonal toward 0
+                on_diag = (c.diagonal() - 1).pow(2).sum()
+                off_diag = c.pow(2).sum() - c.diagonal().pow(2).sum()
+                loss = on_diag + lambd * off_diag
+                total_loss = total_loss + loss
+
+                with torch.no_grad():
+                    sub_diags.append(
+                        {
+                            "top1_acc": 0.0,  # not applicable for BT
+                            "pos_sim_mean": c.diagonal().mean().item(),
+                            "pos_sim_std": c.diagonal().std().item(),
+                            "neg_sim_mean": (c.sum() - c.diagonal().sum()).item() / max(d * d - d, 1),
+                            "neg_sim_std": 0.0,
+                            "on_diag_loss": on_diag.item(),
+                            "off_diag_loss": off_diag.item(),
+                        }
+                    )
+
+    if sub_diags:
+        total_loss._contrastive_diag = _merge_diags(sub_diags)
+    return total_loss
+
+
+def vicreg_loss(
+    hz,
+    estimated_content_indices=None,
+    subsets=None,
+    soft_content_mask=None,
+    sim_coeff=25.0,
+    std_coeff=25.0,
+    cov_coeff=1.0,
+    **_kwargs,
+):
+    """VICReg (Variance-Invariance-Covariance) loss over content channels.
+
+    More stable than Barlow Twins at very small batch sizes because it
+    explicitly enforces per-dimension variance via a hinge loss rather
+    than relying on correlation normalisation.
+
+    Args:
+        hz: Encoder features, shape ``(n_views, B, C)``.
+        estimated_content_indices: Per-subset content channel indices.
+        subsets: View subsets.
+        soft_content_mask: Optional differentiable mask.
+        sim_coeff: Weight on the invariance (MSE) term.
+        std_coeff: Weight on the variance (hinge) term.
+        cov_coeff: Weight on the covariance (decorrelation) term.
+
+    Returns:
+        Scalar loss with ``._contrastive_diag`` attached.
+    """
+    if subsets is None or estimated_content_indices is None:
+        subsets = [list(range(hz.shape[0]))]
+        estimated_content_indices = [list(range(hz.shape[-1]))]
+
+    total_loss = torch.zeros(1, device=hz.device, dtype=hz.dtype)
+    sub_diags = []
+
+    for content_indices, subset in zip(estimated_content_indices, subsets):
+        hz_sub = hz[list(subset)]
+        n_view = hz_sub.shape[0]
+
+        for i in range(n_view):
+            for j in range(i + 1, n_view):
+                if soft_content_mask is not None:
+                    z_i = hz_sub[i] * soft_content_mask
+                    z_j = hz_sub[j] * soft_content_mask
+                else:
+                    z_i = hz_sub[i][:, content_indices]
+                    z_j = hz_sub[j][:, content_indices]
+
+                B, d = z_i.shape
+
+                # --- Invariance: MSE between paired views ---
+                sim_loss = F.mse_loss(z_i, z_j)
+
+                # --- Variance: hinge loss to keep std above 1 ---
+                std_i = z_i.std(dim=0)
+                std_j = z_j.std(dim=0)
+                var_loss = F.relu(1.0 - std_i).mean() + F.relu(1.0 - std_j).mean()
+
+                # --- Covariance: decorrelate dimensions ---
+                z_i_c = z_i - z_i.mean(dim=0)
+                z_j_c = z_j - z_j.mean(dim=0)
+                cov_i = (z_i_c.T @ z_i_c) / max(B - 1, 1)
+                cov_j = (z_j_c.T @ z_j_c) / max(B - 1, 1)
+                # Zero out diagonal (we only penalise off-diagonal)
+                cov_i.fill_diagonal_(0)
+                cov_j.fill_diagonal_(0)
+                cov_loss = (cov_i.pow(2).sum() + cov_j.pow(2).sum()) / d
+
+                loss = sim_coeff * sim_loss + std_coeff * var_loss + cov_coeff * cov_loss
+                total_loss = total_loss + loss
+
+                with torch.no_grad():
+                    sub_diags.append(
+                        {
+                            "top1_acc": 0.0,
+                            "pos_sim_mean": F.cosine_similarity(z_i, z_j, dim=-1).mean().item(),
+                            "pos_sim_std": F.cosine_similarity(z_i, z_j, dim=-1).std().item(),
+                            "neg_sim_mean": 0.0,
+                            "neg_sim_std": 0.0,
+                            "sim_loss": sim_loss.item(),
+                            "var_loss": var_loss.item(),
+                            "cov_loss": cov_loss.item(),
+                        }
+                    )
+
+    if sub_diags:
+        total_loss._contrastive_diag = _merge_diags(sub_diags)
+    return total_loss
+
+
 class BaurLoss(object):
     def __init__(self, lambda_reconstruction=1):
         super().__init__()

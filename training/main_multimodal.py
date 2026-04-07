@@ -44,7 +44,7 @@ import models.vqvae as vqvae
 import utils.utils as utils
 from data.infinite_iterator import InfiniteIterator
 from eval.evaluation import eval_step, get_data
-from losses import BaselineLoss, infonce_loss, moco_loss, patch_infonce_loss
+from losses import BaselineLoss, barlow_twins_loss, infonce_loss, moco_loss, patch_infonce_loss, vicreg_loss
 from models.encoders import TextEncoder2D
 from utils.checkpointing import (
     load_checkpoint,
@@ -78,6 +78,7 @@ def train_step(
     moco_loss_func=None,
     step=0,
     force_compute_recon=None,
+    patch_loss_func=None,
 ):
     """
     Perform a single forward + (optionally) backward pass.
@@ -785,31 +786,69 @@ def main(args):
     criterion = torch.nn.CrossEntropyLoss()
 
     _cross_view_negs = getattr(args, "cross_view_negs_only", False)
+    _contrastive_type = getattr(args, "contrastive_loss_type", "infonce")
 
-    def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
-        return infonce_loss(
-            z_rec_tuple,
-            sim_metric=sim_metric,
-            criterion=criterion,
-            tau=args.tau,
-            projector=(lambda x: x),
-            estimated_content_indices=estimated_content_indices,
-            subsets=subsets,
-            soft_content_mask=soft_content_mask,
-            cross_view_negs_only=_cross_view_negs,
-        )
+    if _contrastive_type == "barlow_twins":
+        _bt_lambda = getattr(args, "bt_lambda", 0.005)
+        logger.info(f"[LOSS] Barlow Twins (λ={_bt_lambda})")
 
-    def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
-        return patch_infonce_loss(
-            z_rec_tuple,
-            sim_metric=sim_metric,
-            criterion=criterion,
-            tau=args.tau,
-            estimated_content_indices=estimated_content_indices,
-            subsets=subsets,
-            soft_content_mask=soft_content_mask,
-            cross_view_negs_only=_cross_view_negs,
-        )
+        def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+            return barlow_twins_loss(
+                z_rec_tuple,
+                estimated_content_indices=estimated_content_indices,
+                subsets=subsets,
+                soft_content_mask=soft_content_mask,
+                lambd=_bt_lambda,
+            )
+
+        patch_loss_func = loss_func  # BT works identically on pooled or patch features
+
+    elif _contrastive_type == "vicreg":
+        _sim_c = getattr(args, "vicreg_sim_coeff", 25.0)
+        _std_c = getattr(args, "vicreg_std_coeff", 25.0)
+        _cov_c = getattr(args, "vicreg_cov_coeff", 1.0)
+        logger.info(f"[LOSS] VICReg (sim={_sim_c}, std={_std_c}, cov={_cov_c})")
+
+        def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+            return vicreg_loss(
+                z_rec_tuple,
+                estimated_content_indices=estimated_content_indices,
+                subsets=subsets,
+                soft_content_mask=soft_content_mask,
+                sim_coeff=_sim_c,
+                std_coeff=_std_c,
+                cov_coeff=_cov_c,
+            )
+
+        patch_loss_func = loss_func
+
+    else:
+        logger.info("[LOSS] InfoNCE")
+
+        def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+            return infonce_loss(
+                z_rec_tuple,
+                sim_metric=sim_metric,
+                criterion=criterion,
+                tau=args.tau,
+                projector=(lambda x: x),
+                estimated_content_indices=estimated_content_indices,
+                subsets=subsets,
+                soft_content_mask=soft_content_mask,
+                cross_view_negs_only=_cross_view_negs,
+            )
+
+        def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+            return patch_infonce_loss(
+                z_rec_tuple,
+                sim_metric=sim_metric,
+                criterion=criterion,
+                tau=args.tau,
+                estimated_content_indices=estimated_content_indices,
+                subsets=subsets,
+                soft_content_mask=soft_content_mask,
+                cross_view_negs_only=_cross_view_negs,
+            )
 
     def moco_loss_func(q, k, queue, estimated_content_indices, subsets, soft_content_mask=None, queue_v1=None):
         return moco_loss(
@@ -1227,6 +1266,7 @@ def main(args):
                             moco_loss_func=moco_loss_func,
                             step=step,
                             force_compute_recon=_window_compute_recon,
+                            patch_loss_func=patch_loss_func,
                         )
                         accum_total += total_loss / accum_steps
                         accum_contrastive += contrastive_loss / accum_steps
