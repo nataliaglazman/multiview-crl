@@ -791,7 +791,9 @@ def barlow_twins_loss(
     embeddings (batch-normalised) and pushes it toward the identity matrix.
 
     Args:
-        hz: Encoder features, shape ``(n_views, B, C)``.
+        hz: Encoder features, shape ``(n_views, B, C)`` or
+            ``(n_views, B, C, P)`` for patch mode (P patches are folded
+            into the batch dimension).
         estimated_content_indices: Per-subset content channel indices.
         subsets: View subsets (same length as *estimated_content_indices*).
         soft_content_mask: Optional differentiable ``(1, C)`` mask.
@@ -800,6 +802,10 @@ def barlow_twins_loss(
     Returns:
         Scalar loss with ``._contrastive_diag`` attached.
     """
+    # Patch mode: fold patches into batch  (n_views, B, C, P) → (n_views, B*P, C)
+    if hz.ndim == 4:
+        hz = hz.permute(0, 1, 3, 2).reshape(hz.shape[0], -1, hz.shape[2])
+
     if subsets is None or estimated_content_indices is None:
         subsets = [list(range(hz.shape[0]))]
         estimated_content_indices = [list(range(hz.shape[-1]))]
@@ -871,7 +877,8 @@ def vicreg_loss(
     than relying on correlation normalisation.
 
     Args:
-        hz: Encoder features, shape ``(n_views, B, C)``.
+        hz: Encoder features, shape ``(n_views, B, C)`` or
+            ``(n_views, B, C, P)`` for patch mode.
         estimated_content_indices: Per-subset content channel indices.
         subsets: View subsets.
         soft_content_mask: Optional differentiable mask.
@@ -882,6 +889,10 @@ def vicreg_loss(
     Returns:
         Scalar loss with ``._contrastive_diag`` attached.
     """
+    # Patch mode: fold patches into batch  (n_views, B, C, P) → (n_views, B*P, C)
+    if hz.ndim == 4:
+        hz = hz.permute(0, 1, 3, 2).reshape(hz.shape[0], -1, hz.shape[2])
+
     if subsets is None or estimated_content_indices is None:
         subsets = [list(range(hz.shape[0]))]
         estimated_content_indices = [list(range(hz.shape[-1]))]

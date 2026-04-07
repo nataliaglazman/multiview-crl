@@ -450,6 +450,12 @@ def transforms(spacing=2.0, crop_margin=0, spatial_size=None):
     """
     if spatial_size is not None:
         spatial_size = tuple(spatial_size)
+        if crop_margin > 0:
+            logging.warning(
+                f"--spatial-size {spatial_size} is set — --crop-margin {crop_margin} "
+                f"will be applied on top (reducing each dim by {2 * crop_margin})."
+            )
+            spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
     else:
         # Calculate spatial size based on spacing
         # Original 1mm images are approximately 182x218x182

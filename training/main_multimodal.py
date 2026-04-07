@@ -1044,13 +1044,16 @@ def main(args):
             encoder_txt = torch.nn.DataParallel(encoder_txt, device_ids=device_ids).to(device)
             encoders += [encoder_txt]
 
-        # Compute spatial size from spacing/crop settings to match the encoder's output
+        # Compute spatial size from spacing/crop settings to match the encoder's output.
+        # Must mirror the logic in utils.utils.transforms() exactly.
         _custom_spatial = getattr(args, "spatial_size", None)
+        crop_margin = getattr(args, "crop_margin", 0)
         if _custom_spatial is not None:
             spatial_size = tuple(_custom_spatial)
+            if crop_margin > 0:
+                spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
         else:
             spacing = getattr(args, "image_spacing", 2.0)
-            crop_margin = getattr(args, "crop_margin", 0)
             if spacing == 1.0:
                 spatial_size = (182, 218, 182)
             elif spacing == 2.0:
@@ -1321,13 +1324,35 @@ def main(args):
 
                     _acc_str = ""
                     if step_moco_diag:
-                        _acc_parts = []
-                        for _li in range(args.vqvae_nb_levels):
-                            _ak = f"Contrastive/top1_acc_L{_li}"
-                            if _ak in step_moco_diag:
-                                _acc_parts.append(f"L{_li}={step_moco_diag[_ak]:.1%}")
-                        if _acc_parts:
-                            _acc_str = f" | Top1Acc: {', '.join(_acc_parts)}"
+                        if _contrastive_type == "barlow_twins":
+                            # Show on/off-diagonal loss per level
+                            _bt_parts = []
+                            for _li in range(args.vqvae_nb_levels):
+                                _on = step_moco_diag.get(f"Contrastive/on_diag_loss_L{_li}", None)
+                                _off = step_moco_diag.get(f"Contrastive/off_diag_loss_L{_li}", None)
+                                if _on is not None:
+                                    _bt_parts.append(f"L{_li}: on={_on:.3f} off={_off:.3f}")
+                            if _bt_parts:
+                                _acc_str = f" | BT({', '.join(_bt_parts)})"
+                        elif _contrastive_type == "vicreg":
+                            # Show sim/var/cov loss per level
+                            _vr_parts = []
+                            for _li in range(args.vqvae_nb_levels):
+                                _sim = step_moco_diag.get(f"Contrastive/sim_loss_L{_li}", None)
+                                _var = step_moco_diag.get(f"Contrastive/var_loss_L{_li}", None)
+                                _cov = step_moco_diag.get(f"Contrastive/cov_loss_L{_li}", None)
+                                if _sim is not None:
+                                    _vr_parts.append(f"L{_li}: sim={_sim:.3f} var={_var:.3f} cov={_cov:.3f}")
+                            if _vr_parts:
+                                _acc_str = f" | VICReg({', '.join(_vr_parts)})"
+                        else:
+                            _acc_parts = []
+                            for _li in range(args.vqvae_nb_levels):
+                                _ak = f"Contrastive/top1_acc_L{_li}"
+                                if _ak in step_moco_diag:
+                                    _acc_parts.append(f"L{_li}={step_moco_diag[_ak]:.1%}")
+                            if _acc_parts:
+                                _acc_str = f" | Top1Acc: {', '.join(_acc_parts)}"
                     _cb_parts = []
                     for _cb_lvl, _cb in enumerate(_raw.codebooks):
                         _alive = (_cb.cluster_size > 1.0).sum().item()
