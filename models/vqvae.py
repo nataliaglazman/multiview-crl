@@ -546,6 +546,24 @@ class VQVAE(HelperModule):
                     )
                 else:
                     self.channel_logits_v1 = None
+            elif mask_mode == "learned_split":
+                # Per-channel sigmoid gates: each channel independently learns
+                # whether it is content (gate → 1) or style (gate → 0).
+                # Unlike top-k Gumbel, the NUMBER of content channels is not
+                # fixed — it emerges from training.
+                #
+                # Initialization: bias the first k channels toward content
+                # (logit = +2 → sigmoid ≈ 0.88) and the rest toward style
+                # (logit = -2 → sigmoid ≈ 0.12).  This gives a stable starting
+                # point near the configured content ratio.
+                self.split_gate_logits = nn.ParameterDict()
+                for lvl in self.content_style_levels:
+                    k_init = self.content_channels_per_level[lvl]
+                    init_logits = torch.full((hidden_channels,), -2.0)
+                    init_logits[:k_init] = 2.0
+                    self.split_gate_logits[str(lvl)] = nn.Parameter(init_logits)
+                self.channel_logits = nn.ParameterDict()  # empty (not used)
+                self.channel_logits_v1 = None
             elif mask_mode == "fixed":
                 # Fixed channel assignment: first content_channels are content,
                 # the rest are style.  No learnable mask parameters — the
@@ -574,6 +592,7 @@ class VQVAE(HelperModule):
             self.channel_logits_v1 = None
 
         has_any_mask = self.content_channels is not None and len(self.content_channels_per_level) > 0
+        self.learned_split = mask_mode == "learned_split"
 
         # --- Style codebooks (Option A: fully independent, no cross-level conditioning) ---
         self.quantize_style = quantize_style and has_any_mask and inject_style_to_decoder
@@ -596,12 +615,6 @@ class VQVAE(HelperModule):
             self.style_embed_dim = None
             self.style_codebooks = nn.ModuleDict()
 
-        # --- Contrastive projection head ---
-        # MoCo v2 / SimCLR-style: projects pooled encoder features into a
-        # space where the contrastive loss operates.  Keeps the encoder
-        # representation richer by decoupling it from the contrastive
-        # objective.  The projection head output is discarded at eval time.
-        #
         # Optional style injection: style channels from each masked level's
         # encoder output are fed into the corresponding decoder.
         # style_channels_per_level: level → int (complement of content_channels).
@@ -622,9 +635,12 @@ class VQVAE(HelperModule):
         # and whether it has decoder conditioning (+embed_dim) from above.
         self.codebooks = nn.ModuleList()
         for lvl in range(nb_levels):
-            if has_any_mask and lvl in self.content_channels_per_level:
+            if has_any_mask and lvl in self.content_channels_per_level and not self.learned_split:
+                # Fixed content_channels for top-k modes (learned/onthefly/fixed)
                 enc_ch = self.content_channels_per_level[lvl]
             else:
+                # Full hidden_channels: either no mask, or learned_split mode
+                # where the effective channel count varies at runtime.
                 enc_ch = hidden_channels
 
             if lvl == nb_levels - 1:
@@ -811,10 +827,22 @@ class VQVAE(HelperModule):
                 return (mask_v0, mask_v1)
 
             else:
-                # --- Shared mask (fixed / on-the-fly / single learned) ---
+                # --- Shared mask (fixed / on-the-fly / single learned / learned_split) ---
                 _mode = getattr(self, "mask_mode", "onthefly")
 
-                if _mode == "fixed":
+                if _mode == "learned_split":
+                    # Per-channel sigmoid gates: each channel independently
+                    # learns content (→1) vs style (→0).  The total number of
+                    # content channels is NOT fixed — it emerges from training.
+                    gate_logits = self.split_gate_logits[str(lvl)].unsqueeze(0)  # (1, C)
+                    gate_probs = torch.sigmoid(gate_logits)
+                    if self.training:
+                        # Straight-through hard sigmoid: binary forward, soft backward
+                        hard_gate = (gate_probs > 0.5).float()
+                        soft_mask = hard_gate - gate_probs.detach() + gate_probs
+                    else:
+                        soft_mask = (gate_probs > 0.5).float()
+                elif _mode == "fixed":
                     # Deterministic: first k channels = content, rest = style.
                     # No Gumbel noise, no learnable params.
                     soft_mask = getattr(self, f"fixed_mask_{lvl}").to(enc_out_lvl.device)
@@ -832,7 +860,7 @@ class VQVAE(HelperModule):
                     else:
                         logits = self.channel_logits[str(lvl)].unsqueeze(0)  # (1, C)
 
-                if _mode != "fixed":
+                if _mode not in ("fixed", "learned_split"):
                     if self.training:
                         soft_mask = utils.topk_gumbel_softmax(
                             k=k_lvl,
@@ -858,7 +886,12 @@ class VQVAE(HelperModule):
                     style_spatials[lvl] = enc_out_lvl[:, style_idx, :, :, :]
 
                 masked = enc_out_lvl * soft_mask.view(1, -1, 1, 1, 1)
-                content_enc_outs[lvl] = masked[:, content_idx, :, :, :]
+                if self.learned_split:
+                    # Keep full hidden_channels (style channels zeroed out) —
+                    # codebook conv_in expects hidden_channels for this mode.
+                    content_enc_outs[lvl] = masked
+                else:
+                    content_enc_outs[lvl] = masked[:, content_idx, :, :, :]
                 del masked
                 return soft_mask
 
@@ -1105,9 +1138,17 @@ class VQVAE(HelperModule):
             if decoder.style_channels > 0:
                 lvl_style = styles.get(l, None)
                 if lvl_style is None:
-                    # Provide a zero placeholder so the decoder's final_conv
-                    # receives the expected number of channels.
-                    dec_feat = decoder.layers(decoder_in)
+                    # Provide a zero placeholder so the decoder receives the
+                    # expected style tensor.  Run through the layers to infer
+                    # the spatial size at the point where style is consumed.
+                    if decoder.film_layers is not None:
+                        # FiLM mode: iterate through ModuleList like forward()
+                        dec_feat = decoder.layers[0](decoder_in)
+                        dec_feat = decoder.layers[1](dec_feat)
+                        for upsample in decoder.layers[2:]:
+                            dec_feat = upsample(dec_feat)
+                    else:
+                        dec_feat = decoder.layers(decoder_in)
                     lvl_style = torch.zeros(
                         dec_feat.shape[0],
                         decoder.style_channels,

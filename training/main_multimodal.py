@@ -1254,6 +1254,27 @@ def main(args):
                             bot_mean = sorted_logits[k_lvl:].mean().item()
                             tb_writer.add_scalar(f"Mask/TopBotGap_L{lvl_key}", top_mean - bot_mean, step)
 
+                    # Log learned_split gate diagnostics (effective content size)
+                    if hasattr(_raw, "split_gate_logits"):
+                        for lvl_key, gate_param in _raw.split_gate_logits.items():
+                            gate_probs = torch.sigmoid(gate_param.detach())
+                            n_content = (gate_probs > 0.5).sum().item()
+                            n_total = gate_param.numel()
+                            tb_writer.add_scalar(f"Split/ContentSize_L{lvl_key}", n_content, step)
+                            tb_writer.add_scalar(f"Split/ContentRatio_L{lvl_key}", n_content / n_total, step)
+                            # Mean gate probability (how confident the gates are)
+                            tb_writer.add_scalar(f"Split/GateMean_L{lvl_key}", gate_probs.mean().item(), step)
+                            # Gate entropy: low = confident split, high = uncertain
+                            gate_ent = (
+                                -(
+                                    gate_probs * gate_probs.clamp(min=1e-7).log()
+                                    + (1 - gate_probs) * (1 - gate_probs).clamp(min=1e-7).log()
+                                )
+                                .mean()
+                                .item()
+                            )
+                            tb_writer.add_scalar(f"Split/GateEntropy_L{lvl_key}", gate_ent, step)
+
                     # Log codebook utilization per level
                     for _cb_lvl, _cb in enumerate(_raw.codebooks):
                         _alive = (_cb.cluster_size > 1.0).sum().item()

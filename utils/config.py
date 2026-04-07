@@ -135,13 +135,17 @@ def parse_args() -> argparse.ArgumentParser:
         "--mask-mode",
         type=str,
         default="onthefly",
-        choices=["learned", "onthefly", "fixed"],
+        choices=["learned", "onthefly", "fixed", "learned_split"],
         help="How the content/style Gumbel mask logits are determined. "
         "'learned': learnable nn.Parameter per level (and per view when --separate-encoders is set). "
         "'onthefly': mask logits computed on-the-fly from average encoder activations, "
         "shared across views (matches the original multiview-crl repo). "
         "'fixed': first K channels are content, rest are style — no learning, no Gumbel noise. "
-        "Eliminates mask instability and MoCo queue inconsistency. Default: onthefly.",
+        "Eliminates mask instability and MoCo queue inconsistency. "
+        "'learned_split': per-channel sigmoid gates that learn which channels are content vs "
+        "style AND how many. The content/style split size is not fixed — it emerges from "
+        "training. Initialized near the ratio from --content-dim/--total-dim. "
+        "Default: onthefly.",
     )
     parser.add_argument(
         "--quantize-style",
@@ -389,6 +393,15 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
 
     logger = logging.getLogger("multiview_crl")
     logger.info(f"Configuring dataset: {args.dataset_name}")
+
+    # --mask-mode learned_split is incompatible with --inject-style-to-decoder
+    # because the number of style channels varies per forward pass.
+    if getattr(args, "mask_mode", "onthefly") == "learned_split" and getattr(args, "inject_style_to_decoder", False):
+        raise ValueError(
+            "--mask-mode learned_split is incompatible with --inject-style-to-decoder "
+            "because the number of style channels varies per forward pass. "
+            "Use --mask-mode fixed or learned instead."
+        )
 
     # --content-size: directly set content channels, override ratio-based defaults
     if getattr(args, "content_size", None) is not None:
