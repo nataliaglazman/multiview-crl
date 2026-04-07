@@ -185,6 +185,76 @@ def _state_dicts_compatible(model: torch.nn.Module, saved_state_dict: dict) -> b
     return True
 
 
+def _try_load_state_dict(
+    model: torch.nn.Module,
+    saved_state_dict: dict,
+    label: str = "model",
+) -> bool:
+    """
+    Load *saved_state_dict* into *model*, tolerating minor differences.
+
+    Strategy:
+    1. If keys & shapes match exactly → ``strict=True`` load.
+    2. Otherwise, load only the parameters whose keys exist in both the model
+       and the checkpoint **and** whose shapes match.  Missing and unexpected
+       keys are logged as warnings, and shape-mismatched keys are skipped.
+
+    Returns ``True`` if at least some weights were loaded, ``False`` if nothing
+    could be loaded (e.g. zero overlapping keys).
+    """
+    if _state_dicts_compatible(model, saved_state_dict):
+        model.load_state_dict(saved_state_dict, strict=True)
+        return True
+
+    model_sd = model.state_dict()
+    saved_keys = set(saved_state_dict.keys())
+    model_keys = set(model_sd.keys())
+
+    missing_from_ckpt = model_keys - saved_keys
+    unexpected_in_ckpt = saved_keys - model_keys
+    shared_keys = model_keys & saved_keys
+
+    shape_mismatched = []
+    loadable = {}
+    for key in shared_keys:
+        if model_sd[key].shape == saved_state_dict[key].shape:
+            loadable[key] = saved_state_dict[key]
+        else:
+            shape_mismatched.append(
+                f"    {key}: checkpoint {tuple(saved_state_dict[key].shape)} " f"vs model {tuple(model_sd[key].shape)}"
+            )
+
+    if not loadable:
+        logger.warning(f"  [{label}] No compatible weights found in checkpoint — cannot resume.")
+        return False
+
+    # Report differences
+    n_total = len(model_sd)
+    n_loaded = len(loadable)
+    if missing_from_ckpt or unexpected_in_ckpt or shape_mismatched:
+        logger.warning(
+            f"  [{label}] Architecture partially changed — loading {n_loaded}/{n_total} " f"compatible parameters."
+        )
+        if missing_from_ckpt:
+            logger.warning(
+                f"  [{label}] {len(missing_from_ckpt)} new parameter(s) not in checkpoint "
+                f"(will use random init):\n" + "\n".join(f"    {k}" for k in sorted(missing_from_ckpt))
+            )
+        if unexpected_in_ckpt:
+            logger.warning(
+                f"  [{label}] {len(unexpected_in_ckpt)} checkpoint parameter(s) no longer "
+                f"in model (ignored):\n" + "\n".join(f"    {k}" for k in sorted(unexpected_in_ckpt))
+            )
+        if shape_mismatched:
+            logger.warning(
+                f"  [{label}] {len(shape_mismatched)} parameter(s) with shape mismatch "
+                f"(skipped):\n" + "\n".join(shape_mismatched)
+            )
+
+    model.load_state_dict(loadable, strict=False)
+    return True
+
+
 def load_checkpoint(
     args,
     encoders: list,
@@ -229,16 +299,20 @@ def load_checkpoint(
 
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-        if not _state_dicts_compatible(encoders[0], checkpoint["encoders"]):
+        if not _try_load_state_dict(encoders[0], checkpoint["encoders"], label="VQ-VAE"):
             logger.warning(
-                "  VQ-VAE checkpoint found but model architecture does not match "
+                "  VQ-VAE checkpoint found but model architecture is completely incompatible "
                 f"(checkpoint: {checkpoint_path}). Starting fresh training."
             )
             return 1
 
         logger.info(f"  Auto-resuming VQ-VAE training from checkpoint: {checkpoint_path}")
-        encoders[0].load_state_dict(checkpoint["encoders"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        # Try to restore optimizer state; skip if it doesn't match (e.g.
+        # param count changed) — the optimizer will reinitialize cleanly.
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        except (ValueError, KeyError) as exc:
+            logger.warning(f"  Optimizer state could not be restored ({exc}); using fresh optimizer.")
         step = checkpoint["step"] + 1
 
         if scheduler is not None:
@@ -314,27 +388,31 @@ def load_checkpoint(
 
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-        # Verify all encoders and the decoder are compatible before loading anything.
+        # Try to load all encoders and the decoder, tolerating minor differences.
+        any_failed = False
         for m_idx, m in enumerate(args.modalities):
             key = f"encoder_{m}"
-            if key not in checkpoint or not _state_dicts_compatible(encoders[m_idx], checkpoint[key]):
+            if key not in checkpoint:
+                logger.warning(f"  VAE checkpoint has no entry for encoder '{m}' — starting fresh training.")
+                any_failed = True
+                break
+            if not _try_load_state_dict(encoders[m_idx], checkpoint[key], label=f"encoder-{m}"):
                 logger.warning(
-                    f"  VAE checkpoint found but encoder '{m}' architecture does not match "
-                    f"(checkpoint: {checkpoint_path}). Starting fresh training."
+                    f"  VAE encoder '{m}' is completely incompatible with checkpoint — " f"starting fresh training."
                 )
-                return 1
-        if not _state_dicts_compatible(decoders[0], checkpoint["decoder"]):
-            logger.warning(
-                "  VAE checkpoint found but decoder architecture does not match "
-                f"(checkpoint: {checkpoint_path}). Starting fresh training."
-            )
+                any_failed = True
+                break
+        if not any_failed and not _try_load_state_dict(decoders[0], checkpoint["decoder"], label="decoder"):
+            logger.warning("  VAE decoder is completely incompatible with checkpoint — " f"starting fresh training.")
+            any_failed = True
+        if any_failed:
             return 1
 
         logger.info(f"  Auto-resuming VAE training from checkpoint: {checkpoint_path}")
-        for m_idx, m in enumerate(args.modalities):
-            encoders[m_idx].load_state_dict(checkpoint[f"encoder_{m}"])
-        decoders[0].load_state_dict(checkpoint["decoder"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        except (ValueError, KeyError) as exc:
+            logger.warning(f"  Optimizer state could not be restored ({exc}); using fresh optimizer.")
         step = checkpoint["step"] + 1
 
         if scheduler is not None:
