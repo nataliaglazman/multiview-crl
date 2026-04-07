@@ -895,6 +895,12 @@ class VQVAE(HelperModule):
                 del masked
                 return soft_mask
 
+        # Remember input spatial dims so the decoder output can be resized to
+        # match.  Necessary because strided conv → transposed conv round-trips
+        # are not size-preserving when input dims aren't divisible by the total
+        # downscale factor (e.g. 91 → 46 → 23 → 12 → 24 → 48 → 96 ≠ 91).
+        _input_spatial = x.shape[2:]
+
         # Encoder forward pass
         if self.separate_encoders and self.encoders_v1 is not None and n_views == 2:
             # View-specific encoders: split batch, encode through separate stacks,
@@ -1064,6 +1070,9 @@ class VQVAE(HelperModule):
 
         if return_recon:
             final_output = decoder_outputs[-1]
+            # Resize to match input spatial dims when they differ (see note above).
+            if final_output.shape[2:] != _input_spatial:
+                final_output = F.interpolate(final_output, size=_input_spatial, mode="trilinear", align_corners=False)
         else:
             final_output = None
             decoder_outputs = []
@@ -1081,7 +1090,7 @@ class VQVAE(HelperModule):
             style_id_outputs,
         )
 
-    def decode_codes(self, *cs, style=None, styles=None, style_codes=None):
+    def decode_codes(self, *cs, style=None, styles=None, style_codes=None, target_spatial_size=None):
         """Decode from discrete codes back to the input space.
 
         Args:
@@ -1095,6 +1104,10 @@ class VQVAE(HelperModule):
                          (LongTensor).  Only used when ``quantize_style`` is active.
                          Decoded through the style codebook and passed to the decoder.
                          Takes precedence over ``styles`` for levels that have entries.
+            target_spatial_size: Optional tuple (D, H, W) to resize the output to.
+                                 When provided, the decoder output is trilinearly
+                                 interpolated to this size (handles the stride
+                                 round-trip mismatch).
         """
         if styles is None:
             styles = {}
@@ -1163,7 +1176,10 @@ class VQVAE(HelperModule):
             code_outputs.append(code_q)
             upscale_counts.append(0)
 
-        return decoder_outputs[-1]
+        out = decoder_outputs[-1]
+        if target_spatial_size is not None and out.shape[2:] != target_spatial_size:
+            out = F.interpolate(out, size=target_spatial_size, mode="trilinear", align_corners=False)
+        return out
 
 
 class MoCoEncoder(nn.Module):

@@ -151,8 +151,15 @@ def train_step(
                 patch_grid=_patch_grid,
             )
 
-            # Compute momentum-encoder key embeddings BEFORE deleting images
+            # Compute momentum-encoder key embeddings BEFORE deleting images.
+            # During mask warmup, disable MoCo so in-batch InfoNCE is used
+            # instead — this lets the learned mask stabilise before stale
+            # queue negatives can corrupt the contrastive signal.
             use_moco = getattr(args, "use_moco", False)
+            _mask_warmup_steps = getattr(args, "mask_warmup_steps", 0)
+            _in_mask_warmup = _mask_warmup_steps > 0 and step <= _mask_warmup_steps
+            if _in_mask_warmup:
+                use_moco = False
             if use_moco:
                 from models.vqvae import MoCoEncoder
 
@@ -165,6 +172,9 @@ def train_step(
             _recon_start = getattr(args, "recon_loss_start_step", 0)
             _recon_active = step >= _recon_start or getattr(args, "_resumed_past_recon_start", False)
             if compute_recon and recon is not None and _recon_active:
+                # Safety net: the model now interpolates internally, but guard
+                # against size mismatch in case decode_codes or an older
+                # checkpoint path bypasses it.
                 if recon.shape[2:] != input_shape:
                     recon = F.interpolate(recon, size=input_shape, mode="trilinear", align_corners=False)
                 recon_loss = (
@@ -580,7 +590,10 @@ def train_step(
 
         # MoCo momentum update: must happen AFTER optimizer.step() so the
         # momentum encoder trails the online encoder by one step.
-        if use_moco and accumulation_step == total_accumulation_steps - 1:
+        # During mask warmup, we still update the momentum encoder (even
+        # though the queue is disabled) so it's warmed up when MoCo begins.
+        _moco_requested = getattr(args, "use_moco", False)
+        if _moco_requested and accumulation_step == total_accumulation_steps - 1:
             from models.vqvae import MoCoEncoder
 
             if isinstance(vqvae_model, MoCoEncoder):
@@ -1030,13 +1043,27 @@ def main(args):
                 encoders[m_idx].load_state_dict(torch.load(path, map_location=device, weights_only=False))
                 logger.info(f"  Loaded encoder_{m} from {path}")
 
-    # Optimizer — separate param groups so weight decay skips biases & norms
+    # Optimizer — separate param groups so weight decay skips biases & norms.
+    # Mask parameters (channel_logits) get their own group with a scaled LR
+    # so the content/style mask evolves slowly relative to the encoder,
+    # reducing MoCo queue staleness when --mask-mode is learned/learned_split.
     _wd = getattr(args, "weight_decay", 0.01)
+    _mask_lr_scale = getattr(args, "mask_lr_scale", 1.0)
+    # Collect param ids for mask logits so we can route them to a dedicated group.
+    _mask_param_ids = set()
+    for module in encoders + decoders:
+        for name, param in module.named_parameters():
+            if "channel_logits" in name or "split_gate_logits" in name:
+                _mask_param_ids.add(id(param))
     decay_params = []
     no_decay_params = []
+    mask_params = []
     for module in encoders + decoders:
         for name, param in module.named_parameters():
             if not param.requires_grad:
+                continue
+            if id(param) in _mask_param_ids:
+                mask_params.append(param)
                 continue
             # Skip weight decay for biases, LayerNorm/GroupNorm weights, and
             # ReZero alpha scalars — these should not be regularised.
@@ -1048,15 +1075,22 @@ def main(args):
         {"params": decay_params, "weight_decay": _wd},
         {"params": no_decay_params, "weight_decay": 0.0},
     ]
+    if mask_params:
+        param_groups.append({"params": mask_params, "weight_decay": 0.0, "lr": args.lr * _mask_lr_scale})
     use_fused = torch.cuda.is_available()
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, fused=use_fused)
-    params = decay_params + no_decay_params  # flat list for gradient clipping
+    params = decay_params + no_decay_params + mask_params  # flat list for gradient clipping
     logger.info("")
     logger.info(
         f"[OPTIMIZER] AdamW (fused={use_fused}) lr={args.lr} wd={_wd} "
         f"params={sum(p.numel() for p in params):,} "
         f"(decay={len(decay_params)}, no_decay={len(no_decay_params)})"
     )
+    if mask_params:
+        logger.info(
+            f"[OPTIMIZER] Mask param group: {len(mask_params)} params, "
+            f"lr={args.lr * _mask_lr_scale:.2e} (scale={_mask_lr_scale})"
+        )
 
     # LR schedule: linear warmup then cosine annealing (or constant)
     warmup_steps = getattr(args, "warmup_steps", 0)
@@ -1078,6 +1112,13 @@ def main(args):
     logger.info(
         f"[LR SCHEDULE] {lr_schedule} | warmup={warmup_steps} steps | " f"lr_min={lr_min} | total={total_steps} steps"
     )
+
+    _mask_warmup = getattr(args, "mask_warmup_steps", 0)
+    if _mask_warmup > 0 and getattr(args, "use_moco", False):
+        logger.info(
+            f"[MASK WARMUP] First {_mask_warmup} steps use in-batch InfoNCE (no MoCo queue) "
+            f"to let the learned mask stabilise."
+        )
 
     scaler = GradScaler("cuda") if args.use_amp else None
     if args.use_amp:
@@ -1192,6 +1233,32 @@ def main(args):
                             ]
 
                     scheduler.step()
+
+                    # Flush MoCo queues at the end of mask warmup so stale
+                    # embeddings from the warmup phase don't pollute the queue.
+                    _mask_warmup_steps = getattr(args, "mask_warmup_steps", 0)
+                    if _mask_warmup_steps > 0 and step == _mask_warmup_steps and getattr(args, "use_moco", False):
+                        from models.vqvae import MoCoEncoder
+
+                        if isinstance(encoders[0], MoCoEncoder):
+                            for lvl in range(encoders[0].nb_levels):
+                                encoders[0]._get_queue(lvl).normal_()
+                                F.normalize(encoders[0]._get_queue(lvl), dim=0, out=encoders[0]._get_queue(lvl))
+                                if encoders[0]._separate_queues:
+                                    encoders[0]._get_queue(lvl, view=1).normal_()
+                                    F.normalize(
+                                        encoders[0]._get_queue(lvl, view=1),
+                                        dim=0,
+                                        out=encoders[0]._get_queue(lvl, view=1),
+                                    )
+                            encoders[0].queue_ptrs.zero_()
+                            if encoders[0]._separate_queues:
+                                encoders[0].queue_v1_ptrs.zero_()
+                            logger.info(
+                                f"  [MASK WARMUP] Step {step}: mask warmup complete — "
+                                f"MoCo queues flushed, switching to MoCo contrastive."
+                            )
+
                     oom_count = 0
                     loss_values.append(accum_total)
                     contrastive_losses.append(accum_contrastive)

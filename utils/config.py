@@ -351,6 +351,25 @@ def parse_args() -> argparse.ArgumentParser:
         default=0.999,
         help="EMA momentum coefficient for the MoCo momentum encoder",
     )
+    parser.add_argument(
+        "--mask-warmup-steps",
+        type=int,
+        default=0,
+        help="Number of initial training steps during which the MoCo queue is disabled "
+        "and in-batch InfoNCE is used instead, allowing the learned content/style mask "
+        "to stabilise before queue negatives are introduced.  Only relevant when "
+        "--mask-mode is 'learned' or 'learned_split' AND --use-moco is set. "
+        "After warmup the queue is flushed and MoCo resumes normally. Default: 0 (disabled).",
+    )
+    parser.add_argument(
+        "--mask-lr-scale",
+        type=float,
+        default=1.0,
+        help="Learning-rate multiplier for the Gumbel mask parameters (channel_logits). "
+        "A value < 1 (e.g. 0.1) slows mask evolution relative to the encoder, reducing "
+        "staleness in the MoCo queue.  Only relevant for --mask-mode learned/learned_split. "
+        "Default: 1.0 (same LR as the encoder).",
+    )
     # Evaluation
     parser.add_argument("--eval-dci", action="store_true")
     parser.add_argument("--eval-style", action="store_true")
