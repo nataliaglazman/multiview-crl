@@ -1055,8 +1055,11 @@ class BaselineLoss(torch.nn.Module):
 
         self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
 
+    @torch.amp.autocast("cuda", enabled=False)
     def forward(self, network_output: Dict[str, List[torch.Tensor]], y: torch.Tensor) -> torch.Tensor:
-        # Unpacking elements
+        # Unpacking elements — compute entirely in float32 to avoid
+        # float16 overflow (FFT magnitudes and perceptual scaling can
+        # exceed the float16 range after enough training steps).
         x = y.float()
         y = network_output["reconstruction"][0].float()
         q_losses = network_output["quantization_losses"]
@@ -1093,7 +1096,7 @@ class BaselineLoss(torch.nn.Module):
                 del yi
                 loss = loss + F.mse_loss(x_mag, y_mag)
                 del x_mag, y_mag
-            loss = (loss / B).to(x.dtype)
+            loss = loss / B
 
         loss = loss * self.fft_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss.detach()
