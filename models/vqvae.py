@@ -1016,7 +1016,7 @@ class VQVAE(HelperModule):
                     # Instead of zeroing style channels (which distorts
                     # GroupNorm in the next encoder), extract content-only
                     # channels and project back to hidden_channels.
-                    _proj = self.content_projections.get(str(i))
+                    _proj = self.content_projections[str(i)] if str(i) in self.content_projections else None
                     if _proj is not None and not isinstance(masks, tuple):
                         # Shared mask — content indices are the same for
                         # both views.  Slice content channels and project.
@@ -1072,7 +1072,7 @@ class VQVAE(HelperModule):
                     masks = apply_mask_to_level(enc_input, i, use_per_view_masks)
                     if masks is not None:
                         # ── Modification 1: ContentProjection ───────────
-                        _proj = self.content_projections.get(str(i))
+                        _proj = self.content_projections[str(i)] if str(i) in self.content_projections else None
                         if _proj is not None:
                             # Extract content channels and project to
                             # hidden_channels for the next encoder level.
