@@ -1062,6 +1062,16 @@ class BaselineLoss(torch.nn.Module):
         # exceed the float16 range after enough training steps).
         x = y.float()
         y = network_output["reconstruction"][0].float()
+
+        # The decoder has no output activation, so y can have arbitrarily
+        # large values.  Clamp to the expected input range [-1, 1] to
+        # prevent the FFT magnitude and LPIPS from amplifying outliers
+        # into NaN.  Gradients still flow through non-clamped voxels;
+        # the clamp only kills gradient for values already far outside
+        # the valid range (desired — push them back via the pixel loss,
+        # not via an exploding FFT gradient).
+        y = y.clamp(-1.0, 1.0)
+
         q_losses = network_output["quantization_losses"]
 
         loss = (
