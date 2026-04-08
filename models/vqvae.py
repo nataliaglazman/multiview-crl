@@ -138,6 +138,51 @@ class SpatialFiLM(nn.Module):
         return feat * (1 + gamma) + beta
 
 
+class SplitGroupNorm(nn.Module):
+    """GroupNorm applied independently to content and style channel subsets.
+
+    Prevents modality-specific style channel statistics from influencing
+    content channel normalization.  Assumes content channels are the first
+    ``content_channels`` channels (true for ``mask_mode="fixed"``).
+    """
+
+    def __init__(self, content_channels: int, total_channels: int, target_groups: int = 32):
+        super().__init__()
+        style_channels = total_channels - content_channels
+        self.content_channels = content_channels
+        self.norm_content = get_group_norm(content_channels, target_groups)
+        self.norm_style = get_group_norm(style_channels, target_groups) if style_channels > 0 else None
+
+    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        c = self.content_channels
+        xc = self.norm_content(x[:, :c])
+        if self.norm_style is not None:
+            xs = self.norm_style(x[:, c:])
+            return torch.cat([xc, xs], dim=1)
+        return xc
+
+
+class ContentProjection(nn.Module):
+    """Project content-only channels back to full hidden_channels width.
+
+    Used between encoder levels so the next encoder receives a clean,
+    fully-populated tensor instead of a hidden_channels-wide tensor with
+    zeroed-out style channels (which distorts GroupNorm statistics inside
+    subsequent encoder layers).
+    """
+
+    def __init__(self, content_channels: int, hidden_channels: int):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Conv3d(content_channels, hidden_channels, 1, bias=False),
+            get_group_norm(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        return self.proj(x)
+
+
 class Decoder(HelperModule):
     """3D Decoder with transposed convolutions for upsampling.
 
@@ -629,6 +674,30 @@ class VQVAE(HelperModule):
             self.style_channels_per_level = {}
             self.style_channels = 0
 
+        # --- Inter-level content/style isolation modules ---
+        # (1) SplitGroupNorm: renormalises content and style channels
+        #     independently at the encoder output, so that modality-specific
+        #     style statistics cannot shift content activations.
+        # (2) ContentProjection: after masking, maps content-only channels
+        #     back to hidden_channels for the next encoder level, replacing
+        #     the old zero-masking approach (which left zeroed style channels
+        #     that distort GroupNorm inside subsequent encoder layers).
+        #
+        # Both modules are only instantiated for hard-mask modes (fixed,
+        # learned, onthefly) where the content channel positions are
+        # deterministic or STE-hard in the forward pass.  learned_split
+        # uses soft sigmoid gates with a variable number of active channels,
+        # so it falls back to the original zero-masking path.
+        self.content_norms = nn.ModuleDict()
+        self.content_projections = nn.ModuleDict()
+        if has_any_mask and not self.learned_split:
+            for lvl in self.content_style_levels:
+                cc = self.content_channels_per_level[lvl]
+                self.content_norms[str(lvl)] = SplitGroupNorm(cc, hidden_channels)
+                # Only need a projection when there is a subsequent encoder level
+                if lvl < nb_levels - 1:
+                    self.content_projections[str(lvl)] = ContentProjection(cc, hidden_channels)
+
         # --- Codebooks ---
         # Each level's codebook input channels depend on whether the level is
         # masked (content_channels for that level) or not (hidden_channels),
@@ -915,6 +984,15 @@ class VQVAE(HelperModule):
             for i, (enc_v0, enc_v1) in enumerate(zip(self.encoders, self.encoders_v1)):
                 enc_in_v0 = enc_v0(enc_in_v0)
                 enc_in_v1 = enc_v1(enc_in_v1)
+
+                # ── Modification 2: SplitGroupNorm ──────────────────────
+                # Re-normalise content and style channels independently so
+                # that modality-specific style statistics cannot bias content
+                # activations before the mask separates them.
+                if str(i) in self.content_norms:
+                    enc_in_v0 = self.content_norms[str(i)](enc_in_v0)
+                    enc_in_v1 = self.content_norms[str(i)](enc_in_v1)
+
                 enc_out = torch.cat([enc_in_v0, enc_in_v1], dim=0)
 
                 encoder_outputs.append(enc_out)
@@ -930,17 +1008,41 @@ class VQVAE(HelperModule):
                         pool_v1 = enc_in_v1.mean(dim=[2, 3, 4])
                     encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
 
-                # Apply mask and zero out style channels so the next encoder
-                # only sees content. Keeps tensor shape at hidden_channels.
+                # Apply mask and isolate content for the next encoder level.
                 if i in self.content_style_levels:
                     masks = apply_mask_to_level(enc_out, i, use_per_view_masks)
-                    if isinstance(masks, tuple):
+
+                    # ── Modification 1: ContentProjection ───────────────
+                    # Instead of zeroing style channels (which distorts
+                    # GroupNorm in the next encoder), extract content-only
+                    # channels and project back to hidden_channels.
+                    _proj = self.content_projections.get(str(i))
+                    if _proj is not None and not isinstance(masks, tuple):
+                        # Shared mask — content indices are the same for
+                        # both views.  Slice content channels and project.
+                        c_idx = torch.where(masks.bool())[-1]
+                        enc_in_v0 = _proj(enc_in_v0[:, c_idx, :, :, :])
+                        enc_in_v1 = _proj(enc_in_v1[:, c_idx, :, :, :])
+                    elif _proj is not None and isinstance(masks, tuple):
+                        # Per-view masks may select different channel
+                        # positions; the shared projection still works
+                        # because both masks select the same *number* of
+                        # channels (k_lvl) — only positions differ.
                         mask_v0, mask_v1 = masks
-                        enc_in_v0 = enc_in_v0 * mask_v0.view(1, -1, 1, 1, 1)
-                        enc_in_v1 = enc_in_v1 * mask_v1.view(1, -1, 1, 1, 1)
+                        c_idx_v0 = torch.where(mask_v0.bool())[-1]
+                        c_idx_v1 = torch.where(mask_v1.bool())[-1]
+                        enc_in_v0 = _proj(enc_in_v0[:, c_idx_v0, :, :, :])
+                        enc_in_v1 = _proj(enc_in_v1[:, c_idx_v1, :, :, :])
                     else:
-                        enc_in_v0 = enc_in_v0 * masks.view(1, -1, 1, 1, 1)
-                        enc_in_v1 = enc_in_v1 * masks.view(1, -1, 1, 1, 1)
+                        # No projection (last encoder level, or
+                        # learned_split mode): fall back to zero-masking.
+                        if isinstance(masks, tuple):
+                            mask_v0, mask_v1 = masks
+                            enc_in_v0 = enc_in_v0 * mask_v0.view(1, -1, 1, 1, 1)
+                            enc_in_v1 = enc_in_v1 * mask_v1.view(1, -1, 1, 1, 1)
+                        else:
+                            enc_in_v0 = enc_in_v0 * masks.view(1, -1, 1, 1, 1)
+                            enc_in_v1 = enc_in_v1 * masks.view(1, -1, 1, 1, 1)
             del enc_in_v0, enc_in_v1
         else:
             # Single-view path.  When separate_encoders is active, view_idx
@@ -953,6 +1055,10 @@ class VQVAE(HelperModule):
             for i, enc in enumerate(enc_stack):
                 enc_input = enc(enc_input)
 
+                # ── Modification 2: SplitGroupNorm (single-view path) ──
+                if str(i) in self.content_norms:
+                    enc_input = self.content_norms[str(i)](enc_input)
+
                 encoder_outputs.append(enc_input)
                 # Pool BEFORE masking (same reason as dual-view path).
                 if pool_only:
@@ -961,14 +1067,25 @@ class VQVAE(HelperModule):
                     else:
                         encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
 
-                # Apply mask and zero out style for next encoder.
+                # Apply mask and isolate content for next encoder level.
                 if i in self.content_style_levels:
                     masks = apply_mask_to_level(enc_input, i, use_per_view_masks)
                     if masks is not None:
-                        if isinstance(masks, tuple):
-                            enc_input = enc_input * masks[0].view(1, -1, 1, 1, 1)
+                        # ── Modification 1: ContentProjection ───────────
+                        _proj = self.content_projections.get(str(i))
+                        if _proj is not None:
+                            # Extract content channels and project to
+                            # hidden_channels for the next encoder level.
+                            _mask = masks[0] if isinstance(masks, tuple) else masks
+                            c_idx = torch.where(_mask.bool())[-1]
+                            enc_input = _proj(enc_input[:, c_idx, :, :, :])
                         else:
-                            enc_input = enc_input * masks.view(1, -1, 1, 1, 1)
+                            # No projection (last level, or learned_split):
+                            # fall back to zero-masking.
+                            if isinstance(masks, tuple):
+                                enc_input = enc_input * masks[0].view(1, -1, 1, 1, 1)
+                            else:
+                                enc_input = enc_input * masks.view(1, -1, 1, 1, 1)
             del x, enc_input
 
         # --- Codebook + decoder loop (top-down: coarsest → finest) ---
