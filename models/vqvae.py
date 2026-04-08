@@ -494,6 +494,7 @@ class VQVAE(HelperModule):
         cb_ema_decay: float = 0.999,  # EMA momentum for codebook running averages
         cb_reset_every: int = 100,  # Reset dead codebook entries every N forwards (0 = disable)
         cb_reset_threshold: float = 1.0,  # EMA cluster_size below this → dead
+        use_content_projection: bool = False,  # If True, project content-only channels back to hidden_channels between encoder levels (extra memory)
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -690,12 +691,13 @@ class VQVAE(HelperModule):
         # so it falls back to the original zero-masking path.
         self.content_norms = nn.ModuleDict()
         self.content_projections = nn.ModuleDict()
+        self.use_content_projection = use_content_projection
         if has_any_mask and not self.learned_split:
             for lvl in self.content_style_levels:
                 cc = self.content_channels_per_level[lvl]
                 self.content_norms[str(lvl)] = SplitGroupNorm(cc, hidden_channels)
                 # Only need a projection when there is a subsequent encoder level
-                if lvl < nb_levels - 1:
+                if use_content_projection and lvl < nb_levels - 1:
                     self.content_projections[str(lvl)] = ContentProjection(cc, hidden_channels)
 
         # --- Codebooks ---
