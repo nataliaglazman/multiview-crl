@@ -441,6 +441,17 @@ def parse_args() -> argparse.ArgumentParser:
         "E.g. '--content-size 48 --vqvae-hidden-channels 64' → 48 content, 16 style channels. "
         "Useful for tuning spatial map alignment.",
     )
+    parser.add_argument(
+        "--use-content-projection",
+        action="store_true",
+        help="Use content projection in the VQ-VAE encoder",
+    )
+    parser.add_argument(
+        "--narrow-encoder-input",
+        action="store_true",
+        help="Narrow the encoder input to content channels only (ablation for testing the importance of style information in the encoder)",
+    )
+
     return parser
 
 
