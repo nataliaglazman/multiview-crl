@@ -495,54 +495,18 @@ class VQVAE(HelperModule):
         cb_reset_every: int = 100,  # Reset dead codebook entries every N forwards (0 = disable)
         cb_reset_threshold: float = 1.0,  # EMA cluster_size below this → dead
         use_content_projection: bool = False,  # If True, project content-only channels back to hidden_channels between encoder levels (extra memory)
+        narrow_encoder_input: bool = False,  # If True, encoder level i+1 accepts content_channels from level i directly (no zero-padding, no projection)
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
         self.separate_encoders = separate_encoders
         self._cb_reset_every = cb_reset_every
         self._cb_reset_threshold = cb_reset_threshold
-
-        def _make_encoder_stack():
-            stack = nn.ModuleList(
-                [
-                    Encoder(
-                        in_channels,
-                        hidden_channels,
-                        res_channels,
-                        nb_res_layers,
-                        scaling_rates[0],
-                        use_checkpoint,
-                    )
-                ]
-            )
-            for _i, sr in enumerate(scaling_rates[1:]):
-                stack.append(
-                    Encoder(
-                        hidden_channels,
-                        hidden_channels,
-                        res_channels,
-                        nb_res_layers,
-                        sr,
-                        use_checkpoint,
-                    )
-                )
-            return stack
-
-        self.encoders = _make_encoder_stack()
-
-        # Second (view-1) encoder stack: deep copy of view-0 so both start
-        # in the same feature space.  This is critical for cross-view
-        # contrastive learning — random init puts the two encoders in
-        # incompatible subspaces where cosine similarity ≈ 0 for everything,
-        # creating a flat loss landscape that prevents bootstrapping.
-        if separate_encoders:
-            self.encoders_v1 = copy.deepcopy(self.encoders)
-        else:
-            self.encoders_v1 = None
+        self.narrow_encoder_input = narrow_encoder_input
 
         # --- Per-level content/style separation ---
-        # Each level in content_style_levels gets its own learnable Gumbel mask
-        # (channel_logits) on the hidden_channels encoder output.
+        # Computed early so _make_encoder_stack can use content_channels_per_level
+        # to narrow the input of encoder levels following a masked level.
         if content_style_levels is None:
             content_style_levels = [0]
         self.content_style_levels = sorted(set(content_style_levels))
@@ -572,12 +536,63 @@ class VQVAE(HelperModule):
             }
             # Backward compat: single value from first masked level
             self.content_channels = self.content_channels_per_level[self.content_style_levels[0]]
+        else:
+            self.content_channels = None
+            self.content_channels_per_level = {}
 
-            # --- Mask logits source ---
-            # "learned":  persistent nn.Parameter per level (optionally per view).
-            # "onthefly": logits computed from average encoder activations each
-            #             forward pass, shared across views.  Matches the original
-            #             multiview-crl repo (Yao et al., 2024).
+        def _make_encoder_stack():
+            stack = nn.ModuleList(
+                [
+                    Encoder(
+                        in_channels,
+                        hidden_channels,
+                        res_channels,
+                        nb_res_layers,
+                        scaling_rates[0],
+                        use_checkpoint,
+                    )
+                ]
+            )
+            for _i, sr in enumerate(scaling_rates[1:]):
+                # When narrow_encoder_input is enabled and the previous
+                # level (_i, since _i is 0-indexed over scaling_rates[1:])
+                # is a masked level, this encoder receives only
+                # content_channels instead of the full hidden_channels.
+                prev_lvl = _i  # encoder level that feeds into this one
+                if narrow_encoder_input and prev_lvl in self.content_channels_per_level:
+                    enc_in = self.content_channels_per_level[prev_lvl]
+                else:
+                    enc_in = hidden_channels
+                stack.append(
+                    Encoder(
+                        enc_in,
+                        hidden_channels,
+                        res_channels,
+                        nb_res_layers,
+                        sr,
+                        use_checkpoint,
+                    )
+                )
+            return stack
+
+        self.encoders = _make_encoder_stack()
+
+        # Second (view-1) encoder stack: deep copy of view-0 so both start
+        # in the same feature space.  This is critical for cross-view
+        # contrastive learning — random init puts the two encoders in
+        # incompatible subspaces where cosine similarity ≈ 0 for everything,
+        # creating a flat loss landscape that prevents bootstrapping.
+        if separate_encoders:
+            self.encoders_v1 = copy.deepcopy(self.encoders)
+        else:
+            self.encoders_v1 = None
+
+        # --- Mask logits source ---
+        # "learned":  persistent nn.Parameter per level (optionally per view).
+        # "onthefly": logits computed from average encoder activations each
+        #             forward pass, shared across views.  Matches the original
+        #             multiview-crl repo (Yao et al., 2024).
+        if has_content_style:
             self.mask_mode = mask_mode
 
             if mask_mode == "learned":
@@ -631,8 +646,6 @@ class VQVAE(HelperModule):
                 self.channel_logits = nn.ParameterDict()  # empty (no learnable params)
                 self.channel_logits_v1 = None
         else:
-            self.content_channels = None
-            self.content_channels_per_level = {}
             self.channel_logits = nn.ParameterDict()  # empty
             self.mask_mode = mask_mode
             self.channel_logits_v1 = None
@@ -1013,31 +1026,37 @@ class VQVAE(HelperModule):
                 # Apply mask and isolate content for the next encoder level.
                 if i in self.content_style_levels:
                     masks = apply_mask_to_level(enc_out, i, use_per_view_masks)
+                    _has_next_level = i < self.nb_levels - 1
 
-                    # ── Modification 1: ContentProjection ───────────────
-                    # Instead of zeroing style channels (which distorts
-                    # GroupNorm in the next encoder), extract content-only
-                    # channels and project back to hidden_channels.
+                    # ── Content isolation for inter-level path ──────────
+                    # Three modes, checked in priority order:
+                    #  1) narrow_encoder_input: slice content channels
+                    #     directly — the next encoder already expects the
+                    #     narrower input width.  No extra params/memory.
+                    #  2) use_content_projection: slice + learned 1×1 conv
+                    #     back to hidden_channels.  Extra params/memory.
+                    #  3) fallback: zero-mask style channels in-place.
                     _proj = self.content_projections[str(i)] if str(i) in self.content_projections else None
-                    if _proj is not None and not isinstance(masks, tuple):
-                        # Shared mask — content indices are the same for
-                        # both views.  Slice content channels and project.
-                        c_idx = torch.where(masks.bool())[-1]
-                        enc_in_v0 = _proj(enc_in_v0[:, c_idx, :, :, :])
-                        enc_in_v1 = _proj(enc_in_v1[:, c_idx, :, :, :])
-                    elif _proj is not None and isinstance(masks, tuple):
-                        # Per-view masks may select different channel
-                        # positions; the shared projection still works
-                        # because both masks select the same *number* of
-                        # channels (k_lvl) — only positions differ.
-                        mask_v0, mask_v1 = masks
-                        c_idx_v0 = torch.where(mask_v0.bool())[-1]
-                        c_idx_v1 = torch.where(mask_v1.bool())[-1]
-                        enc_in_v0 = _proj(enc_in_v0[:, c_idx_v0, :, :, :])
-                        enc_in_v1 = _proj(enc_in_v1[:, c_idx_v1, :, :, :])
+
+                    if _has_next_level and (self.narrow_encoder_input or _proj is not None):
+                        # Both narrow and projection paths need content
+                        # channel indices, then either pass through
+                        # directly or via the projection conv.
+                        def _isolate(tensor, mask):
+                            c_idx = torch.where(mask.bool())[-1]
+                            out = tensor[:, c_idx, :, :, :]
+                            return _proj(out) if _proj is not None else out
+
+                        if isinstance(masks, tuple):
+                            mask_v0, mask_v1 = masks
+                            enc_in_v0 = _isolate(enc_in_v0, mask_v0)
+                            enc_in_v1 = _isolate(enc_in_v1, mask_v1)
+                        else:
+                            enc_in_v0 = _isolate(enc_in_v0, masks)
+                            enc_in_v1 = _isolate(enc_in_v1, masks)
                     else:
-                        # No projection (last encoder level, or
-                        # learned_split mode): fall back to zero-masking.
+                        # Last encoder level, or learned_split mode:
+                        # fall back to zero-masking.
                         if isinstance(masks, tuple):
                             mask_v0, mask_v1 = masks
                             enc_in_v0 = enc_in_v0 * mask_v0.view(1, -1, 1, 1, 1)
@@ -1073,17 +1092,17 @@ class VQVAE(HelperModule):
                 if i in self.content_style_levels:
                     masks = apply_mask_to_level(enc_input, i, use_per_view_masks)
                     if masks is not None:
-                        # ── Modification 1: ContentProjection ───────────
+                        _has_next_level = i < self.nb_levels - 1
                         _proj = self.content_projections[str(i)] if str(i) in self.content_projections else None
-                        if _proj is not None:
-                            # Extract content channels and project to
-                            # hidden_channels for the next encoder level.
+
+                        if _has_next_level and (self.narrow_encoder_input or _proj is not None):
                             _mask = masks[0] if isinstance(masks, tuple) else masks
                             c_idx = torch.where(_mask.bool())[-1]
-                            enc_input = _proj(enc_input[:, c_idx, :, :, :])
+                            enc_input = enc_input[:, c_idx, :, :, :]
+                            if _proj is not None:
+                                enc_input = _proj(enc_input)
                         else:
-                            # No projection (last level, or learned_split):
-                            # fall back to zero-masking.
+                            # Last level, or learned_split: zero-mask.
                             if isinstance(masks, tuple):
                                 enc_input = enc_input * masks[0].view(1, -1, 1, 1, 1)
                             else:
