@@ -1094,21 +1094,31 @@ class BaselineLoss(torch.nn.Module):
         # the size of fftn along the last dim, cutting peak memory ~50%.
         # Per-sample loop keeps only one sample's FFT pair alive at a time,
         # further reducing peak VRAM for large 3D volumes.
+        #
+        # IMPORTANT: we avoid torch.abs() on complex tensors because its
+        # gradient is real/sqrt(real²+imag²), which is 0/0 = NaN when both
+        # components are zero (common in brain-masked volumes).  Instead we
+        # compute the squared magnitude (real² + imag²) which has a clean
+        # gradient everywhere.
         with torch.amp.autocast("cuda", enabled=False):
             loss = torch.tensor(0.0, device=x.device, dtype=torch.float32)
             B = x.shape[0]
             for i in range(B):
                 xi = (x[i : i + 1].float() + 1.0) / 2.0
                 yi = (y[i : i + 1].float() + 1.0) / 2.0
-                x_mag = torch.abs(rfftn(xi, norm="ortho"))
+                x_fft = rfftn(xi, norm="ortho")
                 del xi
-                y_mag = torch.abs(rfftn(yi, norm="ortho"))
+                y_fft = rfftn(yi, norm="ortho")
                 del yi
-                sample_loss = F.l1_loss(x_mag, y_mag)
-                del x_mag, y_mag
-                # Guard against NaN from FFT on degenerate inputs
-                if torch.isfinite(sample_loss):
-                    loss = loss + sample_loss
+                # Squared magnitude: |z|² = real² + imag².  Gradient-safe
+                # (no sqrt), and L1 on squared magnitudes still penalises
+                # spectral differences effectively.
+                x_mag2 = x_fft.real.pow(2) + x_fft.imag.pow(2)
+                del x_fft
+                y_mag2 = y_fft.real.pow(2) + y_fft.imag.pow(2)
+                del y_fft
+                loss = loss + F.l1_loss(x_mag2, y_mag2)
+                del x_mag2, y_mag2
             loss = loss / B
 
         loss = loss * self.fft_factor

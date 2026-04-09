@@ -989,6 +989,7 @@ def main(args):
             use_content_projection=getattr(args, "use_content_projection", False),
             narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
             top_level_recon_only=getattr(args, "top_level_recon_only", False),
+            pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
         )
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")

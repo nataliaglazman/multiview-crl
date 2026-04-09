@@ -497,6 +497,7 @@ class VQVAE(HelperModule):
         use_content_projection: bool = False,  # If True, project content-only channels back to hidden_channels between encoder levels (extra memory)
         narrow_encoder_input: bool = False,  # If True, encoder level i+1 accepts content_channels from level i directly (no zero-padding, no projection)
         top_level_recon_only: bool = False,  # If True, zero out encoder outputs at non-top levels so reconstruction depends only on the coarsest embedding
+        pass_full_to_next_level: bool = False,  # If True, pass full (unmasked) encoder output to the next level instead of zeroing style
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -505,6 +506,7 @@ class VQVAE(HelperModule):
         self._cb_reset_threshold = cb_reset_threshold
         self.narrow_encoder_input = narrow_encoder_input
         self.top_level_recon_only = top_level_recon_only
+        self.pass_full_to_next_level = pass_full_to_next_level
 
         # --- Per-level content/style separation ---
         # Computed early so _make_encoder_stack can use content_channels_per_level
@@ -1031,41 +1033,46 @@ class VQVAE(HelperModule):
                     _has_next_level = i < self.nb_levels - 1
 
                     # ── Content isolation for inter-level path ──────────
-                    # Three modes, checked in priority order:
+                    # Four modes, checked in priority order:
+                    #  0) pass_full_to_next_level: skip isolation entirely —
+                    #     next encoder sees all channels (content + style).
                     #  1) narrow_encoder_input: slice content channels
                     #     directly — the next encoder already expects the
                     #     narrower input width.  No extra params/memory.
                     #  2) use_content_projection: slice + learned 1×1 conv
                     #     back to hidden_channels.  Extra params/memory.
                     #  3) fallback: zero-mask style channels in-place.
-                    _proj = self.content_projections[str(i)] if str(i) in self.content_projections else None
-
-                    if _has_next_level and (self.narrow_encoder_input or _proj is not None):
-                        # Both narrow and projection paths need content
-                        # channel indices, then either pass through
-                        # directly or via the projection conv.
-                        def _isolate(tensor, mask):
-                            c_idx = torch.where(mask.bool())[-1]
-                            out = tensor[:, c_idx, :, :, :]
-                            return _proj(out) if _proj is not None else out
-
-                        if isinstance(masks, tuple):
-                            mask_v0, mask_v1 = masks
-                            enc_in_v0 = _isolate(enc_in_v0, mask_v0)
-                            enc_in_v1 = _isolate(enc_in_v1, mask_v1)
-                        else:
-                            enc_in_v0 = _isolate(enc_in_v0, masks)
-                            enc_in_v1 = _isolate(enc_in_v1, masks)
+                    if _has_next_level and self.pass_full_to_next_level:
+                        pass  # enc_in_v0 / enc_in_v1 remain unmodified
                     else:
-                        # Last encoder level, or learned_split mode:
-                        # fall back to zero-masking.
-                        if isinstance(masks, tuple):
-                            mask_v0, mask_v1 = masks
-                            enc_in_v0 = enc_in_v0 * mask_v0.view(1, -1, 1, 1, 1)
-                            enc_in_v1 = enc_in_v1 * mask_v1.view(1, -1, 1, 1, 1)
+                        _proj = self.content_projections[str(i)] if str(i) in self.content_projections else None
+
+                        if _has_next_level and (self.narrow_encoder_input or _proj is not None):
+                            # Both narrow and projection paths need content
+                            # channel indices, then either pass through
+                            # directly or via the projection conv.
+                            def _isolate(tensor, mask):
+                                c_idx = torch.where(mask.bool())[-1]
+                                out = tensor[:, c_idx, :, :, :]
+                                return _proj(out) if _proj is not None else out
+
+                            if isinstance(masks, tuple):
+                                mask_v0, mask_v1 = masks
+                                enc_in_v0 = _isolate(enc_in_v0, mask_v0)
+                                enc_in_v1 = _isolate(enc_in_v1, mask_v1)
+                            else:
+                                enc_in_v0 = _isolate(enc_in_v0, masks)
+                                enc_in_v1 = _isolate(enc_in_v1, masks)
                         else:
-                            enc_in_v0 = enc_in_v0 * masks.view(1, -1, 1, 1, 1)
-                            enc_in_v1 = enc_in_v1 * masks.view(1, -1, 1, 1, 1)
+                            # Last encoder level, or learned_split mode:
+                            # fall back to zero-masking.
+                            if isinstance(masks, tuple):
+                                mask_v0, mask_v1 = masks
+                                enc_in_v0 = enc_in_v0 * mask_v0.view(1, -1, 1, 1, 1)
+                                enc_in_v1 = enc_in_v1 * mask_v1.view(1, -1, 1, 1, 1)
+                            else:
+                                enc_in_v0 = enc_in_v0 * masks.view(1, -1, 1, 1, 1)
+                                enc_in_v1 = enc_in_v1 * masks.view(1, -1, 1, 1, 1)
             del enc_in_v0, enc_in_v1
         else:
             # Single-view path.  When separate_encoders is active, view_idx
@@ -1095,20 +1102,24 @@ class VQVAE(HelperModule):
                     masks = apply_mask_to_level(enc_input, i, use_per_view_masks)
                     if masks is not None:
                         _has_next_level = i < self.nb_levels - 1
-                        _proj = self.content_projections[str(i)] if str(i) in self.content_projections else None
 
-                        if _has_next_level and (self.narrow_encoder_input or _proj is not None):
-                            _mask = masks[0] if isinstance(masks, tuple) else masks
-                            c_idx = torch.where(_mask.bool())[-1]
-                            enc_input = enc_input[:, c_idx, :, :, :]
-                            if _proj is not None:
-                                enc_input = _proj(enc_input)
+                        if _has_next_level and self.pass_full_to_next_level:
+                            pass  # enc_input remains unmodified
                         else:
-                            # Last level, or learned_split: zero-mask.
-                            if isinstance(masks, tuple):
-                                enc_input = enc_input * masks[0].view(1, -1, 1, 1, 1)
+                            _proj = self.content_projections[str(i)] if str(i) in self.content_projections else None
+
+                            if _has_next_level and (self.narrow_encoder_input or _proj is not None):
+                                _mask = masks[0] if isinstance(masks, tuple) else masks
+                                c_idx = torch.where(_mask.bool())[-1]
+                                enc_input = enc_input[:, c_idx, :, :, :]
+                                if _proj is not None:
+                                    enc_input = _proj(enc_input)
                             else:
-                                enc_input = enc_input * masks.view(1, -1, 1, 1, 1)
+                                # Last level, or learned_split: zero-mask.
+                                if isinstance(masks, tuple):
+                                    enc_input = enc_input * masks[0].view(1, -1, 1, 1, 1)
+                                else:
+                                    enc_input = enc_input * masks.view(1, -1, 1, 1, 1)
             del x, enc_input
 
         # --- Codebook + decoder loop (top-down: coarsest → finest) ---

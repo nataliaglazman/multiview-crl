@@ -459,6 +459,16 @@ def parse_args() -> argparse.ArgumentParser:
         "reconstruction depends only on the coarsest (top) level embedding. "
         "Encoder features are still used for the contrastive loss.",
     )
+    parser.add_argument(
+        "--pass-full-to-next-level",
+        action="store_true",
+        default=False,
+        help="When content/style separation is active, pass the FULL (unmasked) "
+        "encoder output to the next encoder level instead of zeroing out style "
+        "channels. The content/style split still applies to the codebook input "
+        "and the contrastive loss — only the inter-level encoder path is affected. "
+        "Incompatible with --narrow-encoder-input and --use-content-projection.",
+    )
 
     return parser
 
