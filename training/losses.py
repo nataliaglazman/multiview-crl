@@ -1104,8 +1104,11 @@ class BaselineLoss(torch.nn.Module):
                 del xi
                 y_mag = torch.abs(rfftn(yi, norm="ortho"))
                 del yi
-                loss = loss + F.mse_loss(x_mag, y_mag)
+                sample_loss = F.l1_loss(x_mag, y_mag)
                 del x_mag, y_mag
+                # Guard against NaN from FFT on degenerate inputs
+                if torch.isfinite(sample_loss):
+                    loss = loss + sample_loss
             loss = loss / B
 
         loss = loss * self.fft_factor
@@ -1146,6 +1149,10 @@ class BaselineLoss(torch.nn.Module):
                 sel_x = F.adaptive_avg_pool2d(sel_x, _target)
                 sel_y = F.adaptive_avg_pool2d(sel_y, _target)
             p_loss = torch.mean(self.perceptual_function.forward(sel_x.float(), sel_y.float()))
+            # LPIPS can return NaN on near-constant slices (internal feature
+            # normalization divides by near-zero norm).  Fall back to zero.
+            if not torch.isfinite(p_loss):
+                return torch.zeros(1, device=x_vol.device, dtype=torch.float32, requires_grad=True).squeeze()
             return p_loss
 
         orientations = [
