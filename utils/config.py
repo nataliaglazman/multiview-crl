@@ -451,6 +451,14 @@ def parse_args() -> argparse.ArgumentParser:
         action="store_true",
         help="Narrow the encoder input to content channels only (ablation for testing the importance of style information in the encoder)",
     )
+    parser.add_argument(
+        "--top-level-recon-only",
+        action="store_true",
+        default=False,
+        help="Zero out encoder outputs at non-top levels before the codebook, so "
+        "reconstruction depends only on the coarsest (top) level embedding. "
+        "Encoder features are still used for the contrastive loss.",
+    )
 
     return parser
 

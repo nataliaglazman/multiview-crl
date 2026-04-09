@@ -496,6 +496,7 @@ class VQVAE(HelperModule):
         cb_reset_threshold: float = 1.0,  # EMA cluster_size below this → dead
         use_content_projection: bool = False,  # If True, project content-only channels back to hidden_channels between encoder levels (extra memory)
         narrow_encoder_input: bool = False,  # If True, encoder level i+1 accepts content_channels from level i directly (no zero-padding, no projection)
+        top_level_recon_only: bool = False,  # If True, zero out encoder outputs at non-top levels so reconstruction depends only on the coarsest embedding
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -503,6 +504,7 @@ class VQVAE(HelperModule):
         self._cb_reset_every = cb_reset_every
         self._cb_reset_threshold = cb_reset_threshold
         self.narrow_encoder_input = narrow_encoder_input
+        self.top_level_recon_only = top_level_recon_only
 
         # --- Per-level content/style separation ---
         # Computed early so _make_encoder_stack can use content_channels_per_level
@@ -1145,6 +1147,12 @@ class VQVAE(HelperModule):
                 id_outputs.append(None)
                 del enc_for_codebook
                 continue
+
+            # When top_level_recon_only is set, zero out encoder contributions
+            # at non-top levels so reconstruction depends only on the coarsest
+            # level embedding.  The codebook still receives the right shape.
+            if self.top_level_recon_only and l < self.nb_levels - 1:
+                enc_for_codebook = torch.zeros_like(enc_for_codebook)
 
             expected_in = codebook.conv_in.in_channels
 

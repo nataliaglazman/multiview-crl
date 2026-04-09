@@ -988,6 +988,7 @@ def main(args):
             cb_reset_threshold=getattr(args, "cb_reset_threshold", 1.0),
             use_content_projection=getattr(args, "use_content_projection", False),
             narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
+            top_level_recon_only=getattr(args, "top_level_recon_only", False),
         )
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
