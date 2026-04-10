@@ -459,6 +459,23 @@ def parse_args() -> argparse.ArgumentParser:
         "reconstruction depends only on the coarsest (top) level embedding. "
         "Encoder features are still used for the contrastive loss.",
     )
+    # Early stopping
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help="Stop training if the monitored loss does not improve for this many "
+        "checkpoint intervals. 0 disables early stopping (default). "
+        "When --val-every is set, monitors validation loss; otherwise monitors "
+        "the rolling average training loss.",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum improvement in monitored loss to count as progress. "
+        "Only used when --early-stopping-patience > 0. Default: 0.0.",
+    )
     parser.add_argument(
         "--pass-full-to-next-level",
         action="store_true",
@@ -487,6 +504,25 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
 
     logger = logging.getLogger("multiview_crl")
     logger.info(f"Configuring dataset: {args.dataset_name}")
+
+    # Warn when nb_levels=1 with content/style separation but no style decoder path.
+    # In this configuration, style channels receive zero gradient — the codebook
+    # only sees content channels, and there are no higher encoder levels to route
+    # style through.  --inject-style-to-decoder gives style a gradient path.
+    _nb_levels = getattr(args, "vqvae_nb_levels", 3)
+    _has_cs = getattr(args, "content_dim", 0) > 0 and getattr(args, "total_dim", 0) > getattr(args, "content_dim", 0)
+    _cs_levels = getattr(args, "content_style_levels", [0])
+    _all_levels_masked = _has_cs and set(_cs_levels) == set(range(_nb_levels))
+    if (_nb_levels == 1 or _all_levels_masked) and _has_cs and not getattr(args, "inject_style_to_decoder", False):
+        logger.warning(
+            "Content/style separation is active but style channels have NO gradient path! "
+            f"(nb_levels={_nb_levels}, content_style_levels={_cs_levels}, "
+            "inject_style_to_decoder=False). "
+            "The codebook only sees content channels, and there are no unmasked encoder "
+            "levels to route style through. Style channels will be dead (zero gradient). "
+            "Consider adding --inject-style-to-decoder to give style a reconstruction "
+            "gradient path through the decoder."
+        )
 
     # --mask-mode learned_split is incompatible with --inject-style-to-decoder
     # because the number of style channels varies per forward pass.

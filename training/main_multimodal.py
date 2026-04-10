@@ -1232,6 +1232,19 @@ def main(args):
             logger.info(f"  Restored best loss: {best_total_loss:.4f} from {best_ckpt_path}")
             del best_ckpt
 
+        # Early stopping state
+        _es_patience = getattr(args, "early_stopping_patience", 0)
+        _es_min_delta = getattr(args, "early_stopping_min_delta", 0.0)
+        _es_best = float("inf")
+        _es_wait = 0
+        _es_triggered = False
+        if _es_patience > 0:
+            logger.info(
+                f"  Early stopping enabled: patience={_es_patience} checkpoint intervals, "
+                f"min_delta={_es_min_delta:.6f}, "
+                f"monitoring={'validation loss' if val_every > 0 else 'rolling training loss'}"
+            )
+
         oom_count = 0
         MAX_OOM_RETRIES = 5
 
@@ -1506,6 +1519,40 @@ def main(args):
                             f"VQ={val_vq:.4f}"
                         )
 
+                    # --- Early stopping check ---
+                    # Runs at checkpoint intervals (same cadence as best-model tracking).
+                    # Monitors val loss when --val-every is set, otherwise rolling training loss.
+                    if _es_patience > 0 and (step % args.checkpoint_steps == 1 or step == args.train_steps):
+                        # Pick the metric to monitor
+                        if val_every > 0 and val_loader is not None and step % val_every == 0:
+                            _es_metric = val_total
+                            _es_source = "val"
+                        elif rolling_loss is not None:
+                            _es_metric = rolling_loss
+                            _es_source = "rolling_train"
+                        else:
+                            _es_metric = None
+
+                        if _es_metric is not None:
+                            if _es_metric < _es_best - _es_min_delta:
+                                _es_best = _es_metric
+                                _es_wait = 0
+                            else:
+                                _es_wait += 1
+                                logger.info(
+                                    f"  [Early stopping] No improvement in {_es_source} loss "
+                                    f"({_es_metric:.4f} vs best {_es_best:.4f}, "
+                                    f"delta={_es_min_delta:.6f}). "
+                                    f"Patience: {_es_wait}/{_es_patience}"
+                                )
+                                if _es_wait >= _es_patience:
+                                    logger.info(
+                                        f"  [Early stopping] Patience exhausted at step {step}. "
+                                        f"Best {_es_source} loss: {_es_best:.4f}. Stopping."
+                                    )
+                                    _es_triggered = True
+                                    break
+
                     # Periodic CUDA cache cleanup to reduce fragmentation-induced OOM
                     if step % 20 == 0 and torch.cuda.is_available():
                         import gc
@@ -1589,7 +1636,10 @@ def main(args):
 
         logger.info("")
         logger.info("=" * 60)
-        logger.info("TRAINING COMPLETE")
+        if _es_triggered:
+            logger.info(f"TRAINING STOPPED EARLY (step {step})")
+        else:
+            logger.info("TRAINING COMPLETE")
         logger.info("=" * 60)
         if loss_values:
             logger.info(f"  Final total loss:       {loss_values[-1]:.4f}")
@@ -1597,6 +1647,8 @@ def main(args):
             logger.info(f"  Final recon loss:       {recon_losses[-1]:.4f}")
             logger.info(f"  Final VQ loss:          {vq_losses[-1]:.4f}")
             logger.info(f"  Rolling avg total (last {args.log_steps}): {np.mean(loss_values):.4f}")
+        if _es_triggered:
+            logger.info(f"  Early stopping best monitored loss: {_es_best:.4f}")
         logger.info(f"  Models saved to: {args.save_dir}")
         tb_writer.close()
 
