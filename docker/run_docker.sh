@@ -1,5 +1,5 @@
 runai submit --name multiview-crl-fix-gradients \
- -i aicregistry:5000/nglazman:multiview-crl-vqvae-latest \
+ -i aicregistry:5000/nglazman:multiview-crl-vqvae-final \
  --node-type A100 \
  --run-as-user \
  --gpu 1 \
