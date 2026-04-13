@@ -28,7 +28,7 @@ parameters:
     max: 10.0
   # hidden_channels and embed_dim are always set equal (handled by sweep_train.py)
   vqvae_hidden_channels:
-    values: [32, 48, 64, 96]
+    values: [32, 48, 64, 80]
   content_size:
     values: [8, 16, 24, 32, 48]
   mask_mode:
