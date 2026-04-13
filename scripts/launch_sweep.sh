@@ -29,7 +29,7 @@ echo "Sweep created: ${SWEEP_ID}"
 echo "Submitting ${NUM_AGENTS} Run:AI jobs..."
 
 for i in $(seq 0 $((NUM_AGENTS - 1))); do
-    sweep_runai.sh "${SWEEP_ID}" "${i}"
+    ./scripts/sweep_runai.sh "${SWEEP_ID}" "${i}"
 done
 
 echo ""
