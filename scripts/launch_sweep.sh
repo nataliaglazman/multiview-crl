@@ -18,10 +18,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "Creating W&B sweep..."
-SWEEP_ID=$(wandb sweep --project "${WANDB_PROJECT}" sweep_config.yaml 2>&1 | grep -oE '[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+/[a-zA-Z0-9]+$' || true)
+SWEEP_ID=$(wandb sweep --project "${WANDB_PROJECT}" scripts/sweep_config.yaml 2>&1 | grep -oE '[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+/[a-zA-Z0-9]+$' || true)
 
 if [[ -z "${SWEEP_ID}" ]]; then
-    echo "ERROR: Failed to parse sweep ID. Run 'wandb sweep sweep_config.yaml' manually to debug."
+    echo "ERROR: Failed to parse sweep ID. Run 'wandb sweep scripts/sweep_config.yaml' manually to debug."
     exit 1
 fi
 
