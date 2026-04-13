@@ -20,8 +20,8 @@ PROJECT="nglazman"       # e.g. natalia
 GPU=1
 CPU=16
 MEMORY="64Gi"
-PVC_NAME="/nfs:/nfs"          # PVC with data + code
-PVC_MOUNT="/nfs:/nfs/home/nglazman/crl-2"               # Mount point inside container
+VOLUME_MOUNT="/nfs:/nfs"          # Map cluster's /nfs to container's /nfs
+WORKDIR="/nfs/home/nglazman/crl-2/multiview-crl"               # Working directory inside container
 WANDB_API_KEY="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"
 # -----------------------------------------
 
@@ -37,8 +37,8 @@ runai submit "${JOB_NAME}" \
     --cpu "${CPU}" \
     --memory "${MEMORY}" \
     --memory-limit 128G \
-    --volume "/nfs:${PVC_MOUNT}" \
+    --volume "${VOLUME_MOUNT}" \
     --environment "WANDB_API_KEY=${WANDB_API_KEY}" \
-    --command -- bash -c "cd ${PVC_MOUNT}/multiview-crl && wandb agent --count 1 ${SWEEP_ID}"
+    --command -- bash -c "cd ${WORKDIR} && wandb agent --count 1 ${SWEEP_ID}"
 
 echo "Submitted Run:AI job: ${JOB_NAME}"
