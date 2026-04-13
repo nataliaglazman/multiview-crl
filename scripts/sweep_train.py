@@ -109,8 +109,11 @@ def main():
 
         print(f"CRASH OCCURRED: {str(e)}", file=sys.stderr)
         traceback.print_exc()
-        wandb.log({"separation_score": 0.0})
-        wandb.finish(exit_code=1)
+        try:
+            wandb.log({"separation_score": 0.0})
+            wandb.finish(exit_code=1)
+        except:
+            pass
         sys.exit(1)
 
     # Close the sweep-agent run politely after training finishes
