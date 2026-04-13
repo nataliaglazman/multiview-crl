@@ -28,6 +28,13 @@ try:
 except ImportError:
     HAS_FAISS = False
 
+try:
+    import wandb
+
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
 import numpy as np
 import pandas as pd
 import torch
@@ -1184,6 +1191,21 @@ def main(args):
     # ------------------------------------------------------------------
     file_name = os.path.join(args.save_dir, "Training.csv")
 
+    # W&B initialization
+    _use_wandb = getattr(args, "use_wandb", False) and HAS_WANDB
+    if _use_wandb:
+        wandb_config = {k: v for k, v in vars(args).items() if k != "DATASETCLASS"}
+        wandb.init(
+            project=getattr(args, "wandb_project", "multiview-crl-sweep"),
+            entity=getattr(args, "wandb_entity", None),
+            config=wandb_config,
+            name=str(args.model_id),
+            dir=args.save_dir,
+        )
+        logger.info("[WANDB] Logging enabled")
+    elif getattr(args, "use_wandb", False) and not HAS_WANDB:
+        logger.warning("[WANDB] --use-wandb set but wandb not installed. Skipping.")
+
     if not args.evaluate:
         tb_writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "tensorboard"))
         logger.info("")
@@ -1450,6 +1472,32 @@ def main(args):
                         for diag_key, diag_val in step_moco_diag.items():
                             tb_writer.add_scalar(diag_key, diag_val, step)
 
+                    # W&B step logging
+                    if _use_wandb:
+                        wandb_log = {
+                            "loss/total": accum_total,
+                            "loss/contrastive": accum_contrastive,
+                            "loss/recon": accum_recon,
+                            "loss/vq": accum_vq,
+                            "lr": optimizer.param_groups[0]["lr"],
+                        }
+                        if accum_level_losses:
+                            for _li, _lv in enumerate(accum_level_losses):
+                                wandb_log[f"loss/contrastive_L{_li}"] = _lv
+                        if step_moco_diag:
+                            for diag_key, diag_val in step_moco_diag.items():
+                                wandb_log[diag_key.replace("/", "/")] = diag_val
+                        for _cb_lvl, _cb in enumerate(_raw.codebooks):
+                            _alive = (_cb.cluster_size > 1.0).sum().item()
+                            wandb_log[f"codebook/active_L{_cb_lvl}"] = _alive
+                            wandb_log[f"codebook/utilization_L{_cb_lvl}"] = _alive / _cb.n_embed
+                        if hasattr(_raw, "style_codebooks") and _raw.style_codebooks:
+                            for _sc_key, _sc_cb in _raw.style_codebooks.items():
+                                _s_alive = (_sc_cb.cluster_size > 1.0).sum().item()
+                                wandb_log[f"codebook/style_active_L{_sc_key}"] = _s_alive
+                                wandb_log[f"codebook/style_util_L{_sc_key}"] = _s_alive / _sc_cb.n_embed
+                        wandb.log(wandb_log, step=step)
+
                     if step % args.log_steps == 1 or step == args.train_steps:
                         with open(file_name, "a+") as f:
                             csv.writer(f).writerow(
@@ -1513,6 +1561,16 @@ def main(args):
                         tb_writer.add_scalar("Val/Recon", val_rec, step)
                         tb_writer.add_scalar("Val/VQ", val_vq, step)
                         tb_writer.flush()
+                        if _use_wandb:
+                            wandb.log(
+                                {
+                                    "val/total": val_total,
+                                    "val/contrastive": val_con,
+                                    "val/recon": val_rec,
+                                    "val/vq": val_vq,
+                                },
+                                step=step,
+                            )
                         logger.info(
                             f"  [Val @ step {step}] Total={val_total:.4f} | "
                             f"Contrastive={val_con:.4f} | Recon={val_rec:.4f} | "
@@ -1767,6 +1825,42 @@ def main(args):
         df_results.to_csv(results_path)
         logger.info(f"  Results saved to: {results_path}")
         print(df_results.to_string())
+
+        # Cross-reconstruction evaluation for content/style separation
+        if args.encoder_type == "vqvae" and hasattr(args, "content_indices"):
+            try:
+                from eval.cross_reconstruction import evaluate_content_style_separation
+
+                logger.info("[EVALUATION] Running content/style separation metrics...")
+                cs_metrics = evaluate_content_style_separation(
+                    encoders[0],
+                    val_loader or DataLoader(val_dataset, **{**dataloader_kwargs, "shuffle": False}),
+                    args,
+                    device,
+                )
+                for k, v in cs_metrics.items():
+                    logger.info(f"  {k}: {v:.4f}")
+                if _use_wandb:
+                    wandb.summary.update(cs_metrics)
+                # Save to CSV
+                cs_path = os.path.join(args.save_dir, "cross_recon_metrics.csv")
+                pd.DataFrame([cs_metrics]).to_csv(cs_path, index=False)
+                logger.info(f"  Cross-recon metrics saved to: {cs_path}")
+            except Exception as e:
+                logger.warning(f"  Cross-reconstruction evaluation failed: {e}")
+
+        # Log evaluation results to W&B
+        if _use_wandb and len(results) > 0:
+            for row in results:
+                subset, ix, modality, factor_name, factor_type, r2_lin, r2_kr, acc_log, acc_mlp = row
+                prefix = f"eval/{modality}/{factor_name}/subset_{subset}"
+                wandb.summary[f"{prefix}/r2_linreg"] = r2_lin
+                wandb.summary[f"{prefix}/r2_krreg"] = r2_kr
+                wandb.summary[f"{prefix}/acc_logreg"] = acc_log
+                wandb.summary[f"{prefix}/acc_mlp"] = acc_mlp
+
+    if _use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":

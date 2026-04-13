@@ -1,0 +1,61 @@
+# W&B Sweep Configuration for Content/Style Separation
+#
+# Usage:
+#   wandb sweep sweep_config.yaml
+#   wandb agent <entity>/<project>/<sweep_id>
+#
+# Or via SLURM:
+#   ./scripts/launch_sweep.sh --num-agents 50
+#
+# NOTE: Uses scripts/sweep_train.py as a wrapper to handle boolean flags
+# and the content_size < vqvae_hidden_channels constraint.
+
+program: scripts/sweep_train.py
+method: bayes
+metric:
+  name: separation_score
+  goal: maximize
+
+parameters:
+  # --- Tier 1: High-impact ---
+  scale_contrastive_loss:
+    distribution: log_uniform_values
+    min: 0.1
+    max: 10.0
+  scale_recon_loss:
+    distribution: log_uniform_values
+    min: 0.1
+    max: 10.0
+  # hidden_channels and embed_dim are always set equal (handled by sweep_train.py)
+  vqvae_hidden_channels:
+    values: [32, 48, 64, 96]
+  content_size:
+    values: [8, 16, 24, 32, 48]
+  mask_mode:
+    values: ["fixed", "learned"]
+  contrastive_loss_type:
+    values: ["infonce", "barlow_twins"]
+  tau:
+    distribution: log_uniform_values
+    min: 0.05
+    max: 2.0
+
+  # --- Tier 2: Secondary ---
+  lr:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.001
+  patch_contrastive:
+    values: [true, false]
+  bt_lambda:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.05
+
+  # --- Fixed parameters (passed through to sweep_train.py) ---
+  batch_size:
+    value: 2
+  gradient_accumulation_steps:
+    value: 8
+  train_steps:
+    value: 50000

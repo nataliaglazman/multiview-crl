@@ -459,6 +459,25 @@ def parse_args() -> argparse.ArgumentParser:
         "reconstruction depends only on the coarsest (top) level embedding. "
         "Encoder features are still used for the contrastive loss.",
     )
+    # Weights & Biases
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        default=False,
+        help="Enable Weights & Biases logging (requires wandb to be installed).",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="multiview-crl-sweep",
+        help="W&B project name. Default: multiview-crl-sweep.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=None,
+        help="W&B team/entity name. Uses default entity if not set.",
+    )
     # Early stopping
     parser.add_argument(
         "--early-stopping-patience",
