@@ -15,17 +15,27 @@ def main():
     run = wandb.init()
     config = dict(run.config)
 
-    # Build command-line args
+    # Ensure each sweep run gets a unique directory
     argv = [
         sys.executable,
         "training/main_multimodal.py",
         "--model-id",
-        f"sweep-{run.id}",  # Ensure each sweep run gets a unique directory
+        f"sweep-{run.id}",
     ]
 
-    # Enforce vqvae_embed_dim == vqvae_hidden_channels if we are sweeping over hidden_channels
+    # Handle the constraint: content_size must be strictly less than hidden_channels
     if "vqvae_hidden_channels" in config:
         config["vqvae_embed_dim"] = config["vqvae_hidden_channels"]
+        hidden = config["vqvae_hidden_channels"]
+
+        # Only apply constraint if we are still sweeping over 'content_size'
+        if "content_size" in config:
+            content = config["content_size"]
+            if content >= hidden:
+                print(f"SKIP: content_size ({content}) >= vqvae_hidden_channels ({hidden}). " f"Marking run as failed.")
+                wandb.log({"separation_score": 0.0})
+                wandb.finish(exit_code=1)
+                return
 
     # Dynamically inject all parameters from the wandb config
     for key, value in config.items():
