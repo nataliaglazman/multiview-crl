@@ -1008,6 +1008,8 @@ class VQVAE(HelperModule):
                 # Re-normalise content and style channels independently so
                 # that modality-specific style statistics cannot bias content
                 # activations before the mask separates them.
+                enc_in_v0_pool = enc_in_v0
+                enc_in_v1_pool = enc_in_v1
                 if str(i) in self.content_norms:
                     enc_in_v0 = self.content_norms[str(i)](enc_in_v0)
                     enc_in_v1 = self.content_norms[str(i)](enc_in_v1)
@@ -1020,11 +1022,11 @@ class VQVAE(HelperModule):
                 if pool_only:
                     if patch_grid is not None:
                         # Patch-level pooling: (B, C, D, H, W) → (B, C, Pd*Ph*Pw)
-                        pool_v0 = F.adaptive_avg_pool3d(enc_in_v0, patch_grid).flatten(2)
-                        pool_v1 = F.adaptive_avg_pool3d(enc_in_v1, patch_grid).flatten(2)
+                        pool_v0 = F.adaptive_avg_pool3d(enc_in_v0_pool, patch_grid).flatten(2)
+                        pool_v1 = F.adaptive_avg_pool3d(enc_in_v1_pool, patch_grid).flatten(2)
                     else:
-                        pool_v0 = enc_in_v0.mean(dim=[2, 3, 4])
-                        pool_v1 = enc_in_v1.mean(dim=[2, 3, 4])
+                        pool_v0 = enc_in_v0_pool.mean(dim=[2, 3, 4])
+                        pool_v1 = enc_in_v1_pool.mean(dim=[2, 3, 4])
                     encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
 
                 # Apply mask and isolate content for the next encoder level.
@@ -1086,6 +1088,7 @@ class VQVAE(HelperModule):
                 enc_input = enc(enc_input)
 
                 # ── Modification 2: SplitGroupNorm (single-view path) ──
+                enc_input_pool = enc_input
                 if str(i) in self.content_norms:
                     enc_input = self.content_norms[str(i)](enc_input)
 
@@ -1093,9 +1096,9 @@ class VQVAE(HelperModule):
                 # Pool BEFORE masking (same reason as dual-view path).
                 if pool_only:
                     if patch_grid is not None:
-                        encoder_pools.append(F.adaptive_avg_pool3d(enc_input, patch_grid).flatten(2))
+                        encoder_pools.append(F.adaptive_avg_pool3d(enc_input_pool, patch_grid).flatten(2))
                     else:
-                        encoder_pools.append(enc_input.mean(dim=[2, 3, 4]))
+                        encoder_pools.append(enc_input_pool.mean(dim=[2, 3, 4]))
 
                 # Apply mask and isolate content for next encoder level.
                 if i in self.content_style_levels:
