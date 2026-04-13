@@ -64,10 +64,18 @@ def main():
     parser = parse_args()
     args = parser.parse_args(cmd_args)
 
-    # Run the main training loop in the SAME process.
-    # This prevents WandB daemon conflicts that happen when spawning subprocesses
-    # and dropping connection locks, which fixes metrics not logging correctly.
-    run_main(args)
+    try:
+        # Run the main training loop in the SAME process.
+        # This prevents WandB daemon conflicts that happen when spawning subprocesses
+        # and dropping connection locks, which fixes metrics not logging correctly.
+        run_main(args)
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        wandb.log({"separation_score": 0.0})
+        wandb.finish(exit_code=1)
+        sys.exit(1)
 
     # Close the sweep-agent run politely after training finishes
     wandb.finish()
