@@ -1201,6 +1201,7 @@ def main(args):
             config=wandb_config,
             name=str(args.model_id),
             dir=args.save_dir,
+            settings=wandb.Settings(init_timeout=300),
         )
         logger.info("[WANDB] Logging enabled")
     elif getattr(args, "use_wandb", False) and not HAS_WANDB:
