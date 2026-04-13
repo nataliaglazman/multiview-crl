@@ -5,37 +5,30 @@ training/main_multimodal.py, handling boolean flags, lists, and dynamic argument
 """
 
 import os
-import subprocess
 import sys
 
 import wandb
+
+# Add project root to python path so we can import modules correctly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from training.main_multimodal import main as run_main
+from utils.config import parse_args
 
 
 def main():
     run = wandb.init()
     config = dict(run.config)
 
-    # Ensure each sweep run gets a unique directory
-    argv = [
-        sys.executable,
-        "training/main_multimodal.py",
+    # Build command-line args for argparse
+    cmd_args = [
         "--model-id",
         f"sweep-{run.id}",
     ]
 
-    # Handle the constraint: content_size must be strictly less than hidden_channels
+    # Ensure vqvae_embed_dim == vqvae_hidden_channels if we are sweeping over hidden_channels
     if "vqvae_hidden_channels" in config:
         config["vqvae_embed_dim"] = config["vqvae_hidden_channels"]
-        hidden = config["vqvae_hidden_channels"]
-
-        # Only apply constraint if we are still sweeping over 'content_size'
-        if "content_size" in config:
-            content = config["content_size"]
-            if content >= hidden:
-                print(f"SKIP: content_size ({content}) >= vqvae_hidden_channels ({hidden}). " f"Marking run as failed.")
-                wandb.log({"separation_score": 0.0})
-                wandb.finish(exit_code=1)
-                return
 
     # Dynamically inject all parameters from the wandb config
     for key, value in config.items():
@@ -51,31 +44,30 @@ def main():
 
         if isinstance(value, bool):
             if value:
-                argv.append(arg_name)
+                cmd_args.append(arg_name)
         elif isinstance(value, (list, tuple)):
-            argv.append(arg_name)
-            argv.extend(str(v) for v in value)
+            cmd_args.append(arg_name)
+            cmd_args.extend(str(v) for v in value)
         else:
-            argv.append(arg_name)
-            argv.append(str(value))
+            cmd_args.append(arg_name)
+            cmd_args.append(str(value))
 
     # Pass dataroot/labels-path if set in environment overrides
     if os.environ.get("DATAROOT") and "dataroot" not in config:
-        argv.extend(["--dataroot", os.environ["DATAROOT"]])
+        cmd_args.extend(["--dataroot", os.environ["DATAROOT"]])
     if os.environ.get("LABELS_PATH") and "labels_path" not in config:
-        argv.extend(["--labels-path", os.environ["LABELS_PATH"]])
+        cmd_args.extend(["--labels-path", os.environ["LABELS_PATH"]])
 
-    # Ensure PYTHONPATH is set so local modules are found
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.getcwd()
+    print(f"Parsed args for run_main: {' '.join(cmd_args)}")
 
-    print(f"Running: {' '.join(argv)}")
-    result = subprocess.run(argv, env=env)
+    # Parse the arguments natively exactly as main_multimodal.py expects them
+    parser = parse_args()
+    args = parser.parse_args(cmd_args)
 
-    # Close the sweep-agent run AFTER the training finishes
+    # Run the main training loop in the SAME process.
+    # This prevents WandB daemon conflicts that happen when spawning subprocesses
+    # and dropping connection locks, which fixes metrics not logging correctly.
+    run_main(args)
+
+    # Close the sweep-agent run politely after training finishes
     wandb.finish()
-    sys.exit(result.returncode)
-
-
-if __name__ == "__main__":
-    main()
