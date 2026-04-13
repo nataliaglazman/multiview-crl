@@ -1,12 +1,11 @@
 """Wrapper script for W&B sweep agent.
 
 Translates W&B sweep config values into command-line arguments for
-training/main_multimodal.py, handling:
-  - Boolean flags (patch_contrastive, etc.)
-  - The content_size < vqvae_hidden_channels constraint
-  - Setting vqvae_embed_dim = vqvae_hidden_channels
+training/main_multimodal.py, handling boolean flags, lists, and dynamic arguments.
 """
 
+import os
+import subprocess
 import sys
 
 import wandb
@@ -16,82 +15,49 @@ def main():
     run = wandb.init()
     config = dict(run.config)
 
-    # --- Constraint: content_size must be < hidden_channels ---
-    hidden = config.get("vqvae_hidden_channels", 64)
-    content = config.get("content_size", 16)
-    if content >= hidden:
-        print(f"SKIP: content_size ({content}) >= vqvae_hidden_channels ({hidden}). " f"Marking run as failed.")
-        wandb.log({"separation_score": 0.0})
-        wandb.finish(exit_code=1)
-        return
-
     # Build command-line args
     argv = [
         sys.executable,
         "training/main_multimodal.py",
-        "--scale-contrastive-loss",
-        str(config["scale_contrastive_loss"]),
-        "--scale-recon-loss",
-        str(config["scale_recon_loss"]),
-        "--vqvae-hidden-channels",
-        str(hidden),
-        "--vqvae-embed-dim",
-        str(hidden),  # always equal
-        "--content-size",
-        str(content),
-        "--mask-mode",
-        config["mask_mode"],
-        "--contrastive-loss-type",
-        config["contrastive_loss_type"],
-        "--tau",
-        str(config["tau"]),
-        "--lr",
-        str(config["lr"]),
-        "--bt-lambda",
-        str(config.get("bt_lambda", 0.005)),
-        # Fixed params
-        "--encoder-type",
-        "vqvae",
-        "--dataset_name",
-        "ADNI_registered",
-        "--batch-size",
-        str(config.get("batch_size", 2)),
-        "--gradient-accumulation-steps",
-        str(config.get("gradient_accumulation_steps", 8)),
-        "--train-steps",
-        str(config.get("train_steps", 50000)),
-        "--vqvae-nb-levels",
-        "3",
-        "--content-style-levels",
-        "0",
-        "1",
-        "2",
-        # Boolean flags (always on)
-        "--separate-encoders",
-        "--quantize-style",
-        "--use-wandb",
-        "--evaluate",
-        "--use-amp",
+        "--model-id",
+        f"sweep-{run.id}",  # Ensure each sweep run gets a unique directory
     ]
 
-    # Conditional boolean flags
-    if config.get("patch_contrastive", False):
-        argv.append("--patch-contrastive")
+    # Enforce vqvae_embed_dim == vqvae_hidden_channels if we are sweeping over hidden_channels
+    if "vqvae_hidden_channels" in config:
+        config["vqvae_embed_dim"] = config["vqvae_hidden_channels"]
 
-    # Pass dataroot/labels-path if set in environment
-    import os
+    # Dynamically inject all parameters from the wandb config
+    for key, value in config.items():
+        if key.startswith("_"):
+            continue  # Skip internal wandb keys
 
-    if os.environ.get("DATAROOT"):
+        arg_name = f"--{key.replace('_', '-')}"
+
+        if isinstance(value, bool):
+            if value:
+                argv.append(arg_name)
+        elif isinstance(value, (list, tuple)):
+            argv.append(arg_name)
+            argv.extend(str(v) for v in value)
+        else:
+            argv.append(arg_name)
+            argv.append(str(value))
+
+    # Pass dataroot/labels-path if set in environment overrides
+    if os.environ.get("DATAROOT") and "dataroot" not in config:
         argv.extend(["--dataroot", os.environ["DATAROOT"]])
-    if os.environ.get("LABELS_PATH"):
+    if os.environ.get("LABELS_PATH") and "labels_path" not in config:
         argv.extend(["--labels-path", os.environ["LABELS_PATH"]])
 
     wandb.finish()  # Close the sweep-agent run; main_multimodal.py will init its own
 
-    import subprocess
+    # Ensure PYTHONPATH is set so local modules are found
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.getcwd()
 
     print(f"Running: {' '.join(argv)}")
-    result = subprocess.run(argv)
+    result = subprocess.run(argv, env=env)
     sys.exit(result.returncode)
 
 
