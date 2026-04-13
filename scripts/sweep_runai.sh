@@ -20,7 +20,7 @@ PROJECT="nglazman"       # e.g. natalia
 GPU=1
 CPU=16
 MEMORY="64Gi"
-PVC_NAME="/nfs"          # PVC with data + code
+PVC_NAME="/nfs:/nfs"          # PVC with data + code
 PVC_MOUNT="/home/nglazman/crl-2"               # Mount point inside container
 WANDB_API_KEY="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"
 # -----------------------------------------
