@@ -93,13 +93,21 @@ def main():
         sys.exit(1)
 
     try:
+        # W&B has a known issue where it hijacks standard logging configurations.
+        # We need to make sure the root logger doesn't suppress all python errors.
+        import logging
+
+        logging.getLogger().setLevel(logging.INFO)
+
         # Run the main training loop in the SAME process.
         # This prevents WandB daemon conflicts that happen when spawning subprocesses
         # and dropping connection locks, which fixes metrics not logging correctly.
         run_main(args)
     except Exception as e:
+        import sys
         import traceback
 
+        print(f"CRASH OCCURRED: {str(e)}", file=sys.stderr)
         traceback.print_exc()
         wandb.log({"separation_score": 0.0})
         wandb.finish(exit_code=1)
