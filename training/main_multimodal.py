@@ -51,7 +51,7 @@ import models.vqvae as vqvae
 import utils.utils as utils
 from data.infinite_iterator import InfiniteIterator
 from eval.evaluation import eval_step, get_data
-from losses import BaselineLoss, barlow_twins_loss, infonce_loss, moco_loss, patch_infonce_loss, vicreg_loss
+from training.losses import BaselineLoss, barlow_twins_loss, infonce_loss, moco_loss, patch_infonce_loss, vicreg_loss
 from models.encoders import TextEncoder2D
 from utils.checkpointing import (
     load_checkpoint,
