@@ -98,7 +98,6 @@ def main():
         # and dropping connection locks, which fixes metrics not logging correctly.
         run_main(args)
     except Exception as e:
-        import sys
         import traceback
 
         print(f"CRASH OCCURRED: {str(e)}", file=sys.stderr)
