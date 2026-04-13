@@ -38,7 +38,7 @@ runai submit "${JOB_NAME}" \
     --memory "${MEMORY}" \
     --memory-limit 128G \
     --volume "${VOLUME_MOUNT}" \
-    --environment "WANDB_MODE=offline" \
+    --environment "WANDB_DIR=/tmp" \
     --environment "WANDB_API_KEY=${WANDB_API_KEY}" \
     --command -- bash -c "cd ${WORKDIR} && wandb agent --count 1 ${SWEEP_ID}"
 

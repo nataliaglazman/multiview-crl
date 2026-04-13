@@ -1195,12 +1195,13 @@ def main(args):
     _use_wandb = getattr(args, "use_wandb", False) and HAS_WANDB
     if _use_wandb:
         wandb_config = {k: v for k, v in vars(args).items() if k != "DATASETCLASS"}
+        wandb_dir = os.environ.get("WANDB_DIR", args.save_dir)
         wandb.init(
             project=getattr(args, "wandb_project", "multiview-crl-sweep"),
             entity=getattr(args, "wandb_entity", None),
             config=wandb_config,
             name=str(args.model_id),
-            dir=args.save_dir,
+            dir=wandb_dir,
             settings=wandb.Settings(init_timeout=300),
         )
         logger.info("[WANDB] Logging enabled")
