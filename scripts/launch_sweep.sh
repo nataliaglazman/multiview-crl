@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-NUM_AGENTS=50
+NUM_AGENTS=10
 WANDB_PROJECT="multiview-crl-sweep"
 
 while [[ $# -gt 0 ]]; do

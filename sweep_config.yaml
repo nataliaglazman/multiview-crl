@@ -33,20 +33,21 @@ parameters:
     values: [8, 16, 24, 32, 48]
   mask_mode:
     values: ["fixed", "learned"]
-  contrastive_loss_type:
-    values: ["infonce", "barlow_twins"]
   tau:
     distribution: log_uniform_values
     min: 0.05
     max: 2.0
+  content_ratios:
+    values:
+      - [0.5, 0.3, 0.2]
+      - [0.5, 0.5, 0.5]
+      - [0.7, 0.5, 0.3]
 
   # --- Tier 2: Secondary ---
   lr:
     distribution: log_uniform_values
     min: 0.00001
     max: 0.001
-  patch_contrastive:
-    values: [true, false]
   bt_lambda:
     distribution: log_uniform_values
     min: 0.001
@@ -54,8 +55,66 @@ parameters:
 
   # --- Fixed parameters (passed through to sweep_train.py) ---
   batch_size:
-    value: 2
+    value: 4
   gradient_accumulation_steps:
-    value: 8
+    value: 4
   train_steps:
-    value: 50000
+    value: 70000
+  dataroot:
+    value: "/nfs/home/nglazman/data"
+  dataset_name:
+    value: "ADNI_stripped"
+  encoder_type:
+    value: "vqvae"
+  patch_contrastive:
+    value: true
+  patch_grid:
+    value: [4, 5, 4]
+  labels_path:
+    value: "/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv"
+  moco_queue_size:
+    value: 8192
+  moco_momentum:
+    value: 0.99
+  vqvae_nb_levels:
+    value: 3
+  content_dim:
+    value: 128
+  total_dim:
+    value: 512
+  vqvae_scaling_rates:
+    value: [2, 2, 2]
+  vqvae_embed_dim:
+    value: 64
+  spatial_size:
+    value: [150, 180, 150]
+  use_amp:
+    value: true
+  resume_training:
+    value: true
+  workers:
+    value: 8
+  recon_loss_start_step:
+    value: 2000
+  content_style_levels:
+    value: [0, 1, 2]
+  cross_view_negs_only:
+    value: true
+  separate_encoders:
+    value: true
+  gradient_checkpointing:
+    value: true
+  skip_recon_ratio:
+    value: 0.5
+  image_spacing:
+    value: 1.0
+  cache_dataset:
+    value: true
+  vq_commitment_weight:
+    value: 0.25
+  cache_dir:
+    value: "/nfs/home/nglazman/cache/multiview"
+  contrastive_level_weights:
+    value: [1.0, 1.0, 1.0]
+  pass_full_to_next_level:
+    value: true
