@@ -90,6 +90,8 @@ parameters:
     value: [150, 180, 150]
   use_amp:
     value: true
+  use_wandb:
+    value: true
   resume_training:
     value: true
   workers:
