@@ -65,14 +65,15 @@ def main():
     if os.environ.get("LABELS_PATH") and "labels_path" not in config:
         argv.extend(["--labels-path", os.environ["LABELS_PATH"]])
 
-    wandb.finish()  # Close the sweep-agent run; main_multimodal.py will init its own
-
     # Ensure PYTHONPATH is set so local modules are found
     env = os.environ.copy()
     env["PYTHONPATH"] = os.getcwd()
 
     print(f"Running: {' '.join(argv)}")
     result = subprocess.run(argv, env=env)
+
+    # Close the sweep-agent run AFTER the training finishes
+    wandb.finish()
     sys.exit(result.returncode)
 
 
