@@ -37,7 +37,7 @@ runai submit "${JOB_NAME}" \
     --cpu "${CPU}" \
     --memory "${MEMORY}" \
     --memory-limit 128G \
-    --pvc "${PVC_NAME}:${PVC_MOUNT}" \
+    --volume "/nfs:${PVC_MOUNT}" \
     --environment "WANDB_API_KEY=${WANDB_API_KEY}" \
     --command -- bash -c "cd ${PVC_MOUNT}/multiview-crl && wandb agent --count 1 ${SWEEP_ID}"
 
