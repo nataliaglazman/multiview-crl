@@ -59,10 +59,38 @@ def main():
         cmd_args.extend(["--labels-path", os.environ["LABELS_PATH"]])
 
     print(f"Parsed args for run_main: {' '.join(cmd_args)}")
+    sys.stdout.flush()
 
     # Parse the arguments natively exactly as main_multimodal.py expects them
     parser = parse_args()
-    args = parser.parse_args(cmd_args)
+
+    # We must properly format list arguments. wandb passes strings like "[4, 5, 4]"
+    # but argparse with nargs='+' expects multiple string arguments like "4" "5" "4"
+    cleaned_args = []
+    import ast
+
+    for arg in cmd_args:
+        if arg.startswith("[") and arg.endswith("]"):
+            try:
+                # Safely parse stringified lists like "[4, 5, 4]" into python lists
+                parsed_list = ast.literal_eval(arg)
+                cleaned_args.extend(str(x) for x in parsed_list)
+            except Exception:
+                cleaned_args.append(arg)
+        else:
+            cleaned_args.append(arg)
+
+    print(f"Cleaned args for argparse: {' '.join(cleaned_args)}")
+    sys.stdout.flush()
+
+    try:
+        args = parser.parse_args(cleaned_args)
+    except SystemExit as e:
+        print(f"Argparse failed and called sys.exit({e.code}). Arguments passed were:")
+        print(cleaned_args)
+        wandb.log({"separation_score": 0.0})
+        wandb.finish(exit_code=1)
+        sys.exit(1)
 
     try:
         # Run the main training loop in the SAME process.
