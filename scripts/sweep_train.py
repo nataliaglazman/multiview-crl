@@ -32,7 +32,12 @@ def main():
         if key.startswith("_"):
             continue  # Skip internal wandb keys
 
-        arg_name = f"--{key.replace('_', '-')}"
+        # Convert underscores to hyphens for most arguments,
+        # except for a few anomalies in argparse definitions (like dataset_name)
+        if key == "dataset_name":
+            arg_name = "--dataset_name"
+        else:
+            arg_name = f"--{key.replace('_', '-')}"
 
         if isinstance(value, bool):
             if value:
