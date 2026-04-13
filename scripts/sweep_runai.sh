@@ -15,7 +15,7 @@ SWEEP_ID="${1:?Error: pass the W&B sweep ID as first argument}"
 AGENT_IDX="${2:?Error: pass the agent index as second argument}"
 
 # ---- Configure these for your setup ----
-IMAGE="aicregistry:5000/nglazman:multiview-crl-vqvae-latest"          # e.g. registry.example.com/multiview-crl:latest
+IMAGE="aicregistry:5000/nglazman:multiview-crl-vqvae-final"          # e.g. registry.example.com/multiview-crl:latest
 PROJECT="nglazman"       # e.g. natalia
 GPU=1
 CPU=16
