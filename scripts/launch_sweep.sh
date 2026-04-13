@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-NUM_AGENTS=10
+NUM_AGENTS=15
 WANDB_PROJECT="multiview-crl-sweep"
 SWEEP_ID=""
 

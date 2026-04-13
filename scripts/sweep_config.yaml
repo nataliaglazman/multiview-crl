@@ -59,7 +59,7 @@ parameters:
   gradient_accumulation_steps:
     value: 4
   train_steps:
-    value: 70000
+    value: 40000
   dataroot:
     value: "/nfs/home/nglazman/data"
   dataset_name:
