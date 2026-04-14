@@ -1368,7 +1368,9 @@ class MyCustomDataset(MultiviewDataset):
         }
         # Atomic write: save to a temp file then rename, so a crash never
         # leaves a half-written .pt that would be mistaken for a valid cache.
-        tmp_path = save_path + ".tmp"
+        import uuid
+
+        tmp_path = save_path + f".tmp.{uuid.uuid4().hex[:8]}"
         _torch.save(cached, tmp_path)
         os.replace(tmp_path, save_path)
         return idx, save_path

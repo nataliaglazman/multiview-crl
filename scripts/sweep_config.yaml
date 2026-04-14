@@ -58,13 +58,13 @@ parameters:
 
   # --- Fixed parameters (passed through to sweep_train.py) ---
   batch_size:
-    value: 4
+    value: 2
   gradient_accumulation_steps:
     value: 4
   train_steps:
     value: 20000
   dataroot:
-    value: "/nfs/home/nglazman/data"
+    value: "/data/natalia/"
   dataset_name:
     value: "ADNI_stripped"
   encoder_type:
@@ -74,7 +74,7 @@ parameters:
   patch_grid:
     value: [4, 5, 4]
   labels_path:
-    value: "/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv"
+    value: "/home/ng24/projects/nmpevqvae/labels_cleaned_3class.csv"
   vqvae_nb_levels:
     value: 3
   content_dim:
@@ -112,7 +112,7 @@ parameters:
   vq_commitment_weight:
     value: 0.25
   cache_dir:
-    value: "/nfs/home/nglazman/cache/multiview"
+    value: "/home/ng24/cache/multiview"
   contrastive_level_weights:
     value: [1.0, 1.0, 1.0]
   pass_full_to_next_level:
