@@ -1366,23 +1366,20 @@ class MyCustomDataset(MultiviewDataset):
             "image_t2": t2,
             "label": lbl,
         }
-        # Atomic write with local staging:
+        # Atomic write with memory staging:
         # PyTorch's internal ZIP stream writer can fail with "unexpected pos"
-        # when writing gigabytes of data concurrently to NFS drives.
-        # We first save natively to local /tmp, then copy the complete
-        # chunk over the network to the NFS, and finally rename atomically.
-        import shutil
+        # when seeking back-and-forth directly on a mounted NFS drive.
+        # We write the dictionary to a RAM buffer first, then flush the
+        # finalized bytes sequentially to the NFS to guarantee stability.
+        import io
         import uuid
 
-        job_id = uuid.uuid4().hex[:8]
-        local_tmp_path = f"/tmp/cache_{job_id}.pt"
-        nfs_tmp_path = save_path + f".tmp.{job_id}"
+        buffer = io.BytesIO()
+        _torch.save(cached, buffer)
 
-        # 1. Fast local write (avoids inline_container.cc issues)
-        _torch.save(cached, local_tmp_path)
-
-        # 2. Block transfer to NFS temp file
-        shutil.move(local_tmp_path, nfs_tmp_path)
+        nfs_tmp_path = save_path + f".tmp.{uuid.uuid4().hex[:8]}"
+        with open(nfs_tmp_path, "wb") as f:
+            f.write(buffer.getvalue())
 
         # 3. Atomic finalize
         os.replace(nfs_tmp_path, save_path)
