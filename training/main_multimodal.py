@@ -1548,6 +1548,29 @@ def main(args):
                             scaler=scaler,
                         )
 
+                        # Periodic separation score evaluation
+                        if step % 2000 == 1 or step == args.train_steps:
+                            if getattr(args, "eval_separation_periodic", True) and args.encoder_type == "vqvae":
+                                try:
+                                    from eval.cross_reconstruction import evaluate_content_style_separation
+
+                                    logger.info(
+                                        f"  [EVALUATION] Running periodic content/style separation metrics (step {step})..."
+                                    )
+                                    # Use a smaller max_batches for speed during training (80 batches = 320 samples with batch_size=4)
+                                    cs_metrics = evaluate_content_style_separation(
+                                        encoders[0],
+                                        val_loader
+                                        or DataLoader(val_dataset, **{**dataloader_kwargs, "shuffle": False}),
+                                        args,
+                                        device,
+                                        max_batches=80,
+                                    )
+                                    if _use_wandb:
+                                        wandb.log(cs_metrics, step=step)
+                                except Exception as e:
+                                    logger.warning(f"  [WARNING] Periodic separation evaluation failed: {e}")
+
                     # --- Periodic validation ---
                     if val_every > 0 and val_loader is not None and step % val_every == 0:
                         val_total, val_con, val_rec, val_vq = _run_validation(
@@ -1715,6 +1738,18 @@ def main(args):
 
         # Compute separation score at the very end of training so sweeps have it
         if getattr(args, "eval_separation_at_end", True) and args.encoder_type == "vqvae":
+            # First, reload the BEST model weights instead of using the final step's weights
+            best_ckpt_path = os.path.join(args.save_dir, "vqvae_best.pt")
+            if os.path.exists(best_ckpt_path):
+                logger.info(
+                    f"  [EVALUATION] Reloading BEST checkpoint from {best_ckpt_path} for final separation metrics..."
+                )
+                try:
+                    checkpoint = torch.load(best_ckpt_path, map_location=device, weights_only=False)
+                    encoders[0].load_state_dict(checkpoint["encoders"])
+                except Exception as e:
+                    logger.warning(f"  Failed to load best checkpoint, using final weights instead: {e}")
+
             try:
                 from eval.cross_reconstruction import evaluate_content_style_separation
 
