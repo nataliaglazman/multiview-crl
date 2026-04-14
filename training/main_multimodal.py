@@ -36,7 +36,6 @@ except ImportError:
     HAS_WANDB = False
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
 from sklearn.preprocessing import StandardScaler
@@ -922,9 +921,9 @@ def main(args):
         if args.collate_random_pair:
             dataloader_kwargs["collate_fn"] = train_dataset.__collate_fn__random_pair__
 
-    # Always create val_dataset for periodic validation during training
+    # Always create val_dataset for periodic validation during training or final check
     val_every = getattr(args, "val_every", 0)
-    need_val_dataset = args.evaluate or val_every > 0
+    need_val_dataset = args.evaluate or val_every > 0 or getattr(args, "eval_separation_at_end", True)
     if need_val_dataset:
         val_dataset = args.DATASETCLASS(
             data_dir=args.datapath,
@@ -1713,6 +1712,34 @@ def main(args):
         if _es_triggered:
             logger.info(f"  Early stopping best monitored loss: {_es_best:.4f}")
         logger.info(f"  Models saved to: {args.save_dir}")
+
+        # Compute separation score at the very end of training so sweeps have it
+        if getattr(args, "eval_separation_at_end", True) and args.encoder_type == "vqvae":
+            try:
+                from eval.cross_reconstruction import evaluate_content_style_separation
+
+                logger.info("[EVALUATION] Running final content/style separation metrics...")
+                cs_metrics = evaluate_content_style_separation(
+                    encoders[0],
+                    val_loader or DataLoader(val_dataset, **{**dataloader_kwargs, "shuffle": False}),
+                    args,
+                    device,
+                )
+                for k, v in cs_metrics.items():
+                    logger.info(f"  {k}: {v:.4f}")
+                if _use_wandb:
+                    wandb.log(cs_metrics)
+                    # For sweeps, make sure it's pushed to summary so the agent easily captures it
+                    wandb.summary.update(cs_metrics)
+                # Save to CSV
+                cs_path = os.path.join(args.save_dir, "cross_recon_metrics_train_end.csv")
+                import pandas as pd
+
+                pd.DataFrame([cs_metrics]).to_csv(cs_path, index=False)
+                logger.info(f"  Cross-recon metrics saved to: {cs_path}")
+            except Exception as e:
+                logger.error(f"[ERROR] Final content/style separation evaluation failed: {e}")
+
         tb_writer.close()
 
     # ------------------------------------------------------------------
