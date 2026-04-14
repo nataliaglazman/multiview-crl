@@ -28,24 +28,28 @@ parameters:
     max: 10.0
   # hidden_channels and embed_dim are always set equal (handled by sweep_train.py)
   vqvae_hidden_channels:
-    values: [32, 48, 64, 72]
+    values: [32, 48, 64]
+  vqvae_embed_dim:
+    values: [32, 48, 64]
 
   mask_mode:
     values: ["fixed", "learned"]
   tau:
     distribution: log_uniform_values
     min: 0.05
-    max: 2.0
+    max: 1.0
   content_ratios:
     values:
       - [0.5, 0.3, 0.2]
       - [0.5, 0.5, 0.5]
       - [0.7, 0.5, 0.3]
+      - [0.7, 0.7, 0.7]
+      - [0.3, 0.5, 0.7]
 
   # --- Tier 2: Secondary ---
   lr:
     distribution: log_uniform_values
-    min: 0.0001
+    min: 0.0005
     max: 0.002
   bt_lambda:
     distribution: log_uniform_values
@@ -58,7 +62,7 @@ parameters:
   gradient_accumulation_steps:
     value: 4
   train_steps:
-    value: 40000
+    value: 20000
   dataroot:
     value: "/nfs/home/nglazman/data"
   dataset_name:
@@ -71,10 +75,6 @@ parameters:
     value: [4, 5, 4]
   labels_path:
     value: "/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv"
-  moco_queue_size:
-    value: 8192
-  moco_momentum:
-    value: 0.99
   vqvae_nb_levels:
     value: 3
   content_dim:
@@ -83,8 +83,6 @@ parameters:
     value: 512
   vqvae_scaling_rates:
     value: [2, 2, 2]
-  vqvae_embed_dim:
-    value: 64
   spatial_size:
     value: [150, 180, 150]
   use_amp:
