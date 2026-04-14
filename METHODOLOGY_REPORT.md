@@ -5,12 +5,13 @@
 **Project:** `multiview-crl`
 **Dataset:** ADNI (Alzheimer's Disease Neuroimaging Initiative) - Registered T1 and T2 MRI scans
 **Date:** February 2026
-**Last Updated:** 31 March 2026
+**Last Updated:** 14 April 2026
 
 ### Changelog
 
 | Date | Changes |
 |------|--------|
+| 14 Apr 2026 | **W&B sweep infrastructure:** new Bayesian hyperparameter sweep via `scripts/sweep_config.yaml` + `scripts/sweep_train.py` (W&B agent wrapper that handles bool flags and coerces `vqvae_embed_dim` to equal `vqvae_hidden_channels`), launched with `scripts/launch_sweep.sh` (creates sweep, fans out Run:AI agents via `scripts/sweep_runai.sh`). `scripts/analyze_sweep.py` ranks finished runs by `separation_score`. Main training script now accepts `--use-wandb`, `--wandb-project`, `--wandb-entity` and mirrors all per-step scalars + summary metrics to W&B when enabled. Sweep objective is a new composite **`separation_score`** computed in `eval/cross_reconstruction.py` as the mean of (1 − |content→modality accuracy − 0.5|·2) and (1 − max(0, style→subject R²)); logged at the end of training and pushed to `wandb.summary`. **Contrastive loss objectives:** `--contrastive-loss-type {infonce, barlow_twins, vicreg}` (InfoNCE is default). Barlow Twins adds redundancy-reduction via the cross-correlation matrix (`--bt-lambda`, default 0.005); VICReg uses variance-invariance-covariance (`--vicreg-sim-coeff` 25, `--vicreg-std-coeff` 25, `--vicreg-cov-coeff` 1). Both are negative-free and work across patch and pooled modes; MoCo is auto-disabled when selected. **Patch-level (dense) InfoNCE:** `--patch-contrastive` with configurable `--patch-grid` (default `4 5 4`, ≈80 patches) aligns corresponding spatial patches across views instead of globally-pooled vectors. The encoder now adaptive-pools to the patch grid and the loss computes InfoNCE per patch position (or folds patches into the batch for BT/VICReg). **Multi-level content/style masking:** `--content-style-levels` (default `[0]`, can be `0 1 2`) selects which encoder levels receive the Gumbel content/style mask. `--content-ratios` lets each level use its own content ratio (e.g. `0.5 0.3 0.2` for a content-heavy pyramid). Each masked level produces its own style tensor for (a) contrastive loss, (b) decoder injection, and (c) optional style quantization. **Four mask modes** (`--mask-mode`): `onthefly` (default — logits = per-channel mean activation, shared across views, no learnable params; matches the original Yao et al. 2024 repo), `learned` (persistent `channel_logits` nn.Parameter; per-view variants when `--separate-encoders`), `fixed` (deterministic first-K-content split — no Gumbel noise, avoids MoCo queue staleness), and `learned_split` (per-channel sigmoid gates; the content/style size is no longer fixed — it emerges from training; incompatible with `--inject-style-to-decoder`). `--mask-warmup-steps` runs in-batch InfoNCE for the first N steps before starting the MoCo queue so the learned mask can stabilise; `--mask-lr-scale` slows mask evolution relative to the encoder. **Per-view encoders:** `--separate-encoders` gives each modality its own encoder stack (`encoders_v1`) while codebooks, decoders, and masks remain shared (consistent with view-specific identifiability theory, Yao et al. 2024). In this mode the forward pass splits the batch, encodes each half through its stack, and re-concatenates before the codebook loop. Learned mask mode extends automatically to per-view logits (`channel_logits_v1`). **Cross-view-negatives-only InfoNCE:** `--cross-view-negs-only` restricts the InfoNCE denominator to negatives drawn from the other view, forcing the model to align across modalities rather than within-view instance discrimination. Recommended with `--separate-encoders`. **Spatial FiLM style injection:** `--style-injection-mode {concat, film}`. `concat` is the legacy behaviour (style appended to the penultimate decoder feature map). `film` adds a `SpatialFiLM` module after each decoder stage — style is 1×1×1-convolved into per-location scale/shift maps that modulate every resolution, giving style access at every decoder layer. **Content propagation modes:** for levels with masking, four strategies for what the *next* encoder level sees (checked in priority order): `--pass-full-to-next-level` (unchanged full tensor — masking only affects the codebook/contrastive paths), `--narrow-encoder-input` (slice to content channels — cheapest; next encoder expects narrower input), `--use-content-projection` (slice + learned 1×1 conv back to `hidden_channels`), or fallback zero-masking. **SplitGroupNorm:** new module that group-normalises content and style channel groups independently so modality-specific style statistics can't bias content activations before the mask (stored in `content_norms`, applied between each encoder stage). **Codebook-collapse prevention:** explicit `--cb-ema-decay` (default 0.999), `--cb-reset-every` (default 100), `--cb-reset-threshold` (default 1.0) replace dead codebook entries (EMA cluster_size below threshold) with noisy copies of live ones every N forward passes per codebook. Codebook utilisation is now logged per level to TB/W&B (`codebook/active_L{i}`, `codebook/utilization_L{i}`, plus style-codebook variants when `--quantize-style`). **Top-level-recon-only ablation:** `--top-level-recon-only` zeros out encoder contributions at all but the coarsest level before the codebook, making reconstruction depend only on the top-level embedding while the contrastive loss still sees all levels. **Direct content-size override:** `--content-size N` bypasses the `--content-dim / --total-dim` ratio and sets content channels directly (propagates to all `content-style-levels`). **Custom spatial sizing:** `--spatial-size D H W` overrides the `image-spacing`/`crop-margin` derived shape. Matching RunAI defaults use `image-spacing 1.0` with `spatial-size 150 180 150`. **LR schedule + warmup:** `--warmup-steps` (default 1000), `--lr-schedule {cosine, constant}`, `--lr-min`. **Weight decay:** `--weight-decay` (default 0.01, applied to all params except biases, norms, ReZero alphas). **Early stopping:** `--early-stopping-patience` / `--early-stopping-min-delta` halt training if the monitored rolling avg (validation loss when `--val-every > 0`, otherwise training loss) fails to improve. **ADNI_stripped dataset variant:** new choice in `--dataset_name` for the skull-stripped ADNI preprocessing. **Changelog sweep defaults** now live in `scripts/sweep_config.yaml` — current Tier-1 search covers `scale_contrastive_loss`, `scale_recon_loss`, `vqvae_hidden_channels∈{32,48,64}` (locked equal to `vqvae_embed_dim`), `mask_mode∈{fixed,learned}`, `tau`, `content_ratios` (five preset pyramids), and Tier-2 `lr`, `bt_lambda`. Fixed sweep parameters include `patch_contrastive`, `content_style_levels=[0,1,2]`, `cross_view_negs_only`, `separate_encoders`, `pass_full_to_next_level`, `recon_loss_start_step=2000`, and `contrastive_level_weights=[1,1,1]`. **NaN-loss hardening:** losses.py now guards against zero-variance activations in Barlow Twins and division-by-zero in VICReg; contrastive path skips the loss instead of propagating NaN when a level has no valid positives. **Resume robustness:** `utils/checkpointing.py` now reloads optimizer/step state alongside queues, tolerates mismatched bool-flag shapes, and re-seeds dataloader iteration so resumed runs reproduce mid-epoch positions. |
 | 31 Mar 2026 | **Style quantization (Option A):** added independent per-level style codebooks (`--quantize-style`) that vector-quantize style channels before decoder injection, giving style its own discrete bottleneck; configurable via `--style-embed-dim` and `--style-nb-entries` (default to main codebook settings). **Contrastive diagnostics:** both `moco_infonce_loss` and `infonce_base_loss` now compute and return top-1 accuracy, positive/negative cosine similarity distributions (mean, std) as detached side-outputs; logged to TensorBoard per level (`Contrastive/top1_acc_L{i}`, `Contrastive/pos_sim_mean_L{i}`, etc.) and printed to console. **8-tuple forward return:** `VQVAE.forward()` now returns `style_id_outputs` (dict: level → style codebook indices) as the 8th element; updated all callers (training loop, visualisation, eval notebook). |
 | 24 Mar 2026 | **Content/style mask architecture overhaul:** moved Gumbel mask from embed_dim (32) back to hidden_channels (64) to prevent modality leakage through the `conv_in` projection; removed `content_proj` round-trip — level-0 codebook now receives only content channels directly. **Contrastive loss gradient fix:** removed `.detach()` from `channel_logits` in the contrastive path and switched from non-differentiable integer-index selection (`hz[..., indices]`) to differentiable soft masking (`hz * mask`) so Gumbel straight-through gradients flow from contrastive loss back to `channel_logits`. **Shared Gumbel mask:** forward pass now returns the soft content mask as a 7th output; the contrastive loss reuses this same mask instead of drawing an independent Gumbel sample, eliminating conflicting channel selections between reconstruction and contrastive objectives. **Persistent disk caching:** added `--cache-dir` for NFS-safe per-sample `.pt` caching with SHA-256 fingerprint invalidation, atomic writes, corruption detection (validates file size on startup, auto-deletes corrupt files at load time), and `.tmp` cleanup. **Periodic validation:** added `--val-every N` to run a short no-grad validation pass every N training steps, logging `Val/Total`, `Val/Contrastive`, `Val/Recon`, `Val/VQ` to TensorBoard. **Codebook indexing fix:** content-channels-aware codebook is now at index 0 (finest level, where the mask applies), not index `nb_levels-1`. Updated notebook (3 cells) and `visualisation.py` for 7-tuple return signature. |
 | 20 Mar 2026 | Added best-model checkpointing (`vqvae_best.pt`) with rolling-average loss tracking; fixed `decode_codes` 2D→3D permute bug (`permute(0,3,1,2)` → `permute(0,4,1,2,3)` for 3D volumes); added codebook analysis to evaluation notebook (Sections 11–16): codebook usage histograms by diagnosis, mutual information & chi-squared discriminativeness, PCA/t-SNE of codebook usage, code replacement & reconstruction with CN vs AD comparison; added NIfTI export of reconstructed volumes with correct post-transform affine; fixed t-SNE content-only filtering at level 0; fixed `last_id_outputs` leaked loop variable bug |
@@ -32,14 +33,9 @@ Given paired observations $(x^{(1)}, x^{(2)})$ representing T1 and T2 MRI scans 
 - **Content dimensions** $z_c$: Capture shared information (brain anatomy) that is consistent across both views
 - **Style dimensions** $z_s$: Capture view-specific information (T1 vs T2 contrast characteristics)
 
-### 1.2 Two Encoder Architectures
+### 1.2 Encoder Architecture
 
-The project supports two encoder architectures:
-
-| Architecture | Description | Use Case |
-|-------------|-------------|----------|
-| **VAE** | Simple 3D CNN encoder with separate decoder | Baseline, faster training |
-| **VQ-VAE-2** | Hierarchical Vector Quantized VAE with 3 levels | Discrete representations, better disentanglement |
+A hierarchical 3D **VQ-VAE-2** encoder (`models/vqvae.py`) is the sole architecture. Discrete codebook representations at three scales provide multi-resolution features for content/style disentanglement.
 
 ---
 
@@ -101,78 +97,13 @@ Preprocessing brain MRI volumes (loading NIfTI, resampling, brain masking) is I/
 
 ---
 
-## 3. Model Architectures
+## 3. Model Architecture
 
-### 3.1 Architecture Selection
-
-The encoder type is selected via command-line argument:
-
-```bash
---encoder-type vae      # Use simple VAE encoder/decoder
---encoder-type vqvae    # Use hierarchical VQ-VAE-2 (default)
-```
-
----
-
-## 3.2 VAE Architecture (`models/vae.py`)
-
-#### 3.2.1 Encoder
-
-A 3D convolutional neural network with ResNet-style skip connections:
-
-| Layer | Input Channels | Output Channels | Output Size | Description |
-|-------|---------------|-----------------|-------------|-------------|
-| Input | 1 | - | $(91, 109, 91)$ | Single-channel 3D MRI |
-| Conv1 + ResBlock | 1 | 32 | $(46, 55, 46)$ | 3×3×3 conv + MaxPool |
-| Conv2 + ResBlock | 32 | 64 | $(23, 28, 23)$ | 3×3×3 conv + MaxPool |
-| Conv3 + ResBlock | 64 | 128 | $(12, 14, 12)$ | 3×3×3 conv + MaxPool |
-| Conv4 + ResBlock | 128 | 256 | $(6, 7, 6)$ | 3×3×3 conv + MaxPool |
-| Conv5 + ResBlock | 256 | 512 | $(3, 4, 3)$ | 3×3×3 conv + MaxPool |
-| AdaptiveAvgPool | 512 | 512 | $(1, 1, 1)$ | Global average pooling |
-| Flatten | - | - | **512** | Final latent vector |
-
-**Architecture Details:**
-- **Normalization:** GroupNorm (16 groups) for stable training with small batch sizes
-- **Activation:** ReLU for conv blocks, residual connections for gradient flow
-- **Total Encoder Parameters:** ~15.5M
-
-#### 3.2.2 Decoder
-
-A symmetric decoder using transposed convolutions for sharper reconstructions:
-
-| Layer | Input Channels | Output Channels | Output Size | Description |
-|-------|---------------|-----------------|-------------|-------------|
-| Linear | 512 | 512×2×2×2 | $(512, 2, 2, 2)$ | Project to spatial |
-| TransConv1 + ResBlock | 512 | 512 | $(4, 4, 4)$ | Upsample ×2 |
-| TransConv2 + ResBlock | 512 | 256 | $(8, 8, 8)$ | Upsample ×2 |
-| TransConv3 + ResBlock | 256 | 128 | $(16, 16, 16)$ | Upsample ×2 |
-| TransConv4 + ResBlock | 128 | 64 | $(32, 32, 32)$ | Upsample ×2 |
-| TransConv5 + ResBlock | 64 | 32 | $(64, 64, 64)$ | Upsample ×2 |
-| TransConv6 + ResBlock | 32 | 16 | $(128, 128, 128)$ | Upsample ×2 |
-| Refine Block | 16 | 1 | $(128, 128, 128)$ | 3 conv layers |
-| Trilinear Upsample | 1 | 1 | $(91, 109, 91)$ | Final resize |
-
-**Architecture Details:**
-- **Transposed Convolutions:** 4×4×4 kernels, stride 2 for learned upsampling
-- **Refinement Block:** 3 conv layers (16→16→8→1) for sharper output
-- **Final Activation:** None (unbounded output for normalized data)
-- **Total Decoder Parameters:** ~27.8M
-
-#### 3.2.3 VAE Latent Space Structure
-
-| Property | Value | Description |
-|----------|-------|-------------|
-| **Total Latent Dimensions** | 512 | Fixed encoder output |
-| **Content Dimensions** | 256 (indices 0-255) | Shared between T1/T2 |
-| **Style Dimensions** | 256 (indices 256-511) | View-specific |
-
----
-
-## 3.3 VQ-VAE-2 Architecture (`models/vqvae.py`)
+## 3.1 VQ-VAE-2 Architecture (`models/vqvae.py`)
 
 The VQ-VAE-2 is a **hierarchical Vector Quantized Variational Autoencoder** adapted for 3D brain MRI. It uses discrete codebook representations at multiple scales, enabling multi-resolution feature learning.
 
-### 3.3.1 Architecture Overview
+### 3.1.1 Architecture Overview
 
 ```
 Input Image (91, 109, 91)
@@ -226,7 +157,7 @@ Input Image (91, 109, 91)
 Reconstructed Image (91, 109, 91)
 ```
 
-### 3.3.2 Configuration Parameters
+### 3.1.2 Configuration Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -247,7 +178,7 @@ Reconstructed Image (91, 109, 91)
 | `--style-embed-dim` | None | Style codebook embedding dim (defaults to `embed_dim`) |
 | `--style-nb-entries` | None | Style codebook size (defaults to `nb_entries`) |
 
-### 3.3.3 Encoder Details (Per Level)
+### 3.1.3 Encoder Details (Per Level)
 
 Each encoder uses strided 3D convolutions for downsampling. Output sizes depend on input volume shape and `--vqvae-scaling-rates`.
 
@@ -267,7 +198,7 @@ For encoder with 2× downscale:
 
 **Gradient Checkpointing:** The `ResidualStack` supports optional gradient checkpointing (`use_checkpoint=True` by default). During training, the entire stack is wrapped with `torch.utils.checkpoint.checkpoint()`, trading recomputation for memory savings. This is controlled via `--gradient-checkpointing` at the command line, which passes through `VQVAE → Encoder/Decoder → ResidualStack`.
 
-### 3.3.4 Vector Quantization Layer
+### 3.1.4 Vector Quantization Layer
 
 The `CodeLayer` implements EMA (Exponential Moving Average) codebook updates. Each codebook has a `conv_in` projection (1×1×1 Conv3d) that maps from the input channels to `embed_dim`, followed by nearest-neighbour lookup in the codebook:
 
@@ -294,7 +225,7 @@ Level 0 receives only the content channels (selected by the Gumbel mask) rather 
 - **Update Method:** EMA (no codebook gradient, more stable than loss-based)
 - **Decay Rate:** 0.99
 
-### 3.3.5 Decoder Details
+### 3.1.5 Decoder Details
 
 Each decoder receives concatenated codes from current and all higher levels:
 
@@ -304,7 +235,7 @@ Each decoder receives concatenated codes from current and all higher levels:
 | 1 | 64 (2 codes) | 2× | 32 (embed_dim) |
 | 0 (bottom) | 96 (3 codes) | 4× | 1 (image) |
 
-### 3.3.6 Style Injection to Decoder (`--inject-style-to-decoder`)
+### 3.1.6 Style Injection to Decoder (`--inject-style-to-decoder`)
 
 By default, only the **content channels** (selected by the Gumbel mask) are passed forward to the level-0 codebook and decoder chain. The **style channels** (the complement within `hidden_channels`) are discarded after level-0, so the decoder has no signal about modality-specific features.
 
@@ -331,7 +262,7 @@ Encoder level-0 output  (B, hidden_channels, D, H, W)
 
 **Motivation:** Giving the decoder access to style (modality-specific) channels should improve reconstruction quality for T2 scans, whose contrast differs markedly from T1, without weakening the contrastive signal on content dimensions.
 
-### 3.3.7 Style Quantization (`--quantize-style`)
+### 3.1.7 Style Quantization (`--quantize-style`)
 
 By default, style channels are injected into the decoder as raw encoder activations (continuous). When `--quantize-style` is enabled, each masked level gets an **independent style codebook** that vector-quantizes the style channels before decoder injection. This is "Option A" — fully independent codebooks with no cross-level conditioning.
 
@@ -363,12 +294,12 @@ Encoder level-l output  (B, hidden_channels, D, H, W)
 --style-nb-entries 256    # defaults to --vqvae-nb-entries
 ```
 
-### 3.3.8 Total Parameters
+### 3.1.8 Total Parameters
 
 With default configuration:
-- **Total VQ-VAE-2 Parameters:** ~2.9M (much smaller than VAE)
+- **Total VQ-VAE-2 Parameters:** ~2.9M
 
-### 3.3.8 Reconstruction Loss (BaselineLoss)
+### 3.1.9 Reconstruction Loss (BaselineLoss)
 
 The reconstruction loss (`BaselineLoss` in `training/losses.py`) combines three complementary terms:
 
@@ -380,15 +311,15 @@ $$\mathcal{L}_{recon} = \underbrace{\mathcal{L}_{pixel}}_{\lambda_p=1.0} + \unde
 | **Frequency loss** | MSE on FFT magnitudes (ortho-normalized) | Penalize missing high-frequency detail |
 | **Perceptual loss** | LPIPS (SqueezeNet backbone, 512 random axial slices) | Structural/feature-level similarity |
 
-For VQ-VAE, VQ commitment losses per codebook level are added *on top* of this reconstruction loss and logged separately.
+VQ commitment losses per codebook level are added *on top* of this reconstruction loss and logged separately.
 
 ---
 
-## 3.4 Hierarchical Contrastive Learning (VQ-VAE-2)
+## 3.2 Hierarchical Contrastive Learning
 
 A key innovation in this implementation is **hierarchical contrastive learning** applied across all encoder levels.
 
-### 3.4.1 Motivation
+### 3.2.1 Motivation
 
 Different encoder levels capture different types of information:
 - **Level 0 (bottom):** Fine-grained local features (textures, edges)
@@ -397,11 +328,15 @@ Different encoder levels capture different types of information:
 
 By applying contrastive loss at each level, we enforce content/style disentanglement across all scales.
 
-### 3.4.2 Content Selection Strategy
+### 3.2.2 Content Selection Strategy
 
-Content indices at **Level 0** are selected by learnable `channel_logits` via Gumbel-Softmax, applied on the full `hidden_channels` (64-dim) encoder output. Higher levels use batch-statistics-based Gumbel masks with the same content ratio.
+Content masking is controlled by two flags:
+- `--content-style-levels` — which encoder levels receive a mask (default `[0]`, i.e. finest only). Set to `0 1 2` to mask at every level.
+- `--mask-mode` — how the mask is computed. Four modes are implemented (see Section 6 for full details): `onthefly` (default), `learned`, `fixed`, `learned_split`.
 
-**Critical design: shared Gumbel mask.** The forward pass samples a single Gumbel mask from `channel_logits` and uses it for both (a) selecting content channels for the level-0 codebook, and (b) soft-masking pooled features for the contrastive loss. This ensures both losses agree on which channels are content on every step. Previously, two independent Gumbel samples were drawn, causing the reconstruction and contrastive objectives to work on different channel subsets and preventing convergence.
+At each masked level the mask is applied BEFORE the codebook projection so it operates on the raw `hidden_channels` encoder activations (typically 64) rather than the compressed embed_dim space, where the `conv_in` projection would mix all channels and leak modality information.
+
+**Critical design: shared Gumbel mask.** When the mask is drawn (non-`fixed` modes), it is sampled ONCE per forward pass and used for both (a) selecting content channels for that level's codebook and (b) soft-masking pooled features for the contrastive loss. `VQVAE.forward()` returns the per-level soft masks as `soft_content_masks` (7th tuple element); the training loop reuses them verbatim, so both losses agree on which channels are content on every step. Previously, two independent Gumbel samples were drawn, causing the reconstruction and contrastive objectives to work on different channel subsets and preventing convergence.
 
 ```python
 # In VQVAE.forward():
@@ -427,7 +362,7 @@ level_1_content = 48 dims
 level_2_content = 48 dims
 ```
 
-### 3.4.3 Training Loop for VQ-VAE-2
+### 3.2.3 Training Loop
 
 ```python
 # Forward pass returns shared mask (8-tuple)
@@ -458,7 +393,7 @@ for level_idx, enc_pooled in enumerate(encoder_pools):
 total_loss = contrastive_loss + recon_loss * scale + vq_commitment_loss
 ```
 
-### 3.4.4 VQ-VAE-2 Loss Components
+### 3.2.4 Loss Components
 
 $$\mathcal{L}_{total} = \sum_{l=0}^{2} \mathcal{L}_{contrastive}^{(l)} + \lambda_r \cdot \mathcal{L}_{recon} + \lambda_c \cdot \sum_{l=0}^{2} \mathcal{L}_{VQ}^{(l)}$$
 
@@ -475,15 +410,23 @@ Where:
 
 ### 4.1 Total Loss
 
-**For VAE mode:**
-$$\mathcal{L}_{total} = \mathcal{L}_{contrastive} + \lambda \cdot \mathcal{L}_{reconstruction}$$
-
-**For VQ-VAE-2 mode:**
 $$\mathcal{L}_{total} = \sum_{l=0}^{2} \mathcal{L}_{contrastive}^{(l)} + \lambda_r \cdot \mathcal{L}_{recon} + \lambda_c \cdot \sum_{l=0}^{2} \mathcal{L}_{VQ}^{(l)}$$
 
 Where $\lambda_r$ = `scale_recon_loss` (default: 0.00001), $\lambda_c$ = `vq_commitment_weight` (default: 0.25)
 
-### 4.2 Standard Contrastive Loss (InfoNCE)
+### 4.2 Contrastive Objective Selection (`--contrastive-loss-type`)
+
+The contrastive loss family is chosen at runtime:
+
+| Value | Function | Negatives? | Notes |
+|-------|----------|-----------|-------|
+| `infonce` (default) | `infonce_loss` / `patch_infonce_loss` / `moco_infonce_loss` | Yes (in-batch or MoCo queue) | Works with `--use-moco`, `--cross-view-negs-only`, `--patch-contrastive`. |
+| `barlow_twins` | `barlow_twins_loss` | No | Push diagonal of cross-correlation matrix to 1 and off-diagonals to 0. Works at any batch size. `--bt-lambda` (default 0.005) weights the off-diagonal term. |
+| `vicreg` | `vicreg_loss` | No | Variance–Invariance–Covariance — MSE across paired views + per-dim variance hinge (std ≥ 1) + off-diagonal covariance penalty. More stable than BT at very small batches. Coefficients `--vicreg-{sim,std,cov}-coeff`. |
+
+MoCo is auto-disabled when a negative-free objective is selected. All three objectives accept the same `soft_content_mask` argument and fold patch dimensions into the batch when `--patch-contrastive` is set.
+
+### 4.2.1 Standard Contrastive Loss (InfoNCE)
 
 Implemented in `training/losses.py` as `infonce_loss`. Used by default when `--use-moco` is not set.
 
@@ -494,9 +437,20 @@ $$\mathcal{L}_{InfoNCE} = -\log \frac{\exp(\text{sim}(z^{(1)}_c, z^{(2)}_c) / \t
 - **Temperature ($\tau$):** 1.0 (default)
 - **Content-Only Similarity:** Only `content_indices` dimensions are used for similarity computation
 - **Positive Pairs:** Same subject, different views (T1, T2)
-- **Negative Pairs:** Different subjects within the batch
+- **Negative Pairs:** Different subjects within the batch (or only the *other* view when `--cross-view-negs-only` is set — forces alignment across modalities rather than within-view instance discrimination)
 
-**Limitation:** With small batches (batch size 2–4), the number of in-batch negatives is very small, which weakens the contrastive signal. MoCo addresses this (see Section 4.3).
+**Limitation:** With small batches (batch size 2–4), the number of in-batch negatives is very small, which weakens the contrastive signal. MoCo addresses this (see Section 4.3). Barlow Twins and VICReg side-step the problem entirely by discarding negatives.
+
+### 4.2.2 Patch-Level (Dense) InfoNCE (`--patch-contrastive`)
+
+With `--patch-contrastive`, the encoder adaptively pools each level's spatial map to a grid of size `--patch-grid D H W` (default `4 5 4`, ≈80 patches). `patch_infonce_loss` then computes InfoNCE *per patch position* (positives are the same patch location across views; negatives are other subjects at the same patch) and averages over positions. This preserves spatial correspondence: patches at the same anatomical location should align, providing a richer signal than global pooling. For Barlow Twins / VICReg the patch axis is folded into the batch dimension so both objectives operate on the richer sample set.
+
+### 4.2.3 Barlow Twins and VICReg
+
+Both objectives operate on content-masked per-level features.
+
+- **Barlow Twins** computes the cross-correlation matrix $C = Z_1^\top Z_2 / B$ between batch-normalised content features of the two views, then minimises $\sum_i (C_{ii}-1)^2 + \lambda \sum_{i\neq j} C_{ij}^2$. Encourages invariance on the diagonal and decorrelation off-diagonal. `top1_acc` is not meaningful and is reported as 0.
+- **VICReg** combines (i) MSE between paired views (invariance), (ii) `relu(1 − std(z_i))` averaged per dimension (variance hinge to prevent representation collapse), and (iii) a normalised off-diagonal covariance penalty (decorrelation). Unlike Barlow Twins, the variance is enforced directly rather than inferred from the correlation matrix, so the loss behaves better at batch sizes 2–4.
 
 ### 4.3 MoCo Contrastive Loss (`--use-moco`)
 
@@ -578,7 +532,7 @@ Where:
 
 ### 4.5 VQ Commitment Loss
 
-For VQ-VAE-2 mode, each codebook level has a commitment loss:
+Each codebook level has a commitment loss:
 
 $$\mathcal{L}_{VQ}^{(l)} = ||z_e^{(l)} - \text{sg}[z_q^{(l)}]||^2$$
 
@@ -646,7 +600,7 @@ For each step:
 
 **Best-Model Tracking:**
 
-The checkpointing system tracks the best model via a rolling average of the total loss. At each checkpoint step, if `len(loss_values) == maxlen` (the rolling window is full), the current rolling average is compared against the historical best. If improved, the checkpoint is saved to `vqvae_best.pt` (or `checkpoint_best.pt` for VAE mode). When resuming training, the best loss is restored from the existing best checkpoint if present.
+The checkpointing system tracks the best model via a rolling average of the total loss. At each checkpoint step, if `len(loss_values) == maxlen` (the rolling window is full), the current rolling average is compared against the historical best. If improved, the checkpoint is saved to `vqvae_best.pt`. When resuming training, the best loss is restored from the existing best checkpoint if present.
 
 ```python
 # In main_multimodal.py:
@@ -676,7 +630,7 @@ if rolling_loss is not None and rolling_loss < best_total_loss:
 Validation runs a short pass (up to 20 batches) over the validation split with the model in `eval()` mode and no gradient computation. This provides an overfitting signal without significant training slowdown.
 
 **Checkpoint Contents:**
-- Model weights (`vqvae_model.pt` or `checkpoint.pt`; best model in `vqvae_best.pt` or `checkpoint_best.pt`)
+- Model weights (`vqvae_model.pt`; best model in `vqvae_best.pt`)
 - Optimizer state
 - Current step and last loss values (total, contrastive, recon, VQ)
 - If `--use-moco`: per-level queue tensors and queue pointers (explicit `moco_queues` / `moco_queue_ptrs` keys)
@@ -717,22 +671,65 @@ By applying contrastive loss **only on content dimensions**, the model is encour
 1. Push content dimensions to encode shared anatomical features
 2. Leave style dimensions free to capture modality-specific information
 
-### 6.2 Implementation
+### 6.2 Multi-Level Mask Configuration
 
-The content/style split is configured via `--content-dim` and `--total-dim`:
+The content/style split is configured via a combination of `--content-dim`, `--total-dim`, `--content-style-levels`, `--content-ratios`, and `--content-size`:
 
 ```bash
---content-dim 384   # determines content ratio
---total-dim   512   # determines style ratio
+--content-dim 128 --total-dim 512             # global ratio 0.25
+--content-style-levels 0 1 2                  # apply at every level
+--content-ratios      0.5 0.3 0.2             # per-level override (optional)
+# or
+--content-size 48 --vqvae-hidden-channels 64  # directly set 48 content / 16 style
 ```
 
-The `content_channels` in VQ-VAE-2's encoder output is derived proportionally from the `hidden_channels`:
-```python
-content_channels = round(content_dim / total_dim * hidden_channels)
-# e.g. round(384/512 * 64) = 48 content channels out of 64
-```
+The number of content channels at each masked level is `round(ratio * hidden_channels)`. Levels not listed in `--content-style-levels` pass their encoder output through unmasked.
 
-A learnable parameter `channel_logits` (size `hidden_channels`) is trained with Gumbel-Softmax to select which specific channels are content vs style. The selection is:
+### 6.3 Mask Modes (`--mask-mode`)
+
+| Mode | Learnable? | Gumbel? | Per-view? | When to use |
+|------|------------|---------|-----------|-------------|
+| `onthefly` (default) | No | Top-k Gumbel-Softmax on mean-activation logits | Shared (logits averaged over batch+views) | Matches Yao et al. 2024; no learnable mask params. |
+| `learned` | Yes (`channel_logits` nn.Parameter per level) | Top-k Gumbel-Softmax | Per-view when `--separate-encoders` (via `channel_logits_v1`) | Strongest separation signal, but can drift → stale MoCo queue. |
+| `fixed` | No | No — deterministic first-K split | Shared | Avoids Gumbel noise and queue staleness entirely; good baseline for sweeps. |
+| `learned_split` | Yes (per-channel sigmoid gates) | Straight-through hard sigmoid | Shared | Content size is NOT fixed — it emerges from training. Incompatible with `--inject-style-to-decoder` (style size varies per step). |
+
+For learned modes, `--mask-warmup-steps N` runs the first N steps with in-batch InfoNCE (MoCo queue frozen) so the mask can stabilise before the queue is filled, and `--mask-lr-scale` slows mask evolution relative to the encoder.
+
+### 6.4 Content Propagation Between Levels
+
+When content is masked at level $l$, the next encoder level can receive one of four inputs (checked in priority order):
+
+1. `--pass-full-to-next-level` → pass the FULL unmasked tensor forward (mask only affects codebook/contrastive paths).
+2. `--narrow-encoder-input` → slice to content channels (narrower conv input, no extra params).
+3. `--use-content-projection` → slice + learned 1×1×1 conv back to `hidden_channels` (`ContentProjection` module).
+4. Fallback → zero-mask style channels in place.
+
+The choice is a trade-off between preserving modality information for deeper features (option 1) and enforcing bottleneck-like information removal between levels (options 2–4). Sweep runs currently favour option 1 with `--content-style-levels 0 1 2`.
+
+### 6.5 SplitGroupNorm
+
+A per-level `SplitGroupNorm` (registered in `content_norms`) re-normalises content and style channel groups independently between encoder stages, so modality-specific style statistics cannot bias content activations before the mask separates them. Applied in both the shared-encoder and `--separate-encoders` paths.
+
+### 6.6 Cross-Reconstruction Evaluation (`separation_score`)
+
+`eval/cross_reconstruction.py::evaluate_content_style_separation` is run at the end of training (and pushed to W&B summary when `--use-wandb`). It collects pooled level-0 content/style features for every subject and computes:
+
+| Metric | Desired value |
+|--------|---------------|
+| `content/cross_view_cosine_mean` | high (same subject's T1 and T2 content should match) |
+| `content/modality_probe_acc` (LR on content → predict T1 vs T2) | ≈ 0.5 (chance) |
+| `content/modality_invariance` = 1 − 2·|acc − 0.5| | → 1.0 |
+| `style/modality_probe_acc` (LR on style → predict T1 vs T2) | → 1.0 |
+| `style/subject_probe_r2` (Ridge on style → predict subject index) | ≈ 0 |
+| `style/subject_invariance` = 1 − max(0, r²) | → 1.0 |
+| **`separation_score`** = mean(content/modality_invariance, style/subject_invariance) | → 1.0 |
+
+`separation_score` is the default optimisation target for the W&B Bayesian sweep (see Section 8.4).
+
+### 6.7 Implementation Summary
+
+A learnable parameter `channel_logits` (size `hidden_channels`, per level when masked) is trained with Gumbel-Softmax to select which specific channels are content vs style. The selection is:
 1. **Differentiable** — Gumbel straight-through estimator allows gradients from both reconstruction and contrastive losses to flow back to `channel_logits`
 2. **Shared** — a single Gumbel sample is drawn per step and used for both the codebook (reconstruction) and the contrastive loss
 3. **Applied on hidden_channels** — the mask operates on the raw 64-dim encoder output, not on the compressed 32-dim codebook embedding, because the `conv_in` projection would mix all channels and leak modality information
@@ -747,11 +744,12 @@ hz_content = hz * soft_mask  # NOT hz[..., content_indices]
 sim = cosine_similarity(hz_content_view1, hz_content_view2)
 ```
 
-### 6.3 Expected Outcomes
+### 6.8 Expected Outcomes
 
 After training:
-- `z[0:content_dim]` (content) should encode: brain structure, ventricle size, atrophy patterns
-- `z[content_dim:total_dim]` (style) should encode: T1 vs T2 contrast, intensity characteristics
+- Content channels should encode: brain structure, ventricle size, atrophy patterns
+- Style channels should encode: T1 vs T2 contrast, intensity characteristics
+- `separation_score` (Section 6.6) → 1.0 as the two probes approach chance on the adversarial axes and saturation on the desired ones.
 
 ---
 
@@ -775,15 +773,22 @@ multiview-crl/
 ├── eval/
 │   ├── dci.py                  # DCI disentanglement metric
 │   ├── evaluation.py           # val_step / get_data / eval_step
+│   ├── cross_reconstruction.py # evaluate_content_style_separation → separation_score (W&B sweep target)
+│   ├── dino.ipynb              # Self-supervised pretraining exploration
 │   └── view_latents.ipynb      # Load checkpoint, extract & visualize latents
 ├── models/
 │   ├── encoders.py             # Additional encoder architectures (text)
 │   ├── pixelsnail.py           # PixelSNAIL autoregressive prior
-│   ├── vae.py                  # VAE Encoder and Decoder architectures
-│   └── vqvae.py                # VQ-VAE-2 + MoCoEncoder
+│   └── vqvae.py                # VQ-VAE-2 (SpatialFiLM, SplitGroupNorm, ContentProjection) + MoCoEncoder
+├── scripts/
+│   ├── sweep_config.yaml       # W&B Bayesian sweep definition (targets separation_score)
+│   ├── sweep_train.py          # W&B agent wrapper (bool-flag + list handling, in-process run_main)
+│   ├── launch_sweep.sh         # Create sweep + fan out Run:AI agents
+│   ├── sweep_runai.sh          # Single Run:AI submission for one sweep agent
+│   └── analyze_sweep.py        # Rank sweep runs by separation_score
 ├── training/
-│   ├── losses.py               # InfoNCE, MoCo InfoNCE, and BaselineLoss
-│   ├── main_multimodal.py      # train_step + main (VQ-VAE-2 / VAE)
+│   ├── losses.py               # InfoNCE, patch-InfoNCE, MoCo InfoNCE, Barlow Twins, VICReg, BaselineLoss
+│   ├── main_multimodal.py      # train_step + main (VQ-VAE-2); W&B + TB logging
 │   ├── main_numerical.py       # Numerical experiment training script
 │   └── trainer.py              # PixelSNAIL prior trainer
 └── utils/
@@ -798,15 +803,6 @@ multiview-crl/
 
 results/
 └── ADNI_registered/
-    ├── {vae_model_id}/
-    │   ├── settings.json           # Training configuration
-    │   ├── Training.csv            # Loss history (CSV)
-    │   ├── checkpoint.pt           # Full checkpoint (for resume)
-    │   ├── encoder_image.pt        # Encoder weights only
-    │   ├── tensorboard/            # TensorBoard event files
-    │   └── decoded_images/
-    │       ├── step_00001_original.nii.gz
-    │       └── step_00001_decoded.nii.gz
     └── {vqvae_model_id}/
         ├── settings.json           # Training configuration
         ├── Training.csv            # Loss history (CSV)
@@ -870,18 +866,6 @@ python training/main_multimodal.py \
     --model-id vqvae_experiment
 ```
 
-**VAE (Baseline):**
-```bash
-python training/main_multimodal.py \
-    --dataroot /data/natalia \
-    --dataset_name ADNI_registered \
-    --encoder-type vae \
-    --train-steps 5000 \
-    --batch-size 4 \
-    --use-amp \
-    --scale-recon-loss 0.00001
-```
-
 **Resume Training:**
 
 Training now auto-resumes whenever a compatible checkpoint exists in the save directory, so `--resume-training` is technically optional. Pass it explicitly for clarity:
@@ -915,7 +899,7 @@ bash docker/run_docker.sh
 |----------|---------|-------------|
 | `--dataroot` | `/data/natalia/` | Root data directory |
 | `--dataset_name` | `ADNI_registered` | Dataset name |
-| `--encoder-type` | `vqvae` | Architecture: `vae` or `vqvae` |
+| `--encoder-type` | `vqvae` | Fixed to `vqvae` (hierarchical VQ-VAE-2) |
 | `--batch-size` | 2 | Samples per view per batch |
 | `--lr` | 1e-5 | Learning rate |
 | `--train-steps` | 300001 | Total training steps |
@@ -929,6 +913,29 @@ bash docker/run_docker.sh
 | `--crop-margin` | 0 | Voxels to crop from each edge |
 | `--gradient-accumulation-steps` | 1 | Accumulate N mini-batches before optimizer step |
 | `--skip-recon-ratio` | 0.0 | Fraction of steps that skip decoder (0–1) |
+| `--weight-decay` | 0.01 | AdamW weight decay (biases, norms, ReZero alphas are exempted) |
+| `--warmup-steps` | 1000 | Linear LR warmup steps (0 disables) |
+| `--lr-schedule` | `cosine` | Post-warmup schedule: `cosine` or `constant` |
+| `--lr-min` | 0.0 | Minimum LR for cosine annealing |
+| `--recon-loss-start-step` | 0 | Step at which to start applying the reconstruction loss |
+| `--spatial-size D H W` | None | Explicit input spatial size after resampling (overrides `--image-spacing` / `--crop-margin` derived shape) |
+| `--early-stopping-patience` | 0 | Stop if rolling monitored loss fails to improve for N checkpoint intervals (0 disables). Uses Val/Total when `--val-every > 0`, else training loss |
+| `--early-stopping-min-delta` | 0.0 | Minimum improvement to count as progress |
+| `--dataset_name` | `ADNI_registered` | Also supports `ADNI_stripped` (skull-stripped variant) |
+
+**Contrastive Objective Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--contrastive-loss-type` | `infonce` | One of `infonce`, `barlow_twins`, `vicreg` |
+| `--bt-lambda` | 0.005 | Barlow Twins off-diagonal weight |
+| `--vicreg-sim-coeff` | 25.0 | VICReg invariance (MSE) weight |
+| `--vicreg-std-coeff` | 25.0 | VICReg variance (hinge) weight |
+| `--vicreg-cov-coeff` | 1.0 | VICReg covariance (decorrelation) weight |
+| `--patch-contrastive` | False | Use dense patch-level alignment instead of global pooling |
+| `--patch-grid D H W` | `4 5 4` | Patch grid for `--patch-contrastive` |
+| `--cross-view-negs-only` | False | Restrict InfoNCE negatives to the other view (recommended with `--separate-encoders`) |
+| `--contrastive-level-weights w0 w1 …` | None | Per-level weight for the contrastive loss (default: uniform 1.0) |
 
 **VQ-VAE-2 Specific Arguments:**
 
@@ -944,26 +951,85 @@ bash docker/run_docker.sh
 | `--gradient-checkpointing` | False | Trade compute for memory in residual blocks |
 | `--content-dim` | 128 | Content dimensions (determines `content_channels` ratio on `hidden_channels`) |
 | `--total-dim` | 512 | Total dims (`content_dim + style_dim`); ratio `content_dim/total_dim` sets channel split |
-| `--inject-style-to-decoder` | False | Feed style channels from encoder level-0 into the bottom decoder's final layer |
+| `--inject-style-to-decoder` | False | Feed style channels from masked encoder levels into each decoder. With `--style-injection-mode concat` style is appended to the penultimate feature map; with `film` a `SpatialFiLM` modulator is applied at every decoder stage. |
+| `--style-injection-mode` | `concat` | `concat` (legacy) or `film` (Spatial FiLM at every decoder stage) |
 | `--quantize-style` | False | Quantize style channels through independent per-level codebooks (requires `--inject-style-to-decoder`) |
 | `--style-embed-dim` | None | Embedding dimension for style codebooks (defaults to `--vqvae-embed-dim`) |
 | `--style-nb-entries` | None | Codebook size for style codebooks (defaults to `--vqvae-nb-entries`) |
 | `--cache-dir` | None | Directory for persistent preprocessed `.pt` cache (NFS-safe, fingerprinted) |
 | `--val-every` | 0 | Run validation every N steps (0 disables periodic validation) |
+| `--cb-ema-decay` | 0.999 | EMA momentum for codebook running averages |
+| `--cb-reset-every` | 100 | Reset dead codebook entries every N forward passes per codebook (0 disables) |
+| `--cb-reset-threshold` | 1.0 | EMA cluster_size below this value marks a codebook entry as dead |
+| `--top-level-recon-only` | False | Zero out encoder outputs at non-top levels before the codebook (reconstruction depends only on coarsest level; contrastive still uses all levels) |
+
+**Content/Style Masking Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--content-style-levels L …` | `[0]` | Encoder levels that receive the content/style Gumbel mask. Use `0 1 2` for all three levels. |
+| `--content-ratios r0 r1 …` | None | Per-level content ratio (fraction of `hidden_channels` that are content), one per entry in `--content-style-levels`. Example: `--content-style-levels 0 1 2 --content-ratios 0.5 0.3 0.2`. |
+| `--content-size N` | None | Directly set the number of content channels out of `--vqvae-hidden-channels` (overrides the `--content-dim/--total-dim` ratio; applies uniformly across `--content-style-levels`). |
+| `--mask-mode` | `onthefly` | One of `onthefly` (logits = mean activation per channel, shared across views), `learned` (persistent nn.Parameter per level; per-view when `--separate-encoders`), `fixed` (first K channels = content, no Gumbel noise), `learned_split` (per-channel sigmoid gates, content size emerges from training). |
+| `--mask-warmup-steps` | 0 | When `learned`/`learned_split` + MoCo, disable the queue for N steps and use in-batch InfoNCE so the mask can stabilise; queue is flushed afterwards. |
+| `--mask-lr-scale` | 1.0 | LR multiplier for channel_logits (set <1 to slow mask evolution). |
+| `--separate-encoders` | False | Per-view encoder stacks (one VQVAE encoder per modality). Codebooks, decoders, and masks remain shared. Consistent with view-specific identifiability theory (Yao et al., 2024). |
+| `--narrow-encoder-input` | False | After masking, slice to content channels before feeding the next encoder level (narrower input — no extra params). |
+| `--use-content-projection` | False | Slice to content channels and pass through a learned 1×1×1 conv back to `hidden_channels` before the next encoder level. |
+| `--pass-full-to-next-level` | False | Pass the FULL encoder output (content + style) to the next level — masking only affects the codebook and contrastive paths. Incompatible with `--narrow-encoder-input` and `--use-content-projection`. |
 
 **MoCo Arguments:**
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--use-moco` | False | Enable MoCo contrastive training (replaces standard InfoNCE) |
+| `--use-moco` | False | Enable MoCo contrastive training (replaces standard InfoNCE; ignored with `barlow_twins`/`vicreg`) |
 | `--moco-queue-size` | 4096 | Number of negative keys stored per encoder level |
 | `--moco-momentum` | 0.999 | EMA momentum for momentum encoder updates |
+
+**Weights & Biases Arguments:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--use-wandb` | False | Mirror all TB scalars + summary metrics to W&B |
+| `--wandb-project` | `multiview-crl-sweep` | W&B project name |
+| `--wandb-entity` | None | W&B team/entity (uses default if unset) |
+
+### 8.4 W&B Bayesian Sweep
+
+Hyperparameter search is orchestrated by W&B Bayesian sweeps, optimising the composite `separation_score` (Section 6.6).
+
+**Files:**
+- `scripts/sweep_config.yaml` — sweep definition (method, metric, parameter grid/distributions, fixed args).
+- `scripts/sweep_train.py` — W&B agent entrypoint. Calls `wandb.init()`, reconstructs the CLI argv from `wandb.config` (handles bool flags and stringified list values like `"[4, 5, 4]"`), forces `vqvae_embed_dim == vqvae_hidden_channels` when both are in the grid, and calls `run_main(args)` in the same process (avoids daemon-conflict issues that drop W&B metrics when spawning a subprocess).
+- `scripts/launch_sweep.sh` — creates the sweep via `wandb sweep …` and fans out Run:AI agents with `scripts/sweep_runai.sh`.
+- `scripts/analyze_sweep.py` — ranks runs by `separation_score` and prints top-K configurations + per-parameter marginals.
+
+**Current sweep space (`scripts/sweep_config.yaml`):**
+
+| Tier | Parameter | Distribution / values |
+|------|-----------|-----------------------|
+| 1 | `scale_contrastive_loss` | log-uniform 0.1 – 10 |
+| 1 | `scale_recon_loss` | log-uniform 0.1 – 10 |
+| 1 | `vqvae_hidden_channels` (= `vqvae_embed_dim`) | {32, 48, 64} |
+| 1 | `mask_mode` | {`fixed`, `learned`} |
+| 1 | `tau` | log-uniform 0.05 – 1.0 |
+| 1 | `content_ratios` | 5 preset pyramids, e.g. `[0.5, 0.3, 0.2]`, `[0.7, 0.7, 0.7]`, `[0.3, 0.5, 0.7]` |
+| 2 | `lr` | log-uniform 5e-4 – 2e-3 |
+| 2 | `bt_lambda` | log-uniform 1e-3 – 5e-2 |
+
+Fixed sweep parameters include `patch_contrastive=true` with `patch_grid=[4, 5, 4]`, `content_style_levels=[0, 1, 2]`, `cross_view_negs_only=true`, `separate_encoders=true`, `pass_full_to_next_level=true`, `gradient_checkpointing=true`, `skip_recon_ratio=0.5`, `recon_loss_start_step=2000`, `image_spacing=1.0`, `spatial_size=[150, 180, 150]`, `train_steps=20000`, `resume_training=true`, `use_wandb=true`, and a cache directory on NFS.
+
+```bash
+# Launch a fresh sweep with 15 Run:AI agents
+./scripts/launch_sweep.sh --num-agents 15 --wandb-project multiview-crl-sweep-new
+
+# Analyse a completed sweep
+python scripts/analyze_sweep.py <sweep-id>
+```
 
 ---
 
 ## 9. Current Training Status
-
-### 9.1 VQ-VAE-2 Training Results
 
 Based on recent VQ-VAE-2 training runs:
 
@@ -974,23 +1040,8 @@ Based on recent VQ-VAE-2 training runs:
 | 50 | 7.16 | 1.77 | 5.39 |
 
 **Observations:**
-- VQ-VAE-2 achieves lower reconstruction loss faster (~5.4 vs ~50+ for VAE)
 - Contrastive loss fluctuates due to Gumbel-Softmax exploration
 - VQ commitment losses per level: L0≈1.5, L1≈0.3, L2≈0.2 (top level most stable)
-
-### 9.2 VAE Training Results
-
-Based on `results/ADNI_registered/2/Training.csv`:
-
-| Step | Total Loss | Contrastive | Reconstruction |
-|------|------------|-------------|----------------|
-| 1 | 103.285 | 1.946 | 101.340 |
-| 501 | 68.358 | 1.645 | 66.714 |
-| 1001 | 53.411 | 1.515 | 51.896 |
-
-**Observations:**
-- VAE has higher reconstruction loss due to bottleneck through 512-dim vector
-- Contrastive loss is stable and decreasing
 
 ---
 
@@ -1160,29 +1211,29 @@ The following analyses have been implemented in `eval/view_latents.ipynb` (Secti
 
 ## 13. Summary
 
-This implementation provides a framework for learning disentangled representations from paired multimodal brain MRI data using two architectures:
+This implementation provides a framework for learning disentangled representations from paired multimodal brain MRI data.
 
-### VAE Mode:
-- **Shared 3D CNN encoder** (15.5M params) + separate decoder (27.8M params)
-- **512-dimensional latent space** split into 256 content + 256 style dimensions
-- **InfoNCE contrastive loss** applied only to content dimensions
-
-### VQ-VAE-2 Mode (Recommended):
+### Architecture:
 - **Hierarchical 3D VQ-VAE-2** with 3 levels (~2.9M params total)
-- **Discrete codebook representations** (384 codes × 32 dims per level)
-- **Hierarchical contrastive loss** at all encoder levels — either standard InfoNCE or MoCo
+- **Discrete codebook representations** (384 codes × 32 dims per level) with optional **independent style codebooks** (`--quantize-style`)
+- **Hierarchical contrastive loss** at all encoder levels with three objectives — InfoNCE (with optional MoCo queue, cross-view-only negatives, and dense patch alignment), Barlow Twins, or VICReg
 - **MoCo option** (`--use-moco`): momentum encoder + per-level queues (4096 negatives per level) for effective contrastive learning with small batches
-- **Content/style split** controlled via `--content-dim` / `--total-dim` (no longer hardcoded)
-- **Style injection** (`--inject-style-to-decoder`): style channels fed back into the bottom decoder for better modality-specific reconstruction
-- **Content selection at Level 0** propagated proportionally to higher levels
+- **Multi-level content/style masking** — any combination of encoder levels can carry a Gumbel mask, with per-level content ratios; four mask modes (`onthefly`, `learned`, `fixed`, `learned_split`) trade off learnability vs. queue stability
+- **Per-view encoders** (`--separate-encoders`) consistent with view-specific identifiability theory (Yao et al., 2024); shared codebooks/decoders/masks
+- **Style injection** (`--inject-style-to-decoder`) with `concat` or `film` modes; spatial FiLM modulates every decoder stage
+- **Codebook-collapse prevention** via EMA decay + periodic dead-entry reset
 - **EMA codebook updates** for stable training
 - **Auto-resume** with architecture compatibility check — safe to rerun after changing architecture flags
 - **Best-model tracking** via rolling average total loss (`vqvae_best.pt`)
 
 ### Evaluation:
+- **Cross-reconstruction probes** — `separation_score` composite metric (content → modality invariance + style → subject invariance)
 - **Codebook analysis** — usage histograms, MI/chi-squared discriminativeness, PCA/t-SNE of codebook usage per diagnosis class
 - **Code replacement** — swap codebook entries and compare reconstructions between CN and AD subjects
 - **NIfTI export** — save reconstructed volumes with correct affine for 3D inspection in FSLeyes / ITK-SNAP
 - **Downstream classification** — logistic regression and random forest on content-only, style-only, and combined features
 
-Both models learn to encode shared anatomical information in content dimensions while allowing style dimensions to capture modality-specific (T1 vs T2) characteristics.
+### Hyperparameter Search:
+- **W&B Bayesian sweep** (`scripts/sweep_config.yaml` + `scripts/sweep_train.py` + `scripts/launch_sweep.sh`) optimising `separation_score` across contrastive/reconstruction scales, `vqvae_hidden_channels`, mask mode, temperature, content ratios, LR, and Barlow Twins λ. Run:AI agents are spawned via `scripts/sweep_runai.sh`; `scripts/analyze_sweep.py` ranks finished runs.
+
+The model learns to encode shared anatomical information in content dimensions while allowing style dimensions to capture modality-specific (T1 vs T2) characteristics.
