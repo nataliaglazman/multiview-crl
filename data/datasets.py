@@ -1366,13 +1366,26 @@ class MyCustomDataset(MultiviewDataset):
             "image_t2": t2,
             "label": lbl,
         }
-        # Atomic write: save to a temp file then rename, so a crash never
-        # leaves a half-written .pt that would be mistaken for a valid cache.
+        # Atomic write with local staging:
+        # PyTorch's internal ZIP stream writer can fail with "unexpected pos"
+        # when writing gigabytes of data concurrently to NFS drives.
+        # We first save natively to local /tmp, then copy the complete
+        # chunk over the network to the NFS, and finally rename atomically.
+        import shutil
         import uuid
 
-        tmp_path = save_path + f".tmp.{uuid.uuid4().hex[:8]}"
-        _torch.save(cached, tmp_path)
-        os.replace(tmp_path, save_path)
+        job_id = uuid.uuid4().hex[:8]
+        local_tmp_path = f"/tmp/cache_{job_id}.pt"
+        nfs_tmp_path = save_path + f".tmp.{job_id}"
+
+        # 1. Fast local write (avoids inline_container.cc issues)
+        _torch.save(cached, local_tmp_path)
+
+        # 2. Block transfer to NFS temp file
+        shutil.move(local_tmp_path, nfs_tmp_path)
+
+        # 3. Atomic finalize
+        os.replace(nfs_tmp_path, save_path)
         return idx, save_path
 
     # ------------------------------------------------------------------
