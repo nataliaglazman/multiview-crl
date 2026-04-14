@@ -119,6 +119,8 @@ parameters:
     value: [1.0, 1.0, 1.0]
   pass_full_to_next_level:
     value: true
+  evaluate:
+    value: true
 
 command:
   - ${env}

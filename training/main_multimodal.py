@@ -1843,6 +1843,7 @@ def main(args):
                 for k, v in cs_metrics.items():
                     logger.info(f"  {k}: {v:.4f}")
                 if _use_wandb:
+                    wandb.log(cs_metrics)
                     wandb.summary.update(cs_metrics)
                 # Save to CSV
                 cs_path = os.path.join(args.save_dir, "cross_recon_metrics.csv")

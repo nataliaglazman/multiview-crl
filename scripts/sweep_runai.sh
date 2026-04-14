@@ -40,6 +40,6 @@ runai submit "${JOB_NAME}" \
     --volume "${VOLUME_MOUNT}" \
     --environment "WANDB_DIR=/tmp" \
     --environment "WANDB_API_KEY=${WANDB_API_KEY}" \
-    --command -- bash -c "cd ${WORKDIR} && wandb agent --count 1 ${SWEEP_ID}"
+    --command -- bash -c "cd ${WORKDIR} && wandb agent --count 10 ${SWEEP_ID} "
 
 echo "Submitted Run:AI job: ${JOB_NAME}"
