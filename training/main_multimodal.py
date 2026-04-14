@@ -1406,117 +1406,120 @@ def main(args):
                         flush=True,
                     )
 
-                    tb_writer.add_scalar("Loss/Total", accum_total, step)
-                    tb_writer.add_scalar("Loss/Contrastive", accum_contrastive, step)
-                    tb_writer.add_scalar("Loss/Recon", accum_recon, step)
-                    tb_writer.add_scalar("Loss/VQ", accum_vq, step)
-                    tb_writer.add_scalar("LR", optimizer.param_groups[0]["lr"], step)
+                    if step % args.log_steps == 0:
+                        tb_writer.add_scalar("Loss/Total", accum_total, step)
+                        tb_writer.add_scalar("Loss/Contrastive", accum_contrastive, step)
+                        tb_writer.add_scalar("Loss/Recon", accum_recon, step)
+                        tb_writer.add_scalar("Loss/VQ", accum_vq, step)
+                        tb_writer.add_scalar("LR", optimizer.param_groups[0]["lr"], step)
 
-                    # Per-level contrastive losses
-                    if accum_level_losses:
-                        for _li, _lv in enumerate(accum_level_losses):
-                            tb_writer.add_scalar(f"Loss/Contrastive_L{_li}", _lv, step)
-
-                    # Log Gumbel mask diagnostics per level (skip for fixed mode — no logits)
-                    if hasattr(_raw, "channel_logits") and getattr(_raw, "mask_mode", "onthefly") != "fixed":
-                        for lvl_key, logits_param in _raw.channel_logits.items():
-                            probs = torch.softmax(logits_param.detach(), dim=0)
-                            entropy = -(probs * probs.log().clamp(min=-100)).sum().item()
-                            max_entropy = np.log(probs.numel())
-                            tb_writer.add_scalar(f"Mask/Entropy_L{lvl_key}", entropy, step)
-                            tb_writer.add_scalar(f"Mask/NormEntropy_L{lvl_key}", entropy / max_entropy, step)
-                            # How spread out the logits are (higher = more decisive)
-                            tb_writer.add_scalar(f"Mask/LogitStd_L{lvl_key}", logits_param.detach().std().item(), step)
-                            # Top-k vs bottom-k gap: mean of selected minus mean of not selected
-                            k_lvl = _raw.content_channels_per_level.get(int(lvl_key), _raw.content_channels)
-                            sorted_logits = logits_param.detach().sort(descending=True).values
-                            top_mean = sorted_logits[:k_lvl].mean().item()
-                            bot_mean = sorted_logits[k_lvl:].mean().item()
-                            tb_writer.add_scalar(f"Mask/TopBotGap_L{lvl_key}", top_mean - bot_mean, step)
-
-                    # Log learned_split gate diagnostics (effective content size)
-                    if hasattr(_raw, "split_gate_logits"):
-                        for lvl_key, gate_param in _raw.split_gate_logits.items():
-                            gate_probs = torch.sigmoid(gate_param.detach())
-                            n_content = (gate_probs > 0.5).sum().item()
-                            n_total = gate_param.numel()
-                            tb_writer.add_scalar(f"Split/ContentSize_L{lvl_key}", n_content, step)
-                            tb_writer.add_scalar(f"Split/ContentRatio_L{lvl_key}", n_content / n_total, step)
-                            # Mean gate probability (how confident the gates are)
-                            tb_writer.add_scalar(f"Split/GateMean_L{lvl_key}", gate_probs.mean().item(), step)
-                            # Gate entropy: low = confident split, high = uncertain
-                            gate_ent = (
-                                -(
-                                    gate_probs * gate_probs.clamp(min=1e-7).log()
-                                    + (1 - gate_probs) * (1 - gate_probs).clamp(min=1e-7).log()
-                                )
-                                .mean()
-                                .item()
-                            )
-                            tb_writer.add_scalar(f"Split/GateEntropy_L{lvl_key}", gate_ent, step)
-
-                    # Log codebook utilization per level
-                    for _cb_lvl, _cb in enumerate(_raw.codebooks):
-                        _alive = (_cb.cluster_size > 1.0).sum().item()
-                        _total = _cb.n_embed
-                        tb_writer.add_scalar(f"Codebook/Active_L{_cb_lvl}", _alive, step)
-                        tb_writer.add_scalar(f"Codebook/Utilization_L{_cb_lvl}", _alive / _total, step)
-                    # Style codebook utilization (if active)
-                    if hasattr(_raw, "style_codebooks") and _raw.style_codebooks:
-                        for _sc_key, _sc_cb in _raw.style_codebooks.items():
-                            _s_alive = (_sc_cb.cluster_size > 1.0).sum().item()
-                            _s_total = _sc_cb.n_embed
-                            tb_writer.add_scalar(f"Codebook/StyleActive_L{_sc_key}", _s_alive, step)
-                            tb_writer.add_scalar(f"Codebook/StyleUtil_L{_sc_key}", _s_alive / _s_total, step)
-
-                    # Log MoCo stale-queue diagnostics
-                    if step_moco_diag:
-                        for diag_key, diag_val in step_moco_diag.items():
-                            tb_writer.add_scalar(diag_key, diag_val, step)
-
-                    # W&B step logging
-                    if _use_wandb:
-                        wandb_log = {
-                            "loss/total": accum_total,
-                            "loss/contrastive": accum_contrastive,
-                            "loss/recon": accum_recon,
-                            "loss/vq": accum_vq,
-                            "lr": optimizer.param_groups[0]["lr"],
-                        }
+                        # Per-level contrastive losses
                         if accum_level_losses:
                             for _li, _lv in enumerate(accum_level_losses):
-                                wandb_log[f"loss/contrastive_L{_li}"] = _lv
-                        if step_moco_diag:
-                            for diag_key, diag_val in step_moco_diag.items():
-                                wandb_log[diag_key.replace("/", "/")] = diag_val
+                                tb_writer.add_scalar(f"Loss/Contrastive_L{_li}", _lv, step)
+
+                        # Log Gumbel mask diagnostics per level (skip for fixed mode — no logits)
+                        if hasattr(_raw, "channel_logits") and getattr(_raw, "mask_mode", "onthefly") != "fixed":
+                            for lvl_key, logits_param in _raw.channel_logits.items():
+                                probs = torch.softmax(logits_param.detach(), dim=0)
+                                entropy = -(probs * probs.log().clamp(min=-100)).sum().item()
+                                max_entropy = np.log(probs.numel())
+                                tb_writer.add_scalar(f"Mask/Entropy_L{lvl_key}", entropy, step)
+                                tb_writer.add_scalar(f"Mask/NormEntropy_L{lvl_key}", entropy / max_entropy, step)
+                                # How spread out the logits are (higher = more decisive)
+                                tb_writer.add_scalar(
+                                    f"Mask/LogitStd_L{lvl_key}", logits_param.detach().std().item(), step
+                                )
+                                # Top-k vs bottom-k gap: mean of selected minus mean of not selected
+                                k_lvl = _raw.content_channels_per_level.get(int(lvl_key), _raw.content_channels)
+                                sorted_logits = logits_param.detach().sort(descending=True).values
+                                top_mean = sorted_logits[:k_lvl].mean().item()
+                                bot_mean = sorted_logits[k_lvl:].mean().item()
+                                tb_writer.add_scalar(f"Mask/TopBotGap_L{lvl_key}", top_mean - bot_mean, step)
+
+                        # Log learned_split gate diagnostics (effective content size)
+                        if hasattr(_raw, "split_gate_logits"):
+                            for lvl_key, gate_param in _raw.split_gate_logits.items():
+                                gate_probs = torch.sigmoid(gate_param.detach())
+                                n_content = (gate_probs > 0.5).sum().item()
+                                n_total = gate_param.numel()
+                                tb_writer.add_scalar(f"Split/ContentSize_L{lvl_key}", n_content, step)
+                                tb_writer.add_scalar(f"Split/ContentRatio_L{lvl_key}", n_content / n_total, step)
+                                # Mean gate probability (how confident the gates are)
+                                tb_writer.add_scalar(f"Split/GateMean_L{lvl_key}", gate_probs.mean().item(), step)
+                                # Gate entropy: low = confident split, high = uncertain
+                                gate_ent = (
+                                    -(
+                                        gate_probs * gate_probs.clamp(min=1e-7).log()
+                                        + (1 - gate_probs) * (1 - gate_probs).clamp(min=1e-7).log()
+                                    )
+                                    .mean()
+                                    .item()
+                                )
+                                tb_writer.add_scalar(f"Split/GateEntropy_L{lvl_key}", gate_ent, step)
+
+                        # Log codebook utilization per level
                         for _cb_lvl, _cb in enumerate(_raw.codebooks):
                             _alive = (_cb.cluster_size > 1.0).sum().item()
-                            wandb_log[f"codebook/active_L{_cb_lvl}"] = _alive
-                            wandb_log[f"codebook/utilization_L{_cb_lvl}"] = _alive / _cb.n_embed
+                            _total = _cb.n_embed
+                            tb_writer.add_scalar(f"Codebook/Active_L{_cb_lvl}", _alive, step)
+                            tb_writer.add_scalar(f"Codebook/Utilization_L{_cb_lvl}", _alive / _total, step)
+                        # Style codebook utilization (if active)
                         if hasattr(_raw, "style_codebooks") and _raw.style_codebooks:
                             for _sc_key, _sc_cb in _raw.style_codebooks.items():
                                 _s_alive = (_sc_cb.cluster_size > 1.0).sum().item()
-                                wandb_log[f"codebook/style_active_L{_sc_key}"] = _s_alive
-                                wandb_log[f"codebook/style_util_L{_sc_key}"] = _s_alive / _sc_cb.n_embed
-                        wandb.log(wandb_log, step=step)
+                                _s_total = _sc_cb.n_embed
+                                tb_writer.add_scalar(f"Codebook/StyleActive_L{_sc_key}", _s_alive, step)
+                                tb_writer.add_scalar(f"Codebook/StyleUtil_L{_sc_key}", _s_alive / _s_total, step)
 
-                    if step % args.log_steps == 1 or step == args.train_steps:
-                        with open(file_name, "a+") as f:
-                            csv.writer(f).writerow(
-                                [
-                                    "Step",
-                                    step,
-                                    "Total",
-                                    f"{np.mean(loss_values):.3f}",
-                                    "Contrastive",
-                                    f"{np.mean(contrastive_losses):.3f}",
-                                    "Recon",
-                                    f"{np.mean(recon_losses):.3f}",
-                                    "VQ",
-                                    f"{np.mean(vq_losses):.3f}",
-                                ]
-                            )
-                        tb_writer.flush()
+                        # Log MoCo stale-queue diagnostics
+                        if step_moco_diag:
+                            for diag_key, diag_val in step_moco_diag.items():
+                                tb_writer.add_scalar(diag_key, diag_val, step)
+
+                        # W&B step logging
+                        if _use_wandb:
+                            wandb_log = {
+                                "loss/total": accum_total,
+                                "loss/contrastive": accum_contrastive,
+                                "loss/recon": accum_recon,
+                                "loss/vq": accum_vq,
+                                "lr": optimizer.param_groups[0]["lr"],
+                            }
+                            if accum_level_losses:
+                                for _li, _lv in enumerate(accum_level_losses):
+                                    wandb_log[f"loss/contrastive_L{_li}"] = _lv
+                            if step_moco_diag:
+                                for diag_key, diag_val in step_moco_diag.items():
+                                    wandb_log[diag_key.replace("/", "/")] = diag_val
+                            for _cb_lvl, _cb in enumerate(_raw.codebooks):
+                                _alive = (_cb.cluster_size > 1.0).sum().item()
+                                wandb_log[f"codebook/active_L{_cb_lvl}"] = _alive
+                                wandb_log[f"codebook/utilization_L{_cb_lvl}"] = _alive / _cb.n_embed
+                            if hasattr(_raw, "style_codebooks") and _raw.style_codebooks:
+                                for _sc_key, _sc_cb in _raw.style_codebooks.items():
+                                    _s_alive = (_sc_cb.cluster_size > 1.0).sum().item()
+                                    wandb_log[f"codebook/style_active_L{_sc_key}"] = _s_alive
+                                    wandb_log[f"codebook/style_util_L{_sc_key}"] = _s_alive / _sc_cb.n_embed
+                            wandb.log(wandb_log, step=step)
+
+                        if step % args.log_steps == 1 or step == args.train_steps:
+                            with open(file_name, "a+") as f:
+                                csv.writer(f).writerow(
+                                    [
+                                        "Step",
+                                        step,
+                                        "Total",
+                                        f"{np.mean(loss_values):.3f}",
+                                        "Contrastive",
+                                        f"{np.mean(contrastive_losses):.3f}",
+                                        "Recon",
+                                        f"{np.mean(recon_losses):.3f}",
+                                        "VQ",
+                                        f"{np.mean(vq_losses):.3f}",
+                                    ]
+                                )
+                            tb_writer.flush()
 
                     if (step % 200 == 0 or step == 1) and args.encoder_type != "vqvae":
                         save_decoded_images(encoders, decoders, data, args, step)
