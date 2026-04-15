@@ -18,76 +18,72 @@ from sklearn.preprocessing import StandardScaler
 
 @torch.no_grad()
 def _collect_representations(vqvae_model, dataloader, args, device, max_batches=200):
-    """Encode all samples and collect content/style representations per view.
-
-    Returns:
-        dict with keys:
-            content_v0, content_v1: (N, content_dim) arrays
-            style_v0, style_v1: (N, style_dim) arrays
-            subject_ids: (N,) array of subject indices (batch-order index)
-    """
+    """Encode all samples and collect content/style representations per view."""
+    was_training = vqvae_model.training
     vqvae_model.eval()
+    try:
+        # Unwrap DataParallel / MoCo
+        raw = vqvae_model
+        if hasattr(raw, "online"):
+            raw = raw.online
+        if hasattr(raw, "module"):
+            raw = raw.module
 
-    # Unwrap DataParallel / MoCo
-    raw = vqvae_model
-    if hasattr(raw, "online"):
-        raw = raw.online
-    if hasattr(raw, "module"):
-        raw = raw.module
+        content_v0_list, content_v1_list = [], []
+        style_v0_list, style_v1_list = [], []
 
-    content_v0_list, content_v1_list = [], []
-    style_v0_list, style_v1_list = [], []
+        for batch_idx, data in enumerate(dataloader):
+            if batch_idx >= max_batches:
+                break
+            samples = data["image"]
+            n_views = len(samples)
+            if n_views < 2:
+                continue
+            images = torch.cat(samples, 0).to(device, non_blocking=True)
+            B = samples[0].shape[0]
 
-    for batch_idx, data in enumerate(dataloader):
-        if batch_idx >= max_batches:
-            break
-        samples = data["image"]
-        n_views = len(samples)
-        if n_views < 2:
-            continue
-        images = torch.cat(samples, 0).to(device, non_blocking=True)
-        B = samples[0].shape[0]
+            (
+                _recon,
+                _diffs,
+                encoder_features,
+                estimated_content_indices,
+                _decoder_outputs,
+                _id_outputs,
+                soft_content_masks,
+                _style_id_outputs,
+            ) = vqvae_model(images, return_recon=False, pool_only=True, n_views=2)
 
-        (
-            _recon,
-            _diffs,
-            encoder_features,
-            estimated_content_indices,
-            _decoder_outputs,
-            _id_outputs,
-            soft_content_masks,
-            _style_id_outputs,
-        ) = vqvae_model(images, return_recon=False, pool_only=True, n_views=2)
+            # Use level 0 (finest) features for evaluation
+            hz = encoder_features[0]  # (2B, hidden_channels)
+            hz_v0, hz_v1 = hz[:B], hz[B:]
 
-        # Use level 0 (finest) features for evaluation
-        hz = encoder_features[0]  # (2B, hidden_channels)
-        hz_v0, hz_v1 = hz[:B], hz[B:]
-
-        # Determine content/style channel split
-        if estimated_content_indices is not None:
-            if isinstance(estimated_content_indices[0], list):
-                c_idx_v0 = estimated_content_indices[0]
-                c_idx_v1 = estimated_content_indices[1] if len(estimated_content_indices) > 1 else c_idx_v0
+            # Determine content/style channel split
+            if estimated_content_indices is not None:
+                if isinstance(estimated_content_indices[0], list):
+                    c_idx_v0 = estimated_content_indices[0]
+                    c_idx_v1 = estimated_content_indices[1] if len(estimated_content_indices) > 1 else c_idx_v0
+                else:
+                    c_idx_v0 = c_idx_v1 = estimated_content_indices[0]
             else:
-                c_idx_v0 = c_idx_v1 = estimated_content_indices[0]
-        else:
-            c_idx_v0 = c_idx_v1 = list(range(len(args.content_indices[0])))
+                c_idx_v0 = c_idx_v1 = list(range(len(args.content_indices[0])))
 
-        all_channels = set(range(hz.shape[1]))
-        s_idx_v0 = sorted(all_channels - set(c_idx_v0))
-        s_idx_v1 = sorted(all_channels - set(c_idx_v1))
+            all_channels = set(range(hz.shape[1]))
+            s_idx_v0 = sorted(all_channels - set(c_idx_v0))
+            s_idx_v1 = sorted(all_channels - set(c_idx_v1))
 
-        content_v0_list.append(hz_v0[:, c_idx_v0].cpu().numpy())
-        content_v1_list.append(hz_v1[:, c_idx_v1].cpu().numpy())
-        style_v0_list.append(hz_v0[:, s_idx_v0].cpu().numpy())
-        style_v1_list.append(hz_v1[:, s_idx_v1].cpu().numpy())
+            content_v0_list.append(hz_v0[:, c_idx_v0].cpu().numpy())
+            content_v1_list.append(hz_v1[:, c_idx_v1].cpu().numpy())
+            style_v0_list.append(hz_v0[:, s_idx_v0].cpu().numpy())
+            style_v1_list.append(hz_v1[:, s_idx_v1].cpu().numpy())
 
-    return {
-        "content_v0": np.concatenate(content_v0_list, axis=0),
-        "content_v1": np.concatenate(content_v1_list, axis=0),
-        "style_v0": np.concatenate(style_v0_list, axis=0),
-        "style_v1": np.concatenate(style_v1_list, axis=0),
-    }
+        return {
+            "content_v0": np.concatenate(content_v0_list, axis=0),
+            "content_v1": np.concatenate(content_v1_list, axis=0),
+            "style_v0": np.concatenate(style_v0_list, axis=0),
+            "style_v1": np.concatenate(style_v1_list, axis=0),
+        }
+    finally:
+        vqvae_model.train(was_training)
 
 
 def _cosine_sim(a, b):
