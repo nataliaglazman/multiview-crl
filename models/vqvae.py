@@ -480,7 +480,7 @@ class VQVAE(HelperModule):
         nb_res_layers: int = 2,
         nb_levels: int = 3,
         embed_dim: int = 64,
-        nb_entries: int = 512,
+        nb_entries: int | list[int] = 512,
         scaling_rates: list[int] = [8, 4, 2],
         use_checkpoint: bool = True,  # Gradient checkpointing to save memory
         content_size: int = 0,  # # of content dims in original latent space
@@ -492,7 +492,9 @@ class VQVAE(HelperModule):
         mask_mode: str = "onthefly",  # "learned" or "onthefly"
         quantize_style: bool = False,  # If True, style channels get their own independent codebook per level
         style_embed_dim: int | None = None,  # Embedding dim for style codebooks (defaults to embed_dim)
-        style_nb_entries: int | None = None,  # Codebook size for style codebooks (defaults to nb_entries)
+        style_nb_entries: int
+        | list[int]
+        | None = None,  # Codebook size(s) for style codebooks (defaults to nb_entries). Pass a list of length len(content_style_levels) for per-level sizes.
         style_injection_mode: str = "concat",  # "concat" (legacy) or "film" (Spatial FiLM at every decoder stage)
         cb_ema_decay: float = 0.999,  # EMA momentum for codebook running averages
         cb_reset_every: int = 100,  # Reset dead codebook entries every N forwards (0 = disable)
@@ -501,6 +503,8 @@ class VQVAE(HelperModule):
         narrow_encoder_input: bool = False,  # If True, encoder level i+1 accepts content_channels from level i directly (no zero-padding, no projection)
         top_level_recon_only: bool = False,  # If True, zero out encoder outputs at non-top levels so reconstruction depends only on the coarsest embedding
         pass_full_to_next_level: bool = False,  # If True, pass full (unmasked) encoder output to the next level instead of zeroing style
+        skip_decoder_concat_levels: list[int]
+        | None = None,  # Levels whose code_q contributions are zeroed in the final (level-0) decoder's input concat. E.g. [0] drops the finest, [0, 1] drops the two finest — leaving only the top (coarsest) codes to drive reconstruction.
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -510,6 +514,38 @@ class VQVAE(HelperModule):
         self.narrow_encoder_input = narrow_encoder_input
         self.top_level_recon_only = top_level_recon_only
         self.pass_full_to_next_level = pass_full_to_next_level
+
+        # --- Decoder-side level skipping ---
+        # Zero out the contributions of the listed levels' code_q tensors in the
+        # input to the final (level-0) decoder.  Intermediate decoders are left
+        # untouched so their outputs continue to condition finer codebooks; only
+        # the final reconstruction is robbed of those code contributions.
+        if skip_decoder_concat_levels is None:
+            self.skip_decoder_concat_levels = set()
+        else:
+            self.skip_decoder_concat_levels = set(int(l) for l in skip_decoder_concat_levels)
+            for _l in self.skip_decoder_concat_levels:
+                assert 0 <= _l < nb_levels, (
+                    f"skip_decoder_concat_levels contains invalid level {_l} " f"(must be in [0, {nb_levels - 1}])"
+                )
+            assert nb_levels - 1 not in self.skip_decoder_concat_levels, (
+                "Cannot skip the top (coarsest) level — at least one level must contribute "
+                "to reconstruction. Skip only finer levels (e.g. [0] or [0, 1])."
+            )
+
+        # --- Per-level content codebook sizes ---
+        # Accept int (broadcast to all levels) or list[int] of length nb_levels.
+        if isinstance(nb_entries, int):
+            self.nb_entries_per_level = [nb_entries] * nb_levels
+        else:
+            nb_entries_list = list(nb_entries)
+            if len(nb_entries_list) == 1:
+                self.nb_entries_per_level = nb_entries_list * nb_levels
+            else:
+                assert (
+                    len(nb_entries_list) == nb_levels
+                ), f"nb_entries list has {len(nb_entries_list)} entries but nb_levels={nb_levels}"
+                self.nb_entries_per_level = nb_entries_list
 
         # --- Per-level content/style separation ---
         # Computed early so _make_encoder_stack can use content_channels_per_level
@@ -664,7 +700,25 @@ class VQVAE(HelperModule):
         self.quantize_style = quantize_style and has_any_mask and inject_style_to_decoder
         if self.quantize_style:
             _style_embed = style_embed_dim if style_embed_dim is not None else embed_dim
-            _style_entries = style_nb_entries if style_nb_entries is not None else nb_entries
+            # Per-masked-level style codebook sizes.  Accepts:
+            #   None        → broadcast nb_entries_per_level (matches content sizes per level)
+            #   int         → broadcast to all masked levels
+            #   list[int]   → length 1 (broadcast) or len(content_style_levels) (per-level)
+            if style_nb_entries is None:
+                _style_entries_list = [self.nb_entries_per_level[lvl] for lvl in self.content_style_levels]
+            elif isinstance(style_nb_entries, int):
+                _style_entries_list = [style_nb_entries] * len(self.content_style_levels)
+            else:
+                _se_in = list(style_nb_entries)
+                if len(_se_in) == 1:
+                    _style_entries_list = _se_in * len(self.content_style_levels)
+                else:
+                    assert len(_se_in) == len(self.content_style_levels), (
+                        f"style_nb_entries list has {len(_se_in)} entries but "
+                        f"content_style_levels has {len(self.content_style_levels)}"
+                    )
+                    _style_entries_list = _se_in
+            self.style_nb_entries_per_level = {lvl: n for lvl, n in zip(self.content_style_levels, _style_entries_list)}
             self.style_embed_dim = _style_embed
             self.style_codebooks = nn.ModuleDict()
             for lvl in self.content_style_levels:
@@ -672,13 +726,14 @@ class VQVAE(HelperModule):
                 self.style_codebooks[str(lvl)] = CodeLayer(
                     sc,
                     _style_embed,
-                    _style_entries,
+                    self.style_nb_entries_per_level[lvl],
                     reset_threshold=cb_reset_threshold,
                     reset_every=cb_reset_every,
                     ema_decay=cb_ema_decay,
                 )
         else:
             self.style_embed_dim = None
+            self.style_nb_entries_per_level = {}
             self.style_codebooks = nn.ModuleDict()
 
         # Optional style injection: style channels from each masked level's
@@ -734,13 +789,14 @@ class VQVAE(HelperModule):
                 # where the effective channel count varies at runtime.
                 enc_ch = hidden_channels
 
+            lvl_entries = self.nb_entries_per_level[lvl]
             if lvl == nb_levels - 1:
                 # Coarsest level: no decoder conditioning from above
                 self.codebooks.append(
                     CodeLayer(
                         enc_ch,
                         embed_dim,
-                        nb_entries,
+                        lvl_entries,
                         reset_threshold=cb_reset_threshold,
                         reset_every=cb_reset_every,
                         ema_decay=cb_ema_decay,
@@ -752,7 +808,7 @@ class VQVAE(HelperModule):
                     CodeLayer(
                         enc_ch + embed_dim,
                         embed_dim,
-                        nb_entries,
+                        lvl_entries,
                         reset_threshold=cb_reset_threshold,
                         reset_every=cb_reset_every,
                         ema_decay=cb_ema_decay,
@@ -827,6 +883,7 @@ class VQVAE(HelperModule):
         encoder_outputs = []  # Spatial (5D) feature maps, consumed by codebook/decoder loop
         encoder_pools = []  # Pooled (B, C) vectors, returned for contrastive loss
         code_outputs = []
+        code_output_levels = []  # Parallel to code_outputs: source level of each entry
         decoder_outputs = []
         upscale_counts = []
         id_outputs = []
@@ -1222,13 +1279,26 @@ class VQVAE(HelperModule):
                 code_outputs = upscaled_codes
                 upscale_counts = [u + 1 for u in upscale_counts]
 
-                decoder_in = torch.cat([code_q, *code_outputs], axis=1)
+                # For the final (level-0) decoder only, optionally zero out
+                # contributions of levels in self.skip_decoder_concat_levels so
+                # that the reconstruction depends only on the remaining (coarser)
+                # codes. Intermediate decoders are left untouched.
+                if l == 0 and self.skip_decoder_concat_levels:
+                    cur_q = torch.zeros_like(code_q) if 0 in self.skip_decoder_concat_levels else code_q
+                    others = [
+                        torch.zeros_like(c) if lv in self.skip_decoder_concat_levels else c
+                        for c, lv in zip(code_outputs, code_output_levels)
+                    ]
+                    decoder_in = torch.cat([cur_q, *others], dim=1)
+                else:
+                    decoder_in = torch.cat([code_q, *code_outputs], axis=1)
                 if self.inject_style_to_decoder and l in style_spatials:
                     decoder_outputs.append(decoder(decoder_in, style=style_spatials[l]))
                 else:
                     decoder_outputs.append(decoder(decoder_in))
 
                 code_outputs.append(code_q)
+                code_output_levels.append(l)
                 upscale_counts.append(0)
 
         if return_recon:
@@ -1290,6 +1360,7 @@ class VQVAE(HelperModule):
 
         decoder_outputs = []
         code_outputs = []
+        code_output_levels = []
         upscale_counts = []
 
         for l in range(self.nb_levels - 1, -1, -1):
@@ -1310,7 +1381,15 @@ class VQVAE(HelperModule):
             code_outputs = upscaled_codes
             upscale_counts = [u + 1 for u in upscale_counts]
 
-            decoder_in = torch.cat([code_q, *code_outputs], axis=1)
+            if l == 0 and self.skip_decoder_concat_levels:
+                cur_q = torch.zeros_like(code_q) if 0 in self.skip_decoder_concat_levels else code_q
+                others = [
+                    torch.zeros_like(c) if lv in self.skip_decoder_concat_levels else c
+                    for c, lv in zip(code_outputs, code_output_levels)
+                ]
+                decoder_in = torch.cat([cur_q, *others], dim=1)
+            else:
+                decoder_in = torch.cat([code_q, *code_outputs], axis=1)
             if decoder.style_channels > 0:
                 lvl_style = styles.get(l, None)
                 if lvl_style is None:
@@ -1337,6 +1416,7 @@ class VQVAE(HelperModule):
                 decoder_outputs.append(decoder(decoder_in))
 
             code_outputs.append(code_q)
+            code_output_levels.append(l)
             upscale_counts.append(0)
 
         out = decoder_outputs[-1]

@@ -137,7 +137,15 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--vqvae-res-channels", type=int, default=32)
     parser.add_argument("--vqvae-nb-levels", type=int, default=3)
     parser.add_argument("--vqvae-embed-dim", type=int, default=32)
-    parser.add_argument("--vqvae-nb-entries", type=int, default=384)
+    parser.add_argument(
+        "--vqvae-nb-entries",
+        type=int,
+        nargs="+",
+        default=[384],
+        help="Codebook size(s) for the content codebooks. Pass a single int to broadcast "
+        "to all levels, or one int per level (length must equal --vqvae-nb-levels). "
+        "E.g. '--vqvae-nb-entries 512' or '--vqvae-nb-entries 256 384 512'.",
+    )
     parser.add_argument("--vqvae-scaling-rates", type=int, nargs="+", default=[2, 2, 2])
     parser.add_argument("--vq-commitment-weight", type=float, default=0.25)
     parser.add_argument(
@@ -200,8 +208,11 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument(
         "--style-nb-entries",
         type=int,
+        nargs="+",
         default=None,
-        help="Number of codebook entries for style codebooks. Defaults to the main --nb-entries.",
+        help="Number of codebook entries for style codebooks. Pass a single int to broadcast "
+        "to all masked levels, or one int per masked level (length must equal "
+        "len(--content-style-levels)). Defaults to the matching content codebook size per level.",
     )
     parser.add_argument(
         "--cb-ema-decay",
@@ -458,6 +469,20 @@ def parse_args() -> argparse.ArgumentParser:
         help="Zero out encoder outputs at non-top levels before the codebook, so "
         "reconstruction depends only on the coarsest (top) level embedding. "
         "Encoder features are still used for the contrastive loss.",
+    )
+    parser.add_argument(
+        "--skip-decoder-concat-levels",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Levels whose quantized code contributions are zeroed out in the input "
+        "to the FINAL (level-0) decoder, so they do not influence the reconstructed "
+        "image. Intermediate decoders are unaffected (their outputs still condition "
+        "finer codebooks). The top (coarsest) level cannot be skipped — at least one "
+        "level must contribute. "
+        "Examples: '--skip-decoder-concat-levels 0' drops only the finest level; "
+        "'--skip-decoder-concat-levels 0 1' drops the two finest, leaving only the "
+        "top codes to drive reconstruction.",
     )
     # Weights & Biases
     parser.add_argument(

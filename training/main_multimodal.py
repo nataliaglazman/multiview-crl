@@ -963,10 +963,12 @@ def main(args):
     logger.info("[MODEL]")
     if args.encoder_type == "vqvae":
         use_checkpoint = getattr(args, "gradient_checkpointing", False)
+        _entries_arg = args.vqvae_nb_entries
+        _entries_log = _entries_arg[0] if isinstance(_entries_arg, list) and len(_entries_arg) == 1 else _entries_arg
         logger.info(
             f"  VQ-VAE-2 | levels={args.vqvae_nb_levels} "
             f"hidden={args.vqvae_hidden_channels} embed={args.vqvae_embed_dim} "
-            f"entries={args.vqvae_nb_entries} grad_ckpt={use_checkpoint}"
+            f"entries={_entries_log} grad_ckpt={use_checkpoint}"
         )
         vqvae_model = vqvae.VQVAE(
             in_channels=1,
@@ -996,6 +998,7 @@ def main(args):
             narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
             top_level_recon_only=getattr(args, "top_level_recon_only", False),
             pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
+            skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
         )
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
@@ -1020,7 +1023,15 @@ def main(args):
         if getattr(args, "quantize_style", False):
             _se = getattr(args, "style_embed_dim", None) or args.vqvae_embed_dim
             _sn = getattr(args, "style_nb_entries", None) or args.vqvae_nb_entries
+            if isinstance(_sn, list) and len(_sn) == 1:
+                _sn = _sn[0]
             logger.info(f"  Style quantization: ENABLED (embed_dim={_se}, nb_entries={_sn})")
+        _skip_levels = getattr(args, "skip_decoder_concat_levels", None)
+        if _skip_levels:
+            logger.info(
+                f"  Final-decoder concat: SKIPPING levels {sorted(_skip_levels)} "
+                f"(their codes will be zeroed in the level-0 decoder input)"
+            )
 
         encoders = [vqvae_model]
         decoders = []
