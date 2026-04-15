@@ -57,7 +57,7 @@ parameters:
 
   # --- Fixed parameters (passed through to sweep_train.py) ---
   batch_size:
-    value: 4
+    value: 3
   gradient_accumulation_steps:
     value: 4
   train_steps:
