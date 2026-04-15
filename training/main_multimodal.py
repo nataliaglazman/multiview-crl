@@ -1495,6 +1495,13 @@ def main(args):
                                 _alive = (_cb.cluster_size > 1.0).sum().item()
                                 wandb_log[f"codebook/active_L{_cb_lvl}"] = _alive
                                 wandb_log[f"codebook/utilization_L{_cb_lvl}"] = _alive / _cb.n_embed
+                                wandb_log[f"codebook/fwd_count_L{_cb_lvl}"] = getattr(
+                                    _cb, "_fwd_count", torch.tensor(0)
+                                ).item()
+                                wandb_log[f"codebook/finite_L{_cb_lvl}"] = int(getattr(_cb, "_last_finite", True))
+                                wandb_log[f"codebook/dead_L{_cb_lvl}"] = (
+                                    (_cb.cluster_size < getattr(_cb, "reset_threshold", 1.0)).sum().item()
+                                )
                             if hasattr(_raw, "style_codebooks") and _raw.style_codebooks:
                                 for _sc_key, _sc_cb in _raw.style_codebooks.items():
                                     _s_alive = (_sc_cb.cluster_size > 1.0).sum().item()
