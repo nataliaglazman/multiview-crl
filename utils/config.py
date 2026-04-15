@@ -54,7 +54,7 @@ def parse_args() -> argparse.ArgumentParser:
     )
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--train-steps", type=int, default=300001)
-    parser.add_argument("--log-steps", type=int, default=100)
+    parser.add_argument("--log-steps", type=int, default=1)
     parser.add_argument("--checkpoint-steps", type=int, default=200)
     parser.add_argument("--evaluate", action="store_true")
     parser.add_argument("--val-size", default=25000, type=int)
