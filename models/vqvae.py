@@ -412,6 +412,11 @@ class CodeLayer(HelperModule):
             # cluster_size with randomly sampled encoder outputs + noise.
             # (runs even when EMA update was skipped due to NaN)
             self._fwd_count += 1
+            # log the smallest cluster_size for debugging / insight into codebook usage
+            print(f"Forward count: {self._fwd_count.item()}")
+            print(f"All finite: {torch.isfinite(flatten).all().item()}")
+            print(f"Dead entries: {(self.cluster_size < self.reset_threshold).sum().item()}")
+
             if torch.isfinite(flatten).all() and self.reset_every > 0 and self._fwd_count % self.reset_every == 0:
                 dead = self.cluster_size < self.reset_threshold  # (n_embed,)
                 n_dead = dead.sum().item()

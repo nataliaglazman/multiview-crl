@@ -20,9 +20,16 @@ def main():
         f"sweep-{run.id}",
     ]
 
-    # Ensure vqvae_embed_dim == vqvae_hidden_channels if we are sweeping over hidden_channels
+    # Ensure vqvae_embed_dim == vqvae_hidden_channels if we are sweeping over hidden_channels.
+    # Update both the local CLI config and wandb.config so the dashboard reflects the actual
+    # value used in training (allow_val_change=True because wandb treats sweep-sampled values
+    # as immutable by default).
     if "vqvae_hidden_channels" in config:
         config["vqvae_embed_dim"] = config["vqvae_hidden_channels"]
+        run.config.update(
+            {"vqvae_embed_dim": config["vqvae_hidden_channels"]},
+            allow_val_change=True,
+        )
 
     # Dynamically inject all parameters from the wandb config
     for key, value in config.items():
