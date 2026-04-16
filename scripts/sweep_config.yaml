@@ -130,6 +130,9 @@ parameters:
     value: true
   cb_ema_decay:
     value: 0.99
+  recon_loss_fn:
+    JukeboxPerceptualLoss:
+      dimensions: 3
 
 command:
   - ${env}

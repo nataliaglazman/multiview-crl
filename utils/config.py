@@ -100,6 +100,14 @@ def parse_args() -> argparse.ArgumentParser:
         "variance-invariance-covariance — more stable than Barlow Twins at very small "
         "batch sizes).",
     )
+
+    parser.add_argument(
+        "--recon-loss-fn",
+        type=str,
+        default="JukeboxPerceptualLoss",
+        help="Reconstruction loss function: 'mse' (default) or 'JukeboxPerceptual'",
+    )
+
     parser.add_argument(
         "--bt-lambda",
         type=float,

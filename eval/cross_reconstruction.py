@@ -210,15 +210,16 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
             metrics[f"{k}_L{lvl}"] = v
         per_level_sep[lvl] = level_metrics["separation_score"]
 
-        # L2-specific convenience aliases (unsuffixed L2/* namespace for easy
-        # sweep filtering and W&B dashboard pinning).
-        if lvl == 2:
-            metrics["L2/content_modality_invariance"] = level_metrics["content/modality_invariance"]
-            metrics["L2/style_subject_invariance"] = level_metrics["style/subject_invariance"]
-            metrics["L2/content_modality_probe_acc"] = level_metrics["content/modality_probe_acc"]
-            metrics["L2/style_subject_probe_r2"] = level_metrics["style/subject_probe_r2"]
-            metrics["L2/content_cross_view_cosine"] = level_metrics["content/cross_view_cosine_mean"]
-            metrics["L2/separation_score"] = level_metrics["separation_score"]
+        # Per-level convenience aliases (L{i}/* namespace for easy sweep
+        # filtering and W&B dashboard pinning).
+        if lvl in (1, 2):
+            prefix = f"L{lvl}"
+            metrics[f"{prefix}/content_modality_invariance"] = level_metrics["content/modality_invariance"]
+            metrics[f"{prefix}/style_subject_invariance"] = level_metrics["style/subject_invariance"]
+            metrics[f"{prefix}/content_modality_probe_acc"] = level_metrics["content/modality_probe_acc"]
+            metrics[f"{prefix}/style_subject_probe_r2"] = level_metrics["style/subject_probe_r2"]
+            metrics[f"{prefix}/content_cross_view_cosine"] = level_metrics["content/cross_view_cosine_mean"]
+            metrics[f"{prefix}/separation_score"] = level_metrics["separation_score"]
 
     # Backward-compatible unsuffixed keys mirror the finest available level
     # (usually L0), so existing dashboards that track e.g.

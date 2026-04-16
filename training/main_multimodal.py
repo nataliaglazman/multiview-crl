@@ -50,7 +50,15 @@ import models.vqvae as vqvae
 import utils.utils as utils
 from data.infinite_iterator import InfiniteIterator
 from eval.evaluation import eval_step, get_data
-from training.losses import BaselineLoss, barlow_twins_loss, infonce_loss, moco_loss, patch_infonce_loss, vicreg_loss
+from training.losses import (
+    BaselineLoss,
+    barlow_twins_loss,
+    infonce_loss,
+    moco_loss,
+    patch_infonce_loss,
+    vicreg_loss,
+    JukeboxPerceptualLoss,
+)
 from models.encoders import TextEncoder2D
 from utils.checkpointing import (
     load_checkpoint,
@@ -1194,7 +1202,15 @@ def main(args):
     if args.use_amp:
         logger.info("  Mixed precision: enabled (AMP)")
 
-    recon_loss_fn = BaselineLoss().to(device)
+    recon_loss_fn = getattr(args, "recon_loss_type", "mse")
+    if recon_loss_fn == "JukeboxPerceptual":
+        recon_loss_fn = JukeboxPerceptualLoss(
+            dimensions=3,
+        )
+        logger.info(f"  Reconstruction loss: Jukebox Perceptual ({recon_loss_fn.model_name})")
+        recon_loss_fn.to(device)
+    else:
+        recon_loss_fn = recon_loss_fn.to(device)
 
     # ------------------------------------------------------------------
     # Training loop

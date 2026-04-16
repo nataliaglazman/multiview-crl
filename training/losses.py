@@ -1,14 +1,14 @@
 """Definition of loss functions."""
 
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from lpips import LPIPS
 from torch import cat, reshape, tensor
-from torch.fft import rfftn
+from torch.fft import fftn, rfftn
 from torch.nn import PairwiseDistance
 
 from utils.utils import TBSummaryTypes
@@ -1185,3 +1185,167 @@ class BaselineLoss(torch.nn.Module):
 
     def get_summaries(self) -> Dict[str, torch.Tensor]:
         return self.summaries
+
+
+class JukeboxPerceptualLoss(torch.nn.Module):
+    """
+    Loss made of three components:
+        * Perceptual - based on the lpips library, with 2.5D approach for 3D volumes
+        * Spectral - based on the magnitude of FFT
+        * Pixel - MSE
+    """
+
+    def __init__(
+        self,
+        dimensions: int,
+        include_pixel_loss: bool = True,
+        is_fake_3d: bool = True,
+        drop_ratio: float = 0.0,
+        fake_3d_axis: Tuple[int, ...] = (2, 3, 4),
+        lpips_kwargs: Dict = None,
+        lpips_normalize: bool = True,
+        fft_kwargs: Dict = None,
+    ):
+        super(JukeboxPerceptualLoss, self).__init__()
+
+        if not (dimensions in [2, 3]):
+            raise NotImplementedError("Perceptual loss is implemented only in 2D and 3D.")
+
+        if dimensions == 3 and is_fake_3d is False:
+            raise NotImplementedError("True 3D perceptual loss is not implemented yet.")
+
+        self.dimensions = dimensions
+        self.include_pixel_loss = include_pixel_loss
+
+        self.lpips_kwargs = (
+            {
+                "pretrained": True,
+                "net": "alex",
+                "version": "0.1",
+                "lpips": True,
+                "spatial": False,
+                "pnet_rand": False,
+                "pnet_tune": False,
+                "use_dropout": True,
+                "model_path": None,
+                "eval_mode": True,
+                "verbose": False,
+            }
+            if lpips_kwargs is None
+            else lpips_kwargs
+        )
+        self.fake_3D_views = (
+            (
+                []
+                + ([((0, 2, 1, 3, 4), (1, 3, 4))] if 2 in fake_3d_axis else [])
+                + ([((0, 3, 1, 2, 4), (1, 2, 4))] if 3 in fake_3d_axis else [])
+                + ([((0, 4, 1, 2, 3), (1, 2, 3))] if 4 in fake_3d_axis else [])
+            )
+            if is_fake_3d
+            else None
+        )
+        self.keep_ratio = 1 - drop_ratio
+        self.lpips_normalize = lpips_normalize
+        self.perceptual_function = LPIPS(**self.lpips_kwargs) if self.dimensions == 2 or is_fake_3d else None
+        self.perceptual_factor = 0.001
+        self.fft_factor: float = 1.0
+        self.fft_kwargs = (
+            {"s": None, "dim": tuple(range(1, self.dimensions + 2)), "norm": "ortho"}
+            if fft_kwargs is None
+            else fft_kwargs
+        )
+        self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
+
+    @torch.amp.autocast("cuda", enabled=False)
+    def forward(self, network_output: Dict[str, List[torch.Tensor]], y: torch.Tensor) -> torch.Tensor:
+        y = y.float()
+        y_pred = network_output["reconstruction"][0].float()
+        q_losses = network_output["quantization_losses"]
+
+        y_amplitude = self._get_fft_amplitude(y)
+        y_pred_amplitude = self._get_fft_amplitude(y_pred)
+
+        loss = F.mse_loss(y_pred_amplitude, y_amplitude) * self.fft_factor
+        self.summaries[TBSummaryTypes.SCALAR]["Loss-Spectral-Reconstruction"] = loss.detach()
+        self.summaries[TBSummaryTypes.SCALAR]["Auxiliary-FFT_Factor"] = self.fft_factor
+
+        if self.dimensions == 3 and self.fake_3D_views:
+            for idx, fake_views in enumerate(self.fake_3D_views):
+                p_loss = (
+                    self._calculate_fake_3d_loss(
+                        y=y,
+                        y_pred=y_pred,
+                        permute_dims=fake_views[0],
+                        view_dims=fake_views[1],
+                    )
+                    * self.perceptual_factor
+                )
+                p_loss = p_loss.mean()
+                self.summaries[TBSummaryTypes.SCALAR][f"Loss-Perceptual_{idx}-Reconstruction"] = p_loss.detach()
+                loss = loss + p_loss
+        else:
+            p_loss = (
+                self.perceptual_function.forward(y, y_pred, normalize=self.lpips_normalize) * self.perceptual_factor
+            )
+            p_loss = p_loss.mean()
+            self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = p_loss.detach()
+            loss = loss + p_loss
+
+        self.summaries[TBSummaryTypes.SCALAR]["Auxiliary-Perceptual_Factor"] = self.perceptual_factor
+
+        if self.include_pixel_loss:
+            l2_loss = F.mse_loss(y_pred, y)
+            self.summaries[TBSummaryTypes.SCALAR]["Loss-MSE-Reconstruction"] = l2_loss.detach()
+            loss = loss + l2_loss
+
+        for idx, q_loss in enumerate(q_losses):
+            q_loss = q_loss.float()
+            self.summaries[TBSummaryTypes.SCALAR][f"Loss-MSE-VQ{idx}_Commitment_Cost"] = q_loss.detach()
+            loss = loss + q_loss
+
+        return loss
+
+    def _calculate_fake_3d_loss(
+        self,
+        y: torch.Tensor,
+        y_pred: torch.Tensor,
+        permute_dims: Tuple[int, int, int, int, int],
+        view_dims: Tuple[int, int, int],
+    ):
+        y_slices = (
+            y.permute(*permute_dims)
+            .contiguous()
+            .view(-1, y.shape[view_dims[0]], y.shape[view_dims[1]], y.shape[view_dims[2]])
+        )
+        y_pred_slices = (
+            y_pred.permute(*permute_dims)
+            .contiguous()
+            .view(-1, y_pred.shape[view_dims[0]], y_pred.shape[view_dims[1]], y_pred.shape[view_dims[2]])
+        )
+        indices = torch.randperm(y_pred_slices.shape[0], device=y_pred_slices.device)[
+            : int(y_pred_slices.shape[0] * self.keep_ratio)
+        ]
+        y_pred_slices = y_pred_slices[indices]
+        y_slices = y_slices[indices]
+        return torch.mean(self.perceptual_function.forward(y_slices, y_pred_slices, normalize=self.lpips_normalize))
+
+    def _get_fft_amplitude(self, images: torch.Tensor) -> torch.Tensor:
+        img_fft = fftn(input=images, **self.fft_kwargs)
+        return torch.sqrt(img_fft.real**2 + img_fft.imag**2)
+
+    def get_summaries(self) -> Dict[str, torch.Tensor]:
+        return self.summaries
+
+    def get_perceptual_factor(self) -> float:
+        return self.perceptual_factor
+
+    def set_perceptual_factor(self, perceptual_factor: float) -> float:
+        self.perceptual_factor = perceptual_factor
+        return self.get_perceptual_factor()
+
+    def get_fft_factor(self) -> float:
+        return self.fft_factor
+
+    def set_fft_factor(self, fft_factor: float) -> float:
+        self.fft_factor = fft_factor
+        return self.get_fft_factor()
