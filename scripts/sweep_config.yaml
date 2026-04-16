@@ -50,7 +50,11 @@ parameters:
     - [384, 192, 96]
     - [128, 64, 32]
     - [512, 256, 128]
-
+  contrastive_level_weights:
+    values:
+    - [1.0, 1.0, 1.0]
+    - [1.0, 0.5, 0.25]
+    - [0.25, 0.5, 1.0]
   # skip_decoder_concat_levels:
   #   values:
   #     - None
@@ -124,8 +128,6 @@ parameters:
     value: 0.25
   cache_dir:
     value: "/nfs/home/nglazman/cache/multiview"
-  contrastive_level_weights:
-    value: [1.0, 1.0, 1.0]
   pass_full_to_next_level:
     value: true
   cb_ema_decay:

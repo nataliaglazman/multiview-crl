@@ -52,6 +52,7 @@ from data.infinite_iterator import InfiniteIterator
 from eval.evaluation import eval_step, get_data
 from training.losses import (
     BaselineLoss,
+    JukeboxPerceptualLoss,
     barlow_twins_loss,
     infonce_loss,
     moco_loss,
@@ -1204,13 +1205,10 @@ def main(args):
 
     recon_loss_fn = getattr(args, "recon_loss_type", "mse")
     if recon_loss_fn == "JukeboxPerceptual":
-        recon_loss_fn = JukeboxPerceptualLoss(
-            dimensions=3,
-        )
-        logger.info(f"  Reconstruction loss: Jukebox Perceptual ({recon_loss_fn.model_name})")
-        recon_loss_fn.to(device)
+        recon_loss_fn = JukeboxPerceptualLoss(dimensions=3).to(device)
+        logger.info("  Reconstruction loss: Jukebox Perceptual (2.5D LPIPS + FFT + MSE)")
     else:
-        recon_loss_fn = recon_loss_fn.to(device)
+        recon_loss_fn = BaselineLoss().to(device)
 
     # ------------------------------------------------------------------
     # Training loop
