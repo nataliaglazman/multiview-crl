@@ -667,7 +667,7 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         setattr(args, "n_views", 2)
         setattr(args, "subsets", [(0, 1)])
         logger.info("  -> Using custom dataset (image only, 2 views)")
-    elif args.dataset_name in ["adni", "ADNI_registered", "ADNI_stripped"]:
+    elif args.dataset_name in ["adni", "ADNI_registered", "ADNI_stripped", "ADNI_stripped_masks"]:
         args.DATASETCLASS = datasets.MyCustomDataset
         setattr(args, "modalities", ["image"])
         setattr(args, "n_views", 2)
