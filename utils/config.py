@@ -47,7 +47,7 @@ def parse_args() -> argparse.ArgumentParser:
             "multimodal3di",
             "adni",
             "ADNI_registered",
-            "ADNI_stripped",
+            "ADNI_stripped_masks",
             "custom",
         ],
     )

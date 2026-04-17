@@ -32,8 +32,7 @@ parameters:
   # vqvae_embed_dim:
   #   values: [32, 48, 64]
 
-  mask_mode:
-    values: ["fixed", "learned"]
+
   tau:
     distribution: log_uniform_values
     min: 0.05
@@ -81,7 +80,9 @@ parameters:
   dataroot:
     value: "/nfs/home/nglazman/data"
   dataset_name:
-    value: "ADNI_stripped"
+    value: "ADNI_stripped_masks"
+  mask_dir:
+    value: "/nfs/home/nglazman/data/ADNI_stripped_masks"
   encoder_type:
     value: "vqvae"
   patch_contrastive:
@@ -134,6 +135,8 @@ parameters:
     value: 0.99
   recon_loss_fn:
     value: "JukeboxPerceptualLoss"
+  mask_mode:
+    value: ["fixed"]
 
 command:
   - ${env}
