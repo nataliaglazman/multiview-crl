@@ -1048,8 +1048,8 @@ class BaselineLoss(torch.nn.Module):
         self.pixel_factor = 1.0
 
         self.perceptual_factor = 0.002
-        self.n_slices = 4  # Reduced from 32 → 8 → 4; compensated by 6× scale factor
-        self.perceptual_function = LPIPS(net="squeeze")
+        self.n_slices = 16
+        self.perceptual_function = LPIPS(net="alex")
 
         self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
 
@@ -1105,33 +1105,21 @@ class BaselineLoss(torch.nn.Module):
         return loss
 
     def _calculate_perceptual_loss(self, x, y) -> torch.Tensor:
-        # LPIPS backbone weights are frozen (requires_grad=False), so autograd
-        # will not accumulate gradients into the backbone parameters.  However,
-        # gradients DO need to flow back through the LPIPS computation to the
-        # reconstruction tensor `y` so that the decoder is trained by the
-        # perceptual objective.
-        #
-        # Speed optimisation: instead of computing LPIPS on all 3 orientations
-        # every step (3× SqueezeNet passes), we randomly sample ONE orientation
-        # per step and multiply by 3.  The expected gradient is identical, but
-        # each step is ~3× cheaper for the perceptual component.
-
         def _lpips_on_slices(x_vol, y_vol, perm_dims):
-            """Extract 2D slices along one orientation and compute LPIPS."""
-            x_p = x_vol.permute(*perm_dims)  # (B, n_slices_total, C, H, W)
+            x_p = x_vol.permute(*perm_dims)
             n_slices_total = x_p.shape[1]
             indices = torch.randperm(n_slices_total, device=x_vol.device)[: self.n_slices]
             sel_x = x_p[:, indices].contiguous().flatten(0, 1).detach()
             del x_p
             sel_y = y_vol.permute(*perm_dims)[:, indices].contiguous().flatten(0, 1)
-            # Cap spatial size to 96×96 to normalize memory across orientations
             if sel_x.shape[-1] > 96 or sel_x.shape[-2] > 96:
                 _target = (min(sel_x.shape[-2], 96), min(sel_x.shape[-1], 96))
                 sel_x = F.adaptive_avg_pool2d(sel_x, _target)
                 sel_y = F.adaptive_avg_pool2d(sel_y, _target)
+            if sel_x.shape[1] == 1:
+                sel_x = sel_x.expand(-1, 3, -1, -1)
+                sel_y = sel_y.expand(-1, 3, -1, -1)
             p_loss = torch.mean(self.perceptual_function.forward(sel_x.float(), sel_y.float()))
-            # LPIPS can return NaN on near-constant slices (internal feature
-            # normalization divides by near-zero norm).  Fall back to zero.
             if not torch.isfinite(p_loss):
                 return torch.zeros(1, device=x_vol.device, dtype=torch.float32, requires_grad=True).squeeze()
             return p_loss
@@ -1142,14 +1130,13 @@ class BaselineLoss(torch.nn.Module):
             ("Coronal", (0, 3, 1, 2, 4)),
         ]
 
-        # Randomly pick one orientation; multiply by 3 to keep expected value
-        chosen_idx = torch.randint(len(orientations), (1,)).item()
-        name, perm_dims = orientations[chosen_idx]
-        p_loss = _lpips_on_slices(x, y, perm_dims=perm_dims)
-        self.summaries[TBSummaryTypes.SCALAR][f"Loss-Perceptual_{name}-Reconstruction"] = p_loss.detach()
+        total_p_loss = torch.zeros(1, device=x.device, dtype=torch.float32)
+        for name, perm_dims in orientations:
+            p_loss = _lpips_on_slices(x, y, perm_dims=perm_dims)
+            self.summaries[TBSummaryTypes.SCALAR][f"Loss-Perceptual_{name}-Reconstruction"] = p_loss.detach()
+            total_p_loss = total_p_loss + p_loss
 
-        # 3× for random orientation (1 of 3), 2× for halved slices (4 vs original 8)
-        loss = p_loss * 6.0 * self.perceptual_factor
+        loss = total_p_loss * self.perceptual_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = loss.detach()
 
         return loss

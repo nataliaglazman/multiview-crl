@@ -1221,8 +1221,8 @@ def main(args):
     if args.use_amp:
         logger.info("  Mixed precision: enabled (AMP)")
 
-    recon_loss_fn = getattr(args, "recon_loss_type", "mse")
-    if recon_loss_fn == "JukeboxPerceptual":
+    recon_loss_fn = getattr(args, "recon_loss_fn", "BaselineLoss")
+    if recon_loss_fn == "JukeboxPerceptualLoss":
         pixel_loss_type = getattr(args, "jukebox_pixel_loss_type", "mse")
         recon_loss_fn = JukeboxPerceptualLoss(dimensions=3, pixel_loss_type=pixel_loss_type).to(device)
         logger.info(f"  Reconstruction loss: Jukebox Perceptual (2.5D LPIPS + FFT + pixel[{pixel_loss_type}])")

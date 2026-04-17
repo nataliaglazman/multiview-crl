@@ -114,8 +114,8 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument(
         "--recon-loss-fn",
         type=str,
-        default="JukeboxPerceptualLoss",
-        help="Reconstruction loss function: 'mse' (default) or 'JukeboxPerceptual'",
+        default="BaselineLoss",
+        help="Reconstruction loss function: 'BaselineLoss' (default) or 'JukeboxPerceptualLoss'",
     )
 
     parser.add_argument(
