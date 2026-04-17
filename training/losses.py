@@ -1051,8 +1051,6 @@ class BaselineLoss(torch.nn.Module):
         self.n_slices = 4  # Reduced from 32 → 8 → 4; compensated by 6× scale factor
         self.perceptual_function = LPIPS(net="squeeze")
 
-        self.fft_factor = 1.0
-
         self.summaries: Dict = {TBSummaryTypes.SCALAR: dict()}
 
     @torch.amp.autocast("cuda", enabled=False)
@@ -1081,11 +1079,7 @@ class BaselineLoss(torch.nn.Module):
             # terms see the same support as the pixel term.
             y = y * mask
 
-        loss = (
-            self._calculate_pixel_loss(x, y, mask=mask)
-            + self._calculate_frequency_loss(x, y)
-            + self._calculate_perceptual_loss(x, y)
-        )
+        loss = self._calculate_pixel_loss(x, y, mask=mask) + self._calculate_perceptual_loss(x, y)
 
         for idx, q_loss in enumerate(q_losses):
             q_loss = q_loss.float()
@@ -1093,43 +1087,6 @@ class BaselineLoss(torch.nn.Module):
             self.summaries[TBSummaryTypes.SCALAR][f"Loss-MSE-VQ{idx}_Commitment_Cost"] = q_loss.detach()
 
             loss = loss + q_loss
-
-        return loss
-
-    def _calculate_frequency_loss(self, x, y) -> torch.Tensor:
-        # rfftn exploits conjugate symmetry of real inputs → output is ~half
-        # the size of fftn along the last dim, cutting peak memory ~50%.
-        # Per-sample loop keeps only one sample's FFT pair alive at a time,
-        # further reducing peak VRAM for large 3D volumes.
-        #
-        # IMPORTANT: we avoid torch.abs() on complex tensors because its
-        # gradient is real/sqrt(real²+imag²), which is 0/0 = NaN when both
-        # components are zero (common in brain-masked volumes).  Instead we
-        # compute the squared magnitude (real² + imag²) which has a clean
-        # gradient everywhere.
-        with torch.amp.autocast("cuda", enabled=False):
-            loss = torch.tensor(0.0, device=x.device, dtype=torch.float32)
-            B = x.shape[0]
-            for i in range(B):
-                xi = (x[i : i + 1].float() + 1.0) / 2.0
-                yi = (y[i : i + 1].float() + 1.0) / 2.0
-                x_fft = rfftn(xi, norm="ortho")
-                del xi
-                y_fft = rfftn(yi, norm="ortho")
-                del yi
-                # Squared magnitude: |z|² = real² + imag².  Gradient-safe
-                # (no sqrt), and L1 on squared magnitudes still penalises
-                # spectral differences effectively.
-                x_mag2 = x_fft.real.pow(2) + x_fft.imag.pow(2)
-                del x_fft
-                y_mag2 = y_fft.real.pow(2) + y_fft.imag.pow(2)
-                del y_fft
-                loss = loss + F.l1_loss(x_mag2, y_mag2)
-                del x_mag2, y_mag2
-            loss = loss / B
-
-        loss = loss * self.fft_factor
-        self.summaries[TBSummaryTypes.SCALAR]["Loss-Jukebox-Reconstruction"] = loss.detach()
 
         return loss
 
