@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from lpips import LPIPS
 from torch import cat, reshape, tensor
-from torch.fft import fftn, rfftn
+from torch.fft import rfftn
 from torch.nn import PairwiseDistance
 
 from utils.utils import TBSummaryTypes
@@ -1074,8 +1074,15 @@ class BaselineLoss(torch.nn.Module):
 
         q_losses = network_output["quantization_losses"]
 
+        mask = network_output.get("mask")
+        if mask is not None:
+            mask = mask.float()
+            # Zero reconstruction outside the brain so the FFT / perceptual
+            # terms see the same support as the pixel term.
+            y = y * mask
+
         loss = (
-            self._calculate_pixel_loss(x, y)
+            self._calculate_pixel_loss(x, y, mask=mask)
             + self._calculate_frequency_loss(x, y)
             + self._calculate_perceptual_loss(x, y)
         )
@@ -1126,8 +1133,15 @@ class BaselineLoss(torch.nn.Module):
 
         return loss
 
-    def _calculate_pixel_loss(self, x, y) -> torch.Tensor:
-        loss = F.l1_loss(x, y)
+    def _calculate_pixel_loss(self, x, y, mask=None) -> torch.Tensor:
+        if mask is None:
+            loss = F.l1_loss(x, y)
+        else:
+            # Mean over brain voxels only — avoids diluting the loss with
+            # background zeros whose target and prediction are both ~0.
+            diff = (x - y).abs() * mask
+            denom = mask.sum().clamp_min(1.0)
+            loss = diff.sum() / denom
         loss = loss * self.pixel_factor
         self.summaries[TBSummaryTypes.SCALAR]["Loss-MAE-Reconstruction"] = loss.detach()
 
@@ -1203,8 +1217,9 @@ class JukeboxPerceptualLoss(torch.nn.Module):
         drop_ratio: float = 0.0,
         fake_3d_axis: Tuple[int, ...] = (2, 3, 4),
         lpips_kwargs: Dict = None,
-        lpips_normalize: bool = True,
+        lpips_normalize: bool = False,
         fft_kwargs: Dict = None,
+        pixel_loss_type: str = "mse",
     ):
         super(JukeboxPerceptualLoss, self).__init__()
 
@@ -1214,8 +1229,12 @@ class JukeboxPerceptualLoss(torch.nn.Module):
         if dimensions == 3 and is_fake_3d is False:
             raise NotImplementedError("True 3D perceptual loss is not implemented yet.")
 
+        if pixel_loss_type not in ("mse", "l1"):
+            raise ValueError(f"pixel_loss_type must be 'mse' or 'l1', got {pixel_loss_type!r}")
+
         self.dimensions = dimensions
         self.include_pixel_loss = include_pixel_loss
+        self.pixel_loss_type = pixel_loss_type
 
         self.lpips_kwargs = (
             {
@@ -1250,7 +1269,7 @@ class JukeboxPerceptualLoss(torch.nn.Module):
         self.perceptual_factor = 0.001
         self.fft_factor: float = 1.0
         self.fft_kwargs = (
-            {"s": None, "dim": tuple(range(1, self.dimensions + 2)), "norm": "ortho"}
+            {"s": None, "dim": tuple(range(2, self.dimensions + 2)), "norm": "ortho"}
             if fft_kwargs is None
             else fft_kwargs
         )
@@ -1260,6 +1279,9 @@ class JukeboxPerceptualLoss(torch.nn.Module):
     def forward(self, network_output: Dict[str, List[torch.Tensor]], y: torch.Tensor) -> torch.Tensor:
         y = y.float()
         y_pred = network_output["reconstruction"][0].float()
+        # Decoder has no output activation; clamp to target range so FFT
+        # magnitudes and LPIPS don't amplify early-training outliers into NaN.
+        y_pred = y_pred.clamp(-1.0, 1.0)
         q_losses = network_output["quantization_losses"]
 
         y_amplitude = self._get_fft_amplitude(y)
@@ -1284,19 +1306,27 @@ class JukeboxPerceptualLoss(torch.nn.Module):
                 self.summaries[TBSummaryTypes.SCALAR][f"Loss-Perceptual_{idx}-Reconstruction"] = p_loss.detach()
                 loss = loss + p_loss
         else:
-            p_loss = (
-                self.perceptual_function.forward(y, y_pred, normalize=self.lpips_normalize) * self.perceptual_factor
-            )
-            p_loss = p_loss.mean()
+            y_in, y_pred_in = y, y_pred
+            if y_in.shape[1] == 1:
+                y_in = y_in.expand(-1, 3, -1, -1)
+                y_pred_in = y_pred_in.expand(-1, 3, -1, -1)
+            p_loss_raw = self.perceptual_function.forward(y_in, y_pred_in, normalize=self.lpips_normalize).mean()
+            if not torch.isfinite(p_loss_raw):
+                p_loss_raw = torch.zeros(1, device=y.device, dtype=torch.float32, requires_grad=True).squeeze()
+            p_loss = p_loss_raw * self.perceptual_factor
             self.summaries[TBSummaryTypes.SCALAR]["Loss-Perceptual-Reconstruction"] = p_loss.detach()
             loss = loss + p_loss
 
         self.summaries[TBSummaryTypes.SCALAR]["Auxiliary-Perceptual_Factor"] = self.perceptual_factor
 
         if self.include_pixel_loss:
-            l2_loss = F.mse_loss(y_pred, y)
-            self.summaries[TBSummaryTypes.SCALAR]["Loss-MSE-Reconstruction"] = l2_loss.detach()
-            loss = loss + l2_loss
+            if self.pixel_loss_type == "l1":
+                pixel_loss = F.l1_loss(y_pred, y)
+                self.summaries[TBSummaryTypes.SCALAR]["Loss-L1-Reconstruction"] = pixel_loss.detach()
+            else:
+                pixel_loss = F.mse_loss(y_pred, y)
+                self.summaries[TBSummaryTypes.SCALAR]["Loss-MSE-Reconstruction"] = pixel_loss.detach()
+            loss = loss + pixel_loss
 
         for idx, q_loss in enumerate(q_losses):
             q_loss = q_loss.float()
@@ -1327,11 +1357,23 @@ class JukeboxPerceptualLoss(torch.nn.Module):
         ]
         y_pred_slices = y_pred_slices[indices]
         y_slices = y_slices[indices]
-        return torch.mean(self.perceptual_function.forward(y_slices, y_pred_slices, normalize=self.lpips_normalize))
+        # LPIPS backbones are pretrained on 3-channel RGB; MRI is 1-channel.
+        if y_slices.shape[1] == 1:
+            y_slices = y_slices.expand(-1, 3, -1, -1)
+            y_pred_slices = y_pred_slices.expand(-1, 3, -1, -1)
+        p_loss = torch.mean(self.perceptual_function.forward(y_slices, y_pred_slices, normalize=self.lpips_normalize))
+        # LPIPS can return NaN on near-constant slices (internal feature
+        # normalization divides by near-zero norm). Fall back to zero.
+        if not torch.isfinite(p_loss):
+            return torch.zeros(1, device=y.device, dtype=torch.float32, requires_grad=True).squeeze()
+        return p_loss
 
     def _get_fft_amplitude(self, images: torch.Tensor) -> torch.Tensor:
-        img_fft = fftn(input=images, **self.fft_kwargs)
-        return torch.sqrt(img_fft.real**2 + img_fft.imag**2)
+        # Squared magnitude (|z|² = real² + imag²): avoids the NaN gradient of
+        # sqrt at zero (common for brain-masked background voxels). rfftn
+        # exploits conjugate symmetry to roughly halve peak memory.
+        img_fft = rfftn(input=images, **self.fft_kwargs)
+        return img_fft.real.pow(2) + img_fft.imag.pow(2)
 
     def get_summaries(self) -> Dict[str, torch.Tensor]:
         return self.summaries

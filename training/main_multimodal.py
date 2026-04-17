@@ -135,6 +135,14 @@ def train_step(
         images = torch.concat(samples, 0).to(device, non_blocking=True)  # (n_views * B, 1, D, H, W)
         input_shape = images.shape[2:]
 
+        # Brain masks are plumbed alongside the images so the reconstruction
+        # loss can restrict its support to brain voxels.
+        mask_samples = data.get("mask")
+        if mask_samples is not None:
+            masks = torch.concat(mask_samples, 0).to(device, non_blocking=True).float()
+        else:
+            masks = None
+
         # ------------------------------------------------------------------
         # VQ-VAE-2 path
         # ------------------------------------------------------------------
@@ -195,7 +203,11 @@ def train_step(
                     recon = F.interpolate(recon, size=input_shape, mode="trilinear", align_corners=False)
                 recon_loss = (
                     recon_loss_fn(
-                        {"reconstruction": [recon], "quantization_losses": diffs},
+                        {
+                            "reconstruction": [recon],
+                            "quantization_losses": diffs,
+                            "mask": masks,
+                        },
                         images,
                     )
                     * args.scale_recon_loss
@@ -526,7 +538,11 @@ def train_step(
             ground_truth_images = torch.concat(data["image"], 0).to(decoded_images.device)
             recon_loss = (
                 recon_loss_fn(
-                    {"reconstruction": [decoded_images], "quantization_losses": []},
+                    {
+                        "reconstruction": [decoded_images],
+                        "quantization_losses": [],
+                        "mask": masks,
+                    },
                     ground_truth_images,
                 )
                 * args.scale_recon_loss
@@ -895,6 +911,8 @@ def main(args):
     dataset_kwargs = {
         "transform": transform,
         "labels_path": getattr(args, "labels_path", None),
+        "masks_dir": getattr(args, "masks_dir", None),
+        "asymmetric_aug": getattr(args, "asymmetric_aug", False),
     }
     dataloader_kwargs = {
         "batch_size": args.batch_size,
@@ -1205,8 +1223,9 @@ def main(args):
 
     recon_loss_fn = getattr(args, "recon_loss_type", "mse")
     if recon_loss_fn == "JukeboxPerceptual":
-        recon_loss_fn = JukeboxPerceptualLoss(dimensions=3).to(device)
-        logger.info("  Reconstruction loss: Jukebox Perceptual (2.5D LPIPS + FFT + MSE)")
+        pixel_loss_type = getattr(args, "jukebox_pixel_loss_type", "mse")
+        recon_loss_fn = JukeboxPerceptualLoss(dimensions=3, pixel_loss_type=pixel_loss_type).to(device)
+        logger.info(f"  Reconstruction loss: Jukebox Perceptual (2.5D LPIPS + FFT + pixel[{pixel_loss_type}])")
     else:
         recon_loss_fn = BaselineLoss().to(device)
 

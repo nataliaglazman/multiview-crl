@@ -1252,6 +1252,8 @@ class MyCustomDataset(MultiviewDataset):
         cache=False,
         cache_dir: str | None = None,
         labels_path: str | None = None,
+        masks_dir: str | None = None,
+        asymmetric_aug: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -1261,6 +1263,8 @@ class MyCustomDataset(MultiviewDataset):
         self.spacing = spacing
         self.crop_margin = crop_margin
         self.spatial_size = tuple(spatial_size) if spatial_size is not None else None
+        self.masks_dir = masks_dir
+        self.asymmetric_aug = asymmetric_aug
 
         # Load CSV and build item list
         if labels_path is None:
@@ -1270,14 +1274,23 @@ class MyCustomDataset(MultiviewDataset):
         label_map = {v: i for i, v in enumerate(label_values)}
 
         # Load data using utils.load_data
-        self.items, missing = load_data(df, data_dir, label_map)
+        self.items, missing = load_data(df, data_dir, label_map, masks_dir=masks_dir)
         self.num_samples = len(self.items)
+
+        # All items must carry brain-mask paths to enable the mask pipeline —
+        # if any item is missing masks, fall back to the thresholding path so
+        # every sample follows the same transform sequence.
+        self.masks_from_disk = all("mask_image" in it and "mask_z_image" in it for it in self.items)
 
         # Get MONAI transforms with specified spacing and cropping
         from utils.utils import transforms as get_transforms
 
         train_transforms, val_transforms = get_transforms(
-            spacing=self.spacing, crop_margin=self.crop_margin, spatial_size=self.spatial_size
+            spacing=self.spacing,
+            crop_margin=self.crop_margin,
+            spatial_size=self.spatial_size,
+            masks_from_disk=self.masks_from_disk,
+            asymmetric_aug=self.asymmetric_aug,
         )
 
         if cache:
@@ -1285,22 +1298,61 @@ class MyCustomDataset(MultiviewDataset):
             # Augmentation-only pipeline for training (parameters mirror
             # those in utils.utils.transforms — keep in sync).
             if mode == "train":
-                from monai.transforms import Compose, RandAffined, RandShiftIntensityd
-
-                self._aug_transform = Compose(
-                    [
-                        RandAffined(
-                            keys=["image_t1", "image_t2"],
-                            rotate_range=[-0.05, 0.05],
-                            shear_range=[0.001, 0.05],
-                            scale_range=[0, 0.05],
-                            mode="bilinear",
-                            padding_mode="zeros",
-                            prob=0.5,
-                        ),
-                        RandShiftIntensityd(keys=["image_t1", "image_t2"], offsets=(-0.1, 0.1), prob=0.2),
-                    ]
+                from monai.transforms import (
+                    Compose,
+                    RandAdjustContrastd,
+                    RandAffined,
+                    RandBiasFieldd,
+                    RandGaussianNoised,
+                    RandGaussianSmoothd,
+                    RandScaleIntensityd,
+                    RandShiftIntensityd,
                 )
+
+                from utils.utils import ApplyBrainMaskd
+
+                # Affine must apply the same transform to image and mask so
+                # they stay spatially aligned.
+                aug_list = [
+                    RandAffined(
+                        keys=["image_t1", "image_t2", "mask_t1", "mask_t2"],
+                        mode=["bilinear", "bilinear", "nearest", "nearest"],
+                        rotate_range=[-0.05, 0.05],
+                        shear_range=[0.001, 0.05],
+                        scale_range=[0, 0.05],
+                        padding_mode="zeros",
+                        prob=0.5,
+                    )
+                ]
+                if self.asymmetric_aug:
+                    # Independent intensity perturbations per view.
+                    for view_key in ("image_t1", "image_t2"):
+                        aug_list.extend(
+                            [
+                                RandShiftIntensityd(keys=[view_key], offsets=(-0.1, 0.1), prob=0.5),
+                                RandScaleIntensityd(keys=[view_key], factors=0.1, prob=0.5),
+                                RandBiasFieldd(keys=[view_key], coeff_range=(0.0, 0.1), prob=0.3),
+                                RandAdjustContrastd(keys=[view_key], gamma=(0.7, 1.5), prob=0.3),
+                                RandGaussianNoised(keys=[view_key], std=0.05, prob=0.3),
+                                RandGaussianSmoothd(
+                                    keys=[view_key],
+                                    sigma_x=(0.25, 1.0),
+                                    sigma_y=(0.25, 1.0),
+                                    sigma_z=(0.25, 1.0),
+                                    prob=0.2,
+                                ),
+                            ]
+                        )
+                    aug_list.append(
+                        ApplyBrainMaskd(
+                            keys=["image_t1", "image_t2"],
+                            mask_keys=["mask_t1", "mask_t2"],
+                            threshold=0.5,
+                        )
+                    )
+                else:
+                    aug_list.append(RandShiftIntensityd(keys=["image_t1", "image_t2"], offsets=(-0.1, 0.1), prob=0.2))
+                self._aug_transform = Compose(aug_list)
             else:
                 self._aug_transform = None
             self.monai_transform = None  # not used when cached
@@ -1326,11 +1378,16 @@ class MyCustomDataset(MultiviewDataset):
             "image_t2": item["z_image"],
             "label": item["label"],
         }
+        if "mask_image" in item and "mask_z_image" in item:
+            data_dict["mask_t1"] = item["mask_image"]
+            data_dict["mask_t2"] = item["mask_z_image"]
         transformed = deterministic_transform(data_dict)
         cached = {
             "image_t1": transformed["image_t1"],
             "image_t2": transformed["image_t2"],
             "label": transformed["label"],
+            "mask_t1": transformed["mask_t1"],
+            "mask_t2": transformed["mask_t2"],
         }
         return idx, cached
 
@@ -1355,15 +1412,22 @@ class MyCustomDataset(MultiviewDataset):
             "image_t2": item["z_image"],
             "label": item["label"],
         }
+        if "mask_image" in item and "mask_z_image" in item:
+            data_dict["mask_t1"] = item["mask_image"]
+            data_dict["mask_t2"] = item["mask_z_image"]
         transformed = deterministic_transform(data_dict)
         # Convert to plain torch tensors — MONAI MetaTensors carry numpy
         # internals that torch.load(weights_only=True) rejects.
         t1 = _torch.as_tensor(transformed["image_t1"]).clone().contiguous()
         t2 = _torch.as_tensor(transformed["image_t2"]).clone().contiguous()
+        m1 = _torch.as_tensor(transformed["mask_t1"]).clone().contiguous()
+        m2 = _torch.as_tensor(transformed["mask_t2"]).clone().contiguous()
         lbl = int(transformed["label"]) if not isinstance(transformed["label"], int) else transformed["label"]
         cached = {
             "image_t1": t1,
             "image_t2": t2,
+            "mask_t1": m1,
+            "mask_t2": m2,
             "label": lbl,
         }
         # Atomic write with memory staging:
@@ -1402,9 +1466,13 @@ class MyCustomDataset(MultiviewDataset):
         h.update(f"spacing={self.spacing}".encode())
         h.update(f"crop_margin={self.crop_margin}".encode())
         h.update(f"spatial_size={self.spatial_size}".encode())
+        h.update(f"masks_from_disk={self.masks_from_disk}".encode())
         for item in self.items:
             h.update(item["image"].encode())
             h.update(item["z_image"].encode())
+            if "mask_image" in item:
+                h.update(item["mask_image"].encode())
+                h.update(item["mask_z_image"].encode())
         return h.hexdigest()[:16]
 
     # ------------------------------------------------------------------
@@ -1660,8 +1728,6 @@ class MyCustomDataset(MultiviewDataset):
             data_dict = {k: v.clone() if hasattr(v, "clone") else v for k, v in cached.items()}
             if self._aug_transform is not None:
                 data_dict = self._aug_transform(data_dict)
-            img_t1 = data_dict["image_t1"]
-            img_t2 = data_dict["image_t2"]
         else:
             item = self.items[idx]
             data_dict = {
@@ -1669,12 +1735,19 @@ class MyCustomDataset(MultiviewDataset):
                 "image_t2": item["z_image"],
                 "label": item["label"],
             }
-            transformed = self.monai_transform(data_dict)
-            img_t1 = transformed["image_t1"]
-            img_t2 = transformed["image_t2"]
+            if "mask_image" in item and "mask_z_image" in item:
+                data_dict["mask_t1"] = item["mask_image"]
+                data_dict["mask_t2"] = item["mask_z_image"]
+            data_dict = self.monai_transform(data_dict)
+
+        img_t1 = data_dict["image_t1"]
+        img_t2 = data_dict["image_t2"]
+        mask_t1 = data_dict["mask_t1"]
+        mask_t2 = data_dict["mask_t2"]
 
         return {
             "image": [img_t1, img_t2],
+            "mask": [mask_t1, mask_t2],
             "z_image": [{}, {}],
             "index": idx,
         }

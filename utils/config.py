@@ -27,6 +27,16 @@ def parse_args() -> argparse.ArgumentParser:
         help="Path to the labels CSV file (e.g. labels_cleaned_3class.csv). " "Required for ADNI / custom datasets.",
     )
     parser.add_argument(
+        "--masks-dir",
+        type=str,
+        default=None,
+        help="Root directory containing per-subject brain masks "
+        "(same <subject>/t1, <subject>/t2 layout as the image data). "
+        "Masks are identified by a '_brain_mask.nii.gz' suffix. "
+        "When set, reconstruction loss is computed only over brain voxels. "
+        "Defaults to None, in which case masks are expected alongside the images.",
+    )
+    parser.add_argument(
         "--dataset_name",
         type=str,
         default="ADNI_registered",
@@ -106,6 +116,15 @@ def parse_args() -> argparse.ArgumentParser:
         type=str,
         default="JukeboxPerceptualLoss",
         help="Reconstruction loss function: 'mse' (default) or 'JukeboxPerceptual'",
+    )
+
+    parser.add_argument(
+        "--jukebox-pixel-loss-type",
+        type=str,
+        default="mse",
+        choices=["mse", "l1"],
+        help="Distance used on the pixel reconstruction term inside JukeboxPerceptualLoss. "
+        "'mse' (default) matches the original formulation; 'l1' is more robust to outliers.",
     )
 
     parser.add_argument(
@@ -527,6 +546,17 @@ def parse_args() -> argparse.ArgumentParser:
         default=0.0,
         help="Minimum improvement in monitored loss to count as progress. "
         "Only used when --early-stopping-patience > 0. Default: 0.0.",
+    )
+    parser.add_argument(
+        "--asymmetric-aug",
+        action="store_true",
+        default=False,
+        help="Apply independent intensity augmentations per view (T1 and T2 get different "
+        "random draws for shift/scale/bias-field/gamma/noise/smooth). Spatial augmentations "
+        "remain synchronised across views so anatomical correspondence is preserved for "
+        "patch-level contrastive alignment. Motivated by the multi-view identifiability "
+        "framework (Yao et al., 2024): an intensity-augmented T1 is effectively a third "
+        "view, shrinking the shared-content block to truly modality-invariant anatomy.",
     )
     parser.add_argument(
         "--pass-full-to-next-level",
