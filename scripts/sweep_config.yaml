@@ -81,7 +81,7 @@ parameters:
     value: "/nfs/home/nglazman/data"
   dataset_name:
     value: "ADNI_stripped_masks"
-  mask_dir:
+  masks_dir:
     value: "/nfs/home/nglazman/data/ADNI_stripped_masks"
   encoder_type:
     value: "vqvae"
