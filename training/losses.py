@@ -1228,6 +1228,11 @@ class JukeboxPerceptualLoss(torch.nn.Module):
         y_pred = y_pred.clamp(-1.0, 1.0)
         q_losses = network_output["quantization_losses"]
 
+        mask = network_output.get("mask")
+        if mask is not None:
+            mask = mask.float()
+            y_pred = y_pred * mask
+
         y_amplitude = self._get_fft_amplitude(y)
         y_pred_amplitude = self._get_fft_amplitude(y_pred)
 
@@ -1264,12 +1269,15 @@ class JukeboxPerceptualLoss(torch.nn.Module):
         self.summaries[TBSummaryTypes.SCALAR]["Auxiliary-Perceptual_Factor"] = self.perceptual_factor
 
         if self.include_pixel_loss:
-            if self.pixel_loss_type == "l1":
+            if mask is not None:
+                diff = (y_pred - y).abs() if self.pixel_loss_type == "l1" else (y_pred - y).pow(2)
+                pixel_loss = (diff * mask).sum() / mask.sum().clamp_min(1.0)
+            elif self.pixel_loss_type == "l1":
                 pixel_loss = F.l1_loss(y_pred, y)
-                self.summaries[TBSummaryTypes.SCALAR]["Loss-L1-Reconstruction"] = pixel_loss.detach()
             else:
                 pixel_loss = F.mse_loss(y_pred, y)
-                self.summaries[TBSummaryTypes.SCALAR]["Loss-MSE-Reconstruction"] = pixel_loss.detach()
+            key = "Loss-L1-Reconstruction" if self.pixel_loss_type == "l1" else "Loss-MSE-Reconstruction"
+            self.summaries[TBSummaryTypes.SCALAR][key] = pixel_loss.detach()
             loss = loss + pixel_loss
 
         for idx, q_loss in enumerate(q_losses):
