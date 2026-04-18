@@ -94,6 +94,9 @@ def train_step(
     step=0,
     force_compute_recon=None,
     patch_loss_func=None,
+    discriminator=None,
+    disc_optimizer=None,
+    disc_scaler=None,
 ):
     """
     Perform a single forward + (optionally) backward pass.
@@ -118,6 +121,9 @@ def train_step(
         tuple: ``(total_loss, contrastive_loss, recon_loss, vq_loss, estimated_content_indices)``
     """
     _diag = {}  # MoCo stale-queue diagnostics (populated below when applicable)
+    _gan_recon = None  # set in VQVAE path; guards discriminator update for VAE path
+    _gan_real = None
+    adv_loss_value = 0.0
 
     if optimizer is not None and accumulation_step == 0:
         # set_to_none=True frees gradient tensors rather than zeroing them (~1× param memory saved)
@@ -195,6 +201,8 @@ def train_step(
 
             _recon_start = getattr(args, "recon_loss_start_step", 0)
             _recon_active = step >= _recon_start or getattr(args, "_resumed_past_recon_start", False)
+            _gan_recon = None
+            _gan_real = None
             if compute_recon and recon is not None and _recon_active:
                 # Safety net: the model now interpolates internally, but guard
                 # against size mismatch in case decode_codes or an older
@@ -212,6 +220,11 @@ def train_step(
                     )
                     * args.scale_recon_loss
                 )
+                # Stash for GAN update before freeing (references keep tensors alive)
+                _use_gan = discriminator is not None and step >= getattr(args, "gan_start_step", 0)
+                if _use_gan:
+                    _gan_recon = recon
+                    _gan_real = images
                 del recon, images
             else:
                 recon_loss = torch.zeros(1, device=device)
@@ -511,6 +524,15 @@ def train_step(
 
             contrastive_loss = total_contrastive_loss
             total_loss = contrastive_loss + recon_loss + vq_loss
+
+            # Generator adversarial loss: fool the discriminator into predicting
+            # the reconstruction as real (hinge: -mean(D(fake))).
+            adv_loss_value = 0.0
+            if _gan_recon is not None and optimizer is not None:
+                g_adv = -discriminator(_gan_recon).mean() * args.scale_adv_loss
+                total_loss = total_loss + g_adv
+                adv_loss_value = g_adv.item()
+
             recon_loss_value = recon_loss.item()
             vq_loss_value = vq_loss.item()
             contrastive_loss_value = contrastive_loss.item()
@@ -630,6 +652,32 @@ def train_step(
 
             if isinstance(vqvae_model, MoCoEncoder):
                 vqvae_model.momentum_update()
+
+        # ------------------------------------------------------------------
+        # Discriminator update (hinge loss; runs after G step so D sees the
+        # updated generator, keeping training dynamics stable).
+        # ------------------------------------------------------------------
+        if _gan_recon is not None and disc_optimizer is not None and accumulation_step == total_accumulation_steps - 1:
+            disc_optimizer.zero_grad(set_to_none=True)
+            _use_disc_amp = disc_scaler is not None
+            with autocast("cuda", enabled=_use_disc_amp):
+                d_real = discriminator(_gan_real)
+                d_fake = discriminator(_gan_recon.detach())
+                # Hinge loss: push real > +1, push fake < -1
+                d_loss = (F.relu(1.0 - d_real) + F.relu(1.0 + d_fake)).mean()
+            if _use_disc_amp:
+                disc_scaler.scale(d_loss).backward()
+                disc_scaler.step(disc_optimizer)
+                disc_scaler.update()
+            else:
+                d_loss.backward()
+                disc_optimizer.step()
+            _diag["GAN/D_loss"] = d_loss.item()
+            _diag["GAN/D_real"] = d_real.mean().item()
+            _diag["GAN/D_fake"] = d_fake.mean().item()
+
+    if adv_loss_value != 0.0:
+        _diag["GAN/G_adv_loss"] = adv_loss_value
 
     return (
         total_loss.item(),
@@ -1230,6 +1278,33 @@ def main(args):
         recon_loss_fn = BaselineLoss().to(device)
 
     # ------------------------------------------------------------------
+    # GAN discriminator (optional, vqvae path only)
+    # ------------------------------------------------------------------
+    discriminator = None
+    disc_optimizer = None
+    disc_scaler = None
+    if getattr(args, "use_gan", False) and args.encoder_type == "vqvae":
+        from models.discriminator import PatchDiscriminator3D
+
+        _disc_base_ch = getattr(args, "disc_base_channels", 32)
+        discriminator = PatchDiscriminator3D(in_channels=1, base_channels=_disc_base_ch).to(device)
+        disc_optimizer = torch.optim.AdamW(
+            discriminator.parameters(),
+            lr=getattr(args, "disc_lr", 4e-4),
+            betas=(0.5, 0.9),
+            weight_decay=0.0,
+        )
+        disc_scaler = GradScaler("cuda") if args.use_amp else None
+        _disc_params = sum(p.numel() for p in discriminator.parameters())
+        logger.info(
+            f"[GAN] PatchDiscriminator3D enabled | base_ch={_disc_base_ch} | "
+            f"params={_disc_params:,} | disc_lr={getattr(args, 'disc_lr', 4e-4):.2e} | "
+            f"adv_weight={args.scale_adv_loss} | starts at step {getattr(args, 'gan_start_step', 0)}"
+        )
+    elif getattr(args, "use_gan", False) and args.encoder_type != "vqvae":
+        logger.warning("[GAN] --use-gan is only supported for --encoder-type vqvae; skipping.")
+
+    # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
     file_name = os.path.join(args.save_dir, "Training.csv")
@@ -1354,6 +1429,9 @@ def main(args):
                             step=step,
                             force_compute_recon=_window_compute_recon,
                             patch_loss_func=patch_loss_func,
+                            discriminator=discriminator,
+                            disc_optimizer=disc_optimizer,
+                            disc_scaler=disc_scaler,
                         )
                         accum_total += total_loss / accum_steps
                         accum_contrastive += contrastive_loss / accum_steps
@@ -1442,10 +1520,16 @@ def main(args):
                         _alive = (_cb.cluster_size > 1.0).sum().item()
                         _cb_parts.append(f"L{_cb_lvl}={_alive:.0f}/{_cb.n_embed}")
                     _cb_str = f" | CB: {', '.join(_cb_parts)}" if _cb_parts else ""
+                    _gan_str = ""
+                    if step_moco_diag.get("GAN/G_adv_loss") is not None:
+                        _gan_str = (
+                            f" | G_adv={step_moco_diag['GAN/G_adv_loss']:.4f}"
+                            f" D={step_moco_diag.get('GAN/D_loss', 0.0):.4f}"
+                        )
                     print(
                         f"Step {step}: Total={accum_total:.4f} | "
                         f"Contrastive={accum_contrastive:.4f} | "
-                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}{_cb_str}",
+                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}{_cb_str}{_gan_str}",
                         flush=True,
                     )
 
@@ -1454,6 +1538,11 @@ def main(args):
                         tb_writer.add_scalar("Loss/Contrastive", accum_contrastive, step)
                         tb_writer.add_scalar("Loss/Recon", accum_recon, step)
                         tb_writer.add_scalar("Loss/VQ", accum_vq, step)
+
+                        # GAN diagnostics
+                        for _gan_key in ("GAN/G_adv_loss", "GAN/D_loss", "GAN/D_real", "GAN/D_fake"):
+                            if _gan_key in step_moco_diag:
+                                tb_writer.add_scalar(_gan_key, step_moco_diag[_gan_key], step)
                         tb_writer.add_scalar("LR", optimizer.param_groups[0]["lr"], step)
 
                         # Per-level contrastive losses

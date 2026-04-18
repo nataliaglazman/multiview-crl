@@ -99,6 +99,39 @@ def parse_args() -> argparse.ArgumentParser:
         help="Scale factor for the reconstruction loss",
     )
     parser.add_argument("--scale-contrastive-loss", type=float, default=1)
+
+    # GAN discriminator (improves reconstruction sharpness)
+    parser.add_argument(
+        "--use-gan",
+        action="store_true",
+        help="Add a 3-D PatchGAN discriminator to sharpen reconstructions.",
+    )
+    parser.add_argument(
+        "--scale-adv-loss",
+        type=float,
+        default=0.1,
+        help="Weight of the generator adversarial loss term (default: 0.1).",
+    )
+    parser.add_argument(
+        "--gan-start-step",
+        type=int,
+        default=0,
+        help="Step at which the GAN loss activates. Setting this to e.g. 5000 "
+        "lets reconstruction stabilise before the discriminator is introduced.",
+    )
+    parser.add_argument(
+        "--disc-lr",
+        type=float,
+        default=4e-4,
+        help="Learning rate for the discriminator optimizer (default: 4e-4).",
+    )
+    parser.add_argument(
+        "--disc-base-channels",
+        type=int,
+        default=32,
+        help="Base channel width of the PatchDiscriminator3D (default: 32).",
+    )
+
     parser.add_argument(
         "--contrastive-loss-type",
         type=str,
