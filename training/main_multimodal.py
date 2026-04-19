@@ -1546,10 +1546,16 @@ def main(args):
                             f" | G_adv={step_moco_diag['GAN/G_adv_loss']:.4f}"
                             f" D={step_moco_diag.get('GAN/D_loss', 0.0):.4f}"
                         )
+                    _style_parts = [
+                        f"L{_li}={step_moco_diag[f'Style/infonce_L{_li}']:.4f}"
+                        for _li in range(args.vqvae_nb_levels)
+                        if f"Style/infonce_L{_li}" in step_moco_diag
+                    ]
+                    _style_str = f" | StyleNCE: {', '.join(_style_parts)}" if _style_parts else ""
                     print(
                         f"Step {step}: Total={accum_total:.4f} | "
                         f"Contrastive={accum_contrastive:.4f} | "
-                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}{_cb_str}{_gan_str}",
+                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}{_cb_str}{_gan_str}{_style_str}",
                         flush=True,
                     )
 
