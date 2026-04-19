@@ -18,7 +18,8 @@ import numpy as np
 import torch
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.model_selection import cross_val_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import Normalizer, StandardScaler
 
 
 def _mask_to_indices(mask):
@@ -152,7 +153,7 @@ def _metrics_for_level(reps_lvl):
     content_all = np.concatenate([reps_lvl["content_v0"], reps_lvl["content_v1"]], axis=0)
     modality_labels = np.array([0] * N + [1] * N)
 
-    content_scaled = StandardScaler().fit_transform(content_all)
+    content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
     try:
         clf = LogisticRegression(max_iter=1000, solver="lbfgs")
         scores = cross_val_score(clf, content_scaled, modality_labels, cv=5, scoring="accuracy")
@@ -164,7 +165,7 @@ def _metrics_for_level(reps_lvl):
 
     # --- 4. Linear probe: subject identity from style (should be chance) ---
     subject_ids = np.arange(N)
-    style_scaled_v0 = StandardScaler().fit_transform(reps_lvl["style_v0"])
+    style_scaled_v0 = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(reps_lvl["style_v0"])
     try:
         ridge = Ridge(alpha=1.0)
         scores = cross_val_score(ridge, style_scaled_v0, subject_ids, cv=5, scoring="r2")
@@ -176,7 +177,7 @@ def _metrics_for_level(reps_lvl):
 
     # --- 5. Linear probe: modality from style (should be high ~1.0) ---
     style_all = np.concatenate([reps_lvl["style_v0"], reps_lvl["style_v1"]], axis=0)
-    style_all_scaled = StandardScaler().fit_transform(style_all)
+    style_all_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(style_all)
     try:
         clf2 = LogisticRegression(max_iter=1000, solver="lbfgs")
         scores2 = cross_val_score(clf2, style_all_scaled, modality_labels, cv=5, scoring="accuracy")

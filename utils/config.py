@@ -99,6 +99,12 @@ def parse_args() -> argparse.ArgumentParser:
         help="Scale factor for the reconstruction loss",
     )
     parser.add_argument("--scale-contrastive-loss", type=float, default=1)
+    parser.add_argument(
+        "--scale-style-contrastive-loss",
+        type=float,
+        default=0.0,
+        help="Scale factor for the within-modality style InfoNCE loss. 0 disables it.",
+    )
 
     # GAN discriminator (improves reconstruction sharpness)
     parser.add_argument(

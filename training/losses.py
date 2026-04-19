@@ -955,6 +955,41 @@ def vicreg_loss(
     return total_loss
 
 
+def style_infonce_loss(hz_v0_style, hz_v1_style, tau=0.1):
+    """Within-modality InfoNCE on style channels.
+
+    Positive pairs: same modality, different subject (random roll within batch).
+    Negative pairs: cross-modality features.
+
+    This encourages style to capture modality-specific contrast rather than
+    collapsing onto the content (subject anatomy) manifold.
+    """
+    B = hz_v0_style.shape[0]
+    if B < 2:
+        return hz_v0_style.sum() * 0.0
+
+    z0 = F.normalize(hz_v0_style, dim=-1)
+    z1 = F.normalize(hz_v1_style, dim=-1)
+
+    shift = torch.randint(1, B, (1,), device=z0.device).item()
+    z0_pos = z0.roll(shift, dims=0)
+    z1_pos = z1.roll(shift, dims=0)
+
+    # T1 query: positive = rolled T1 (same modality, different subject)
+    #           negatives = all T2 (cross-modality)
+    pos_0 = (z0 * z0_pos).sum(-1, keepdim=True) / tau  # (B, 1)
+    neg_0 = (z0 @ z1.T) / tau  # (B, B)
+    logits_0 = torch.cat([pos_0, neg_0], dim=1)  # (B, 1+B)
+
+    # T2 query: positive = rolled T2, negatives = all T1
+    pos_1 = (z1 * z1_pos).sum(-1, keepdim=True) / tau
+    neg_1 = (z1 @ z0.T) / tau
+    logits_1 = torch.cat([pos_1, neg_1], dim=1)
+
+    targets = torch.zeros(B, dtype=torch.long, device=z0.device)
+    return (F.cross_entropy(logits_0, targets) + F.cross_entropy(logits_1, targets)) / 2
+
+
 class BaurLoss(object):
     def __init__(self, lambda_reconstruction=1):
         super().__init__()

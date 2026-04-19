@@ -57,8 +57,8 @@ from training.losses import (
     infonce_loss,
     moco_loss,
     patch_infonce_loss,
+    style_infonce_loss,
     vicreg_loss,
-    JukeboxPerceptualLoss,
 )
 from models.encoders import TextEncoder2D
 from utils.checkpointing import (
@@ -262,6 +262,7 @@ def train_step(
                     content_size = max(1, int(default_content_ratio * n_channels))
 
                 soft_content_mask = None
+                _style_hz_v0 = _style_hz_v1 = None
 
                 if level_idx in fwd_soft_content_masks:
                     mask_or_tuple = fwd_soft_content_masks[level_idx]
@@ -288,6 +289,13 @@ def train_step(
                         # level so later levels don't overwrite it (fix #6).
                         if estimated_content_indices is None:
                             estimated_content_indices = [idx_v0.tolist()]  # view-0 for backward compat
+
+                        if not _is_patch:
+                            _s_v0 = sorted(set(range(n_channels)) - set(idx_v0.tolist()))
+                            _s_v1 = sorted(set(range(n_channels)) - set(idx_v1.tolist()))
+                            if _s_v0 and _s_v1 and len(_s_v0) == len(_s_v1):
+                                _style_hz_v0 = hz_level[0][:, _s_v0]
+                                _style_hz_v1 = hz_level[1][:, _s_v1]
 
                         if use_moco:
                             assert not _is_patch, (
@@ -383,6 +391,12 @@ def train_step(
                         level_content_indices = _level_ci
                         if estimated_content_indices is None:
                             estimated_content_indices = _level_ci
+
+                        if not _is_patch:
+                            _s_idx = sorted(set(range(n_channels)) - set(_level_ci[0]))
+                            if _s_idx:
+                                _style_hz_v0 = hz_level[0][:, _s_idx]
+                                _style_hz_v1 = hz_level[1][:, _s_idx]
 
                         if use_moco:
                             key_pooled = key_outputs[level_idx]
@@ -500,6 +514,12 @@ def train_step(
                             args.subsets,
                             soft_content_mask=soft_content_mask,
                         )
+
+                _style_cl_scale = getattr(args, "scale_style_contrastive_loss", 0.0)
+                if _style_cl_scale > 0.0 and _style_hz_v0 is not None:
+                    _style_loss = style_infonce_loss(_style_hz_v0, _style_hz_v1, tau=args.tau)
+                    total_contrastive_loss = total_contrastive_loss + _style_loss * _style_cl_scale
+                    _diag[f"Style/infonce_L{level_idx}"] = _style_loss.item()
 
                 level_losses.append(level_loss.item())
                 # Collect contrastive diagnostics (top-1 acc, sim distributions)
@@ -1706,6 +1726,8 @@ def main(args):
                                         device,
                                         max_batches=80,
                                     )
+                                    for _cs_k, _cs_v in cs_metrics.items():
+                                        tb_writer.add_scalar(_cs_k, _cs_v, step)
                                     if _use_wandb:
                                         wandb.log(cs_metrics, step=step)
                                 except Exception as e:
@@ -1902,6 +1924,7 @@ def main(args):
                 )
                 for k, v in cs_metrics.items():
                     logger.info(f"  {k}: {v:.4f}")
+                    tb_writer.add_scalar(k, v, step)
                 if _use_wandb:
                     wandb.log(cs_metrics)
                     # For sweeps, make sure it's pushed to summary so the agent easily captures it
