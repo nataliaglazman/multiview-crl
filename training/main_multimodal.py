@@ -290,10 +290,13 @@ def train_step(
                         if estimated_content_indices is None:
                             estimated_content_indices = [idx_v0.tolist()]  # view-0 for backward compat
 
-                        if not _is_patch:
-                            _s_v0 = sorted(set(range(n_channels)) - set(idx_v0.tolist()))
-                            _s_v1 = sorted(set(range(n_channels)) - set(idx_v1.tolist()))
-                            if _s_v0 and _s_v1 and len(_s_v0) == len(_s_v1):
+                        _s_v0 = sorted(set(range(n_channels)) - set(idx_v0.tolist()))
+                        _s_v1 = sorted(set(range(n_channels)) - set(idx_v1.tolist()))
+                        if _s_v0 and _s_v1 and len(_s_v0) == len(_s_v1):
+                            if _is_patch:
+                                _style_hz_v0 = hz_level[0][:, _s_v0, :].mean(-1)
+                                _style_hz_v1 = hz_level[1][:, _s_v1, :].mean(-1)
+                            else:
                                 _style_hz_v0 = hz_level[0][:, _s_v0]
                                 _style_hz_v1 = hz_level[1][:, _s_v1]
 
@@ -392,9 +395,12 @@ def train_step(
                         if estimated_content_indices is None:
                             estimated_content_indices = _level_ci
 
-                        if not _is_patch:
-                            _s_idx = sorted(set(range(n_channels)) - set(_level_ci[0]))
-                            if _s_idx:
+                        _s_idx = sorted(set(range(n_channels)) - set(_level_ci[0]))
+                        if _s_idx:
+                            if _is_patch:
+                                _style_hz_v0 = hz_level[0][:, _s_idx, :].mean(-1)
+                                _style_hz_v1 = hz_level[1][:, _s_idx, :].mean(-1)
+                            else:
                                 _style_hz_v0 = hz_level[0][:, _s_idx]
                                 _style_hz_v1 = hz_level[1][:, _s_idx]
 
