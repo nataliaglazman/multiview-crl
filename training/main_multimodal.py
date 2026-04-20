@@ -1698,29 +1698,11 @@ def main(args):
                         save_vqvae_decoded_images(encoders[0], data, args, step)
 
                     if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
-                        # Check if rolling average loss is a new best
-                        rolling_loss = np.mean(loss_values) if len(loss_values) == loss_values.maxlen else None
-                        new_best = None
-                        if rolling_loss is not None and rolling_loss < best_total_loss:
-                            best_total_loss = rolling_loss
-                            new_best = rolling_loss
-
-                        save_checkpoint(
-                            args,
-                            step,
-                            encoders,
-                            decoders,
-                            optimizer,
-                            total_loss,
-                            contrastive_loss,
-                            recon_loss,
-                            vq_loss,
-                            scheduler=scheduler,
-                            best_loss=new_best,
-                            scaler=scaler,
-                        )
-
-                        # Periodic separation score evaluation
+                        # Periodic separation score evaluation — run BEFORE saving the
+                        # checkpoint so that if the process is killed mid-eval, the
+                        # prior checkpoint is preserved and the eval will be retried
+                        # on resume (instead of being silently skipped because step
+                        # has already advanced past the `step % 2000 == 1` trigger).
                         if step % 2000 == 1 or step == args.train_steps:
                             if getattr(args, "eval_separation_periodic", True) and args.encoder_type == "vqvae":
                                 try:
@@ -1744,6 +1726,28 @@ def main(args):
                                         wandb.log(cs_metrics, step=step)
                                 except Exception as e:
                                     logger.warning(f"  [WARNING] Periodic separation evaluation failed: {e}")
+
+                        # Check if rolling average loss is a new best
+                        rolling_loss = np.mean(loss_values) if len(loss_values) == loss_values.maxlen else None
+                        new_best = None
+                        if rolling_loss is not None and rolling_loss < best_total_loss:
+                            best_total_loss = rolling_loss
+                            new_best = rolling_loss
+
+                        save_checkpoint(
+                            args,
+                            step,
+                            encoders,
+                            decoders,
+                            optimizer,
+                            total_loss,
+                            contrastive_loss,
+                            recon_loss,
+                            vq_loss,
+                            scheduler=scheduler,
+                            best_loss=new_best,
+                            scaler=scaler,
+                        )
 
                     # --- Periodic validation ---
                     if val_every > 0 and val_loader is not None and step % val_every == 0:
