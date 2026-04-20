@@ -721,8 +721,8 @@ A per-level `SplitGroupNorm` (registered in `content_norms`) re-normalises conte
 | `content/modality_probe_acc` (LR on content → predict T1 vs T2) | ≈ 0.5 (chance) |
 | `content/modality_invariance` = 1 − 2·|acc − 0.5| | → 1.0 |
 | `style/modality_probe_acc` (LR on style → predict T1 vs T2) | → 1.0 |
-| `style/subject_probe_r2` (Ridge on style → predict subject index) | ≈ 0 |
-| `style/subject_invariance` = 1 − max(0, r²) | → 1.0 |
+| `style/subject_retrieval_top1` (cosine NN of `style_v0[i]` in `style_v1` is subject `i`) | ≈ 1/N (chance) |
+| `style/subject_invariance` = 1 − (top1 − 1/N) / (1 − 1/N) | → 1.0 |
 | **`separation_score`** = mean(content/modality_invariance, style/subject_invariance) | → 1.0 |
 
 `separation_score` is the default optimisation target for the W&B Bayesian sweep (see Section 8.4).

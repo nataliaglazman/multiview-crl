@@ -3,10 +3,11 @@
 Measures how well content and style are disentangled by:
 1. Content invariance: content representations of the same subject across T1/T2
    should be similar (style should not leak into content).
-2. Style invariance: style representations of different subjects within the same
-   modality should be similar (content should not leak into style).
+2. Style non-identifiability: given ``style_v0[i]``, its nearest neighbour in
+   ``style_v1`` should NOT be subject ``i`` above chance (subject identity
+   should not leak into style).
 3. Linear probe leakage: a linear probe on content should NOT predict modality,
-   and a linear probe on style should NOT predict subject identity.
+   and a linear probe on style SHOULD predict modality (style carries modality).
 
 All metrics are computed *per level* for every level in ``args.content_style_levels``
 (the levels where a content/style mask is applied).  The composite
@@ -16,7 +17,7 @@ reflects content/style quality at the coarse levels (L1, L2) as well as L0.
 
 import numpy as np
 import torch
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import cross_val_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import Normalizer, StandardScaler
@@ -142,7 +143,8 @@ def _metrics_for_level(reps_lvl):
     m["content/cross_view_cosine_std"] = float(np.std(content_sim))
 
     # --- 2. Style invariance within modality ---
-    perm = np.random.permutation(N)
+    rng = np.random.default_rng(0)
+    perm = rng.permutation(N)
     style_intra_sim_v0 = _cosine_sim(reps_lvl["style_v0"], reps_lvl["style_v0"][perm])
     m["style/intra_view_cosine_mean_v0"] = float(np.mean(style_intra_sim_v0))
 
@@ -163,17 +165,26 @@ def _metrics_for_level(reps_lvl):
     m["content/modality_probe_acc"] = content_modality_acc
     m["content/modality_invariance"] = 1.0 - abs(content_modality_acc - 0.5) * 2
 
-    # --- 4. Linear probe: subject identity from style (should be chance) ---
-    subject_ids = np.arange(N)
-    style_scaled_v0 = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(reps_lvl["style_v0"])
-    try:
-        ridge = Ridge(alpha=1.0)
-        scores = cross_val_score(ridge, style_scaled_v0, subject_ids, cv=5, scoring="r2")
-        style_subject_r2 = float(np.mean(scores))
-    except Exception:
-        style_subject_r2 = 0.0
-    m["style/subject_probe_r2"] = style_subject_r2
-    m["style/subject_invariance"] = 1.0 - max(0.0, style_subject_r2)
+    # --- 4. Subject identifiability from style via paired retrieval ---
+    # For each i, rank subjects in view 1 by cosine similarity to style_v0[i].
+    # If style carries subject identity, the true match (j == i) ranks first.
+    # Chance top-1 = 1/N; chance mean-rank = (N-1)/2.
+    sv0 = reps_lvl["style_v0"]
+    sv1 = reps_lvl["style_v1"]
+    sv0_n = sv0 / (np.linalg.norm(sv0, axis=1, keepdims=True) + 1e-8)
+    sv1_n = sv1 / (np.linalg.norm(sv1, axis=1, keepdims=True) + 1e-8)
+    sim_matrix = sv0_n @ sv1_n.T  # (N, N)
+    # Rank of the diagonal entry (true match) within each row, descending.
+    order = np.argsort(-sim_matrix, axis=1)
+    ranks = np.argmax(order == np.arange(N)[:, None], axis=1)
+    top1 = float(np.mean(ranks == 0))
+    mean_rank = float(np.mean(ranks))
+    m["style/subject_retrieval_top1"] = top1
+    m["style/subject_retrieval_mean_rank"] = mean_rank
+    # Normalise top-1 against chance into an invariance score in [0, 1]:
+    # 1.0 when top-1 == chance (no identity leakage), 0.0 when top-1 == 1.
+    chance = 1.0 / max(N, 2)
+    m["style/subject_invariance"] = float(max(0.0, 1.0 - (top1 - chance) / (1.0 - chance)))
 
     # --- 5. Linear probe: modality from style (should be high ~1.0) ---
     style_all = np.concatenate([reps_lvl["style_v0"], reps_lvl["style_v1"]], axis=0)
@@ -218,7 +229,7 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
             metrics[f"{prefix}/content_modality_invariance"] = level_metrics["content/modality_invariance"]
             metrics[f"{prefix}/style_subject_invariance"] = level_metrics["style/subject_invariance"]
             metrics[f"{prefix}/content_modality_probe_acc"] = level_metrics["content/modality_probe_acc"]
-            metrics[f"{prefix}/style_subject_probe_r2"] = level_metrics["style/subject_probe_r2"]
+            metrics[f"{prefix}/style_subject_retrieval_top1"] = level_metrics["style/subject_retrieval_top1"]
             metrics[f"{prefix}/content_cross_view_cosine"] = level_metrics["content/cross_view_cosine_mean"]
             metrics[f"{prefix}/separation_score"] = level_metrics["separation_score"]
 
@@ -234,7 +245,8 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
             "style/cross_view_cosine_mean",
             "content/modality_probe_acc",
             "content/modality_invariance",
-            "style/subject_probe_r2",
+            "style/subject_retrieval_top1",
+            "style/subject_retrieval_mean_rank",
             "style/subject_invariance",
             "style/modality_probe_acc",
         ):
