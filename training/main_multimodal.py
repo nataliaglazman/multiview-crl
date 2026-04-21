@@ -1711,14 +1711,13 @@ def main(args):
                                     logger.info(
                                         f"  [EVALUATION] Running periodic content/style separation metrics (step {step})..."
                                     )
-                                    # Use a smaller max_batches for speed during training (80 batches = 320 samples with batch_size=4)
                                     cs_metrics = evaluate_content_style_separation(
                                         encoders[0],
                                         val_loader
                                         or DataLoader(val_dataset, **{**dataloader_kwargs, "shuffle": False}),
                                         args,
                                         device,
-                                        max_batches=80,
+                                        max_batches=200,
                                     )
                                     for _cs_k, _cs_v in cs_metrics.items():
                                         tb_writer.add_scalar(_cs_k, _cs_v, step)

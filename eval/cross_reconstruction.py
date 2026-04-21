@@ -212,6 +212,8 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
     ``separation_score_min`` is the worst level, useful for filtering runs
     where a coarse level is modality-contaminated while L0 looks fine.
     """
+    torch.manual_seed(0)
+    np.random.seed(0)
     reps = _collect_representations(vqvae_model, dataloader, args, device, max_batches)
     metrics = {}
 
