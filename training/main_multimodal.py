@@ -1389,15 +1389,31 @@ def main(args):
                 f"(skipping --recon-loss-start-step {_recon_start} warmup)."
             )
 
-        # Restore best loss from best checkpoint if resuming
+        # Restore best-model tracking state from best checkpoint if resuming.
+        # For VQ-VAE: best is chosen by separation_score (higher is better).
+        # For other encoders: best is chosen by rolling training loss (lower is better).
         best_total_loss = float("inf")
+        best_separation_score = float("-inf")
         best_ckpt_path = os.path.join(
             args.save_dir, "vqvae_best.pt" if args.encoder_type == "vqvae" else "checkpoint_best.pt"
         )
         if getattr(args, "resume_training", False) and os.path.exists(best_ckpt_path):
             best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
-            best_total_loss = best_ckpt.get("loss", float("inf"))
-            logger.info(f"  Restored best loss: {best_total_loss:.4f} from {best_ckpt_path}")
+            _prev_name = best_ckpt.get("best_metric_name")
+            _prev_value = best_ckpt.get("best_metric_value")
+            if _prev_name == "separation_score" and _prev_value is not None:
+                best_separation_score = float(_prev_value)
+                logger.info(f"  Restored best separation_score: {best_separation_score:.4f} " f"from {best_ckpt_path}")
+            elif _prev_name == "rolling_loss" and _prev_value is not None:
+                best_total_loss = float(_prev_value)
+                logger.info(f"  Restored best rolling_loss: {best_total_loss:.4f} from {best_ckpt_path}")
+            else:
+                # Legacy checkpoint without best_metric_* fields — fall back to stored total loss.
+                best_total_loss = best_ckpt.get("loss", float("inf"))
+                logger.info(
+                    f"  Restored legacy best loss: {best_total_loss:.4f} from {best_ckpt_path} "
+                    f"(will be replaced once a separation score is computed)"
+                )
             del best_ckpt
 
         # Early stopping state
@@ -1703,6 +1719,7 @@ def main(args):
                         # prior checkpoint is preserved and the eval will be retried
                         # on resume (instead of being silently skipped because step
                         # has already advanced past the `step % 2000 == 1` trigger).
+                        separation_score = None
                         if step % 2000 == 1 or step == args.train_steps:
                             if getattr(args, "eval_separation_periodic", True) and args.encoder_type == "vqvae":
                                 try:
@@ -1723,15 +1740,30 @@ def main(args):
                                         tb_writer.add_scalar(_cs_k, _cs_v, step)
                                     if _use_wandb:
                                         wandb.log(cs_metrics, step=step)
+                                    separation_score = cs_metrics.get("separation_score")
                                 except Exception as e:
                                     logger.warning(f"  [WARNING] Periodic separation evaluation failed: {e}")
 
-                        # Check if rolling average loss is a new best
+                        # Best-checkpoint selection.
+                        # VQ-VAE: pick the checkpoint with the highest separation_score
+                        # (content/style disentanglement), which is what the training
+                        # objective ultimately targets. Only updated on steps where the
+                        # separation eval ran (every 2000 steps).
+                        # Other encoders: fall back to rolling training loss.
                         rolling_loss = np.mean(loss_values) if len(loss_values) == loss_values.maxlen else None
                         new_best = None
-                        if rolling_loss is not None and rolling_loss < best_total_loss:
-                            best_total_loss = rolling_loss
-                            new_best = rolling_loss
+                        best_metric_name = "total_loss"
+                        if args.encoder_type == "vqvae":
+                            if separation_score is not None and separation_score > best_separation_score:
+                                best_separation_score = separation_score
+                                new_best = separation_score
+                                best_metric_name = "separation_score"
+                                logger.info(f"  [BEST] New best separation_score={separation_score:.4f} at step {step}")
+                        else:
+                            if rolling_loss is not None and rolling_loss < best_total_loss:
+                                best_total_loss = rolling_loss
+                                new_best = rolling_loss
+                                best_metric_name = "rolling_loss"
 
                         save_checkpoint(
                             args,
@@ -1745,6 +1777,7 @@ def main(args):
                             vq_loss,
                             scheduler=scheduler,
                             best_loss=new_best,
+                            best_metric_name=best_metric_name,
                             scaler=scaler,
                         )
 

@@ -25,6 +25,7 @@ def save_checkpoint(
     vq_loss,
     scheduler=None,
     best_loss=None,
+    best_metric_name="total_loss",
     scaler=None,
 ) -> None:
     """
@@ -99,8 +100,10 @@ def save_checkpoint(
     if best_loss is not None:
         suffix = "vqvae_best.pt" if args.encoder_type == "vqvae" else "checkpoint_best.pt"
         best_path = os.path.join(args.save_dir, suffix)
+        checkpoint["best_metric_name"] = best_metric_name
+        checkpoint["best_metric_value"] = float(best_loss)
         torch.save(checkpoint, best_path)
-        logger.info(f"[CHECKPOINT] Step {step}: New best model (loss={best_loss:.4f}) → {best_path}")
+        logger.info(f"[CHECKPOINT] Step {step}: New best model " f"({best_metric_name}={best_loss:.4f}) → {best_path}")
 
     if args.save_all_checkpoints:
         m_idx = len(args.modalities) - 1
