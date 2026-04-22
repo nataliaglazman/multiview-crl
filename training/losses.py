@@ -956,13 +956,14 @@ def vicreg_loss(
 
 
 def style_infonce_loss(hz_v0_style, hz_v1_style, tau=0.1):
-    """Within-modality InfoNCE on style channels.
+    """Within-modality supervised-contrastive loss on style channels.
 
-    Positive pairs: same modality, different subject (random roll within batch).
-    Negative pairs: cross-modality features.
+    Positives: all same-modality, different-subject samples in the batch.
+    Negatives: all cross-modality samples.
 
-    This encourages style to capture modality-specific contrast rather than
-    collapsing onto the content (subject anatomy) manifold.
+    Assumes no subject appears twice in a batch, so every other batch index
+    counts as a different subject. This more aggressively collapses style
+    onto the modality manifold than a single-positive InfoNCE would.
     """
     B = hz_v0_style.shape[0]
     if B < 2:
@@ -971,23 +972,32 @@ def style_infonce_loss(hz_v0_style, hz_v1_style, tau=0.1):
     z0 = F.normalize(hz_v0_style, dim=-1)
     z1 = F.normalize(hz_v1_style, dim=-1)
 
-    shift = torch.randint(1, B, (1,), device=z0.device).item()
-    z0_pos = z0.roll(shift, dims=0)
-    z1_pos = z1.roll(shift, dims=0)
+    eye = torch.eye(B, dtype=torch.bool, device=z0.device)
+    neg_inf = torch.finfo(z0.dtype).min
 
-    # T1 query: positive = rolled T1 (same modality, different subject)
-    #           negatives = all T2 (cross-modality)
-    pos_0 = (z0 * z0_pos).sum(-1, keepdim=True) / tau  # (B, 1)
-    neg_0 = (z0 @ z1.T) / tau  # (B, B)
-    logits_0 = torch.cat([pos_0, neg_0], dim=1)  # (B, 1+B)
+    # Pairwise similarities, scaled by temperature
+    s00 = (z0 @ z0.T) / tau
+    s01 = (z0 @ z1.T) / tau
+    s11 = (z1 @ z1.T) / tau
+    s10 = s01.T
 
-    # T2 query: positive = rolled T2, negatives = all T1
-    pos_1 = (z1 * z1_pos).sum(-1, keepdim=True) / tau
-    neg_1 = (z1 @ z0.T) / tau
-    logits_1 = torch.cat([pos_1, neg_1], dim=1)
+    # Positive mask: same-modality, not-self (first B cols); cross-modality cols are negatives only
+    pos_mask = torch.cat([(~eye).float(), torch.zeros(B, B, device=z0.device)], dim=1)
+    num_pos = pos_mask.sum(dim=1).clamp(min=1.0)
 
-    targets = torch.zeros(B, dtype=torch.long, device=z0.device)
-    return (F.cross_entropy(logits_0, targets) + F.cross_entropy(logits_1, targets)) / 2
+    # T1 anchor: denom includes all other T1 + all T2; self masked out of denom
+    logits_0 = torch.cat([s00.masked_fill(eye, neg_inf), s01], dim=1)
+    log_prob_0 = logits_0 - torch.logsumexp(logits_0, dim=1, keepdim=True)
+    log_prob_0 = torch.where(pos_mask.bool(), log_prob_0, torch.zeros_like(log_prob_0))
+    loss_0 = -(log_prob_0.sum(dim=1) / num_pos).mean()
+
+    # T2 anchor: symmetric
+    logits_1 = torch.cat([s11.masked_fill(eye, neg_inf), s10], dim=1)
+    log_prob_1 = logits_1 - torch.logsumexp(logits_1, dim=1, keepdim=True)
+    log_prob_1 = torch.where(pos_mask.bool(), log_prob_1, torch.zeros_like(log_prob_1))
+    loss_1 = -(log_prob_1.sum(dim=1) / num_pos).mean()
+
+    return (loss_0 + loss_1) / 2
 
 
 class BaurLoss(object):
