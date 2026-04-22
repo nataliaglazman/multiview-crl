@@ -973,7 +973,7 @@ def style_infonce_loss(hz_v0_style, hz_v1_style, tau=0.1):
     z1 = F.normalize(hz_v1_style, dim=-1)
 
     eye = torch.eye(B, dtype=torch.bool, device=z0.device)
-    neg_inf = torch.finfo(z0.dtype).min
+    neg_inf = float("-inf")
 
     # Pairwise similarities, scaled by temperature
     s00 = (z0 @ z0.T) / tau
