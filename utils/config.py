@@ -328,6 +328,17 @@ def parse_args() -> argparse.ArgumentParser:
         "Only used when --patch-contrastive is set. Default: 4 5 4 (~80 patches).",
     )
     parser.add_argument(
+        "--patch-grid-per-level",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Per-level spatial grid for patch-level contrastive loss. Flat list of "
+        "3*nb_levels ints (D0 H0 W0 D1 H1 W1 ...). When set, overrides --patch-grid. "
+        "Useful when finer levels need smaller patches than coarser ones to avoid "
+        "trivially-similar neighbouring voxels. E.g. '--patch-grid-per-level 2 3 2 "
+        "3 4 3 4 5 4' for a 3-level model (coarsest → finest).",
+    )
+    parser.add_argument(
         "--contrastive-level-weights",
         type=float,
         nargs="+",
@@ -344,7 +355,12 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compile-model",
         action="store_true",
-        help="Use torch.compile for kernel fusion (requires PyTorch 2.0+)",
+        help="Use torch.compile (mode=max-autotune) for kernel fusion (requires PyTorch 2.0+)",
+    )
+    parser.add_argument(
+        "--channels-last",
+        action="store_true",
+        help="Use channels_last_3d memory format for the VQ-VAE (faster 3D convs on A100+)",
     )
     parser.add_argument(
         "--cache-dataset",
@@ -644,6 +660,20 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             "Consider adding --inject-style-to-decoder to give style a reconstruction "
             "gradient path through the decoder."
         )
+
+    # --patch-grid-per-level: flat list → list of (D, H, W) tuples, one per level.
+    _pgpl = getattr(args, "patch_grid_per_level", None)
+    if _pgpl is not None:
+        if not getattr(args, "patch_contrastive", False):
+            logger.warning("--patch-grid-per-level is set but --patch-contrastive is not; it will be ignored.")
+            args.patch_grid_per_level = None
+        elif len(_pgpl) != 3 * _nb_levels:
+            raise ValueError(
+                f"--patch-grid-per-level expects 3*nb_levels={3 * _nb_levels} ints "
+                f"(nb_levels={_nb_levels}), got {len(_pgpl)}."
+            )
+        else:
+            args.patch_grid_per_level = [tuple(_pgpl[3 * i : 3 * i + 3]) for i in range(_nb_levels)]
 
     # --mask-mode learned_split is incompatible with --inject-style-to-decoder
     # because the number of style channels varies per forward pass.

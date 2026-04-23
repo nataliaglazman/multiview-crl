@@ -1,0 +1,62 @@
+# Shared fixed parameters for staged sweeps.
+# NOT a runnable sweep on its own — copy the `parameters:` block below into each
+# stage config and add the axis you want to vary. wandb sweeps don't support
+# YAML includes, so duplication is unavoidable.
+#
+# Rationale for which params are "fixed" here vs "swept":
+#   - Fixed: infra (paths, workers, AMP), architecture choices locked before
+#     contrastive tuning (encoder_type, nb_levels, scaling_rates, total_dim,
+#     spatial_size), and dataset.
+#   - Varied across stages: loss scales, content_ratios, patch grid,
+#     contrastive_level_weights, codebook entries.
+#   - Pinned by prior: tau=0.15 (InfoNCE literature consensus 0.1-0.2).
+#     Run a τ sensitivity sweep once on the final config as a thesis
+#     ablation — not during model selection.
+
+parameters:
+  # --- Infra / dataset (never vary) ---
+  batch_size:                   { value: 3 }
+  gradient_accumulation_steps:  { value: 4 }
+  train_steps:                  { value: 20000 }
+  dataroot:                     { value: "/nfs/home/nglazman/data" }
+  dataset_name:                 { value: "ADNI_stripped_masks" }
+  masks_dir:                    { value: "/nfs/home/nglazman/data/ADNI_stripped_masks" }
+  labels_path:                  { value: "/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv" }
+  cache_dir:                    { value: "/nfs/home/nglazman/cache/multiview" }
+  cache_dataset:                { value: true }
+  workers:                      { value: 8 }
+  use_amp:                      { value: true }
+  use_wandb:                    { value: true }
+  resume_training:              { value: true }
+  gradient_checkpointing:       { value: true }
+  image_spacing:                { value: 1.0 }
+  spatial_size:                 { value: [150, 180, 150] }
+
+  # --- Architecture (locked before loss tuning) ---
+  encoder_type:                 { value: "vqvae" }
+  vqvae_nb_levels:              { value: 3 }
+  vqvae_scaling_rates:          { value: [2, 2, 2] }
+  vqvae_hidden_channels:        { value: 48 }   # pick winner from Stage 0 or existing sweep
+  content_dim:                  { value: 128 }
+  total_dim:                    { value: 512 }
+  separate_encoders:            { value: true }
+  content_style_levels:         { value: [0, 1, 2] }
+  pass_full_to_next_level:      { value: true }
+  mask_mode:                    { value: ["fixed"] }
+  skip_recon_ratio:             { value: 0.5 }
+  recon_loss_start_step:        { value: 2000 }
+
+  # --- Quantization defaults ---
+  vq_commitment_weight:         { value: 0.25 }
+  cb_ema_decay:                 { value: 0.99 }
+  vqvae_nb_entries:             { value: [256, 128, 64] }
+
+  # --- Contrastive defaults ---
+  patch_contrastive:            { value: true }
+  cross_view_negs_only:         { value: true }
+  lr:                           { value: 0.001 }
+
+command:
+  - ${env}
+  - python
+  - ${program}

@@ -139,6 +139,8 @@ def train_step(
         samples = data["image"]
         n_views = len(samples)
         images = torch.concat(samples, 0).to(device, non_blocking=True)  # (n_views * B, 1, D, H, W)
+        if getattr(args, "channels_last", False):
+            images = images.to(memory_format=torch.channels_last_3d)
         input_shape = images.shape[2:]
 
         # Brain masks are plumbed alongside the images so the reconstruction
@@ -161,7 +163,12 @@ def train_step(
                 skip_recon_ratio = getattr(args, "skip_recon_ratio", 0.0)
                 compute_recon = (skip_recon_ratio == 0.0) or (torch.rand(1).item() > skip_recon_ratio)
 
-            _patch_grid = tuple(args.patch_grid) if getattr(args, "patch_contrastive", False) else None
+            if getattr(args, "patch_contrastive", False):
+                _pgpl = getattr(args, "patch_grid_per_level", None)
+                # Per-level override (list of tuples) when provided, else single shared tuple.
+                _patch_grid = _pgpl if _pgpl is not None else tuple(args.patch_grid)
+            else:
+                _patch_grid = None
 
             (
                 recon,
@@ -1101,9 +1108,12 @@ def main(args):
             pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
             skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
         )
+        if getattr(args, "channels_last", False):
+            vqvae_model = vqvae_model.to(memory_format=torch.channels_last_3d)
+            logger.info("  Memory format: channels_last_3d")
         if getattr(args, "compile_model", False):
-            logger.info("  Compiling VQ-VAE-2 with torch.compile (this may take a minute)...")
-            vqvae_model = torch.compile(vqvae_model)
+            logger.info("  Compiling VQ-VAE-2 with torch.compile mode=max-autotune (this may take a minute)...")
+            vqvae_model = torch.compile(vqvae_model, mode="max-autotune")
         vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
         vqvae_model.to(device)
         logger.info(f"  Parameters: {sum(p.numel() for p in vqvae_model.parameters()):,}")

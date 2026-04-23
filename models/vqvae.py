@@ -864,9 +864,11 @@ class VQVAE(HelperModule):
             view_idx: When separate_encoders is active and n_views=1, selects which
                       encoder stack to use (0 → self.encoders, 1 → self.encoders_v1).
                       Defaults to 0 if not specified.  Ignored when n_views=2.
-            patch_grid: Optional tuple (D, H, W) for patch-level pooling. When set
-                        and pool_only=True, features are pooled to this spatial grid
-                        instead of globally, returning (B, C, D*H*W) per level.
+            patch_grid: Optional patch pooling spec. When set and pool_only=True,
+                        features are pooled to a spatial grid instead of globally,
+                        returning (B, hidden_channels, D*H*W) per level. Accepts:
+                          - tuple/list of 3 ints (D, H, W): same grid at every level.
+                          - list of 3-int tuples/lists, one per level: per-level grids.
 
         Returns:
             final_output: Reconstruction (or None if return_recon=False)
@@ -882,6 +884,15 @@ class VQVAE(HelperModule):
         """
         encoder_outputs = []  # Spatial (5D) feature maps, consumed by codebook/decoder loop
         encoder_pools = []  # Pooled (B, C) vectors, returned for contrastive loss
+
+        # Resolve a per-level grid: accept shared tuple or list of per-level tuples.
+        def _grid_for(level_idx):
+            if patch_grid is None:
+                return None
+            if len(patch_grid) > 0 and isinstance(patch_grid[0], (list, tuple)):
+                return tuple(patch_grid[level_idx])
+            return tuple(patch_grid)
+
         code_outputs = []
         code_output_levels = []  # Parallel to code_outputs: source level of each entry
         decoder_outputs = []
@@ -1080,10 +1091,11 @@ class VQVAE(HelperModule):
                 # Pool BEFORE masking so contrastive loss sees full channels
                 # and can apply its own differentiable soft mask.
                 if pool_only:
-                    if patch_grid is not None:
+                    _grid = _grid_for(i)
+                    if _grid is not None:
                         # Patch-level pooling: (B, C, D, H, W) → (B, C, Pd*Ph*Pw)
-                        pool_v0 = F.adaptive_avg_pool3d(enc_in_v0_pool, patch_grid).flatten(2)
-                        pool_v1 = F.adaptive_avg_pool3d(enc_in_v1_pool, patch_grid).flatten(2)
+                        pool_v0 = F.adaptive_avg_pool3d(enc_in_v0_pool, _grid).flatten(2)
+                        pool_v1 = F.adaptive_avg_pool3d(enc_in_v1_pool, _grid).flatten(2)
                     else:
                         pool_v0 = enc_in_v0_pool.mean(dim=[2, 3, 4])
                         pool_v1 = enc_in_v1_pool.mean(dim=[2, 3, 4])
@@ -1155,8 +1167,9 @@ class VQVAE(HelperModule):
                 encoder_outputs.append(enc_input)
                 # Pool BEFORE masking (same reason as dual-view path).
                 if pool_only:
-                    if patch_grid is not None:
-                        encoder_pools.append(F.adaptive_avg_pool3d(enc_input_pool, patch_grid).flatten(2))
+                    _grid = _grid_for(i)
+                    if _grid is not None:
+                        encoder_pools.append(F.adaptive_avg_pool3d(enc_input_pool, _grid).flatten(2))
                     else:
                         encoder_pools.append(enc_input_pool.mean(dim=[2, 3, 4]))
 
@@ -1552,9 +1565,10 @@ class MoCoEncoder(nn.Module):
         Encode ``x`` with the momentum encoder stack and return per-level
         pooled feature vectors.
 
-        When ``patch_grid`` is set (a tuple of 3 ints), uses adaptive average
-        pooling to that grid instead of global average pooling, returning
-        ``(B, hidden_channels, n_patches)`` per level.
+        When ``patch_grid`` is set, uses adaptive average pooling to that grid
+        instead of global average pooling, returning ``(B, hidden_channels,
+        n_patches)`` per level. Accepts a tuple of 3 ints (shared across levels)
+        or a list of per-level 3-int tuples.
 
         When ``separate_encoders`` is active and ``n_views == 2``, the first
         half of the batch is routed through the view-0 momentum encoders and
@@ -1562,26 +1576,34 @@ class MoCoEncoder(nn.Module):
         re-concatenated — mirroring the online encoder split.
         """
 
-        def _pool(t):
-            if patch_grid is not None:
-                return F.adaptive_avg_pool3d(t, patch_grid).flatten(2)
+        def _grid_for(level_idx):
+            if patch_grid is None:
+                return None
+            if len(patch_grid) > 0 and isinstance(patch_grid[0], (list, tuple)):
+                return tuple(patch_grid[level_idx])
+            return tuple(patch_grid)
+
+        def _pool(t, level_idx):
+            _grid = _grid_for(level_idx)
+            if _grid is not None:
+                return F.adaptive_avg_pool3d(t, _grid).flatten(2)
             return t.mean(dim=[2, 3, 4])
 
         if self.momentum_encoders_v1 is not None and n_views == 2:
             B = x.shape[0] // 2
             key_pools = []
             enc_v0, enc_v1 = x[:B], x[B:]
-            for mom_enc_v0, mom_enc_v1 in zip(self.momentum_encoders, self.momentum_encoders_v1):
+            for lvl, (mom_enc_v0, mom_enc_v1) in enumerate(zip(self.momentum_encoders, self.momentum_encoders_v1)):
                 enc_v0 = mom_enc_v0(enc_v0)
                 enc_v1 = mom_enc_v1(enc_v1)
-                key_pools.append(torch.cat([_pool(enc_v0), _pool(enc_v1)], dim=0))
+                key_pools.append(torch.cat([_pool(enc_v0, lvl), _pool(enc_v1, lvl)], dim=0))
             return key_pools
         else:
             key_pools = []
             enc_input = x
-            for mom_enc in self.momentum_encoders:
+            for lvl, mom_enc in enumerate(self.momentum_encoders):
                 enc_input = mom_enc(enc_input)
-                key_pools.append(_pool(enc_input))
+                key_pools.append(_pool(enc_input, lvl))
             return key_pools
 
     # ------------------------------------------------------------------

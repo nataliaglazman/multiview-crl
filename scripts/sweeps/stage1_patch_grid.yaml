@@ -1,0 +1,75 @@
+# Stage 1B — Architecture sensitivity: patch_grid (# contrastive patches / image).
+# 4 configs × 1 seed = 4 runs.
+#
+# Why this matters: patch count = effective negatives per image. With batch_size=3
+# and cross_view_negs_only=true, you have (batch_size-1) * n_patches negatives per
+# anchor. Going 4×5×4=80 → 6×7×6=252 triples your negative pool. InfoNCE quality
+# often improves more from this than from tau tuning.
+#
+# Shortened to 8000 steps. Launch in parallel with the other Stage 1 sweeps.
+#   wandb sweep scripts/sweeps/stage1_patch_grid.yaml
+#   wandb agent <sweep_id>   # allocate ~2 of your 6 GPUs to this sweep
+
+program: scripts/sweep_train.py
+method: grid
+metric:
+  name: separation_score
+  goal: maximize
+
+parameters:
+  # --- Axis under test ---
+  patch_grid:
+    values:
+      - [2, 3, 2]   # ~12 patches, very coarse
+      - [3, 4, 3]   # ~36
+      - [4, 5, 4]   # ~80  (current default)
+      - [6, 7, 6]   # ~252 (memory check this first)
+
+  # --- Other knobs pinned ---
+  tau:                          { value: 0.15 }
+  scale_contrastive_loss:       { value: 1.0 }
+  scale_recon_loss:             { value: 1.0 }
+  content_ratios:               { value: [0.5, 0.5, 0.5] }  # or winner from 1A
+  contrastive_level_weights:    { value: [1.0, 1.0, 1.0] }
+
+  # --- Fixed ---
+  batch_size:                   { value: 3 }
+  gradient_accumulation_steps:  { value: 4 }
+  train_steps:                  { value: 8000 }
+  dataroot:                     { value: "/nfs/home/nglazman/data" }
+  dataset_name:                 { value: "ADNI_stripped_masks" }
+  masks_dir:                    { value: "/nfs/home/nglazman/data/ADNI_stripped_masks" }
+  labels_path:                  { value: "/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv" }
+  cache_dir:                    { value: "/nfs/home/nglazman/cache/multiview" }
+  cache_dataset:                { value: true }
+  workers:                      { value: 8 }
+  use_amp:                      { value: true }
+  use_wandb:                    { value: true }
+  resume_training:              { value: true }
+  gradient_checkpointing:       { value: true }
+  image_spacing:                { value: 1.0 }
+  spatial_size:                 { value: [150, 180, 150] }
+  encoder_type:                 { value: "vqvae" }
+  vqvae_nb_levels:              { value: 3 }
+  vqvae_scaling_rates:          { value: [2, 2, 2] }
+  vqvae_hidden_channels:        { value: 48 }
+  content_dim:                  { value: 128 }
+  total_dim:                    { value: 512 }
+  separate_encoders:            { value: true }
+  content_style_levels:         { value: [0, 1, 2] }
+  pass_full_to_next_level:      { value: true }
+  mask_mode:                    { value: ["fixed"] }
+  skip_recon_ratio:             { value: 0.5 }
+  recon_loss_start_step:        { value: 1000 }
+  vq_commitment_weight:         { value: 0.25 }
+  cb_ema_decay:                 { value: 0.99 }
+  vqvae_nb_entries:             { value: [256, 128, 64] }
+  patch_contrastive:            { value: true }
+  cross_view_negs_only:         { value: true }
+  lr:                           { value: 0.001 }
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}

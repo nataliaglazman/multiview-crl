@@ -1,0 +1,86 @@
+# Stage 2 — Focused Bayes search on the 2-3 axes that Stage 1 showed were
+# actually sensitive. Template only — EDIT BEFORE RUNNING:
+#   1. Comment out axes that were flat in Stage 1 and set them to their winner.
+#   2. Plug in winners from Stage 1 (content_ratios, patch_grid, etc.).
+#   3. Narrow each distribution's min/max to the regime where Stage 1 looked best.
+#
+# Budget: ~30-40 runs. Bayes converges fast when the axis count is low.
+#
+# Usage:
+#   wandb sweep scripts/sweeps/stage2_focused_bayes.yaml
+#   ./scripts/launch_sweep.sh <sweep_id> --num-agents 10
+
+program: scripts/sweep_train.py
+method: bayes
+metric:
+  name: separation_score
+  goal: maximize
+
+# Hyperband early termination. separation_score logs every 2000 training steps
+# (see main_multimodal.py:1728), so min_iter is in units of metric logs:
+#   min_iter=2  -> first kill decision at step 4000 (2nd log)
+#   eta=3       -> at each rung, keep top 1/3 of runs, kill the rest
+# With train_steps=20000 (10 logs/run), expect ~40-60% of runs to die early.
+early_terminate:
+  type: hyperband
+  min_iter: 2
+  eta: 3
+
+parameters:
+  # --- Typical survivors (edit after Stage 1) ---
+  tau:
+    distribution: log_uniform_values
+    min: 0.08
+    max: 0.25
+  scale_recon_loss:
+    distribution: log_uniform_values
+    min: 0.3
+    max: 3.0
+
+  # --- Pin to Stage 1 winners ---
+  scale_contrastive_loss:       { value: 1.0 }
+  content_ratios:               { value: [0.5, 0.5, 0.5] }   # <- replace
+  patch_grid:                   { value: [4, 5, 4] }         # <- replace
+  contrastive_level_weights:    { value: [1.0, 1.0, 1.0] }
+
+  # --- Fixed ---
+  batch_size:                   { value: 3 }
+  gradient_accumulation_steps:  { value: 4 }
+  train_steps:                  { value: 20000 }
+  dataroot:                     { value: "/nfs/home/nglazman/data" }
+  dataset_name:                 { value: "ADNI_stripped_masks" }
+  masks_dir:                    { value: "/nfs/home/nglazman/data/ADNI_stripped_masks" }
+  labels_path:                  { value: "/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv" }
+  cache_dir:                    { value: "/nfs/home/nglazman/cache/multiview" }
+  cache_dataset:                { value: true }
+  workers:                      { value: 8 }
+  use_amp:                      { value: true }
+  use_wandb:                    { value: true }
+  resume_training:              { value: true }
+  gradient_checkpointing:       { value: true }
+  image_spacing:                { value: 1.0 }
+  spatial_size:                 { value: [150, 180, 150] }
+  encoder_type:                 { value: "vqvae" }
+  vqvae_nb_levels:              { value: 3 }
+  vqvae_scaling_rates:          { value: [2, 2, 2] }
+  vqvae_hidden_channels:        { value: 48 }
+  content_dim:                  { value: 128 }
+  total_dim:                    { value: 512 }
+  separate_encoders:            { value: true }
+  content_style_levels:         { value: [0, 1, 2] }
+  pass_full_to_next_level:      { value: true }
+  mask_mode:                    { value: ["fixed"] }
+  skip_recon_ratio:             { value: 0.5 }
+  recon_loss_start_step:        { value: 2000 }
+  vq_commitment_weight:         { value: 0.25 }
+  cb_ema_decay:                 { value: 0.99 }
+  vqvae_nb_entries:             { value: [256, 128, 64] }
+  patch_contrastive:            { value: true }
+  cross_view_negs_only:         { value: true }
+  lr:                           { value: 0.001 }
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}
