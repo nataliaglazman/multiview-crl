@@ -1745,9 +1745,19 @@ class MyCustomDataset(MultiviewDataset):
         mask_t1 = data_dict["mask_t1"]
         mask_t2 = data_dict["mask_t2"]
 
+        lbl = data_dict.get("label", -1)
+        if hasattr(lbl, "item"):
+            lbl = int(lbl.item())
+        else:
+            try:
+                lbl = int(lbl)
+            except (TypeError, ValueError):
+                lbl = -1
+
         return {
             "image": [img_t1, img_t2],
             "mask": [mask_t1, mask_t2],
             "z_image": [{}, {}],
             "index": idx,
+            "label": lbl,
         }

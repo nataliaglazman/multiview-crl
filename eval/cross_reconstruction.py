@@ -61,6 +61,7 @@ def _collect_representations(vqvae_model, dataloader, args, device, max_batches=
 
         # Accumulate per-level lists
         per_level = {lvl: {"c_v0": [], "c_v1": [], "s_v0": [], "s_v1": []} for lvl in levels}
+        labels_buf = []
 
         for batch_idx, data in enumerate(dataloader):
             if batch_idx >= max_batches:
@@ -71,6 +72,12 @@ def _collect_representations(vqvae_model, dataloader, args, device, max_batches=
                 continue
             images = torch.cat(samples, 0).to(device, non_blocking=True)
             B = samples[0].shape[0]
+            if "label" in data:
+                lbl = data["label"]
+                if torch.is_tensor(lbl):
+                    labels_buf.append(lbl.detach().cpu().numpy())
+                else:
+                    labels_buf.append(np.asarray(lbl))
 
             (
                 _recon,
@@ -107,15 +114,22 @@ def _collect_representations(vqvae_model, dataloader, args, device, max_batches=
                 per_level[lvl]["s_v1"].append(hz_v1[:, s_idx_v1].cpu().numpy())
 
         out = {}
+        labels_arr = np.concatenate(labels_buf, axis=0) if labels_buf else None
         for lvl, bufs in per_level.items():
             if not bufs["c_v0"]:
                 continue
-            out[lvl] = {
+            per_lvl = {
                 "content_v0": np.concatenate(bufs["c_v0"], axis=0),
                 "content_v1": np.concatenate(bufs["c_v1"], axis=0),
                 "style_v0": np.concatenate(bufs["s_v0"], axis=0),
                 "style_v1": np.concatenate(bufs["s_v1"], axis=0),
             }
+            if labels_arr is not None:
+                # Labels are per-subject; align to the encoded N (labels may be
+                # longer if more batches were iterated than stored — slice down).
+                n = per_lvl["content_v0"].shape[0]
+                per_lvl["labels"] = labels_arr[:n]
+            out[lvl] = per_lvl
         return out
     finally:
         vqvae_model.train(was_training)
@@ -199,6 +213,27 @@ def _metrics_for_level(reps_lvl):
 
     # Per-level composite (same formula as the old global separation_score)
     m["separation_score"] = (m["content/modality_invariance"] + m["style/subject_invariance"]) / 2.0
+
+    # --- 6. Anatomy-probe floor: content should be predictive of diagnosis.
+    # High content/modality_invariance is only meaningful if content still
+    # carries anatomical signal. diagnosis_info = 0 at chance, 1 at perfect.
+    labels = reps_lvl.get("labels")
+    if labels is not None and len(np.unique(labels[labels >= 0])) >= 2:
+        mask_valid = labels >= 0
+        content_all = np.concatenate([reps_lvl["content_v0"][mask_valid], reps_lvl["content_v1"][mask_valid]], axis=0)
+        y_all = np.concatenate([labels[mask_valid], labels[mask_valid]], axis=0)
+        counts = np.bincount(y_all)
+        chance = float(counts.max()) / float(len(y_all))
+        try:
+            content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
+            clf_d = LogisticRegression(max_iter=1000, solver="lbfgs")
+            scores_d = cross_val_score(clf_d, content_scaled, y_all, cv=5, scoring="accuracy")
+            diag_acc = float(np.mean(scores_d))
+        except Exception:
+            diag_acc = chance
+        m["content/diagnosis_probe_acc"] = diag_acc
+        m["content/diagnosis_probe_chance"] = chance
+        m["content/diagnosis_info"] = float(max(0.0, (diag_acc - chance) / max(1e-6, 1.0 - chance)))
     return m
 
 
@@ -234,6 +269,9 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
             metrics[f"{prefix}/style_subject_retrieval_top1"] = level_metrics["style/subject_retrieval_top1"]
             metrics[f"{prefix}/content_cross_view_cosine"] = level_metrics["content/cross_view_cosine_mean"]
             metrics[f"{prefix}/separation_score"] = level_metrics["separation_score"]
+            if "content/diagnosis_info" in level_metrics:
+                metrics[f"{prefix}/content_diagnosis_info"] = level_metrics["content/diagnosis_info"]
+                metrics[f"{prefix}/content_diagnosis_probe_acc"] = level_metrics["content/diagnosis_probe_acc"]
 
     # Backward-compatible unsuffixed keys mirror the finest available level
     # (usually L0), so existing dashboards that track e.g.
@@ -251,6 +289,9 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
             "style/subject_retrieval_mean_rank",
             "style/subject_invariance",
             "style/modality_probe_acc",
+            "content/diagnosis_probe_acc",
+            "content/diagnosis_probe_chance",
+            "content/diagnosis_info",
         ):
             suffixed = f"{k}_L{finest}"
             if suffixed in metrics:
@@ -266,5 +307,21 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
         metrics["separation_score"] = 0.0
         metrics["separation_score_min"] = 0.0
         metrics["separation_score_max"] = 0.0
+
+    # Floor-gated separation: penalise runs whose content carries no diagnosis
+    # information — otherwise a collapsed encoder wins by default (content
+    # invariant because content is empty). The finest level (L0) is the one
+    # the decoder sees, so its anatomy signal is what matters.
+    floor = float(getattr(args, "separation_floor_diagnosis_info", 0.1))
+    finest = min(reps.keys()) if reps else None
+    diag_info_finest = metrics.get(f"content/diagnosis_info_L{finest}") if finest is not None else None
+    if diag_info_finest is not None:
+        gate = min(1.0, diag_info_finest / max(1e-6, floor))
+        metrics["separation_score_gated"] = metrics["separation_score"] * gate
+        metrics["anatomy_floor_gate"] = gate
+    else:
+        # No labels available — gating is a no-op.
+        metrics["separation_score_gated"] = metrics["separation_score"]
+        metrics["anatomy_floor_gate"] = 1.0
 
     return metrics

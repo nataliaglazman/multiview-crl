@@ -54,10 +54,12 @@ from training.losses import (
     BaselineLoss,
     JukeboxPerceptualLoss,
     barlow_twins_loss,
+    content_modality_adv_loss,
     infonce_loss,
     moco_loss,
     patch_infonce_loss,
     style_infonce_loss,
+    style_modality_ce_loss,
     vicreg_loss,
 )
 from models.encoders import TextEncoder2D
@@ -533,6 +535,51 @@ def train_step(
                     _style_loss = style_infonce_loss(_style_hz_v0, _style_hz_v1, tau=args.tau)
                     total_contrastive_loss = total_contrastive_loss + _style_loss * _style_cl_scale
                     _diag[f"Style/infonce_L{level_idx}"] = _style_loss.item()
+
+                # --- Auxiliary modality heads (decouple invariance from capacity) ---
+                # Content path: gradient-reversal → content becomes linearly
+                #   modality-invariant regardless of style dim.
+                # Style path: CE → style must be linearly modality-sufficient,
+                #   preventing collapse of modality-correlated demographic signal.
+                _adv_scale = getattr(args, "scale_content_modality_adv", 0.0)
+                _suf_scale = getattr(args, "scale_style_modality_ce", 0.0)
+                if (_adv_scale > 0.0 or _suf_scale > 0.0) and _style_hz_v0 is not None:
+                    # Pull pooled content features for this level (shared-mask path).
+                    _ci = level_content_indices[0] if level_content_indices else None
+                    if _ci:
+                        if _is_patch:
+                            _content_hz_v0 = hz_level[0][:, _ci, :].mean(-1)
+                            _content_hz_v1 = hz_level[1][:, _ci, :].mean(-1)
+                        else:
+                            _content_hz_v0 = hz_level[0][:, _ci]
+                            _content_hz_v1 = hz_level[1][:, _ci]
+
+                        # Lazy-init heads on first call, store on the raw model.
+                        _heads = getattr(_raw_vqvae, "_aux_modality_heads", None)
+                        if _heads is None:
+                            _heads = torch.nn.ModuleDict()
+                            _raw_vqvae._aux_modality_heads = _heads
+                        _ck = f"content_L{level_idx}"
+                        _sk = f"style_L{level_idx}"
+                        if _ck not in _heads:
+                            _heads[_ck] = torch.nn.Linear(_content_hz_v0.shape[-1], 2).to(device)
+                        if _sk not in _heads:
+                            _heads[_sk] = torch.nn.Linear(_style_hz_v0.shape[-1], 2).to(device)
+
+                        if _adv_scale > 0.0:
+                            _lam = getattr(args, "content_modality_adv_lambda", 1.0)
+                            _adv_loss, _adv_acc = content_modality_adv_loss(
+                                _content_hz_v0, _content_hz_v1, _heads[_ck], lambd=_lam
+                            )
+                            total_contrastive_loss = total_contrastive_loss + _adv_loss * _adv_scale
+                            _diag[f"ModAdv/loss_L{level_idx}"] = _adv_loss.item()
+                            _diag[f"ModAdv/acc_L{level_idx}"] = _adv_acc  # ~0.5 = invariant
+
+                        if _suf_scale > 0.0:
+                            _suf_loss, _suf_acc = style_modality_ce_loss(_style_hz_v0, _style_hz_v1, _heads[_sk])
+                            total_contrastive_loss = total_contrastive_loss + _suf_loss * _suf_scale
+                            _diag[f"ModSuf/loss_L{level_idx}"] = _suf_loss.item()
+                            _diag[f"ModSuf/acc_L{level_idx}"] = _suf_acc  # ~1.0 = sufficient
 
                 level_losses.append(level_loss.item())
                 # Collect contrastive diagnostics (top-1 acc, sim distributions)
@@ -1114,6 +1161,24 @@ def main(args):
         if getattr(args, "compile_model", False):
             logger.info("  Compiling VQ-VAE-2 with torch.compile mode=max-autotune (this may take a minute)...")
             vqvae_model = torch.compile(vqvae_model, mode="max-autotune")
+        # Auxiliary modality heads: linear probes for gradient-reversal
+        # (content invariance) and CE (style sufficiency). Built eagerly here
+        # so their params are picked up by the main optimizer's param loop.
+        _adv_on = getattr(args, "scale_content_modality_adv", 0.0) > 0.0
+        _suf_on = getattr(args, "scale_style_modality_ce", 0.0) > 0.0
+        if _adv_on or _suf_on:
+            _heads = torch.nn.ModuleDict()
+            _hid = args.vqvae_hidden_channels
+            for _lvl in getattr(args, "content_style_levels", [0]):
+                _cc = vqvae_model.content_channels_per_level.get(_lvl)
+                if _cc is None:
+                    continue
+                _sc = _hid - _cc
+                _heads[f"content_L{_lvl}"] = torch.nn.Linear(_cc, 2)
+                _heads[f"style_L{_lvl}"] = torch.nn.Linear(_sc, 2)
+            vqvae_model._aux_modality_heads = _heads
+            logger.info(f"  Aux modality heads: adv={_adv_on} suf={_suf_on} levels={list(_heads.keys())}")
+
         vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
         vqvae_model.to(device)
         logger.info(f"  Parameters: {sum(p.numel() for p in vqvae_model.parameters()):,}")
@@ -1750,7 +1815,17 @@ def main(args):
                                         tb_writer.add_scalar(_cs_k, _cs_v, step)
                                     if _use_wandb:
                                         wandb.log(cs_metrics, step=step)
-                                    separation_score = cs_metrics.get("separation_score")
+                                    # If the user opts into gating, selection uses the
+                                    # anatomy-floor-penalised score so a collapsed
+                                    # encoder with "invariant" but content-free features
+                                    # cannot win. Falls back to raw score if labels are
+                                    # unavailable (gate = 1.0 in that case).
+                                    if getattr(args, "select_by_gated_score", False):
+                                        separation_score = cs_metrics.get(
+                                            "separation_score_gated", cs_metrics.get("separation_score")
+                                        )
+                                    else:
+                                        separation_score = cs_metrics.get("separation_score")
                                 except Exception as e:
                                     logger.warning(f"  [WARNING] Periodic separation evaluation failed: {e}")
 

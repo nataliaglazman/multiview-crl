@@ -105,6 +105,42 @@ def parse_args() -> argparse.ArgumentParser:
         default=0.0,
         help="Scale factor for the within-modality style InfoNCE loss. 0 disables it.",
     )
+    parser.add_argument(
+        "--scale-content-modality-adv",
+        type=float,
+        default=0.0,
+        help="Weight on gradient-reversal modality classifier from content. "
+        "Enforces content invariance explicitly, decoupled from style bottleneck size. "
+        "Watch ModAdv/acc_L0 → 0.5 means invariant.",
+    )
+    parser.add_argument(
+        "--content-modality-adv-lambda",
+        type=float,
+        default=1.0,
+        help="Gradient-reversal scale lambda for the content→modality adversarial loss.",
+    )
+    parser.add_argument(
+        "--scale-style-modality-ce",
+        type=float,
+        default=0.0,
+        help="Weight on CE modality classifier from style (sufficiency). "
+        "Pushes style to carry modality info so demographic signal stays in style, "
+        "not discarded. Watch ModSuf/acc_L0 → 1.0 means sufficient.",
+    )
+    parser.add_argument(
+        "--separation-floor-diagnosis-info",
+        type=float,
+        default=0.1,
+        help="Minimum content/diagnosis_info (chance-adjusted probe accuracy in [0,1]) "
+        "at the finest level. Below this, separation_score_gated is linearly penalised "
+        "so a collapsed-content encoder cannot win the sweep.",
+    )
+    parser.add_argument(
+        "--select-by-gated-score",
+        action="store_true",
+        help="Use separation_score_gated (not separation_score) for best-checkpoint selection. "
+        "Requires labels in the val loader; otherwise gate is 1.0 and behaviour is unchanged.",
+    )
 
     # GAN discriminator (improves reconstruction sharpness)
     parser.add_argument(

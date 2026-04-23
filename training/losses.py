@@ -1000,6 +1000,57 @@ def style_infonce_loss(hz_v0_style, hz_v1_style, tau=0.1):
     return (loss_0 + loss_1) / 2
 
 
+class _GradReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg() * ctx.lambd, None
+
+
+def grad_reverse(x, lambd=1.0):
+    return _GradReverse.apply(x, lambd)
+
+
+def content_modality_adv_loss(hz_v0_content, hz_v1_content, head, lambd=1.0):
+    """Gradient-reversal modality classifier on content.
+
+    Encoder sees -lambd * grad, head sees +grad. At equilibrium content carries
+    no modality-linear info, independent of the style bottleneck size.
+
+    head: nn.Linear(C_content, 2) or a small MLP.
+    Returns (loss, accuracy) — accuracy near 0.5 means invariance achieved.
+    """
+    B = hz_v0_content.shape[0]
+    z = torch.cat([hz_v0_content, hz_v1_content], dim=0)  # (2B, C)
+    y = torch.cat([torch.zeros(B, dtype=torch.long), torch.ones(B, dtype=torch.long)]).to(z.device)
+    logits = head(grad_reverse(z, lambd))
+    loss = F.cross_entropy(logits, y)
+    with torch.no_grad():
+        acc = (logits.argmax(-1) == y).float().mean().item()
+    return loss, acc
+
+
+def style_modality_ce_loss(hz_v0_style, hz_v1_style, head):
+    """Sufficiency: style must be linearly modality-predictive.
+
+    Normal gradient flow — pushes style to *carry* modality info (and, via the
+    capacity it frees in style, demographic info correlated with modality).
+    Returns (loss, accuracy). Accuracy near 1.0 means style is sufficient.
+    """
+    B = hz_v0_style.shape[0]
+    z = torch.cat([hz_v0_style, hz_v1_style], dim=0)
+    y = torch.cat([torch.zeros(B, dtype=torch.long), torch.ones(B, dtype=torch.long)]).to(z.device)
+    logits = head(z)
+    loss = F.cross_entropy(logits, y)
+    with torch.no_grad():
+        acc = (logits.argmax(-1) == y).float().mean().item()
+    return loss, acc
+
+
 class BaurLoss(object):
     def __init__(self, lambda_reconstruction=1):
         super().__init__()
