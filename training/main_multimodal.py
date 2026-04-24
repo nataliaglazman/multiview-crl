@@ -1472,6 +1472,17 @@ def main(args):
         best_ckpt_path = os.path.join(
             args.save_dir, "vqvae_best.pt" if args.encoder_type == "vqvae" else "checkpoint_best.pt"
         )
+        # Fallback: if the dedicated best file is missing, read the bookkeeping
+        # from the rolling checkpoint (which now mirrors best_metric_*).
+        if (
+            getattr(args, "resume_training", False)
+            and not os.path.exists(best_ckpt_path)
+            and args.encoder_type == "vqvae"
+        ):
+            _rolling_path = os.path.join(args.save_dir, "vqvae_model.pt")
+            if os.path.exists(_rolling_path):
+                best_ckpt_path = _rolling_path
+
         if getattr(args, "resume_training", False) and os.path.exists(best_ckpt_path):
             best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
             _prev_name = best_ckpt.get("best_metric_name")

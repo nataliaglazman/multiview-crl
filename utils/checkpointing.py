@@ -2,10 +2,43 @@
 
 import logging
 import os
+import random
 
+import numpy as np
 import torch
 
 logger = logging.getLogger("multiview_crl")
+
+
+def _capture_rng_state() -> dict:
+    """Snapshot all RNGs so a resumed run reproduces the same augmentation /
+    Gumbel / shuffling sequence as the original."""
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: dict) -> None:
+    """Restore RNGs previously captured by ``_capture_rng_state``. Missing keys
+    are tolerated so old checkpoints still load."""
+    if not isinstance(state, dict):
+        return
+    if "python" in state:
+        random.setstate(state["python"])
+    if "numpy" in state:
+        np.random.set_state(state["numpy"])
+    if "torch" in state:
+        torch.set_rng_state(state["torch"])
+    if "cuda" in state and torch.cuda.is_available():
+        try:
+            torch.cuda.set_rng_state_all(state["cuda"])
+        except Exception as e:
+            logger.warning(f"  Could not restore CUDA RNG state: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +91,12 @@ def save_checkpoint(
             "contrastive_loss": contrastive_loss,
             "recon_loss": recon_loss,
             "vq_loss": vq_loss,
+            "rng_state": _capture_rng_state(),
+            # Mirror the best-metric bookkeeping into the rolling checkpoint so
+            # that resuming from the latest file (even when vqvae_best.pt is
+            # missing or stale) preserves the selector's history.
+            "best_metric_name": best_metric_name,
+            "best_metric_value": float(best_loss) if best_loss is not None else None,
         }
         if scheduler is not None:
             checkpoint["scheduler_state_dict"] = scheduler.state_dict()
@@ -86,6 +125,9 @@ def save_checkpoint(
             "contrastive_loss": contrastive_loss,
             "recon_loss": recon_loss,
             "vq_loss": vq_loss,
+            "rng_state": _capture_rng_state(),
+            "best_metric_name": best_metric_name,
+            "best_metric_value": float(best_loss) if best_loss is not None else None,
         }
         if scheduler is not None:
             checkpoint["scheduler_state_dict"] = scheduler.state_dict()
@@ -335,6 +377,10 @@ def load_checkpoint(
             scaler.load_state_dict(checkpoint["scaler_state_dict"])
             logger.info("  AMP GradScaler state restored from checkpoint.")
 
+        if "rng_state" in checkpoint:
+            _restore_rng_state(checkpoint["rng_state"])
+            logger.info("  RNG state (torch/cuda/numpy/python) restored from checkpoint.")
+
         if getattr(args, "use_moco", False) and "moco_queues" in checkpoint:
             from models.vqvae import MoCoEncoder
 
@@ -429,6 +475,10 @@ def load_checkpoint(
 
         for key, deque in loss_deques.items():
             deque.append(checkpoint.get(key, 0))
+
+        if "rng_state" in checkpoint:
+            _restore_rng_state(checkpoint["rng_state"])
+            logger.info("  RNG state (torch/cuda/numpy/python) restored from checkpoint.")
 
         logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
         logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")
