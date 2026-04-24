@@ -152,7 +152,7 @@ def print_result(res: dict, param: str, level: int) -> None:
         "diag_info_mean",
         "diag_info_std",
         "modality_acc_mean",
-        "psnr_mean",
+        "val_recon_mean",
         "sep_gated_mean",
     ]
     print(agg[cols].round(4).to_string())
@@ -166,7 +166,7 @@ def print_result(res: dict, param: str, level: int) -> None:
         )
         print(f"  C={cap:>6}: {flags}")
     print()
-    print(res.get("psnr_note", ""))
+    print(res.get("recon_note", ""))
     if res["winner"] is None:
         print("*** NO capacity satisfies all three rules. Fix the pipeline before sweeping further. ***")
     else:
@@ -185,7 +185,12 @@ def main() -> None:
     p.add_argument("--level", type=int, default=0, help="Level whose metrics to evaluate (L0, L1, L2)")
     p.add_argument("--diag-fraction", type=float, default=0.9)
     p.add_argument("--modality-ceiling", type=float, default=0.55)
-    p.add_argument("--psnr-tolerance-db", type=float, default=1.0)
+    p.add_argument(
+        "--recon-tolerance",
+        type=float,
+        default=0.1,
+        help="Fractional slack on val/recon (lower is better). 0.1 = within 10%% of best.",
+    )
     p.add_argument("--noise-threshold", type=float, default=0.05)
     p.add_argument("--output-csv", default=None)
     args = p.parse_args()
@@ -203,7 +208,7 @@ def main() -> None:
         agg,
         diag_fraction=args.diag_fraction,
         modality_ceiling=args.modality_ceiling,
-        psnr_tolerance_db=args.psnr_tolerance_db,
+        recon_tolerance=args.recon_tolerance,
         noise_threshold=args.noise_threshold,
     )
     print_result(result, args.param, args.level)

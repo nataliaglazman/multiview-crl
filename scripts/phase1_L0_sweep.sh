@@ -10,7 +10,10 @@
 #   C*_L0 = min C such that
 #     diag_info_L0  ≥ 0.9 · max(diag_info_L0)
 #     modality_acc  ≤ 0.55
-#     PSNR          ≥ max(PSNR) − 1.0 dB
+#     val/recon     ≤ min(val/recon) · (1 + recon_tolerance)   # default 10% slack
+#
+# (val/recon is the validation reconstruction loss — lower is better. The
+# training loop does not log PSNR, so recon fidelity is gated on val/recon.)
 #
 # Launch: each loop iteration runs sequentially. On a cluster, copy/paste
 # blocks across GPUs or fan out through your launcher (sweep_runai.sh style).

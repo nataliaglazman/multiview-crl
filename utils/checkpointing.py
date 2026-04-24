@@ -33,12 +33,28 @@ def _restore_rng_state(state: dict) -> None:
     if "numpy" in state:
         np.random.set_state(state["numpy"])
     if "torch" in state:
-        torch.set_rng_state(state["torch"])
+        try:
+            torch.set_rng_state(_as_byte_tensor(state["torch"]))
+        except Exception as e:
+            logger.warning(f"  Could not restore torch RNG state: {e}")
     if "cuda" in state and torch.cuda.is_available():
         try:
-            torch.cuda.set_rng_state_all(state["cuda"])
+            cuda_state = state["cuda"]
+            if isinstance(cuda_state, (list, tuple)):
+                cuda_state = [_as_byte_tensor(s) for s in cuda_state]
+            else:
+                cuda_state = _as_byte_tensor(cuda_state)
+            torch.cuda.set_rng_state_all(cuda_state)
         except Exception as e:
             logger.warning(f"  Could not restore CUDA RNG state: {e}")
+
+
+def _as_byte_tensor(t) -> torch.Tensor:
+    """Coerce a tensor loaded from checkpoint into the CPU ByteTensor that
+    ``torch.set_rng_state`` requires."""
+    if not isinstance(t, torch.Tensor):
+        t = torch.as_tensor(t)
+    return t.detach().cpu().to(torch.uint8).contiguous()
 
 
 # ---------------------------------------------------------------------------
