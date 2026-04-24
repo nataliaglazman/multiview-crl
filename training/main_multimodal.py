@@ -12,14 +12,21 @@
 
 import collections
 import csv
+import faulthandler
 import json
 import math
 import os
 import random
+import signal
+import sys
 import traceback
 import uuid
 import warnings
 from datetime import datetime
+
+faulthandler.enable()
+if hasattr(signal, "SIGUSR1"):
+    faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
 
 try:
     import faiss
@@ -1815,14 +1822,29 @@ def main(args):
                                     logger.info(
                                         f"  [EVALUATION] Running periodic content/style separation metrics (step {step})..."
                                     )
-                                    cs_metrics = evaluate_content_style_separation(
-                                        encoders[0],
-                                        val_loader
-                                        or DataLoader(val_dataset, **{**dataloader_kwargs, "shuffle": False}),
-                                        args,
-                                        device,
-                                        max_batches=200,
-                                    )
+                                    # Fresh single-process loader for eval — avoids worker
+                                    # deadlocks seen on resumed jobs where persistent
+                                    # DataLoader workers idle across 2k training steps on
+                                    # NFS and hang on first re-iteration.
+                                    eval_loader_kwargs = {
+                                        **dataloader_kwargs,
+                                        "shuffle": False,
+                                        "num_workers": 0,
+                                        "persistent_workers": False,
+                                        "prefetch_factor": None,
+                                    }
+                                    eval_loader = DataLoader(val_dataset, **eval_loader_kwargs)
+                                    faulthandler.dump_traceback_later(300, repeat=True, file=sys.stderr)
+                                    try:
+                                        cs_metrics = evaluate_content_style_separation(
+                                            encoders[0],
+                                            eval_loader,
+                                            args,
+                                            device,
+                                            max_batches=200,
+                                        )
+                                    finally:
+                                        faulthandler.cancel_dump_traceback_later()
                                     for _cs_k, _cs_v in cs_metrics.items():
                                         tb_writer.add_scalar(_cs_k, _cs_v, step)
                                     if _use_wandb:
