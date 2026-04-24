@@ -621,6 +621,13 @@ def parse_args() -> argparse.ArgumentParser:
         default=None,
         help="W&B team/entity name. Uses default entity if not set.",
     )
+    parser.add_argument(
+        "--wandb-group",
+        type=str,
+        default=None,
+        help="W&B group name. Use to bundle seeds/variants of the same experiment "
+        "for analysis (e.g. --wandb-group phase1-L0).",
+    )
     # Early stopping
     parser.add_argument(
         "--early-stopping-patience",

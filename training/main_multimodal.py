@@ -1418,6 +1418,7 @@ def main(args):
         wandb.init(
             project=getattr(args, "wandb_project", "multiview-crl-sweep"),
             entity=getattr(args, "wandb_entity", None),
+            group=getattr(args, "wandb_group", None),
             config=wandb_config,
             name=str(args.model_id),
             dir=wandb_dir,
