@@ -327,8 +327,8 @@ def train_step(
                             k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
                             k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
 
-                            q_snap_v0 = vqvae_model.queues[level_idx].clone().detach()
-                            q_snap_v1 = vqvae_model.queues_v1[level_idx].clone().detach()
+                            q_snap_v0 = vqvae_model.queues[level_idx].detach()
+                            q_snap_v1 = vqvae_model.queues_v1[level_idx].detach()
                             _norm_eps = 1e-6  # avoid NaN when masked features have zero norm
                             queue_v0 = F.normalize(q_snap_v0[idx_v0, :], dim=0, eps=_norm_eps)
                             queue_v1 = F.normalize(q_snap_v1[idx_v1, :], dim=0, eps=_norm_eps)
@@ -344,39 +344,51 @@ def train_step(
                                 neg_queue_for_v0, neg_queue_for_v1 = queue_v1, queue_v0
                             else:
                                 neg_queue_for_v0, neg_queue_for_v1 = queue_v0, queue_v1
+                            # Cache the negative-similarity matmuls — these dominate the
+                            # contrastive cost (B × queue_size) and were previously
+                            # recomputed up to 4× per step for diagnostics.
+                            neg_sim_v0 = q_v0 @ neg_queue_for_v0
+                            neg_sim_v1 = q_v1 @ neg_queue_for_v1
                             # view-0 query → view-1 key positive
                             pos_01 = (q_v0 * k_v1_n).sum(dim=-1, keepdim=True)
-                            logits_01 = torch.cat([pos_01, q_v0 @ neg_queue_for_v0], dim=1) / _tau
+                            logits_01 = torch.cat([pos_01, neg_sim_v0], dim=1) / _tau
                             # view-1 query → view-0 key positive
                             pos_10 = (q_v1 * k_v0_n).sum(dim=-1, keepdim=True)
-                            logits_10 = torch.cat([pos_10, q_v1 @ neg_queue_for_v1], dim=1) / _tau
+                            logits_10 = torch.cat([pos_10, neg_sim_v1], dim=1) / _tau
                             level_loss = F.cross_entropy(logits_01, _targets) + F.cross_entropy(logits_10, _targets)
 
                             # --- Contrastive diagnostics for per-view path ---
+                            # top1_acc is consumed every step in the train-loop printout;
+                            # the sim summaries are TB-only, so defer the extra .item() syncs
+                            # and reductions to log-step boundaries.
+                            _is_log_step = step is None or (step % args.log_steps == 0)
                             with torch.no_grad():
                                 _pv_correct = (logits_01.argmax(dim=1) == 0).sum().item() + (
                                     logits_10.argmax(dim=1) == 0
                                 ).sum().item()
                                 _pv_total = logits_01.shape[0] + logits_10.shape[0]
-                                level_loss._contrastive_diag = {
-                                    "top1_acc": _pv_correct / max(_pv_total, 1),
-                                    "pos_sim_mean": torch.cat([pos_01.squeeze(-1), pos_10.squeeze(-1)]).mean().item(),
-                                    "pos_sim_std": torch.cat([pos_01.squeeze(-1), pos_10.squeeze(-1)]).std().item(),
-                                    "neg_sim_mean": torch.cat([q_v0 @ neg_queue_for_v0, q_v1 @ neg_queue_for_v1])
-                                    .mean()
-                                    .item(),
-                                    "neg_sim_std": torch.cat([q_v0 @ neg_queue_for_v0, q_v1 @ neg_queue_for_v1])
-                                    .std()
-                                    .item(),
-                                }
+                                _diag_dict = {"top1_acc": _pv_correct / max(_pv_total, 1)}
+                                if _is_log_step:
+                                    _pos_cat = torch.cat([pos_01.squeeze(-1), pos_10.squeeze(-1)])
+                                    _neg_cat = torch.cat([neg_sim_v0, neg_sim_v1])
+                                    _diag_dict.update(
+                                        {
+                                            "pos_sim_mean": _pos_cat.mean().item(),
+                                            "pos_sim_std": _pos_cat.std().item(),
+                                            "neg_sim_mean": _neg_cat.mean().item(),
+                                            "neg_sim_std": _neg_cat.std().item(),
+                                        }
+                                    )
+                                level_loss._contrastive_diag = _diag_dict
 
                             # --- Stale-queue diagnostic (cheap, no grad) ---
-                            if level_idx == 0 and optimizer is not None:
+                            # TB-only — gate to log-step to skip the extra .item() syncs.
+                            if level_idx == 0 and optimizer is not None and _is_log_step:
                                 with torch.no_grad():
                                     # 1. Positive vs negative similarity gap
                                     #    Healthy: pos >> mean(neg).  Stale queue: gap shrinks.
-                                    neg_sim_v0 = (q_v0 @ neg_queue_for_v0).mean().item()
-                                    neg_sim_v1 = (q_v1 @ neg_queue_for_v1).mean().item()
+                                    _neg_v0 = neg_sim_v0.mean().item()
+                                    _neg_v1 = neg_sim_v1.mean().item()
                                     pos_sim = (
                                         (q_v0 * k_v1_n).sum(-1).mean().item() + (q_v1 * k_v0_n).sum(-1).mean().item()
                                     ) / 2
@@ -385,9 +397,9 @@ def train_step(
                                     raw_norm_v1 = q_snap_v1[idx_v1, :].norm(dim=0).mean().item()
                                     _diag = {
                                         "MoCo/pos_sim": pos_sim,
-                                        "MoCo/neg_sim_v0": neg_sim_v0,
-                                        "MoCo/neg_sim_v1": neg_sim_v1,
-                                        "MoCo/pos_neg_gap": pos_sim - (neg_sim_v0 + neg_sim_v1) / 2,
+                                        "MoCo/neg_sim_v0": _neg_v0,
+                                        "MoCo/neg_sim_v1": _neg_v1,
+                                        "MoCo/pos_neg_gap": pos_sim - (_neg_v0 + _neg_v1) / 2,
                                         "MoCo/queue_raw_norm_v0": raw_norm_v0,
                                         "MoCo/queue_raw_norm_v1": raw_norm_v1,
                                     }
@@ -423,11 +435,11 @@ def train_step(
                         if use_moco:
                             key_pooled = key_outputs[level_idx]
                             k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
-                            queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
+                            # Queue is mutated only by enqueue() after the loss loop, so
+                            # detach() (a view) is safe — no need for the extra clone.
+                            queue_snapshot = vqvae_model.queues[level_idx].detach()
                             _qv1 = (
-                                vqvae_model.queues_v1[level_idx].clone().detach()
-                                if hasattr(vqvae_model, "queues_v1")
-                                else None
+                                vqvae_model.queues_v1[level_idx].detach() if hasattr(vqvae_model, "queues_v1") else None
                             )
                             # Patch MoCo: flatten (n_views, B, C, P) → (n_views, B*P, C)
                             # so each patch becomes an independent query/key in the queue.
@@ -487,12 +499,9 @@ def train_step(
                     if use_moco:
                         key_pooled = key_outputs[level_idx]
                         k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
-                        queue_snapshot = vqvae_model.queues[level_idx].clone().detach()
-                        _qv1 = (
-                            vqvae_model.queues_v1[level_idx].clone().detach()
-                            if hasattr(vqvae_model, "queues_v1")
-                            else None
-                        )
+                        # Queue is mutated only by enqueue() after the loss loop.
+                        queue_snapshot = vqvae_model.queues[level_idx].detach()
+                        _qv1 = vqvae_model.queues_v1[level_idx].detach() if hasattr(vqvae_model, "queues_v1") else None
                         # Patch MoCo: flatten (n_views, B, C, P) → (n_views, B*P, C)
                         _hz_moco = (
                             hz_level.permute(0, 1, 3, 2).reshape(n_views, -1, hz_level.shape[2])
@@ -514,7 +523,13 @@ def train_step(
                         )
 
                         # --- Stale-queue diagnostic for shared-mask / onthefly path ---
-                        if level_idx == 0 and optimizer is not None and accumulation_step == 0:
+                        # TB-only — gate to log-step to skip the extra .item() syncs.
+                        if (
+                            level_idx == 0
+                            and optimizer is not None
+                            and accumulation_step == 0
+                            and (step is None or step % args.log_steps == 0)
+                        ):
                             with torch.no_grad():
                                 _ci = level_content_indices[0]
                                 _q = F.normalize(_hz_moco[0, :, _ci], dim=-1)
@@ -1843,16 +1858,19 @@ def main(args):
                                     logger.info(
                                         f"  [EVALUATION] Running periodic content/style separation metrics (step {step})..."
                                     )
-                                    # Fresh single-process loader for eval — avoids worker
-                                    # deadlocks seen on resumed jobs where persistent
-                                    # DataLoader workers idle across 2k training steps on
-                                    # NFS and hang on first re-iteration.
+                                    # Fresh non-persistent loader for eval — the original
+                                    # NFS hang was triggered by *idle persistent* workers
+                                    # spanning 2k training steps, not by workers per se.
+                                    # Spinning up a few short-lived workers per eval keeps
+                                    # the 200-batch loop I/O-bound rather than
+                                    # CPU-decode-bound, while still avoiding the deadlock.
+                                    _eval_workers = min(getattr(args, "workers", 0) or 0, 4)
                                     eval_loader_kwargs = {
                                         **dataloader_kwargs,
                                         "shuffle": False,
-                                        "num_workers": 0,
+                                        "num_workers": _eval_workers,
                                         "persistent_workers": False,
-                                        "prefetch_factor": None,
+                                        "prefetch_factor": 2 if _eval_workers > 0 else None,
                                     }
                                     eval_loader = DataLoader(val_dataset, **eval_loader_kwargs)
                                     faulthandler.dump_traceback_later(300, repeat=True, file=sys.stderr)
