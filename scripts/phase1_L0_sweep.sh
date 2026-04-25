@@ -76,7 +76,7 @@ for SEED in "${SEEDS[@]}"; do
             --scale-recon-loss 1.0 \
             --scale-adv-loss 0.0 \
             --tau 0.1 \
-            --lr 1e-3 \
+            --lr 0.01 \
             --batch-size 4 \
             --train-steps ${STEPS} \
             --spatial-size 150 180 150 \

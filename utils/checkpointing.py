@@ -76,6 +76,7 @@ def save_checkpoint(
     best_loss=None,
     best_metric_name="total_loss",
     scaler=None,
+    train_sampler=None,
 ) -> None:
     """
     Save a training checkpoint to ``args.save_dir``.
@@ -118,6 +119,8 @@ def save_checkpoint(
             checkpoint["scheduler_state_dict"] = scheduler.state_dict()
         if scaler is not None:
             checkpoint["scaler_state_dict"] = scaler.state_dict()
+        if train_sampler is not None and hasattr(train_sampler, "state_dict"):
+            checkpoint["train_sampler_state_dict"] = train_sampler.state_dict()
         if getattr(args, "use_moco", False):
             from models.vqvae import MoCoEncoder
 
@@ -147,6 +150,8 @@ def save_checkpoint(
         }
         if scheduler is not None:
             checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+        if train_sampler is not None and hasattr(train_sampler, "state_dict"):
+            checkpoint["train_sampler_state_dict"] = train_sampler.state_dict()
         for m_idx, m in enumerate(args.modalities):
             checkpoint[f"encoder_{m}"] = encoders[m_idx].state_dict()
             encoder_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
@@ -179,6 +184,7 @@ def save_emergency_checkpoint(
     optimizer: torch.optim.Optimizer,
     reason: str = "unknown",
     scheduler=None,
+    train_sampler=None,
 ) -> None:
     """
     Best-effort checkpoint written on unexpected interruption (OOM, crash, KeyboardInterrupt).
@@ -211,6 +217,8 @@ def save_emergency_checkpoint(
                 ckpt[f"encoder_{m}"] = encoders[m_idx].state_dict()
         if scheduler is not None:
             ckpt["scheduler_state_dict"] = scheduler.state_dict()
+        if train_sampler is not None and hasattr(train_sampler, "state_dict"):
+            ckpt["train_sampler_state_dict"] = train_sampler.state_dict()
         torch.save(ckpt, emergency_path)
         logger.warning(f"[EMERGENCY] Saved emergency checkpoint to {emergency_path} (reason: {reason})")
     except Exception as save_err:
@@ -325,6 +333,7 @@ def load_checkpoint(
     loss_deques: dict,
     scheduler=None,
     scaler=None,
+    train_sampler=None,
 ) -> int:
     """
     Restore training state from the most recent checkpoint, if one exists
@@ -396,6 +405,16 @@ def load_checkpoint(
         if "rng_state" in checkpoint:
             _restore_rng_state(checkpoint["rng_state"])
             logger.info("  RNG state (torch/cuda/numpy/python) restored from checkpoint.")
+
+        if train_sampler is not None and "train_sampler_state_dict" in checkpoint:
+            try:
+                train_sampler.load_state_dict(checkpoint["train_sampler_state_dict"])
+                logger.info(
+                    f"  Train sampler resumed at epoch={train_sampler.epoch} "
+                    f"offset={train_sampler.consumed} (mid-epoch continuity)."
+                )
+            except Exception as e:
+                logger.warning(f"  Could not restore train sampler state: {e}")
 
         if getattr(args, "use_moco", False) and "moco_queues" in checkpoint:
             from models.vqvae import MoCoEncoder
@@ -495,6 +514,16 @@ def load_checkpoint(
         if "rng_state" in checkpoint:
             _restore_rng_state(checkpoint["rng_state"])
             logger.info("  RNG state (torch/cuda/numpy/python) restored from checkpoint.")
+
+        if train_sampler is not None and "train_sampler_state_dict" in checkpoint:
+            try:
+                train_sampler.load_state_dict(checkpoint["train_sampler_state_dict"])
+                logger.info(
+                    f"  Train sampler resumed at epoch={train_sampler.epoch} "
+                    f"offset={train_sampler.consumed} (mid-epoch continuity)."
+                )
+            except Exception as e:
+                logger.warning(f"  Could not restore train sampler state: {e}")
 
         logger.info(f"  Checkpoint loaded successfully! Resuming from step {step}")
         logger.info(f"  Previous loss: {checkpoint.get('loss', 'N/A')}")

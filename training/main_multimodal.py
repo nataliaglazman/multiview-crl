@@ -55,7 +55,7 @@ from torchvision import transforms
 import models.vae as vae
 import models.vqvae as vqvae
 import utils.utils as utils
-from data.infinite_iterator import InfiniteIterator
+from data.infinite_iterator import InfiniteIterator, ResumableSampler
 from eval.evaluation import eval_step, get_data
 from training.losses import (
     BaselineLoss,
@@ -1104,6 +1104,7 @@ def main(args):
         val_dataset = None
         val_loader = None
 
+    train_sampler = None
     if args.evaluate:
         test_dataset = args.DATASETCLASS(
             data_dir=args.datapath,
@@ -1115,8 +1116,16 @@ def main(args):
             **dataset_kwargs,
         )
     else:
-        train_loader = DataLoader(train_dataset, **dataloader_kwargs)
-        train_iterator = InfiniteIterator(train_loader)
+        # Use a resumable sampler so mid-epoch resume continues the same
+        # shuffle order — otherwise EMA codebook stats and any contrastive
+        # queues see a different sample stream after resume and transiently
+        # drift. Defer InfiniteIterator construction until after load_checkpoint
+        # restores the sampler offset.
+        train_dl_kwargs = {**dataloader_kwargs}
+        train_dl_kwargs.pop("shuffle", None)
+        train_sampler = ResumableSampler(train_dataset, seed=getattr(args, "seed", 0) or 0)
+        train_loader = DataLoader(train_dataset, sampler=train_sampler, **train_dl_kwargs)
+        train_iterator = None  # built after load_checkpoint below
 
     print(f"Train dataset size: {len(train_dataset)} samples.")
 
@@ -1459,8 +1468,20 @@ def main(args):
             "vq_loss": vq_losses,
         }
         step = load_checkpoint(
-            args, encoders, decoders, optimizer, device, loss_deques, scheduler=scheduler, scaler=scaler
+            args,
+            encoders,
+            decoders,
+            optimizer,
+            device,
+            loss_deques,
+            scheduler=scheduler,
+            scaler=scaler,
+            train_sampler=train_sampler,
         )
+
+        # Build the train iterator AFTER the sampler has been (potentially)
+        # restored, so the first epoch starts from the correct mid-epoch offset.
+        train_iterator = InfiniteIterator(train_loader)
 
         # If we successfully resumed from a checkpoint, the model is already
         # warm — skip the recon_loss_start_step delay.
@@ -1898,6 +1919,7 @@ def main(args):
                             best_loss=new_best,
                             best_metric_name=best_metric_name,
                             scaler=scaler,
+                            train_sampler=train_sampler,
                         )
 
                     # --- Periodic validation ---
@@ -2004,6 +2026,7 @@ def main(args):
                                 optimizer,
                                 reason=f"oom_x{oom_count}",
                                 scheduler=scheduler,
+                                train_sampler=train_sampler,
                             )
                             raise
                         logger.warning(f"[OOM] Skipping step {step}, continuing...")
@@ -2018,6 +2041,7 @@ def main(args):
                             optimizer,
                             reason=f"runtime_error_step{step}",
                             scheduler=scheduler,
+                            train_sampler=train_sampler,
                         )
                         raise
 
@@ -2031,6 +2055,7 @@ def main(args):
                         optimizer,
                         reason=f"{type(e).__name__}_step{step}",
                         scheduler=scheduler,
+                        train_sampler=train_sampler,
                     )
                     raise
 
@@ -2044,6 +2069,7 @@ def main(args):
                 optimizer,
                 reason=f"keyboard_interrupt_step{step}",
                 scheduler=scheduler,
+                train_sampler=train_sampler,
             )
             tb_writer.close()
             return
