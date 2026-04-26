@@ -1254,6 +1254,7 @@ class MyCustomDataset(MultiviewDataset):
         labels_path: str | None = None,
         masks_dir: str | None = None,
         asymmetric_aug: bool = False,
+        shared_brain_mask: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -1265,6 +1266,7 @@ class MyCustomDataset(MultiviewDataset):
         self.spatial_size = tuple(spatial_size) if spatial_size is not None else None
         self.masks_dir = masks_dir
         self.asymmetric_aug = asymmetric_aug
+        self.shared_brain_mask = shared_brain_mask
 
         # Load CSV and build item list
         if labels_path is None:
@@ -1291,6 +1293,7 @@ class MyCustomDataset(MultiviewDataset):
             spatial_size=self.spatial_size,
             masks_from_disk=self.masks_from_disk,
             asymmetric_aug=self.asymmetric_aug,
+            shared_brain_mask=self.shared_brain_mask,
         )
 
         if cache:
@@ -1467,6 +1470,7 @@ class MyCustomDataset(MultiviewDataset):
         h.update(f"crop_margin={self.crop_margin}".encode())
         h.update(f"spatial_size={self.spatial_size}".encode())
         h.update(f"masks_from_disk={self.masks_from_disk}".encode())
+        h.update(f"shared_brain_mask={self.shared_brain_mask}".encode())
         for item in self.items:
             h.update(item["image"].encode())
             h.update(item["z_image"].encode())

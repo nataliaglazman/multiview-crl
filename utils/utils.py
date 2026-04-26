@@ -64,6 +64,38 @@ class ApplyBrainMaskd(MapTransform):
         return d
 
 
+class IntersectMasksd(MapTransform):
+    """Replace each listed mask with the elementwise AND of all of them.
+
+    Produces a single shared brain mask across modalities so the image
+    boundary is identical between views.  Per-modality intensity-thresholded
+    masks otherwise leave a modality-specific rim that the patch-contrastive
+    objective can pick up as a low-level modality cue.
+    """
+
+    def __init__(self, mask_keys, threshold=0.5):
+        super().__init__(mask_keys)
+        self.mask_keys = list(mask_keys)
+        self.threshold = threshold
+
+    def __call__(self, data):
+        d = dict(data)
+        if len(self.mask_keys) < 2:
+            return d
+        first = d[self.mask_keys[0]]
+        if hasattr(first, "cpu"):  # torch tensor / MONAI MetaTensor
+            shared = (first > self.threshold).float()
+            for k in self.mask_keys[1:]:
+                shared = shared * (d[k] > self.threshold).float()
+        else:
+            shared = (np.asarray(first) > self.threshold).astype(np.float32)
+            for k in self.mask_keys[1:]:
+                shared = shared * (np.asarray(d[k]) > self.threshold).astype(np.float32)
+        for k in self.mask_keys:
+            d[k] = shared
+        return d
+
+
 EPSILON = 1e-8  # was np.finfo(np.float32).tiny ≈ 1e-45; too small for AMP float16
 
 
@@ -467,7 +499,14 @@ def _find_brain_mask(dir_path, require_substr=None):
     return None
 
 
-def transforms(spacing=2.0, crop_margin=0, spatial_size=None, masks_from_disk=False, asymmetric_aug=False):
+def transforms(
+    spacing=2.0,
+    crop_margin=0,
+    spatial_size=None,
+    masks_from_disk=False,
+    asymmetric_aug=False,
+    shared_brain_mask=False,
+):
     """
     Create training and validation transforms for brain MRI images.
 
@@ -484,6 +523,11 @@ def transforms(spacing=2.0, crop_margin=0, spatial_size=None, masks_from_disk=Fa
                         (T1 and T2 receive different random draws for shift, scale,
                         bias field, gamma, noise, and smoothing). Spatial augmentations
                         remain synced across views.
+        shared_brain_mask: When True, intersect ``mask_t1`` and ``mask_t2`` into a
+                           single shared mask before applying it.  Removes the
+                           modality-specific boundary that arises from per-modality
+                           intensity-thresholded masks (or from independently
+                           computed disk masks).
 
     Returns:
         train_transforms, val_transforms
@@ -555,12 +599,16 @@ def transforms(spacing=2.0, crop_margin=0, spatial_size=None, masks_from_disk=Fa
                     spatial_size=spatial_size,
                 ),
                 NormalizeIntensityd(keys=["image_t1", "image_t2"], nonzero=True, channel_wise=True),
-                ApplyBrainMaskd(
-                    keys=["image_t1", "image_t2"],
-                    mask_keys=["mask_t1", "mask_t2"],
-                    threshold=0.5,
-                ),
             ]
+        )
+        if shared_brain_mask:
+            transforms_list.append(IntersectMasksd(mask_keys=["mask_t1", "mask_t2"], threshold=0.5))
+        transforms_list.append(
+            ApplyBrainMaskd(
+                keys=["image_t1", "image_t2"],
+                mask_keys=["mask_t1", "mask_t2"],
+                threshold=0.5,
+            )
         )
 
         # Add augmentations for training only

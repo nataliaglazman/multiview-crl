@@ -1063,6 +1063,7 @@ def main(args):
         "labels_path": getattr(args, "labels_path", None),
         "masks_dir": getattr(args, "masks_dir", None),
         "asymmetric_aug": getattr(args, "asymmetric_aug", False),
+        "shared_brain_mask": getattr(args, "shared_brain_mask", False),
     }
     dataloader_kwargs = {
         "batch_size": args.batch_size,

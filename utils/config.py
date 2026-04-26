@@ -646,6 +646,16 @@ def parse_args() -> argparse.ArgumentParser:
         "Only used when --early-stopping-patience > 0. Default: 0.0.",
     )
     parser.add_argument(
+        "--shared-brain-mask",
+        action="store_true",
+        default=False,
+        help="Intersect the T1 and T2 brain masks into a single shared mask before "
+        "applying it to both modalities. Eliminates the modality-specific image "
+        "boundary that the patch-contrastive objective can otherwise pick up as a "
+        "low-level modality cue (visible as edge-of-skull hot spots on the per-patch "
+        "modality probe).",
+    )
+    parser.add_argument(
         "--asymmetric-aug",
         action="store_true",
         default=False,
