@@ -2,26 +2,29 @@
 # Launch a W&B sweep and submit agents as Run:AI jobs.
 #
 # Usage:
-#   ./scripts/launch_sweep.sh [--num-agents 50] [--wandb-project multiview-crl-sweep]
+#   ./scripts/launch_sweep.sh [--num-agents 50] [--wandb-project multiview-crl-sweep] \
+#     [--config scripts/sweep_config.yaml] [--sweep-id <id>]
 
 set -euo pipefail
 
 NUM_AGENTS=15
 WANDB_PROJECT="multiview-crl-sweep-new"
 SWEEP_ID=""
+CONFIG="scripts/sweep_config.yaml"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --num-agents) NUM_AGENTS="$2"; shift 2 ;;
         --wandb-project) WANDB_PROJECT="$2"; shift 2 ;;
         --sweep-id) SWEEP_ID="$2"; shift 2 ;;
+        --config) CONFIG="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
 if [[ -z "${SWEEP_ID}" ]]; then
-    echo "Creating W&B sweep..."
-    RAW_OUTPUT=$(wandb sweep --project "${WANDB_PROJECT}" scripts/sweep_config.yaml 2>&1 || true)
+    echo "Creating W&B sweep from ${CONFIG}..."
+    RAW_OUTPUT=$(wandb sweep --project "${WANDB_PROJECT}" "${CONFIG}" 2>&1 || true)
     SWEEP_ID=$(echo "$RAW_OUTPUT" | awk '/Run sweep agent with:/ {print $NF}')
 
     if [[ -z "${SWEEP_ID}" ]]; then
@@ -29,7 +32,7 @@ if [[ -z "${SWEEP_ID}" ]]; then
         echo "--- RAW WANDB OUTPUT ---"
         echo "$RAW_OUTPUT"
         echo "------------------------"
-        echo "Run 'wandb sweep scripts/sweep_config.yaml' manually to debug."
+        echo "Run 'wandb sweep ${CONFIG}' manually to debug."
         exit 1
     fi
 fi

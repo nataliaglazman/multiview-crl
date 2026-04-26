@@ -1,0 +1,145 @@
+# Joint content-size sweep across all three levels.
+#
+# Design: Latin-hypercube-balanced sample of 15 (C_L0, C_L1, C_L2) tuples in
+#   {4, 8, 13, 16, 20} channels (out of vqvae_hidden_channels=32),
+#   crossed with 2 seeds = 30 runs total (≈3 rounds at 10 parallel agents).
+# Each per-level value appears exactly 3 times in each column, so per-level
+# marginal effects are unbiased under OLS. OLS pools all 30 runs to estimate
+# each level's slope, so 2 seeds is sufficient for tight standard errors.
+#
+# All other hyperparameters are locked at the Phase-2 baseline
+# (mirroring scripts/sweep_content_L0.sh) so the only varying axes are the
+# three content channel counts and the seed.
+#
+# Usage:
+#   ./scripts/launch_sweep.sh --config scripts/sweep_content_joint.yaml \
+#     --wandb-project multiview-crl-content-joint --num-agents 10
+#
+# Then analyze with:
+#   python scripts/analyze_content_joint.py --wandb-project multiview-crl-content-joint --sweep-id <id>
+
+program: scripts/sweep_train.py
+method: grid
+metric:
+  name: separation_score
+  goal: maximize
+
+parameters:
+  # --- Varying axes ---
+  # 15 (C_L0, C_L1, C_L2) tuples, each level balanced across {4,8,13,16,20}.
+  # Ratios = channels / 32.
+  content_ratios:
+    values:
+      - [0.125,   0.125,   0.40625]   # 4,  4,  13
+      - [0.125,   0.25,    0.5]       # 4,  8,  16
+      - [0.125,   0.5,     0.125]     # 4,  16, 4
+      - [0.25,    0.125,   0.625]     # 8,  4,  20
+      - [0.25,    0.5,     0.25]      # 8,  16, 8
+      - [0.25,    0.625,   0.5]       # 8,  20, 16
+      - [0.40625, 0.125,   0.40625]   # 13, 4,  13
+      - [0.40625, 0.25,    0.125]     # 13, 8,  4
+      - [0.40625, 0.625,   0.25]      # 13, 20, 8
+      - [0.5,     0.40625, 0.625]     # 16, 13, 20
+      - [0.5,     0.25,    0.125]     # 16, 8,  4
+      - [0.5,     0.125,   0.40625]   # 16, 4,  13
+      - [0.625,   0.40625, 0.5]       # 20, 13, 16
+      - [0.625,   0.5,     0.625]     # 20, 16, 20
+      - [0.625,   0.625,   0.25]      # 20, 20, 8
+  seed:
+    values: [0, 1]
+
+  # --- Locked hyperparameters (Phase-2 baseline) ---
+  scale_contrastive_loss:
+    value: 10.0
+  scale_recon_loss:
+    value: 10.0
+  scale_style_contrastive_loss:
+    value: 10.0
+  vqvae_hidden_channels:
+    value: 32
+  tau:
+    value: 0.8
+  lr:
+    value: 0.001
+  vqvae_nb_entries:
+    value: [256, 128, 64]
+  contrastive_level_weights:
+    value: [1.0, 1.0, 1.0]
+  moco_queue_size:
+    value: 8192
+  moco_momentum:
+    value: 0.99
+  quantize_style:
+    value: true
+
+  # --- Fixed (carried over from sweep_config.yaml) ---
+  batch_size:
+    value: 4
+  gradient_accumulation_steps:
+    value: 4
+  train_steps:
+    value: 20000
+  dataroot:
+    value: "/nfs/home/nglazman/data"
+  dataset_name:
+    value: "ADNI_stripped_masks"
+  masks_dir:
+    value: "/nfs/home/nglazman/data/ADNI_stripped_masks"
+  encoder_type:
+    value: "vqvae"
+  patch_contrastive:
+    value: true
+  patch_grid:
+    value: [4, 5, 4]
+  labels_path:
+    value: "/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv"
+  vqvae_nb_levels:
+    value: 3
+  content_dim:
+    value: 128
+  total_dim:
+    value: 512
+  vqvae_scaling_rates:
+    value: [2, 2, 2]
+  spatial_size:
+    value: [150, 180, 150]
+  use_amp:
+    value: true
+  use_wandb:
+    value: true
+  resume_training:
+    value: true
+  workers:
+    value: 8
+  recon_loss_start_step:
+    value: 2000
+  content_style_levels:
+    value: [0, 1, 2]
+  cross_view_negs_only:
+    value: true
+  separate_encoders:
+    value: true
+  gradient_checkpointing:
+    value: true
+  skip_recon_ratio:
+    value: 0.5
+  image_spacing:
+    value: 1.0
+  cache_dataset:
+    value: true
+  vq_commitment_weight:
+    value: 0.25
+  cache_dir:
+    value: "/nfs/home/nglazman/cache/multiview"
+  pass_full_to_next_level:
+    value: true
+  cb_ema_decay:
+    value: 0.99
+  mask_mode:
+    value: ["fixed"]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}
