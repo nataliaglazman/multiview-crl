@@ -50,15 +50,15 @@ parameters:
 
   # --- Locked hyperparameters (Phase-2 baseline) ---
   scale_contrastive_loss:
-    value: 10.0
+    value: 1.0
   scale_recon_loss:
-    value: 10.0
+    value: 1.0
   scale_style_contrastive_loss:
-    value: 10.0
+    value: 0.0
   vqvae_hidden_channels:
     value: 32
   tau:
-    value: 0.8
+    value: 0.1
   lr:
     value: 0.001
   vqvae_nb_entries:
@@ -78,7 +78,7 @@ parameters:
   gradient_accumulation_steps:
     value: 4
   train_steps:
-    value: 20000
+    value: 60000
   dataroot:
     value: "/nfs/home/nglazman/data"
   dataset_name:
@@ -87,10 +87,10 @@ parameters:
     value: "/nfs/home/nglazman/data/ADNI_stripped_masks"
   encoder_type:
     value: "vqvae"
-  patch_contrastive:
-    value: true
-  patch_grid:
-    value: [4, 5, 4]
+  # patch_contrastive:
+  #   value: true
+  # patch_grid:
+  #   value: [4, 5, 4]
   labels_path:
     value: "/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv"
   vqvae_nb_levels:
@@ -125,6 +125,8 @@ parameters:
     value: 0.5
   image_spacing:
     value: 1.0
+  inject_style_to_decoder:
+    value: true
   cache_dataset:
     value: true
   vq_commitment_weight:
@@ -137,6 +139,8 @@ parameters:
     value: 0.99
   mask_mode:
     value: ["fixed"]
+  cb_reset_threshold:
+    value: 5
 
 command:
   - ${env}
