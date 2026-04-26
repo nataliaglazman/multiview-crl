@@ -44,7 +44,14 @@ except ImportError:
 
 import numpy as np
 import torch
+import torch.multiprocessing as _torch_mp
 import torch.nn.functional as F
+
+# NFS workaround: the default "file_descriptor" sharing strategy hits FD limits
+# and stalls when DataLoader workers hand off large tensors over NFS. Switching
+# to "file_system" routes the handoff via shm-style temp files and is the
+# standard fix for NFS-backed clusters.
+_torch_mp.set_sharing_strategy("file_system")
 from sklearn.preprocessing import StandardScaler
 from torch.amp import GradScaler, autocast
 from torch.nn.utils import clip_grad_norm_
@@ -1859,19 +1866,19 @@ def main(args):
                                     logger.info(
                                         f"  [EVALUATION] Running periodic content/style separation metrics (step {step})..."
                                     )
-                                    # Fresh non-persistent loader for eval — the original
-                                    # NFS hang was triggered by *idle persistent* workers
-                                    # spanning 2k training steps, not by workers per se.
-                                    # Spinning up a few short-lived workers per eval keeps
-                                    # the 200-batch loop I/O-bound rather than
-                                    # CPU-decode-bound, while still avoiding the deadlock.
-                                    _eval_workers = min(getattr(args, "workers", 0) or 0, 4)
+                                    # Single-process eval loader. Multi-worker eval was
+                                    # hanging on NFS (workers stuck on torch.load of
+                                    # cached .pt files, never returning a batch). The
+                                    # 200-batch loop is short enough that synchronous
+                                    # loading is acceptable, and it surfaces any worker
+                                    # exception in the main thread instead of swallowing it.
                                     eval_loader_kwargs = {
                                         **dataloader_kwargs,
                                         "shuffle": False,
-                                        "num_workers": _eval_workers,
+                                        "num_workers": 0,
                                         "persistent_workers": False,
-                                        "prefetch_factor": 2 if _eval_workers > 0 else None,
+                                        "prefetch_factor": None,
+                                        "pin_memory": False,
                                     }
                                     eval_loader = DataLoader(val_dataset, **eval_loader_kwargs)
                                     faulthandler.dump_traceback_later(300, repeat=True, file=sys.stderr)
