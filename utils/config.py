@@ -302,6 +302,16 @@ def parse_args() -> argparse.ArgumentParser:
         "before injection into the decoder, giving style its own discrete bottleneck.",
     )
     parser.add_argument(
+        "--style-dropout-prob",
+        type=float,
+        default=0.0,
+        help="Per-sample, per-level probability of zeroing the style tensor before it is "
+        "injected into the decoder during training. Forces the decoder to reconstruct from "
+        "content alone on a fraction of samples, pressuring content to carry anatomy. "
+        "No expectation-rescaling. 0.0 disables (default). Typical values: 0.1–0.5. "
+        "Only active when --inject-style-to-decoder is set.",
+    )
+    parser.add_argument(
         "--style-embed-dim",
         type=int,
         default=None,

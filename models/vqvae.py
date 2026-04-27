@@ -505,6 +505,7 @@ class VQVAE(HelperModule):
         pass_full_to_next_level: bool = False,  # If True, pass full (unmasked) encoder output to the next level instead of zeroing style
         skip_decoder_concat_levels: list[int]
         | None = None,  # Levels whose code_q contributions are zeroed in the final (level-0) decoder's input concat. E.g. [0] drops the finest, [0, 1] drops the two finest — leaving only the top (coarsest) codes to drive reconstruction.
+        style_dropout_prob: float = 0.0,  # Per-sample, per-level probability of zeroing the style tensor before it is injected into the decoder. Forces the decoder to reconstruct from content alone on a fraction of samples, pressuring content to carry anatomy. No expectation-rescaling. Active only in training mode.
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -514,6 +515,8 @@ class VQVAE(HelperModule):
         self.narrow_encoder_input = narrow_encoder_input
         self.top_level_recon_only = top_level_recon_only
         self.pass_full_to_next_level = pass_full_to_next_level
+        assert 0.0 <= style_dropout_prob < 1.0, f"style_dropout_prob must be in [0, 1), got {style_dropout_prob}"
+        self.style_dropout_prob = float(style_dropout_prob)
 
         # --- Decoder-side level skipping ---
         # Zero out the contributions of the listed levels' code_q tensors in the
@@ -1306,7 +1309,13 @@ class VQVAE(HelperModule):
                 else:
                     decoder_in = torch.cat([code_q, *code_outputs], axis=1)
                 if self.inject_style_to_decoder and l in style_spatials:
-                    decoder_outputs.append(decoder(decoder_in, style=style_spatials[l]))
+                    _style = style_spatials[l]
+                    if self.training and self.style_dropout_prob > 0.0:
+                        _keep = (
+                            torch.rand(_style.shape[0], 1, 1, 1, 1, device=_style.device) >= self.style_dropout_prob
+                        ).to(_style.dtype)
+                        _style = _style * _keep
+                    decoder_outputs.append(decoder(decoder_in, style=_style))
                 else:
                     decoder_outputs.append(decoder(decoder_in))
 
@@ -1324,6 +1333,11 @@ class VQVAE(HelperModule):
             decoder_outputs = []
 
         encoder_features = encoder_pools if pool_only else encoder_outputs
+
+        # Stash style activations so callers (eval/notebook code that wants to
+        # re-decode with swapped content codes but original style) can pass
+        # them back into decode_codes(..., styles=...).
+        self._last_style_spatials = {k: v.detach() for k, v in style_spatials.items()}
 
         return (
             final_output,

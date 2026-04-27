@@ -1200,6 +1200,7 @@ def main(args):
             top_level_recon_only=getattr(args, "top_level_recon_only", False),
             pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
             skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
+            style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
         )
         if getattr(args, "channels_last", False):
             vqvae_model = vqvae_model.to(memory_format=torch.channels_last_3d)
