@@ -1139,16 +1139,23 @@ def main(args):
             **dataset_kwargs,
         )
     else:
-        # Use a resumable sampler so mid-epoch resume continues the same
-        # shuffle order — otherwise EMA codebook stats and any contrastive
-        # queues see a different sample stream after resume and transiently
-        # drift. Defer InfiniteIterator construction until after load_checkpoint
-        # restores the sampler offset.
-        train_dl_kwargs = {**dataloader_kwargs}
-        train_dl_kwargs.pop("shuffle", None)
-        train_sampler = ResumableSampler(train_dataset, seed=getattr(args, "seed", 0) or 0)
-        train_loader = DataLoader(train_dataset, sampler=train_sampler, **train_dl_kwargs)
-        train_iterator = None  # built after load_checkpoint below
+        if getattr(args, "no_resumable_sampler", False):
+            # Pre-Apr-25 behaviour: DataLoader's built-in RandomSampler draws
+            # from the global torch RNG, so augmentations / Gumbel noise /
+            # dropout see the same random stream as before.
+            train_loader = DataLoader(train_dataset, **dataloader_kwargs)
+            train_iterator = InfiniteIterator(train_loader)
+        else:
+            # Use a resumable sampler so mid-epoch resume continues the same
+            # shuffle order — otherwise EMA codebook stats and any contrastive
+            # queues see a different sample stream after resume and transiently
+            # drift. Defer InfiniteIterator construction until after load_checkpoint
+            # restores the sampler offset.
+            train_dl_kwargs = {**dataloader_kwargs}
+            train_dl_kwargs.pop("shuffle", None)
+            train_sampler = ResumableSampler(train_dataset, seed=getattr(args, "seed", 0) or 0)
+            train_loader = DataLoader(train_dataset, sampler=train_sampler, **train_dl_kwargs)
+            train_iterator = None  # built after load_checkpoint below
 
     print(f"Train dataset size: {len(train_dataset)} samples.")
 

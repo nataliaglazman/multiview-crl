@@ -646,6 +646,17 @@ def parse_args() -> argparse.ArgumentParser:
         "Only used when --early-stopping-patience > 0. Default: 0.0.",
     )
     parser.add_argument(
+        "--no-resumable-sampler",
+        action="store_true",
+        default=False,
+        help="Disable the ResumableSampler and fall back to DataLoader(shuffle=True). "
+        "Use to A/B-test whether the ResumableSampler (added Apr 25) is responsible "
+        "for run-to-run reproducibility regressions vs pre-Apr-25 baselines. With "
+        "this flag set, the sample order is drawn from the global torch RNG (as "
+        "before), which also restores the random stream consumed by augmentations, "
+        "Gumbel noise, dropout, etc. Mid-epoch resume continuity is lost.",
+    )
+    parser.add_argument(
         "--shared-brain-mask",
         action="store_true",
         default=False,
