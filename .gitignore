@@ -98,6 +98,7 @@ check*
 
 merged_data.csv
 eval/nifti_outputs/
+pseudo_mri_outputs/
 
 # pyenv
 #   For a library or package, you might want to ignore these files since the code is

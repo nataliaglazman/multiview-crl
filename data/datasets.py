@@ -1765,3 +1765,122 @@ class MyCustomDataset(MultiviewDataset):
             "index": idx,
             "label": lbl,
         }
+
+
+class SyntheticBrainDataset(MultiviewDataset):
+    """Drop-in synthetic baseline mirroring the MyCustomDataset contract.
+
+    Wraps eval.synthetic_dataset.Synthetic3DDisentanglementDataset and emits
+    {"image": [v1, v2], "mask": [m1, m2], "z_image": [{}, {}], "index", "label"}
+    so the existing training / val loops accept it without changes.
+
+    Most kwargs (spacing, crop_margin, transform, labels_path, masks_dir,
+    asymmetric_aug, shared_brain_mask, cache_dir, ...) are accepted for API
+    parity but ignored — the synthetic generator owns its own pipeline.
+    """
+
+    mean_per_channel = [0.0]
+    std_per_channel = [1.0]
+    FACTORS = {"image": {0: "view"}}
+    DISCRETE_FACTORS = {"image": {}}
+    LATENT_SPACES = {"image": {}}
+
+    _SPLIT_OFFSETS = {"train": 0, "val": 1, "test": 2}
+    _DEFAULT_SAMPLES = {"train": 1000, "val": 100, "test": 200}
+
+    def __init__(
+        self,
+        data_dir=None,
+        change_lists=None,
+        mode="train",
+        spatial_size=None,
+        cache=False,
+        synthetic_mode="pseudo_mri",
+        synthetic_seed=42,
+        synthetic_num_samples=None,
+        synthetic_num_samples_per_mode=None,
+        synthetic_n_content=5,
+        synthetic_n_style=3,
+        **kwargs,
+    ):
+        super().__init__()
+        from eval.synthetic_dataset import Synthetic3DDisentanglementDataset
+
+        self.mode = mode
+        self.change_lists = change_lists or []
+
+        # Resolution: cubic. Take min of spatial_size if provided so we don't
+        # exceed any axis the user intended; default to 32 (cheap baseline).
+        if spatial_size is not None:
+            res = int(min(spatial_size))
+        else:
+            res = 32
+        self.res = res
+
+        if synthetic_num_samples is None:
+            if synthetic_num_samples_per_mode is not None:
+                synthetic_num_samples = synthetic_num_samples_per_mode.get(mode, self._DEFAULT_SAMPLES.get(mode, 100))
+            else:
+                synthetic_num_samples = self._DEFAULT_SAMPLES.get(mode, 100)
+
+        split_seed = synthetic_seed + self._SPLIT_OFFSETS.get(mode, 0)
+        self._inner = Synthetic3DDisentanglementDataset(
+            num_samples=synthetic_num_samples,
+            res=res,
+            seed=split_seed,
+            mode=synthetic_mode,
+            n_content=synthetic_n_content,
+            n_style=synthetic_n_style,
+        )
+        self.num_samples = synthetic_num_samples
+        self.synthetic_mode = synthetic_mode
+
+        # Optional in-memory cache — synthetic rendering is non-trivial at
+        # higher res, and DataLoader workers re-render every epoch otherwise.
+        self._cache = [None] * synthetic_num_samples if cache else None
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getview__(self, item):
+        """Not used — overridden __getitem__."""
+
+    def __get_augmented_view__(self, idx, z, change_list):
+        """Not used — second view comes from the synthetic generator."""
+
+    def sample(self, size, random_state=None):
+        return np.array([[]]), []
+
+    def _render(self, idx):
+        x_v1, x_v2, latents = self._inner[idx]
+        # Inner returns 4D tensors [1, res, res, res] — matches MyCustomDataset.
+        # Prefer the renderer's true foreground mask when available (pseudo_mri
+        # path); fall back to intensity threshold for primitives / random modes
+        # whose renderers don't expose tissue maps.
+        if "brain_mask" in latents:
+            mask = latents.pop("brain_mask")
+            mask_t1 = mask
+            mask_t2 = mask.clone()
+        else:
+            mask_t1 = (x_v1 > 0.05).float()
+            mask_t2 = (x_v2 > 0.05).float()
+        return x_v1, x_v2, mask_t1, mask_t2, latents
+
+    def __getitem__(self, idx):
+        if self._cache is not None and self._cache[idx] is not None:
+            x_v1, x_v2, mask_t1, mask_t2, latents = self._cache[idx]
+        else:
+            x_v1, x_v2, mask_t1, mask_t2, latents = self._render(idx)
+            if self._cache is not None:
+                self._cache[idx] = (x_v1, x_v2, mask_t1, mask_t2, latents)
+
+        return {
+            "image": [x_v1, x_v2],
+            "mask": [mask_t1, mask_t2],
+            "z_image": [{}, {}],
+            "index": idx,
+            "label": 0,
+            # Ground-truth latents — not consumed by training, but available
+            # for downstream R²/DCI probes via `data["gt_latents"]`.
+            "gt_latents": latents,
+        }

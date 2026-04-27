@@ -49,7 +49,44 @@ def parse_args() -> argparse.ArgumentParser:
             "ADNI_registered",
             "ADNI_stripped_masks",
             "custom",
+            "synthetic",
         ],
+    )
+    parser.add_argument(
+        "--synthetic-mode",
+        type=str,
+        default="pseudo_mri",
+        choices=["pseudo_mri", "primitives", "random"],
+        help="Renderer used by the synthetic dataset (only when --dataset_name=synthetic).",
+    )
+    parser.add_argument(
+        "--synthetic-num-train",
+        type=int,
+        default=1000,
+        help="Number of synthetic training samples per epoch.",
+    )
+    parser.add_argument(
+        "--synthetic-num-val",
+        type=int,
+        default=100,
+        help="Number of synthetic validation samples.",
+    )
+    parser.add_argument(
+        "--synthetic-num-test",
+        type=int,
+        default=200,
+        help="Number of synthetic test samples.",
+    )
+    parser.add_argument("--synthetic-seed", type=int, default=42)
+    parser.add_argument("--synthetic-n-content", type=int, default=5)
+    parser.add_argument("--synthetic-n-style", type=int, default=3)
+    parser.add_argument(
+        "--synthetic-res",
+        type=int,
+        default=32,
+        help="Cubic resolution for synthetic volumes. Used as the default "
+        "--spatial-size when --dataset_name=synthetic and --spatial-size is unset. "
+        "Should be divisible by 8 for the 3-level VQ-VAE.",
     )
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default=None)
@@ -810,6 +847,25 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         setattr(args, "n_views", 2)
         setattr(args, "subsets", [(0, 1)])
         logger.info("  -> Using custom dataset (image only, 2 views)")
+    elif args.dataset_name == "synthetic":
+        args.DATASETCLASS = datasets.SyntheticBrainDataset
+        setattr(args, "modalities", ["image"])
+        setattr(args, "n_views", 2)
+        setattr(args, "subsets", [(0, 1)])
+        setattr(args, "content_indices", [list(range(args.content_dim))])
+        setattr(args, "style_indices", list(range(args.content_dim, args.total_dim)))
+        # Default the model's spatial_size to the synthetic resolution so the
+        # VAE decoder isn't sized for ADNI volumes (91,109,91) when the inputs
+        # are actually 32x32x32. VQ-VAE infers shape from input and is unaffected.
+        if getattr(args, "spatial_size", None) is None:
+            res = getattr(args, "synthetic_res", 32)
+            setattr(args, "spatial_size", (res, res, res))
+            logger.info(f"  -> Auto-set --spatial-size to ({res}, {res}, {res}) from --synthetic-res")
+        logger.info("  -> Using synthetic dataset (pseudo-MRI, 2 views)")
+        logger.info(f"  -> Content dimensions: 0-{args.content_dim - 1} ({args.content_dim} dims)")
+        logger.info(
+            f"  -> Style dimensions: {args.content_dim}-{args.total_dim - 1} ({args.total_dim - args.content_dim} dims)"
+        )
     elif args.dataset_name in ["adni", "ADNI_registered", "ADNI_stripped", "ADNI_stripped_masks"]:
         args.DATASETCLASS = datasets.MyCustomDataset
         setattr(args, "modalities", ["image"])

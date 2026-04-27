@@ -1073,6 +1073,20 @@ def main(args):
         "asymmetric_aug": getattr(args, "asymmetric_aug", False),
         "shared_brain_mask": getattr(args, "shared_brain_mask", False),
     }
+    if args.dataset_name == "synthetic":
+        dataset_kwargs.update(
+            {
+                "synthetic_mode": getattr(args, "synthetic_mode", "pseudo_mri"),
+                "synthetic_seed": getattr(args, "synthetic_seed", 42),
+                "synthetic_n_content": getattr(args, "synthetic_n_content", 5),
+                "synthetic_n_style": getattr(args, "synthetic_n_style", 3),
+                "synthetic_num_samples_per_mode": {
+                    "train": getattr(args, "synthetic_num_train", 1000),
+                    "val": getattr(args, "synthetic_num_val", 100),
+                    "test": getattr(args, "synthetic_num_test", 200),
+                },
+            }
+        )
     dataloader_kwargs = {
         "batch_size": args.batch_size,
         "shuffle": True,
