@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
+REPO=${REPO:-"/nfs/home/nglazman/crl-2/multiview-crl"}
 STEPS=${STEPS:-5000}
 RES=${RES:-32}
 TAG=${TAG:-synthetic-pseudo-mri}

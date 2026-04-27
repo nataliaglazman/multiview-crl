@@ -87,6 +87,11 @@ class PseudoMRIRenderer(nn.Module):
 
         return tissue_map, lesion_mask
 
+    # render_modality consumes 3 style components (gain, bias, noise sigma).
+    # Shorter z_style is right-padded with zeros so it never IndexErrors —
+    # missing components simply default to "no modulation".
+    N_STYLE_COMPONENTS = 3
+
     def render_modality(self, tissue_map, lesion_mask, z_style, modality, view_seed, device):
         """View-specific rendering. z_style drives gain, bias, and noise sigma."""
         gen = torch.Generator(device=device).manual_seed(int(view_seed))
@@ -99,6 +104,12 @@ class PseudoMRIRenderer(nn.Module):
             lesion_int = 1.0
         else:
             raise ValueError(f"Unknown modality {modality}")
+
+        # Right-pad z_style with zeros if the caller supplied fewer components
+        # than render_modality consumes. Defensive guard for misconfigured runs.
+        if z_style.numel() < self.N_STYLE_COMPONENTS:
+            pad = torch.zeros(self.N_STYLE_COMPONENTS - z_style.numel(), device=z_style.device)
+            z_style = torch.cat([z_style.flatten(), pad])
 
         gain = 1.0 + z_style[0].clamp(-1, 1) * 0.3
         bias = z_style[1].clamp(-1, 1) * 0.1
@@ -251,6 +262,29 @@ class Synthetic3DDisentanglementDataset(Dataset):
         # and 8³ for the fissure (slightly higher frequency).
         self.n_deformation_grid = n_deformation_grid
         self.n_fissure_grid = n_fissure_grid
+
+        if mode == "pseudo_mri":
+            # render_structure indexes z_content[0..4] and render_modality indexes
+            # z_style[0..2]. Smaller values silently disable the corresponding
+            # anatomical / nuisance factor — warn loudly so it's not a surprise.
+            if n_content < 5:
+                import warnings
+
+                warnings.warn(
+                    f"pseudo_mri renderer consumes z_content[0..4] but n_content={n_content}. "
+                    f"Missing components will default to 0 (no anatomical variation on those axes). "
+                    f"Pass --synthetic-n-content 5 (or greater) to fully exercise the renderer.",
+                    stacklevel=2,
+                )
+            if n_style < PseudoMRIRenderer.N_STYLE_COMPONENTS:
+                import warnings
+
+                warnings.warn(
+                    f"pseudo_mri renderer consumes z_style[0..{PseudoMRIRenderer.N_STYLE_COMPONENTS - 1}] "
+                    f"but n_style={n_style}. Missing components will default to 0 (no contrast/noise modulation). "
+                    f"Pass --synthetic-n-style {PseudoMRIRenderer.N_STYLE_COMPONENTS} to fully exercise it.",
+                    stacklevel=2,
+                )
 
         # Hyperparameters from the recipe (used by primitives / random modes)
         self.grid_t = 4  # Top-level spatial grid

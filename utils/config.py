@@ -858,7 +858,7 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         # VAE decoder isn't sized for ADNI volumes (91,109,91) when the inputs
         # are actually 32x32x32. VQ-VAE infers shape from input and is unaffected.
         if getattr(args, "spatial_size", None) is None:
-            res = getattr(args, "synthetic_res", 32)
+            res = getattr(args, "synthetic_res", 64)
             setattr(args, "spatial_size", (res, res, res))
             logger.info(f"  -> Auto-set --spatial-size to ({res}, {res}, {res}) from --synthetic-res")
         logger.info("  -> Using synthetic dataset (pseudo-MRI, 2 views)")
