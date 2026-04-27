@@ -29,17 +29,41 @@ class PseudoMRIRenderer(nn.Module):
         )
         return F.interpolate(n, size=(self.res,) * 3, mode="trilinear", align_corners=False).squeeze(0).squeeze(0)
 
-    def render_structure(self, z_content, sample_seed, device):
-        """Deterministic given (z_content, sample_seed). Identical across views."""
-        gen = torch.Generator(device=device).manual_seed(int(sample_seed))
+    def _upsample_field(self, z_field, device):
+        """Trilinear-upsample a small (K, K, K) latent grid to volume resolution.
 
+        Deterministic — same latent grid → same field. Used in place of seeded
+        random noise so the gyral / fissure pattern becomes a discoverable
+        content latent rather than an unrecoverable per-sample seed.
+        """
+        return (
+            F.interpolate(
+                z_field.to(device).float()[None, None],
+                size=(self.res,) * 3,
+                mode="trilinear",
+                align_corners=False,
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
+
+    def render_structure(self, z_content, z_deformation, z_fissure, device):
+        """Deterministic given (z_content, z_deformation, z_fissure). Shared across views.
+
+        z_deformation: small (K, K, K) grid → trilinear-upsampled into the
+            cortical-deformation field (gyral pattern proxy). Replaces the
+            previous random `_seeded_noise(scale=8, ...)` call so the gyral
+            pattern is a recoverable latent rather than an unrecoverable seed.
+        z_fissure: small (K, K, K) grid → drives the longitudinal fissure
+            wiggle (was `_seeded_noise(scale=16, ...)`).
+        """
         radii_wm = 0.5 + z_content[0].clamp(-1, 1) * 0.1
         radii_gm = radii_wm + 0.15
         ventricle_size = 0.15 + z_content[1].clamp(-1, 1) * 0.05
 
         dist = torch.norm(self.coords, dim=-1)
 
-        deformation = self._seeded_noise(scale=8, gen=gen, device=device) * 0.1
+        deformation = self._upsample_field(z_deformation, device) * 0.1
         deformed_dist = dist + deformation
 
         mask_gm = deformed_dist < radii_gm
@@ -49,7 +73,7 @@ class PseudoMRIRenderer(nn.Module):
         ventricle_split = torch.abs(x_coords) > 0.05
         mask_csf = (deformed_dist < ventricle_size) & ventricle_split
 
-        fissure_noise = self._seeded_noise(scale=16, gen=gen, device=device) * 0.05
+        fissure_noise = self._upsample_field(z_fissure, device) * 0.05
         fissure_mask = (torch.abs(x_coords + fissure_noise) < 0.03) & mask_gm
 
         tissue_map = torch.zeros_like(dist, dtype=torch.long)
@@ -203,7 +227,17 @@ class Synthetic3DDisentanglementDataset(Dataset):
     Outputs: (View 1, View 2, Ground Truth Latents Dictionary)
     """
 
-    def __init__(self, num_samples=1000, res=32, seed=42, mode="primitives", n_content=5, n_style=3):
+    def __init__(
+        self,
+        num_samples=1000,
+        res=32,
+        seed=42,
+        mode="primitives",
+        n_content=5,
+        n_style=3,
+        n_deformation_grid=4,
+        n_fissure_grid=8,
+    ):
         super().__init__()
         self.num_samples = num_samples
         self.res = res
@@ -211,6 +245,12 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.seed = seed
         self.n_content = n_content
         self.n_style = n_style
+        # Spatial-content grid sizes for pseudo_mri mode. Trilinear-upsampled
+        # to (res, res, res) → drives the deformation / fissure fields.
+        # Default 4³ for the gyral pattern (low-frequency, ~16 dof per axis at res=32)
+        # and 8³ for the fissure (slightly higher frequency).
+        self.n_deformation_grid = n_deformation_grid
+        self.n_fissure_grid = n_fissure_grid
 
         # Hyperparameters from the recipe (used by primitives / random modes)
         self.grid_t = 4  # Top-level spatial grid
@@ -244,6 +284,21 @@ class Synthetic3DDisentanglementDataset(Dataset):
         sample_gen = torch.Generator().manual_seed(sample_seed)
 
         z_content = torch.randn(self.n_content, generator=sample_gen)
+        # Spatial content latents — drive the gyral pattern and fissure shape
+        # via deterministic upsampling. Each subject gets a unique, recoverable
+        # cortical pattern instead of an unrecoverable seed.
+        z_deformation = torch.randn(
+            self.n_deformation_grid,
+            self.n_deformation_grid,
+            self.n_deformation_grid,
+            generator=sample_gen,
+        )
+        z_fissure = torch.randn(
+            self.n_fissure_grid,
+            self.n_fissure_grid,
+            self.n_fissure_grid,
+            generator=sample_gen,
+        )
         z_style_v1 = torch.randn(self.n_style, generator=sample_gen)
         z_style_v2 = torch.randn(self.n_style, generator=sample_gen)
 
@@ -251,7 +306,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
         with torch.no_grad():
             tissue, lesion = self.renderer.render_structure(
                 z_content,
-                sample_seed=sample_seed,
+                z_deformation,
+                z_fissure,
                 device=device,
             )
             x_v1 = self.renderer.render_modality(
@@ -278,6 +334,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
 
         latents = {
             "z_content": z_content,
+            "z_deformation": z_deformation,
+            "z_fissure": z_fissure,
             "z_style_v1": z_style_v1,
             "z_style_v2": z_style_v2,
             "brain_mask": brain_mask,

@@ -1,35 +1,34 @@
 #!/usr/bin/env bash
-# Synthetic-data baseline #1: primitives mode.
-# Hierarchical categorical content/style — the cleanest test of the model's
-# disentanglement objective. Content (z_t, z_b_shared) is bit-identical across
-# views; only z_b_style_v{1,2} differs. Use this FIRST: if the model can't
-# disentangle here, the architecture has a problem.
+# Synthetic-data baseline #2: pseudo-MRI mode.
+# Continuous content/style with brain-like appearance. Run AFTER primitives —
+# tests whether the model's conv inductive biases hold up on image-shaped data
+# that resembles real T1/FLAIR. Smaller GT factor count than primitives
+# (5 content + 3 style) so use tighter --content-dim / --total-dim.
 #
-# Knobs vs. ablation_baseline.sh:
-#   - --dataset_name synthetic            (replaces ADNI_stripped_masks)
-#   - --synthetic-mode primitives         (categorical hierarchy, not brain-like)
-#   - --synthetic-res 32                  (32^3 — divisible by 8, fits VQ-VAE)
-#   - --content-style-levels 0 1 2        (mask at every level — primitives data is hierarchical)
-#   - --content-dim 32 / --total-dim 64   (more GT factors than pseudo_mri, room to disentangle)
-#   - no --labels-path / --cache-dir / --select-by-gated-score
-#     (synthetic has no diagnosis labels — selection by val loss instead)
+# Differences from run_synthetic.sh (primitives variant):
+#   - --synthetic-mode pseudo_mri
+#   - --content-style-levels 0          (content here is global, not hierarchical)
+#   - --content-dim 16 / --total-dim 32 (only 5 GT content dims — don't oversize)
+#   - exposes --synthetic-n-content / --synthetic-n-style (pseudo_mri-only)
 
 set -euo pipefail
 
 REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 STEPS=${STEPS:-5000}
 RES=${RES:-32}
-TAG=${TAG:-synthetic-primitives}
+TAG=${TAG:-synthetic-pseudo-mri}
 
 PYTHONPATH=${REPO} \
 python ${REPO}/training/main_multimodal.py \
     --dataset_name synthetic \
-    --synthetic-mode primitives \
+    --synthetic-mode pseudo_mri \
     --synthetic-res ${RES} \
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-num-test 400 \
     --synthetic-seed 42 \
+    --synthetic-n-content 5 \
+    --synthetic-n-style 3 \
     --model-id "${TAG}" \
     --encoder-type vqvae \
     --vqvae-nb-levels 3 \
@@ -38,9 +37,9 @@ python ${REPO}/training/main_multimodal.py \
     --vqvae-nb-entries 256 \
     --vqvae-scaling-rates 2 2 2 \
     --vq-commitment-weight 0.25 \
-    --content-style-levels 0 1 2 \
-    --content-dim 32 \
-    --total-dim 64 \
+    --content-style-levels 0 \
+    --content-dim 16 \
+    --total-dim 32 \
     --mask-mode fixed \
     --separate-encoders \
     --pass-full-to-next-level \
