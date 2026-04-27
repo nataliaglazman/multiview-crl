@@ -172,7 +172,7 @@ def _metrics_for_level(reps_lvl):
     content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
     try:
         clf = LogisticRegression(max_iter=1000, solver="lbfgs")
-        scores = cross_val_score(clf, content_scaled, modality_labels, cv=5, scoring="accuracy")
+        scores = cross_val_score(clf, content_scaled, modality_labels, cv=5, scoring="accuracy", n_jobs=-1)
         content_modality_acc = float(np.mean(scores))
     except Exception:
         content_modality_acc = 0.5
@@ -205,7 +205,7 @@ def _metrics_for_level(reps_lvl):
     style_all_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(style_all)
     try:
         clf2 = LogisticRegression(max_iter=1000, solver="lbfgs")
-        scores2 = cross_val_score(clf2, style_all_scaled, modality_labels, cv=5, scoring="accuracy")
+        scores2 = cross_val_score(clf2, style_all_scaled, modality_labels, cv=5, scoring="accuracy", n_jobs=-1)
         style_modality_acc = float(np.mean(scores2))
     except Exception:
         style_modality_acc = 0.5
@@ -227,7 +227,7 @@ def _metrics_for_level(reps_lvl):
         try:
             content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
             clf_d = LogisticRegression(max_iter=1000, solver="lbfgs")
-            scores_d = cross_val_score(clf_d, content_scaled, y_all, cv=5, scoring="accuracy")
+            scores_d = cross_val_score(clf_d, content_scaled, y_all, cv=5, scoring="accuracy", n_jobs=-1)
             diag_acc = float(np.mean(scores_d))
         except Exception:
             diag_acc = chance
