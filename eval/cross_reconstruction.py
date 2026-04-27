@@ -22,6 +22,31 @@ from sklearn.model_selection import cross_val_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import Normalizer, StandardScaler
 
+# Module-level cache of validation input batches. The val set is fixed across
+# training, but NFS reads + torch.load of the .pt cache dominated the periodic
+# eval cost. We pull the batches once into CPU memory and reuse them on every
+# subsequent call. Keyed by (id(dataset), max_batches) so a different dataset
+# or batch budget transparently rebuilds the cache.
+_BATCH_CACHE = {"key": None, "batches": None}
+
+
+def _get_cached_batches(dataloader, max_batches):
+    key = (id(dataloader.dataset), max_batches)
+    if _BATCH_CACHE["key"] == key and _BATCH_CACHE["batches"] is not None:
+        return _BATCH_CACHE["batches"]
+    cached = []
+    for batch_idx, data in enumerate(dataloader):
+        if batch_idx >= max_batches:
+            break
+        entry = {"image": [s.detach().cpu() for s in data["image"]]}
+        if "label" in data:
+            lbl = data["label"]
+            entry["label"] = lbl.detach().cpu() if torch.is_tensor(lbl) else np.asarray(lbl)
+        cached.append(entry)
+    _BATCH_CACHE["key"] = key
+    _BATCH_CACHE["batches"] = cached
+    return cached
+
 
 def _mask_to_indices(mask):
     """Convert a soft/hard content mask tensor to (v0_idx, v1_idx) channel lists.
@@ -63,9 +88,9 @@ def _collect_representations(vqvae_model, dataloader, args, device, max_batches=
         per_level = {lvl: {"c_v0": [], "c_v1": [], "s_v0": [], "s_v1": []} for lvl in levels}
         labels_buf = []
 
-        for batch_idx, data in enumerate(dataloader):
-            if batch_idx >= max_batches:
-                break
+        batches = _get_cached_batches(dataloader, max_batches)
+
+        for data in batches:
             samples = data["image"]
             n_views = len(samples)
             if n_views < 2:
@@ -171,8 +196,8 @@ def _metrics_for_level(reps_lvl):
 
     content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
     try:
-        clf = LogisticRegression(max_iter=1000, solver="lbfgs")
-        scores = cross_val_score(clf, content_scaled, modality_labels, cv=5, scoring="accuracy")
+        clf = LogisticRegression(max_iter=200, solver="lbfgs", n_jobs=-1)
+        scores = cross_val_score(clf, content_scaled, modality_labels, cv=3, scoring="accuracy", n_jobs=-1)
         content_modality_acc = float(np.mean(scores))
     except Exception:
         content_modality_acc = 0.5
@@ -204,8 +229,8 @@ def _metrics_for_level(reps_lvl):
     style_all = np.concatenate([reps_lvl["style_v0"], reps_lvl["style_v1"]], axis=0)
     style_all_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(style_all)
     try:
-        clf2 = LogisticRegression(max_iter=1000, solver="lbfgs")
-        scores2 = cross_val_score(clf2, style_all_scaled, modality_labels, cv=5, scoring="accuracy")
+        clf2 = LogisticRegression(max_iter=200, solver="lbfgs", n_jobs=-1)
+        scores2 = cross_val_score(clf2, style_all_scaled, modality_labels, cv=3, scoring="accuracy", n_jobs=-1)
         style_modality_acc = float(np.mean(scores2))
     except Exception:
         style_modality_acc = 0.5
@@ -226,8 +251,8 @@ def _metrics_for_level(reps_lvl):
         chance = float(counts.max()) / float(len(y_all))
         try:
             content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
-            clf_d = LogisticRegression(max_iter=1000, solver="lbfgs")
-            scores_d = cross_val_score(clf_d, content_scaled, y_all, cv=5, scoring="accuracy")
+            clf_d = LogisticRegression(max_iter=200, solver="lbfgs", n_jobs=-1)
+            scores_d = cross_val_score(clf_d, content_scaled, y_all, cv=3, scoring="accuracy", n_jobs=-1)
             diag_acc = float(np.mean(scores_d))
         except Exception:
             diag_acc = chance

@@ -1896,7 +1896,7 @@ def main(args):
                                             eval_loader,
                                             args,
                                             device,
-                                            max_batches=200,
+                                            max_batches=50,
                                         )
                                     finally:
                                         faulthandler.cancel_dump_traceback_later()
