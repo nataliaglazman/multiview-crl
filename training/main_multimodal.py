@@ -192,9 +192,9 @@ def train_step(
                 encoder_outputs,
                 estimated_content_indices,
                 _,
-                _,
+                fwd_id_outputs,
                 fwd_soft_content_masks,
-                _,  # style_id_outputs
+                fwd_style_id_outputs,
             ) = vqvae_model(
                 images,
                 return_recon=compute_recon,
@@ -1703,10 +1703,30 @@ def main(args):
                                     _acc_parts.append(f"L{_li}={step_moco_diag[_ak]:.1%}")
                             if _acc_parts:
                                 _acc_str = f" | Top1Acc: {', '.join(_acc_parts)}"
+                    # True per-batch utilization (from actual quantizer assignments).
+                    # id_outputs is appended coarsest-first inside VQVAE.forward, so
+                    # id_outputs[i] corresponds to codebook level (nb_levels - 1 - i).
+                    _cb_true = {}  # level → (n_unique, perplexity)
+                    if fwd_id_outputs:
+                        with torch.no_grad():
+                            for _i, _ids in enumerate(fwd_id_outputs):
+                                if _ids is None:
+                                    continue
+                                _cb_lvl = _raw.nb_levels - 1 - _i
+                                _flat = _ids.reshape(-1)
+                                _n_total = _raw.codebooks[_cb_lvl].n_embed
+                                _counts = torch.bincount(_flat, minlength=_n_total).float()
+                                _p = _counts / _counts.sum().clamp(min=1.0)
+                                _entropy = -(_p * _p.clamp(min=1e-12).log()).sum().item()
+                                _cb_true[_cb_lvl] = (_flat.unique().numel(), float(np.exp(_entropy)))
                     _cb_parts = []
                     for _cb_lvl, _cb in enumerate(_raw.codebooks):
-                        _alive = (_cb.cluster_size > 1.0).sum().item()
-                        _cb_parts.append(f"L{_cb_lvl}={_alive:.0f}/{_cb.n_embed}")
+                        _alive_ema = (_cb.cluster_size > 1.0).sum().item()
+                        if _cb_lvl in _cb_true:
+                            _u, _ppl = _cb_true[_cb_lvl]
+                            _cb_parts.append(f"L{_cb_lvl}={_u}/{_cb.n_embed}(ppl={_ppl:.1f},ema={_alive_ema:.0f})")
+                        else:
+                            _cb_parts.append(f"L{_cb_lvl}=ema{_alive_ema:.0f}/{_cb.n_embed}")
                     _cb_str = f" | CB: {', '.join(_cb_parts)}" if _cb_parts else ""
                     _gan_str = ""
                     if step_moco_diag.get("GAN/G_adv_loss") is not None:
@@ -1784,12 +1804,38 @@ def main(args):
                                 )
                                 tb_writer.add_scalar(f"Split/GateEntropy_L{lvl_key}", gate_ent, step)
 
-                        # Log codebook utilization per level
+                        # Log codebook utilization per level.
+                        # `Active_L*` / `Utilization_L*` are EMA-based ("ever recently used")
+                        # and overestimate when the encoder has collapsed onto a small
+                        # subset of codes. `UniqueIdx_L*`, `UtilizationTrue_L*`, and
+                        # `Perplexity_L*` are computed from the actual quantizer
+                        # assignments on the current batch and are the honest signal.
+                        _style_true = {}
+                        if hasattr(_raw, "style_codebooks") and _raw.style_codebooks and fwd_style_id_outputs:
+                            with torch.no_grad():
+                                for _sc_key_int, _ids in fwd_style_id_outputs.items():
+                                    if _ids is None:
+                                        continue
+                                    _sc_key = str(_sc_key_int)
+                                    if _sc_key not in _raw.style_codebooks:
+                                        continue
+                                    _flat = _ids.reshape(-1)
+                                    _n_total = _raw.style_codebooks[_sc_key].n_embed
+                                    _counts = torch.bincount(_flat, minlength=_n_total).float()
+                                    _p = _counts / _counts.sum().clamp(min=1.0)
+                                    _entropy = -(_p * _p.clamp(min=1e-12).log()).sum().item()
+                                    _style_true[_sc_key] = (_flat.unique().numel(), float(np.exp(_entropy)))
                         for _cb_lvl, _cb in enumerate(_raw.codebooks):
                             _alive = (_cb.cluster_size > 1.0).sum().item()
                             _total = _cb.n_embed
                             tb_writer.add_scalar(f"Codebook/Active_L{_cb_lvl}", _alive, step)
                             tb_writer.add_scalar(f"Codebook/Utilization_L{_cb_lvl}", _alive / _total, step)
+                            if _cb_lvl in _cb_true:
+                                _u, _ppl = _cb_true[_cb_lvl]
+                                tb_writer.add_scalar(f"Codebook/UniqueIdx_L{_cb_lvl}", _u, step)
+                                tb_writer.add_scalar(f"Codebook/UtilizationTrue_L{_cb_lvl}", _u / _total, step)
+                                tb_writer.add_scalar(f"Codebook/Perplexity_L{_cb_lvl}", _ppl, step)
+                                tb_writer.add_scalar(f"Codebook/PerplexityRatio_L{_cb_lvl}", _ppl / _total, step)
                         # Style codebook utilization (if active)
                         if hasattr(_raw, "style_codebooks") and _raw.style_codebooks:
                             for _sc_key, _sc_cb in _raw.style_codebooks.items():
@@ -1797,6 +1843,14 @@ def main(args):
                                 _s_total = _sc_cb.n_embed
                                 tb_writer.add_scalar(f"Codebook/StyleActive_L{_sc_key}", _s_alive, step)
                                 tb_writer.add_scalar(f"Codebook/StyleUtil_L{_sc_key}", _s_alive / _s_total, step)
+                                if _sc_key in _style_true:
+                                    _u, _ppl = _style_true[_sc_key]
+                                    tb_writer.add_scalar(f"Codebook/StyleUniqueIdx_L{_sc_key}", _u, step)
+                                    tb_writer.add_scalar(f"Codebook/StyleUtilTrue_L{_sc_key}", _u / _s_total, step)
+                                    tb_writer.add_scalar(f"Codebook/StylePerplexity_L{_sc_key}", _ppl, step)
+                                    tb_writer.add_scalar(
+                                        f"Codebook/StylePerplexityRatio_L{_sc_key}", _ppl / _s_total, step
+                                    )
 
                         # Log MoCo stale-queue diagnostics
                         if step_moco_diag:
@@ -1829,11 +1883,23 @@ def main(args):
                                 wandb_log[f"codebook/dead_L{_cb_lvl}"] = (
                                     (_cb.cluster_size < getattr(_cb, "reset_threshold", 1.0)).sum().item()
                                 )
+                                if _cb_lvl in _cb_true:
+                                    _u, _ppl = _cb_true[_cb_lvl]
+                                    wandb_log[f"codebook/unique_idx_L{_cb_lvl}"] = _u
+                                    wandb_log[f"codebook/utilization_true_L{_cb_lvl}"] = _u / _cb.n_embed
+                                    wandb_log[f"codebook/perplexity_L{_cb_lvl}"] = _ppl
+                                    wandb_log[f"codebook/perplexity_ratio_L{_cb_lvl}"] = _ppl / _cb.n_embed
                             if hasattr(_raw, "style_codebooks") and _raw.style_codebooks:
                                 for _sc_key, _sc_cb in _raw.style_codebooks.items():
                                     _s_alive = (_sc_cb.cluster_size > 1.0).sum().item()
                                     wandb_log[f"codebook/style_active_L{_sc_key}"] = _s_alive
                                     wandb_log[f"codebook/style_util_L{_sc_key}"] = _s_alive / _sc_cb.n_embed
+                                    if _sc_key in _style_true:
+                                        _u, _ppl = _style_true[_sc_key]
+                                        wandb_log[f"codebook/style_unique_idx_L{_sc_key}"] = _u
+                                        wandb_log[f"codebook/style_utilization_true_L{_sc_key}"] = _u / _sc_cb.n_embed
+                                        wandb_log[f"codebook/style_perplexity_L{_sc_key}"] = _ppl
+                                        wandb_log[f"codebook/style_perplexity_ratio_L{_sc_key}"] = _ppl / _sc_cb.n_embed
                             wandb.log(wandb_log, step=step)
 
                         if step % args.log_steps == 1 or step == args.train_steps:
