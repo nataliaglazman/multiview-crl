@@ -23,7 +23,8 @@ RUN apt-get update && \
         python3.12 \
         python3.12-venv \
         curl \
-        ca-certificates && \
+        ca-certificates \
+        build-essential && \
     rm -rf /var/lib/apt/lists/*
 
 # Make python3.12 the default python
