@@ -1,8 +1,13 @@
-# NVIDIA CUDA runtime (no Python baked in)
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+# NVIDIA CUDA devel (includes nvcc + libcuda.so stub for torch.compile/Inductor)
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
 
 # Prevent tzdata prompts
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Make the libcuda.so stub visible to the linker so torch.compile/Inductor's
+# generated kernels can resolve `-lcuda` at compile time. At runtime the real
+# libcuda is mounted by the NVIDIA container toolkit.
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH}
 
 ARG USER_ID
 ARG GROUP_ID
@@ -22,6 +27,7 @@ RUN apt-get update && \
     apt-get install -y \
         python3.12 \
         python3.12-venv \
+        python3.12-dev \
         curl \
         ca-certificates \
         build-essential && \
