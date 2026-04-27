@@ -174,18 +174,32 @@ code(
     """\
 @torch.no_grad()
 def encode_batch(model, x, n_views=2):
-    \"\"\"Returns encoder_outputs (list of pooled features per level) and the
-    soft content masks (dict: level -> mask tensor or (mask_v0, mask_v1) tuple).\"\"\"
-    out = model(x, return_recon=False, pool_only=True, n_views=n_views,
+    \"\"\"Returns spatial encoder maps (list per level) and the soft content masks.
+
+    NOTE: We deliberately use `pool_only=False` and pool ourselves with
+    mean+std. The model's built-in mean-pool is preceded by a GroupNorm whose
+    affine bias makes the spatial mean of every channel sample-independent —
+    so mean-pooling there returns a constant vector and probes find nothing.
+    Pooling per-channel std (variance is preserved by GroupNorm's affine
+    transform: Var[γn + β] = γ² Var[n]) recovers the signal.
+    \"\"\"
+    out = model(x, return_recon=False, pool_only=False, n_views=n_views,
                 subsets=[(0, 1)], patch_grid=None)
-    # forward returns: (recon, diffs, encoder_outputs, est_idx, _, _, fwd_soft_masks, _)
-    encoder_outputs = out[2]
-    soft_masks = out[6]
-    return encoder_outputs, soft_masks
+    spatial_maps = out[2]   # list of (n_views*B, C, D, H, W)
+    soft_masks   = out[6]
+    return spatial_maps, soft_masks
+
+
+def pool_mean_std(s):
+    \"\"\"Concat per-channel mean and std → (n_views*B, 2C). Layout: [μ_0, ..., μ_{C-1}, σ_0, ..., σ_{C-1}].\"\"\"
+    m = s.mean(dim=[2, 3, 4])
+    v = s.std(dim=[2, 3, 4])
+    return torch.cat([m, v], dim=1)
 
 
 # Pre-allocate storage
 features_per_level = {lvl: {"v1": [], "v2": []} for lvl in range(nb_levels)}
+n_channels_per_level = {}
 gt = {k: [] for k in ds[0]["gt_latents"].keys()}
 
 batch_size = 16
@@ -194,13 +208,13 @@ loader = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=False, n
 for batch in loader:
     v1, v2 = batch["image"]
     x = torch.cat([v1, v2], dim=0).to(DEVICE)
-    enc_outs, soft_masks = encode_batch(vqvae_model, x, n_views=2)
+    spatial_maps, soft_masks = encode_batch(vqvae_model, x, n_views=2)
 
-    for lvl, enc in enumerate(enc_outs):
-        # enc shape: (n_views * B, C) after pool_only=True
-        n_views_x_b = enc.shape[0]
-        B = n_views_x_b // 2
-        feats = enc.reshape(2, B, -1).cpu().numpy()
+    for lvl, s in enumerate(spatial_maps):
+        n_channels_per_level[lvl] = s.shape[1]
+        pooled = pool_mean_std(s)                     # (2*B, 2C)
+        n2B = pooled.shape[0]; B = n2B // 2
+        feats = pooled.reshape(2, B, -1).cpu().numpy()
         features_per_level[lvl]["v1"].append(feats[0])
         features_per_level[lvl]["v2"].append(feats[1])
 
@@ -217,13 +231,25 @@ gt = {k: np.concatenate(v, 0) for k, v in gt.items()}
 # Flatten ground-truth tensors so each sample becomes a vector.
 gt_flat = {k: v.reshape(v.shape[0], -1).astype(np.float32) for k, v in gt.items()}
 
-print("Per-level encoder feature shapes (view 1):")
+print("Per-level pooled feature shapes (view 1) — layout is [mean_chans, std_chans]:")
 for lvl, d in features_per_level.items():
-    print(f"  level {lvl}: {d['v1'].shape}")
+    C = n_channels_per_level[lvl]
+    print(f"  level {lvl}: {d['v1'].shape} (C={C}, pooled width=2C={2*C})")
 
 print("\\nGround-truth factor shapes:")
 for k, v in gt_flat.items():
     print(f"  {k}: {v.shape}")
+
+# Sanity: the std slice should have non-zero variance across samples.
+print("\\nSanity check (std slice variance across samples):")
+for lvl in range(nb_levels):
+    C = n_channels_per_level[lvl]
+    f = features_per_level[lvl]["v1"]
+    mean_slice = f[:, :C]
+    std_slice  = f[:, C:]
+    print(f"  L{lvl}: mean-slice std-across-samples={mean_slice.std(0).mean():.4f}  "
+          f"(expected ~0 due to GroupNorm); "
+          f"std-slice std-across-samples={std_slice.std(0).mean():.4f}  (expected > 0)")
 """
 )
 
@@ -238,7 +264,7 @@ Levels not in `content_style_levels` are treated as "all content".
 code(
     """\
 def get_mask_indices(soft_masks, lvl, n_channels):
-    \"\"\"Return (content_idx, style_idx) for a given level.\"\"\"
+    \"\"\"Return channel indices (in the original C-wide spatial map) for content / style.\"\"\"
     if lvl not in soft_masks:
         return np.arange(n_channels), np.array([], dtype=int)
     m = soft_masks[lvl]
@@ -250,6 +276,18 @@ def get_mask_indices(soft_masks, lvl, n_channels):
     return content_idx, style_idx
 
 
+def to_pool_indices(c_idx, s_idx, C):
+    \"\"\"Map channel indices into the 2C-wide [mean | std] pooled vector layout.
+
+    For each spatial channel `c`, the pooled vector has its mean at position `c`
+    and its std at position `C + c`. We index BOTH so the probe sees the full
+    (mean, std) signal for that channel — even though the mean half is constant.
+    \"\"\"
+    c_pool = np.concatenate([c_idx, c_idx + C]) if len(c_idx) else np.array([], dtype=int)
+    s_pool = np.concatenate([s_idx, s_idx + C]) if len(s_idx) else np.array([], dtype=int)
+    return c_pool, s_pool
+
+
 # Re-grab one batch's masks (they don't change between batches)
 v1, v2 = ds[0]["image"]
 x = torch.cat([v1[None], v2[None]], 0).to(DEVICE)
@@ -257,10 +295,12 @@ _, masks_for_split = encode_batch(vqvae_model, x, n_views=2)
 
 splits = {}
 for lvl in range(nb_levels):
-    n_ch = features_per_level[lvl]["v1"].shape[-1]
-    c_idx, s_idx = get_mask_indices(masks_for_split, lvl, n_ch)
-    splits[lvl] = {"content": c_idx, "style": s_idx}
-    print(f"level {lvl}: {n_ch} channels → content={len(c_idx)}, style={len(s_idx)}")
+    C = n_channels_per_level[lvl]
+    c_idx, s_idx = get_mask_indices(masks_for_split, lvl, C)
+    c_pool, s_pool = to_pool_indices(c_idx, s_idx, C)
+    splits[lvl] = {"content": c_pool, "style": s_pool}
+    print(f"level {lvl}: C={C} channels → content={len(c_idx)}, style={len(s_idx)} "
+          f"(pooled indices: content×2={len(c_pool)}, style×2={len(s_pool)})")
 """
 )
 
@@ -448,6 +488,90 @@ md(
 If content purity is high but style purity is near 0, the model collapsed style channels — they
 might be unused, in which case lower `--total-dim` next time. If both are near 0, the encoder isn't
 learning anything useful (check loss curves).
+"""
+)
+
+md(
+    """## 10. TB sanity check — did the contrastive loss actually engage during training?
+
+Open the run's TensorBoard log dir (`<save_dir>/tb/` or whatever your trainer uses) and look
+for these scalars:
+
+- **`contrastive/level_*/top1_acc`** (or similarly named): for batch size B, *chance* is `1/B`.
+  If this stays near `1/B` for the whole run → the contrastive loss never engaged.
+  Healthy runs climb above 0.5 within a few thousand steps.
+- **`contrastive/level_*/loss`**: should drop from `ln(B)` toward 0 (e.g. ln(16) ≈ 2.77 → < 1.0).
+
+Quick programmatic check below — pulls scalars from the TB event file using `tbparse` if
+installed, otherwise prints the path you can open manually.
+"""
+)
+
+code(
+    """\
+import glob
+tb_dir = os.path.join(os.path.dirname(CHECKPOINT_PATH), "tb")
+event_files = glob.glob(os.path.join(tb_dir, "events.out.tfevents.*"))
+print(f"Looking for TB events in: {tb_dir}")
+print(f"Found {len(event_files)} event file(s).")
+
+if not event_files:
+    print("\\nNo TB events found — open your run's log dir manually and check that "
+          "contrastive accuracy climbed above 1/batch_size.")
+else:
+    try:
+        from tbparse import SummaryReader
+        reader = SummaryReader(tb_dir, pivot=False)
+        scalars = reader.scalars
+        contrastive_tags = [t for t in scalars["tag"].unique()
+                             if "contrast" in t.lower() and ("acc" in t.lower() or "loss" in t.lower())]
+        print(f"\\nFound {len(contrastive_tags)} contrastive scalar(s).")
+        for tag in sorted(contrastive_tags)[:12]:
+            sub = scalars[scalars["tag"] == tag].sort_values("step")
+            if len(sub) == 0: continue
+            first, last = sub.iloc[0]["value"], sub.iloc[-1]["value"]
+            print(f"  {tag:60s}  first={first:.4f}  last={last:.4f}  Δ={last-first:+.4f}")
+
+        # Hard call: did top-1 accuracy actually move?
+        acc_tags = [t for t in contrastive_tags if "acc" in t.lower()]
+        if acc_tags:
+            print("\\nVerdict on contrastive engagement:")
+            for tag in acc_tags:
+                sub = scalars[scalars["tag"] == tag].sort_values("step")
+                last = sub.iloc[-1]["value"]
+                B = settings.get("batch_size", 16)
+                chance = 1.0 / B
+                if last > chance * 3:
+                    verdict = "✓ engaged"
+                elif last > chance * 1.5:
+                    verdict = "~ marginal"
+                else:
+                    verdict = "✗ STUCK AT CHANCE — contrastive loss never engaged"
+                print(f"  {tag}: last={last:.3f}, chance≈{chance:.3f}  → {verdict}")
+    except ImportError:
+        print("\\n`tbparse` not installed (pip install tbparse). Open the TB dir manually:")
+        print(f"  tensorboard --logdir {tb_dir}")
+"""
+)
+
+md(
+    """### If contrastive accuracy is at chance
+
+Then the bug is upstream of this notebook — the contrastive loss never learned to align cross-view
+positives. The most likely cause given the GroupNorm+mean-pool issue we just diagnosed:
+
+> The trainer also computes its contrastive loss on a mean-pooled feature whose per-channel
+> spatial mean is constant across samples (since GroupNorm + affine bias). With constant features,
+> all positives and negatives have the same similarity, so the InfoNCE loss is at `ln(B)` forever.
+
+Two possible fixes for the trainer (not applied — flagging for discussion):
+
+1. **Pool with std instead of mean** in the contrastive feature path
+   (`models/vqvae.py` around line 1103: replace `enc_in_v0_pool.mean(dim=[2,3,4])` with
+   `enc_in_v0_pool.std(dim=[2,3,4])`, or concat both).
+2. **Pool BEFORE the encoder's final GroupNorm**, by exposing an intermediate-feature hook.
+
+Option 1 is one line and matches what this notebook does to recover signal.
 """
 )
 
