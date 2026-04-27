@@ -354,10 +354,11 @@ class Synthetic3DDisentanglementDataset(Dataset):
 
 
 import numpy as np
-import plotly.graph_objects as go
 
 
 def view_3d_volume(tensor_3d):
+    import plotly.graph_objects as go
+
     vol = tensor_3d.squeeze().cpu().numpy()
     res = vol.shape[0]
 
