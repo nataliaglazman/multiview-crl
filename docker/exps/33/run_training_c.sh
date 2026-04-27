@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl \
+python /nfs/home/nglazman/crl-2/multiview-crl/training/main_multimodal.py \
+    --dataroot /nfs/home/nglazman/data \
+    --dataset_name ADNI_stripped_masks \
+    --encoder-type vqvae \
+    --model-id multiview-new-loss-test-l1-normal-full-test-style-contrastive-loss \
+    --scale-recon-loss 10 \
+    --patch-contrastive --patch-grid 4 5 4 \
+    --labels-path /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv \
+    --moco-queue-size 8192 \
+    --vqvae-nb-entries 512 256 128 \
+    --moco-momentum 0.99 \
+    --mask-mode fixed \
+    --vqvae-nb-levels 3 \
+    --lr 0.0001 \
+    --content-dim 128 \
+    --total-dim 512 \
+    --vqvae-scaling-rates 2 2 2 \
+    --train-steps 80000 \
+    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 48 \
+    --batch-size 3 \
+    --spatial-size 150 180 150 \
+    --use-amp \
+    --resume-training \
+    --workers 8 \
+    --recon-loss-start-step 2000 \
+    --tau 0.07 \
+    --scale-contrastive-loss 10.0 \
+    --content-style-levels 0 1 2 \
+    --cross-view-negs-only \
+    --scale-style-contrastive-loss 0.1 \
+    --content-ratios 0.5 0.3 0.2 \
+    --separate-encoders \
+    --gradient-accumulation-steps 4 \
+    --gradient-checkpointing \
+    --skip-recon-ratio 0.5 \
+    --image-spacing 1.0 \
+    --cache-dataset \
+    --vq-commitment-weight 0.25 \
+    --cache-dir /nfs/home/nglazman/cache/multiview \
+    --contrastive-level-weights 1.0 1.0 1.0 \
+    --pass-full-to-next-level \
+
+
