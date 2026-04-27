@@ -1,0 +1,185 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            pbf2de821bcq07g44na0wud4zx1ypqol:
+                args:
+                    - --batch_size=4
+                    - --bt_lambda=0.044520206945651265
+                    - --cache_dataset=True
+                    - --cache_dir=/nfs/home/nglazman/cache/multiview
+                    - --content_dim=128
+                    - --content_ratios=[0.7, 0.5, 0.3]
+                    - --content_style_levels=[0, 1, 2]
+                    - --contrastive_level_weights=[1, 1, 1]
+                    - --cross_view_negs_only=True
+                    - --dataroot=/nfs/home/nglazman/data
+                    - --dataset_name=ADNI_stripped
+                    - --encoder_type=vqvae
+                    - --gradient_accumulation_steps=4
+                    - --gradient_checkpointing=True
+                    - --image_spacing=1
+                    - --labels_path=/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv
+                    - --lr=2.4349033224577163e-05
+                    - --mask_mode=fixed
+                    - --moco_momentum=0.99
+                    - --moco_queue_size=8192
+                    - --pass_full_to_next_level=True
+                    - --patch_contrastive=True
+                    - --patch_grid=[4, 5, 4]
+                    - --recon_loss_start_step=2000
+                    - --resume_training=True
+                    - --scale_contrastive_loss=0.963186767268007
+                    - --scale_recon_loss=4.443926831008995
+                    - --separate_encoders=True
+                    - --skip_recon_ratio=0.5
+                    - --spatial_size=[150, 180, 150]
+                    - --tau=1.6498923307839983
+                    - --total_dim=512
+                    - --train_steps=40000
+                    - --use_amp=True
+                    - --use_wandb=True
+                    - --vq_commitment_weight=0.25
+                    - --vqvae_embed_dim=64
+                    - --vqvae_hidden_channels=80
+                    - --vqvae_nb_levels=3
+                    - --vqvae_scaling_rates=[2, 2, 2]
+                    - --workers=8
+                codePath: scripts/sweep_train.py
+                codePathLocal: scripts/sweep_train.py
+                cpu_count: 128
+                cpu_count_logical: 256
+                cudaVersion: "12.4"
+                disk:
+                    /:
+                        total: "1887374536704"
+                        used: "1401905942528"
+                email: glazmann@yahoo.co.uk
+                executable: /usr/bin/python
+                gpu: NVIDIA A100-SXM4-40GB
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "42949672960"
+                      name: NVIDIA A100-SXM4-40GB
+                      uuid: GPU-672ffaf3-4aa1-ac29-b706-59641921ac2e
+                host: sweep-10-0-0
+                memory:
+                    total: "1081968930816"
+                os: Linux-5.4.0-216-generic-x86_64-with-glibc2.35
+                program: /nfs/home/nglazman/crl-2/multiview-crl/scripts/sweep_train.py
+                python: CPython 3.12.13
+                root: /nfs/home/nglazman/crl-2/multiview-crl
+                startedAt: "2026-04-13T15:56:27.549162Z"
+                writerId: pbf2de821bcq07g44na0wud4zx1ypqol
+        m: []
+        python_version: 3.12.13
+        t:
+            "3":
+                - 2
+                - 14
+            "4": 3.12.13
+            "5": 0.25.1
+            "12": 0.25.1
+            "13": linux-x86_64
+batch_size:
+    value: 4
+bt_lambda:
+    value: 0.044520206945651265
+cache_dataset:
+    value: true
+cache_dir:
+    value: /nfs/home/nglazman/cache/multiview
+content_dim:
+    value: 128
+content_ratios:
+    value:
+        - 0.7
+        - 0.5
+        - 0.3
+content_style_levels:
+    value:
+        - 0
+        - 1
+        - 2
+contrastive_level_weights:
+    value:
+        - 1
+        - 1
+        - 1
+cross_view_negs_only:
+    value: true
+dataroot:
+    value: /nfs/home/nglazman/data
+dataset_name:
+    value: ADNI_stripped
+encoder_type:
+    value: vqvae
+gradient_accumulation_steps:
+    value: 4
+gradient_checkpointing:
+    value: true
+image_spacing:
+    value: 1
+labels_path:
+    value: /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv
+lr:
+    value: 2.4349033224577163e-05
+mask_mode:
+    value: fixed
+moco_momentum:
+    value: 0.99
+moco_queue_size:
+    value: 8192
+pass_full_to_next_level:
+    value: true
+patch_contrastive:
+    value: true
+patch_grid:
+    value:
+        - 4
+        - 5
+        - 4
+recon_loss_start_step:
+    value: 2000
+resume_training:
+    value: true
+scale_contrastive_loss:
+    value: 0.963186767268007
+scale_recon_loss:
+    value: 4.443926831008995
+separate_encoders:
+    value: true
+skip_recon_ratio:
+    value: 0.5
+spatial_size:
+    value:
+        - 150
+        - 180
+        - 150
+tau:
+    value: 1.6498923307839983
+total_dim:
+    value: 512
+train_steps:
+    value: 40000
+use_amp:
+    value: true
+use_wandb:
+    value: true
+vq_commitment_weight:
+    value: 0.25
+vqvae_embed_dim:
+    value: 64
+vqvae_hidden_channels:
+    value: 80
+vqvae_nb_levels:
+    value: 3
+vqvae_scaling_rates:
+    value:
+        - 2
+        - 2
+        - 2
+workers:
+    value: 8

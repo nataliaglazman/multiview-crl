@@ -9,6 +9,8 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+docker/
+wandb/
 .Python
 build/
 develop-eggs/

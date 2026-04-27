@@ -24,7 +24,7 @@ REPO=${REPO:-/nfs/home/nglazman/crl-2/multiview-crl}
 DATAROOT=${DATAROOT:-/nfs/home/nglazman/data}
 LABELS=${LABELS:-/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv}
 CACHE=${CACHE:-/nfs/home/nglazman/cache/multiview}
-STEPS=${STEPS:-30000}
+STEPS=${STEPS:-90000}
 WANDB_PROJECT=${WANDB_PROJECT:-multiview-crl-capacity}
 GROUP=${GROUP:-phase1-L0}
 
@@ -47,6 +47,7 @@ for SEED in "${SEEDS[@]}"; do
             --dataset_name ADNI_stripped_masks \
             --labels-path ${LABELS} \
             --cache-dataset \
+	    --cb-reset-threshold 5 \
             --cache-dir ${CACHE} \
             --model-id "${TAG}" \
             --seed ${SEED} \
@@ -60,7 +61,7 @@ for SEED in "${SEEDS[@]}"; do
             --vqvae-nb-entries 256 \
             --vqvae-scaling-rates 2 2 2 \
             --vq-commitment-weight 0.25 \
-            --content-style-levels 0 \
+            --content-style-levels 0 1 2 \
             --content-ratios ${RATIO_L0} \
             --mask-mode fixed \
             --separate-encoders \
@@ -76,7 +77,7 @@ for SEED in "${SEEDS[@]}"; do
             --scale-recon-loss 1.0 \
             --scale-adv-loss 0.0 \
             --tau 0.1 \
-            --lr 0.01 \
+            --lr 0.001 \
             --batch-size 4 \
             --train-steps ${STEPS} \
             --spatial-size 150 180 150 \

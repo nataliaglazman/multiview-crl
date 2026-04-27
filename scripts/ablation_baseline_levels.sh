@@ -69,7 +69,6 @@ python ${REPO}/training/main_multimodal.py \
     --gradient-checkpointing \
     --select-by-gated-score \
     --separation-floor-diagnosis-info 0.1 \
-    --compile-model --channels-last \
     --quantize-style \
     --inject-style-to-decoder \
     --resume-training
