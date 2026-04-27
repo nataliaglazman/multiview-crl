@@ -1206,9 +1206,6 @@ def main(args):
         if getattr(args, "channels_last", False):
             vqvae_model = vqvae_model.to(memory_format=torch.channels_last_3d)
             logger.info("  Memory format: channels_last_3d")
-        if getattr(args, "compile_model", False):
-            logger.info("  Compiling VQ-VAE-2 with torch.compile mode=max-autotune (this may take a minute)...")
-            vqvae_model = torch.compile(vqvae_model, mode="max-autotune")
         # Auxiliary modality heads: linear probes for gradient-reversal
         # (content invariance) and CE (style sufficiency). Built eagerly here
         # so their params are picked up by the main optimizer's param loop.
@@ -1226,6 +1223,13 @@ def main(args):
                 _heads[f"style_L{_lvl}"] = torch.nn.Linear(_sc, 2)
             vqvae_model._aux_modality_heads = _heads
             logger.info(f"  Aux modality heads: adv={_adv_on} suf={_suf_on} levels={list(_heads.keys())}")
+
+        # Compile AFTER attaching all submodules but BEFORE DataParallel.
+        # DataParallel(compiled) is unsupported; submodules attached to an
+        # OptimizedModule live outside the traced graph.
+        if getattr(args, "compile_model", False):
+            logger.info("  Compiling VQ-VAE-2 with torch.compile mode=reduce-overhead...")
+            vqvae_model = torch.compile(vqvae_model, mode="reduce-overhead")
 
         vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
         vqvae_model.to(device)
