@@ -1339,6 +1339,12 @@ class VQVAE(HelperModule):
         # them back into decode_codes(..., styles=...).
         self._last_style_spatials = {k: v.detach() for k, v in style_spatials.items()}
 
+        # Stash actual quantizer assignments so the training loop's logging
+        # block (which lives outside this forward) can compute honest per-step
+        # codebook utilization without re-running the encoder.
+        self._last_id_outputs = [None if t is None else t.detach() for t in id_outputs]
+        self._last_style_id_outputs = {k: v.detach() for k, v in style_id_outputs.items()}
+
         return (
             final_output,
             diffs,

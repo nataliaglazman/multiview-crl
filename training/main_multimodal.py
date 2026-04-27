@@ -192,9 +192,9 @@ def train_step(
                 encoder_outputs,
                 estimated_content_indices,
                 _,
-                fwd_id_outputs,
+                _,
                 fwd_soft_content_masks,
-                fwd_style_id_outputs,
+                _,  # style_id_outputs
             ) = vqvae_model(
                 images,
                 return_recon=compute_recon,
@@ -1706,10 +1706,12 @@ def main(args):
                     # True per-batch utilization (from actual quantizer assignments).
                     # id_outputs is appended coarsest-first inside VQVAE.forward, so
                     # id_outputs[i] corresponds to codebook level (nb_levels - 1 - i).
+                    _last_id_outputs = getattr(_raw, "_last_id_outputs", None)
+                    _last_style_id_outputs = getattr(_raw, "_last_style_id_outputs", None)
                     _cb_true = {}  # level → (n_unique, perplexity)
-                    if fwd_id_outputs:
+                    if _last_id_outputs:
                         with torch.no_grad():
-                            for _i, _ids in enumerate(fwd_id_outputs):
+                            for _i, _ids in enumerate(_last_id_outputs):
                                 if _ids is None:
                                     continue
                                 _cb_lvl = _raw.nb_levels - 1 - _i
@@ -1811,9 +1813,9 @@ def main(args):
                         # `Perplexity_L*` are computed from the actual quantizer
                         # assignments on the current batch and are the honest signal.
                         _style_true = {}
-                        if hasattr(_raw, "style_codebooks") and _raw.style_codebooks and fwd_style_id_outputs:
+                        if hasattr(_raw, "style_codebooks") and _raw.style_codebooks and _last_style_id_outputs:
                             with torch.no_grad():
-                                for _sc_key_int, _ids in fwd_style_id_outputs.items():
+                                for _sc_key_int, _ids in _last_style_id_outputs.items():
                                     if _ids is None:
                                         continue
                                     _sc_key = str(_sc_key_int)
