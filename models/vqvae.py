@@ -1100,8 +1100,8 @@ class VQVAE(HelperModule):
                         pool_v0 = F.adaptive_avg_pool3d(enc_in_v0_pool, _grid).flatten(2)
                         pool_v1 = F.adaptive_avg_pool3d(enc_in_v1_pool, _grid).flatten(2)
                     else:
-                        pool_v0 = enc_in_v0_pool.std(dim=[2, 3, 4])
-                        pool_v1 = enc_in_v1_pool.std(dim=[2, 3, 4])
+                        pool_v0 = enc_in_v0_pool.mean(dim=[2, 3, 4])
+                        pool_v1 = enc_in_v1_pool.mean(dim=[2, 3, 4])
                     encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
 
                 # Apply mask and isolate content for the next encoder level.
