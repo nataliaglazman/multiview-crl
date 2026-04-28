@@ -172,21 +172,68 @@ plus the model-applied content/style mask split.
 
 code(
     """\
+_inner_for_hooks = vqvae_model.module if hasattr(vqvae_model, "module") else vqvae_model
+
+
+def install_encoder_hooks(model_inner):
+    \"\"\"Install forward hooks on each encoder level so we can capture spatial outputs.
+
+    The model's `forward` nulls `encoder_outputs[l]` after decoding to free memory,
+    so we have to grab the spatial maps in-flight. This works regardless of
+    `pool_only` / `return_recon` settings.
+    \"\"\"
+    captured = {"v0": [None] * model_inner.nb_levels, "v1": [None] * model_inner.nb_levels}
+    handles = []
+
+    def make_hook(view, lvl):
+        def fn(module, inputs, output):
+            captured[view][lvl] = output.detach()
+        return fn
+
+    sep = getattr(model_inner, "separate_encoders", False) and (model_inner.encoders_v1 is not None)
+    for i, enc in enumerate(model_inner.encoders):
+        # When NOT separated, both views go through the same encoder via a concat
+        # batch — we capture and split below.
+        handles.append(enc.register_forward_hook(make_hook("v0" if sep else "shared", i)))
+    if sep:
+        for i, enc in enumerate(model_inner.encoders_v1):
+            handles.append(enc.register_forward_hook(make_hook("v1", i)))
+
+    return captured, handles, sep
+
+
 @torch.no_grad()
 def encode_batch(model, x, n_views=2):
-    \"\"\"Returns spatial encoder maps (list per level) and the soft content masks.
+    \"\"\"Run forward, return spatial encoder maps per level + soft masks.
 
-    NOTE: We deliberately use `pool_only=False` and pool ourselves with
-    mean+std. The model's built-in mean-pool is preceded by a GroupNorm whose
-    affine bias makes the spatial mean of every channel sample-independent —
-    so mean-pooling there returns a constant vector and probes find nothing.
-    Pooling per-channel std (variance is preserved by GroupNorm's affine
-    transform: Var[γn + β] = γ² Var[n]) recovers the signal.
+    We use forward hooks to capture encoder outputs because the model nulls
+    its internal `encoder_outputs` list after the decoder consumes them.
+    Then we mean+std-pool ourselves — see notes above on why.
     \"\"\"
-    out = model(x, return_recon=False, pool_only=False, n_views=n_views,
-                subsets=[(0, 1)], patch_grid=None)
-    spatial_maps = out[2]   # list of (n_views*B, C, D, H, W)
-    soft_masks   = out[6]
+    captured, handles, sep = install_encoder_hooks(_inner_for_hooks)
+    try:
+        # pool_only=True + return_recon=False keeps memory low (skips decoder)
+        # but the value returned at out[2] (encoder_pools) is the constant
+        # mean-pool we don't want. We use the hooks instead.
+        out = model(x, return_recon=False, pool_only=True, n_views=n_views,
+                    subsets=[(0, 1)], patch_grid=None)
+        soft_masks = out[6]
+    finally:
+        for h in handles:
+            h.remove()
+
+    # Build per-level spatial maps in (n_views*B, C, D, H, W) layout.
+    spatial_maps = []
+    if sep:
+        for lvl in range(_inner_for_hooks.nb_levels):
+            v0 = captured["v0"][lvl]
+            v1 = captured["v1"][lvl]
+            spatial_maps.append(torch.cat([v0, v1], dim=0))
+    else:
+        # Shared encoder was called once with concat batch; capture is already
+        # the (n_views*B, C, ...) tensor.
+        for lvl in range(_inner_for_hooks.nb_levels):
+            spatial_maps.append(captured["shared"][lvl])
     return spatial_maps, soft_masks
 
 
