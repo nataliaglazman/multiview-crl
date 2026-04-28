@@ -93,6 +93,7 @@ embed_dim       = settings["vqvae_embed_dim"]
 content_style_levels = settings.get("content_style_levels", [0])
 
 # Per-level content_channels detection from codebook conv_in widths.
+# Conv_in shape is (lvl_entries, content_ch [+ embed_dim if has-upper-conditioning], 1, 1, 1).
 content_ch_per_level = {}
 for lvl in content_style_levels:
     cb_key = f"{prefix}module.codebooks.{lvl}.conv_in.weight"
@@ -105,23 +106,58 @@ for lvl in content_style_levels:
 
 print("Detected content_channels per level:", content_ch_per_level)
 
-# Build the model. Most kwargs come straight from settings.
+# Per-level content ratios — required when the trained pyramid is non-uniform
+# (e.g. L0=10/22, L1=6/10, L2=4/6). VQVAE.build computes
+# `content_channels_per_level[lvl] = round(ratio * hidden_channels)`, so we
+# back-derive each ratio from the detected content channel counts. Without
+# this the constructor falls back to `default_ratio = content_size / total`
+# and all levels collapse to the same width, producing the load_state_dict
+# size-mismatch errors.
+levels_sorted = sorted(content_ch_per_level.keys())
+if levels_sorted:
+    detected_ratios = [content_ch_per_level[lvl] / hidden_channels for lvl in levels_sorted]
+    # Prefer settings.json if present (cleaner provenance), else fall back to detected.
+    content_ratios_arg = settings.get("content_ratios") or detected_ratios
+    _first_content = content_ch_per_level[levels_sorted[0]]
+    content_size_arg = max(1, _first_content)
+    style_size_arg = max(1, hidden_channels - _first_content)
+else:
+    content_ratios_arg = None
+    content_size_arg = hidden_channels
+    style_size_arg = 0
+
+# Forward every shape-sensitive kwarg we know about. Anything missing from
+# settings.json defaults to the constructor's own default.
+def _opt(name, default=None):
+    return settings.get(name, default)
+
 vqvae_model = vqvae.VQVAE(
     in_channels=1,
     hidden_channels=hidden_channels,
-    res_channels=settings.get("vqvae_res_channels", 32),
-    nb_res_layers=settings.get("vqvae_nb_res_layers", 2),
+    res_channels=_opt("vqvae_res_channels", 32),
+    nb_res_layers=_opt("vqvae_nb_res_layers", 2),
     nb_levels=nb_levels,
     embed_dim=embed_dim,
-    nb_entries=settings.get("vqvae_nb_entries", 256),
-    scaling_rates=settings.get("vqvae_scaling_rates", [2, 2, 2]),
-    content_size=max(content_ch_per_level.values()) if content_ch_per_level else hidden_channels,
-    style_size=hidden_channels - (max(content_ch_per_level.values()) if content_ch_per_level else hidden_channels),
+    nb_entries=_opt("vqvae_nb_entries", 256),
+    scaling_rates=_opt("vqvae_scaling_rates", [2, 2, 2]),
+    content_size=content_size_arg,
+    style_size=style_size_arg,
+    content_ratios=content_ratios_arg,
     content_style_levels=content_style_levels,
-    mask_mode=settings.get("mask_mode", "fixed"),
-    separate_encoders=settings.get("separate_encoders", False),
-    pass_full_to_next_level=settings.get("pass_full_to_next_level", False),
+    mask_mode=_opt("mask_mode", "fixed"),
+    separate_encoders=_opt("separate_encoders", False),
+    pass_full_to_next_level=_opt("pass_full_to_next_level", False),
+    narrow_encoder_input=_opt("narrow_encoder_input", False),
+    use_content_projection=_opt("use_content_projection", False),
+    inject_style_to_decoder=_opt("inject_style_to_decoder", False),
+    quantize_style=_opt("quantize_style", False),
+    style_embed_dim=_opt("style_embed_dim", None),
+    style_nb_entries=_opt("style_nb_entries", None),
+    style_injection_mode=_opt("style_injection_mode", "concat"),
+    top_level_recon_only=_opt("top_level_recon_only", False),
+    skip_decoder_concat_levels=_opt("skip_decoder_concat_levels", None),
 ).to(DEVICE)
+print(f"Built VQVAE with content_ratios={content_ratios_arg}")
 
 # Wrap in DataParallel to match training-time key prefixes ("module.").
 vqvae_model = torch.nn.DataParallel(vqvae_model)
