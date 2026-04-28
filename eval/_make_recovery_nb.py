@@ -208,7 +208,10 @@ def encode_batch(model, x, n_views=2):
 
     We use forward hooks to capture encoder outputs because the model nulls
     its internal `encoder_outputs` list after the decoder consumes them.
-    Then we mean+std-pool ourselves — see notes above on why.
+    Spatial maps are then patch-pooled downstream (see ``pool_spatial``)
+    rather than globally pooled — the trainer's std-only global pool throws
+    away the layout that ``z_deformation`` / ``z_fissure`` / ``brain_mask``
+    live in, so probing on it would under-report a working model.
     \"\"\"
     captured, handles, sep = install_encoder_hooks(_inner_for_hooks)
     try:
@@ -237,11 +240,18 @@ def encode_batch(model, x, n_views=2):
     return spatial_maps, soft_masks
 
 
-def pool_mean_std(s):
-    \"\"\"Concat per-channel mean and std → (n_views*B, 2C). Layout: [μ_0, ..., μ_{C-1}, σ_0, ..., σ_{C-1}].\"\"\"
-    m = s.mean(dim=[2, 3, 4])
-    v = s.std(dim=[2, 3, 4])
-    return torch.cat([m, v], dim=1)
+PATCH_GRID = (4, 4, 4)  # adaptive-pool every level to 4³=64 patches → preserves spatial layout
+
+
+def pool_spatial(s, grid=PATCH_GRID):
+    \"\"\"Adaptive-pool (B, C, D, H, W) → (B, C, P), P = prod(grid).
+
+    Replaces global mean/std pooling. Spatial GT factors (z_deformation,
+    z_fissure, brain_mask) only live in the spatial dimensions — collapsing
+    those to per-channel scalars guarantees the probe can't recover them
+    regardless of what the encoder learned.
+    \"\"\"
+    return F.adaptive_avg_pool3d(s, grid).flatten(2)  # (B, C, P)
 
 
 # Pre-allocate storage
@@ -259,9 +269,9 @@ for batch in loader:
 
     for lvl, s in enumerate(spatial_maps):
         n_channels_per_level[lvl] = s.shape[1]
-        pooled = pool_mean_std(s)                     # (2*B, 2C)
-        n2B = pooled.shape[0]; B = n2B // 2
-        feats = pooled.reshape(2, B, -1).cpu().numpy()
+        pooled = pool_spatial(s)                                # (2*B, C, P)
+        n2B, C, P = pooled.shape; B = n2B // 2
+        feats = pooled.reshape(2, B, C * P).cpu().numpy()       # flatten (C, P) → C*P
         features_per_level[lvl]["v1"].append(feats[0])
         features_per_level[lvl]["v2"].append(feats[1])
 
@@ -278,25 +288,21 @@ gt = {k: np.concatenate(v, 0) for k, v in gt.items()}
 # Flatten ground-truth tensors so each sample becomes a vector.
 gt_flat = {k: v.reshape(v.shape[0], -1).astype(np.float32) for k, v in gt.items()}
 
-print("Per-level pooled feature shapes (view 1) — layout is [mean_chans, std_chans]:")
+P = int(np.prod(PATCH_GRID))
+print(f"Per-level pooled feature shapes (view 1) — patch-pooled, reshape order (C × {P}):")
 for lvl, d in features_per_level.items():
     C = n_channels_per_level[lvl]
-    print(f"  level {lvl}: {d['v1'].shape} (C={C}, pooled width=2C={2*C})")
+    print(f"  level {lvl}: {d['v1'].shape}  (C={C}, P={P}, flat={C*P})")
 
 print("\\nGround-truth factor shapes:")
 for k, v in gt_flat.items():
     print(f"  {k}: {v.shape}")
 
-# Sanity: the std slice should have non-zero variance across samples.
-print("\\nSanity check (std slice variance across samples):")
+# Sanity: patch features should vary across samples even where the global mean was constant.
+print("\\nSanity check (per-feature std across samples — should be > 0):")
 for lvl in range(nb_levels):
-    C = n_channels_per_level[lvl]
     f = features_per_level[lvl]["v1"]
-    mean_slice = f[:, :C]
-    std_slice  = f[:, C:]
-    print(f"  L{lvl}: mean-slice std-across-samples={mean_slice.std(0).mean():.4f}  "
-          f"(expected ~0 due to GroupNorm); "
-          f"std-slice std-across-samples={std_slice.std(0).mean():.4f}  (expected > 0)")
+    print(f"  L{lvl}: mean across-sample std={f.std(0).mean():.4f}")
 """
 )
 
@@ -323,16 +329,17 @@ def get_mask_indices(soft_masks, lvl, n_channels):
     return content_idx, style_idx
 
 
-def to_pool_indices(c_idx, s_idx, C):
-    \"\"\"Map channel indices into the 2C-wide [mean | std] pooled vector layout.
+def to_flat_indices(c_idx, s_idx, C, P):
+    \"\"\"Map channel indices into the C*P-wide flat (channel × patch) layout.
 
-    For each spatial channel `c`, the pooled vector has its mean at position `c`
-    and its std at position `C + c`. We index BOTH so the probe sees the full
-    (mean, std) signal for that channel — even though the mean half is constant.
+    With reshape order (B, C, P) → (B, C*P), channel ``c``'s ``P`` patches
+    occupy positions ``[c*P, (c+1)*P)`` in the flat vector.
     \"\"\"
-    c_pool = np.concatenate([c_idx, c_idx + C]) if len(c_idx) else np.array([], dtype=int)
-    s_pool = np.concatenate([s_idx, s_idx + C]) if len(s_idx) else np.array([], dtype=int)
-    return c_pool, s_pool
+    def expand(idx):
+        if len(idx) == 0:
+            return np.array([], dtype=int)
+        return np.concatenate([np.arange(c * P, (c + 1) * P) for c in idx])
+    return expand(c_idx), expand(s_idx)
 
 
 # Re-grab one batch's masks (they don't change between batches)
@@ -340,14 +347,16 @@ v1, v2 = ds[0]["image"]
 x = torch.cat([v1[None], v2[None]], 0).to(DEVICE)
 _, masks_for_split = encode_batch(vqvae_model, x, n_views=2)
 
+P = int(np.prod(PATCH_GRID))
 splits = {}
 for lvl in range(nb_levels):
     C = n_channels_per_level[lvl]
     c_idx, s_idx = get_mask_indices(masks_for_split, lvl, C)
-    c_pool, s_pool = to_pool_indices(c_idx, s_idx, C)
-    splits[lvl] = {"content": c_pool, "style": s_pool}
-    print(f"level {lvl}: C={C} channels → content={len(c_idx)}, style={len(s_idx)} "
-          f"(pooled indices: content×2={len(c_pool)}, style×2={len(s_pool)})")
+    c_flat, s_flat = to_flat_indices(c_idx, s_idx, C, P)
+    splits[lvl] = {"content": c_flat, "style": s_flat}
+    print(f"level {lvl}: C={C} channels (P={P} patches each) → "
+          f"content={len(c_idx)}, style={len(s_idx)} "
+          f"(flat indices: content={len(c_flat)}, style={len(s_flat)})")
 """
 )
 
