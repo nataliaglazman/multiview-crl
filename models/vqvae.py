@@ -1221,7 +1221,10 @@ class VQVAE(HelperModule):
             codebook = self.codebooks[l]
 
             enc_out = encoder_outputs[l]
-            encoder_outputs[l] = None  # free memory
+            # Free memory only when the caller doesn't need the spatial maps;
+            # with pool_only=False the same list is returned to the caller.
+            if pool_only:
+                encoder_outputs[l] = None
 
             if l in content_enc_outs:
                 # This level has content masking: codebook sees only content channels
