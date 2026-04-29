@@ -13,12 +13,24 @@ Usage:
         --run-dir runs/<model_id> \\
         --features content style all \\
         --feature-levels 0 1 \\
+        --task ad_cn \\
         --classifier-epochs 50 --classifier-batch-size 8 \\
-        [--views t1|t2|both] [--unfreeze-encoder]
+        [--views t1|t2|both]
+
+Speed: the encoder runs ONCE over train + val and the resulting spatial maps
+are held in CPU RAM (fp16 by default).  All (level, kind) heads then train on
+those cached tensors, so encoder cost is paid only once regardless of how many
+combinations are compared.  Memory budget per cached level ≈
+``N_rows × hidden_channels × D × H × W × 2 bytes`` (fp16).  At level 0 with
+default ADNI shapes this is ~30 MB per row — keep an eye on it.
+
+Tasks:
+  --task all    — multi-class over every Group label found in the labels CSV
+  --task ad_cn  — binary AD vs CN (CN→0, AD→1); MCI rows are dropped
 
 Outputs (per (level, kind) tag):
-    <run-dir>/disease_classifier_<tag>_best.pt    — best DenseNet head
-    <run-dir>/disease_classifier_metrics.json     — single combined metrics file
+    <run-dir>/disease_classifier_<task>__<tag>_best.pt — best DenseNet head
+    <run-dir>/disease_classifier_metrics.json          — single combined metrics file
 """
 
 from __future__ import annotations
@@ -228,65 +240,137 @@ def _resolve_views(name: str) -> list[int]:
     raise ValueError(f"--views must be t1|t2|both, got {name}")
 
 
-def _batch_to_features(
-    batch, encoder, spec: FeatureSpec, view_idxs: list[int], device, encoder_grad: bool
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Convert a dataloader batch into ``(features, labels)`` ready for the head.
-
-    Stacks views along the batch dimension (label is replicated per view)."""
-    images = batch["image"]  # list of (B, 1, D, H, W) — one tensor per view
-    labels = batch["label"].to(device).long()
-
-    feats_list, lbls_list = [], []
-    ctx = torch.enable_grad() if encoder_grad else torch.no_grad()
-    with ctx:
-        for v in view_idxs:
-            img = images[v].to(device, non_blocking=True)
-            f = _extract_features(encoder, img, view_idx=v, spec=spec)
-            feats_list.append(f)
-            lbls_list.append(labels)
-    return torch.cat(feats_list, dim=0), torch.cat(lbls_list, dim=0)
+# ---------------------------------------------------------------------------
+# Feature precomputation — encoder runs ONCE per dataset, results held in RAM.
+# This is the main speedup: every (level, kind) head trains on cached tensors
+# instead of re-running the encoder each epoch.
+# ---------------------------------------------------------------------------
 
 
-def _epoch(
+@dataclass
+class FeatureCache:
+    """All-channel features per requested level, plus labels and per-view masks."""
+
+    feats: dict[int, torch.Tensor]  # level → (N, C, D, H, W) fp16/fp32 on CPU
+    labels: torch.Tensor  # (N,) long
+    view_ids: torch.Tensor  # (N,) long, 0=T1, 1=T2
+    content_masks: dict[int, dict[int, torch.Tensor]]  # level → view_idx → bool (C,)
+
+    def slice_channels(self, level: int, kind: str, view: int) -> torch.Tensor:
+        """Return the channel-index tensor selecting `kind` from level `level`."""
+        if kind == "all":
+            C = self.feats[level].shape[1]
+            return torch.arange(C)
+        mask = self.content_masks.get(level, {}).get(view)
+        if mask is None:
+            C = self.feats[level].shape[1]
+            return torch.arange(C)
+        if kind == "content":
+            return torch.where(mask)[0]
+        if kind == "style":
+            return torch.where(~mask)[0]
+        raise ValueError(kind)
+
+
+@torch.no_grad()
+def _precompute_features(
     encoder,
-    head,
-    loader,
-    opt,
-    spec,
-    view_idxs,
+    dataset,
+    levels: list[int],
+    view_idxs: list[int],
     device,
+    batch_size: int,
+    workers: int,
+    dtype: torch.dtype,
+) -> FeatureCache:
+    """One pass of the encoder; caches per-level spatial maps to CPU memory."""
+    encoder.eval()
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
+
+    feats_by_level: dict[int, list[torch.Tensor]] = {l: [] for l in levels}
+    labels_list: list[torch.Tensor] = []
+    view_list: list[torch.Tensor] = []
+    masks: dict[int, dict[int, torch.Tensor]] = {l: {} for l in levels}
+
+    n_done = 0
+    for batch in loader:
+        labels = batch["label"].long()
+        for v in view_idxs:
+            img = batch["image"][v].to(device, non_blocking=True)
+            out = encoder(img, return_recon=False, pool_only=False, view_idx=v)
+            encoder_features, soft_masks = out[2], out[6]
+            for L in levels:
+                feats_by_level[L].append(encoder_features[L].to(dtype).cpu())
+                if L not in masks or v not in masks[L]:
+                    m = soft_masks.get(L)
+                    if m is not None:
+                        if isinstance(m, tuple):
+                            m = m[v]
+                        masks[L][v] = m.bool().cpu()
+            labels_list.append(labels)
+            view_list.append(torch.full_like(labels, v))
+        n_done += img.size(0)
+        if n_done % (10 * batch_size) < batch_size:
+            logger.info(f"  precomputed {n_done}/{len(dataset)}")
+
+    feats = {L: torch.cat(feats_by_level[L], 0) for L in levels}
+    labels_all = torch.cat(labels_list, 0)
+    views_all = torch.cat(view_list, 0)
+    return FeatureCache(feats=feats, labels=labels_all, view_ids=views_all, content_masks=masks)
+
+
+def _filter_cache(cache: FeatureCache, valid_mask: torch.Tensor) -> FeatureCache:
+    """Apply a row-mask to all per-row tensors in the cache (in-place new)."""
+    return FeatureCache(
+        feats={L: t[valid_mask] for L, t in cache.feats.items()},
+        labels=cache.labels[valid_mask],
+        view_ids=cache.view_ids[valid_mask],
+        content_masks=cache.content_masks,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cached-feature epoch
+# ---------------------------------------------------------------------------
+
+
+def _epoch_cached(
+    head,
+    feats_full: torch.Tensor,
+    labels: torch.Tensor,
+    ch_idx: torch.Tensor,
+    opt,
+    device,
+    batch_size: int,
     train: bool,
-    encoder_grad: bool,
+    use_amp: bool,
 ) -> tuple[float, float, np.ndarray, np.ndarray]:
     head.train(train)
-    if encoder_grad:
-        encoder.train(train)
-    else:
-        encoder.eval()
+    N = feats_full.shape[0]
+    order = torch.randperm(N) if train else torch.arange(N)
 
-    losses = []
-    all_pred, all_true = [], []
-    for batch in loader:
-        feats, lbls = _batch_to_features(batch, encoder, spec, view_idxs, device, encoder_grad)
-        # Drop samples without a valid label (-1 sentinel from dataset).
-        keep = lbls >= 0
-        if keep.sum() == 0:
-            continue
-        feats, lbls = feats[keep], lbls[keep]
+    losses, preds, trues = [], [], []
+    autocast_ctx = torch.amp.autocast(device_type=device.type, enabled=use_amp and device.type == "cuda")
 
-        logits = head(feats)
-        loss = F.cross_entropy(logits, lbls)
+    for start in range(0, N, batch_size):
+        idx = order[start : start + batch_size]
+        # Slice channels lazily (cheap on CPU), then move to GPU + cast.
+        x = feats_full[idx][:, ch_idx].to(device, non_blocking=True).float()
+        y = labels[idx].to(device, non_blocking=True)
+
+        with autocast_ctx:
+            logits = head(x)
+            loss = F.cross_entropy(logits, y)
         if train:
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
         losses.append(float(loss.detach()))
-        all_pred.append(logits.argmax(1).detach().cpu().numpy())
-        all_true.append(lbls.detach().cpu().numpy())
+        preds.append(logits.argmax(1).detach().cpu().numpy())
+        trues.append(y.detach().cpu().numpy())
 
-    y_pred = np.concatenate(all_pred) if all_pred else np.array([])
-    y_true = np.concatenate(all_true) if all_true else np.array([])
+    y_pred = np.concatenate(preds) if preds else np.array([])
+    y_true = np.concatenate(trues) if trues else np.array([])
     bacc = balanced_accuracy_score(y_true, y_pred) if len(y_true) else float("nan")
     return float(np.mean(losses) if losses else float("nan")), bacc, y_true, y_pred
 
@@ -318,13 +402,62 @@ def parse_args() -> argparse.Namespace:
         help="Which channel slice(s) to compare. Trains one classifier per choice.",
     )
     p.add_argument("--views", default="both", choices=["t1", "t2", "both"])
-    p.add_argument("--unfreeze-encoder", action="store_true")
-    p.add_argument("--encoder-lr", type=float, default=1e-5, help="LR for encoder params if --unfreeze-encoder")
+    p.add_argument(
+        "--task",
+        default="all",
+        choices=["all", "ad_cn"],
+        help="`all`: multi-class over every Group label found in the CSV. "
+        "`ad_cn`: binary AD vs CN, MCI rows are dropped.",
+    )
+    p.add_argument(
+        "--unfreeze-encoder",
+        action="store_true",
+        help="(Disabled in cached mode.) End-to-end fine-tuning is not supported when "
+        "features are cached; this flag is kept for back-compat and is currently a no-op.",
+    )
+    p.add_argument(
+        "--cache-dtype",
+        default="fp16",
+        choices=["fp16", "fp32"],
+        help="Dtype for the on-CPU feature cache. fp16 halves memory; cast back to fp32 for the head.",
+    )
+    p.add_argument("--no-amp", action="store_true", help="Disable autocast in the head training loop.")
+    p.add_argument("--extract-batch-size", type=int, default=4, help="Batch size for the one-time encoder pass.")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-name", default="disease_classifier", help="Filename prefix for outputs in --run-dir")
     return p.parse_args()
+
+
+def _resolve_task(task: str, train_ds, val_ds) -> tuple[dict, str]:
+    """Return (label_remap: orig_int → new_int, task_label_name).
+
+    ``orig_int`` keys NOT in the remap are dropped from training/eval.
+    """
+    label_map = getattr(train_ds, "label_map", None) or getattr(val_ds, "label_map", None)
+    if label_map is None:
+        # Fallback: assume identity over the integer labels found in the data.
+        ints = sorted({it["label"] for it in train_ds.items if it.get("label", -1) >= 0})
+        label_map = {str(i): i for i in ints}
+
+    if task == "all":
+        # Identity: every original label maps to itself.
+        remap = {v: v for v in label_map.values()}
+        return remap, ",".join(label_map.keys())
+
+    if task == "ad_cn":
+        # Case-insensitive match: any group whose name starts with AD or CN.
+        ad_int = next((v for k, v in label_map.items() if k.upper().startswith("AD")), None)
+        cn_int = next((v for k, v in label_map.items() if k.upper().startswith("CN")), None)
+        if ad_int is None or cn_int is None:
+            raise RuntimeError(
+                f"--task ad_cn requires AD and CN groups in the labels CSV; " f"found {list(label_map.keys())}"
+            )
+        # CN → 0, AD → 1. All other groups dropped.
+        return {cn_int: 0, ad_int: 1}, "CN_vs_AD"
+
+    raise ValueError(task)
 
 
 def main(cli):
@@ -338,10 +471,11 @@ def main(cli):
 
     logger.info("Building VQ-VAE encoder")
     encoder = _load_encoder(cli.run_dir, run_args, device)
-    if not cli.unfreeze_encoder:
-        for p in encoder.parameters():
-            p.requires_grad = False
-        encoder.eval()
+    for p in encoder.parameters():
+        p.requires_grad = False
+    encoder.eval()
+    if cli.unfreeze_encoder:
+        logger.warning("  --unfreeze-encoder is a no-op in cached mode (encoder stays frozen).")
     logger.info(f"  Encoder params: {sum(p.numel() for p in encoder.parameters()):,}")
 
     logger.info("Building datasets")
@@ -349,63 +483,110 @@ def main(cli):
     logger.info(f"  Train: {len(train_ds)} samples | Val: {len(val_ds)} samples")
 
     view_idxs = _resolve_views(cli.views)
+    label_remap, task_name = _resolve_task(cli.task, train_ds, val_ds)
+    logger.info(f"  Task: {cli.task} ({task_name}) | label_remap={label_remap}")
 
-    # Discover label set from the training dataset's items.
-    train_labels = np.array([it["label"] for it in train_ds.items if it.get("label", -1) >= 0])
-    num_classes = int(train_labels.max()) + 1 if len(train_labels) else 0
-    if num_classes < 2:
-        raise RuntimeError(f"Need ≥ 2 classes; found {num_classes} in {run_args.labels_path}")
-    logger.info(f"  num_classes={num_classes}")
+    cache_dtype = torch.float16 if cli.cache_dtype == "fp16" else torch.float32
 
-    # Loaders are shared across all (level, kind) runs.
-    train_loader = DataLoader(
+    # ---- One-time encoder pass over train+val ----
+    logger.info("Precomputing features (single encoder pass) ...")
+    levels = sorted(set(cli.feature_levels))
+    train_cache = _precompute_features(
+        encoder,
         train_ds,
-        batch_size=cli.classifier_batch_size,
-        shuffle=True,
-        num_workers=cli.workers,
-        pin_memory=True,
-        drop_last=True,
+        levels,
+        view_idxs,
+        device,
+        batch_size=cli.extract_batch_size,
+        workers=cli.workers,
+        dtype=cache_dtype,
     )
-    val_loader = DataLoader(
+    val_cache = _precompute_features(
+        encoder,
         val_ds,
-        batch_size=cli.classifier_batch_size,
-        shuffle=False,
-        num_workers=cli.workers,
-        pin_memory=True,
+        levels,
+        view_idxs,
+        device,
+        batch_size=cli.extract_batch_size,
+        workers=cli.workers,
+        dtype=cache_dtype,
     )
 
-    # Probe once per level to discover channel counts (cheap — single batch).
-    probe_loader = DataLoader(train_ds, batch_size=2, shuffle=False, num_workers=0)
-    probe_batch = next(iter(probe_loader))
+    # Apply task filter + label remap.
+    def _apply_task(cache: FeatureCache) -> FeatureCache:
+        valid = torch.tensor([int(l.item()) in label_remap for l in cache.labels])
+        cache = _filter_cache(cache, valid)
+        # Remap to contiguous task labels.
+        new_labels = torch.tensor([label_remap[int(l.item())] for l in cache.labels], dtype=torch.long)
+        cache.labels = new_labels
+        return cache
+
+    train_cache = _apply_task(train_cache)
+    val_cache = _apply_task(val_cache)
+    num_classes = int(max(train_cache.labels.max().item(), val_cache.labels.max().item())) + 1
+    logger.info(
+        f"  After task filter: train rows={len(train_cache.labels)} "
+        f"val rows={len(val_cache.labels)} num_classes={num_classes}"
+    )
+    if len(train_cache.labels) == 0 or len(val_cache.labels) == 0:
+        raise RuntimeError("Empty train or val set after task filter.")
+
+    # Encoder no longer needed — free GPU memory for the head.
+    del encoder
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    use_amp = not cli.no_amp
 
     comparison: dict[str, dict] = {}
-    for level in cli.feature_levels:
+    for level in levels:
         for kind in cli.features:
             spec = FeatureSpec(level=level, kind=kind)
-            tag = spec.label
+            tag = f"{task_name}__{spec.label}"
             logger.info("")
             logger.info(f"=== Probing {tag} ===")
 
-            # Reseed per run so each classifier sees the same init / shuffle order.
             torch.manual_seed(cli.seed)
             np.random.seed(cli.seed)
 
-            with torch.no_grad():
-                feats, _ = _batch_to_features(probe_batch, encoder, spec, view_idxs[:1], device, encoder_grad=False)
-            in_channels = feats.shape[1]
-            feat_shape = tuple(feats.shape[2:])
+            # Channel selection per view. If T1 and T2 use different content
+            # channels (separate_encoders + per-view masks), we can't share a
+            # single channel index across rows; in that case route per view by
+            # building a virtual channel-aligned tensor.
+            v0_idx = train_cache.slice_channels(level, kind, view=view_idxs[0])
+            in_channels = len(v0_idx)
             if in_channels == 0:
                 logger.warning(f"  {tag}: 0 channels selected — skipping")
                 continue
-            logger.info(f"  Feature shape: ({in_channels}, {feat_shape})")
+
+            # Build per-row channel-sliced tensors. Per-view masks may differ;
+            # we handle by gathering separately and concatenating row-aligned.
+            def _slice_cache(cache: FeatureCache) -> torch.Tensor:
+                feat = cache.feats[level]
+                out = torch.empty((feat.shape[0], in_channels, *feat.shape[2:]), dtype=feat.dtype)
+                for v in view_idxs:
+                    rows = cache.view_ids == v
+                    ch = cache.slice_channels(level, kind, view=v)
+                    if len(ch) != in_channels:
+                        raise RuntimeError(
+                            f"Per-view channel-count mismatch at level {level} "
+                            f"({len(ch)} vs {in_channels}); content channel allocation "
+                            "differs between views."
+                        )
+                    out[rows] = feat[rows][:, ch]
+                return out
+
+            train_feats = _slice_cache(train_cache)
+            val_feats = _slice_cache(val_cache)
+            feat_shape = tuple(train_feats.shape[2:])
+            logger.info(
+                f"  Feature shape per sample: ({in_channels}, {feat_shape})  "
+                f"train rows={len(train_feats)} val rows={len(val_feats)}"
+            )
 
             head = _build_classifier(in_channels=in_channels, num_classes=num_classes).to(device)
+            opt = torch.optim.AdamW(head.parameters(), lr=cli.classifier_lr, weight_decay=cli.classifier_weight_decay)
             logger.info(f"  Head params: {sum(p.numel() for p in head.parameters()):,}")
-
-            param_groups = [{"params": head.parameters(), "lr": cli.classifier_lr}]
-            if cli.unfreeze_encoder:
-                param_groups.append({"params": encoder.parameters(), "lr": cli.encoder_lr})
-            opt = torch.optim.AdamW(param_groups, weight_decay=cli.classifier_weight_decay)
 
             best_bacc = -1.0
             best_report: dict = {}
@@ -415,28 +596,29 @@ def main(cli):
             best_path = os.path.join(cli.run_dir, f"{cli.out_name}_{tag}_best.pt")
 
             for epoch in range(1, cli.classifier_epochs + 1):
-                tr_loss, tr_bacc, _, _ = _epoch(
-                    encoder,
+                tr_loss, tr_bacc, _, _ = _epoch_cached(
                     head,
-                    train_loader,
+                    train_feats,
+                    train_cache.labels,
+                    torch.arange(in_channels),
                     opt,
-                    spec,
-                    view_idxs,
                     device,
+                    cli.classifier_batch_size,
                     train=True,
-                    encoder_grad=cli.unfreeze_encoder,
+                    use_amp=use_amp,
                 )
-                va_loss, va_bacc, y_true, y_pred = _epoch(
-                    encoder,
-                    head,
-                    val_loader,
-                    opt,
-                    spec,
-                    view_idxs,
-                    device,
-                    train=False,
-                    encoder_grad=False,
-                )
+                with torch.no_grad():
+                    va_loss, va_bacc, y_true, y_pred = _epoch_cached(
+                        head,
+                        val_feats,
+                        val_cache.labels,
+                        torch.arange(in_channels),
+                        opt,
+                        device,
+                        cli.classifier_batch_size,
+                        train=False,
+                        use_amp=use_amp,
+                    )
                 logger.info(
                     f"  [{tag}] epoch {epoch:3d}/{cli.classifier_epochs} | "
                     f"train loss={tr_loss:.4f} bacc={tr_bacc:.3f} | "
@@ -464,6 +646,7 @@ def main(cli):
                             "num_classes": num_classes,
                             "feature_spec": vars(spec),
                             "views": cli.views,
+                            "task": cli.task,
                         },
                         best_path,
                     )
@@ -472,6 +655,7 @@ def main(cli):
 
             logger.info(f"  [{tag}] best val bACC = {best_bacc:.4f} @ epoch {best_epoch} → {best_path}")
             comparison[tag] = {
+                "task": cli.task,
                 "level": level,
                 "kind": kind,
                 "in_channels": in_channels,
@@ -484,7 +668,7 @@ def main(cli):
                 "ckpt_path": best_path,
             }
 
-            del head, opt
+            del head, opt, train_feats, val_feats
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 

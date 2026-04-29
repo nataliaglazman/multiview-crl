@@ -1274,6 +1274,7 @@ class MyCustomDataset(MultiviewDataset):
         df = pd.read_csv(labels_path)
         label_values = sorted(df["Group"].unique())
         label_map = {v: i for i, v in enumerate(label_values)}
+        self.label_map = label_map  # group_name → int
 
         # Load data using utils.load_data
         self.items, missing = load_data(df, data_dir, label_map, masks_dir=masks_dir)
