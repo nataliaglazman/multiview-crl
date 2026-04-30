@@ -41,6 +41,7 @@ import logging
 import os
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Optional
 
 import numpy as np
 import torch
@@ -249,27 +250,72 @@ def _resolve_views(name: str) -> list[int]:
 
 @dataclass
 class FeatureCache:
-    """All-channel features per requested level, plus labels and per-view masks."""
+    """All-channel features per requested level, plus labels and per-view masks.
 
-    feats: dict[int, torch.Tensor]  # level → (N, C, D, H, W) fp16/fp32 on CPU
+    ``feats[L]`` may be a CPU tensor, an ``np.memmap`` (disk-backed), or a
+    ``_MemmapRowView`` (filtered subset of a memmap).  Use ``read_batch`` to
+    pull a (B, k, D, H, W) tensor without copying the full cache.
+    """
+
+    feats: dict  # level → tensor | np.memmap | _MemmapRowView
     labels: torch.Tensor  # (N,) long
     view_ids: torch.Tensor  # (N,) long, 0=T1, 1=T2
     content_masks: dict[int, dict[int, torch.Tensor]]  # level → view_idx → bool (C,)
 
+    def __len__(self) -> int:
+        return self.labels.shape[0]
+
     def slice_channels(self, level: int, kind: str, view: int) -> torch.Tensor:
         """Return the channel-index tensor selecting `kind` from level `level`."""
+        feat = self.feats[level]
+        C = feat.shape[1]
         if kind == "all":
-            C = self.feats[level].shape[1]
             return torch.arange(C)
         mask = self.content_masks.get(level, {}).get(view)
         if mask is None:
-            C = self.feats[level].shape[1]
             return torch.arange(C)
         if kind == "content":
             return torch.where(mask)[0]
         if kind == "style":
             return torch.where(~mask)[0]
         raise ValueError(kind)
+
+    def read_batch(self, level: int, batch_rows: torch.Tensor, kind: str, view_idxs: list[int]) -> torch.Tensor:
+        """Return ``(B, k, D, H, W)`` for the given row indices, channel-sliced
+        per-view (uses per-row view_id to pick the right channel index).
+        """
+        feat = self.feats[level]
+        rows_np = batch_rows.numpy() if isinstance(batch_rows, torch.Tensor) else np.asarray(batch_rows)
+
+        # Determine output channel count from view_idxs[0] (assumed equal across views).
+        ch0 = self.slice_channels(level, kind, view=view_idxs[0])
+        k = len(ch0)
+
+        # Group rows by view_id so we can use a single fancy index per group.
+        view_ids_batch = self.view_ids[batch_rows].numpy()
+        out_shape = (len(rows_np), k, *feat.shape[2:])
+        out = torch.empty(out_shape, dtype=torch.float32)
+        for v in view_idxs:
+            sel = view_ids_batch == v
+            if not sel.any():
+                continue
+            ch = self.slice_channels(level, kind, view=v).numpy()
+            sub_rows = rows_np[sel]  # row indices into this cache's row-space
+            if isinstance(feat, _MemmapRowView):
+                block = feat.gather(sub_rows, ch)
+            elif isinstance(feat, np.memmap):
+                block = torch.from_numpy(np.ascontiguousarray(feat[sub_rows][:, ch]))
+            else:  # torch tensor
+                block = feat[torch.as_tensor(sub_rows)][:, torch.as_tensor(ch)]
+            out[sel] = block.float()
+        return out
+
+
+def _bytes_human(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.2f} {unit}"
+        n /= 1024
 
 
 @torch.no_grad()
@@ -282,51 +328,129 @@ def _precompute_features(
     batch_size: int,
     workers: int,
     dtype: torch.dtype,
+    cache_dir: Optional[str] = None,
+    cache_tag: str = "train",
 ) -> FeatureCache:
-    """One pass of the encoder; caches per-level spatial maps to CPU memory."""
+    """One pass of the encoder; writes per-level spatial maps to a single
+    preallocated buffer (avoids the large ``torch.cat`` peak that otherwise
+    pegs RAM at 2× cache size).
+
+    If ``cache_dir`` is set, buffers are backed by ``np.memmap`` files so the
+    OS pages them on demand instead of holding everything resident.
+    """
     encoder.eval()
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
 
-    feats_by_level: dict[int, list[torch.Tensor]] = {l: [] for l in levels}
-    labels_list: list[torch.Tensor] = []
-    view_list: list[torch.Tensor] = []
+    n_rows = len(dataset) * len(view_idxs)
+
+    # Probe one batch to discover per-level spatial shapes (cheap, single forward).
+    probe_iter = iter(loader)
+    probe_batch = next(probe_iter)
+    probe_img = probe_batch["image"][view_idxs[0]][:1].to(device, non_blocking=True)
+    probe_out = encoder(probe_img, return_recon=False, pool_only=False, view_idx=view_idxs[0])
+    shapes = {L: tuple(probe_out[2][L].shape[1:]) for L in levels}
+    del probe_out, probe_img
+
+    # Allocate one big buffer per level (memmap on disk if cache_dir, else RAM tensor).
+    feats_by_level: dict = {}
+    is_memmap = cache_dir is not None
+    if is_memmap:
+        os.makedirs(cache_dir, exist_ok=True)
+        np_dtype = np.float16 if dtype == torch.float16 else np.float32
+    for L in levels:
+        nbytes = n_rows * int(np.prod(shapes[L])) * (2 if dtype == torch.float16 else 4)
+        logger.info(
+            f"  Allocating L{L} cache: ({n_rows}, {shapes[L]}) ≈ {_bytes_human(nbytes)} ({'disk' if is_memmap else 'RAM'})"
+        )
+        if is_memmap:
+            path = os.path.join(cache_dir, f"feats_{cache_tag}_L{L}.dat")
+            feats_by_level[L] = np.memmap(path, dtype=np_dtype, mode="w+", shape=(n_rows, *shapes[L]))
+        else:
+            feats_by_level[L] = torch.empty((n_rows, *shapes[L]), dtype=dtype)
+
+    labels_all = torch.empty(n_rows, dtype=torch.long)
+    view_ids_all = torch.empty(n_rows, dtype=torch.long)
     masks: dict[int, dict[int, torch.Tensor]] = {l: {} for l in levels}
 
-    n_done = 0
-    for batch in loader:
-        labels = batch["label"].long()
+    # Replay the probe batch so we don't skip it.
+    write_idx = 0
+
+    def _consume(batch):
+        nonlocal write_idx
+        bsz = batch["label"].shape[0]
         for v in view_idxs:
             img = batch["image"][v].to(device, non_blocking=True)
             out = encoder(img, return_recon=False, pool_only=False, view_idx=v)
-            encoder_features, soft_masks = out[2], out[6]
+            enc_features, soft_masks = out[2], out[6]
             for L in levels:
-                feats_by_level[L].append(encoder_features[L].to(dtype).cpu())
-                if L not in masks or v not in masks[L]:
+                f = enc_features[L].to(dtype).cpu()
+                if is_memmap:
+                    feats_by_level[L][write_idx : write_idx + bsz] = f.numpy()
+                else:
+                    feats_by_level[L][write_idx : write_idx + bsz].copy_(f)
+                if v not in masks[L]:
                     m = soft_masks.get(L)
                     if m is not None:
                         if isinstance(m, tuple):
                             m = m[v]
                         masks[L][v] = m.bool().cpu()
-            labels_list.append(labels)
-            view_list.append(torch.full_like(labels, v))
-        n_done += img.size(0)
-        if n_done % (10 * batch_size) < batch_size:
-            logger.info(f"  precomputed {n_done}/{len(dataset)}")
+            labels_all[write_idx : write_idx + bsz] = batch["label"].long()
+            view_ids_all[write_idx : write_idx + bsz] = v
+            write_idx += bsz
 
-    feats = {L: torch.cat(feats_by_level[L], 0) for L in levels}
-    labels_all = torch.cat(labels_list, 0)
-    views_all = torch.cat(view_list, 0)
-    return FeatureCache(feats=feats, labels=labels_all, view_ids=views_all, content_masks=masks)
+    _consume(probe_batch)
+    for batch in probe_iter:
+        _consume(batch)
+        if write_idx % (10 * batch_size * len(view_idxs)) < batch_size * len(view_idxs):
+            logger.info(f"  precomputed {write_idx}/{n_rows}")
+
+    if is_memmap:
+        for L in levels:
+            feats_by_level[L].flush()
+
+    return FeatureCache(feats=feats_by_level, labels=labels_all, view_ids=view_ids_all, content_masks=masks)
 
 
 def _filter_cache(cache: FeatureCache, valid_mask: torch.Tensor) -> FeatureCache:
-    """Apply a row-mask to all per-row tensors in the cache (in-place new)."""
+    """Apply a row-mask to all per-row tensors. For memmap-backed caches we
+    keep the original buffer and store the row indices instead of physically
+    rewriting (which would double disk usage)."""
+    keep_idx = torch.where(valid_mask)[0].numpy()
+    new_feats = {}
+    for L, t in cache.feats.items():
+        if isinstance(t, np.memmap):
+            # Wrap in a row-indexed view: a thin object that defers slicing
+            # to read time (memmap supports fancy indexing).
+            new_feats[L] = _MemmapRowView(t, keep_idx)
+        else:
+            new_feats[L] = t[valid_mask]
     return FeatureCache(
-        feats={L: t[valid_mask] for L, t in cache.feats.items()},
+        feats=new_feats,
         labels=cache.labels[valid_mask],
         view_ids=cache.view_ids[valid_mask],
         content_masks=cache.content_masks,
     )
+
+
+class _MemmapRowView:
+    """np.memmap restricted to a row-index list; supports cache.feats[L][rows][:, ch] semantics."""
+
+    def __init__(self, mm: np.memmap, row_idx: np.ndarray):
+        self.mm = mm
+        self.row_idx = row_idx
+        self.shape = (len(row_idx), *mm.shape[1:])
+        self.dtype = mm.dtype
+
+    def __len__(self):
+        return self.shape[0]
+
+    def gather(self, batch_rows: np.ndarray, ch_idx: np.ndarray) -> torch.Tensor:
+        """Read `batch_rows` (indices into this view) with channels `ch_idx`."""
+        physical_rows = self.row_idx[batch_rows]
+        # np.memmap fancy indexing: read rows then slice channels.
+        block = np.asarray(self.mm[physical_rows])  # (B, C, D, H, W)
+        block = block[:, ch_idx]
+        return torch.from_numpy(np.ascontiguousarray(block))
 
 
 # ---------------------------------------------------------------------------
@@ -336,9 +460,10 @@ def _filter_cache(cache: FeatureCache, valid_mask: torch.Tensor) -> FeatureCache
 
 def _epoch_cached(
     head,
-    feats_full: torch.Tensor,
-    labels: torch.Tensor,
-    ch_idx: torch.Tensor,
+    cache: FeatureCache,
+    level: int,
+    kind: str,
+    view_idxs: list[int],
     opt,
     device,
     batch_size: int,
@@ -346,7 +471,7 @@ def _epoch_cached(
     use_amp: bool,
 ) -> tuple[float, float, np.ndarray, np.ndarray]:
     head.train(train)
-    N = feats_full.shape[0]
+    N = len(cache)
     order = torch.randperm(N) if train else torch.arange(N)
 
     losses, preds, trues = [], [], []
@@ -354,9 +479,9 @@ def _epoch_cached(
 
     for start in range(0, N, batch_size):
         idx = order[start : start + batch_size]
-        # Slice channels lazily (cheap on CPU), then move to GPU + cast.
-        x = feats_full[idx][:, ch_idx].to(device, non_blocking=True).float()
-        y = labels[idx].to(device, non_blocking=True)
+        # Read batch directly from the cache (avoids a giant pre-sliced tensor).
+        x = cache.read_batch(level, idx, kind, view_idxs).to(device, non_blocking=True)
+        y = cache.labels[idx].to(device, non_blocking=True)
 
         with autocast_ctx:
             logits = head(x)
@@ -423,6 +548,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--no-amp", action="store_true", help="Disable autocast in the head training loop.")
     p.add_argument("--extract-batch-size", type=int, default=4, help="Batch size for the one-time encoder pass.")
+    p.add_argument(
+        "--feature-cache-dir",
+        default=None,
+        help="If set, cache features as np.memmap files in this directory instead of RAM. "
+        "Recommended at level 0 with > a few hundred samples.",
+    )
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=0)
@@ -500,6 +631,8 @@ def main(cli):
         batch_size=cli.extract_batch_size,
         workers=cli.workers,
         dtype=cache_dtype,
+        cache_dir=cli.feature_cache_dir,
+        cache_tag="train",
     )
     val_cache = _precompute_features(
         encoder,
@@ -510,6 +643,8 @@ def main(cli):
         batch_size=cli.extract_batch_size,
         workers=cli.workers,
         dtype=cache_dtype,
+        cache_dir=cli.feature_cache_dir,
+        cache_tag="val",
     )
 
     # Apply task filter + label remap.
@@ -549,39 +684,25 @@ def main(cli):
             torch.manual_seed(cli.seed)
             np.random.seed(cli.seed)
 
-            # Channel selection per view. If T1 and T2 use different content
-            # channels (separate_encoders + per-view masks), we can't share a
-            # single channel index across rows; in that case route per view by
-            # building a virtual channel-aligned tensor.
+            # Channel selection per view. Per-view masks may differ
+            # (separate_encoders + per-view masks); read_batch handles that
+            # row-by-row, but we require a constant channel count k across
+            # views so the head's input width is fixed.
             v0_idx = train_cache.slice_channels(level, kind, view=view_idxs[0])
             in_channels = len(v0_idx)
             if in_channels == 0:
                 logger.warning(f"  {tag}: 0 channels selected — skipping")
                 continue
-
-            # Build per-row channel-sliced tensors. Per-view masks may differ;
-            # we handle by gathering separately and concatenating row-aligned.
-            def _slice_cache(cache: FeatureCache) -> torch.Tensor:
-                feat = cache.feats[level]
-                out = torch.empty((feat.shape[0], in_channels, *feat.shape[2:]), dtype=feat.dtype)
-                for v in view_idxs:
-                    rows = cache.view_ids == v
-                    ch = cache.slice_channels(level, kind, view=v)
-                    if len(ch) != in_channels:
-                        raise RuntimeError(
-                            f"Per-view channel-count mismatch at level {level} "
-                            f"({len(ch)} vs {in_channels}); content channel allocation "
-                            "differs between views."
-                        )
-                    out[rows] = feat[rows][:, ch]
-                return out
-
-            train_feats = _slice_cache(train_cache)
-            val_feats = _slice_cache(val_cache)
-            feat_shape = tuple(train_feats.shape[2:])
+            for v in view_idxs[1:]:
+                if len(train_cache.slice_channels(level, kind, view=v)) != in_channels:
+                    raise RuntimeError(
+                        f"Per-view channel-count mismatch at level {level} kind {kind}; "
+                        "use --views t1 or --views t2."
+                    )
+            feat_shape = tuple(train_cache.feats[level].shape[2:])
             logger.info(
                 f"  Feature shape per sample: ({in_channels}, {feat_shape})  "
-                f"train rows={len(train_feats)} val rows={len(val_feats)}"
+                f"train rows={len(train_cache)} val rows={len(val_cache)}"
             )
 
             head = _build_classifier(in_channels=in_channels, num_classes=num_classes).to(device)
@@ -598,9 +719,10 @@ def main(cli):
             for epoch in range(1, cli.classifier_epochs + 1):
                 tr_loss, tr_bacc, _, _ = _epoch_cached(
                     head,
-                    train_feats,
-                    train_cache.labels,
-                    torch.arange(in_channels),
+                    train_cache,
+                    level,
+                    kind,
+                    view_idxs,
                     opt,
                     device,
                     cli.classifier_batch_size,
@@ -610,9 +732,10 @@ def main(cli):
                 with torch.no_grad():
                     va_loss, va_bacc, y_true, y_pred = _epoch_cached(
                         head,
-                        val_feats,
-                        val_cache.labels,
-                        torch.arange(in_channels),
+                        val_cache,
+                        level,
+                        kind,
+                        view_idxs,
                         opt,
                         device,
                         cli.classifier_batch_size,
@@ -668,7 +791,7 @@ def main(cli):
                 "ckpt_path": best_path,
             }
 
-            del head, opt, train_feats, val_feats
+            del head, opt
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
