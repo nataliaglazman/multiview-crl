@@ -549,10 +549,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-amp", action="store_true", help="Disable autocast in the head training loop.")
     p.add_argument("--extract-batch-size", type=int, default=4, help="Batch size for the one-time encoder pass.")
     p.add_argument(
+        "--cache-mode",
+        default="memmap",
+        choices=["memmap", "memory"],
+        help="memmap (default): cache features as np.memmap files on disk so the OS pages "
+        "them on demand. memory: hold all features in RAM (fast but huge — only safe at "
+        "coarse levels or for small datasets).",
+    )
+    p.add_argument(
         "--feature-cache-dir",
         default=None,
-        help="If set, cache features as np.memmap files in this directory instead of RAM. "
-        "Recommended at level 0 with > a few hundred samples.",
+        help="Directory for memmap files. Defaults to <run-dir>/.disease_classifier_cache/.",
+    )
+    p.add_argument(
+        "--keep-cache",
+        action="store_true",
+        help="Keep memmap cache files after training (default: delete on exit).",
     )
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -619,6 +631,17 @@ def main(cli):
 
     cache_dtype = torch.float16 if cli.cache_dtype == "fp16" else torch.float32
 
+    # Resolve cache directory. By default, use disk-backed memmap so the OS
+    # pages features on demand instead of holding everything resident.
+    cache_dir: Optional[str]
+    if cli.cache_mode == "memory":
+        cache_dir = None
+        logger.info("  Cache mode: in-memory (entire cache held in RAM)")
+    else:
+        cache_dir = cli.feature_cache_dir or os.path.join(cli.run_dir, ".disease_classifier_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        logger.info(f"  Cache mode: memmap → {cache_dir}")
+
     # ---- One-time encoder pass over train+val ----
     logger.info("Precomputing features (single encoder pass) ...")
     levels = sorted(set(cli.feature_levels))
@@ -631,7 +654,7 @@ def main(cli):
         batch_size=cli.extract_batch_size,
         workers=cli.workers,
         dtype=cache_dtype,
-        cache_dir=cli.feature_cache_dir,
+        cache_dir=cache_dir,
         cache_tag="train",
     )
     val_cache = _precompute_features(
@@ -643,7 +666,7 @@ def main(cli):
         batch_size=cli.extract_batch_size,
         workers=cli.workers,
         dtype=cache_dtype,
-        cache_dir=cli.feature_cache_dir,
+        cache_dir=cache_dir,
         cache_tag="val",
     )
 
@@ -813,6 +836,26 @@ def main(cli):
             indent=2,
         )
     logger.info(f"Metrics written to {metrics_path}")
+
+    # Clean up memmap cache files unless asked to keep them.
+    if cache_dir is not None and not cli.keep_cache:
+        # Drop python references first so memmap files can be removed cleanly.
+        del train_cache, val_cache
+        import gc
+
+        gc.collect()
+        for fn in os.listdir(cache_dir):
+            if fn.startswith("feats_") and fn.endswith(".dat"):
+                try:
+                    os.remove(os.path.join(cache_dir, fn))
+                except OSError as e:
+                    logger.warning(f"  Could not remove {fn}: {e}")
+        # Remove the directory if it ends up empty.
+        try:
+            os.rmdir(cache_dir)
+        except OSError:
+            pass
+        logger.info(f"Cache cleaned ({cache_dir})")
 
 
 if __name__ == "__main__":
