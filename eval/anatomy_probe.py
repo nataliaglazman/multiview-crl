@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -105,15 +105,46 @@ def _lookup_age(lookup: pd.DataFrame, subj: str):
 
 _VIEW_IDX = {"T1": 0, "T2": 1}
 
+# Default patch-grid for spatially-aware pooling. Global-mean pooling
+# (patch_grid=None) collapses anatomy across the whole volume, which makes
+# content vs style indistinguishable for region-local signals (e.g. medial-
+# temporal atrophy). A coarse 4x5x4 grid keeps the probe linear-sized while
+# preserving rough spatial structure; matches the convention in
+# view_latents_probes.ipynb cell ~1573.
+DEFAULT_PATCH_GRID: Tuple[int, int, int] = (4, 5, 4)
+
+
+def _normalize_patch_grid(patch_grid, nb_levels: int):
+    """Accept None, a single (D,H,W) tuple, or a per-level list of tuples.
+    Returns either None or a list of length nb_levels of 3-int tuples."""
+    if patch_grid is None:
+        return None
+    if len(patch_grid) > 0 and isinstance(patch_grid[0], (list, tuple)):
+        if len(patch_grid) != nb_levels:
+            raise ValueError(f"patch_grid per-level list has {len(patch_grid)} entries, expected {nb_levels}")
+        return [tuple(g) for g in patch_grid]
+    return [tuple(patch_grid)] * nb_levels
+
 
 @torch.no_grad()
-def extract_features(vqvae_model, items, val_transforms, device, nb_levels: int):
+def extract_features(
+    vqvae_model,
+    items,
+    val_transforms,
+    device,
+    nb_levels: int,
+    patch_grid: Optional[Sequence] = DEFAULT_PATCH_GRID,
+):
     """Run the model over ``items`` (T1+T2 per subject) and collect pooled
     per-level features plus per-level content/style indices.
 
     Follows cell 10 of view_latents.ipynb.  Returns all rows in T1/T2 alternating
     order: row 2k = T1 of subject k, row 2k+1 = T2 of subject k.
+
+    When ``patch_grid`` is set, per-level features have shape ``(N, C, P)``
+    where ``P`` is the product of the per-level grid; otherwise ``(N, C)``.
     """
+    patch_grids = _normalize_patch_grid(patch_grid, nb_levels)
     vqvae_module = vqvae_model.module if hasattr(vqvae_model, "module") else vqvae_model
     has_per_view = (
         getattr(vqvae_module, "separate_encoders", False)
@@ -142,6 +173,7 @@ def extract_features(vqvae_model, items, val_transforms, device, nb_levels: int)
                 return_recon=False,
                 pool_only=True,
                 view_idx=_VIEW_IDX[modality],
+                patch_grid=patch_grids,
             )
             _, _, enc_features, _, _, _, soft_masks, *_ = out
 
@@ -194,13 +226,25 @@ def extract_features(vqvae_model, items, val_transforms, device, nb_levels: int)
 
 def _per_view_select(feats: np.ndarray, idx_v0, idx_v1):
     """Mirror notebook's `_per_view_select`: T1 rows use idx_v0, T2 rows idx_v1,
-    producing a k-dim column-aligned matrix."""
+    producing a k-dim column-aligned matrix.
+
+    Accepts 2D ``(N, C)`` arrays (global-mean pooled) or 3D ``(N, C, P)``
+    arrays (patch-grid pooled). For 3D inputs, slicing is applied on the
+    channel axis, then patch axis is flattened so the probe sees
+    ``(N, |idx| * P)`` features.
+    """
     n = feats.shape[0]
     t1_mask = np.arange(n) % 2 == 0
-    out = np.empty((n, len(idx_v0)), dtype=feats.dtype)
-    out[t1_mask] = feats[t1_mask][:, idx_v0]
-    out[~t1_mask] = feats[~t1_mask][:, idx_v1]
-    return out
+    if feats.ndim == 2:
+        out = np.empty((n, len(idx_v0)), dtype=feats.dtype)
+        out[t1_mask] = feats[t1_mask][:, idx_v0]
+        out[~t1_mask] = feats[~t1_mask][:, idx_v1]
+        return out
+    P = feats.shape[2]
+    out = np.empty((n, len(idx_v0), P), dtype=feats.dtype)
+    out[t1_mask] = feats[t1_mask][:, idx_v0, :]
+    out[~t1_mask] = feats[~t1_mask][:, idx_v1, :]
+    return out.reshape(n, -1)
 
 
 def _build_feature_sets(extracted) -> Dict[str, np.ndarray]:
@@ -227,7 +271,8 @@ def _build_feature_sets(extracted) -> Dict[str, np.ndarray]:
             X_s = _per_view_select(f, s0, s1)
             sets[f"Style L{L}"] = X_s
             style_parts.append(X_s)
-        sets[f"All L{L}"] = f
+        # Flatten patch axis if patch-grid pooling was used.
+        sets[f"All L{L}"] = f.reshape(f.shape[0], -1) if f.ndim == 3 else f
     if content_parts:
         sets["Content all"] = np.concatenate(content_parts, axis=1)
     if style_parts:
@@ -324,7 +369,15 @@ TARGETS_CLS = ("sex", "race", "group")
 TARGETS_REG = ("age",)
 
 
-def anatomy_eval(vqvae_model, items, val_transforms, device, labels_path: str, nb_levels: int) -> Dict[str, float]:
+def anatomy_eval(
+    vqvae_model,
+    items,
+    val_transforms,
+    device,
+    labels_path: str,
+    nb_levels: int,
+    patch_grid: Optional[Sequence] = DEFAULT_PATCH_GRID,
+) -> Dict[str, float]:
     """Run the anatomy probe suite.  Returns a flat metrics dict.
 
     Parameters
@@ -338,9 +391,14 @@ def anatomy_eval(vqvae_model, items, val_transforms, device, labels_path: str, n
     labels_path : path to labels CSV; ``merged_data.csv`` is expected next to
         it (same directory), matching the notebook convention.
     nb_levels : number of VQ-VAE levels (``args.vqvae_nb_levels``).
+    patch_grid : spatial-pooling spec passed to ``vqvae_model``.  Either a
+        single ``(D, H, W)`` tuple applied to every level, a list of per-level
+        tuples, or ``None`` for global-mean pooling.  Defaults to
+        ``(4, 5, 4)`` — a coarse grid that preserves rough spatial structure
+        without exploding feature dimensionality.
     """
     lookup = _load_demo_lookup(labels_path)
-    extracted = extract_features(vqvae_model, items, val_transforms, device, nb_levels)
+    extracted = extract_features(vqvae_model, items, val_transforms, device, nb_levels, patch_grid=patch_grid)
     subjects = extracted["subjects"]
     modalities = extracted["modalities"]
 

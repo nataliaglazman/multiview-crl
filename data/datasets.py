@@ -1869,7 +1869,27 @@ class SyntheticBrainDataset(MultiviewDataset):
         else:
             mask_t1 = (x_v1 > 0.05).float()
             mask_t2 = (x_v2 > 0.05).float()
+
+        # Match ADNI's NormalizeIntensityd(nonzero=True, channel_wise=True):
+        # z-score each view over its foreground voxels so synthetic ranges
+        # align with the [-1, 1] regime BaselineLoss (clamp + LPIPS) assumes.
+        # Without this the renderer's [0, ~1.5] output gets clipped at 1.0
+        # and LPIPS sees out-of-distribution intensities.
+        x_v1 = self._znorm_nonzero(x_v1, mask_t1)
+        x_v2 = self._znorm_nonzero(x_v2, mask_t2)
+
         return x_v1, x_v2, mask_t1, mask_t2, latents
+
+    @staticmethod
+    def _znorm_nonzero(x, mask):
+        m = mask > 0
+        if m.any():
+            vals = x[m]
+            mean = vals.mean()
+            std = vals.std().clamp_min(1e-6)
+            x = (x - mean) / std
+            x = x * mask
+        return x
 
     def __getitem__(self, idx):
         if self._cache is not None and self._cache[idx] is not None:
