@@ -62,7 +62,7 @@ class LpSimCLRLoss(CLLoss):
         alpha: float = 0.5,
         simclr_compatibility_mode: bool = False,
         simclr_denominator: bool = True,
-        pow: bool = True,
+        pow: bool = False,
     ):
         self.p = p
         self.tau = tau
@@ -178,6 +178,8 @@ class UnifiedCLLoss(CLLoss):
         """
         z_rec = torch.stack(z_rec, dim=0)  # [n_views, batch-size, nSk]
         z3_rec = torch.stack(z3_rec, dim=0)  # [n_views, batch-size, nSk]
+        z_rec = F.normalize(z_rec, dim=-1, eps=1e-6)
+        z3_rec = F.normalize(z3_rec, dim=-1, eps=1e-6)
 
         total_loss_mean, total_loss, total_loss_pos_mean, total_loss_neg_mean = (
             0.0,
