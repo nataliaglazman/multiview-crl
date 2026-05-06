@@ -131,6 +131,33 @@ class LpSimCLRLoss(CLLoss):
         return loss_mean, loss, [loss_pos_mean, loss_neg_mean]
 
 
+class CosineInfoNCELoss(CLLoss):
+    """Standard InfoNCE: cosine similarity matrix + cross-entropy over all view pairs.
+
+    Expects L2-normalized representations (UnifiedCLLoss normalizes before calling).
+    """
+
+    def __init__(self, tau: float = 1.0):
+        self.tau = tau
+
+    def loss(self, z_rec, z3_rec, l):
+        # z_rec: [n_views, B, C] — already L2-normalized
+        B = z_rec.shape[1]
+        targets = torch.arange(B, device=z_rec.device)
+        total = z_rec.new_zeros(())
+        n_terms = 0
+        for i in range(l):
+            for j in range(i + 1, l):
+                sim = (z_rec[i] @ z_rec[j].T) / self.tau  # (B, B)
+                total = total + F.cross_entropy(sim, targets) + F.cross_entropy(sim.T, targets)
+                n_terms += 2
+        loss_mean = total / max(n_terms, 1)
+        with torch.no_grad():
+            pos_sim = (z_rec[0] * z_rec[1 % l]).sum(-1).mean() if l > 1 else z_rec.new_zeros(())
+            neg_sim = z_rec.new_zeros(())
+        return loss_mean, total, [pos_sim, neg_sim]
+
+
 def _logmeanexp(x, dim):
     """
     Compute the log-mean-exponential of a tensor along a specified dimension.

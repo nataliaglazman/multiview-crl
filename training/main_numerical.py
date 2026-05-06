@@ -705,7 +705,7 @@ def main():
     params, optimizer = init_or_load_optimizer(models=models, args=args)
 
     # initialise loss function
-    loss = losses.UnifiedCLLoss(losses.LpSimCLRLoss())
+    loss = losses.UnifiedCLLoss(losses.CosineInfoNCELoss())
     # initialise latent space
     latent_space = generate_latent_space(args)
 
