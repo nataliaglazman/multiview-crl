@@ -642,14 +642,21 @@ class VQVAE(HelperModule):
             self.mask_mode = mask_mode
 
             if mask_mode == "learned":
+
+                def _biased_logits(lvl):
+                    k = self.content_channels_per_level[lvl]
+                    init = torch.full((hidden_channels,), -2.0)
+                    init[:k] = 2.0
+                    return init
+
                 self.channel_logits = nn.ParameterDict(
-                    {str(lvl): nn.Parameter(torch.zeros(hidden_channels)) for lvl in self.content_style_levels}
+                    {str(lvl): nn.Parameter(_biased_logits(lvl)) for lvl in self.content_style_levels}
                 )
                 # Per-view content selectors (Def 3.5, Yao et al.):
                 # When separate_encoders is active, view-1 gets its own logits.
                 if separate_encoders:
                     self.channel_logits_v1 = nn.ParameterDict(
-                        {str(lvl): nn.Parameter(torch.zeros(hidden_channels)) for lvl in self.content_style_levels}
+                        {str(lvl): nn.Parameter(_biased_logits(lvl)) for lvl in self.content_style_levels}
                     )
                 else:
                     self.channel_logits_v1 = None

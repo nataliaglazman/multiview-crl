@@ -417,9 +417,12 @@ def parse_args() -> argparse.ArgumentParser:
         default=None,
         help="Per-level spatial grid for patch-level contrastive loss. Flat list of "
         "3*nb_levels ints (D0 H0 W0 D1 H1 W1 ...). When set, overrides --patch-grid. "
-        "Useful when finer levels need smaller patches than coarser ones to avoid "
-        "trivially-similar neighbouring voxels. E.g. '--patch-grid-per-level 2 3 2 "
-        "3 4 3 4 5 4' for a 3-level model (coarsest → finest).",
+        "Index 0 = level 0 = FINEST level (first encoder); index nb_levels-1 = COARSEST. "
+        "Choose grids so that each patch covers one spatial content cell: for a 4^3 "
+        "deformation grid on a 64^3 input (cell = 16 input vox), use 4 4 4 at every "
+        "level (32^3 features -> 8 vox/patch; 16^3 -> 4 vox/patch; 8^3 -> 2 vox/patch). "
+        "E.g. '--patch-grid-per-level 4 4 4 4 4 4 2 2 2' for a 3-level model "
+        "(finest → coarsest).",
     )
     parser.add_argument(
         "--contrastive-level-weights",
