@@ -78,8 +78,17 @@ def parse_args() -> argparse.ArgumentParser:
         help="Number of synthetic test samples.",
     )
     parser.add_argument("--synthetic-seed", type=int, default=42)
-    parser.add_argument("--synthetic-n-content", type=int, default=5)
+    parser.add_argument("--synthetic-n-content", type=int, default=9)
     parser.add_argument("--synthetic-n-style", type=int, default=3)
+    parser.add_argument(
+        "--synthetic-hierarchical-content",
+        action="store_true",
+        help="Enable hierarchical content latents: a shared global-atrophy "
+        "scalar drives regional content dims (brain size, ventricle, cortical "
+        "thickness, temporal atrophy, sulcal widening) via fixed couplings + "
+        "independent residuals. GT latents include z_global_atrophy and "
+        "z_content_residuals for probing.",
+    )
     parser.add_argument(
         "--synthetic-res",
         type=int,

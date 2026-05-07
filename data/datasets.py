@@ -1800,10 +1800,11 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_seed=42,
         synthetic_num_samples=None,
         synthetic_num_samples_per_mode=None,
-        synthetic_n_content=5,
+        synthetic_n_content=9,
         synthetic_n_style=3,
         synthetic_n_deformation_grid=4,
         synthetic_n_fissure_grid=8,
+        synthetic_hierarchical_content=False,
         **kwargs,
     ):
         super().__init__()
@@ -1836,6 +1837,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             n_style=synthetic_n_style,
             n_deformation_grid=synthetic_n_deformation_grid,
             n_fissure_grid=synthetic_n_fissure_grid,
+            hierarchical_content=synthetic_hierarchical_content,
         )
         self.num_samples = synthetic_num_samples
         self.synthetic_mode = synthetic_mode

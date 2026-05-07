@@ -47,29 +47,69 @@ class PseudoMRIRenderer(nn.Module):
             .squeeze(0)
         )
 
+    # Number of z_content components consumed by render_structure.
+    # [0] brain size (WM radius), [1] ventricle size, [2:5] lesion position,
+    # [5] cortical thickness, [6] temporal-lobe atrophy (hippocampal proxy),
+    # [7] left–right asymmetry, [8] sulcal widening.
+    N_CONTENT_COMPONENTS = 9
+
     def render_structure(self, z_content, z_deformation, z_fissure, device):
         """Deterministic given (z_content, z_deformation, z_fissure). Shared across views.
 
+        z_content layout (9 components, extras default to 0):
+            [0]  brain size      — WM radius ±0.1 around 0.5
+            [1]  ventricle size  — CSF cavity ±0.05 around 0.15
+            [2:5] lesion xyz     — WM lesion center position
+            [5]  cortical thickness — GM shell width ±0.06 around 0.15
+            [6]  temporal atrophy — shrinks the inferior–posterior lobe
+                                   (hippocampal volume proxy)
+            [7]  L–R asymmetry   — differential atrophy across hemispheres
+            [8]  sulcal widening  — amplifies deformation at tissue boundaries
+
         z_deformation: small (K, K, K) grid → trilinear-upsampled into the
-            cortical-deformation field (gyral pattern proxy). Replaces the
-            previous random `_seeded_noise(scale=8, ...)` call so the gyral
-            pattern is a recoverable latent rather than an unrecoverable seed.
+            cortical-deformation field (gyral pattern proxy).
         z_fissure: small (K, K, K) grid → drives the longitudinal fissure
-            wiggle (was `_seeded_noise(scale=16, ...)`).
+            wiggle.
         """
+        # Right-pad z_content with zeros when the caller supplies fewer dims
+        # than the renderer consumes (back-compat with n_content=5 runs).
+        if z_content.numel() < self.N_CONTENT_COMPONENTS:
+            pad = torch.zeros(self.N_CONTENT_COMPONENTS - z_content.numel())
+            z_content = torch.cat([z_content.flatten(), pad])
+
         radii_wm = 0.5 + z_content[0].clamp(-1, 1) * 0.1
-        radii_gm = radii_wm + 0.15
+        cortical_thickness = 0.15 + z_content[5].clamp(-1, 1) * 0.06
+        radii_gm = radii_wm + cortical_thickness
         ventricle_size = 0.15 + z_content[1].clamp(-1, 1) * 0.05
 
         dist = torch.norm(self.coords, dim=-1)
 
-        deformation = self._upsample_field(z_deformation, device) * 0.1
+        # Sulcal widening: amplifies the deformation field at boundary regions,
+        # making gyri/sulci more or less pronounced.
+        sulcal_factor = 1.0 + z_content[8].clamp(-1, 1) * 0.6
+        deformation = self._upsample_field(z_deformation, device) * 0.1 * sulcal_factor
         deformed_dist = dist + deformation
+
+        # Temporal-lobe atrophy: shrink the brain radius in the inferior–
+        # posterior octant (y < 0, z < 0) to simulate hippocampal / medial-
+        # temporal volume loss. Smooth falloff via a sigmoid so the boundary
+        # isn't artificially sharp.
+        y_coords = self.coords[..., 1]
+        z_coords = self.coords[..., 2]
+        temporal_weight = torch.sigmoid(-8 * y_coords) * torch.sigmoid(-8 * z_coords)
+        temporal_shrink = z_content[6].clamp(-1, 1) * 0.12
+        deformed_dist = deformed_dist + temporal_weight * temporal_shrink
+
+        # Left–right asymmetry: differential atrophy across hemispheres.
+        # Positive z_content[7] → left hemisphere (x < 0) more atrophied.
+        x_coords = self.coords[..., 0]
+        lr_weight = torch.tanh(-3 * x_coords)  # smooth L/R gradient, ∈ (−1, 1)
+        lr_shift = z_content[7].clamp(-1, 1) * 0.08
+        deformed_dist = deformed_dist + lr_weight * lr_shift
 
         mask_gm = deformed_dist < radii_gm
         mask_wm = deformed_dist < radii_wm
 
-        x_coords = self.coords[..., 0]
         ventricle_split = torch.abs(x_coords) > 0.05
         mask_csf = (deformed_dist < ventricle_size) & ventricle_split
 
@@ -248,6 +288,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         n_style=3,
         n_deformation_grid=4,
         n_fissure_grid=8,
+        hierarchical_content=False,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -256,6 +297,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.seed = seed
         self.n_content = n_content
         self.n_style = n_style
+        self.hierarchical_content = hierarchical_content
         # Spatial-content grid sizes for pseudo_mri mode. Trilinear-upsampled
         # to (res, res, res) → drives the deformation / fissure fields.
         # Default 4³ for the gyral pattern (low-frequency, ~16 dof per axis at res=32)
@@ -264,16 +306,17 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.n_fissure_grid = n_fissure_grid
 
         if mode == "pseudo_mri":
-            # render_structure indexes z_content[0..4] and render_modality indexes
+            # render_structure indexes z_content[0..8] and render_modality indexes
             # z_style[0..2]. Smaller values silently disable the corresponding
             # anatomical / nuisance factor — warn loudly so it's not a surprise.
-            if n_content < 5:
+            if n_content < PseudoMRIRenderer.N_CONTENT_COMPONENTS:
                 import warnings
 
                 warnings.warn(
-                    f"pseudo_mri renderer consumes z_content[0..4] but n_content={n_content}. "
-                    f"Missing components will default to 0 (no anatomical variation on those axes). "
-                    f"Pass --synthetic-n-content 5 (or greater) to fully exercise the renderer.",
+                    f"pseudo_mri renderer consumes z_content[0..{PseudoMRIRenderer.N_CONTENT_COMPONENTS - 1}] "
+                    f"but n_content={n_content}. Missing components will default to 0 "
+                    f"(no anatomical variation on those axes). Pass --synthetic-n-content "
+                    f"{PseudoMRIRenderer.N_CONTENT_COMPONENTS} (or greater) to fully exercise the renderer.",
                     stacklevel=2,
                 )
             if n_style < PseudoMRIRenderer.N_STYLE_COMPONENTS:
@@ -313,14 +356,50 @@ class Synthetic3DDisentanglementDataset(Dataset):
     def __len__(self):
         return self.num_samples
 
+    # Hierarchical content structure: a global atrophy scalar drives the
+    # regional content dims via fixed coupling weights + independent residuals.
+    # Indices into z_content that each regional factor occupies:
+    #   [0] brain size, [1] ventricle, [5] cortical thickness,
+    #   [6] temporal atrophy, [8] sulcal widening.
+    # [2:5] (lesion xyz) and [7] (L-R asymmetry) are independent of global.
+    _HIER_COUPLINGS = {
+        0: -1.0,  # global atrophy → smaller brain
+        1: -0.8,  # global atrophy → bigger ventricles (anticorrelated)
+        5: -0.9,  # global atrophy → thinner cortex
+        6: 1.5,  # global atrophy → more temporal atrophy (AD-like)
+        8: 0.7,  # global atrophy → wider sulci
+    }
+    _HIER_RESIDUAL_SCALE = 0.6
+
+    def _sample_hierarchical_content(self, gen):
+        """Sample z_content with a shared global-atrophy factor.
+
+        Returns (z_content, z_global, z_residuals) where:
+          z_content  = the actual vector fed to the renderer
+          z_global   = scalar global atrophy severity
+          z_residuals = independent per-dim residuals (same shape as z_content)
+
+        The relationship is:
+          z_content[i] = coupling[i] * z_global + residual_scale * residual[i]
+        for coupled dims, and z_content[i] = residual[i] for independent dims.
+        """
+        z_global = torch.randn(1, generator=gen)
+        z_residuals = torch.randn(self.n_content, generator=gen)
+        z_content = z_residuals.clone() * self._HIER_RESIDUAL_SCALE
+        for idx, weight in self._HIER_COUPLINGS.items():
+            if idx < self.n_content:
+                z_content[idx] = weight * z_global.item() + self._HIER_RESIDUAL_SCALE * z_residuals[idx]
+        return z_content, z_global, z_residuals
+
     def _pseudo_mri_item(self, idx):
         sample_seed = self.seed * 1000003 + idx
         sample_gen = torch.Generator().manual_seed(sample_seed)
 
-        z_content = torch.randn(self.n_content, generator=sample_gen)
-        # Spatial content latents — drive the gyral pattern and fissure shape
-        # via deterministic upsampling. Each subject gets a unique, recoverable
-        # cortical pattern instead of an unrecoverable seed.
+        if self.hierarchical_content:
+            z_content, z_global, z_residuals = self._sample_hierarchical_content(sample_gen)
+        else:
+            z_content = torch.randn(self.n_content, generator=sample_gen)
+
         z_deformation = torch.randn(
             self.n_deformation_grid,
             self.n_deformation_grid,
@@ -361,9 +440,6 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 device=device,
             )
 
-        # True foreground mask from the structural render — shared across views
-        # since brain anatomy is content. Shape: [1, res, res, res] to match
-        # the image tensors.
         brain_mask = (tissue > 0).unsqueeze(0).float()
 
         latents = {
@@ -374,6 +450,10 @@ class Synthetic3DDisentanglementDataset(Dataset):
             "z_style_v2": z_style_v2,
             "brain_mask": brain_mask,
         }
+        if self.hierarchical_content:
+            latents["z_global_atrophy"] = z_global
+            latents["z_content_residuals"] = z_residuals
+
         return x_v1, x_v2, latents
 
     def _categorical_item(self, idx):
