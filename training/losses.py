@@ -1063,6 +1063,25 @@ def content_modality_adv_loss(hz_v0_content, hz_v1_content, head, lambd=1.0):
     return loss, acc
 
 
+def content_patch_modality_adv_loss(hz_v0_content, hz_v1_content, head, lambd=1.0):
+    """Patch-level gradient-reversal modality classifier on content.
+
+    hz_v0_content, hz_v1_content: (B, k, P) patch-level content features.
+    Reshapes to (B*P, k) per view so the adversary sees each patch independently,
+    penalising position-specific modality encoding that the pooled variant misses.
+    """
+    B, k, P = hz_v0_content.shape
+    z0 = hz_v0_content.permute(0, 2, 1).reshape(B * P, k)
+    z1 = hz_v1_content.permute(0, 2, 1).reshape(B * P, k)
+    z = torch.cat([z0, z1], dim=0)
+    y = torch.cat([torch.zeros(B * P, dtype=torch.long), torch.ones(B * P, dtype=torch.long)]).to(z.device)
+    logits = head(grad_reverse(z, lambd))
+    loss = F.cross_entropy(logits, y)
+    with torch.no_grad():
+        acc = (logits.argmax(-1) == y).float().mean().item()
+    return loss, acc
+
+
 def style_modality_ce_loss(hz_v0_style, hz_v1_style, head):
     """Sufficiency: style must be linearly modality-predictive.
 

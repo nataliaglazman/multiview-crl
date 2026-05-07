@@ -157,6 +157,15 @@ def parse_args() -> argparse.ArgumentParser:
         help="Gradient-reversal scale lambda for the content→modality adversarial loss.",
     )
     parser.add_argument(
+        "--scale-content-patch-modality-adv",
+        type=float,
+        default=0.0,
+        help="Weight on patch-level gradient-reversal modality classifier from content. "
+        "Penalises position-specific modality encoding that the pooled adversarial "
+        "term misses. Operates on (B*P, k) content features per level. "
+        "Watch ModAdvPatch/acc_L0 → 0.5 means patch-level invariance achieved.",
+    )
+    parser.add_argument(
         "--scale-style-modality-ce",
         type=float,
         default=0.0,

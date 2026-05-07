@@ -69,6 +69,7 @@ from training.losses import (
     JukeboxPerceptualLoss,
     barlow_twins_loss,
     content_modality_adv_loss,
+    content_patch_modality_adv_loss,
     infonce_loss,
     moco_loss,
     patch_infonce_loss,
@@ -571,14 +572,17 @@ def train_step(
                 # Style path: CE → style must be linearly modality-sufficient,
                 #   preventing collapse of modality-correlated demographic signal.
                 _adv_scale = getattr(args, "scale_content_modality_adv", 0.0)
+                _patch_adv_scale = getattr(args, "scale_content_patch_modality_adv", 0.0)
                 _suf_scale = getattr(args, "scale_style_modality_ce", 0.0)
-                if (_adv_scale > 0.0 or _suf_scale > 0.0) and _style_hz_v0 is not None:
-                    # Pull pooled content features for this level (shared-mask path).
+                if (_adv_scale > 0.0 or _patch_adv_scale > 0.0 or _suf_scale > 0.0) and _style_hz_v0 is not None:
+                    # Pull content features for this level (shared-mask path).
                     _ci = level_content_indices[0] if level_content_indices else None
                     if _ci:
                         if _is_patch:
-                            _content_hz_v0 = hz_level[0][:, _ci, :].mean(-1)
-                            _content_hz_v1 = hz_level[1][:, _ci, :].mean(-1)
+                            _content_hz_v0_patch = hz_level[0][:, _ci, :]  # (B, k, P)
+                            _content_hz_v1_patch = hz_level[1][:, _ci, :]
+                            _content_hz_v0 = _content_hz_v0_patch.mean(-1)  # (B, k)
+                            _content_hz_v1 = _content_hz_v1_patch.mean(-1)
                         else:
                             _content_hz_v0 = hz_level[0][:, _ci]
                             _content_hz_v1 = hz_level[1][:, _ci]
@@ -589,9 +593,12 @@ def train_step(
                             _heads = torch.nn.ModuleDict()
                             _raw_vqvae._aux_modality_heads = _heads
                         _ck = f"content_L{level_idx}"
+                        _cpk = f"content_patch_L{level_idx}"
                         _sk = f"style_L{level_idx}"
                         if _ck not in _heads:
                             _heads[_ck] = torch.nn.Linear(_content_hz_v0.shape[-1], 2).to(device)
+                        if _cpk not in _heads and _is_patch:
+                            _heads[_cpk] = torch.nn.Linear(_content_hz_v0.shape[-1], 2).to(device)
                         if _sk not in _heads:
                             _heads[_sk] = torch.nn.Linear(_style_hz_v0.shape[-1], 2).to(device)
 
@@ -603,6 +610,15 @@ def train_step(
                             total_contrastive_loss = total_contrastive_loss + _adv_loss * _adv_scale
                             _diag[f"ModAdv/loss_L{level_idx}"] = _adv_loss.item()
                             _diag[f"ModAdv/acc_L{level_idx}"] = _adv_acc  # ~0.5 = invariant
+
+                        if _patch_adv_scale > 0.0 and _is_patch:
+                            _lam = getattr(args, "content_modality_adv_lambda", 1.0)
+                            _padv_loss, _padv_acc = content_patch_modality_adv_loss(
+                                _content_hz_v0_patch, _content_hz_v1_patch, _heads[_cpk], lambd=_lam
+                            )
+                            total_contrastive_loss = total_contrastive_loss + _padv_loss * _patch_adv_scale
+                            _diag[f"ModAdvPatch/loss_L{level_idx}"] = _padv_loss.item()
+                            _diag[f"ModAdvPatch/acc_L{level_idx}"] = _padv_acc  # ~0.5 = invariant
 
                         if _suf_scale > 0.0:
                             _suf_loss, _suf_acc = style_modality_ce_loss(_style_hz_v0, _style_hz_v1, _heads[_sk])
@@ -1224,8 +1240,9 @@ def main(args):
         # (content invariance) and CE (style sufficiency). Built eagerly here
         # so their params are picked up by the main optimizer's param loop.
         _adv_on = getattr(args, "scale_content_modality_adv", 0.0) > 0.0
+        _patch_adv_on = getattr(args, "scale_content_patch_modality_adv", 0.0) > 0.0
         _suf_on = getattr(args, "scale_style_modality_ce", 0.0) > 0.0
-        if _adv_on or _suf_on:
+        if _adv_on or _patch_adv_on or _suf_on:
             _heads = torch.nn.ModuleDict()
             _hid = args.vqvae_hidden_channels
             for _lvl in getattr(args, "content_style_levels", [0]):
@@ -1234,9 +1251,13 @@ def main(args):
                     continue
                 _sc = _hid - _cc
                 _heads[f"content_L{_lvl}"] = torch.nn.Linear(_cc, 2)
+                if _patch_adv_on:
+                    _heads[f"content_patch_L{_lvl}"] = torch.nn.Linear(_cc, 2)
                 _heads[f"style_L{_lvl}"] = torch.nn.Linear(_sc, 2)
             vqvae_model._aux_modality_heads = _heads
-            logger.info(f"  Aux modality heads: adv={_adv_on} suf={_suf_on} levels={list(_heads.keys())}")
+            logger.info(
+                f"  Aux modality heads: adv={_adv_on} patch_adv={_patch_adv_on} suf={_suf_on} levels={list(_heads.keys())}"
+            )
 
         # Compile AFTER attaching all submodules but BEFORE DataParallel.
         # DataParallel(compiled) is unsupported; submodules attached to an
