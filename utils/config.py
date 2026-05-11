@@ -367,6 +367,14 @@ def parse_args() -> argparse.ArgumentParser:
         "Only active when --inject-style-to-decoder is set.",
     )
     parser.add_argument(
+        "--detach-style-injection",
+        action="store_true",
+        default=False,
+        help="Detach style features before decoder injection so the reconstruction loss "
+        "cannot backpropagate into the encoder's style channels. Prevents the recon loss "
+        "from incentivising content encoding in style channels.",
+    )
+    parser.add_argument(
         "--style-embed-dim",
         type=int,
         default=None,
