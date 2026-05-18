@@ -787,6 +787,21 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
     # only sees content channels, and there are no higher encoder levels to route
     # style through.  --inject-style-to-decoder gives style a gradient path.
     _nb_levels = getattr(args, "vqvae_nb_levels", 3)
+
+    _sr = getattr(args, "vqvae_scaling_rates", None)
+    if _sr is not None and len(_sr) != _nb_levels:
+        if len(_sr) > _nb_levels:
+            logger.info(
+                f"Truncating --vqvae-scaling-rates from {_sr} to {_sr[:_nb_levels]} "
+                f"to match nb_levels={_nb_levels}."
+            )
+            args.vqvae_scaling_rates = _sr[:_nb_levels]
+        else:
+            raise ValueError(
+                f"--vqvae-scaling-rates has {len(_sr)} entries but nb_levels={_nb_levels}. "
+                "Provide at least nb_levels scaling rates."
+            )
+
     _has_cs = getattr(args, "content_dim", 0) > 0 and getattr(args, "total_dim", 0) > getattr(args, "content_dim", 0)
     _cs_levels = getattr(args, "content_style_levels", [0])
     _all_levels_masked = _has_cs and set(_cs_levels) == set(range(_nb_levels))
