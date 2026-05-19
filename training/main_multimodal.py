@@ -2329,6 +2329,32 @@ def main(args):
                 val_dict[f"hz_{m}_subsets"][s] = sc.fit_transform(val_dict[f"hz_{m}_subsets"][s])
                 test_dict[f"hz_{m}_subsets"][s] = sc.transform(test_dict[f"hz_{m}_subsets"][s])
 
+        if args.dataset_name == "synthetic" and args.eval_dci:
+            import eval.dci as dci
+
+            logger.info("[EVALUATION] Computing DCI metrics on synthetic GT factors...")
+            dci_synth = dci.compute_dci_synthetic(
+                encoder=encoders[0],
+                dataset=test_dataset,
+                device=args.device,
+                batch_size=dataloader_kwargs.get("batch_size", 32),
+                num_workers=dataloader_kwargs.get("num_workers", 0),
+            )
+            dci_synth_path = os.path.join(args.save_dir, "dci_synthetic.csv")
+            flat = {k: v for k, v in dci_synth.items() if k != "factor_info"}
+            with open(dci_synth_path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=flat.keys())
+                w.writeheader()
+                w.writerow(flat)
+            logger.info(f"  Synthetic DCI saved to: {dci_synth_path}")
+
+            if tb_writer is not None:
+                for k, v in flat.items():
+                    if not np.isnan(v):
+                        tb_writer.add_scalar(f"dci_synthetic/{k}", v, global_step=args.iterations)
+            if _use_wandb:
+                wandb.log({f"dci_synthetic/{k}": v for k, v in flat.items() if not np.isnan(v)})
+
         results = []
         for m_idx, m in enumerate(args.modalities):
             factors_m = args.DATASETCLASS.FACTORS[m]
