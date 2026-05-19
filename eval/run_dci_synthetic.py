@@ -192,35 +192,114 @@ def main():
 
         for section in sections:
             full_section = f"{prefix}{section}"
-            metrics = {k.split("/")[-1]: v for k, v in results.items() if k.startswith(full_section + "/")}
-            if not metrics:
+            detail = results.get(f"{full_section}/detail")
+            if detail is None:
                 continue
+
+            d_score = results.get(f"{full_section}/disentanglement", float("nan"))
+            c_score = results.get(f"{full_section}/completeness", float("nan"))
+            i_train = results.get(f"{full_section}/informativeness_train", float("nan"))
+            i_test = results.get(f"{full_section}/informativeness_test", float("nan"))
+
             print(f"  {section}")
-            for mk, mv in metrics.items():
-                print(f"    {mk:<25s} {mv:.4f}")
+            print(f"    {'':30s} {'Train R²':>10s} {'Test R²':>10s} {'Complet.':>10s}")
+            print(f"    {'─' * 62}")
+            names = detail["factor_names"]
+            for j, name in enumerate(names):
+                tr = detail["per_factor_train"][j]
+                te = detail["per_factor_test"][j]
+                co = detail["per_factor_completeness"][j]
+                print(f"    {name:30s} {tr:10.4f} {te:10.4f} {co:10.4f}")
+            print(f"    {'─' * 62}")
+            print(f"    {'MEAN':30s} {i_train:10.4f} {i_test:10.4f} {c_score:10.4f}")
+            print(f"    Disentanglement: {d_score:.4f}")
             print()
 
     # ── Save ──────────────────────────────────────────────────────────────
     out_dir = cli.output_dir or cli.run_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    flat = {k: v for k, v in results.items() if not k.endswith("factor_info")}
+    scalar_results = {k: v for k, v in results.items() if isinstance(v, (int, float, np.floating))}
     csv_path = os.path.join(out_dir, "dci_synthetic.csv")
     with open(csv_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=flat.keys())
+        w = csv.DictWriter(f, fieldnames=scalar_results.keys())
         w.writeheader()
-        w.writerow(flat)
+        w.writerow(scalar_results)
 
     json_path = os.path.join(out_dir, "dci_synthetic.json")
+    serialisable = {}
+    for k, v in results.items():
+        if isinstance(v, (int, float, np.floating)):
+            serialisable[k] = float(v)
+        elif isinstance(v, dict) and "importance_matrix" not in v:
+            serialisable[k] = v
     with open(json_path, "w") as f:
-        json.dump(
-            {k: float(v) if isinstance(v, (float, np.floating)) else v for k, v in results.items()},
-            f,
-            indent=2,
-        )
+        json.dump(serialisable, f, indent=2)
 
     logger.info("Results saved to: %s", csv_path)
     logger.info("Results saved to: %s", json_path)
+
+    # ── Importance heatmaps ───────────────────────────────────────────────
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        if isinstance(pooling, (list, tuple)):
+            n_repeats = int(np.prod(pooling))
+        elif pooling == "stats":
+            n_repeats = 4
+        else:
+            n_repeats = 1
+
+        for lvl in levels:
+            prefix = f"L{lvl}/" if len(levels) > 1 else ""
+            fi = results.get(f"{prefix}factor_info")
+            if fi is None:
+                continue
+
+            heatmap_sections = []
+            for section in sections:
+                detail = results.get(f"{prefix}{section}/detail")
+                if detail is not None:
+                    heatmap_sections.append((section, detail))
+            if not heatmap_sections:
+                continue
+
+            fig, axes = plt.subplots(1, len(heatmap_sections), figsize=(5 * len(heatmap_sections), 6), squeeze=False)
+            for ax, (section, detail) in zip(axes[0], heatmap_sections):
+                im = detail["importance_matrix"]
+                names = detail["factor_names"]
+                n_codes, n_factors = im.shape
+
+                if n_repeats > 1 and n_codes >= n_repeats:
+                    n_ch = n_codes // n_repeats
+                    agg = im.reshape(n_repeats, n_ch, n_factors).sum(axis=0)
+                else:
+                    agg = im
+
+                ax.imshow(agg.T, aspect="auto", cmap="viridis")
+                ax.set_yticks(range(len(names)))
+                ax.set_yticklabels(names, fontsize=8)
+                xlabel = f"channel (aggregated from {n_codes} features)" if n_repeats > 1 else "channel"
+                ax.set_xlabel(xlabel, fontsize=8)
+                ax.set_title(section, fontsize=10)
+
+            fig.suptitle(f"Importance matrix — Level {lvl} ({fi['pooling']})", fontsize=12)
+            fig.tight_layout()
+            heatmap_path = os.path.join(out_dir, f"dci_importance_L{lvl}.png")
+            fig.savefig(heatmap_path, dpi=150)
+            plt.close(fig)
+            logger.info("Heatmap saved to: %s", heatmap_path)
+
+            np.savez_compressed(
+                os.path.join(out_dir, f"dci_importance_L{lvl}.npz"),
+                **{f"{s}/importance_matrix": d["importance_matrix"] for s, d in heatmap_sections},
+                **{f"{s}/factor_names": d["factor_names"] for s, d in heatmap_sections},
+            )
+    except ImportError:
+        logger.warning("matplotlib not available — skipping heatmap export")
 
 
 if __name__ == "__main__":

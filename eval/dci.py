@@ -71,14 +71,19 @@ def compute_dci(
     mus_test, ys_test = utils.generate_batch_factor_code(
         ground_truth_data, representation_function, num_test, random_state, batch_size
     )
-    scores = _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types)
+    scores, _ = _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types)
     return scores
 
 
 def _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types):
-    """Computes score based on both training and testing codes and factors."""
+    """Computes score based on both training and testing codes and factors.
+
+    Returns:
+        scores: dict with scalar summary metrics.
+        detail: dict with per-factor / per-code arrays and the importance matrix.
+    """
     scores = {}
-    importance_matrix, train_err, test_err = compute_importance_gbt(
+    importance_matrix, train_err, test_err, pf_train, pf_test = compute_importance_gbt(
         mus_train, ys_train, mus_test, ys_test, factor_types
     )
     assert importance_matrix.shape[0] == mus_train.shape[0]
@@ -87,7 +92,14 @@ def _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types):
     scores["informativeness_test"] = test_err
     scores["disentanglement"] = disentanglement(importance_matrix)
     scores["completeness"] = completeness(importance_matrix)
-    return scores
+    detail = {
+        "importance_matrix": importance_matrix,
+        "per_factor_train": pf_train,
+        "per_factor_test": pf_test,
+        "per_code_disentanglement": disentanglement_per_code(importance_matrix),
+        "per_factor_completeness": completeness_per_factor(importance_matrix),
+    }
+    return scores, detail
 
 
 def compute_dci_on_fixed_data(observations, labels, representation_function, train_percentage=0.8, batch_size=100):
@@ -134,7 +146,13 @@ def compute_importance_gbt(x_train, y_train, x_test, y_test, factor_types):
             importance_matrix[:, i] = np.abs(model.feature_importances_)
             train_loss.append(model.score(x_train.T, y_train[i, :]))
             test_loss.append(model.score(x_test.T, y_test[i, :]))
-    return importance_matrix, np.mean(train_loss), np.mean(test_loss)
+    return (
+        importance_matrix,
+        np.mean(train_loss),
+        np.mean(test_loss),
+        np.array(train_loss),
+        np.array(test_loss),
+    )
 
 
 def disentanglement_per_code(importance_matrix):
@@ -426,13 +444,13 @@ def compute_dci_synthetic(
         prefix = f"L{lvl}/" if use_prefix else ""
         results[f"{prefix}factor_info"] = info
 
-        pairs = [(f"{prefix}content→content", content_repr, gt_content)]
-        pairs.append((f"{prefix}content→style", content_repr, gt_style))
+        pairs = [(f"{prefix}content→content", content_repr, gt_content, info["content_names"])]
+        pairs.append((f"{prefix}content→style", content_repr, gt_style, info["style_names"]))
         if style_repr is not None:
-            pairs.append((f"{prefix}style→style", style_repr, gt_style))
-            pairs.append((f"{prefix}style→content", style_repr, gt_content))
+            pairs.append((f"{prefix}style→style", style_repr, gt_style, info["style_names"]))
+            pairs.append((f"{prefix}style→content", style_repr, gt_content, info["content_names"]))
 
-        for label, repr_arr, factor_arr in pairs:
+        for label, repr_arr, factor_arr, factor_names in pairs:
             mus_train = repr_arr[:split].T
             mus_test = repr_arr[split:].T
             ys_train = factor_arr[:split].T
@@ -442,9 +460,11 @@ def compute_dci_synthetic(
             factor_types = ["continuous"] * n_factors
 
             try:
-                scores = _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types)
+                scores, detail = _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types)
                 for k, v in scores.items():
                     results[f"{label}/{k}"] = v
+                detail["factor_names"] = factor_names
+                results[f"{label}/detail"] = detail
             except Exception as e:
                 logger.warning("DCI computation failed for %s: %s", label, e)
                 for k in [

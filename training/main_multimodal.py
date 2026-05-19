@@ -2341,7 +2341,7 @@ def main(args):
                 num_workers=dataloader_kwargs.get("num_workers", 0),
             )
             dci_synth_path = os.path.join(args.save_dir, "dci_synthetic.csv")
-            flat = {k: v for k, v in dci_synth.items() if k != "factor_info"}
+            flat = {k: v for k, v in dci_synth.items() if isinstance(v, (int, float, np.floating))}
             with open(dci_synth_path, "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=flat.keys())
                 w.writeheader()
