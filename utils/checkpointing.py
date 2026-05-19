@@ -109,7 +109,6 @@ def save_checkpoint(
             "recon_loss": recon_loss,
             "vq_loss": vq_loss,
             "rng_state": _capture_rng_state(),
-            "args": args,
             # Mirror the best-metric bookkeeping into the rolling checkpoint so
             # that resuming from the latest file (even when vqvae_best.pt is
             # missing or stale) preserves the selector's history.
@@ -146,7 +145,6 @@ def save_checkpoint(
             "recon_loss": recon_loss,
             "vq_loss": vq_loss,
             "rng_state": _capture_rng_state(),
-            "args": args,
             "best_metric_name": best_metric_name,
             "best_metric_value": float(best_loss) if best_loss is not None else None,
         }

@@ -2,34 +2,24 @@
 """Standalone DCI evaluation on a saved VQ-VAE checkpoint + synthetic data.
 
 Usage:
-    python -m eval.run_dci_synthetic --checkpoint path/to/vqvae_model.pt [training flags...]
+    python -m eval.run_dci_synthetic --run-dir path/to/run_directory
 
-The script re-creates the VQVAE from the same CLI flags used during training,
-loads the checkpoint weights, generates a synthetic test set, and prints DCI
-scores for every content/style combination.
+    # or point directly at a checkpoint (settings.json must be in same dir):
+    python -m eval.run_dci_synthetic --run-dir path/to/run_directory \
+        --checkpoint path/to/vqvae_best.pt
 
-Any flag accepted by the training script can be passed here — the script uses
-the same parse_args() so the model architecture matches the checkpoint.  Only
-the flags that affect model construction and synthetic data matter; training-
-only flags (lr, iterations, etc.) are ignored.
+The script reads settings.json from the run directory to reconstruct the
+exact model architecture, loads the checkpoint, generates a synthetic test
+set, and prints DCI scores for every content/style combination.
 
 Examples:
-    # Minimal — uses defaults for all arch flags:
-    python -m eval.run_dci_synthetic --checkpoint runs/my_run/vqvae_model.pt
-
-    # Override synthetic data size and architecture flags to match training:
-    python -m eval.run_dci_synthetic \
-        --checkpoint runs/my_run/vqvae_best.pt \
-        --vqvae-hidden-channels 128 \
-        --vqvae-nb-levels 3 \
-        --content-size 32 \
-        --synthetic-n-content 9 \
-        --synthetic-n-style 3 \
-        --synthetic-num-test 500 \
-        --batch-size 16
+    python -m eval.run_dci_synthetic --run-dir runs/my_run
+    python -m eval.run_dci_synthetic --run-dir runs/my_run --num-samples 500
+    python -m eval.run_dci_synthetic --run-dir runs/my_run --checkpoint runs/my_run/vqvae_best.pt
 """
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -38,151 +28,43 @@ import sys
 import numpy as np
 import torch
 
-import models.vqvae as vqvae
-from data.datasets import SyntheticBrainDataset
-from eval.dci import compute_dci_synthetic
-from utils.config import parse_args, update_args
-
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _infer_arch_from_state_dict(sd):
-    """Best-effort inference of VQVAE constructor args from a state dict.
-
-    Reads tensor shapes from known parameter names to recover hidden_channels,
-    embed_dim, nb_levels, and res_channels.  Returns a dict of arg overrides
-    (only includes values it could determine).
-    """
-    overrides = {}
-
-    # hidden_channels: first encoder conv weight shape is (hidden, in_ch, k, k, k)
-    key = "encoders.0.layers.0.0.weight"
-    if key in sd:
-        overrides["vqvae_hidden_channels"] = sd[key].shape[0]
-        overrides["vqvae_res_channels"] = sd[key].shape[0]
-
-    # embed_dim: codebook embedding weight shape is (nb_entries, embed_dim)
-    for k, v in sd.items():
-        if k.endswith(".embed") and v.dim() == 2:
-            overrides["vqvae_embed_dim"] = v.shape[1]
-            break
-
-    # nb_levels: count distinct encoder indices "encoders.<i>.*"
-    enc_indices = set()
-    for k in sd:
-        if k.startswith("encoders."):
-            parts = k.split(".")
-            if len(parts) >= 2 and parts[1].isdigit():
-                enc_indices.add(int(parts[1]))
-    if enc_indices:
-        overrides["vqvae_nb_levels"] = max(enc_indices) + 1
-        overrides["vqvae_scaling_rates"] = [2] * (max(enc_indices) + 1)
-
-    # separate_encoders: presence of "encoders_v1.*" keys
-    if any(k.startswith("encoders_v1.") for k in sd):
-        overrides["separate_encoders"] = True
-
-    # mask_mode: presence of "channel_logits.*" → learned mask
-    if any(k.startswith("channel_logits.") for k in sd):
-        overrides["mask_mode"] = "learned"
-
-    # quantize_style: presence of "style_codebooks.*"
-    if any(k.startswith("style_codebooks.") for k in sd):
-        overrides["quantize_style"] = True
-
-    return overrides
+def _namespace_from_dict(d):
+    """Convert a flat dict to an argparse.Namespace."""
+    return argparse.Namespace(**d)
 
 
 def main():
-    # ── Parse args ────────────────────────────────────────────────────────
-    # Inject --dataset_name synthetic so parse_args sets up DATASETCLASS etc.
-    # Also inject --evaluate so the arg-postprocessing path runs.
-    if "--dataset_name" not in sys.argv:
-        sys.argv.extend(["--dataset_name", "synthetic"])
-    if "--evaluate" not in sys.argv:
-        sys.argv.append("--evaluate")
-
-    # Add --checkpoint to the parser before parse_args runs.
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pt checkpoint file")
-    pre_parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=None,
-        help="Where to write dci_synthetic.csv (default: same dir as checkpoint)",
+    parser = argparse.ArgumentParser(description="Standalone DCI evaluation for synthetic data")
+    parser.add_argument("--run-dir", type=str, required=True, help="Training run directory containing settings.json")
+    parser.add_argument(
+        "--checkpoint", type=str, default=None, help="Path to .pt file (default: <run-dir>/vqvae_model.pt)"
     )
-    pre_parser.add_argument("--num-samples", type=int, default=None, help="Override number of test samples")
-    pre_parser.add_argument("--batch-size-eval", type=int, default=32)
-    pre_parser.add_argument("--num-workers-eval", type=int, default=0)
-    pre_known, remaining = pre_parser.parse_known_args()
+    parser.add_argument("--output-dir", type=str, default=None, help="Where to write results (default: run-dir)")
+    parser.add_argument("--num-samples", type=int, default=None, help="Override number of test samples")
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--num-workers", type=int, default=0)
+    cli = parser.parse_args()
 
-    # Temporarily replace sys.argv so parse_args sees only the remaining flags.
-    # parse_args() returns the ArgumentParser; .parse_args() gives the namespace;
-    # update_args() fills in dataset-specific fields (content_indices, etc.).
-    orig_argv = sys.argv
-    sys.argv = [sys.argv[0]] + remaining
-    try:
-        parser = parse_args()
-        args = parser.parse_args()
-        args = update_args(args)
-    finally:
-        sys.argv = orig_argv
+    # ── Load settings.json ────────────────────────────────────────────────
+    settings_path = os.path.join(cli.run_dir, "settings.json")
+    if not os.path.exists(settings_path):
+        logger.error("settings.json not found in %s", cli.run_dir)
+        sys.exit(1)
+
+    with open(settings_path) as f:
+        settings = json.load(f)
+    args = _namespace_from_dict(settings)
+    logger.info("Loaded settings from: %s", settings_path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    args.device = device
 
-    # ── Load checkpoint & infer architecture ──────────────────────────────
-    ckpt_path = pre_known.checkpoint
-    logger.info("Loading checkpoint: %s", ckpt_path)
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    # ── Build model from saved settings ───────────────────────────────────
+    import models.vqvae as vqvae
 
-    state_dict = ckpt.get("encoders", ckpt)
-    cleaned = {}
-    for k, v in state_dict.items():
-        cleaned[k.removeprefix("module.")] = v
-
-    if "args" in ckpt:
-        saved_args = ckpt["args"]
-        logger.info("Found saved args in checkpoint — using them for model construction.")
-        for attr in [
-            "vqvae_hidden_channels",
-            "vqvae_res_channels",
-            "vqvae_nb_levels",
-            "vqvae_embed_dim",
-            "vqvae_nb_entries",
-            "vqvae_scaling_rates",
-            "content_indices",
-            "style_indices",
-            "inject_style_to_decoder",
-            "content_style_levels",
-            "content_ratios",
-            "separate_encoders",
-            "mask_mode",
-            "quantize_style",
-            "style_embed_dim",
-            "style_nb_entries",
-            "style_injection_mode",
-            "use_content_projection",
-            "narrow_encoder_input",
-            "top_level_recon_only",
-            "pass_full_to_next_level",
-            "skip_decoder_concat_levels",
-            "style_dropout_prob",
-            "detach_style_injection",
-            "encoding_size",
-        ]:
-            if hasattr(saved_args, attr):
-                setattr(args, attr, getattr(saved_args, attr))
-    else:
-        inferred = _infer_arch_from_state_dict(cleaned)
-        if inferred:
-            logger.info("No saved args in checkpoint — inferred from weights: %s", inferred)
-            for attr, val in inferred.items():
-                setattr(args, attr, val)
-            args = update_args(args)
-
-    # ── Build model ───────────────────────────────────────────────────────
     logger.info(
         "Building VQVAE: hidden=%d, levels=%d, embed=%d",
         args.vqvae_hidden_channels,
@@ -218,6 +100,13 @@ def main():
         detach_style_injection=getattr(args, "detach_style_injection", False),
     )
 
+    # ── Load checkpoint ───────────────────────────────────────────────────
+    ckpt_path = cli.checkpoint or os.path.join(cli.run_dir, "vqvae_model.pt")
+    logger.info("Loading checkpoint: %s", ckpt_path)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+
+    state_dict = ckpt.get("encoders", ckpt)
+    cleaned = {k.removeprefix("module."): v for k, v in state_dict.items()}
     model.load_state_dict(cleaned, strict=False)
     model.to(device)
     model.eval()
@@ -227,7 +116,9 @@ def main():
     logger.info("Model params: %s", f"{sum(p.numel() for p in model.parameters()):,}")
 
     # ── Build synthetic dataset ───────────────────────────────────────────
-    n_samples = pre_known.num_samples or getattr(args, "synthetic_num_test", 200)
+    from data.datasets import SyntheticBrainDataset
+
+    n_samples = cli.num_samples or getattr(args, "synthetic_num_test", 200)
     res = getattr(args, "synthetic_res", 64)
     spatial_size = getattr(args, "spatial_size", (res, res, res))
 
@@ -246,13 +137,15 @@ def main():
     )
 
     # ── Run DCI ───────────────────────────────────────────────────────────
+    from eval.dci import compute_dci_synthetic
+
     logger.info("Computing DCI metrics...")
     results = compute_dci_synthetic(
         encoder=model,
         dataset=test_dataset,
         device=device,
-        batch_size=pre_known.batch_size_eval,
-        num_workers=pre_known.num_workers_eval,
+        batch_size=cli.batch_size,
+        num_workers=cli.num_workers,
     )
 
     # ── Print results ─────────────────────────────────────────────────────
@@ -278,13 +171,11 @@ def main():
         print()
 
     # ── Save ──────────────────────────────────────────────────────────────
-    out_dir = pre_known.output_dir or os.path.dirname(ckpt_path)
+    out_dir = cli.output_dir or cli.run_dir
     os.makedirs(out_dir, exist_ok=True)
 
     flat = {k: v for k, v in results.items() if k != "factor_info"}
     csv_path = os.path.join(out_dir, "dci_synthetic.csv")
-    import csv
-
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=flat.keys())
         w.writeheader()
@@ -292,7 +183,11 @@ def main():
 
     json_path = os.path.join(out_dir, "dci_synthetic.json")
     with open(json_path, "w") as f:
-        json.dump({k: float(v) if isinstance(v, (float, np.floating)) else v for k, v in results.items()}, f, indent=2)
+        json.dump(
+            {k: float(v) if isinstance(v, (float, np.floating)) else v for k, v in results.items()},
+            f,
+            indent=2,
+        )
 
     logger.info("Results saved to: %s", csv_path)
     logger.info("Results saved to: %s", json_path)
