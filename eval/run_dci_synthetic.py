@@ -41,7 +41,7 @@ import torch
 import models.vqvae as vqvae
 from data.datasets import SyntheticBrainDataset
 from eval.dci import compute_dci_synthetic
-from utils.config import parse_args
+from utils.config import parse_args, update_args
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -70,11 +70,15 @@ def main():
     pre_parser.add_argument("--num-workers-eval", type=int, default=0)
     pre_known, remaining = pre_parser.parse_known_args()
 
-    # Temporarily replace sys.argv so parse_args sees only the remaining flags
+    # Temporarily replace sys.argv so parse_args sees only the remaining flags.
+    # parse_args() returns the ArgumentParser; .parse_args() gives the namespace;
+    # update_args() fills in dataset-specific fields (content_indices, etc.).
     orig_argv = sys.argv
     sys.argv = [sys.argv[0]] + remaining
     try:
-        args = parse_args()
+        parser = parse_args()
+        args = parser.parse_args()
+        args = update_args(args)
     finally:
         sys.argv = orig_argv
 
