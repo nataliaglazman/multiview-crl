@@ -47,6 +47,53 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
 
+def _infer_arch_from_state_dict(sd):
+    """Best-effort inference of VQVAE constructor args from a state dict.
+
+    Reads tensor shapes from known parameter names to recover hidden_channels,
+    embed_dim, nb_levels, and res_channels.  Returns a dict of arg overrides
+    (only includes values it could determine).
+    """
+    overrides = {}
+
+    # hidden_channels: first encoder conv weight shape is (hidden, in_ch, k, k, k)
+    key = "encoders.0.layers.0.0.weight"
+    if key in sd:
+        overrides["vqvae_hidden_channels"] = sd[key].shape[0]
+        overrides["vqvae_res_channels"] = sd[key].shape[0]
+
+    # embed_dim: codebook embedding weight shape is (nb_entries, embed_dim)
+    for k, v in sd.items():
+        if k.endswith(".embed") and v.dim() == 2:
+            overrides["vqvae_embed_dim"] = v.shape[1]
+            break
+
+    # nb_levels: count distinct encoder indices "encoders.<i>.*"
+    enc_indices = set()
+    for k in sd:
+        if k.startswith("encoders."):
+            parts = k.split(".")
+            if len(parts) >= 2 and parts[1].isdigit():
+                enc_indices.add(int(parts[1]))
+    if enc_indices:
+        overrides["vqvae_nb_levels"] = max(enc_indices) + 1
+        overrides["vqvae_scaling_rates"] = [2] * (max(enc_indices) + 1)
+
+    # separate_encoders: presence of "encoders_v1.*" keys
+    if any(k.startswith("encoders_v1.") for k in sd):
+        overrides["separate_encoders"] = True
+
+    # mask_mode: presence of "channel_logits.*" → learned mask
+    if any(k.startswith("channel_logits.") for k in sd):
+        overrides["mask_mode"] = "learned"
+
+    # quantize_style: presence of "style_codebooks.*"
+    if any(k.startswith("style_codebooks.") for k in sd):
+        overrides["quantize_style"] = True
+
+    return overrides
+
+
 def main():
     # ── Parse args ────────────────────────────────────────────────────────
     # Inject --dataset_name synthetic so parse_args sets up DATASETCLASS etc.
@@ -85,8 +132,63 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args.device = device
 
+    # ── Load checkpoint & infer architecture ──────────────────────────────
+    ckpt_path = pre_known.checkpoint
+    logger.info("Loading checkpoint: %s", ckpt_path)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+
+    state_dict = ckpt.get("encoders", ckpt)
+    cleaned = {}
+    for k, v in state_dict.items():
+        cleaned[k.removeprefix("module.")] = v
+
+    if "args" in ckpt:
+        saved_args = ckpt["args"]
+        logger.info("Found saved args in checkpoint — using them for model construction.")
+        for attr in [
+            "vqvae_hidden_channels",
+            "vqvae_res_channels",
+            "vqvae_nb_levels",
+            "vqvae_embed_dim",
+            "vqvae_nb_entries",
+            "vqvae_scaling_rates",
+            "content_indices",
+            "style_indices",
+            "inject_style_to_decoder",
+            "content_style_levels",
+            "content_ratios",
+            "separate_encoders",
+            "mask_mode",
+            "quantize_style",
+            "style_embed_dim",
+            "style_nb_entries",
+            "style_injection_mode",
+            "use_content_projection",
+            "narrow_encoder_input",
+            "top_level_recon_only",
+            "pass_full_to_next_level",
+            "skip_decoder_concat_levels",
+            "style_dropout_prob",
+            "detach_style_injection",
+            "encoding_size",
+        ]:
+            if hasattr(saved_args, attr):
+                setattr(args, attr, getattr(saved_args, attr))
+    else:
+        inferred = _infer_arch_from_state_dict(cleaned)
+        if inferred:
+            logger.info("No saved args in checkpoint — inferred from weights: %s", inferred)
+            for attr, val in inferred.items():
+                setattr(args, attr, val)
+            args = update_args(args)
+
     # ── Build model ───────────────────────────────────────────────────────
-    logger.info("Building VQVAE with the same architecture flags...")
+    logger.info(
+        "Building VQVAE: hidden=%d, levels=%d, embed=%d",
+        args.vqvae_hidden_channels,
+        args.vqvae_nb_levels,
+        args.vqvae_embed_dim,
+    )
     model = vqvae.VQVAE(
         in_channels=1,
         hidden_channels=args.vqvae_hidden_channels,
@@ -116,16 +218,6 @@ def main():
         detach_style_injection=getattr(args, "detach_style_injection", False),
     )
 
-    # ── Load checkpoint ───────────────────────────────────────────────────
-    ckpt_path = pre_known.checkpoint
-    logger.info("Loading checkpoint: %s", ckpt_path)
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-
-    state_dict = ckpt.get("encoders", ckpt)
-    # Strip "module." prefix from DataParallel checkpoints
-    cleaned = {}
-    for k, v in state_dict.items():
-        cleaned[k.removeprefix("module.")] = v
     model.load_state_dict(cleaned, strict=False)
     model.to(device)
     model.eval()
