@@ -1323,7 +1323,7 @@ class VQVAE(HelperModule):
                 if self.inject_style_to_decoder and l in style_spatials:
                     _style = style_spatials[l]
                     if self.detach_style_injection:
-                        _style = F.normalize(_style, dim=1, eps=1e-6).detach()
+                        _style = _style.detach()
                     if self.training and self.style_dropout_prob > 0.0:
                         _keep = (
                             torch.rand(_style.shape[0], 1, 1, 1, 1, device=_style.device) >= self.style_dropout_prob
