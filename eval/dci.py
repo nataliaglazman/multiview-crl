@@ -187,21 +187,65 @@ CONTENT_FACTOR_NAMES = [
 STYLE_FACTOR_NAMES = ["gain", "bias", "noise_sigma"]
 
 
-def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, num_workers=0):
-    """Run the encoder over a synthetic dataset, returning content/style representations and GT factors.
+def _parse_content_indices(content_idx_raw):
+    """Normalise the various formats content_idx can arrive in to a plain list[int]."""
+    if content_idx_raw is None:
+        return None
+    if isinstance(content_idx_raw, (list, tuple)) and len(content_idx_raw) > 0:
+        first = content_idx_raw[0]
+        if isinstance(first, (list, tuple)):
+            return list(first)
+        if isinstance(first, torch.Tensor):
+            return first.cpu().tolist()
+        return list(content_idx_raw)
+    if isinstance(content_idx_raw, torch.Tensor):
+        return content_idx_raw.cpu().tolist()
+    return None
+
+
+def _split_content_style(features_np, content_indices):
+    """Split a (B, D) array into content and style columns.
+
+    Returns (content, style).  style is None when there is no split.
+    """
+    if content_indices is not None and len(content_indices) > 0:
+        all_channels = set(range(features_np.shape[1]))
+        style_indices = sorted(all_channels - set(content_indices))
+        content = features_np[:, content_indices]
+        style = features_np[:, style_indices] if style_indices else None
+        return content, style
+    return features_np, None
+
+
+def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, num_workers=0, pooling="gap"):
+    """Run the encoder over a synthetic dataset and collect per-level representations + GT factors.
+
+    A single forward pass extracts features from every encoder level.  Each level's
+    content/style split uses that level's own ``soft_content_masks`` entry (from the
+    Gumbel mask), so levels without a mask have no split (all channels → content).
+
+    Args:
+        encoder: VQVAE (or compatible) model.
+        dataset: SyntheticBrainDataset.
+        device: torch device.
+        batch_size: DataLoader batch size.
+        num_workers: DataLoader workers.
+        pooling: How to reduce spatial maps to feature vectors.
+            ``"gap"``   — global average pool → (B, C).
+            ``(D,H,W)`` — patch-grid pool → (B, C*D*H*W).  E.g. ``(2,2,2)``
+                          gives 8 patches per channel.
+            ``"stats"`` — per-channel (mean, std, max, min) → (B, C*4).
 
     Returns:
-        content_repr: (N, n_content_channels) numpy array
-        style_repr:   (N, n_style_channels)  numpy array  — None if no content/style split
-        gt_content:   (N, n_content_factors) numpy array   (the scalar z_content)
-        gt_style_v1:  (N, n_style_factors) numpy array
-        gt_style_v2:  (N, n_style_factors) numpy array
-        factor_info:  dict with metadata (factor names, counts)
+        level_data: ``{level_idx: (content_repr, style_repr, factor_info)}``
+        gt_content, gt_style_v1, gt_style_v2: shared GT arrays ``(N, n_factors)``
     """
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    all_content_repr = []
-    all_style_repr = []
+    use_patch_grid = isinstance(pooling, (list, tuple))
+    use_stats = pooling == "stats"
+
+    per_level = {}
     all_gt_content = []
     all_gt_style_v1 = []
     all_gt_style_v2 = []
@@ -212,78 +256,134 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
             imgs = batch["image"]
             x = torch.cat(imgs, dim=0).to(device)
 
-            enc_out = encoder(x, pool_only=True, n_views=len(imgs))
+            if use_patch_grid:
+                enc_out = encoder(x, pool_only=True, n_views=len(imgs), patch_grid=pooling)
+            elif use_stats:
+                enc_out = encoder(x, pool_only=False, return_recon=False, n_views=len(imgs))
+            else:
+                enc_out = encoder(x, pool_only=True, n_views=len(imgs))
 
             if isinstance(enc_out, tuple):
                 encoder_features = enc_out[2]
-                content_idx_raw = enc_out[3]
-                if len(encoder_features) > 0 and encoder_features[0].dim() == 5:
-                    pooled = encoder_features[0].mean(dim=[2, 3, 4])
-                elif len(encoder_features) > 0:
-                    pooled = encoder_features[0]
-                else:
-                    pooled = x.view(x.size(0), -1)
+                soft_masks = enc_out[6] if len(enc_out) > 6 else {}
             else:
-                pooled = enc_out
-                content_idx_raw = None
+                encoder_features = [enc_out]
+                soft_masks = {}
 
-            B_per_view = pooled.shape[0] // len(imgs)
-            pooled_v1 = pooled[:B_per_view]
+            n_views = len(imgs)
 
-            content_indices = None
-            if content_idx_raw is not None:
-                if isinstance(content_idx_raw, (list, tuple)) and len(content_idx_raw) > 0:
-                    first = content_idx_raw[0]
-                    if isinstance(first, (list, tuple)):
-                        content_indices = list(first)
-                    elif isinstance(first, torch.Tensor):
-                        content_indices = first.cpu().tolist()
+            for lvl_idx, feat in enumerate(encoder_features):
+                B_per_view = feat.shape[0] // n_views
+                feat_v1 = feat[:B_per_view]
+
+                if use_stats and feat_v1.dim() == 5:
+                    B, C = feat_v1.shape[:2]
+                    flat = feat_v1.view(B, C, -1)
+                    feat_v1 = torch.cat(
+                        [flat.mean(dim=2), flat.std(dim=2), flat.amax(dim=2), flat.amin(dim=2)],
+                        dim=1,
+                    )
+                elif use_patch_grid and feat_v1.dim() == 3:
+                    # (B, C, P) → (B, P*C) patch-major so expansion loop works
+                    feat_v1 = feat_v1.permute(0, 2, 1).flatten(1)
+                elif feat_v1.dim() == 5:
+                    feat_v1 = feat_v1.mean(dim=[2, 3, 4])
+
+                if isinstance(soft_masks, dict) and lvl_idx in soft_masks:
+                    mask = soft_masks[lvl_idx]
+                    if isinstance(mask, tuple):
+                        content_idx_raw = torch.where(mask[0].bool())[-1]
                     else:
-                        content_indices = list(content_idx_raw)
-                elif isinstance(content_idx_raw, torch.Tensor):
-                    content_indices = content_idx_raw.cpu().tolist()
+                        content_idx_raw = torch.where(mask.bool())[-1]
+                else:
+                    content_idx_raw = None
 
-            pooled_np = pooled_v1.cpu().numpy()
+                content_indices = _parse_content_indices(content_idx_raw)
 
-            if content_indices is not None and len(content_indices) > 0:
-                all_channels = set(range(pooled_np.shape[1]))
-                style_indices = sorted(all_channels - set(content_indices))
-                all_content_repr.append(pooled_np[:, content_indices])
-                if style_indices:
-                    all_style_repr.append(pooled_np[:, style_indices])
-            else:
-                all_content_repr.append(pooled_np)
+                feat_np = feat_v1.cpu().numpy()
+                if use_patch_grid and content_indices is not None:
+                    n_patches = int(np.prod(pooling))
+                    n_channels = feat_np.shape[1] // n_patches
+                    expanded_content = []
+                    expanded_style = []
+                    all_ch = set(range(n_channels))
+                    style_ch = sorted(all_ch - set(content_indices))
+                    for p in range(n_patches):
+                        offset = p * n_channels
+                        expanded_content.extend(offset + c for c in content_indices)
+                        expanded_style.extend(offset + c for c in style_ch)
+                    content = feat_np[:, expanded_content]
+                    style = feat_np[:, expanded_style] if expanded_style else None
+                elif use_stats and content_indices is not None:
+                    n_stats = 4
+                    n_channels = feat_np.shape[1] // n_stats
+                    expanded_content = []
+                    expanded_style = []
+                    all_ch = set(range(n_channels))
+                    style_ch = sorted(all_ch - set(content_indices))
+                    for s in range(n_stats):
+                        offset = s * n_channels
+                        expanded_content.extend(offset + c for c in content_indices)
+                        expanded_style.extend(offset + c for c in style_ch)
+                    content = feat_np[:, expanded_content]
+                    style = feat_np[:, expanded_style] if expanded_style else None
+                else:
+                    content, style = _split_content_style(feat_np, content_indices)
+
+                if lvl_idx not in per_level:
+                    per_level[lvl_idx] = {"content": [], "style": []}
+                per_level[lvl_idx]["content"].append(content)
+                if style is not None:
+                    per_level[lvl_idx]["style"].append(style)
 
             gt = batch["gt_latents"]
             all_gt_content.append(gt["z_content"].numpy())
             all_gt_style_v1.append(gt["z_style_v1"].numpy())
             all_gt_style_v2.append(gt["z_style_v2"].numpy())
 
-    content_repr = np.concatenate(all_content_repr, axis=0)
-    style_repr = np.concatenate(all_style_repr, axis=0) if all_style_repr else None
     gt_content = np.concatenate(all_gt_content, axis=0)
     gt_style_v1 = np.concatenate(all_gt_style_v1, axis=0)
     gt_style_v2 = np.concatenate(all_gt_style_v2, axis=0)
 
     n_c = gt_content.shape[1]
     n_s = gt_style_v1.shape[1]
+    pooling_label = f"patch{list(pooling)}" if use_patch_grid else str(pooling)
 
-    factor_info = {
-        "content_names": CONTENT_FACTOR_NAMES[:n_c],
-        "style_names": STYLE_FACTOR_NAMES[:n_s],
-        "n_content": n_c,
-        "n_style": n_s,
-        "n_content_channels": content_repr.shape[1],
-        "n_style_channels": style_repr.shape[1] if style_repr is not None else 0,
-        "has_split": style_repr is not None,
-    }
-    return content_repr, style_repr, gt_content, gt_style_v1, gt_style_v2, factor_info
+    level_data = {}
+    for lvl, data in per_level.items():
+        content_repr = np.concatenate(data["content"], axis=0)
+        style_repr = np.concatenate(data["style"], axis=0) if data["style"] else None
+        level_data[lvl] = (
+            content_repr,
+            style_repr,
+            {
+                "content_names": CONTENT_FACTOR_NAMES[:n_c],
+                "style_names": STYLE_FACTOR_NAMES[:n_s],
+                "n_content": n_c,
+                "n_style": n_s,
+                "n_content_channels": content_repr.shape[1],
+                "n_style_channels": style_repr.shape[1] if style_repr is not None else 0,
+                "has_split": style_repr is not None,
+                "pooling": pooling_label,
+                "level": lvl,
+            },
+        )
+    return level_data, gt_content, gt_style_v1, gt_style_v2
 
 
-def compute_dci_synthetic(encoder, dataset, device, train_ratio=0.8, batch_size=32, num_workers=0):
+def compute_dci_synthetic(
+    encoder,
+    dataset,
+    device,
+    train_ratio=0.8,
+    batch_size=32,
+    num_workers=0,
+    pooling="gap",
+    levels=None,
+):
     """Compute DCI metrics for a synthetic dataset with known GT content/style factors.
 
-    Evaluates four combinations:
+    Evaluates four combinations per requested encoder level:
       - content_repr → content_factors  (should be high D, C, I)
       - content_repr → style_factors    (should be low I — content shouldn't encode style)
       - style_repr   → style_factors    (should be high)
@@ -296,46 +396,68 @@ def compute_dci_synthetic(encoder, dataset, device, train_ratio=0.8, batch_size=
         train_ratio: fraction of samples for train split.
         batch_size: batch size for representation extraction.
         num_workers: DataLoader workers.
+        pooling: How to reduce spatial maps — ``"gap"``, ``"stats"``, or ``(D,H,W)`` tuple.
+        levels: List of encoder levels to evaluate.  ``None`` → ``[0]``.
 
     Returns:
-        dict with keys like "content→content/disentanglement", etc.
+        dict with keys like ``"L0/content→content/disentanglement"``.
+        When a single level is requested the ``L{i}/`` prefix is omitted.
     """
-    content_repr, style_repr, gt_content, gt_style_v1, gt_style_v2, info = _extract_synthetic_representations(
-        encoder, dataset, device, batch_size, num_workers
+    level_data, gt_content, gt_style_v1, gt_style_v2 = _extract_synthetic_representations(
+        encoder, dataset, device, batch_size, num_workers, pooling=pooling
     )
 
-    n = content_repr.shape[0]
+    if levels is None:
+        levels = [0]
+    available = sorted(level_data.keys())
+    use_prefix = len(levels) > 1
+
+    n = gt_content.shape[0]
     split = int(n * train_ratio)
     gt_style = gt_style_v1
 
-    pairs = [("content→content", content_repr, gt_content)]
-    pairs.append(("content→style", content_repr, gt_style))
-    if style_repr is not None:
-        pairs.append(("style→style", style_repr, gt_style))
-        pairs.append(("style→content", style_repr, gt_content))
+    results = {}
+    for lvl in levels:
+        if lvl not in level_data:
+            logger.warning("Level %d not found in encoder outputs (available: %s)", lvl, available)
+            continue
 
-    results = {"factor_info": info}
-    for label, repr_arr, factor_arr in pairs:
-        mus_train = repr_arr[:split].T
-        mus_test = repr_arr[split:].T
-        ys_train = factor_arr[:split].T
-        ys_test = factor_arr[split:].T
+        content_repr, style_repr, info = level_data[lvl]
+        prefix = f"L{lvl}/" if use_prefix else ""
+        results[f"{prefix}factor_info"] = info
 
-        n_factors = ys_train.shape[0]
-        factor_types = ["continuous"] * n_factors
+        pairs = [(f"{prefix}content→content", content_repr, gt_content)]
+        pairs.append((f"{prefix}content→style", content_repr, gt_style))
+        if style_repr is not None:
+            pairs.append((f"{prefix}style→style", style_repr, gt_style))
+            pairs.append((f"{prefix}style→content", style_repr, gt_content))
 
-        try:
-            scores = _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types)
-            for k, v in scores.items():
-                results[f"{label}/{k}"] = v
-        except Exception as e:
-            logger.warning("DCI computation failed for %s: %s", label, e)
-            for k in ["disentanglement", "completeness", "informativeness_train", "informativeness_test"]:
-                results[f"{label}/{k}"] = float("nan")
+        for label, repr_arr, factor_arr in pairs:
+            mus_train = repr_arr[:split].T
+            mus_test = repr_arr[split:].T
+            ys_train = factor_arr[:split].T
+            ys_test = factor_arr[split:].T
+
+            n_factors = ys_train.shape[0]
+            factor_types = ["continuous"] * n_factors
+
+            try:
+                scores = _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types)
+                for k, v in scores.items():
+                    results[f"{label}/{k}"] = v
+            except Exception as e:
+                logger.warning("DCI computation failed for %s: %s", label, e)
+                for k in [
+                    "disentanglement",
+                    "completeness",
+                    "informativeness_train",
+                    "informativeness_test",
+                ]:
+                    results[f"{label}/{k}"] = float("nan")
 
     logger.info("DCI synthetic results:")
     for k, v in results.items():
-        if k != "factor_info" and not np.isnan(v):
+        if not isinstance(v, dict) and not np.isnan(v):
             logger.info("  %-45s %.4f", k, v)
 
     return results

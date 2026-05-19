@@ -47,7 +47,25 @@ def main():
     parser.add_argument("--num-samples", type=int, default=None, help="Override number of test samples")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--pooling",
+        type=str,
+        default="gap",
+        help='Pooling mode: "gap", "stats", or a patch grid like "2,2,2"',
+    )
+    parser.add_argument(
+        "--levels",
+        type=str,
+        default="0",
+        help='Comma-separated encoder levels to evaluate, e.g. "0,1,2"',
+    )
     cli = parser.parse_args()
+
+    if cli.pooling in ("gap", "stats"):
+        pooling = cli.pooling
+    else:
+        pooling = tuple(int(x) for x in cli.pooling.split(","))
+    levels = [int(x) for x in cli.levels.split(",")]
 
     # ── Load settings.json ────────────────────────────────────────────────
     settings_path = os.path.join(cli.run_dir, "settings.json")
@@ -139,13 +157,15 @@ def main():
     # ── Run DCI ───────────────────────────────────────────────────────────
     from eval.dci import compute_dci_synthetic
 
-    logger.info("Computing DCI metrics...")
+    logger.info("Computing DCI metrics (pooling=%s, levels=%s)...", pooling, levels)
     results = compute_dci_synthetic(
         encoder=model,
         dataset=test_dataset,
         device=device,
         batch_size=cli.batch_size,
         num_workers=cli.num_workers,
+        pooling=pooling,
+        levels=levels,
     )
 
     # ── Print results ─────────────────────────────────────────────────────
@@ -154,27 +174,37 @@ def main():
     print("DCI Synthetic Evaluation Results")
     print("=" * 65)
 
-    fi = results["factor_info"]
-    print(f"  Content channels: {fi['n_content_channels']}  |  Style channels: {fi['n_style_channels']}")
-    print(f"  Content factors:  {fi['content_names']}")
-    print(f"  Style factors:    {fi['style_names']}")
-    print()
+    sections = ["content→content", "content→style", "style→style", "style→content"]
 
-    for section in ["content→content", "content→style", "style→style", "style→content"]:
-        header = f"  {section}"
-        metrics = {k.split("/")[1]: v for k, v in results.items() if k.startswith(section + "/")}
-        if not metrics:
+    for lvl in levels:
+        prefix = f"L{lvl}/" if len(levels) > 1 else ""
+        fi_key = f"{prefix}factor_info"
+        fi = results.get(fi_key)
+        if fi is None:
+            print(f"\n  Level {lvl}: no data")
             continue
-        print(header)
-        for mk, mv in metrics.items():
-            print(f"    {mk:<25s} {mv:.4f}")
+
+        print(f"\n  Level {lvl}  (pooling={fi['pooling']})")
+        print(f"  Content channels: {fi['n_content_channels']}  |  Style channels: {fi['n_style_channels']}")
+        print(f"  Content factors:  {fi['content_names']}")
+        print(f"  Style factors:    {fi['style_names']}")
         print()
+
+        for section in sections:
+            full_section = f"{prefix}{section}"
+            metrics = {k.split("/")[-1]: v for k, v in results.items() if k.startswith(full_section + "/")}
+            if not metrics:
+                continue
+            print(f"  {section}")
+            for mk, mv in metrics.items():
+                print(f"    {mk:<25s} {mv:.4f}")
+            print()
 
     # ── Save ──────────────────────────────────────────────────────────────
     out_dir = cli.output_dir or cli.run_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    flat = {k: v for k, v in results.items() if k != "factor_info"}
+    flat = {k: v for k, v in results.items() if not k.endswith("factor_info")}
     csv_path = os.path.join(out_dir, "dci_synthetic.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=flat.keys())
