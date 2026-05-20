@@ -481,3 +481,30 @@ def compute_dci_synthetic(
             logger.info("  %-45s %.4f", k, v)
 
     return results
+
+
+def flatten_dci_results(results):
+    """Flatten DCI results dict into a single-row CSV-friendly dict.
+
+    - Replaces Unicode arrows with ASCII ``->``
+    - Expands per-factor arrays (train/test R², completeness) into named columns
+    - Expands per-code disentanglement into indexed columns
+    - Skips importance matrices and factor_info dicts
+    """
+    flat = {}
+    for k, v in results.items():
+        key = k.replace("→", "->")
+        if isinstance(v, (int, float, np.floating)):
+            flat[key] = float(v)
+        elif isinstance(v, dict) and "factor_names" in v:
+            section = key.replace("/detail", "")
+            names = v["factor_names"]
+            for arr_key in ("per_factor_train", "per_factor_test", "per_factor_completeness"):
+                if arr_key in v:
+                    arr = v[arr_key]
+                    for j, name in enumerate(names):
+                        flat[f"{section}/{arr_key}/{name}"] = float(arr[j])
+            if "per_code_disentanglement" in v:
+                for j, val in enumerate(v["per_code_disentanglement"]):
+                    flat[f"{section}/per_code_disentanglement/{j}"] = float(val)
+    return flat
