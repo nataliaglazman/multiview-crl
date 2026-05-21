@@ -78,6 +78,21 @@ def parse_args():
     parser.add_argument("--subsets", default=None)
     parser.add_argument("--evaluate_individual_latents", action="store_true")
     parser.add_argument("--n_dependent_dims", default=0, type=int)
+    parser.add_argument("--causal", action="store_true", help="Sample content latents from a causal SCM")
+    parser.add_argument(
+        "--causal-graph",
+        type=str,
+        default="chain",
+        choices=["chain", "full", "random"],
+    )
+    parser.add_argument("--causal-edge-prob", type=float, default=0.5)
+    parser.add_argument("--causal-noise-scale", type=float, default=0.4)
+    parser.add_argument(
+        "--causal-nonlinearity",
+        type=str,
+        default="leaky_relu",
+        choices=["linear", "leaky_relu"],
+    )
     args = parser.parse_args()
     return args, parser
 
@@ -539,30 +554,117 @@ def train_step(data, loss, models, optimizer, params, args, **kwargs):
     return total_loss_value.item()
 
 
+def build_scm(causal_dims, args):
+    n = len(causal_dims)
+    adj = np.zeros((n, n), dtype=bool)
+    if args.causal_graph == "chain":
+        for i in range(n - 1):
+            adj[i, i + 1] = True
+    elif args.causal_graph == "full":
+        for i in range(n):
+            for j in range(i + 1, n):
+                adj[i, j] = True
+    elif args.causal_graph == "random":
+        for i in range(n):
+            for j in range(i + 1, n):
+                if np.random.rand() < args.causal_edge_prob:
+                    adj[i, j] = True
+
+    parents = {}
+    weights = {}
+    for idx in range(n):
+        d = causal_dims[idx]
+        parent_indices = np.where(adj[:, idx])[0]
+        parent_dims = [causal_dims[p] for p in parent_indices]
+        parents[d] = parent_dims
+        if len(parent_dims) > 0:
+            w = torch.randn(len(parent_dims))
+            w = w / (w.norm() + 1e-8)
+            weights[d] = w
+        else:
+            weights[d] = torch.tensor([])
+
+    return {
+        "adj": adj,
+        "causal_dims": causal_dims,
+        "parents": parents,
+        "weights": weights,
+    }
+
+
+def sample_from_scm(scm, size, latent_dim, noise_scale, nonlinearity, device):
+    z = torch.zeros(size, latent_dim, device=device)
+    noise = torch.randn(size, latent_dim, device=device)
+
+    non_causal = sorted(set(range(latent_dim)) - set(scm["causal_dims"]))
+    for d in non_causal:
+        z[:, d] = noise[:, d]
+
+    for d in scm["causal_dims"]:
+        pa = scm["parents"][d]
+        if len(pa) == 0:
+            z[:, d] = noise[:, d]
+        else:
+            parent_vals = z[:, pa]
+            w = scm["weights"][d].to(device)
+            signal = parent_vals @ w
+            if nonlinearity == "leaky_relu":
+                signal = torch.nn.functional.leaky_relu(signal, 0.2)
+            z[:, d] = signal + noise_scale * noise[:, d]
+    return z
+
+
 def generate_latent_space(args):
     assert args.n_dependent_dims <= args.latent_dim
     latent_spaces_list = []
-    Sigma_z_path = os.path.join(args.save_dir, "Sigma_z.csv")
-    if not args.evaluate:
-        if args.n_dependent_dims == 0:
-            Sigma_z = np.eye(args.latent_dim)
+
+    if args.causal:
+        causal_dims = sorted(set.intersection(*[set(s) for s in args.S_k]))
+        assert len(causal_dims) >= 2, f"Need >=2 shared content dims for causal SCM, got {causal_dims}"
+
+        scm_path = os.path.join(args.save_dir, "scm.pt")
+        adj_path = os.path.join(args.save_dir, "causal_adj.csv")
+        if not args.evaluate:
+            scm = build_scm(causal_dims, args)
+            torch.save(scm, scm_path)
+            np.savetxt(adj_path, scm["adj"].astype(int), delimiter=",", fmt="%d")
+            print(f"Causal SCM over dims {causal_dims}, graph type={args.causal_graph}")
+            print(f"Adjacency:\n{scm['adj'].astype(int)}")
         else:
-            # In the non-dependent case, we generate a set of dependent and non-dependent latent variables
-            Sigma_z = np.eye(args.latent_dim)
-            Sigma_z_dep = wishart.rvs(args.n_dependent_dims, np.eye(args.n_dependent_dims), size=1)
-            Sigma_z[: args.n_dependent_dims, : args.n_dependent_dims] = Sigma_z_dep
+            scm = torch.load(scm_path, weights_only=False)
+            print(f"Loaded causal SCM over dims {scm['causal_dims']}")
 
-        np.savetxt(Sigma_z_path, Sigma_z, delimiter=",")
+        space = spaces.NRealSpace(args.latent_dim)
+        _noise_scale = args.causal_noise_scale
+        _nonlinearity = args.causal_nonlinearity
+        _latent_dim = args.latent_dim
+
+        def sample_latent(space, size, device=device):
+            return sample_from_scm(scm, size, _latent_dim, _noise_scale, _nonlinearity, device)
+
+        latent_spaces_list.append(latent_spaces.LatentSpace(space=space, sample_latent=sample_latent))
+
     else:
-        Sigma_z = np.loadtxt(Sigma_z_path, delimiter=",")
-        print(Sigma_z)
-    space = spaces.NRealSpace(args.latent_dim)
+        Sigma_z_path = os.path.join(args.save_dir, "Sigma_z.csv")
+        if not args.evaluate:
+            if args.n_dependent_dims == 0:
+                Sigma_z = np.eye(args.latent_dim)
+            else:
+                Sigma_z = np.eye(args.latent_dim)
+                Sigma_z_dep = wishart.rvs(args.n_dependent_dims, np.eye(args.n_dependent_dims), size=1)
+                Sigma_z[: args.n_dependent_dims, : args.n_dependent_dims] = Sigma_z_dep
 
-    # Here just one latent space
-    def sample_latent(space, size, device=device):
-        return space.normal(None, 1.0, size, device, Sigma=Sigma_z)
+            np.savetxt(Sigma_z_path, Sigma_z, delimiter=",")
+        else:
+            Sigma_z = np.loadtxt(Sigma_z_path, delimiter=",")
+            print(Sigma_z)
+        space = spaces.NRealSpace(args.latent_dim)
 
-    latent_spaces_list.append(latent_spaces.LatentSpace(space=space, sample_latent=sample_latent))
+        def sample_latent(space, size, device=device):
+            return space.normal(None, 1.0, size, device, Sigma=Sigma_z)
+
+        latent_spaces_list.append(latent_spaces.LatentSpace(space=space, sample_latent=sample_latent))
+
     latent_space = latent_spaces.ProductLatentSpace(spaces=latent_spaces_list)
     return latent_space
 
