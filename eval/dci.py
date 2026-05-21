@@ -484,7 +484,7 @@ def compute_dci_synthetic(
 
 
 def flatten_dci_results(results):
-    """Flatten DCI results dict into a single-row CSV-friendly dict.
+    """Flatten DCI results dict into a single-row dict for TB / W&B logging.
 
     - Replaces Unicode arrows with ASCII ``->``
     - Expands per-factor arrays (train/test R², completeness) into named columns
@@ -508,3 +508,71 @@ def flatten_dci_results(results):
                 for j, val in enumerate(v["per_code_disentanglement"]):
                     flat[f"{section}/per_code_disentanglement/{j}"] = float(val)
     return flat
+
+
+DCI_CSV_COLUMNS = ["level", "section", "factor", "train_r2", "test_r2", "completeness", "disentanglement"]
+
+
+def dci_results_to_rows(results):
+    """Convert DCI results dict into a table that mirrors the terminal printout.
+
+    Each row is one factor within one section.  A ``(mean)`` row per section
+    carries the summary scores and the section-level disentanglement.
+
+    Columns: level, section, factor, train_r2, test_r2, completeness, disentanglement.
+    """
+    levels_found = set()
+    for k in results:
+        parts = k.split("/", 1)
+        if parts[0].startswith("L") and parts[0][1:].isdigit():
+            levels_found.add(int(parts[0][1:]))
+    has_prefix = bool(levels_found)
+    if not has_prefix:
+        levels_found = {0}
+
+    section_names = ["content->content", "content->style", "style->style", "style->content"]
+    section_keys = ["content→content", "content→style", "style→style", "style→content"]
+
+    rows = []
+    for lvl in sorted(levels_found):
+        pfx = f"L{lvl}/" if has_prefix else ""
+        for sec_name, sec_key in zip(section_names, section_keys):
+            full = f"{pfx}{sec_key}"
+
+            detail = results.get(f"{full}/detail")
+            if detail is not None and "factor_names" in detail:
+                names = detail["factor_names"]
+                pf_train = detail.get("per_factor_train")
+                pf_test = detail.get("per_factor_test")
+                pf_comp = detail.get("per_factor_completeness")
+                for j, name in enumerate(names):
+                    rows.append(
+                        {
+                            "level": lvl,
+                            "section": sec_name,
+                            "factor": name,
+                            "train_r2": round(float(pf_train[j]), 4) if pf_train is not None else "",
+                            "test_r2": round(float(pf_test[j]), 4) if pf_test is not None else "",
+                            "completeness": round(float(pf_comp[j]), 4) if pf_comp is not None else "",
+                            "disentanglement": "",
+                        }
+                    )
+
+            i_train = results.get(f"{full}/informativeness_train")
+            i_test = results.get(f"{full}/informativeness_test")
+            c_score = results.get(f"{full}/completeness")
+            d_score = results.get(f"{full}/disentanglement")
+            if any(v is not None for v in (i_train, i_test, c_score, d_score)):
+                rows.append(
+                    {
+                        "level": lvl,
+                        "section": sec_name,
+                        "factor": "(mean)",
+                        "train_r2": round(float(i_train), 4) if i_train is not None else "",
+                        "test_r2": round(float(i_test), 4) if i_test is not None else "",
+                        "completeness": round(float(c_score), 4) if c_score is not None else "",
+                        "disentanglement": round(float(d_score), 4) if d_score is not None else "",
+                    }
+                )
+
+    return rows

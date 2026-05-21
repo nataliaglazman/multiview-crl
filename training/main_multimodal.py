@@ -2341,13 +2341,14 @@ def main(args):
                 num_workers=dataloader_kwargs.get("num_workers", 0),
             )
             dci_synth_path = os.path.join(args.save_dir, "dci_synthetic.csv")
-            flat = dci.flatten_dci_results(dci_synth)
+            rows = dci.dci_results_to_rows(dci_synth)
             with open(dci_synth_path, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=flat.keys())
+                w = csv.DictWriter(f, fieldnames=dci.DCI_CSV_COLUMNS)
                 w.writeheader()
-                w.writerow(flat)
+                w.writerows(rows)
             logger.info(f"  Synthetic DCI saved to: {dci_synth_path}")
 
+            flat = dci.flatten_dci_results(dci_synth)
             if tb_writer is not None:
                 for k, v in flat.items():
                     if not np.isnan(v):

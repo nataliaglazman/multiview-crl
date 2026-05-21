@@ -219,14 +219,14 @@ def main():
     out_dir = cli.output_dir or cli.run_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    from eval.dci import flatten_dci_results
+    from eval.dci import DCI_CSV_COLUMNS, dci_results_to_rows
 
-    flat = flatten_dci_results(results)
+    rows = dci_results_to_rows(results)
     csv_path = os.path.join(out_dir, "dci_synthetic.csv")
     with open(csv_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=flat.keys())
+        w = csv.DictWriter(f, fieldnames=DCI_CSV_COLUMNS)
         w.writeheader()
-        w.writerow(flat)
+        w.writerows(rows)
 
     json_path = os.path.join(out_dir, "dci_synthetic.json")
     serialisable = {}
