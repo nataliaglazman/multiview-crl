@@ -90,6 +90,16 @@ def parse_args() -> argparse.ArgumentParser:
         "z_content_residuals for probing.",
     )
     parser.add_argument(
+        "--synthetic-normalize",
+        type=str,
+        default="fixed_ref",
+        choices=["fixed_ref", "per_sample"],
+        help="Normalization for synthetic pseudo-MRI volumes. "
+        "'fixed_ref' uses reference stats from canonical zero-style samples "
+        "(preserves between-sample style variation). "
+        "'per_sample' uses per-sample z-scoring (legacy, pre-May 2026).",
+    )
+    parser.add_argument(
         "--synthetic-res",
         type=int,
         default=32,

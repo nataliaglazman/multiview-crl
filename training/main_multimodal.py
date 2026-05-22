@@ -1096,6 +1096,7 @@ def main(args):
                 "synthetic_seed": getattr(args, "synthetic_seed", 42),
                 "synthetic_n_content": getattr(args, "synthetic_n_content", 5),
                 "synthetic_n_style": getattr(args, "synthetic_n_style", 3),
+                "synthetic_normalize": getattr(args, "synthetic_normalize", "fixed_ref"),
                 "synthetic_num_samples_per_mode": {
                     "train": getattr(args, "synthetic_num_train", 1000),
                     "val": getattr(args, "synthetic_num_val", 100),

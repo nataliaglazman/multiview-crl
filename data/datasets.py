@@ -1805,6 +1805,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_n_deformation_grid=4,
         synthetic_n_fissure_grid=8,
         synthetic_hierarchical_content=False,
+        synthetic_normalize="fixed_ref",
         **kwargs,
     ):
         super().__init__()
@@ -1812,6 +1813,7 @@ class SyntheticBrainDataset(MultiviewDataset):
 
         self.mode = mode
         self.change_lists = change_lists or []
+        self.synthetic_normalize = synthetic_normalize
 
         # Resolution: cubic. Take min of spatial_size if provided so we don't
         # exceed any axis the user intended; default to 32 (cheap baseline).
@@ -1846,7 +1848,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         # higher res, and DataLoader workers re-render every epoch otherwise.
         self._cache = [None] * synthetic_num_samples if cache else None
 
-        if synthetic_mode == "pseudo_mri":
+        if synthetic_mode == "pseudo_mri" and synthetic_normalize == "fixed_ref":
             self._reference_stats = self._compute_reference_stats()
         else:
             self._reference_stats = None
