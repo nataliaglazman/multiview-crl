@@ -63,7 +63,8 @@ def parse_args():
     parser.add_argument(
         "--S-k",
         type=int,
-        help="view-specific latents",
+        nargs="+",
+        help="view-specific latents (flat list, reshaped by --n-views)",
         default=[[0, 1, 2, 3, 4], [0, 1, 2, 4, 5], [0, 1, 2, 3, 5], [0, 1, 3, 4, 5]],
     )
     parser.add_argument("--grid-search-eval", action="store_true")
@@ -110,7 +111,15 @@ def update_args(args):
     Returns:
         Namespace: The updated arguments.
     """
-    zs_views = torch.tensor(args.S_k)  # [n_views, n_sk] # the view-specific latents as given in args.
+    # Reshape flat CLI list into [n_views, dims_per_view] if needed
+    if isinstance(args.S_k[0], int):
+        n_per_view = len(args.S_k) // args.n_views
+        assert (
+            len(args.S_k) == args.n_views * n_per_view
+        ), f"--S-k has {len(args.S_k)} values, not divisible by --n-views={args.n_views}"
+        args.S_k = [args.S_k[i * n_per_view : (i + 1) * n_per_view] for i in range(args.n_views)]
+
+    zs_views = torch.tensor(args.S_k)  # [n_views, n_sk]
 
     # retrieve subsets, content dict and style dict for all subsets and views
     if args.subsets is None:
