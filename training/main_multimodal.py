@@ -915,7 +915,7 @@ def main(args):
         )
     args.model_dir = os.path.join(args.model_dir, args.dataset_name)
     if args.model_id is None:
-        setattr(args, "model_id", uuid.uuid4())
+        setattr(args, "model_id", str(uuid.uuid4()))
     args.save_dir = os.path.join(args.model_dir, args.model_id)
     os.makedirs(args.save_dir, exist_ok=True)
 
@@ -1097,6 +1097,12 @@ def main(args):
                 "synthetic_n_content": getattr(args, "synthetic_n_content", 5),
                 "synthetic_n_style": getattr(args, "synthetic_n_style", 3),
                 "synthetic_normalize": getattr(args, "synthetic_normalize", "fixed_ref"),
+                "synthetic_hierarchical_content": getattr(args, "synthetic_hierarchical_content", False),
+                "synthetic_causal": getattr(args, "synthetic_causal", False),
+                "synthetic_causal_graph": getattr(args, "synthetic_causal_graph", "chain"),
+                "synthetic_causal_edge_prob": getattr(args, "synthetic_causal_edge_prob", 0.5),
+                "synthetic_causal_noise_scale": getattr(args, "synthetic_causal_noise_scale", 0.4),
+                "synthetic_causal_nonlinearity": getattr(args, "synthetic_causal_nonlinearity", "leaky_relu"),
                 "synthetic_num_samples_per_mode": {
                     "train": getattr(args, "synthetic_num_train", 1000),
                     "val": getattr(args, "synthetic_num_val", 100),

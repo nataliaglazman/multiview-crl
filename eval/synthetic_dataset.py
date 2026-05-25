@@ -1,10 +1,65 @@
 import os
 
 import nibabel as nib
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+
+
+def build_content_scm(n_dims, graph_type="chain", edge_prob=0.5, seed=0):
+    rng = np.random.RandomState(seed)
+    adj = np.zeros((n_dims, n_dims), dtype=bool)
+
+    if graph_type == "chain":
+        for i in range(n_dims - 1):
+            adj[i, i + 1] = True
+    elif graph_type == "full":
+        for i in range(n_dims):
+            for j in range(i + 1, n_dims):
+                adj[i, j] = True
+    elif graph_type == "random":
+        for i in range(n_dims):
+            for j in range(i + 1, n_dims):
+                if rng.rand() < edge_prob:
+                    adj[i, j] = True
+    else:
+        raise ValueError(f"Unknown causal graph type: {graph_type}")
+
+    parents = {}
+    weights = {}
+    gen = torch.Generator().manual_seed(seed)
+    for idx in range(n_dims):
+        parent_indices = np.where(adj[:, idx])[0].tolist()
+        parents[idx] = parent_indices
+        if len(parent_indices) > 0:
+            w = torch.randn(len(parent_indices), generator=gen)
+            w = w / (w.norm() + 1e-8)
+            weights[idx] = w
+        else:
+            weights[idx] = torch.tensor([])
+
+    return {"adj": adj, "parents": parents, "weights": weights, "n_dims": n_dims}
+
+
+def sample_content_from_scm(scm, generator, noise_scale=0.4, nonlinearity="leaky_relu"):
+    n = scm["n_dims"]
+    z = torch.zeros(n)
+    noise = torch.randn(n, generator=generator)
+
+    for d in range(n):
+        pa = scm["parents"][d]
+        if len(pa) == 0:
+            z[d] = noise[d]
+        else:
+            parent_vals = z[pa]
+            w = scm["weights"][d]
+            signal = (parent_vals * w).sum()
+            if nonlinearity == "leaky_relu":
+                signal = F.leaky_relu(signal, 0.2)
+            z[d] = signal + noise_scale * noise[d]
+    return z
 
 
 class PseudoMRIRenderer(nn.Module):
@@ -289,6 +344,11 @@ class Synthetic3DDisentanglementDataset(Dataset):
         n_deformation_grid=4,
         n_fissure_grid=8,
         hierarchical_content=False,
+        causal=False,
+        causal_graph="chain",
+        causal_edge_prob=0.5,
+        causal_noise_scale=0.4,
+        causal_nonlinearity="leaky_relu",
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -298,6 +358,18 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.n_content = n_content
         self.n_style = n_style
         self.hierarchical_content = hierarchical_content
+        self.causal = causal
+        self.causal_noise_scale = causal_noise_scale
+        self.causal_nonlinearity = causal_nonlinearity
+
+        if causal and hierarchical_content:
+            raise ValueError("--synthetic-causal and --synthetic-hierarchical-content " "are mutually exclusive")
+
+        if causal:
+            self.scm = build_content_scm(n_content, causal_graph, causal_edge_prob, seed)
+        else:
+            self.scm = None
+
         # Spatial-content grid sizes for pseudo_mri mode. Trilinear-upsampled
         # to (res, res, res) → drives the deformation / fissure fields.
         # Default 4³ for the gyral pattern (low-frequency, ~16 dof per axis at res=32)
@@ -395,7 +467,9 @@ class Synthetic3DDisentanglementDataset(Dataset):
         sample_seed = self.seed * 1000003 + idx
         sample_gen = torch.Generator().manual_seed(sample_seed)
 
-        if self.hierarchical_content:
+        if self.causal:
+            z_content = sample_content_from_scm(self.scm, sample_gen, self.causal_noise_scale, self.causal_nonlinearity)
+        elif self.hierarchical_content:
             z_content, z_global, z_residuals = self._sample_hierarchical_content(sample_gen)
         else:
             z_content = torch.randn(self.n_content, generator=sample_gen)
@@ -450,7 +524,9 @@ class Synthetic3DDisentanglementDataset(Dataset):
             "z_style_v2": z_style_v2,
             "brain_mask": brain_mask,
         }
-        if self.hierarchical_content:
+        if self.causal:
+            latents["causal_adj"] = torch.from_numpy(self.scm["adj"].astype(np.float32))
+        elif self.hierarchical_content:
             latents["z_global_atrophy"] = z_global
             latents["z_content_residuals"] = z_residuals
 
@@ -523,9 +599,6 @@ class Synthetic3DDisentanglementDataset(Dataset):
         if self.mode == "pseudo_mri":
             return self._pseudo_mri_item(idx)
         return self._categorical_item(idx)
-
-
-import numpy as np
 
 
 def view_3d_volume(tensor_3d):

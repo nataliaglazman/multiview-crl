@@ -1806,6 +1806,11 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_n_fissure_grid=8,
         synthetic_hierarchical_content=False,
         synthetic_normalize="fixed_ref",
+        synthetic_causal=False,
+        synthetic_causal_graph="chain",
+        synthetic_causal_edge_prob=0.5,
+        synthetic_causal_noise_scale=0.4,
+        synthetic_causal_nonlinearity="leaky_relu",
         **kwargs,
     ):
         super().__init__()
@@ -1840,6 +1845,11 @@ class SyntheticBrainDataset(MultiviewDataset):
             n_deformation_grid=synthetic_n_deformation_grid,
             n_fissure_grid=synthetic_n_fissure_grid,
             hierarchical_content=synthetic_hierarchical_content,
+            causal=synthetic_causal,
+            causal_graph=synthetic_causal_graph,
+            causal_edge_prob=synthetic_causal_edge_prob,
+            causal_noise_scale=synthetic_causal_noise_scale,
+            causal_nonlinearity=synthetic_causal_nonlinearity,
         )
         self.num_samples = synthetic_num_samples
         self.synthetic_mode = synthetic_mode

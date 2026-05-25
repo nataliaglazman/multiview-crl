@@ -107,6 +107,36 @@ def parse_args() -> argparse.ArgumentParser:
         "--spatial-size when --dataset_name=synthetic and --spatial-size is unset. "
         "Should be divisible by 8 for the 3-level VQ-VAE.",
     )
+    parser.add_argument(
+        "--synthetic-causal",
+        action="store_true",
+        help="Sample content latents from a causal SCM (DAG with nonlinear "
+        "mechanisms) instead of i.i.d. Gaussians. Mutually exclusive with "
+        "--synthetic-hierarchical-content.",
+    )
+    parser.add_argument(
+        "--synthetic-causal-graph",
+        type=str,
+        default="chain",
+        choices=["chain", "full", "random"],
+        help="DAG topology for the content SCM.",
+    )
+    parser.add_argument(
+        "--synthetic-causal-edge-prob",
+        type=float,
+        default=0.5,
+        help="Edge probability for random DAG (ignored for chain/full).",
+    )
+    parser.add_argument(
+        "--synthetic-causal-noise-scale", type=float, default=0.4, help="Additive noise scale in causal mechanisms."
+    )
+    parser.add_argument(
+        "--synthetic-causal-nonlinearity",
+        type=str,
+        default="leaky_relu",
+        choices=["leaky_relu", "none"],
+        help="Nonlinearity in causal mechanisms.",
+    )
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default=None)
     parser.add_argument("--encoding-size", type=int, default=256)
