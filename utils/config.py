@@ -92,12 +92,12 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument(
         "--synthetic-normalize",
         type=str,
-        default="fixed_ref",
-        choices=["fixed_ref", "per_sample"],
+        default="per_sample",
+        choices=["per_sample", "shared"],
         help="Normalization for synthetic pseudo-MRI volumes. "
-        "'fixed_ref' uses reference stats from canonical zero-style samples "
-        "(preserves between-sample style variation). "
-        "'per_sample' uses per-sample z-scoring (legacy, pre-May 2026).",
+        "'per_sample' z-scores each view independently over its foreground. "
+        "'shared' z-scores both views using view-1's foreground stats, "
+        "preserving the relative intensity difference between views.",
     )
     parser.add_argument(
         "--synthetic-res",

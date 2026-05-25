@@ -1805,7 +1805,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_n_deformation_grid=4,
         synthetic_n_fissure_grid=8,
         synthetic_hierarchical_content=False,
-        synthetic_normalize="fixed_ref",
+        synthetic_normalize="per_sample",
         synthetic_causal=False,
         synthetic_causal_graph="chain",
         synthetic_causal_edge_prob=0.5,
@@ -1819,7 +1819,6 @@ class SyntheticBrainDataset(MultiviewDataset):
         self.mode = mode
         self.change_lists = change_lists or []
         self.synthetic_normalize = synthetic_normalize
-
         # Resolution: cubic. Take min of spatial_size if provided so we don't
         # exceed any axis the user intended; default to 32 (cheap baseline).
         if spatial_size is not None:
@@ -1858,11 +1857,6 @@ class SyntheticBrainDataset(MultiviewDataset):
         # higher res, and DataLoader workers re-render every epoch otherwise.
         self._cache = [None] * synthetic_num_samples if cache else None
 
-        if synthetic_mode == "pseudo_mri" and synthetic_normalize == "fixed_ref":
-            self._reference_stats = self._compute_reference_stats()
-        else:
-            self._reference_stats = None
-
     def __len__(self):
         return self.num_samples
 
@@ -1875,66 +1869,6 @@ class SyntheticBrainDataset(MultiviewDataset):
     def sample(self, size, random_state=None):
         return np.array([[]]), []
 
-    def _compute_reference_stats(self):
-        """Compute fixed normalization stats from canonical (zero-style) samples.
-
-        Averages foreground mean/std over several random anatomies rendered
-        with neutral style (gain=1, bias=0, noise=0).  Using these fixed
-        stats instead of per-sample z-scoring preserves between-sample
-        intensity variation caused by the style factors.
-        """
-        renderer = self._inner.renderer
-        device = torch.device("cpu")
-        n_c, n_s = self._inner.n_content, self._inner.n_style
-        n_d = self._inner.n_deformation_grid
-        n_f = self._inner.n_fissure_grid
-
-        stats = {"T1": [], "FLAIR": []}
-        for seed in range(5):
-            gen = torch.Generator().manual_seed(seed * 7 + 13)
-            z_content = torch.randn(n_c, generator=gen)
-            z_def = torch.randn(n_d, n_d, n_d, generator=gen)
-            z_fis = torch.randn(n_f, n_f, n_f, generator=gen)
-            z_style_zero = torch.zeros(n_s)
-
-            with torch.no_grad():
-                tissue, lesion = renderer.render_structure(
-                    z_content,
-                    z_def,
-                    z_fis,
-                    device=device,
-                )
-                mask = (tissue > 0).float()
-                for mod in ("T1", "FLAIR"):
-                    vol = renderer.render_modality(
-                        tissue,
-                        lesion,
-                        z_style_zero,
-                        mod,
-                        view_seed=seed * 2 + (0 if mod == "T1" else 1),
-                        device=device,
-                    )
-                    vals = vol.squeeze()[mask > 0]
-                    stats[mod].append((vals.mean().item(), vals.std().clamp_min(1e-6).item()))
-
-        ref = {}
-        for mod in ("T1", "FLAIR"):
-            means = [s[0] for s in stats[mod]]
-            stds = [s[1] for s in stats[mod]]
-            ref[mod] = (sum(means) / len(means), sum(stds) / len(stds))
-        return ref
-
-    @staticmethod
-    def _fixed_normalize(x, mask, ref_mean, ref_std):
-        """Normalize using fixed reference statistics.
-
-        Unlike per-sample z-scoring, this preserves between-sample intensity
-        differences caused by style factors (gain, bias).
-        """
-        x = (x - ref_mean) / ref_std
-        x = x * mask
-        return x
-
     def _render(self, idx):
         x_v1, x_v2, latents = self._inner[idx]
         if "brain_mask" in latents:
@@ -1945,11 +1879,14 @@ class SyntheticBrainDataset(MultiviewDataset):
             mask_t1 = (x_v1 > 0.05).float()
             mask_t2 = (x_v2 > 0.05).float()
 
-        if self._reference_stats is not None:
-            ref_v1 = self._reference_stats["T1"]
-            ref_v2 = self._reference_stats["FLAIR"]
-            x_v1 = self._fixed_normalize(x_v1, mask_t1, ref_v1[0], ref_v1[1])
-            x_v2 = self._fixed_normalize(x_v2, mask_t2, ref_v2[0], ref_v2[1])
+        if self.synthetic_normalize == "shared":
+            m = mask_t1 > 0
+            if m.any():
+                vals = x_v1[m]
+                mean = vals.mean()
+                std = vals.std().clamp_min(1e-6)
+                x_v1 = (x_v1 - mean) / std * mask_t1
+                x_v2 = (x_v2 - mean) / std * mask_t2
         else:
             x_v1 = self._znorm_nonzero(x_v1, mask_t1)
             x_v2 = self._znorm_nonzero(x_v2, mask_t2)
