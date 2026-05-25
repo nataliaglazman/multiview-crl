@@ -363,7 +363,10 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.causal_nonlinearity = causal_nonlinearity
 
         if causal and hierarchical_content:
-            raise ValueError("--synthetic-causal and --synthetic-hierarchical-content " "are mutually exclusive")
+            raise ValueError("--synthetic-causal and --synthetic-hierarchical-content are mutually exclusive")
+
+        if causal and mode != "pseudo_mri":
+            raise ValueError(f"--synthetic-causal requires --synthetic-mode pseudo_mri, got '{mode}'")
 
         if causal:
             self.scm = build_content_scm(n_content, causal_graph, causal_edge_prob, seed)
