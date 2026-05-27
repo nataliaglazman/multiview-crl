@@ -29,13 +29,6 @@ if hasattr(signal, "SIGUSR1"):
     faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
 
 try:
-    import faiss
-
-    HAS_FAISS = True
-except ImportError:
-    HAS_FAISS = False
-
-try:
     import wandb
 
     HAS_WANDB = True
@@ -77,7 +70,6 @@ from training.losses import (
     style_modality_ce_loss,
     vicreg_loss,
 )
-from models.encoders import TextEncoder2D
 from utils.checkpointing import (
     load_checkpoint,
     save_checkpoint,
@@ -700,22 +692,19 @@ def train_step(
                 data["content_indices"] = args.content_indices
             content_size = [len(content) for content in data["content_indices"]]
 
-            if args.selection in ["ground_truth", "concat"]:
-                estimated_content_indices = args.content_indices
+            if args.subsets[-1] == list(range(args.n_views)) and content_size[-1] > 0:
+                content_masks = utils.smart_gumbel_softmax_mask(
+                    avg_logits=avg_logits,
+                    content_sizes=content_size,
+                    subsets=args.subsets,
+                )
             else:
-                if args.subsets[-1] == list(range(args.n_views)) and content_size[-1] > 0:
-                    content_masks = utils.smart_gumbel_softmax_mask(
-                        avg_logits=avg_logits,
-                        content_sizes=content_size,
-                        subsets=args.subsets,
-                    )
-                else:
-                    content_masks = utils.gumbel_softmax_mask(
-                        avg_logits=avg_logits,
-                        content_sizes=content_size,
-                        subsets=args.subsets,
-                    )
-                estimated_content_indices = [torch.where(c_mask)[-1].tolist() for c_mask in content_masks]
+                content_masks = utils.gumbel_softmax_mask(
+                    avg_logits=avg_logits,
+                    content_sizes=content_size,
+                    subsets=args.subsets,
+                )
+            estimated_content_indices = [torch.where(c_mask)[-1].tolist() for c_mask in content_masks]
 
             contrastive_loss = loss_func(
                 hz_flat.reshape(n_views, -1, hz_flat.shape[-1]),
@@ -906,13 +895,7 @@ def main(args):
         torch.cuda.empty_cache()
 
     # Resolve paths
-    if args.dataset_name != "mpi3d":
-        args.datapath = os.path.join(args.dataroot, args.dataset_name)
-    else:
-        args.datapath = os.path.join(
-            args.dataroot,
-            f"{args.dataset_name}/real3d_complicated_shapes_ordered.npz",
-        )
+    args.datapath = os.path.join(args.dataroot, args.dataset_name)
     args.model_dir = os.path.join(args.model_dir, args.dataset_name)
     if args.model_id is None:
         setattr(args, "model_id", str(uuid.uuid4()))
@@ -933,26 +916,15 @@ def main(args):
     logger.info(f"  Save dir:   {args.save_dir}")
     logger.info(f"  Model ID:   {args.model_id}")
 
-    # Optionally reload saved args (evaluation only)
-    if args.evaluate and args.load_args:
-        with open(os.path.join(args.save_dir, "settings.json"), "r") as fp:
-            loaded_args = json.load(fp)
-        for arg in ["encoding_size", "hidden_size"]:
-            setattr(args, arg, loaded_args[arg])
-
     args = update_args(args)
 
     logger.info("")
     logger.info("[CONFIGURATION]")
     logger.info(f"  Dataset:       {args.dataset_name}")
-    logger.info(f"  Modalities:    {args.modalities}")
-    logger.info(f"  Num views:     {args.n_views}")
-    logger.info(f"  Encoding size: {args.encoding_size}")
     logger.info(f"  Batch size:    {args.batch_size}")
     logger.info(f"  Learning rate: {args.lr}")
     logger.info(f"  Temperature:   {args.tau}")
     logger.info(f"  Train steps:   {args.train_steps}")
-    logger.info(f"  Subsets:       {args.subsets}")
 
     # Print all args for backwards compatibility
     print("Arguments:")
@@ -1070,8 +1042,6 @@ def main(args):
         )
 
     # Augmentations / transforms
-    if HAS_FAISS:
-        faiss.omp_set_num_threads(args.faiss_omp_threads)
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -1126,7 +1096,6 @@ def main(args):
     train_dataset = args.DATASETCLASS(
         data_dir=args.datapath,
         mode="train",
-        change_lists=args.change_lists,
         spacing=getattr(args, "image_spacing", 2.0),
         crop_margin=getattr(args, "crop_margin", 0),
         spatial_size=getattr(args, "spatial_size", None),
@@ -1136,14 +1105,6 @@ def main(args):
     )
     logger.info(f"  Train: {len(train_dataset)} samples from {args.datapath}")
 
-    if args.dataset_name == "multimodal3di":
-        dataset_kwargs["vocab_filepath"] = train_dataset.vocab_filepath
-    if args.dataset_name == "mpi3d":
-        dataset_kwargs["collate_random_pair"] = True
-        train_dataset.collate_random_pair = True
-        if args.collate_random_pair:
-            dataloader_kwargs["collate_fn"] = train_dataset.__collate_fn__random_pair__
-
     # Always create val_dataset for periodic validation during training or final check
     val_every = getattr(args, "val_every", 0)
     need_val_dataset = args.evaluate or val_every > 0 or getattr(args, "eval_separation_at_end", True)
@@ -1151,7 +1112,6 @@ def main(args):
         val_dataset = args.DATASETCLASS(
             data_dir=args.datapath,
             mode="val",
-            change_lists=args.change_lists,
             spacing=getattr(args, "image_spacing", 2.0),
             crop_margin=getattr(args, "crop_margin", 0),
             spatial_size=getattr(args, "spatial_size", None),
@@ -1170,7 +1130,6 @@ def main(args):
         test_dataset = args.DATASETCLASS(
             data_dir=args.datapath,
             mode="test",
-            change_lists=args.change_lists,
             spacing=getattr(args, "image_spacing", 2.0),
             crop_margin=getattr(args, "crop_margin", 0),
             spatial_size=getattr(args, "spatial_size", None),
@@ -1326,15 +1285,6 @@ def main(args):
         logger.info("  VAE encoder + decoder")
         encoder_img = torch.nn.DataParallel(vae.Encoder(), device_ids=device_ids).to(device)
         encoders = [encoder_img]
-
-        if "text" in args.modalities:
-            encoder_txt = TextEncoder2D(
-                input_size=train_dataset.vocab_size,
-                output_size=args.encoding_size,
-                sequence_length=train_dataset.max_sequence_length,
-            )
-            encoder_txt = torch.nn.DataParallel(encoder_txt, device_ids=device_ids).to(device)
-            encoders += [encoder_txt]
 
         # Compute spatial size from spacing/crop settings to match the encoder's output.
         # Must mirror the logic in utils.utils.transforms() exactly.
@@ -2322,11 +2272,6 @@ def main(args):
         print(f"<Val Loss>: {np.mean(val_dict['loss_values']):.4f}")
         print(f"<Test Loss>: {np.mean(test_dict['loss_values']):.4f}")
 
-        if args.encoding_size == 1:
-            for split in (val_dict, test_dict):
-                for m in args.modalities:
-                    split[f"hz_{m}"] = split[f"hz_{m}"].reshape(-1, 1)
-
         for m in args.modalities:
             sc = StandardScaler()
             val_dict[f"hz_{m}"] = sc.fit_transform(val_dict[f"hz_{m}"])
@@ -2373,8 +2318,6 @@ def main(args):
 
                 def repr_fn(samples):
                     with torch.no_grad():
-                        if m == "image" and args.dataset_name == "mpi3d":
-                            samples = torch.stack([transform(i) for i in samples], dim=0)
                         return encoders[m_idx](samples).cpu().numpy()
 
                 dci_score = dci.compute_dci(

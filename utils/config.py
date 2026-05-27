@@ -2,13 +2,8 @@
 """Argument parsing and dataset-specific configuration for multiview-CRL."""
 
 import argparse
-import functools
-import operator
-
-import numpy as np
 
 import data.datasets as datasets
-import utils.utils as utils
 
 
 def parse_args() -> argparse.ArgumentParser:
@@ -41,10 +36,6 @@ def parse_args() -> argparse.ArgumentParser:
         type=str,
         default="ADNI_registered",
         choices=[
-            "mpi3d",
-            "independent3di",
-            "causal3di",
-            "multimodal3di",
             "adni",
             "ADNI_registered",
             "ADNI_stripped_masks",
@@ -139,7 +130,6 @@ def parse_args() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default=None)
-    parser.add_argument("--encoding-size", type=int, default=256)
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument(
@@ -175,9 +165,6 @@ def parse_args() -> argparse.ArgumentParser:
         action="store_true",
         help="Resume training from last checkpoint if available",
     )
-    parser.add_argument("--load-args", action="store_true")
-    parser.add_argument("--collate-random-pair", action="store_true")
-    parser.add_argument("--modalities", default=["image"], choices=[["image"], ["image", "text"]])
     parser.add_argument(
         "--scale-recon-loss",
         type=float,
@@ -583,16 +570,6 @@ def parse_args() -> argparse.ArgumentParser:
         "Example: --spatial-size 80 96 80",
     )
     parser.add_argument(
-        "--selection",
-        type=str,
-        default="gumbel_softmax",
-        choices=["ground_truth", "gumbel_softmax", "concat", "soft"],
-    )
-    parser.add_argument("--n-views", default=2, type=int)
-    parser.add_argument("--change-lists", default=[[4, 5, 6, 8, 9, 10]])
-    parser.add_argument("--faiss-omp-threads", type=int, default=16)
-    parser.add_argument("--subsets", default=[(0, 1), (0, 2), (1, 2), (0, 1, 2)])
-    parser.add_argument(
         "--recon-loss-start-step",
         type=int,
         default=0,
@@ -905,45 +882,20 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             f"({cs}/{hidden_ch} channels) applied to levels {cs_levels}"
         )
 
-    if args.dataset_name == "independent3di":
-        args.DATASETCLASS = datasets.Indepdenent3DIdent
-        setattr(args, "modalities", ["image"])
-        logger.info("  -> Using Independent3DIdent dataset (image only)")
-    elif args.dataset_name == "causal3di":
-        args.DATASETCLASS = datasets.Causal3DIdent
-        setattr(args, "modalities", ["image"])
-        logger.info("  -> Using Causal3DIdent dataset (image only)")
-    elif args.dataset_name == "multimodal3di":
-        args.DATASETCLASS = datasets.Multimodal3DIdent
-        setattr(args, "modalities", ["image", "text"])
-        logger.info("  -> Using Multimodal3DIdent dataset (image + text)")
-    elif args.dataset_name == "mpi3d":
-        args.DATASETCLASS = datasets.MPI3D
-        setattr(args, "modalities", ["image"])
-        assert args.n_views == 2, "mpi3d only considers pairs of views: n-views=2"
-        setattr(args, "n-views", 2)
-        setattr(args, "subsets", [(0, 1)])
-        setattr(args, "change_lists", [])
-        setattr(args, "collate_random_pair", True)
-    elif args.dataset_name == "custom":
+    args.modalities = ["image"]
+    args.n_views = 2
+    args.subsets = [(0, 1)]
+
+    if args.dataset_name == "custom":
         args.DATASETCLASS = datasets.MyCustomDataset
-        setattr(args, "modalities", ["image"])
-        setattr(args, "n_views", 2)
-        setattr(args, "subsets", [(0, 1)])
         logger.info("  -> Using custom dataset (image only, 2 views)")
     elif args.dataset_name == "synthetic":
         args.DATASETCLASS = datasets.SyntheticBrainDataset
-        setattr(args, "modalities", ["image"])
-        setattr(args, "n_views", 2)
-        setattr(args, "subsets", [(0, 1)])
-        setattr(args, "content_indices", [list(range(args.content_dim))])
-        setattr(args, "style_indices", list(range(args.content_dim, args.total_dim)))
-        # Default the model's spatial_size to the synthetic resolution so the
-        # VAE decoder isn't sized for ADNI volumes (91,109,91) when the inputs
-        # are actually 32x32x32. VQ-VAE infers shape from input and is unaffected.
+        args.content_indices = [list(range(args.content_dim))]
+        args.style_indices = list(range(args.content_dim, args.total_dim))
         if getattr(args, "spatial_size", None) is None:
             res = getattr(args, "synthetic_res", 64)
-            setattr(args, "spatial_size", (res, res, res))
+            args.spatial_size = (res, res, res)
             logger.info(f"  -> Auto-set --spatial-size to ({res}, {res}, {res}) from --synthetic-res")
         logger.info("  -> Using synthetic dataset (pseudo-MRI, 2 views)")
         logger.info(f"  -> Content dimensions: 0-{args.content_dim - 1} ({args.content_dim} dims)")
@@ -952,11 +904,8 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         )
     elif args.dataset_name in ["adni", "ADNI_registered", "ADNI_stripped", "ADNI_stripped_masks"]:
         args.DATASETCLASS = datasets.MyCustomDataset
-        setattr(args, "modalities", ["image"])
-        setattr(args, "n_views", 2)
-        setattr(args, "subsets", [(0, 1)])
-        setattr(args, "content_indices", [list(range(args.content_dim))])
-        setattr(args, "style_indices", list(range(args.content_dim, args.total_dim)))
+        args.content_indices = [list(range(args.content_dim))]
+        args.style_indices = list(range(args.content_dim, args.total_dim))
         logger.info("  -> Using ADNI dataset (image only, 2 views)")
         logger.info(f"  -> Content dimensions: 0-{args.content_dim - 1} ({args.content_dim} dims)")
         logger.info(
@@ -965,79 +914,9 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
     else:
         raise ValueError(f"{args.dataset_name=} not supported.")
 
-    if len(args.subsets) == 1 or args.n_views == 2:
-        setattr(args, "subsets", [tuple(range(args.n_views))])
-        if not hasattr(args, "content_indices") or args.content_indices is None:
-            setattr(args, "content_indices", [list(range(args.encoding_size))])
-        logger.info(f"  -> Training content encoders with {args.n_views} views")
-        logger.info(f"  -> Subsets: {args.subsets}")
-        logger.info(f"  -> Content indices: {len(args.content_indices[0])} dimensions")
-    else:
-        if not hasattr(args, "subsets"):
-            subsets, _ = utils.powerset(range(args.n_views))
-            setattr(args, "subsets", subsets)
-
-        assert max(set().union(*args.subsets)) < args.n_views, "The given view is outside boundary!"
-
-        if args.selection in ["ground_truth", "gumbel_softmax"]:
-            content_indices = compute_gt_idx(args)
-            setattr(args, "content_indices", content_indices)
-            setattr(args, "encoding_size", len(args.DATASETCLASS.FACTORS["image"]))
-        elif args.selection == "concat":
-            assert args.encoding_size > len(args.subsets)
-            est_content_indices = np.array_split(range(args.encoding_size), len(args.subsets))
-            setattr(args, "content_indices", [ind.tolist() for ind in est_content_indices])
-
-        content_union = set().union(*args.content_indices)
-        style_indices = [i for i in range(args.encoding_size) if i not in content_union]
-        setattr(args, "style_indices", style_indices)
+    if not hasattr(args, "content_indices") or args.content_indices is None:
+        args.content_indices = [list(range(args.content_dim))]
+    logger.info(f"  -> Subsets: {args.subsets}")
+    logger.info(f"  -> Content indices: {len(args.content_indices[0])} dimensions")
 
     return args
-
-
-def compute_gt_idx(args: argparse.Namespace) -> list:
-    """
-    Compute ground-truth content indices for supervised datasets.
-
-    Args:
-        args: Parsed argument namespace.
-
-    Returns:
-        list: Per-subset list of content channel indices.
-    """
-    factors = args.DATASETCLASS.FACTORS["image"].keys()
-
-    if args.dataset_name in ["independent3di", "causal3di"]:
-        if args.dataset_name == "independent3di":
-            setattr(args, "change_lists", [[4, 5, 6, 8, 9]])
-        elif args.dataset_name == "causal3di":
-            setattr(args, "change_lists", [[8, 9, 10], [1, 2, 3, 4, 5, 6, 7]])
-        content_dict = {}
-        indicators = [[True] * len(factors)]
-        for _, change in enumerate(args.change_lists):
-            indicators.append([z not in change for z in factors])
-        for s in args.subsets:
-            content_dict[s] = np.where(list(functools.reduce(operator.eq, [np.array(indicators[k]) for k in s])))[
-                0
-            ].tolist()
-        return list(content_dict.values())
-
-    elif args.dataset_name == "multimodal3di":
-        setattr(args, "change_lists", [[1, 2, 3, 4, 5, 6, 7, 8, 9]])
-        content_dict = {}
-        indicators = [[True] * len(factors)]
-        for _, change in enumerate(args.change_lists):
-            indicators.append([z not in change for z in factors])
-        indicators.append([True] * 3)
-        for s in args.subsets:
-            indicators_copy = indicators.copy()
-            if 2 in s:
-                indicators_copy = [ind[: len(indicators[-1])] for ind in indicators]
-            content_dict[s] = np.where(list(functools.reduce(operator.eq, [np.array(indicators_copy[k]) for k in s])))[
-                0
-            ].tolist()
-        print(content_dict)
-        return list(content_dict.values())
-
-    else:
-        raise ValueError(f"No ground truth content computed for {args.dataset_name=} yet!")

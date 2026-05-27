@@ -153,7 +153,6 @@ def _load_encoder(run_dir: str, args: SimpleNamespace, device) -> vqvae_mod.VQVA
 def _build_datasets(args: SimpleNamespace):
     common = dict(
         data_dir=args.datapath,
-        change_lists=args.change_lists,
         spacing=getattr(args, "image_spacing", 2.0),
         crop_margin=getattr(args, "crop_margin", 0),
         spatial_size=getattr(args, "spatial_size", None),
