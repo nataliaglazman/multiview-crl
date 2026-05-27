@@ -6,12 +6,11 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 
 ## Layout
 
-- `training/main_multimodal.py` — primary training entrypoint (VAE/VQ-VAE, InfoNCE/MoCo/BT/VICReg, Gumbel content mask, optional style quantization). Large file (~2400 lines).
+- `training/main_multimodal.py` — primary training entrypoint (VQ-VAE-2, InfoNCE/MoCo/BT/VICReg, Gumbel content mask, optional style quantization). ~2300 lines.
 - `training/main_numerical.py` — small numerical theory-validation experiments (separate, simpler).
 - `training/losses.py` — contrastive + recon losses (InfoNCE, MoCo, Barlow Twins, VICReg, patch-InfoNCE, LPIPS-based `BaselineLoss`).
 - `models/vqvae.py` — hierarchical 3D VQ-VAE-2 (content/style split, Gumbel mask, style codebooks). Primary model.
-- `models/vae.py` — simpler 3D VAE baseline.
-- `models/encoders.py` — MLP helpers, `TextEncoder2D`.
+- `models/encoders.py` — MLP helpers for numerical experiments.
 - `models/discriminator.py` — optional 3D PatchGAN discriminator (behind `--use-gan`).
 - `data/datasets.py` — `MyCustomDataset` (ADNI) + `SyntheticBrainDataset`, NIfTI loading, MONAI preprocessing, SHA-256 fingerprinted disk cache.
 - `data/infinite_iterator.py` — wraps DataLoader for infinite iteration.
@@ -23,7 +22,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `utils/visualisation.py` — decoded-image TB logging.
 - `utils/logging_setup.py` — logging config.
 - `utils/utils.py` — MONAI transforms (`CreateBrainMaskd`, `ApplyBrainMaskd`), `load_data`, `TBSummaryTypes`.
-- `utils/{spaces,latent_spaces,invertible_network_utils,helper}.py` — numerical-experiment support.
+- `utils/helper.py` — `HelperModule`, `get_parameter_count` (used by vqvae.py).
 - `scripts/sweep_config.yaml` + `sweep_train.py` — W&B Bayesian sweep wrapper (handles bool flags + constraints).
 - `scripts/launch_sweep.sh`, `sweep_runai.sh`, `analyze_sweep.py` — SLURM/RunAI sweep launchers and analysis.
 - `docker/` — CUDA 12.1 / Python 3.12 container, training scripts for RunAI cluster.
@@ -32,7 +31,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 ## Key facts
 
 - 3D volumes, target shape `(91, 109, 91)` at 2mm isotropic.
-- VQ-VAE default: 3 levels, content channels via learned/fixed Gumbel mask at level 0 (finest), separate style codebook per level (optional).
+- VQ-VAE-2 is the only encoder type. 3 levels, content channels via learned/fixed Gumbel mask at level 0 (finest), separate style codebook per level (optional).
 - `VQVAE.forward()` returns an 8-tuple; callers assume that signature.
 - Persistent `.pt` cache with SHA-256 fingerprint over `(spacing, crop_margin, paths)`; NFS-safe atomic writes.
 - W&B + TensorBoard logging. Contrastive diagnostics (top-1 acc, pos/neg sim) logged per level.
@@ -47,6 +46,6 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 
 ## Commands
 
-- Train: `python -m training.main_multimodal --dataroot ... --dataset-name ADNI_stripped --encoder-type vqvae ...` (see `METHODOLOGY_REPORT.md` for full arg list).
+- Train: `python -m training.main_multimodal --dataroot ... --dataset-name ADNI_stripped ...` (see `METHODOLOGY_REPORT.md` for full arg list).
 - Sweep: `wandb sweep scripts/sweep_config.yaml` then `./scripts/launch_sweep.sh`.
 - Docker: `./docker/run_docker.sh`.

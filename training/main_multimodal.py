@@ -3,10 +3,10 @@
 #
 # High-level structure
 # --------------------
-# config.py          parse_args / update_args / compute_gt_idx
+# config.py          parse_args / update_args
 # logging_setup.py   setup_logging
 # checkpointing.py   save_checkpoint / load_checkpoint / save_emergency_checkpoint
-# visualisation.py   save_decoded_images / save_vqvae_decoded_images
+# visualisation.py   save_vqvae_decoded_images
 # evaluation.py      val_step / get_data / eval_step
 # main_multimodal.py train_step + main (this file)
 
@@ -50,9 +50,6 @@ from torch.amp import GradScaler, autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torchvision import transforms
-
-import models.vae as vae
 import models.vqvae as vqvae
 import utils.utils as utils
 from data.infinite_iterator import InfiniteIterator, ResumableSampler
@@ -77,7 +74,7 @@ from utils.checkpointing import (
 )
 from utils.config import parse_args, update_args
 from utils.logging_setup import setup_logging
-from utils.visualisation import save_decoded_images, save_vqvae_decoded_images
+from utils.visualisation import save_vqvae_decoded_images
 
 device_ids = [0]
 
@@ -130,7 +127,7 @@ def train_step(
         tuple: ``(total_loss, contrastive_loss, recon_loss, vq_loss, estimated_content_indices)``
     """
     _diag = {}  # MoCo stale-queue diagnostics (populated below when applicable)
-    _gan_recon = None  # set in VQVAE path; guards discriminator update for VAE path
+    _gan_recon = None
     _gan_real = None
     adv_loss_value = 0.0
 
@@ -163,346 +160,284 @@ def train_step(
         # ------------------------------------------------------------------
         # VQ-VAE-2 path
         # ------------------------------------------------------------------
-        if args.encoder_type == "vqvae":
-            vqvae_model = encoders[0]
+        # ------------------------------------------------------------------
+        # VQ-VAE-2 forward pass
+        # ------------------------------------------------------------------
+        vqvae_model = encoders[0]
 
-            if force_compute_recon is not None:
-                compute_recon = force_compute_recon
-            else:
-                skip_recon_ratio = getattr(args, "skip_recon_ratio", 0.0)
-                compute_recon = (skip_recon_ratio == 0.0) or (torch.rand(1).item() > skip_recon_ratio)
+        if force_compute_recon is not None:
+            compute_recon = force_compute_recon
+        else:
+            skip_recon_ratio = getattr(args, "skip_recon_ratio", 0.0)
+            compute_recon = (skip_recon_ratio == 0.0) or (torch.rand(1).item() > skip_recon_ratio)
 
-            if getattr(args, "patch_contrastive", False):
-                _pgpl = getattr(args, "patch_grid_per_level", None)
-                # Per-level override (list of tuples) when provided, else single shared tuple.
-                _patch_grid = _pgpl if _pgpl is not None else tuple(args.patch_grid)
-            else:
-                _patch_grid = None
+        if getattr(args, "patch_contrastive", False):
+            _pgpl = getattr(args, "patch_grid_per_level", None)
+            # Per-level override (list of tuples) when provided, else single shared tuple.
+            _patch_grid = _pgpl if _pgpl is not None else tuple(args.patch_grid)
+        else:
+            _patch_grid = None
 
-            (
-                recon,
-                diffs,
-                encoder_outputs,
-                estimated_content_indices,
-                _,
-                _,
-                fwd_soft_content_masks,
-                _,  # style_id_outputs
-            ) = vqvae_model(
-                images,
-                return_recon=compute_recon,
-                pool_only=True,
-                n_views=n_views,
-                subsets=args.subsets,
-                patch_grid=_patch_grid,
-            )
+        (
+            recon,
+            diffs,
+            encoder_outputs,
+            estimated_content_indices,
+            _,
+            _,
+            fwd_soft_content_masks,
+            _,  # style_id_outputs
+        ) = vqvae_model(
+            images,
+            return_recon=compute_recon,
+            pool_only=True,
+            n_views=n_views,
+            subsets=args.subsets,
+            patch_grid=_patch_grid,
+        )
 
-            # Compute momentum-encoder key embeddings BEFORE deleting images.
-            # During mask warmup, disable MoCo so in-batch InfoNCE is used
-            # instead — this lets the learned mask stabilise before stale
-            # queue negatives can corrupt the contrastive signal.
-            use_moco = getattr(args, "use_moco", False)
-            _mask_warmup_steps = getattr(args, "mask_warmup_steps", 0)
-            _in_mask_warmup = _mask_warmup_steps > 0 and step <= _mask_warmup_steps
-            if _in_mask_warmup:
-                use_moco = False
-            if use_moco:
-                from models.vqvae import MoCoEncoder
+        # Compute momentum-encoder key embeddings BEFORE deleting images.
+        # During mask warmup, disable MoCo so in-batch InfoNCE is used
+        # instead — this lets the learned mask stabilise before stale
+        # queue negatives can corrupt the contrastive signal.
+        use_moco = getattr(args, "use_moco", False)
+        _mask_warmup_steps = getattr(args, "mask_warmup_steps", 0)
+        _in_mask_warmup = _mask_warmup_steps > 0 and step <= _mask_warmup_steps
+        if _in_mask_warmup:
+            use_moco = False
+        if use_moco:
+            from models.vqvae import MoCoEncoder
 
-                assert isinstance(
-                    vqvae_model, MoCoEncoder
-                ), "MoCo requested but encoders[0] is not a MoCoEncoder instance."
-                with torch.no_grad():
-                    key_outputs = vqvae_model.encode_keys(images, n_views=n_views, patch_grid=_patch_grid)
+            assert isinstance(vqvae_model, MoCoEncoder), "MoCo requested but encoders[0] is not a MoCoEncoder instance."
+            with torch.no_grad():
+                key_outputs = vqvae_model.encode_keys(images, n_views=n_views, patch_grid=_patch_grid)
 
-            _recon_start = getattr(args, "recon_loss_start_step", 0)
-            _recon_active = step >= _recon_start or getattr(args, "_resumed_past_recon_start", False)
-            _gan_recon = None
-            _gan_real = None
-            if compute_recon and recon is not None and _recon_active:
-                # Safety net: the model now interpolates internally, but guard
-                # against size mismatch in case decode_codes or an older
-                # checkpoint path bypasses it.
-                if recon.shape[2:] != input_shape:
-                    recon = F.interpolate(recon, size=input_shape, mode="trilinear", align_corners=False)
-                recon_loss = (
-                    recon_loss_fn(
-                        {
-                            "reconstruction": [recon],
-                            "quantization_losses": diffs,
-                            "mask": masks,
-                        },
-                        images,
-                    )
-                    * args.scale_recon_loss
+        _recon_start = getattr(args, "recon_loss_start_step", 0)
+        _recon_active = step >= _recon_start or getattr(args, "_resumed_past_recon_start", False)
+        _gan_recon = None
+        _gan_real = None
+        if compute_recon and recon is not None and _recon_active:
+            # Safety net: the model now interpolates internally, but guard
+            # against size mismatch in case decode_codes or an older
+            # checkpoint path bypasses it.
+            if recon.shape[2:] != input_shape:
+                recon = F.interpolate(recon, size=input_shape, mode="trilinear", align_corners=False)
+            recon_loss = (
+                recon_loss_fn(
+                    {
+                        "reconstruction": [recon],
+                        "quantization_losses": diffs,
+                        "mask": masks,
+                    },
+                    images,
                 )
-                # Stash for GAN update before freeing (references keep tensors alive)
-                _use_gan = discriminator is not None and step >= getattr(args, "gan_start_step", 0)
-                if _use_gan:
-                    _gan_recon = recon
-                    _gan_real = images
-                del recon, images
-            else:
-                recon_loss = torch.zeros(1, device=device)
-                del images
-                if recon is not None:
-                    del recon
-
-            vq_loss = sum(diffs) * args.vq_commitment_weight
-            del diffs
-
-            total_contrastive_loss = torch.zeros(1, device=device)
-            level_losses = []
-            default_content_ratio = len(args.content_indices[0]) / (
-                len(args.content_indices[0]) + len(args.style_indices)
+                * args.scale_recon_loss
             )
+            # Stash for GAN update before freeing (references keep tensors alive)
+            _use_gan = discriminator is not None and step >= getattr(args, "gan_start_step", 0)
+            if _use_gan:
+                _gan_recon = recon
+                _gan_real = images
+            del recon, images
+        else:
+            recon_loss = torch.zeros(1, device=device)
+            del images
+            if recon is not None:
+                del recon
 
-            # Unwrap DataParallel / MoCoEncoder to reach the bare VQVAE so we
-            # can read channel_logits (fix #1 / #4).
-            _raw_vqvae = vqvae_model.online if hasattr(vqvae_model, "online") else vqvae_model
-            _raw_vqvae = _raw_vqvae.module if hasattr(_raw_vqvae, "module") else _raw_vqvae
+        vq_loss = sum(diffs) * args.vq_commitment_weight
+        del diffs
 
-            # Per-level content channel counts from the model (set by --content-ratios)
-            _content_ch_per_level = getattr(_raw_vqvae, "content_channels_per_level", {})
+        total_contrastive_loss = torch.zeros(1, device=device)
+        level_losses = []
+        default_content_ratio = len(args.content_indices[0]) / (len(args.content_indices[0]) + len(args.style_indices))
 
-            for level_idx, enc_pooled in enumerate(encoder_outputs):
-                # Global pool: enc_pooled is (2B, C) → hz_level (n_views, B, C)
-                # Patch pool:  enc_pooled is (2B, C, P) → hz_level (n_views, B, C, P)
-                hz_level = enc_pooled.reshape(n_views, -1, *enc_pooled.shape[1:])
-                _is_patch = hz_level.ndim == 4  # has patch dimension
-                n_channels = hz_level.shape[2] if _is_patch else hz_level.shape[-1]
-                # Use per-level content_channels if available, otherwise fall back to ratio
-                if level_idx in _content_ch_per_level:
-                    content_size = _content_ch_per_level[level_idx]
-                else:
-                    content_size = max(1, int(default_content_ratio * n_channels))
+        # Unwrap DataParallel / MoCoEncoder to reach the bare VQVAE so we
+        # can read channel_logits (fix #1 / #4).
+        _raw_vqvae = vqvae_model.online if hasattr(vqvae_model, "online") else vqvae_model
+        _raw_vqvae = _raw_vqvae.module if hasattr(_raw_vqvae, "module") else _raw_vqvae
 
-                soft_content_mask = None
-                _style_hz_v0 = _style_hz_v1 = None
+        # Per-level content channel counts from the model (set by --content-ratios)
+        _content_ch_per_level = getattr(_raw_vqvae, "content_channels_per_level", {})
 
-                if level_idx in fwd_soft_content_masks:
-                    mask_or_tuple = fwd_soft_content_masks[level_idx]
+        for level_idx, enc_pooled in enumerate(encoder_outputs):
+            # Global pool: enc_pooled is (2B, C) → hz_level (n_views, B, C)
+            # Patch pool:  enc_pooled is (2B, C, P) → hz_level (n_views, B, C, P)
+            hz_level = enc_pooled.reshape(n_views, -1, *enc_pooled.shape[1:])
+            _is_patch = hz_level.ndim == 4  # has patch dimension
+            n_channels = hz_level.shape[2] if _is_patch else hz_level.shape[-1]
+            # Use per-level content_channels if available, otherwise fall back to ratio
+            if level_idx in _content_ch_per_level:
+                content_size = _content_ch_per_level[level_idx]
+            else:
+                content_size = max(1, int(default_content_ratio * n_channels))
 
-                    if isinstance(mask_or_tuple, tuple):
-                        mask_v0, mask_v1 = mask_or_tuple
-                        idx_v0 = torch.where(mask_v0.bool())[-1]
-                        idx_v1 = torch.where(mask_v1.bool())[-1]
-                        k_content = int(mask_v0.sum().item())
+            soft_content_mask = None
+            _style_hz_v0 = _style_hz_v1 = None
 
-                        # Pre-mask and extract k-dim content per view
+            if level_idx in fwd_soft_content_masks:
+                mask_or_tuple = fwd_soft_content_masks[level_idx]
+
+                if isinstance(mask_or_tuple, tuple):
+                    mask_v0, mask_v1 = mask_or_tuple
+                    idx_v0 = torch.where(mask_v0.bool())[-1]
+                    idx_v1 = torch.where(mask_v1.bool())[-1]
+                    k_content = int(mask_v0.sum().item())
+
+                    # Pre-mask and extract k-dim content per view
+                    if _is_patch:
+                        # hz_level: (n_views, B, C, P), mask: (1, C)
+                        hz_v0_content = (hz_level[0] * mask_v0.unsqueeze(-1))[:, idx_v0, :]  # (B, k, P)
+                        hz_v1_content = (hz_level[1] * mask_v1.unsqueeze(-1))[:, idx_v1, :]  # (B, k, P)
+                    else:
+                        hz_v0_content = (hz_level[0] * mask_v0)[:, idx_v0]  # (B, k)
+                        hz_v1_content = (hz_level[1] * mask_v1)[:, idx_v1]  # (B, k)
+                    hz_content = torch.stack([hz_v0_content, hz_v1_content], dim=0)
+
+                    # All k dims are now content (already selected)
+                    level_content_indices = [list(range(k_content))] * len(args.subsets)
+                    # Only set estimated_content_indices on the first masked
+                    # level so later levels don't overwrite it (fix #6).
+                    if estimated_content_indices is None:
+                        estimated_content_indices = [idx_v0.tolist()]  # view-0 for backward compat
+
+                    _s_v0 = sorted(set(range(n_channels)) - set(idx_v0.tolist()))
+                    _s_v1 = sorted(set(range(n_channels)) - set(idx_v1.tolist()))
+                    if _s_v0 and _s_v1 and len(_s_v0) == len(_s_v1):
                         if _is_patch:
-                            # hz_level: (n_views, B, C, P), mask: (1, C)
-                            hz_v0_content = (hz_level[0] * mask_v0.unsqueeze(-1))[:, idx_v0, :]  # (B, k, P)
-                            hz_v1_content = (hz_level[1] * mask_v1.unsqueeze(-1))[:, idx_v1, :]  # (B, k, P)
+                            _style_hz_v0 = hz_level[0][:, _s_v0, :].mean(-1)
+                            _style_hz_v1 = hz_level[1][:, _s_v1, :].mean(-1)
                         else:
-                            hz_v0_content = (hz_level[0] * mask_v0)[:, idx_v0]  # (B, k)
-                            hz_v1_content = (hz_level[1] * mask_v1)[:, idx_v1]  # (B, k)
-                        hz_content = torch.stack([hz_v0_content, hz_v1_content], dim=0)
+                            _style_hz_v0 = hz_level[0][:, _s_v0]
+                            _style_hz_v1 = hz_level[1][:, _s_v1]
 
-                        # All k dims are now content (already selected)
-                        level_content_indices = [list(range(k_content))] * len(args.subsets)
-                        # Only set estimated_content_indices on the first masked
-                        # level so later levels don't overwrite it (fix #6).
-                        if estimated_content_indices is None:
-                            estimated_content_indices = [idx_v0.tolist()]  # view-0 for backward compat
+                    if use_moco:
+                        assert not _is_patch, (
+                            "Per-view mask MoCo path does not support patch-contrastive yet. "
+                            "Use --mask-mode fixed or --mask-mode learned (without per-view masks) instead."
+                        )
+                        key_pooled = key_outputs[level_idx]
+                        k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
+                        # Pre-mask momentum keys the same way
+                        k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
+                        k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
 
-                        _s_v0 = sorted(set(range(n_channels)) - set(idx_v0.tolist()))
-                        _s_v1 = sorted(set(range(n_channels)) - set(idx_v1.tolist()))
-                        if _s_v0 and _s_v1 and len(_s_v0) == len(_s_v1):
-                            if _is_patch:
-                                _style_hz_v0 = hz_level[0][:, _s_v0, :].mean(-1)
-                                _style_hz_v1 = hz_level[1][:, _s_v1, :].mean(-1)
-                            else:
-                                _style_hz_v0 = hz_level[0][:, _s_v0]
-                                _style_hz_v1 = hz_level[1][:, _s_v1]
+                        q_snap_v0 = vqvae_model.queues[level_idx].detach()
+                        q_snap_v1 = vqvae_model.queues_v1[level_idx].detach()
+                        _norm_eps = 1e-6  # avoid NaN when masked features have zero norm
+                        queue_v0 = F.normalize(q_snap_v0[idx_v0, :], dim=0, eps=_norm_eps)
+                        queue_v1 = F.normalize(q_snap_v1[idx_v1, :], dim=0, eps=_norm_eps)
+                        q_v0 = F.normalize(hz_v0_content, dim=-1, eps=_norm_eps)
+                        q_v1 = F.normalize(hz_v1_content, dim=-1, eps=_norm_eps)
+                        k_v0_n = F.normalize(k_v0_content, dim=-1, eps=_norm_eps)
+                        k_v1_n = F.normalize(k_v1_content, dim=-1, eps=_norm_eps)
+                        _tau = args.tau
+                        B_moco = q_v0.shape[0]
+                        _targets = torch.zeros(B_moco, dtype=torch.long, device=device)
 
-                        if use_moco:
-                            assert not _is_patch, (
-                                "Per-view mask MoCo path does not support patch-contrastive yet. "
-                                "Use --mask-mode fixed or --mask-mode learned (without per-view masks) instead."
-                            )
-                            key_pooled = key_outputs[level_idx]
-                            k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
-                            # Pre-mask momentum keys the same way
-                            k_v0_content = (k_level[0] * mask_v0.detach())[:, idx_v0]
-                            k_v1_content = (k_level[1] * mask_v1.detach())[:, idx_v1]
+                        if getattr(args, "cross_view_negs_only", False):
+                            neg_queue_for_v0, neg_queue_for_v1 = queue_v1, queue_v0
+                        else:
+                            neg_queue_for_v0, neg_queue_for_v1 = queue_v0, queue_v1
+                        # Cache the negative-similarity matmuls — these dominate the
+                        # contrastive cost (B × queue_size) and were previously
+                        # recomputed up to 4× per step for diagnostics.
+                        neg_sim_v0 = q_v0 @ neg_queue_for_v0
+                        neg_sim_v1 = q_v1 @ neg_queue_for_v1
+                        # view-0 query → view-1 key positive
+                        pos_01 = (q_v0 * k_v1_n).sum(dim=-1, keepdim=True)
+                        logits_01 = torch.cat([pos_01, neg_sim_v0], dim=1) / _tau
+                        # view-1 query → view-0 key positive
+                        pos_10 = (q_v1 * k_v0_n).sum(dim=-1, keepdim=True)
+                        logits_10 = torch.cat([pos_10, neg_sim_v1], dim=1) / _tau
+                        level_loss = F.cross_entropy(logits_01, _targets) + F.cross_entropy(logits_10, _targets)
 
-                            q_snap_v0 = vqvae_model.queues[level_idx].detach()
-                            q_snap_v1 = vqvae_model.queues_v1[level_idx].detach()
-                            _norm_eps = 1e-6  # avoid NaN when masked features have zero norm
-                            queue_v0 = F.normalize(q_snap_v0[idx_v0, :], dim=0, eps=_norm_eps)
-                            queue_v1 = F.normalize(q_snap_v1[idx_v1, :], dim=0, eps=_norm_eps)
-                            q_v0 = F.normalize(hz_v0_content, dim=-1, eps=_norm_eps)
-                            q_v1 = F.normalize(hz_v1_content, dim=-1, eps=_norm_eps)
-                            k_v0_n = F.normalize(k_v0_content, dim=-1, eps=_norm_eps)
-                            k_v1_n = F.normalize(k_v1_content, dim=-1, eps=_norm_eps)
-                            _tau = args.tau
-                            B_moco = q_v0.shape[0]
-                            _targets = torch.zeros(B_moco, dtype=torch.long, device=device)
-
-                            if getattr(args, "cross_view_negs_only", False):
-                                neg_queue_for_v0, neg_queue_for_v1 = queue_v1, queue_v0
-                            else:
-                                neg_queue_for_v0, neg_queue_for_v1 = queue_v0, queue_v1
-                            # Cache the negative-similarity matmuls — these dominate the
-                            # contrastive cost (B × queue_size) and were previously
-                            # recomputed up to 4× per step for diagnostics.
-                            neg_sim_v0 = q_v0 @ neg_queue_for_v0
-                            neg_sim_v1 = q_v1 @ neg_queue_for_v1
-                            # view-0 query → view-1 key positive
-                            pos_01 = (q_v0 * k_v1_n).sum(dim=-1, keepdim=True)
-                            logits_01 = torch.cat([pos_01, neg_sim_v0], dim=1) / _tau
-                            # view-1 query → view-0 key positive
-                            pos_10 = (q_v1 * k_v0_n).sum(dim=-1, keepdim=True)
-                            logits_10 = torch.cat([pos_10, neg_sim_v1], dim=1) / _tau
-                            level_loss = F.cross_entropy(logits_01, _targets) + F.cross_entropy(logits_10, _targets)
-
-                            # --- Contrastive diagnostics for per-view path ---
-                            # top1_acc is consumed every step in the train-loop printout;
-                            # the sim summaries are TB-only, so defer the extra .item() syncs
-                            # and reductions to log-step boundaries.
-                            _is_log_step = step is None or (step % args.log_steps == 0)
-                            with torch.no_grad():
-                                _pv_correct = (logits_01.argmax(dim=1) == 0).sum().item() + (
-                                    logits_10.argmax(dim=1) == 0
-                                ).sum().item()
-                                _pv_total = logits_01.shape[0] + logits_10.shape[0]
-                                _diag_dict = {"top1_acc": _pv_correct / max(_pv_total, 1)}
-                                if _is_log_step:
-                                    _pos_cat = torch.cat([pos_01.squeeze(-1), pos_10.squeeze(-1)])
-                                    _neg_cat = torch.cat([neg_sim_v0, neg_sim_v1])
-                                    _diag_dict.update(
-                                        {
-                                            "pos_sim_mean": _pos_cat.mean().item(),
-                                            "pos_sim_std": _pos_cat.std().item(),
-                                            "neg_sim_mean": _neg_cat.mean().item(),
-                                            "neg_sim_std": _neg_cat.std().item(),
-                                        }
-                                    )
-                                level_loss._contrastive_diag = _diag_dict
-
-                            # --- Stale-queue diagnostic (cheap, no grad) ---
-                            # TB-only — gate to log-step to skip the extra .item() syncs.
-                            if level_idx == 0 and optimizer is not None and _is_log_step:
-                                with torch.no_grad():
-                                    # 1. Positive vs negative similarity gap
-                                    #    Healthy: pos >> mean(neg).  Stale queue: gap shrinks.
-                                    _neg_v0 = neg_sim_v0.mean().item()
-                                    _neg_v1 = neg_sim_v1.mean().item()
-                                    pos_sim = (
-                                        (q_v0 * k_v1_n).sum(-1).mean().item() + (q_v1 * k_v0_n).sum(-1).mean().item()
-                                    ) / 2
-                                    # 2. Queue feature norm BEFORE L2-norm (detects dead channels)
-                                    raw_norm_v0 = q_snap_v0[idx_v0, :].norm(dim=0).mean().item()
-                                    raw_norm_v1 = q_snap_v1[idx_v1, :].norm(dim=0).mean().item()
-                                    _diag = {
-                                        "MoCo/pos_sim": pos_sim,
-                                        "MoCo/neg_sim_v0": _neg_v0,
-                                        "MoCo/neg_sim_v1": _neg_v1,
-                                        "MoCo/pos_neg_gap": pos_sim - (_neg_v0 + _neg_v1) / 2,
-                                        "MoCo/queue_raw_norm_v0": raw_norm_v0,
-                                        "MoCo/queue_raw_norm_v1": raw_norm_v1,
+                        # --- Contrastive diagnostics for per-view path ---
+                        # top1_acc is consumed every step in the train-loop printout;
+                        # the sim summaries are TB-only, so defer the extra .item() syncs
+                        # and reductions to log-step boundaries.
+                        _is_log_step = step is None or (step % args.log_steps == 0)
+                        with torch.no_grad():
+                            _pv_correct = (logits_01.argmax(dim=1) == 0).sum().item() + (
+                                logits_10.argmax(dim=1) == 0
+                            ).sum().item()
+                            _pv_total = logits_01.shape[0] + logits_10.shape[0]
+                            _diag_dict = {"top1_acc": _pv_correct / max(_pv_total, 1)}
+                            if _is_log_step:
+                                _pos_cat = torch.cat([pos_01.squeeze(-1), pos_10.squeeze(-1)])
+                                _neg_cat = torch.cat([neg_sim_v0, neg_sim_v1])
+                                _diag_dict.update(
+                                    {
+                                        "pos_sim_mean": _pos_cat.mean().item(),
+                                        "pos_sim_std": _pos_cat.std().item(),
+                                        "neg_sim_mean": _neg_cat.mean().item(),
+                                        "neg_sim_std": _neg_cat.std().item(),
                                     }
-                        else:
-                            _lf = patch_loss_func if _is_patch else loss_func
-                            level_loss = _lf(
-                                hz_content,
-                                level_content_indices,
-                                args.subsets,
-                                soft_content_mask=None,
-                            )
+                                )
+                            level_loss._contrastive_diag = _diag_dict
+
+                        # --- Stale-queue diagnostic (cheap, no grad) ---
+                        # TB-only — gate to log-step to skip the extra .item() syncs.
+                        if level_idx == 0 and optimizer is not None and _is_log_step:
+                            with torch.no_grad():
+                                # 1. Positive vs negative similarity gap
+                                #    Healthy: pos >> mean(neg).  Stale queue: gap shrinks.
+                                _neg_v0 = neg_sim_v0.mean().item()
+                                _neg_v1 = neg_sim_v1.mean().item()
+                                pos_sim = (
+                                    (q_v0 * k_v1_n).sum(-1).mean().item() + (q_v1 * k_v0_n).sum(-1).mean().item()
+                                ) / 2
+                                # 2. Queue feature norm BEFORE L2-norm (detects dead channels)
+                                raw_norm_v0 = q_snap_v0[idx_v0, :].norm(dim=0).mean().item()
+                                raw_norm_v1 = q_snap_v1[idx_v1, :].norm(dim=0).mean().item()
+                                _diag = {
+                                    "MoCo/pos_sim": pos_sim,
+                                    "MoCo/neg_sim_v0": _neg_v0,
+                                    "MoCo/neg_sim_v1": _neg_v1,
+                                    "MoCo/pos_neg_gap": pos_sim - (_neg_v0 + _neg_v1) / 2,
+                                    "MoCo/queue_raw_norm_v0": raw_norm_v0,
+                                    "MoCo/queue_raw_norm_v1": raw_norm_v1,
+                                }
                     else:
-                        # --- Shared mask (original path) ---
-                        # This level has a learnable Gumbel mask — reuse the same
-                        # mask the forward pass sampled for the codebook.  Gradients
-                        # from the contrastive loss flow back to channel_logits.
-                        soft_content_mask = mask_or_tuple
-                        content_masks = [soft_content_mask] * len(args.subsets)
-                        _level_ci = [torch.where(m.bool())[-1].tolist() for m in content_masks]
-                        level_content_indices = _level_ci
-                        if estimated_content_indices is None:
-                            estimated_content_indices = _level_ci
-
-                        _s_idx = sorted(set(range(n_channels)) - set(_level_ci[0]))
-                        if _s_idx:
-                            if _is_patch:
-                                _style_hz_v0 = hz_level[0][:, _s_idx, :].mean(-1)
-                                _style_hz_v1 = hz_level[1][:, _s_idx, :].mean(-1)
-                            else:
-                                _style_hz_v0 = hz_level[0][:, _s_idx]
-                                _style_hz_v1 = hz_level[1][:, _s_idx]
-
-                        if use_moco:
-                            key_pooled = key_outputs[level_idx]
-                            k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
-                            # Queue is mutated only by enqueue() after the loss loop, so
-                            # detach() (a view) is safe — no need for the extra clone.
-                            queue_snapshot = vqvae_model.queues[level_idx].detach()
-                            _qv1 = (
-                                vqvae_model.queues_v1[level_idx].detach() if hasattr(vqvae_model, "queues_v1") else None
-                            )
-                            # Patch MoCo: flatten (n_views, B, C, P) → (n_views, B*P, C)
-                            # so each patch becomes an independent query/key in the queue.
-                            # Positives: same subject + same patch position across views.
-                            # Negatives: queue entries from all subjects × all patches.
-                            _hz_moco = (
-                                hz_level.permute(0, 1, 3, 2).reshape(n_views, -1, hz_level.shape[2])
-                                if _is_patch
-                                else hz_level
-                            )
-                            _k_moco = (
-                                k_level.permute(0, 1, 3, 2).reshape(n_views, -1, k_level.shape[2])
-                                if _is_patch
-                                else k_level
-                            )
-
-                            level_loss = moco_loss_func(
-                                _hz_moco,
-                                _k_moco,
-                                queue_snapshot,
-                                level_content_indices,
-                                args.subsets,
-                                soft_content_mask=soft_content_mask,
-                                queue_v1=_qv1,
-                            )
-                        else:
-                            _lf = patch_loss_func if _is_patch else loss_func
-                            level_loss = _lf(
-                                hz_level,
-                                level_content_indices,
-                                args.subsets,
-                                soft_content_mask=soft_content_mask,
-                            )
+                        _lf = patch_loss_func if _is_patch else loss_func
+                        level_loss = _lf(
+                            hz_content,
+                            level_content_indices,
+                            args.subsets,
+                            soft_content_mask=None,
+                        )
                 else:
-                    # Fallback: no channel_logits configured, use batch statistics.
-                    # For patch mode, average over the patch dim to get per-channel logits.
-                    _hz_for_logits = hz_level.mean(dim=-1) if _is_patch else hz_level
-                    avg_logits = _hz_for_logits.mean(dim=[0, 1], keepdim=False).unsqueeze(0)
-                    if len(args.subsets) > 1 and content_size > 0:
-                        content_masks = utils.smart_gumbel_softmax_mask(
-                            avg_logits=avg_logits,
-                            content_sizes=[content_size],
-                            subsets=args.subsets,
-                        )
-                    else:
-                        content_masks = utils.gumbel_softmax_mask(
-                            avg_logits=avg_logits,
-                            content_sizes=[content_size],
-                            subsets=args.subsets,
-                        )
-
+                    # --- Shared mask (original path) ---
+                    # This level has a learnable Gumbel mask — reuse the same
+                    # mask the forward pass sampled for the codebook.  Gradients
+                    # from the contrastive loss flow back to channel_logits.
+                    soft_content_mask = mask_or_tuple
+                    content_masks = [soft_content_mask] * len(args.subsets)
                     _level_ci = [torch.where(m.bool())[-1].tolist() for m in content_masks]
                     level_content_indices = _level_ci
                     if estimated_content_indices is None:
                         estimated_content_indices = _level_ci
 
+                    _s_idx = sorted(set(range(n_channels)) - set(_level_ci[0]))
+                    if _s_idx:
+                        if _is_patch:
+                            _style_hz_v0 = hz_level[0][:, _s_idx, :].mean(-1)
+                            _style_hz_v1 = hz_level[1][:, _s_idx, :].mean(-1)
+                        else:
+                            _style_hz_v0 = hz_level[0][:, _s_idx]
+                            _style_hz_v1 = hz_level[1][:, _s_idx]
+
                     if use_moco:
                         key_pooled = key_outputs[level_idx]
                         k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
-                        # Queue is mutated only by enqueue() after the loss loop.
+                        # Queue is mutated only by enqueue() after the loss loop, so
+                        # detach() (a view) is safe — no need for the extra clone.
                         queue_snapshot = vqvae_model.queues[level_idx].detach()
                         _qv1 = vqvae_model.queues_v1[level_idx].detach() if hasattr(vqvae_model, "queues_v1") else None
                         # Patch MoCo: flatten (n_views, B, C, P) → (n_views, B*P, C)
+                        # so each patch becomes an independent query/key in the queue.
+                        # Positives: same subject + same patch position across views.
+                        # Negatives: queue entries from all subjects × all patches.
                         _hz_moco = (
                             hz_level.permute(0, 1, 3, 2).reshape(n_views, -1, hz_level.shape[2])
                             if _is_patch
@@ -521,28 +456,6 @@ def train_step(
                             soft_content_mask=soft_content_mask,
                             queue_v1=_qv1,
                         )
-
-                        # --- Stale-queue diagnostic for shared-mask / onthefly path ---
-                        # TB-only — gate to log-step to skip the extra .item() syncs.
-                        if (
-                            level_idx == 0
-                            and optimizer is not None
-                            and accumulation_step == 0
-                            and (step is None or step % args.log_steps == 0)
-                        ):
-                            with torch.no_grad():
-                                _ci = level_content_indices[0]
-                                _q = F.normalize(_hz_moco[0, :, _ci], dim=-1)
-                                _k = F.normalize(_k_moco[1, :, _ci], dim=-1)
-                                _queue_neg = F.normalize(queue_snapshot[_ci, :], dim=0)
-                                _pos = (_q * _k).sum(-1).mean().item()
-                                _neg = (_q @ _queue_neg).mean().item()
-                                _diag = {
-                                    "MoCo/pos_sim": _pos,
-                                    "MoCo/neg_sim_v0": _neg,
-                                    "MoCo/pos_neg_gap": _pos - _neg,
-                                    "MoCo/queue_raw_norm": queue_snapshot.norm(dim=0).mean().item(),
-                                }
                     else:
                         _lf = patch_loss_func if _is_patch else loss_func
                         level_loss = _lf(
@@ -551,171 +464,191 @@ def train_step(
                             args.subsets,
                             soft_content_mask=soft_content_mask,
                         )
-
-                _style_cl_scale = getattr(args, "scale_style_contrastive_loss", 0.0)
-                if _style_cl_scale > 0.0 and _style_hz_v0 is not None:
-                    _style_loss = style_infonce_loss(_style_hz_v0, _style_hz_v1, tau=args.tau)
-                    total_contrastive_loss = total_contrastive_loss + _style_loss * _style_cl_scale
-                    _diag[f"Style/infonce_L{level_idx}"] = _style_loss.item()
-
-                # --- Auxiliary modality heads (decouple invariance from capacity) ---
-                # Content path: gradient-reversal → content becomes linearly
-                #   modality-invariant regardless of style dim.
-                # Style path: CE → style must be linearly modality-sufficient,
-                #   preventing collapse of modality-correlated demographic signal.
-                _adv_scale = getattr(args, "scale_content_modality_adv", 0.0)
-                _patch_adv_scale = getattr(args, "scale_content_patch_modality_adv", 0.0)
-                _suf_scale = getattr(args, "scale_style_modality_ce", 0.0)
-                if (_adv_scale > 0.0 or _patch_adv_scale > 0.0 or _suf_scale > 0.0) and _style_hz_v0 is not None:
-                    # Pull content features for this level (shared-mask path).
-                    _ci = level_content_indices[0] if level_content_indices else None
-                    if _ci:
-                        if _is_patch:
-                            _content_hz_v0_patch = hz_level[0][:, _ci, :]  # (B, k, P)
-                            _content_hz_v1_patch = hz_level[1][:, _ci, :]
-                            _content_hz_v0 = _content_hz_v0_patch.mean(-1)  # (B, k)
-                            _content_hz_v1 = _content_hz_v1_patch.mean(-1)
-                        else:
-                            _content_hz_v0 = hz_level[0][:, _ci]
-                            _content_hz_v1 = hz_level[1][:, _ci]
-
-                        # Lazy-init heads on first call, store on the raw model.
-                        _heads = getattr(_raw_vqvae, "_aux_modality_heads", None)
-                        if _heads is None:
-                            _heads = torch.nn.ModuleDict()
-                            _raw_vqvae._aux_modality_heads = _heads
-                        _ck = f"content_L{level_idx}"
-                        _cpk = f"content_patch_L{level_idx}"
-                        _sk = f"style_L{level_idx}"
-                        if _ck not in _heads:
-                            _heads[_ck] = torch.nn.Linear(_content_hz_v0.shape[-1], 2).to(device)
-                        if _cpk not in _heads and _is_patch:
-                            _heads[_cpk] = torch.nn.Linear(_content_hz_v0.shape[-1], 2).to(device)
-                        if _sk not in _heads:
-                            _heads[_sk] = torch.nn.Linear(_style_hz_v0.shape[-1], 2).to(device)
-
-                        if _adv_scale > 0.0:
-                            _lam = getattr(args, "content_modality_adv_lambda", 1.0)
-                            _adv_loss, _adv_acc = content_modality_adv_loss(
-                                _content_hz_v0, _content_hz_v1, _heads[_ck], lambd=_lam
-                            )
-                            total_contrastive_loss = total_contrastive_loss + _adv_loss * _adv_scale
-                            _diag[f"ModAdv/loss_L{level_idx}"] = _adv_loss.item()
-                            _diag[f"ModAdv/acc_L{level_idx}"] = _adv_acc  # ~0.5 = invariant
-
-                        if _patch_adv_scale > 0.0 and _is_patch:
-                            _lam = getattr(args, "content_modality_adv_lambda", 1.0)
-                            _padv_loss, _padv_acc = content_patch_modality_adv_loss(
-                                _content_hz_v0_patch, _content_hz_v1_patch, _heads[_cpk], lambd=_lam
-                            )
-                            total_contrastive_loss = total_contrastive_loss + _padv_loss * _patch_adv_scale
-                            _diag[f"ModAdvPatch/loss_L{level_idx}"] = _padv_loss.item()
-                            _diag[f"ModAdvPatch/acc_L{level_idx}"] = _padv_acc  # ~0.5 = invariant
-
-                        if _suf_scale > 0.0:
-                            _suf_loss, _suf_acc = style_modality_ce_loss(_style_hz_v0, _style_hz_v1, _heads[_sk])
-                            total_contrastive_loss = total_contrastive_loss + _suf_loss * _suf_scale
-                            _diag[f"ModSuf/loss_L{level_idx}"] = _suf_loss.item()
-                            _diag[f"ModSuf/acc_L{level_idx}"] = _suf_acc  # ~1.0 = sufficient
-
-                level_losses.append(level_loss.item())
-                # Collect contrastive diagnostics (top-1 acc, sim distributions)
-                if hasattr(level_loss, "_contrastive_diag"):
-                    for _dk, _dv in level_loss._contrastive_diag.items():
-                        _diag[f"Contrastive/{_dk}_L{level_idx}"] = _dv
-                _lvl_weights = getattr(args, "contrastive_level_weights", None)
-                _lvl_w = _lvl_weights[level_idx] if _lvl_weights and level_idx < len(_lvl_weights) else 1.0
-                total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss * _lvl_w
-
-            # Enqueue all levels in one call after the loss loop.
-            if use_moco and optimizer is not None:
-                with torch.no_grad():
-                    _keys = []
-                    for _lvl_idx, k in enumerate(key_outputs):
-                        if _patch_grid is not None:
-                            _k_flat = k.detach().permute(0, 2, 1).reshape(-1, k.shape[1])
-                        else:
-                            _k_flat = k.detach()
-                        _keys.append(_k_flat)
-                    vqvae_model.enqueue(_keys, n_views=n_views)
-
-            contrastive_loss = total_contrastive_loss
-            total_loss = contrastive_loss + recon_loss + vq_loss
-
-            # Generator adversarial loss: fool the discriminator into predicting
-            # the reconstruction as real (hinge: -mean(D(fake))).
-            adv_loss_value = 0.0
-            if _gan_recon is not None and optimizer is not None:
-                g_adv = -discriminator(_gan_recon).mean() * args.scale_adv_loss
-                total_loss = total_loss + g_adv
-                adv_loss_value = g_adv.item()
-
-            recon_loss_value = recon_loss.item()
-            vq_loss_value = vq_loss.item()
-            contrastive_loss_value = contrastive_loss.item()
-            # NOTE: estimated_content_indices was already set to the dynamically
-            # computed indices from channel_logits inside the level loop above
-            # (line: estimated_content_indices = [torch.where(m.bool())[-1].tolist()
-            # for m in content_masks]).  Do NOT overwrite it here with
-            # args.content_indices — that would replace the learned channel
-            # selection with the static config-based indices and break evaluation
-            # in get_data() for any run that uses channel_logits.
-
-        # ------------------------------------------------------------------
-        # VAE path
-        # ------------------------------------------------------------------
-        else:
-            hz = []
-            for m_midx, m in enumerate(args.modalities):
-                samples = data[m]
-                hz_m = encoders[m_midx](torch.concat(samples, 0))
-                hz += [hz_m]
-            hz = torch.concat(hz, 0)
-            hz_flat = hz.view(hz.size(0), -1)
-
-            decoded_images = decoders[0](hz_flat)
-            ground_truth_images = torch.concat(data["image"], 0).to(decoded_images.device)
-            recon_loss = (
-                recon_loss_fn(
-                    {
-                        "reconstruction": [decoded_images],
-                        "quantization_losses": [],
-                        "mask": masks,
-                    },
-                    ground_truth_images,
-                )
-                * args.scale_recon_loss
-            )
-
-            avg_logits = hz_flat.mean(0)[None]
-            if "content_indices" not in data:
-                data["content_indices"] = args.content_indices
-            content_size = [len(content) for content in data["content_indices"]]
-
-            if args.subsets[-1] == list(range(args.n_views)) and content_size[-1] > 0:
-                content_masks = utils.smart_gumbel_softmax_mask(
-                    avg_logits=avg_logits,
-                    content_sizes=content_size,
-                    subsets=args.subsets,
-                )
             else:
-                content_masks = utils.gumbel_softmax_mask(
-                    avg_logits=avg_logits,
-                    content_sizes=content_size,
-                    subsets=args.subsets,
-                )
-            estimated_content_indices = [torch.where(c_mask)[-1].tolist() for c_mask in content_masks]
+                # Fallback: no channel_logits configured, use batch statistics.
+                # For patch mode, average over the patch dim to get per-channel logits.
+                _hz_for_logits = hz_level.mean(dim=-1) if _is_patch else hz_level
+                avg_logits = _hz_for_logits.mean(dim=[0, 1], keepdim=False).unsqueeze(0)
+                if len(args.subsets) > 1 and content_size > 0:
+                    content_masks = utils.smart_gumbel_softmax_mask(
+                        avg_logits=avg_logits,
+                        content_sizes=[content_size],
+                        subsets=args.subsets,
+                    )
+                else:
+                    content_masks = utils.gumbel_softmax_mask(
+                        avg_logits=avg_logits,
+                        content_sizes=[content_size],
+                        subsets=args.subsets,
+                    )
 
-            contrastive_loss = loss_func(
-                hz_flat.reshape(n_views, -1, hz_flat.shape[-1]),
-                estimated_content_indices,
-                args.subsets,
-            )
-            total_loss = contrastive_loss + recon_loss
-            recon_loss_value = recon_loss.item()
-            vq_loss_value = 0.0
-            contrastive_loss_value = contrastive_loss.item()
-            level_losses = [contrastive_loss_value]
+                _level_ci = [torch.where(m.bool())[-1].tolist() for m in content_masks]
+                level_content_indices = _level_ci
+                if estimated_content_indices is None:
+                    estimated_content_indices = _level_ci
+
+                if use_moco:
+                    key_pooled = key_outputs[level_idx]
+                    k_level = key_pooled.reshape(n_views, -1, *key_pooled.shape[1:])
+                    # Queue is mutated only by enqueue() after the loss loop.
+                    queue_snapshot = vqvae_model.queues[level_idx].detach()
+                    _qv1 = vqvae_model.queues_v1[level_idx].detach() if hasattr(vqvae_model, "queues_v1") else None
+                    # Patch MoCo: flatten (n_views, B, C, P) → (n_views, B*P, C)
+                    _hz_moco = (
+                        hz_level.permute(0, 1, 3, 2).reshape(n_views, -1, hz_level.shape[2]) if _is_patch else hz_level
+                    )
+                    _k_moco = (
+                        k_level.permute(0, 1, 3, 2).reshape(n_views, -1, k_level.shape[2]) if _is_patch else k_level
+                    )
+
+                    level_loss = moco_loss_func(
+                        _hz_moco,
+                        _k_moco,
+                        queue_snapshot,
+                        level_content_indices,
+                        args.subsets,
+                        soft_content_mask=soft_content_mask,
+                        queue_v1=_qv1,
+                    )
+
+                    # --- Stale-queue diagnostic for shared-mask / onthefly path ---
+                    # TB-only — gate to log-step to skip the extra .item() syncs.
+                    if (
+                        level_idx == 0
+                        and optimizer is not None
+                        and accumulation_step == 0
+                        and (step is None or step % args.log_steps == 0)
+                    ):
+                        with torch.no_grad():
+                            _ci = level_content_indices[0]
+                            _q = F.normalize(_hz_moco[0, :, _ci], dim=-1)
+                            _k = F.normalize(_k_moco[1, :, _ci], dim=-1)
+                            _queue_neg = F.normalize(queue_snapshot[_ci, :], dim=0)
+                            _pos = (_q * _k).sum(-1).mean().item()
+                            _neg = (_q @ _queue_neg).mean().item()
+                            _diag = {
+                                "MoCo/pos_sim": _pos,
+                                "MoCo/neg_sim_v0": _neg,
+                                "MoCo/pos_neg_gap": _pos - _neg,
+                                "MoCo/queue_raw_norm": queue_snapshot.norm(dim=0).mean().item(),
+                            }
+                else:
+                    _lf = patch_loss_func if _is_patch else loss_func
+                    level_loss = _lf(
+                        hz_level,
+                        level_content_indices,
+                        args.subsets,
+                        soft_content_mask=soft_content_mask,
+                    )
+
+            _style_cl_scale = getattr(args, "scale_style_contrastive_loss", 0.0)
+            if _style_cl_scale > 0.0 and _style_hz_v0 is not None:
+                _style_loss = style_infonce_loss(_style_hz_v0, _style_hz_v1, tau=args.tau)
+                total_contrastive_loss = total_contrastive_loss + _style_loss * _style_cl_scale
+                _diag[f"Style/infonce_L{level_idx}"] = _style_loss.item()
+
+            # --- Auxiliary modality heads (decouple invariance from capacity) ---
+            # Content path: gradient-reversal → content becomes linearly
+            #   modality-invariant regardless of style dim.
+            # Style path: CE → style must be linearly modality-sufficient,
+            #   preventing collapse of modality-correlated demographic signal.
+            _adv_scale = getattr(args, "scale_content_modality_adv", 0.0)
+            _patch_adv_scale = getattr(args, "scale_content_patch_modality_adv", 0.0)
+            _suf_scale = getattr(args, "scale_style_modality_ce", 0.0)
+            if (_adv_scale > 0.0 or _patch_adv_scale > 0.0 or _suf_scale > 0.0) and _style_hz_v0 is not None:
+                # Pull content features for this level (shared-mask path).
+                _ci = level_content_indices[0] if level_content_indices else None
+                if _ci:
+                    if _is_patch:
+                        _content_hz_v0_patch = hz_level[0][:, _ci, :]  # (B, k, P)
+                        _content_hz_v1_patch = hz_level[1][:, _ci, :]
+                        _content_hz_v0 = _content_hz_v0_patch.mean(-1)  # (B, k)
+                        _content_hz_v1 = _content_hz_v1_patch.mean(-1)
+                    else:
+                        _content_hz_v0 = hz_level[0][:, _ci]
+                        _content_hz_v1 = hz_level[1][:, _ci]
+
+                    # Lazy-init heads on first call, store on the raw model.
+                    _heads = getattr(_raw_vqvae, "_aux_modality_heads", None)
+                    if _heads is None:
+                        _heads = torch.nn.ModuleDict()
+                        _raw_vqvae._aux_modality_heads = _heads
+                    _ck = f"content_L{level_idx}"
+                    _cpk = f"content_patch_L{level_idx}"
+                    _sk = f"style_L{level_idx}"
+                    if _ck not in _heads:
+                        _heads[_ck] = torch.nn.Linear(_content_hz_v0.shape[-1], 2).to(device)
+                    if _cpk not in _heads and _is_patch:
+                        _heads[_cpk] = torch.nn.Linear(_content_hz_v0.shape[-1], 2).to(device)
+                    if _sk not in _heads:
+                        _heads[_sk] = torch.nn.Linear(_style_hz_v0.shape[-1], 2).to(device)
+
+                    if _adv_scale > 0.0:
+                        _lam = getattr(args, "content_modality_adv_lambda", 1.0)
+                        _adv_loss, _adv_acc = content_modality_adv_loss(
+                            _content_hz_v0, _content_hz_v1, _heads[_ck], lambd=_lam
+                        )
+                        total_contrastive_loss = total_contrastive_loss + _adv_loss * _adv_scale
+                        _diag[f"ModAdv/loss_L{level_idx}"] = _adv_loss.item()
+                        _diag[f"ModAdv/acc_L{level_idx}"] = _adv_acc  # ~0.5 = invariant
+
+                    if _patch_adv_scale > 0.0 and _is_patch:
+                        _lam = getattr(args, "content_modality_adv_lambda", 1.0)
+                        _padv_loss, _padv_acc = content_patch_modality_adv_loss(
+                            _content_hz_v0_patch, _content_hz_v1_patch, _heads[_cpk], lambd=_lam
+                        )
+                        total_contrastive_loss = total_contrastive_loss + _padv_loss * _patch_adv_scale
+                        _diag[f"ModAdvPatch/loss_L{level_idx}"] = _padv_loss.item()
+                        _diag[f"ModAdvPatch/acc_L{level_idx}"] = _padv_acc  # ~0.5 = invariant
+
+                    if _suf_scale > 0.0:
+                        _suf_loss, _suf_acc = style_modality_ce_loss(_style_hz_v0, _style_hz_v1, _heads[_sk])
+                        total_contrastive_loss = total_contrastive_loss + _suf_loss * _suf_scale
+                        _diag[f"ModSuf/loss_L{level_idx}"] = _suf_loss.item()
+                        _diag[f"ModSuf/acc_L{level_idx}"] = _suf_acc  # ~1.0 = sufficient
+
+            level_losses.append(level_loss.item())
+            # Collect contrastive diagnostics (top-1 acc, sim distributions)
+            if hasattr(level_loss, "_contrastive_diag"):
+                for _dk, _dv in level_loss._contrastive_diag.items():
+                    _diag[f"Contrastive/{_dk}_L{level_idx}"] = _dv
+            _lvl_weights = getattr(args, "contrastive_level_weights", None)
+            _lvl_w = _lvl_weights[level_idx] if _lvl_weights and level_idx < len(_lvl_weights) else 1.0
+            total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss * _lvl_w
+
+        # Enqueue all levels in one call after the loss loop.
+        if use_moco and optimizer is not None:
+            with torch.no_grad():
+                _keys = []
+                for _lvl_idx, k in enumerate(key_outputs):
+                    if _patch_grid is not None:
+                        _k_flat = k.detach().permute(0, 2, 1).reshape(-1, k.shape[1])
+                    else:
+                        _k_flat = k.detach()
+                    _keys.append(_k_flat)
+                vqvae_model.enqueue(_keys, n_views=n_views)
+
+        contrastive_loss = total_contrastive_loss
+        total_loss = contrastive_loss + recon_loss + vq_loss
+
+        # Generator adversarial loss: fool the discriminator into predicting
+        # the reconstruction as real (hinge: -mean(D(fake))).
+        adv_loss_value = 0.0
+        if _gan_recon is not None and optimizer is not None:
+            g_adv = -discriminator(_gan_recon).mean() * args.scale_adv_loss
+            total_loss = total_loss + g_adv
+            adv_loss_value = g_adv.item()
+
+        recon_loss_value = recon_loss.item()
+        vq_loss_value = vq_loss.item()
+        contrastive_loss_value = contrastive_loss.item()
+        # NOTE: estimated_content_indices was already set to the dynamically
+        # computed indices from channel_logits inside the level loop above
+        # (line: estimated_content_indices = [torch.where(m.bool())[-1].tolist()
+        # for m in content_masks]).  Do NOT overwrite it here with
+        # args.content_indices — that would replace the learned channel
+        # selection with the static config-based indices and break evaluation
+        # in get_data() for any run that uses channel_logits.
 
     # ------------------------------------------------------------------
     # Backward pass
@@ -1041,19 +974,7 @@ def main(args):
             cross_view_negs_only=_cross_view_negs,
         )
 
-    # Augmentations / transforms
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize(
-                args.DATASETCLASS.mean_per_channel,
-                args.DATASETCLASS.std_per_channel,
-            ),
-        ]
-    )
-
     dataset_kwargs = {
-        "transform": transform,
         "labels_path": getattr(args, "labels_path", None),
         "masks_dir": getattr(args, "masks_dir", None),
         "asymmetric_aug": getattr(args, "asymmetric_aug", False),
@@ -1159,180 +1080,137 @@ def main(args):
     # Model
     logger.info("")
     logger.info("[MODEL]")
-    if args.encoder_type == "vqvae":
-        use_checkpoint = getattr(args, "gradient_checkpointing", False)
-        _entries_arg = args.vqvae_nb_entries
-        _entries_log = _entries_arg[0] if isinstance(_entries_arg, list) and len(_entries_arg) == 1 else _entries_arg
+    use_checkpoint = getattr(args, "gradient_checkpointing", False)
+    _entries_arg = args.vqvae_nb_entries
+    _entries_log = _entries_arg[0] if isinstance(_entries_arg, list) and len(_entries_arg) == 1 else _entries_arg
+    logger.info(
+        f"  VQ-VAE-2 | levels={args.vqvae_nb_levels} "
+        f"hidden={args.vqvae_hidden_channels} embed={args.vqvae_embed_dim} "
+        f"entries={_entries_log} grad_ckpt={use_checkpoint}"
+    )
+    vqvae_model = vqvae.VQVAE(
+        in_channels=1,
+        hidden_channels=args.vqvae_hidden_channels,
+        res_channels=args.vqvae_res_channels,
+        nb_res_layers=2,
+        nb_levels=args.vqvae_nb_levels,
+        embed_dim=args.vqvae_embed_dim,
+        nb_entries=args.vqvae_nb_entries,
+        scaling_rates=args.vqvae_scaling_rates,
+        use_checkpoint=use_checkpoint,
+        content_size=len(args.content_indices[0]),
+        style_size=len(args.style_indices),
+        inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
+        content_style_levels=getattr(args, "content_style_levels", [0]),
+        content_ratios=getattr(args, "content_ratios", None),
+        separate_encoders=getattr(args, "separate_encoders", False),
+        mask_mode=getattr(args, "mask_mode", "onthefly"),
+        quantize_style=getattr(args, "quantize_style", False),
+        style_embed_dim=getattr(args, "style_embed_dim", None),
+        style_nb_entries=getattr(args, "style_nb_entries", None),
+        style_injection_mode=getattr(args, "style_injection_mode", "concat"),
+        cb_ema_decay=getattr(args, "cb_ema_decay", 0.999),
+        cb_reset_every=getattr(args, "cb_reset_every", 100),
+        cb_reset_threshold=getattr(args, "cb_reset_threshold", 1.0),
+        use_content_projection=getattr(args, "use_content_projection", False),
+        narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
+        top_level_recon_only=getattr(args, "top_level_recon_only", False),
+        pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
+        skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
+        style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
+        detach_style_injection=getattr(args, "detach_style_injection", False),
+    )
+    if getattr(args, "channels_last", False):
+        vqvae_model = vqvae_model.to(memory_format=torch.channels_last_3d)
+        logger.info("  Memory format: channels_last_3d")
+    _adv_on = getattr(args, "scale_content_modality_adv", 0.0) > 0.0
+    _patch_adv_on = getattr(args, "scale_content_patch_modality_adv", 0.0) > 0.0
+    _suf_on = getattr(args, "scale_style_modality_ce", 0.0) > 0.0
+    if _adv_on or _patch_adv_on or _suf_on:
+        _heads = torch.nn.ModuleDict()
+        _hid = args.vqvae_hidden_channels
+        for _lvl in getattr(args, "content_style_levels", [0]):
+            _cc = vqvae_model.content_channels_per_level.get(_lvl)
+            if _cc is None:
+                continue
+            _sc = _hid - _cc
+            _heads[f"content_L{_lvl}"] = torch.nn.Linear(_cc, 2)
+            if _patch_adv_on:
+                _heads[f"content_patch_L{_lvl}"] = torch.nn.Linear(_cc, 2)
+            _heads[f"style_L{_lvl}"] = torch.nn.Linear(_sc, 2)
+        vqvae_model._aux_modality_heads = _heads
         logger.info(
-            f"  VQ-VAE-2 | levels={args.vqvae_nb_levels} "
-            f"hidden={args.vqvae_hidden_channels} embed={args.vqvae_embed_dim} "
-            f"entries={_entries_log} grad_ckpt={use_checkpoint}"
+            f"  Aux modality heads: adv={_adv_on} patch_adv={_patch_adv_on} suf={_suf_on} levels={list(_heads.keys())}"
         )
-        vqvae_model = vqvae.VQVAE(
-            in_channels=1,
-            hidden_channels=args.vqvae_hidden_channels,
-            res_channels=args.vqvae_res_channels,
-            nb_res_layers=2,
+
+    if getattr(args, "compile_model", False):
+        logger.info("  Compiling VQ-VAE-2 with torch.compile mode=reduce-overhead...")
+        vqvae_model = torch.compile(vqvae_model, mode="reduce-overhead")
+
+    vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
+    vqvae_model.to(device)
+    logger.info(f"  Parameters: {sum(p.numel() for p in vqvae_model.parameters()):,}")
+    cs_levels = getattr(args, "content_style_levels", [0])
+    cs_ratios = getattr(args, "content_ratios", None)
+    logger.info(f"  Content/style mask levels: {cs_levels}")
+    if cs_ratios is not None:
+        logger.info(f"  Per-level content ratios: {dict(zip(cs_levels, cs_ratios))}")
+    if getattr(args, "separate_encoders", False):
+        logger.info("  Separate encoders: ENABLED (one encoder stack per view)")
+    mask_mode = getattr(args, "mask_mode", "onthefly")
+    _mask_desc = {
+        "onthefly": " (on-the-fly from avg activations, shared across views)",
+        "learned": " (learnable nn.Parameter per level)",
+        "fixed": " (static first-K-channels = content, no Gumbel noise)",
+    }
+    logger.info(f"  Mask mode: {mask_mode}" + _mask_desc.get(mask_mode, ""))
+    if getattr(args, "quantize_style", False):
+        _se = getattr(args, "style_embed_dim", None) or args.vqvae_embed_dim
+        _sn = getattr(args, "style_nb_entries", None) or args.vqvae_nb_entries
+        if isinstance(_sn, list) and len(_sn) == 1:
+            _sn = _sn[0]
+        logger.info(f"  Style quantization: ENABLED (embed_dim={_se}, nb_entries={_sn})")
+    _skip_levels = getattr(args, "skip_decoder_concat_levels", None)
+    if _skip_levels:
+        logger.info(
+            f"  Final-decoder concat: SKIPPING levels {sorted(_skip_levels)} "
+            f"(their codes will be zeroed in the level-0 decoder input)"
+        )
+
+    encoders = [vqvae_model]
+    decoders = []
+
+    if getattr(args, "use_moco", False):
+        from models.vqvae import MoCoEncoder
+
+        moco_model = MoCoEncoder(
+            vqvae_model,
+            queue_size=args.moco_queue_size,
+            momentum=args.moco_momentum,
             nb_levels=args.vqvae_nb_levels,
-            embed_dim=args.vqvae_embed_dim,
-            nb_entries=args.vqvae_nb_entries,
-            scaling_rates=args.vqvae_scaling_rates,
-            use_checkpoint=use_checkpoint,
-            content_size=len(args.content_indices[0]),
-            style_size=len(args.style_indices),
-            inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
-            content_style_levels=getattr(args, "content_style_levels", [0]),
-            content_ratios=getattr(args, "content_ratios", None),
-            separate_encoders=getattr(args, "separate_encoders", False),
-            mask_mode=getattr(args, "mask_mode", "onthefly"),
-            quantize_style=getattr(args, "quantize_style", False),
-            style_embed_dim=getattr(args, "style_embed_dim", None),
-            style_nb_entries=getattr(args, "style_nb_entries", None),
-            style_injection_mode=getattr(args, "style_injection_mode", "concat"),
-            cb_ema_decay=getattr(args, "cb_ema_decay", 0.999),
-            cb_reset_every=getattr(args, "cb_reset_every", 100),
-            cb_reset_threshold=getattr(args, "cb_reset_threshold", 1.0),
-            use_content_projection=getattr(args, "use_content_projection", False),
-            narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
-            top_level_recon_only=getattr(args, "top_level_recon_only", False),
-            pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
-            skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
-            style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
-            detach_style_injection=getattr(args, "detach_style_injection", False),
         )
-        if getattr(args, "channels_last", False):
-            vqvae_model = vqvae_model.to(memory_format=torch.channels_last_3d)
-            logger.info("  Memory format: channels_last_3d")
-        # Auxiliary modality heads: linear probes for gradient-reversal
-        # (content invariance) and CE (style sufficiency). Built eagerly here
-        # so their params are picked up by the main optimizer's param loop.
-        _adv_on = getattr(args, "scale_content_modality_adv", 0.0) > 0.0
-        _patch_adv_on = getattr(args, "scale_content_patch_modality_adv", 0.0) > 0.0
-        _suf_on = getattr(args, "scale_style_modality_ce", 0.0) > 0.0
-        if _adv_on or _patch_adv_on or _suf_on:
-            _heads = torch.nn.ModuleDict()
-            _hid = args.vqvae_hidden_channels
-            for _lvl in getattr(args, "content_style_levels", [0]):
-                _cc = vqvae_model.content_channels_per_level.get(_lvl)
-                if _cc is None:
-                    continue
-                _sc = _hid - _cc
-                _heads[f"content_L{_lvl}"] = torch.nn.Linear(_cc, 2)
-                if _patch_adv_on:
-                    _heads[f"content_patch_L{_lvl}"] = torch.nn.Linear(_cc, 2)
-                _heads[f"style_L{_lvl}"] = torch.nn.Linear(_sc, 2)
-            vqvae_model._aux_modality_heads = _heads
-            logger.info(
-                f"  Aux modality heads: adv={_adv_on} patch_adv={_patch_adv_on} suf={_suf_on} levels={list(_heads.keys())}"
-            )
+        moco_model.to(device)
+        encoders = [moco_model]
+        logger.info(f"  MoCo: queue_size={args.moco_queue_size} momentum={args.moco_momentum}")
 
-        # Compile AFTER attaching all submodules but BEFORE DataParallel.
-        # DataParallel(compiled) is unsupported; submodules attached to an
-        # OptimizedModule live outside the traced graph.
-        if getattr(args, "compile_model", False):
-            logger.info("  Compiling VQ-VAE-2 with torch.compile mode=reduce-overhead...")
-            vqvae_model = torch.compile(vqvae_model, mode="reduce-overhead")
-
-        vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
-        vqvae_model.to(device)
-        logger.info(f"  Parameters: {sum(p.numel() for p in vqvae_model.parameters()):,}")
-        cs_levels = getattr(args, "content_style_levels", [0])
-        cs_ratios = getattr(args, "content_ratios", None)
-        logger.info(f"  Content/style mask levels: {cs_levels}")
-        if cs_ratios is not None:
-            logger.info(f"  Per-level content ratios: {dict(zip(cs_levels, cs_ratios))}")
-        if getattr(args, "separate_encoders", False):
-            logger.info("  Separate encoders: ENABLED (one encoder stack per view)")
-        mask_mode = getattr(args, "mask_mode", "onthefly")
-        _mask_desc = {
-            "onthefly": " (on-the-fly from avg activations, shared across views)",
-            "learned": " (learnable nn.Parameter per level)",
-            "fixed": " (static first-K-channels = content, no Gumbel noise)",
-        }
-        logger.info(f"  Mask mode: {mask_mode}" + _mask_desc.get(mask_mode, ""))
-        if getattr(args, "quantize_style", False):
-            _se = getattr(args, "style_embed_dim", None) or args.vqvae_embed_dim
-            _sn = getattr(args, "style_nb_entries", None) or args.vqvae_nb_entries
-            if isinstance(_sn, list) and len(_sn) == 1:
-                _sn = _sn[0]
-            logger.info(f"  Style quantization: ENABLED (embed_dim={_se}, nb_entries={_sn})")
-        _skip_levels = getattr(args, "skip_decoder_concat_levels", None)
-        if _skip_levels:
-            logger.info(
-                f"  Final-decoder concat: SKIPPING levels {sorted(_skip_levels)} "
-                f"(their codes will be zeroed in the level-0 decoder input)"
-            )
-
-        encoders = [vqvae_model]
-        decoders = []
-
-        if getattr(args, "use_moco", False):
-            from models.vqvae import MoCoEncoder
-
-            moco_model = MoCoEncoder(
-                vqvae_model,
-                queue_size=args.moco_queue_size,
-                momentum=args.moco_momentum,
-                nb_levels=args.vqvae_nb_levels,
-            )
-            moco_model.to(device)
-            encoders = [moco_model]
-            logger.info(f"  MoCo: queue_size={args.moco_queue_size} momentum={args.moco_momentum}")
-
-        total_params = sum(p.numel() for p in vqvae_model.parameters())
-
-    else:
-        logger.info("  VAE encoder + decoder")
-        encoder_img = torch.nn.DataParallel(vae.Encoder(), device_ids=device_ids).to(device)
-        encoders = [encoder_img]
-
-        # Compute spatial size from spacing/crop settings to match the encoder's output.
-        # Must mirror the logic in utils.utils.transforms() exactly.
-        _custom_spatial = getattr(args, "spatial_size", None)
-        crop_margin = getattr(args, "crop_margin", 0)
-        if _custom_spatial is not None:
-            spatial_size = tuple(_custom_spatial)
-            if crop_margin > 0:
-                spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
-        else:
-            spacing = getattr(args, "image_spacing", 2.0)
-            if spacing == 1.0:
-                spatial_size = (182, 218, 182)
-            elif spacing == 2.0:
-                spatial_size = (91, 109, 91)
-            else:
-                spatial_size = tuple(int(s / spacing) for s in (182, 218, 182))
-            if crop_margin > 0:
-                spatial_size = tuple(s - 2 * crop_margin for s in spatial_size)
-        decoder = torch.nn.DataParallel(
-            vae.Decoder(latent_dim=512, spatial_size=spatial_size), device_ids=device_ids
-        ).to(device)
-        decoders = [decoder]
-        total_params = sum(sum(p.numel() for p in m.parameters()) for m in encoders + decoders)
-
+    total_params = sum(p.numel() for p in vqvae_model.parameters())
     logger.info(f"  Total trainable parameters: {total_params:,}")
 
     # Load pretrained weights (evaluation mode)
     if args.evaluate:
         logger.info("")
         logger.info("[LOADING PRETRAINED MODELS]")
-        if args.encoder_type == "vqvae":
-            path = os.path.join(args.save_dir, "vqvae_model.pt")
-            checkpoint = torch.load(path, map_location=device, weights_only=False)
-            encoders[0].load_state_dict(checkpoint["encoders"])
-            if getattr(args, "use_moco", False) and "moco_queues" in checkpoint:
-                from models.vqvae import MoCoEncoder
+        path = os.path.join(args.save_dir, "vqvae_model.pt")
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+        encoders[0].load_state_dict(checkpoint["encoders"])
+        if getattr(args, "use_moco", False) and "moco_queues" in checkpoint:
+            from models.vqvae import MoCoEncoder
 
-                if isinstance(encoders[0], MoCoEncoder):
-                    for lvl, q_cpu in enumerate(checkpoint["moco_queues"]):
-                        encoders[0]._get_queue(lvl).copy_(q_cpu.to(device))
-                    encoders[0].queue_ptrs.copy_(torch.tensor(checkpoint["moco_queue_ptrs"], dtype=torch.long))
-            logger.info(f"  Loaded VQ-VAE-2 from {path}")
-        else:
-            for m_idx, m in enumerate(args.modalities):
-                path = os.path.join(args.save_dir, f"encoder_{m}.pt")
-                encoders[m_idx].load_state_dict(torch.load(path, map_location=device, weights_only=False))
-                logger.info(f"  Loaded encoder_{m} from {path}")
+            if isinstance(encoders[0], MoCoEncoder):
+                for lvl, q_cpu in enumerate(checkpoint["moco_queues"]):
+                    encoders[0]._get_queue(lvl).copy_(q_cpu.to(device))
+                encoders[0].queue_ptrs.copy_(torch.tensor(checkpoint["moco_queue_ptrs"], dtype=torch.long))
+        logger.info(f"  Loaded VQ-VAE-2 from {path}")
 
     # Optimizer — separate param groups so weight decay skips biases & norms.
     # Mask parameters (channel_logits) get their own group with a scaled LR
@@ -1429,7 +1307,7 @@ def main(args):
     discriminator = None
     disc_optimizer = None
     disc_scaler = None
-    if getattr(args, "use_gan", False) and args.encoder_type == "vqvae":
+    if getattr(args, "use_gan", False):
         from models.discriminator import PatchDiscriminator3D
 
         _disc_base_ch = getattr(args, "disc_base_channels", 32)
@@ -1447,8 +1325,6 @@ def main(args):
             f"params={_disc_params:,} | disc_lr={getattr(args, 'disc_lr', 4e-4):.2e} | "
             f"adv_weight={args.scale_adv_loss} | starts at step {getattr(args, 'gan_start_step', 0)}"
         )
-    elif getattr(args, "use_gan", False) and args.encoder_type != "vqvae":
-        logger.warning("[GAN] --use-gan is only supported for --encoder-type vqvae; skipping.")
 
     # ------------------------------------------------------------------
     # Training loop
@@ -1527,16 +1403,10 @@ def main(args):
         # For other encoders: best is chosen by rolling training loss (lower is better).
         best_total_loss = float("inf")
         best_separation_score = float("-inf")
-        best_ckpt_path = os.path.join(
-            args.save_dir, "vqvae_best.pt" if args.encoder_type == "vqvae" else "checkpoint_best.pt"
-        )
+        best_ckpt_path = os.path.join(args.save_dir, "vqvae_best.pt")
         # Fallback: if the dedicated best file is missing, read the bookkeeping
         # from the rolling checkpoint (which now mirrors best_metric_*).
-        if (
-            getattr(args, "resume_training", False)
-            and not os.path.exists(best_ckpt_path)
-            and args.encoder_type == "vqvae"
-        ):
+        if getattr(args, "resume_training", False) and not os.path.exists(best_ckpt_path):
             _rolling_path = os.path.join(args.save_dir, "vqvae_model.pt")
             if os.path.exists(_rolling_path):
                 best_ckpt_path = _rolling_path
@@ -1920,9 +1790,7 @@ def main(args):
                                 )
                             tb_writer.flush()
 
-                    if (step % 200 == 0 or step == 1) and args.encoder_type != "vqvae":
-                        save_decoded_images(encoders, decoders, data, args, step)
-                    if (step % 200 == 0 or step == 1) and args.encoder_type == "vqvae":
+                    if step % 200 == 0 or step == 1:
                         save_vqvae_decoded_images(encoders[0], data, args, step)
 
                     if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
@@ -1933,7 +1801,7 @@ def main(args):
                         # has already advanced past the `step % 2000 == 1` trigger).
                         separation_score = None
                         if step % 2000 == 1 or step == args.train_steps:
-                            if getattr(args, "eval_separation_periodic", True) and args.encoder_type == "vqvae":
+                            if getattr(args, "eval_separation_periodic", True):
                                 try:
                                     from eval.cross_reconstruction import evaluate_content_style_separation
 
@@ -1989,21 +1857,14 @@ def main(args):
                         # (content/style disentanglement), which is what the training
                         # objective ultimately targets. Only updated on steps where the
                         # separation eval ran (every 2000 steps).
-                        # Other encoders: fall back to rolling training loss.
                         rolling_loss = np.mean(loss_values) if len(loss_values) == loss_values.maxlen else None
                         new_best = None
                         best_metric_name = "total_loss"
-                        if args.encoder_type == "vqvae":
-                            if separation_score is not None and separation_score > best_separation_score:
-                                best_separation_score = separation_score
-                                new_best = separation_score
-                                best_metric_name = "separation_score"
-                                logger.info(f"  [BEST] New best separation_score={separation_score:.4f} at step {step}")
-                        else:
-                            if rolling_loss is not None and rolling_loss < best_total_loss:
-                                best_total_loss = rolling_loss
-                                new_best = rolling_loss
-                                best_metric_name = "rolling_loss"
+                        if separation_score is not None and separation_score > best_separation_score:
+                            best_separation_score = separation_score
+                            new_best = separation_score
+                            best_metric_name = "separation_score"
+                            logger.info(f"  [BEST] New best separation_score={separation_score:.4f} at step {step}")
 
                         save_checkpoint(
                             args,
@@ -2192,7 +2053,7 @@ def main(args):
         logger.info(f"  Models saved to: {args.save_dir}")
 
         # Compute separation score at the very end of training so sweeps have it
-        if getattr(args, "eval_separation_at_end", True) and args.encoder_type == "vqvae":
+        if getattr(args, "eval_separation_at_end", True):
             # First, reload the BEST model weights instead of using the final step's weights
             best_ckpt_path = os.path.join(args.save_dir, "vqvae_best.pt")
             if os.path.exists(best_ckpt_path):
@@ -2370,7 +2231,7 @@ def main(args):
         print(df_results.to_string())
 
         # Cross-reconstruction evaluation for content/style separation
-        if args.encoder_type == "vqvae" and hasattr(args, "content_indices"):
+        if hasattr(args, "content_indices"):
             try:
                 from eval.cross_reconstruction import evaluate_content_style_separation
 
