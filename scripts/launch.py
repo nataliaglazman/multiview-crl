@@ -249,26 +249,58 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
 
     elif cluster_name == "slurm":
         slurm = config.get("_slurm", {})
-        repo_path = slurm.get("repo_path", "/nfs/home/nglazman/crl-2/multiview-crl")
+        conda_env = slurm.get("conda_env", "multiview-env")
+        req_txt = slurm.get("requirements_txt", "docker/requirements.txt")
+        exp_rel = experiment_path.relative_to(REPO_ROOT) if experiment_path.is_absolute() else experiment_path
 
         lines = [
-            "#!/bin/bash",
-            f"# Auto-generated from: {experiment_path.relative_to(REPO_ROOT) if experiment_path.is_absolute() else experiment_path}",
+            "#!/bin/bash -l",
+            f"# Auto-generated from: {exp_rel}",
             f"# Generated at: {ts}",
             f"# Git SHA: {sha}",
+            "# Re-generate with: python scripts/launch.py --generate --cluster slurm",
             f"#SBATCH --job-name={tag}",
+            "#SBATCH --output=/scratch/users/%u/%j.out",
+            f"#SBATCH --error={tag}-%j.err",
             f"#SBATCH --partition={slurm.get('partition', 'gpu')}",
             f"#SBATCH --gres={slurm.get('gres', 'gpu:1')}",
-            f"#SBATCH --cpus-per-task={slurm.get('cpus_per_task', 16)}",
+            f"#SBATCH --nodes={slurm.get('nodes', 1)}",
             f"#SBATCH --mem={slurm.get('mem', '64G')}",
-            f"#SBATCH --time={slurm.get('time', '24:00:00')}",
-            f"#SBATCH --output={repo_path}/results/{tag}/slurm_%j.log",
             "",
-            "set -euo pipefail",
-            f"cd {repo_path}",
-            f"export PYTHONPATH={repo_path}",
+            "# -- Software & Environment Setup --",
+            "module load anaconda3/2022.10-gcc-13.2.0",
             "",
-            "python -m training.main_multimodal \\",
+            f'CONDA_ENV_NAME="{conda_env}"',
+            'PYTHON="${HOME}/.conda/envs/${CONDA_ENV_NAME}/bin/python"',
+            "",
+            "export PYTHONNOUSERSITE=1",
+            "",
+            "# Automatically repair/build the environment if numpy or torch are missing",
+            'if ! "$PYTHON" -c "import torch; import numpy" 2>/dev/null; then',
+            "    echo \"Environment '${CONDA_ENV_NAME}' missing or broken -- rebuilding cleanly...\"",
+            '    conda env remove -n "${CONDA_ENV_NAME}" --yes 2>/dev/null || true',
+            '    conda create -n "${CONDA_ENV_NAME}" python=3.10 -y',
+            "",
+            '    "$PYTHON" -m pip install --upgrade pip',
+            '    "$PYTHON" -m pip install torch==2.3.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121',
+            '    "$PYTHON" -m pip install numpy',
+            '    "$PYTHON" -m pip install scikit-learn',
+            '    "$PYTHON" -m pip install tensorboard pandas matplotlib',
+            "fi",
+            "",
+            f'if [ -f "${{SLURM_SUBMIT_DIR}}/{req_txt}" ]; then',
+            f'    "$PYTHON" -m pip install -r "${{SLURM_SUBMIT_DIR}}/{req_txt}" || echo "Requirements sync skipped a broken package."',
+            "fi",
+            'echo "Environment setup complete."',
+            "",
+            "# -- Working directory --",
+            'cd "${SLURM_SUBMIT_DIR}"',
+            'export PYTHONPATH="${SLURM_SUBMIT_DIR}"',
+            'source "$(conda info --base)/etc/profile.d/conda.sh"',
+            'conda activate "${CONDA_ENV_NAME}"',
+            "",
+            "# -- Training --",
+            '"$PYTHON" -m training.main_multimodal \\',
         ]
         for j, al in enumerate(arg_lines):
             suffix = " \\" if j < len(arg_lines) - 1 else ""

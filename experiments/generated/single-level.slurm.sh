@@ -1,11 +1,11 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/ablation_baseline.yaml
+# Auto-generated from: experiments/single-level.yaml
 # Generated at: 2026-05-28T11:48:21Z
 # Git SHA: 35db103
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=ablation-baseline
+#SBATCH --job-name=single-level-causal-random
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=ablation-baseline-%j.err
+#SBATCH --error=single-level-causal-random-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -66,7 +66,7 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1.0 \
+    --scale-contrastive-loss 10.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -74,7 +74,10 @@ conda activate "${CONDA_ENV_NAME}"
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
     --spatial-size 150 180 150 \
-    --model-id ablation-baseline \
+    --synthetic-causal \
+    --synthetic-causal-edge-prob 0.5 \
+    --synthetic-causal-graph random \
+    --model-id single-level-causal-random \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 20000 \

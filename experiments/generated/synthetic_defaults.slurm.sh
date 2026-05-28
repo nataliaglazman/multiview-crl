@@ -1,20 +1,50 @@
-#!/bin/bash
-# Auto-generated from: /Users/nataliaglazman/Desktop/PhD/projects/multiview-crl/experiments/synthetic_defaults.yaml
-# Generated at: 2026-05-28T08:55:08Z
-# Git SHA: 1c237d3
+#!/bin/bash -l
+# Auto-generated from: experiments/synthetic_defaults.yaml
+# Generated at: 2026-05-28T11:48:21Z
+# Git SHA: 35db103
+# Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic_defaults
+#SBATCH --output=/scratch/users/%u/%j.out
+#SBATCH --error=synthetic_defaults-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=16
+#SBATCH --nodes=1
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
-#SBATCH --output=/nfs/home/nglazman/crl-2/multiview-crl/results/synthetic_defaults/slurm_%j.log
 
-set -euo pipefail
-cd /nfs/home/nglazman/crl-2/multiview-crl
-export PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl
+# -- Software & Environment Setup --
+module load anaconda3/2022.10-gcc-13.2.0
 
-python -m training.main_multimodal \
+CONDA_ENV_NAME="multiview-env"
+PYTHON="${HOME}/.conda/envs/${CONDA_ENV_NAME}/bin/python"
+
+export PYTHONNOUSERSITE=1
+
+# Automatically repair/build the environment if numpy or torch are missing
+if ! "$PYTHON" -c "import torch; import numpy" 2>/dev/null; then
+    echo "Environment '${CONDA_ENV_NAME}' missing or broken -- rebuilding cleanly..."
+    conda env remove -n "${CONDA_ENV_NAME}" --yes 2>/dev/null || true
+    conda create -n "${CONDA_ENV_NAME}" python=3.10 -y
+
+    "$PYTHON" -m pip install --upgrade pip
+    "$PYTHON" -m pip install torch==2.3.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    "$PYTHON" -m pip install numpy
+    "$PYTHON" -m pip install scikit-learn
+    "$PYTHON" -m pip install tensorboard pandas matplotlib
+fi
+
+if [ -f "${SLURM_SUBMIT_DIR}/docker/requirements.txt" ]; then
+    "$PYTHON" -m pip install -r "${SLURM_SUBMIT_DIR}/docker/requirements.txt" || echo "Requirements sync skipped a broken package."
+fi
+echo "Environment setup complete."
+
+# -- Working directory --
+cd "${SLURM_SUBMIT_DIR}"
+export PYTHONPATH="${SLURM_SUBMIT_DIR}"
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "${CONDA_ENV_NAME}"
+
+# -- Training --
+"$PYTHON" -m training.main_multimodal \
     --batch-size 32 \
     --content-dim 128 \
     --content-ratios 0.95 \
@@ -22,7 +52,7 @@ python -m training.main_multimodal \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
-    --dataroot /nfs/home/nglazman/data \
+    --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
     --image-spacing 1.0 \
     --lr 0.001 \

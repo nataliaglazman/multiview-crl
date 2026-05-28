@@ -1,19 +1,17 @@
-# SLURM cluster paths and job defaults.
+# SLURM cluster (CREATE HPC) paths and job defaults.
 # Merged into every experiment when launched with --cluster slurm.
-#
-# Edit paths to match your SLURM cluster layout.
 
 # ---- Paths ----
-dataroot: /nfs/home/nglazman/data
-labels_path: /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv
-masks_dir: /nfs/home/nglazman/data/ADNI_stripped_masks
-cache_dir: /nfs/home/nglazman/cache/multiview
+dataroot: /scratch/users/k24058220
+labels_path: /users/k24058220/multiview-crl/labels_cleaned_3class.csv
+masks_dir: /scratch/users/k24058220/ADNI_stripped_masks
+cache_dir: /scratch/users/k24058220/cache/multiview
 
 # ---- SLURM job resources ----
 _slurm:
   partition: gpu
   gres: "gpu:1"
-  cpus_per_task: 16
+  nodes: 1
   mem: 64G
-  time: "24:00:00"
-  repo_path: /nfs/home/nglazman/crl-2/multiview-crl
+  conda_env: multiview-env
+  requirements_txt: docker/requirements.txt
