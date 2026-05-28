@@ -14,4 +14,5 @@ _slurm:
   nodes: 1
   mem: 64G
   conda_env: multiview-env
+  constraint: a100_40g
   requirements_txt: docker/requirements.txt

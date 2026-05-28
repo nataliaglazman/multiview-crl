@@ -5,6 +5,7 @@
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-random
 #SBATCH --output=/scratch/users/%u/%j.out
+#SBATCH --constraint=a100_40g
 #SBATCH --error=synthetic-causal-random-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
