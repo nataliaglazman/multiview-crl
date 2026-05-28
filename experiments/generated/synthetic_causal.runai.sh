@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-05-28T11:55:21Z
-# Git SHA: dd815a1
+# Generated at: 2026-05-28T12:02:11Z
+# Git SHA: 5563d66
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -32,7 +32,7 @@ python -m training.main_multimodal \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1.0 \
+    --scale-contrastive-loss 10.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -40,13 +40,14 @@ python -m training.main_multimodal \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
     --synthetic-causal \
-    --synthetic-causal-graph chain \
+    --synthetic-causal-edge-prob 0.5 \
+    --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-chain \
+    --model-id synthetic-causal-random \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -63,7 +64,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai submit synthetic-causal-chain \
+runai submit synthetic-causal-random \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \

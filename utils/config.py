@@ -32,7 +32,7 @@ def parse_args() -> argparse.ArgumentParser:
         "Defaults to None, in which case masks are expected alongside the images.",
     )
     parser.add_argument(
-        "--dataset_name",
+        "--dataset-name",
         type=str,
         default="ADNI_registered",
         choices=[
