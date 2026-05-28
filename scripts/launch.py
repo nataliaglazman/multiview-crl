@@ -307,7 +307,7 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
             '    conda create -n "${CONDA_ENV_NAME}" python=3.10 -y',
             "",
             '    "$PYTHON" -m pip install --upgrade pip',
-            '    "$PYTHON" -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126',
+            '    "$PYTHON" -m pip install torch==2.3.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121',
             '    "$PYTHON" -m pip install numpy',
             '    "$PYTHON" -m pip install scikit-learn',
             '    "$PYTHON" -m pip install tensorboard pandas matplotlib',

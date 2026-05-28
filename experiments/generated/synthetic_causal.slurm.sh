@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-05-28T12:30:51Z
-# Git SHA: 8eb18e8
+# Generated at: 2026-05-28T14:37:57Z
+# Git SHA: 1137840
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-random
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -26,7 +26,7 @@ if ! "$PYTHON" -c "import torch; import numpy" 2>/dev/null; then
     conda create -n "${CONDA_ENV_NAME}" python=3.10 -y
 
     "$PYTHON" -m pip install --upgrade pip
-    "$PYTHON" -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+    "$PYTHON" -m pip install torch==2.3.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
     "$PYTHON" -m pip install numpy
     "$PYTHON" -m pip install scikit-learn
     "$PYTHON" -m pip install tensorboard pandas matplotlib
@@ -48,6 +48,7 @@ conda activate "${CONDA_ENV_NAME}"
     --batch-size 32 \
     --content-dim 128 \
     --content-ratios 0.95 \
+    --content-size 9 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
