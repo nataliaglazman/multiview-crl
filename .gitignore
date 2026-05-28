@@ -61,3 +61,4 @@ eval/nifti_outputs/
 *.nii
 *.nii.gz
 *.pptx
+check.ipynb
