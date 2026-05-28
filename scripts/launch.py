@@ -101,8 +101,27 @@ def git_dirty() -> bool:
 
 
 def resolve_config(experiment_path: Path, cluster_name: str | None, cli_overrides: dict) -> dict:
-    """Merge defaults <- cluster <- experiment <- CLI overrides."""
+    """Merge defaults <- base (if any) <- cluster <- experiment <- CLI overrides.
+
+    If the experiment YAML contains a ``_base_`` key (e.g. ``_base_: synthetic_defaults``),
+    that file is loaded on top of defaults.yaml before the experiment overrides.
+    This lets synthetic experiments inherit from ``synthetic_defaults.yaml`` instead of
+    repeating all the synthetic-specific settings.
+    """
     config = load_yaml(DEFAULTS_PATH)
+
+    # Check the experiment for a _base_ reference before merging cluster/experiment.
+    experiment_cfg = load_yaml(experiment_path)
+    base_name = experiment_cfg.pop("_base_", None)
+    base_cfg = {}
+    if base_name is not None:
+        base_path = REPO_ROOT / "experiments" / f"{base_name}.yaml"
+        if not base_path.exists():
+            print(f"Error: _base_ config not found: {base_path}", file=sys.stderr)
+            sys.exit(1)
+        base_cfg = load_yaml(base_path)
+        base_cfg.pop("_base_", None)  # Don't chain further.
+        config.update(base_cfg)
 
     if cluster_name and cluster_name != "local":
         cluster_path = CLUSTER_DIR / f"{cluster_name}.yaml"
@@ -112,7 +131,13 @@ def resolve_config(experiment_path: Path, cluster_name: str | None, cli_override
         cluster_cfg = load_yaml(cluster_path)
         config.update(cluster_cfg)
 
-    experiment_cfg = load_yaml(experiment_path)
+    # Re-apply null keys from the base so they aren't overridden by cluster paths.
+    # E.g. synthetic_defaults.yaml sets labels_path: null to suppress the ADNI
+    # labels path that the cluster config provides.
+    for key, value in base_cfg.items():
+        if value is None:
+            config[key] = None
+
     config.update(experiment_cfg)
 
     # CLI --set overrides take highest priority.

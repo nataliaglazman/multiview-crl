@@ -1,0 +1,8 @@
+# Synthetic experiment with causal content SCM.
+_base_: synthetic_defaults
+
+tag: synthetic-causal-random
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+scale_contrastive_loss: 10.0

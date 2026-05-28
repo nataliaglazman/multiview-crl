@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/ablation_baseline.yaml
+# Auto-generated from: experiments/synthetic_causal.yaml
 # Generated at: 2026-05-28T11:55:21Z
 # Git SHA: dd815a1
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -12,23 +12,22 @@ REPO="/nfs/home/nglazman/crl-2/multiview-crl"
 TRAIN_CMD=$(cat <<'TRAIN_EOF'
 cd ${REPO} && PYTHONPATH=${REPO} \
 python -m training.main_multimodal \
-    --batch-size 4 \
-    --cache-dataset \
-    --cache-dir /nfs/home/nglazman/cache/multiview \
+    --batch-size 32 \
     --content-dim 128 \
+    --content-ratios 0.95 \
+    --content-size 9 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
     --dataroot /nfs/home/nglazman/data \
-    --dataset-name ADNI_stripped_masks \
-    --gradient-checkpointing \
+    --dataset-name synthetic \
     --image-spacing 1.0 \
-    --labels-path /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv \
     --lr 0.001 \
     --mask-mode fixed \
-    --masks-dir /nfs/home/nglazman/data/ADNI_stripped_masks \
     --moco-queue-size 0 \
     --pass-full-to-next-level \
+    --patch-contrastive \
+    --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
@@ -40,25 +39,31 @@ python -m training.main_multimodal \
     --select-by-gated-score \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
-    --spatial-size 150 180 150 \
-    --model-id ablation-baseline \
+    --synthetic-causal \
+    --synthetic-causal-graph chain \
+    --synthetic-mode pseudo_mri \
+    --synthetic-num-test 400 \
+    --synthetic-num-train 2000 \
+    --synthetic-num-val 200 \
+    --synthetic-res 64 \
+    --model-id synthetic-causal-chain \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 20000 \
+    --train-steps 200000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 32 \
-    --vqvae-hidden-channels 32 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
-    --vqvae-nb-levels 3 \
-    --vqvae-scaling-rates 2 2 2 \
+    --vqvae-nb-levels 1 \
+    --vqvae-scaling-rates 2 \
     --workers 8
 TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai submit ablation-baseline \
+runai submit synthetic-causal-chain \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \

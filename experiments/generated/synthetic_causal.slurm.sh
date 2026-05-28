@@ -1,11 +1,11 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/single-level.yaml
-# Generated at: 2026-05-28T11:48:21Z
-# Git SHA: 35db103
+# Auto-generated from: experiments/synthetic_causal.yaml
+# Generated at: 2026-05-28T11:57:07Z
+# Git SHA: dd815a1
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=single-level-causal-random
+#SBATCH --job-name=synthetic-causal-random
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=single-level-causal-random-%j.err
+#SBATCH --error=synthetic-causal-random-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -45,23 +45,22 @@ conda activate "${CONDA_ENV_NAME}"
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 4 \
-    --cache-dataset \
-    --cache-dir /scratch/users/k24058220/cache/multiview \
+    --batch-size 32 \
     --content-dim 128 \
+    --content-ratios 0.95 \
+    --content-size 9 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
-    --dataset-name ADNI_stripped_masks \
-    --gradient-checkpointing \
+    --dataset-name synthetic \
     --image-spacing 1.0 \
-    --labels-path /users/k24058220/multiview-crl/labels_cleaned_3class.csv \
     --lr 0.001 \
     --mask-mode fixed \
-    --masks-dir /scratch/users/k24058220/ADNI_stripped_masks \
     --moco-queue-size 0 \
     --pass-full-to-next-level \
+    --patch-contrastive \
+    --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
@@ -73,20 +72,24 @@ conda activate "${CONDA_ENV_NAME}"
     --select-by-gated-score \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
-    --spatial-size 150 180 150 \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
-    --model-id single-level-causal-random \
+    --synthetic-mode pseudo_mri \
+    --synthetic-num-test 400 \
+    --synthetic-num-train 2000 \
+    --synthetic-num-val 200 \
+    --synthetic-res 64 \
+    --model-id synthetic-causal-random \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 20000 \
+    --train-steps 200000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 32 \
-    --vqvae-hidden-channels 32 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
-    --vqvae-nb-levels 3 \
-    --vqvae-scaling-rates 2 2 2 \
+    --vqvae-nb-levels 1 \
+    --vqvae-scaling-rates 2 \
     --workers 8
