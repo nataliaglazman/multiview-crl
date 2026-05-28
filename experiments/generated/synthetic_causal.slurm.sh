@@ -49,7 +49,6 @@ conda activate "${CONDA_ENV_NAME}"
     --batch-size 32 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 9 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
