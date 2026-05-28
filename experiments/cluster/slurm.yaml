@@ -1,0 +1,19 @@
+# SLURM cluster paths and job defaults.
+# Merged into every experiment when launched with --cluster slurm.
+#
+# Edit paths to match your SLURM cluster layout.
+
+# ---- Paths ----
+dataroot: /nfs/home/nglazman/data
+labels_path: /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv
+masks_dir: /nfs/home/nglazman/data/ADNI_stripped_masks
+cache_dir: /nfs/home/nglazman/cache/multiview
+
+# ---- SLURM job resources ----
+_slurm:
+  partition: gpu
+  gres: "gpu:1"
+  cpus_per_task: 16
+  mem: 64G
+  time: "24:00:00"
+  repo_path: /nfs/home/nglazman/crl-2/multiview-crl

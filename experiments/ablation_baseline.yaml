@@ -1,0 +1,8 @@
+# Ablation baseline: everything optional is OFF.
+# Reference run — add ONE component at a time and compare.
+#
+# What's on:  separate encoders + cross-view-negs InfoNCE at L0 + recon.
+# What's off: style InfoNCE, content GRL, style-CE, GAN, style quantization,
+#             patch InfoNCE, multi-level masking, MoCo, asymmetric aug, learned mask.
+
+tag: ablation-baseline

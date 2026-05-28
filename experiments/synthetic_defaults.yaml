@@ -1,0 +1,52 @@
+# Default config for synthetic pseudo-MRI experiments.
+# Inherits from defaults.yaml, then overrides architecture and data
+# settings for the lightweight synthetic pipeline.
+#
+# Use as a base for synthetic experiments:
+#   experiments/synthetic_causal.yaml might contain just:
+#     _base_: synthetic_defaults
+#     tag: synthetic-causal-chain
+#     synthetic_causal: true
+#     synthetic_causal_graph: chain
+
+# ---- Data (null out ADNI-specific defaults) ----
+dataset_name: synthetic
+spatial_size: null
+labels_path: null
+masks_dir: null
+cache_dir: null
+synthetic_mode: pseudo_mri
+synthetic_res: 64
+synthetic_num_train: 2000
+synthetic_num_val: 200
+synthetic_num_test: 400
+
+# ---- Architecture (smaller, single-level) ----
+vqvae_nb_levels: 1
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [2]
+content_style_levels: [0]
+content_size: 9
+content_ratios: [0.95]
+mask_mode: fixed
+separate_encoders: true
+pass_full_to_next_level: true
+quantize_style: true
+
+# ---- Contrastive ----
+contrastive_loss_type: infonce
+tau: 0.1
+scale_contrastive_loss: 1.0
+patch_contrastive: true
+
+# ---- Reconstruction ----
+scale_recon_loss: 1.0
+
+# ---- Training (no gradient checkpointing needed for small volumes) ----
+lr: 1.0e-3
+batch_size: 32
+train_steps: 200000
+resume_training: true
+gradient_checkpointing: false
+cache_dataset: false

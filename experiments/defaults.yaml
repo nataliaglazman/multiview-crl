@@ -1,0 +1,66 @@
+# Default experiment configuration for multiview-CRL.
+#
+# Every experiment inherits these values. Override only what differs in
+# your experiment YAML (e.g. experiments/ablation_patches.yaml).
+#
+# Cluster-specific paths (dataroot, labels_path, cache_dir) live in
+# experiments/cluster/<name>.yaml and are merged at launch time via
+#   python scripts/launch.py <experiment.yaml> --cluster runai
+#
+# To see the fully resolved config without launching:
+#   python scripts/launch.py <experiment.yaml> --cluster runai --dry-run
+
+# ---- Data ----
+dataset_name: ADNI_stripped_masks
+image_spacing: 1.0
+spatial_size: [150, 180, 150]
+cache_dataset: true
+
+# ---- Architecture ----
+vqvae_nb_levels: 3
+vqvae_hidden_channels: 32
+vqvae_embed_dim: 32
+vqvae_nb_entries: [256]
+vqvae_scaling_rates: [2, 2, 2]
+vq_commitment_weight: 0.25
+separate_encoders: true
+pass_full_to_next_level: true
+
+# ---- Content / style split ----
+content_dim: 128
+total_dim: 512
+content_style_levels: [0]
+mask_mode: fixed
+
+# ---- Contrastive ----
+contrastive_loss_type: infonce
+cross_view_negs_only: true
+tau: 0.1
+scale_contrastive_loss: 1.0
+
+# ---- Reconstruction ----
+scale_recon_loss: 1.0
+recon_loss_start_step: 0
+
+# ---- Losses (off by default) ----
+scale_style_contrastive_loss: 0.0
+scale_content_modality_adv: 0.0
+scale_style_modality_ce: 0.0
+scale_adv_loss: 0.0
+moco_queue_size: 0
+
+# ---- Training ----
+lr: 1.0e-3
+batch_size: 4
+train_steps: 20000
+gradient_checkpointing: true
+use_amp: true
+workers: 8
+resume_training: true
+
+# ---- Evaluation ----
+select_by_gated_score: true
+separation_floor_diagnosis_info: 0.1
+
+# ---- Logging ----
+use_wandb: true

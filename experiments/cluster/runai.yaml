@@ -1,0 +1,21 @@
+# RunAI cluster paths and job defaults.
+# Merged into every experiment when launched with --cluster runai.
+
+# ---- Paths ----
+dataroot: /nfs/home/nglazman/data
+labels_path: /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv
+masks_dir: /nfs/home/nglazman/data/ADNI_stripped_masks
+cache_dir: /nfs/home/nglazman/cache/multiview
+
+# ---- RunAI job resources ----
+_runai:
+  image: "aicregistry:5000/nglazman:multiview-crl-vqvae-final"
+  project: nglazman
+  node_type: A100
+  gpu: 1
+  cpu: 16
+  cpu_limit: 32
+  memory: 64G
+  memory_limit: 128G
+  volume: "/nfs:/nfs"
+  repo_path: /nfs/home/nglazman/crl-2/multiview-crl

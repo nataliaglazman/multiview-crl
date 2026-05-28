@@ -23,8 +23,12 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `utils/logging_setup.py` — logging config.
 - `utils/utils.py` — MONAI transforms (`CreateBrainMaskd`, `ApplyBrainMaskd`), `load_data`, `TBSummaryTypes`.
 - `utils/helper.py` — `HelperModule`, `get_parameter_count` (used by vqvae.py).
+- `experiments/defaults.yaml` — base config (all shared flags). Experiment YAMLs override only what differs.
+- `experiments/cluster/{runai,slurm}.yaml` — cluster-specific paths and job resource configs.
+- `experiments/*.yaml` — per-experiment configs (e.g. `ablation_baseline.yaml`).
+- `scripts/launch.py` — reads experiment YAML, merges defaults+cluster+overrides, submits to RunAI/SLURM/local. Saves timestamped resolved config snapshot with git SHA to the run's output directory.
 - `scripts/sweep_config.yaml` + `sweep_train.py` — W&B Bayesian sweep wrapper (handles bool flags + constraints).
-- `scripts/launch_sweep.sh`, `sweep_runai.sh`, `analyze_sweep.py` — SLURM/RunAI sweep launchers and analysis.
+- `scripts/launch_sweep.sh`, `sweep_runai.sh`, `analyze_sweep.py` — RunAI sweep launchers and analysis.
 - `docker/` — CUDA 12.1 / Python 3.12 container, training scripts for RunAI cluster.
 - `data/` (dir of code) vs `/data/natalia/ADNI_registered/` (actual dataset on cluster).
 
@@ -46,6 +50,9 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 
 ## Commands
 
-- Train: `python -m training.main_multimodal --dataroot ... --dataset-name ADNI_stripped ...` (see `METHODOLOGY_REPORT.md` for full arg list).
+- Launch experiment: `python scripts/launch.py experiments/<name>.yaml --cluster runai` (or `--cluster slurm`, `--cluster local`).
+- Dry run (show resolved config + command): `python scripts/launch.py experiments/<name>.yaml --cluster runai --dry-run`.
+- Override at launch: `python scripts/launch.py experiments/<name>.yaml --cluster runai --set lr=5e-4 train_steps=50000`.
+- Direct train: `python -m training.main_multimodal --dataroot ... --dataset-name ADNI_stripped ...`
 - Sweep: `wandb sweep scripts/sweep_config.yaml` then `./scripts/launch_sweep.sh`.
 - Docker: `./docker/run_docker.sh`.

@@ -1,0 +1,34 @@
+# Ablation: MoCo + patch contrastive (based on docker/exps/1).
+
+tag: ablation-moco-patches
+
+train_steps: 50000
+
+# MoCo
+use_moco: true
+moco_queue_size: 8192
+moco_momentum: 0.99
+
+# Patch contrastive
+patch_contrastive: true
+patch_grid: [4, 5, 4]
+
+# Architecture overrides
+vqvae_hidden_channels: 64
+vqvae_embed_dim: 38
+batch_size: 2
+gradient_accumulation_steps: 4
+
+# Style injection
+inject_style_to_decoder: true
+style_injection_mode: film
+mask_mode: fixed
+
+# Loss tuning
+tau: 0.07
+recon_loss_start_step: 2000
+skip_recon_ratio: 0.5
+crop_margin: 12
+
+# Level weights
+contrastive_level_weights: [3.0, 0.5, 0.5]

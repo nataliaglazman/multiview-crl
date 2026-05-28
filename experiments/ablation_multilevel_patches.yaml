@@ -1,0 +1,24 @@
+# Ablation: multi-level masking + patch contrastive + style quantization.
+# Based on docker/exps/64.
+
+tag: ablation-multilevel-patches
+train_steps: 100000
+
+# Multi-level content/style
+content_style_levels: [0, 1, 2]
+content_ratios: [0.5, 0.5, 0.5]
+
+# Stronger contrastive
+scale_contrastive_loss: 10.0
+
+# Patch contrastive
+patch_contrastive: true
+patch_grid: [6, 7, 6]
+shared_brain_mask: true
+
+# Style quantization + decoder injection
+quantize_style: true
+inject_style_to_decoder: true
+
+# Codebook tuning
+cb_reset_threshold: 5

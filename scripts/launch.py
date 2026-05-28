@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+"""Launch an experiment from a YAML config on RunAI or SLURM.
+
+Usage:
+    # Dry run — print resolved config + command, don't submit:
+    python scripts/launch.py experiments/ablation_baseline.yaml --cluster runai --dry-run
+
+    # Submit to RunAI (needs Python on cluster):
+    python scripts/launch.py experiments/ablation_baseline.yaml --cluster runai
+
+    # Generate bash scripts for ALL experiments (no Python needed on cluster):
+    python scripts/launch.py --generate --cluster runai
+    # Then on cluster:  bash experiments/generated/ablation_baseline.runai.sh
+
+    # Override any parameter from CLI:
+    python scripts/launch.py experiments/ablation_baseline.yaml --cluster runai --set lr=5e-4 train_steps=50000
+"""
+
+import argparse
+import copy
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULTS_PATH = REPO_ROOT / "experiments" / "defaults.yaml"
+CLUSTER_DIR = REPO_ROOT / "experiments" / "cluster"
+GENERATED_DIR = REPO_ROOT / "experiments" / "generated"
+
+# Boolean flags in argparse that are store_true (no value, just the flag name).
+# Maintained here so the launcher knows to emit `--flag` instead of `--flag True`.
+_STORE_TRUE_FLAGS = {
+    "evaluate",
+    "no_cuda",
+    "use_amp",
+    "save_all_checkpoints",
+    "resume_training",
+    "use_gan",
+    "separate_encoders",
+    "quantize_style",
+    "cross_view_negs_only",
+    "patch_contrastive",
+    "gradient_checkpointing",
+    "compile_model",
+    "channels_last",
+    "cache_dataset",
+    "inject_style_to_decoder",
+    "use_moco",
+    "eval_dci",
+    "eval_style",
+    "grid_search_eval",
+    "use_content_projection",
+    "narrow_encoder_input",
+    "top_level_recon_only",
+    "use_wandb",
+    "no_resumable_sampler",
+    "shared_brain_mask",
+    "asymmetric_aug",
+    "pass_full_to_next_level",
+    "select_by_gated_score",
+    "detach_style_injection",
+    "synthetic_hierarchical_content",
+    "synthetic_causal",
+}
+
+
+def load_yaml(path: Path) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
+
+
+def git_sha() -> str:
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=REPO_ROOT,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return "unknown"
+
+
+def git_dirty() -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
+        return result.returncode != 0
+    except Exception:
+        return False
+
+
+def resolve_config(experiment_path: Path, cluster_name: str | None, cli_overrides: dict) -> dict:
+    """Merge defaults <- cluster <- experiment <- CLI overrides."""
+    config = load_yaml(DEFAULTS_PATH)
+
+    if cluster_name and cluster_name != "local":
+        cluster_path = CLUSTER_DIR / f"{cluster_name}.yaml"
+        if not cluster_path.exists():
+            print(f"Error: cluster config not found: {cluster_path}", file=sys.stderr)
+            sys.exit(1)
+        cluster_cfg = load_yaml(cluster_path)
+        config.update(cluster_cfg)
+
+    experiment_cfg = load_yaml(experiment_path)
+    config.update(experiment_cfg)
+
+    # CLI --set overrides take highest priority.
+    config.update(cli_overrides)
+
+    return config
+
+
+def config_to_cli_args(config: dict) -> list[str]:
+    """Convert a flat config dict into argparse-style CLI arguments.
+
+    Keys with a value of ``None`` are skipped (use this to unset a default).
+    """
+    args = []
+    for key, value in sorted(config.items()):
+        if key.startswith("_"):
+            continue
+        if value is None:
+            continue
+        if key == "tag":
+            args.extend(["--model-id", str(value)])
+            continue
+
+        cli_flag = f"--{key.replace('_', '-')}"
+
+        if key in _STORE_TRUE_FLAGS:
+            if value:
+                args.append(cli_flag)
+            continue
+
+        if isinstance(value, list):
+            args.append(cli_flag)
+            args.extend(str(v) for v in value)
+        elif isinstance(value, bool):
+            # Non-store-true booleans (shouldn't happen, but be safe).
+            if value:
+                args.append(cli_flag)
+        else:
+            args.append(cli_flag)
+            args.append(str(value))
+
+    return args
+
+
+def _group_cli_args(cli_args: list[str]) -> list[str]:
+    """Group CLI args into logical lines: --flag value [value ...] per line."""
+    arg_lines = []
+    i = 0
+    while i < len(cli_args):
+        if cli_args[i].startswith("--"):
+            chunk = [cli_args[i]]
+            i += 1
+            while i < len(cli_args) and not cli_args[i].startswith("--"):
+                chunk.append(cli_args[i])
+                i += 1
+            arg_lines.append(" ".join(chunk))
+        else:
+            arg_lines.append(cli_args[i])
+            i += 1
+    return arg_lines
+
+
+def save_resolved_config(config: dict, experiment_path: Path) -> dict:
+    """Add provenance metadata to the config for the snapshot saved alongside results."""
+    snapshot = copy.deepcopy(config)
+    snapshot["_provenance"] = {
+        "experiment_file": str(experiment_path),
+        "resolved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "git_sha": git_sha(),
+        "git_dirty": git_dirty(),
+    }
+    return snapshot
+
+
+def build_training_script(config: dict, tag: str, cluster_name: str, experiment_path: Path) -> str:
+    """Build a self-contained bash script that runs the training command.
+
+    For RunAI: wraps in `runai submit`.
+    For SLURM: adds #SBATCH headers.
+    For local: plain python command.
+    """
+    cli_args = config_to_cli_args(config)
+    arg_lines = _group_cli_args(cli_args)
+    sha = git_sha()
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    header = [
+        "#!/usr/bin/env bash",
+        f"# Auto-generated from: {experiment_path.relative_to(REPO_ROOT) if experiment_path.is_absolute() else experiment_path}",
+        f"# Generated at: {ts}",
+        f"# Git SHA: {sha}",
+        "# Re-generate with: python scripts/launch.py --generate --cluster " + cluster_name,
+        "",
+        "set -euo pipefail",
+        "",
+    ]
+
+    if cluster_name == "runai":
+        runai = config.get("_runai", {})
+        repo_path = runai.get("repo_path", "/nfs/home/nglazman/crl-2/multiview-crl")
+
+        # Build the training command as a single string for bash -c.
+        train_parts = ["python -m training.main_multimodal \\"]
+        for j, al in enumerate(arg_lines):
+            suffix = " \\" if j < len(arg_lines) - 1 else ""
+            train_parts.append(f"    {al}{suffix}")
+        train_cmd = "\n".join(train_parts)
+
+        lines = header + [
+            f'REPO="{repo_path}"',
+            "",
+            "# --- Training command ---",
+            f"TRAIN_CMD=$(cat <<'TRAIN_EOF'",
+            f"cd ${{REPO}} && PYTHONPATH=${{REPO}} \\",
+            train_cmd,
+            "TRAIN_EOF",
+            ")",
+            "",
+            "# --- RunAI submission ---",
+            f"runai submit {tag} \\",
+            f'    --project {runai.get("project", "nglazman")} \\',
+            f'    --image {runai.get("image", "")} \\',
+            f"    --run-as-user \\",
+            f"    --large-shm \\",
+            f'    --node-type {runai.get("node_type", "A100")} \\',
+            f'    --gpu {runai.get("gpu", 1)} \\',
+            f'    --cpu {runai.get("cpu", 16)} \\',
+            f'    --cpu-limit {runai.get("cpu_limit", 32)} \\',
+            f'    --memory {runai.get("memory", "64G")} \\',
+            f'    --memory-limit {runai.get("memory_limit", "128G")} \\',
+            f'    --volume {runai.get("volume", "/nfs:/nfs")} \\',
+            f'    --command -- bash -c "${{TRAIN_CMD}}"',
+        ]
+
+    elif cluster_name == "slurm":
+        slurm = config.get("_slurm", {})
+        repo_path = slurm.get("repo_path", "/nfs/home/nglazman/crl-2/multiview-crl")
+
+        lines = [
+            "#!/bin/bash",
+            f"# Auto-generated from: {experiment_path.relative_to(REPO_ROOT) if experiment_path.is_absolute() else experiment_path}",
+            f"# Generated at: {ts}",
+            f"# Git SHA: {sha}",
+            f"#SBATCH --job-name={tag}",
+            f"#SBATCH --partition={slurm.get('partition', 'gpu')}",
+            f"#SBATCH --gres={slurm.get('gres', 'gpu:1')}",
+            f"#SBATCH --cpus-per-task={slurm.get('cpus_per_task', 16)}",
+            f"#SBATCH --mem={slurm.get('mem', '64G')}",
+            f"#SBATCH --time={slurm.get('time', '24:00:00')}",
+            f"#SBATCH --output={repo_path}/results/{tag}/slurm_%j.log",
+            "",
+            "set -euo pipefail",
+            f"cd {repo_path}",
+            f"export PYTHONPATH={repo_path}",
+            "",
+            "python -m training.main_multimodal \\",
+        ]
+        for j, al in enumerate(arg_lines):
+            suffix = " \\" if j < len(arg_lines) - 1 else ""
+            lines.append(f"    {al}{suffix}")
+
+    else:
+        # Local.
+        lines = header + [
+            "python -m training.main_multimodal \\",
+        ]
+        for j, al in enumerate(arg_lines):
+            suffix = " \\" if j < len(arg_lines) - 1 else ""
+            lines.append(f"    {al}{suffix}")
+
+    return "\n".join(lines) + "\n"
+
+
+def build_runai_command(config: dict, tag: str) -> list[str]:
+    runai = config.get("_runai", {})
+    repo_path = runai.get("repo_path", "/nfs/home/nglazman/crl-2/multiview-crl")
+    cli_args = config_to_cli_args(config)
+    train_cmd = f"cd {repo_path} && PYTHONPATH={repo_path} python -m training.main_multimodal {' '.join(cli_args)}"
+
+    cmd = [
+        "runai",
+        "submit",
+        tag,
+        "--project",
+        runai.get("project", "nglazman"),
+        "--image",
+        runai.get("image", ""),
+        "--run-as-user",
+        "--large-shm",
+        "--node-type",
+        runai.get("node_type", "A100"),
+        "--gpu",
+        str(runai.get("gpu", 1)),
+        "--cpu",
+        str(runai.get("cpu", 16)),
+        "--cpu-limit",
+        str(runai.get("cpu_limit", 32)),
+        "--memory",
+        runai.get("memory", "64G"),
+        "--memory-limit",
+        runai.get("memory_limit", "128G"),
+        "--volume",
+        runai.get("volume", "/nfs:/nfs"),
+        "--command",
+        "--",
+        "bash",
+        "-c",
+        train_cmd,
+    ]
+    return cmd
+
+
+def build_local_command(config: dict) -> str:
+    cli_args = config_to_cli_args(config)
+    return f"python -m training.main_multimodal {' '.join(cli_args)}"
+
+
+def parse_cli_overrides(override_strs: list[str]) -> dict:
+    """Parse 'key=value' pairs from --set arguments."""
+    overrides = {}
+    for s in override_strs:
+        if "=" not in s:
+            print(f"Error: --set value must be key=value, got: {s}", file=sys.stderr)
+            sys.exit(1)
+        key, val = s.split("=", 1)
+        try:
+            import ast
+
+            parsed = ast.literal_eval(val)
+        except (ValueError, SyntaxError):
+            parsed = val
+        overrides[key] = parsed
+    return overrides
+
+
+def find_experiment_yamls() -> list[Path]:
+    """Find all experiment YAML files (excluding cluster configs and defaults)."""
+    exp_dir = REPO_ROOT / "experiments"
+    skip = {"defaults.yaml", "cluster"}
+    yamls = []
+    for p in sorted(exp_dir.glob("*.yaml")):
+        if p.name not in skip:
+            yamls.append(p)
+    return yamls
+
+
+def generate_all(cluster_name: str):
+    """Generate bash scripts for all experiment YAMLs."""
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+    experiments = find_experiment_yamls()
+    if not experiments:
+        print("No experiment YAMLs found in experiments/", file=sys.stderr)
+        sys.exit(1)
+
+    generated = []
+    for exp_path in experiments:
+        config = resolve_config(exp_path, cluster_name, {})
+        tag = config.get("tag", exp_path.stem)
+        script = build_training_script(config, tag, cluster_name, exp_path)
+        out_name = f"{exp_path.stem}.{cluster_name}.sh"
+        out_path = GENERATED_DIR / out_name
+        with open(out_path, "w") as f:
+            f.write(script)
+        os.chmod(out_path, 0o755)
+        generated.append(out_name)
+        print(f"  {out_path}")
+
+    print(f"\nGenerated {len(generated)} scripts in experiments/generated/")
+    print(f"On cluster: bash experiments/generated/<name>.{cluster_name}.sh")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Launch a multiview-CRL experiment from a YAML config.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "experiment",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="Path to experiment YAML (omit when using --generate)",
+    )
+    parser.add_argument(
+        "--cluster",
+        type=str,
+        default="local",
+        help="Cluster name (matches experiments/cluster/<name>.yaml), or 'local'",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the resolved config and command without submitting",
+    )
+    parser.add_argument(
+        "--generate",
+        action="store_true",
+        help="Generate bash scripts for all experiment YAMLs (no Python needed on cluster)",
+    )
+    parser.add_argument(
+        "--set",
+        nargs="*",
+        default=[],
+        dest="overrides",
+        metavar="KEY=VALUE",
+        help="Override config values (e.g. --set lr=5e-4 train_steps=50000)",
+    )
+    args = parser.parse_args()
+
+    # --generate mode: batch-generate scripts for all experiments.
+    if args.generate:
+        generate_all(args.cluster)
+        return
+
+    if args.experiment is None:
+        parser.error("experiment path is required (or use --generate)")
+
+    if not args.experiment.exists():
+        print(f"Error: experiment file not found: {args.experiment}", file=sys.stderr)
+        sys.exit(1)
+
+    cli_overrides = parse_cli_overrides(args.overrides)
+    config = resolve_config(args.experiment, args.cluster, cli_overrides)
+    tag = config.get("tag", args.experiment.stem)
+
+    # -- Provenance snapshot --
+    snapshot = save_resolved_config(config, args.experiment)
+
+    if args.dry_run:
+        print("=" * 60)
+        print("RESOLVED CONFIG")
+        print("=" * 60)
+        print(yaml.dump(snapshot, default_flow_style=False, sort_keys=False))
+        print("=" * 60)
+
+    if args.cluster == "local":
+        cmd_str = build_local_command(config)
+        if args.dry_run:
+            print(f"COMMAND:\n  {cmd_str}")
+        else:
+            print(f"Running locally: {cmd_str}")
+            os.execvp("python", ["python", "-m", "training.main_multimodal"] + config_to_cli_args(config))
+
+    elif args.cluster == "runai" or (CLUSTER_DIR / f"{args.cluster}.yaml").exists() and "_runai" in config:
+        cmd = build_runai_command(config, tag)
+        if args.dry_run:
+            print(f"RUNAI COMMAND:\n  {' '.join(cmd)}")
+        else:
+            # Save snapshot to results dir before submitting.
+            results_dir = REPO_ROOT / "results" / tag
+            results_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            snapshot_path = results_dir / f"config_{ts}.yaml"
+            with open(snapshot_path, "w") as f:
+                yaml.dump(snapshot, f, default_flow_style=False, sort_keys=False)
+            print(f"Config snapshot saved to: {snapshot_path}")
+            print(f"Submitting to RunAI: {tag}")
+            subprocess.run(cmd, check=True)
+
+    elif args.cluster == "slurm" or "_slurm" in config:
+        script = build_training_script(config, tag, "slurm", args.experiment)
+        if args.dry_run:
+            print(f"SLURM SCRIPT:\n{script}")
+        else:
+            results_dir = REPO_ROOT / "results" / tag
+            results_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            snapshot_path = results_dir / f"config_{ts}.yaml"
+            with open(snapshot_path, "w") as f:
+                yaml.dump(snapshot, f, default_flow_style=False, sort_keys=False)
+            script_path = results_dir / f"submit_{ts}.sh"
+            with open(script_path, "w") as f:
+                f.write(script)
+            print(f"Config snapshot saved to: {snapshot_path}")
+            print(f"Submitting to SLURM: {tag}")
+            subprocess.run(["sbatch", str(script_path)], check=True)
+    else:
+        print(f"Error: unknown cluster '{args.cluster}'. Expected 'local', 'runai', or 'slurm'.", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
