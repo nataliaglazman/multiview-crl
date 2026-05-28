@@ -80,7 +80,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random \
+    --model-id synthetic-causal-random-single-level \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
