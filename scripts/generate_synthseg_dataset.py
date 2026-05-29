@@ -84,6 +84,39 @@ logger = logging.getLogger(__name__)
 # ── Segmentation discovery ────────────────────────────────────────────────────
 
 
+def _ensure_nifti_ext(path):
+    """Add a NIfTI extension if the file lacks one (common in ADNI LONI downloads).
+
+    Checks the first two bytes: gzip magic (\\x1f\\x8b) → .nii.gz, else → .nii.
+    Creates a symlink next to the original so nibabel can identify the format.
+    Returns the path with the extension (original path if it already has one).
+    """
+    KNOWN_EXTS = (".nii.gz", ".nii", ".mgz", ".mgh", ".mha", ".nrrd")
+    if any(path.endswith(ext) for ext in KNOWN_EXTS):
+        return path
+
+    if not os.path.isfile(path):
+        return path
+
+    with open(path, "rb") as f:
+        magic = f.read(2)
+
+    ext = ".nii.gz" if magic == b"\x1f\x8b" else ".nii"
+    linked = path + ext
+
+    if not os.path.exists(linked):
+        try:
+            os.symlink(os.path.basename(path), linked)
+        except OSError:
+            # Fallback: hard link (works on NFS where symlinks may be restricted)
+            try:
+                os.link(path, linked)
+            except OSError:
+                return path  # give up, let nibabel try the raw path
+
+    return linked
+
+
 def find_seg(seg_dir, subject_id):
     """Locate segmentation for a subject.
 
@@ -92,6 +125,7 @@ def find_seg(seg_dir, subject_id):
     ADNI MUSE layout on LONI is:
       <seg_dir>/ADNI/<PTID>/T1_MUSE_segmentation/<date>/<IMAGEUID>[.nii.gz]
     We take the most recent date if multiple timepoints exist.
+    Files without NIfTI extensions get a symlink so nibabel can load them.
     """
     import glob
 
@@ -111,7 +145,7 @@ def find_seg(seg_dir, subject_id):
                 for pattern in ["*.nii.gz", "*.nii", "*.mgz", "I*"]:
                     hits = glob.glob(os.path.join(session_dir, pattern))
                     if hits:
-                        return sorted(hits)[0]
+                        return _ensure_nifti_ext(sorted(hits)[0])
 
     # ── FreeSurfer layouts ────────────────────────────────────────────────
     candidates = [
@@ -133,7 +167,7 @@ def find_seg(seg_dir, subject_id):
     ]
     for c in candidates:
         if os.path.exists(c):
-            return c
+            return _ensure_nifti_ext(c)
     return None
 
 
