@@ -339,7 +339,7 @@ def synthesize_lab2im(seg_path, t1_path, t2_path, seed=42):
 
 
 def _process_subject(args_tuple):
-    """Process one (subject, alpha) pair: atrophy → remap → synthesis."""
+    """Process one (subject, alpha) pair: atrophy → synthesis."""
     (
         subject_id,
         group,
@@ -352,6 +352,7 @@ def _process_subject(args_tuple):
         smooth_sigma,
         base_seed,
         label_set,
+        remap_to_fs,
     ) = args_tuple
 
     sample_id = f"{subject_id}_alpha{alpha:.2f}"
@@ -376,17 +377,20 @@ def _process_subject(args_tuple):
             out_path=atrophied_seg_path,
         )
 
-    # Remap MUSE → FreeSurfer labels before synthesis so SynthSeg intensity
-    # priors match the expected label conventions.
+    # Optional: remap MUSE → FreeSurfer labels before synthesis.
+    # Only needed if the SynthSeg generation model was trained on FS labels.
+    # lab2im and the builtin synthesizer work with any label set — MUSE's
+    # 152 ROIs actually produce more realistic cortical intensity variation
+    # than collapsing to FS's ~30 labels.
     synth_seg_path = atrophied_seg_path
-    if label_set == "muse" and synthesizer != "builtin":
+    if remap_to_fs and label_set == "muse":
         remapped_path = os.path.join(seg_out_dir, f"{sample_id}_seg_fs.nii.gz")
         synth_seg_path = remap_seg_for_synthseg(atrophied_seg_path, remapped_path, label_set)
 
     seed = base_seed + hash(sample_id) % (2**31)
 
     if synthesizer == "builtin":
-        synthesize_builtin(atrophied_seg_path, t1_path, t2_path, seed=seed)
+        synthesize_builtin(synth_seg_path, t1_path, t2_path, seed=seed)
     elif synthesizer == "synthseg":
         synthesize_synthseg(synth_seg_path, t1_path, t2_path, synthseg_script, seed=seed)
     elif synthesizer == "lab2im":
@@ -408,6 +412,7 @@ def generate_dataset(
     synthesizer="builtin",
     synthseg_script=None,
     label_set=None,
+    remap_to_fs=False,
     wmh_fraction=0.0,
     smooth_sigma=0.6,
     seed=42,
@@ -451,6 +456,7 @@ def generate_dataset(
                     smooth_sigma,
                     seed,
                     label_set,
+                    remap_to_fs,
                 )
             )
 
@@ -575,6 +581,13 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Base random seed.")
     parser.add_argument("--num-workers", type=int, default=4, help="Parallel workers.")
     parser.add_argument(
+        "--remap-to-fs",
+        action="store_true",
+        help="Remap MUSE labels to FreeSurfer before synthesis. Only needed if "
+        "your SynthSeg generation model was trained on FS labels. Off by default — "
+        "MUSE's 152 ROIs give better cortical intensity variation than FS's ~30.",
+    )
+    parser.add_argument(
         "--remap-groups-by-alpha",
         action="store_true",
         help="Override diagnostic group based on alpha: [0, 0.3)->CN, [0.3, 0.7)->MCI, [0.7, 1.01)->AD.",
@@ -594,6 +607,7 @@ def main():
         synthesizer=args.synthesizer,
         synthseg_script=args.synthseg_script,
         label_set=args.label_set,
+        remap_to_fs=args.remap_to_fs,
         wmh_fraction=args.wmh_fraction,
         smooth_sigma=args.smooth_sigma,
         seed=args.seed,

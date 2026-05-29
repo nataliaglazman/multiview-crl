@@ -50,7 +50,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data.atrophy_simulator import MUSE, detect_label_set, simulate_atrophy
-from scripts.generate_synthseg_dataset import _builtin_synthesize_one, find_seg, remap_seg_for_synthseg
+from scripts.generate_synthseg_dataset import _builtin_synthesize_one, find_seg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -170,18 +170,14 @@ def process_subject(subject_id, seg_path, out_dir, alphas, wmh_fraction, smooth_
             logger.info(f"    Hippocampus: {hippo_orig} → {hippo_new} voxels ({hippo_new - hippo_orig:+d})")
             logger.info(f"    Ventricles:  {vent_orig} → {vent_new} voxels ({vent_new - vent_orig:+d})")
 
-        # Remap for synthesis if MUSE
-        synth_seg_path = seg_out_path
-        if label_set == "muse":
-            fs_path = os.path.join(subj_dir, f"{tag}_seg_fs.nii.gz")
-            synth_seg_path = remap_seg_for_synthseg(seg_out_path, fs_path, label_set)
-
-        # Synthesize T1 and T2
+        # Synthesize T1 and T2 directly from MUSE labels — lab2im and the
+        # builtin synthesizer sample random intensities per label, so MUSE's
+        # 152 ROIs give better cortical variation than remapping to FS's ~30.
         t1_path = os.path.join(subj_dir, f"{tag}_T1.nii.gz")
         t2_path = os.path.join(subj_dir, f"{tag}_T2.nii.gz")
         s = seed + hash(f"{subject_id}_{tag}") % (2**31)
-        _builtin_synthesize_one(synth_seg_path, t1_path, seed=s)
-        _builtin_synthesize_one(synth_seg_path, t2_path, seed=s + 1_000_000)
+        _builtin_synthesize_one(seg_out_path, t1_path, seed=s)
+        _builtin_synthesize_one(seg_out_path, t2_path, seed=s + 1_000_000)
 
         t1 = nib.load(t1_path).get_fdata()
         t2 = nib.load(t2_path).get_fdata()
