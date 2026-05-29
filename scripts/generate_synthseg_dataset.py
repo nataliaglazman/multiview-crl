@@ -141,11 +141,24 @@ def find_seg(seg_dir, subject_id):
             )
             for dd in date_dirs:
                 session_dir = os.path.join(muse_dir, dd)
-                # Try NIfTI files first, then bare image ID files
-                for pattern in ["*.nii.gz", "*.nii", "*.mgz", "I*"]:
+                # NIfTI directly in the date folder
+                for pattern in ["*.nii.gz", "*.nii", "*.mgz"]:
                     hits = glob.glob(os.path.join(session_dir, pattern))
                     if hits:
                         return _ensure_nifti_ext(sorted(hits)[0])
+                # ADNI LONI layout: date/<IMAGEUID_dir>/<file>.nii[.gz]
+                for entry in sorted(os.listdir(session_dir)):
+                    sub = os.path.join(session_dir, entry)
+                    if os.path.isdir(sub):
+                        for pattern in ["*.nii.gz", "*.nii", "*.mgz"]:
+                            hits = glob.glob(os.path.join(sub, pattern))
+                            if hits:
+                                return _ensure_nifti_ext(sorted(hits)[0])
+                        # Bare files without extension inside the I* dir
+                        for f in sorted(os.listdir(sub)):
+                            fpath = os.path.join(sub, f)
+                            if os.path.isfile(fpath):
+                                return _ensure_nifti_ext(fpath)
 
     # ── FreeSurfer layouts ────────────────────────────────────────────────
     candidates = [
