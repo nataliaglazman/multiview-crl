@@ -85,16 +85,45 @@ logger = logging.getLogger(__name__)
 
 
 def find_seg(seg_dir, subject_id):
-    """Locate segmentation for a subject. Checks FreeSurfer and MUSE layouts."""
+    """Locate segmentation for a subject.
+
+    Checks (in order): ADNI MUSE download layout, FreeSurfer layout, flat layout.
+
+    ADNI MUSE layout on LONI is:
+      <seg_dir>/ADNI/<PTID>/T1_MUSE_segmentation/<date>/<IMAGEUID>[.nii.gz]
+    We take the most recent date if multiple timepoints exist.
+    """
+    import glob
+
+    # ── ADNI MUSE download layout ─────────────────────────────────────────
+    # <seg_dir>[/ADNI]/<subject>/T1_MUSE_segmentation/<date>/<file>
+    for prefix in [os.path.join(seg_dir, "ADNI", subject_id), os.path.join(seg_dir, subject_id)]:
+        muse_dir = os.path.join(prefix, "T1_MUSE_segmentation")
+        if os.path.isdir(muse_dir):
+            # Pick the most recent date subfolder
+            date_dirs = sorted(
+                [d for d in os.listdir(muse_dir) if os.path.isdir(os.path.join(muse_dir, d))],
+                reverse=True,
+            )
+            for dd in date_dirs:
+                session_dir = os.path.join(muse_dir, dd)
+                # Try NIfTI files first, then bare image ID files
+                for pattern in ["*.nii.gz", "*.nii", "*.mgz", "I*"]:
+                    hits = glob.glob(os.path.join(session_dir, pattern))
+                    if hits:
+                        return sorted(hits)[0]
+
+    # ── FreeSurfer layouts ────────────────────────────────────────────────
     candidates = [
-        # FreeSurfer layouts
         os.path.join(seg_dir, subject_id, "mri", "aseg.mgz"),
         os.path.join(seg_dir, subject_id, "mri", "aseg.nii.gz"),
         os.path.join(seg_dir, subject_id, "mri", "aparc+aseg.mgz"),
         os.path.join(seg_dir, subject_id, "mri", "aparc+aseg.nii.gz"),
         os.path.join(seg_dir, subject_id, "aseg.mgz"),
         os.path.join(seg_dir, subject_id, "aseg.nii.gz"),
-        # MUSE / flat layouts
+    ]
+    # ── Flat / MUSE naming ────────────────────────────────────────────────
+    candidates += [
         os.path.join(seg_dir, subject_id, f"{subject_id}_seg.nii.gz"),
         os.path.join(seg_dir, subject_id, f"{subject_id}_muse.nii.gz"),
         os.path.join(seg_dir, f"{subject_id}_seg.nii.gz"),
