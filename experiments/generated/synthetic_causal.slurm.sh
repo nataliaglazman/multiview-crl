@@ -3,14 +3,15 @@
 # Generated at: 2026-05-29T10:28:23Z
 # Git SHA: fb1d51d
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random
+#SBATCH --job-name=synthetic-causal-random-2
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-%j.err
+#SBATCH --error=synthetic-causal-random-2-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
+#SBATCH --constraint=a100_40g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -49,7 +50,6 @@ conda activate "${CONDA_ENV_NAME}"
     --batch-size 32 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 9 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -81,7 +81,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random \
+    --model-id synthetic-causal-random-2 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
