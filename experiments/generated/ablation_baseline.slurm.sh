@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_baseline.yaml
-# Generated at: 2026-05-28T14:37:57Z
-# Git SHA: 1137840
+# Generated at: 2026-05-29T10:28:23Z
+# Git SHA: fb1d51d
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -10,6 +10,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
