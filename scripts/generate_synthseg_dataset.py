@@ -240,24 +240,73 @@ def remap_seg_for_synthseg(seg_path, out_path, label_set):
 # ── Synthesizers ──────────────────────────────────────────────────────────────
 
 
-def _builtin_synthesize_one(seg_path, out_path, seed=0):
-    """Tissue-aware label-to-image synthesis with partial volume effects.
+def _deform_label_map(seg, rng, nonlin_std=3.0, nonlin_scale=0.0625, scaling_std=0.15, rotation_std=10.0):
+    """Random elastic + affine deformation of a label map (nearest-neighbour).
 
-    Mimics the SynthSeg/lab2im approach:
-      1. Sample per-label intensities (bilateral-consistent, tissue-grouped,
-         guaranteed contrast between CSF/GM/WM)
-      2. Render hard intensity image with per-voxel texture noise
-      3. Detect tissue boundaries and blend with smoothed version (partial volume)
-      4. Add smooth spatial intensity gradient
-      5. Multiplicative bias field
-      6. Simulate acquisition blur (anisotropic slice profile)
-      7. Rician noise
+    Follows the lab2im approach:
+      1. Sample a small random SVF and upscale to full resolution
+      2. Build an affine (scaling + rotation)
+      3. Compose and apply with order-0 (nearest) interpolation
     """
-    from scipy.ndimage import gaussian_filter, maximum_filter, minimum_filter, zoom
+    from scipy.ndimage import map_coordinates, zoom
+
+    shape = np.array(seg.shape, dtype=np.float64)
+    n_dims = len(shape)
+    centre = (shape - 1) / 2.0
+
+    # ── Elastic displacement field ────────────────────────────────────────
+    small_shape = [max(int(s * nonlin_scale), 4) for s in seg.shape]
+    std = rng.uniform(0, nonlin_std)
+
+    coords = np.mgrid[[slice(0, int(s)) for s in shape]].astype(np.float64)
+    for d in range(n_dims):
+        small_field = rng.normal(0, std, size=small_shape).astype(np.float64)
+        zoom_factors = [shape[i] / small_shape[i] for i in range(n_dims)]
+        disp = zoom(small_field, zoom_factors, order=3)
+        # Handle shape mismatch from zoom rounding
+        slices = tuple(slice(0, int(shape[i])) for i in range(n_dims))
+        coords[d] += disp[slices]
+
+    # ── Random affine (rotation + scaling around centre) ──────────────────
+    angles = rng.normal(0, np.radians(rotation_std), size=3)
+    scales = rng.normal(1.0, scaling_std, size=3)
+
+    cx, cy, cz = np.cos(angles)
+    sx, sy, sz = np.sin(angles)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    R = Rz @ Ry @ Rx
+    S = np.diag(scales)
+    A = R @ S
+
+    for d in range(n_dims):
+        shifted = coords[d] - centre[d]
+        coords[d] = (
+            sum(A[d, j] * (coords[j] - centre[j]) if j != d else A[d, d] * shifted for j in range(n_dims)) + centre[d]
+        )
+
+    # ── Apply with nearest-neighbour ──────────────────────────────────────
+    deformed = map_coordinates(seg, coords, order=0, mode="nearest")
+    return deformed.astype(seg.dtype)
+
+
+def _builtin_synthesize_one(seg_path, out_path, seed=0):
+    """Label-to-image synthesis following the lab2im/SynthSeg approach.
+
+    Pipeline (matches lab2im):
+      1. Random elastic + affine deformation of the label map
+      2. GMM sampling: per-voxel intensity = N(mean[label], std[label])
+         with bilateral consistency and tissue-class contrast guarantees
+      3. Gaussian blur (simulates acquisition PSF)
+      4. Multiplicative bias field
+      5. Rician noise
+      6. Intensity normalisation
+    """
+    from scipy.ndimage import gaussian_filter, zoom
 
     img = nib.load(seg_path)
     seg = np.asarray(img.dataobj).astype(np.int32)
-    shape = seg.shape
     rng = np.random.default_rng(seed)
 
     label_set = detect_label_set(seg)
@@ -270,95 +319,87 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0):
         for lbl in lbls:
             label_to_tissue[lbl] = tissue
 
-    # ── Step 1: Sample tissue-class base intensities with guaranteed contrast ─
-    # Pick 3 anchor values with minimum separation, then jitter per-structure.
-    anchors = sorted(rng.uniform(30, 230, size=3))
-    # Enforce minimum 40-unit gaps between CSF / GM / WM
-    anchors[1] = max(anchors[1], anchors[0] + 40)
-    anchors[2] = max(anchors[2], anchors[1] + 40)
-    # Randomly assign ordering: T1-like (WM>GM>CSF) or T2-like (CSF>GM>WM)
-    # or intermediate. The random anchor order already gives variety.
-    if rng.random() < 0.5:
-        anchors = anchors[::-1]  # flip → T2-like contrast
+    # ── 1. Deform label map ───────────────────────────────────────────────
+    seg_d = _deform_label_map(seg, rng)
+    shape = seg_d.shape
 
-    tissue_base = {
+    # ── 2. Sample GMM parameters ──────────────────────────────────────────
+    # Three tissue anchors with guaranteed separation
+    anchors = sorted(rng.uniform(40, 220, size=3))
+    anchors[1] = max(anchors[1], anchors[0] + 35)
+    anchors[2] = max(anchors[2], anchors[1] + 35)
+    if rng.random() < 0.5:
+        anchors = anchors[::-1]
+
+    tissue_mean = {
         "csf": anchors[0],
-        "cortical_gm": anchors[1] + rng.normal(0, 8),
-        "subcortical_gm": anchors[1] + rng.normal(0, 8),
-        "cerebellum_gm": anchors[1] + rng.normal(0, 8),
-        "wm": anchors[2] + rng.normal(0, 8),
-        "brainstem": anchors[1] * 0.5 + anchors[2] * 0.5 + rng.normal(0, 5),
+        "cortical_gm": anchors[1] + rng.normal(0, 10),
+        "subcortical_gm": anchors[1] + rng.normal(0, 10),
+        "cerebellum_gm": anchors[1] + rng.normal(0, 10),
+        "wm": anchors[2] + rng.normal(0, 10),
+        "brainstem": 0.5 * anchors[1] + 0.5 * anchors[2] + rng.normal(0, 5),
         "vessel": anchors[0] + rng.normal(0, 5),
         "other": anchors[1] + rng.normal(0, 10),
     }
 
-    # ── Step 2: Per-label intensities (bilateral-consistent + small jitter) ───
-    labels = [l for l in np.unique(seg) if l != 0]
-    canonical_intensity = {}
-    intensity_map = {}
+    # Per-label means: bilateral pairs share the same mean, small jitter
+    # between structures within a tissue class.
+    labels = [l for l in np.unique(seg_d) if l != 0]
+    canonical_mean = {}
+    mean_map = {}
+    std_map = {}
 
     for lbl in labels:
         canon = bilateral.get(lbl, lbl)
-        if canon not in canonical_intensity:
+        if canon not in canonical_mean:
             tissue = label_to_tissue.get(lbl, "other")
-            base = tissue_base.get(tissue, 120.0)
-            canonical_intensity[canon] = base + rng.normal(0, 4)
-        intensity_map[lbl] = canonical_intensity[canon]
+            base = tissue_mean.get(tissue, 120.0)
+            canonical_mean[canon] = base + rng.normal(0, 5)
+        mean_map[lbl] = canonical_mean[canon]
+        # Per-label std: sampled from a prior range (lab2im uses U(5, 25))
+        std_map[lbl] = rng.uniform(5, 25)
 
-    # ── Step 3: Render hard intensity image with per-voxel texture ────────────
-    hard = np.zeros(shape, dtype=np.float32)
+    # ── 3. GMM sampling: synth[v] = N(mean[label[v]], std[label[v]]) ─────
+    synth = np.zeros(shape, dtype=np.float32)
     for lbl in labels:
-        mask = seg == lbl
-        mean_i = intensity_map[lbl]
-        hard[mask] = rng.normal(mean_i, max(abs(mean_i) * 0.03, 1.0), size=int(mask.sum()))
+        mask = seg_d == lbl
+        n = int(mask.sum())
+        if n > 0:
+            synth[mask] = rng.normal(mean_map[lbl], std_map[lbl], size=n)
 
-    # ── Step 4: Partial volume at tissue boundaries ───────────────────────────
-    # Detect boundary voxels (where label changes in 3x3x3 neighbourhood)
-    seg_max = maximum_filter(seg, size=3)
-    seg_min = minimum_filter(seg, size=3)
-    boundary = (seg_max != seg_min).astype(np.float32)
-    # Expand boundary into a soft transition zone
-    pv_sigma = rng.uniform(0.8, 1.3)
-    boundary_soft = gaussian_filter(boundary, sigma=pv_sigma)
-    boundary_soft = np.clip(boundary_soft * 2.5, 0, 1)
+    # ── 4. Gaussian blur (acquisition PSF / slice profile) ───────────────
+    blur_sigma = [rng.uniform(0.5, 1.15) for _ in range(3)]
+    synth = gaussian_filter(synth, sigma=blur_sigma)
 
-    # Smoothed version for blending at boundaries
-    smooth = gaussian_filter(hard, sigma=pv_sigma * 1.5)
-
-    # Interior stays sharp, boundaries get partial volume
-    synth = hard * (1 - boundary_soft) + smooth * boundary_soft
-
-    # ── Step 5: Smooth spatial intensity gradient (tissue inhomogeneity) ──────
-    texture = rng.normal(0, 1, size=shape).astype(np.float32)
-    texture = gaussian_filter(texture, sigma=4.0) * 6
-    synth += texture
-
-    # ── Step 6: Multiplicative bias field ─────────────────────────────────────
-    n_control = 4
-    bias_coeff = rng.normal(0, 0.04, size=(3, n_control, n_control, n_control))
-    bias_low = np.zeros(shape, dtype=np.float32)
+    # ── 5. Multiplicative bias field ─────────────────────────────────────
+    n_ctrl = 4
+    bias_coeff = rng.normal(0, 0.025, size=(3, n_ctrl, n_ctrl, n_ctrl))
+    bias_field = np.zeros(shape, dtype=np.float32)
     for ax in range(3):
-        zoomed = zoom(bias_coeff[ax], np.array(shape) / n_control, order=3)
-        if zoomed.shape != tuple(shape):
-            zoomed = zoomed[: shape[0], : shape[1], : shape[2]]
-        bias_low += zoomed
-    synth *= np.exp(bias_low)
+        z = zoom(bias_coeff[ax], np.array(shape) / n_ctrl, order=3)
+        bias_field += z[: shape[0], : shape[1], : shape[2]]
+    synth *= np.exp(bias_field)
 
-    # ── Step 7: Acquisition blur (simulate finite slice thickness) ────────────
-    acq_sigma = [rng.uniform(0.3, 0.7) for _ in range(3)]
-    synth = gaussian_filter(synth, sigma=acq_sigma)
+    # ── 6. Gamma augmentation (contrast non-linearity, lab2im std=0.2) ───
+    synth = np.clip(synth, 0, None)
+    fg = synth[seg_d > 0]
+    if fg.size > 0 and fg.max() > 0:
+        synth = synth / fg.max()
+        gamma = np.exp(rng.normal(0, 0.2))
+        synth = np.power(synth, gamma)
+        synth *= 300.0  # lab2im clipping range
 
-    # ── Step 8: Rician noise ──────────────────────────────────────────────────
-    noise_std = rng.uniform(1.5, 4.0)
+    # ── 7. Rician noise ──────────────────────────────────────────────────
+    noise_std = rng.uniform(2, 8)
     noise_r = rng.normal(0, noise_std, size=shape)
     noise_i = rng.normal(0, noise_std, size=shape)
     synth = np.sqrt(np.maximum(synth + noise_r, 0) ** 2 + noise_i**2)
 
-    # ── Step 9: Normalize and mask background ─────────────────────────────────
-    brain_mask = seg > 0
+    # ── 8. Normalise to [0, 255], zero background ────────────────────────
+    brain_mask = seg_d > 0
     synth[~brain_mask] = 0
     if brain_mask.any():
-        p99 = np.percentile(synth[brain_mask], 99)
+        p99 = np.percentile(synth[brain_mask], 99.5)
         if p99 > 0:
             synth = synth / p99 * 255.0
     synth = np.clip(synth, 0, 255).astype(np.float32)
