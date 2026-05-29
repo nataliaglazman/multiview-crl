@@ -619,6 +619,8 @@ def sample_from_scm(scm, size, latent_dim, noise_scale, nonlinearity, device):
             signal = parent_vals @ w
             if nonlinearity == "leaky_relu":
                 signal = torch.nn.functional.leaky_relu(signal, 0.2)
+            elif nonlinearity == "tanh":
+                signal = torch.tanh(signal)
             z[:, d] = signal + noise_scale * noise[:, d]
     return z
 

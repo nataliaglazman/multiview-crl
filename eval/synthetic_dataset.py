@@ -58,6 +58,8 @@ def sample_content_from_scm(scm, generator, noise_scale=0.4, nonlinearity="leaky
             signal = (parent_vals * w).sum()
             if nonlinearity == "leaky_relu":
                 signal = F.leaky_relu(signal, 0.2)
+            elif nonlinearity == "tanh":
+                signal = torch.tanh(signal)
             z[d] = signal + noise_scale * noise[d]
     return z
 

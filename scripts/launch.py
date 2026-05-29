@@ -291,6 +291,7 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
             f"#SBATCH --gres={slurm.get('gres', 'gpu:1')}",
             f"#SBATCH --nodes={slurm.get('nodes', 1)}",
             f"#SBATCH --mem={slurm.get('mem', '64G')}",
+            f"#SBATCH --cpus-per-task={slurm.get('cpus_per_task', 8)}",
             "",
             "# -- Software & Environment Setup --",
             "module load anaconda3/2022.10-gcc-13.2.0",
