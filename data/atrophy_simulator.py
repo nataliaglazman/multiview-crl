@@ -154,6 +154,110 @@ def remap_muse_to_freesurfer(seg):
     return out
 
 
+# ── Bilateral pairing (for intensity-consistent synthesis) ────────────────────
+
+# Bilateral subcortical pairs: (right, left) in MUSE convention.
+_MUSE_BILATERAL_PAIRS = [
+    (23, 30),  # accumbens
+    (31, 32),  # amygdala
+    (36, 37),  # caudate
+    (38, 39),  # cerebellum exterior
+    (40, 41),  # cerebellum WM
+    (42, 43),  # cerebral exterior
+    (47, 48),  # hippocampus
+    (49, 50),  # inf lat ventricle
+    (51, 52),  # lateral ventricle
+    (55, 56),  # pallidum
+    (57, 58),  # putamen
+    (59, 60),  # thalamus
+    (61, 62),  # ventral DC
+    (63, 64),  # vessel
+    (75, 76),  # basal forebrain
+    (81, 82),  # frontal WM
+    (83, 84),  # occipital WM
+    (85, 86),  # parietal WM
+    (87, 88),  # temporal WM
+    (89, 90),  # fornix
+    (91, 92),  # anterior internal capsule
+    (93, 94),  # posterior internal capsule
+]
+# Cortical ROIs: even = right, odd = left, consecutive pairs
+_MUSE_BILATERAL_PAIRS += [(i, i + 1) for i in range(100, 208, 2)]
+
+_FS_BILATERAL_PAIRS = [
+    (4, 43),  # lateral ventricle
+    (5, 44),  # inf lat ventricle
+    (2, 41),  # cerebral WM
+    (3, 42),  # cerebral cortex
+    (7, 46),  # cerebellum WM
+    (8, 47),  # cerebellum cortex
+    (10, 49),  # thalamus
+    (11, 50),  # caudate
+    (12, 51),  # putamen
+    (13, 52),  # pallidum
+    (17, 53),  # hippocampus
+    (18, 54),  # amygdala
+    (26, 58),  # accumbens
+    (28, 60),  # ventral DC
+]
+
+
+def get_bilateral_map(label_set="muse"):
+    """Return {label: canonical_label} so bilateral pairs share one key.
+
+    Both labels in a pair map to the same canonical (the lower ID).
+    Unpaired / midline labels map to themselves.
+    """
+    pairs = _MUSE_BILATERAL_PAIRS if label_set == "muse" else _FS_BILATERAL_PAIRS
+    bmap = {}
+    for a, b in pairs:
+        canonical = min(a, b)
+        bmap[a] = canonical
+        bmap[b] = canonical
+    return bmap
+
+
+# ── Tissue class grouping (for realistic intensity ranges) ───────────────────
+
+MUSE_TISSUE_CLASSES = {
+    "csf": [4, 11, 46, 49, 50, 51, 52],
+    "cortical_gm": [42, 43] + list(range(100, 208)),
+    "subcortical_gm": [23, 30, 31, 32, 36, 37, 47, 48, 55, 56, 57, 58, 59, 60, 61, 62, 75, 76],
+    "wm": [40, 41, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95],
+    "cerebellum_gm": [38, 39, 71, 72, 73],
+    "brainstem": [35],
+    "vessel": [63, 64],
+    "other": [69],
+}
+
+FS_TISSUE_CLASSES = {
+    "csf": [4, 5, 14, 15, 24, 43, 44],
+    "cortical_gm": [3, 42],
+    "subcortical_gm": [10, 11, 12, 13, 17, 18, 26, 28, 49, 50, 51, 52, 53, 54, 58, 60],
+    "wm": [2, 7, 41, 46],
+    "cerebellum_gm": [8, 47],
+    "brainstem": [16],
+}
+
+# Intensity ranges per tissue class — (min_mean, max_mean).
+# View-to-view variation comes from sampling different means within these
+# ranges on each call, naturally producing T1-like vs T2-like contrast.
+TISSUE_INTENSITY_RANGES = {
+    "csf": (10, 80),
+    "cortical_gm": (90, 170),
+    "subcortical_gm": (100, 180),
+    "wm": (140, 240),
+    "cerebellum_gm": (90, 170),
+    "brainstem": (110, 190),
+    "vessel": (20, 90),
+    "other": (50, 150),
+}
+
+
+def get_tissue_classes(label_set="muse"):
+    return MUSE_TISSUE_CLASSES if label_set == "muse" else FS_TISSUE_CLASSES
+
+
 # ── Structure configs ─────────────────────────────────────────────────────────
 
 
