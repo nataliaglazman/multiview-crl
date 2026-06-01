@@ -76,6 +76,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from data.atrophy_simulator import (
+    CONTRAST_PRIORS,
     detect_label_set,
     get_bilateral_map,
     get_tissue_classes,
@@ -291,7 +292,7 @@ def _deform_label_map(seg, rng, nonlin_std=3.0, nonlin_scale=0.0625, scaling_std
     return deformed.astype(seg.dtype)
 
 
-def _builtin_synthesize_one(seg_path, out_path, seed=0):
+def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
     """Label-to-image synthesis following the lab2im/SynthSeg approach.
 
     Pipeline (matches lab2im):
@@ -302,6 +303,14 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0):
       4. Multiplicative bias field
       5. Rician noise
       6. Intensity normalisation
+
+    Parameters
+    ----------
+    contrast : str or None
+        None  — fully random contrast (SynthSeg-style domain randomization).
+        't1'  — T1-weighted priors (WM bright, GM mid, CSF dark).
+        't2'  — T2-weighted priors (CSF bright, GM mid, WM dark).
+        'flair' — FLAIR priors (CSF suppressed, GM/WM bright).
     """
     from scipy.ndimage import gaussian_filter, zoom
 
@@ -324,23 +333,29 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0):
     shape = seg_d.shape
 
     # ── 2. Sample GMM parameters ──────────────────────────────────────────
-    # Three tissue anchors with guaranteed separation
-    anchors = sorted(rng.uniform(40, 220, size=3))
-    anchors[1] = max(anchors[1], anchors[0] + 35)
-    anchors[2] = max(anchors[2], anchors[1] + 35)
-    if rng.random() < 0.5:
-        anchors = anchors[::-1]
-
-    tissue_mean = {
-        "csf": anchors[0],
-        "cortical_gm": anchors[1] + rng.normal(0, 10),
-        "subcortical_gm": anchors[1] + rng.normal(0, 10),
-        "cerebellum_gm": anchors[1] + rng.normal(0, 10),
-        "wm": anchors[2] + rng.normal(0, 10),
-        "brainstem": 0.5 * anchors[1] + 0.5 * anchors[2] + rng.normal(0, 5),
-        "vessel": anchors[0] + rng.normal(0, 5),
-        "other": anchors[1] + rng.normal(0, 10),
-    }
+    if contrast is not None and contrast in CONTRAST_PRIORS:
+        # Contrast-specific: sample from N(prior_mean, prior_std) per tissue
+        priors = CONTRAST_PRIORS[contrast]
+        tissue_mean = {}
+        for tissue, (mu, sigma) in priors.items():
+            tissue_mean[tissue] = rng.normal(mu, sigma)
+    else:
+        # Fully random: three anchors with guaranteed separation
+        anchors = sorted(rng.uniform(40, 220, size=3))
+        anchors[1] = max(anchors[1], anchors[0] + 35)
+        anchors[2] = max(anchors[2], anchors[1] + 35)
+        if rng.random() < 0.5:
+            anchors = anchors[::-1]
+        tissue_mean = {
+            "csf": anchors[0],
+            "cortical_gm": anchors[1] + rng.normal(0, 10),
+            "subcortical_gm": anchors[1] + rng.normal(0, 10),
+            "cerebellum_gm": anchors[1] + rng.normal(0, 10),
+            "wm": anchors[2] + rng.normal(0, 10),
+            "brainstem": 0.5 * anchors[1] + 0.5 * anchors[2] + rng.normal(0, 5),
+            "vessel": anchors[0] + rng.normal(0, 5),
+            "other": anchors[1] + rng.normal(0, 10),
+        }
 
     # Per-label means: bilateral pairs share the same mean, small jitter
     # between structures within a tissue class.
@@ -410,9 +425,24 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0):
     return out_path
 
 
-def synthesize_builtin(seg_path, t1_path, t2_path, seed=42):
-    _builtin_synthesize_one(seg_path, t1_path, seed=seed)
-    _builtin_synthesize_one(seg_path, t2_path, seed=seed + 1_000_000)
+def synthesize_builtin(seg_path, t1_path, t2_path, seed=42, contrast_mode="paired"):
+    """Generate a paired T1/T2 from the same segmentation.
+
+    Parameters
+    ----------
+    contrast_mode : str
+        'paired'  — view 1 uses T1 priors, view 2 uses FLAIR priors.
+                    The style axis is meaningful: it captures real T1-vs-FLAIR
+                    contrast differences. Best for content/style disentanglement.
+        'random'  — both views use fully random contrast (SynthSeg-style).
+                    Maximum style diversity, but the style axis is unstructured.
+    """
+    if contrast_mode == "paired":
+        _builtin_synthesize_one(seg_path, t1_path, seed=seed, contrast="t1")
+        _builtin_synthesize_one(seg_path, t2_path, seed=seed + 1_000_000, contrast="flair")
+    else:
+        _builtin_synthesize_one(seg_path, t1_path, seed=seed, contrast=None)
+        _builtin_synthesize_one(seg_path, t2_path, seed=seed + 1_000_000, contrast=None)
 
 
 def synthesize_synthseg(seg_path, t1_path, t2_path, synthseg_script, seed=42):
@@ -463,6 +493,7 @@ def _process_subject(args_tuple):
         base_seed,
         label_set,
         remap_to_fs,
+        contrast_mode,
     ) = args_tuple
 
     sample_id = f"{subject_id}_alpha{alpha:.2f}"
@@ -500,7 +531,7 @@ def _process_subject(args_tuple):
     seed = base_seed + hash(sample_id) % (2**31)
 
     if synthesizer == "builtin":
-        synthesize_builtin(synth_seg_path, t1_path, t2_path, seed=seed)
+        synthesize_builtin(synth_seg_path, t1_path, t2_path, seed=seed, contrast_mode=contrast_mode)
     elif synthesizer == "synthseg":
         synthesize_synthseg(synth_seg_path, t1_path, t2_path, synthseg_script, seed=seed)
     elif synthesizer == "lab2im":
@@ -523,6 +554,7 @@ def generate_dataset(
     synthseg_script=None,
     label_set=None,
     remap_to_fs=False,
+    contrast_mode="paired",
     wmh_fraction=0.0,
     smooth_sigma=0.6,
     seed=42,
@@ -567,6 +599,7 @@ def generate_dataset(
                     seed,
                     label_set,
                     remap_to_fs,
+                    contrast_mode,
                 )
             )
 
@@ -698,6 +731,16 @@ def main():
         "MUSE's 152 ROIs give better cortical intensity variation than FS's ~30.",
     )
     parser.add_argument(
+        "--contrast-mode",
+        choices=["paired", "random"],
+        default="paired",
+        help="Contrast mode for the builtin synthesizer. "
+        "'paired' (default): view 1 = T1 priors, view 2 = FLAIR priors — "
+        "the style axis captures real modality contrast differences. "
+        "'random': both views get fully random SynthSeg-style contrast — "
+        "maximum diversity but unstructured style.",
+    )
+    parser.add_argument(
         "--remap-groups-by-alpha",
         action="store_true",
         help="Override diagnostic group based on alpha: [0, 0.3)->CN, [0.3, 0.7)->MCI, [0.7, 1.01)->AD.",
@@ -718,6 +761,7 @@ def main():
         synthseg_script=args.synthseg_script,
         label_set=args.label_set,
         remap_to_fs=args.remap_to_fs,
+        contrast_mode=args.contrast_mode,
         wmh_fraction=args.wmh_fraction,
         smooth_sigma=args.smooth_sigma,
         seed=args.seed,

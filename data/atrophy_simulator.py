@@ -240,8 +240,7 @@ FS_TISSUE_CLASSES = {
 }
 
 # Intensity ranges per tissue class — (min_mean, max_mean).
-# View-to-view variation comes from sampling different means within these
-# ranges on each call, naturally producing T1-like vs T2-like contrast.
+# Used when contrast=None (fully random, SynthSeg-style domain randomization).
 TISSUE_INTENSITY_RANGES = {
     "csf": (10, 80),
     "cortical_gm": (90, 170),
@@ -251,6 +250,46 @@ TISSUE_INTENSITY_RANGES = {
     "brainstem": (110, 190),
     "vessel": (20, 90),
     "other": (50, 150),
+}
+
+# ── Contrast-specific priors (mean, std_of_mean) ─────────────────────────────
+# Each call samples tissue_mean ~ N(prior_mean, prior_std), so images vary
+# across subjects while maintaining the characteristic contrast ordering.
+
+CONTRAST_PRIORS = {
+    # T1-weighted: WM bright, GM intermediate, CSF dark
+    "t1": {
+        "csf": (25, 8),
+        "cortical_gm": (105, 12),
+        "subcortical_gm": (115, 10),
+        "wm": (175, 15),
+        "cerebellum_gm": (100, 10),
+        "brainstem": (140, 10),
+        "vessel": (30, 10),
+        "other": (90, 15),
+    },
+    # T2-weighted: CSF bright, GM intermediate, WM dark
+    "t2": {
+        "csf": (210, 15),
+        "cortical_gm": (120, 12),
+        "subcortical_gm": (110, 10),
+        "wm": (75, 12),
+        "cerebellum_gm": (115, 10),
+        "brainstem": (90, 10),
+        "vessel": (200, 15),
+        "other": (100, 15),
+    },
+    # FLAIR: CSF suppressed (dark), GM/WM bright, WM lesions hyperintense
+    "flair": {
+        "csf": (20, 8),
+        "cortical_gm": (130, 12),
+        "subcortical_gm": (120, 10),
+        "wm": (160, 15),
+        "cerebellum_gm": (125, 10),
+        "brainstem": (140, 10),
+        "vessel": (25, 10),
+        "other": (110, 15),
+    },
 }
 
 

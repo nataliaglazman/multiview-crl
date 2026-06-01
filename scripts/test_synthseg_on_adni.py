@@ -176,8 +176,8 @@ def process_subject(subject_id, seg_path, out_dir, alphas, wmh_fraction, smooth_
         t1_path = os.path.join(subj_dir, f"{tag}_T1.nii.gz")
         t2_path = os.path.join(subj_dir, f"{tag}_T2.nii.gz")
         s = seed + hash(f"{subject_id}_{tag}") % (2**31)
-        _builtin_synthesize_one(seg_out_path, t1_path, seed=s)
-        _builtin_synthesize_one(seg_out_path, t2_path, seed=s + 1_000_000)
+        _builtin_synthesize_one(seg_out_path, t1_path, seed=s, contrast="t1")
+        _builtin_synthesize_one(seg_out_path, t2_path, seed=s + 1_000_000, contrast="flair")
 
         t1 = nib.load(t1_path).get_fdata()
         t2 = nib.load(t2_path).get_fdata()
