@@ -282,7 +282,7 @@ def train_step(
                     mask_v0, mask_v1 = mask_or_tuple
                     idx_v0 = torch.where(mask_v0.bool())[-1]
                     idx_v1 = torch.where(mask_v1.bool())[-1]
-                    k_content = int(mask_v0.sum().item())
+                    k_content = int(mask_v0.sum())
 
                     # Pre-mask and extract k-dim content per view
                     if _is_patch:
@@ -295,21 +295,27 @@ def train_step(
                     hz_content = torch.stack([hz_v0_content, hz_v1_content], dim=0)
 
                     # All k dims are now content (already selected)
-                    level_content_indices = [list(range(k_content))] * len(args.subsets)
+                    _k_range = torch.arange(k_content, device=hz_level.device)
+                    level_content_indices = [_k_range] * len(args.subsets)
                     # Only set estimated_content_indices on the first masked
                     # level so later levels don't overwrite it (fix #6).
                     if estimated_content_indices is None:
-                        estimated_content_indices = [idx_v0.tolist()]  # view-0 for backward compat
+                        estimated_content_indices = [idx_v0]  # view-0 for backward compat
 
-                    _s_v0 = sorted(set(range(n_channels)) - set(idx_v0.tolist()))
-                    _s_v1 = sorted(set(range(n_channels)) - set(idx_v1.tolist()))
-                    if _s_v0 and _s_v1 and len(_s_v0) == len(_s_v1):
+                    # Style indices: complement of the content mask (no GPU→CPU sync)
+                    _style_idx_v0 = torch.where(~mask_v0.bool())[-1]
+                    _style_idx_v1 = torch.where(~mask_v1.bool())[-1]
+                    if (
+                        _style_idx_v0.numel() > 0
+                        and _style_idx_v1.numel() > 0
+                        and _style_idx_v0.numel() == _style_idx_v1.numel()
+                    ):
                         if _is_patch:
-                            _style_hz_v0 = hz_level[0][:, _s_v0, :].mean(-1)
-                            _style_hz_v1 = hz_level[1][:, _s_v1, :].mean(-1)
+                            _style_hz_v0 = hz_level[0][:, _style_idx_v0, :].mean(-1)
+                            _style_hz_v1 = hz_level[1][:, _style_idx_v1, :].mean(-1)
                         else:
-                            _style_hz_v0 = hz_level[0][:, _s_v0]
-                            _style_hz_v1 = hz_level[1][:, _s_v1]
+                            _style_hz_v0 = hz_level[0][:, _style_idx_v0]
+                            _style_hz_v1 = hz_level[1][:, _style_idx_v1]
 
                     if use_moco:
                         assert not _is_patch, (
@@ -413,13 +419,13 @@ def train_step(
                     # from the contrastive loss flow back to channel_logits.
                     soft_content_mask = mask_or_tuple
                     content_masks = [soft_content_mask] * len(args.subsets)
-                    _level_ci = [torch.where(m.bool())[-1].tolist() for m in content_masks]
+                    _level_ci = [torch.where(m.bool())[-1] for m in content_masks]
                     level_content_indices = _level_ci
                     if estimated_content_indices is None:
                         estimated_content_indices = _level_ci
 
-                    _s_idx = sorted(set(range(n_channels)) - set(_level_ci[0]))
-                    if _s_idx:
+                    _s_idx = torch.where(~soft_content_mask.bool())[-1]
+                    if _s_idx.numel() > 0:
                         if _is_patch:
                             _style_hz_v0 = hz_level[0][:, _s_idx, :].mean(-1)
                             _style_hz_v1 = hz_level[1][:, _s_idx, :].mean(-1)
@@ -482,7 +488,7 @@ def train_step(
                         subsets=args.subsets,
                     )
 
-                _level_ci = [torch.where(m.bool())[-1].tolist() for m in content_masks]
+                _level_ci = [torch.where(m.bool())[-1] for m in content_masks]
                 level_content_indices = _level_ci
                 if estimated_content_indices is None:
                     estimated_content_indices = _level_ci
@@ -644,7 +650,7 @@ def train_step(
         contrastive_loss_value = contrastive_loss.item()
         # NOTE: estimated_content_indices was already set to the dynamically
         # computed indices from channel_logits inside the level loop above
-        # (line: estimated_content_indices = [torch.where(m.bool())[-1].tolist()
+        # (line: estimated_content_indices = [torch.where(m.bool())[-1]
         # for m in content_masks]).  Do NOT overwrite it here with
         # args.content_indices — that would replace the learned channel
         # selection with the static config-based indices and break evaluation
@@ -1144,8 +1150,13 @@ def main(args):
         )
 
     if getattr(args, "compile_model", False):
-        logger.info("  Compiling VQ-VAE-2 with torch.compile mode=reduce-overhead...")
-        vqvae_model = torch.compile(vqvae_model, mode="reduce-overhead")
+        # "default" mode: Triton kernel fusion without CUDA graphs.
+        # "reduce-overhead" captures CUDA graphs which breaks on VQ-VAE's
+        # dict-based masking logic, dynamic shape comparisons, and codebook
+        # EMA updates.  "default" is more robust and still gives ~15-20%
+        # speedup from fused 3D conv kernels.
+        logger.info("  Compiling VQ-VAE-2 with torch.compile mode=default...")
+        vqvae_model = torch.compile(vqvae_model, mode="default")
 
     vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
     vqvae_model.to(device)

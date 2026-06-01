@@ -164,7 +164,12 @@ def get_data(
                     if len(args.subsets) == 1:
                         rdict[f"hz_{m}_subsets"][s].append(hz_m)
                     else:
-                        rdict[f"hz_{m}_subsets"][s].append(hz_m[..., estimated_content_indices[s_id]])
+                        _ci = estimated_content_indices[s_id]
+                        # Content indices may be a torch.Tensor (compile-friendly)
+                        # or a plain list; numpy needs a list/ndarray for indexing.
+                        if isinstance(_ci, torch.Tensor):
+                            _ci = _ci.cpu().numpy()
+                        rdict[f"hz_{m}_subsets"][s].append(hz_m[..., _ci])
 
             del data
             rdict["content_indices"] += [estimated_content_indices]

@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_multilevel_patches.yaml
-# Generated at: 2026-06-01T10:53:33Z
-# Git SHA: 30ff967
+# Generated at: 2026-06-01T20:43:52Z
+# Git SHA: cddf6b8
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-multilevel-patches
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -50,6 +50,8 @@ conda activate "${CONDA_ENV_NAME}"
     --cache-dataset \
     --cache-dir /scratch/users/k24058220/cache/multiview \
     --cb-reset-threshold 5 \
+    --channels-last \
+    --compile-model \
     --content-dim 128 \
     --content-ratios 0.5 0.5 0.5 \
     --content-style-levels 0 1 2 \

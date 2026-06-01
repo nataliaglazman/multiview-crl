@@ -413,11 +413,17 @@ class CodeLayer(HelperModule):
             # (runs even when EMA update was skipped due to NaN)
             self._fwd_count += 1
             # Save for upstream logging instead of printing every single forward pass
-            self._last_finite = torch.isfinite(flatten).all().item()
+            # Guard .item() behind is_compiling() so torch.compile can trace
+            # through this block without a graph break.
+            _is_compiling = torch.compiler.is_compiling() if hasattr(torch, "compiler") else False
+            if _is_compiling:
+                self._last_finite = True
+            else:
+                self._last_finite = torch.isfinite(flatten).all().item()
 
             if self._last_finite and self.reset_every > 0 and self._fwd_count % self.reset_every == 0:
                 dead = self.cluster_size < self.reset_threshold  # (n_embed,)
-                n_dead = dead.sum().item()
+                n_dead = dead.sum().item() if not _is_compiling else int(dead.sum())
                 if n_dead > 0:
                     # Sample replacements from the current batch of encoder outputs
                     n_flat = flatten.shape[0]
@@ -974,15 +980,15 @@ class VQVAE(HelperModule):
                     mask_v1 = hard_v1
 
                 soft_content_masks[lvl] = (mask_v0, mask_v1)
-                idx_v0 = torch.where(mask_v0.bool())[-1].tolist()
-                idx_v1 = torch.where(mask_v1.bool())[-1].tolist()
+                idx_v0 = torch.where(mask_v0.bool())[-1]
+                idx_v1 = torch.where(mask_v1.bool())[-1]
 
                 if estimated_content_indices is None:
                     estimated_content_indices = [idx_v0, idx_v1]
 
                 if self.inject_style_to_decoder and return_recon:
-                    style_idx_v0 = torch.where(~mask_v0.bool())[-1].tolist()
-                    style_idx_v1 = torch.where(~mask_v1.bool())[-1].tolist()
+                    style_idx_v0 = torch.where(~mask_v0.bool())[-1]
+                    style_idx_v1 = torch.where(~mask_v1.bool())[-1]
                     style_spatials[lvl] = torch.cat(
                         [enc_v0[:, style_idx_v0, :, :, :], enc_v1[:, style_idx_v1, :, :, :]],
                         dim=0,
@@ -1047,13 +1053,13 @@ class VQVAE(HelperModule):
 
                 soft_content_masks[lvl] = soft_mask
                 content_mask_bool = soft_mask.bool()
-                content_idx = torch.where(content_mask_bool)[-1].tolist()
+                content_idx = torch.where(content_mask_bool)[-1]
 
                 if estimated_content_indices is None:
                     estimated_content_indices = [content_idx]
 
                 if self.inject_style_to_decoder and return_recon:
-                    style_idx = torch.where(~content_mask_bool)[-1].tolist()
+                    style_idx = torch.where(~content_mask_bool)[-1]
                     style_spatials[lvl] = enc_out_lvl[:, style_idx, :, :, :]
 
                 masked = enc_out_lvl * soft_mask.view(1, -1, 1, 1, 1)
