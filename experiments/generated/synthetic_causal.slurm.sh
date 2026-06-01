@@ -49,7 +49,7 @@ conda activate "${CONDA_ENV_NAME}"
 "$PYTHON" -m training.main_multimodal \
     --batch-size 32 \
     --channels-last \
-    --compile-model \
+    # --compile-model \
     --content-dim 128 \
     --content-ratios 0.95 \
     --content-style-levels 0 \
