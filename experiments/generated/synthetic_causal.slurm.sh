@@ -3,7 +3,7 @@
 # Generated at: 2026-06-01T20:43:52Z
 # Git SHA: cddf6b8
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random
+#SBATCH --job-name=synthetic-causal-random-new
 #SBATCH --output=/scratch/users/%u/%j.out
 #SBATCH --error=synthetic-causal-random-%j.err
 #SBATCH --partition=gpu
