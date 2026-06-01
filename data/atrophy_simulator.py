@@ -279,16 +279,16 @@ CONTRAST_PRIORS = {
         "vessel": (200, 15),
         "other": (100, 15),
     },
-    # FLAIR: CSF suppressed (dark), GM/WM bright, WM lesions hyperintense
+    # FLAIR: CSF suppressed (dark), WM bright, GM intermediate
     "flair": {
-        "csf": (20, 8),
-        "cortical_gm": (130, 12),
-        "subcortical_gm": (120, 10),
-        "wm": (160, 15),
-        "cerebellum_gm": (125, 10),
-        "brainstem": (140, 10),
-        "vessel": (25, 10),
-        "other": (110, 15),
+        "csf": (15, 6),
+        "cortical_gm": (105, 12),
+        "subcortical_gm": (85, 10),
+        "wm": (175, 15),
+        "cerebellum_gm": (95, 10),
+        "brainstem": (120, 10),
+        "vessel": (20, 8),
+        "other": (90, 15),
     },
 }
 
