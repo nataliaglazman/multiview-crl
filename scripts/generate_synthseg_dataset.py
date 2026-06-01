@@ -264,7 +264,7 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
         't2'  — T2-weighted priors (CSF bright, GM mid, WM dark).
         'flair' — FLAIR priors (CSF suppressed, GM/WM bright).
     """
-    from scipy.ndimage import gaussian_filter, zoom
+    from scipy.ndimage import gaussian_filter
 
     img = nib.load(seg_path)
     seg = np.asarray(img.dataobj).astype(np.int32)
@@ -336,16 +336,7 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
     blur_sigma = [rng.uniform(0.5, 1.15) for _ in range(3)]
     synth = gaussian_filter(synth, sigma=blur_sigma)
 
-    # ── 5. Multiplicative bias field ─────────────────────────────────────
-    n_ctrl = 4
-    bias_coeff = rng.normal(0, 0.025, size=(3, n_ctrl, n_ctrl, n_ctrl))
-    bias_field = np.zeros(shape, dtype=np.float32)
-    for ax in range(3):
-        z = zoom(bias_coeff[ax], np.array(shape) / n_ctrl, order=3)
-        bias_field += z[: shape[0], : shape[1], : shape[2]]
-    synth *= np.exp(bias_field)
-
-    # ── 6. Gamma augmentation (contrast non-linearity, lab2im std=0.2) ───
+    # ── 5. Gamma augmentation (contrast non-linearity, lab2im std=0.2) ───
     synth = np.clip(synth, 0, None)
     fg = synth[seg > 0]
     if fg.size > 0 and fg.max() > 0:
