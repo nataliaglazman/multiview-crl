@@ -124,21 +124,21 @@ def _ensure_nifti_ext(path):
     return linked
 
 
-def find_seg(segir, subject_id):
+def find_seg(seg_dir, subject_id):
     """Locate segmentation for a subject.
 
     Checks (in order): ADNI MUSE download layout, FreeSurfer layout, flat layout.
 
     ADNI MUSE layout on LONI is:
-      <segir>/ADNI/<PTID>/T1_MUSE_segmentation/<date>/<IMAGEUID>[.nii.gz]
+      <seg_dir>/ADNI/<PTID>/T1_MUSE_segmentation/<date>/<IMAGEUID>[.nii.gz]
     We take the most recent date if multiple timepoints exist.
     Files without NIfTI extensions get a symlink so nibabel can load them.
     """
     import glob
 
     # ── ADNI MUSE download layout ─────────────────────────────────────────
-    # <segir>[/ADNI]/<subject>/T1_MUSE_segmentation/<date>/<file>
-    for prefix in [os.path.join(segir, "ADNI", subject_id), os.path.join(segir, subject_id)]:
+    # <seg_dir>[/ADNI]/<subject>/T1_MUSE_segmentation/<date>/<file>
+    for prefix in [os.path.join(seg_dir, "ADNI", subject_id), os.path.join(seg_dir, subject_id)]:
         muse_dir = os.path.join(prefix, "T1_MUSE_segmentation")
         if os.path.isdir(muse_dir):
             # Pick the most recent date subfolder
@@ -169,21 +169,21 @@ def find_seg(segir, subject_id):
 
     # ── FreeSurfer layouts ────────────────────────────────────────────────
     candidates = [
-        os.path.join(segir, subject_id, "mri", "aseg.mgz"),
-        os.path.join(segir, subject_id, "mri", "aseg.nii.gz"),
-        os.path.join(segir, subject_id, "mri", "aparc+aseg.mgz"),
-        os.path.join(segir, subject_id, "mri", "aparc+aseg.nii.gz"),
-        os.path.join(segir, subject_id, "aseg.mgz"),
-        os.path.join(segir, subject_id, "aseg.nii.gz"),
+        os.path.join(seg_dir, subject_id, "mri", "aseg.mgz"),
+        os.path.join(seg_dir, subject_id, "mri", "aseg.nii.gz"),
+        os.path.join(seg_dir, subject_id, "mri", "aparc+aseg.mgz"),
+        os.path.join(seg_dir, subject_id, "mri", "aparc+aseg.nii.gz"),
+        os.path.join(seg_dir, subject_id, "aseg.mgz"),
+        os.path.join(seg_dir, subject_id, "aseg.nii.gz"),
     ]
     # ── Flat / MUSE naming ────────────────────────────────────────────────
     candidates += [
-        os.path.join(segir, subject_id, f"{subject_id}_seg.nii.gz"),
-        os.path.join(segir, subject_id, f"{subject_id}_muse.nii.gz"),
-        os.path.join(segir, f"{subject_id}_seg.nii.gz"),
-        os.path.join(segir, f"{subject_id}_muse.nii.gz"),
-        os.path.join(segir, f"{subject_id}_aseg.nii.gz"),
-        os.path.join(segir, f"{subject_id}.nii.gz"),
+        os.path.join(seg_dir, subject_id, f"{subject_id}_seg.nii.gz"),
+        os.path.join(seg_dir, subject_id, f"{subject_id}_muse.nii.gz"),
+        os.path.join(seg_dir, f"{subject_id}_seg.nii.gz"),
+        os.path.join(seg_dir, f"{subject_id}_muse.nii.gz"),
+        os.path.join(seg_dir, f"{subject_id}_aseg.nii.gz"),
+        os.path.join(seg_dir, f"{subject_id}.nii.gz"),
     ]
     for c in candidates:
         if os.path.exists(c):
@@ -191,28 +191,52 @@ def find_seg(segir, subject_id):
     return None
 
 
-def discover_subjects(segir, adni_labels_csv):
-    """Match ADNI label CSV subjects to segmentation files on disk."""
-    import pandas as pd
+def discover_subjects(seg_dir, adni_labels_csv=None):
+    """Find subjects with segmentation files on disk.
 
-    df = pd.read_csv(adni_labels_csv)
-    assert (
-        "Subject" in df.columns and "Group" in df.columns
-    ), f"Labels CSV must have 'Subject' and 'Group' columns, got: {list(df.columns)}"
+    If adni_labels_csv is provided, match CSV subjects to segmentation files.
+    Otherwise, auto-discover all subjects from the segmentation directory
+    (scans ADNI/<PTID>/ subdirectories and flat files).
+    """
+    if adni_labels_csv is not None:
+        import pandas as pd
 
+        df = pd.read_csv(adni_labels_csv)
+        assert (
+            "Subject" in df.columns and "Group" in df.columns
+        ), f"Labels CSV must have 'Subject' and 'Group' columns, got: {list(df.columns)}"
+
+        found = []
+        missing = []
+        for _, row in df.iterrows():
+            subj = str(row["Subject"])
+            seg_path = find_seg(seg_dir, subj)
+            if seg_path:
+                found.append({"subject": subj, "group": row["Group"], "seg_path": seg_path})
+            else:
+                missing.append(subj)
+
+        logger.info(f"Found segmentations for {len(found)}/{len(found) + len(missing)} subjects")
+        if missing:
+            logger.warning(f"Missing segmentations for {len(missing)} subjects (first 5): {missing[:5]}")
+        return found
+
+    # Auto-discover from directory structure
     found = []
-    missing = []
-    for _, row in df.iterrows():
-        subj = str(row["Subject"])
-        seg_path = find_seg(segir, subj)
-        if seg_path:
-            found.append({"subject": subj, "group": row["Group"], "seg_path": seg_path})
-        else:
-            missing.append(subj)
+    # Check ADNI/<PTID>/ layout
+    adni_dir = os.path.join(seg_dir, "ADNI")
+    scan_dirs = [adni_dir] if os.path.isdir(adni_dir) else [seg_dir]
+    for scan_dir in scan_dirs:
+        if not os.path.isdir(scan_dir):
+            continue
+        for entry in sorted(os.listdir(scan_dir)):
+            if not os.path.isdir(os.path.join(scan_dir, entry)):
+                continue
+            seg_path = find_seg(seg_dir, entry)
+            if seg_path:
+                found.append({"subject": entry, "group": "unknown", "seg_path": seg_path})
 
-    logger.info(f"Found segmentations for {len(found)}/{len(found) + len(missing)} subjects")
-    if missing:
-        logger.warning(f"Missing segmentations for {len(missing)} subjects (first 5): {missing[:5]}")
+    logger.info(f"Auto-discovered {len(found)} subjects from {seg_dir}")
     return found
 
 
@@ -487,10 +511,10 @@ def _process_subject(args_tuple):
 
 
 def generate_dataset(
-    segir,
-    adni_labels_csv,
+    seg_dir,
     out_dir,
     alphas,
+    adni_labels_csv=None,
     synthesizer="builtin",
     synthseg_script=None,
     label_set=None,
@@ -504,7 +528,7 @@ def generate_dataset(
 ):
     os.makedirs(out_dir, exist_ok=True)
 
-    subjects = discover_subjects(segir, adni_labels_csv)
+    subjects = discover_subjects(seg_dir, adni_labels_csv)
     if not subjects:
         logger.error("No subjects found. Check --seg-dir and --adni-labels paths.")
         return None
@@ -597,7 +621,7 @@ def generate_dataset(
     logger.info(f"Labels CSV: {labels_path} ({len(results)} entries)")
 
     manifest = {
-        "segir": segir,
+        "seg_dir": seg_dir,
         "adni_labels_csv": adni_labels_csv,
         "alphas": alphas,
         "synthesizer": synthesizer,
@@ -631,8 +655,9 @@ def main():
     )
     parser.add_argument(
         "--adni-labels",
-        required=True,
-        help="ADNI labels CSV with 'Subject' and 'Group' columns.",
+        default=None,
+        help="ADNI labels CSV with 'Subject' and 'Group' columns. "
+        "If omitted, all subjects are auto-discovered from --seg-dir.",
     )
     parser.add_argument("--out-dir", required=True, help="Output dataset directory.")
     parser.add_argument(
@@ -694,10 +719,10 @@ def main():
         alpha_group_map = {(0, 0.3): "CN", (0.3, 0.7): "MCI", (0.7, 1.01): "AD"}
 
     labels_path = generate_dataset(
-        segir=args.segir,
-        adni_labels_csv=args.adni_labels,
+        seg_dir=args.seg_dir,
         out_dir=args.out_dir,
         alphas=args.alphas,
+        adni_labels_csv=args.adni_labels,
         synthesizer=args.synthesizer,
         synthseg_script=args.synthseg_script,
         label_set=args.label_set,
