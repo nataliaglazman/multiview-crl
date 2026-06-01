@@ -25,21 +25,21 @@ Output structure (directly loadable by MyCustomDataset):
 
 Usage:
   # MUSE segmentations (auto-detected, remapped for SynthSeg):
-  python scripts/generate_synthseg_dataset.py \\
+  python scripts/generate_synthsegataset.py \\
       --seg-dir /data/natalia/ADNI_MUSE_segs \\
       --adni-labels /data/natalia/labels_cleaned_3class.csv \\
       --out-dir /data/natalia/ADNI_synthseg \\
       --alphas 0.0 0.2 0.4 0.6 0.8 1.0
 
   # Explicit label set (skip auto-detection):
-  python scripts/generate_synthseg_dataset.py \\
+  python scripts/generate_synthsegataset.py \\
       --seg-dir /data/natalia/ADNI_MUSE_segs \\
       --adni-labels /data/natalia/labels_cleaned_3class.csv \\
       --out-dir /data/natalia/ADNI_synthseg \\
       --label-set muse
 
   # FreeSurfer segmentations + SynthSeg synthesis:
-  python scripts/generate_synthseg_dataset.py \\
+  python scripts/generate_synthsegataset.py \\
       --seg-dir /data/natalia/ADNI_freesurfer \\
       --adni-labels /data/natalia/labels_cleaned_3class.csv \\
       --out-dir /data/natalia/ADNI_synthseg \\
@@ -48,7 +48,7 @@ Usage:
       --synthseg-script "python /path/to/SynthSeg/scripts/commands/generation.py"
 
   # Test with built-in synthesizer (no SynthSeg needed):
-  python scripts/generate_synthseg_dataset.py \\
+  python scripts/generate_synthsegataset.py \\
       --seg-dir /data/natalia/ADNI_MUSE_segs \\
       --adni-labels /data/natalia/labels_cleaned_3class.csv \\
       --out-dir /data/natalia/ADNI_synthseg \\
@@ -124,21 +124,21 @@ def _ensure_nifti_ext(path):
     return linked
 
 
-def find_seg(seg_dir, subject_id):
+def find_seg(segir, subject_id):
     """Locate segmentation for a subject.
 
     Checks (in order): ADNI MUSE download layout, FreeSurfer layout, flat layout.
 
     ADNI MUSE layout on LONI is:
-      <seg_dir>/ADNI/<PTID>/T1_MUSE_segmentation/<date>/<IMAGEUID>[.nii.gz]
+      <segir>/ADNI/<PTID>/T1_MUSE_segmentation/<date>/<IMAGEUID>[.nii.gz]
     We take the most recent date if multiple timepoints exist.
     Files without NIfTI extensions get a symlink so nibabel can load them.
     """
     import glob
 
     # ── ADNI MUSE download layout ─────────────────────────────────────────
-    # <seg_dir>[/ADNI]/<subject>/T1_MUSE_segmentation/<date>/<file>
-    for prefix in [os.path.join(seg_dir, "ADNI", subject_id), os.path.join(seg_dir, subject_id)]:
+    # <segir>[/ADNI]/<subject>/T1_MUSE_segmentation/<date>/<file>
+    for prefix in [os.path.join(segir, "ADNI", subject_id), os.path.join(segir, subject_id)]:
         muse_dir = os.path.join(prefix, "T1_MUSE_segmentation")
         if os.path.isdir(muse_dir):
             # Pick the most recent date subfolder
@@ -169,21 +169,21 @@ def find_seg(seg_dir, subject_id):
 
     # ── FreeSurfer layouts ────────────────────────────────────────────────
     candidates = [
-        os.path.join(seg_dir, subject_id, "mri", "aseg.mgz"),
-        os.path.join(seg_dir, subject_id, "mri", "aseg.nii.gz"),
-        os.path.join(seg_dir, subject_id, "mri", "aparc+aseg.mgz"),
-        os.path.join(seg_dir, subject_id, "mri", "aparc+aseg.nii.gz"),
-        os.path.join(seg_dir, subject_id, "aseg.mgz"),
-        os.path.join(seg_dir, subject_id, "aseg.nii.gz"),
+        os.path.join(segir, subject_id, "mri", "aseg.mgz"),
+        os.path.join(segir, subject_id, "mri", "aseg.nii.gz"),
+        os.path.join(segir, subject_id, "mri", "aparc+aseg.mgz"),
+        os.path.join(segir, subject_id, "mri", "aparc+aseg.nii.gz"),
+        os.path.join(segir, subject_id, "aseg.mgz"),
+        os.path.join(segir, subject_id, "aseg.nii.gz"),
     ]
     # ── Flat / MUSE naming ────────────────────────────────────────────────
     candidates += [
-        os.path.join(seg_dir, subject_id, f"{subject_id}_seg.nii.gz"),
-        os.path.join(seg_dir, subject_id, f"{subject_id}_muse.nii.gz"),
-        os.path.join(seg_dir, f"{subject_id}_seg.nii.gz"),
-        os.path.join(seg_dir, f"{subject_id}_muse.nii.gz"),
-        os.path.join(seg_dir, f"{subject_id}_aseg.nii.gz"),
-        os.path.join(seg_dir, f"{subject_id}.nii.gz"),
+        os.path.join(segir, subject_id, f"{subject_id}_seg.nii.gz"),
+        os.path.join(segir, subject_id, f"{subject_id}_muse.nii.gz"),
+        os.path.join(segir, f"{subject_id}_seg.nii.gz"),
+        os.path.join(segir, f"{subject_id}_muse.nii.gz"),
+        os.path.join(segir, f"{subject_id}_aseg.nii.gz"),
+        os.path.join(segir, f"{subject_id}.nii.gz"),
     ]
     for c in candidates:
         if os.path.exists(c):
@@ -191,7 +191,7 @@ def find_seg(seg_dir, subject_id):
     return None
 
 
-def discover_subjects(seg_dir, adni_labels_csv):
+def discover_subjects(segir, adni_labels_csv):
     """Match ADNI label CSV subjects to segmentation files on disk."""
     import pandas as pd
 
@@ -204,7 +204,7 @@ def discover_subjects(seg_dir, adni_labels_csv):
     missing = []
     for _, row in df.iterrows():
         subj = str(row["Subject"])
-        seg_path = find_seg(seg_dir, subj)
+        seg_path = find_seg(segir, subj)
         if seg_path:
             found.append({"subject": subj, "group": row["Group"], "seg_path": seg_path})
         else:
@@ -241,68 +241,20 @@ def remap_seg_for_synthseg(seg_path, out_path, label_set):
 # ── Synthesizers ──────────────────────────────────────────────────────────────
 
 
-def _deform_label_map(seg, rng, nonlin_std=3.0, nonlin_scale=0.0625, scaling_std=0.15, rotation_std=10.0):
-    """Random elastic + affine deformation of a label map (nearest-neighbour).
-
-    Follows the lab2im approach:
-      1. Sample a small random SVF and upscale to full resolution
-      2. Build an affine (scaling + rotation)
-      3. Compose and apply with order-0 (nearest) interpolation
-    """
-    from scipy.ndimage import map_coordinates, zoom
-
-    shape = np.array(seg.shape, dtype=np.float64)
-    n_dims = len(shape)
-    centre = (shape - 1) / 2.0
-
-    # ── Elastic displacement field ────────────────────────────────────────
-    small_shape = [max(int(s * nonlin_scale), 4) for s in seg.shape]
-    std = rng.uniform(0, nonlin_std)
-
-    coords = np.mgrid[[slice(0, int(s)) for s in shape]].astype(np.float64)
-    for d in range(n_dims):
-        small_field = rng.normal(0, std, size=small_shape).astype(np.float64)
-        zoom_factors = [shape[i] / small_shape[i] for i in range(n_dims)]
-        disp = zoom(small_field, zoom_factors, order=3)
-        # Handle shape mismatch from zoom rounding
-        slices = tuple(slice(0, int(shape[i])) for i in range(n_dims))
-        coords[d] += disp[slices]
-
-    # ── Random affine (rotation + scaling around centre) ──────────────────
-    angles = rng.normal(0, np.radians(rotation_std), size=3)
-    scales = rng.normal(1.0, scaling_std, size=3)
-
-    cx, cy, cz = np.cos(angles)
-    sx, sy, sz = np.sin(angles)
-    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
-    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
-    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
-    R = Rz @ Ry @ Rx
-    S = np.diag(scales)
-    A = R @ S
-
-    for d in range(n_dims):
-        shifted = coords[d] - centre[d]
-        coords[d] = (
-            sum(A[d, j] * (coords[j] - centre[j]) if j != d else A[d, d] * shifted for j in range(n_dims)) + centre[d]
-        )
-
-    # ── Apply with nearest-neighbour ──────────────────────────────────────
-    deformed = map_coordinates(seg, coords, order=0, mode="nearest")
-    return deformed.astype(seg.dtype)
-
-
 def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
-    """Label-to-image synthesis following the lab2im/SynthSeg approach.
+    """Label-to-image synthesis from a segmentation map.
 
-    Pipeline (matches lab2im):
-      1. Random elastic + affine deformation of the label map
-      2. GMM sampling: per-voxel intensity = N(mean[label], std[label])
+    Pipeline:
+      1. GMM sampling: per-voxel intensity = N(mean[label], std[label])
          with bilateral consistency and tissue-class contrast guarantees
-      3. Gaussian blur (simulates acquisition PSF)
-      4. Multiplicative bias field
-      5. Rician noise
-      6. Intensity normalisation
+      2. Gaussian blur (simulates acquisition PSF)
+      3. Multiplicative bias field
+      4. Rician noise
+      5. Intensity normalisation
+
+    No spatial deformation is applied — the generated data is intended for
+    a pipeline where real images are already registered to a common template,
+    so synthetic data should match that aligned geometry.
 
     Parameters
     ----------
@@ -328,9 +280,7 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
         for lbl in lbls:
             label_to_tissue[lbl] = tissue
 
-    # ── 1. Deform label map ───────────────────────────────────────────────
-    seg_d = _deform_label_map(seg, rng)
-    shape = seg_d.shape
+    shape = seg.shape
 
     # ── 2. Sample GMM parameters ──────────────────────────────────────────
     if contrast is not None and contrast in CONTRAST_PRIORS:
@@ -359,7 +309,7 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
 
     # Per-label means: bilateral pairs share the same mean, small jitter
     # between structures within a tissue class.
-    labels = [l for l in np.unique(seg_d) if l != 0]
+    labels = [l for l in np.unique(seg) if l != 0]
     canonical_mean = {}
     mean_map = {}
     std_map = {}
@@ -377,7 +327,7 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
     # ── 3. GMM sampling: synth[v] = N(mean[label[v]], std[label[v]]) ─────
     synth = np.zeros(shape, dtype=np.float32)
     for lbl in labels:
-        mask = seg_d == lbl
+        mask = seg == lbl
         n = int(mask.sum())
         if n > 0:
             synth[mask] = rng.normal(mean_map[lbl], std_map[lbl], size=n)
@@ -397,7 +347,7 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
 
     # ── 6. Gamma augmentation (contrast non-linearity, lab2im std=0.2) ───
     synth = np.clip(synth, 0, None)
-    fg = synth[seg_d > 0]
+    fg = synth[seg > 0]
     if fg.size > 0 and fg.max() > 0:
         synth = synth / fg.max()
         gamma = np.exp(rng.normal(0, 0.2))
@@ -411,7 +361,7 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
     synth = np.sqrt(np.maximum(synth + noise_r, 0) ** 2 + noise_i**2)
 
     # ── 8. Normalise to [0, 255], zero background ────────────────────────
-    brain_mask = seg_d > 0
+    brain_mask = seg > 0
     synth[~brain_mask] = 0
     if brain_mask.any():
         p99 = np.percentile(synth[brain_mask], 99.5)
@@ -546,7 +496,7 @@ def _process_subject(args_tuple):
 
 
 def generate_dataset(
-    seg_dir,
+    segir,
     adni_labels_csv,
     out_dir,
     alphas,
@@ -563,7 +513,7 @@ def generate_dataset(
 ):
     os.makedirs(out_dir, exist_ok=True)
 
-    subjects = discover_subjects(seg_dir, adni_labels_csv)
+    subjects = discover_subjects(segir, adni_labels_csv)
     if not subjects:
         logger.error("No subjects found. Check --seg-dir and --adni-labels paths.")
         return None
@@ -656,7 +606,7 @@ def generate_dataset(
     logger.info(f"Labels CSV: {labels_path} ({len(results)} entries)")
 
     manifest = {
-        "seg_dir": seg_dir,
+        "segir": segir,
         "adni_labels_csv": adni_labels_csv,
         "alphas": alphas,
         "synthesizer": synthesizer,
@@ -753,7 +703,7 @@ def main():
         alpha_group_map = {(0, 0.3): "CN", (0.3, 0.7): "MCI", (0.7, 1.01): "AD"}
 
     labels_path = generate_dataset(
-        seg_dir=args.seg_dir,
+        segir=args.segir,
         adni_labels_csv=args.adni_labels,
         out_dir=args.out_dir,
         alphas=args.alphas,
