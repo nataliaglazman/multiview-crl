@@ -1150,11 +1150,9 @@ def main(args):
         )
 
     if getattr(args, "compile_model", False):
-        # "default" mode: Triton kernel fusion without CUDA graphs.
-        # "reduce-overhead" captures CUDA graphs which breaks on VQ-VAE's
-        # dict-based masking logic, dynamic shape comparisons, and codebook
-        # EMA updates.  "default" is more robust and still gives ~15-20%
-        # speedup from fused 3D conv kernels.
+        # Fall back to eager for subgraphs that Triton can't handle
+        # (e.g. misaligned-address errors from odd 3D spatial dims).
+        torch._dynamo.config.suppress_errors = True
         logger.info("  Compiling VQ-VAE-2 with torch.compile mode=default...")
         vqvae_model = torch.compile(vqvae_model, mode="default")
 
