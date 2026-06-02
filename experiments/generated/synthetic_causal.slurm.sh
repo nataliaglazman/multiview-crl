@@ -84,7 +84,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-change \
+    --model-id synthetic-causal-random-change-tau \
     --tau 0.2 \
     --total-dim 512 \
     --train-steps 200000 \
