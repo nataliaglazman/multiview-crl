@@ -231,16 +231,36 @@ def save_emergency_checkpoint(
 
 
 def _move_optimizer_to_device(optimizer: torch.optim.Optimizer, device) -> None:
-    """Move optimizer state tensors to *device* and cast floating-point
-    buffers to match parameter dtype so fused AdamW doesn't crash on resume."""
+    """Align restored optimizer state with the live parameters so fused AdamW
+    doesn't crash on resume.
+
+    Fused AdamW requires params, grads, ``exp_avg`` and ``exp_avg_sq`` to share
+    the same dtype, device **and** memory layout. ``load_state_dict`` casts the
+    restored buffers to the parameter dtype/device but preserves their *saved*
+    memory format, so a checkpoint written with a different layout (e.g. before
+    ``--channels-last`` was enabled) leaves the state contiguous while the
+    params are ``channels_last_3d``. Rebuild each per-parameter buffer with
+    ``empty_like`` so it inherits the parameter's exact dtype, device and
+    memory format, then copy the values across.
+    """
     for param, state in optimizer.state.items():
-        target_dtype = param.dtype if isinstance(param, torch.Tensor) else None
+        if not isinstance(param, torch.Tensor):
+            continue
         for k, v in state.items():
-            if isinstance(v, torch.Tensor):
-                v = v.to(device)
-                if target_dtype is not None and v.is_floating_point() and v.dtype != target_dtype:
-                    v = v.to(target_dtype)
-                state[k] = v
+            if not isinstance(v, torch.Tensor):
+                continue
+            if k == "step":
+                # Scalar step counter: fused/capturable AdamW wants it float32
+                # and on the parameter's device.
+                state[k] = v.to(device=param.device, dtype=torch.float32)
+            elif v.shape == param.shape:
+                # exp_avg / exp_avg_sq / max_exp_avg_sq: match the parameter's
+                # dtype, device and memory format exactly.
+                aligned = torch.empty_like(param)
+                aligned.copy_(v)
+                state[k] = aligned
+            else:
+                state[k] = v.to(device=param.device)
 
 
 def _state_dicts_compatible(model: torch.nn.Module, saved_state_dict: dict) -> bool:
