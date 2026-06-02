@@ -1,0 +1,10 @@
+# Baseline experiment on SynthSeg-simulated dataset.
+# 50/50 CN/AD split by hippocampal atrophy (alpha=0.0 vs 0.8).
+# Paired T1 + FLAIR synthesis from ADNI MUSE segmentations.
+
+tag: synthseg-baseline
+
+# ---- Data (override cluster paths) ----
+dataroot: /data/natalia/ADNI_synthseg
+labels_path: /data/natalia/ADNI_synthseg/labels.csv
+masks_dir: null
