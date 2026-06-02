@@ -477,15 +477,33 @@ def _process_subject(args_tuple):
         if seg_path in bad_paths:
             return {"sample_id": sample_id, "group": group, "alpha": alpha, "subject": subject_id, "status": "skipped"}
 
-    # Validate input file before expensive processing
-    try:
-        test_img = nib.load(seg_path)
-        _ = np.asarray(test_img.dataobj).shape
-    except Exception as e:
-        # Record bad input so future runs skip it immediately
-        with open(bad_inputs_file, "a") as f:
-            f.write(seg_path + "\n")
-        raise RuntimeError(f"Corrupted input segmentation {seg_path}: {e}") from e
+    # Validate gzip integrity before nibabel touches the file — truncated
+    # .nii.gz files cause nibabel to hang rather than raise an exception.
+    if seg_path.endswith(".nii.gz") or seg_path.endswith(".gz"):
+        import gzip
+
+        try:
+            with gzip.open(seg_path, "rb") as f:
+                while f.read(65536):
+                    pass
+        except (EOFError, gzip.BadGzipFile, OSError) as e:
+            with open(bad_inputs_file, "a") as f:
+                f.write(seg_path + "\n")
+            raise RuntimeError(f"Truncated gzip: {seg_path}: {e}") from e
+    else:
+        # For uncompressed files, compare file size to header expectation
+        try:
+            hdr = nib.load(seg_path)
+            expected = int(np.prod(hdr.shape)) * hdr.header.get_data_dtype().itemsize
+            actual = os.path.getsize(seg_path)
+            if actual < expected:
+                with open(bad_inputs_file, "a") as f:
+                    f.write(seg_path + "\n")
+                raise RuntimeError(f"Truncated NIfTI: {seg_path}: expected {expected} bytes, got {actual}")
+        except Exception as e:
+            with open(bad_inputs_file, "a") as f:
+                f.write(seg_path + "\n")
+            raise RuntimeError(f"Invalid input: {seg_path}: {e}") from e
 
     seg_out_dir = os.path.join(out_dir, "_segmentations")
     os.makedirs(seg_out_dir, exist_ok=True)
