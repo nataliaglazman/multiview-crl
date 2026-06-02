@@ -231,12 +231,16 @@ def save_emergency_checkpoint(
 
 
 def _move_optimizer_to_device(optimizer: torch.optim.Optimizer, device) -> None:
-    """Move optimizer state tensors to *device* so fused AdamW doesn't crash
-    when checkpoint was saved/loaded on a different device."""
-    for state in optimizer.state.values():
+    """Move optimizer state tensors to *device* and cast floating-point
+    buffers to match parameter dtype so fused AdamW doesn't crash on resume."""
+    for param, state in optimizer.state.items():
+        target_dtype = param.dtype if isinstance(param, torch.Tensor) else None
         for k, v in state.items():
             if isinstance(v, torch.Tensor):
-                state[k] = v.to(device)
+                v = v.to(device)
+                if target_dtype is not None and v.is_floating_point() and v.dtype != target_dtype:
+                    v = v.to(target_dtype)
+                state[k] = v
 
 
 def _state_dicts_compatible(model: torch.nn.Module, saved_state_dict: dict) -> bool:
