@@ -37,7 +37,6 @@ except ImportError:
 
 import numpy as np
 import torch
-import torch._dynamo
 import torch.multiprocessing as _torch_mp
 import torch.nn.functional as F
 
@@ -1151,11 +1150,11 @@ def main(args):
         )
 
     if getattr(args, "compile_model", False):
-        # Triton kernels crash with "misaligned address" on odd 3D spatial
-        # dims.  Use aot_eager: graph-level fusion without Triton codegen.
-        torch._dynamo.config.suppress_errors = True
-        logger.info("  Compiling VQ-VAE-2 with torch.compile backend=aot_eager...")
-        vqvae_model = torch.compile(vqvae_model, backend="aot_eager")
+        logger.warning(
+            "  --compile-model ignored: torch.compile is incompatible with "
+            "3D VQ-VAE (Triton misaligned-address on odd spatial dims, "
+            "aot_eager OOM from graph materialisation). Running eager."
+        )
 
     vqvae_model = torch.nn.DataParallel(vqvae_model, device_ids=device_ids)
     vqvae_model.to(device)

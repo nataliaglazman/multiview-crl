@@ -230,6 +230,15 @@ def save_emergency_checkpoint(
 # ---------------------------------------------------------------------------
 
 
+def _move_optimizer_to_device(optimizer: torch.optim.Optimizer, device) -> None:
+    """Move optimizer state tensors to *device* so fused AdamW doesn't crash
+    when checkpoint was saved/loaded on a different device."""
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device)
+
+
 def _state_dicts_compatible(model: torch.nn.Module, saved_state_dict: dict) -> bool:
     """
     Return True when *saved_state_dict* is compatible with *model*.
@@ -381,6 +390,7 @@ def load_checkpoint(
         # param count changed) — the optimizer will reinitialize cleanly.
         try:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            _move_optimizer_to_device(optimizer, device)
         except (ValueError, KeyError) as exc:
             logger.warning(f"  Optimizer state could not be restored ({exc}); using fresh optimizer.")
         step = checkpoint["step"] + 1
@@ -495,6 +505,7 @@ def load_checkpoint(
         logger.info(f"  Auto-resuming VAE training from checkpoint: {checkpoint_path}")
         try:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            _move_optimizer_to_device(optimizer, device)
         except (ValueError, KeyError) as exc:
             logger.warning(f"  Optimizer state could not be restored ({exc}); using fresh optimizer.")
         step = checkpoint["step"] + 1
