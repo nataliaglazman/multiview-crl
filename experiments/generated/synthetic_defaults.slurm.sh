@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-06-02T17:11:34Z
-# Git SHA: 186f5c0
+# Generated at: 2026-06-02T17:15:26Z
+# Git SHA: 7f970a4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic_defaults
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -11,7 +11,7 @@
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --constraint=a100_40g
 
 # -- Software & Environment Setup --

@@ -1,17 +1,17 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-02T17:11:34Z
-# Git SHA: 186f5c0
+# Generated at: 2026-06-02T17:15:26Z
+# Git SHA: 7f970a4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-patches
+#SBATCH --job-name=synthetic-causal-random-2
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-patches-%j.err
+#SBATCH --error=synthetic-causal-random-2-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --constraint=a100_40g
 
 # -- Software & Environment Setup --
@@ -58,13 +58,11 @@ conda activate "${CONDA_ENV_NAME}"
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
     --image-spacing 1.0 \
-    --inject-style-to-decoder \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
     --pass-full-to-next-level \
     --patch-contrastive \
-    --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -77,7 +75,6 @@ conda activate "${CONDA_ENV_NAME}"
     --select-by-gated-score \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
-    --style-dropout-prob 0.2 \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -86,7 +83,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-patches \
+    --model-id synthetic-causal-random-2 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
