@@ -469,6 +469,24 @@ def _process_subject(args_tuple):
     if os.path.exists(t1_path) and os.path.exists(t2_path):
         return {"sample_id": sample_id, "group": group, "alpha": alpha, "subject": subject_id, "status": "cached"}
 
+    # Skip subjects whose input segmentation is known-bad (recorded on previous failure)
+    bad_inputs_file = os.path.join(out_dir, "_bad_inputs.txt")
+    if os.path.exists(bad_inputs_file):
+        with open(bad_inputs_file) as f:
+            bad_paths = set(f.read().splitlines())
+        if seg_path in bad_paths:
+            return {"sample_id": sample_id, "group": group, "alpha": alpha, "subject": subject_id, "status": "skipped"}
+
+    # Validate input file before expensive processing
+    try:
+        test_img = nib.load(seg_path)
+        _ = np.asarray(test_img.dataobj).shape
+    except Exception as e:
+        # Record bad input so future runs skip it immediately
+        with open(bad_inputs_file, "a") as f:
+            f.write(seg_path + "\n")
+        raise RuntimeError(f"Corrupted input segmentation {seg_path}: {e}") from e
+
     seg_out_dir = os.path.join(out_dir, "_segmentations")
     os.makedirs(seg_out_dir, exist_ok=True)
     atrophied_seg_path = os.path.join(seg_out_dir, f"{sample_id}_seg.nii.gz")
