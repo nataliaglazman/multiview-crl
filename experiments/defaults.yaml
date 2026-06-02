@@ -55,7 +55,6 @@ batch_size: 4
 train_steps: 20000
 gradient_checkpointing: true
 use_amp: true
-compile_model: true
 channels_last: true
 workers: 8
 resume_training: true

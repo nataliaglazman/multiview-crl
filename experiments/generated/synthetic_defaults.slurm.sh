@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-06-01T20:43:52Z
-# Git SHA: cddf6b8
+# Generated at: 2026-06-02T17:11:34Z
+# Git SHA: 186f5c0
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic_defaults
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -11,6 +11,8 @@
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
+#SBATCH --time=24:00:00
+#SBATCH --constraint=a100_40g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -48,10 +50,8 @@ conda activate "${CONDA_ENV_NAME}"
 "$PYTHON" -m training.main_multimodal \
     --batch-size 32 \
     --channels-last \
-    --compile-model \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 9 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \

@@ -27,7 +27,6 @@ vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
 vqvae_scaling_rates: [2]
 content_style_levels: [0]
-content_size: 9
 content_ratios: [0.95]
 mask_mode: fixed
 separate_encoders: true

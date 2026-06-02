@@ -1,11 +1,11 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthetic_causal.yaml
+# Auto-generated from: experiments/synthseg_baseline.yaml
 # Generated at: 2026-06-02T17:11:34Z
 # Git SHA: 186f5c0
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-patches
+#SBATCH --job-name=synthseg-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-patches-%j.err
+#SBATCH --error=synthseg-baseline-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -48,54 +48,45 @@ conda activate "${CONDA_ENV_NAME}"
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 32 \
+    --batch-size 4 \
+    --cache-dataset \
+    --cache-dir /scratch/users/k24058220/cache/multiview \
     --channels-last \
     --content-dim 128 \
-    --content-ratios 0.95 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
-    --dataroot /scratch/users/k24058220 \
-    --dataset-name synthetic \
+    --dataroot /data/natalia/ADNI_synthseg \
+    --dataset-name ADNI_stripped_masks \
+    --gradient-checkpointing \
     --image-spacing 1.0 \
-    --inject-style-to-decoder \
+    --labels-path /data/natalia/ADNI_synthseg/labels.csv \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
     --pass-full-to-next-level \
-    --patch-contrastive \
-    --patch-grid 4 4 4 \
-    --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 10.0 \
+    --scale-contrastive-loss 1.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
-    --style-dropout-prob 0.2 \
-    --synthetic-causal \
-    --synthetic-causal-edge-prob 0.5 \
-    --synthetic-causal-graph random \
-    --synthetic-mode pseudo_mri \
-    --synthetic-num-test 400 \
-    --synthetic-num-train 2000 \
-    --synthetic-num-val 200 \
-    --synthetic-res 64 \
-    --model-id synthetic-causal-random-patches \
+    --spatial-size 150 180 150 \
+    --model-id synthseg-baseline \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 300000 \
+    --train-steps 20000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 32 \
+    --vqvae-hidden-channels 32 \
     --vqvae-nb-entries 256 \
-    --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 2 \
+    --vqvae-nb-levels 3 \
+    --vqvae-scaling-rates 2 2 2 \
     --workers 8
