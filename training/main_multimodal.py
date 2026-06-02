@@ -37,6 +37,8 @@ except ImportError:
 
 import numpy as np
 import torch
+import torch._dynamo
+import torch._inductor.config
 import torch.multiprocessing as _torch_mp
 import torch.nn.functional as F
 
@@ -1150,8 +1152,10 @@ def main(args):
         )
 
     if getattr(args, "compile_model", False):
-        # Fall back to eager for subgraphs that Triton can't handle
-        # (e.g. misaligned-address errors from odd 3D spatial dims).
+        # Triton autotuning can crash with "misaligned address" on odd 3D
+        # spatial dims (91, 109, 91).  Run autotune in a subprocess so a
+        # crash there doesn't poison the main CUDA context.
+        torch._inductor.config.autotune_in_subproc = True
         torch._dynamo.config.suppress_errors = True
         logger.info("  Compiling VQ-VAE-2 with torch.compile mode=default...")
         vqvae_model = torch.compile(vqvae_model, mode="default")
