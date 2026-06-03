@@ -603,6 +603,21 @@ def parse_args() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--style-spatial-size",
+        type=int,
+        default=0,
+        help=(
+            "If > 0, average-pool each injected style tensor to an (N, N, N) spatial "
+            "grid (clamped per-axis to the current size, so it only ever downsamples) "
+            "before it is quantized / injected into the decoder.  Caps the spatial "
+            "capacity of the style pathway so style carries the global tissue-contrast "
+            "transform rather than anatomy (which stays in the content code); the "
+            "decoder's FiLM/concat upsampling restores feature resolution.  "
+            "0 (default) keeps full-resolution style (legacy behaviour).  "
+            "Requires --inject-style-to-decoder."
+        ),
+    )
+    parser.add_argument(
         "--use-moco",
         action="store_true",
         help="Use MoCo momentum-contrast training for the VQ-VAE encoder",

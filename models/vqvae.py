@@ -513,6 +513,7 @@ class VQVAE(HelperModule):
         | None = None,  # Levels whose code_q contributions are zeroed in the final (level-0) decoder's input concat. E.g. [0] drops the finest, [0, 1] drops the two finest — leaving only the top (coarsest) codes to drive reconstruction.
         style_dropout_prob: float = 0.0,  # Per-sample, per-level probability of zeroing the style tensor before it is injected into the decoder. Forces the decoder to reconstruct from content alone on a fraction of samples, pressuring content to carry anatomy. No expectation-rescaling. Active only in training mode.
         detach_style_injection: bool = False,  # If True, detach style features before decoder injection so the reconstruction loss cannot push content information into style channels.
+        style_spatial_size: int = 0,  # If > 0, average-pool each injected style tensor to an (N, N, N) grid (clamped per-axis) before quantization/injection, capping its spatial capacity so style carries the global contrast transform rather than anatomy. 0 = full-resolution (legacy).
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -525,6 +526,8 @@ class VQVAE(HelperModule):
         assert 0.0 <= style_dropout_prob < 1.0, f"style_dropout_prob must be in [0, 1), got {style_dropout_prob}"
         self.style_dropout_prob = float(style_dropout_prob)
         self.detach_style_injection = detach_style_injection
+        assert style_spatial_size >= 0, f"style_spatial_size must be >= 0, got {style_spatial_size}"
+        self.style_spatial_size = int(style_spatial_size)
 
         # --- Decoder-side level skipping ---
         # Zero out the contributions of the listed levels' code_q tensors in the
@@ -868,6 +871,25 @@ class VQVAE(HelperModule):
             rates = scaling_rates[1 : len(scaling_rates) - i][::-1]  # noqa: E203
             self.upscalers.append(Upscaler(embed_dim, rates))
 
+    def _bottleneck_style(self, style: torch.FloatTensor) -> torch.FloatTensor:
+        """Optionally average-pool style to a coarse spatial grid before injection.
+
+        A full-resolution style tensor can encode anatomy (the leakage we want to
+        avoid); pooling it to an ``(N, N, N)`` grid forces style to carry only the
+        global tissue->intensity contrast, leaving spatial structure to the
+        content code.  The decoder's FiLM/concat path upsamples it back to feature
+        resolution.  Each axis is clamped to its current size, so this only ever
+        downsamples and is a no-op when ``style_spatial_size`` is 0 or already
+        >= the current resolution (e.g. at coarse levels).
+        """
+        if self.style_spatial_size <= 0:
+            return style
+        cur = style.shape[2:]
+        target = tuple(min(self.style_spatial_size, c) for c in cur)
+        if target == tuple(cur):
+            return style
+        return F.adaptive_avg_pool3d(style, target)
+
     def forward(self, x, return_recon=True, pool_only=False, n_views=1, subsets=None, view_idx=None, patch_grid=None):
         """Forward pass through VQ-VAE-2.
 
@@ -989,9 +1011,11 @@ class VQVAE(HelperModule):
                 if self.inject_style_to_decoder and return_recon:
                     style_idx_v0 = torch.where(~mask_v0.bool())[-1]
                     style_idx_v1 = torch.where(~mask_v1.bool())[-1]
-                    style_spatials[lvl] = torch.cat(
-                        [enc_v0[:, style_idx_v0, :, :, :], enc_v1[:, style_idx_v1, :, :, :]],
-                        dim=0,
+                    style_spatials[lvl] = self._bottleneck_style(
+                        torch.cat(
+                            [enc_v0[:, style_idx_v0, :, :, :], enc_v1[:, style_idx_v1, :, :, :]],
+                            dim=0,
+                        )
                     )
 
                 masked_v0 = enc_v0 * mask_v0.view(1, -1, 1, 1, 1)
@@ -1060,7 +1084,7 @@ class VQVAE(HelperModule):
 
                 if self.inject_style_to_decoder and return_recon:
                     style_idx = torch.where(~content_mask_bool)[-1]
-                    style_spatials[lvl] = enc_out_lvl[:, style_idx, :, :, :]
+                    style_spatials[lvl] = self._bottleneck_style(enc_out_lvl[:, style_idx, :, :, :])
 
                 masked = enc_out_lvl * soft_mask.view(1, -1, 1, 1, 1)
                 if self.learned_split:

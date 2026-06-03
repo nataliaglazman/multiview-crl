@@ -1125,6 +1125,7 @@ def main(args):
         skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
         style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
         detach_style_injection=getattr(args, "detach_style_injection", False),
+        style_spatial_size=getattr(args, "style_spatial_size", 0),
     )
     if getattr(args, "channels_last", False):
         vqvae_model = vqvae_model.to(memory_format=torch.channels_last_3d)
