@@ -658,6 +658,15 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--eval-style", action="store_true")
     parser.add_argument("--grid-search-eval", action="store_true")
     parser.add_argument(
+        "--dci-every",
+        type=int,
+        default=0,
+        help="If > 0 and --dataset-name is 'synthetic', compute and log DCI "
+        "identifiability metrics (content/style vs ground-truth factor recovery) "
+        "on the val set every N training steps. 0 disables periodic DCI; the "
+        "end-of-run synthetic DCI is still controlled by --eval-dci.",
+    )
+    parser.add_argument(
         "--content-dim",
         type=int,
         default=128,

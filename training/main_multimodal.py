@@ -1803,6 +1803,50 @@ def main(args):
                     if step % 200 == 0 or step == 1:
                         save_vqvae_decoded_images(encoders[0], data, args, step)
 
+                    # Periodic synthetic DCI — track identifiability (content vs
+                    # ground-truth factor recovery) DURING training instead of only
+                    # at the end of the run. Synthetic-only: requires the gt_latents
+                    # emitted by SyntheticBrainDataset.
+                    _dci_every = getattr(args, "dci_every", 0)
+                    if (
+                        _dci_every > 0
+                        and args.dataset_name == "synthetic"
+                        and val_dataset is not None
+                        and (step % _dci_every == 1 or step == args.train_steps)
+                    ):
+                        # compute_dci_synthetic calls encoder.eval() and does NOT
+                        # restore train mode; save/restore it here, otherwise codebook
+                        # EMA and Gumbel sampling stay disabled for the rest of training.
+                        _dci_was_training = encoders[0].training
+                        try:
+                            import eval.dci as dci
+
+                            logger.info(f"  [EVALUATION] Periodic synthetic DCI (step {step})...")
+                            _dci_synth = dci.compute_dci_synthetic(
+                                encoder=encoders[0],
+                                dataset=val_dataset,
+                                device=device,
+                                batch_size=dataloader_kwargs.get("batch_size", 32),
+                                num_workers=0,
+                            )
+                            _dci_flat = dci.flatten_dci_results(_dci_synth)
+                            for _dci_k, _dci_v in _dci_flat.items():
+                                if not np.isnan(_dci_v):
+                                    tb_writer.add_scalar(f"dci_synthetic/{_dci_k}", _dci_v, step)
+                            if _use_wandb:
+                                wandb.log(
+                                    {
+                                        f"dci_synthetic/{_dci_k}": _dci_v
+                                        for _dci_k, _dci_v in _dci_flat.items()
+                                        if not np.isnan(_dci_v)
+                                    },
+                                    step=step,
+                                )
+                        except Exception as e:
+                            logger.warning(f"  [WARNING] Periodic synthetic DCI failed: {e}")
+                        finally:
+                            encoders[0].train(_dci_was_training)
+
                     if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
                         # Periodic separation score evaluation — run BEFORE saving the
                         # checkpoint so that if the process is killed mid-eval, the

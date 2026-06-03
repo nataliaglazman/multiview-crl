@@ -5,12 +5,14 @@ tag: synthetic-causal-random-style-spatial-size
 synthetic_causal: true
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
-scale_contrastive_loss: 10.0
+scale_contrastive_loss: 1.0
 inject_style_to_decoder: true
 tau: 0.07
 patch_grid: [4, 4, 4]
 train_steps: 300000
 spatial_size: 4
+eval_dci: true
+checkpoint_steps: 1000
 # style_dropout_prob: 0.2
 # vqvae_hidden_channels: 32
 # vqvae_embed_dim: 32

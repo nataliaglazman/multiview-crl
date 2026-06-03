@@ -49,3 +49,10 @@ train_steps: 200000
 resume_training: true
 gradient_checkpointing: false
 cache_dataset: false
+
+# ---- Evaluation ----
+# Identifiability tracking against ground-truth factors. Periodic DCI is logged
+# to TB/W&B under dci_synthetic/* every dci_every steps (content/style -> factor
+# recovery); eval_dci also runs a final DCI on the test set at end of training.
+dci_every: 2000
+eval_dci: true
