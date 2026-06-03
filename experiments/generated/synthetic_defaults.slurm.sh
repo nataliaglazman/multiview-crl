@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-06-03T13:55:28Z
-# Git SHA: 836bb37
+# Generated at: 2026-06-03T14:48:59Z
+# Git SHA: ae7d7f4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic_defaults
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -57,6 +57,8 @@ conda activate "${CONDA_ENV_NAME}"
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
+    --dci-every 2000 \
+    --eval-dci \
     --image-spacing 1.0 \
     --lr 0.001 \
     --mask-mode fixed \
