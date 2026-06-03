@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-03T13:49:11Z
-# Git SHA: d6b3225
+# Generated at: 2026-06-03T13:55:27Z
+# Git SHA: 836bb37
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-tau-007
+#SBATCH --job-name=synthetic-causal-random-style-spatial-size
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-tau-007-%j.err
+#SBATCH --error=synthetic-causal-random-style-spatial-size-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -64,6 +64,7 @@ conda activate "${CONDA_ENV_NAME}"
     --moco-queue-size 0 \
     --pass-full-to-next-level \
     --patch-contrastive \
+    --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -76,6 +77,7 @@ conda activate "${CONDA_ENV_NAME}"
     --select-by-gated-score \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
+    --spatial-size 4 \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -84,7 +86,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-tau-007 \
+    --model-id synthetic-causal-random-style-spatial-size \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
