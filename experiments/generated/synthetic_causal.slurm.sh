@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-03T22:20:09Z
-# Git SHA: 4f2ee18
+# Generated at: 2026-06-04T11:32:27Z
+# Git SHA: c292186
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-adv-loss
+#SBATCH --job-name=synthetic-causal-random-adv-loss-32
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-adv-loss-%j.err
+#SBATCH --error=synthetic-causal-random-adv-loss-32-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -88,16 +88,16 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-adv-loss \
+    --model-id synthetic-causal-random-adv-loss-32 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 32 \
+    --vqvae-hidden-channels 32 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 2 \
+    --vqvae-scaling-rates 4 \
     --workers 8
