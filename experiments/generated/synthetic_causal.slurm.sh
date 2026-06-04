@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-04T11:32:27Z
-# Git SHA: c292186
+# Generated at: 2026-06-04T11:33:18Z
+# Git SHA: 28ad318
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-adv-loss-32
+#SBATCH --job-name=synthetic-causal-random-adv-loss-32-scale-4
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-adv-loss-32-%j.err
+#SBATCH --error=synthetic-causal-random-adv-loss-32-scale-4-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -73,7 +73,7 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.1 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1.0 \
+    --scale-contrastive-loss 10.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -88,7 +88,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-adv-loss-32 \
+    --model-id synthetic-causal-random-adv-loss-32-scale-4 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
