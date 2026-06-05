@@ -43,6 +43,7 @@ import glob
 import logging
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import nibabel as nib
@@ -96,7 +97,7 @@ def check_same_world_space(seg_path, t1_path, tol=2.0):
     return same_fov, same_handedness
 
 
-def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform, force):
+def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform, force, omp=0):
     """Register one subject's T1->MNI (rigid) and resample its seg onto the MNI grid (NN)."""
     from nipype.interfaces import niftyreg
 
@@ -125,12 +126,26 @@ def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform,
     reg = niftyreg.RegAladin()
     reg.inputs.ref_file = mni_path  # fixed = MNI template
     reg.inputs.flo_file = t1_path  # moving = subject T1
-    reg.inputs.res_file = t1_mni_path  # resampled T1 (kept for QC)
+    reg.inputs.res_file = t1_mni_path  # reg_aladin's own resample (overwritten by the QC step below)
     reg.inputs.aff_file = aff_path
     reg.inputs.rig_only_flag = True
     reg.inputs.nac_flag = True
     reg.inputs.platform_val = platform
+    if omp > 0:
+        reg.inputs.omp_core_val = omp
     reg.run()
+
+    # ── QC: resample the T1 into MNI via the affine, explicit step like helpers.py ──
+    # (reg_aladin's own res_file is unreliable across NiftyReg builds; this guarantees it.)
+    res_t1 = niftyreg.RegResample()
+    res_t1.inputs.ref_file = mni_path
+    res_t1.inputs.flo_file = t1_path
+    res_t1.inputs.trans_file = aff_path
+    res_t1.inputs.inter_val = "LIN"
+    res_t1.inputs.out_file = t1_mni_path
+    if omp > 0:
+        res_t1.inputs.omp_core_val = omp
+    res_t1.run()
 
     # ── Apply transform to the segmentation, NN (mirrors resample_mask_with_transform) ──
     res = niftyreg.RegResample()
@@ -139,6 +154,8 @@ def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform,
     res.inputs.trans_file = aff_path
     res.inputs.inter_val = "NN"
     res.inputs.out_file = seg_out
+    if omp > 0:
+        res.inputs.omp_core_val = omp
     res.run()
 
     # ── Cast back to integer labels and confirm the MNI grid ──────────────────────
@@ -181,7 +198,15 @@ def main():
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Register even when the seg and T1 affines disagree (different world spaces).",
+        help="Register even when the seg and T1 occupy different physical space "
+        "(different FOV or opposite handedness).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="Parallel registration processes (CPU only; use with --platform 0). Each NiftyReg job "
+        "is capped to (cpu_count // num_workers) OpenMP threads to avoid over-subscription.",
     )
     args = parser.parse_args()
 
@@ -196,23 +221,47 @@ def main():
         logger.error("No subjects found. Check --seg-dir and --adni-labels.")
         sys.exit(1)
 
+    # Threads per NiftyReg process: cap when parallelising so workers don't over-subscribe.
+    omp = max(1, (os.cpu_count() or 1) // args.num_workers) if args.num_workers > 1 else 0
+
     counts = {"registered": 0, "cached": 0, "grid_mismatch": 0, "no_t1": 0, "failed": 0}
-    for i, s in enumerate(subjects):
+    work = []
+    for s in subjects:
         subject_id = s["subject"]
-        seg_path = s["seg_path"]
         t1_path = find_t1(args.t1_root, subject_id)
         if not t1_path:
             logger.warning(f"{subject_id}: no T1 under {os.path.join(args.t1_root, subject_id, 't1')} — skipping")
             counts["no_t1"] += 1
             continue
-        try:
-            status = register_subject(subject_id, seg_path, t1_path, args.mni, args.out_dir, args.platform, args.force)
-            counts[status] += 1
-        except Exception as e:
-            logger.error(f"{subject_id}: registration failed: {e}")
-            counts["failed"] += 1
-        if (i + 1) % 25 == 0 or i + 1 == len(subjects):
-            logger.info(f"  Progress: {i + 1}/{len(subjects)}  {counts}")
+        work.append((subject_id, s["seg_path"], t1_path, args.mni, args.out_dir, args.platform, args.force, omp))
+
+    logger.info(f"Registering {len(work)} subjects ({args.num_workers} worker(s), omp={omp or 'default'})")
+
+    done = 0
+    if args.num_workers > 1:
+        with ProcessPoolExecutor(max_workers=args.num_workers) as pool:
+            futures = {pool.submit(register_subject, *w): w[0] for w in work}
+            for fut in as_completed(futures):
+                subject_id = futures[fut]
+                try:
+                    counts[fut.result()] += 1
+                except Exception as e:
+                    logger.error(f"{subject_id}: registration failed: {e}")
+                    counts["failed"] += 1
+                done += 1
+                if done % 25 == 0 or done == len(work):
+                    logger.info(f"  Progress: {done}/{len(work)}  {counts}")
+    else:
+        for w in work:
+            subject_id = w[0]
+            try:
+                counts[register_subject(*w)] += 1
+            except Exception as e:
+                logger.error(f"{subject_id}: registration failed: {e}")
+                counts["failed"] += 1
+            done += 1
+            if done % 25 == 0 or done == len(work):
+                logger.info(f"  Progress: {done}/{len(work)}  {counts}")
 
     logger.info(f"Done: {counts}")
     print(f"\nMNI-space segmentations in: {args.out_dir}")
