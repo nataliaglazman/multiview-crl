@@ -68,13 +68,32 @@ def find_t1(t1_root, subject_id):
     return (mprage or candidates)[0]
 
 
-def check_same_world_space(seg_path, t1_path):
-    """Return (affine_match, shape_match) for the seg vs the T1 it will borrow a transform from."""
+def _world_bbox(img):
+    """World-space (min, max) corner of an image's voxel grid."""
+    n = np.array(img.shape[:3]) - 1
+    corners = np.array([[x, y, z] for x in (0, n[0]) for y in (0, n[1]) for z in (0, n[2])], dtype=float)
+    world = corners @ img.affine[:3, :3].T + img.affine[:3, 3]
+    return world.min(axis=0), world.max(axis=0)
+
+
+def check_same_world_space(seg_path, t1_path, tol=2.0):
+    """Check the seg and T1 occupy the same physical space.
+
+    NiftyReg resamples in world coordinates, so a different array *orientation*
+    (axis flips/permutations) is harmless as long as both images map to the same
+    physical bounding box — the common MUSE case. We therefore compare world
+    bounding boxes, not affine matrices. Opposite handedness (a left/right mirror)
+    is not safe to ignore and is reported separately.
+
+    Returns (same_fov, same_handedness).
+    """
     seg = nib.load(seg_path)
     t1 = nib.load(t1_path)
-    affine_match = np.allclose(seg.affine, t1.affine, atol=1e-2)
-    shape_match = tuple(seg.shape[:3]) == tuple(t1.shape[:3])
-    return affine_match, shape_match
+    smin, smax = _world_bbox(seg)
+    tmin, tmax = _world_bbox(t1)
+    same_fov = bool(np.allclose(smin, tmin, atol=tol) and np.allclose(smax, tmax, atol=tol))
+    same_handedness = (np.linalg.det(seg.affine[:3, :3]) > 0) == (np.linalg.det(t1.affine[:3, :3]) > 0)
+    return same_fov, same_handedness
 
 
 def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform, force):
@@ -85,15 +104,17 @@ def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform,
     if os.path.exists(seg_out):
         return "cached"
 
-    affine_match, shape_match = check_same_world_space(seg_path, t1_path)
-    if not affine_match:
-        msg = f"{subject_id}: seg and T1 are in different world spaces (affines differ)"
+    same_fov, same_handedness = check_same_world_space(seg_path, t1_path)
+    problem = None
+    if not same_handedness:
+        problem = "opposite handedness (possible left/right mirror)"
+    elif not same_fov:
+        problem = "different physical FOV (likely a different scan/timepoint)"
+    if problem:
         if not force:
-            logger.warning(f"{msg} — skipping (use --force to override)")
+            logger.warning(f"{subject_id}: seg and T1 have {problem} — skipping (use --force to override)")
             return "grid_mismatch"
-        logger.warning(f"{msg} — proceeding anyway (--force)")
-    elif not shape_match:
-        logger.info(f"{subject_id}: seg/T1 shapes differ but share a world frame — NiftyReg handles this")
+        logger.warning(f"{subject_id}: seg and T1 have {problem} — proceeding anyway (--force)")
 
     aff_path = os.path.join(out_dir, "_transforms", f"{subject_id}_t1_to_mni_aff.txt")
     t1_mni_path = os.path.join(out_dir, "_t1_in_mni", f"{subject_id}_T1_mni.nii.gz")
