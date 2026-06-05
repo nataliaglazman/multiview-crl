@@ -50,7 +50,7 @@ import nibabel as nib
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.generate_synthseg_dataset import discover_subjects
+from scripts.generate_synthseg_dataset import _builtin_synthesize_one, discover_subjects
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -97,36 +97,70 @@ def check_same_world_space(seg_path, t1_path, tol=2.0):
     return same_fov, same_handedness
 
 
-def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform, force, omp=0):
-    """Register one subject's T1->MNI (rigid) and resample its seg onto the MNI grid (NN)."""
+def _recenter_to_origin(in_path, out_path):
+    """Rewrite an image's affine so its volume centre sits at world (0, 0, 0).
+
+    Keeps the orientation/spacing (the 3x3) but discards the (sometimes bogus) MUSE
+    origin, so reg_aladin starts within capture range of the MNI template.
+    """
+    img = nib.load(in_path)
+    rot = img.affine[:3, :3]
+    vox_centre = (np.array(img.shape[:3]) - 1) / 2.0
+    new_affine = img.affine.copy()
+    new_affine[:3, 3] = -rot @ vox_centre
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    nib.save(nib.Nifti1Image(np.asarray(img.dataobj), new_affine, img.header), out_path)
+    return out_path
+
+
+def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform, force, omp=0, register_via="t1"):
+    """Register a subject's segmentation onto the MNI grid (rigid).
+
+    register_via='t1'    — register the real T1 -> MNI and apply the transform to the
+                           seg (requires seg and T1 to share world space).
+    register_via='synth' — synthesise a pseudo-T1 from the seg itself, register that
+                           -> MNI, and apply to the seg. Immune to seg/T1 header
+                           mismatches (flips, bogus origins) and needs no external T1.
+    """
     from nipype.interfaces import niftyreg
 
     seg_out = os.path.join(out_dir, subject_id, f"{subject_id}_seg.nii.gz")
     if os.path.exists(seg_out):
         return "cached"
 
-    same_fov, same_handedness = check_same_world_space(seg_path, t1_path)
-    problem = None
-    if not same_handedness:
-        problem = "opposite handedness (possible left/right mirror)"
-    elif not same_fov:
-        problem = "different physical FOV (likely a different scan/timepoint)"
-    if problem:
-        if not force:
-            logger.warning(f"{subject_id}: seg and T1 have {problem} — skipping (use --force to override)")
-            return "grid_mismatch"
-        logger.warning(f"{subject_id}: seg and T1 have {problem} — proceeding anyway (--force)")
-
-    aff_path = os.path.join(out_dir, "_transforms", f"{subject_id}_t1_to_mni_aff.txt")
-    t1_mni_path = os.path.join(out_dir, "_t1_in_mni", f"{subject_id}_T1_mni.nii.gz")
-    for p in (seg_out, aff_path, t1_mni_path):
+    aff_path = os.path.join(out_dir, "_transforms", f"{subject_id}_aff.txt")
+    qc_path = os.path.join(out_dir, "_qc_in_mni", f"{subject_id}_mni.nii.gz")
+    for p in (seg_out, aff_path, qc_path):
         os.makedirs(os.path.dirname(p), exist_ok=True)
 
-    # ── T1 -> MNI, rigid only (mirrors utils/helpers.py register_images) ──────────
+    if register_via == "synth":
+        # Pseudo-T1 built from the seg shares the seg's exact affine, so the transform
+        # always applies cleanly. Recenter first so the (often bogus) origin can't blow
+        # past reg_aladin's capture range.
+        work = os.path.join(out_dir, "_work")
+        seg_moving = _recenter_to_origin(seg_path, os.path.join(work, f"{subject_id}_seg_c.nii.gz"))
+        moving = os.path.join(work, f"{subject_id}_pseudoT1.nii.gz")
+        _builtin_synthesize_one(seg_moving, moving, seed=0, contrast="t1")
+    else:
+        same_fov, same_handedness = check_same_world_space(seg_path, t1_path)
+        problem = None
+        if not same_handedness:
+            problem = "opposite handedness (possible left/right mirror)"
+        elif not same_fov:
+            problem = "different physical FOV (likely a different scan/timepoint)"
+        if problem:
+            if not force:
+                logger.warning(f"{subject_id}: seg and T1 have {problem} — skipping (--force or --register-via synth)")
+                return "grid_mismatch"
+            logger.warning(f"{subject_id}: seg and T1 have {problem} — proceeding anyway (--force)")
+        moving = t1_path
+        seg_moving = seg_path
+
+    # ── rigid registration: moving -> MNI (mirrors utils/helpers.py register_images) ──
     reg = niftyreg.RegAladin()
-    reg.inputs.ref_file = mni_path  # fixed = MNI template
-    reg.inputs.flo_file = t1_path  # moving = subject T1
-    reg.inputs.res_file = t1_mni_path  # reg_aladin's own resample (overwritten by the QC step below)
+    reg.inputs.ref_file = mni_path
+    reg.inputs.flo_file = moving
+    reg.inputs.res_file = qc_path
     reg.inputs.aff_file = aff_path
     reg.inputs.rig_only_flag = True
     reg.inputs.nac_flag = True
@@ -135,22 +169,22 @@ def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform,
         reg.inputs.omp_core_val = omp
     reg.run()
 
-    # ── QC: resample the T1 into MNI via the affine, explicit step like helpers.py ──
+    # ── QC: explicit LIN resample of the moving image into MNI ──
     # (reg_aladin's own res_file is unreliable across NiftyReg builds; this guarantees it.)
-    res_t1 = niftyreg.RegResample()
-    res_t1.inputs.ref_file = mni_path
-    res_t1.inputs.flo_file = t1_path
-    res_t1.inputs.trans_file = aff_path
-    res_t1.inputs.inter_val = "LIN"
-    res_t1.inputs.out_file = t1_mni_path
+    res_qc = niftyreg.RegResample()
+    res_qc.inputs.ref_file = mni_path
+    res_qc.inputs.flo_file = moving
+    res_qc.inputs.trans_file = aff_path
+    res_qc.inputs.inter_val = "LIN"
+    res_qc.inputs.out_file = qc_path
     if omp > 0:
-        res_t1.inputs.omp_core_val = omp
-    res_t1.run()
+        res_qc.inputs.omp_core_val = omp
+    res_qc.run()
 
-    # ── Apply transform to the segmentation, NN (mirrors resample_mask_with_transform) ──
+    # ── apply the transform to the segmentation, NN (mirrors resample_mask_with_transform) ──
     res = niftyreg.RegResample()
     res.inputs.ref_file = mni_path
-    res.inputs.flo_file = seg_path
+    res.inputs.flo_file = seg_moving
     res.inputs.trans_file = aff_path
     res.inputs.inter_val = "NN"
     res.inputs.out_file = seg_out
@@ -158,16 +192,13 @@ def register_subject(subject_id, seg_path, t1_path, mni_path, out_dir, platform,
         res.inputs.omp_core_val = omp
     res.run()
 
-    # ── Cast back to integer labels and confirm the MNI grid ──────────────────────
+    # ── cast back to integer labels and confirm the MNI grid ──
     out_img = nib.load(seg_out)
     labels = np.rint(np.asarray(out_img.dataobj)).astype(np.int32)
     nib.save(nib.Nifti1Image(labels, out_img.affine, out_img.header), seg_out)
-
     mni = nib.load(mni_path)
     if tuple(out_img.shape[:3]) != tuple(mni.shape[:3]) or not np.allclose(out_img.affine, mni.affine, atol=1e-2):
-        logger.warning(
-            f"{subject_id}: registered seg grid {out_img.shape[:3]} does not match MNI {mni.shape[:3]} — check output"
-        )
+        logger.warning(f"{subject_id}: registered seg grid {out_img.shape[:3]} != MNI {mni.shape[:3]} — check output")
     return "registered"
 
 
@@ -180,7 +211,11 @@ def main():
     parser.add_argument(
         "--seg-dir", required=True, help="Directory with MUSE segmentations (as for generate_synthseg_dataset)."
     )
-    parser.add_argument("--t1-root", required=True, help="Root with <subject>/t1/<subject>_*.nii original T1s.")
+    parser.add_argument(
+        "--t1-root",
+        default=None,
+        help="Root with <subject>/t1/<subject>_*.nii original T1s. Required for --register-via t1.",
+    )
     parser.add_argument("--mni", required=True, help="ICBM152 linear template (icbm_avg_152_t1_tal_lin.nii).")
     parser.add_argument("--out-dir", required=True, help="Output directory for MNI-space segmentations.")
     parser.add_argument(
@@ -208,10 +243,22 @@ def main():
         help="Parallel registration processes (CPU only; use with --platform 0). Each NiftyReg job "
         "is capped to (cpu_count // num_workers) OpenMP threads to avoid over-subscription.",
     )
+    parser.add_argument(
+        "--register-via",
+        choices=["t1", "synth"],
+        default="t1",
+        help="'t1' (default): register the real T1 and apply its transform to the seg. "
+        "'synth': register a pseudo-T1 synthesised from the seg — robust to seg/T1 header "
+        "mismatches (flips, bogus origins) and needs no --t1-root.",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.mni):
         logger.error(f"MNI template not found: {args.mni}")
+        sys.exit(1)
+
+    if args.register_via == "t1" and not args.t1_root:
+        logger.error("--t1-root is required for --register-via t1 (or use --register-via synth)")
         sys.exit(1)
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -228,14 +275,31 @@ def main():
     work = []
     for s in subjects:
         subject_id = s["subject"]
-        t1_path = find_t1(args.t1_root, subject_id)
-        if not t1_path:
-            logger.warning(f"{subject_id}: no T1 under {os.path.join(args.t1_root, subject_id, 't1')} — skipping")
-            counts["no_t1"] += 1
-            continue
-        work.append((subject_id, s["seg_path"], t1_path, args.mni, args.out_dir, args.platform, args.force, omp))
+        t1_path = None
+        if args.register_via == "t1":
+            t1_path = find_t1(args.t1_root, subject_id)
+            if not t1_path:
+                logger.warning(f"{subject_id}: no T1 under {os.path.join(args.t1_root, subject_id, 't1')} — skipping")
+                counts["no_t1"] += 1
+                continue
+        work.append(
+            (
+                subject_id,
+                s["seg_path"],
+                t1_path,
+                args.mni,
+                args.out_dir,
+                args.platform,
+                args.force,
+                omp,
+                args.register_via,
+            )
+        )
 
-    logger.info(f"Registering {len(work)} subjects ({args.num_workers} worker(s), omp={omp or 'default'})")
+    logger.info(
+        f"Registering {len(work)} subjects via {args.register_via} "
+        f"({args.num_workers} worker(s), omp={omp or 'default'})"
+    )
 
     done = 0
     if args.num_workers > 1:
