@@ -59,6 +59,13 @@ def main():
         default="0",
         help='Comma-separated encoder levels to evaluate, e.g. "0,1,2"',
     )
+    parser.add_argument(
+        "--null-permute",
+        action="store_true",
+        help="Also compute a row-permuted null floor per block — the D/C/I a block's "
+        "shape yields from noise alone. Real minus null is the non-structural signal.",
+    )
+    parser.add_argument("--n-null", type=int, default=5, help="Permutations to average for the null floor")
     cli = parser.parse_args()
 
     if cli.pooling in ("gap", "stats"):
@@ -166,6 +173,8 @@ def main():
         num_workers=cli.num_workers,
         pooling=pooling,
         levels=levels,
+        null_permute=cli.null_permute,
+        n_null=cli.n_null,
     )
 
     # ── Print results ─────────────────────────────────────────────────────
@@ -212,7 +221,19 @@ def main():
                 print(f"    {name:30s} {tr:10.4f} {te:10.4f} {co:10.4f}")
             print(f"    {'─' * 62}")
             print(f"    {'MEAN':30s} {i_train:10.4f} {i_test:10.4f} {c_score:10.4f}")
-            print(f"    Disentanglement: {d_score:.4f}")
+
+            n_train = results.get(f"{full_section}/null/informativeness_train")
+            if n_train is not None:
+                n_test = results.get(f"{full_section}/null/informativeness_test", float("nan"))
+                n_comp = results.get(f"{full_section}/null/completeness", float("nan"))
+                n_dis = results.get(f"{full_section}/null/disentanglement", float("nan"))
+                print(f"    {'NULL (shape floor)':30s} {n_train:10.4f} {n_test:10.4f} {n_comp:10.4f}")
+                print(
+                    f"    {'GAP (real − null)':30s} {i_train - n_train:10.4f} {i_test - n_test:10.4f} {c_score - n_comp:10.4f}"
+                )
+                print(f"    Disentanglement: {d_score:.4f}   (null {n_dis:.4f}, gap {d_score - n_dis:+.4f})")
+            else:
+                print(f"    Disentanglement: {d_score:.4f}")
             print()
 
     # ── Save ──────────────────────────────────────────────────────────────

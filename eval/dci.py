@@ -235,6 +235,55 @@ def _split_content_style(features_np, content_indices):
     return features_np, None
 
 
+def _pool_and_split_view(feat_view, content_indices, pooling, use_patch_grid, use_stats):
+    """Pool one view's spatial map to a feature vector and split content/style.
+
+    Factored out of the extraction loop so view 1 and view 2 are processed
+    identically (view 2 is needed for the content->view leakage probe).
+    Returns ``(content, style)`` numpy arrays; ``style`` is ``None`` when there
+    is no content/style split at this level.
+    """
+    if use_stats and feat_view.dim() == 5:
+        B, C = feat_view.shape[:2]
+        flat = feat_view.view(B, C, -1)
+        feat_view = torch.cat(
+            [flat.mean(dim=2), flat.std(dim=2), flat.amax(dim=2), flat.amin(dim=2)],
+            dim=1,
+        )
+    elif use_patch_grid and feat_view.dim() == 3:
+        # (B, C, P) → (B, P*C) patch-major so the expansion loop below works.
+        feat_view = feat_view.permute(0, 2, 1).flatten(1)
+    elif feat_view.dim() == 5:
+        feat_view = feat_view.mean(dim=[2, 3, 4])
+
+    feat_np = feat_view.cpu().numpy()
+    if use_patch_grid and content_indices is not None:
+        n_patches = int(np.prod(pooling))
+        n_channels = feat_np.shape[1] // n_patches
+        expanded_content, expanded_style = [], []
+        style_ch = sorted(set(range(n_channels)) - set(content_indices))
+        for p in range(n_patches):
+            offset = p * n_channels
+            expanded_content.extend(offset + c for c in content_indices)
+            expanded_style.extend(offset + c for c in style_ch)
+        content = feat_np[:, expanded_content]
+        style = feat_np[:, expanded_style] if expanded_style else None
+    elif use_stats and content_indices is not None:
+        n_stats = 4
+        n_channels = feat_np.shape[1] // n_stats
+        expanded_content, expanded_style = [], []
+        style_ch = sorted(set(range(n_channels)) - set(content_indices))
+        for s in range(n_stats):
+            offset = s * n_channels
+            expanded_content.extend(offset + c for c in content_indices)
+            expanded_style.extend(offset + c for c in style_ch)
+        content = feat_np[:, expanded_content]
+        style = feat_np[:, expanded_style] if expanded_style else None
+    else:
+        content, style = _split_content_style(feat_np, content_indices)
+    return content, style
+
+
 def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, num_workers=0, pooling="gap"):
     """Run the encoder over a synthetic dataset and collect per-level representations + GT factors.
 
@@ -255,7 +304,9 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
             ``"stats"`` — per-channel (mean, std, max, min) → (B, C*4).
 
     Returns:
-        level_data: ``{level_idx: (content_repr, style_repr, factor_info)}``
+        level_data: ``{level_idx: (content_repr, style_repr, content_v2, style_v2, factor_info)}``
+            where the ``_v2`` arrays are the second view's features (``None`` when
+            only one view is present), used for the content->view leakage probe.
         gt_content, gt_style_v1, gt_style_v2: shared GT arrays ``(N, n_factors)``
     """
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
@@ -292,21 +343,9 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
 
             for lvl_idx, feat in enumerate(encoder_features):
                 B_per_view = feat.shape[0] // n_views
-                feat_v1 = feat[:B_per_view]
 
-                if use_stats and feat_v1.dim() == 5:
-                    B, C = feat_v1.shape[:2]
-                    flat = feat_v1.view(B, C, -1)
-                    feat_v1 = torch.cat(
-                        [flat.mean(dim=2), flat.std(dim=2), flat.amax(dim=2), flat.amin(dim=2)],
-                        dim=1,
-                    )
-                elif use_patch_grid and feat_v1.dim() == 3:
-                    # (B, C, P) → (B, P*C) patch-major so expansion loop works
-                    feat_v1 = feat_v1.permute(0, 2, 1).flatten(1)
-                elif feat_v1.dim() == 5:
-                    feat_v1 = feat_v1.mean(dim=[2, 3, 4])
-
+                # Content/style channel split from this level's Gumbel mask
+                # (shared across views — symmetric masks use the view-0 indices).
                 if isinstance(soft_masks, dict) and lvl_idx in soft_masks:
                     mask = soft_masks[lvl_idx]
                     if isinstance(mask, tuple):
@@ -315,44 +354,28 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
                         content_idx_raw = torch.where(mask.bool())[-1]
                 else:
                     content_idx_raw = None
-
                 content_indices = _parse_content_indices(content_idx_raw)
 
-                feat_np = feat_v1.cpu().numpy()
-                if use_patch_grid and content_indices is not None:
-                    n_patches = int(np.prod(pooling))
-                    n_channels = feat_np.shape[1] // n_patches
-                    expanded_content = []
-                    expanded_style = []
-                    all_ch = set(range(n_channels))
-                    style_ch = sorted(all_ch - set(content_indices))
-                    for p in range(n_patches):
-                        offset = p * n_channels
-                        expanded_content.extend(offset + c for c in content_indices)
-                        expanded_style.extend(offset + c for c in style_ch)
-                    content = feat_np[:, expanded_content]
-                    style = feat_np[:, expanded_style] if expanded_style else None
-                elif use_stats and content_indices is not None:
-                    n_stats = 4
-                    n_channels = feat_np.shape[1] // n_stats
-                    expanded_content = []
-                    expanded_style = []
-                    all_ch = set(range(n_channels))
-                    style_ch = sorted(all_ch - set(content_indices))
-                    for s in range(n_stats):
-                        offset = s * n_channels
-                        expanded_content.extend(offset + c for c in content_indices)
-                        expanded_style.extend(offset + c for c in style_ch)
-                    content = feat_np[:, expanded_content]
-                    style = feat_np[:, expanded_style] if expanded_style else None
-                else:
-                    content, style = _split_content_style(feat_np, content_indices)
-
                 if lvl_idx not in per_level:
-                    per_level[lvl_idx] = {"content": [], "style": []}
+                    per_level[lvl_idx] = {"content": [], "style": [], "content_v2": [], "style_v2": []}
+
+                # View 1 (primary) — unchanged behaviour.
+                content, style = _pool_and_split_view(
+                    feat[:B_per_view], content_indices, pooling, use_patch_grid, use_stats
+                )
                 per_level[lvl_idx]["content"].append(content)
                 if style is not None:
                     per_level[lvl_idx]["style"].append(style)
+
+                # View 2 — needed for the content->view leakage probe. Same
+                # content_indices (symmetric mask), processed identically.
+                if n_views >= 2:
+                    content2, style2 = _pool_and_split_view(
+                        feat[B_per_view : 2 * B_per_view], content_indices, pooling, use_patch_grid, use_stats
+                    )
+                    per_level[lvl_idx]["content_v2"].append(content2)
+                    if style2 is not None:
+                        per_level[lvl_idx]["style_v2"].append(style2)
 
             gt = batch["gt_latents"]
             all_gt_content.append(gt["z_content"].numpy())
@@ -371,9 +394,13 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
     for lvl, data in per_level.items():
         content_repr = np.concatenate(data["content"], axis=0)
         style_repr = np.concatenate(data["style"], axis=0) if data["style"] else None
+        content_v2 = np.concatenate(data["content_v2"], axis=0) if data["content_v2"] else None
+        style_v2 = np.concatenate(data["style_v2"], axis=0) if data["style_v2"] else None
         level_data[lvl] = (
             content_repr,
             style_repr,
+            content_v2,
+            style_v2,
             {
                 "content_names": CONTENT_FACTOR_NAMES[:n_c],
                 "style_names": STYLE_FACTOR_NAMES[:n_s],
@@ -389,6 +416,39 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
     return level_data, gt_content, gt_style_v1, gt_style_v2
 
 
+def _null_permuted_dci(repr_arr, factor_arr, split, factor_types, n_null, rng):
+    """DCI scores under row-permuted factors — the structural floor for a block.
+
+    Permuting the factor rows destroys the representation↔factor correspondence,
+    so whatever D/C/I survives is what the block's *shape* (n_codes × n_factors)
+    yields from noise alone.  This is the quantity to subtract before comparing a
+    wide block (e.g. 46 content channels) against a narrow one (2 style channels):
+    real minus null is the part that is not a shape artifact.
+
+    Averaged over ``n_null`` permutations.  Returns means for
+    ``{disentanglement, completeness, informativeness_train,
+    informativeness_test}`` plus matching ``*_std`` keys.
+    """
+    keys = ["disentanglement", "completeness", "informativeness_train", "informativeness_test"]
+    acc = {k: [] for k in keys}
+    n = repr_arr.shape[0]
+    mus_train = repr_arr[:split].T
+    mus_test = repr_arr[split:].T
+    for _ in range(n_null):
+        f = factor_arr[rng.permutation(n)]
+        try:
+            scores, _ = _compute_dci(mus_train, f[:split].T, mus_test, f[split:].T, factor_types)
+            for k in keys:
+                acc[k].append(scores[k])
+        except Exception as e:
+            logger.warning("Null DCI permutation failed: %s", e)
+    out = {}
+    for k in keys:
+        out[k] = float(np.mean(acc[k])) if acc[k] else float("nan")
+        out[f"{k}_std"] = float(np.std(acc[k])) if acc[k] else float("nan")
+    return out
+
+
 def compute_dci_synthetic(
     encoder,
     dataset,
@@ -398,6 +458,9 @@ def compute_dci_synthetic(
     num_workers=0,
     pooling="gap",
     levels=None,
+    null_permute=False,
+    n_null=5,
+    null_seed=0,
 ):
     """Compute DCI metrics for a synthetic dataset with known GT content/style factors.
 
@@ -416,10 +479,17 @@ def compute_dci_synthetic(
         num_workers: DataLoader workers.
         pooling: How to reduce spatial maps — ``"gap"``, ``"stats"``, or ``(D,H,W)`` tuple.
         levels: List of encoder levels to evaluate.  ``None`` → ``[0]``.
+        null_permute: If True, also compute a row-permuted null floor per block
+            (``"{label}/null/..."`` keys) — the score the block's shape yields
+            from noise alone.  Real minus null is the non-structural signal.
+        n_null: Number of permutations to average for the null floor.
+        null_seed: Seed for the permutation RNG.
 
     Returns:
         dict with keys like ``"L0/content→content/disentanglement"``.
         When a single level is requested the ``L{i}/`` prefix is omitted.
+        With ``null_permute`` each block also gets ``"{label}/null/{metric}"``
+        (and ``"..._std"``) entries.
     """
     level_data, gt_content, gt_style_v1, gt_style_v2 = _extract_synthetic_representations(
         encoder, dataset, device, batch_size, num_workers, pooling=pooling
@@ -435,12 +505,13 @@ def compute_dci_synthetic(
     gt_style = gt_style_v1
 
     results = {}
+    null_rng = np.random.RandomState(null_seed)
     for lvl in levels:
         if lvl not in level_data:
             logger.warning("Level %d not found in encoder outputs (available: %s)", lvl, available)
             continue
 
-        content_repr, style_repr, info = level_data[lvl]
+        content_repr, style_repr, content_v2, style_v2, info = level_data[lvl]
         prefix = f"L{lvl}/" if use_prefix else ""
         results[f"{prefix}factor_info"] = info
 
@@ -474,6 +545,35 @@ def compute_dci_synthetic(
                     "informativeness_test",
                 ]:
                     results[f"{label}/{k}"] = float("nan")
+
+            if null_permute:
+                null = _null_permuted_dci(repr_arr, factor_arr, split, factor_types, n_null, null_rng)
+                for k, v in null.items():
+                    results[f"{label}/null/{k}"] = v
+
+        # ── Canonical block-identifiability metrics (Yao-style) ──────────────
+        # These are the trustworthy headline numbers (see eval/identifiability_metrics):
+        #   block_mcc      — identifiability up to the allowed invertible map
+        #                    (content->content high; content->style low = no leakage).
+        #   content->view  — over-allocation leakage signal; ~0.5 means content is
+        #                    view-invariant (clean of style), the Yao/von Kügelgen claim.
+        try:
+            from eval.identifiability_metrics import block_mcc as _block_mcc
+            from eval.identifiability_metrics import view_invariance as _view_invariance
+
+            results[f"{prefix}content->content/block_mcc"] = _block_mcc(content_repr, gt_content)["mean"]
+            if style_repr is not None:
+                results[f"{prefix}style->style/block_mcc"] = _block_mcc(style_repr, gt_style)["mean"]
+                results[f"{prefix}content->style/block_mcc"] = _block_mcc(content_repr, gt_style)["mean"]
+            if content_v2 is not None:
+                _s1 = style_repr if style_repr is not None else content_repr[:, :0]
+                _s2 = style_v2 if style_v2 is not None else content_v2[:, :0]
+                _vi = _view_invariance(content_repr, content_v2, _s1, _s2)
+                results[f"{prefix}content->view/acc"] = _vi["content_acc"]
+                if style_repr is not None:
+                    results[f"{prefix}style->view/acc"] = _vi["style_acc"]
+        except Exception as e:
+            logger.warning("Block-identifiability metrics failed at L%s: %s", lvl, e)
 
     logger.info("DCI synthetic results:")
     for k, v in results.items():

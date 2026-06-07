@@ -1822,12 +1822,21 @@ def main(args):
                             import eval.dci as dci
 
                             logger.info(f"  [EVALUATION] Periodic synthetic DCI (step {step})...")
+                            # Match the pooling to the contrastive objective: patch
+                            # pooling preserves the spatial layout that spatial GT
+                            # factors live in, so identifiability isn't under-reported.
+                            _dci_pooling = (
+                                tuple(args.patch_grid)
+                                if getattr(args, "patch_contrastive", False) and getattr(args, "patch_grid", None)
+                                else "gap"
+                            )
                             _dci_synth = dci.compute_dci_synthetic(
                                 encoder=encoders[0],
                                 dataset=val_dataset,
                                 device=device,
                                 batch_size=dataloader_kwargs.get("batch_size", 32),
                                 num_workers=0,
+                                pooling=_dci_pooling,
                             )
                             _dci_flat = dci.flatten_dci_results(_dci_synth)
                             for _dci_k, _dci_v in _dci_flat.items():
