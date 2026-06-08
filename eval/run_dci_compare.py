@@ -261,6 +261,7 @@ def evaluate_model(
     row = score_reprs(reprs, gt_content, gt_style, info, level, n_null=n_null, seeds=seeds)
     row["name"] = name
     row["run_dir"] = run_dir
+    row["checkpoint"] = os.path.basename(checkpoint) if checkpoint else "vqvae_model.pt"
     return row
 
 
@@ -321,6 +322,7 @@ def write_outputs(rows, out_dir, baseline_name=None):
     flat_cols = [
         "name",
         "run_dir",
+        "checkpoint",
         "n_content_channels",
         "n_style_channels",
         "separation",
@@ -359,6 +361,12 @@ def main():
     p.add_argument("--run-dirs", nargs="+", required=True, help="Run directories to compare (settings.json each).")
     p.add_argument("--names", nargs="*", default=None, help="Labels (default: basename of each run-dir).")
     p.add_argument("--baseline", default=None, help="Run-dir to anchor Δ (e.g. the 0-contrastive model).")
+    p.add_argument(
+        "--checkpoint-name",
+        default="vqvae_model.pt",
+        help="Checkpoint filename loaded from every run-dir. Use vqvae_best.pt for the best-by-loss copy "
+        "(recommended for a final comparison; same choice for all models keeps it fair).",
+    )
     p.add_argument("--num-samples", type=int, default=2000, help="Frozen test-set size, shared across models.")
     p.add_argument("--poolings", default="gap,stats,2x2x2", help="Comma list: gap, stats, and/or DxHxW (e.g. 2x2x2).")
     p.add_argument("--level", type=int, default=0, help="Encoder level to compare on.")
@@ -411,6 +419,7 @@ def main():
                     cli.batch_size,
                     cli.num_workers,
                     device,
+                    checkpoint=os.path.join(run_dir, cli.checkpoint_name),
                 )
             )
         except Exception as e:
