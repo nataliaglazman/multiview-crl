@@ -33,9 +33,19 @@
 #     store-true flag like inject_style_to_decoder could not be turned off. !!!
 #
 # Usage (coarse pass to locate the elbow, then widen SEEDS for the fine pass):
-#   ./scripts/sweep_content_dim_synthetic.sh
-#   SEEDS="0 1 2" K_VALUES="5 6 7 8 9 10 12" ./scripts/sweep_content_dim_synthetic.sh
-#   CLUSTER=slurm REGIMES=causal ARMS=theory ./scripts/sweep_content_dim_synthetic.sh
+#   ./scripts/sweep_content_dim_synthetic.sh                                  # runai (W&B on)
+#   CLUSTER=slurm ./scripts/sweep_content_dim_synthetic.sh                    # SLURM (W&B off → analyse --results-glob)
+#   SEEDS="0 1 2" K_VALUES="5 6 7 8 9 10 12" CLUSTER=slurm ./scripts/sweep_content_dim_synthetic.sh
+#
+# SLURM (CREATE) notes:
+#   * launch.py sbatches one job per point (unique --job-name per (regime,arm,k,seed)).
+#   * W&B is OFF by default on SLURM because CREATE compute nodes have no outbound
+#     internet (wandb.init would hang). Runs still write tensorboard/ + settings.json,
+#     so read the elbow with: scripts/analyze_content_dim.py --results-glob 'results/cdim-...-*'.
+#     If your SLURM nodes DO have internet, set USE_WANDB=1.
+#   * PREREQUISITE: build the conda env (default 'multiview-env') with torch ON A NODE
+#     WITH INTERNET first. The generated job only pip-installs if torch import fails,
+#     and that install needs internet — pre-build it so the job skips that path.
 
 set -euo pipefail
 
@@ -44,6 +54,10 @@ EXP=${EXP:-experiments/synthetic_causal.yaml}
 WANDB_PROJECT=${WANDB_PROJECT:-multiview-crl-content-dim}
 STEPS=${STEPS:-60000}
 DCI_EVERY=${DCI_EVERY:-2000}
+
+# W&B on by default for runai; OFF by default for slurm (no-internet compute nodes).
+# Override explicitly with USE_WANDB=1 / USE_WANDB=0.
+if [ "${CLUSTER}" = "slurm" ]; then USE_WANDB=${USE_WANDB:-0}; else USE_WANDB=${USE_WANDB:-1}; fi
 
 # Grid. Coarse default (1 seed) locates the elbow; rerun with SEEDS="0 1 2" and a
 # finer K_VALUES band around the elbow for the headline numbers. hidden_channels=48
@@ -76,12 +90,17 @@ submit () {
     *) echo "unknown arm: ${arm}" >&2; exit 1 ;;
   esac
 
-  echo "── submit ${tag}  (cluster=${CLUSTER})"
+  local wandb_ov=""
+  if [ "${USE_WANDB}" = "1" ]; then
+    wandb_ov="use_wandb=True wandb_project=${WANDB_PROJECT} wandb_group=${group}"
+  fi
+
+  echo "── submit ${tag}  (cluster=${CLUSTER}, wandb=${USE_WANDB})"
   python scripts/launch.py "${EXP}" --cluster "${CLUSTER}" --set \
     content_size="${k}" seed="${seed}" \
     ${COMMON_OFF} ${regime_ov} ${arm_ov} \
     train_steps="${STEPS}" dci_every="${DCI_EVERY}" eval_dci=True \
-    use_wandb=True wandb_project="${WANDB_PROJECT}" wandb_group="${group}" tag="${tag}"
+    ${wandb_ov} tag="${tag}"
 }
 
 n=0
@@ -97,10 +116,14 @@ for regime in ${REGIMES}; do
 done
 
 echo ""
-echo "Submitted ${n} runs to project '${WANDB_PROJECT}'."
-echo "Analyse each (regime, arm) cell once the runs finish, e.g.:"
+echo "Submitted ${n} runs (cluster=${CLUSTER}, wandb=${USE_WANDB})."
+echo "Analyse each (regime, arm) cell once the runs finish:"
 for regime in ${REGIMES}; do
   for arm in ${ARMS}; do
-    echo "  python scripts/analyze_content_dim.py --wandb-project ${WANDB_PROJECT} --group cdim-${regime}-${arm}"
+    if [ "${USE_WANDB}" = "1" ]; then
+      echo "  python scripts/analyze_content_dim.py --wandb-project ${WANDB_PROJECT} --group cdim-${regime}-${arm} --plot ${regime}-${arm}.png"
+    else
+      echo "  python scripts/analyze_content_dim.py --results-glob 'results/cdim-${regime}-${arm}-*' --plot ${regime}-${arm}.png"
+    fi
   done
 done

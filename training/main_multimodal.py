@@ -601,7 +601,10 @@ def train_step(
                     if _patch_adv_scale > 0.0 and _is_patch:
                         _lam = getattr(args, "content_modality_adv_lambda", 1.0)
                         _padv_loss, _padv_acc = content_patch_modality_adv_loss(
-                            _content_hz_v0_patch, _content_hz_v1_patch, _heads[_cpk], lambd=_lam
+                            _content_hz_v0_patch,
+                            _content_hz_v1_patch,
+                            _heads[_cpk],
+                            lambd=_lam,
                         )
                         total_contrastive_loss = total_contrastive_loss + _padv_loss * _patch_adv_scale
                         _diag[f"ModAdvPatch/loss_L{level_idx}"] = _padv_loss.item()
@@ -819,6 +822,39 @@ def _run_validation(
 
 
 # ---------------------------------------------------------------------------
+# Deterministic data loading
+# ---------------------------------------------------------------------------
+
+
+def _seed_dataset_transforms(dataset, seed):
+    """Seed any MONAI ``Compose`` pipelines a dataset carries (no-op if absent).
+
+    ``Compose.set_random_state`` propagates a distinct, derived seed to each
+    child ``Rand*`` transform, so the whole augmentation pipeline becomes
+    reproducible from a single seed.
+    """
+    for attr in ("monai_transform", "_aug_transform"):
+        t = getattr(dataset, attr, None)
+        if t is not None and hasattr(t, "set_random_state"):
+            t.set_random_state(seed=seed)
+
+
+def _seed_worker(worker_id):
+    """DataLoader ``worker_init_fn`` for reproducible augmentation.
+
+    PyTorch seeds each worker's torch/python RNG from the main seed but leaves
+    numpy and MONAI's per-transform ``RandomState`` untouched. Re-seed all three,
+    decorrelated per worker via ``torch.initial_seed()`` (= base_seed + worker_id).
+    """
+    worker_seed = torch.initial_seed() % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+    info = torch.utils.data.get_worker_info()
+    if info is not None:
+        _seed_dataset_transforms(info.dataset, worker_seed)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -828,7 +864,13 @@ def main(args):
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
+        if getattr(args, "deterministic", False):
+            # cuBLAS needs a fixed workspace for deterministic matmuls; the env
+            # var must be set before the first CUDA matmul. cudnn.benchmark stays
+            # off (set in the reproducibility block below).
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        else:
+            torch.backends.cudnn.benchmark = True
         torch.set_float32_matmul_precision("high")
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         torch.cuda.empty_cache()
@@ -871,7 +913,25 @@ def main(args):
         print(f"\t{k}: {v}")
 
     # Reproducibility
-    if args.seed is not None:
+    if getattr(args, "deterministic", False):
+        seed = args.seed if args.seed is not None else 42
+        try:
+            from monai.utils import set_determinism
+
+            # Seeds torch/numpy/python RNG and every MONAI transform's RandomState.
+            set_determinism(seed=seed)
+        except Exception as e:  # MONAI layout/version mismatch — seed the basics.
+            np.random.seed(seed)
+            random.seed(seed)
+            torch.manual_seed(seed)
+            logger.warning(f"  monai.set_determinism unavailable ({e}); seeded torch/numpy/random only")
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        # warn_only: 3D conv-transpose / trilinear-interp backward have no
+        # deterministic CUDA kernel; warn instead of crashing the run.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        logger.info(f"  Seed: {seed} (deterministic mode: cudnn.benchmark off, deterministic algorithms on)")
+    elif args.seed is not None:
         np.random.seed(args.seed)
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -966,7 +1026,15 @@ def main(args):
                 cross_view_negs_only=_cross_view_negs,
             )
 
-    def moco_loss_func(q, k, queue, estimated_content_indices, subsets, soft_content_mask=None, queue_v1=None):
+    def moco_loss_func(
+        q,
+        k,
+        queue,
+        estimated_content_indices,
+        subsets,
+        soft_content_mask=None,
+        queue_v1=None,
+    ):
         return moco_loss(
             q,
             k,
@@ -1016,6 +1084,9 @@ def main(args):
         "prefetch_factor": 2,
         "persistent_workers": True,
     }
+    if getattr(args, "deterministic", False):
+        # Reproducible augmentation: seed numpy + MONAI transforms in each worker.
+        dataloader_kwargs["worker_init_fn"] = _seed_worker
 
     # Datasets
     logger.info("")
@@ -1521,7 +1592,11 @@ def main(args):
                         if isinstance(encoders[0], MoCoEncoder):
                             for lvl in range(encoders[0].nb_levels):
                                 encoders[0]._get_queue(lvl).normal_()
-                                F.normalize(encoders[0]._get_queue(lvl), dim=0, out=encoders[0]._get_queue(lvl))
+                                F.normalize(
+                                    encoders[0]._get_queue(lvl),
+                                    dim=0,
+                                    out=encoders[0]._get_queue(lvl),
+                                )
                                 if encoders[0]._separate_queues:
                                     encoders[0]._get_queue(lvl, view=1).normal_()
                                     F.normalize(
@@ -1598,7 +1673,10 @@ def main(args):
                                 _counts = torch.bincount(_flat, minlength=_n_total).float()
                                 _p = _counts / _counts.sum().clamp(min=1.0)
                                 _entropy = -(_p * _p.clamp(min=1e-12).log()).sum().item()
-                                _cb_true[_cb_lvl] = (_flat.unique().numel(), float(np.exp(_entropy)))
+                                _cb_true[_cb_lvl] = (
+                                    _flat.unique().numel(),
+                                    float(np.exp(_entropy)),
+                                )
                     _cb_parts = []
                     for _cb_lvl, _cb in enumerate(_raw.codebooks):
                         _alive_ema = (_cb.cluster_size > 1.0).sum().item()
@@ -1634,7 +1712,12 @@ def main(args):
                         tb_writer.add_scalar("Loss/VQ", accum_vq, step)
 
                         # GAN diagnostics
-                        for _gan_key in ("GAN/G_adv_loss", "GAN/D_loss", "GAN/D_real", "GAN/D_fake"):
+                        for _gan_key in (
+                            "GAN/G_adv_loss",
+                            "GAN/D_loss",
+                            "GAN/D_real",
+                            "GAN/D_fake",
+                        ):
                             if _gan_key in step_moco_diag:
                                 tb_writer.add_scalar(_gan_key, step_moco_diag[_gan_key], step)
                         tb_writer.add_scalar("LR", optimizer.param_groups[0]["lr"], step)
@@ -1651,17 +1734,27 @@ def main(args):
                                 entropy = -(probs * probs.log().clamp(min=-100)).sum().item()
                                 max_entropy = np.log(probs.numel())
                                 tb_writer.add_scalar(f"Mask/Entropy_L{lvl_key}", entropy, step)
-                                tb_writer.add_scalar(f"Mask/NormEntropy_L{lvl_key}", entropy / max_entropy, step)
+                                tb_writer.add_scalar(
+                                    f"Mask/NormEntropy_L{lvl_key}",
+                                    entropy / max_entropy,
+                                    step,
+                                )
                                 # How spread out the logits are (higher = more decisive)
                                 tb_writer.add_scalar(
-                                    f"Mask/LogitStd_L{lvl_key}", logits_param.detach().std().item(), step
+                                    f"Mask/LogitStd_L{lvl_key}",
+                                    logits_param.detach().std().item(),
+                                    step,
                                 )
                                 # Top-k vs bottom-k gap: mean of selected minus mean of not selected
                                 k_lvl = _raw.content_channels_per_level.get(int(lvl_key), _raw.content_channels)
                                 sorted_logits = logits_param.detach().sort(descending=True).values
                                 top_mean = sorted_logits[:k_lvl].mean().item()
                                 bot_mean = sorted_logits[k_lvl:].mean().item()
-                                tb_writer.add_scalar(f"Mask/TopBotGap_L{lvl_key}", top_mean - bot_mean, step)
+                                tb_writer.add_scalar(
+                                    f"Mask/TopBotGap_L{lvl_key}",
+                                    top_mean - bot_mean,
+                                    step,
+                                )
 
                         # Log learned_split gate diagnostics (effective content size)
                         if hasattr(_raw, "split_gate_logits"):
@@ -1670,9 +1763,17 @@ def main(args):
                                 n_content = (gate_probs > 0.5).sum().item()
                                 n_total = gate_param.numel()
                                 tb_writer.add_scalar(f"Split/ContentSize_L{lvl_key}", n_content, step)
-                                tb_writer.add_scalar(f"Split/ContentRatio_L{lvl_key}", n_content / n_total, step)
+                                tb_writer.add_scalar(
+                                    f"Split/ContentRatio_L{lvl_key}",
+                                    n_content / n_total,
+                                    step,
+                                )
                                 # Mean gate probability (how confident the gates are)
-                                tb_writer.add_scalar(f"Split/GateMean_L{lvl_key}", gate_probs.mean().item(), step)
+                                tb_writer.add_scalar(
+                                    f"Split/GateMean_L{lvl_key}",
+                                    gate_probs.mean().item(),
+                                    step,
+                                )
                                 # Gate entropy: low = confident split, high = uncertain
                                 gate_ent = (
                                     -(
@@ -1704,32 +1805,61 @@ def main(args):
                                     _counts = torch.bincount(_flat, minlength=_n_total).float()
                                     _p = _counts / _counts.sum().clamp(min=1.0)
                                     _entropy = -(_p * _p.clamp(min=1e-12).log()).sum().item()
-                                    _style_true[_sc_key] = (_flat.unique().numel(), float(np.exp(_entropy)))
+                                    _style_true[_sc_key] = (
+                                        _flat.unique().numel(),
+                                        float(np.exp(_entropy)),
+                                    )
                         for _cb_lvl, _cb in enumerate(_raw.codebooks):
                             _alive = (_cb.cluster_size > 1.0).sum().item()
                             _total = _cb.n_embed
                             tb_writer.add_scalar(f"Codebook/Active_L{_cb_lvl}", _alive, step)
-                            tb_writer.add_scalar(f"Codebook/Utilization_L{_cb_lvl}", _alive / _total, step)
+                            tb_writer.add_scalar(
+                                f"Codebook/Utilization_L{_cb_lvl}",
+                                _alive / _total,
+                                step,
+                            )
                             if _cb_lvl in _cb_true:
                                 _u, _ppl = _cb_true[_cb_lvl]
                                 tb_writer.add_scalar(f"Codebook/UniqueIdx_L{_cb_lvl}", _u, step)
-                                tb_writer.add_scalar(f"Codebook/UtilizationTrue_L{_cb_lvl}", _u / _total, step)
+                                tb_writer.add_scalar(
+                                    f"Codebook/UtilizationTrue_L{_cb_lvl}",
+                                    _u / _total,
+                                    step,
+                                )
                                 tb_writer.add_scalar(f"Codebook/Perplexity_L{_cb_lvl}", _ppl, step)
-                                tb_writer.add_scalar(f"Codebook/PerplexityRatio_L{_cb_lvl}", _ppl / _total, step)
+                                tb_writer.add_scalar(
+                                    f"Codebook/PerplexityRatio_L{_cb_lvl}",
+                                    _ppl / _total,
+                                    step,
+                                )
                         # Style codebook utilization (if active)
                         if hasattr(_raw, "style_codebooks") and _raw.style_codebooks:
                             for _sc_key, _sc_cb in _raw.style_codebooks.items():
                                 _s_alive = (_sc_cb.cluster_size > 1.0).sum().item()
                                 _s_total = _sc_cb.n_embed
                                 tb_writer.add_scalar(f"Codebook/StyleActive_L{_sc_key}", _s_alive, step)
-                                tb_writer.add_scalar(f"Codebook/StyleUtil_L{_sc_key}", _s_alive / _s_total, step)
+                                tb_writer.add_scalar(
+                                    f"Codebook/StyleUtil_L{_sc_key}",
+                                    _s_alive / _s_total,
+                                    step,
+                                )
                                 if _sc_key in _style_true:
                                     _u, _ppl = _style_true[_sc_key]
                                     tb_writer.add_scalar(f"Codebook/StyleUniqueIdx_L{_sc_key}", _u, step)
-                                    tb_writer.add_scalar(f"Codebook/StyleUtilTrue_L{_sc_key}", _u / _s_total, step)
-                                    tb_writer.add_scalar(f"Codebook/StylePerplexity_L{_sc_key}", _ppl, step)
                                     tb_writer.add_scalar(
-                                        f"Codebook/StylePerplexityRatio_L{_sc_key}", _ppl / _s_total, step
+                                        f"Codebook/StyleUtilTrue_L{_sc_key}",
+                                        _u / _s_total,
+                                        step,
+                                    )
+                                    tb_writer.add_scalar(
+                                        f"Codebook/StylePerplexity_L{_sc_key}",
+                                        _ppl,
+                                        step,
+                                    )
+                                    tb_writer.add_scalar(
+                                        f"Codebook/StylePerplexityRatio_L{_sc_key}",
+                                        _ppl / _s_total,
+                                        step,
                                     )
 
                         # Log MoCo stale-queue diagnostics
@@ -1866,7 +1996,9 @@ def main(args):
                         if step % 2000 == 1 or step == args.train_steps:
                             if getattr(args, "eval_separation_periodic", True):
                                 try:
-                                    from eval.cross_reconstruction import evaluate_content_style_separation
+                                    from eval.cross_reconstruction import (
+                                        evaluate_content_style_separation,
+                                    )
 
                                     logger.info(
                                         f"  [EVALUATION] Running periodic content/style separation metrics (step {step})..."
@@ -1908,7 +2040,8 @@ def main(args):
                                     # unavailable (gate = 1.0 in that case).
                                     if getattr(args, "select_by_gated_score", False):
                                         separation_score = cs_metrics.get(
-                                            "separation_score_gated", cs_metrics.get("separation_score")
+                                            "separation_score_gated",
+                                            cs_metrics.get("separation_score"),
                                         )
                                     else:
                                         separation_score = cs_metrics.get("separation_score")
@@ -2320,7 +2453,17 @@ def main(args):
         # Log evaluation results to W&B
         if _use_wandb and len(results) > 0:
             for row in results:
-                subset, ix, modality, factor_name, factor_type, r2_lin, r2_kr, acc_log, acc_mlp = row
+                (
+                    subset,
+                    ix,
+                    modality,
+                    factor_name,
+                    factor_type,
+                    r2_lin,
+                    r2_kr,
+                    acc_log,
+                    acc_mlp,
+                ) = row
                 prefix = f"eval/{modality}/{factor_name}/subset_{subset}"
                 wandb.summary[f"{prefix}/r2_linreg"] = r2_lin
                 wandb.summary[f"{prefix}/r2_krreg"] = r2_kr

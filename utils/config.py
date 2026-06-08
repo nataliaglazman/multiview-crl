@@ -119,7 +119,10 @@ def parse_args() -> argparse.ArgumentParser:
         help="Edge probability for random DAG (ignored for chain/full).",
     )
     parser.add_argument(
-        "--synthetic-causal-noise-scale", type=float, default=0.4, help="Additive noise scale in causal mechanisms."
+        "--synthetic-causal-noise-scale",
+        type=float,
+        default=0.4,
+        help="Additive noise scale in causal mechanisms.",
     )
     parser.add_argument(
         "--synthetic-causal-nonlinearity",
@@ -146,6 +149,14 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--val-size", default=25000, type=int)
     parser.add_argument("--test-size", default=25000, type=int)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Make a run bit-reproducible across re-runs with the same config: "
+        "seeds MONAI transforms + a numpy-seeding worker_init_fn, disables "
+        "cudnn.benchmark, sets cudnn.deterministic, and enables "
+        "torch.use_deterministic_algorithms (warn_only). Costs some throughput.",
+    )
     parser.add_argument(
         "--workers",
         type=int,
@@ -926,7 +937,12 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         logger.info(
             f"  -> Style dimensions: {args.content_dim}-{args.total_dim - 1} ({args.total_dim - args.content_dim} dims)"
         )
-    elif args.dataset_name in ["adni", "ADNI_registered", "ADNI_stripped", "ADNI_stripped_masks"]:
+    elif args.dataset_name in [
+        "adni",
+        "ADNI_registered",
+        "ADNI_stripped",
+        "ADNI_stripped_masks",
+    ]:
         args.DATASETCLASS = datasets.MyCustomDataset
         args.content_indices = [list(range(args.content_dim))]
         args.style_indices = list(range(args.content_dim, args.total_dim))

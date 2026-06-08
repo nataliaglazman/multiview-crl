@@ -59,6 +59,7 @@ _STORE_TRUE_FLAGS = {
     "use_wandb",
     "no_resumable_sampler",
     "shared_brain_mask",
+    "deterministic",
     "asymmetric_aug",
     "pass_full_to_next_level",
     "select_by_gated_score",
@@ -514,7 +515,10 @@ def main():
             print(f"COMMAND:\n  {cmd_str}")
         else:
             print(f"Running locally: {cmd_str}")
-            os.execvp("python", ["python", "-m", "training.main_multimodal"] + config_to_cli_args(config))
+            os.execvp(
+                "python",
+                ["python", "-m", "training.main_multimodal"] + config_to_cli_args(config),
+            )
 
     elif args.cluster == "runai" or (CLUSTER_DIR / f"{args.cluster}.yaml").exists() and "_runai" in config:
         cmd = build_runai_command(config, tag)
@@ -550,7 +554,10 @@ def main():
             print(f"Submitting to SLURM: {tag}")
             subprocess.run(["sbatch", str(script_path)], check=True)
     else:
-        print(f"Error: unknown cluster '{args.cluster}'. Expected 'local', 'runai', or 'slurm'.", file=sys.stderr)
+        print(
+            f"Error: unknown cluster '{args.cluster}'. Expected 'local', 'runai', or 'slurm'.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 

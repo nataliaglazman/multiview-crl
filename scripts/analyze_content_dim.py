@@ -16,21 +16,27 @@ Hungarian match averages over min(k, n_factors) pairs, so it reads high even at
 small k by greedily picking the few easiest factors. block_mcc is the headline
 *subspace-quality* number at the chosen k, not the rising/elbow signal.
 
-Example:
+Two ways to read the runs:
+  * W&B  (cloud)       : --wandb-project ... --group cdim-causal-deploy
+  * filesystem (SLURM) : --results-glob 'results/cdim-causal-deploy-*'
+    Reads each run's tensorboard/ + settings.json directly, so it works on HPC
+    clusters whose compute nodes have no internet (no W&B sync needed).
+
+Examples:
     python scripts/analyze_content_dim.py \\
         --wandb-project multiview-crl-content-dim --group cdim-causal-deploy --plot
+    python scripts/analyze_content_dim.py \\
+        --results-glob 'results/cdim-causal-deploy-*' --plot deploy.png
 """
 
 import argparse
+import glob
+import json
 import math
+import os
 import sys
 
 import pandas as pd
-
-try:
-    import wandb
-except ImportError:
-    sys.exit("wandb is required. pip install wandb")
 
 
 def _metric_keys(level: int | None):
@@ -46,6 +52,10 @@ def _metric_keys(level: int | None):
 
 
 def fetch_runs(project: str, group: str, entity: str | None) -> pd.DataFrame:
+    try:
+        import wandb
+    except ImportError:
+        sys.exit("W&B mode needs wandb (`pip install wandb`), or use --results-glob for the filesystem path.")
     api = wandb.Api()
     path = f"{entity}/{project}" if entity else project
     runs = api.runs(path, filters={"group": group, "state": "finished"})
@@ -53,6 +63,58 @@ def fetch_runs(project: str, group: str, entity: str | None) -> pd.DataFrame:
     for run in runs:
         rows.append({"run_name": run.name, "_config": dict(run.config), "_summary": dict(run.summary)})
     return pd.DataFrame(rows)
+
+
+def fetch_runs_from_results(glob_pattern: str, keys: dict) -> pd.DataFrame:
+    """Build the metrics table from run directories on disk — no W&B needed.
+
+    Each matched directory must contain ``settings.json`` (for content_size + seed)
+    and a ``tensorboard/`` subdir carrying the ``dci_synthetic/*`` scalars. This is
+    the SLURM-friendly path: compute nodes that lack internet still write TB +
+    settings.json to the shared filesystem, so the elbow can be read with no W&B
+    connectivity or sync step. Returns the same schema as ``extract_metrics``.
+    """
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    except ImportError:
+        sys.exit("--results-glob needs tensorboard (`pip install tensorboard`, or activate the training env).")
+
+    run_dirs = sorted(d for d in glob.glob(glob_pattern) if os.path.isdir(d))
+    if not run_dirs:
+        sys.exit(f"No directories matched --results-glob {glob_pattern!r}")
+
+    out = []
+    for run_dir in run_dirs:
+        settings_path = os.path.join(run_dir, "settings.json")
+        tb_dir = os.path.join(run_dir, "tensorboard")
+        if not os.path.exists(settings_path) or not os.path.isdir(tb_dir):
+            print(f"  skip {run_dir} (missing settings.json or tensorboard/)", file=sys.stderr)
+            continue
+        with open(settings_path) as f:
+            settings = json.load(f)
+        cap = settings.get("content_size")
+        if cap is None:
+            print(f"  skip {run_dir} (no content_size in settings.json)", file=sys.stderr)
+            continue
+        ea = EventAccumulator(tb_dir, size_guidance={"scalars": 0})
+        ea.Reload()
+        avail = set(ea.Tags().get("scalars", []))
+
+        def _last(tag, _avail=avail, _ea=ea):
+            return _ea.Scalars(tag)[-1].value if tag in _avail else None
+
+        out.append(
+            {
+                "run_name": os.path.basename(run_dir.rstrip("/")),
+                "content_size": int(cap),
+                "seed": settings.get("seed", -1),
+                "complete": _last(keys["complete"]),
+                "view": _last(keys["view"]),
+                "leak_style": _last(keys["leak_style"]),
+                "block_mcc": _last(keys["block_mcc"]),
+            }
+        )
+    return pd.DataFrame(out)
 
 
 def extract_metrics(df: pd.DataFrame, keys: dict) -> pd.DataFrame:
@@ -191,9 +253,14 @@ def maybe_plot(agg: pd.DataFrame, winner, group: str, path: str) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--wandb-project", required=True)
+    p.add_argument("--wandb-project", default=None, help="W&B project (W&B mode)")
     p.add_argument("--wandb-entity", default=None)
-    p.add_argument("--group", required=True, help="W&B group, e.g. cdim-causal-deploy")
+    p.add_argument("--group", default=None, help="W&B group, e.g. cdim-causal-deploy (W&B mode)")
+    p.add_argument(
+        "--results-glob",
+        default=None,
+        help="Filesystem mode: glob of run dirs, e.g. 'results/cdim-causal-deploy-*' (no W&B needed)",
+    )
     p.add_argument("--level", type=int, default=None, help="Encoder level (omit for single-level synthetic runs)")
     p.add_argument("--complete-frac", type=float, default=0.9, help="Lower fence: fraction of max completeness")
     p.add_argument("--view-ceiling", type=float, default=0.55, help="Upper fence: max content→view accuracy")
@@ -202,23 +269,31 @@ def main() -> None:
     p.add_argument("--plot", default=None, nargs="?", const="content_dim_sweep.png", help="Save a PNG (optional path)")
     args = p.parse_args()
 
-    runs_df = fetch_runs(args.wandb_project, args.group, args.wandb_entity)
-    if runs_df.empty:
-        sys.exit(f"No finished runs in project={args.wandb_project} group={args.group}.")
-    print(f"Fetched {len(runs_df)} finished runs.")
+    keys = _metric_keys(args.level)
+    if args.results_glob:
+        metrics = fetch_runs_from_results(args.results_glob, keys)
+        label = args.results_glob
+    else:
+        if not args.wandb_project or not args.group:
+            p.error("provide --wandb-project and --group (W&B mode), or --results-glob (filesystem mode)")
+        runs_df = fetch_runs(args.wandb_project, args.group, args.wandb_entity)
+        if runs_df.empty:
+            sys.exit(f"No finished runs in project={args.wandb_project} group={args.group}.")
+        print(f"Fetched {len(runs_df)} finished runs.")
+        metrics = extract_metrics(runs_df, keys)
+        label = args.group
 
-    metrics = extract_metrics(runs_df, _metric_keys(args.level))
     if metrics.empty:
-        sys.exit("No runs carry a content_size config value. Check the sweep.")
+        sys.exit("No runs carry a content_size value. Check the sweep / glob.")
     agg = aggregate(metrics)
     res = apply_decision_rule(agg, args.complete_frac, args.view_ceiling, args.noise_threshold)
-    print_result(res, args.group)
+    print_result(res, label)
 
     if args.output_csv:
         agg.to_csv(args.output_csv)
         print(f"Saved aggregate table to {args.output_csv}")
     if args.plot:
-        maybe_plot(agg, res["winner"], args.group, args.plot)
+        maybe_plot(agg, res["winner"], label, args.plot)
 
 
 if __name__ == "__main__":
