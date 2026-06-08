@@ -136,28 +136,37 @@ def _block_array(reprs, key, level, block_idx):
 
 
 def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, rng):
-    """Per-factor GAP (real − null) test-R² for one repr→factor block.
+    """Per-factor informativeness for one repr→factor block, under every pooling.
 
     ``block_idx`` selects the content (0) or style (1) array; ``factors``/``names``
-    select which ground-truth columns to predict.  Each factor uses its assigned
-    pooling.  Returns ``{"mean_gap", "per_factor"}``.
+    select which ground-truth columns to predict.  For each factor the GAP
+    (real − null) test-R² is computed under *every* available pooling and kept in
+    ``by_pooling``; the headline ``gap`` is that factor's assigned pooling
+    (``FACTOR_POOLING``).  Returns ``{"mean_gap", "per_factor"}``.
     """
+    pools = [k for k in ("gap", "stats", "patch") if k in avail]
     per = {}
     for j, name in enumerate(names):
-        key = _resolve_key(FACTOR_POOLING.get(name, "stats"), avail)
-        X = _block_array(reprs, key, level, block_idx)
-        if X is None or X.shape[1] == 0:
-            per[name] = {
-                "gap": float("nan"),
-                "real": float("nan"),
-                "null": float("nan"),
-                "std": float("nan"),
-                "pooling": key,
-            }
-            continue
-        r = cv_probe_r2(X, factors[:, j], seeds=seeds)
-        nl = _null_cv_r2(X, factors[:, j], n_null, seeds, rng)
-        per[name] = {"gap": r["mean"] - nl, "real": r["mean"], "null": nl, "std": r["std"], "pooling": key}
+        by_pooling = {}
+        for pk in pools:
+            X = _block_array(reprs, pk, level, block_idx)
+            if X is None or X.shape[1] == 0:
+                continue
+            r = cv_probe_r2(X, factors[:, j], seeds=seeds)
+            nl = _null_cv_r2(X, factors[:, j], n_null, seeds, rng)
+            by_pooling[pk] = {"real": r["mean"], "std": r["std"], "null": nl, "gap": r["mean"] - nl}
+        assigned = _resolve_key(FACTOR_POOLING.get(name, "stats"), avail)
+        head = by_pooling.get(
+            assigned, {"gap": float("nan"), "real": float("nan"), "null": float("nan"), "std": float("nan")}
+        )
+        per[name] = {
+            "gap": head["gap"],
+            "real": head["real"],
+            "null": head["null"],
+            "std": head["std"],
+            "pooling": assigned,
+            "by_pooling": by_pooling,
+        }
     gaps = [v["gap"] for v in per.values() if np.isfinite(v["gap"])]
     return {"mean_gap": float(np.mean(gaps)) if gaps else float("nan"), "per_factor": per}
 
@@ -334,6 +343,74 @@ def print_table(rows, baseline_name=None):
     )
 
 
+_BLOCK_LABELS = {
+    "content2content": "content→content",
+    "content2style": "content→style",
+    "style2style": "style→style",
+    "style2content": "style→content",
+}
+
+
+def iter_per_latent_rows(rows):
+    """Long-format rows: one per (model, block, factor, pooling) informativeness cell."""
+    for r in rows:
+        detail = r.get("detail", {})
+        for bkey, blabel in _BLOCK_LABELS.items():
+            blk = detail.get(bkey)
+            if not blk:
+                continue
+            for fname, fd in blk["per_factor"].items():
+                assigned = fd.get("pooling")
+                for pool, pd in fd.get("by_pooling", {}).items():
+                    yield {
+                        "model": r["name"],
+                        "block": blabel,
+                        "factor": fname,
+                        "pooling": pool,
+                        "assigned": pool == assigned,
+                        "real_r2": pd["real"],
+                        "real_std": pd["std"],
+                        "null_r2": pd["null"],
+                        "gap": pd["gap"],
+                    }
+
+
+def print_per_latent(rows):
+    """Per-model per-latent informativeness grid: GAP test-R² of the matched block,
+    one column per pooling.  ``*`` marks each factor's assigned (headline) pooling,
+    so you can see whether a factor is better exposed by a non-default pooling.
+    """
+    print("\nPER-LATENT INFORMATIVENESS  (GAP test-R²; matched repr→factor; * = assigned pooling)")
+    for r in rows:
+        cc = r.get("detail", {}).get("content2content")
+        ss = r.get("detail", {}).get("style2style")
+        if not cc:
+            continue
+        pools = [
+            k
+            for k in ("gap", "stats", "patch")
+            if any(k in fd.get("by_pooling", {}) for fd in cc["per_factor"].values())
+        ]
+        print(f"\n  {r['name']}  ({r.get('checkpoint', '?')})")
+        print("    " + f"{'factor':22s}" + "".join(f"{p:>9s}" for p in pools))
+        print("    " + "-" * (22 + 9 * len(pools)))
+
+        def emit(block):
+            for fname, fd in block["per_factor"].items():
+                assigned = fd.get("pooling")
+                cells = ""
+                for p in pools:
+                    g = fd.get("by_pooling", {}).get(p, {}).get("gap")
+                    txt = _fmt(g, 3).strip()
+                    cells += f"{(txt + '*') if p == assigned else txt:>9s}"
+                print(f"    {fname:22s}{cells}")
+
+        emit(cc)
+        if ss:
+            print(f"    {'· style ·':22s}")
+            emit(ss)
+
+
 def write_outputs(rows, out_dir, baseline_name=None):
     os.makedirs(out_dir, exist_ok=True)
     flat_cols = [
@@ -362,10 +439,18 @@ def write_outputs(rows, out_dir, baseline_name=None):
         for r in rows:
             w.writerow({k: r.get(k) for k in flat_cols})
 
+    per_latent_path = os.path.join(out_dir, "dci_compare_per_latent.csv")
+    pl_cols = ["model", "block", "factor", "pooling", "assigned", "real_r2", "real_std", "null_r2", "gap"]
+    with open(per_latent_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=pl_cols)
+        w.writeheader()
+        for prow in iter_per_latent_rows(rows):
+            w.writerow(prow)
+
     json_path = os.path.join(out_dir, "dci_compare.json")
     with open(json_path, "w") as f:
         json.dump({"baseline": baseline_name, "models": rows}, f, indent=2, default=float)
-    logger.info("Wrote %s and %s", csv_path, json_path)
+    logger.info("Wrote %s, %s, %s", csv_path, per_latent_path, json_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -446,6 +531,7 @@ def main():
         logger.error("No models evaluated successfully.")
         return
     print_table(rows, baseline_name)
+    print_per_latent(rows)
     write_outputs(rows, cli.out, baseline_name)
 
 
