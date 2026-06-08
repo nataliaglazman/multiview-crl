@@ -304,9 +304,14 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
     sha = git_sha()
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    try:
+        exp_label = experiment_path.relative_to(REPO_ROOT)
+    except ValueError:
+        exp_label = experiment_path
+
     header = [
         "#!/usr/bin/env bash",
-        f"# Auto-generated from: {experiment_path.relative_to(REPO_ROOT) if experiment_path.is_absolute() else experiment_path}",
+        f"# Auto-generated from: {exp_label}",
         f"# Generated at: {ts}",
         f"# Git SHA: {sha}",
         "# Re-generate with: python scripts/launch.py --generate --cluster " + cluster_name,
@@ -354,7 +359,10 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
         slurm = config.get("_slurm", {})
         conda_env = slurm.get("conda_env", "multiview-env")
         req_txt = slurm.get("requirements_txt", "docker/requirements.txt")
-        exp_rel = experiment_path.relative_to(REPO_ROOT) if experiment_path.is_absolute() else experiment_path
+        try:
+            exp_rel = experiment_path.relative_to(REPO_ROOT)
+        except ValueError:
+            exp_rel = experiment_path
 
         lines = [
             "#!/bin/bash -l",
