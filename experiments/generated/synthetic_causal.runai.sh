@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-08T14:01:46Z
-# Git SHA: 216dcba
+# Generated at: 2026-06-08T14:22:14Z
+# Git SHA: ffccb65
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -18,6 +18,7 @@ python -m training.main_multimodal \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
+    --dataroot /nfs/home/nglazman/data \
     --dataset-name synthetic \
     --dci-every 2000 \
     --deterministic \
