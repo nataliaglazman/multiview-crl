@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-08T19:38:07Z
-# Git SHA: 99ff37b
+# Generated at: 2026-06-08T19:39:11Z
+# Git SHA: 7169473
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-075-compressed-input
+#SBATCH --job-name=synthetic-causal-random-compressed-input-12-48
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-075-compressed-input-%j.err
+#SBATCH --error=synthetic-causal-random-compressed-input-12-48-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -91,7 +91,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-075-compressed-input \
+    --model-id synthetic-causal-random-compressed-input-12-48 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
