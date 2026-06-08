@@ -14,10 +14,18 @@ Usage:
 
     # Override any parameter from CLI:
     python scripts/launch.py experiments/ablation_baseline.yaml --cluster runai --set lr=5e-4 train_steps=50000
+
+    # Re-launch from a previous run's settings.json:
+    python scripts/launch.py --from-config results/my-run/settings.json --cluster slurm --dry-run
+    python scripts/launch.py --from-config results/my-run/settings.json --cluster slurm --set train_steps=100000
+
+    # Save a settings.json as an experiment YAML (for version control):
+    python scripts/launch.py --from-config results/my-run/settings.json --save-yaml experiments/rerun.yaml
 """
 
 import argparse
 import copy
+import json
 import os
 import subprocess
 import sys
@@ -67,6 +75,75 @@ _STORE_TRUE_FLAGS = {
     "synthetic_hierarchical_content",
     "synthetic_causal",
 }
+
+# Keys added at runtime by update_args() or the training loop — not part of the
+# experiment config and must be stripped when reconstructing from settings.json.
+_RUNTIME_KEYS = {
+    "DATASETCLASS",
+    "modalities",
+    "n_views",
+    "subsets",
+    "content_indices",
+    "style_indices",
+    "save_dir",
+}
+
+
+def load_from_config(path: Path, strip_cluster: bool = False) -> dict:
+    """Read a settings.json or config YAML from a previous run and return a clean config.
+
+    Handles both:
+    - ``settings.json`` saved by the training loop (``args.__dict__`` as JSON)
+    - ``config_<ts>.yaml`` snapshots saved by launch.py (includes ``_provenance``)
+
+    Runtime-derived keys (added by ``update_args`` / the training loop) are stripped
+    so the result can be fed back into ``config_to_cli_args`` or saved as an
+    experiment YAML.
+
+    Args:
+        path: Path to settings.json or config_*.yaml.
+        strip_cluster: If True, also remove cluster-specific resource keys
+            (``_slurm``, ``_runai``) so the output is a pure training config.
+
+    Returns:
+        Flat config dict ready for ``config_to_cli_args``.
+    """
+    path = Path(path)
+    if not path.exists():
+        print(f"Error: config file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    if path.suffix == ".json":
+        with open(path) as f:
+            config = json.load(f)
+    else:
+        config = load_yaml(path)
+
+    # Strip runtime keys that aren't part of the experiment config.
+    for key in _RUNTIME_KEYS:
+        config.pop(key, None)
+
+    # Strip provenance metadata (from config YAML snapshots).
+    config.pop("_provenance", None)
+
+    if strip_cluster:
+        config.pop("_slurm", None)
+        config.pop("_runai", None)
+
+    # settings.json stores the argparse key "model_id"; the launcher uses "tag".
+    # Normalise to "tag" so config_to_cli_args emits --model-id correctly.
+    if "model_id" in config and "tag" not in config:
+        config["tag"] = config.pop("model_id")
+    elif "model_id" in config and "tag" in config:
+        config.pop("model_id")
+
+    # patch_grid_per_level is stored as a list of [D,H,W] lists after
+    # update_args converts it; flatten back to the CLI-style flat int list.
+    pgpl = config.get("patch_grid_per_level")
+    if pgpl is not None and len(pgpl) > 0 and isinstance(pgpl[0], (list, tuple)):
+        config["patch_grid_per_level"] = [v for triple in pgpl for v in triple]
+
+    return config
 
 
 def load_yaml(path: Path) -> dict:
@@ -474,6 +551,23 @@ def main():
         help="Generate bash scripts for all experiment YAMLs (no Python needed on cluster)",
     )
     parser.add_argument(
+        "--from-config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Re-launch from a previous run's settings.json or config YAML snapshot. "
+        "Replaces the experiment YAML; --cluster and --set still apply on top.",
+    )
+    parser.add_argument(
+        "--save-yaml",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Save the resolved config as an experiment YAML (for version control). "
+        "Strips runtime and cluster keys so the output is a clean experiment file. "
+        "Use with --from-config to convert a settings.json into a reusable YAML.",
+    )
+    parser.add_argument(
         "--set",
         nargs="*",
         default=[],
@@ -488,19 +582,55 @@ def main():
         generate_all(args.cluster)
         return
 
-    if args.experiment is None:
-        parser.error("experiment path is required (or use --generate)")
-
-    if not args.experiment.exists():
-        print(f"Error: experiment file not found: {args.experiment}", file=sys.stderr)
-        sys.exit(1)
-
     cli_overrides = parse_cli_overrides(args.overrides)
-    config = resolve_config(args.experiment, args.cluster, cli_overrides)
-    tag = config.get("tag", args.experiment.stem)
+
+    # --from-config mode: reconstruct config from a previous run's settings.json
+    # or config YAML, instead of resolving from an experiment YAML.
+    if args.from_config is not None:
+        config = load_from_config(args.from_config)
+
+        # Merge cluster resource config (_slurm / _runai) if a cluster is specified,
+        # so the submission wrapper knows how to submit the job.  Training-level
+        # keys from the cluster YAML (dataroot, labels_path, …) are NOT merged —
+        # the settings.json already has the fully resolved paths from the original run.
+        # Use --set to override paths for a different cluster.
+        if args.cluster and args.cluster != "local":
+            cluster_path = CLUSTER_DIR / f"{args.cluster}.yaml"
+            if cluster_path.exists():
+                cluster_cfg = load_yaml(cluster_path)
+                for key, value in cluster_cfg.items():
+                    if key.startswith("_"):
+                        config[key] = value
+
+        # CLI --set overrides take highest priority.
+        config.update(cli_overrides)
+
+        # --save-yaml: write a clean experiment YAML and exit.
+        if args.save_yaml is not None:
+            save_config = load_from_config(args.from_config, strip_cluster=True)
+            save_config.update(cli_overrides)
+            args.save_yaml.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.save_yaml, "w") as f:
+                yaml.dump(save_config, f, default_flow_style=False, sort_keys=False)
+            print(f"Experiment YAML saved to: {args.save_yaml}")
+            return
+
+        tag = config.get("tag", args.from_config.stem)
+        experiment_source = args.from_config
+    else:
+        if args.experiment is None:
+            parser.error("experiment path is required (or use --generate / --from-config)")
+
+        if not args.experiment.exists():
+            print(f"Error: experiment file not found: {args.experiment}", file=sys.stderr)
+            sys.exit(1)
+
+        config = resolve_config(args.experiment, args.cluster, cli_overrides)
+        tag = config.get("tag", args.experiment.stem)
+        experiment_source = args.experiment
 
     # -- Provenance snapshot --
-    snapshot = save_resolved_config(config, args.experiment)
+    snapshot = save_resolved_config(config, experiment_source)
 
     if args.dry_run:
         print("=" * 60)
@@ -537,7 +667,7 @@ def main():
             subprocess.run(cmd, check=True)
 
     elif args.cluster == "slurm" or "_slurm" in config:
-        script = build_training_script(config, tag, "slurm", args.experiment)
+        script = build_training_script(config, tag, "slurm", experiment_source)
         if args.dry_run:
             print(f"SLURM SCRIPT:\n{script}")
         else:

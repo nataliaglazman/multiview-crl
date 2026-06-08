@@ -431,6 +431,8 @@ def write_outputs(rows, out_dir, baseline_name=None):
         "content_view",
         "style_view",
         "view_chance",
+        "num_samples",
+        "poolings",
     ]
     csv_path = os.path.join(out_dir, "dci_compare.csv")
     with open(csv_path, "w", newline="") as f:
@@ -451,6 +453,36 @@ def write_outputs(rows, out_dir, baseline_name=None):
     with open(json_path, "w") as f:
         json.dump({"baseline": baseline_name, "models": rows}, f, indent=2, default=float)
     logger.info("Wrote %s, %s, %s", csv_path, per_latent_path, json_path)
+
+
+def _load_existing_rows(out_dir):
+    """Load previously-saved model rows from dci_compare.json, for incremental runs."""
+    path = os.path.join(out_dir, "dci_compare.json")
+    if not os.path.exists(path):
+        return [], None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("models", []), data.get("baseline")
+    except Exception as e:
+        logger.warning("Could not read existing %s (%s) — starting fresh.", path, e)
+        return [], None
+
+
+def _merge_rows(existing, new):
+    """Merge model rows by name: new wins, existing order preserved, genuinely-new appended."""
+    by_name = {r["name"]: r for r in existing}
+    order = [r["name"] for r in existing]
+    for r in new:
+        if r["name"] not in by_name:
+            order.append(r["name"])
+        by_name[r["name"]] = r
+    return [by_name[n] for n in order]
+
+
+def _settings_of(row):
+    """The eval settings that must match for rows to be comparable in one leaderboard."""
+    return (row.get("num_samples"), row.get("poolings"), row.get("level"), row.get("n_null"), row.get("seeds"))
 
 
 # --------------------------------------------------------------------------- #
@@ -477,6 +509,11 @@ def main():
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
+    p.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Overwrite any existing results in --out instead of merging the new models into them.",
+    )
     cli = p.parse_args()
 
     poolings = parse_poolings(cli.poolings)
@@ -530,9 +567,33 @@ def main():
     if not rows:
         logger.error("No models evaluated successfully.")
         return
-    print_table(rows, baseline_name)
-    print_per_latent(rows)
-    write_outputs(rows, cli.out, baseline_name)
+
+    # Stamp eval settings on each row (provenance + the merge-comparability check).
+    meta = {
+        "num_samples": cli.num_samples,
+        "poolings": cli.poolings,
+        "level": cli.level,
+        "n_null": cli.n_null,
+        "seeds": cli.seeds,
+    }
+    for r in rows:
+        r.update(meta)
+
+    existing, existing_baseline = ([], None) if cli.fresh else _load_existing_rows(cli.out)
+    if existing:
+        if any(_settings_of(e) != _settings_of(rows[0]) for e in existing):
+            logger.warning(
+                "Existing results used different eval settings (num-samples/poolings/level/n-null/seeds); "
+                "the merged leaderboard would mix them. Use --fresh to start clean, or match the settings."
+            )
+        logger.info("Merging %d new with %d existing model(s) in %s.", len(rows), len(existing), cli.out)
+    merged = _merge_rows(existing, rows)
+    if baseline_name is None:
+        baseline_name = existing_baseline
+
+    print_table(merged, baseline_name)
+    print_per_latent(merged)
+    write_outputs(merged, cli.out, baseline_name)
 
 
 if __name__ == "__main__":
