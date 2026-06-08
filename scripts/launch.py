@@ -325,11 +325,9 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
         train_cmd = "\n".join(train_parts)
 
         lines = header + [
-            f'REPO="{repo_path}"',
-            "",
             "# --- Training command ---",
             f"TRAIN_CMD=$(cat <<'TRAIN_EOF'",
-            f"cd ${{REPO}} && PYTHONPATH=${{REPO}} \\",
+            f"cd {repo_path} && PYTHONPATH={repo_path} \\",
             train_cmd,
             "TRAIN_EOF",
             ")",

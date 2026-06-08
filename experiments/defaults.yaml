@@ -25,7 +25,7 @@ vqvae_scaling_rates: [2, 2, 2]
 vq_commitment_weight: 0.25
 separate_encoders: true
 pass_full_to_next_level: true
-determinism: true
+deterministic: true
 
 # ---- Content / style split ----
 content_dim: 128

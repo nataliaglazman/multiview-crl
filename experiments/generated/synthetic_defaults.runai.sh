@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-06-08T09:22:24Z
-# Git SHA: 4aac7ae
+# Generated at: 2026-06-08T14:01:46Z
+# Git SHA: 216dcba
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
 
-REPO="/nfs/home/nglazman/crl-2/multiview-crl"
-
 # --- Training command ---
 TRAIN_CMD=$(cat <<'TRAIN_EOF'
-cd ${REPO} && PYTHONPATH=${REPO} \
+cd /nfs/home/nglazman/crl-2/multiview-crl && PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl \
 python -m training.main_multimodal \
     --batch-size 32 \
     --channels-last \
@@ -22,6 +20,7 @@ python -m training.main_multimodal \
     --dataroot /nfs/home/nglazman/data \
     --dataset-name synthetic \
     --dci-every 2000 \
+    --deterministic \
     --eval-dci \
     --image-spacing 1.0 \
     --lr 0.001 \
