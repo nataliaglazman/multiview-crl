@@ -195,6 +195,11 @@ class Decoder(HelperModule):
       modulates the feature map via learned scale+shift **after each decoder
       stage** (initial conv, residual stack, and every upsampling step).
       This gives the decoder access to style information at every resolution.
+    * ``"input"`` — style is concatenated onto the decoder **input** alongside
+      the content codes, so it propagates through the entire decoder from the
+      first conv.  Style is treated symmetrically with content and the
+      reconstruction depends on it from the very start (pairs naturally with
+      quantized style).
     """
 
     def build(
@@ -210,14 +215,19 @@ class Decoder(HelperModule):
         style_injection_mode: str = "concat",
     ):
         assert log2(upscale_factor) % 1 == 0, "Upscale must be a power of 2"
-        assert style_injection_mode in ("concat", "film"), (
-            f"Unknown style_injection_mode: {style_injection_mode!r}. " f"Expected 'concat' or 'film'."
+        assert style_injection_mode in ("concat", "film", "input"), (
+            f"Unknown style_injection_mode: {style_injection_mode!r}. " f"Expected 'concat', 'film' or 'input'."
         )
         upscale_steps = int(log2(upscale_factor))
         self.style_channels = style_channels
         self.style_injection_mode = style_injection_mode
 
-        layers = [nn.Conv3d(in_channels, hidden_channels, 3, stride=1, padding=1)]
+        # In "input" mode style is concatenated onto the decoder input, so the
+        # first conv must accept the extra style channels.
+        init_in_channels = in_channels
+        if style_channels > 0 and style_injection_mode == "input":
+            init_in_channels = in_channels + style_channels
+        layers = [nn.Conv3d(init_in_channels, hidden_channels, 3, stride=1, padding=1)]
         layers.append(
             ResidualStack(
                 hidden_channels,
@@ -271,6 +281,17 @@ class Decoder(HelperModule):
                 nn.Conv3d(c_channel + style_channels, out_channels, 3, stride=1, padding=1),
                 get_group_norm(out_channels),
             )
+        elif style_channels > 0 and style_injection_mode == "input":
+            # Style is concatenated onto the decoder INPUT (the widened initial
+            # conv above already accounts for the extra channels), so it
+            # propagates through every layer.  The rest of the stack is a
+            # standard decoder with a plain output conv.
+            layers.append(nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1))
+            layers.append(get_group_norm(out_channels))
+            self.layers = nn.Sequential(*layers)
+            self.film_layers = None
+            self.output_conv = None
+            self.final_conv = None
         else:
             # No style injection
             layers.append(nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1))
@@ -296,6 +317,16 @@ class Decoder(HelperModule):
         Returns:
             Decoded output ``(B, out_channels, D_out, H_out, W_out)``.
         """
+        if self.style_injection_mode == "input" and self.style_channels > 0:
+            # Style concatenated onto the decoder input so it flows through the
+            # whole stack.  Resize to the input's spatial dims (style may have
+            # been spatially bottlenecked) before concatenation.
+            if style is None:
+                raise ValueError("Decoder was built with style (input) but no style tensor was provided.")
+            if style.shape[2:] != x.shape[2:]:
+                style = F.interpolate(style, size=x.shape[2:], mode="trilinear", align_corners=False)
+            return self.layers(torch.cat([x, style], dim=1))
+
         if self.film_layers is not None:
             # FiLM mode: run layers one-by-one with FiLM modulation between.
             # layers[0] = initial conv, layers[1] = residual stack,
@@ -501,7 +532,7 @@ class VQVAE(HelperModule):
         style_nb_entries: int
         | list[int]
         | None = None,  # Codebook size(s) for style codebooks (defaults to nb_entries). Pass a list of length len(content_style_levels) for per-level sizes.
-        style_injection_mode: str = "concat",  # "concat" (legacy) or "film" (Spatial FiLM at every decoder stage)
+        style_injection_mode: str = "concat",  # "concat" (legacy), "film" (Spatial FiLM at every decoder stage), or "input" (style concatenated onto the decoder input, flowing through the whole decoder)
         cb_ema_decay: float = 0.999,  # EMA momentum for codebook running averages
         cb_reset_every: int = 100,  # Reset dead codebook entries every N forwards (0 = disable)
         cb_reset_threshold: float = 1.0,  # EMA cluster_size below this → dead
@@ -1473,7 +1504,10 @@ class VQVAE(HelperModule):
                     # Provide a zero placeholder so the decoder receives the
                     # expected style tensor.  Run through the layers to infer
                     # the spatial size at the point where style is consumed.
-                    if decoder.film_layers is not None:
+                    if decoder.style_injection_mode == "input":
+                        # Style is consumed at the decoder input — match its dims.
+                        dec_feat = decoder_in
+                    elif decoder.film_layers is not None:
                         # FiLM mode: iterate through ModuleList like forward()
                         dec_feat = decoder.layers[0](decoder_in)
                         dec_feat = decoder.layers[1](dec_feat)

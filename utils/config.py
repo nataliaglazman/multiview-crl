@@ -601,7 +601,7 @@ def parse_args() -> argparse.ArgumentParser:
         "--style-injection-mode",
         type=str,
         default="concat",
-        choices=["concat", "film"],
+        choices=["concat", "film", "input"],
         help=(
             "How style features are injected into the decoder.  "
             "'concat' (default): style is concatenated onto the penultimate feature map "
@@ -610,6 +610,10 @@ def parse_args() -> argparse.ArgumentParser:
             "the decoder feature map via learned per-location scale and shift after every "
             "decoder stage (residual block + each upsampling step), giving the decoder "
             "access to style information at every resolution.  "
+            "'input': style is concatenated onto the decoder INPUT alongside the content "
+            "codes, so it flows through the entire decoder from the first conv layer — "
+            "style is treated symmetrically with content and reconstruction depends on it "
+            "from the start (pairs naturally with --quantize-style).  "
             "Requires --inject-style-to-decoder."
         ),
     )
