@@ -37,6 +37,101 @@ def _namespace_from_dict(d):
     return argparse.Namespace(**d)
 
 
+def load_run_args(run_dir):
+    """Load a run's settings.json into an argparse.Namespace (no model build)."""
+    settings_path = os.path.join(run_dir, "settings.json")
+    if not os.path.exists(settings_path):
+        raise FileNotFoundError(f"settings.json not found in {run_dir}")
+    with open(settings_path) as f:
+        return _namespace_from_dict(json.load(f))
+
+
+def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
+    """Rebuild the VQVAE from a run's settings.json and load its checkpoint.
+
+    Returns ``(model, args, device)``.  Shared by the single-run eval and the
+    model-comparison pipeline so model construction lives in exactly one place.
+    """
+    import models.vqvae as vqvae
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    args = load_run_args(run_dir)
+    logger.info("Loaded settings from: %s", os.path.join(run_dir, "settings.json"))
+    logger.info(
+        "Building VQVAE: hidden=%d, levels=%d, embed=%d",
+        args.vqvae_hidden_channels,
+        args.vqvae_nb_levels,
+        args.vqvae_embed_dim,
+    )
+    model = vqvae.VQVAE(
+        in_channels=1,
+        hidden_channels=args.vqvae_hidden_channels,
+        res_channels=args.vqvae_res_channels,
+        nb_res_layers=2,
+        nb_levels=args.vqvae_nb_levels,
+        embed_dim=args.vqvae_embed_dim,
+        nb_entries=args.vqvae_nb_entries,
+        scaling_rates=args.vqvae_scaling_rates,
+        content_size=len(args.content_indices[0]),
+        style_size=len(args.style_indices),
+        inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
+        content_style_levels=getattr(args, "content_style_levels", [0]),
+        content_ratios=getattr(args, "content_ratios", None),
+        separate_encoders=getattr(args, "separate_encoders", False),
+        mask_mode=getattr(args, "mask_mode", "onthefly"),
+        quantize_style=getattr(args, "quantize_style", False),
+        style_embed_dim=getattr(args, "style_embed_dim", None),
+        style_nb_entries=getattr(args, "style_nb_entries", None),
+        style_injection_mode=getattr(args, "style_injection_mode", "concat"),
+        use_content_projection=getattr(args, "use_content_projection", False),
+        narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
+        top_level_recon_only=getattr(args, "top_level_recon_only", False),
+        pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
+        skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
+        style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
+        detach_style_injection=getattr(args, "detach_style_injection", False),
+    )
+
+    ckpt_path = checkpoint or os.path.join(run_dir, "vqvae_model.pt")
+    logger.info("Loading checkpoint: %s", ckpt_path)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = ckpt.get("encoders", ckpt)
+    cleaned = {k.removeprefix("module."): v for k, v in state_dict.items()}
+    model.load_state_dict(cleaned, strict=False)
+    model.to(device)
+    model.eval()
+    logger.info(
+        "Checkpoint step: %s | params: %s",
+        ckpt.get("step", -1),
+        f"{sum(p.numel() for p in model.parameters()):,}",
+    )
+    return model, args, device
+
+
+def build_synthetic_test_set(args, num_samples=None):
+    """Build the synthetic test dataset from a run's settings (shared helper)."""
+    from data.datasets import SyntheticBrainDataset
+
+    n_samples = num_samples or getattr(args, "synthetic_num_test", 200)
+    res = getattr(args, "synthetic_res", 64)
+    spatial_size = getattr(args, "spatial_size", (res, res, res))
+    logger.info("Generating %d synthetic test samples at resolution %s...", n_samples, spatial_size)
+    return SyntheticBrainDataset(
+        mode="test",
+        spatial_size=spatial_size,
+        synthetic_mode=getattr(args, "synthetic_mode", "pseudo_mri"),
+        synthetic_seed=getattr(args, "synthetic_seed", 42),
+        synthetic_num_samples=n_samples,
+        synthetic_n_content=getattr(args, "synthetic_n_content", 9),
+        synthetic_n_style=getattr(args, "synthetic_n_style", 3),
+        synthetic_n_deformation_grid=getattr(args, "synthetic_n_deformation_grid", 4),
+        synthetic_n_fissure_grid=getattr(args, "synthetic_n_fissure_grid", 8),
+        synthetic_hierarchical_content=getattr(args, "synthetic_hierarchical_content", False),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Standalone DCI evaluation for synthetic data")
     parser.add_argument("--run-dir", type=str, required=True, help="Training run directory containing settings.json")
@@ -74,92 +169,12 @@ def main():
         pooling = tuple(int(x) for x in cli.pooling.split(","))
     levels = [int(x) for x in cli.levels.split(",")]
 
-    # ── Load settings.json ────────────────────────────────────────────────
-    settings_path = os.path.join(cli.run_dir, "settings.json")
-    if not os.path.exists(settings_path):
+    # ── Load model + build synthetic dataset (shared helpers) ─────────────
+    if not os.path.exists(os.path.join(cli.run_dir, "settings.json")):
         logger.error("settings.json not found in %s", cli.run_dir)
         sys.exit(1)
-
-    with open(settings_path) as f:
-        settings = json.load(f)
-    args = _namespace_from_dict(settings)
-    logger.info("Loaded settings from: %s", settings_path)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # ── Build model from saved settings ───────────────────────────────────
-    import models.vqvae as vqvae
-
-    logger.info(
-        "Building VQVAE: hidden=%d, levels=%d, embed=%d",
-        args.vqvae_hidden_channels,
-        args.vqvae_nb_levels,
-        args.vqvae_embed_dim,
-    )
-    model = vqvae.VQVAE(
-        in_channels=1,
-        hidden_channels=args.vqvae_hidden_channels,
-        res_channels=args.vqvae_res_channels,
-        nb_res_layers=2,
-        nb_levels=args.vqvae_nb_levels,
-        embed_dim=args.vqvae_embed_dim,
-        nb_entries=args.vqvae_nb_entries,
-        scaling_rates=args.vqvae_scaling_rates,
-        content_size=len(args.content_indices[0]),
-        style_size=len(args.style_indices),
-        inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
-        content_style_levels=getattr(args, "content_style_levels", [0]),
-        content_ratios=getattr(args, "content_ratios", None),
-        separate_encoders=getattr(args, "separate_encoders", False),
-        mask_mode=getattr(args, "mask_mode", "onthefly"),
-        quantize_style=getattr(args, "quantize_style", False),
-        style_embed_dim=getattr(args, "style_embed_dim", None),
-        style_nb_entries=getattr(args, "style_nb_entries", None),
-        style_injection_mode=getattr(args, "style_injection_mode", "concat"),
-        use_content_projection=getattr(args, "use_content_projection", False),
-        narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
-        top_level_recon_only=getattr(args, "top_level_recon_only", False),
-        pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
-        skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
-        style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
-        detach_style_injection=getattr(args, "detach_style_injection", False),
-    )
-
-    # ── Load checkpoint ───────────────────────────────────────────────────
-    ckpt_path = cli.checkpoint or os.path.join(cli.run_dir, "vqvae_model.pt")
-    logger.info("Loading checkpoint: %s", ckpt_path)
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-
-    state_dict = ckpt.get("encoders", ckpt)
-    cleaned = {k.removeprefix("module."): v for k, v in state_dict.items()}
-    model.load_state_dict(cleaned, strict=False)
-    model.to(device)
-    model.eval()
-
-    step = ckpt.get("step", -1)
-    logger.info("Checkpoint step: %s", step)
-    logger.info("Model params: %s", f"{sum(p.numel() for p in model.parameters()):,}")
-
-    # ── Build synthetic dataset ───────────────────────────────────────────
-    from data.datasets import SyntheticBrainDataset
-
-    n_samples = cli.num_samples or getattr(args, "synthetic_num_test", 200)
-    res = getattr(args, "synthetic_res", 64)
-    spatial_size = getattr(args, "spatial_size", (res, res, res))
-
-    logger.info("Generating %d synthetic test samples at resolution %s...", n_samples, spatial_size)
-    test_dataset = SyntheticBrainDataset(
-        mode="test",
-        spatial_size=spatial_size,
-        synthetic_mode=getattr(args, "synthetic_mode", "pseudo_mri"),
-        synthetic_seed=getattr(args, "synthetic_seed", 42),
-        synthetic_num_samples=n_samples,
-        synthetic_n_content=getattr(args, "synthetic_n_content", 9),
-        synthetic_n_style=getattr(args, "synthetic_n_style", 3),
-        synthetic_n_deformation_grid=getattr(args, "synthetic_n_deformation_grid", 4),
-        synthetic_n_fissure_grid=getattr(args, "synthetic_n_fissure_grid", 8),
-        synthetic_hierarchical_content=getattr(args, "synthetic_hierarchical_content", False),
-    )
+    model, args, device = load_model_from_run_dir(cli.run_dir, cli.checkpoint)
+    test_dataset = build_synthetic_test_set(args, cli.num_samples)
 
     # ── Run DCI ───────────────────────────────────────────────────────────
     from eval.dci import compute_dci_synthetic
