@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-05-28T14:37:57Z
-# Git SHA: 1137840
+# Generated at: 2026-06-08T09:22:24Z
+# Git SHA: 4aac7ae
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -13,26 +13,32 @@ TRAIN_CMD=$(cat <<'TRAIN_EOF'
 cd ${REPO} && PYTHONPATH=${REPO} \
 python -m training.main_multimodal \
     --batch-size 32 \
+    --channels-last \
+    --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 9 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
     --dataroot /nfs/home/nglazman/data \
     --dataset-name synthetic \
+    --dci-every 2000 \
+    --deterministic \
+    --eval-dci \
     --image-spacing 1.0 \
+    --inject-style-to-decoder \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
     --pass-full-to-next-level \
     --patch-contrastive \
+    --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
-    --scale-adv-loss 0.0 \
+    --scale-adv-loss 0.1 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 10.0 \
+    --scale-contrastive-loss 1.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -47,10 +53,10 @@ python -m training.main_multimodal \
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random \
+    --model-id synthetic-causal-random-adv-loss-redo-deterministic \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 200000 \
+    --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
@@ -64,7 +70,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai submit synthetic-causal-random \
+runai submit synthetic-causal-random-adv-loss-redo-deterministic \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \

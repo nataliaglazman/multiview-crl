@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-05-28T14:37:57Z
-# Git SHA: 1137840
+# Generated at: 2026-06-08T09:22:24Z
+# Git SHA: 4aac7ae
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -13,14 +13,16 @@ TRAIN_CMD=$(cat <<'TRAIN_EOF'
 cd ${REPO} && PYTHONPATH=${REPO} \
 python -m training.main_multimodal \
     --batch-size 32 \
+    --channels-last \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 9 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
     --dataroot /nfs/home/nglazman/data \
     --dataset-name synthetic \
+    --dci-every 2000 \
+    --eval-dci \
     --image-spacing 1.0 \
     --lr 0.001 \
     --mask-mode fixed \

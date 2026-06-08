@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/ablation_multilevel_patches.yaml
+# Auto-generated from: experiments/synthseg_baseline.yaml
 # Generated at: 2026-06-08T09:22:24Z
 # Git SHA: 4aac7ae
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -15,44 +15,36 @@ python -m training.main_multimodal \
     --batch-size 4 \
     --cache-dataset \
     --cache-dir /nfs/home/nglazman/cache/multiview \
-    --cb-reset-threshold 5 \
     --channels-last \
     --content-dim 128 \
-    --content-ratios 0.5 0.5 0.5 \
-    --content-style-levels 0 1 2 \
+    --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
-    --dataroot /nfs/home/nglazman/data \
+    --dataroot /data/natalia/ADNI_synthseg \
     --dataset-name ADNI_stripped_masks \
     --gradient-checkpointing \
     --image-spacing 1.0 \
-    --inject-style-to-decoder \
-    --labels-path /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv \
+    --labels-path /data/natalia/ADNI_synthseg/labels.csv \
     --lr 0.001 \
     --mask-mode fixed \
-    --masks-dir /nfs/home/nglazman/data/ADNI_stripped_masks \
     --moco-queue-size 0 \
     --pass-full-to-next-level \
-    --patch-contrastive \
-    --patch-grid 6 7 6 \
-    --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 10.0 \
+    --scale-contrastive-loss 1.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
-    --shared-brain-mask \
     --spatial-size 150 180 150 \
-    --model-id ablation-multilevel-patches \
+    --model-id synthseg-baseline \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 100000 \
+    --train-steps 20000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
@@ -66,7 +58,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai submit ablation-multilevel-patches \
+runai submit synthseg-baseline \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \

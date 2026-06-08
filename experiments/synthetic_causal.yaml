@@ -18,4 +18,5 @@ scale_adv_loss: 0.1
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
 vqvae_scaling_rates: [2]
+deterministic: true
 # select_by_gated_score: false

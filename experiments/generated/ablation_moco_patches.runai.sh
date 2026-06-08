@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/ablation_moco_patches.yaml
-# Generated at: 2026-05-28T14:37:57Z
-# Git SHA: 1137840
+# Generated at: 2026-06-08T09:22:24Z
+# Git SHA: 4aac7ae
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -15,6 +15,7 @@ python -m training.main_multimodal \
     --batch-size 2 \
     --cache-dataset \
     --cache-dir /nfs/home/nglazman/cache/multiview \
+    --channels-last \
     --content-dim 128 \
     --content-style-levels 0 \
     --contrastive-level-weights 3.0 0.5 0.5 \
