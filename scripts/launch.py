@@ -23,6 +23,8 @@ Usage:
     python scripts/launch.py --from-config results/my-run/settings.json --save-yaml experiments/rerun.yaml
 """
 
+from __future__ import annotations
+
 import argparse
 import copy
 import json
