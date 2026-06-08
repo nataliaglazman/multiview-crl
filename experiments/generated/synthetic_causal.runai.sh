@@ -18,7 +18,6 @@ python -m training.main_multimodal \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
-    --dataroot /nfs/home/nglazman/data \
     --dataset-name synthetic \
     --dci-every 2000 \
     --deterministic \
