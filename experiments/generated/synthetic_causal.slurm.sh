@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-08T19:02:37Z
-# Git SHA: 6ef0ec8
+# Generated at: 2026-06-08T19:38:07Z
+# Git SHA: 99ff37b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-random-075-compressed-input
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -52,7 +52,8 @@ conda activate "${CONDA_ENV_NAME}"
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
-    --content-ratios 0.75 \
+    --content-ratios 0.95 \
+    --content-size 12 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -97,8 +98,8 @@ conda activate "${CONDA_ENV_NAME}"
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 32 \
-    --vqvae-hidden-channels 32 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
