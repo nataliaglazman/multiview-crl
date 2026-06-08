@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/ablation_baseline.yaml
-# Generated at: 2026-06-08T14:22:14Z
-# Git SHA: ffccb65
+# Generated at: 2026-06-08T18:07:38Z
+# Git SHA: 42c6a26
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail

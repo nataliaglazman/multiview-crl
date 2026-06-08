@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_moco_patches.yaml
-# Generated at: 2026-06-08T09:00:22Z
-# Git SHA: e024588
+# Generated at: 2026-06-08T18:07:42Z
+# Git SHA: 42c6a26
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-moco-patches
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -60,6 +60,7 @@ conda activate "${CONDA_ENV_NAME}"
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name ADNI_stripped_masks \
+    --deterministic \
     --gradient-accumulation-steps 4 \
     --gradient-checkpointing \
     --image-spacing 1.0 \

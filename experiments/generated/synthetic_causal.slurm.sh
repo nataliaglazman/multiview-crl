@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-08T09:00:22Z
-# Git SHA: e024588
+# Generated at: 2026-06-08T18:07:42Z
+# Git SHA: 42c6a26
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-adv-loss-redo-deterministic
+#SBATCH --job-name=synthetic-causal-random-075-compressed
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-adv-loss-redo-deterministic-%j.err
+#SBATCH --error=synthetic-causal-random-075-compressed-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -52,13 +52,14 @@ conda activate "${CONDA_ENV_NAME}"
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
-    --content-ratios 0.95 \
+    --content-ratios 0.75 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
     --dci-every 2000 \
+    --deterministic \
     --eval-dci \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
@@ -73,7 +74,7 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.1 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1.0 \
+    --scale-contrastive-loss 10.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -88,16 +89,16 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-adv-loss-redo-deterministic \
+    --model-id synthetic-causal-random-075-compressed \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 32 \
+    --vqvae-hidden-channels 32 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 2 \
+    --vqvae-scaling-rates 4 \
     --workers 8

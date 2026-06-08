@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-08T14:22:14Z
-# Git SHA: ffccb65
+# Generated at: 2026-06-08T18:07:38Z
+# Git SHA: 42c6a26
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -14,7 +14,7 @@ python -m training.main_multimodal \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
-    --content-ratios 0.95 \
+    --content-ratios 0.75 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -36,7 +36,7 @@ python -m training.main_multimodal \
     --resume-training \
     --scale-adv-loss 0.1 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1.0 \
+    --scale-contrastive-loss 10.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -51,24 +51,24 @@ python -m training.main_multimodal \
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-adv-loss-redo-deterministic \
+    --model-id synthetic-causal-random-075-compressed \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 32 \
+    --vqvae-hidden-channels 32 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 2 \
+    --vqvae-scaling-rates 4 \
     --workers 8
 TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai submit synthetic-causal-random-adv-loss-redo-deterministic \
+runai submit synthetic-causal-random-075-compressed \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \

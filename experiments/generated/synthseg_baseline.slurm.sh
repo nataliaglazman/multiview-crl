@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-06-08T09:00:22Z
-# Git SHA: e024588
+# Generated at: 2026-06-08T18:07:42Z
+# Git SHA: 42c6a26
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthseg-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -58,6 +58,7 @@ conda activate "${CONDA_ENV_NAME}"
     --cross-view-negs-only \
     --dataroot /data/natalia/ADNI_synthseg \
     --dataset-name ADNI_stripped_masks \
+    --deterministic \
     --gradient-checkpointing \
     --image-spacing 1.0 \
     --labels-path /data/natalia/ADNI_synthseg/labels.csv \
