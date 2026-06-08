@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-random-075-compressed
+tag: synthetic-causal-random-075-compressed-input
 synthetic_causal: true
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
@@ -20,4 +20,5 @@ vqvae_embed_dim: 32
 vqvae_scaling_rates: [4]
 deterministic: true
 content_ratios: [0.75]
+style_injection_mode: input
 # select_by_gated_score: false
