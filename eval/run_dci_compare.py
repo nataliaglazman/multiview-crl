@@ -225,6 +225,23 @@ def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1,
 # --------------------------------------------------------------------------- #
 
 
+def _resolve_checkpoint(run_dir, name):
+    """Prefer ``<run_dir>/<name>``; fall back to vqvae_model.pt if it is missing.
+
+    Lets a comparison mix runs that have a best-by-loss checkpoint with runs that
+    only have a latest one, instead of dropping the latter.  Returns the preferred
+    path unchanged when neither exists so the loader can raise a clear error.
+    """
+    preferred = os.path.join(run_dir, name)
+    if os.path.exists(preferred):
+        return preferred
+    fallback = os.path.join(run_dir, "vqvae_model.pt")
+    if name != "vqvae_model.pt" and os.path.exists(fallback):
+        logger.warning("%s not found in %s — falling back to vqvae_model.pt", name, run_dir)
+        return fallback
+    return preferred
+
+
 def evaluate_model(
     name, run_dir, dataset, poolings, level, n_null, seeds, batch_size, num_workers, device, checkpoint=None
 ):
@@ -419,7 +436,7 @@ def main():
                     cli.batch_size,
                     cli.num_workers,
                     device,
-                    checkpoint=os.path.join(run_dir, cli.checkpoint_name),
+                    checkpoint=_resolve_checkpoint(run_dir, cli.checkpoint_name),
                 )
             )
         except Exception as e:
