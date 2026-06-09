@@ -1327,12 +1327,20 @@ def main(args):
     ]
     if mask_params:
         param_groups.append({"params": mask_params, "weight_decay": 0.0, "lr": args.lr * _mask_lr_scale})
-    use_fused = torch.cuda.is_available()
+    # Fused AdamW is fastest but requires params, grads, exp_avg, and
+    # exp_avg_sq to share the exact same dtype, device AND memory layout.
+    # channels_last_3d changes the layout of 5D conv weights while 1D/2D
+    # params stay contiguous — PyTorch < 2.4 fused kernels can't handle the
+    # mixed layouts within a param group.  Fall back to the foreach backend
+    # (nearly as fast, no layout constraint) when channels_last is active.
+    _channels_last = getattr(args, "channels_last", False)
+    use_fused = torch.cuda.is_available() and not _channels_last
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, fused=use_fused)
     params = decay_params + no_decay_params + mask_params  # flat list for gradient clipping
     logger.info("")
     logger.info(
-        f"[OPTIMIZER] AdamW (fused={use_fused}) lr={args.lr} wd={_wd} "
+        f"[OPTIMIZER] AdamW (fused={use_fused}{', channels_last→foreach' if _channels_last else ''}) "
+        f"lr={args.lr} wd={_wd} "
         f"params={sum(p.numel() for p in params):,} "
         f"(decay={len(decay_params)}, no_decay={len(no_decay_params)})"
     )
