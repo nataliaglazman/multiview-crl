@@ -230,26 +230,49 @@ def _has_v2(reprs, level):
     return False
 
 
-_DCI_KEYS = ("dci_d", "dci_d_null", "dci_d_gap", "dci_c", "dci_c_null", "dci_c_gap")
+_DCI_BASE = ("d", "d_null", "d_gap", "c", "c_null", "c_gap")
+# Two scopes: "dci" = all-channels × all-factors (baseline-comparable, defined even
+# for a no-split model); "dci_content" = content-channels × content-factors (the
+# model-internal "is content disentangled" number, undefined for a no-split baseline).
+_DCI_KEYS = tuple(f"dci_{s}" for s in _DCI_BASE)
+_DCI_CONTENT_KEYS = tuple(f"dci_content_{s}" for s in _DCI_BASE)
 
 
-def _score_dci(reprs, level, block_idx, gt_content, gt_style, avail, n_null, rng, train_ratio=0.8):
+def _blank_dci(prefix):
+    return {
+        **{f"{prefix}_{s}": float("nan") for s in _DCI_BASE},
+        f"{prefix}_pooling": None,
+    }
+
+
+def _score_dci(
+    reprs,
+    level,
+    block_idx,
+    gt_content,
+    gt_style,
+    avail,
+    n_null,
+    rng,
+    key_prefix="dci",
+    train_ratio=0.8,
+):
     """GAP DCI disentanglement + completeness on one representation block.
 
-    ``block_idx`` is normally ``(content_idx, style_idx)`` so DCI is measured on the
-    full (all-channels) representation — the split-free disentanglement axis that is
-    defined even for a vanilla, no-split baseline.  Reuses the GBT importance +
-    label-permutation null floor from ``eval.dci`` (the same path as
+    ``block_idx`` selects the codes: ``(content_idx, style_idx)`` for the all-channels
+    rep, or ``content_idx`` alone for content-only.  ``gt_content``/``gt_style`` pick
+    the factor columns (pass ``gt_style=None`` for content-only).  Reuses the GBT
+    importance + label-permutation null floor from ``eval.dci`` (the same path as
     ``compute_dci_synthetic``), at the richest available pooling.  Returns real /
-    null / gap for both D and C; ``gap = real - null`` cancels the shape advantage of
-    a wider latent so models with different channel counts stay comparable.
+    null / gap for D and C under ``key_prefix``; ``gap = real - null`` cancels the
+    shape advantage of a wider latent so different channel counts stay comparable.
     """
     nan = float("nan")
-    blank = {k: nan for k in _DCI_KEYS}
+    blank = _blank_dci(key_prefix)
     mkey = _resolve_key("stats", avail)
     X = _block_array(reprs, mkey, level, block_idx)
     if X is None or X.shape[1] == 0 or X.shape[0] < 20:
-        return {**blank, "dci_pooling": None}
+        return blank
 
     F = np.hstack([gt_content, gt_style]) if gt_style is not None and gt_style.shape[1] else gt_content
     split = int(X.shape[0] * train_ratio)
@@ -262,18 +285,18 @@ def _score_dci(reprs, level, block_idx, gt_content, gt_style, avail, n_null, rng
         rd, rc = real["disentanglement"], real["completeness"]
     except Exception as e:
         logger.warning("DCI (real) failed: %s", e)
-        return {**blank, "dci_pooling": mkey}
+        return {**blank, f"{key_prefix}_pooling": mkey}
 
     null = _null_permuted_dci(X, F, split, factor_types, n_null, rng)
     nd, nc = null.get("disentanglement", nan), null.get("completeness", nan)
     return {
-        "dci_d": rd,
-        "dci_d_null": nd,
-        "dci_d_gap": rd - nd,
-        "dci_c": rc,
-        "dci_c_null": nc,
-        "dci_c_gap": rc - nc,
-        "dci_pooling": mkey,
+        f"{key_prefix}_d": rd,
+        f"{key_prefix}_d_null": nd,
+        f"{key_prefix}_d_gap": rd - nd,
+        f"{key_prefix}_c": rc,
+        f"{key_prefix}_c_null": nc,
+        f"{key_prefix}_c_gap": rc - nc,
+        f"{key_prefix}_pooling": mkey,
     }
 
 
@@ -319,10 +342,13 @@ def _score_one_encoder(
     allb["content_names"] = list(cnames)
     allb["style_names"] = list(snames)
 
-    # Split-free DCI (component-wise) on the all-channels rep — the disentanglement
-    # axis that is defined even for a no-split baseline.  Off by default (GBT cost).
-    dci = (
-        _score_dci(
+    # Component-wise DCI, two scopes (off by default — GBT cost):
+    #   dci_*          — all-channels × all-factors: defined even for a no-split
+    #                    baseline, so it is the apples-to-apples axis vs the baseline.
+    #   dci_content_*  — content-channels × content-factors: the model-internal
+    #                    "is content disentangled" number; NaN for a no-split baseline.
+    if with_dci:
+        dci = _score_dci(
             reprs,
             level,
             (content_idx, style_idx),
@@ -331,10 +357,26 @@ def _score_one_encoder(
             avail,
             n_null,
             rng,
+            key_prefix="dci",
         )
-        if with_dci
-        else {**{k: float("nan") for k in _DCI_KEYS}, "dci_pooling": None}
-    )
+        if not all_only and has_split:
+            dci.update(
+                _score_dci(
+                    reprs,
+                    level,
+                    content_idx,
+                    gt_content,
+                    None,
+                    avail,
+                    n_null,
+                    rng,
+                    key_prefix="dci_content",
+                )
+            )
+        else:
+            dci.update(_blank_dci("dci_content"))
+    else:
+        dci = {**_blank_dci("dci"), **_blank_dci("dci_content")}
 
     if all_only:
         nan = float("nan")
@@ -1145,27 +1187,47 @@ def print_capacity_table(rows, baseline_name=None):
     print("  ALL-CHANNELS CAPACITY   (GAP = real - null; full representation -> each factor)")
     print("  higher = more factor information present somewhere in the representation")
     for r in ranked:
-        allb = (r.get("detail") or {}).get("all")
-        mean = r.get("info_all", float("nan"))
         tag = "   <- baseline (all-channels only)" if r["name"] == baseline_name else ""
         chans = r.get("n_content_channels", 0) + r.get("n_style_channels", 0)
+        # When --per-encoder produced a second encoder, show its capacity too — the
+        # baseline (all-channels) is scored on both encoders, not just the first.
+        has_v2 = np.isfinite(r.get("info_all_v2", float("nan")))
+
+        def _emit_enc(suffix, enc_label):
+            allb = (r.get("detail_v2" if suffix else "detail") or {}).get("all")
+            mean = r.get("info_all" + suffix, float("nan"))
+            head = f"    {enc_label}  " if enc_label else "    "
+            print(f"{head}mean {_num(mean)} {_minibar(mean)}")
+            dgap = r.get("dci_d_gap" + suffix, float("nan"))
+            if np.isfinite(dgap):
+                cgap = r.get("dci_c_gap" + suffix, float("nan"))
+                print(
+                    f"      {'DCI all (gap)':18s} D {_num(dgap)} {_minibar(dgap)}   "
+                    f"C {_num(cgap)} {_minibar(cgap)}   (all chan x all factors)"
+                )
+                dcg = r.get("dci_content_d_gap" + suffix, float("nan"))
+                if np.isfinite(dcg):
+                    ccg = r.get("dci_content_c_gap" + suffix, float("nan"))
+                    print(
+                        f"      {'DCI content (gap)':18s} D {_num(dcg)} {_minibar(dcg)}   "
+                        f"C {_num(ccg)} {_minibar(ccg)}   (content chan x content factors)"
+                    )
+            if allb:
+                cset = set(allb.get("content_names", []))
+                fw = max([len(n) for n in allb["per_factor"]] + [16])
+                for fname, fd in allb["per_factor"].items():
+                    kind = "content" if fname in cset else "style"
+                    g = fd.get("gap")
+                    pool = fd.get("pooling") or "?"
+                    print(f"      {kind:7s} {fname:<{fw}s} {pool:<6s} {_num(g)} {_minibar(g)}")
+
         print()
-        print(f"  {r['name']}{tag}   {chans}ch   mean {_num(mean)} {_minibar(mean)}")
-        dgap = r.get("dci_d_gap", float("nan"))
-        if np.isfinite(dgap):
-            cgap = r.get("dci_c_gap", float("nan"))
-            print(
-                f"      {'DCI (gap)':14s} D {_num(dgap)} {_minibar(dgap)}   "
-                f"C {_num(cgap)} {_minibar(cgap)}   (disentangle / complete; split-free)"
-            )
-        if allb:
-            cset = set(allb.get("content_names", []))
-            fw = max([len(n) for n in allb["per_factor"]] + [16])
-            for fname, fd in allb["per_factor"].items():
-                kind = "content" if fname in cset else "style"
-                g = fd.get("gap")
-                pool = fd.get("pooling") or "?"
-                print(f"      {kind:7s} {fname:<{fw}s} {pool:<6s} {_num(g)} {_minibar(g)}")
+        print(f"  {r['name']}{tag}   {chans}ch")
+        if has_v2:
+            _emit_enc("", "encoder 1")
+            _emit_enc("_v2", "encoder 2")
+        else:
+            _emit_enc("", "")
     print()
 
 
@@ -1182,12 +1244,8 @@ def write_outputs(rows, out_dir, baseline_name=None):
     ]
     _enc1_cols = [
         "info_all",
-        "dci_d",
-        "dci_d_null",
-        "dci_d_gap",
-        "dci_c",
-        "dci_c_null",
-        "dci_c_gap",
+        *_DCI_KEYS,
+        *_DCI_CONTENT_KEYS,
         "separation",
         "leak_c2s",
         "info_c2c",
