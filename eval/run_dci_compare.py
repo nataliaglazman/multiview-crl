@@ -19,8 +19,15 @@ Protocol
 * **Null floor via label permutation** → every informativeness number is reported
   as a GAP (real − null).  The GAP cancels each model's channel-count/shape
   advantage, which is what makes models directly comparable.
-* **Optional 0-contrastive baseline anchor** → Δ (model − baseline) isolates what
-  the objective *earned* on top of the architecture.
+* **0-contrastive baseline** → scored *all-channels only* by default (its
+  content/style split carries no meaning without the objective): it appears in the
+  all-channels capacity table and as ``-`` placeholders in the per-block tables.
+  Roughly-equal capacity (model vs baseline) shows the objective *organizes* the
+  information rather than adding it.  Pass ``--baseline-per-block`` to score its
+  split too (then Δ model − baseline is reported).
+* **All-channels capacity** → every factor predicted from content+style together
+  (GAP, per factor at its assigned pooling).  The one apples-to-apples axis: same
+  total width across models, no assumption of a split.
 * **Ranks on the theory-aligned headline metrics** — content→style leakage,
   block-MCC, view-invariance — never the capacity-bound content→content diagonal.
 
@@ -135,6 +142,12 @@ def _block_array(reprs, key, level, block_idx):
     ld = reprs.get(key)
     if ld is None or level not in ld:
         return None
+    # A tuple/list of indices means "concatenate these blocks" — used to build the
+    # split-free all-channels array (content+style) for the capacity probe.
+    if isinstance(block_idx, (tuple, list)):
+        parts = [ld[level][i] for i in block_idx]
+        parts = [p for p in parts if p is not None and p.shape[1] > 0]
+        return np.hstack(parts) if parts else None
     return ld[level][block_idx]
 
 
@@ -227,10 +240,54 @@ def _score_one_encoder(
     seeds,
     rng,
     n_jobs,
+    all_only=False,
 ):
-    """Score all four blocks (cc, cs, ss, sc) + block-MCC for one encoder's features."""
+    """Score the four split blocks (cc, cs, ss, sc) + block-MCC for one encoder's
+    features, plus the split-free ``all``-channels capacity (full representation →
+    every factor).  ``all_only`` skips the split blocks and returns only that
+    capacity — for a baseline with no meaningful content/style distinction."""
     cnames, snames = info["content_names"], info["style_names"]
     has_split = info["has_split"]
+
+    # All-channels capacity: every factor predicted from content+style together.
+    # Computed for every model so it is the one apples-to-apples axis (same total
+    # width across models) whether or not the split means anything.
+    allb = _score_block(
+        reprs,
+        level,
+        (content_idx, style_idx),
+        np.hstack([gt_content, gt_style]),
+        cnames + snames,
+        avail,
+        n_null,
+        seeds,
+        rng,
+        n_jobs=n_jobs,
+    )
+    allb["content_names"] = list(cnames)
+    allb["style_names"] = list(snames)
+
+    if all_only:
+        nan = float("nan")
+        return {
+            "leak_c2s": nan,
+            "info_c2c": nan,
+            "suff_s2s": nan,
+            "leak_s2c": nan,
+            "mcc_cc": nan,
+            "mcc_cc_null": nan,
+            "mcc_cs": nan,
+            "mcc_cs_null": nan,
+            "separation": nan,
+            "info_all": allb["mean_gap"],
+            "detail": {
+                "content2content": None,
+                "content2style": None,
+                "style2style": None,
+                "style2content": None,
+                "all": allb,
+            },
+        }
 
     cc = _score_block(
         reprs,
@@ -310,11 +367,13 @@ def _score_one_encoder(
         "mcc_cs": mcc_cs,
         "mcc_cs_null": mcc_cs_null,
         "separation": sep,
+        "info_all": allb["mean_gap"],
         "detail": {
             "content2content": cc,
             "content2style": cs,
             "style2style": ss,
             "style2content": sc,
+            "all": allb,
         },
     }
 
@@ -329,6 +388,7 @@ def score_reprs(
     seeds=(0, 1, 2),
     n_jobs=1,
     per_encoder=False,
+    all_only=False,
 ):
     """Turn extracted representations into one comparison row (torch-free).
 
@@ -355,15 +415,17 @@ def score_reprs(
         seeds,
         rng,
         n_jobs,
+        all_only=all_only,
     )
 
-    # View-invariance (always uses both encoders).
+    # View-invariance (uses both encoders).  Skipped for an all-channels-only
+    # baseline: with no content block, "can content predict the view" is moot.
     mkey = _resolve_key("stats", avail)
     Cc = _block_array(reprs, mkey, level, _CONTENT)
     Sc = _block_array(reprs, mkey, level, _STYLE)
     Cc2 = reprs[mkey][level][_CONTENT_V2] if mkey in reprs and level in reprs[mkey] else None
     Sc2 = reprs[mkey][level][_STYLE_V2] if mkey in reprs and level in reprs[mkey] else None
-    if Cc is not None and Cc2 is not None:
+    if not all_only and Cc is not None and Cc2 is not None:
         s1 = Sc if Sc is not None and Sc.shape[1] else Cc[:, :0]
         s2 = Sc2 if Sc2 is not None and Sc2.shape[1] else Cc2[:, :0]
         vi = view_invariance(Cc, Cc2, s1, s2, seeds=seeds)
@@ -398,6 +460,7 @@ def score_reprs(
             seeds,
             rng,
             n_jobs,
+            all_only=all_only,
         )
         for k, v in enc2.items():
             if k == "detail":
@@ -444,6 +507,7 @@ def evaluate_model(
     checkpoint=None,
     n_jobs=1,
     per_encoder=False,
+    all_only=False,
 ):
     """Load a model, extract representations under each pooling, return a row."""
     from eval.dci import _extract_synthetic_representations
@@ -485,6 +549,7 @@ def evaluate_model(
         seeds=seeds,
         n_jobs=n_jobs,
         per_encoder=per_encoder,
+        all_only=all_only,
     )
     row["name"] = name
     row["run_dir"] = run_dir
@@ -808,7 +873,7 @@ def print_table(rows, baseline_name=None):
         else:
             _print_metric_row(r["name"], mw, r, tag=tag)
 
-    if base is not None:
+    if base is not None and np.isfinite(base.get("separation", float("nan"))):
         print("  " + "-" * (w - 2))
         print(f"  Delta vs baseline '{baseline_name}'")
         for r in ranked:
@@ -834,22 +899,34 @@ def print_table(rows, baseline_name=None):
     )
 
 
-_BLOCK_LABELS = {
-    "content2content": "content→content",
-    "content2style": "content→style",
-    "style2style": "style→style",
-    "style2content": "style→content",
+# block key -> (predicted_from, factor_type, relationship, want).  These spell
+# out what each repr→factor block means so the CSV is self-describing: a reader
+# can filter `relationship == leakage and gap > 0.1` without knowing the protocol.
+_BLOCK_SEMANTICS = {
+    "content2content": ("content", "content", "signal", "high"),
+    "content2style": ("content", "style", "leakage", "low"),
+    "style2style": ("style", "style", "signal", "high"),
+    "style2content": ("style", "content", "leakage", "low"),
 }
 
 
+def _round(x, nd=4):
+    return round(float(x), nd) if x is not None and np.isfinite(x) else None
+
+
 def iter_per_latent_rows(rows):
-    """Long-format rows: one per (model, encoder, block, factor, pooling) informativeness cell."""
+    """Long-format rows: one per (model, encoder, factor, predicted_from, pooling).
+
+    Columns are de-jargonised — ``relationship`` (signal vs leakage), ``want``
+    (high/low), and ``is_assigned`` (the headline pooling) — so the file is
+    filterable in a spreadsheet without consulting the protocol docstring.
+    """
     for r in rows:
         for detail_key, enc_label in [("detail", "enc1"), ("detail_v2", "enc2")]:
             detail = r.get(detail_key, {})
             if not detail:
                 continue
-            for bkey, blabel in _BLOCK_LABELS.items():
+            for bkey, (pred_from, ftype, rel, want) in _BLOCK_SEMANTICS.items():
                 blk = detail.get(bkey)
                 if not blk:
                     continue
@@ -859,59 +936,153 @@ def iter_per_latent_rows(rows):
                         yield {
                             "model": r["name"],
                             "encoder": enc_label,
-                            "block": blabel,
                             "factor": fname,
+                            "factor_type": ftype,
+                            "predicted_from": pred_from,
+                            "relationship": rel,
+                            "want": want,
                             "pooling": pool,
-                            "assigned": pool == assigned,
-                            "real_r2": pd["real"],
-                            "real_std": pd["std"],
-                            "null_r2": pd["null"],
-                            "gap": pd["gap"],
+                            "is_assigned": pool == assigned,
+                            "real_r2": _round(pd.get("real")),
+                            "null_r2": _round(pd.get("null")),
+                            "gap": _round(pd.get("gap")),
+                            "real_std": _round(pd.get("std")),
+                        }
+
+            allb = detail.get("all")
+            if allb:
+                cset = set(allb.get("content_names", []))
+                for fname, fd in allb["per_factor"].items():
+                    assigned = fd.get("pooling")
+                    for pool, pd in fd.get("by_pooling", {}).items():
+                        yield {
+                            "model": r["name"],
+                            "encoder": enc_label,
+                            "factor": fname,
+                            "factor_type": "content" if fname in cset else "style",
+                            "predicted_from": "all",
+                            "relationship": "capacity",
+                            "want": "high",
+                            "pooling": pool,
+                            "is_assigned": pool == assigned,
+                            "real_r2": _round(pd.get("real")),
+                            "null_r2": _round(pd.get("null")),
+                            "gap": _round(pd.get("gap")),
+                            "real_std": _round(pd.get("std")),
                         }
 
 
+def _num(x, nd=3):
+    return f"{x:.{nd}f}" if x is not None and np.isfinite(x) else "  -  "
+
+
+def _minibar(gap, width=10):
+    """Inline ``[####......]`` bar for a GAP in [0,1]; negatives render empty."""
+    if gap is None or not np.isfinite(gap):
+        return " " * (width + 2)
+    filled = int(round(min(1.0, max(0.0, gap)) * width))
+    return "[" + "#" * filled + "." * (width - filled) + "]"
+
+
 def print_per_latent(rows):
-    """Per-model per-latent informativeness grid: GAP test-R² of the matched block,
-    one column per pooling.  ``*`` marks each factor's assigned (headline) pooling,
-    so you can see whether a factor is better exposed by a non-default pooling.
+    """Per-model, per-factor breakdown: for every ground-truth factor, the GAP
+    test-R² of predicting it from its OWN block (signal, want high) next to the
+    OTHER block (leak, want low), at the factor's assigned pooling.
+
+    Putting signal and leak side by side is the readable disentanglement story:
+    a content factor should light up the signal bar and leave the leak bar empty,
+    and vice-versa for style.  The full per-pooling sweep lives in the CSV.
     """
     print()
-    print("  PER-LATENT INFORMATIVENESS  (GAP test-R2; * = assigned pooling)")
-    print()
+    print("  PER-LATENT BREAKDOWN   (GAP = real - null at each factor's assigned pooling)")
+    print("  SIGNAL = predicted from its own block (want high)   LEAK = from the other block (want low)")
+
+    _NUMW, _CELLW = 5, 18  # "0.650" and "0.650 [##########]"
+
+    def _cell(g):
+        return f"{_num(g):>{_NUMW}s} {_minibar(g)}"
+
     for r in rows:
-        for detail_key, enc_label in [("detail", ""), ("detail_v2", " enc2")]:
+        for detail_key, enc_label in [("detail", ""), ("detail_v2", "  [enc2]")]:
             detail = r.get(detail_key)
             if not detail:
                 continue
-            cc = detail.get("content2content")
-            ss = detail.get("style2style")
+            cc = detail.get("content2content")  # content factors from content (signal)
+            cs = detail.get("content2style")  # style   factors from content (leak)
+            ss = detail.get("style2style")  # style   factors from style   (signal)
+            sc = detail.get("style2content")  # content factors from style   (leak)
             if not cc:
                 continue
-            pools = [
-                k
-                for k in ("gap", "stats", "patch")
-                if any(k in fd.get("by_pooling", {}) for fd in cc["per_factor"].values())
-            ]
-            header = f"  {r['name']}{enc_label}  ({r.get('checkpoint', '?')})"
-            print(header)
-            print("    " + f"{'factor':24s}" + "".join(f"{p:>10s}" for p in pools))
-            print("    " + "-" * (24 + 10 * len(pools)))
 
-            def _emit(block):
-                for fname, fd in block["per_factor"].items():
-                    assigned = fd.get("pooling")
-                    cells = ""
-                    for p in pools:
-                        g = fd.get("by_pooling", {}).get(p, {}).get("gap")
-                        txt = f"{g:.3f}" if g is not None and np.isfinite(g) else "-"
-                        cells += f"{'  ' + txt + '*' if p == assigned else '  ' + txt:>10s}"
-                    print(f"    {fname:24s}{cells}")
+            names = list(cc["per_factor"]) + (list(ss["per_factor"]) if ss else [])
+            fw = max([len(n) for n in names] + [14])
+            sep_w = fw + 2 + 6 + 2 + _CELLW + 4 + _CELLW
 
-            _emit(cc)
-            if ss:
-                print(f"    {'-- style --':24s}")
-                _emit(ss)
+            def _emit(kind, signal_pf, leak_pf, sig_src, leak_src):
+                print(
+                    f"    {kind + ' factor':<{fw}s}  {'pool':<6s}  "
+                    f"{'SIGNAL: ' + sig_src:<{_CELLW}s}    {'LEAK: ' + leak_src:<{_CELLW}s}"
+                )
+                print("    " + "-" * sep_w)
+                for fname, fd in signal_pf.items():
+                    pool = fd.get("pooling") or "?"
+                    sgap = fd.get("gap")
+                    lgap = (leak_pf.get(fname, {}) or {}).get("gap") if leak_pf else None
+                    leak_cell = _cell(lgap) if leak_pf is not None else f"{'n/a':>{_NUMW}s}"
+                    print(f"    {fname:<{fw}s}  {pool:<6s}  {_cell(sgap)}    {leak_cell}")
+
             print()
+            print(f"  {r['name']}{enc_label}  ({r.get('checkpoint', '?')})")
+            _emit(
+                "content",
+                cc["per_factor"],
+                sc["per_factor"] if sc else None,
+                "from content",
+                "from style",
+            )
+            if ss:
+                print()
+                _emit(
+                    "style",
+                    ss["per_factor"],
+                    cs["per_factor"] if cs else None,
+                    "from style",
+                    "from content",
+                )
+    print()
+
+
+def print_capacity_table(rows, baseline_name=None):
+    """All-channels capacity: GAP test-R² of predicting each factor from the FULL
+    representation (content+style together), with no split.
+
+    This is the apples-to-apples axis — every model gets a number here (including a
+    baseline scored all-channels-only), because it assumes nothing about a
+    content/style boundary.  Roughly-equal capacity across models is the point: it
+    shows the objective *organizes* the information rather than adding it.
+    """
+    have = [r for r in rows if np.isfinite(r.get("info_all", float("nan")))]
+    if not have:
+        return
+    ranked = sorted(have, key=lambda r: r.get("info_all", float("-inf")), reverse=True)
+    print()
+    print("  ALL-CHANNELS CAPACITY   (GAP = real - null; full representation -> each factor)")
+    print("  higher = more factor information present somewhere in the representation")
+    for r in ranked:
+        allb = (r.get("detail") or {}).get("all")
+        mean = r.get("info_all", float("nan"))
+        tag = "   <- baseline (all-channels only)" if r["name"] == baseline_name else ""
+        chans = r.get("n_content_channels", 0) + r.get("n_style_channels", 0)
+        print()
+        print(f"  {r['name']}{tag}   {chans}ch   mean {_num(mean)} {_minibar(mean)}")
+        if allb:
+            cset = set(allb.get("content_names", []))
+            for fname, fd in allb["per_factor"].items():
+                kind = "content" if fname in cset else "style"
+                g = fd.get("gap")
+                pool = fd.get("pooling") or "?"
+                print(f"      {kind:7s} {fname:<16s} {pool:<6s} {_num(g)} {_minibar(g)}")
+    print()
 
 
 def write_outputs(rows, out_dir, baseline_name=None):
@@ -926,6 +1097,7 @@ def write_outputs(rows, out_dir, baseline_name=None):
         "style_purity",
     ]
     _enc1_cols = [
+        "info_all",
         "separation",
         "leak_c2s",
         "info_c2c",
@@ -963,19 +1135,34 @@ def write_outputs(rows, out_dir, baseline_name=None):
     pl_cols = [
         "model",
         "encoder",
-        "block",
         "factor",
+        "factor_type",
+        "predicted_from",
+        "relationship",
+        "want",
         "pooling",
-        "assigned",
+        "is_assigned",
         "real_r2",
-        "real_std",
         "null_r2",
         "gap",
+        "real_std",
     ]
+    # Sort so a factor's signal and leak rows sit together, assigned pooling first.
+    pl_rows = sorted(
+        iter_per_latent_rows(rows),
+        key=lambda d: (
+            d["model"],
+            d["encoder"],
+            d["factor_type"],
+            d["factor"],
+            d["relationship"],
+            not d["is_assigned"],
+        ),
+    )
     with open(per_latent_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=pl_cols)
         w.writeheader()
-        for prow in iter_per_latent_rows(rows):
+        for prow in pl_rows:
             w.writerow(prow)
 
     json_path = os.path.join(out_dir, "dci_compare.json")
@@ -1077,6 +1264,14 @@ def main():
         action="store_true",
         help="Score each encoder separately (for separate_encoders models).",
     )
+    p.add_argument(
+        "--baseline-per-block",
+        action="store_true",
+        help="Also score the --baseline run on the content/style split (leakage, "
+        "separation, view-invariance).  Default: the baseline is scored all-channels "
+        "only, since with no contrastive objective its split is not meaningful — it "
+        "appears only in the capacity table, with placeholders in the per-block tables.",
+    )
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
     p.add_argument(
         "--fresh",
@@ -1134,6 +1329,7 @@ def main():
                     checkpoint=_resolve_checkpoint(run_dir, cli.checkpoint_name),
                     n_jobs=cli.n_jobs,
                     per_encoder=cli.per_encoder,
+                    all_only=(baseline_name is not None and name == baseline_name and not cli.baseline_per_block),
                 )
             )
         except Exception as e:
@@ -1172,6 +1368,7 @@ def main():
         baseline_name = existing_baseline
 
     attach_scores(merged)
+    print_capacity_table(merged, baseline_name)
     print_scorecard(merged, baseline_name)
     print_table(merged, baseline_name)
     print_per_latent(merged)
