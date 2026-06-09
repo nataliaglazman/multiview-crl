@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_baseline.yaml
-# Generated at: 2026-06-09T17:05:12Z
-# Git SHA: fe56cf1
+# Generated at: 2026-06-09T21:41:51Z
+# Git SHA: b1bbf2b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
