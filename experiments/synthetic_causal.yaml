@@ -19,6 +19,6 @@ vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
-content_ratios: 12
+content_size: 12
 style_injection_mode: concat
 # select_by_gated_score: false
