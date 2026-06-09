@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-08T20:37:15Z
-# Git SHA: a5ade35
+# Generated at: 2026-06-09T08:39:37Z
+# Git SHA: 1036acb
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-075-compressed-input
+#SBATCH --job-name=synthetic-causal-random-compressed-input-12-48
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-075-compressed-input-%j.err
+#SBATCH --error=synthetic-causal-random-compressed-input-12-48-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -52,7 +52,8 @@ conda activate "${CONDA_ENV_NAME}"
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
-    --content-ratios 0.75 \
+    --content-ratios 0.95 \
+    --content-size 12 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -90,15 +91,15 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-075-compressed-input \
+    --model-id synthetic-causal-random-compressed-input-12-48 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 32 \
-    --vqvae-hidden-channels 32 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
