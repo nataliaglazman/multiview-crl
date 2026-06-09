@@ -43,6 +43,7 @@ import logging
 import os
 
 import numpy as np
+from joblib import Parallel, delayed
 
 from eval.identifiability_metrics import block_mcc, cv_probe_r2, view_invariance
 
@@ -135,7 +136,15 @@ def _block_array(reprs, key, level, block_idx):
     return ld[level][block_idx]
 
 
-def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, rng):
+def _probe_cell(X, y, seeds, perm_indices):
+    """One (factor, pooling) cell: real CV-R² + permutation null floor."""
+    r = cv_probe_r2(X, y, seeds=seeds)
+    null_vals = [cv_probe_r2(X, y[pi], seeds=seeds)["mean"] for pi in perm_indices]
+    nl = float(np.mean(null_vals)) if null_vals else float("nan")
+    return {"real": r["mean"], "std": r["std"], "null": nl, "gap": r["mean"] - nl}
+
+
+def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, rng, n_jobs=1):
     """Per-factor informativeness for one repr→factor block, under every pooling.
 
     ``block_idx`` selects the content (0) or style (1) array; ``factors``/``names``
@@ -145,16 +154,29 @@ def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, 
     (``FACTOR_POOLING``).  Returns ``{"mean_gap", "per_factor"}``.
     """
     pools = [k for k in ("gap", "stats", "patch") if k in avail]
-    per = {}
+
+    # Collect work items; pre-draw permutation indices so the shared rng is
+    # consumed deterministically regardless of worker ordering.
+    work = []
     for j, name in enumerate(names):
-        by_pooling = {}
         for pk in pools:
             X = _block_array(reprs, pk, level, block_idx)
             if X is None or X.shape[1] == 0:
                 continue
-            r = cv_probe_r2(X, factors[:, j], seeds=seeds)
-            nl = _null_cv_r2(X, factors[:, j], n_null, seeds, rng)
-            by_pooling[pk] = {"real": r["mean"], "std": r["std"], "null": nl, "gap": r["mean"] - nl}
+            perm_indices = [rng.permutation(factors.shape[0]) for _ in range(n_null)]
+            work.append((name, j, pk, X, perm_indices))
+
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(_probe_cell)(X, factors[:, j], seeds, pi) for _name, j, _pk, X, pi in work
+    )
+
+    per = {}
+    for (name, _j, pk, _X, _pi), cell in zip(work, results):
+        per.setdefault(name, {})
+        per[name][pk] = cell
+
+    for name in list(per):
+        by_pooling = per[name]
         assigned = _resolve_key(FACTOR_POOLING.get(name, "stats"), avail)
         head = by_pooling.get(
             assigned, {"gap": float("nan"), "real": float("nan"), "null": float("nan"), "std": float("nan")}
@@ -171,7 +193,7 @@ def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, 
     return {"mean_gap": float(np.mean(gaps)) if gaps else float("nan"), "per_factor": per}
 
 
-def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1, 2)):
+def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1, 2), n_jobs=1):
     """Turn extracted representations into one comparison row (torch-free).
 
     ``reprs`` maps a pooling key to a ``level_data`` dict (the output of
@@ -182,10 +204,18 @@ def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1,
     cnames, snames = info["content_names"], info["style_names"]
     has_split = info["has_split"]
 
-    cc = _score_block(reprs, level, _CONTENT, gt_content, cnames, avail, n_null, seeds, rng)
-    cs = _score_block(reprs, level, _CONTENT, gt_style, snames, avail, n_null, seeds, rng)
-    ss = _score_block(reprs, level, _STYLE, gt_style, snames, avail, n_null, seeds, rng) if has_split else None
-    sc = _score_block(reprs, level, _STYLE, gt_content, cnames, avail, n_null, seeds, rng) if has_split else None
+    cc = _score_block(reprs, level, _CONTENT, gt_content, cnames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+    cs = _score_block(reprs, level, _CONTENT, gt_style, snames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+    ss = (
+        _score_block(reprs, level, _STYLE, gt_style, snames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+        if has_split
+        else None
+    )
+    sc = (
+        _score_block(reprs, level, _STYLE, gt_content, cnames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+        if has_split
+        else None
+    )
 
     # Block-MCC + view-invariance under the richest available pooling.
     mkey = _resolve_key("stats", avail)
@@ -252,7 +282,7 @@ def _resolve_checkpoint(run_dir, name):
 
 
 def evaluate_model(
-    name, run_dir, dataset, poolings, level, n_null, seeds, batch_size, num_workers, device, checkpoint=None
+    name, run_dir, dataset, poolings, level, n_null, seeds, batch_size, num_workers, device, checkpoint=None, n_jobs=1
 ):
     """Load a model, extract representations under each pooling, return a row."""
     from eval.dci import _extract_synthetic_representations
@@ -284,7 +314,7 @@ def evaluate_model(
     if info is None:
         raise RuntimeError(f"level {level} not found in encoder outputs for {name}")
 
-    row = score_reprs(reprs, gt_content, gt_style, info, level, n_null=n_null, seeds=seeds)
+    row = score_reprs(reprs, gt_content, gt_style, info, level, n_null=n_null, seeds=seeds, n_jobs=n_jobs)
     row["name"] = name
     row["run_dir"] = run_dir
     row["checkpoint"] = os.path.basename(checkpoint) if checkpoint else "vqvae_model.pt"
@@ -508,6 +538,7 @@ def main():
     p.add_argument("--n-null", type=int, default=3, help="Permutations for the null floor.")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument("--n-jobs", type=int, default=-1, help="Parallel probe jobs (-1 = all cores, 1 = sequential).")
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
     p.add_argument(
         "--fresh",
@@ -559,6 +590,7 @@ def main():
                     cli.num_workers,
                     device,
                     checkpoint=_resolve_checkpoint(run_dir, cli.checkpoint_name),
+                    n_jobs=cli.n_jobs,
                 )
             )
         except Exception as e:
