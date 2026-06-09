@@ -73,6 +73,7 @@ FACTOR_POOLING = {
 # Index of the content / style array inside a level_data tuple from
 # eval.dci._extract_synthetic_representations: (content, style, content_v2, style_v2, info)
 _CONTENT, _STYLE = 0, 1
+_CONTENT_V2, _STYLE_V2 = 2, 3
 
 
 # --------------------------------------------------------------------------- #
@@ -193,34 +194,38 @@ def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, 
     return {"mean_gap": float(np.mean(gaps)) if gaps else float("nan"), "per_factor": per}
 
 
-def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1, 2), n_jobs=1):
-    """Turn extracted representations into one comparison row (torch-free).
+def _has_v2(reprs, level):
+    """Check whether any pooling produced non-empty view-2 features at *level*."""
+    for ld in reprs.values():
+        if level in ld:
+            arr = ld[level][_CONTENT_V2]
+            if arr is not None and arr.shape[1] > 0:
+                return True
+    return False
 
-    ``reprs`` maps a pooling key to a ``level_data`` dict (the output of
-    ``_extract_synthetic_representations``).  ``info`` is that level's factor_info.
-    """
-    avail = set(reprs.keys())
-    rng = np.random.RandomState(0)
+
+def _score_one_encoder(
+    reprs, level, content_idx, style_idx, gt_content, gt_style, info, avail, n_null, seeds, rng, n_jobs
+):
+    """Score all four blocks (cc, cs, ss, sc) + block-MCC for one encoder's features."""
     cnames, snames = info["content_names"], info["style_names"]
     has_split = info["has_split"]
 
-    cc = _score_block(reprs, level, _CONTENT, gt_content, cnames, avail, n_null, seeds, rng, n_jobs=n_jobs)
-    cs = _score_block(reprs, level, _CONTENT, gt_style, snames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+    cc = _score_block(reprs, level, content_idx, gt_content, cnames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+    cs = _score_block(reprs, level, content_idx, gt_style, snames, avail, n_null, seeds, rng, n_jobs=n_jobs)
     ss = (
-        _score_block(reprs, level, _STYLE, gt_style, snames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+        _score_block(reprs, level, style_idx, gt_style, snames, avail, n_null, seeds, rng, n_jobs=n_jobs)
         if has_split
         else None
     )
     sc = (
-        _score_block(reprs, level, _STYLE, gt_content, cnames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+        _score_block(reprs, level, style_idx, gt_content, cnames, avail, n_null, seeds, rng, n_jobs=n_jobs)
         if has_split
         else None
     )
 
-    # Block-MCC + view-invariance under the richest available pooling.
     mkey = _resolve_key("stats", avail)
-    Cc = _block_array(reprs, mkey, level, _CONTENT)
-    Sc = _block_array(reprs, mkey, level, _STYLE)
+    Cc = _block_array(reprs, mkey, level, content_idx)
     mcc_cc = block_mcc(Cc, gt_content, seeds=seeds)["mean"] if Cc is not None and Cc.shape[1] else float("nan")
     mcc_cc_null = (
         _null_block_mcc(Cc, gt_content, n_null, seeds, rng) if Cc is not None and Cc.shape[1] else float("nan")
@@ -228,8 +233,45 @@ def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1,
     mcc_cs = block_mcc(Cc, gt_style, seeds=seeds)["mean"] if Cc is not None and Cc.shape[1] else float("nan")
     mcc_cs_null = _null_block_mcc(Cc, gt_style, n_null, seeds, rng) if Cc is not None and Cc.shape[1] else float("nan")
 
-    Cc2 = reprs[mkey][level][2] if mkey in reprs and level in reprs[mkey] else None
-    Sc2 = reprs[mkey][level][3] if mkey in reprs and level in reprs[mkey] else None
+    sep = mcc_cc - mcc_cs if np.isfinite(mcc_cc) and np.isfinite(mcc_cs) else float("nan")
+
+    return {
+        "leak_c2s": cs["mean_gap"],
+        "info_c2c": cc["mean_gap"],
+        "suff_s2s": ss["mean_gap"] if ss else float("nan"),
+        "leak_s2c": sc["mean_gap"] if sc else float("nan"),
+        "mcc_cc": mcc_cc,
+        "mcc_cc_null": mcc_cc_null,
+        "mcc_cs": mcc_cs,
+        "mcc_cs_null": mcc_cs_null,
+        "separation": sep,
+        "detail": {"content2content": cc, "content2style": cs, "style2style": ss, "style2content": sc},
+    }
+
+
+def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1, 2), n_jobs=1, per_encoder=False):
+    """Turn extracted representations into one comparison row (torch-free).
+
+    ``reprs`` maps a pooling key to a ``level_data`` dict (the output of
+    ``_extract_synthetic_representations``).  ``info`` is that level's factor_info.
+
+    When ``per_encoder`` is True and view-2 features exist, the four score blocks
+    and block-MCC are computed separately for each encoder and reported with a
+    ``_v2`` suffix.
+    """
+    avail = set(reprs.keys())
+    rng = np.random.RandomState(0)
+
+    enc1 = _score_one_encoder(
+        reprs, level, _CONTENT, _STYLE, gt_content, gt_style, info, avail, n_null, seeds, rng, n_jobs
+    )
+
+    # View-invariance (always uses both encoders).
+    mkey = _resolve_key("stats", avail)
+    Cc = _block_array(reprs, mkey, level, _CONTENT)
+    Sc = _block_array(reprs, mkey, level, _STYLE)
+    Cc2 = reprs[mkey][level][_CONTENT_V2] if mkey in reprs and level in reprs[mkey] else None
+    Sc2 = reprs[mkey][level][_STYLE_V2] if mkey in reprs and level in reprs[mkey] else None
     if Cc is not None and Cc2 is not None:
         s1 = Sc if Sc is not None and Sc.shape[1] else Cc[:, :0]
         s2 = Sc2 if Sc2 is not None and Sc2.shape[1] else Cc2[:, :0]
@@ -238,25 +280,26 @@ def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1,
     else:
         content_view = style_view = chance = float("nan")
 
-    sep = mcc_cc - mcc_cs if np.isfinite(mcc_cc) and np.isfinite(mcc_cs) else float("nan")
-
-    return {
+    row = {
         "n_content_channels": info["n_content_channels"],
         "n_style_channels": info["n_style_channels"],
-        "leak_c2s": cs["mean_gap"],  # headline ↓  (content must not encode style)
-        "info_c2c": cc["mean_gap"],  # diagnostic  (capacity, not the claim)
-        "suff_s2s": ss["mean_gap"] if ss else float("nan"),  # style sufficiency ↑
-        "leak_s2c": sc["mean_gap"] if sc else float("nan"),  # content leaking into style ↓
-        "mcc_cc": mcc_cc,
-        "mcc_cc_null": mcc_cc_null,
-        "mcc_cs": mcc_cs,
-        "mcc_cs_null": mcc_cs_null,
+        **enc1,
         "content_view": content_view,
         "style_view": style_view,
         "view_chance": chance,
-        "separation": sep,  # headline ↑  mcc_cc − mcc_cs
-        "detail": {"content2content": cc, "content2style": cs, "style2style": ss, "style2content": sc},
     }
+
+    if per_encoder and _has_v2(reprs, level):
+        enc2 = _score_one_encoder(
+            reprs, level, _CONTENT_V2, _STYLE_V2, gt_content, gt_style, info, avail, n_null, seeds, rng, n_jobs
+        )
+        for k, v in enc2.items():
+            if k == "detail":
+                row["detail_v2"] = v
+            else:
+                row[k + "_v2"] = v
+
+    return row
 
 
 # --------------------------------------------------------------------------- #
@@ -282,7 +325,19 @@ def _resolve_checkpoint(run_dir, name):
 
 
 def evaluate_model(
-    name, run_dir, dataset, poolings, level, n_null, seeds, batch_size, num_workers, device, checkpoint=None, n_jobs=1
+    name,
+    run_dir,
+    dataset,
+    poolings,
+    level,
+    n_null,
+    seeds,
+    batch_size,
+    num_workers,
+    device,
+    checkpoint=None,
+    n_jobs=1,
+    per_encoder=False,
 ):
     """Load a model, extract representations under each pooling, return a row."""
     from eval.dci import _extract_synthetic_representations
@@ -314,7 +369,9 @@ def evaluate_model(
     if info is None:
         raise RuntimeError(f"level {level} not found in encoder outputs for {name}")
 
-    row = score_reprs(reprs, gt_content, gt_style, info, level, n_null=n_null, seeds=seeds, n_jobs=n_jobs)
+    row = score_reprs(
+        reprs, gt_content, gt_style, info, level, n_null=n_null, seeds=seeds, n_jobs=n_jobs, per_encoder=per_encoder
+    )
     row["name"] = name
     row["run_dir"] = run_dir
     row["checkpoint"] = os.path.basename(checkpoint) if checkpoint else "vqvae_model.pt"
@@ -372,6 +429,26 @@ def print_table(rows, baseline_name=None):
         "info_c2c is capacity-bound (high even at 0 contrastive) — not shown; see JSON. Rank on SEP / leak / view.\n"
     )
 
+    # Per-encoder (v2) table — printed only when --per-encoder produced data.
+    if any("separation_v2" in r for r in rows):
+        print("\n" + "=" * 110)
+        print("ENCODER 2 (view 2)   — same metrics, scored on the second encoder's features")
+        print("=" * 110)
+        print(
+            f"{'model':16s} {'chan c/s':>9s} {'SEP↑':>8s} {'leak c→s↓':>10s} "
+            f"{'mcc c→c↑':>9s} {'mcc c→s↓':>9s} {'suff s→s↑':>10s}"
+        )
+        print("-" * 110)
+        for r in ranked:
+            if "separation_v2" not in r:
+                continue
+            chans = f"{r['n_content_channels']}/{r['n_style_channels']}"
+            print(
+                f"{r['name'][:16]:16s} {chans:>9s} {_fmt(r.get('separation_v2')):>8s} {_fmt(r.get('leak_c2s_v2')):>10s} "
+                f"{_fmt(r.get('mcc_cc_v2')):>9s} {_fmt(r.get('mcc_cs_v2')):>9s} {_fmt(r.get('suff_s2s_v2')):>10s}"
+            )
+        print("=" * 110)
+
 
 _BLOCK_LABELS = {
     "content2content": "content→content",
@@ -382,27 +459,31 @@ _BLOCK_LABELS = {
 
 
 def iter_per_latent_rows(rows):
-    """Long-format rows: one per (model, block, factor, pooling) informativeness cell."""
+    """Long-format rows: one per (model, encoder, block, factor, pooling) informativeness cell."""
     for r in rows:
-        detail = r.get("detail", {})
-        for bkey, blabel in _BLOCK_LABELS.items():
-            blk = detail.get(bkey)
-            if not blk:
+        for detail_key, enc_label in [("detail", "enc1"), ("detail_v2", "enc2")]:
+            detail = r.get(detail_key, {})
+            if not detail:
                 continue
-            for fname, fd in blk["per_factor"].items():
-                assigned = fd.get("pooling")
-                for pool, pd in fd.get("by_pooling", {}).items():
-                    yield {
-                        "model": r["name"],
-                        "block": blabel,
-                        "factor": fname,
-                        "pooling": pool,
-                        "assigned": pool == assigned,
-                        "real_r2": pd["real"],
-                        "real_std": pd["std"],
-                        "null_r2": pd["null"],
-                        "gap": pd["gap"],
-                    }
+            for bkey, blabel in _BLOCK_LABELS.items():
+                blk = detail.get(bkey)
+                if not blk:
+                    continue
+                for fname, fd in blk["per_factor"].items():
+                    assigned = fd.get("pooling")
+                    for pool, pd in fd.get("by_pooling", {}).items():
+                        yield {
+                            "model": r["name"],
+                            "encoder": enc_label,
+                            "block": blabel,
+                            "factor": fname,
+                            "pooling": pool,
+                            "assigned": pool == assigned,
+                            "real_r2": pd["real"],
+                            "real_std": pd["std"],
+                            "null_r2": pd["null"],
+                            "gap": pd["gap"],
+                        }
 
 
 def print_per_latent(rows):
@@ -443,12 +524,7 @@ def print_per_latent(rows):
 
 def write_outputs(rows, out_dir, baseline_name=None):
     os.makedirs(out_dir, exist_ok=True)
-    flat_cols = [
-        "name",
-        "run_dir",
-        "checkpoint",
-        "n_content_channels",
-        "n_style_channels",
+    _enc1_cols = [
         "separation",
         "leak_c2s",
         "info_c2c",
@@ -458,9 +534,19 @@ def write_outputs(rows, out_dir, baseline_name=None):
         "mcc_cc_null",
         "mcc_cs",
         "mcc_cs_null",
+    ]
+    has_v2 = any("separation_v2" in r for r in rows)
+    flat_cols = [
+        "name",
+        "run_dir",
+        "checkpoint",
+        "n_content_channels",
+        "n_style_channels",
+        *_enc1_cols,
         "content_view",
         "style_view",
         "view_chance",
+        *([c + "_v2" for c in _enc1_cols] if has_v2 else []),
         "num_samples",
         "poolings",
     ]
@@ -472,7 +558,7 @@ def write_outputs(rows, out_dir, baseline_name=None):
             w.writerow({k: r.get(k) for k in flat_cols})
 
     per_latent_path = os.path.join(out_dir, "dci_compare_per_latent.csv")
-    pl_cols = ["model", "block", "factor", "pooling", "assigned", "real_r2", "real_std", "null_r2", "gap"]
+    pl_cols = ["model", "encoder", "block", "factor", "pooling", "assigned", "real_r2", "real_std", "null_r2", "gap"]
     with open(per_latent_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=pl_cols)
         w.writeheader()
@@ -539,6 +625,9 @@ def main():
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--n-jobs", type=int, default=-1, help="Parallel probe jobs (-1 = all cores, 1 = sequential).")
+    p.add_argument(
+        "--per-encoder", action="store_true", help="Score each encoder separately (for separate_encoders models)."
+    )
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
     p.add_argument(
         "--fresh",
@@ -591,6 +680,7 @@ def main():
                     device,
                     checkpoint=_resolve_checkpoint(run_dir, cli.checkpoint_name),
                     n_jobs=cli.n_jobs,
+                    per_encoder=cli.per_encoder,
                 )
             )
         except Exception as e:
