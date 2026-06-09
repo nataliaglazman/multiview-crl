@@ -91,6 +91,24 @@ _RUNTIME_KEYS = {
 }
 
 
+def _get_valid_config_keys() -> set:
+    """Return the set of argparse dest names accepted by main_multimodal.
+
+    Parsed once from ``utils/config.py`` via regex so we don't need to import
+    torch just to introspect the parser.  Also includes launcher-only keys
+    (``tag``, ``model_dir``) and underscore-prefixed internal keys.
+    """
+    import re
+
+    config_py = REPO_ROOT / "utils" / "config.py"
+    source = config_py.read_text()
+    flags = set(re.findall(r'"--([a-z][a-z0-9-]*)"', source))
+    dests = {f.replace("-", "_") for f in flags}
+    # Launcher-only keys that config_to_cli_args handles specially.
+    dests.add("tag")
+    return dests
+
+
 def load_from_config(path: Path, strip_cluster: bool = False) -> dict:
     """Read a settings.json or config YAML from a previous run and return a clean config.
 
@@ -100,7 +118,9 @@ def load_from_config(path: Path, strip_cluster: bool = False) -> dict:
 
     Runtime-derived keys (added by ``update_args`` / the training loop) are stripped
     so the result can be fed back into ``config_to_cli_args`` or saved as an
-    experiment YAML.
+    experiment YAML.  Keys that are not recognised by the current argparse
+    definition (e.g. renamed or removed flags from older code) are dropped with
+    a warning so the re-launched job doesn't crash on ``unrecognized arguments``.
 
     Args:
         path: Path to settings.json or config_*.yaml.
@@ -144,6 +164,16 @@ def load_from_config(path: Path, strip_cluster: bool = False) -> dict:
     pgpl = config.get("patch_grid_per_level")
     if pgpl is not None and len(pgpl) > 0 and isinstance(pgpl[0], (list, tuple)):
         config["patch_grid_per_level"] = [v for triple in pgpl for v in triple]
+
+    # Drop keys that the current argparse doesn't recognise (renamed/removed
+    # flags from older runs) so the training script doesn't crash on
+    # "unrecognized arguments".
+    valid_keys = _get_valid_config_keys()
+    stale = [k for k in config if not k.startswith("_") and k not in valid_keys]
+    if stale:
+        print(f"Warning: dropping unrecognised keys from {path.name}: {stale}", file=sys.stderr)
+        for k in stale:
+            del config[k]
 
     return config
 

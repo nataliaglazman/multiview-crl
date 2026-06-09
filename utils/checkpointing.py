@@ -242,10 +242,17 @@ def _move_optimizer_to_device(optimizer: torch.optim.Optimizer, device) -> None:
     params are ``channels_last_3d``. Rebuild each per-parameter buffer with
     ``empty_like`` so it inherits the parameter's exact dtype, device and
     memory format, then copy the values across.
+
+    When the optimizer state was restored from a checkpoint with a different
+    architecture (e.g. via ``--from-config`` with ``--set`` overrides), some
+    state tensors may have shapes that no longer match their parameters.
+    Those stale entries are dropped so the optimizer reinitialises them cleanly
+    on the next step.
     """
     for param, state in optimizer.state.items():
         if not isinstance(param, torch.Tensor):
             continue
+        stale_keys = []
         for k, v in state.items():
             if not isinstance(v, torch.Tensor):
                 continue
@@ -260,7 +267,16 @@ def _move_optimizer_to_device(optimizer: torch.optim.Optimizer, device) -> None:
                 aligned.copy_(v)
                 state[k] = aligned
             else:
-                state[k] = v.to(device=param.device)
+                # Shape mismatch — state tensor is from a different architecture.
+                # Mark for removal; the optimizer will reinitialise on next step.
+                stale_keys.append(k)
+        if stale_keys:
+            logger.warning(
+                f"  Optimizer state: dropping {stale_keys} for param with shape "
+                f"{tuple(param.shape)} (checkpoint shapes don't match)."
+            )
+            for k in stale_keys:
+                del state[k]
 
 
 def _state_dicts_compatible(model: torch.nn.Module, saved_state_dict: dict) -> bool:
@@ -415,7 +431,7 @@ def load_checkpoint(
         try:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             _move_optimizer_to_device(optimizer, device)
-        except (ValueError, KeyError) as exc:
+        except (ValueError, KeyError, RuntimeError) as exc:
             logger.warning(f"  Optimizer state could not be restored ({exc}); using fresh optimizer.")
         step = checkpoint["step"] + 1
 
@@ -530,7 +546,7 @@ def load_checkpoint(
         try:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             _move_optimizer_to_device(optimizer, device)
-        except (ValueError, KeyError) as exc:
+        except (ValueError, KeyError, RuntimeError) as exc:
             logger.warning(f"  Optimizer state could not be restored ({exc}); using fresh optimizer.")
         step = checkpoint["step"] + 1
 
