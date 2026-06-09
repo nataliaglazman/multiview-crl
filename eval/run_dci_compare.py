@@ -384,70 +384,105 @@ def evaluate_model(
 
 _HEADLINE_COLS = ["separation", "leak_c2s", "mcc_cc", "mcc_cs", "content_view", "style_view", "suff_s2s"]
 
+_COL_W = 10  # width per metric column
+
 
 def _fmt(v, nd=4):
-    return "  nan  " if v is None or (isinstance(v, float) and not np.isfinite(v)) else f"{v:.{nd}f}"
+    if v is None or (isinstance(v, float) and not np.isfinite(v)):
+        return "-".center(_COL_W)
+    return f"{v:.{nd}f}".center(_COL_W)
+
+
+def _model_width(rows):
+    return max(len(r["name"]) for r in rows) + 2 if rows else 18
+
+
+def _print_metric_row(label, mw, r, suffix="", tag=""):
+    """Print one data row.  *suffix* selects v2 keys when non-empty."""
+    s = suffix
+    chans = f"{r['n_content_channels']}/{r['n_style_channels']}"
+    print(
+        f"  {label:<{mw}s} {chans:>6s}"
+        f"  {_fmt(r.get('separation' + s))}"
+        f"  {_fmt(r.get('leak_c2s' + s))}"
+        f"  {_fmt(r.get('mcc_cc' + s))}"
+        f"  {_fmt(r.get('mcc_cs' + s))}"
+        f"  {_fmt(r.get('content_view') if not s else float('nan'))}"
+        f"  {_fmt(r.get('style_view') if not s else float('nan'))}"
+        f"  {_fmt(r.get('suff_s2s' + s))}"
+        f"{tag}"
+    )
 
 
 def print_table(rows, baseline_name=None):
     """Ranked stdout table.  Ranks by separation↑ (tie-break leakage↓)."""
     base = next((r for r in rows if r["name"] == baseline_name), None)
     ranked = sorted(rows, key=lambda r: (-(r["separation"] if np.isfinite(r["separation"]) else -9), r["leak_c2s"]))
+    has_v2 = any("separation_v2" in r for r in rows)
+    mw = _model_width(rows) + (6 if has_v2 else 0)  # extra room for enc label
+    w = mw + 8 + 7 * (_COL_W + 2) + 2
+    hdr_label = "model" if not has_v2 else "model / encoder"
 
-    print("\n" + "=" * 110)
-    print("DCI MODEL COMPARISON   (GAP = real − null; ↑ better unless marked ↓)")
-    print("=" * 110)
+    print()
+    print("=" * w)
+    print("  DCI MODEL COMPARISON   (GAP = real - null)")
+    print("=" * w)
     print(
-        f"{'model':16s} {'chan c/s':>9s} {'SEP↑':>8s} {'leak c→s↓':>10s} "
-        f"{'mcc c→c↑':>9s} {'mcc c→s↓':>9s} {'c→view≈.5':>10s} {'s→view↑':>8s} {'suff s→s↑':>10s}"
+        f"  {hdr_label:<{mw}s} {'c/s':>6s}"
+        f"  {'SEP':^{_COL_W}s}"
+        f"  {'leak c>s':^{_COL_W}s}"
+        f"  {'mcc c>c':^{_COL_W}s}"
+        f"  {'mcc c>s':^{_COL_W}s}"
+        f"  {'c>view':^{_COL_W}s}"
+        f"  {'s>view':^{_COL_W}s}"
+        f"  {'suff s>s':^{_COL_W}s}"
     )
-    print("-" * 110)
+    print(
+        f"  {'':>{mw}s} {'':>6s}"
+        f"  {'higher':^{_COL_W}s}"
+        f"  {'lower':^{_COL_W}s}"
+        f"  {'higher':^{_COL_W}s}"
+        f"  {'lower':^{_COL_W}s}"
+        f"  {'~0.5':^{_COL_W}s}"
+        f"  {'higher':^{_COL_W}s}"
+        f"  {'higher':^{_COL_W}s}"
+    )
+    print("  " + "-" * (w - 2))
+
     for r in ranked:
         tag = "  *base" if r["name"] == baseline_name else ""
-        chans = f"{r['n_content_channels']}/{r['n_style_channels']}"
-        print(
-            f"{r['name'][:16]:16s} {chans:>9s} {_fmt(r['separation']):>8s} {_fmt(r['leak_c2s']):>10s} "
-            f"{_fmt(r['mcc_cc']):>9s} {_fmt(r['mcc_cs']):>9s} {_fmt(r['content_view']):>10s} "
-            f"{_fmt(r['style_view']):>8s} {_fmt(r['suff_s2s']):>10s}{tag}"
-        )
+        if has_v2:
+            _print_metric_row(r["name"] + " enc1", mw, r, suffix="", tag=tag)
+            if "separation_v2" in r:
+                _print_metric_row(r["name"] + " enc2", mw, r, suffix="_v2")
+            print()
+        else:
+            _print_metric_row(r["name"], mw, r, tag=tag)
 
     if base is not None:
-        print("-" * 110)
-        print(f"Δ vs baseline '{baseline_name}'  (what the objective earned on top of the architecture)")
-        print(f"{'model':16s} {'Δsep':>8s} {'Δleak c→s':>10s} {'Δmcc c→c':>9s} {'Δc→view':>9s}")
+        print("  " + "-" * (w - 2))
+        print(f"  Delta vs baseline '{baseline_name}'")
         for r in ranked:
             if r["name"] == baseline_name:
                 continue
+            d = {
+                k: r.get(k, float("nan")) - base.get(k, float("nan"))
+                for k in ("separation", "leak_c2s", "mcc_cc", "content_view")
+            }
             print(
-                f"{r['name'][:16]:16s} {_fmt(r['separation'] - base['separation']):>8s} "
-                f"{_fmt(r['leak_c2s'] - base['leak_c2s']):>10s} {_fmt(r['mcc_cc'] - base['mcc_cc']):>9s} "
-                f"{_fmt(r['content_view'] - base['content_view']):>9s}"
+                f"  {r['name']:<{mw}s} {'':>6s}"
+                f"  {_fmt(d['separation'])}"
+                f"  {_fmt(d['leak_c2s'])}"
+                f"  {_fmt(d['mcc_cc'])}"
+                f"  {'':^{_COL_W}s}"
+                f"  {_fmt(d['content_view'])}"
             )
-    print("=" * 110)
-    print(
-        "SEP = mcc(content→content) − mcc(content→style)  ·  leak c→s near 0 = content is style-invariant\n"
-        "info_c2c is capacity-bound (high even at 0 contrastive) — not shown; see JSON. Rank on SEP / leak / view.\n"
-    )
 
-    # Per-encoder (v2) table — printed only when --per-encoder produced data.
-    if any("separation_v2" in r for r in rows):
-        print("\n" + "=" * 110)
-        print("ENCODER 2 (view 2)   — same metrics, scored on the second encoder's features")
-        print("=" * 110)
-        print(
-            f"{'model':16s} {'chan c/s':>9s} {'SEP↑':>8s} {'leak c→s↓':>10s} "
-            f"{'mcc c→c↑':>9s} {'mcc c→s↓':>9s} {'suff s→s↑':>10s}"
-        )
-        print("-" * 110)
-        for r in ranked:
-            if "separation_v2" not in r:
-                continue
-            chans = f"{r['n_content_channels']}/{r['n_style_channels']}"
-            print(
-                f"{r['name'][:16]:16s} {chans:>9s} {_fmt(r.get('separation_v2')):>8s} {_fmt(r.get('leak_c2s_v2')):>10s} "
-                f"{_fmt(r.get('mcc_cc_v2')):>9s} {_fmt(r.get('mcc_cs_v2')):>9s} {_fmt(r.get('suff_s2s_v2')):>10s}"
-            )
-        print("=" * 110)
+    print("=" * w)
+    print(
+        "  SEP = mcc(c>c) - mcc(c>s)   |   leak c>s near 0 = content is style-invariant\n"
+        "  info_c2c is capacity-bound (high even at 0 contrastive) -- not shown; see JSON.\n"
+    )
 
 
 _BLOCK_LABELS = {
@@ -491,35 +526,43 @@ def print_per_latent(rows):
     one column per pooling.  ``*`` marks each factor's assigned (headline) pooling,
     so you can see whether a factor is better exposed by a non-default pooling.
     """
-    print("\nPER-LATENT INFORMATIVENESS  (GAP test-R²; matched repr→factor; * = assigned pooling)")
+    print()
+    print("  PER-LATENT INFORMATIVENESS  (GAP test-R2; * = assigned pooling)")
+    print()
     for r in rows:
-        cc = r.get("detail", {}).get("content2content")
-        ss = r.get("detail", {}).get("style2style")
-        if not cc:
-            continue
-        pools = [
-            k
-            for k in ("gap", "stats", "patch")
-            if any(k in fd.get("by_pooling", {}) for fd in cc["per_factor"].values())
-        ]
-        print(f"\n  {r['name']}  ({r.get('checkpoint', '?')})")
-        print("    " + f"{'factor':22s}" + "".join(f"{p:>9s}" for p in pools))
-        print("    " + "-" * (22 + 9 * len(pools)))
+        for detail_key, enc_label in [("detail", ""), ("detail_v2", " enc2")]:
+            detail = r.get(detail_key)
+            if not detail:
+                continue
+            cc = detail.get("content2content")
+            ss = detail.get("style2style")
+            if not cc:
+                continue
+            pools = [
+                k
+                for k in ("gap", "stats", "patch")
+                if any(k in fd.get("by_pooling", {}) for fd in cc["per_factor"].values())
+            ]
+            header = f"  {r['name']}{enc_label}  ({r.get('checkpoint', '?')})"
+            print(header)
+            print("    " + f"{'factor':24s}" + "".join(f"{p:>10s}" for p in pools))
+            print("    " + "-" * (24 + 10 * len(pools)))
 
-        def emit(block):
-            for fname, fd in block["per_factor"].items():
-                assigned = fd.get("pooling")
-                cells = ""
-                for p in pools:
-                    g = fd.get("by_pooling", {}).get(p, {}).get("gap")
-                    txt = _fmt(g, 3).strip()
-                    cells += f"{(txt + '*') if p == assigned else txt:>9s}"
-                print(f"    {fname:22s}{cells}")
+            def _emit(block):
+                for fname, fd in block["per_factor"].items():
+                    assigned = fd.get("pooling")
+                    cells = ""
+                    for p in pools:
+                        g = fd.get("by_pooling", {}).get(p, {}).get("gap")
+                        txt = f"{g:.3f}" if g is not None and np.isfinite(g) else "-"
+                        cells += f"{'  ' + txt + '*' if p == assigned else '  ' + txt:>10s}"
+                    print(f"    {fname:24s}{cells}")
 
-        emit(cc)
-        if ss:
-            print(f"    {'· style ·':22s}")
-            emit(ss)
+            _emit(cc)
+            if ss:
+                print(f"    {'-- style --':24s}")
+                _emit(ss)
+            print()
 
 
 def write_outputs(rows, out_dir, baseline_name=None):
