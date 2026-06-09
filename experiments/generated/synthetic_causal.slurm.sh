@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-09T11:59:12Z
-# Git SHA: a5abdc4
+# Generated at: 2026-06-09T17:05:12Z
+# Git SHA: fe56cf1
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-12-48-compressed-concat
+#SBATCH --job-name=synthetic-causal-random-real-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-12-48-compressed-concat-%j.err
+#SBATCH --error=synthetic-causal-random-real-baseline-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -52,8 +52,7 @@ conda activate "${CONDA_ENV_NAME}"
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
-    --content-ratios 0.95 \
-    --content-size 12 \
+    --content-ratios 1 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -63,7 +62,6 @@ conda activate "${CONDA_ENV_NAME}"
     --deterministic \
     --eval-dci \
     --image-spacing 1.0 \
-    --inject-style-to-decoder \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
@@ -75,14 +73,13 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1.0 \
+    --scale-contrastive-loss 0.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode concat \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -91,7 +88,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-12-48-compressed-concat \
+    --model-id synthetic-causal-random-real-baseline \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \

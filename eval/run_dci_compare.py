@@ -227,6 +227,53 @@ def _has_v2(reprs, level):
     return False
 
 
+_DCI_KEYS = ("dci_d", "dci_d_null", "dci_d_gap", "dci_c", "dci_c_null", "dci_c_gap")
+
+
+def _score_dci(reprs, level, block_idx, gt_content, gt_style, avail, n_null, rng, train_ratio=0.8):
+    """GAP DCI disentanglement + completeness on one representation block.
+
+    ``block_idx`` is normally ``(content_idx, style_idx)`` so DCI is measured on the
+    full (all-channels) representation — the split-free disentanglement axis that is
+    defined even for a vanilla, no-split baseline.  Reuses the GBT importance +
+    label-permutation null floor from ``eval.dci`` (the same path as
+    ``compute_dci_synthetic``), at the richest available pooling.  Returns real /
+    null / gap for both D and C; ``gap = real - null`` cancels the shape advantage of
+    a wider latent so models with different channel counts stay comparable.
+    """
+    nan = float("nan")
+    blank = {k: nan for k in _DCI_KEYS}
+    mkey = _resolve_key("stats", avail)
+    X = _block_array(reprs, mkey, level, block_idx)
+    if X is None or X.shape[1] == 0 or X.shape[0] < 20:
+        return {**blank, "dci_pooling": None}
+
+    F = np.hstack([gt_content, gt_style]) if gt_style is not None and gt_style.shape[1] else gt_content
+    split = int(X.shape[0] * train_ratio)
+    factor_types = ["continuous"] * F.shape[1]
+
+    from eval.dci import _compute_dci, _null_permuted_dci  # pulls torch in lazily
+
+    try:
+        real, _ = _compute_dci(X[:split].T, F[:split].T, X[split:].T, F[split:].T, factor_types)
+        rd, rc = real["disentanglement"], real["completeness"]
+    except Exception as e:
+        logger.warning("DCI (real) failed: %s", e)
+        return {**blank, "dci_pooling": mkey}
+
+    null = _null_permuted_dci(X, F, split, factor_types, n_null, rng)
+    nd, nc = null.get("disentanglement", nan), null.get("completeness", nan)
+    return {
+        "dci_d": rd,
+        "dci_d_null": nd,
+        "dci_d_gap": rd - nd,
+        "dci_c": rc,
+        "dci_c_null": nc,
+        "dci_c_gap": rc - nc,
+        "dci_pooling": mkey,
+    }
+
+
 def _score_one_encoder(
     reprs,
     level,
@@ -1077,11 +1124,12 @@ def print_capacity_table(rows, baseline_name=None):
         print(f"  {r['name']}{tag}   {chans}ch   mean {_num(mean)} {_minibar(mean)}")
         if allb:
             cset = set(allb.get("content_names", []))
+            fw = max([len(n) for n in allb["per_factor"]] + [16])
             for fname, fd in allb["per_factor"].items():
                 kind = "content" if fname in cset else "style"
                 g = fd.get("gap")
                 pool = fd.get("pooling") or "?"
-                print(f"      {kind:7s} {fname:<16s} {pool:<6s} {_num(g)} {_minibar(g)}")
+                print(f"      {kind:7s} {fname:<{fw}s} {pool:<6s} {_num(g)} {_minibar(g)}")
     print()
 
 
