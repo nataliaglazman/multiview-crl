@@ -34,6 +34,7 @@ Usage
 The torch-dependent parts (model load + encoder forward) are lazily imported so
 the scoring/ranking logic stays unit-testable on plain numpy (see ``__main__``).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -180,7 +181,13 @@ def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, 
         by_pooling = per[name]
         assigned = _resolve_key(FACTOR_POOLING.get(name, "stats"), avail)
         head = by_pooling.get(
-            assigned, {"gap": float("nan"), "real": float("nan"), "null": float("nan"), "std": float("nan")}
+            assigned,
+            {
+                "gap": float("nan"),
+                "real": float("nan"),
+                "null": float("nan"),
+                "std": float("nan"),
+            },
         )
         per[name] = {
             "gap": head["gap"],
@@ -191,7 +198,10 @@ def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, 
             "by_pooling": by_pooling,
         }
     gaps = [v["gap"] for v in per.values() if np.isfinite(v["gap"])]
-    return {"mean_gap": float(np.mean(gaps)) if gaps else float("nan"), "per_factor": per}
+    return {
+        "mean_gap": float(np.mean(gaps)) if gaps else float("nan"),
+        "per_factor": per,
+    }
 
 
 def _has_v2(reprs, level):
@@ -205,21 +215,76 @@ def _has_v2(reprs, level):
 
 
 def _score_one_encoder(
-    reprs, level, content_idx, style_idx, gt_content, gt_style, info, avail, n_null, seeds, rng, n_jobs
+    reprs,
+    level,
+    content_idx,
+    style_idx,
+    gt_content,
+    gt_style,
+    info,
+    avail,
+    n_null,
+    seeds,
+    rng,
+    n_jobs,
 ):
     """Score all four blocks (cc, cs, ss, sc) + block-MCC for one encoder's features."""
     cnames, snames = info["content_names"], info["style_names"]
     has_split = info["has_split"]
 
-    cc = _score_block(reprs, level, content_idx, gt_content, cnames, avail, n_null, seeds, rng, n_jobs=n_jobs)
-    cs = _score_block(reprs, level, content_idx, gt_style, snames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+    cc = _score_block(
+        reprs,
+        level,
+        content_idx,
+        gt_content,
+        cnames,
+        avail,
+        n_null,
+        seeds,
+        rng,
+        n_jobs=n_jobs,
+    )
+    cs = _score_block(
+        reprs,
+        level,
+        content_idx,
+        gt_style,
+        snames,
+        avail,
+        n_null,
+        seeds,
+        rng,
+        n_jobs=n_jobs,
+    )
     ss = (
-        _score_block(reprs, level, style_idx, gt_style, snames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+        _score_block(
+            reprs,
+            level,
+            style_idx,
+            gt_style,
+            snames,
+            avail,
+            n_null,
+            seeds,
+            rng,
+            n_jobs=n_jobs,
+        )
         if has_split
         else None
     )
     sc = (
-        _score_block(reprs, level, style_idx, gt_content, cnames, avail, n_null, seeds, rng, n_jobs=n_jobs)
+        _score_block(
+            reprs,
+            level,
+            style_idx,
+            gt_content,
+            cnames,
+            avail,
+            n_null,
+            seeds,
+            rng,
+            n_jobs=n_jobs,
+        )
         if has_split
         else None
     )
@@ -245,11 +310,26 @@ def _score_one_encoder(
         "mcc_cs": mcc_cs,
         "mcc_cs_null": mcc_cs_null,
         "separation": sep,
-        "detail": {"content2content": cc, "content2style": cs, "style2style": ss, "style2content": sc},
+        "detail": {
+            "content2content": cc,
+            "content2style": cs,
+            "style2style": ss,
+            "style2content": sc,
+        },
     }
 
 
-def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1, 2), n_jobs=1, per_encoder=False):
+def score_reprs(
+    reprs,
+    gt_content,
+    gt_style,
+    info,
+    level,
+    n_null=3,
+    seeds=(0, 1, 2),
+    n_jobs=1,
+    per_encoder=False,
+):
     """Turn extracted representations into one comparison row (torch-free).
 
     ``reprs`` maps a pooling key to a ``level_data`` dict (the output of
@@ -263,7 +343,18 @@ def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1,
     rng = np.random.RandomState(0)
 
     enc1 = _score_one_encoder(
-        reprs, level, _CONTENT, _STYLE, gt_content, gt_style, info, avail, n_null, seeds, rng, n_jobs
+        reprs,
+        level,
+        _CONTENT,
+        _STYLE,
+        gt_content,
+        gt_style,
+        info,
+        avail,
+        n_null,
+        seeds,
+        rng,
+        n_jobs,
     )
 
     # View-invariance (always uses both encoders).
@@ -276,7 +367,11 @@ def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1,
         s1 = Sc if Sc is not None and Sc.shape[1] else Cc[:, :0]
         s2 = Sc2 if Sc2 is not None and Sc2.shape[1] else Cc2[:, :0]
         vi = view_invariance(Cc, Cc2, s1, s2, seeds=seeds)
-        content_view, style_view, chance = vi["content_acc"], vi.get("style_acc", float("nan")), vi["chance"]
+        content_view, style_view, chance = (
+            vi["content_acc"],
+            vi.get("style_acc", float("nan")),
+            vi["chance"],
+        )
     else:
         content_view = style_view = chance = float("nan")
 
@@ -291,7 +386,18 @@ def score_reprs(reprs, gt_content, gt_style, info, level, n_null=3, seeds=(0, 1,
 
     if per_encoder and _has_v2(reprs, level):
         enc2 = _score_one_encoder(
-            reprs, level, _CONTENT_V2, _STYLE_V2, gt_content, gt_style, info, avail, n_null, seeds, rng, n_jobs
+            reprs,
+            level,
+            _CONTENT_V2,
+            _STYLE_V2,
+            gt_content,
+            gt_style,
+            info,
+            avail,
+            n_null,
+            seeds,
+            rng,
+            n_jobs,
         )
         for k, v in enc2.items():
             if k == "detail":
@@ -370,7 +476,15 @@ def evaluate_model(
         raise RuntimeError(f"level {level} not found in encoder outputs for {name}")
 
     row = score_reprs(
-        reprs, gt_content, gt_style, info, level, n_null=n_null, seeds=seeds, n_jobs=n_jobs, per_encoder=per_encoder
+        reprs,
+        gt_content,
+        gt_style,
+        info,
+        level,
+        n_null=n_null,
+        seeds=seeds,
+        n_jobs=n_jobs,
+        per_encoder=per_encoder,
     )
     row["name"] = name
     row["run_dir"] = run_dir
@@ -379,10 +493,239 @@ def evaluate_model(
 
 
 # --------------------------------------------------------------------------- #
+# Interpretive layer — derived human-readable scores (all 0..1, higher = better)
+# --------------------------------------------------------------------------- #
+#
+# The raw protocol metrics each point a different direction (leak↓, mcc↑,
+# view≈0.5) and sit on different scales, so reading "the whole picture" means
+# holding the theory in your head.  These derived scores re-express the same
+# numbers as four intuitive questions, every one oriented so 1.0 = ideal:
+#
+#   content_anatomy  — does content capture the shared (anatomy) factors?
+#   content_purity   — does content stay free of modality/style?
+#   style_modality   — does style capture the modality signal?
+#   style_purity     — does style stay free of anatomy?
+#
+# Their mean is a single 0..1 "disentanglement" health score (→ letter grade).
+# All are clipped to [0,1] and degrade to NaN (not a crash) when an input is
+# missing, so a no-style-split model still scores its content half.
+
+_EPS = 1e-6
+
+
+def _clip01(x):
+    if x is None or not np.isfinite(x):
+        return float("nan")
+    return float(min(1.0, max(0.0, x)))
+
+
+def _headroom(real, null):
+    """Fraction of the achievable ``[null, 1]`` band that ``real`` reaches.
+
+    Normalising by ``1 - null`` removes each block's shape/chance advantage, so
+    0 = no better than the permutation floor, 1 = perfect readout.
+    """
+    if real is None or null is None or not (np.isfinite(real) and np.isfinite(null)):
+        return float("nan")
+    denom = 1.0 - null
+    if denom <= _EPS:
+        return float("nan")
+    return _clip01((real - null) / denom)
+
+
+def _leak_rejection(leak_gap, signal_gap):
+    """1 = no leak; 0 = leak as large as the block's legitimate signal."""
+    if leak_gap is None or not np.isfinite(leak_gap):
+        return float("nan")
+    leak = max(0.0, leak_gap)
+    sig = max(
+        signal_gap if (signal_gap is not None and np.isfinite(signal_gap)) else 0.0,
+        _EPS,
+    )
+    return _clip01(1.0 - leak / sig)
+
+
+def _view_invariance_score(content_view):
+    """1 = content predicts the view at chance (0.5); 0 = predicts it perfectly."""
+    if content_view is None or not np.isfinite(content_view):
+        return float("nan")
+    return _clip01(1.0 - (content_view - 0.5) / 0.5)
+
+
+def _view_specificity_score(style_view):
+    """1 = style predicts the view perfectly; 0 = no better than chance."""
+    if style_view is None or not np.isfinite(style_view):
+        return float("nan")
+    return _clip01((style_view - 0.5) / 0.5)
+
+
+def _mean_finite(vals):
+    vals = [v for v in vals if v is not None and np.isfinite(v)]
+    return float(np.mean(vals)) if vals else float("nan")
+
+
+def _grade(score):
+    if score is None or not np.isfinite(score):
+        return "?"
+    for thresh, letter in ((0.80, "A"), (0.65, "B"), (0.50, "C"), (0.35, "D")):
+        if score >= thresh:
+            return letter
+    return "F"
+
+
+def derive_scores(row, suffix=""):
+    """Map raw protocol metrics to interpretable 0..1 sub-scores + an overall.
+
+    ``suffix`` selects an encoder's metrics (``""`` = enc1, ``"_v2"`` = enc2).
+    The view-identity probes are model-level (shared across encoders), so they
+    only feed the enc1 scores; enc2 purity/modality fall back to the
+    informativeness-based signals alone.  Returns keys with ``suffix`` appended.
+    """
+    s = suffix
+
+    content_anatomy = _headroom(row.get("mcc_cc" + s), row.get("mcc_cc_null" + s))
+
+    purity_info = _leak_rejection(row.get("leak_c2s" + s), row.get("info_c2c" + s))
+    purity_view = _view_invariance_score(row.get("content_view")) if not s else float("nan")
+    content_purity = _mean_finite([purity_info, purity_view])
+
+    suff = _clip01(row.get("suff_s2s" + s))
+    spec_view = _view_specificity_score(row.get("style_view")) if not s else float("nan")
+    style_modality = _mean_finite([suff, spec_view])
+
+    style_purity = _leak_rejection(row.get("leak_s2c" + s), row.get("suff_s2s" + s))
+
+    overall = _mean_finite([content_anatomy, content_purity, style_modality, style_purity])
+    out = {
+        "content_anatomy": content_anatomy,
+        "content_purity": content_purity,
+        "style_modality": style_modality,
+        "style_purity": style_purity,
+        "disentanglement": overall,
+        "grade": _grade(overall),
+    }
+    return {k + s: v for k, v in out.items()}
+
+
+def attach_scores(rows):
+    """Add derived scores in-place to every row (enc1, and enc2 when present)."""
+    for r in rows:
+        r.update(derive_scores(r, ""))
+        if "separation_v2" in r:
+            r.update(derive_scores(r, "_v2"))
+    return rows
+
+
+# --------------------------------------------------------------------------- #
 # Reporting
 # --------------------------------------------------------------------------- #
 
-_HEADLINE_COLS = ["separation", "leak_c2s", "mcc_cc", "mcc_cs", "content_view", "style_view", "suff_s2s"]
+_HEADLINE_COLS = [
+    "separation",
+    "leak_c2s",
+    "mcc_cc",
+    "mcc_cs",
+    "content_view",
+    "style_view",
+    "suff_s2s",
+]
+
+_SUBSCORES = [
+    ("content_anatomy", "Content: captures anatomy"),
+    ("content_purity", "Content: rejects modality"),
+    ("style_modality", "Style:   captures modality"),
+    ("style_purity", "Style:   rejects anatomy"),
+]
+
+
+def _bar(score, width=20):
+    if score is None or not np.isfinite(score):
+        return "[" + "?" * width + "]"
+    filled = int(round(_clip01(score) * width))
+    return "[" + "#" * filled + "." * (width - filled) + "]"
+
+
+def _verdict_lines(row):
+    """A few plain-English findings, each tagged [+] good / [~] caution / [!] problem."""
+    out = []
+    ca = row.get("content_anatomy", float("nan"))
+    leak = row.get("leak_c2s", float("nan"))
+    cv = row.get("content_view", float("nan"))
+    sv = row.get("style_view", float("nan"))
+    sep = row.get("separation", float("nan"))
+
+    if np.isfinite(ca):
+        if ca >= 0.60:
+            out.append("[+] content captures the shared anatomy factors")
+        elif ca >= 0.35:
+            out.append("[~] content captures anatomy only partially")
+        else:
+            out.append("[!] content barely captures the shared factors")
+    if np.isfinite(leak):
+        if leak <= 0.05:
+            out.append("[+] negligible style leakage into content")
+        elif leak <= 0.15:
+            out.append("[~] some style information leaks into content")
+        else:
+            out.append("[!] substantial style leakage into content")
+    if np.isfinite(cv):
+        if cv <= 0.55:
+            out.append("[+] a linear probe cannot read modality from content")
+        elif cv <= 0.70:
+            out.append("[~] content weakly predicts the modality/view")
+        else:
+            out.append("[!] content strongly predicts the modality (view leak)")
+    if np.isfinite(sv):
+        if sv >= 0.80:
+            out.append("[+] style carries the modality signal")
+        elif sv >= 0.60:
+            out.append("[~] style only partly captures the modality")
+        else:
+            out.append("[!] style fails to capture the modality")
+    if np.isfinite(sep) and sep < 0.10:
+        out.append("[!] weak content/style separation overall")
+    return out
+
+
+def _disent_of(r):
+    v = r.get("disentanglement", float("nan"))
+    return v if (v is not None and np.isfinite(v)) else -1.0
+
+
+def print_scorecard(rows, baseline_name=None):
+    """Headline readable view: per-model sub-score bars, grade, and verdicts.
+
+    Ranks by the overall disentanglement health score (↓).  This is the layer to
+    read first; ``print_table`` below has the underlying protocol numbers.
+    """
+    ranked = sorted(rows, key=_disent_of, reverse=True)
+    w = 76
+    print()
+    print("=" * w)
+    print("  MODEL SCORECARD   (every score 0-100%, higher = better)")
+    print("=" * w)
+    for r in ranked:
+        tag = "   <- baseline" if r["name"] == baseline_name else ""
+        overall = r.get("disentanglement", float("nan"))
+        opct = f"{overall * 100:3.0f}%" if np.isfinite(overall) else " ? "
+        print()
+        print(f"  {r['name']}{tag}")
+        print(f"      {'OVERALL (disentanglement)':26s} {_bar(overall)} {opct}  grade {r.get('grade', '?')}")
+        print(f"      {'-' * (26 + 22 + 11)}")
+        for key, label in _SUBSCORES:
+            sc = r.get(key, float("nan"))
+            pct = f"{sc * 100:3.0f}%" if np.isfinite(sc) else " ? "
+            print(f"      {label:26s} {_bar(sc)} {pct}")
+        for line in _verdict_lines(r):
+            print(f"        {line}")
+    print("=" * w)
+    print(
+        "  anatomy  : content informative about shared factors (block-MCC above null)\n"
+        "  rejects  : content can't predict the view + low style leakage\n"
+        "  modality : style predicts the view & is sufficient for style factors\n"
+        "  Read this first; the protocol table below has the raw numbers.\n"
+    )
+
 
 _COL_W = 10  # width per metric column
 
@@ -417,7 +760,13 @@ def _print_metric_row(label, mw, r, suffix="", tag=""):
 def print_table(rows, baseline_name=None):
     """Ranked stdout table.  Ranks by separation↑ (tie-break leakage↓)."""
     base = next((r for r in rows if r["name"] == baseline_name), None)
-    ranked = sorted(rows, key=lambda r: (-(r["separation"] if np.isfinite(r["separation"]) else -9), r["leak_c2s"]))
+    ranked = sorted(
+        rows,
+        key=lambda r: (
+            -(r["separation"] if np.isfinite(r["separation"]) else -9),
+            r["leak_c2s"],
+        ),
+    )
     has_v2 = any("separation_v2" in r for r in rows)
     mw = _model_width(rows) + (6 if has_v2 else 0)  # extra room for enc label
     w = mw + 8 + 7 * (_COL_W + 2) + 2
@@ -567,6 +916,15 @@ def print_per_latent(rows):
 
 def write_outputs(rows, out_dir, baseline_name=None):
     os.makedirs(out_dir, exist_ok=True)
+    attach_scores(rows)  # idempotent — ensure derived columns exist even if called directly
+    _score_cols = [
+        "grade",
+        "disentanglement",
+        "content_anatomy",
+        "content_purity",
+        "style_modality",
+        "style_purity",
+    ]
     _enc1_cols = [
         "separation",
         "leak_c2s",
@@ -585,11 +943,12 @@ def write_outputs(rows, out_dir, baseline_name=None):
         "checkpoint",
         "n_content_channels",
         "n_style_channels",
+        *_score_cols,
         *_enc1_cols,
         "content_view",
         "style_view",
         "view_chance",
-        *([c + "_v2" for c in _enc1_cols] if has_v2 else []),
+        *([c + "_v2" for c in (_score_cols + _enc1_cols)] if has_v2 else []),
         "num_samples",
         "poolings",
     ]
@@ -601,7 +960,18 @@ def write_outputs(rows, out_dir, baseline_name=None):
             w.writerow({k: r.get(k) for k in flat_cols})
 
     per_latent_path = os.path.join(out_dir, "dci_compare_per_latent.csv")
-    pl_cols = ["model", "encoder", "block", "factor", "pooling", "assigned", "real_r2", "real_std", "null_r2", "gap"]
+    pl_cols = [
+        "model",
+        "encoder",
+        "block",
+        "factor",
+        "pooling",
+        "assigned",
+        "real_r2",
+        "real_std",
+        "null_r2",
+        "gap",
+    ]
     with open(per_latent_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=pl_cols)
         w.writeheader()
@@ -641,7 +1011,13 @@ def _merge_rows(existing, new):
 
 def _settings_of(row):
     """The eval settings that must match for rows to be comparable in one leaderboard."""
-    return (row.get("num_samples"), row.get("poolings"), row.get("level"), row.get("n_null"), row.get("seeds"))
+    return (
+        row.get("num_samples"),
+        row.get("poolings"),
+        row.get("level"),
+        row.get("n_null"),
+        row.get("seeds"),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -651,25 +1027,55 @@ def _settings_of(row):
 
 def main():
     p = argparse.ArgumentParser(description="Final DCI comparison across models (shared architecture).")
-    p.add_argument("--run-dirs", nargs="+", required=True, help="Run directories to compare (settings.json each).")
-    p.add_argument("--names", nargs="*", default=None, help="Labels (default: basename of each run-dir).")
-    p.add_argument("--baseline", default=None, help="Run-dir to anchor Δ (e.g. the 0-contrastive model).")
+    p.add_argument(
+        "--run-dirs",
+        nargs="+",
+        required=True,
+        help="Run directories to compare (settings.json each).",
+    )
+    p.add_argument(
+        "--names",
+        nargs="*",
+        default=None,
+        help="Labels (default: basename of each run-dir).",
+    )
+    p.add_argument(
+        "--baseline",
+        default=None,
+        help="Run-dir to anchor Δ (e.g. the 0-contrastive model).",
+    )
     p.add_argument(
         "--checkpoint-name",
         default="vqvae_model.pt",
         help="Checkpoint filename loaded from every run-dir. Use vqvae_best.pt for the best-by-loss copy "
         "(recommended for a final comparison; same choice for all models keeps it fair).",
     )
-    p.add_argument("--num-samples", type=int, default=2000, help="Frozen test-set size, shared across models.")
-    p.add_argument("--poolings", default="gap,stats,2x2x2", help="Comma list: gap, stats, and/or DxHxW (e.g. 2x2x2).")
+    p.add_argument(
+        "--num-samples",
+        type=int,
+        default=2000,
+        help="Frozen test-set size, shared across models.",
+    )
+    p.add_argument(
+        "--poolings",
+        default="gap,stats,2x2x2",
+        help="Comma list: gap, stats, and/or DxHxW (e.g. 2x2x2).",
+    )
     p.add_argument("--level", type=int, default=0, help="Encoder level to compare on.")
     p.add_argument("--seeds", default="0,1,2", help="Probe CV seeds.")
     p.add_argument("--n-null", type=int, default=3, help="Permutations for the null floor.")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument("--n-jobs", type=int, default=-1, help="Parallel probe jobs (-1 = all cores, 1 = sequential).")
     p.add_argument(
-        "--per-encoder", action="store_true", help="Score each encoder separately (for separate_encoders models)."
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="Parallel probe jobs (-1 = all cores, 1 = sequential).",
+    )
+    p.add_argument(
+        "--per-encoder",
+        action="store_true",
+        help="Score each encoder separately (for separate_encoders models).",
     )
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
     p.add_argument(
@@ -704,7 +1110,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ref_args = load_run_args(specs[0])
     dataset = build_synthetic_test_set(ref_args, cli.num_samples)
-    logger.info("Frozen test set: %d samples, shared across %d model(s).", cli.num_samples, len(specs))
+    logger.info(
+        "Frozen test set: %d samples, shared across %d model(s).",
+        cli.num_samples,
+        len(specs),
+    )
 
     rows = []
     for name, run_dir in zip(names, specs):
@@ -751,11 +1161,18 @@ def main():
                 "Existing results used different eval settings (num-samples/poolings/level/n-null/seeds); "
                 "the merged leaderboard would mix them. Use --fresh to start clean, or match the settings."
             )
-        logger.info("Merging %d new with %d existing model(s) in %s.", len(rows), len(existing), cli.out)
+        logger.info(
+            "Merging %d new with %d existing model(s) in %s.",
+            len(rows),
+            len(existing),
+            cli.out,
+        )
     merged = _merge_rows(existing, rows)
     if baseline_name is None:
         baseline_name = existing_baseline
 
+    attach_scores(merged)
+    print_scorecard(merged, baseline_name)
     print_table(merged, baseline_name)
     print_per_latent(merged)
     write_outputs(merged, cli.out, baseline_name)
