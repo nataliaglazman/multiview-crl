@@ -28,6 +28,9 @@ Protocol
 * **All-channels capacity** → every factor predicted from content+style together
   (GAP, per factor at its assigned pooling).  The one apples-to-apples axis: same
   total width across models, no assumption of a split.
+* **Optional split-free DCI** (``--with-dci``) → GAP disentanglement/completeness
+  on the all-channels rep, so even a no-split vanilla baseline gets a real
+  component-wise disentanglement number.  GBT-based, so off by default (slower).
 * **Ranks on the theory-aligned headline metrics** — content→style leakage,
   block-MCC, view-invariance — never the capacity-bound content→content diagonal.
 
@@ -288,11 +291,13 @@ def _score_one_encoder(
     rng,
     n_jobs,
     all_only=False,
+    with_dci=False,
 ):
     """Score the four split blocks (cc, cs, ss, sc) + block-MCC for one encoder's
     features, plus the split-free ``all``-channels capacity (full representation →
     every factor).  ``all_only`` skips the split blocks and returns only that
-    capacity — for a baseline with no meaningful content/style distinction."""
+    capacity — for a baseline with no meaningful content/style distinction.
+    ``with_dci`` adds GAP DCI disentanglement/completeness on the all-channels rep."""
     cnames, snames = info["content_names"], info["style_names"]
     has_split = info["has_split"]
 
@@ -314,6 +319,23 @@ def _score_one_encoder(
     allb["content_names"] = list(cnames)
     allb["style_names"] = list(snames)
 
+    # Split-free DCI (component-wise) on the all-channels rep — the disentanglement
+    # axis that is defined even for a no-split baseline.  Off by default (GBT cost).
+    dci = (
+        _score_dci(
+            reprs,
+            level,
+            (content_idx, style_idx),
+            gt_content,
+            gt_style,
+            avail,
+            n_null,
+            rng,
+        )
+        if with_dci
+        else {**{k: float("nan") for k in _DCI_KEYS}, "dci_pooling": None}
+    )
+
     if all_only:
         nan = float("nan")
         return {
@@ -327,6 +349,7 @@ def _score_one_encoder(
             "mcc_cs_null": nan,
             "separation": nan,
             "info_all": allb["mean_gap"],
+            **dci,
             "detail": {
                 "content2content": None,
                 "content2style": None,
@@ -415,6 +438,7 @@ def _score_one_encoder(
         "mcc_cs_null": mcc_cs_null,
         "separation": sep,
         "info_all": allb["mean_gap"],
+        **dci,
         "detail": {
             "content2content": cc,
             "content2style": cs,
@@ -436,6 +460,7 @@ def score_reprs(
     n_jobs=1,
     per_encoder=False,
     all_only=False,
+    with_dci=False,
 ):
     """Turn extracted representations into one comparison row (torch-free).
 
@@ -444,7 +469,7 @@ def score_reprs(
 
     When ``per_encoder`` is True and view-2 features exist, the four score blocks
     and block-MCC are computed separately for each encoder and reported with a
-    ``_v2`` suffix.
+    ``_v2`` suffix.  ``with_dci`` adds the split-free GAP DCI scores.
     """
     avail = set(reprs.keys())
     rng = np.random.RandomState(0)
@@ -463,6 +488,7 @@ def score_reprs(
         rng,
         n_jobs,
         all_only=all_only,
+        with_dci=with_dci,
     )
 
     # View-invariance (uses both encoders).  Skipped for an all-channels-only
@@ -508,6 +534,7 @@ def score_reprs(
             rng,
             n_jobs,
             all_only=all_only,
+            with_dci=with_dci,
         )
         for k, v in enc2.items():
             if k == "detail":
@@ -555,6 +582,7 @@ def evaluate_model(
     n_jobs=1,
     per_encoder=False,
     all_only=False,
+    with_dci=False,
 ):
     """Load a model, extract representations under each pooling, return a row."""
     from eval.dci import _extract_synthetic_representations
@@ -597,6 +625,7 @@ def evaluate_model(
         n_jobs=n_jobs,
         per_encoder=per_encoder,
         all_only=all_only,
+        with_dci=with_dci,
     )
     row["name"] = name
     row["run_dir"] = run_dir
@@ -1122,6 +1151,13 @@ def print_capacity_table(rows, baseline_name=None):
         chans = r.get("n_content_channels", 0) + r.get("n_style_channels", 0)
         print()
         print(f"  {r['name']}{tag}   {chans}ch   mean {_num(mean)} {_minibar(mean)}")
+        dgap = r.get("dci_d_gap", float("nan"))
+        if np.isfinite(dgap):
+            cgap = r.get("dci_c_gap", float("nan"))
+            print(
+                f"      {'DCI (gap)':14s} D {_num(dgap)} {_minibar(dgap)}   "
+                f"C {_num(cgap)} {_minibar(cgap)}   (disentangle / complete; split-free)"
+            )
         if allb:
             cset = set(allb.get("content_names", []))
             fw = max([len(n) for n in allb["per_factor"]] + [16])
@@ -1146,6 +1182,12 @@ def write_outputs(rows, out_dir, baseline_name=None):
     ]
     _enc1_cols = [
         "info_all",
+        "dci_d",
+        "dci_d_null",
+        "dci_d_gap",
+        "dci_c",
+        "dci_c_null",
+        "dci_c_gap",
         "separation",
         "leak_c2s",
         "info_c2c",
@@ -1320,6 +1362,13 @@ def main():
         "only, since with no contrastive objective its split is not meaningful — it "
         "appears only in the capacity table, with placeholders in the per-block tables.",
     )
+    p.add_argument(
+        "--with-dci",
+        action="store_true",
+        help="Also compute split-free GAP DCI disentanglement/completeness on the "
+        "all-channels representation for every model (incl. a no-split vanilla "
+        "baseline).  Uses GBT importance — noticeably slower; off by default.",
+    )
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
     p.add_argument(
         "--fresh",
@@ -1377,6 +1426,7 @@ def main():
                     checkpoint=_resolve_checkpoint(run_dir, cli.checkpoint_name),
                     n_jobs=cli.n_jobs,
                     per_encoder=cli.per_encoder,
+                    with_dci=cli.with_dci,
                     all_only=(baseline_name is not None and name == baseline_name and not cli.baseline_per_block),
                 )
             )
