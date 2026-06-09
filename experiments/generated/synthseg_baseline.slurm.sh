@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-06-09T08:48:56Z
-# Git SHA: db5646e
+# Generated at: 2026-06-09T09:16:23Z
+# Git SHA: 34cb8e7
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthseg-baseline
 #SBATCH --output=/scratch/users/%u/%j.out

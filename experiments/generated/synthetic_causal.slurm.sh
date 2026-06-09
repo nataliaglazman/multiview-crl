@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-09T08:48:56Z
-# Git SHA: db5646e
+# Generated at: 2026-06-09T09:16:23Z
+# Git SHA: 34cb8e7
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-075-compressed-input
+#SBATCH --job-name=synthetic-causal-random-actual-baseline-compressed
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-075-compressed-input-%j.err
+#SBATCH --error=synthetic-causal-random-actual-baseline-compressed-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -62,7 +62,6 @@ conda activate "${CONDA_ENV_NAME}"
     --deterministic \
     --eval-dci \
     --image-spacing 1.0 \
-    --inject-style-to-decoder \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
@@ -72,9 +71,9 @@ conda activate "${CONDA_ENV_NAME}"
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
-    --scale-adv-loss 0.1 \
+    --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 10.0 \
+    --scale-contrastive-loss 0.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -90,15 +89,15 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-075-compressed-input \
+    --model-id synthetic-causal-random-actual-baseline-compressed \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 32 \
-    --vqvae-hidden-channels 32 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
