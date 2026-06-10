@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-09T21:41:51Z
-# Git SHA: b1bbf2b
+# Generated at: 2026-06-10T09:12:53Z
+# Git SHA: 32fb2fb
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-final
+#SBATCH --job-name=synthetic-causal-random-final-shared-norm
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-final-%j.err
+#SBATCH --error=synthetic-causal-random-final-shared-norm-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -53,6 +53,7 @@ conda activate "${CONDA_ENV_NAME}"
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -86,11 +87,12 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
+    --synthetic-normalize shared \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-final \
+    --model-id synthetic-causal-random-final-shared-norm \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \

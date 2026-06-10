@@ -1,11 +1,11 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthseg_baseline.yaml
+# Auto-generated from: experiments/synthetic_causal_fixedref.yaml
 # Generated at: 2026-06-10T09:12:53Z
 # Git SHA: 32fb2fb
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthseg-baseline
+#SBATCH --job-name=synthetic-causal-random-fixedref
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthseg-baseline-%j.err
+#SBATCH --error=synthetic-causal-random-fixedref-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -52,25 +52,31 @@ conda activate "${CONDA_ENV_NAME}"
     --cache-dataset \
     --cache-dir /scratch/users/k24058220/cache/multiview \
     --channels-last \
+    --checkpoint-steps 1000 \
     --content-dim 128 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
-    --dataroot /data/natalia/ADNI_synthseg \
+    --dataroot /scratch/users/k24058220 \
     --dataset-name ADNI_stripped_masks \
     --deterministic \
+    --eval-dci \
     --gradient-checkpointing \
     --image-spacing 1.0 \
-    --labels-path /data/natalia/ADNI_synthseg/labels.csv \
+    --inject-style-to-decoder \
+    --labels-path /users/k24058220/multiview-crl/labels_cleaned_3class.csv \
     --lr 0.001 \
     --mask-mode fixed \
+    --masks-dir /scratch/users/k24058220/ADNI_stripped_masks \
     --moco-queue-size 0 \
     --pass-full-to-next-level \
+    --patch-grid 4 4 4 \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1.0 \
+    --scale-contrastive-loss 100 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -78,16 +84,21 @@ conda activate "${CONDA_ENV_NAME}"
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
     --spatial-size 150 180 150 \
-    --model-id synthseg-baseline \
+    --style-injection-mode concat \
+    --synthetic-causal \
+    --synthetic-causal-edge-prob 0.5 \
+    --synthetic-causal-graph random \
+    --synthetic-normalize fixed_reference \
+    --model-id synthetic-causal-random-fixedref \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 20000 \
+    --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 32 \
-    --vqvae-hidden-channels 32 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 3 \
-    --vqvae-scaling-rates 2 2 2 \
+    --vqvae-scaling-rates 4 \
     --workers 8
