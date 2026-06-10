@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-10T09:52:57Z
-# Git SHA: c2ddc24
+# Generated at: 2026-06-10T10:21:22Z
+# Git SHA: dc933cd
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-final-shared-norm
+#SBATCH --job-name=synthetic-causal-random-final-2
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-final-shared-norm-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-random-final-2-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_40g
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -53,7 +53,7 @@ conda activate "${CONDA_ENV_NAME}"
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 44 \
+    --content-size 48 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -87,20 +87,19 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
-    --synthetic-normalize shared \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-final-shared-norm \
+    --model-id synthetic-causal-random-final-2 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 54 \
+    --vqvae-hidden-channels 54 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \

@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_fixedref.yaml
-# Generated at: 2026-06-10T09:52:57Z
-# Git SHA: c2ddc24
+# Generated at: 2026-06-10T10:21:22Z
+# Git SHA: dc933cd
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-random-fixedref
 #SBATCH --output=/scratch/users/%u/%j.out
 #SBATCH --error=synthetic-causal-random-fixedref-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
+#SBATCH --constraint=a100_40g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
