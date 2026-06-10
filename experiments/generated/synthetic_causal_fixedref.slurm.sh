@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_fixedref.yaml
-# Generated at: 2026-06-10T09:19:04Z
-# Git SHA: e55ef21
+# Generated at: 2026-06-10T09:34:12Z
+# Git SHA: 70fefc5
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-random-fixedref
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -70,6 +70,7 @@ conda activate "${CONDA_ENV_NAME}"
     --mask-mode fixed \
     --masks-dir /scratch/users/k24058220/ADNI_stripped_masks \
     --moco-queue-size 0 \
+    --nb-levels 1 \
     --pass-full-to-next-level \
     --patch-grid 4 4 4 \
     --recon-loss-start-step 0 \

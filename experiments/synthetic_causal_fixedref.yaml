@@ -15,6 +15,7 @@ tau: 0.1
 patch_grid: [4, 4, 4]
 train_steps: 300000
 # spatial_size: 4
+nb_levels: 1
 eval_dci: true
 checkpoint_steps: 1000
 scale_adv_loss: 0.0
