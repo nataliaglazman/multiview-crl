@@ -491,6 +491,46 @@ def _score_one_encoder(
     }
 
 
+def _reduce_reprs(reprs, level, probe_dim, seed=0):
+    """Return a copy of *reprs* with each block at *level* PCA-reduced to
+    ``min(probe_dim, width)`` components, so every model's probes see the same
+    feature capacity regardless of its channel count.
+
+    View-1 and view-2 of a block share one PCA basis (fit on view 1) so the
+    view-invariance probe is not confounded by mismatched bases.  PCA is
+    unsupervised and fit on all samples — a transductive but label-free step.  The
+    ``info`` dict is left untouched, so the tables still report the model's real
+    channel count.  Blocks already at or below ``probe_dim`` are left unchanged.
+    """
+    from sklearn.decomposition import PCA
+
+    def _fit(A):
+        if A is None or A.shape[1] == 0 or A.shape[1] <= probe_dim:
+            return None
+        return PCA(n_components=min(probe_dim, A.shape[0]), random_state=seed).fit(A)
+
+    def _apply(pca, A):
+        return pca.transform(A) if (pca is not None and A is not None) else A
+
+    out = {}
+    for key, ld in reprs.items():
+        if level not in ld:
+            out[key] = ld
+            continue
+        content, style, content_v2, style_v2, info = ld[level]
+        pca_c, pca_s = _fit(content), _fit(style)  # fit on view-1, reuse for view-2
+        new_ld = dict(ld)
+        new_ld[level] = (
+            _apply(pca_c, content),
+            _apply(pca_s, style),
+            _apply(pca_c, content_v2),
+            _apply(pca_s, style_v2),
+            info,
+        )
+        out[key] = new_ld
+    return out
+
+
 def score_reprs(
     reprs,
     gt_content,
@@ -503,6 +543,7 @@ def score_reprs(
     per_encoder=False,
     all_only=False,
     with_dci=False,
+    probe_dim=0,
 ):
     """Turn extracted representations into one comparison row (torch-free).
 
@@ -511,8 +552,12 @@ def score_reprs(
 
     When ``per_encoder`` is True and view-2 features exist, the four score blocks
     and block-MCC are computed separately for each encoder and reported with a
-    ``_v2`` suffix.  ``with_dci`` adds the split-free GAP DCI scores.
+    ``_v2`` suffix.  ``with_dci`` adds the split-free GAP DCI scores.  ``probe_dim``
+    (>0) PCA-reduces every block to that many components first, so informativeness /
+    MCC / DCI are compared at equal capacity across models of different width.
     """
+    if probe_dim and probe_dim > 0:
+        reprs = _reduce_reprs(reprs, level, probe_dim)
     avail = set(reprs.keys())
     rng = np.random.RandomState(0)
 
@@ -625,6 +670,7 @@ def evaluate_model(
     per_encoder=False,
     all_only=False,
     with_dci=False,
+    probe_dim=0,
 ):
     """Load a model, extract representations under each pooling, return a row."""
     from eval.dci import _extract_synthetic_representations
@@ -668,6 +714,7 @@ def evaluate_model(
         per_encoder=per_encoder,
         all_only=all_only,
         with_dci=with_dci,
+        probe_dim=probe_dim,
     )
     row["name"] = name
     row["run_dir"] = run_dir
@@ -1183,9 +1230,12 @@ def print_capacity_table(rows, baseline_name=None):
     if not have:
         return
     ranked = sorted(have, key=lambda r: r.get("info_all", float("-inf")), reverse=True)
+    pdim = next((r.get("probe_dim") for r in have if r.get("probe_dim")), 0)
     print()
     print("  ALL-CHANNELS CAPACITY   (GAP = real - null; full representation -> each factor)")
     print("  higher = more factor information present somewhere in the representation")
+    if pdim:
+        print(f"  NOTE: scored on top-{pdim} PCs per block (--probe-dim) — capacity equalized across widths")
     for r in ranked:
         tag = "   <- baseline (all-channels only)" if r["name"] == baseline_name else ""
         chans = r.get("n_content_channels", 0) + r.get("n_style_channels", 0)
@@ -1271,6 +1321,7 @@ def write_outputs(rows, out_dir, baseline_name=None):
         *([c + "_v2" for c in (_score_cols + _enc1_cols)] if has_v2 else []),
         "num_samples",
         "poolings",
+        "probe_dim",
     ]
     csv_path = os.path.join(out_dir, "dci_compare.csv")
     with open(csv_path, "w", newline="") as f:
@@ -1352,6 +1403,7 @@ def _settings_of(row):
         row.get("level"),
         row.get("n_null"),
         row.get("seeds"),
+        row.get("probe_dim"),
     )
 
 
@@ -1427,6 +1479,16 @@ def main():
         "all-channels representation for every model (incl. a no-split vanilla "
         "baseline).  Uses GBT importance — noticeably slower; off by default.",
     )
+    p.add_argument(
+        "--probe-dim",
+        type=int,
+        default=0,
+        help="If >0, PCA-reduce every block to this many components before scoring, "
+        "so informativeness/MCC/DCI are compared at EQUAL probe capacity across "
+        "models of different channel counts (removes the capacity confound when "
+        "sweeping channel width).  Set it to <= the smallest content width in the "
+        "comparison.  0 (default) = no reduction.",
+    )
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
     p.add_argument(
         "--fresh",
@@ -1485,6 +1547,7 @@ def main():
                     n_jobs=cli.n_jobs,
                     per_encoder=cli.per_encoder,
                     with_dci=cli.with_dci,
+                    probe_dim=cli.probe_dim,
                     all_only=(baseline_name is not None and name == baseline_name and not cli.baseline_per_block),
                 )
             )
@@ -1502,6 +1565,7 @@ def main():
         "level": cli.level,
         "n_null": cli.n_null,
         "seeds": cli.seeds,
+        "probe_dim": cli.probe_dim,
     }
     for r in rows:
         r.update(meta)
