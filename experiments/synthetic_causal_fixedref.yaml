@@ -2,7 +2,7 @@
 # normalization, which preserves global style gain/bias into the encoder
 # input (per_sample z-scoring erases them). Used to test whether style
 # channels can recover gain/bias once the input-level eraser is removed.
-_base_: synthetic_causal
+_base_: synthetic_defaults
 
 tag: synthetic-causal-random-fixedref
 synthetic_normalize: fixed_reference
