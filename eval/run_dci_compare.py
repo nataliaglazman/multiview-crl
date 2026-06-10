@@ -29,8 +29,10 @@ Protocol
   (GAP, per factor at its assigned pooling).  The one apples-to-apples axis: same
   total width across models, no assumption of a split.
 * **Optional split-free DCI** (``--with-dci``) → GAP disentanglement/completeness
-  on the all-channels rep, so even a no-split vanilla baseline gets a real
-  component-wise disentanglement number.  GBT-based, so off by default (slower).
+  in three scopes: ``dci`` (all-channels × all-factors, stats pooling — defined even
+  for a no-split vanilla baseline), ``dci_content`` (content-channels × content-factors)
+  and ``dci_patch`` (all-channels at the PATCH pooling, so spatially-localized factors
+  like lesions count).  GBT-based, so off by default (slower).
 * **Ranks on the theory-aligned headline metrics** — content→style leakage,
   block-MCC, view-invariance — never the capacity-bound content→content diagonal.
 
@@ -231,11 +233,14 @@ def _has_v2(reprs, level):
 
 
 _DCI_BASE = ("d", "d_null", "d_gap", "c", "c_null", "c_gap")
-# Two scopes: "dci" = all-channels × all-factors (baseline-comparable, defined even
-# for a no-split model); "dci_content" = content-channels × content-factors (the
-# model-internal "is content disentangled" number, undefined for a no-split baseline).
+# Three scopes: "dci" = all-channels × all-factors at the richest (stats) pooling
+# (baseline-comparable, defined even for a no-split model); "dci_content" =
+# content-channels × content-factors (the model-internal "is content disentangled"
+# number, undefined for a no-split baseline); "dci_patch" = all-channels × all-factors
+# at the PATCH pooling (spatial-grid codes, so localized factors like lesions count).
 _DCI_KEYS = tuple(f"dci_{s}" for s in _DCI_BASE)
 _DCI_CONTENT_KEYS = tuple(f"dci_content_{s}" for s in _DCI_BASE)
+_DCI_PATCH_KEYS = tuple(f"dci_patch_{s}" for s in _DCI_BASE)
 
 
 def _blank_dci(prefix):
@@ -255,21 +260,24 @@ def _score_dci(
     n_null,
     rng,
     key_prefix="dci",
+    pooling_key=None,
     train_ratio=0.8,
 ):
     """GAP DCI disentanglement + completeness on one representation block.
 
     ``block_idx`` selects the codes: ``(content_idx, style_idx)`` for the all-channels
     rep, or ``content_idx`` alone for content-only.  ``gt_content``/``gt_style`` pick
-    the factor columns (pass ``gt_style=None`` for content-only).  Reuses the GBT
-    importance + label-permutation null floor from ``eval.dci`` (the same path as
-    ``compute_dci_synthetic``), at the richest available pooling.  Returns real /
-    null / gap for D and C under ``key_prefix``; ``gap = real - null`` cancels the
-    shape advantage of a wider latent so different channel counts stay comparable.
+    the factor columns (pass ``gt_style=None`` for content-only).  ``pooling_key``
+    picks which pooling's features are the codes (default: the richest, ``stats``;
+    pass ``"patch"`` for the spatial-grid rep that exposes localized factors).
+    Reuses the GBT importance + label-permutation null floor from ``eval.dci`` (the
+    same path as ``compute_dci_synthetic``).  Returns real / null / gap for D and C
+    under ``key_prefix``; ``gap = real - null`` cancels the shape advantage of a
+    wider latent so different channel counts stay comparable.
     """
     nan = float("nan")
     blank = _blank_dci(key_prefix)
-    mkey = _resolve_key("stats", avail)
+    mkey = pooling_key or _resolve_key("stats", avail)
     X = _block_array(reprs, mkey, level, block_idx)
     if X is None or X.shape[1] == 0 or X.shape[0] < 20:
         return blank
@@ -342,11 +350,14 @@ def _score_one_encoder(
     allb["content_names"] = list(cnames)
     allb["style_names"] = list(snames)
 
-    # Component-wise DCI, two scopes (off by default — GBT cost):
-    #   dci_*          — all-channels × all-factors: defined even for a no-split
-    #                    baseline, so it is the apples-to-apples axis vs the baseline.
+    # Component-wise DCI, three scopes (off by default — GBT cost):
+    #   dci_*          — all-channels × all-factors at stats pooling: defined even for
+    #                    a no-split baseline, so it is the apples-to-apples baseline axis.
     #   dci_content_*  — content-channels × content-factors: the model-internal
     #                    "is content disentangled" number; NaN for a no-split baseline.
+    #   dci_patch_*    — all-channels × all-factors at the PATCH pooling: spatial-grid
+    #                    codes, so localized factors (lesions) contribute; NaN if no
+    #                    patch pooling was requested.
     if with_dci:
         dci = _score_dci(
             reprs,
@@ -375,8 +386,29 @@ def _score_one_encoder(
             )
         else:
             dci.update(_blank_dci("dci_content"))
+        if "patch" in avail:
+            dci.update(
+                _score_dci(
+                    reprs,
+                    level,
+                    (content_idx, style_idx),
+                    gt_content,
+                    gt_style,
+                    avail,
+                    n_null,
+                    rng,
+                    key_prefix="dci_patch",
+                    pooling_key="patch",
+                )
+            )
+        else:
+            dci.update(_blank_dci("dci_patch"))
     else:
-        dci = {**_blank_dci("dci"), **_blank_dci("dci_content")}
+        dci = {
+            **_blank_dci("dci"),
+            **_blank_dci("dci_content"),
+            **_blank_dci("dci_patch"),
+        }
 
     if all_only:
         nan = float("nan")
@@ -1262,6 +1294,13 @@ def print_capacity_table(rows, baseline_name=None):
                         f"      {'DCI content (gap)':18s} D {_num(dcg)} {_minibar(dcg)}   "
                         f"C {_num(ccg)} {_minibar(ccg)}   (content chan x content factors)"
                     )
+                dpg = r.get("dci_patch_d_gap" + suffix, float("nan"))
+                if np.isfinite(dpg):
+                    cpg = r.get("dci_patch_c_gap" + suffix, float("nan"))
+                    print(
+                        f"      {'DCI patch (gap)':18s} D {_num(dpg)} {_minibar(dpg)}   "
+                        f"C {_num(cpg)} {_minibar(cpg)}   (patch-grid chan x all factors)"
+                    )
             if allb:
                 cset = set(allb.get("content_names", []))
                 fw = max([len(n) for n in allb["per_factor"]] + [16])
@@ -1296,6 +1335,7 @@ def write_outputs(rows, out_dir, baseline_name=None):
         "info_all",
         *_DCI_KEYS,
         *_DCI_CONTENT_KEYS,
+        *_DCI_PATCH_KEYS,
         "separation",
         "leak_c2s",
         "info_c2c",
