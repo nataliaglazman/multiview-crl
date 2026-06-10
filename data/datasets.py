@@ -627,6 +627,10 @@ class SyntheticBrainDataset(MultiviewDataset):
 
         self.mode = mode
         self.synthetic_normalize = synthetic_normalize
+        # Lazily-estimated global foreground statistics for the
+        # ``fixed_reference`` normalization mode (see ``_render``).
+        self._fixed_mean = None
+        self._fixed_std = None
         # Resolution: cubic. Take min of spatial_size if provided so we don't
         # exceed any axis the user intended; default to 32 (cheap baseline).
         if spatial_size is not None:
@@ -695,11 +699,50 @@ class SyntheticBrainDataset(MultiviewDataset):
                 std = vals.std().clamp_min(1e-6)
                 x_v1 = (x_v1 - mean) / std * mask_t1
                 x_v2 = (x_v2 - mean) / std * mask_t2
+        elif self.synthetic_normalize == "fixed_reference":
+            if self._fixed_mean is None:
+                self._compute_fixed_reference()
+            x_v1 = (x_v1 - self._fixed_mean) / self._fixed_std * mask_t1
+            x_v2 = (x_v2 - self._fixed_mean) / self._fixed_std * mask_t2
         else:
             x_v1 = self._znorm_nonzero(x_v1, mask_t1)
             x_v2 = self._znorm_nonzero(x_v2, mask_t2)
 
         return x_v1, x_v2, mask_t1, mask_t2, latents
+
+    def _compute_fixed_reference(self, n_ref=64):
+        """Estimate global foreground mean/std from a fixed reference subset.
+
+        Used by the ``fixed_reference`` normalization mode: every sample and
+        view is standardized by these dataset-level constants instead of its
+        own statistics, so global per-sample intensity factors (style gain and
+        bias) are preserved into the encoder input rather than divided out.
+        """
+        n = min(n_ref, len(self._inner))
+        total = 0
+        s = 0.0
+        ss = 0.0
+        for j in range(n):
+            x_v1, x_v2, latents = self._inner[j]
+            bm = latents.get("brain_mask", None) if isinstance(latents, dict) else None
+            if bm is not None:
+                masks = (bm > 0, bm > 0)
+            else:
+                masks = (x_v1 > 0.05, x_v2 > 0.05)
+            for x, mk in ((x_v1, masks[0]), (x_v2, masks[1])):
+                vals = x[mk]
+                if vals.numel() == 0:
+                    continue
+                s += float(vals.sum())
+                ss += float((vals * vals).sum())
+                total += int(vals.numel())
+        if total == 0:
+            self._fixed_mean, self._fixed_std = 0.0, 1.0
+            return
+        mean = s / total
+        var = max(ss / total - mean * mean, 1e-12)
+        self._fixed_mean = mean
+        self._fixed_std = max(var**0.5, 1e-6)
 
     @staticmethod
     def _znorm_nonzero(x, mask):
