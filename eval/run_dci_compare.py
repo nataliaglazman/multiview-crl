@@ -54,6 +54,7 @@ import csv
 import json
 import logging
 import os
+import time
 
 import numpy as np
 from joblib import Parallel, delayed
@@ -709,9 +710,12 @@ def evaluate_model(
     from eval.run_dci_synthetic import load_model_from_run_dir
 
     logger.info("=== evaluating %s (%s) ===", name, run_dir)
+    t0 = time.perf_counter()
     model, _args, device = load_model_from_run_dir(run_dir, checkpoint, device)
+    t_load = time.perf_counter() - t0
 
     reprs, gt_content, gt_style, info = {}, None, None, None
+    t0 = time.perf_counter()
     for key, value in poolings:
         level_data, gc, gsv1, _gsv2 = _extract_synthetic_representations(
             model, dataset, device, batch_size, num_workers, pooling=value
@@ -721,6 +725,7 @@ def evaluate_model(
             gt_content, gt_style = gc, gsv1
         if info is None and level in level_data:
             info = level_data[level][4]
+    t_extract = time.perf_counter() - t0
 
     del model
     try:
@@ -734,6 +739,7 @@ def evaluate_model(
     if info is None:
         raise RuntimeError(f"level {level} not found in encoder outputs for {name}")
 
+    t0 = time.perf_counter()
     row = score_reprs(
         reprs,
         gt_content,
@@ -747,6 +753,15 @@ def evaluate_model(
         all_only=all_only,
         with_dci=with_dci,
         probe_dim=probe_dim,
+    )
+    t_score = time.perf_counter() - t0
+    logger.info(
+        "timing [%s]: load %.1fs | extract %.1fs (%d poolings) | score %.1fs",
+        name,
+        t_load,
+        t_extract,
+        len(poolings),
+        t_score,
     )
     row["name"] = name
     row["run_dir"] = run_dir

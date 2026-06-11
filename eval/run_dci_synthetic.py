@@ -110,8 +110,15 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
     return model, args, device
 
 
-def build_synthetic_test_set(args, num_samples=None):
-    """Build the synthetic test dataset from a run's settings (shared helper)."""
+def build_synthetic_test_set(args, num_samples=None, cache=True):
+    """Build the synthetic test dataset from a run's settings (shared helper).
+
+    ``cache=True`` (default) renders each volume once into RAM and reuses it on
+    every later access.  This matters because the frozen test set is iterated
+    once per pooling and once per model, so without caching the procedural
+    generator re-renders the whole set 3*N times.  Costs ~num_samples*4*res**3
+    floats of RAM; pass ``cache=False`` if that is too much.
+    """
     from data.datasets import SyntheticBrainDataset
 
     n_samples = num_samples or getattr(args, "synthetic_num_test", 200)
@@ -121,6 +128,7 @@ def build_synthetic_test_set(args, num_samples=None):
     return SyntheticBrainDataset(
         mode="test",
         spatial_size=spatial_size,
+        cache=cache,
         synthetic_mode=getattr(args, "synthetic_mode", "pseudo_mri"),
         synthetic_seed=getattr(args, "synthetic_seed", 42),
         synthetic_num_samples=n_samples,
