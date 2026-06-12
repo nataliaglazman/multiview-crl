@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_multilevel_patches.yaml
-# Generated at: 2026-06-12T10:00:47Z
-# Git SHA: 869f0de
+# Generated at: 2026-06-12T12:08:00Z
+# Git SHA: 2f7c03c
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-multilevel-patches
 #SBATCH --output=/scratch/users/%u/%j.out

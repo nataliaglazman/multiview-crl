@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-12T10:00:47Z
-# Git SHA: 869f0de
+# Generated at: 2026-06-12T12:08:00Z
+# Git SHA: 2f7c03c
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-fixedref-no-recon-norm
+#SBATCH --job-name=synthetic-causal-random-fixedref-new
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-fixedref-no-recon-norm-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-random-fixedref-new-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_40g
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -67,7 +67,6 @@ conda activate "${CONDA_ENV_NAME}"
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
-    --no-final-recon-norm \
     --pass-full-to-next-level \
     --patch-contrastive \
     --patch-grid 4 4 4 \
@@ -93,7 +92,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-fixedref-no-recon-norm \
+    --model-id synthetic-causal-random-fixedref-new \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
