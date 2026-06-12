@@ -1327,6 +1327,34 @@ _VS_ORG = [
     ("content_view", "c>view (~.5)", "half"),
 ]
 
+# Per-encoder metrics with an enc2 (_v2) twin worth consolidating in the per-encoder
+# summary.  (content_view/style_view are model-level — no _v2 — so they are omitted.)
+_ENC_METRICS = [
+    ("separation", "separation"),
+    ("leak_c2s", "leak c>s"),
+    ("suff_s2s", "suff s>s"),
+    ("leak_s2c", "leak s>c"),
+    ("info_all", "info_all"),
+]
+
+
+def _fl(x):
+    """Coerce to float; NaN on None / non-numeric."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _enc_mean(r, key):
+    """Mean of a metric across the available encoders (enc1 + enc2 ``_v2``).
+
+    For a single-encoder run (no ``_v2``) this is just enc1, so callers can use it
+    unconditionally; NaN encoders are dropped.
+    """
+    vals = [v for v in (_fl(r.get(key)), _fl(r.get(key + "_v2"))) if np.isfinite(v)]
+    return float(np.mean(vals)) if vals else float("nan")
+
 
 def _vs_verdict(mv, bv, direction, tol=0.05):
     """Verdict mark for one model-vs-baseline cell (ASCII, matches the scorecard)."""
@@ -1383,16 +1411,17 @@ def print_comparison(rows, baseline_name=None):
     mode = (
         "all content"
         if base.get("baseline_all_content")
-        else ("own split" if np.isfinite(base.get("separation", float("nan"))) else "capacity only")
+        else ("own split" if np.isfinite(_enc_mean(base, "separation")) else "capacity only")
     )
-    print(f"  HEAD-TO-HEAD vs BASELINE '{baseline_name}'   (baseline scored: {mode})")
+    enc_note = "   · values = mean over both encoders" if any("separation_v2" in r for r in rows) else ""
+    print(f"  HEAD-TO-HEAD vs BASELINE '{baseline_name}'   (baseline scored: {mode}){enc_note}")
     print("=" * w)
     print("  CAPACITY      should ~ match the baseline (objective organizes, doesn't add, info)")
     print("  ORGANIZATION  should beat it: separation up, leak down, c>view -> 0.5")
 
     ranked = sorted(
         models,
-        key=lambda r: -(r["separation"] if np.isfinite(r.get("separation", float("nan"))) else -9),
+        key=lambda r: -(_enc_mean(r, "separation") if np.isfinite(_enc_mean(r, "separation")) else -9),
     )
     for r in ranked:
         print()
@@ -1400,17 +1429,52 @@ def print_comparison(rows, baseline_name=None):
         cap = [
             (k, lab, dirn)
             for (k, lab, dirn) in _VS_CAPACITY
-            if np.isfinite(r.get(k, float("nan"))) or np.isfinite(base.get(k, float("nan")))
+            if np.isfinite(_enc_mean(r, k)) or np.isfinite(_enc_mean(base, k))
         ]
         if cap:
             print("      capacity")
             for k, lab, dirn in cap:
-                print(_vs_line(lab, r.get(k, float("nan")), base.get(k, float("nan")), dirn))
+                print(_vs_line(lab, _enc_mean(r, k), _enc_mean(base, k), dirn))
         print("      organization")
         for k, lab, dirn in _VS_ORG:
-            print(_vs_line(lab, r.get(k, float("nan")), base.get(k, float("nan")), dirn))
+            print(_vs_line(lab, _enc_mean(r, k), _enc_mean(base, k), dirn))
     print("=" * w)
     print("  [+] beats baseline   [~] matches (capacity)   [!] worse / diverges\n")
+
+
+def print_encoder_summary(rows):
+    """Consolidate the two encoders (--per-encoder) into one compact per-model block.
+
+    With ``separate_encoders`` every metric is scored twice (enc1 + enc2/``_v2``) and
+    otherwise ends up split across the tables.  This collapses each model to enc1,
+    enc2, their mean, and the agreement ``|enc1 - enc2|`` (small = the two encoders
+    behave the same) in one place.  Skipped entirely for single-encoder runs.
+    """
+    per_enc = [r for r in rows if "separation_v2" in r]
+    if not per_enc:
+        return
+    w = 76
+    print()
+    print("=" * w)
+    print("  PER-ENCODER SUMMARY   (separate_encoders: enc1 vs enc2)")
+    print("=" * w)
+    print("  agree = |enc1 - enc2|;  small = the two encoders behave consistently.")
+    ranked = sorted(
+        per_enc,
+        key=lambda r: -(_enc_mean(r, "separation") if np.isfinite(_enc_mean(r, "separation")) else -9),
+    )
+    for r in ranked:
+        print()
+        print(f"  {r['name']}")
+        print(f"      {'metric':<12s} {'enc1':>7s} {'enc2':>7s} {'mean':>7s} {'agree':>7s}")
+        for k, label in _ENC_METRICS:
+            v1, v2 = _fl(r.get(k)), _fl(r.get(k + "_v2"))
+            if not (np.isfinite(v1) or np.isfinite(v2)):
+                continue
+            agree = abs(v1 - v2) if (np.isfinite(v1) and np.isfinite(v2)) else float("nan")
+            print(f"      {label:<12s} {_num(v1):>7s} {_num(v2):>7s} {_num(_enc_mean(r, k)):>7s} {_num(agree):>7s}")
+    print("=" * w)
+    print()
 
 
 def print_capacity_table(rows, baseline_name=None):
@@ -1837,6 +1901,7 @@ def main():
 
     attach_scores(merged)
     print_comparison(merged, baseline_name)
+    print_encoder_summary(merged)
     print_capacity_table(merged, baseline_name)
     print_scorecard(merged, baseline_name)
     print_table(merged, baseline_name)
