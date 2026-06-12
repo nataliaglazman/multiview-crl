@@ -1414,7 +1414,7 @@ class VQVAE(HelperModule):
                         dtype=enc_for_codebook.dtype,
                     )
                     enc_for_codebook = torch.cat([enc_for_codebook, zeros], dim=1)
-                code_q, code_d, emb_id = codebook(enc_for_codebook)
+                code_q, code_d, emb_id = _quantize_content(l, enc_for_codebook)
                 del enc_for_codebook
 
             diffs.append(code_d)
