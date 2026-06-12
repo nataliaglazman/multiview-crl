@@ -627,10 +627,10 @@ class SyntheticBrainDataset(MultiviewDataset):
 
         self.mode = mode
         self.synthetic_normalize = synthetic_normalize
-        # Lazily-estimated global foreground statistics for the
-        # ``fixed_reference`` normalization mode (see ``_render``).
+        # Lazily-estimated global foreground centering/scaling constants for
+        # the ``fixed_reference`` normalization mode (see ``_render``).
         self._fixed_mean = None
-        self._fixed_std = None
+        self._fixed_scale = None
         # Resolution: cubic. Take min of spatial_size if provided so we don't
         # exceed any axis the user intended; default to 32 (cheap baseline).
         if spatial_size is not None:
@@ -702,26 +702,32 @@ class SyntheticBrainDataset(MultiviewDataset):
         elif self.synthetic_normalize == "fixed_reference":
             if self._fixed_mean is None:
                 self._compute_fixed_reference()
-            x_v1 = (x_v1 - self._fixed_mean) / self._fixed_std * mask_t1
-            x_v2 = (x_v2 - self._fixed_mean) / self._fixed_std * mask_t2
+            x_v1 = (x_v1 - self._fixed_mean) / self._fixed_scale * mask_t1
+            x_v2 = (x_v2 - self._fixed_mean) / self._fixed_scale * mask_t2
         else:
             x_v1 = self._znorm_nonzero(x_v1, mask_t1)
             x_v2 = self._znorm_nonzero(x_v2, mask_t2)
 
         return x_v1, x_v2, mask_t1, mask_t2, latents
 
-    def _compute_fixed_reference(self, n_ref=64):
-        """Estimate global foreground mean/std from a fixed reference subset.
+    def _compute_fixed_reference(self, n_ref=64, scale_quantile=0.99):
+        """Estimate global foreground centering/scaling constants.
 
         Used by the ``fixed_reference`` normalization mode: every sample and
         view is standardized by these dataset-level constants instead of its
         own statistics, so global per-sample intensity factors (style gain and
         bias) are preserved into the encoder input rather than divided out.
+
+        The scale is a *robust* spread — the ``scale_quantile`` quantile of the
+        absolute foreground deviation, not the standard deviation — so the bulk
+        of the (globally mean-shifted) tissue maps into roughly [-1, 1].  This
+        matters because the reconstruction loss clamps predictions to [-1, 1]
+        with no gradient beyond: a std-based scale leaves bright tissue at ~+2,
+        so the loss would flatten every bright voxel to +1.  Per-sample gain/
+        bias survives as relative differences under this shared affine map.
         """
         n = min(n_ref, len(self._inner))
-        total = 0
-        s = 0.0
-        ss = 0.0
+        vals_all = []
         for j in range(n):
             x_v1, x_v2, latents = self._inner[j]
             bm = latents.get("brain_mask", None) if isinstance(latents, dict) else None
@@ -731,18 +737,22 @@ class SyntheticBrainDataset(MultiviewDataset):
                 masks = (x_v1 > 0.05, x_v2 > 0.05)
             for x, mk in ((x_v1, masks[0]), (x_v2, masks[1])):
                 vals = x[mk]
-                if vals.numel() == 0:
-                    continue
-                s += float(vals.sum())
-                ss += float((vals * vals).sum())
-                total += int(vals.numel())
-        if total == 0:
-            self._fixed_mean, self._fixed_std = 0.0, 1.0
+                if vals.numel():
+                    vals_all.append(vals.flatten().float())
+        if not vals_all:
+            self._fixed_mean, self._fixed_scale = 0.0, 1.0
             return
-        mean = s / total
-        var = max(ss / total - mean * mean, 1e-12)
+        vals_all = torch.cat(vals_all)
+        # torch.quantile caps at ~16M elements; a uniform subsample is plenty
+        # for a stable quantile and keeps the estimate memory-cheap.
+        cap = 4_000_000
+        if vals_all.numel() > cap:
+            g = torch.Generator().manual_seed(0)
+            vals_all = vals_all[torch.randint(vals_all.numel(), (cap,), generator=g)]
+        mean = float(vals_all.mean())
+        scale = float(torch.quantile((vals_all - mean).abs(), scale_quantile))
         self._fixed_mean = mean
-        self._fixed_std = max(var**0.5, 1e-6)
+        self._fixed_scale = max(scale, 1e-6)
 
     @staticmethod
     def _znorm_nonzero(x, mask):
