@@ -74,6 +74,7 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
         embed_dim=args.vqvae_embed_dim,
         nb_entries=args.vqvae_nb_entries,
         scaling_rates=args.vqvae_scaling_rates,
+        use_checkpoint=False,
         content_size=len(args.content_indices[0]),
         style_size=len(args.style_indices),
         inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
@@ -85,6 +86,9 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
         style_embed_dim=getattr(args, "style_embed_dim", None),
         style_nb_entries=getattr(args, "style_nb_entries", None),
         style_injection_mode=getattr(args, "style_injection_mode", "concat"),
+        cb_ema_decay=getattr(args, "cb_ema_decay", 0.999),
+        cb_reset_every=getattr(args, "cb_reset_every", 100),
+        cb_reset_threshold=getattr(args, "cb_reset_threshold", 1.0),
         use_content_projection=getattr(args, "use_content_projection", False),
         narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
         top_level_recon_only=getattr(args, "top_level_recon_only", False),
@@ -92,6 +96,7 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
         skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
         style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
         detach_style_injection=getattr(args, "detach_style_injection", False),
+        style_spatial_size=getattr(args, "style_spatial_size", 0),
         final_recon_norm=not getattr(args, "no_final_recon_norm", False),
     )
 

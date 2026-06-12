@@ -19,12 +19,14 @@ Protocol
 * **Null floor via label permutation** → every informativeness number is reported
   as a GAP (real − null).  The GAP cancels each model's channel-count/shape
   advantage, which is what makes models directly comparable.
-* **0-contrastive baseline** → scored *all-channels only* by default (its
-  content/style split carries no meaning without the objective): it appears in the
-  all-channels capacity table and as ``-`` placeholders in the per-block tables.
-  Roughly-equal capacity (model vs baseline) shows the objective *organizes* the
-  information rather than adding it.  Pass ``--baseline-per-block`` to score its
-  split too (then Δ model − baseline is reported).
+* **0-contrastive baseline** → scored as one *all-content* block by default (its
+  content/style split carries no meaning without the objective, so all channels are
+  treated as content): its content-side metrics (separation, leakage, block-MCC,
+  content→view) and capacity are filled and directly comparable to the models, with
+  the style-side N/A.  Pass ``--baseline-per-block`` to score its own (arbitrary)
+  split instead.  The ``HEAD-TO-HEAD vs BASELINE`` block at the top of the report is
+  the headline model-vs-baseline view; roughly-equal capacity there shows the
+  objective *organizes* the information rather than adding it.
 * **All-channels capacity** → every factor predicted from content+style together
   (GAP, per factor at its assigned pooling).  The one apples-to-apples axis: same
   total width across models, no assumption of a split.
@@ -564,6 +566,44 @@ def _reduce_reprs(reprs, level, probe_dim, seed=0):
     return out
 
 
+def _collapse_to_all_content(reprs, info, level):
+    """Merge style channels into content at *level* so the model is scored as one
+    all-content block with no style — the "baseline = full representation used as
+    content" treatment.
+
+    The content/style split metrics then run on the full representation, and the
+    style-side blocks (ss, sc, style→view) fall out as NaN via the ``has_split``
+    gate.  The all-channels capacity, ``dci`` and ``dci_patch`` are unchanged —
+    they concatenate content+style regardless.  Returns ``(new_reprs, new_info)``.
+    """
+
+    def _merge(c, s):
+        if c is None:
+            return None
+        return c if (s is None or s.shape[1] == 0) else np.hstack([c, s])
+
+    out = {}
+    for key, ld in reprs.items():
+        if level not in ld:
+            out[key] = ld
+            continue
+        content, style, content_v2, style_v2, inner = ld[level]
+        merged = _merge(content, style)
+        new_inner = dict(inner)
+        new_inner["n_content_channels"] = merged.shape[1] if merged is not None else 0
+        new_inner["n_style_channels"] = 0
+        new_inner["has_split"] = False
+        new_ld = dict(ld)
+        new_ld[level] = (merged, None, _merge(content_v2, style_v2), None, new_inner)
+        out[key] = new_ld
+
+    new_info = dict(info)
+    new_info["n_content_channels"] = info.get("n_content_channels", 0) + info.get("n_style_channels", 0)
+    new_info["n_style_channels"] = 0
+    new_info["has_split"] = False
+    return out, new_info
+
+
 def score_reprs(
     reprs,
     gt_content,
@@ -702,6 +742,7 @@ def evaluate_model(
     n_jobs=1,
     per_encoder=False,
     all_only=False,
+    all_content=False,
     with_dci=False,
     probe_dim=0,
 ):
@@ -739,6 +780,9 @@ def evaluate_model(
     if info is None:
         raise RuntimeError(f"level {level} not found in encoder outputs for {name}")
 
+    if all_content:
+        reprs, info = _collapse_to_all_content(reprs, info, level)
+
     t0 = time.perf_counter()
     row = score_reprs(
         reprs,
@@ -766,6 +810,7 @@ def evaluate_model(
     row["name"] = name
     row["run_dir"] = run_dir
     row["checkpoint"] = os.path.basename(checkpoint) if checkpoint else "vqvae_model.pt"
+    row["baseline_all_content"] = all_content
     return row
 
 
@@ -1264,6 +1309,110 @@ def print_per_latent(rows):
     print()
 
 
+# Head-to-head vs baseline.  direction drives the verdict mark: "up" = higher beats
+# the baseline, "down" = lower beats it, "half" = closer to 0.5 beats it, "eq" =
+# should roughly match the baseline (a capacity sanity check, not a payoff).
+_VS_CAPACITY = [
+    ("info_all", "info_all", "eq"),
+    ("dci_d_gap", "DCI all", "eq"),
+    ("dci_patch_d_gap", "DCI patch", "eq"),
+]
+# Only the channel-count-fair, theory-aligned metrics belong here.  Raw mcc_cc /
+# info_c2c are capacity-bound (an all-content baseline reads content from ALL
+# channels, so they inflate for it) — separation = mcc_cc - mcc_cs is the fair
+# version and is what carries the block-MCC story.
+_VS_ORG = [
+    ("separation", "separation", "up"),
+    ("leak_c2s", "leak c>s", "down"),
+    ("content_view", "c>view (~.5)", "half"),
+]
+
+
+def _vs_verdict(mv, bv, direction, tol=0.05):
+    """Verdict mark for one model-vs-baseline cell (ASCII, matches the scorecard)."""
+    if not (np.isfinite(mv) and np.isfinite(bv)):
+        return ""
+    d = mv - bv
+    if direction == "eq":
+        return "[~] match" if abs(d) <= tol else "[!] diverges"
+    if direction == "half":
+        return "[+] better" if abs(mv - 0.5) < abs(bv - 0.5) else "[!] worse"
+    if abs(d) <= 1e-9:
+        return "[ ] same"
+    better = (d > 0) if direction == "up" else (d < 0)
+    return "[+] better" if better else "[!] worse"
+
+
+def _vs_line(label, mv, bv, direction):
+    d = mv - bv if (np.isfinite(mv) and np.isfinite(bv)) else float("nan")
+    dtxt = f"{d:+.3f}" if np.isfinite(d) else "  -  "
+    return (
+        f"        {label:<14s} {_num(mv):>7s}   base {_num(bv):>7s}   "
+        f"Δ {dtxt:>7s}   {_vs_verdict(mv, bv, direction)}"
+    )
+
+
+def print_comparison(rows, baseline_name=None):
+    """Headline model-vs-baseline view — the first thing to read.
+
+    For each model it puts the apples-to-apples CAPACITY metrics (which should
+    roughly match the baseline — the objective organizes information, it does not
+    add it) next to the ORGANIZATION metrics (which should beat the baseline — that
+    is the disentanglement payoff), with Δ and a verdict mark.  Degrades gracefully:
+    a metric the baseline was not scored on shows ``-`` instead of silently dropping
+    the whole comparison.
+    """
+    w = 76
+    print()
+    print("=" * w)
+    base = next((r for r in rows if r["name"] == baseline_name), None)
+    models = [r for r in rows if r["name"] != baseline_name]
+    if base is None or not models:
+        print("  HEAD-TO-HEAD vs BASELINE")
+        print("=" * w)
+        if base is None:
+            print("  No --baseline set — nothing to compare against.  Re-run with")
+            print("  --baseline <run-dir> to anchor the comparison (the baseline is scored")
+            print("  as one all-content block by default, so its metrics line up here).")
+        else:
+            print(f"  Only the baseline '{baseline_name}' was evaluated — add model run-dirs to compare.")
+        print("=" * w)
+        print()
+        return
+
+    mode = (
+        "all content"
+        if base.get("baseline_all_content")
+        else ("own split" if np.isfinite(base.get("separation", float("nan"))) else "capacity only")
+    )
+    print(f"  HEAD-TO-HEAD vs BASELINE '{baseline_name}'   (baseline scored: {mode})")
+    print("=" * w)
+    print("  CAPACITY      should ~ match the baseline (objective organizes, doesn't add, info)")
+    print("  ORGANIZATION  should beat it: separation up, leak down, c>view -> 0.5")
+
+    ranked = sorted(
+        models,
+        key=lambda r: -(r["separation"] if np.isfinite(r.get("separation", float("nan"))) else -9),
+    )
+    for r in ranked:
+        print()
+        print(f"  {r['name']}")
+        cap = [
+            (k, lab, dirn)
+            for (k, lab, dirn) in _VS_CAPACITY
+            if np.isfinite(r.get(k, float("nan"))) or np.isfinite(base.get(k, float("nan")))
+        ]
+        if cap:
+            print("      capacity")
+            for k, lab, dirn in cap:
+                print(_vs_line(lab, r.get(k, float("nan")), base.get(k, float("nan")), dirn))
+        print("      organization")
+        for k, lab, dirn in _VS_ORG:
+            print(_vs_line(lab, r.get(k, float("nan")), base.get(k, float("nan")), dirn))
+    print("=" * w)
+    print("  [+] beats baseline   [~] matches (capacity)   [!] worse / diverges\n")
+
+
 def print_capacity_table(rows, baseline_name=None):
     """All-channels capacity: GAP test-R² of predicting each factor from the FULL
     representation (content+style together), with no split.
@@ -1284,7 +1433,16 @@ def print_capacity_table(rows, baseline_name=None):
     if pdim:
         print(f"  NOTE: scored on top-{pdim} PCs per block (--probe-dim) — capacity equalized across widths")
     for r in ranked:
-        tag = "   <- baseline (all-channels only)" if r["name"] == baseline_name else ""
+        if r["name"] == baseline_name:
+            if r.get("baseline_all_content"):
+                _bmode = "all content"
+            elif np.isfinite(r.get("separation", float("nan"))):
+                _bmode = "own split"
+            else:
+                _bmode = "all-channels only"
+            tag = f"   <- baseline ({_bmode})"
+        else:
+            tag = ""
         chans = r.get("n_content_channels", 0) + r.get("n_style_channels", 0)
         # When --per-encoder produced a second encoder, show its capacity too — the
         # baseline (all-channels) is scored on both encoders, not just the first.
@@ -1338,52 +1496,82 @@ def print_capacity_table(rows, baseline_name=None):
 def write_outputs(rows, out_dir, baseline_name=None):
     os.makedirs(out_dir, exist_ok=True)
     attach_scores(rows)  # idempotent — ensure derived columns exist even if called directly
-    _score_cols = [
-        "grade",
-        "disentanglement",
-        "content_anatomy",
-        "content_purity",
-        "style_modality",
-        "style_purity",
-    ]
-    _enc1_cols = [
-        "info_all",
-        *_DCI_KEYS,
-        *_DCI_CONTENT_KEYS,
-        *_DCI_PATCH_KEYS,
-        "separation",
-        "leak_c2s",
-        "info_c2c",
-        "suff_s2s",
-        "leak_s2c",
-        "mcc_cc",
-        "mcc_cc_null",
-        "mcc_cs",
-        "mcc_cs_null",
-    ]
+
+    # Headline CSV, ordered for reading: identity -> health scores -> capacity ->
+    # organization -> Δ vs baseline -> raw detail -> meta.  Floats are rounded to 4dp
+    # and NaNs blanked; rows are baseline-first then by separation (desc).  The
+    # full-precision record (every DCI real/null, info_c2c, per-factor detail) lives
+    # in dci_compare.json — this file is the at-a-glance comparison.
+    base_row = next((r for r in rows if baseline_name and r.get("name") == baseline_name), None)
     has_v2 = any("separation_v2" in r for r in rows)
-    flat_cols = [
-        "name",
-        "run_dir",
-        "checkpoint",
-        "n_content_channels",
-        "n_style_channels",
-        *_score_cols,
-        *_enc1_cols,
-        "content_view",
-        "style_view",
+
+    id_cols = ["name", "role", "checkpoint", "n_content_channels", "n_style_channels"]
+    health_cols = ["grade", "disentanglement", "content_anatomy", "content_purity", "style_modality", "style_purity"]
+    capacity_cols = ["info_all", "dci_d_gap", "dci_content_d_gap", "dci_patch_d_gap"]
+    org_cols = ["separation", "leak_c2s", "content_view", "style_view", "suff_s2s", "leak_s2c"]
+    delta_cols = ["d_separation", "d_leak_c2s", "d_content_view", "d_info_all"]
+    # Kept because analyze_dci_csv.py reads them; parked at the end as raw detail.
+    detail_cols = [
+        "mcc_cc",
+        "mcc_cs",
+        "mcc_cc_null",
+        "mcc_cs_null",
         "view_chance",
-        *([c + "_v2" for c in (_score_cols + _enc1_cols)] if has_v2 else []),
-        "num_samples",
-        "poolings",
-        "probe_dim",
+        "dci_c_gap",
+        "dci_content_c_gap",
+        "dci_patch_c_gap",
     ]
+    meta_cols = ["num_samples", "poolings", "probe_dim", "run_dir"]
+    v2_cols = (
+        ["grade_v2", "disentanglement_v2", "info_all_v2", "separation_v2", "leak_c2s_v2", "suff_s2s_v2", "leak_s2c_v2"]
+        if has_v2
+        else []
+    )
+    flat_cols = id_cols + health_cols + capacity_cols + org_cols + delta_cols + detail_cols + meta_cols + v2_cols
+
+    def _cell(v):
+        if isinstance(v, float):
+            return round(v, 4) if np.isfinite(v) else ""
+        return v
+
+    def _delta(r, k):
+        if base_row is None or r is base_row:
+            return ""
+        mv, bv = r.get(k), base_row.get(k)
+        if not (isinstance(mv, (int, float)) and isinstance(bv, (int, float)) and np.isfinite(mv) and np.isfinite(bv)):
+            return ""
+        return round(mv - bv, 4)
+
+    def _row_out(r):
+        is_base = bool(baseline_name) and r.get("name") == baseline_name
+        deltas = {
+            "d_separation": _delta(r, "separation"),
+            "d_leak_c2s": _delta(r, "leak_c2s"),
+            "d_content_view": _delta(r, "content_view"),
+            "d_info_all": _delta(r, "info_all"),
+        }
+        out = {}
+        for c in flat_cols:
+            if c == "role":
+                out[c] = "baseline" if is_base else "model"
+            elif c in deltas:
+                out[c] = deltas[c]
+            else:
+                out[c] = _cell(r.get(c))
+        return out
+
+    def _sort_key(r):
+        s = r.get("separation")
+        s = s if isinstance(s, (int, float)) and np.isfinite(s) else -9.0
+        is_base = bool(baseline_name) and r.get("name") == baseline_name
+        return (0 if is_base else 1, -s)
+
     csv_path = os.path.join(out_dir, "dci_compare.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=flat_cols, extrasaction="ignore")
         w.writeheader()
-        for r in rows:
-            w.writerow({k: r.get(k) for k in flat_cols})
+        for r in sorted(rows, key=_sort_key):
+            w.writerow(_row_out(r))
 
     per_latent_path = os.path.join(out_dir, "dci_compare_per_latent.csv")
     pl_cols = [
@@ -1522,10 +1710,10 @@ def main():
     p.add_argument(
         "--baseline-per-block",
         action="store_true",
-        help="Also score the --baseline run on the content/style split (leakage, "
-        "separation, view-invariance).  Default: the baseline is scored all-channels "
-        "only, since with no contrastive objective its split is not meaningful — it "
-        "appears only in the capacity table, with placeholders in the per-block tables.",
+        help="Score the --baseline run on its own (arbitrary) content/style split — every "
+        "metric filled, content AND style side.  Default (without this flag): the baseline is "
+        "scored as one all-content block (style merged into content), so the content-side "
+        "metrics + capacity are comparable to the models and the style-side is N/A.",
     )
     p.add_argument(
         "--with-dci",
@@ -1585,6 +1773,11 @@ def main():
 
     rows = []
     for name, run_dir in zip(names, specs):
+        is_baseline = baseline_name is not None and name == baseline_name
+        # Baseline default = all-content: style is merged into content (one content
+        # block, no style), so its content-side metrics + capacity line up with the
+        # models.  --baseline-per-block instead scores its own (arbitrary) split.
+        all_content = is_baseline and not cli.baseline_per_block
         try:
             rows.append(
                 evaluate_model(
@@ -1603,7 +1796,7 @@ def main():
                     per_encoder=cli.per_encoder,
                     with_dci=cli.with_dci,
                     probe_dim=cli.probe_dim,
-                    all_only=(baseline_name is not None and name == baseline_name and not cli.baseline_per_block),
+                    all_content=all_content,
                 )
             )
         except Exception as e:
@@ -1643,6 +1836,7 @@ def main():
         baseline_name = existing_baseline
 
     attach_scores(merged)
+    print_comparison(merged, baseline_name)
     print_capacity_table(merged, baseline_name)
     print_scorecard(merged, baseline_name)
     print_table(merged, baseline_name)

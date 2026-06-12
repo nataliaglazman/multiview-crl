@@ -136,11 +136,15 @@ def _per_latent_breakdown(pl_path, model):
     blocks (content->style, style->content).
     """
     pl = pd.read_csv(pl_path)
-    pl["block"] = pl["block"].astype(str).str.replace("→", "->", regex=False)
     pl = pl[pl["model"] == model]
     if pl.empty:
         return
-    assigned = pl["assigned"].astype(str).str.lower().isin(["true", "1"])
+    # Schema note: the per-latent CSV splits the old single "block" column into
+    # predicted_from + factor_type, and renames assigned -> is_assigned.  Rebuild the
+    # block label (e.g. "content->style") and drop the all-channels capacity rows.
+    pl = pl[pl["predicted_from"].isin(["content", "style"])].copy()
+    pl["block"] = pl["predicted_from"].astype(str) + "->" + pl["factor_type"].astype(str)
+    assigned = pl["is_assigned"].astype(str).str.lower().isin(["true", "1"])
     pl = pl[assigned]
     if pl.empty:
         return
