@@ -156,6 +156,7 @@ vqvae_model = vqvae.VQVAE(
     style_injection_mode=_opt("style_injection_mode", "concat"),
     top_level_recon_only=_opt("top_level_recon_only", False),
     skip_decoder_concat_levels=_opt("skip_decoder_concat_levels", None),
+    final_recon_norm=not _opt("no_final_recon_norm", False),
 ).to(DEVICE)
 print(f"Built VQVAE with content_ratios={content_ratios_arg}")
 

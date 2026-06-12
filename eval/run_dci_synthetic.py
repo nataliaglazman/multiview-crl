@@ -92,6 +92,7 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
         skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
         style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
         detach_style_injection=getattr(args, "detach_style_injection", False),
+        final_recon_norm=not getattr(args, "no_final_recon_norm", False),
     )
 
     ckpt_path = checkpoint or os.path.join(run_dir, "vqvae_model.pt")

@@ -54,6 +54,7 @@ moco_queue_size: 0
 lr: 1.0e-3
 batch_size: 4
 train_steps: 20000
+checkpoint_steps: 500
 gradient_checkpointing: true
 use_amp: true
 channels_last: true

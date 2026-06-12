@@ -1197,6 +1197,7 @@ def main(args):
         style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
         detach_style_injection=getattr(args, "detach_style_injection", False),
         style_spatial_size=getattr(args, "style_spatial_size", 0),
+        final_recon_norm=not getattr(args, "no_final_recon_norm", False),
     )
     if getattr(args, "channels_last", False):
         vqvae_model = vqvae_model.to(memory_format=torch.channels_last_3d)

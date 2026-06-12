@@ -636,6 +636,20 @@ def parse_args() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-final-recon-norm",
+        action="store_true",
+        help=(
+            "Drop the GroupNorm on the level-0 decoder's final conv (the reconstruction "
+            "output).  By default the output is instance-normalized, which pins every "
+            "reconstruction to a fixed global mean/std and so cannot reproduce per-sample "
+            "intensity — fine when the input is per-sample z-scored, but an unrecoverable "
+            "reconstruction error when global gain/bias is preserved into the input "
+            "(e.g. --synthetic-normalize fixed_reference).  Pass this to let the decoder "
+            "emit absolute intensity.  Changes the model architecture, so it is not "
+            "checkpoint-compatible with runs trained without it."
+        ),
+    )
+    parser.add_argument(
         "--use-moco",
         action="store_true",
         help="Use MoCo momentum-contrast training for the VQ-VAE encoder",

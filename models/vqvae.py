@@ -213,6 +213,7 @@ class Decoder(HelperModule):
         use_checkpoint: bool = True,
         style_channels: int = 0,
         style_injection_mode: str = "concat",
+        final_norm: bool = True,
     ):
         assert log2(upscale_factor) % 1 == 0, "Upscale must be a power of 2"
         assert style_injection_mode in ("concat", "film", "input"), (
@@ -254,6 +255,13 @@ class Decoder(HelperModule):
             upsample_out_chs.append(_n)
             _c, _n = _n, out_channels
 
+        # Trailing normalization on the final output conv (legacy default). When
+        # ``final_norm`` is False the GroupNorm is dropped so the decoder can emit
+        # absolute per-sample intensity — needed when the input preserves global
+        # gain/bias (e.g. ``--synthetic-normalize fixed_reference``); the norm
+        # would otherwise pin every reconstruction to a fixed global mean/std.
+        final_tail = [get_group_norm(out_channels)] if final_norm else []
+
         if style_channels > 0 and style_injection_mode == "film":
             # FiLM mode: store each layer separately so we can apply
             # SpatialFiLM between them.  A FiLM layer is inserted after the
@@ -268,7 +276,7 @@ class Decoder(HelperModule):
             # Final projection (no style concat needed — FiLM already applied)
             self.output_conv = nn.Sequential(
                 nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1),
-                get_group_norm(out_channels),
+                *final_tail,
             )
             self.final_conv = None  # not used in FiLM mode
 
@@ -279,7 +287,7 @@ class Decoder(HelperModule):
             self.output_conv = None
             self.final_conv = nn.Sequential(
                 nn.Conv3d(c_channel + style_channels, out_channels, 3, stride=1, padding=1),
-                get_group_norm(out_channels),
+                *final_tail,
             )
         elif style_channels > 0 and style_injection_mode == "input":
             # Style is concatenated onto the decoder INPUT (the widened initial
@@ -287,7 +295,7 @@ class Decoder(HelperModule):
             # propagates through every layer.  The rest of the stack is a
             # standard decoder with a plain output conv.
             layers.append(nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1))
-            layers.append(get_group_norm(out_channels))
+            layers.extend(final_tail)
             self.layers = nn.Sequential(*layers)
             self.film_layers = None
             self.output_conv = None
@@ -295,7 +303,7 @@ class Decoder(HelperModule):
         else:
             # No style injection
             layers.append(nn.Conv3d(c_channel, out_channels, 3, stride=1, padding=1))
-            layers.append(get_group_norm(out_channels))
+            layers.extend(final_tail)
             self.layers = nn.Sequential(*layers)
             self.film_layers = None
             self.output_conv = None
@@ -545,6 +553,7 @@ class VQVAE(HelperModule):
         style_dropout_prob: float = 0.0,  # Per-sample, per-level probability of zeroing the style tensor before it is injected into the decoder. Forces the decoder to reconstruct from content alone on a fraction of samples, pressuring content to carry anatomy. No expectation-rescaling. Active only in training mode.
         detach_style_injection: bool = False,  # If True, detach style features before decoder injection so the reconstruction loss cannot push content information into style channels.
         style_spatial_size: int = 0,  # If > 0, average-pool each injected style tensor to an (N, N, N) grid (clamped per-axis) before quantization/injection, capping its spatial capacity so style carries the global contrast transform rather than anatomy. 0 = full-resolution (legacy).
+        final_recon_norm: bool = True,  # If False, drop the GroupNorm on the level-0 (reconstruction) decoder's final conv so the output can carry per-sample global intensity (style gain/bias). True (legacy) instance-normalizes the output, pinning every reconstruction to a fixed global mean/std — fine under per-sample input z-scoring, but unrecoverable error under --synthetic-normalize fixed_reference.
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -894,6 +903,7 @@ class VQVAE(HelperModule):
                     use_checkpoint,
                     style_channels=sc,
                     style_injection_mode=style_injection_mode if sc > 0 else "concat",
+                    final_norm=(final_recon_norm if lvl == 0 else True),
                 )
             )
 

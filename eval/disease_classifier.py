@@ -117,6 +117,7 @@ def _build_vqvae(args: SimpleNamespace) -> vqvae_mod.VQVAE:
         pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
         skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
         style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
+        final_recon_norm=not getattr(args, "no_final_recon_norm", False),
     )
 
 

@@ -74,6 +74,7 @@ _STORE_TRUE_FLAGS = {
     "pass_full_to_next_level",
     "select_by_gated_score",
     "detach_style_injection",
+    "no_final_recon_norm",
     "synthetic_hierarchical_content",
     "synthetic_causal",
 }
