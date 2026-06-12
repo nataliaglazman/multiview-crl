@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-06-10T12:58:59Z
-# Git SHA: 08b75fe
+# Generated at: 2026-06-12T10:00:47Z
+# Git SHA: 869f0de
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic_defaults
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -50,6 +50,7 @@ conda activate "${CONDA_ENV_NAME}"
 "$PYTHON" -m training.main_multimodal \
     --batch-size 32 \
     --channels-last \
+    --checkpoint-steps 500 \
     --content-dim 128 \
     --content-ratios 0.95 \
     --content-style-levels 0 \

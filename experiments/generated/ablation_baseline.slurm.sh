@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_baseline.yaml
-# Generated at: 2026-06-10T12:58:59Z
-# Git SHA: 08b75fe
+# Generated at: 2026-06-12T10:00:47Z
+# Git SHA: 869f0de
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -52,6 +52,7 @@ conda activate "${CONDA_ENV_NAME}"
     --cache-dataset \
     --cache-dir /scratch/users/k24058220/cache/multiview \
     --channels-last \
+    --checkpoint-steps 500 \
     --content-dim 128 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
