@@ -604,6 +604,27 @@ def _collapse_to_all_content(reprs, info, level):
     return out, new_info
 
 
+def _effective_rank(X):
+    """Roy–Vetterli effective rank: ``exp(entropy of the normalized singular values)``.
+
+    A continuous count, in ``[1, n_features]``, of the dimensions a block actually
+    uses.  Far below the nominal width means the representation is (partly) collapsed
+    — a failure mode contrastive/VICReg/BT objectives are prone to that the probes can
+    miss, and the thing the nominal channel count overstates.  Computed on the centered
+    features.
+    """
+    if X is None or np.ndim(X) != 2 or X.shape[1] == 0 or X.shape[0] < 2:
+        return float("nan")
+    Xc = np.asarray(X, dtype=np.float64)
+    Xc = Xc - Xc.mean(axis=0, keepdims=True)
+    sv = np.linalg.svd(Xc, compute_uv=False)
+    sv = sv[sv > 1e-12]
+    if sv.size == 0:
+        return float("nan")
+    p = sv / sv.sum()
+    return float(np.exp(-np.sum(p * np.log(p))))
+
+
 def score_reprs(
     reprs,
     gt_content,
@@ -629,6 +650,20 @@ def score_reprs(
     (>0) PCA-reduces every block to that many components first, so informativeness /
     MCC / DCI are compared at equal capacity across models of different width.
     """
+    # Effective rank (collapse diagnostic) on the ORIGINAL representation, before any
+    # probe_dim PCA — how many dims a block actually uses vs its nominal width.  Use
+    # the gap pooling (one value per channel) so it reads as "effective channels".
+    _rk = "gap" if "gap" in reprs else _resolve_key("stats", set(reprs.keys()))
+    ranks = {
+        "content_rank": _effective_rank(_block_array(reprs, _rk, level, _CONTENT)),
+        "style_rank": _effective_rank(_block_array(reprs, _rk, level, _STYLE)),
+        "all_rank": _effective_rank(_block_array(reprs, _rk, level, (_CONTENT, _STYLE))),
+    }
+    if per_encoder and _has_v2(reprs, level):
+        ranks["content_rank_v2"] = _effective_rank(_block_array(reprs, _rk, level, _CONTENT_V2))
+        ranks["style_rank_v2"] = _effective_rank(_block_array(reprs, _rk, level, _STYLE_V2))
+        ranks["all_rank_v2"] = _effective_rank(_block_array(reprs, _rk, level, (_CONTENT_V2, _STYLE_V2)))
+
     if probe_dim and probe_dim > 0:
         reprs = _reduce_reprs(reprs, level, probe_dim)
     avail = set(reprs.keys())
@@ -673,6 +708,7 @@ def score_reprs(
     row = {
         "n_content_channels": info["n_content_channels"],
         "n_style_channels": info["n_style_channels"],
+        **ranks,
         **enc1,
         "content_view": content_view,
         "style_view": style_view,
@@ -1335,6 +1371,8 @@ _ENC_METRICS = [
     ("suff_s2s", "suff s>s"),
     ("leak_s2c", "leak s>c"),
     ("info_all", "info_all"),
+    ("content_rank", "content rank"),
+    ("style_rank", "style rank"),
 ]
 
 
@@ -1549,6 +1587,12 @@ def print_capacity_table(rows, baseline_name=None):
 
         print()
         print(f"  {r['name']}{tag}   {chans}ch")
+        _cr, _sr = _fl(r.get("content_rank")), _fl(r.get("style_rank"))
+        if np.isfinite(_cr) or np.isfinite(_sr):
+            _nc, _ns = r.get("n_content_channels", 0), r.get("n_style_channels", 0)
+            _crs = f"{_cr:.1f}" if np.isfinite(_cr) else "-"
+            _srs = f"{_sr:.1f}" if np.isfinite(_sr) else "-"
+            print(f"      eff. rank  content {_crs}/{_nc}   style {_srs}/{_ns}   (low vs nominal => collapse)")
         if has_v2:
             _emit_enc("", "encoder 1")
             _emit_enc("_v2", "encoder 2")
@@ -1571,7 +1615,15 @@ def write_outputs(rows, out_dir, baseline_name=None):
 
     id_cols = ["name", "role", "checkpoint", "n_content_channels", "n_style_channels"]
     health_cols = ["grade", "disentanglement", "content_anatomy", "content_purity", "style_modality", "style_purity"]
-    capacity_cols = ["info_all", "dci_d_gap", "dci_content_d_gap", "dci_patch_d_gap"]
+    capacity_cols = [
+        "info_all",
+        "content_rank",
+        "style_rank",
+        "all_rank",
+        "dci_d_gap",
+        "dci_content_d_gap",
+        "dci_patch_d_gap",
+    ]
     org_cols = ["separation", "leak_c2s", "content_view", "style_view", "suff_s2s", "leak_s2c"]
     delta_cols = ["d_separation", "d_leak_c2s", "d_content_view", "d_info_all"]
     # Kept because analyze_dci_csv.py reads them; parked at the end as raw detail.
@@ -1587,7 +1639,17 @@ def write_outputs(rows, out_dir, baseline_name=None):
     ]
     meta_cols = ["num_samples", "poolings", "probe_dim", "run_dir"]
     v2_cols = (
-        ["grade_v2", "disentanglement_v2", "info_all_v2", "separation_v2", "leak_c2s_v2", "suff_s2s_v2", "leak_s2c_v2"]
+        [
+            "grade_v2",
+            "disentanglement_v2",
+            "info_all_v2",
+            "content_rank_v2",
+            "style_rank_v2",
+            "separation_v2",
+            "leak_c2s_v2",
+            "suff_s2s_v2",
+            "leak_s2c_v2",
+        ]
         if has_v2
         else []
     )

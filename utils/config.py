@@ -370,7 +370,8 @@ def parse_args() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Use separate encoder stacks per view (one VQVAE encoder per modality). "
-        "Codebooks, decoders, and Gumbel content masks remain shared. "
+        "Codebooks, decoders, and Gumbel content masks remain shared (style codebooks too, "
+        "unless --separate-style-codebooks). "
         "Consistent with the view-specific encoder identifiability theory (Yao et al., 2024).",
     )
     parser.add_argument(
@@ -396,6 +397,16 @@ def parse_args() -> argparse.ArgumentParser:
         help="Quantize style channels through independent per-level codebooks (Option A). "
         "Requires --inject-style-to-decoder. When active, style channels are vector-quantized "
         "before injection into the decoder, giving style its own discrete bottleneck.",
+    )
+    parser.add_argument(
+        "--separate-style-codebooks",
+        action="store_true",
+        default=False,
+        help="Give each view its own style codebook (view-0 and view-1 quantize style through "
+        "independent codebooks). Requires --quantize-style; pairs naturally with "
+        "--separate-encoders. Since style is modality-specific, this guarantees T1 and T2 style "
+        "codes never share entries and gives each modality dedicated style capacity. Content "
+        "codebooks remain shared (content is modality-invariant). Default: shared style codebook.",
     )
     parser.add_argument(
         "--style-dropout-prob",
@@ -911,6 +922,20 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             "because the number of style channels varies per forward pass. "
             "Use --mask-mode fixed or learned instead."
         )
+
+    # --separate-style-codebooks needs a style codebook to separate.
+    if getattr(args, "separate_style_codebooks", False):
+        if not getattr(args, "quantize_style", False):
+            raise ValueError(
+                "--separate-style-codebooks requires --quantize-style (there is no style "
+                "codebook to give each view otherwise)."
+            )
+        if not getattr(args, "separate_encoders", False):
+            logger.warning(
+                "--separate-style-codebooks is set without --separate-encoders. Per-view style "
+                "codebooks are most meaningful when each view also has its own encoder; with a "
+                "shared encoder the two views' style channels are produced identically."
+            )
 
     # Warn if MoCo is enabled with a negative-free loss (it'll be ignored)
     _cl_type = getattr(args, "contrastive_loss_type", "infonce")

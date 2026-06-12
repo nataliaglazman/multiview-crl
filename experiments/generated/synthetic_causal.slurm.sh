@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-12T14:26:30Z
-# Git SHA: 932f906
+# Generated at: 2026-06-12T14:58:22Z
+# Git SHA: 679811b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-fixedref-9-3
+#SBATCH --job-name=synthetic-causal-random-fixedref-separate-style-codebooks
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-fixedref-9-3-%j.err
+#SBATCH --error=synthetic-causal-random-fixedref-separate-style-codebooks-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -53,7 +53,7 @@ conda activate "${CONDA_ENV_NAME}"
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 9 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -81,6 +81,7 @@ conda activate "${CONDA_ENV_NAME}"
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
+    --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --style-injection-mode concat \
     --synthetic-causal \
@@ -92,15 +93,15 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-fixedref-9-3 \
+    --model-id synthetic-causal-random-fixedref-separate-style-codebooks \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 12 \
-    --vqvae-hidden-channels 12 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \

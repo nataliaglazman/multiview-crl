@@ -1183,6 +1183,7 @@ def main(args):
         separate_encoders=getattr(args, "separate_encoders", False),
         mask_mode=getattr(args, "mask_mode", "onthefly"),
         quantize_style=getattr(args, "quantize_style", False),
+        separate_style_codebooks=getattr(args, "separate_style_codebooks", False),
         style_embed_dim=getattr(args, "style_embed_dim", None),
         style_nb_entries=getattr(args, "style_nb_entries", None),
         style_injection_mode=getattr(args, "style_injection_mode", "concat"),
@@ -1252,6 +1253,8 @@ def main(args):
         if isinstance(_sn, list) and len(_sn) == 1:
             _sn = _sn[0]
         logger.info(f"  Style quantization: ENABLED (embed_dim={_se}, nb_entries={_sn})")
+        if getattr(args, "separate_style_codebooks", False):
+            logger.info("  Separate style codebooks: ENABLED (one style codebook per view; content shared)")
     _skip_levels = getattr(args, "skip_decoder_concat_levels", None)
     if _skip_levels:
         logger.info(

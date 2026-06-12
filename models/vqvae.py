@@ -534,8 +534,10 @@ class VQVAE(HelperModule):
         content_style_levels: list[int] | None = None,  # Levels with learnable Gumbel mask
         content_ratios: list[float] | None = None,  # Per-level content ratio (fraction of hidden_channels)
         separate_encoders: bool = False,  # If True, create a second encoder stack for view 1
+        separate_content_codebooks: bool = False,  # If True, give each view its own content codebook stack (view 0 → self.codebooks, view 1 → self.codebooks_v1). Decoders stay shared. Weakens content identifiability (content no longer in a shared discrete vocabulary) — intended as an ablation.
         mask_mode: str = "onthefly",  # "learned" or "onthefly"
         quantize_style: bool = False,  # If True, style channels get their own independent codebook per level
+        separate_style_codebooks: bool = False,  # If True (and quantize_style), give each view its own style codebook (view 0 → self.style_codebooks, view 1 → self.style_codebooks_v1). Content codebooks stay shared.
         style_embed_dim: int | None = None,  # Embedding dim for style codebooks (defaults to embed_dim)
         style_nb_entries: int
         | list[int]
@@ -792,10 +794,20 @@ class VQVAE(HelperModule):
                     reset_every=cb_reset_every,
                     ema_decay=cb_ema_decay,
                 )
+            # Per-view style codebooks: deep-copy the stack for view 1 so each
+            # modality quantizes style through its own codebook (content stays
+            # shared).  Mirrors the encoders_v1 pattern.
+            self.separate_style_codebooks = separate_style_codebooks
+            if separate_style_codebooks:
+                self.style_codebooks_v1 = copy.deepcopy(self.style_codebooks)
+            else:
+                self.style_codebooks_v1 = None
         else:
             self.style_embed_dim = None
             self.style_nb_entries_per_level = {}
             self.style_codebooks = nn.ModuleDict()
+            self.separate_style_codebooks = False
+            self.style_codebooks_v1 = None
 
         # Optional style injection: style channels from each masked level's
         # encoder output are fed into the corresponding decoder.
@@ -875,6 +887,16 @@ class VQVAE(HelperModule):
                         ema_decay=cb_ema_decay,
                     )
                 )
+
+        # Per-view content codebooks: deep-copy the whole stack for view 1 so
+        # each modality quantizes content through its own codebook (decoders
+        # stay shared).  Mirrors encoders_v1 / style_codebooks_v1.  Off by
+        # default — sharing content codes is the identifiability-preserving choice.
+        self.separate_content_codebooks = separate_content_codebooks
+        if separate_content_codebooks:
+            self.codebooks_v1 = copy.deepcopy(self.codebooks)
+        else:
+            self.codebooks_v1 = None
 
         # Decoders: each decoder at a masked level receives its own style_channels.
         self.style_injection_mode = style_injection_mode
@@ -1290,13 +1312,50 @@ class VQVAE(HelperModule):
         # --- Style quantization (independent codebooks, no cross-level conditioning) ---
         style_id_outputs = {}
         if self.quantize_style and return_recon and not skip_codebook:
+            _split_style = self.separate_style_codebooks and self.style_codebooks_v1 is not None
             for lvl in self.content_style_levels:
-                if lvl in style_spatials:
-                    style_cb = self.style_codebooks[str(lvl)]
+                if lvl not in style_spatials:
+                    continue
+                if _split_style and n_views == 2:
+                    # Per-view style codebooks: split the batch [v0; v1], quantize
+                    # each half through its own codebook, then re-concatenate.
+                    _spatial = style_spatials[lvl]
+                    _b = _spatial.shape[0] // 2
+                    q0, d0, id0 = self.style_codebooks[str(lvl)](_spatial[:_b])
+                    q1, d1, id1 = self.style_codebooks_v1[str(lvl)](_spatial[_b:])
+                    style_spatials[lvl] = torch.cat([q0, q1], dim=0)
+                    # Average so the commitment-loss magnitude matches the shared
+                    # case (both halves are per-element means over B samples).
+                    diffs.append((d0 + d1) / 2)
+                    style_id_outputs[lvl] = torch.cat([id0, id1], dim=0)
+                else:
+                    # Shared style codebook, or single-view forward (n_views=1):
+                    # select the view's codebook by view_idx when split.
+                    if _split_style and view_idx == 1:
+                        style_cb = self.style_codebooks_v1[str(lvl)]
+                    else:
+                        style_cb = self.style_codebooks[str(lvl)]
                     style_q, style_d, style_emb_id = style_cb(style_spatials[lvl])
                     style_spatials[lvl] = style_q  # replace raw with quantized
                     diffs.append(style_d)
                     style_id_outputs[lvl] = style_emb_id
+
+        # Per-view content quantization helper.  When separate_content_codebooks
+        # is active, view 0 and view 1 quantize through their own codebooks; the
+        # [v0; v1] batch is split, each half quantized, then re-concatenated so
+        # the shared decoder path is unchanged.  The commitment loss is averaged
+        # to match the shared-codebook magnitude.
+        _split_content = self.separate_content_codebooks and self.codebooks_v1 is not None
+
+        def _quantize_content(level, inp):
+            if _split_content and n_views == 2:
+                _b = inp.shape[0] // 2
+                q0, d0, i0 = self.codebooks[level](inp[:_b])
+                q1, d1, i1 = self.codebooks_v1[level](inp[_b:])
+                return torch.cat([q0, q1], dim=0), (d0 + d1) / 2, torch.cat([i0, i1], dim=0)
+            cb = self.codebooks_v1[level] if (_split_content and view_idx == 1) else self.codebooks[level]
+            return cb(inp)
+
         for l in range(self.nb_levels - 1, -1, -1):
             codebook = self.codebooks[l]
 
@@ -1340,7 +1399,7 @@ class VQVAE(HelperModule):
                     )
                 combined = torch.cat([enc_for_codebook, dec_out], dim=1)
                 del enc_for_codebook
-                code_q, code_d, emb_id = codebook(combined)
+                code_q, code_d, emb_id = _quantize_content(l, combined)
                 del combined
             else:
                 # Pad with zero conditioning channels if needed (e.g. pool_only
@@ -1441,7 +1500,7 @@ class VQVAE(HelperModule):
             style_id_outputs,
         )
 
-    def decode_codes(self, *cs, style=None, styles=None, style_codes=None, target_spatial_size=None):
+    def decode_codes(self, *cs, style=None, styles=None, style_codes=None, target_spatial_size=None, style_view_idx=0):
         """Decode from discrete codes back to the input space.
 
         Args:
@@ -1459,6 +1518,9 @@ class VQVAE(HelperModule):
                                  When provided, the decoder output is trilinearly
                                  interpolated to this size (handles the stride
                                  round-trip mismatch).
+            style_view_idx: When ``separate_style_codebooks`` is active, selects which
+                            view's style codebook decodes ``style_codes`` (0 or 1).
+                            Ignored for shared style codebooks. Default 0.
         """
         if styles is None:
             styles = {}
@@ -1468,9 +1530,12 @@ class VQVAE(HelperModule):
         if style is not None and 0 not in styles:
             styles[0] = style
 
-        # Decode style codes through style codebooks
+        # Decode style codes through style codebooks (view-1 codebook when split).
         if self.quantize_style:
-            for lvl_str, style_cb in self.style_codebooks.items():
+            _style_cbs = self.style_codebooks
+            if self.separate_style_codebooks and style_view_idx == 1 and self.style_codebooks_v1 is not None:
+                _style_cbs = self.style_codebooks_v1
+            for lvl_str, style_cb in _style_cbs.items():
                 lvl = int(lvl_str)
                 if lvl in style_codes:
                     style_q = style_cb.embed_code(style_codes[lvl]).permute(0, 4, 1, 2, 3)
