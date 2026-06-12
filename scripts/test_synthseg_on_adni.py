@@ -50,7 +50,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data.atrophy_simulator import MUSE, detect_label_set, simulate_atrophy
-from scripts.generate_synthseg_dataset import _builtin_synthesize_one, find_seg
+from scripts.generate_synthseg_dataset import _builtin_synthesize_one, _stable_seed, find_seg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -175,9 +175,14 @@ def process_subject(subject_id, seg_path, out_dir, alphas, wmh_fraction, smooth_
         # 152 ROIs give better cortical variation than remapping to FS's ~30.
         t1_path = os.path.join(subj_dir, f"{tag}_T1.nii.gz")
         t2_path = os.path.join(subj_dir, f"{tag}_T2.nii.gz")
-        s = seed + hash(f"{subject_id}_{tag}") % (2**31)
-        _builtin_synthesize_one(seg_out_path, t1_path, seed=s, contrast="t1")
-        _builtin_synthesize_one(seg_out_path, t2_path, seed=s + 1_000_000, contrast="flair")
+        # Noise seed varies per alpha; contrast seed depends only on the subject
+        # so contrast stays fixed across the atrophy spectrum (see _builtin_synthesize_one).
+        s = seed + _stable_seed(f"{subject_id}_{tag}")
+        cs = seed + _stable_seed(subject_id)
+        _builtin_synthesize_one(seg_out_path, t1_path, seed=s, contrast="t1", contrast_seed=cs)
+        _builtin_synthesize_one(
+            seg_out_path, t2_path, seed=s + 1_000_000, contrast="flair", contrast_seed=cs + 1_000_000
+        )
 
         t1 = nib.load(t1_path).get_fdata()
         t2 = nib.load(t2_path).get_fdata()

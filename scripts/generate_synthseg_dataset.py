@@ -68,6 +68,7 @@ import logging
 import os
 import subprocess
 import sys
+import zlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -86,6 +87,15 @@ from data.atrophy_simulator import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _stable_seed(s):
+    """Deterministic 32-bit seed from a string, stable across processes.
+
+    Python's builtin hash() is salted per-process via PYTHONHASHSEED, so it
+    can't be used for reproducible seeding; zlib.crc32 is stable and fast.
+    """
+    return zlib.crc32(s.encode("utf-8"))
 
 
 # ── Segmentation discovery ────────────────────────────────────────────────────
@@ -265,7 +275,7 @@ def remap_seg_for_synthseg(seg_path, out_path, label_set):
 # ── Synthesizers ──────────────────────────────────────────────────────────────
 
 
-def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
+def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None, contrast_seed=None):
     """Label-to-image synthesis from a segmentation map.
 
     Pipeline:
@@ -287,12 +297,25 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
         't1'  — T1-weighted priors (WM bright, GM mid, CSF dark).
         't2'  — T2-weighted priors (CSF bright, GM mid, WM dark).
         'flair' — FLAIR priors (CSF suppressed, GM/WM bright).
+    contrast_seed : int or None
+        Seeds the contrast-determining draws (tissue means, gamma, per-label
+        means/stds) on a stream separate from the per-voxel noise. Pass a value
+        derived from subject+modality but *not* the atrophy level so a subject
+        keeps one consistent contrast across the alpha spectrum; only the
+        anatomy then changes. None → falls back to `seed` (contrast varies per
+        call, the legacy behaviour).
     """
     from scipy.ndimage import gaussian_filter
 
     img = nib.load(seg_path)
     seg = np.asarray(img.dataobj).astype(np.int32)
     rng = np.random.default_rng(seed)
+    # Contrast (tissue means, gamma, per-label means/stds) is seeded separately
+    # from the per-voxel noise so it stays fixed across atrophy levels that share
+    # a subject+modality — otherwise every alpha re-rolls the contrast.
+    if contrast_seed is None:
+        contrast_seed = seed
+    crng = np.random.default_rng(contrast_seed)
 
     label_set = detect_label_set(seg)
     bilateral = get_bilateral_map(label_set)
@@ -306,33 +329,40 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
 
     shape = seg.shape
 
-    # ── 2. Sample GMM parameters ──────────────────────────────────────────
+    # ── 2. Sample GMM parameters (from the contrast stream `crng`) ────────
     if contrast is not None and contrast in CONTRAST_PRIORS:
         # Contrast-specific: sample from N(prior_mean, prior_std) per tissue
         priors = CONTRAST_PRIORS[contrast]
         tissue_mean = {}
         for tissue, (mu, sigma) in priors.items():
-            tissue_mean[tissue] = rng.normal(mu, sigma)
+            tissue_mean[tissue] = crng.normal(mu, sigma)
     else:
         # Fully random: three anchors with guaranteed separation
-        anchors = sorted(rng.uniform(40, 220, size=3))
+        anchors = sorted(crng.uniform(40, 220, size=3))
         anchors[1] = max(anchors[1], anchors[0] + 35)
         anchors[2] = max(anchors[2], anchors[1] + 35)
-        if rng.random() < 0.5:
+        if crng.random() < 0.5:
             anchors = anchors[::-1]
         tissue_mean = {
             "csf": anchors[0],
-            "cortical_gm": anchors[1] + rng.normal(0, 10),
-            "subcortical_gm": anchors[1] + rng.normal(0, 10),
-            "cerebellum_gm": anchors[1] + rng.normal(0, 10),
-            "wm": anchors[2] + rng.normal(0, 10),
-            "brainstem": 0.5 * anchors[1] + 0.5 * anchors[2] + rng.normal(0, 5),
-            "vessel": anchors[0] + rng.normal(0, 5),
-            "other": anchors[1] + rng.normal(0, 10),
+            "cortical_gm": anchors[1] + crng.normal(0, 10),
+            "subcortical_gm": anchors[1] + crng.normal(0, 10),
+            "cerebellum_gm": anchors[1] + crng.normal(0, 10),
+            "wm": anchors[2] + crng.normal(0, 10),
+            "brainstem": 0.5 * anchors[1] + 0.5 * anchors[2] + crng.normal(0, 5),
+            "vessel": anchors[0] + crng.normal(0, 5),
+            "other": anchors[1] + crng.normal(0, 10),
         }
 
+    # Gamma is a global contrast non-linearity. Draw it here, off `crng` and
+    # before any voxel-count-dependent consumption, so it can't drift across
+    # atrophy levels (applied after blur below).
+    gamma = float(np.exp(crng.normal(0, 0.2)))
+
     # Per-label means: bilateral pairs share the same mean, small jitter
-    # between structures within a tissue class.
+    # between structures within a tissue class. Seeded per (canonical) label so
+    # the jitter is stable across atrophy levels even when the present label set
+    # changes (e.g. WMH added, a structure fully eroded).
     labels = [l for l in np.unique(seg) if l != 0]
     canonical_mean = {}
     mean_map = {}
@@ -343,10 +373,12 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
         if canon not in canonical_mean:
             tissue = label_to_tissue.get(lbl, "other")
             base = tissue_mean.get(tissue, 120.0)
-            canonical_mean[canon] = base + rng.normal(0, 5)
+            jitter = np.random.default_rng([int(contrast_seed), int(canon)]).normal(0, 5)
+            canonical_mean[canon] = base + jitter
         mean_map[lbl] = canonical_mean[canon]
-        # Per-label std: sampled from a prior range (lab2im uses U(5, 25))
-        std_map[lbl] = rng.uniform(5, 25)
+        # Per-label std, seeded per label for the same alpha-stability reason.
+        # Ceiling lowered 25 → 15 to cut within-tissue graininess.
+        std_map[lbl] = float(np.random.default_rng([int(contrast_seed), int(lbl), 7]).uniform(5, 15))
 
     # ── 3. GMM sampling: synth[v] = N(mean[label[v]], std[label[v]]) ─────
     synth = np.zeros(shape, dtype=np.float32)
@@ -361,11 +393,11 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
     synth = gaussian_filter(synth, sigma=blur_sigma)
 
     # ── 5. Gamma augmentation (contrast non-linearity, lab2im std=0.2) ───
+    # `gamma` was drawn from the contrast stream above so it's fixed per subject.
     synth = np.clip(synth, 0, None)
     fg = synth[seg > 0]
     if fg.size > 0 and fg.max() > 0:
         synth = synth / fg.max()
-        gamma = np.exp(rng.normal(0, 0.2))
         synth = np.power(synth, gamma)
         synth *= 300.0  # lab2im clipping range
 
@@ -390,7 +422,7 @@ def _builtin_synthesize_one(seg_path, out_path, seed=0, contrast=None):
     return out_path
 
 
-def synthesize_builtin(seg_path, t1_path, t2_path, seed=42, contrast_mode="paired"):
+def synthesize_builtin(seg_path, t1_path, t2_path, seed=42, contrast_seed=None, contrast_mode="paired"):
     """Generate a paired T1/T2 from the same segmentation.
 
     Parameters
@@ -401,13 +433,24 @@ def synthesize_builtin(seg_path, t1_path, t2_path, seed=42, contrast_mode="paire
                     contrast differences. Best for content/style disentanglement.
         'random'  — both views use fully random contrast (SynthSeg-style).
                     Maximum style diversity, but the style axis is unstructured.
+    contrast_seed : int or None
+        Base seed for the contrast draws, offset by +1e6 for the FLAIR view to
+        match the noise-seed convention. Derive it from the subject (not the
+        atrophy level) so the contrast is held fixed across the alpha spectrum.
+        None → tied to `seed` (legacy behaviour; contrast varies per call).
     """
+    if contrast_seed is None:
+        contrast_seed = seed
     if contrast_mode == "paired":
-        _builtin_synthesize_one(seg_path, t1_path, seed=seed, contrast="t1")
-        _builtin_synthesize_one(seg_path, t2_path, seed=seed + 1_000_000, contrast="flair")
+        _builtin_synthesize_one(seg_path, t1_path, seed=seed, contrast="t1", contrast_seed=contrast_seed)
+        _builtin_synthesize_one(
+            seg_path, t2_path, seed=seed + 1_000_000, contrast="flair", contrast_seed=contrast_seed + 1_000_000
+        )
     else:
-        _builtin_synthesize_one(seg_path, t1_path, seed=seed, contrast=None)
-        _builtin_synthesize_one(seg_path, t2_path, seed=seed + 1_000_000, contrast=None)
+        _builtin_synthesize_one(seg_path, t1_path, seed=seed, contrast=None, contrast_seed=contrast_seed)
+        _builtin_synthesize_one(
+            seg_path, t2_path, seed=seed + 1_000_000, contrast=None, contrast_seed=contrast_seed + 1_000_000
+        )
 
 
 def synthesize_synthseg(seg_path, t1_path, t2_path, synthseg_script, seed=42):
@@ -529,10 +572,15 @@ def _process_subject(args_tuple):
         remapped_path = os.path.join(seg_out_dir, f"{sample_id}_seg_fs.nii.gz")
         synth_seg_path = remap_seg_for_synthseg(atrophied_seg_path, remapped_path, label_set)
 
-    seed = base_seed + hash(sample_id) % (2**31)
+    # Noise seed varies per (subject, alpha); contrast seed depends only on the
+    # subject so the same individual keeps one T1/FLAIR contrast across alphas.
+    seed = base_seed + _stable_seed(sample_id)
+    contrast_seed = base_seed + _stable_seed(subject_id)
 
     if synthesizer == "builtin":
-        synthesize_builtin(synth_seg_path, t1_path, t2_path, seed=seed, contrast_mode=contrast_mode)
+        synthesize_builtin(
+            synth_seg_path, t1_path, t2_path, seed=seed, contrast_seed=contrast_seed, contrast_mode=contrast_mode
+        )
     elif synthesizer == "synthseg":
         synthesize_synthseg(synth_seg_path, t1_path, t2_path, synthseg_script, seed=seed)
     elif synthesizer == "lab2im":
