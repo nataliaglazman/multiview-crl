@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-random-fixedref-separate-style-codebooks-baseline
+tag: synthetic-causal-random-fixedref-separate-style-content-codebooks-baseline
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -26,3 +26,4 @@ style_injection_mode: concat
 # synthetic_normalize: shared
 # select_by_gated_score: false
 separate_style_codebooks: true   # vs false for the shared baseline
+separate_content_codebooks: true   # the ablation; false = shared baseline

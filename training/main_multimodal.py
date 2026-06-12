@@ -1181,6 +1181,7 @@ def main(args):
         content_style_levels=getattr(args, "content_style_levels", [0]),
         content_ratios=getattr(args, "content_ratios", None),
         separate_encoders=getattr(args, "separate_encoders", False),
+        separate_content_codebooks=getattr(args, "separate_content_codebooks", False),
         mask_mode=getattr(args, "mask_mode", "onthefly"),
         quantize_style=getattr(args, "quantize_style", False),
         separate_style_codebooks=getattr(args, "separate_style_codebooks", False),
@@ -1240,6 +1241,11 @@ def main(args):
         logger.info(f"  Per-level content ratios: {dict(zip(cs_levels, cs_ratios))}")
     if getattr(args, "separate_encoders", False):
         logger.info("  Separate encoders: ENABLED (one encoder stack per view)")
+    if getattr(args, "separate_content_codebooks", False):
+        logger.info(
+            "  Separate content codebooks: ENABLED (one content codebook per view; "
+            "decoders shared) — ablation, weakens content identifiability"
+        )
     mask_mode = getattr(args, "mask_mode", "onthefly")
     _mask_desc = {
         "onthefly": " (on-the-fly from avg activations, shared across views)",

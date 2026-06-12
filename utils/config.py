@@ -370,9 +370,20 @@ def parse_args() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Use separate encoder stacks per view (one VQVAE encoder per modality). "
-        "Codebooks, decoders, and Gumbel content masks remain shared (style codebooks too, "
-        "unless --separate-style-codebooks). "
+        "Decoders and Gumbel content masks remain shared; codebooks remain shared too unless "
+        "--separate-content-codebooks / --separate-style-codebooks are set. "
         "Consistent with the view-specific encoder identifiability theory (Yao et al., 2024).",
+    )
+    parser.add_argument(
+        "--separate-content-codebooks",
+        action="store_true",
+        default=False,
+        help="Give each view its own content codebook (view-0 and view-1 quantize content "
+        "through independent codebooks); decoders stay shared. Pairs naturally with "
+        "--separate-encoders. NOTE: content is meant to be the shared, modality-invariant "
+        "anatomy, so splitting its codebook removes the common discrete vocabulary that ties "
+        "the two views together and weakens identifiability — intended as an ablation, not a "
+        "default. Default: shared content codebook.",
     )
     parser.add_argument(
         "--mask-mode",
@@ -936,6 +947,19 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
                 "codebooks are most meaningful when each view also has its own encoder; with a "
                 "shared encoder the two views' style channels are produced identically."
             )
+
+    # --separate-content-codebooks: ablation that breaks the shared content vocabulary.
+    if getattr(args, "separate_content_codebooks", False):
+        if not getattr(args, "separate_encoders", False):
+            logger.warning(
+                "--separate-content-codebooks is set without --separate-encoders. Per-view "
+                "content codebooks are most meaningful when each view also has its own encoder."
+            )
+        logger.warning(
+            "--separate-content-codebooks gives each view its own content codebook. Content is "
+            "meant to be modality-invariant, so this removes the shared discrete vocabulary that "
+            "aligns the two views and is expected to weaken identifiability. Use as an ablation."
+        )
 
     # Warn if MoCo is enabled with a negative-free loss (it'll be ignored)
     _cl_type = getattr(args, "contrastive_loss_type", "infonce")

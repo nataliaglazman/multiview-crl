@@ -1500,7 +1500,16 @@ class VQVAE(HelperModule):
             style_id_outputs,
         )
 
-    def decode_codes(self, *cs, style=None, styles=None, style_codes=None, target_spatial_size=None, style_view_idx=0):
+    def decode_codes(
+        self,
+        *cs,
+        style=None,
+        styles=None,
+        style_codes=None,
+        target_spatial_size=None,
+        style_view_idx=0,
+        content_view_idx=0,
+    ):
         """Decode from discrete codes back to the input space.
 
         Args:
@@ -1521,6 +1530,9 @@ class VQVAE(HelperModule):
             style_view_idx: When ``separate_style_codebooks`` is active, selects which
                             view's style codebook decodes ``style_codes`` (0 or 1).
                             Ignored for shared style codebooks. Default 0.
+            content_view_idx: When ``separate_content_codebooks`` is active, selects
+                              which view's content codebook decodes ``cs`` (0 or 1).
+                              Ignored for shared content codebooks. Default 0.
         """
         if styles is None:
             styles = {}
@@ -1546,8 +1558,13 @@ class VQVAE(HelperModule):
         code_output_levels = []
         upscale_counts = []
 
+        # Select the content codebook stack (view-1 when split & requested).
+        _content_cbs = self.codebooks
+        if self.separate_content_codebooks and content_view_idx == 1 and self.codebooks_v1 is not None:
+            _content_cbs = self.codebooks_v1
+
         for l in range(self.nb_levels - 1, -1, -1):
-            codebook, decoder = self.codebooks[l], self.decoders[l]
+            codebook, decoder = _content_cbs[l], self.decoders[l]
             code_q = codebook.embed_code(cs[l]).permute(0, 4, 1, 2, 3)
             target_size = code_q.shape[2:]
             upscaled_codes = []
