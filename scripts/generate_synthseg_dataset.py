@@ -558,6 +558,7 @@ def _process_subject(args_tuple):
             alpha=alpha,
             label_set=label_set,
             wmh_fraction=wmh_fraction,
+            wmh_seed=base_seed + _stable_seed(subject_id),
             smooth_sigma=smooth_sigma,
             out_path=atrophied_seg_path,
         )

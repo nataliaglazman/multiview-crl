@@ -155,6 +155,7 @@ def process_subject(subject_id, seg_path, out_dir, alphas, wmh_fraction, smooth_
             alpha=alpha,
             label_set=label_set,
             wmh_fraction=wmh_fraction,
+            wmh_seed=_stable_seed(subject_id),
             smooth_sigma=smooth_sigma,
             out_path=seg_out_path,
         )

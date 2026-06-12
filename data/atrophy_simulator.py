@@ -403,9 +403,63 @@ def erode_structure(label_map, cfg, alpha, connectivity=1):
 # ── WMH injection ─────────────────────────────────────────────────────────────
 
 
+def _grow_wmh_blob(center, wm_mask, rng, n_steps, struct, keep_prob=0.65):
+    """Grow one contiguous, WM-confined lesion blob from a seed voxel.
+
+    Stochastic morphological dilation: each step dilates the current blob by one
+    voxel (6-connectivity), then keeps the new front voxels that fall inside WM
+    with probability `keep_prob`, giving an organic (non-spherical) boundary.
+    Operates on a small window around `center` for speed.
+
+    Returns (blob_sub, lo): the bool sub-volume and its origin in the full array.
+    """
+    shape = wm_mask.shape
+    pad = n_steps + 1
+    lo = [max(0, int(center[d]) - pad) for d in range(3)]
+    hi = [min(shape[d], int(center[d]) + pad + 1) for d in range(3)]
+    sub_wm = wm_mask[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]]
+    blob = np.zeros_like(sub_wm)
+    blob[int(center[0]) - lo[0], int(center[1]) - lo[1], int(center[2]) - lo[2]] = True
+    for _ in range(n_steps):
+        front = binary_dilation(blob, structure=struct) & sub_wm & ~blob
+        if not front.any():
+            break
+        keep = front & (rng.random(front.shape) < keep_prob)
+        blob |= keep
+    return blob, lo
+
+
 def inject_wmh(
-    label_map, wmh_label=77, wm_labels=None, vent_labels=None, fraction=0.05, seed=42, label_set="freesurfer"
+    label_map,
+    wmh_label=77,
+    wm_labels=None,
+    vent_labels=None,
+    fraction=0.05,
+    seed=42,
+    label_set="freesurfer",
+    max_radius=3,
 ):
+    """Inject contiguous, periventricular white-matter-hyperintensity lesions.
+
+    Unlike a per-voxel speckle, lesions are grown as smooth blobs:
+
+      1. A subject-fixed propensity field (depends only on `seed` and volume
+         shape — *not* the atrophied geometry) is multiplied by a periventricular
+         weight 1/(dist_to_ventricle + 1). Seeding from this field means the same
+         `seed` places lesions in the same anatomical locations regardless of the
+         atrophy level, so a subject's WMH pattern is stable across alphas.
+      2. Seeds are taken in descending score order (highest-propensity
+         periventricular WM first); each uncovered seed is grown into a
+         contiguous, WM-confined blob by `_grow_wmh_blob`.
+      3. Blobs accumulate until the lesion volume reaches `fraction` of total WM.
+
+    Parameters
+    ----------
+    fraction   : target lesion volume as a fraction of total white matter.
+    seed       : RNG seed — pass a per-subject value for cross-alpha stability.
+    max_radius : cap on per-lesion growth steps (≈ blob radius in voxels). Larger
+                 → fewer, bigger, more confluent lesions.
+    """
     seg = label_map.copy()
     rng = np.random.default_rng(seed)
 
@@ -416,21 +470,41 @@ def inject_wmh(
 
     wm_mask = np.isin(seg, list(wm_labels))
     vent_mask = np.isin(seg, list(vent_labels))
-
-    dist_to_vent = distance_transform_edt(~vent_mask)
-    wm_coords = np.argwhere(wm_mask)
-
-    if len(wm_coords) == 0:
+    n_wm = int(wm_mask.sum())
+    if n_wm == 0:
         return seg
 
-    dists = dist_to_vent[wm_mask]
-    weights = 1.0 / (dists + 1.0)
-    weights /= weights.sum()
+    target_voxels = int(n_wm * fraction)
+    if target_voxels < 1:
+        return seg
 
-    n_lesion = max(1, int(wm_mask.sum() * fraction))
-    chosen_idx = rng.choice(len(wm_coords), size=n_lesion, replace=False, p=weights)
-    chosen = wm_coords[chosen_idx]
-    seg[chosen[:, 0], chosen[:, 1], chosen[:, 2]] = wmh_label
+    # Periventricular weight × subject-fixed propensity → per-voxel seed score.
+    dist_to_vent = distance_transform_edt(~vent_mask)
+    periv = 1.0 / (dist_to_vent + 1.0)
+    propensity = gaussian_filter(rng.random(seg.shape, dtype=np.float32), sigma=2.0)
+    score = (propensity * periv).astype(np.float32)
+    score[~wm_mask] = -1.0  # only seed inside white matter
+
+    struct = generate_binary_structure(3, 1)  # 6-connectivity
+    wmh_mask = np.zeros(seg.shape, dtype=bool)
+
+    # Walk candidate seeds from highest score; grow a blob at each uncovered one
+    # until the target lesion volume is reached.
+    order = np.argsort(score, axis=None)[::-1]
+    placed = 0
+    for flat in order:
+        if placed >= target_voxels or score.flat[flat] <= 0:
+            break  # target reached, or exhausted WM seed candidates
+        center = np.unravel_index(int(flat), seg.shape)
+        if wmh_mask[center]:
+            continue  # already inside a previous blob
+        n_steps = int(rng.integers(1, max_radius + 1))
+        blob, lo = _grow_wmh_blob(center, wm_mask, rng, n_steps, struct)
+        window = wmh_mask[lo[0] : lo[0] + blob.shape[0], lo[1] : lo[1] + blob.shape[1], lo[2] : lo[2] + blob.shape[2]]
+        placed += int((blob & ~window).sum())
+        window |= blob
+
+    seg[wmh_mask] = wmh_label
     return seg
 
 
@@ -462,6 +536,8 @@ def simulate_atrophy(
     label_set=None,
     wmh_fraction=0.0,
     wmh_label=77,
+    wmh_seed=42,
+    wmh_max_radius=3,
     smooth_sigma=0.6,
     out_path=None,
 ):
@@ -473,6 +549,9 @@ def simulate_atrophy(
     alpha      : global severity in [0, 1]
     configs    : per-structure erosion configs; None = auto from label_set
     label_set  : 'freesurfer', 'muse', or None (auto-detect)
+    wmh_seed   : RNG seed for WMH placement; pass a per-subject value (constant
+                 across alphas) to keep a subject's lesion pattern stable.
+    wmh_max_radius : per-lesion blob radius cap (voxels) for inject_wmh.
     """
     img = nib.load(seg_path)
     seg = np.asarray(img.dataobj).astype(np.int32)
@@ -487,7 +566,14 @@ def simulate_atrophy(
             seg = erode_structure(seg, cfg, alpha)
 
     if wmh_fraction > 0:
-        seg = inject_wmh(seg, wmh_label=wmh_label, fraction=wmh_fraction, label_set=label_set)
+        seg = inject_wmh(
+            seg,
+            wmh_label=wmh_label,
+            fraction=wmh_fraction,
+            label_set=label_set,
+            seed=wmh_seed,
+            max_radius=wmh_max_radius,
+        )
 
     if smooth_sigma > 0:
         seg = smooth_label_boundaries(seg, sigma=smooth_sigma)
