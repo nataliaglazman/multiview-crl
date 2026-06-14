@@ -9,12 +9,12 @@ cache_dir: /scratch/users/k24058220/cache/multiview
 
 # ---- SLURM job resources ----
 _slurm:
-  partition: gpu
+  partition: biomed_a100_gpu
   gres: "gpu:1"
   nodes: 1
   mem: 64G
   cpus_per_task: 8
   conda_env: multiview-env
   time: "48:00:00"
-  constraint: a100_40g
+  constraint: a100_80g
   requirements_txt: docker/requirements.txt
