@@ -1235,10 +1235,10 @@ def iter_per_latent_rows(rows):
                             "relationship": rel,
                             "want": want,
                             "pooling": pool,
-                            "is_assigned": pool == assigned,
+                            "is_headline_pooling": pool == assigned,
                             "real_r2": _round(pd.get("real")),
                             "null_r2": _round(pd.get("null")),
-                            "gap": _round(pd.get("gap")),
+                            "gap_r2": _round(pd.get("gap")),
                             "real_std": _round(pd.get("std")),
                         }
 
@@ -1257,10 +1257,10 @@ def iter_per_latent_rows(rows):
                             "relationship": "capacity",
                             "want": "high",
                             "pooling": pool,
-                            "is_assigned": pool == assigned,
+                            "is_headline_pooling": pool == assigned,
                             "real_r2": _round(pd.get("real")),
                             "null_r2": _round(pd.get("null")),
-                            "gap": _round(pd.get("gap")),
+                            "gap_r2": _round(pd.get("gap")),
                             "real_std": _round(pd.get("std")),
                         }
 
@@ -1601,54 +1601,128 @@ def print_capacity_table(rows, baseline_name=None):
     print()
 
 
+_CSV_RENAME = {
+    "name": "model",
+    "n_content_channels": "content_channels",
+    "n_style_channels": "style_channels",
+    "disentanglement": "overall_score",
+    "info_all": "informativeness",
+    "content_rank": "content_eff_rank",
+    "style_rank": "style_eff_rank",
+    "all_rank": "total_eff_rank",
+    "dci_d_gap": "dci_disent_gap",
+    "dci_content_d_gap": "dci_disent_gap_content",
+    "dci_patch_d_gap": "dci_disent_gap_patch",
+    "leak_c2s": "content_to_style_leak",
+    "content_view": "content_view_acc",
+    "style_view": "style_view_acc",
+    "suff_s2s": "style_sufficiency",
+    "leak_s2c": "style_to_content_leak",
+    "mcc_cc": "mcc_content_to_content",
+    "mcc_cs": "mcc_content_to_style",
+    "mcc_cc_null": "mcc_content_to_content_null",
+    "mcc_cs_null": "mcc_content_to_style_null",
+    "dci_c_gap": "dci_complete_gap",
+    "dci_content_c_gap": "dci_complete_gap_content",
+    "dci_patch_c_gap": "dci_complete_gap_patch",
+}
+_CSV_TO_INTERNAL = {v: k for k, v in _CSV_RENAME.items()}
+for _old, _new in list(_CSV_RENAME.items()):
+    _CSV_TO_INTERNAL[_new + "_v2"] = _old + "_v2"
+
+_CSV_LEGEND = """\
+# DCI MODEL COMPARISON — one row per model
+# Use comment='#' when loading with pandas:  pd.read_csv("dci_compare.csv", comment='#')
+#
+# IDENTITY: model, role, checkpoint, content_channels, style_channels
+#
+# HEALTH SCORES (derived 0–1 composites, higher = better):
+#   grade              letter grade (A+ to F) from overall_score
+#   overall_score      mean of the four sub-scores below
+#   content_anatomy    content captures shared anatomy factors
+#   content_purity     content rejects modality / view information
+#   style_modality     style captures modality / view information
+#   style_purity       style rejects anatomy information
+#
+# CAPACITY:
+#   informativeness          test R² predicting all factors from all channels  (higher = better)
+#   content/style_eff_rank   effective rank of representation (low vs nominal → collapse)
+#   dci_disent_gap*          DCI Disentanglement score (real − null)
+#
+# ORGANIZATION (raw protocol metrics):
+#   separation               mcc(content→content) − mcc(content→style)    higher = better
+#   content_to_style_leak    content→style R² gap (null-subtracted)       lower = better, ~0 = clean
+#   content_view_acc         probe: predict view from content             ~0.5 = view-invariant
+#   style_view_acc           probe: predict view from style               higher = better
+#   style_sufficiency        style→style R² gap                           higher = better
+#   style_to_content_leak    style→content R² gap                         lower = better
+#
+# DELTA: delta_* columns = this model minus the baseline
+#
+# RAW DETAIL:
+#   mcc_content_to_*         block MCC scores and their null-permuted floors
+#   view_chance              chance-level view classification accuracy
+#   dci_complete_gap*        DCI Completeness score (real − null)
+#
+# META: num_samples, poolings, probe_dim, run_dir
+#
+"""
+
+
 def write_outputs(rows, out_dir, baseline_name=None):
     os.makedirs(out_dir, exist_ok=True)
     attach_scores(rows)  # idempotent — ensure derived columns exist even if called directly
 
-    # Headline CSV, ordered for reading: identity -> health scores -> capacity ->
-    # organization -> Δ vs baseline -> raw detail -> meta.  Floats are rounded to 4dp
-    # and NaNs blanked; rows are baseline-first then by separation (desc).  The
-    # full-precision record (every DCI real/null, info_c2c, per-factor detail) lives
-    # in dci_compare.json — this file is the at-a-glance comparison.
     base_row = next((r for r in rows if baseline_name and r.get("name") == baseline_name), None)
     has_v2 = any("separation_v2" in r for r in rows)
 
-    id_cols = ["name", "role", "checkpoint", "n_content_channels", "n_style_channels"]
-    health_cols = ["grade", "disentanglement", "content_anatomy", "content_purity", "style_modality", "style_purity"]
+    id_cols = ["model", "role", "checkpoint", "content_channels", "style_channels"]
+    health_cols = ["grade", "overall_score", "content_anatomy", "content_purity", "style_modality", "style_purity"]
     capacity_cols = [
-        "info_all",
-        "content_rank",
-        "style_rank",
-        "all_rank",
-        "dci_d_gap",
-        "dci_content_d_gap",
-        "dci_patch_d_gap",
+        "informativeness",
+        "content_eff_rank",
+        "style_eff_rank",
+        "total_eff_rank",
+        "dci_disent_gap",
+        "dci_disent_gap_content",
+        "dci_disent_gap_patch",
     ]
-    org_cols = ["separation", "leak_c2s", "content_view", "style_view", "suff_s2s", "leak_s2c"]
-    delta_cols = ["d_separation", "d_leak_c2s", "d_content_view", "d_info_all"]
-    # Kept because analyze_dci_csv.py reads them; parked at the end as raw detail.
+    org_cols = [
+        "separation",
+        "content_to_style_leak",
+        "content_view_acc",
+        "style_view_acc",
+        "style_sufficiency",
+        "style_to_content_leak",
+    ]
+    delta_cols = [
+        "delta_separation",
+        "delta_content_to_style_leak",
+        "delta_content_view_acc",
+        "delta_informativeness",
+    ]
     detail_cols = [
-        "mcc_cc",
-        "mcc_cs",
-        "mcc_cc_null",
-        "mcc_cs_null",
+        "mcc_content_to_content",
+        "mcc_content_to_style",
+        "mcc_content_to_content_null",
+        "mcc_content_to_style_null",
         "view_chance",
-        "dci_c_gap",
-        "dci_content_c_gap",
-        "dci_patch_c_gap",
+        "dci_complete_gap",
+        "dci_complete_gap_content",
+        "dci_complete_gap_patch",
     ]
     meta_cols = ["num_samples", "poolings", "probe_dim", "run_dir"]
     v2_cols = (
         [
             "grade_v2",
-            "disentanglement_v2",
-            "info_all_v2",
-            "content_rank_v2",
-            "style_rank_v2",
+            "overall_score_v2",
+            "informativeness_v2",
+            "content_eff_rank_v2",
+            "style_eff_rank_v2",
             "separation_v2",
-            "leak_c2s_v2",
-            "suff_s2s_v2",
-            "leak_s2c_v2",
+            "content_to_style_leak_v2",
+            "style_sufficiency_v2",
+            "style_to_content_leak_v2",
         ]
         if has_v2
         else []
@@ -1671,10 +1745,10 @@ def write_outputs(rows, out_dir, baseline_name=None):
     def _row_out(r):
         is_base = bool(baseline_name) and r.get("name") == baseline_name
         deltas = {
-            "d_separation": _delta(r, "separation"),
-            "d_leak_c2s": _delta(r, "leak_c2s"),
-            "d_content_view": _delta(r, "content_view"),
-            "d_info_all": _delta(r, "info_all"),
+            "delta_separation": _delta(r, "separation"),
+            "delta_content_to_style_leak": _delta(r, "leak_c2s"),
+            "delta_content_view_acc": _delta(r, "content_view"),
+            "delta_informativeness": _delta(r, "info_all"),
         }
         out = {}
         for c in flat_cols:
@@ -1683,7 +1757,8 @@ def write_outputs(rows, out_dir, baseline_name=None):
             elif c in deltas:
                 out[c] = deltas[c]
             else:
-                out[c] = _cell(r.get(c))
+                internal = _CSV_TO_INTERNAL.get(c, c)
+                out[c] = _cell(r.get(internal))
         return out
 
     def _sort_key(r):
@@ -1694,6 +1769,7 @@ def write_outputs(rows, out_dir, baseline_name=None):
 
     csv_path = os.path.join(out_dir, "dci_compare.csv")
     with open(csv_path, "w", newline="") as f:
+        f.write(_CSV_LEGEND)
         w = csv.DictWriter(f, fieldnames=flat_cols, extrasaction="ignore")
         w.writeheader()
         for r in sorted(rows, key=_sort_key):
@@ -1709,13 +1785,12 @@ def write_outputs(rows, out_dir, baseline_name=None):
         "relationship",
         "want",
         "pooling",
-        "is_assigned",
+        "is_headline_pooling",
         "real_r2",
         "null_r2",
-        "gap",
+        "gap_r2",
         "real_std",
     ]
-    # Sort so a factor's signal and leak rows sit together, assigned pooling first.
     pl_rows = sorted(
         iter_per_latent_rows(rows),
         key=lambda d: (
@@ -1724,10 +1799,37 @@ def write_outputs(rows, out_dir, baseline_name=None):
             d["factor_type"],
             d["factor"],
             d["relationship"],
-            not d["is_assigned"],
+            not d["is_headline_pooling"],
         ),
     )
+    _PL_LEGEND = """\
+# DCI PER-LATENT BREAKDOWN — one row per (model, encoder, factor, pooling)
+# Use comment='#' when loading with pandas:  pd.read_csv("dci_compare_per_latent.csv", comment='#')
+#
+# IDENTITY:
+#   model                model name
+#   encoder              enc1 or enc2 (when two encoders are evaluated)
+#   factor               ground-truth factor name (e.g. brain_size, gain)
+#   factor_type          content or style — which group the factor belongs to
+#
+# PROBE SETUP:
+#   predicted_from       which representation block is used as input (content / style / all)
+#   relationship         signal = factor predicted from its own block (want high)
+#                        leakage = factor predicted from the wrong block (want low)
+#                        capacity = factor predicted from all channels
+#   want                 desired direction for gap_r2: "high" for signal/capacity, "low" for leakage
+#   pooling              spatial pooling method used (gap, stats, patch)
+#   is_headline_pooling  True = this pooling was selected as the headline (best-of) for this factor
+#
+# RESULTS:
+#   real_r2              test R² from the GBT probe
+#   null_r2              test R² under row-permuted factors (structural floor for this block shape)
+#   gap_r2               real_r2 − null_r2 (the non-structural signal)
+#   real_std              std of real_r2 across repeats
+#
+"""
     with open(per_latent_path, "w", newline="") as f:
+        f.write(_PL_LEGEND)
         w = csv.DictWriter(f, fieldnames=pl_cols)
         w.writeheader()
         for prow in pl_rows:

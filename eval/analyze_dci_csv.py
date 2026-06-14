@@ -42,6 +42,29 @@ SEP_GOOD = 0.20  # separation above this -> strong content/style split
 OK, WARN, BAD, NA = "[ok ]", "[warn]", "[BAD]", "[ -- ]"
 
 
+_OLD_TO_NEW = {
+    "name": "model",
+    "n_content_channels": "content_channels",
+    "n_style_channels": "style_channels",
+    "disentanglement": "overall_score",
+    "info_all": "informativeness",
+    "leak_c2s": "content_to_style_leak",
+    "content_view": "content_view_acc",
+    "style_view": "style_view_acc",
+    "suff_s2s": "style_sufficiency",
+    "leak_s2c": "style_to_content_leak",
+    "mcc_cc": "mcc_content_to_content",
+    "mcc_cs": "mcc_content_to_style",
+    "mcc_cc_null": "mcc_content_to_content_null",
+    "mcc_cs_null": "mcc_content_to_style_null",
+}
+
+
+def _compat_rename(df):
+    """Rename old-format CSV columns so analysis works on files from either version."""
+    return df.rename(columns={old: new for old, new in _OLD_TO_NEW.items() if old in df.columns})
+
+
 def _f(df_row, col):
     """Float value of a cell, or NaN when the column is absent/empty."""
     if col not in df_row or pd.isna(df_row[col]):
@@ -57,12 +80,12 @@ def _flag(ok, warn):
 def _verdicts(r):
     """Per-axis (marker, message) verdicts for one model row ``r`` (a Series)."""
     sep = _f(r, "separation")
-    leak = _f(r, "leak_c2s")
-    mcc_cc, mcc_cc_null = _f(r, "mcc_cc"), _f(r, "mcc_cc_null")
-    mcc_cs, mcc_cs_null = _f(r, "mcc_cs"), _f(r, "mcc_cs_null")
-    cview, schance = _f(r, "content_view"), _f(r, "view_chance")
-    sview = _f(r, "style_view")
-    suff = _f(r, "suff_s2s")
+    leak = _f(r, "content_to_style_leak")
+    mcc_cc, mcc_cc_null = _f(r, "mcc_content_to_content"), _f(r, "mcc_content_to_content_null")
+    mcc_cs, mcc_cs_null = _f(r, "mcc_content_to_style"), _f(r, "mcc_content_to_style_null")
+    cview, schance = _f(r, "content_view_acc"), _f(r, "view_chance")
+    sview = _f(r, "style_view_acc")
+    suff = _f(r, "style_sufficiency")
 
     out = []
 
@@ -85,7 +108,7 @@ def _verdicts(r):
 
     # 2b. Does the style block stay clean of content?  (the over-allocation check —
     # a big style block can soak up anatomy even when content excludes style.)
-    leak_sc = _f(r, "leak_s2c")
+    leak_sc = _f(r, "style_to_content_leak")
     if np.isfinite(leak_sc):
         m = _flag(leak_sc < LEAK_CLEAN, leak_sc < LEAK_BAD)
         out.append((m, f"style clean of content: leak_s2c={leak_sc:.3f} " f"(~0 good; high = style absorbs anatomy)"))
@@ -121,9 +144,9 @@ def _verdicts(r):
 
 
 def _rank(df):
-    """Rank like print_table: separation desc, tie-break leak_c2s asc."""
+    """Rank like print_table: separation desc, tie-break content_to_style_leak asc."""
     sep = df["separation"].fillna(-9.0)
-    leak = df["leak_c2s"].fillna(9.0)
+    leak = df["content_to_style_leak"].fillna(9.0)
     return df.assign(_sep=sep, _leak=leak).sort_values(["_sep", "_leak"], ascending=[False, True])
 
 
@@ -135,16 +158,15 @@ def _per_latent_breakdown(pl_path, model):
     matched blocks (content->content, style->style) and a red flag for the leakage
     blocks (content->style, style->content).
     """
-    pl = pd.read_csv(pl_path)
+    pl = pd.read_csv(pl_path, comment="#")
+    if "is_assigned" in pl.columns:
+        pl = pl.rename(columns={"is_assigned": "is_headline_pooling", "gap": "gap_r2"})
     pl = pl[pl["model"] == model]
     if pl.empty:
         return
-    # Schema note: the per-latent CSV splits the old single "block" column into
-    # predicted_from + factor_type, and renames assigned -> is_assigned.  Rebuild the
-    # block label (e.g. "content->style") and drop the all-channels capacity rows.
     pl = pl[pl["predicted_from"].isin(["content", "style"])].copy()
     pl["block"] = pl["predicted_from"].astype(str) + "->" + pl["factor_type"].astype(str)
-    assigned = pl["is_assigned"].astype(str).str.lower().isin(["true", "1"])
+    assigned = pl["is_headline_pooling"].astype(str).str.lower().isin(["true", "1"])
     pl = pl[assigned]
     if pl.empty:
         return
@@ -153,15 +175,15 @@ def _per_latent_breakdown(pl_path, model):
     desirable = {"content->content": "recovered", "style->style": "recovered"}
     leaky = {"content->style": "LEAK", "style->content": "LEAK"}
     for block, df_b in pl.groupby("block"):
-        df_b = df_b.sort_values("gap", ascending=False)
+        df_b = df_b.sort_values("gap_r2", ascending=False)
         kind = desirable.get(block) or leaky.get(block) or "?"
-        cells = ", ".join(f"{row.factor}={row.gap:+.2f}" for row in df_b.itertuples())
+        cells = ", ".join(f"{row.factor}={row.gap_r2:+.2f}" for row in df_b.itertuples())
         print(f"    {block:18s} [{kind:9s}] {cells}")
     if any(b in leaky for b in pl["block"].unique()):
-        worst = pl[pl["block"].isin(leaky)].sort_values("gap", ascending=False).head(1)
-        if not worst.empty and worst.iloc[0]["gap"] > LEAK_CLEAN:
+        worst = pl[pl["block"].isin(leaky)].sort_values("gap_r2", ascending=False).head(1)
+        if not worst.empty and worst.iloc[0]["gap_r2"] > LEAK_CLEAN:
             w = worst.iloc[0]
-            print(f"    -> biggest leak: {w['factor']} via {w['block']} (gap {w['gap']:+.2f})")
+            print(f"    -> biggest leak: {w['factor']} via {w['block']} (gap {w['gap_r2']:+.2f})")
 
 
 def _resolve_paths(path):
@@ -193,7 +215,7 @@ def main(argv=None):
     if not os.path.exists(head_path):
         ap.error(f"no dci_compare.csv at {head_path}")
 
-    df = pd.read_csv(head_path)
+    df = _compat_rename(pd.read_csv(head_path, comment="#"))
     if df.empty:
         print("dci_compare.csv has no rows.")
         return 0
@@ -201,44 +223,44 @@ def main(argv=None):
 
     print("=" * 78)
     print(f"DCI CONCLUSIONS  ({len(df)} model(s) from {head_path})")
-    print("ranked by separation (desc), tie-break leak_c2s (asc)")
+    print("ranked by separation (desc), tie-break content_to_style_leak (asc)")
     print("=" * 78)
 
     for i, (_, r) in enumerate(ranked.iterrows(), 1):
         chans = (
-            f"{int(_f(r,'n_content_channels'))}/{int(_f(r,'n_style_channels'))}"
-            if np.isfinite(_f(r, "n_content_channels"))
+            f"{int(_f(r,'content_channels'))}/{int(_f(r,'style_channels'))}"
+            if np.isfinite(_f(r, "content_channels"))
             else "?/?"
         )
-        print(f"\n#{i}  {r['name']}   (content/style channels {chans})")
+        print(f"\n#{i}  {r['model']}   (content/style channels {chans})")
         for marker, msg in _verdicts(r):
             print(f"    {marker} {msg}")
 
     # Overall takeaway: the winner + whether anything passes the separation bar.
     top = ranked.iloc[0]
-    strong = ranked[ranked["separation"].fillna(-9) >= SEP_GOOD]["name"].tolist()
+    strong = ranked[ranked["separation"].fillna(-9) >= SEP_GOOD]["model"].tolist()
     print("\n" + "-" * 78)
     print(
-        f"VERDICT: best split is '{top['name']}' (separation {_f(top,'separation'):.3f}, "
-        f"leak_c2s {_f(top,'leak_c2s'):.3f})."
+        f"VERDICT: best split is '{top['model']}' (separation {_f(top,'separation'):.3f}, "
+        f"content_to_style_leak {_f(top,'content_to_style_leak'):.3f})."
     )
     if strong:
         print(f"         clears the strong bar (>= {SEP_GOOD}): {', '.join(strong)}.")
     else:
         print(f"         NOTHING clears the strong-separation bar (>= {SEP_GOOD}) — split is weak.")
 
-    if args.baseline and args.baseline in set(df["name"]):
-        base = df[df["name"] == args.baseline].iloc[0]
+    if args.baseline and args.baseline in set(df["model"]):
+        base = df[df["model"] == args.baseline].iloc[0]
         print(f"\n  deltas vs baseline '{args.baseline}' (what the objective earned over the architecture):")
         for _, r in ranked.iterrows():
-            if r["name"] == args.baseline:
+            if r["model"] == args.baseline:
                 continue
             dsep = _f(r, "separation") - _f(base, "separation")
-            dleak = _f(r, "leak_c2s") - _f(base, "leak_c2s")
-            print(f"    {r['name']:20s} dSEP {dsep:+.3f}   dleak_c2s {dleak:+.3f}")
+            dleak = _f(r, "content_to_style_leak") - _f(base, "content_to_style_leak")
+            print(f"    {r['model']:20s} dSEP {dsep:+.3f}   dLEAK {dleak:+.3f}")
 
     if per_path:
-        _per_latent_breakdown(per_path, top["name"])
+        _per_latent_breakdown(per_path, top["model"])
     else:
         print("\n  (no dci_compare_per_latent.csv found — skipping per-factor breakdown)")
     print()
