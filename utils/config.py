@@ -739,6 +739,8 @@ def parse_args() -> argparse.ArgumentParser:
         help="Directly set the number of content channels (out of --vqvae-hidden-channels). "
         "Overrides the ratio derived from --content-dim / --total-dim. "
         "E.g. '--content-size 48 --vqvae-hidden-channels 64' → 48 content, 16 style channels. "
+        "Set it equal to --vqvae-hidden-channels for an all-content baseline with no "
+        "content/style separation (plain VQ-VAE-2: no Gumbel mask, no style injection). "
         "Useful for tuning spatial map alignment.",
     )
     parser.add_argument(
@@ -970,11 +972,13 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         )
         args.use_moco = False
 
-    # --content-size: directly set content channels, override ratio-based defaults
+    # --content-size: directly set content channels, override ratio-based defaults.
+    # cs == hidden_ch is the all-content baseline: no style channels, so downstream
+    # has_content_style is False (no Gumbel mask, no style injection — plain VQ-VAE-2).
     if getattr(args, "content_size", None) is not None:
         hidden_ch = args.vqvae_hidden_channels
         cs = args.content_size
-        assert 1 <= cs < hidden_ch, f"--content-size must be in [1, {hidden_ch - 1}], got {cs}"
+        assert 1 <= cs <= hidden_ch, f"--content-size must be in [1, {hidden_ch}], got {cs}"
         ratio = cs / hidden_ch
         # Override content_dim / total_dim to be consistent with the chosen ratio
         args.content_dim = cs
@@ -982,10 +986,17 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         # Set content_ratios for all content_style_levels
         cs_levels = getattr(args, "content_style_levels", [0])
         args.content_ratios = [ratio] * len(cs_levels)
-        logger.info(
-            f"  --content-size={cs}: content_ratio={ratio:.3f} "
-            f"({cs}/{hidden_ch} channels) applied to levels {cs_levels}"
-        )
+        if cs == hidden_ch:
+            logger.info(
+                f"  --content-size={cs}: all {hidden_ch} channels are content "
+                "(no content/style separation — plain VQ-VAE-2 baseline, no Gumbel "
+                "mask or style injection)."
+            )
+        else:
+            logger.info(
+                f"  --content-size={cs}: content_ratio={ratio:.3f} "
+                f"({cs}/{hidden_ch} channels) applied to levels {cs_levels}"
+            )
 
     args.modalities = ["image"]
     args.n_views = 2
