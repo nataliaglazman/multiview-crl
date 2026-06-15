@@ -20,7 +20,7 @@ vqvae_hidden_channels: 44
 vqvae_embed_dim: 44
 vqvae_scaling_rates: [4]
 deterministic: true
-content_size: 48
+content_size: 44
 style_injection_mode: concat
 no_final_recon_norm: true
 # separate_style_codebooks: true

@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-15T10:40:32Z
-# Git SHA: dbe80d5
+# Generated at: 2026-06-15T12:13:57Z
+# Git SHA: 358a7eb
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-random-baseline-separate-content-codebooks-44
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -53,7 +53,7 @@ conda activate "${CONDA_ENV_NAME}"
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 48 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
