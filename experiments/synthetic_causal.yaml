@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-random-separate-style-codebooks-baseline
+tag: synthetic-causal-random-separate-style-content-codebooks-baseline
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -24,3 +24,4 @@ content_size: 44
 style_injection_mode: concat
 no_final_recon_norm: true
 separate_style_codebooks: true
+separate_content_codebooks: true
