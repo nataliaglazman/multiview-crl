@@ -586,9 +586,14 @@ def compute_dci_synthetic(
 def flatten_dci_results(results):
     """Flatten DCI results dict into a single-row dict for TB / W&B logging.
 
+    Keeps the per-block summary scalars (disentanglement, completeness,
+    informativeness train/test, block-MCC, view accuracy) and expands only the
+    per-factor *test* R² into named columns. The per-factor train/completeness
+    arrays and the per-code disentanglement are intentionally dropped here — they
+    are too many scalars to log per step and remain available in the ``detail``
+    dict (and the CSV from ``dci_results_to_rows``).
+
     - Replaces Unicode arrows with ASCII ``->``
-    - Expands per-factor arrays (train/test R², completeness) into named columns
-    - Expands per-code disentanglement into indexed columns
     - Skips importance matrices and factor_info dicts
     """
     flat = {}
@@ -596,17 +601,12 @@ def flatten_dci_results(results):
         key = k.replace("→", "->")
         if isinstance(v, (int, float, np.floating)):
             flat[key] = float(v)
-        elif isinstance(v, dict) and "factor_names" in v:
+        elif isinstance(v, dict) and "factor_names" in v and "per_factor_test" in v:
             section = key.replace("/detail", "")
             names = v["factor_names"]
-            for arr_key in ("per_factor_train", "per_factor_test", "per_factor_completeness"):
-                if arr_key in v:
-                    arr = v[arr_key]
-                    for j, name in enumerate(names):
-                        flat[f"{section}/{arr_key}/{name}"] = float(arr[j])
-            if "per_code_disentanglement" in v:
-                for j, val in enumerate(v["per_code_disentanglement"]):
-                    flat[f"{section}/per_code_disentanglement/{j}"] = float(val)
+            arr = v["per_factor_test"]
+            for j, name in enumerate(names):
+                flat[f"{section}/per_factor_test/{name}"] = float(arr[j])
     return flat
 
 
