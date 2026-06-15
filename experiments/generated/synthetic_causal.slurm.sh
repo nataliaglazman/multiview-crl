@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-15T12:13:57Z
-# Git SHA: 358a7eb
+# Generated at: 2026-06-15T13:40:25Z
+# Git SHA: 0f78252
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-baseline-separate-content-codebooks-44
+#SBATCH --job-name=synthetic-causal-random-baseline-44
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-baseline-separate-content-codebooks-44-%j.err
+#SBATCH --error=synthetic-causal-random-baseline-44-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -81,7 +81,6 @@ conda activate "${CONDA_ENV_NAME}"
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
     --style-injection-mode concat \
@@ -94,7 +93,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-baseline-separate-content-codebooks-44 \
+    --model-id synthetic-causal-random-baseline-44 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
