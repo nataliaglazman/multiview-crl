@@ -1207,7 +1207,10 @@ class VQVAE(HelperModule):
                     encoder_pools.append(torch.cat([pool_v0, pool_v1], dim=0))
 
                 # Apply mask and isolate content for the next encoder level.
-                if i in self.content_style_levels:
+                # has_any_mask gates this so an all-content model (no style
+                # channels, content_size == hidden_channels) skips masking even
+                # though content_style_levels still defaults to [0].
+                if has_any_mask and i in self.content_style_levels:
                     masks = apply_mask_to_level(enc_out, i, use_per_view_masks)
                     _has_next_level = i < self.nb_levels - 1
 
@@ -1279,7 +1282,9 @@ class VQVAE(HelperModule):
                         encoder_pools.append(enc_input_pool.mean(dim=[2, 3, 4]))
 
                 # Apply mask and isolate content for next encoder level.
-                if i in self.content_style_levels:
+                # has_any_mask gates this (see dual-view path above): an
+                # all-content model skips masking entirely.
+                if has_any_mask and i in self.content_style_levels:
                     masks = apply_mask_to_level(enc_input, i, use_per_view_masks)
                     if masks is not None:
                         _has_next_level = i < self.nb_levels - 1
