@@ -1,12 +1,12 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-random-fixedref-rescale
+tag: synthetic-causal-random-separate-style-codebooks-baseline
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
-scale_contrastive_loss: 100
+scale_contrastive_loss: 0
 inject_style_to_decoder: true
 tau: 0.1
 patch_grid: [4, 4, 4]
@@ -23,5 +23,4 @@ deterministic: true
 content_size: 44
 style_injection_mode: concat
 no_final_recon_norm: true
-# synthetic_normalize: shared
-# select_by_gated_score: false
+separate_style_codebooks: true
