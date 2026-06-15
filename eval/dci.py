@@ -449,6 +449,25 @@ def _null_permuted_dci(repr_arr, factor_arr, split, factor_types, n_null, rng):
     return out
 
 
+def _ridge_informativeness(repr_arr, factor_arr, seeds=(0, 1, 2)):
+    """Linear-probe informativeness for one repr→factor block.
+
+    Cross-validated, standardized RidgeCV test-R² per factor — the same probe as
+    ``eval.run_dci_compare`` (via ``cv_probe_r2``) — so this in-training number is
+    directly comparable to the cross-model comparison table, unlike the GBT
+    ``informativeness_test`` which a nonlinear learner inflates.  Returns
+    ``(mean_over_factors, per_factor_array)``; non-finite factors are dropped from
+    the mean.
+    """
+    from eval.identifiability_metrics import cv_probe_r2
+
+    per_factor = np.array(
+        [cv_probe_r2(repr_arr, factor_arr[:, j], seeds=seeds)["mean"] for j in range(factor_arr.shape[1])]
+    )
+    finite = per_factor[np.isfinite(per_factor)]
+    return (float(finite.mean()) if finite.size else float("nan")), per_factor
+
+
 def compute_dci_synthetic(
     encoder,
     dataset,
@@ -488,6 +507,9 @@ def compute_dci_synthetic(
     Returns:
         dict with keys like ``"L0/content→content/disentanglement"``.
         When a single level is requested the ``L{i}/`` prefix is omitted.
+        Each block also gets ``"{label}/informativeness_ridge"`` — the linear
+        RidgeCV-probe analogue of the GBT ``informativeness_test``, computed the
+        same way as ``eval.run_dci_compare`` so the two are directly comparable.
         With ``null_permute`` each block also gets ``"{label}/null/{metric}"``
         (and ``"..._std"``) entries.
     """
@@ -545,6 +567,16 @@ def compute_dci_synthetic(
                     "informativeness_test",
                 ]:
                     results[f"{label}/{k}"] = float("nan")
+
+            try:
+                ridge_mean, ridge_pf = _ridge_informativeness(repr_arr, factor_arr)
+                results[f"{label}/informativeness_ridge"] = ridge_mean
+                _detail = results.get(f"{label}/detail")
+                if isinstance(_detail, dict):
+                    _detail["per_factor_ridge"] = ridge_pf
+            except Exception as e:
+                logger.warning("Ridge informativeness failed for %s: %s", label, e)
+                results[f"{label}/informativeness_ridge"] = float("nan")
 
             if null_permute:
                 null = _null_permuted_dci(repr_arr, factor_arr, split, factor_types, n_null, null_rng)
@@ -610,7 +642,7 @@ def flatten_dci_results(results):
     return flat
 
 
-DCI_CSV_COLUMNS = ["level", "section", "factor", "train_r2", "test_r2", "completeness", "disentanglement"]
+DCI_CSV_COLUMNS = ["level", "section", "factor", "train_r2", "test_r2", "ridge_r2", "completeness", "disentanglement"]
 
 
 def dci_results_to_rows(results):
@@ -619,7 +651,9 @@ def dci_results_to_rows(results):
     Each row is one factor within one section.  A ``(mean)`` row per section
     carries the summary scores and the section-level disentanglement.
 
-    Columns: level, section, factor, train_r2, test_r2, completeness, disentanglement.
+    Columns: level, section, factor, train_r2, test_r2, ridge_r2, completeness, disentanglement.
+    ``ridge_r2`` is the linear RidgeCV-probe informativeness; ``train_r2``/``test_r2``
+    are the GBT informativeness.
     """
     levels_found = set()
     for k in results:
@@ -645,6 +679,7 @@ def dci_results_to_rows(results):
                 pf_train = detail.get("per_factor_train")
                 pf_test = detail.get("per_factor_test")
                 pf_comp = detail.get("per_factor_completeness")
+                pf_ridge = detail.get("per_factor_ridge")
                 for j, name in enumerate(names):
                     rows.append(
                         {
@@ -653,6 +688,7 @@ def dci_results_to_rows(results):
                             "factor": name,
                             "train_r2": round(float(pf_train[j]), 4) if pf_train is not None else "",
                             "test_r2": round(float(pf_test[j]), 4) if pf_test is not None else "",
+                            "ridge_r2": round(float(pf_ridge[j]), 4) if pf_ridge is not None else "",
                             "completeness": round(float(pf_comp[j]), 4) if pf_comp is not None else "",
                             "disentanglement": "",
                         }
@@ -660,9 +696,10 @@ def dci_results_to_rows(results):
 
             i_train = results.get(f"{full}/informativeness_train")
             i_test = results.get(f"{full}/informativeness_test")
+            i_ridge = results.get(f"{full}/informativeness_ridge")
             c_score = results.get(f"{full}/completeness")
             d_score = results.get(f"{full}/disentanglement")
-            if any(v is not None for v in (i_train, i_test, c_score, d_score)):
+            if any(v is not None for v in (i_train, i_test, i_ridge, c_score, d_score)):
                 rows.append(
                     {
                         "level": lvl,
@@ -670,6 +707,7 @@ def dci_results_to_rows(results):
                         "factor": "(mean)",
                         "train_r2": round(float(i_train), 4) if i_train is not None else "",
                         "test_r2": round(float(i_test), 4) if i_test is not None else "",
+                        "ridge_r2": round(float(i_ridge), 4) if i_ridge is not None else "",
                         "completeness": round(float(c_score), 4) if c_score is not None else "",
                         "disentanglement": round(float(d_score), 4) if d_score is not None else "",
                     }
