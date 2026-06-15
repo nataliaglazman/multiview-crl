@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-15T09:41:42Z
-# Git SHA: 4092b0a
+# Generated at: 2026-06-15T09:43:00Z
+# Git SHA: 59864e2
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-separate-style-content-codebooks-baseline
+#SBATCH --job-name=synthetic-causal-random-separate-style-content-codebooks
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-separate-style-content-codebooks-baseline-%j.err
+#SBATCH --error=synthetic-causal-random-separate-style-content-codebooks-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -76,7 +76,7 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 100 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -95,7 +95,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-separate-style-content-codebooks-baseline \
+    --model-id synthetic-causal-random-separate-style-content-codebooks \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
