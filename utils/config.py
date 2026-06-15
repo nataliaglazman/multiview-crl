@@ -721,6 +721,44 @@ def parse_args() -> argparse.ArgumentParser:
         "end-of-run synthetic DCI is still controlled by --eval-dci.",
     )
     parser.add_argument(
+        "--no-select-by-synthetic-dci",
+        dest="select_by_synthetic_dci",
+        action="store_false",
+        help="On --dataset-name 'synthetic', do NOT select the best checkpoint by the "
+        "run_dci_compare health composite (overall_score) on the GT factors; fall back to "
+        "the cross-reconstruction separation_score. By default synthetic runs select on the "
+        "composite so the in-training selector matches the offline comparison protocol. "
+        "No effect on non-synthetic runs (no GT factors).",
+    )
+    parser.add_argument(
+        "--selection-dci-n-null",
+        type=int,
+        default=3,
+        help="Permutation-null repeats for the synthetic GT selection composite. Higher = "
+        "lower-variance null floor but slower. Only used when selecting by synthetic DCI.",
+    )
+    parser.add_argument(
+        "--selection-dci-n-seeds",
+        type=int,
+        default=2,
+        help="CV probe seeds (0..N-1) for the synthetic GT selection composite. Only used "
+        "when selecting by synthetic DCI.",
+    )
+    parser.add_argument(
+        "--selection-dci-level",
+        type=int,
+        default=0,
+        help="Encoder level scored for the synthetic GT selection composite. Default 0 (finest).",
+    )
+    parser.add_argument(
+        "--selection-dci-max-samples",
+        type=int,
+        default=2000,
+        help="Cap the val set to this many samples when scoring the synthetic GT selection "
+        "composite, to bound periodic cost. 0 = use the full val set. Default 2000 (matches the "
+        "offline run_dci_compare --num-samples convention).",
+    )
+    parser.add_argument(
         "--content-dim",
         type=int,
         default=128,

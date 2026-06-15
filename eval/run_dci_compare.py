@@ -850,6 +850,79 @@ def evaluate_model(
     return row
 
 
+def score_encoder_live(
+    model,
+    dataset,
+    device,
+    level=0,
+    poolings=(("gap", "gap"), ("stats", "stats")),
+    n_null=3,
+    seeds=(0, 1),
+    batch_size=32,
+    num_workers=0,
+    per_encoder=False,
+    probe_dim=0,
+    max_samples=None,
+):
+    """In-training counterpart of ``evaluate_model`` for a live (in-memory) encoder.
+
+    Extracts representations under each pooling and scores them with the *same*
+    ``score_reprs`` + ``attach_scores`` path the offline comparison uses, so the
+    returned health composite tracks the ``run_dci_compare`` ranking by
+    construction.  Use it to drive in-training checkpoint selection on synthetic
+    runs (where ground-truth content/style factors are available).
+
+    ``poolings`` is a list of ``(key, value)`` pairs: ``value`` is passed to
+    ``_extract_synthetic_representations`` (``"gap"`` / ``"stats"`` / a ``(D,H,W)``
+    patch tuple) and ``key`` is how that pooling is addressed in the score
+    (``"gap"`` / ``"stats"`` / ``"patch"``).  ``gap`` + ``stats`` is enough for the
+    composite; add ``patch`` only when spatially-localized factors matter.
+
+    ``max_samples`` (when set) caps the dataset to its first N items so the
+    periodic selection cost stays bounded regardless of val-set size.
+
+    Note: ``_extract_synthetic_representations`` calls ``model.eval()`` and does
+    not restore train mode — the caller must save/restore it.
+
+    Returns one row dict carrying the raw protocol metrics plus the derived
+    scores: ``disentanglement`` (= overall_score), ``content_anatomy``,
+    ``content_purity``, ``style_modality``, ``style_purity``, ``grade``.
+    """
+    from eval.dci import _extract_synthetic_representations
+
+    if max_samples and hasattr(dataset, "__len__") and len(dataset) > max_samples:
+        from torch.utils.data import Subset
+
+        dataset = Subset(dataset, range(max_samples))
+
+    reprs, gt_content, gt_style, info = {}, None, None, None
+    for key, value in poolings:
+        level_data, gc, gsv1, _gsv2 = _extract_synthetic_representations(
+            model, dataset, device, batch_size, num_workers, pooling=value
+        )
+        reprs[key] = level_data
+        if gt_content is None:
+            gt_content, gt_style = gc, gsv1
+        if info is None and level in level_data:
+            info = level_data[level][4]
+    if info is None:
+        raise RuntimeError(f"level {level} not found in encoder outputs")
+
+    row = score_reprs(
+        reprs,
+        gt_content,
+        gt_style,
+        info,
+        level,
+        n_null=n_null,
+        seeds=seeds,
+        per_encoder=per_encoder,
+        probe_dim=probe_dim,
+    )
+    attach_scores([row])
+    return row
+
+
 # --------------------------------------------------------------------------- #
 # Interpretive layer — derived human-readable scores (all 0..1, higher = better)
 # --------------------------------------------------------------------------- #

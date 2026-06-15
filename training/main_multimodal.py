@@ -1514,9 +1514,23 @@ def main(args):
             best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
             _prev_name = best_ckpt.get("best_metric_name")
             _prev_value = best_ckpt.get("best_metric_value")
-            if _prev_name == "separation_score" and _prev_value is not None:
-                best_separation_score = float(_prev_value)
-                logger.info(f"  Restored best separation_score: {best_separation_score:.4f} " f"from {best_ckpt_path}")
+            _expected_sel_name = (
+                "synthetic_overall_score"
+                if (args.dataset_name == "synthetic" and getattr(args, "select_by_synthetic_dci", True))
+                else "separation_score"
+            )
+            if _prev_name in ("separation_score", "synthetic_overall_score") and _prev_value is not None:
+                # Both are higher-is-better selection scores tracked by the same
+                # variable, but they are on different scales — only restore when the
+                # stored metric matches what this run selects by, else start fresh.
+                if _prev_name == _expected_sel_name:
+                    best_separation_score = float(_prev_value)
+                    logger.info(f"  Restored best {_prev_name}: {best_separation_score:.4f} from {best_ckpt_path}")
+                else:
+                    logger.info(
+                        f"  Prior best used '{_prev_name}' but this run selects by "
+                        f"'{_expected_sel_name}'; starting selection fresh."
+                    )
             elif _prev_name == "rolling_loss" and _prev_value is not None:
                 best_total_loss = float(_prev_value)
                 logger.info(f"  Restored best rolling_loss: {best_total_loss:.4f} from {best_ckpt_path}")
@@ -2011,8 +2025,86 @@ def main(args):
                         # on resume (instead of being silently skipped because step
                         # has already advanced past the `step % 2000 == 1` trigger).
                         separation_score = None
+                        selection_name = "separation_score"
                         if step % 2000 == 1 or step == args.train_steps:
-                            if getattr(args, "eval_separation_periodic", True):
+                            # (A) Synthetic GT selection: select on the SAME health
+                            # composite (overall_score) as eval.run_dci_compare so the
+                            # chosen checkpoint is the one that protocol would rank best
+                            # (single source of truth). ADNI runs have no GT factors and
+                            # fall through to the cross-reconstruction proxy in (B).
+                            if (
+                                args.dataset_name == "synthetic"
+                                and val_dataset is not None
+                                and getattr(args, "select_by_synthetic_dci", True)
+                            ):
+                                # score_encoder_live → _extract_synthetic_representations
+                                # calls encoder.eval() without restoring train mode.
+                                _sel_was_training = encoders[0].training
+                                try:
+                                    from eval.run_dci_compare import score_encoder_live
+
+                                    _sel_pool = [("gap", "gap"), ("stats", "stats")]
+                                    if getattr(args, "patch_contrastive", False) and getattr(args, "patch_grid", None):
+                                        _sel_pool.append(("patch", tuple(args.patch_grid)))
+                                    logger.info(f"  [EVALUATION] Synthetic GT selection composite (step {step})...")
+                                    _sel_row = score_encoder_live(
+                                        encoders[0],
+                                        val_dataset,
+                                        device,
+                                        level=getattr(args, "selection_dci_level", 0),
+                                        poolings=_sel_pool,
+                                        n_null=getattr(args, "selection_dci_n_null", 3),
+                                        seeds=tuple(range(getattr(args, "selection_dci_n_seeds", 2))),
+                                        batch_size=dataloader_kwargs.get("batch_size", 32),
+                                        num_workers=0,
+                                        per_encoder=getattr(args, "separate_encoders", False),
+                                        max_samples=getattr(args, "selection_dci_max_samples", 2000) or None,
+                                    )
+                                    separation_score = _sel_row.get("disentanglement")  # overall_score
+                                    selection_name = "synthetic_overall_score"
+                                    _mcc_cc = _sel_row.get("mcc_cc", float("nan"))
+                                    _mcc_null = _sel_row.get("mcc_cc_null", float("nan"))
+                                    _mcc_gap = (
+                                        _mcc_cc - _mcc_null
+                                        if np.isfinite(_mcc_cc) and np.isfinite(_mcc_null)
+                                        else float("nan")
+                                    )
+                                    _sel_log = {
+                                        "selection/overall_score": _sel_row.get("disentanglement"),
+                                        "selection/content_anatomy": _sel_row.get("content_anatomy"),
+                                        "selection/content_purity": _sel_row.get("content_purity"),
+                                        "selection/style_modality": _sel_row.get("style_modality"),
+                                        "selection/style_purity": _sel_row.get("style_purity"),
+                                        "selection/separation": _sel_row.get("separation"),
+                                        "selection/content_to_style_leak": _sel_row.get("leak_c2s"),
+                                        "selection/mcc_cc_gap": _mcc_gap,
+                                        "selection/content_view_acc": _sel_row.get("content_view"),
+                                    }
+                                    for _sel_k, _sel_v in _sel_log.items():
+                                        if _sel_v is not None and np.isfinite(_sel_v):
+                                            tb_writer.add_scalar(_sel_k, _sel_v, step)
+                                    if _use_wandb:
+                                        wandb.log(
+                                            {
+                                                _sel_k: _sel_v
+                                                for _sel_k, _sel_v in _sel_log.items()
+                                                if _sel_v is not None and np.isfinite(_sel_v)
+                                            },
+                                            step=step,
+                                        )
+                                    logger.info(
+                                        f"  [SELECTION] synthetic overall_score={separation_score:.4f} "
+                                        f"grade={_sel_row.get('grade')} at step {step}"
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"  [WARNING] Synthetic GT selection failed: {e}")
+                                finally:
+                                    encoders[0].train(_sel_was_training)
+
+                            # (B) Cross-reconstruction separation proxy — used for selection
+                            # only when the synthetic GT composite is unavailable (ADNI runs,
+                            # --no-select-by-synthetic-dci, or a failed synthetic eval).
+                            if separation_score is None and getattr(args, "eval_separation_periodic", True):
                                 try:
                                     from eval.cross_reconstruction import (
                                         evaluate_content_style_separation,
@@ -2077,8 +2169,8 @@ def main(args):
                         if separation_score is not None and separation_score > best_separation_score:
                             best_separation_score = separation_score
                             new_best = separation_score
-                            best_metric_name = "separation_score"
-                            logger.info(f"  [BEST] New best separation_score={separation_score:.4f} at step {step}")
+                            best_metric_name = selection_name
+                            logger.info(f"  [BEST] New best {selection_name}={separation_score:.4f} at step {step}")
 
                         save_checkpoint(
                             args,
