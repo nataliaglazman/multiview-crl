@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-16T16:34:13Z
-# Git SHA: 41b41d1
+# Generated at: 2026-06-16T16:35:40Z
+# Git SHA: ccddf25
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-separate-style-codebooks-42
+#SBATCH --job-name=synthetic-independent-separate-style-codebooks
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-separate-style-codebooks-42-%j.err
+#SBATCH --error=synthetic-independent-separate-style-codebooks-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -53,7 +53,7 @@ conda activate "${CONDA_ENV_NAME}"
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 42 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -85,7 +85,6 @@ conda activate "${CONDA_ENV_NAME}"
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --style-injection-mode concat \
-    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
@@ -94,7 +93,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-separate-style-codebooks-42 \
+    --model-id synthetic-independent-separate-style-codebooks \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \

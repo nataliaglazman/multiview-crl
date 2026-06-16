@@ -1,9 +1,9 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-separate-style-codebooks-42
+tag: synthetic-independent-separate-style-codebooks
 synthetic_normalize: fixed_reference
-synthetic_causal: true
+synthetic_causal: false
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
 scale_contrastive_loss: 100
@@ -20,7 +20,7 @@ vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
-content_size: 42
+content_size: 44
 style_injection_mode: concat
 no_final_recon_norm: true
 separate_style_codebooks: true
