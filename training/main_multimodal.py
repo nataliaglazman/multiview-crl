@@ -1999,6 +1999,7 @@ def main(args):
                                 batch_size=dataloader_kwargs.get("batch_size", 32),
                                 num_workers=0,
                                 pooling=_dci_pooling,
+                                per_encoder=getattr(args, "separate_encoders", False),
                             )
                             _dci_flat = dci.flatten_dci_results(_dci_synth)
                             for _dci_k, _dci_v in _dci_flat.items():
@@ -2458,6 +2459,7 @@ def main(args):
                 device=args.device,
                 batch_size=dataloader_kwargs.get("batch_size", 32),
                 num_workers=dataloader_kwargs.get("num_workers", 0),
+                per_encoder=getattr(args, "separate_encoders", False),
             )
             dci_synth_path = os.path.join(args.save_dir, "dci_synthetic.csv")
             rows = dci.dci_results_to_rows(dci_synth)

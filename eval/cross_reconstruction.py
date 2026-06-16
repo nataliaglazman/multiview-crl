@@ -167,6 +167,60 @@ def _cosine_sim(a, b):
     return (a_norm * b_norm).sum(axis=1)
 
 
+def _effective_rank(X):
+    """Roy–Vetterli effective rank: ``exp(entropy of the normalized singular values)``.
+
+    A continuous count, in ``[1, n_features]``, of the dimensions a view's encoder
+    actually uses.  Far below the nominal channel width means the representation is
+    (partly) collapsed — a failure mode contrastive objectives are prone to that the
+    probe metrics can miss.  Matches ``eval.run_dci_compare._effective_rank`` so the
+    figure is comparable across the synthetic and ADNI evaluation paths.
+    """
+    if X is None or np.ndim(X) != 2 or X.shape[1] == 0 or X.shape[0] < 2:
+        return float("nan")
+    Xc = np.asarray(X, dtype=np.float64)
+    Xc = Xc - Xc.mean(axis=0, keepdims=True)
+    sv = np.linalg.svd(Xc, compute_uv=False)
+    sv = sv[sv > 1e-12]
+    if sv.size == 0:
+        return float("nan")
+    p = sv / sv.sum()
+    return float(np.exp(-np.sum(p * np.log(p))))
+
+
+def _feature_health(X):
+    """Per-encoder representation-health stats for one view's features X (N, D).
+
+    Returns:
+        eff_rank: Roy–Vetterli effective rank (dimensions actually used).
+        active_frac: fraction of channels whose std exceeds 1% of the largest
+                     channel std — dead/saturated channels fall below this.
+        feat_std: mean per-channel standard deviation (overall variation scale;
+                  collapses toward 0 when an encoder stops responding to input).
+    """
+    if X is None or np.ndim(X) != 2 or X.shape[1] == 0 or X.shape[0] < 2:
+        return {"eff_rank": float("nan"), "active_frac": float("nan"), "feat_std": float("nan")}
+    chan_std = X.std(axis=0)
+    max_std = float(np.max(chan_std))
+    active_frac = float(np.mean(chan_std > 0.01 * max_std)) if max_std > 0 else 0.0
+    return {
+        "eff_rank": _effective_rank(X),
+        "active_frac": active_frac,
+        "feat_std": float(np.mean(chan_std)),
+    }
+
+
+def _balance_ratio(a, b):
+    """Symmetry of a stat across the two view encoders: min/max, in (0, 1].
+
+    ~1.0 means both encoders are exercised equally; well below 1.0 flags one
+    encoder lagging (lower effective rank / weaker activations than its pair).
+    """
+    if not (np.isfinite(a) and np.isfinite(b)) or max(a, b) <= 0:
+        return float("nan")
+    return float(min(a, b) / max(a, b))
+
+
 def _metrics_for_level(reps_lvl):
     """Compute the full set of content/style separation metrics for one level.
 
@@ -259,6 +313,49 @@ def _metrics_for_level(reps_lvl):
         m["content/diagnosis_probe_acc"] = diag_acc
         m["content/diagnosis_probe_chance"] = chance
         m["content/diagnosis_info"] = float(max(0.0, (diag_acc - chance) / max(1e-6, 1.0 - chance)))
+
+        # Per-view diagnosis probe: does EACH encoder individually carry anatomy?
+        # The pooled probe above can be propped up by one strong view; splitting
+        # it surfaces a view whose content has collapsed or lost diagnostic signal.
+        for v in ("v0", "v1"):
+            Xv = reps_lvl[f"content_{v}"][mask_valid]
+            yv = labels[mask_valid]
+            try:
+                Xv_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(Xv)
+                clf_v = LogisticRegression(max_iter=200, solver="lbfgs", n_jobs=-1)
+                acc_v = float(np.mean(cross_val_score(clf_v, Xv_scaled, yv, cv=3, scoring="accuracy", n_jobs=-1)))
+            except Exception:
+                acc_v = chance
+            m[f"content/diagnosis_probe_acc_{v}"] = acc_v
+            m[f"content/diagnosis_info_{v}"] = float(max(0.0, (acc_v - chance) / max(1e-6, 1.0 - chance)))
+
+    # --- 7. Per-encoder representation health ---
+    # Effective rank, active-channel fraction and activation scale for each view's
+    # content and style features, computed independently so a collapsing or
+    # under-used encoder is visible even when the pooled separation metrics look
+    # fine. Applies whether the two views share an encoder or use --separate-encoders.
+    for rep in ("content", "style"):
+        for v in ("v0", "v1"):
+            health = _feature_health(reps_lvl[f"{rep}_{v}"])
+            for stat, val in health.items():
+                if np.isfinite(val):
+                    m[f"{rep}/{stat}_{v}"] = val
+
+    # Encoder balance: how symmetric the two views' representations are. ~1.0 means
+    # both encoders are equally exercised; well below flags one view lagging.
+    for rep in ("content", "style"):
+        for stat in ("eff_rank", "feat_std"):
+            ratio = _balance_ratio(m.get(f"{rep}/{stat}_v0", float("nan")), m.get(f"{rep}/{stat}_v1", float("nan")))
+            if np.isfinite(ratio):
+                m[f"{rep}/view_balance_{stat}"] = ratio
+
+    # --- 8. Content alignment gap vs a shuffled-pair baseline ---
+    # Raw cross-view cosine can sit high simply because features are anisotropic
+    # (every pair points in a similar direction). Subtracting the cosine of
+    # mismatched pairs isolates the signal genuinely shared by the true pair.
+    shuffled_sim = _cosine_sim(reps_lvl["content_v0"], reps_lvl["content_v1"][perm])
+    m["content/cross_view_cosine_shuffled"] = float(np.mean(shuffled_sim))
+    m["content/alignment_gap"] = float(np.mean(content_sim) - np.mean(shuffled_sim))
     return m
 
 
@@ -317,6 +414,17 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
             "content/diagnosis_probe_acc",
             "content/diagnosis_probe_chance",
             "content/diagnosis_info",
+            "content/diagnosis_probe_acc_v0",
+            "content/diagnosis_probe_acc_v1",
+            "content/eff_rank_v0",
+            "content/eff_rank_v1",
+            "content/active_frac_v0",
+            "content/active_frac_v1",
+            "content/view_balance_eff_rank",
+            "content/alignment_gap",
+            "style/eff_rank_v0",
+            "style/eff_rank_v1",
+            "style/view_balance_eff_rank",
         ):
             suffixed = f"{k}_L{finest}"
             if suffixed in metrics:

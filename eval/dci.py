@@ -477,6 +477,7 @@ def compute_dci_synthetic(
     num_workers=0,
     pooling="gap",
     levels=None,
+    per_encoder=False,
     null_permute=False,
     n_null=5,
     null_seed=0,
@@ -489,6 +490,13 @@ def compute_dci_synthetic(
       - style_repr   → style_factors    (should be high)
       - style_repr   → content_factors  (should be low — style shouldn't encode content)
 
+    With ``per_encoder=True`` and two views present, the same four combinations are
+    additionally scored for the **second** encoder (the ``_v2`` representations),
+    emitted as ``content_v2→…`` / ``style_v2→…`` blocks so per-view informativeness
+    on the GT factors is visible under ``--separate-encoders``.  The primary view's
+    blocks stay unsuffixed.  Second-view style is read against the second view's
+    style factors (``z_style_v2``); content factors are shared across views.
+
     Args:
         encoder: VQVAE encoder (or any nn.Module with compatible forward signature).
         dataset: SyntheticBrainDataset instance.
@@ -498,6 +506,10 @@ def compute_dci_synthetic(
         num_workers: DataLoader workers.
         pooling: How to reduce spatial maps — ``"gap"``, ``"stats"``, or ``(D,H,W)`` tuple.
         levels: List of encoder levels to evaluate.  ``None`` → ``[0]``.
+        per_encoder: If True (and a second view is present), also score the second
+            encoder's representations against the GT factors, emitting ``content_v2→…``
+            / ``style_v2→…`` blocks alongside the primary view's. Doubles the per-level
+            probe cost, so it is intended for ``--separate-encoders`` runs.
         null_permute: If True, also compute a row-permuted null floor per block
             (``"{label}/null/..."`` keys) — the score the block's shape yields
             from noise alone.  Real minus null is the non-structural signal.
@@ -542,6 +554,17 @@ def compute_dci_synthetic(
         if style_repr is not None:
             pairs.append((f"{prefix}style→style", style_repr, gt_style, info["style_names"]))
             pairs.append((f"{prefix}style→content", style_repr, gt_content, info["content_names"]))
+
+        # Second encoder (view 2): score its representations against the GT factors
+        # so per-view informativeness is visible when --separate-encoders gives each
+        # modality its own encoder. View-2 style is read against gt_style_v2 (style
+        # factors are view-specific); content factors are shared across views.
+        if per_encoder and content_v2 is not None:
+            pairs.append((f"{prefix}content_v2→content", content_v2, gt_content, info["content_names"]))
+            pairs.append((f"{prefix}content_v2→style", content_v2, gt_style_v2, info["style_names"]))
+            if style_v2 is not None:
+                pairs.append((f"{prefix}style_v2→style", style_v2, gt_style_v2, info["style_names"]))
+                pairs.append((f"{prefix}style_v2→content", style_v2, gt_content, info["content_names"]))
 
         for label, repr_arr, factor_arr, factor_names in pairs:
             mus_train = repr_arr[:split].T
@@ -597,6 +620,11 @@ def compute_dci_synthetic(
             if style_repr is not None:
                 results[f"{prefix}style->style/block_mcc"] = _block_mcc(style_repr, gt_style)["mean"]
                 results[f"{prefix}content->style/block_mcc"] = _block_mcc(content_repr, gt_style)["mean"]
+            if per_encoder and content_v2 is not None:
+                results[f"{prefix}content_v2->content/block_mcc"] = _block_mcc(content_v2, gt_content)["mean"]
+                if style_v2 is not None:
+                    results[f"{prefix}style_v2->style/block_mcc"] = _block_mcc(style_v2, gt_style_v2)["mean"]
+                    results[f"{prefix}content_v2->style/block_mcc"] = _block_mcc(content_v2, gt_style_v2)["mean"]
             if content_v2 is not None:
                 _s1 = style_repr if style_repr is not None else content_repr[:, :0]
                 _s2 = style_v2 if style_v2 is not None else content_v2[:, :0]
@@ -664,8 +692,27 @@ def dci_results_to_rows(results):
     if not has_prefix:
         levels_found = {0}
 
-    section_names = ["content->content", "content->style", "style->style", "style->content"]
-    section_keys = ["content→content", "content→style", "style→style", "style→content"]
+    section_names = [
+        "content->content",
+        "content->style",
+        "style->style",
+        "style->content",
+        # Second encoder (only present when compute_dci_synthetic ran with per_encoder).
+        "content_v2->content",
+        "content_v2->style",
+        "style_v2->style",
+        "style_v2->content",
+    ]
+    section_keys = [
+        "content→content",
+        "content→style",
+        "style→style",
+        "style→content",
+        "content_v2→content",
+        "content_v2→style",
+        "style_v2→style",
+        "style_v2→content",
+    ]
 
     rows = []
     for lvl in sorted(levels_found):
