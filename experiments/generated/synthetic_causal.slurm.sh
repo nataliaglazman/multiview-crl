@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-16T08:52:19Z
-# Git SHA: 3afebc8
+# Generated at: 2026-06-16T10:12:22Z
+# Git SHA: 9dc4718
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-separate-style-content-codebooks-retry-baseline-48
+#SBATCH --job-name=synthetic-independent-separate-style-content-codebooks-retry-baseline-44
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-separate-style-content-codebooks-retry-baseline-48-%j.err
+#SBATCH --error=synthetic-independent-separate-style-content-codebooks-retry-baseline-44-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -53,7 +53,7 @@ conda activate "${CONDA_ENV_NAME}"
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 48 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -81,12 +81,10 @@ conda activate "${CONDA_ENV_NAME}"
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --style-injection-mode concat \
-    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
@@ -95,7 +93,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-separate-style-content-codebooks-retry-baseline-48 \
+    --model-id synthetic-independent-separate-style-content-codebooks-retry-baseline-44 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
