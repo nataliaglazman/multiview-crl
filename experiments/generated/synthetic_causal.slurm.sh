@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-16T10:12:22Z
-# Git SHA: 9dc4718
+# Generated at: 2026-06-16T10:13:44Z
+# Git SHA: a4fad42
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-independent-separate-style-content-codebooks-retry-baseline-44
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -100,8 +100,8 @@ conda activate "${CONDA_ENV_NAME}"
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 44 \
+    --vqvae-hidden-channels 44 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \

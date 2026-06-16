@@ -16,8 +16,8 @@ eval_dci: true
 checkpoint_steps: 1000
 scale_adv_loss: 0.0
 # style_dropout_prob: 0.2
-vqvae_hidden_channels: 48
-vqvae_embed_dim: 48
+vqvae_hidden_channels: 44
+vqvae_embed_dim: 44
 vqvae_scaling_rates: [4]
 deterministic: true
 content_size: 44
