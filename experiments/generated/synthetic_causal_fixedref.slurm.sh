@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_fixedref.yaml
-# Generated at: 2026-06-16T15:23:15Z
-# Git SHA: f571ad4
+# Generated at: 2026-06-16T16:34:13Z
+# Git SHA: 41b41d1
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-random-fixedref
 #SBATCH --output=/scratch/users/%u/%j.out
