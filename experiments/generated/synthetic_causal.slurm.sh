@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-16T10:15:51Z
-# Git SHA: 50061af
+# Generated at: 2026-06-16T10:16:04Z
+# Git SHA: 73ad546
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-independent-separate-style-codebooks
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -76,7 +76,7 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 100 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
