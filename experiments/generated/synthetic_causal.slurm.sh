@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-16T15:19:52Z
-# Git SHA: ddbbb8d
+# Generated at: 2026-06-16T15:23:15Z
+# Git SHA: f571ad4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-separate-style-codebooks-42
+#SBATCH --job-name=synthetic-causal-separate-style-codebooks-10-scale
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-separate-style-codebooks-42-%j.err
+#SBATCH --error=synthetic-causal-separate-style-codebooks-10-scale-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -53,7 +53,7 @@ conda activate "${CONDA_ENV_NAME}"
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 42 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -76,7 +76,7 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 100 \
+    --scale-contrastive-loss 10 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -94,7 +94,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-separate-style-codebooks-42 \
+    --model-id synthetic-causal-separate-style-codebooks-10-scale \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
