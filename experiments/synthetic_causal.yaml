@@ -24,4 +24,4 @@ content_size: 44
 style_injection_mode: concat
 no_final_recon_norm: true
 separate_style_codebooks: true
-# separate_content_codebooks: true
+separate_content_codebooks: true
