@@ -855,6 +855,58 @@ def _seed_worker(worker_id):
 
 
 # ---------------------------------------------------------------------------
+# Model construction
+# ---------------------------------------------------------------------------
+
+
+def build_vqvae(args) -> vqvae.VQVAE:
+    """Construct the bare ``VQVAE`` from a parsed args namespace.
+
+    Single source of truth for the args→model mapping so training (``main``)
+    and offline tools (e.g. ``eval/phase0_extract.py``) build an identical
+    architecture from the same config. Returns the unwrapped module — callers
+    add DataParallel / MoCo / aux heads as needed.
+    """
+    use_checkpoint = getattr(args, "gradient_checkpointing", False)
+    return vqvae.VQVAE(
+        in_channels=1,
+        hidden_channels=args.vqvae_hidden_channels,
+        res_channels=args.vqvae_res_channels,
+        nb_res_layers=2,
+        nb_levels=args.vqvae_nb_levels,
+        embed_dim=args.vqvae_embed_dim,
+        nb_entries=args.vqvae_nb_entries,
+        scaling_rates=args.vqvae_scaling_rates,
+        use_checkpoint=use_checkpoint,
+        content_size=len(args.content_indices[0]),
+        style_size=len(args.style_indices),
+        inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
+        content_style_levels=getattr(args, "content_style_levels", [0]),
+        content_ratios=getattr(args, "content_ratios", None),
+        separate_encoders=getattr(args, "separate_encoders", False),
+        separate_content_codebooks=getattr(args, "separate_content_codebooks", False),
+        mask_mode=getattr(args, "mask_mode", "onthefly"),
+        quantize_style=getattr(args, "quantize_style", False),
+        separate_style_codebooks=getattr(args, "separate_style_codebooks", False),
+        style_embed_dim=getattr(args, "style_embed_dim", None),
+        style_nb_entries=getattr(args, "style_nb_entries", None),
+        style_injection_mode=getattr(args, "style_injection_mode", "concat"),
+        cb_ema_decay=getattr(args, "cb_ema_decay", 0.999),
+        cb_reset_every=getattr(args, "cb_reset_every", 100),
+        cb_reset_threshold=getattr(args, "cb_reset_threshold", 1.0),
+        use_content_projection=getattr(args, "use_content_projection", False),
+        narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
+        top_level_recon_only=getattr(args, "top_level_recon_only", False),
+        pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
+        skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
+        style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
+        detach_style_injection=getattr(args, "detach_style_injection", False),
+        style_spatial_size=getattr(args, "style_spatial_size", 0),
+        final_recon_norm=not getattr(args, "no_final_recon_norm", False),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1165,42 +1217,7 @@ def main(args):
         f"hidden={args.vqvae_hidden_channels} embed={args.vqvae_embed_dim} "
         f"entries={_entries_log} grad_ckpt={use_checkpoint}"
     )
-    vqvae_model = vqvae.VQVAE(
-        in_channels=1,
-        hidden_channels=args.vqvae_hidden_channels,
-        res_channels=args.vqvae_res_channels,
-        nb_res_layers=2,
-        nb_levels=args.vqvae_nb_levels,
-        embed_dim=args.vqvae_embed_dim,
-        nb_entries=args.vqvae_nb_entries,
-        scaling_rates=args.vqvae_scaling_rates,
-        use_checkpoint=use_checkpoint,
-        content_size=len(args.content_indices[0]),
-        style_size=len(args.style_indices),
-        inject_style_to_decoder=getattr(args, "inject_style_to_decoder", False),
-        content_style_levels=getattr(args, "content_style_levels", [0]),
-        content_ratios=getattr(args, "content_ratios", None),
-        separate_encoders=getattr(args, "separate_encoders", False),
-        separate_content_codebooks=getattr(args, "separate_content_codebooks", False),
-        mask_mode=getattr(args, "mask_mode", "onthefly"),
-        quantize_style=getattr(args, "quantize_style", False),
-        separate_style_codebooks=getattr(args, "separate_style_codebooks", False),
-        style_embed_dim=getattr(args, "style_embed_dim", None),
-        style_nb_entries=getattr(args, "style_nb_entries", None),
-        style_injection_mode=getattr(args, "style_injection_mode", "concat"),
-        cb_ema_decay=getattr(args, "cb_ema_decay", 0.999),
-        cb_reset_every=getattr(args, "cb_reset_every", 100),
-        cb_reset_threshold=getattr(args, "cb_reset_threshold", 1.0),
-        use_content_projection=getattr(args, "use_content_projection", False),
-        narrow_encoder_input=getattr(args, "narrow_encoder_input", False),
-        top_level_recon_only=getattr(args, "top_level_recon_only", False),
-        pass_full_to_next_level=getattr(args, "pass_full_to_next_level", False),
-        skip_decoder_concat_levels=getattr(args, "skip_decoder_concat_levels", None),
-        style_dropout_prob=getattr(args, "style_dropout_prob", 0.0),
-        detach_style_injection=getattr(args, "detach_style_injection", False),
-        style_spatial_size=getattr(args, "style_spatial_size", 0),
-        final_recon_norm=not getattr(args, "no_final_recon_norm", False),
-    )
+    vqvae_model = build_vqvae(args)
     if getattr(args, "channels_last", False):
         vqvae_model = vqvae_model.to(memory_format=torch.channels_last_3d)
         logger.info("  Memory format: channels_last_3d")
