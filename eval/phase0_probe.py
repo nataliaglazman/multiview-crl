@@ -52,6 +52,7 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -122,6 +123,17 @@ def load_mask(subject, cfg: Config):
     if os.path.exists(path):
         return np.load(path).astype(bool)
     return None
+
+
+def discover_subjects(cfg: Config) -> list:
+    """Enumerate subjects in ``cfg.root`` from the ``{subject}_{t1}_seed{s}.npy``
+    files (using the first seed). Lets you point ``--root`` at an extracted dump
+    without ``--synthetic`` or hand-editing ``cfg.subjects``."""
+    seed = cfg.seeds[0]
+    suffix = f"_{cfg.t1}_seed{seed}.npy"
+    matches = glob.glob(os.path.join(cfg.root, f"*{suffix}"))
+    subjects = sorted(os.path.basename(p)[: -len(suffix)] for p in matches)
+    return subjects
 
 
 # --------------------------------------------------------------------------------------
@@ -332,6 +344,12 @@ def main():
     ap.add_argument("--folds", type=int, default=None)
     ap.add_argument("--nonlinear", default=None, choices=["torch", "sklearn", "auto", "none"])
     ap.add_argument("--out", default=None)
+    ap.add_argument(
+        "--subjects",
+        nargs="+",
+        default=None,
+        help="Explicit subject ids. Default: auto-discover from --root (no --synthetic needed).",
+    )
     a = ap.parse_args()
 
     cfg = Config()
@@ -352,10 +370,23 @@ def main():
     if a.out:
         cfg.out_json = a.out
 
+    if a.synthetic and a.root and glob.glob(os.path.join(cfg.root, "*.npy")):
+        sys.exit(
+            f"--synthetic would overwrite .npy files already in {cfg.root}. It is a self-test "
+            "that writes toy data; run it without --root (uses ./content_maps), or drop "
+            "--synthetic to probe a real extracted dump."
+        )
     if a.synthetic:
         cfg.subjects = make_synthetic(cfg)
+    elif a.subjects:
+        cfg.subjects = a.subjects
+    elif not cfg.subjects:
+        cfg.subjects = discover_subjects(cfg)
     if not cfg.subjects:
-        sys.exit("No subjects. Use --synthetic, or set cfg.subjects and edit the loaders.")
+        sys.exit(
+            f"No subjects found in {cfg.root} matching *_{cfg.t1}_seed{cfg.seeds[0]}.npy. "
+            "Run eval/phase0_extract.py first, or pass --subjects / --synthetic."
+        )
     if len(cfg.seeds) < 2:
         print("[warn] seed reproducibility needs >=2 seeds; skipping that comparison.")
 
