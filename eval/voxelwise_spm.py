@@ -105,6 +105,32 @@ def discover_subjects(cfg):
     return sorted(os.path.basename(p)[: -len(suffix)] for p in matches)
 
 
+def _no_subjects_message(cfg):
+    """Diagnostic for an empty discovery: report what (if anything) the dir holds
+    so a view-name/seed-tag mismatch is obvious instead of a bare 'not found'."""
+    want = f"*_{cfg.src[0]}_seed{cfg.src[1]}.npy"
+    if not os.path.isdir(cfg.root):
+        return (
+            f"--root {cfg.root} does not exist. Dump content maps first:\n"
+            f"  python -m eval.phase0_extract --run-dir <run> --seed {cfg.src[1]}"
+        )
+    seed_npys = sorted(os.path.basename(p) for p in glob.glob(os.path.join(cfg.root, "*_seed*.npy")))
+    if not seed_npys:
+        return (
+            f"No content-map .npy files in {cfg.root} (looked for {want}). "
+            f"Run eval/phase0_extract.py first:\n"
+            f"  python -m eval.phase0_extract --run-dir <run> --seed {cfg.src[1]}"
+        )
+    # Surface the view/seed tags actually present so the right --src/--tgt is obvious.
+    tags = sorted({n[n.find("_") + 1 : -len(".npy")] for n in seed_npys if "_seed" in n})
+    return (
+        f"No subjects in {cfg.root} matching {want}.\n"
+        f"Files ARE present with these <view>_seed<n> tags: {tags}\n"
+        f"Pass --src/--tgt to match (e.g. --src {tags[0].replace('_seed', ':')} ...), "
+        f"or re-extract with the view-names/seed you expect."
+    )
+
+
 # ======================================================================================
 
 
@@ -286,11 +312,11 @@ def main():
     if a.tgt:
         cfg.tgt = tuple(a.tgt.split(":")[:1]) + (int(a.tgt.split(":")[1]),)
 
-    if a.synthetic and a.root and glob.glob(os.path.join(cfg.root, "*.npy")):
+    if a.synthetic and a.root:
         sys.exit(
-            f"--synthetic would overwrite .npy files already in {cfg.root}. It is a self-test "
-            "that writes toy data; run it without --root (uses ./content_maps), or drop "
-            "--synthetic to map a real extracted dump."
+            "--synthetic is a self-test that WRITES toy data into --root; do not point it at a "
+            f"real dump ({cfg.root}). Run it bare (`--synthetic`, writes to ./content_maps), or "
+            "drop --synthetic to map your extracted dump."
         )
     if a.synthetic:
         signal = make_synthetic(cfg)
@@ -299,10 +325,7 @@ def main():
     elif not cfg.subjects:
         cfg.subjects = discover_subjects(cfg)
     if not cfg.subjects:
-        sys.exit(
-            f"No subjects found in {cfg.root} matching *_{cfg.src[0]}_seed{cfg.src[1]}.npy. "
-            "Run eval/phase0_extract.py first, or pass --subjects / --synthetic."
-        )
+        sys.exit(_no_subjects_message(cfg))
 
     backend = cfg.backend
     if backend == "auto":
