@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-16T16:35:40Z
-# Git SHA: ccddf25
+# Generated at: 2026-06-23T16:16:20Z
+# Git SHA: e98acd2
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-independent-separate-style-codebooks
+#SBATCH --job-name=synthetic-causal-random-input
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-independent-separate-style-codebooks-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-random-input-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_40g
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -76,7 +76,7 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 100 \
+    --scale-contrastive-loss 10 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -84,7 +84,8 @@ conda activate "${CONDA_ENV_NAME}"
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode concat \
+    --style-injection-mode input \
+    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
@@ -93,7 +94,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-independent-separate-style-codebooks \
+    --model-id synthetic-causal-random-input \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
