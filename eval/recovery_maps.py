@@ -1207,6 +1207,144 @@ def _visibility_control(results, seed, side=8, C=3):
     return ok
 
 
+def _parse_sol(s):
+    v, seed = s.split(":")
+    return (v, int(seed))
+
+
+def _load_factors_aligned(factors_path, meta_path, fields):
+    """Load [S,K] factors and re-order rows to ``fields.subjects`` via factors_meta."""
+    Z = np.load(factors_path)
+    if os.path.exists(meta_path):
+        subs = json.load(open(meta_path)).get("subjects", [])
+        idx = {s: i for i, s in enumerate(subs)}
+        missing = [s for s in fields.subjects if s not in idx]
+        if missing:
+            raise SystemExit(
+                f"{len(missing)} content subjects absent from {meta_path} (e.g. {missing[:3]}). "
+                "Re-run eval.extract_factors for the SAME run/split."
+            )
+        return np.stack([Z[idx[s]] for s in fields.subjects]).astype(np.float32)
+    if Z.shape[0] != len(fields.subjects):
+        raise SystemExit(
+            f"{factors_path} has {Z.shape[0]} rows but {len(fields.subjects)} content subjects, and no "
+            f"{meta_path} to align them. Re-run eval.extract_factors."
+        )
+    return Z.astype(np.float32)
+
+
+def _write_prov(out, prov):
+    with open(f"{out}_provenance.json", "w") as f:
+        json.dump(prov, f, indent=2)
+    print(json.dumps({k: v for k, v in prov.items() if not (k.startswith("roi_") or k == "drift")}, indent=2))
+    print(f"maps -> {out}_*.npy/.nii.gz ; provenance -> {out}_provenance.json")
+
+
+def _run_recovery(a):
+    if not (a.root and a.solA and a.solB):
+        raise SystemExit("recovery mode needs --root --solA --solB")
+    solA, solB = _parse_sol(a.solA), _parse_sol(a.solB)
+    fields = load_fields(a.root, [solA, solB], atlas_path=a.atlas, ref_path=a.ref)
+    assert_common_space(fields)
+    A, B = fields.content[solA], fields.content[solB]
+    g = fit_global_gauge(A, B, fields.mask)
+    rec = recovery_maps(A, B, g, fields.mask, block_metric=a.block_metric)
+    rng = np.random.default_rng(0)
+    map_block = lambda x, y: recovery_maps(x, y, g, fields.mask, block_metric=a.block_metric)["block"]
+    map_comp = lambda x, y: recovery_maps(x, y, fit_global_gauge(x, y, fields.mask), fields.mask)["component"]
+    block_null = gauge_null(map_block, A, B, "subject_perm", a.perms, fields.mask, rng=rng)
+    comp_null = gauge_null(map_comp, A, B, "content_rotation", a.perms, fields.mask, rng=rng)
+    block_inf = fwe_tfce(rec["block"], block_null, fields.mask, fields.spatial)
+    comp_inf = fwe_tfce(rec["component"], comp_null, fields.mask, fields.spatial)
+    for name, arr in [("block", rec["block"]), ("component", rec["component"]), ("boundary", rec["boundary"])]:
+        save_map(arr, fields.mask, fields.spatial, fields.affine, a.out, name)
+    save_map(block_inf["sig_fwe"], fields.mask, fields.spatial, fields.affine, a.out, "block_sig_fwe")
+    save_map(comp_inf["sig_fwe"], fields.mask, fields.spatial, fields.affine, a.out, "component_sig_fwe")
+    _write_prov(
+        a.out,
+        {
+            "mode": "recovery",
+            "solA": list(solA),
+            "solB": list(solB),
+            "block_metric": a.block_metric,
+            "block_null": "subject_perm",
+            "component_null": "content_rotation",
+            "perms": a.perms,
+            "n_subjects": len(fields.subjects),
+            "n_voxels": int(fields.mask.sum()),
+            "block_mean": float(rec["block"].mean()),
+            "component_mean": float(rec["component"].mean()),
+            "boundary_mean": float(rec["boundary"].mean()),
+            "block_fwe_survivors": int((block_inf["p_fwe"] < 0.05).sum()),
+            "component_fwe_survivors": int((comp_inf["p_fwe"] < 0.05).sum()),
+            "roi_block": roi_summary(rec["block"], fields.atlas, fields.mask, n_boot=200),
+            "roi_component": roi_summary(rec["component"], fields.atlas, fields.mask, n_boot=200),
+        },
+    )
+
+
+def _run_labelled(a):
+    if not (a.root and a.solA):
+        raise SystemExit(f"{a.mode} mode needs --root and --solA (the content solution)")
+    solA = _parse_sol(a.solA)
+    fields = load_fields(a.root, [solA], atlas_path=a.atlas, ref_path=a.ref)
+    assert_common_space(fields)
+    content = fields.content[solA]
+    factors_path = a.factors or os.path.join(a.root, "factors.npy")
+    meta_path = a.factors_meta or os.path.join(a.root, "factors_meta.json")
+    if not os.path.exists(factors_path):
+        raise SystemExit(
+            f"no factor array at {factors_path}. For synthetic, run:\n"
+            f"  python -m eval.extract_factors --run-dir <run> --split <split>\n"
+            f"or pass --factors <S x K .npy> (e.g. an ADNI severity/age covariate)."
+        )
+    Z = _load_factors_aligned(factors_path, meta_path, fields)
+    rng = np.random.default_rng(0)
+    prov = {"mode": a.mode, "solA": list(solA), "K": int(Z.shape[1]), "n_subjects": len(fields.subjects)}
+
+    if a.mode == "gt":
+        rec = gt_recovery_map(content, Z, fields.mask)
+        block_fn = lambda c, z: gt_recovery_map(c, z, fields.mask)["block"]
+        comp_fn = lambda c, z: gt_recovery_map(c, z, fields.mask)["component"]
+        bnull = gt_null(block_fn, content, Z, a.perms, fields.mask, rng=rng)
+        cnull = gt_null(comp_fn, content, Z, a.perms, fields.mask, rng=rng)
+        binf = fwe_tfce(rec["block"], bnull, fields.mask, fields.spatial)
+        cinf = fwe_tfce(rec["component"], cnull, fields.mask, fields.spatial)
+        for name in ("block", "component", "informativeness"):
+            save_map(rec[name], fields.mask, fields.spatial, fields.affine, a.out, name)
+        save_map(binf["sig_fwe"], fields.mask, fields.spatial, fields.affine, a.out, "block_sig_fwe")
+        save_map(cinf["sig_fwe"], fields.mask, fields.spatial, fields.affine, a.out, "component_sig_fwe")
+        prov.update(
+            {
+                "block_mean": float(rec["block"].mean()),
+                "component_mean": float(rec["component"].mean()),
+                "informativeness_mean": float(rec["informativeness"].mean()),
+                "block_fwe_survivors": int((binf["p_fwe"] < 0.05).sum()),
+                "component_fwe_survivors": int((cinf["p_fwe"] < 0.05).sum()),
+                "roi_block": roi_summary(rec["block"], fields.atlas, fields.mask, n_boot=200),
+            }
+        )
+    elif a.mode == "dci":
+        dci = dci_maps(content, Z, fields.mask, level="voxel")
+        for key, nm in (("disentanglement", "D"), ("completeness", "C"), ("informativeness", "I")):
+            save_map(dci[key], fields.mask, fields.spatial, fields.affine, a.out, nm)
+        prov.update(
+            {
+                "ceiling": float(dci["ceiling"]),
+                "D_mean": float(dci["disentanglement"].mean()),  # already an in-mask (V,) array
+                "C_mean": float(dci["completeness"].mean()),
+                "roi_dci": dci_maps(content, Z, fields.mask, level="roi", atlas=fields.atlas),
+            }
+        )
+    else:  # drift
+        atlas = fields.atlas
+        if atlas is None:
+            print("[warn] drift is per-ROI; with no --atlas it is one whole-brain ROI (drift==0). Pass --atlas.")
+            atlas = np.ones(fields.spatial, int)
+        prov["drift"] = gauge_drift_roi(content, Z, atlas, fields.mask, n_perm=a.perms, rng=rng)
+    _write_prov(a.out, prov)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument(
@@ -1220,58 +1358,24 @@ def main():
     ap.add_argument("--out", default="recovery")
     ap.add_argument("--ref", help="Reference NIfTI (feature-grid) for output affine.")
     ap.add_argument("--atlas", help="ROI atlas .npy at feature-grid resolution.")
+    ap.add_argument(
+        "--mode",
+        choices=["recovery", "gt", "dci", "drift"],
+        default="recovery",
+        help="recovery (default): solA-vs-solB block/component/boundary. "
+        "gt/dci/drift: labelled-data maps vs a factor array (needs --factors / eval.extract_factors).",
+    )
+    ap.add_argument("--factors", help="Factor array .npy [S,K]. Default <root>/factors.npy (see eval.extract_factors).")
+    ap.add_argument("--factors-meta", help="factors_meta.json for subject alignment. Default <root>/factors_meta.json.")
     a = ap.parse_args()
 
     if a.synthetic:
         _run_synthetic()
         return
-
-    if not (a.root and a.solA and a.solB):
-        ap.error("provide --root --solA --solB (or --synthetic)")
-    parse = lambda s: (s.split(":")[0], int(s.split(":")[1]))
-    solA, solB = parse(a.solA), parse(a.solB)
-    fields = load_fields(a.root, [solA, solB], atlas_path=a.atlas, ref_path=a.ref)
-    assert_common_space(fields)
-    A, B = fields.content[solA], fields.content[solB]
-
-    g = fit_global_gauge(A, B, fields.mask)
-    rec = recovery_maps(A, B, g, fields.mask, block_metric=a.block_metric)
-
-    rng = np.random.default_rng(0)
-    map_block = lambda x, y: recovery_maps(x, y, g, fields.mask, block_metric=a.block_metric)["block"]
-    map_comp = lambda x, y: recovery_maps(x, y, fit_global_gauge(x, y, fields.mask), fields.mask)["component"]
-    block_null = gauge_null(map_block, A, B, "subject_perm", a.perms, fields.mask, rng=rng)
-    comp_null = gauge_null(map_comp, A, B, "content_rotation", a.perms, fields.mask, rng=rng)
-    block_inf = fwe_tfce(rec["block"], block_null, fields.mask, fields.spatial)
-    comp_inf = fwe_tfce(rec["component"], comp_null, fields.mask, fields.spatial)
-
-    for name, arr in [("block", rec["block"]), ("component", rec["component"]), ("boundary", rec["boundary"])]:
-        save_map(arr, fields.mask, fields.spatial, fields.affine, a.out, name)
-    save_map(block_inf["sig_fwe"], fields.mask, fields.spatial, fields.affine, a.out, "block_sig_fwe")
-    save_map(comp_inf["sig_fwe"], fields.mask, fields.spatial, fields.affine, a.out, "component_sig_fwe")
-
-    prov = {
-        "solA": list(solA),
-        "solB": list(solB),
-        "block_metric": a.block_metric,
-        "block_null": "subject_perm",
-        "component_null": "content_rotation",
-        "boundary_null": "content_style",
-        "perms": a.perms,
-        "n_subjects": len(fields.subjects),
-        "n_voxels": int(fields.mask.sum()),
-        "block_mean": float(rec["block"].mean()),
-        "component_mean": float(rec["component"].mean()),
-        "boundary_mean": float(rec["boundary"].mean()),
-        "block_fwe_survivors": int((block_inf["p_fwe"] < 0.05).sum()),
-        "component_fwe_survivors": int((comp_inf["p_fwe"] < 0.05).sum()),
-        "roi_block": roi_summary(rec["block"], fields.atlas, fields.mask, n_boot=200),
-        "roi_component": roi_summary(rec["component"], fields.atlas, fields.mask, n_boot=200),
-    }
-    with open(f"{a.out}_provenance.json", "w") as f:
-        json.dump(prov, f, indent=2)
-    print(json.dumps({k: v for k, v in prov.items() if not k.startswith("roi_")}, indent=2))
-    print(f"maps -> {a.out}_*.npy/.nii.gz ; provenance -> {a.out}_provenance.json")
+    if a.mode == "recovery":
+        _run_recovery(a)
+    else:
+        _run_labelled(a)
 
 
 if __name__ == "__main__":
