@@ -377,10 +377,12 @@ def gauge_null(map_fn, solA, solB, subgroup, K, mask, *, rng=None, styleA=None):
     return np.stack(cols, axis=1)
 
 
-def fwe_tfce(observed, null_stack, mask, shape, *, alpha=0.05, tfce_H=2.0, tfce_E=0.5, tfce_dh=0.1):
-    """Per-voxel p from the tail, max-statistic FWE over the mask, and TFCE cluster
-    extent -- all against the gauge/subject null. Reuses ``voxelwise_spm.tfce``
-    (the corrected background-bin handling)."""
+def fwe_tfce(observed, null_stack, mask, shape, *, alpha=0.05, tfce_H=2.0, tfce_E=0.5, tfce_dh=0.1, do_tfce=True):
+    """Per-voxel p from the tail, max-statistic FWE over the mask, and (when
+    ``do_tfce``) TFCE cluster extent -- all against the gauge/subject null. Reuses
+    ``voxelwise_spm.tfce`` (the corrected background-bin handling). ``do_tfce=False``
+    skips the (per-permutation) TFCE pass -- useful when running it K times for
+    per-factor maps."""
     K = null_stack.shape[1]
     mf = mask.reshape(-1)
     nmean, nstd = null_stack.mean(1), null_stack.std(1) + 1e-9
@@ -390,6 +392,8 @@ def fwe_tfce(observed, null_stack, mask, shape, *, alpha=0.05, tfce_H=2.0, tfce_
     maxstat = null_stack.max(0)  # (K,)
     p_fwe = ((maxstat[None, :] >= observed[:, None]).sum(1) + 1) / (K + 1)
     out = {"z": z, "p_unc": p_unc, "q_fdr": q_fdr, "p_fwe": p_fwe, "sig_fwe": observed * (p_fwe < alpha)}
+    if not do_tfce:
+        return out
 
     znull = (null_stack - nmean[:, None]) / nstd[:, None]
     t_obs = tfce(np.clip(z, 0, None), mf, shape, tfce_H, tfce_E, tfce_dh)
@@ -456,6 +460,18 @@ def _ridge_importance(Xv, Z, lam=1e-2):
     return W, Xc, Zc
 
 
+def _perfactor_r2(Xv, Z, lam=1e-2):
+    """Per-voxel, per-factor in-sample ridge R^2 content (V,S,C) -> factors (S,K).
+    Returns (V,K). In-sample (not CV), so the ABSOLUTE level is optimistic — read it
+    relatively, and use the permutation null (which carries the same bias) for
+    significance."""
+    W, Xc, Zc = _ridge_importance(Xv, Z, lam)
+    Zhat = np.einsum("vsc,vck->vsk", Xc, W, optimize=True)
+    ss_res = ((Zc[None] - Zhat) ** 2).sum(1)  # (V,K)
+    ss_tot = (Zc**2).sum(0)[None] + 1e-12  # (1,K)
+    return 1.0 - ss_res / ss_tot
+
+
 def gt_recovery_map(content, factors, mask, *, lam=1e-2):
     """Per-voxel recovery of KNOWN factors by the content block (the synthetic
     direct test; degrades to any covariate on real data).
@@ -463,6 +479,9 @@ def gt_recovery_map(content, factors, mask, *, lam=1e-2):
       * block      -- mean canonical correlation content-block <-> all factors (CCA).
       * component  -- matched Spearman after the ONE global content<->factor Hungarian.
       * informativeness -- per-voxel mean ridge R^2 over factors.
+      * informativeness_per_factor -- (V,K) ridge R^2 for EACH factor separately,
+        i.e. "where is factor k encoded" (no Hungarian: each factor predicted from
+        the whole content block).
 
     Use ``gt_null`` + ``fwe_tfce`` for significance (subject-permutation of Z)."""
     mf = mask.reshape(-1)
@@ -479,12 +498,13 @@ def gt_recovery_map(content, factors, mask, *, lam=1e-2):
     den = np.sqrt(np.einsum("vsm,vsm->vm", Rx, Rx, optimize=True) * (Rz**2).sum(0)[None])
     component = (num / (den + 1e-12)).mean(1)
 
-    W, Xc, Zc = _ridge_importance(Xv, Z, lam)
-    Zhat = np.einsum("vsc,vck->vsk", Xc, W, optimize=True)
-    ss_res = ((Zc[None] - Zhat) ** 2).sum(1)
-    ss_tot = (Zc**2).sum(0)[None] + 1e-12
-    informativeness = (1.0 - ss_res / ss_tot).mean(1)
-    return {"block": block, "component": component, "informativeness": informativeness}
+    r2 = _perfactor_r2(Xv, Z, lam)  # (V,K)
+    return {
+        "block": block,
+        "component": component,
+        "informativeness": r2.mean(1),
+        "informativeness_per_factor": r2,
+    }
 
 
 def gt_null(map_fn, content, factors, K, mask, *, rng=None):
@@ -492,6 +512,15 @@ def gt_null(map_fn, content, factors, K, mask, *, rng=None):
     (the existence-of-association chance level). Returns (V, K)."""
     rng = rng or np.random.default_rng(0)
     return np.stack([map_fn(content, factors[rng.permutation(factors.shape[0])]) for _ in range(K)], axis=1)
+
+
+def gt_perfactor_null(content, factors, n_perm, mask, *, rng=None, lam=1e-2):
+    """Subject-permutation null for the per-factor R^2 map. Returns (V, K, n_perm).
+    One batched ridge per draw yields all K factors at once."""
+    rng = rng or np.random.default_rng(0)
+    Xv = _to_vsc(content, mask.reshape(-1))
+    Z = np.asarray(factors, np.float32)
+    return np.stack([_perfactor_r2(Xv, Z[rng.permutation(Z.shape[0])], lam) for _ in range(n_perm)], axis=2)
 
 
 def _dci_from_importance(R):
@@ -1025,6 +1054,12 @@ def _synthetic_gt(case, rng, S=120, K=4, side=10, noise=0.1):
             content[:, c] = ident * left[None] + (ZP[:, c, None, None] * gains[c][None]) * right[None]
         else:
             raise ValueError(case)
+    # A shared per-voxel "anatomy" offset (same for every subject) gives the group
+    # mean real structure -> passes assert_common_space, like trained-encoder content.
+    # It is constant across subjects, so every metric (which centres over subjects)
+    # removes it: recovery is unaffected.
+    anatomy = np.stack([_smudge(rng.standard_normal((1, side, side)), 1.5)[0] for _ in range(K)])
+    content += anatomy[None]
     content += noise * rng.standard_normal(content.shape).astype(np.float32)
     return content.astype(np.float32), Z, mask, atlas
 
@@ -1300,7 +1335,14 @@ def _run_labelled(a):
         )
     Z = _load_factors_aligned(factors_path, meta_path, fields)
     rng = np.random.default_rng(0)
-    prov = {"mode": a.mode, "solA": list(solA), "K": int(Z.shape[1]), "n_subjects": len(fields.subjects)}
+    prov = {
+        "mode": a.mode,
+        "solA": list(solA),
+        "K": int(Z.shape[1]),
+        "n_content_channels": int(content.shape[1]),
+        "n_subjects": len(fields.subjects),
+        "n_voxels": int(fields.mask.sum()),
+    }
 
     if a.mode == "gt":
         rec = gt_recovery_map(content, Z, fields.mask)
@@ -1314,6 +1356,12 @@ def _run_labelled(a):
             save_map(rec[name], fields.mask, fields.spatial, fields.affine, a.out, name)
         save_map(binf["sig_fwe"], fields.mask, fields.spatial, fields.affine, a.out, "block_sig_fwe")
         save_map(cinf["sig_fwe"], fields.mask, fields.spatial, fields.affine, a.out, "component_sig_fwe")
+        # Per-factor "where is factor k encoded" R^2 maps (always; in-sample, read
+        # relatively). The factor key order is recorded in factors_meta.json.
+        ipf = rec["informativeness_per_factor"]  # (V, K)
+        K = ipf.shape[1]
+        for k in range(K):
+            save_map(ipf[:, k], fields.mask, fields.spatial, fields.affine, a.out, f"informativeness_f{k}")
         prov.update(
             {
                 "block_mean": float(rec["block"].mean()),
@@ -1321,9 +1369,18 @@ def _run_labelled(a):
                 "informativeness_mean": float(rec["informativeness"].mean()),
                 "block_fwe_survivors": int((binf["p_fwe"] < 0.05).sum()),
                 "component_fwe_survivors": int((cinf["p_fwe"] < 0.05).sum()),
+                "informativeness_per_factor_mean": [float(ipf[:, k].mean()) for k in range(K)],
                 "roi_block": roi_summary(rec["block"], fields.atlas, fields.mask, n_boot=200),
             }
         )
+        if a.per_factor_sig:  # per-factor voxel-FWE (shared subject-perm null; no TFCE for speed)
+            null_pf = gt_perfactor_null(content, Z, a.perms, fields.mask, rng=rng)  # (V,K,perms)
+            surv = []
+            for k in range(K):
+                infk = fwe_tfce(ipf[:, k], null_pf[:, k, :], fields.mask, fields.spatial, do_tfce=False)
+                save_map(infk["sig_fwe"], fields.mask, fields.spatial, fields.affine, a.out, f"info_f{k}_sig_fwe")
+                surv.append(int((infk["p_fwe"] < 0.05).sum()))
+            prov["informativeness_per_factor_fwe_survivors"] = surv
     elif a.mode == "dci":
         dci = dci_maps(content, Z, fields.mask, level="voxel")
         for key, nm in (("disentanglement", "D"), ("completeness", "C"), ("informativeness", "I")):
@@ -1367,6 +1424,11 @@ def main():
     )
     ap.add_argument("--factors", help="Factor array .npy [S,K]. Default <root>/factors.npy (see eval.extract_factors).")
     ap.add_argument("--factors-meta", help="factors_meta.json for subject alignment. Default <root>/factors_meta.json.")
+    ap.add_argument(
+        "--per-factor-sig",
+        action="store_true",
+        help="gt mode: also compute per-factor voxel-FWE significance maps (K x the null cost).",
+    )
     a = ap.parse_args()
 
     if a.synthetic:
