@@ -929,10 +929,9 @@ def main(args):
 
     # Resolve paths
     args.datapath = os.path.join(args.dataroot, args.dataset_name)
-    args.model_dir = os.path.join(args.model_dir, args.dataset_name)
     if args.model_id is None:
         setattr(args, "model_id", str(uuid.uuid4()))
-    args.save_dir = os.path.join(args.model_dir, args.model_id)
+    args.save_dir = os.path.join(args.model_dir, args.dataset_name, args.model_id)
     os.makedirs(args.save_dir, exist_ok=True)
 
     # Logging
