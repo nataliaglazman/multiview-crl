@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Content-block geometry diagnostic: effective rank per pooling + PCA-truncation R² curve.
 
-Answers two questions that ``run_dci_compare``'s single GAP ``content_rank`` cannot,
+Answers three questions that ``run_dci_compare``'s single GAP ``content_rank`` cannot,
 for a set of trained runs scored on one shared synthetic test set:
 
 1. **Is a low GAP effective rank a *collapse* or just *spatial storage*?**
@@ -17,6 +17,13 @@ for a set of trained runs scored on one shared synthetic test set:
    the variance past that point is *not* about the content factors — redundancy, or
    leaked nuisance/style worth checking against ``content→style``.
 
+3. **Is weak *linear* recovery a model failure or just non-linear encoding /
+   a data ceiling?**  The CEILING table puts the linear (ridge) full-block R² next
+   to a non-linear (MLP) one, plus a raw-downsampled-pixel row.  ``mlp >> linear``
+   means the factors are encoded non-linearly (still identifiable up to a smooth
+   map, just not linearly); ``model R² ≈ raw-pixel R²`` means recovery is limited by
+   the data, not the model.
+
 The R² is the variance-weighted CV test-R² of predicting *all* content factors
 jointly (``cv_probe_r2`` with a multioutput target), averaged over seeds — the same
 probe family as ``run_dci_compare``.
@@ -30,7 +37,8 @@ Usage
 
 PCA is fit on all samples (unsupervised, transductive but label-free — the same
 choice ``run_dci_compare._reduce_reprs`` makes), so the curve is an honest
-"how many directions carry the factors" readout.
+"how many directions carry the factors" readout.  The MLP ceiling is the slow part;
+pass ``--no-mlp`` to skip it, ``--raw-grid 0`` to skip the raw-pixel row.
 """
 from __future__ import annotations
 
@@ -85,7 +93,9 @@ def pca_truncation_curve(X, factors, max_pcs, seeds):
     return grid, r2_by_k, r2_full, n_pcs_95
 
 
-def analyse_model(name, run_dir, dataset, poolings, level, checkpoint_name, max_pcs, seeds, batch_size, num_workers):
+def analyse_model(
+    name, run_dir, dataset, poolings, level, checkpoint_name, max_pcs, seeds, batch_size, num_workers, compute_mlp=True
+):
     """Load one run, extract its content block under every pooling, and score geometry."""
     import torch
 
@@ -115,6 +125,9 @@ def analyse_model(name, run_dir, dataset, poolings, level, checkpoint_name, max_
 
         rank = _effective_rank(content)
         grid, r2_by_k, r2_full, n95 = pca_truncation_curve(content, gt_content, max_pcs, seeds)
+        # Non-linear ceiling on the full block: mlp >> ridge => factors are there but
+        # encoded non-linearly (identifiable up to a smooth map, not linearly).
+        r2_full_mlp = cv_probe_r2(content, gt_content, seeds=seeds, kind="mlp")["mean"] if compute_mlp else float("nan")
         rows.append(
             {
                 "model": name,
@@ -123,6 +136,7 @@ def analyse_model(name, run_dir, dataset, poolings, level, checkpoint_name, max_
                 "nominal_channels": info.get("n_content_channels", content.shape[1]),
                 "eff_rank": rank,
                 "r2_full": r2_full,
+                "r2_full_mlp": r2_full_mlp,
                 "n_pcs_95": n95,
                 "grid": grid,
                 "r2_by_k": r2_by_k,
@@ -138,6 +152,42 @@ def analyse_model(name, run_dir, dataset, poolings, level, checkpoint_name, max_
     return rows
 
 
+def extract_raw_pixels(dataset, grid, batch_size=32, num_workers=0):
+    """Downsampled raw-image features (view 1) + content factors, aligned by sample order."""
+    import torch
+    import torch.nn.functional as F
+    from torch.utils.data import DataLoader
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    feats, gtc = [], []
+    with torch.no_grad():
+        for batch in loader:
+            img = batch["image"]
+            if isinstance(img, (list, tuple)):
+                img = img[0]  # primary view
+            img = img.float()
+            if img.dim() == 5:
+                pooled = F.adaptive_avg_pool3d(img, (grid, grid, grid))
+            elif img.dim() == 4:
+                pooled = F.adaptive_avg_pool2d(img, (grid, grid))
+            else:
+                pooled = img
+            feats.append(pooled.reshape(pooled.shape[0], -1).cpu().numpy())
+            gtc.append(batch["gt_latents"]["z_content"].numpy())
+    return np.concatenate(feats), np.concatenate(gtc)
+
+
+def raw_pixel_ceiling(dataset, grid, seeds, batch_size, num_workers, compute_mlp=True):
+    """The data ceiling: how well the content factors are recoverable from raw pixels."""
+    X, Z = extract_raw_pixels(dataset, grid, batch_size, num_workers)
+    return {
+        "feat_dim": X.shape[1],
+        "grid": grid,
+        "r2_lin": cv_probe_r2(X, Z, seeds=seeds)["mean"],
+        "r2_mlp": cv_probe_r2(X, Z, seeds=seeds, kind="mlp")["mean"] if compute_mlp else float("nan"),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Reporting
 # --------------------------------------------------------------------------- #
@@ -145,6 +195,10 @@ def analyse_model(name, run_dir, dataset, poolings, level, checkpoint_name, max_
 
 def _f(x, nd=2):
     return f"{x:.{nd}f}" if (x is not None and isinstance(x, (int, float)) and np.isfinite(x)) else "  -  "
+
+
+def _rnd(x):
+    return round(float(x), 4) if isinstance(x, (int, float)) and np.isfinite(x) else ""
 
 
 def print_rank_table(rows):
@@ -157,9 +211,7 @@ def print_rank_table(rows):
     print("  " + "-" * 60)
     for r in rows:
         ratio = r["eff_rank"] / r["feat_dim"] if r["feat_dim"] else float("nan")
-        print(
-            f"  {r['model']:<16s} {r['pooling']:<8s} {r['feat_dim']:>8d} " f"{_f(r['eff_rank'], 1):>9s} {_f(ratio):>9s}"
-        )
+        print(f"  {r['model']:<16s} {r['pooling']:<8s} {r['feat_dim']:>8d} {_f(r['eff_rank'], 1):>9s} {_f(ratio):>9s}")
 
 
 def print_pca_table(rows):
@@ -182,6 +234,32 @@ def print_pca_table(rows):
             + "  ".join(f"{c:>7s}" for c in cells)
             + f"  {_f(r['r2_full'], 3):>7s} {n95:>6s}"
         )
+
+
+def print_ceiling_table(rows, raw=None):
+    print("\n" + "=" * 72)
+    print("  LINEAR vs NON-LINEAR CEILING  (R² -> all content factors, full block)")
+    print("  mlp >> linear  => factors encoded NON-LINEARLY (identifiable up to a smooth map)")
+    print("  model R² ≈ raw-pixel R²  => recovery is data-limited, not a model failure")
+    print("=" * 72)
+    print(f"  {'scope':<16s} {'pooling':<8s} {'linear':>8s} {'mlp':>8s} {'mlp-lin':>8s}")
+    print("  " + "-" * 56)
+    for r in rows:
+        lin, mlp = r.get("r2_full", float("nan")), r.get("r2_full_mlp", float("nan"))
+        gain = mlp - lin if (np.isfinite(lin) and np.isfinite(mlp)) else float("nan")
+        print(f"  {r['model']:<16s} {r['pooling']:<8s} {_f(lin, 3):>8s} {_f(mlp, 3):>8s} {_f(gain, 3):>8s}")
+    if raw is not None:
+        gain = (
+            raw["r2_mlp"] - raw["r2_lin"]
+            if (np.isfinite(raw["r2_lin"]) and np.isfinite(raw["r2_mlp"]))
+            else float("nan")
+        )
+        glabel = f"{raw['grid']}x{raw['grid']}x{raw['grid']}"
+        print("  " + "-" * 56)
+        print(
+            f"  {'RAW PIXELS':<16s} {glabel:<8s} {_f(raw['r2_lin'], 3):>8s} {_f(raw['r2_mlp'], 3):>8s} {_f(gain, 3):>8s}"
+        )
+        print("  (raw = downsampled input image — the best any readout could extract)")
 
 
 def save_plot(rows, out_dir):
@@ -230,18 +308,38 @@ def write_csv(rows, out_dir):
                         r["pooling"],
                         r["feat_dim"],
                         r["nominal_channels"],
-                        round(r["eff_rank"], 4) if np.isfinite(r["eff_rank"]) else "",
-                        round(r["r2_full"], 4) if np.isfinite(r["r2_full"]) else "",
+                        _rnd(r["eff_rank"]),
+                        _rnd(r["r2_full"]),
                         r["n_pcs_95"] if r["n_pcs_95"] is not None else "",
                         k,
-                        round(r["r2_by_k"][k], 4) if np.isfinite(r["r2_by_k"][k]) else "",
+                        _rnd(r["r2_by_k"][k]),
                     ]
                 )
     logger.info("Wrote %s", path)
 
 
+def write_ceiling_csv(rows, raw, out_dir):
+    path = os.path.join(out_dir, "content_rank_ceiling.csv")
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["scope", "pooling", "feat_dim", "r2_full_linear", "r2_full_mlp"])
+        for r in rows:
+            w.writerow([r["model"], r["pooling"], r["feat_dim"], _rnd(r.get("r2_full")), _rnd(r.get("r2_full_mlp"))])
+        if raw is not None:
+            w.writerow(
+                [
+                    "RAW_PIXELS",
+                    f"{raw['grid']}x{raw['grid']}x{raw['grid']}",
+                    raw["feat_dim"],
+                    _rnd(raw["r2_lin"]),
+                    _rnd(raw["r2_mlp"]),
+                ]
+            )
+    logger.info("Wrote %s", path)
+
+
 def main():
-    p = argparse.ArgumentParser(description="Content effective rank (per pooling) + PCA-truncation R² curve.")
+    p = argparse.ArgumentParser(description="Content effective rank (per pooling) + PCA-truncation R² + ceiling.")
     p.add_argument("--run-dirs", nargs="+", required=True, help="Run directories (settings.json each).")
     p.add_argument("--names", nargs="*", default=None, help="Labels (default: basename of each run-dir).")
     p.add_argument("--checkpoint-name", default="vqvae_best.pt", help="Checkpoint file (falls back to vqvae_model.pt).")
@@ -252,6 +350,8 @@ def main():
     p.add_argument("--seeds", default="0,1", help="CV seeds for the probe (fewer = faster).")
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument("--no-mlp", action="store_true", help="Skip the (slow) non-linear MLP ceiling.")
+    p.add_argument("--raw-grid", type=int, default=4, help="Raw-pixel ceiling grid GxGxG (0 = skip the raw row).")
     p.add_argument("--out", default="content_rank_out", help="Output directory.")
     cli = p.parse_args()
 
@@ -260,6 +360,7 @@ def main():
         p.error("--names must have one entry per --run-dirs")
     poolings = parse_poolings(cli.poolings)
     seeds = tuple(int(s) for s in cli.seeds.split(","))
+    compute_mlp = not cli.no_mlp
 
     from eval.run_dci_synthetic import build_synthetic_test_set, load_run_args
 
@@ -282,6 +383,7 @@ def main():
                     seeds,
                     cli.batch_size,
                     cli.num_workers,
+                    compute_mlp=compute_mlp,
                 )
             )
         except Exception as e:
@@ -291,10 +393,20 @@ def main():
         logger.error("Nothing analysed successfully.")
         return
 
+    raw = None
+    if cli.raw_grid and cli.raw_grid > 0:
+        try:
+            logger.info("Computing raw-pixel ceiling (grid %d^3)...", cli.raw_grid)
+            raw = raw_pixel_ceiling(dataset, cli.raw_grid, seeds, cli.batch_size, cli.num_workers, compute_mlp)
+        except Exception as e:
+            logger.error("Raw-pixel ceiling failed: %s", e)
+
     print_rank_table(all_rows)
     print_pca_table(all_rows)
+    print_ceiling_table(all_rows, raw)
     os.makedirs(cli.out, exist_ok=True)
     write_csv(all_rows, cli.out)
+    write_ceiling_csv(all_rows, raw, cli.out)
     save_plot(all_rows, cli.out)
 
 
