@@ -77,6 +77,7 @@ _STORE_TRUE_FLAGS = {
     "no_final_recon_norm",
     "synthetic_hierarchical_content",
     "synthetic_causal",
+    "contrastive_only",
 }
 
 # Keys added at runtime by update_args() or the training loop — not part of the

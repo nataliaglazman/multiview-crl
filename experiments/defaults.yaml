@@ -42,6 +42,9 @@ scale_contrastive_loss: 1.0
 # ---- Reconstruction ----
 scale_recon_loss: 1.0
 recon_loss_start_step: 0
+# Encoder-only ablation: skip the whole quantization + decoding path (no codebook,
+# no decoder → no VQ loss, no recon loss). Encoder trained by contrastive loss only.
+contrastive_only: false
 
 # ---- Losses (off by default) ----
 scale_style_contrastive_loss: 0.0

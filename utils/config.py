@@ -193,6 +193,17 @@ def parse_args() -> argparse.ArgumentParser:
         default=1,
         help="Scale factor for the reconstruction loss",
     )
+    parser.add_argument(
+        "--contrastive-only",
+        action="store_true",
+        help="Encoder-only ablation: skip the entire quantization + decoding path "
+        "(no codebook forward, no decoder, hence no VQ commitment loss and no "
+        "reconstruction loss). The encoder is trained purely by the contrastive "
+        "objective. Forces return_recon=False on every forward (training, "
+        "validation, and accumulation windows) and skips decoder-dependent "
+        "logging/eval (decoded-image dumps, cross-reconstruction separation "
+        "metrics). Codebook and decoder parameters receive no gradient.",
+    )
     parser.add_argument("--scale-contrastive-loss", type=float, default=1)
     parser.add_argument(
         "--scale-style-contrastive-loss",

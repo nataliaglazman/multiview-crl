@@ -165,7 +165,14 @@ def train_step(
         # ------------------------------------------------------------------
         vqvae_model = encoders[0]
 
-        if force_compute_recon is not None:
+        if getattr(args, "contrastive_only", False):
+            # Encoder-only ablation: never decode. return_recon=False makes the
+            # VQVAE skip the codebook+decoder loop entirely (skip_codebook), so
+            # there is no VQ commitment loss and no reconstruction loss. Overrides
+            # force_compute_recon so the validation and accumulation-window
+            # callers honour it too.
+            compute_recon = False
+        elif force_compute_recon is not None:
             compute_recon = force_compute_recon
         else:
             skip_recon_ratio = getattr(args, "skip_recon_ratio", 0.0)
@@ -1979,7 +1986,7 @@ def main(args):
                                 )
                             tb_writer.flush()
 
-                    if step % 200 == 0 or step == 1:
+                    if (step % 200 == 0 or step == 1) and not getattr(args, "contrastive_only", False):
                         save_vqvae_decoded_images(encoders[0], data, args, step)
 
                     # Periodic synthetic DCI — track identifiability (content vs
@@ -2122,7 +2129,11 @@ def main(args):
                             # (B) Cross-reconstruction separation proxy — used for selection
                             # only when the synthetic GT composite is unavailable (ADNI runs,
                             # --no-select-by-synthetic-dci, or a failed synthetic eval).
-                            if separation_score is None and getattr(args, "eval_separation_periodic", True):
+                            if (
+                                separation_score is None
+                                and getattr(args, "eval_separation_periodic", True)
+                                and not getattr(args, "contrastive_only", False)
+                            ):
                                 try:
                                     from eval.cross_reconstruction import (
                                         evaluate_content_style_separation,
@@ -2376,8 +2387,12 @@ def main(args):
             logger.info(f"  Early stopping best monitored loss: {_es_best:.4f}")
         logger.info(f"  Models saved to: {args.save_dir}")
 
-        # Compute separation score at the very end of training so sweeps have it
-        if getattr(args, "eval_separation_at_end", True):
+        # Compute separation score at the very end of training so sweeps have it.
+        # contrastive_only disables the decoder, so cross-reconstruction metrics
+        # are not meaningful and the block is skipped entirely.
+        if getattr(args, "contrastive_only", False):
+            logger.info("[EVALUATION] contrastive_only: decoder disabled, skipping final cross-reconstruction metrics.")
+        if getattr(args, "eval_separation_at_end", True) and not getattr(args, "contrastive_only", False):
             # First, reload the BEST model weights instead of using the final step's weights
             best_ckpt_path = os.path.join(args.save_dir, "vqvae_best.pt")
             if os.path.exists(best_ckpt_path):
@@ -2556,7 +2571,8 @@ def main(args):
         print(df_results.to_string())
 
         # Cross-reconstruction evaluation for content/style separation
-        if hasattr(args, "content_indices"):
+        # (skipped under contrastive_only — the decoder is never trained).
+        if hasattr(args, "content_indices") and not getattr(args, "contrastive_only", False):
             try:
                 from eval.cross_reconstruction import evaluate_content_style_separation
 
