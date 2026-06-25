@@ -1119,6 +1119,7 @@ def main(args):
                 "synthetic_causal_edge_prob": getattr(args, "synthetic_causal_edge_prob", 0.5),
                 "synthetic_causal_noise_scale": getattr(args, "synthetic_causal_noise_scale", 0.4),
                 "synthetic_causal_nonlinearity": getattr(args, "synthetic_causal_nonlinearity", "leaky_relu"),
+                "synthetic_clean_content": getattr(args, "synthetic_clean_content", False),
                 "synthetic_num_samples_per_mode": {
                     "train": getattr(args, "synthetic_num_train", 1000),
                     "val": getattr(args, "synthetic_num_val", 100),

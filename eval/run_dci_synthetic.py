@@ -144,6 +144,7 @@ def build_synthetic_test_set(args, num_samples=None, cache=True):
         synthetic_n_fissure_grid=getattr(args, "synthetic_n_fissure_grid", 8),
         synthetic_hierarchical_content=getattr(args, "synthetic_hierarchical_content", False),
         synthetic_normalize=getattr(args, "synthetic_normalize", "per_sample"),
+        synthetic_clean_content=getattr(args, "synthetic_clean_content", False),
     )
 
 

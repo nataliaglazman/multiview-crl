@@ -620,6 +620,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_causal_edge_prob=0.5,
         synthetic_causal_noise_scale=0.4,
         synthetic_causal_nonlinearity="leaky_relu",
+        synthetic_clean_content=False,
         **kwargs,
     ):
         super().__init__()
@@ -661,6 +662,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             causal_edge_prob=synthetic_causal_edge_prob,
             causal_noise_scale=synthetic_causal_noise_scale,
             causal_nonlinearity=synthetic_causal_nonlinearity,
+            clean_content=synthetic_clean_content,
         )
         self.num_samples = synthetic_num_samples
         self.synthetic_mode = synthetic_mode

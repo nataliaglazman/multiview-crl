@@ -64,6 +64,12 @@ def sample_content_from_scm(scm, generator, noise_scale=0.4, nonlinearity="leaky
     return z
 
 
+# clean-content mode (synthetic_clean_content): factor by which the unlabeled
+# z_deformation / z_fissure fields are shrunk so the named content factors dominate
+# structural variance.  1.0 (default mode) leaves them at full amplitude.
+CLEAN_NUISANCE_SCALE = 0.15
+
+
 class PseudoMRIRenderer(nn.Module):
     def __init__(self, res=64):
         super().__init__()
@@ -110,7 +116,7 @@ class PseudoMRIRenderer(nn.Module):
     # [7] left–right asymmetry, [8] sulcal widening.
     N_CONTENT_COMPONENTS = 9
 
-    def render_structure(self, z_content, z_deformation, z_fissure, device):
+    def render_structure(self, z_content, z_deformation, z_fissure, device, clean=False):
         """Deterministic given (z_content, z_deformation, z_fissure). Shared across views.
 
         z_content layout (9 components, extras default to 0):
@@ -134,17 +140,25 @@ class PseudoMRIRenderer(nn.Module):
             pad = torch.zeros(self.N_CONTENT_COMPONENTS - z_content.numel())
             z_content = torch.cat([z_content.flatten(), pad])
 
-        radii_wm = 0.5 + z_content[0].clamp(-1, 1) * 0.1
-        cortical_thickness = 0.15 + z_content[5].clamp(-1, 1) * 0.06
+        # clean-content mode: tanh-squash (monotone → fully recoverable) instead of the
+        # hard clamp (which flattens the ~1/3 of N(0,1) values that overflow ±1), and
+        # shrink the unlabeled deformation/fissure nuisance so the named factors dominate.
+        nuisance = CLEAN_NUISANCE_SCALE if clean else 1.0
+
+        def _sq(z, a=1.0):
+            return a * torch.tanh(z) if clean else z.clamp(-a, a)
+
+        radii_wm = 0.5 + _sq(z_content[0]) * 0.1
+        cortical_thickness = 0.15 + _sq(z_content[5]) * 0.06
         radii_gm = radii_wm + cortical_thickness
-        ventricle_size = 0.15 + z_content[1].clamp(-1, 1) * 0.05
+        ventricle_size = 0.15 + _sq(z_content[1]) * 0.05
 
         dist = torch.norm(self.coords, dim=-1)
 
         # Sulcal widening: amplifies the deformation field at boundary regions,
         # making gyri/sulci more or less pronounced.
-        sulcal_factor = 1.0 + z_content[8].clamp(-1, 1) * 0.6
-        deformation = self._upsample_field(z_deformation, device) * 0.1 * sulcal_factor
+        sulcal_factor = 1.0 + _sq(z_content[8]) * 0.6
+        deformation = self._upsample_field(z_deformation, device) * 0.1 * sulcal_factor * nuisance
         deformed_dist = dist + deformation
 
         # Temporal-lobe atrophy: shrink the brain radius in the inferior–
@@ -154,14 +168,14 @@ class PseudoMRIRenderer(nn.Module):
         y_coords = self.coords[..., 1]
         z_coords = self.coords[..., 2]
         temporal_weight = torch.sigmoid(-8 * y_coords) * torch.sigmoid(-8 * z_coords)
-        temporal_shrink = z_content[6].clamp(-1, 1) * 0.12
+        temporal_shrink = _sq(z_content[6]) * 0.12
         deformed_dist = deformed_dist + temporal_weight * temporal_shrink
 
         # Left–right asymmetry: differential atrophy across hemispheres.
         # Positive z_content[7] → left hemisphere (x < 0) more atrophied.
         x_coords = self.coords[..., 0]
         lr_weight = torch.tanh(-3 * x_coords)  # smooth L/R gradient, ∈ (−1, 1)
-        lr_shift = z_content[7].clamp(-1, 1) * 0.08
+        lr_shift = _sq(z_content[7]) * 0.08
         deformed_dist = deformed_dist + lr_weight * lr_shift
 
         mask_gm = deformed_dist < radii_gm
@@ -170,7 +184,7 @@ class PseudoMRIRenderer(nn.Module):
         ventricle_split = torch.abs(x_coords) > 0.05
         mask_csf = (deformed_dist < ventricle_size) & ventricle_split
 
-        fissure_noise = self._upsample_field(z_fissure, device) * 0.05
+        fissure_noise = self._upsample_field(z_fissure, device) * 0.05 * nuisance
         fissure_mask = (torch.abs(x_coords + fissure_noise) < 0.03) & mask_gm
 
         tissue_map = torch.zeros_like(dist, dtype=torch.long)
@@ -179,7 +193,7 @@ class PseudoMRIRenderer(nn.Module):
         tissue_map[mask_csf] = 1
         tissue_map[fissure_mask] = 1
 
-        lesion_xyz = z_content[2:5].clamp(-0.6, 0.6).to(device)
+        lesion_xyz = _sq(z_content[2:5], 0.6).to(device)
         lesion_mask = (torch.norm(self.coords - lesion_xyz, dim=-1) < 0.1) & mask_wm
 
         return tissue_map, lesion_mask
@@ -351,6 +365,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         causal_edge_prob=0.5,
         causal_noise_scale=0.4,
         causal_nonlinearity="leaky_relu",
+        clean_content=False,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -363,6 +378,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.causal = causal
         self.causal_noise_scale = causal_noise_scale
         self.causal_nonlinearity = causal_nonlinearity
+        self.clean_content = clean_content
 
         if causal and hierarchical_content:
             raise ValueError("--synthetic-causal and --synthetic-hierarchical-content are mutually exclusive")
@@ -501,6 +517,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 z_deformation,
                 z_fissure,
                 device=device,
+                clean=self.clean_content,
             )
             x_v1 = self.renderer.render_modality(
                 tissue,
