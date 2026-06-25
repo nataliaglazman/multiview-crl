@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-25T23:03:49Z
-# Git SHA: f19c6e7
+# Generated at: 2026-06-25T23:04:22Z
+# Git SHA: 1c9d88d
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-input-tau
+#SBATCH --job-name=synthetic-causal-random-input-proj
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-input-tau-%j.err
+#SBATCH --error=synthetic-causal-random-input-proj-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -95,8 +95,8 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-input-tau \
-    --tau 0.07 \
+    --model-id synthetic-causal-random-input-proj \
+    --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \

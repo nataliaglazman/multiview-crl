@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-random-input-tau
+tag: synthetic-causal-random-input-proj
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -10,7 +10,7 @@ scale_contrastive_loss: 10
 scale_recon_loss: 1
 # vq_commitment_weight: 0
 inject_style_to_decoder: true
-tau: 0.07
+tau: 0.1
 patch_grid: [4, 4, 4]
 train_steps: 300000
 # spatial_size: 4
