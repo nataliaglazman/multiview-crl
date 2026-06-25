@@ -50,13 +50,19 @@ def main():
     ap.add_argument("--in", dest="indir", default="content_rank_out", help="Dir holding the content_rank_pca CSVs.")
     ap.add_argument("--model", default=None, help="Model for the per-factor heatmap (default: first in the CSV).")
     ap.add_argument("--out", default=None, help="Output PNG (default: <in>/local_vs_global.png).")
+    ap.add_argument("--metric", choices=["r2", "mcc"], default="r2", help="Panel B metric: R² (default) or block-MCC.")
     args = ap.parse_args()
 
     rk = pd.read_csv(os.path.join(args.indir, "content_rank_pca.csv"))
     pf = pd.read_csv(os.path.join(args.indir, "content_rank_per_factor.csv"))
 
-    # eff_rank / r2_full are constant across the per-k rows — collapse to one per (model, pooling).
-    summ = rk.drop_duplicates(subset=["model", "pooling"])[["model", "pooling", "eff_rank", "r2_full"]]
+    # eff_rank / r2_full / block_mcc are constant across the per-k rows — collapse to one per (model, pooling).
+    has_mcc = "block_mcc" in rk.columns
+    metric_col = "block_mcc" if (args.metric == "mcc" and has_mcc) else "r2_full"
+    if args.metric == "mcc" and not has_mcc:
+        print("WARNING: --metric mcc but no block_mcc column — re-run content_rank_pca; falling back to R².")
+    keep = ["model", "pooling", "eff_rank", "r2_full"] + (["block_mcc"] if has_mcc else [])
+    summ = rk.drop_duplicates(subset=["model", "pooling"])[keep]
     models = list(dict.fromkeys(summ["model"]))
     pools = _present(summ["pooling"])
     if not pools:
@@ -77,13 +83,14 @@ def main():
     axA.legend(fontsize=7)
 
     # ---- B: aggregate recovery vs locality --------------------------------------------
+    mlabel = "block-MCC" if metric_col == "block_mcc" else "R² (full block)"
     for m in models:
         s = summ[summ["model"] == m].set_index("pooling").reindex(pools)
-        axB.plot(x, s["r2_full"].values, marker="o", label=m)
+        axB.plot(x, s[metric_col].values, marker="o", label=m)
     axB.set_xticks(x)
     axB.set_xticklabels([XLABEL.get(p, p) for p in pools])
-    axB.set_ylabel("content recovery R² (full block)")
-    axB.set_title("B. Recovery vs locality")
+    axB.set_ylabel(f"content recovery: {mlabel}")
+    axB.set_title(f"B. Recovery vs locality\n({mlabel})")
     axB.grid(alpha=0.3)
     axB.legend(fontsize=7)
 

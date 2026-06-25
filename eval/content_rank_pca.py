@@ -50,7 +50,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 
 from eval.dci import _extract_synthetic_representations
-from eval.identifiability_metrics import cv_probe_r2
+from eval.identifiability_metrics import block_mcc, cv_probe_r2
 from eval.run_dci_compare import _CONTENT, FACTOR_POOLING, _effective_rank, parse_poolings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
@@ -131,6 +131,9 @@ def analyse_model(
         # per content factor, so "global recovered / localized not" is visible.
         names = info["content_names"]
         per_factor = {f: cv_probe_r2(content, gt_content[:, j], seeds=seeds)["mean"] for j, f in enumerate(names)}
+        # Block-MCC (run_dci_compare's headline metric) on THIS pooling — so it can be read
+        # across the gap->stats->patch locality ladder, not only the stats pooling.
+        mcc_full = block_mcc(content, gt_content, seeds=seeds)["mean"]
         rows.append(
             {
                 "model": name,
@@ -139,6 +142,7 @@ def analyse_model(
                 "nominal_channels": info.get("n_content_channels", content.shape[1]),
                 "eff_rank": rank,
                 "r2_full": r2_full,
+                "block_mcc": mcc_full,
                 "r2_full_mlp": r2_full_mlp,
                 "n_pcs_95": n95,
                 "grid": grid,
@@ -343,7 +347,18 @@ def write_csv(rows, out_dir):
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(
-            ["model", "pooling", "feat_dim", "nominal_channels", "eff_rank", "r2_full", "n_pcs_95", "k", "r2_at_k"]
+            [
+                "model",
+                "pooling",
+                "feat_dim",
+                "nominal_channels",
+                "eff_rank",
+                "r2_full",
+                "block_mcc",
+                "n_pcs_95",
+                "k",
+                "r2_at_k",
+            ]
         )
         for r in rows:
             for k in r["grid"]:
@@ -355,6 +370,7 @@ def write_csv(rows, out_dir):
                         r["nominal_channels"],
                         _rnd(r["eff_rank"]),
                         _rnd(r["r2_full"]),
+                        _rnd(r["block_mcc"]),
                         r["n_pcs_95"] if r["n_pcs_95"] is not None else "",
                         k,
                         _rnd(r["r2_by_k"][k]),
