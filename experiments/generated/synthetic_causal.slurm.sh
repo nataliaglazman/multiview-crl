@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-25T22:26:27Z
-# Git SHA: a8c37b4
+# Generated at: 2026-06-25T23:03:49Z
+# Git SHA: f19c6e7
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-random-input-tau
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -55,6 +55,7 @@ conda activate "${CONDA_ENV_NAME}"
     --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
+    --contrastive-proj-dim 128 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \

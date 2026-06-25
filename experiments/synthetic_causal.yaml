@@ -28,3 +28,4 @@ no_final_recon_norm: true
 separate_style_codebooks: true
 separate_content_codebooks: true
 # synthetic_clean_content: true
+contrastive_proj_dim: 128

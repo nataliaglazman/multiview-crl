@@ -206,6 +206,25 @@ def parse_args() -> argparse.ArgumentParser:
     )
     parser.add_argument("--scale-contrastive-loss", type=float, default=1)
     parser.add_argument(
+        "--contrastive-proj-dim",
+        type=int,
+        default=0,
+        help="If > 0, insert an MLP projection head (one per content/style level) "
+        "between the pooled content features and the contrastive loss. The loss is "
+        "computed on the head's output, while eval/probes keep reading the pre-head "
+        "encoder features (the SimCLR/MoCo/BYOL recipe — the loss-facing space "
+        "over-compresses toward view-invariance and loses linear-probe info). "
+        "0 (default) disables the head: the loss acts directly on the representation. "
+        "Not supported with --use-moco.",
+    )
+    parser.add_argument(
+        "--contrastive-proj-hidden",
+        type=int,
+        default=256,
+        help="Hidden width of the contrastive projection head MLP "
+        "(Linear -> ReLU -> Linear). Only used when --contrastive-proj-dim > 0. Default: 256.",
+    )
+    parser.add_argument(
         "--scale-style-contrastive-loss",
         type=float,
         default=0.0,
@@ -1028,6 +1047,16 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             f"use negatives.  MoCo queue and momentum encoder will be disabled."
         )
         args.use_moco = False
+
+    # The projection head is wired into the in-batch InfoNCE / patch / BT / VICReg
+    # paths only. The MoCo path keeps a momentum-encoder + queue of *un-projected*
+    # features, so a head there would need a momentum copy and projected enqueues —
+    # not implemented. Fail loudly rather than silently ignoring the head.
+    if getattr(args, "contrastive_proj_dim", 0) > 0 and getattr(args, "use_moco", False):
+        raise ValueError(
+            "--contrastive-proj-dim is not supported with --use-moco yet (the MoCo queue stores "
+            "un-projected features). Disable one of them."
+        )
 
     # --content-size: directly set content channels, override ratio-based defaults.
     # cs == hidden_ch is the all-content baseline: no style channels, so downstream

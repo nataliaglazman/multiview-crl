@@ -79,6 +79,21 @@ from utils.visualisation import save_vqvae_decoded_images
 device_ids = [0]
 
 
+def _project_contrastive_content(head, hz_c, is_patch):
+    """Apply an MLP projection head to content-selected features for the contrastive loss.
+
+    ``hz_c`` is the content block already sliced to its content channels:
+    ``(n_views, B, k)`` (pooled) or ``(n_views, B, k, P)`` (patch). Returns the
+    projected features ``(n_views, B, d)`` / ``(n_views, B, d, P)``. The head is a
+    plain ``Linear -> ReLU -> Linear`` MLP, so for the patch case we move the
+    channel axis last, project, and move it back. Eval/probes never call this — they
+    read the pre-head encoder features — which is the whole point of the head.
+    """
+    if is_patch:
+        return head(hz_c.permute(0, 1, 3, 2)).permute(0, 1, 3, 2).contiguous()
+    return head(hz_c)
+
+
 # ---------------------------------------------------------------------------
 # Training step
 # ---------------------------------------------------------------------------
@@ -267,6 +282,17 @@ def train_step(
         # Per-level content channel counts from the model (set by --content-ratios)
         _content_ch_per_level = getattr(_raw_vqvae, "content_channels_per_level", {})
 
+        # Optional contrastive projection head(s): a per-level MLP applied to the
+        # content features *before* the contrastive loss (None when disabled).
+        # Eval/probes keep reading the pre-head encoder features, so the head only
+        # shapes the loss-facing space.
+        _proj_heads = getattr(_raw_vqvae, "_contrastive_proj_heads", None)
+
+        def _proj_head_for(_lvl):
+            if _proj_heads is None:
+                return None
+            return _proj_heads[f"L{_lvl}"] if f"L{_lvl}" in _proj_heads else None
+
         for level_idx, enc_pooled in enumerate(encoder_outputs):
             # Global pool: enc_pooled is (2B, C) → hz_level (n_views, B, C)
             # Patch pool:  enc_pooled is (2B, C, P) → hz_level (n_views, B, C, P)
@@ -413,12 +439,19 @@ def train_step(
                                 }
                     else:
                         _lf = patch_loss_func if _is_patch else loss_func
-                        level_loss = _lf(
-                            hz_content,
-                            level_content_indices,
-                            args.subsets,
-                            soft_content_mask=None,
-                        )
+                        _ph = _proj_head_for(level_idx)
+                        if _ph is not None:
+                            # hz_content is already sliced to k content channels.
+                            _hz_proj = _project_contrastive_content(_ph, hz_content, _is_patch)
+                            _proj_ci = [torch.arange(_hz_proj.shape[2], device=_hz_proj.device)] * len(args.subsets)
+                            level_loss = _lf(_hz_proj, _proj_ci, args.subsets, soft_content_mask=None)
+                        else:
+                            level_loss = _lf(
+                                hz_content,
+                                level_content_indices,
+                                args.subsets,
+                                soft_content_mask=None,
+                            )
                 else:
                     # --- Shared mask (original path) ---
                     # This level has a learnable Gumbel mask — reuse the same
@@ -471,12 +504,26 @@ def train_step(
                         )
                     else:
                         _lf = patch_loss_func if _is_patch else loss_func
-                        level_loss = _lf(
-                            hz_level,
-                            level_content_indices,
-                            args.subsets,
-                            soft_content_mask=soft_content_mask,
-                        )
+                        _ph = _proj_head_for(level_idx)
+                        if _ph is not None:
+                            # Slice to content channels — keep the differentiable
+                            # mask multiply so gradients still reach learned logits —
+                            # then project before the loss.
+                            _c_idx = level_content_indices[0]
+                            if _is_patch:
+                                _hz_c = (hz_level * soft_content_mask.unsqueeze(-1))[:, :, _c_idx, :]
+                            else:
+                                _hz_c = (hz_level * soft_content_mask)[:, :, _c_idx]
+                            _hz_proj = _project_contrastive_content(_ph, _hz_c, _is_patch)
+                            _proj_ci = [torch.arange(_hz_proj.shape[2], device=_hz_proj.device)] * len(args.subsets)
+                            level_loss = _lf(_hz_proj, _proj_ci, args.subsets, soft_content_mask=None)
+                        else:
+                            level_loss = _lf(
+                                hz_level,
+                                level_content_indices,
+                                args.subsets,
+                                soft_content_mask=soft_content_mask,
+                            )
             else:
                 # Fallback: no channel_logits configured, use batch statistics.
                 # For patch mode, average over the patch dim to get per-channel logits.
@@ -547,12 +594,26 @@ def train_step(
                             }
                 else:
                     _lf = patch_loss_func if _is_patch else loss_func
-                    level_loss = _lf(
-                        hz_level,
-                        level_content_indices,
-                        args.subsets,
-                        soft_content_mask=soft_content_mask,
-                    )
+                    _ph = _proj_head_for(level_idx)
+                    if _ph is not None:
+                        # Fallback path: select content via the gumbel mask (keeping
+                        # the multiply for gradient flow), then project.
+                        _mask0 = content_masks[0]
+                        _c_idx = level_content_indices[0]
+                        if _is_patch:
+                            _hz_c = (hz_level * _mask0.unsqueeze(-1))[:, :, _c_idx, :]
+                        else:
+                            _hz_c = (hz_level * _mask0)[:, :, _c_idx]
+                        _hz_proj = _project_contrastive_content(_ph, _hz_c, _is_patch)
+                        _proj_ci = [torch.arange(_hz_proj.shape[2], device=_hz_proj.device)] * len(args.subsets)
+                        level_loss = _lf(_hz_proj, _proj_ci, args.subsets, soft_content_mask=None)
+                    else:
+                        level_loss = _lf(
+                            hz_level,
+                            level_content_indices,
+                            args.subsets,
+                            soft_content_mask=soft_content_mask,
+                        )
 
             _style_cl_scale = getattr(args, "scale_style_contrastive_loss", 0.0)
             if _style_cl_scale > 0.0 and _style_hz_v0 is not None:
@@ -1246,6 +1307,32 @@ def main(args):
         vqvae_model._aux_modality_heads = _heads
         logger.info(
             f"  Aux modality heads: adv={_adv_on} patch_adv={_patch_adv_on} suf={_suf_on} levels={list(_heads.keys())}"
+        )
+
+    # Optional contrastive projection head(s): an MLP per content/style level placed
+    # between the pooled content features and the contrastive loss. The loss is
+    # computed on the head's output; eval/probes keep reading the pre-head encoder
+    # features (SimCLR/MoCo/BYOL recipe — the loss-facing space over-compresses toward
+    # view-invariance and loses linear-probe info). Built eagerly here (before the
+    # optimizer + DataParallel wrap) so its params land in the optimizer and the
+    # checkpoint state_dict, mirroring the aux-modality heads above.
+    _proj_dim = getattr(args, "contrastive_proj_dim", 0)
+    if _proj_dim > 0:
+        _proj_hidden = getattr(args, "contrastive_proj_hidden", 256)
+        _proj_heads = torch.nn.ModuleDict()
+        for _lvl in getattr(args, "content_style_levels", [0]):
+            _cc = vqvae_model.content_channels_per_level.get(_lvl)
+            if _cc is None:
+                continue
+            _proj_heads[f"L{_lvl}"] = torch.nn.Sequential(
+                torch.nn.Linear(_cc, _proj_hidden),
+                torch.nn.ReLU(inplace=True),
+                torch.nn.Linear(_proj_hidden, _proj_dim),
+            )
+        vqvae_model._contrastive_proj_heads = _proj_heads
+        logger.info(
+            f"  Contrastive projection head: dim={_proj_dim} hidden={_proj_hidden} "
+            f"levels={list(_proj_heads.keys())} (loss-facing only; probes read pre-head features)"
         )
 
     if getattr(args, "compile_model", False):
