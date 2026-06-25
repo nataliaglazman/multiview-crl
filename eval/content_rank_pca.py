@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Content-block geometry diagnostic: effective rank per pooling + PCA-truncation R² curve.
+"""Content-block geometry diagnostic: effective rank + PCA-truncation R² + ceiling + per-factor.
 
-Answers three questions that ``run_dci_compare``'s single GAP ``content_rank`` cannot,
+Answers four questions that ``run_dci_compare``'s single GAP ``content_rank`` cannot,
 for a set of trained runs scored on one shared synthetic test set:
 
 1. **Is a low GAP effective rank a *collapse* or just *spatial storage*?**
@@ -14,19 +14,19 @@ for a set of trained runs scored on one shared synthetic test set:
    redundancy/nuisance?**  For each block we PCA the features and fit a ridge probe
    from the first ``k`` PCs to the (shared) content factors, sweeping ``k``.  If the
    R² curve saturates at ``k`` far below the effective rank (``n_pcs@95%`` ≪ rank),
-   the variance past that point is *not* about the content factors — redundancy, or
-   leaked nuisance/style worth checking against ``content→style``.
+   the variance past that point is *not* about the content factors.
 
 3. **Is weak *linear* recovery a model failure or just non-linear encoding /
    a data ceiling?**  The CEILING table puts the linear (ridge) full-block R² next
-   to a non-linear (MLP) one, plus a raw-downsampled-pixel row.  ``mlp >> linear``
-   means the factors are encoded non-linearly (still identifiable up to a smooth
-   map, just not linearly); ``model R² ≈ raw-pixel R²`` means recovery is limited by
-   the data, not the model.
+   to a non-linear (MLP) one, plus a raw-downsampled-pixel row.
 
-The R² is the variance-weighted CV test-R² of predicting *all* content factors
-jointly (``cv_probe_r2`` with a multioutput target), averaged over seeds — the same
-probe family as ``run_dci_compare``.
+4. **Which content factors are actually recovered?**  The PER-FACTOR table splits the
+   variance-weighted aggregate into one linear R² per factor, each read at the pooling
+   that can expose it (global→gap, localized→patch), so "0.35 overall" is resolved into
+   e.g. "global anatomy ~0.7, lesions ~0".
+
+The R² is the variance-weighted CV test-R² of predicting the content factors via
+``cv_probe_r2`` (the same probe family as ``run_dci_compare``), averaged over seeds.
 
 Usage
 -----
@@ -36,8 +36,7 @@ Usage
         --num-samples 2000 --level 0 --out content_rank_out
 
 PCA is fit on all samples (unsupervised, transductive but label-free — the same
-choice ``run_dci_compare._reduce_reprs`` makes), so the curve is an honest
-"how many directions carry the factors" readout.  The MLP ceiling is the slow part;
+choice ``run_dci_compare._reduce_reprs`` makes).  The MLP ceiling is the slow part;
 pass ``--no-mlp`` to skip it, ``--raw-grid 0`` to skip the raw-pixel row.
 """
 from __future__ import annotations
@@ -52,7 +51,7 @@ from sklearn.decomposition import PCA
 
 from eval.dci import _extract_synthetic_representations
 from eval.identifiability_metrics import cv_probe_r2
-from eval.run_dci_compare import _CONTENT, _effective_rank, parse_poolings
+from eval.run_dci_compare import _CONTENT, FACTOR_POOLING, _effective_rank, parse_poolings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -128,6 +127,10 @@ def analyse_model(
         # Non-linear ceiling on the full block: mlp >> ridge => factors are there but
         # encoded non-linearly (identifiable up to a smooth map, not linearly).
         r2_full_mlp = cv_probe_r2(content, gt_content, seeds=seeds, kind="mlp")["mean"] if compute_mlp else float("nan")
+        # Per-factor linear R²: splits the variance-weighted aggregate into one number
+        # per content factor, so "global recovered / localized not" is visible.
+        names = info["content_names"]
+        per_factor = {f: cv_probe_r2(content, gt_content[:, j], seeds=seeds)["mean"] for j, f in enumerate(names)}
         rows.append(
             {
                 "model": name,
@@ -140,6 +143,8 @@ def analyse_model(
                 "n_pcs_95": n95,
                 "grid": grid,
                 "r2_by_k": r2_by_k,
+                "per_factor": per_factor,
+                "content_names": list(names),
             }
         )
 
@@ -262,6 +267,46 @@ def print_ceiling_table(rows, raw=None):
         print("  (raw = downsampled input image — the best any readout could extract)")
 
 
+def print_per_factor_table(rows):
+    """One linear R² per content factor, read at the pooling that can expose it."""
+    by, models, names = {}, [], None
+    for r in rows:
+        by[(r["model"], r["pooling"])] = r.get("per_factor", {})
+        if r["model"] not in models:
+            models.append(r["model"])
+        if names is None and r.get("content_names"):
+            names = r["content_names"]
+    if not names:
+        return
+    avail = sorted({r["pooling"] for r in rows})
+
+    def assigned(f):
+        a = FACTOR_POOLING.get(f, "gap")
+        return a if a in avail else (avail[0] if avail else "gap")
+
+    print("\n" + "=" * 72)
+    print("  PER-FACTOR LINEAR R²  (each factor at its assigned pooling)")
+    print("  splits the aggregate: which content factors are actually recovered")
+    print("=" * 72)
+    fw = max([len(n) for n in names] + [16])
+    width = fw + 2 + 6 + 12 * len(models)
+    print(f"  {'factor':<{fw}s} {'pool':<6s}" + "".join(f"{m:>12s}" for m in models))
+    print("  " + "-" * width)
+    sums = {m: [] for m in models}
+    for f in names:
+        pool = assigned(f)
+        cells = []
+        for m in models:
+            v = by.get((m, pool), {}).get(f, float("nan"))
+            cells.append(v)
+            if np.isfinite(v):
+                sums[m].append(v)
+        print(f"  {f:<{fw}s} {pool:<6s}" + "".join(f"{_f(v, 3):>12s}" for v in cells))
+    print("  " + "-" * width)
+    means = [float(np.mean(sums[m])) if sums[m] else float("nan") for m in models]
+    print(f"  {'(mean of factors)':<{fw}s} {'-':<6s}" + "".join(f"{_f(v, 3):>12s}" for v in means))
+
+
 def save_plot(rows, out_dir):
     try:
         import matplotlib
@@ -338,8 +383,19 @@ def write_ceiling_csv(rows, raw, out_dir):
     logger.info("Wrote %s", path)
 
 
+def write_per_factor_csv(rows, out_dir):
+    path = os.path.join(out_dir, "content_rank_per_factor.csv")
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["model", "pooling", "factor", "r2_linear"])
+        for r in rows:
+            for fname, v in r.get("per_factor", {}).items():
+                w.writerow([r["model"], r["pooling"], fname, _rnd(v)])
+    logger.info("Wrote %s", path)
+
+
 def main():
-    p = argparse.ArgumentParser(description="Content effective rank (per pooling) + PCA-truncation R² + ceiling.")
+    p = argparse.ArgumentParser(description="Content effective rank + PCA-truncation R² + ceiling + per-factor.")
     p.add_argument("--run-dirs", nargs="+", required=True, help="Run directories (settings.json each).")
     p.add_argument("--names", nargs="*", default=None, help="Labels (default: basename of each run-dir).")
     p.add_argument("--checkpoint-name", default="vqvae_best.pt", help="Checkpoint file (falls back to vqvae_model.pt).")
@@ -351,7 +407,7 @@ def main():
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--no-mlp", action="store_true", help="Skip the (slow) non-linear MLP ceiling.")
-    p.add_argument("--raw-grid", type=int, default=4, help="Raw-pixel ceiling grid GxGxG (0 = skip the raw row).")
+    p.add_argument("--raw-grid", type=int, default=16, help="Raw-pixel ceiling grid GxGxG (0 = skip the raw row).")
     p.add_argument("--out", default="content_rank_out", help="Output directory.")
     cli = p.parse_args()
 
@@ -404,9 +460,11 @@ def main():
     print_rank_table(all_rows)
     print_pca_table(all_rows)
     print_ceiling_table(all_rows, raw)
+    print_per_factor_table(all_rows)
     os.makedirs(cli.out, exist_ok=True)
     write_csv(all_rows, cli.out)
     write_ceiling_csv(all_rows, raw, cli.out)
+    write_per_factor_csv(all_rows, cli.out)
     save_plot(all_rows, cli.out)
 
 
