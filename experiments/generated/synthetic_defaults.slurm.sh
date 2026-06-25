@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-06-24T19:37:30Z
-# Git SHA: 385f5d5
+# Generated at: 2026-06-25T16:38:19Z
+# Git SHA: 3e115e0
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic_defaults
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -73,7 +73,7 @@ conda activate "${CONDA_ENV_NAME}"
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 1.0 \
-    --scale-recon-loss 1.0 \
+    --scale-recon-loss 0.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \

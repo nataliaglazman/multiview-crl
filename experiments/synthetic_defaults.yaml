@@ -40,7 +40,7 @@ scale_contrastive_loss: 1.0
 patch_contrastive: true
 
 # ---- Reconstruction ----
-scale_recon_loss: 1.0
+scale_recon_loss: 0.0
 
 # ---- Training (no gradient checkpointing needed for small volumes) ----
 lr: 1.0e-3
