@@ -1,17 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-25T20:10:53Z
-# Git SHA: 01f401b
+# Generated at: 2026-06-25T20:42:55Z
+# Git SHA: 274e340
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-input-synthetic-adj
+#SBATCH --job-name=synthetic-causal-random-input-synthetic-adj-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-input-synthetic-adj-%j.err
+#SBATCH --error=synthetic-causal-random-input-synthetic-adj-baseline-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
+
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -75,11 +76,12 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1 \
+    --scale-contrastive-loss 0 \
     --scale-recon-loss 10.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
+    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
@@ -94,7 +96,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-input-synthetic-adj \
+    --model-id synthetic-causal-random-input-synthetic-adj-baseline \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
