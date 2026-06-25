@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-25T17:19:02Z
-# Git SHA: cb78546
+# Generated at: 2026-06-25T18:03:52Z
+# Git SHA: e6c97d7
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-input-no-recon-48
+#SBATCH --job-name=synthetic-causal-random-input-1
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-input-no-recon-48-%j.err
+#SBATCH --error=synthetic-causal-random-input-1-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -75,8 +75,8 @@ conda activate "${CONDA_ENV_NAME}"
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 10 \
-    --scale-recon-loss 0.0 \
+    --scale-contrastive-loss 1 \
+    --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
@@ -93,13 +93,13 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-input-no-recon-48 \
+    --model-id synthetic-causal-random-input-1 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
     --use-wandb \
-    --vq-commitment-weight 0 \
+    --vq-commitment-weight 0.25 \
     --vqvae-embed-dim 48 \
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
