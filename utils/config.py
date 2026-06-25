@@ -138,9 +138,9 @@ def parse_args() -> argparse.ArgumentParser:
         "--synthetic-clean-content",
         action="store_true",
         help="Identifiability-friendly synthetic generation: tanh-squash content factors "
-        "(instead of the hard clamp that flattens ~1/3 of N(0,1) values) and shrink the "
-        "unlabeled z_deformation/z_fissure nuisance fields so the named factors dominate "
-        "structural variance. Default off = byte-identical to prior runs.",
+        "(instead of the hard clamp that flattens ~1/3 of N(0,1) values) and zero out the "
+        "unlabeled z_deformation/z_fissure nuisance fields so the named factors fully "
+        "determine structural variance. Default off = byte-identical to prior runs.",
     )
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default=None)

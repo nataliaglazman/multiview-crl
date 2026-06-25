@@ -64,10 +64,11 @@ def sample_content_from_scm(scm, generator, noise_scale=0.4, nonlinearity="leaky
     return z
 
 
-# clean-content mode (synthetic_clean_content): factor by which the unlabeled
-# z_deformation / z_fissure fields are shrunk so the named content factors dominate
-# structural variance.  1.0 (default mode) leaves them at full amplitude.
-CLEAN_NUISANCE_SCALE = 0.15
+# clean-content mode (synthetic_clean_content): factor applied to the unlabeled
+# z_deformation / z_fissure fields. 0.0 removes them entirely so the named content
+# factors fully determine structural variance. 1.0 (default mode) leaves them at
+# full amplitude.
+CLEAN_NUISANCE_SCALE = 0.0
 
 
 class PseudoMRIRenderer(nn.Module):
@@ -142,7 +143,7 @@ class PseudoMRIRenderer(nn.Module):
 
         # clean-content mode: tanh-squash (monotone → fully recoverable) instead of the
         # hard clamp (which flattens the ~1/3 of N(0,1) values that overflow ±1), and
-        # shrink the unlabeled deformation/fissure nuisance so the named factors dominate.
+        # zero out the unlabeled deformation/fissure nuisance so the named factors dominate.
         nuisance = CLEAN_NUISANCE_SCALE if clean else 1.0
 
         def _sq(z, a=1.0):
