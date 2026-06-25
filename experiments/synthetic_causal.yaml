@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-random-input-no-recon-9
+tag: synthetic-causal-random-input-no-recon-48
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -18,11 +18,11 @@ eval_dci: true
 checkpoint_steps: 1000
 scale_adv_loss: 0.0
 # style_dropout_prob: 0.2
-vqvae_hidden_channels: 12
-vqvae_embed_dim: 12
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
-content_size: 9
+content_size: 44
 style_injection_mode: input
 no_final_recon_norm: true
 separate_style_codebooks: true
