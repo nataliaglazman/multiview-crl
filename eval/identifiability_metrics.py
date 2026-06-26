@@ -76,6 +76,54 @@ def cv_probe_r2(X, y, n_splits=5, seeds=(0, 1, 2), kind="ridge", clip=False):
     return {"mean": float(arr.mean()), "std": float(arr.std()), "per_seed": per_seed}
 
 
+def _make_multi_regressor(kind, seed):
+    """Multi-output twin of ``_make_regressor``.
+
+    ``RidgeCV(alpha_per_target=True)`` fits a single GCV decomposition of ``X`` and
+    picks a per-column alpha from it, so a batched fit reproduces the single-target
+    probe column-by-column while decomposing ``X`` only once.  Other kinds fall back
+    to ``_make_regressor`` (MLPRegressor is natively multi-output).
+    """
+    if kind == "ridge":
+        return RidgeCV(alphas=(0.01, 0.1, 1.0, 10.0, 100.0, 1000.0), alpha_per_target=True)
+    return _make_regressor(kind, seed)
+
+
+def cv_probe_r2_multi(X, Y, n_splits=5, seeds=(0, 1, 2), kind="ridge"):
+    """Per-column K-fold CV test-R^2 of predicting each column of ``Y`` from ``X``.
+
+    Equivalent to calling :func:`cv_probe_r2` on every column of ``Y`` separately,
+    but fits one multi-output regressor per (seed, fold) so the ``StandardScaler`` +
+    ridge decomposition of ``X[train]`` is computed once and reused across all
+    targets.  When many factors (and their permutation nulls) share the same ``X`` —
+    the case in ``eval.run_dci_compare._score_block`` — this avoids re-decomposing
+    ``X`` once per target, which is where that script's score phase spends its time.
+
+    Returns ``{"mean": (T,), "std": (T,)}``: the per-seed mean R^2 averaged over
+    seeds and its spread across seeds, matching ``cv_probe_r2`` column-wise.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
+    if Y.ndim == 1:
+        Y = Y[:, None]
+    T = Y.shape[1]
+    if X.shape[1] == 0 or X.shape[0] < n_splits * 4:
+        return {"mean": np.full(T, float("nan")), "std": np.full(T, float("nan"))}
+
+    per_seed = np.empty((len(seeds), T))
+    for si, seed in enumerate(seeds):
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        fold = np.empty((n_splits, T))
+        for fi, (tr, te) in enumerate(kf.split(X)):
+            sc = StandardScaler().fit(X[tr])
+            model = _make_multi_regressor(kind, seed)
+            model.fit(sc.transform(X[tr]), Y[tr])
+            pred = np.asarray(model.predict(sc.transform(X[te]))).reshape(len(te), T)
+            fold[fi] = r2_score(Y[te], pred, multioutput="raw_values")
+        per_seed[si] = fold.mean(axis=0)
+    return {"mean": per_seed.mean(axis=0), "std": per_seed.std(axis=0)}
+
+
 def cv_probe_acc(X, y, n_splits=5, seeds=(0, 1, 2)):
     """K-fold CV accuracy of a logistic probe (e.g. predicting view identity)."""
     X = np.asarray(X, dtype=np.float64)

@@ -61,7 +61,7 @@ import time
 import numpy as np
 from joblib import Parallel, delayed
 
-from eval.identifiability_metrics import block_mcc, cv_probe_r2, view_invariance
+from eval.identifiability_metrics import block_mcc, cv_probe_r2, cv_probe_r2_multi, view_invariance
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -159,14 +159,6 @@ def _block_array(reprs, key, level, block_idx):
     return ld[level][block_idx]
 
 
-def _probe_cell(X, y, seeds, perm_indices):
-    """One (factor, pooling) cell: real CV-R² + permutation null floor."""
-    r = cv_probe_r2(X, y, seeds=seeds)
-    null_vals = [cv_probe_r2(X, y[pi], seeds=seeds)["mean"] for pi in perm_indices]
-    nl = float(np.mean(null_vals)) if null_vals else float("nan")
-    return {"real": r["mean"], "std": r["std"], "null": nl, "gap": r["mean"] - nl}
-
-
 def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, rng, n_jobs=1):
     """Per-factor informativeness for one repr→factor block, under every pooling.
 
@@ -175,28 +167,48 @@ def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, 
     (real − null) test-R² is computed under *every* available pooling and kept in
     ``by_pooling``; the headline ``gap`` is that factor's assigned pooling
     (``FACTOR_POOLING``).  Returns ``{"mean_gap", "per_factor"}``.
+
+    All of a pooling's factors and their permutation nulls share one ``X``, so they
+    are scored in a single batched probe per pooling (``cv_probe_r2_multi``) that
+    reuses one StandardScaler + ridge decomposition across every target instead of
+    re-decomposing ``X`` once per factor and per permutation.
     """
     pools = [k for k in ("gap", "stats", "patch") if k in avail]
+    pool_X = [(pk, _block_array(reprs, pk, level, block_idx)) for pk in pools]
+    pool_X = [(pk, X) for pk, X in pool_X if X is not None and X.shape[1] > 0]
 
-    # Collect work items; pre-draw permutation indices so the shared rng is
-    # consumed deterministically regardless of worker ordering.
-    work = []
-    for j, name in enumerate(names):
-        for pk in pools:
-            X = _block_array(reprs, pk, level, block_idx)
-            if X is None or X.shape[1] == 0:
-                continue
-            perm_indices = [rng.permutation(factors.shape[0]) for _ in range(n_null)]
-            work.append((name, j, pk, X, perm_indices))
+    K = len(names)
+    n = factors.shape[0]
+    if not names or not pool_X:
+        return {"mean_gap": float("nan"), "per_factor": {}}
 
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(_probe_cell)(X, factors[:, j], seeds, pi) for _name, j, _pk, X, pi in work
-    )
+    # Pre-draw the null permutations in the same (factor, pooling) order the per-cell
+    # implementation used, so the structural null floor is unchanged and the shared
+    # rng is consumed deterministically regardless of worker ordering.
+    perms = {}
+    for j in range(K):
+        for pk, _X in pool_X:
+            perms[(pk, j)] = [rng.permutation(n) for _ in range(n_null)]
 
-    per = {}
-    for (name, _j, pk, _X, _pi), cell in zip(work, results):
-        per.setdefault(name, {})
-        per[name][pk] = cell
+    def _targets(pk):
+        # [K real columns | per-factor null columns] — one batched target set per X.
+        cols = [factors[:, j] for j in range(K)]
+        for j in range(K):
+            cols.extend(factors[pi, j] for pi in perms[(pk, j)])
+        return np.column_stack(cols)
+
+    tasks = [(pk, X, _targets(pk)) for pk, X in pool_X]
+    results = Parallel(n_jobs=n_jobs)(delayed(cv_probe_r2_multi)(X, Y, seeds=seeds) for _pk, X, Y in tasks)
+
+    per = {name: {} for name in names}
+    for (pk, _X, _Y), res in zip(tasks, results):
+        means, stds = res["mean"], res["std"]
+        for j, name in enumerate(names):
+            real, std = float(means[j]), float(stds[j])
+            start = K + j * n_null
+            nl = float(np.mean(means[start : start + n_null])) if n_null > 0 else float("nan")
+            per[name][pk] = {"real": real, "std": std, "null": nl, "gap": real - nl}
+    per = {name: by_pool for name, by_pool in per.items() if by_pool}
 
     for name in list(per):
         by_pooling = per[name]
