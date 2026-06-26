@@ -223,6 +223,17 @@ def print_rank_table(rows):
         print(f"  {r['model']:<16s} {r['pooling']:<8s} {r['feat_dim']:>8d} {_f(r['eff_rank'], 1):>9s} {_f(ratio):>9s}")
 
 
+def print_mcc_table(rows):
+    print("\n" + "=" * 72)
+    print("  BLOCK-MCC BY POOLING  (affine identifiability: content block -> gt_content)")
+    print("  read across gap->stats->patch: at which locality the content is recoverable")
+    print("=" * 72)
+    print(f"  {'model':<16s} {'pooling':<8s} {'block_mcc':>10s}")
+    print("  " + "-" * 38)
+    for r in rows:
+        print(f"  {r['model']:<16s} {r['pooling']:<8s} {_f(r['block_mcc'], 3):>10s}")
+
+
 def print_pca_table(rows):
     print("\n" + "=" * 72)
     print("  PCA-TRUNCATION R²  (content PCs -> all content factors, variance-weighted)")
@@ -474,6 +485,7 @@ def main():
             logger.error("Raw-pixel ceiling failed: %s", e)
 
     print_rank_table(all_rows)
+    print_mcc_table(all_rows)
     print_pca_table(all_rows)
     print_ceiling_table(all_rows, raw)
     print_per_factor_table(all_rows)
