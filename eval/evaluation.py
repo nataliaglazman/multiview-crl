@@ -3,10 +3,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.kernel_ridge import KernelRidge
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import accuracy_score, r2_score
-from sklearn.model_selection import GridSearchCV
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from torch.utils.data import DataLoader
 
@@ -185,7 +183,7 @@ def get_data(
     return rdict
 
 
-def eval_step(ix, subset, modality, factor_name, discrete_factors_m, data, args):
+def eval_step(ix, subset, modality, factor_name, discrete_factors_m, data):
     """
     Fit regression / classification models and return a result row.
 
@@ -196,31 +194,20 @@ def eval_step(ix, subset, modality, factor_name, discrete_factors_m, data, args)
         factor_name (str): Human-readable factor name.
         discrete_factors_m (list[int]): Indices of discrete factors for this modality.
         data (list): ``[train_inputs, train_labels, test_inputs, test_labels]``.
-        args: Parsed argument namespace (needs ``args.grid_search_eval``).
 
     Returns:
         list: ``[subset, ix, modality, factor_name, factor_type,
-                 r2_linreg, r2_krreg, acc_logreg, acc_mlp]``
+                 r2_linreg, r2_mlpreg, acc_logreg, acc_mlp]``
     """
-    r2_linreg = r2_krreg = acc_logreg = acc_mlp = np.nan
+    r2_linreg = r2_mlpreg = acc_logreg = acc_mlp = np.nan
 
     factor_type = "discrete" if ix in discrete_factors_m else "continuous"
 
     if factor_type == "continuous":
         linreg = LinearRegression(n_jobs=-1)
         r2_linreg = utils.evaluate_prediction(linreg, r2_score, *data)
-        if args.grid_search_eval:
-            gskrreg = GridSearchCV(
-                KernelRidge(kernel="rbf", gamma=0.1),
-                param_grid={
-                    "alpha": [1e0, 0.1, 1e-2, 1e-3],
-                    "gamma": np.logspace(-2, 2, 4),
-                },
-                cv=3,
-                n_jobs=-1,
-            )
-            r2_krreg = utils.evaluate_prediction(gskrreg, r2_score, *data)
-        r2_krreg = utils.evaluate_prediction(MLPRegressor(max_iter=1000), r2_score, *data)
+        mlpreg = MLPRegressor(max_iter=1000)
+        r2_mlpreg = utils.evaluate_prediction(mlpreg, r2_score, *data)
 
     if factor_type == "discrete" and factor_name != "object_zpos":
         logreg = LogisticRegression(n_jobs=-1, max_iter=1000)
@@ -235,7 +222,7 @@ def eval_step(ix, subset, modality, factor_name, discrete_factors_m, data, args)
         factor_name,
         factor_type,
         r2_linreg,
-        r2_krreg,
+        r2_mlpreg,
         acc_logreg,
         acc_mlp,
     ]

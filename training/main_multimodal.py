@@ -2630,7 +2630,7 @@ def main(args):
                         test_dict[f"hz_{m}_subsets"][s],
                         test_dict[f"labels_{m}"][factor_name],
                     ]
-                    results.append(eval_step(ix, s, m, factor_name, discrete_factors_m, data_eval, args))
+                    results.append(eval_step(ix, s, m, factor_name, discrete_factors_m, data_eval))
                 if args.eval_style and len(args.style_indices) > 0:
                     data_eval = [
                         val_dict[f"hz_{m}"][..., args.style_indices],
@@ -2638,7 +2638,7 @@ def main(args):
                         test_dict[f"hz_{m}"][..., args.style_indices],
                         test_dict[f"labels_{m}"][factor_name],
                     ]
-                    results.append(eval_step(ix, -1, m, factor_name, discrete_factors_m, data_eval, args))
+                    results.append(eval_step(ix, -1, m, factor_name, discrete_factors_m, data_eval))
 
         columns = [
             "subset",
@@ -2647,7 +2647,7 @@ def main(args):
             "factor_name",
             "factor_type",
             "r2_linreg",
-            "r2_krreg",
+            "r2_mlpreg",
             "acc_logreg",
             "acc_mlp",
         ]
@@ -2692,13 +2692,13 @@ def main(args):
                     factor_name,
                     factor_type,
                     r2_lin,
-                    r2_kr,
+                    r2_mlp,
                     acc_log,
                     acc_mlp,
                 ) = row
                 prefix = f"eval/{modality}/{factor_name}/subset_{subset}"
                 wandb.summary[f"{prefix}/r2_linreg"] = r2_lin
-                wandb.summary[f"{prefix}/r2_krreg"] = r2_kr
+                wandb.summary[f"{prefix}/r2_mlpreg"] = r2_mlp
                 wandb.summary[f"{prefix}/acc_logreg"] = acc_log
                 wandb.summary[f"{prefix}/acc_mlp"] = acc_mlp
 
