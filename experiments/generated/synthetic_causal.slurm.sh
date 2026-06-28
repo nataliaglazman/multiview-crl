@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-25T23:04:22Z
-# Git SHA: 1c9d88d
+# Generated at: 2026-06-28T12:05:19Z
+# Git SHA: 8c91711
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-input-proj
+#SBATCH --job-name=synthetic-causal-random-input-sep-content
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-input-proj-%j.err
+#SBATCH --error=synthetic-causal-random-input-sep-content-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -55,7 +55,6 @@ conda activate "${CONDA_ENV_NAME}"
     --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
-    --contrastive-proj-dim 128 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -95,7 +94,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-input-proj \
+    --model-id synthetic-causal-random-input-sep-content \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \
