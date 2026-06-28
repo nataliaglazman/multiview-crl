@@ -93,7 +93,18 @@ def pca_truncation_curve(X, factors, max_pcs, seeds):
 
 
 def analyse_model(
-    name, run_dir, dataset, poolings, level, checkpoint_name, max_pcs, seeds, batch_size, num_workers, compute_mlp=True
+    name,
+    run_dir,
+    dataset,
+    poolings,
+    level,
+    checkpoint_name,
+    max_pcs,
+    seeds,
+    batch_size,
+    num_workers,
+    compute_mlp=True,
+    compute_per_factor_mlp=False,
 ):
     """Load one run, extract its content block under every pooling, and score geometry."""
     import torch
@@ -131,6 +142,14 @@ def analyse_model(
         # per content factor, so "global recovered / localized not" is visible.
         names = info["content_names"]
         per_factor = {f: cv_probe_r2(content, gt_content[:, j], seeds=seeds)["mean"] for j, f in enumerate(names)}
+        # Per-factor MLP R², at gap/patch only (expensive). Lets the format-breakdown
+        # table tell reformatting (a factor weak at lin@gap but recoverable by mlp@gap
+        # or lin@patch) from genuinely-absent content (weak under every readout).
+        per_factor_mlp = {}
+        if compute_per_factor_mlp and key in ("gap", "patch"):
+            per_factor_mlp = {
+                f: cv_probe_r2(content, gt_content[:, j], seeds=seeds, kind="mlp")["mean"] for j, f in enumerate(names)
+            }
         # Block-MCC (run_dci_compare's headline metric) on THIS pooling — so it can be read
         # across the gap->stats->patch locality ladder, not only the stats pooling.
         mcc_full = block_mcc(content, gt_content, seeds=seeds)["mean"]
@@ -148,6 +167,7 @@ def analyse_model(
                 "grid": grid,
                 "r2_by_k": r2_by_k,
                 "per_factor": per_factor,
+                "per_factor_mlp": per_factor_mlp,
                 "content_names": list(names),
             }
         )
@@ -322,6 +342,69 @@ def print_per_factor_table(rows):
     print(f"  {'(mean of factors)':<{fw}s} {'-':<6s}" + "".join(f"{_f(v, 3):>12s}" for v in means))
 
 
+def _format_cells(lin, mlp, model, factor):
+    """The four {linear, mlp} x {gap, patch} readouts for one (model, factor), + best."""
+    cells = {
+        "lin_gap": lin.get((model, "gap"), {}).get(factor, float("nan")),
+        "mlp_gap": mlp.get((model, "gap"), {}).get(factor, float("nan")),
+        "lin_patch": lin.get((model, "patch"), {}).get(factor, float("nan")),
+        "mlp_patch": mlp.get((model, "patch"), {}).get(factor, float("nan")),
+    }
+    finite = [v for v in cells.values() if np.isfinite(v)]
+    best = max(finite) if finite else float("nan")
+    return cells, best
+
+
+def _format_index(rows):
+    """``(lin, mlp, models, names)`` indexed by ``(model, pooling)`` for the format table."""
+    lin, mlp, models, names = {}, {}, [], None
+    for r in rows:
+        lin[(r["model"], r["pooling"])] = r.get("per_factor", {})
+        mlp[(r["model"], r["pooling"])] = r.get("per_factor_mlp", {})
+        if r["model"] not in models:
+            models.append(r["model"])
+        if names is None and r.get("content_names"):
+            names = r["content_names"]
+    return lin, mlp, models, names
+
+
+def print_per_factor_format_table(rows):
+    """Per-factor linear-vs-MLP at gap-vs-patch — separates reformatting from new content.
+
+    For a model, ``lin_gap`` far below ``best`` means the factor's content is stored
+    non-globally (recoverable at ``lin_patch``) or non-linearly (recoverable at
+    ``mlp_gap``), not absent.  If one model's ``lin_gap`` ≈ its ``best`` while another's
+    ``lin_gap`` ≪ ``best`` for the same factor, the gap between them is a global-linear
+    *reformat* (same content, made more accessible), not extra identifiable content.
+    """
+    lin, mlp, models, names = _format_index(rows)
+    if not names or not any(mlp.values()):
+        return
+
+    aliases = {m: f"m{i}" for i, m in enumerate(models)}
+    print("\n" + "=" * 72)
+    print("  PER-FACTOR FORMAT BREAKDOWN  (linear vs MLP × gap vs patch)")
+    print("  lin_gap ≪ best => content stored non-globally/non-linearly, not absent;")
+    print("  other model's lin_gap ≈ best => global-linear REFORMAT, not new content")
+    print("=" * 72)
+    for m in models:
+        print(f"  {aliases[m]} = {m}")
+    fw = max([len(n) for n in names] + [16])
+    print(
+        f"  {'factor':<{fw}s} {'m':<3s} {'lin_gap':>8s} {'mlp_gap':>8s} "
+        f"{'lin_patch':>9s} {'mlp_patch':>9s} {'best':>7s}"
+    )
+    print("  " + "-" * (fw + 3 + 8 + 8 + 9 + 9 + 7 + 6))
+    for f in names:
+        for m in models:
+            cells, best = _format_cells(lin, mlp, m, f)
+            print(
+                f"  {f:<{fw}s} {aliases[m]:<3s} {_f(cells['lin_gap'], 3):>8s} "
+                f"{_f(cells['mlp_gap'], 3):>8s} {_f(cells['lin_patch'], 3):>9s} "
+                f"{_f(cells['mlp_patch'], 3):>9s} {_f(best, 3):>7s}"
+            )
+
+
 def save_plot(rows, out_dir):
     try:
         import matplotlib
@@ -421,6 +504,23 @@ def write_per_factor_csv(rows, out_dir):
     logger.info("Wrote %s", path)
 
 
+def write_per_factor_format_csv(rows, out_dir):
+    lin, mlp, models, names = _format_index(rows)
+    if not names or not any(mlp.values()):
+        return
+    path = os.path.join(out_dir, "content_rank_per_factor_format.csv")
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["model", "factor", "lin_gap", "mlp_gap", "lin_patch", "mlp_patch", "best"])
+        for fac in names:
+            for m in models:
+                cells, best = _format_cells(lin, mlp, m, fac)
+                w.writerow(
+                    [m, fac] + [_rnd(cells[k]) for k in ("lin_gap", "mlp_gap", "lin_patch", "mlp_patch")] + [_rnd(best)]
+                )
+    logger.info("Wrote %s", path)
+
+
 def main():
     p = argparse.ArgumentParser(description="Content effective rank + PCA-truncation R² + ceiling + per-factor.")
     p.add_argument("--run-dirs", nargs="+", required=True, help="Run directories (settings.json each).")
@@ -434,6 +534,11 @@ def main():
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--no-mlp", action="store_true", help="Skip the (slow) non-linear MLP ceiling.")
+    p.add_argument(
+        "--per-factor-mlp",
+        action="store_true",
+        help="Also compute per-factor MLP R² at gap/patch (slow) for the format-breakdown table.",
+    )
     p.add_argument("--raw-grid", type=int, default=16, help="Raw-pixel ceiling grid GxGxG (0 = skip the raw row).")
     p.add_argument("--out", default="content_rank_out", help="Output directory.")
     cli = p.parse_args()
@@ -467,6 +572,7 @@ def main():
                     cli.batch_size,
                     cli.num_workers,
                     compute_mlp=compute_mlp,
+                    compute_per_factor_mlp=cli.per_factor_mlp,
                 )
             )
         except Exception as e:
@@ -489,10 +595,14 @@ def main():
     print_pca_table(all_rows)
     print_ceiling_table(all_rows, raw)
     print_per_factor_table(all_rows)
+    if cli.per_factor_mlp:
+        print_per_factor_format_table(all_rows)
     os.makedirs(cli.out, exist_ok=True)
     write_csv(all_rows, cli.out)
     write_ceiling_csv(all_rows, raw, cli.out)
     write_per_factor_csv(all_rows, cli.out)
+    if cli.per_factor_mlp:
+        write_per_factor_format_csv(all_rows, cli.out)
     save_plot(all_rows, cli.out)
 
 
