@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-28T12:05:19Z
-# Git SHA: 8c91711
+# Generated at: 2026-06-28T12:07:36Z
+# Git SHA: ba2210b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-input-sep-content
+#SBATCH --job-name=synthetic-causal-random-input-tau-no-sep
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-input-sep-content-%j.err
+#SBATCH --error=synthetic-causal-random-input-tau-no-sep-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -80,7 +80,6 @@ conda activate "${CONDA_ENV_NAME}"
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
@@ -94,8 +93,8 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-input-sep-content \
-    --tau 0.1 \
+    --model-id synthetic-causal-random-input-tau-no-sep \
+    --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
