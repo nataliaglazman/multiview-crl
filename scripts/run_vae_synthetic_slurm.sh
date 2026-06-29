@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # ---- Experiment knobs (override via environment at submit time) ----
-MODEL_ID=${MODEL_ID:-vae_synthetic_no_recon}
+MODEL_ID=${MODEL_ID:-vae_synthetic_recon}
 CONTENT_CHANNELS=${CONTENT_CHANNELS:-9}   # the "number of dimensions" under test
 LATENT_CHANNELS=${LATENT_CHANNELS:-16}    # total latent = content + style
 N_CONTENT=${N_CONTENT:-9}                 # true shared content factors
@@ -79,4 +79,4 @@ conda activate "${CONDA_ENV_NAME}"
     --lr "${LR}" \
     --beta-kl "${BETA_KL}" \
     --num-workers 8 \
-    --recon-weight 0
+    --recon-weight 1
