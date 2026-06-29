@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-random-new-16-noise-baseline
+tag: synthetic-causal-random-new-16-noise
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -27,7 +27,7 @@ content_size: 13
 style_injection_mode: input
 no_final_recon_norm: true
 separate_style_codebooks: true
-separate_content_codebooks: true
+separate_content_codebooks: false
 # synthetic_clean_content: true
 synthetic_style_scale:   3.0   # ×(gain, bias, noise-sigma, bias-field) — nuisance-dominant
 synthetic_content_scale: 0.3   # ×(brain/ventricle/cortex/temporal/asymmetry/sulcal) — subtle content

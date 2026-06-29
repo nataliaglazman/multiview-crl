@@ -15,8 +15,7 @@
 #SBATCH --job-name=vae-synthetic
 #SBATCH --output=vae-synthetic-%j.out
 #SBATCH --error=vae-synthetic-%j.err
-#SBATCH --partition=biomed_a100_gpu
-#SBATCH --constraint=a100_80g
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -32,10 +31,10 @@ CONTENT_CHANNELS=${CONTENT_CHANNELS:-9}   # the "number of dimensions" under tes
 LATENT_CHANNELS=${LATENT_CHANNELS:-16}    # total latent = content + style
 N_CONTENT=${N_CONTENT:-9}                 # true shared content factors
 N_STYLE=${N_STYLE:-3}                     # per-view style factors
-RES=${RES:-32}                            # cubic resolution (power of 2)
+RES=${RES:-64}                            # cubic resolution (power of 2)
 STEPS=${STEPS:-20000}
 EVAL_EVERY=${EVAL_EVERY:-2000}
-BATCH_SIZE=${BATCH_SIZE:-16}
+BATCH_SIZE=${BATCH_SIZE:-64}
 LR=${LR:-1e-3}
 BETA_KL=${BETA_KL:-1e-4}
 
@@ -79,4 +78,5 @@ conda activate "${CONDA_ENV_NAME}"
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \
     --beta-kl "${BETA_KL}" \
-    --num-workers 8
+    --num-workers 8 \
+    --recon-weight 0
