@@ -27,7 +27,7 @@ content_size: 13
 style_injection_mode: input
 no_final_recon_norm: true
 separate_style_codebooks: true
-separate_content_codebooks: false
+separate_content_codebooks: true
 # synthetic_clean_content: true
 synthetic_style_scale:   3.0   # ×(gain, bias, noise-sigma, bias-field) — nuisance-dominant
 synthetic_content_scale: 0.3   # ×(brain/ventricle/cortex/temporal/asymmetry/sulcal) — subtle content
