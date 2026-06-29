@@ -72,6 +72,20 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--synthetic-n-content", type=int, default=9)
     parser.add_argument("--synthetic-n-style", type=int, default=3)
     parser.add_argument(
+        "--synthetic-style-scale",
+        type=float,
+        default=1.0,
+        help="Multiply view-varying style/nuisance magnitudes (gain, bias, noise sigma, bias field). "
+        ">1 = nuisance-dominant (reconstruction must spend capacity on nuisance).",
+    )
+    parser.add_argument(
+        "--synthetic-content-scale",
+        type=float,
+        default=1.0,
+        help="Multiply anatomy content effect-sizes (brain/ventricle/cortex/temporal/asymmetry/sulcal). "
+        "<1 = subtle content (low reconstruction salience).",
+    )
+    parser.add_argument(
         "--synthetic-hierarchical-content",
         action="store_true",
         help="Enable hierarchical content latents: a shared global-atrophy "

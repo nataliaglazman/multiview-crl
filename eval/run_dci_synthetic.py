@@ -140,6 +140,8 @@ def build_synthetic_test_set(args, num_samples=None, cache=True):
         synthetic_num_samples=n_samples,
         synthetic_n_content=getattr(args, "synthetic_n_content", 9),
         synthetic_n_style=getattr(args, "synthetic_n_style", 3),
+        synthetic_style_scale=getattr(args, "synthetic_style_scale", 1.0),
+        synthetic_content_scale=getattr(args, "synthetic_content_scale", 1.0),
         synthetic_n_deformation_grid=getattr(args, "synthetic_n_deformation_grid", 4),
         synthetic_n_fissure_grid=getattr(args, "synthetic_n_fissure_grid", 8),
         synthetic_hierarchical_content=getattr(args, "synthetic_hierarchical_content", False),

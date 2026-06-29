@@ -72,9 +72,11 @@ CLEAN_NUISANCE_SCALE = 0.0
 
 
 class PseudoMRIRenderer(nn.Module):
-    def __init__(self, res=64):
+    def __init__(self, res=64, style_scale=1.0, content_scale=1.0):
         super().__init__()
         self.res = res
+        self.style_scale = style_scale
+        self.content_scale = content_scale
         grid = torch.linspace(-1, 1, res)
         self.register_buffer(
             "coords",
@@ -149,16 +151,16 @@ class PseudoMRIRenderer(nn.Module):
         def _sq(z, a=1.0):
             return a * torch.tanh(z) if clean else z.clamp(-a, a)
 
-        radii_wm = 0.5 + _sq(z_content[0]) * 0.1
-        cortical_thickness = 0.15 + _sq(z_content[5]) * 0.06
+        radii_wm = 0.5 + _sq(z_content[0]) * 0.1 * self.content_scale
+        cortical_thickness = 0.15 + _sq(z_content[5]) * 0.06 * self.content_scale
         radii_gm = radii_wm + cortical_thickness
-        ventricle_size = 0.15 + _sq(z_content[1]) * 0.05
+        ventricle_size = 0.15 + _sq(z_content[1]) * 0.05 * self.content_scale
 
         dist = torch.norm(self.coords, dim=-1)
 
         # Sulcal widening: amplifies the deformation field at boundary regions,
         # making gyri/sulci more or less pronounced.
-        sulcal_factor = 1.0 + _sq(z_content[8]) * 0.6
+        sulcal_factor = 1.0 + _sq(z_content[8]) * 0.6 * self.content_scale
         deformation = self._upsample_field(z_deformation, device) * 0.1 * sulcal_factor * nuisance
         deformed_dist = dist + deformation
 
@@ -169,14 +171,14 @@ class PseudoMRIRenderer(nn.Module):
         y_coords = self.coords[..., 1]
         z_coords = self.coords[..., 2]
         temporal_weight = torch.sigmoid(-8 * y_coords) * torch.sigmoid(-8 * z_coords)
-        temporal_shrink = _sq(z_content[6]) * 0.12
+        temporal_shrink = _sq(z_content[6]) * 0.12 * self.content_scale
         deformed_dist = deformed_dist + temporal_weight * temporal_shrink
 
         # Left–right asymmetry: differential atrophy across hemispheres.
         # Positive z_content[7] → left hemisphere (x < 0) more atrophied.
         x_coords = self.coords[..., 0]
         lr_weight = torch.tanh(-3 * x_coords)  # smooth L/R gradient, ∈ (−1, 1)
-        lr_shift = _sq(z_content[7]) * 0.08
+        lr_shift = _sq(z_content[7]) * 0.08 * self.content_scale
         deformed_dist = deformed_dist + lr_weight * lr_shift
 
         mask_gm = deformed_dist < radii_gm
@@ -223,17 +225,17 @@ class PseudoMRIRenderer(nn.Module):
             pad = torch.zeros(self.N_STYLE_COMPONENTS - z_style.numel(), device=z_style.device)
             z_style = torch.cat([z_style.flatten(), pad])
 
-        gain = 1.0 + z_style[0].clamp(-1, 1) * 0.3
-        bias = z_style[1].clamp(-1, 1) * 0.1
+        gain = (1.0 + z_style[0].clamp(-1, 1) * 0.3 * self.style_scale).clamp_min(0.05)
+        bias = z_style[1].clamp(-1, 1) * 0.1 * self.style_scale
         lut = base * gain + bias
         volume = lut[tissue_map]
 
         volume = torch.where(lesion_mask, torch.full_like(volume, lesion_int), volume)
 
-        bias_field = 1.0 + self._seeded_noise(scale=4, gen=gen, device=device) * 0.15
+        bias_field = 1.0 + self._seeded_noise(scale=4, gen=gen, device=device) * 0.15 * self.style_scale
         volume = volume * bias_field
 
-        sigma = 0.01 + z_style[2].abs() * 0.05
+        sigma = 0.01 + z_style[2].abs() * 0.05 * self.style_scale
         real = torch.randn(volume.shape, generator=gen, device=device) * sigma
         imag = torch.randn(volume.shape, generator=gen, device=device) * sigma
         volume = torch.sqrt((volume + real) ** 2 + imag**2)
@@ -367,6 +369,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
         causal_noise_scale=0.4,
         causal_nonlinearity="leaky_relu",
         clean_content=False,
+        style_scale=1.0,
+        content_scale=1.0,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -435,7 +439,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
             self.renderer_v1 = Primitive3DRenderer(res=res, modality="T1")
             self.renderer_v2 = Primitive3DRenderer(res=res, modality="FLAIR")
         elif mode == "pseudo_mri":
-            self.renderer = PseudoMRIRenderer(res=res)
+            self.renderer = PseudoMRIRenderer(res=res, style_scale=style_scale, content_scale=content_scale)
         else:
             # Fallback to the Conv-based random decoders
             self.renderer_v1 = Random3DRenderer(8, 16, res)

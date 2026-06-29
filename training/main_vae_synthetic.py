@@ -102,6 +102,8 @@ def make_dataset(args, mode, num_samples):
         synthetic_num_samples=num_samples,
         synthetic_n_content=args.n_content,
         synthetic_n_style=args.n_style,
+        synthetic_style_scale=getattr(args, "synthetic_style_scale", 1.0),
+        synthetic_content_scale=getattr(args, "synthetic_content_scale", 1.0),
         synthetic_normalize=args.synthetic_normalize,
         synthetic_causal=args.synthetic_causal,
     )

@@ -1180,6 +1180,8 @@ def main(args):
                 "synthetic_seed": getattr(args, "synthetic_seed", 42),
                 "synthetic_n_content": getattr(args, "synthetic_n_content", 5),
                 "synthetic_n_style": getattr(args, "synthetic_n_style", 3),
+                "synthetic_style_scale": getattr(args, "synthetic_style_scale", 1.0),
+                "synthetic_content_scale": getattr(args, "synthetic_content_scale", 1.0),
                 "synthetic_normalize": getattr(args, "synthetic_normalize", "per_sample"),
                 "synthetic_hierarchical_content": getattr(args, "synthetic_hierarchical_content", False),
                 "synthetic_causal": getattr(args, "synthetic_causal", False),

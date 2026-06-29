@@ -1,17 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-29T11:00:20Z
-# Git SHA: 31391f3
+# Generated at: 2026-06-29T13:19:49Z
+# Git SHA: f260e83
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-new-16
+#SBATCH --job-name=synthetic-causal-random-new-16-noise-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-new-16-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-random-new-16-noise-baseline-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -69,13 +70,13 @@ conda activate "${CONDA_ENV_NAME}"
     --no-final-recon-norm \
     --pass-full-to-next-level \
     --patch-contrastive \
-    --patch-grid 8 8 8 \
+    --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 10 \
+    --scale-contrastive-loss 0 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -87,13 +88,15 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
+    --synthetic-content-scale 0.3 \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-new-16 \
+    --synthetic-style-scale 3.0 \
+    --model-id synthetic-causal-random-new-16-noise-baseline \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
