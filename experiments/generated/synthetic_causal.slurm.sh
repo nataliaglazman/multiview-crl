@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-29T09:23:06Z
-# Git SHA: 4b11885
+# Generated at: 2026-06-29T09:35:13Z
+# Git SHA: a20f699
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-input-6-scaling
+#SBATCH --job-name=synthetic-causal-random-input-8-scaling
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-input-6-scaling-%j.err
+#SBATCH --error=synthetic-causal-random-input-8-scaling-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -93,7 +93,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-input-6-scaling \
+    --model-id synthetic-causal-random-input-8-scaling \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
@@ -104,5 +104,5 @@ conda activate "${CONDA_ENV_NAME}"
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 6 \
+    --vqvae-scaling-rates 8 \
     --workers 8
