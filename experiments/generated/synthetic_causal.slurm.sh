@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-28T12:07:36Z
-# Git SHA: ba2210b
+# Generated at: 2026-06-29T09:23:06Z
+# Git SHA: 4b11885
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-input-tau-no-sep
+#SBATCH --job-name=synthetic-causal-random-input-6-scaling
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-input-tau-no-sep-%j.err
+#SBATCH --error=synthetic-causal-random-input-6-scaling-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -47,7 +47,7 @@ conda activate "${CONDA_ENV_NAME}"
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 32 \
+    --batch-size 64 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
@@ -93,7 +93,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-input-tau-no-sep \
+    --model-id synthetic-causal-random-input-6-scaling \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
@@ -104,5 +104,5 @@ conda activate "${CONDA_ENV_NAME}"
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 4 \
+    --vqvae-scaling-rates 6 \
     --workers 8
