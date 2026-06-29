@@ -78,6 +78,45 @@ def _fmt(v):
     return "  nan" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:.3f}"
 
 
+def run_analysis(run_dir, num_test_samples=400, batch_size=32, num_workers=0, null_permute=False, device=None):
+    """Load a run, score it on the test split, and return ``(cfg, metrics)``.
+
+    ``metrics`` is a flat dict: the trusted ``compute_dci_synthetic`` outputs
+    (DCI, block-MCC, content->view leakage, ridge informativeness) plus the
+    component-wise per-channel MCC and the factor-correlation ceiling.  Shared by
+    the single-run CLI below and ``eval.sweep_vae_identifiability``.
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, cfg = load_model(run_dir, device)
+    dataset = build_test_dataset(cfg, num_test_samples)
+    per_encoder = not cfg.get("no_separate_encoders", False)
+
+    results = dci.compute_dci_synthetic(
+        encoder=model,
+        dataset=dataset,
+        device=device,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pooling="gap",
+        per_encoder=per_encoder,
+        null_permute=null_permute,
+        n_null=5,
+    )
+    metrics = dict(dci.flatten_dci_results(results))
+
+    # Per-channel ("normal") MCC needs the raw channels — re-extract once.
+    level_data, gt_content, gt_style_v1, _gt_style_v2 = dci._extract_synthetic_representations(
+        model, dataset, device, batch_size=batch_size, num_workers=num_workers, pooling="gap"
+    )
+    content_repr, style_repr, _content_v2, _style_v2, _info = level_data[0]
+    metrics["per_channel_mcc/content->content"] = float(per_channel_mcc(content_repr, gt_content))
+    if style_repr is not None:
+        metrics["per_channel_mcc/style->style"] = float(per_channel_mcc(style_repr, gt_style_v1))
+    metrics["factor_correlation_ceiling/content"] = float(factor_correlation_ceiling(gt_content))
+    return cfg, metrics
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run-dir", required=True, help="results/<model-id> directory with settings.json + model.pt")
