@@ -63,6 +63,19 @@ def _pc_grid(ncomp):
     return sorted({k for k in base if k <= ncomp} | {ncomp}) if ncomp >= 1 else []
 
 
+def _pca_reduce(X, n_comp):
+    """PCA-reduce ``X`` to ``n_comp`` components (unsupervised, fit on all samples — the
+    same transductive choice ``pca_truncation_curve`` makes). No-op if ``n_comp<=0`` or
+    ``>=`` the current width."""
+    if n_comp is None or n_comp <= 0:
+        return X
+    n, d = X.shape
+    k = int(min(n_comp, d, n - 1))
+    if k >= d:
+        return X
+    return PCA(n_components=k, random_state=0).fit_transform(X)
+
+
 def pca_truncation_curve(X, factors, max_pcs, seeds):
     """R² of predicting ``factors`` from the first k content PCs, swept over k.
 
@@ -105,6 +118,7 @@ def analyse_model(
     num_workers,
     compute_mlp=True,
     compute_per_factor_mlp=False,
+    probe_dim=0,
 ):
     """Load one run, extract its content block under every pooling, and score geometry."""
     import torch
@@ -134,25 +148,33 @@ def analyse_model(
             continue
 
         rank = _effective_rank(content)
-        grid, r2_by_k, r2_full, n95 = pca_truncation_curve(content, gt_content, max_pcs, seeds)
+        # Probe-capacity control: PCA-reduce the block to ``probe_dim`` comps before the
+        # probes only (eff_rank/feat_dim stay on the FULL block). Kills the p>>n overfit on
+        # the huge patch block and the capacity confound when models/baselines differ in
+        # channel count. probe_dim<=0 = no reduction.
+        content_p = _pca_reduce(content, probe_dim)
+        grid, r2_by_k, r2_full, n95 = pca_truncation_curve(content_p, gt_content, max_pcs, seeds)
         # Non-linear ceiling on the full block: mlp >> ridge => factors are there but
         # encoded non-linearly (identifiable up to a smooth map, not linearly).
-        r2_full_mlp = cv_probe_r2(content, gt_content, seeds=seeds, kind="mlp")["mean"] if compute_mlp else float("nan")
+        r2_full_mlp = (
+            cv_probe_r2(content_p, gt_content, seeds=seeds, kind="mlp")["mean"] if compute_mlp else float("nan")
+        )
         # Per-factor linear R²: splits the variance-weighted aggregate into one number
         # per content factor, so "global recovered / localized not" is visible.
         names = info["content_names"]
-        per_factor = {f: cv_probe_r2(content, gt_content[:, j], seeds=seeds)["mean"] for j, f in enumerate(names)}
+        per_factor = {f: cv_probe_r2(content_p, gt_content[:, j], seeds=seeds)["mean"] for j, f in enumerate(names)}
         # Per-factor MLP R², at gap/patch only (expensive). Lets the format-breakdown
         # table tell reformatting (a factor weak at lin@gap but recoverable by mlp@gap
         # or lin@patch) from genuinely-absent content (weak under every readout).
         per_factor_mlp = {}
         if compute_per_factor_mlp and key in ("gap", "patch"):
             per_factor_mlp = {
-                f: cv_probe_r2(content, gt_content[:, j], seeds=seeds, kind="mlp")["mean"] for j, f in enumerate(names)
+                f: cv_probe_r2(content_p, gt_content[:, j], seeds=seeds, kind="mlp")["mean"]
+                for j, f in enumerate(names)
             }
         # Block-MCC (run_dci_compare's headline metric) on THIS pooling — so it can be read
         # across the gap->stats->patch locality ladder, not only the stats pooling.
-        mcc_full = block_mcc(content, gt_content, seeds=seeds)["mean"]
+        mcc_full = block_mcc(content_p, gt_content, seeds=seeds)["mean"]
         rows.append(
             {
                 "model": name,
@@ -206,14 +228,15 @@ def extract_raw_pixels(dataset, grid, batch_size=32, num_workers=0):
     return np.concatenate(feats), np.concatenate(gtc)
 
 
-def raw_pixel_ceiling(dataset, grid, seeds, batch_size, num_workers, compute_mlp=True):
+def raw_pixel_ceiling(dataset, grid, seeds, batch_size, num_workers, compute_mlp=True, probe_dim=0):
     """The data ceiling: how well the content factors are recoverable from raw pixels."""
     X, Z = extract_raw_pixels(dataset, grid, batch_size, num_workers)
+    Xp = _pca_reduce(X, probe_dim)
     return {
         "feat_dim": X.shape[1],
         "grid": grid,
-        "r2_lin": cv_probe_r2(X, Z, seeds=seeds)["mean"],
-        "r2_mlp": cv_probe_r2(X, Z, seeds=seeds, kind="mlp")["mean"] if compute_mlp else float("nan"),
+        "r2_lin": cv_probe_r2(Xp, Z, seeds=seeds)["mean"],
+        "r2_mlp": cv_probe_r2(Xp, Z, seeds=seeds, kind="mlp")["mean"] if compute_mlp else float("nan"),
     }
 
 
@@ -540,6 +563,15 @@ def main():
         help="Also compute per-factor MLP R² at gap/patch (slow) for the format-breakdown table.",
     )
     p.add_argument("--raw-grid", type=int, default=16, help="Raw-pixel ceiling grid GxGxG (0 = skip the raw row).")
+    p.add_argument(
+        "--probe-dim",
+        type=int,
+        default=0,
+        help="PCA-reduce every block to this many components before the probes (ceiling, per-factor, "
+        "block-MCC, raw-pixel). Removes the p>>n overfit on the huge patch block and the capacity "
+        "confound when models/baselines differ in channel count. eff_rank/feat_dim stay on the full "
+        "block. 0 = no reduction.",
+    )
     p.add_argument("--out", default="content_rank_out", help="Output directory.")
     cli = p.parse_args()
 
@@ -549,6 +581,8 @@ def main():
     poolings = parse_poolings(cli.poolings)
     seeds = tuple(int(s) for s in cli.seeds.split(","))
     compute_mlp = not cli.no_mlp
+    if cli.probe_dim and cli.probe_dim > 0:
+        logger.info("Probes PCA-reduced to %d components (eff_rank/feat_dim stay on the full block).", cli.probe_dim)
 
     from eval.run_dci_synthetic import build_synthetic_test_set, load_run_args
 
@@ -573,6 +607,7 @@ def main():
                     cli.num_workers,
                     compute_mlp=compute_mlp,
                     compute_per_factor_mlp=cli.per_factor_mlp,
+                    probe_dim=cli.probe_dim,
                 )
             )
         except Exception as e:
@@ -586,7 +621,9 @@ def main():
     if cli.raw_grid and cli.raw_grid > 0:
         try:
             logger.info("Computing raw-pixel ceiling (grid %d^3)...", cli.raw_grid)
-            raw = raw_pixel_ceiling(dataset, cli.raw_grid, seeds, cli.batch_size, cli.num_workers, compute_mlp)
+            raw = raw_pixel_ceiling(
+                dataset, cli.raw_grid, seeds, cli.batch_size, cli.num_workers, compute_mlp, cli.probe_dim
+            )
         except Exception as e:
             logger.error("Raw-pixel ceiling failed: %s", e)
 
