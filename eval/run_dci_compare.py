@@ -650,6 +650,7 @@ def score_reprs(
     all_only=False,
     with_dci=False,
     probe_dim=0,
+    gt_style_v2=None,
 ):
     """Turn extracted representations into one comparison row (torch-free).
 
@@ -734,7 +735,10 @@ def score_reprs(
             _CONTENT_V2,
             _STYLE_V2,
             gt_content,
-            gt_style,
+            # Encoder 2 sees view-2 style (z_style_v2), which is drawn independently of
+            # view-1's — so it MUST be scored against gsv2, not gsv1. Falls back to
+            # gt_style for callers that don't supply gt_style_v2.
+            gt_style_v2 if gt_style_v2 is not None else gt_style,
             info,
             avail,
             n_null,
@@ -803,15 +807,15 @@ def evaluate_model(
     model, _args, device = load_model_from_run_dir(run_dir, checkpoint, device)
     t_load = time.perf_counter() - t0
 
-    reprs, gt_content, gt_style, info = {}, None, None, None
+    reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
     t0 = time.perf_counter()
     for key, value in poolings:
-        level_data, gc, gsv1, _gsv2 = _extract_synthetic_representations(
+        level_data, gc, gsv1, gsv2 = _extract_synthetic_representations(
             model, dataset, device, batch_size, num_workers, pooling=value
         )
         reprs[key] = level_data
         if gt_content is None:
-            gt_content, gt_style = gc, gsv1
+            gt_content, gt_style, gt_style_v2 = gc, gsv1, gsv2
         if info is None and level in level_data:
             info = level_data[level][4]
     t_extract = time.perf_counter() - t0
@@ -838,6 +842,7 @@ def evaluate_model(
         gt_style,
         info,
         level,
+        gt_style_v2=gt_style_v2,
         n_null=n_null,
         seeds=seeds,
         n_jobs=n_jobs,
@@ -907,14 +912,14 @@ def score_encoder_live(
 
         dataset = Subset(dataset, range(max_samples))
 
-    reprs, gt_content, gt_style, info = {}, None, None, None
+    reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
     for key, value in poolings:
-        level_data, gc, gsv1, _gsv2 = _extract_synthetic_representations(
+        level_data, gc, gsv1, gsv2 = _extract_synthetic_representations(
             model, dataset, device, batch_size, num_workers, pooling=value
         )
         reprs[key] = level_data
         if gt_content is None:
-            gt_content, gt_style = gc, gsv1
+            gt_content, gt_style, gt_style_v2 = gc, gsv1, gsv2
         if info is None and level in level_data:
             info = level_data[level][4]
     if info is None:
@@ -926,6 +931,7 @@ def score_encoder_live(
         gt_style,
         info,
         level,
+        gt_style_v2=gt_style_v2,
         n_null=n_null,
         seeds=seeds,
         per_encoder=per_encoder,
