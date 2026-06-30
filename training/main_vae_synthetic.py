@@ -85,7 +85,7 @@ def parse_args():
     p.add_argument(
         "--synthetic-normalize",
         type=str,
-        default="per_sample",
+        default="fixed_reference",
         choices=["per_sample", "shared", "fixed_reference"],
     )
     p.add_argument("--synthetic-causal", action="store_true", help="Sample content from a causal SCM")
