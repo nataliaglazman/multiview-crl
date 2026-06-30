@@ -18,8 +18,8 @@ from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 
-import losses
 import models.encoders as encoders
+import training.losses as losses
 import utils.invertible_network_utils as invertible_network_utils
 import utils.latent_spaces as latent_spaces
 import utils.spaces as spaces

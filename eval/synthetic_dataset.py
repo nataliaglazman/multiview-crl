@@ -64,6 +64,48 @@ def sample_content_from_scm(scm, generator, noise_scale=0.4, nonlinearity="leaky
     return z
 
 
+def _gaussian_blur_field(field, sigma):
+    """Separable 3D Gaussian blur with periodic ('wrap') padding -> stationary field.
+
+    Convolving white noise with a Gaussian of width ``sigma`` IS the spectral
+    construction of a GP sample whose covariance is a squared-exponential kernel of
+    that length-scale (exact for a stationary SE kernel up to lattice/boundary
+    effects). ``sigma`` is in lattice units.
+    """
+    if sigma <= 0:
+        return field
+    from scipy.ndimage import gaussian_filter
+
+    out = gaussian_filter(field.detach().cpu().numpy().astype(np.float64), sigma=float(sigma), mode="wrap")
+    return torch.from_numpy(out).to(field.dtype)
+
+
+def sample_gp_field(grid, lengthscale, generator, *, prior="gp", dof=3.0, tau_seed=0):
+    """One stationary GP/TP latent field on a ``grid**3`` lattice, at unit variance.
+
+    The field latents of Halva et al. (AISTATS 2024): each independent component is
+    a spatial field drawn from a process with its own covariance kernel. Here the
+    kernel is squared-exponential with length-scale ``lengthscale`` (set via the
+    Gaussian-blur construction above). ``prior='gp'`` is the Gaussian case;
+    ``prior='tp'`` rescales the field by ``1/sqrt(tau)``, ``tau ~ Gamma(dof/2,
+    dof/2)`` (Student-t process, their Prop. 1) -> heavier tails. Their Theorem 2:
+    GP components are identifiable iff their kernels are DISTINCT, whereas the
+    non-Gaussian t-process stays identifiable even with REPEATED kernels -- which
+    is exactly the ``field_kernels`` x ``field_prior`` control this enables.
+
+    Amplitude is left to the caller (the renderer's deformation/fissure gains);
+    the field is returned unit-variance so ``field_scale=1`` matches the legacy iid
+    amplitude.
+    """
+    white = torch.randn(grid, grid, grid, generator=generator)
+    field = _gaussian_blur_field(white, lengthscale)
+    field = field / (field.std() + 1e-8)
+    if prior == "tp":
+        tau = np.random.RandomState(int(tau_seed) % (2**32 - 1)).gamma(dof / 2.0, 2.0 / dof)
+        field = field / (float(tau) ** 0.5 + 1e-8)
+    return field
+
+
 # clean-content mode (synthetic_clean_content): factor applied to the unlabeled
 # z_deformation / z_fissure fields. 0.0 removes them entirely so the named content
 # factors fully determine structural variance. 1.0 (default mode) leaves them at
