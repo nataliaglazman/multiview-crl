@@ -305,6 +305,23 @@ def train_step(
             else:
                 content_size = max(1, int(default_content_ratio * n_channels))
 
+            # Foreground patch masking: drop always-background patch positions so the
+            # patch-contrastive loss isn't dominated by dead background patches (which
+            # inject noise — actively harmful for InfoNCE, diluting for BT; see
+            # patch-infonce-false-negatives). Position-level, recomputed per batch from
+            # the brain mask: keep a position if any sample has >= thresh brain there.
+            # Slicing hz_level here flows to every downstream patch path (content, style,
+            # loss). Gated to the in-batch path; MoCo patch keys are not sliced in v1.
+            if _is_patch and getattr(args, "patch_foreground_mask", False) and masks is not None and not use_moco:
+                _pg = _patch_grid[level_idx] if isinstance(_patch_grid, list) else _patch_grid
+                _fg_thr = getattr(args, "patch_foreground_thresh", 0.05)
+                with torch.no_grad():
+                    _frac = F.adaptive_avg_pool3d(masks, tuple(_pg)).flatten(1)  # (n_views*B, P)
+                    _keep_pos = (_frac >= _fg_thr).any(dim=0)  # (P,)
+                    if not bool(_keep_pos.any()):
+                        _keep_pos = torch.ones_like(_keep_pos)  # never drop every patch
+                hz_level = hz_level[..., _keep_pos]
+
             soft_content_mask = None
             _style_hz_v0 = _style_hz_v1 = None
 

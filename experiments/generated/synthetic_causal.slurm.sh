@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-30T21:42:43Z
-# Git SHA: 8123d6b
+# Generated at: 2026-06-30T23:50:58Z
+# Git SHA: 213eee7
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-tau-005-8-grid
+#SBATCH --job-name=synthetic-causal-random-renew-bt
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-tau-005-8-grid-%j.err
+#SBATCH --error=synthetic-causal-random-renew-bt-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -54,7 +54,7 @@ conda activate "${CONDA_ENV_NAME}"
     --content-ratios 0.95 \
     --content-size 44 \
     --content-style-levels 0 \
-    --contrastive-loss-type infonce \
+    --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -69,7 +69,9 @@ conda activate "${CONDA_ENV_NAME}"
     --no-final-recon-norm \
     --pass-full-to-next-level \
     --patch-contrastive \
-    --patch-grid 8 8 8 \
+    --patch-foreground-mask \
+    --patch-foreground-thresh 0.05 \
+    --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -94,8 +96,8 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-tau-005-8-grid \
-    --tau 0.05 \
+    --model-id synthetic-causal-random-renew-bt \
+    --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \

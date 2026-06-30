@@ -566,6 +566,25 @@ def parse_args() -> argparse.ArgumentParser:
         "(finest → coarsest).",
     )
     parser.add_argument(
+        "--patch-foreground-mask",
+        action="store_true",
+        help="Drop always-background patch positions from the patch-contrastive loss. "
+        "Pools the brain mask to the patch grid each batch and keeps only positions with "
+        "foreground (>= --patch-foreground-thresh) in at least one batch sample. On the "
+        "central-brain synthetic data ~11%% of a 4^3 grid (and ~37%% of an 8^3 grid) is "
+        "dead background; those positions inject noise into the contrastive signal "
+        "(actively harmful for patch InfoNCE, diluting for Barlow Twins). Requires "
+        "--patch-contrastive and brain masks; no effect under MoCo (patch keys unsliced).",
+    )
+    parser.add_argument(
+        "--patch-foreground-thresh",
+        type=float,
+        default=0.05,
+        help="Foreground-fraction threshold for --patch-foreground-mask: a patch position "
+        "is kept if its pooled brain-mask fraction is >= this in at least one batch sample. "
+        "Default: 0.05.",
+    )
+    parser.add_argument(
         "--contrastive-level-weights",
         type=float,
         nargs="+",
@@ -1016,6 +1035,11 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             )
         else:
             args.patch_grid_per_level = [tuple(_pgpl[3 * i : 3 * i + 3]) for i in range(_nb_levels)]
+
+    # --patch-foreground-mask only does anything with patch-contrastive active.
+    if getattr(args, "patch_foreground_mask", False) and not getattr(args, "patch_contrastive", False):
+        logger.warning("--patch-foreground-mask is set but --patch-contrastive is not; it will be ignored.")
+        args.patch_foreground_mask = False
 
     # --mask-mode learned_split is incompatible with --inject-style-to-decoder
     # because the number of style channels varies per forward pass.
