@@ -448,9 +448,11 @@ def load_checkpoint(
         for key, deque in loss_deques.items():
             deque.append(checkpoint.get(key, 0))
 
-        if scaler is not None and "scaler_state_dict" in checkpoint:
+        if scaler is not None and checkpoint.get("scaler_state_dict"):
             scaler.load_state_dict(checkpoint["scaler_state_dict"])
             logger.info("  AMP GradScaler state restored from checkpoint.")
+        elif scaler is not None:
+            logger.info("  No usable AMP GradScaler state in checkpoint; using a fresh scaler.")
 
         if "rng_state" in checkpoint:
             _restore_rng_state(checkpoint["rng_state"])
