@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-random-tau-005
+tag: synthetic-causal-random-tau-005-8-grid
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -11,7 +11,7 @@ scale_recon_loss: 1
 # vq_commitment_weight: 0
 inject_style_to_decoder: true
 tau: 0.05
-patch_grid: [4, 4, 4]
+patch_grid: [8, 8, 8]
 train_steps: 300000
 # spatial_size: 4
 eval_dci: true

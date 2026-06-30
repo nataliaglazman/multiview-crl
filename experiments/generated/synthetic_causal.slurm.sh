@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-06-30T21:40:56Z
-# Git SHA: 9f184c1
+# Generated at: 2026-06-30T21:42:43Z
+# Git SHA: 8123d6b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-tau-005
+#SBATCH --job-name=synthetic-causal-random-tau-005-8-grid
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-tau-005-%j.err
+#SBATCH --error=synthetic-causal-random-tau-005-8-grid-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -69,7 +69,7 @@ conda activate "${CONDA_ENV_NAME}"
     --no-final-recon-norm \
     --pass-full-to-next-level \
     --patch-contrastive \
-    --patch-grid 4 4 4 \
+    --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -94,7 +94,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-tau-005 \
+    --model-id synthetic-causal-random-tau-005-8-grid \
     --tau 0.05 \
     --total-dim 512 \
     --train-steps 300000 \
