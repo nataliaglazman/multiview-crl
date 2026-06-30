@@ -19,6 +19,10 @@ Usage:
     python scripts/launch.py --from-config results/my-run/settings.json --cluster slurm --dry-run
     python scripts/launch.py --from-config results/my-run/settings.json --cluster slurm --set train_steps=100000
 
+    # Re-launch on a different partition and drop the original node constraint:
+    python scripts/launch.py --from-config results/my-run/settings.json --cluster slurm \
+        --partition cpu --no-constraint --set resume_training=True
+
     # Save a settings.json as an experiment YAML (for version control):
     python scripts/launch.py --from-config results/my-run/settings.json --save-yaml experiments/rerun.yaml
 """
@@ -615,6 +619,20 @@ def main():
         metavar="KEY=VALUE",
         help="Override config values (e.g. --set lr=5e-4 train_steps=50000)",
     )
+    parser.add_argument(
+        "--partition",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Override the SLURM partition (sets _slurm.partition). Useful when "
+        "re-launching a job on a different queue.",
+    )
+    parser.add_argument(
+        "--no-constraint",
+        action="store_true",
+        help="Drop the SLURM --constraint header (clears _slurm.constraint). Useful "
+        "when re-launching on a partition where the original node constraint no longer applies.",
+    )
     args = parser.parse_args()
 
     # --generate mode: batch-generate scripts for all experiments.
@@ -668,6 +686,15 @@ def main():
         config = resolve_config(args.experiment, args.cluster, cli_overrides)
         tag = config.get("tag", args.experiment.stem)
         experiment_source = args.experiment
+
+    # -- SLURM resource overrides (apply to the nested _slurm block, which
+    # --set cannot reach since it only updates top-level keys). --
+    if args.partition is not None or args.no_constraint:
+        slurm_cfg = config.setdefault("_slurm", {})
+        if args.partition is not None:
+            slurm_cfg["partition"] = args.partition
+        if args.no_constraint:
+            slurm_cfg["constraint"] = None
 
     # -- Provenance snapshot --
     snapshot = save_resolved_config(config, experiment_source)

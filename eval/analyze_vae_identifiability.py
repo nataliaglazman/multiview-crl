@@ -35,7 +35,7 @@ import torch
 
 import eval.dci as dci
 from data.datasets import SyntheticBrainDataset
-from eval.identifiability_metrics import block_mcc, factor_correlation_ceiling, per_channel_mcc
+from eval.identifiability_metrics import factor_correlation_ceiling, per_channel_mcc
 from models.vae import MultiviewVAE
 
 
@@ -128,30 +128,23 @@ def main():
     args = p.parse_args()
 
     device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
-    model, cfg = load_model(args.run_dir, device)
-    dataset = build_test_dataset(cfg, args.num_test_samples)
+    cfg, metrics = run_analysis(
+        args.run_dir,
+        num_test_samples=args.num_test_samples,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        null_permute=args.null_permute,
+        device=device,
+    )
+
+    def g(key):
+        return metrics.get(key, float("nan"))
+
     print(f"run-dir: {args.run_dir}")
     print(
         f"latent_channels={cfg.get('latent_channels')}  content_channels={cfg.get('content_channels')}  "
         f"n_content={cfg.get('n_content')}  n_style={cfg.get('n_style')}"
     )
-
-    # --- Trusted protocol: DCI + block-MCC + content->view leakage ---
-    results = dci.compute_dci_synthetic(
-        encoder=model,
-        dataset=dataset,
-        device=device,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pooling="gap",
-        per_encoder=not cfg.get("no_separate_encoders", False),
-        null_permute=args.null_permute,
-        n_null=5,
-    )
-    flat = dci.flatten_dci_results(results)
-
-    def g(key):
-        return flat.get(key, float("nan"))
 
     print("\n=== Tier 1: block identifiability (the claim) ===")
     print(f"{'block':32s} {'D':>6} {'C':>6} {'info_test':>10} {'info_ridge':>11} {'block_MCC':>10}")
@@ -169,30 +162,16 @@ def main():
         f"style->view/acc: {_fmt(g('style->view/acc'))}"
     )
 
-    # --- Tier 3: per-channel ("normal") MCC + factor-correlation ceiling ---
-    # Re-extract the raw representations so per_channel_mcc sees individual channels.
-    level_data, gt_content, gt_style_v1, gt_style_v2 = dci._extract_synthetic_representations(
-        model, dataset, device, batch_size=args.batch_size, num_workers=args.num_workers, pooling="gap"
-    )
-    content_repr, style_repr, content_v2, style_v2, _info = level_data[0]
-
     print("\n=== Tier 3: component-wise diagnostics (NOT theory-guaranteed) ===")
-    print(f"per-channel MCC  content->content : {_fmt(per_channel_mcc(content_repr, gt_content))}")
-    if style_repr is not None:
-        print(f"per-channel MCC  style->style     : {_fmt(per_channel_mcc(style_repr, gt_style_v1))}")
-    # Side-by-side block-MCC on the SAME extraction (sanity check vs the table above).
-    print(f"block-MCC (recomputed) content    : {_fmt(block_mcc(content_repr, gt_content)['mean'])}")
+    print(f"per-channel MCC  content->content : {_fmt(g('per_channel_mcc/content->content'))}")
+    print(f"per-channel MCC  style->style     : {_fmt(g('per_channel_mcc/style->style'))}")
     print(
-        f"factor-correlation ceiling (content): {_fmt(factor_correlation_ceiling(gt_content))}"
+        f"factor-correlation ceiling (content): {_fmt(g('factor_correlation_ceiling/content'))}"
         "   (DCI-D cannot exceed ~1 - this)"
     )
 
     out_path = os.path.join(args.run_dir, "identifiability_analysis.json")
-    summary = {k: float(v) for k, v in flat.items() if not (isinstance(v, float) and np.isnan(v))}
-    summary["per_channel_mcc/content->content"] = float(per_channel_mcc(content_repr, gt_content))
-    if style_repr is not None:
-        summary["per_channel_mcc/style->style"] = float(per_channel_mcc(style_repr, gt_style_v1))
-    summary["factor_correlation_ceiling/content"] = float(factor_correlation_ceiling(gt_content))
+    summary = {k: float(v) for k, v in metrics.items() if not (isinstance(v, float) and np.isnan(v))}
     with open(out_path, "w") as fp:
         json.dump(summary, fp, indent=2)
     print(f"\nfull summary -> {out_path}")
