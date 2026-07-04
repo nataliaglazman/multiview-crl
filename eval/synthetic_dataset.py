@@ -167,17 +167,17 @@ class PseudoMRIRenderer(nn.Module):
         z_content layout (9 components, extras default to 0):
             [0]  brain size      — WM radius ±0.1 around 0.5
             [1]  ventricle size  — CSF cavity ±0.05 around 0.15
-            [2:5] lesion xyz     — WM lesion center position
+            [2:5] lesion xyz     — WM lesion center (direction within the WM)
             [5]  cortical thickness — GM shell width ±0.06 around 0.15
-            [6]  temporal atrophy — shrinks the inferior–posterior lobe
-                                   (hippocampal volume proxy)
+            [6]  temporal atrophy — shrinks a compact bilateral inferior–lateral
+                                   temporal region (hippocampal volume proxy)
             [7]  L–R asymmetry   — differential atrophy across hemispheres
-            [8]  sulcal widening  — amplifies deformation at tissue boundaries
+            [8]  sulcal widening  — depth of a deterministic gyral corrugation
 
-        z_deformation: small (K, K, K) grid → trilinear-upsampled into the
-            cortical-deformation field (gyral pattern proxy).
+        z_deformation: small (K, K, K) grid → trilinear-upsampled into a random
+            per-sample gyral corrugation. Pure nuisance: zeroed in clean mode.
         z_fissure: small (K, K, K) grid → drives the longitudinal fissure
-            wiggle.
+            wiggle. Pure nuisance: zeroed in clean mode.
         """
         # Right-pad z_content with zeros when the caller supplies fewer dims
         # than the renderer consumes (back-compat with n_content=5 runs).
@@ -199,26 +199,41 @@ class PseudoMRIRenderer(nn.Module):
         ventricle_size = 0.15 + _sq(z_content[1]) * 0.05 * self.content_scale
 
         dist = torch.norm(self.coords, dim=-1)
-
-        # Sulcal widening: amplifies the deformation field at boundary regions,
-        # making gyri/sulci more or less pronounced.
-        sulcal_factor = 1.0 + _sq(z_content[8]) * 0.6 * self.content_scale
-        deformation = self._upsample_field(z_deformation, device) * 0.1 * sulcal_factor * nuisance
-        deformed_dist = dist + deformation
-
-        # Temporal-lobe atrophy: shrink the brain radius in the inferior–
-        # posterior octant (y < 0, z < 0) to simulate hippocampal / medial-
-        # temporal volume loss. Smooth falloff via a sigmoid so the boundary
-        # isn't artificially sharp.
+        x_coords = self.coords[..., 0]
         y_coords = self.coords[..., 1]
         z_coords = self.coords[..., 2]
-        temporal_weight = torch.sigmoid(-8 * y_coords) * torch.sigmoid(-8 * z_coords)
+
+        # Nuisance gyral field (z_deformation): a per-sample random corrugation,
+        # zeroed in clean-content mode. Pure nuisance — no named factor rides on
+        # it (sulcal widening below has its own deterministic channel).
+        deformation = self._upsample_field(z_deformation, device) * 0.1 * nuisance
+        deformed_dist = dist + deformation
+
+        # Sulcal widening (z_content[8]): a DETERMINISTIC high-frequency gyral
+        # corrugation whose depth is set by z_content[8]. Unlike the nuisance
+        # field above it does not vanish in clean-content mode, so it stays a
+        # recoverable named factor. Sign flips the gyral phase (map stays
+        # injective); |z| sets sulcal depth → surface roughness.
+        gyral_pattern = torch.sin(12 * x_coords) * torch.sin(12 * y_coords) * torch.sin(12 * z_coords)
+        sulcal_amp = _sq(z_content[8]) * 0.06 * self.content_scale
+        deformed_dist = deformed_dist + gyral_pattern * sulcal_amp
+
+        # Temporal-lobe atrophy (z_content[6]): shrink the WM/GM boundary inside a
+        # compact, BILATERAL region over the (inferior, lateral, mid-A/P) temporal
+        # lobes — a hippocampal / medial-temporal volume-loss proxy. A localized
+        # Gaussian bump (not a product of half-space sigmoids) keeps the effect
+        # off the brain centre and the superior/anterior cortex, so it no longer
+        # drags the whole-brain volume down; |x| makes it symmetric across
+        # hemispheres so it does not confound the L–R asymmetry factor.
+        tw_x = torch.abs(x_coords) - 0.30  # lateral lobes at |x| ≈ 0.30
+        tw_y = y_coords - 0.05
+        tw_z = z_coords + 0.35  # inferior
+        temporal_weight = torch.exp(-(tw_x**2 + tw_y**2 + tw_z**2) / (2 * 0.18**2))
         temporal_shrink = _sq(z_content[6]) * 0.12 * self.content_scale
         deformed_dist = deformed_dist + temporal_weight * temporal_shrink
 
         # Left–right asymmetry: differential atrophy across hemispheres.
         # Positive z_content[7] → left hemisphere (x < 0) more atrophied.
-        x_coords = self.coords[..., 0]
         lr_weight = torch.tanh(-3 * x_coords)  # smooth L/R gradient, ∈ (−1, 1)
         lr_shift = _sq(z_content[7]) * 0.08 * self.content_scale
         deformed_dist = deformed_dist + lr_weight * lr_shift
@@ -238,7 +253,16 @@ class PseudoMRIRenderer(nn.Module):
         tissue_map[mask_csf] = 1
         tissue_map[fissure_mask] = 1
 
-        lesion_xyz = _sq(z_content[2:5], 0.6).to(device)
+        # WM lesion (z_content[2:5]): place the 0.1-radius lesion so it lands
+        # INSIDE the white matter for (almost) every draw. z_content[2:5] is a
+        # direction in the unit cube; scaling by lesion_reach/√3 bounds the centre
+        # norm to lesion_reach = radii_wm − margin, so centre+radius stays within
+        # WM regardless of direction. (Old code scaled to ±0.6 per axis → centre
+        # norm up to ~1.04 ≫ radii_wm≈0.5, so the lesion was absent in ~95% of
+        # samples and its 3 position dims were near-dead / unidentifiable.)
+        lesion_dir = _sq(z_content[2:5], 1.0).to(device)
+        lesion_reach = (radii_wm - 0.12).clamp_min(0.05)
+        lesion_xyz = lesion_dir * (lesion_reach / (3**0.5))
         lesion_mask = (torch.norm(self.coords - lesion_xyz, dim=-1) < 0.1) & mask_wm
 
         return tissue_map, lesion_mask
