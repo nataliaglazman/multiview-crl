@@ -623,6 +623,12 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_causal_noise_scale=0.4,
         synthetic_causal_nonlinearity="leaky_relu",
         synthetic_clean_content=False,
+        synthetic_field_prior="iid",
+        synthetic_field_grid=8,
+        synthetic_field_kernels="distinct",
+        synthetic_field_lengthscales=(1.0, 2.5),
+        synthetic_field_tp_dof=3.0,
+        synthetic_field_scale=1.0,
         **kwargs,
     ):
         super().__init__()
@@ -667,6 +673,12 @@ class SyntheticBrainDataset(MultiviewDataset):
             causal_noise_scale=synthetic_causal_noise_scale,
             causal_nonlinearity=synthetic_causal_nonlinearity,
             clean_content=synthetic_clean_content,
+            field_prior=synthetic_field_prior,
+            field_grid=synthetic_field_grid,
+            field_kernels=synthetic_field_kernels,
+            field_lengthscales=synthetic_field_lengthscales,
+            field_tp_dof=synthetic_field_tp_dof,
+            field_scale=synthetic_field_scale,
         )
         self.num_samples = synthetic_num_samples
         self.synthetic_mode = synthetic_mode

@@ -437,6 +437,12 @@ class Synthetic3DDisentanglementDataset(Dataset):
         clean_content=False,
         style_scale=1.0,
         content_scale=1.0,
+        field_prior="iid",
+        field_grid=8,
+        field_kernels="distinct",
+        field_lengthscales=(1.0, 2.5),
+        field_tp_dof=3.0,
+        field_scale=1.0,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -450,6 +456,23 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.causal_noise_scale = causal_noise_scale
         self.causal_nonlinearity = causal_nonlinearity
         self.clean_content = clean_content
+
+        # Field latents (Halva et al. 2024): the shared z_deformation / z_fissure
+        # fields are, by default, iid grids (a fixed triangular kernel). When
+        # field_prior is "gp"/"tp" they become GP / t-process samples with a chosen
+        # squared-exponential kernel per field, so their recovery is testable and
+        # the distinct-vs-repeated-kernel identifiability control (their Thm 2) is
+        # exposed. iid keeps prior runs byte-identical.
+        if field_prior not in ("iid", "gp", "tp"):
+            raise ValueError(f"field_prior must be iid|gp|tp, got {field_prior!r}")
+        if field_kernels not in ("distinct", "repeated"):
+            raise ValueError(f"field_kernels must be distinct|repeated, got {field_kernels!r}")
+        self.field_prior = field_prior
+        self.field_grid = field_grid
+        self.field_kernels = field_kernels
+        self.field_lengthscales = tuple(field_lengthscales)
+        self.field_tp_dof = field_tp_dof
+        self.field_scale = field_scale
 
         if causal and hierarchical_content:
             raise ValueError("--synthetic-causal and --synthetic-hierarchical-content are mutually exclusive")
@@ -566,18 +589,43 @@ class Synthetic3DDisentanglementDataset(Dataset):
         else:
             z_content = torch.randn(self.n_content, generator=sample_gen)
 
-        z_deformation = torch.randn(
-            self.n_deformation_grid,
-            self.n_deformation_grid,
-            self.n_deformation_grid,
-            generator=sample_gen,
-        )
-        z_fissure = torch.randn(
-            self.n_fissure_grid,
-            self.n_fissure_grid,
-            self.n_fissure_grid,
-            generator=sample_gen,
-        )
+        if self.field_prior == "iid":
+            z_deformation = torch.randn(
+                self.n_deformation_grid,
+                self.n_deformation_grid,
+                self.n_deformation_grid,
+                generator=sample_gen,
+            )
+            z_fissure = torch.randn(
+                self.n_fissure_grid,
+                self.n_fissure_grid,
+                self.n_fissure_grid,
+                generator=sample_gen,
+            )
+            field_lengthscales = None
+        else:
+            # GP / t-process fields on a COMMON lattice so the only difference
+            # between the two is the kernel length-scale (the clean Thm-2 control).
+            ls_def, ls_fis = self.field_lengthscales
+            if self.field_kernels == "repeated":
+                ls_fis = ls_def
+            z_deformation = self.field_scale * sample_gp_field(
+                self.field_grid,
+                ls_def,
+                sample_gen,
+                prior=self.field_prior,
+                dof=self.field_tp_dof,
+                tau_seed=sample_seed * 7 + 1,
+            )
+            z_fissure = self.field_scale * sample_gp_field(
+                self.field_grid,
+                ls_fis,
+                sample_gen,
+                prior=self.field_prior,
+                dof=self.field_tp_dof,
+                tau_seed=sample_seed * 7 + 2,
+            )
+            field_lengthscales = torch.tensor([ls_def, ls_fis], dtype=torch.float32)
         z_style_v1 = torch.randn(self.n_style, generator=sample_gen)
         z_style_v2 = torch.randn(self.n_style, generator=sample_gen)
 
@@ -617,6 +665,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
             "z_style_v2": z_style_v2,
             "brain_mask": brain_mask,
         }
+        if field_lengthscales is not None:
+            latents["field_lengthscales"] = field_lengthscales
         if self.causal:
             latents["causal_adj"] = torch.from_numpy(self.scm["adj"].astype(np.float32))
         elif self.hierarchical_content:
