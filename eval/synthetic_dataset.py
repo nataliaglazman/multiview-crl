@@ -80,7 +80,7 @@ def _gaussian_blur_field(field, sigma):
     return torch.from_numpy(out).to(field.dtype)
 
 
-def sample_gp_field(grid, lengthscale, generator, *, prior="gp", dof=3.0, tau_seed=0):
+def sample_gp_field(grid, lengthscale, generator, *, prior="gp", dof=8.0, tau_seed=0):
     """One stationary GP/TP latent field on a ``grid**3`` lattice, at unit variance.
 
     The field latents of Halva et al. (AISTATS 2024): each independent component is
@@ -99,7 +99,12 @@ def sample_gp_field(grid, lengthscale, generator, *, prior="gp", dof=3.0, tau_se
     """
     white = torch.randn(grid, grid, grid, generator=generator)
     field = _gaussian_blur_field(white, lengthscale)
-    field = field / (field.std() + 1e-8)
+    # Zero-mean, unit-variance per realisation. Centering is essential: without it a
+    # long-length-scale (heavily blurred) field is nearly constant, so dividing by its
+    # tiny spatial std blows the surviving DC offset up to a huge value -- and that DC
+    # is a uniform radius shift, i.e. a brain_size confound. Centering makes the field
+    # a pure spatial pattern with a length-scale-independent range.
+    field = (field - field.mean()) / (field.std() + 1e-8)
     if prior == "tp":
         tau = np.random.RandomState(int(tau_seed) % (2**32 - 1)).gamma(dof / 2.0, 2.0 / dof)
         field = field / (float(tau) ** 0.5 + 1e-8)
@@ -441,7 +446,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         field_grid=8,
         field_kernels="distinct",
         field_lengthscales=(1.0, 2.5),
-        field_tp_dof=3.0,
+        field_tp_dof=8.0,
         field_scale=1.0,
     ):
         super().__init__()

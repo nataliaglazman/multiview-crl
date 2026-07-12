@@ -627,7 +627,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_field_grid=8,
         synthetic_field_kernels="distinct",
         synthetic_field_lengthscales=(1.0, 2.5),
-        synthetic_field_tp_dof=3.0,
+        synthetic_field_tp_dof=8.0,
         synthetic_field_scale=1.0,
         **kwargs,
     ):
