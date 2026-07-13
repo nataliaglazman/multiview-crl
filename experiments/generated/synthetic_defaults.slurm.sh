@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-07-01T08:50:27Z
-# Git SHA: 79d7123
+# Generated at: 2026-07-13T06:36:28Z
+# Git SHA: c769aa5
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic_defaults
 #SBATCH --output=/scratch/users/%u/%j.out

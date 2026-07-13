@@ -1,17 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-01T08:50:27Z
-# Git SHA: 79d7123
+# Generated at: 2026-07-13T06:36:28Z
+# Git SHA: c769aa5
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-tau-redo
+#SBATCH --job-name=synthetic-causal-random-tau-mask
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-tau-redo-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-random-tau-mask-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -69,6 +70,8 @@ conda activate "${CONDA_ENV_NAME}"
     --no-final-recon-norm \
     --pass-full-to-next-level \
     --patch-contrastive \
+    --patch-foreground-mask \
+    --patch-foreground-thresh 0.05 \
     --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
@@ -94,7 +97,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-tau-redo \
+    --model-id synthetic-causal-random-tau-mask \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
