@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # ---- Experiment knobs (override via environment at submit time) ----
-MODEL_ID=${MODEL_ID:-vae_synthetic_recon_baseline}
+MODEL_ID=${MODEL_ID:-ae_normal}
 CONTENT_CHANNELS=${CONTENT_CHANNELS:-9}   # the "number of dimensions" under test
 LATENT_CHANNELS=${LATENT_CHANNELS:-16}    # total latent = content + style
 N_CONTENT=${N_CONTENT:-9}                 # true shared content factors
@@ -66,7 +66,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV_NAME}"
 
 # ---- Train ----
-"$PYTHON" -m training.main_vae_synthetic \
+"$PYTHON" -m training.main_ae_synthetic \
     --model-id "${MODEL_ID}" \
     --content-channels "${CONTENT_CHANNELS}" \
     --latent-channels "${LATENT_CHANNELS}" \

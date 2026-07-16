@@ -42,17 +42,33 @@ from models.vae import MultiviewVAE
 def load_model(run_dir, device):
     with open(os.path.join(run_dir, "settings.json")) as fp:
         cfg = json.load(fp)
-    model = MultiviewVAE(
-        in_channels=1,
-        hidden_channels=cfg.get("hidden_channels", 64),
-        res_channels=cfg.get("res_channels", 32),
-        nb_res_layers=cfg.get("nb_res_layers", 2),
-        downscale_factor=cfg.get("downscale_factor", 4),
-        latent_channels=cfg.get("latent_channels", 16),
-        content_channels=cfg.get("content_channels", 9),
-        beta_kl=cfg.get("beta_kl", 0.0),
-        separate_encoders=not cfg.get("no_separate_encoders", False),
-    ).to(device)
+    # ``model_type`` is written by the training scripts; absent → legacy VAE run.
+    if cfg.get("model_type") == "ae":
+        from models.ae import MultiviewAE
+
+        model = MultiviewAE(
+            in_channels=1,
+            hidden_channels=cfg.get("hidden_channels", 64),
+            res_channels=cfg.get("res_channels", 32),
+            nb_res_layers=cfg.get("nb_res_layers", 2),
+            downscale_factor=cfg.get("downscale_factor", 4),
+            latent_dim=cfg.get("latent_channels", 16),
+            content_channels=cfg.get("content_channels", 9),
+            separate_encoders=not cfg.get("no_separate_encoders", False),
+            res=cfg.get("res", 32),
+        ).to(device)
+    else:
+        model = MultiviewVAE(
+            in_channels=1,
+            hidden_channels=cfg.get("hidden_channels", 64),
+            res_channels=cfg.get("res_channels", 32),
+            nb_res_layers=cfg.get("nb_res_layers", 2),
+            downscale_factor=cfg.get("downscale_factor", 4),
+            latent_channels=cfg.get("latent_channels", 16),
+            content_channels=cfg.get("content_channels", 9),
+            beta_kl=cfg.get("beta_kl", 0.0),
+            separate_encoders=not cfg.get("no_separate_encoders", False),
+        ).to(device)
     state = torch.load(os.path.join(run_dir, "model.pt"), map_location=device)
     model.load_state_dict(state)
     model.eval()
