@@ -77,7 +77,6 @@ conda activate "${CONDA_ENV_NAME}"
     --eval-every "${EVAL_EVERY}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \
-    --beta-kl "${BETA_KL}" \
     --num-workers 8 \
     --recon-weight 1 \
-    --contrastive-weight 0
+    --contrastive-weight 1
