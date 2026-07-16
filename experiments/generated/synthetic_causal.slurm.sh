@@ -93,7 +93,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-shared \
+    --model-id synthetic-causal-random-shared-512 \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
@@ -102,7 +102,7 @@ conda activate "${CONDA_ENV_NAME}"
     --vq-commitment-weight 0.25 \
     --vqvae-embed-dim 48 \
     --vqvae-hidden-channels 48 \
-    --vqvae-nb-entries 256 \
+    --vqvae-nb-entries 512 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
     --workers 8
