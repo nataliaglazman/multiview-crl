@@ -1,11 +1,11 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthetic_causal_fixedref.yaml
+# Auto-generated from: experiments/synthetic_causal_patch_vicreg.yaml
 # Generated at: 2026-07-16T06:37:52Z
 # Git SHA: 926c21b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-fixedref
+#SBATCH --job-name=synthetic-causal-patch-vicreg
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-fixedref-%j.err
+#SBATCH --error=synthetic-causal-patch-vicreg-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -48,14 +48,14 @@ conda activate "${CONDA_ENV_NAME}"
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 32 \
+    --batch-size 64 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
     --content-size 44 \
     --content-style-levels 0 \
-    --contrastive-loss-type infonce \
+    --contrastive-loss-type vicreg \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -67,22 +67,27 @@ conda activate "${CONDA_ENV_NAME}"
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
+    --no-final-recon-norm \
     --pass-full-to-next-level \
     --patch-contrastive \
+    --patch-foreground-mask \
+    --patch-foreground-thresh 0.05 \
     --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 100 \
-    --scale-recon-loss 0.0 \
+    --scale-contrastive-loss 10 \
+    --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
+    --separate-content-codebooks \
     --separate-encoders \
+    --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode concat \
+    --style-injection-mode input \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -92,12 +97,15 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-fixedref \
-    --tau 0.1 \
+    --model-id synthetic-causal-patch-vicreg \
+    --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
     --use-wandb \
+    --vicreg-cov-coeff 1.0 \
+    --vicreg-sim-coeff 25.0 \
+    --vicreg-std-coeff 25.0 \
     --vq-commitment-weight 0.25 \
     --vqvae-embed-dim 48 \
     --vqvae-hidden-channels 48 \

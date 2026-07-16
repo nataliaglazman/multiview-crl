@@ -1,0 +1,49 @@
+# Patch VICReg on causal synthetic — a negative-free local objective.
+#
+# Same setup as synthetic_causal.yaml, but the PATCH contrastive loss is VICReg instead
+# of InfoNCE. Mechanism: vicreg_loss folds (n_views, B, C, P) -> (n_views, B*P, C), so its
+# invariance (MSE) term aligns CORRESPONDING VOXELS across T1/T2 on the content channels —
+# local correspondence without negatives. Because it has no negatives, it sidesteps the
+# background false-negative problem that patch-InfoNCE needs masking to avoid.
+#
+# Masking is kept ON: VICReg's variance hinge would otherwise reward injecting variance into
+# low-info background patches (reinforcing the background "registers"), so excluding dead
+# patches still helps. For the pure "VICReg instead of masking" ablation, set
+# patch_foreground_mask: false.
+_base_: synthetic_defaults
+
+tag: synthetic-causal-patch-vicreg
+
+# --- the change vs synthetic_causal.yaml: patch VICReg instead of patch InfoNCE ---
+contrastive_loss_type: vicreg
+vicreg_sim_coeff: 25.0    # invariance: align corresponding voxels across views (content channels)
+vicreg_std_coeff: 25.0    # variance hinge: anti-collapse (per-channel std >= 1)
+vicreg_cov_coeff: 1.0     # covariance: decorrelate content channels
+
+# --- everything below mirrors synthetic_causal.yaml ---
+synthetic_normalize: fixed_reference
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+scale_contrastive_loss: 10
+scale_recon_loss: 1
+inject_style_to_decoder: true
+tau: 0.07                 # unused by VICReg (no temperature / negatives), kept for parity
+patch_grid: [4, 4, 4]
+patch_contrastive: true
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+train_steps: 300000
+eval_dci: true
+checkpoint_steps: 1000
+scale_adv_loss: 0.0
+batch_size: 64            # effective VICReg batch = 64 * 64 patches = 4096 folded samples (variance term well-fed)
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [4]
+deterministic: true
+content_size: 44
+style_injection_mode: input
+no_final_recon_norm: true
+separate_style_codebooks: true
+separate_content_codebooks: true
