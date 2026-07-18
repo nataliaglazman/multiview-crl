@@ -1,9 +1,9 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-independent-independent-contrastive-real
+tag: synthetic-independent-8-patch
 synthetic_normalize: fixed_reference
-synthetic_causal: false
+synthetic_causal: true
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
 scale_contrastive_loss: 1
@@ -30,6 +30,6 @@ separate_style_codebooks: true
 separate_content_codebooks: false
 # synthetic_clean_content: true
 patch_contrastive: true
-patch_foreground_mask: true
-patch_foreground_thresh: 0.05
-# contrastive_loss_type: vicreg
+# patch_foreground_mask: true
+# patch_foreground_thresh: 0.05
+contrastive_loss_type: vicreg
