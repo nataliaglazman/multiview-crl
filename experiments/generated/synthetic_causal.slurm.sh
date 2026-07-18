@@ -1,18 +1,17 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-18T10:20:28Z
-# Git SHA: 6b3ede8
+# Generated at: 2026-07-18T10:50:23Z
+# Git SHA: 29a73d5
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-independent-8-patch-mask
+#SBATCH --job-name=synthetic-independent-independent-contrastive-real
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-independent-8-patch-mask-%j.err
+#SBATCH --error=synthetic-independent-independent-contrastive-real-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -87,7 +86,6 @@ conda activate "${CONDA_ENV_NAME}"
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --style-injection-mode input \
-    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
@@ -96,7 +94,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-independent-8-patch-mask \
+    --model-id synthetic-independent-independent-contrastive-real \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
