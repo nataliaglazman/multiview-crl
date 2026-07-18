@@ -1,17 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-18T09:50:29Z
-# Git SHA: f174b7b
+# Generated at: 2026-07-18T10:01:38Z
+# Git SHA: 4892a72
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-independent-8-patch-mask
 #SBATCH --output=/scratch/users/%u/%j.out
 #SBATCH --error=synthetic-independent-8-patch-mask-%j.err
-#SBATCH --partition=gpu
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -52,7 +53,7 @@ conda activate "${CONDA_ENV_NAME}"
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 48 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
