@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-18T06:08:50Z
-# Git SHA: e7a6c40
+# Generated at: 2026-07-18T09:50:29Z
+# Git SHA: f174b7b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-independent-contrastive
+#SBATCH --job-name=synthetic-independent-8-patch-mask
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-independent-contrastive-%j.err
+#SBATCH --error=synthetic-independent-8-patch-mask-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -69,7 +69,9 @@ conda activate "${CONDA_ENV_NAME}"
     --no-final-recon-norm \
     --pass-full-to-next-level \
     --patch-contrastive \
-    --patch-grid 4 4 4 \
+    --patch-foreground-mask \
+    --patch-foreground-thresh 0.05 \
+    --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -84,6 +86,7 @@ conda activate "${CONDA_ENV_NAME}"
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --style-injection-mode input \
+    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
@@ -92,7 +95,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-independent-contrastive \
+    --model-id synthetic-independent-8-patch-mask \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
