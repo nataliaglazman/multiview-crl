@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-18T10:01:38Z
-# Git SHA: 4892a72
+# Generated at: 2026-07-18T10:15:32Z
+# Git SHA: 69d4614
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-independent-8-patch-mask
+#SBATCH --job-name=synthetic-independent-8-patch-vicreg
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-independent-8-patch-mask-%j.err
+#SBATCH --error=synthetic-independent-8-patch-vicreg-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -54,7 +54,7 @@ conda activate "${CONDA_ENV_NAME}"
     --content-ratios 0.95 \
     --content-size 44 \
     --content-style-levels 0 \
-    --contrastive-loss-type infonce \
+    --contrastive-loss-type vicreg \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -69,8 +69,6 @@ conda activate "${CONDA_ENV_NAME}"
     --no-final-recon-norm \
     --pass-full-to-next-level \
     --patch-contrastive \
-    --patch-foreground-mask \
-    --patch-foreground-thresh 0.05 \
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
@@ -95,7 +93,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-independent-8-patch-mask \
+    --model-id synthetic-independent-8-patch-vicreg \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
