@@ -629,6 +629,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_field_lengthscales=(1.0, 2.5),
         synthetic_field_tp_dof=8.0,
         synthetic_field_scale=1.0,
+        synthetic_identifiable_ventricle=False,
         **kwargs,
     ):
         super().__init__()
@@ -679,6 +680,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             field_lengthscales=synthetic_field_lengthscales,
             field_tp_dof=synthetic_field_tp_dof,
             field_scale=synthetic_field_scale,
+            identifiable_ventricle=synthetic_identifiable_ventricle,
         )
         self.num_samples = synthetic_num_samples
         self.synthetic_mode = synthetic_mode

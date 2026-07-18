@@ -119,11 +119,16 @@ CLEAN_NUISANCE_SCALE = 0.0
 
 
 class PseudoMRIRenderer(nn.Module):
-    def __init__(self, res=64, style_scale=1.0, content_scale=1.0):
+    def __init__(self, res=64, style_scale=1.0, content_scale=1.0, identifiable_ventricle=False):
         super().__init__()
         self.res = res
         self.style_scale = style_scale
         self.content_scale = content_scale
+        # When True, the ventricle is made recoverable: larger effect size, read off
+        # the UNdeformed radius (no gyral-field swamping), and the fissure gets its own
+        # tissue label so "total CSF" is no longer fissure-dominated. Default False =
+        # byte-identical to prior runs. See render_structure / render_modality.
+        self.identifiable_ventricle = identifiable_ventricle
         grid = torch.linspace(-1, 1, res)
         self.register_buffer(
             "coords",
@@ -201,7 +206,13 @@ class PseudoMRIRenderer(nn.Module):
         radii_wm = 0.5 + _sq(z_content[0]) * 0.1 * self.content_scale
         cortical_thickness = 0.15 + _sq(z_content[5]) * 0.06 * self.content_scale
         radii_gm = radii_wm + cortical_thickness
-        ventricle_size = 0.15 + _sq(z_content[1]) * 0.05 * self.content_scale
+        # identifiable_ventricle: re-centre to a larger, more salient ventricle whose
+        # SMALLEST radius (0.12) still clears the |x|>0.05 septum split. A naive
+        # amplitude bump around the 0.15 base instead drops the low end to ~0.05, where
+        # the split erases the ventricle entirely for z1<0 -- a floor effect that CAPS
+        # recoverability (R^2 0.92 -> 0.81). Range [0.12, 0.28], all inside the WM.
+        vent_base, vent_amp = (0.20, 0.08) if self.identifiable_ventricle else (0.15, 0.05)
+        ventricle_size = vent_base + _sq(z_content[1]) * vent_amp * self.content_scale
 
         dist = torch.norm(self.coords, dim=-1)
         x_coords = self.coords[..., 0]
@@ -247,7 +258,11 @@ class PseudoMRIRenderer(nn.Module):
         mask_wm = deformed_dist < radii_wm
 
         ventricle_split = torch.abs(x_coords) > 0.05
-        mask_csf = (deformed_dist < ventricle_size) & ventricle_split
+        # identifiable_ventricle: read the ventricle off the UNdeformed radius so the
+        # gyral/nuisance field (calibrated for the outer cortex, but ~50% of the tiny
+        # ventricle radius) no longer overwrites its boundary.
+        vent_dist = dist if self.identifiable_ventricle else deformed_dist
+        mask_csf = (vent_dist < ventricle_size) & ventricle_split
 
         fissure_noise = self._upsample_field(z_fissure, device) * 0.05 * nuisance
         fissure_mask = (torch.abs(x_coords + fissure_noise) < 0.03) & mask_gm
@@ -256,7 +271,11 @@ class PseudoMRIRenderer(nn.Module):
         tissue_map[mask_gm] = 3
         tissue_map[mask_wm] = 2
         tissue_map[mask_csf] = 1
-        tissue_map[fissure_mask] = 1
+        # identifiable_ventricle: give the longitudinal fissure its OWN label (4,
+        # rendered at a distinct intensity) so a pooled probe can separate ventricle
+        # CSF from fissure CSF. Otherwise "total CSF" tracks the brain-size-driven
+        # fissure sheet, not the ventricle signal (see render_modality's 5th LUT entry).
+        tissue_map[fissure_mask] = 4 if self.identifiable_ventricle else 1
 
         # WM lesion (z_content[2:5]): place the 0.1-radius lesion so it lands
         # INSIDE the white matter for (almost) every draw. z_content[2:5] is a
@@ -281,11 +300,15 @@ class PseudoMRIRenderer(nn.Module):
         """View-specific rendering. z_style drives gain, bias, and noise sigma."""
         gen = torch.Generator(device=device).manual_seed(int(view_seed))
 
+        # LUT indexed by tissue label [bg, CSF, WM, GM, fissure]. The 5th (fissure)
+        # entry is only reached when identifiable_ventricle relabels the fissure to 4;
+        # with the default (fissure == CSF == label 1) it is inert, so runs are
+        # byte-identical. The fissure intensity is deliberately distinct from CSF.
         if modality == "T1":
-            base = torch.tensor([0.0, 0.1, 0.8, 0.5], device=device)
+            base = torch.tensor([0.0, 0.1, 0.8, 0.5, 0.3], device=device)
             lesion_int = 0.4
         elif modality == "FLAIR":
-            base = torch.tensor([0.0, 0.1, 0.4, 0.8], device=device)
+            base = torch.tensor([0.0, 0.1, 0.4, 0.8, 0.3], device=device)
             lesion_int = 1.0
         else:
             raise ValueError(f"Unknown modality {modality}")
@@ -448,9 +471,11 @@ class Synthetic3DDisentanglementDataset(Dataset):
         field_lengthscales=(1.0, 2.5),
         field_tp_dof=8.0,
         field_scale=1.0,
+        identifiable_ventricle=False,
     ):
         super().__init__()
         self.num_samples = num_samples
+        self.identifiable_ventricle = identifiable_ventricle
         self.res = res
         self.mode = mode
         self.seed = seed
@@ -533,7 +558,12 @@ class Synthetic3DDisentanglementDataset(Dataset):
             self.renderer_v1 = Primitive3DRenderer(res=res, modality="T1")
             self.renderer_v2 = Primitive3DRenderer(res=res, modality="FLAIR")
         elif mode == "pseudo_mri":
-            self.renderer = PseudoMRIRenderer(res=res, style_scale=style_scale, content_scale=content_scale)
+            self.renderer = PseudoMRIRenderer(
+                res=res,
+                style_scale=style_scale,
+                content_scale=content_scale,
+                identifiable_ventricle=identifiable_ventricle,
+            )
         else:
             # Fallback to the Conv-based random decoders
             self.renderer_v1 = Random3DRenderer(8, 16, res)
