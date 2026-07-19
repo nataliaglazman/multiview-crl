@@ -3,9 +3,9 @@
 # Generated at: 2026-07-19T11:09:08Z
 # Git SHA: ee58c39
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-new
+#SBATCH --job-name=synthetic-causal-projection-new-2
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-new-%j.err
+#SBATCH --error=synthetic-causal-projection-new-2-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -60,7 +60,7 @@ conda activate "${CONDA_ENV_NAME}"
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
-    --dci-every 2000 \
+    --dci-every 10000 \
     --deterministic \
     --eval-dci \
     --image-spacing 1.0 \
@@ -94,7 +94,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-new \
+    --model-id synthetic-causal-projection-ne-2 \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
