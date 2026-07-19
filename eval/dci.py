@@ -130,18 +130,23 @@ def compute_importance_gbt(x_train, y_train, x_test, y_test, factor_types):
     num_factors = y_train.shape[0]
     assert num_factors == len(factor_types)
     num_codes = x_train.shape[0]
+    # sklearn's default max_features=None rescans every code at every split, which
+    # is the dominant cost once patch pooling pushes num_codes into the tens of
+    # thousands. Subsample features only in that regime, so gap/stats pooling (tens
+    # of codes) keeps its historical numbers bit-for-bit.
+    _max_features = "sqrt" if num_codes > 2000 else None
     importance_matrix = np.zeros(shape=[num_codes, num_factors], dtype=np.float64)
     train_loss = []
     test_loss = []
     for i, ftype in zip(range(num_factors), factor_types):
         if ftype == "discrete":
-            model = ensemble.GradientBoostingClassifier()
+            model = ensemble.GradientBoostingClassifier(max_features=_max_features)
             model.fit(x_train.T, y_train[i, :])
             importance_matrix[:, i] = np.abs(model.feature_importances_)
             train_loss.append(np.mean(model.predict(x_train.T) == y_train[i, :]))
             test_loss.append(np.mean(model.predict(x_test.T) == y_test[i, :]))
         else:
-            model = ensemble.GradientBoostingRegressor()
+            model = ensemble.GradientBoostingRegressor(max_features=_max_features)
             model.fit(x_train.T, y_train[i, :])
             importance_matrix[:, i] = np.abs(model.feature_importances_)
             train_loss.append(model.score(x_train.T, y_train[i, :]))

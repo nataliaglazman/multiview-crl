@@ -2115,15 +2115,14 @@ def main(args):
                             import eval.dci as dci
 
                             logger.info(f"  [EVALUATION] Periodic synthetic DCI (step {step})...")
-                            # Pooling is a measurement choice, not a mirror of the
-                            # training objective: global factors live in the channel
-                            # mean, localized ones (lesion_*) only survive patch
-                            # pooling. Log both under separate namespaces and leave
-                            # the headline to run_dci_compare's FACTOR_POOLING, so
-                            # this stays a diagnostic and never a max over poolings.
+                            # Gap only, deliberately: this path scores via GBT
+                            # (compute_importance_gbt), which refits per factor per
+                            # encoder and is orders of magnitude slower on the ~22k
+                            # codes patch pooling produces — it blocks the training
+                            # loop. Localized factors (lesion_*) are still covered at
+                            # patch by the selection composite below, which probes
+                            # with RidgeCV instead, and by the end-of-training DCI.
                             _dci_poolings = [("gap", "gap")]
-                            if getattr(args, "patch_grid", None):
-                                _dci_poolings.append(("patch", tuple(args.patch_grid)))
                             for _dci_label, _dci_pooling in _dci_poolings:
                                 _dci_synth = dci.compute_dci_synthetic(
                                     encoder=encoders[0],
