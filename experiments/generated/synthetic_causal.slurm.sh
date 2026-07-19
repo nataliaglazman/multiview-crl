@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-19T02:39:14Z
-# Git SHA: edf4e3b
+# Generated at: 2026-07-19T03:15:29Z
+# Git SHA: 6fa51eb
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-independent-8-patch-infonce
+#SBATCH --job-name=synthetic-causal-projection
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-independent-8-patch-infonce-%j.err
+#SBATCH --error=synthetic-causal-projection-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -55,6 +55,8 @@ conda activate "${CONDA_ENV_NAME}"
     --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
+    --contrastive-proj-dim 32 \
+    --contrastive-proj-hidden 128 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -68,7 +70,6 @@ conda activate "${CONDA_ENV_NAME}"
     --moco-queue-size 0 \
     --no-final-recon-norm \
     --pass-full-to-next-level \
-    --patch-contrastive \
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
@@ -93,7 +94,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-independent-8-patch-infonce \
+    --model-id synthetic-causal-projection \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \

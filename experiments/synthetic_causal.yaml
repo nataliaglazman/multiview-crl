@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-independent-8-patch-infonce
+tag: synthetic-causal-projection
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -29,7 +29,9 @@ no_final_recon_norm: true
 separate_style_codebooks: true
 separate_content_codebooks: false
 # synthetic_clean_content: true
-patch_contrastive: true
+patch_contrastive: false
+contrastive_proj_dim: 32     # >0 enables it; 0 (default) = off
+contrastive_proj_hidden: 128  # optional, defaults to 256
 # patch_foreground_mask: true
 # patch_foreground_thresh: 0.05
 # contrastive_loss_type: vicreg
