@@ -18,7 +18,10 @@ cache_dir: null
 synthetic_mode: pseudo_mri
 synthetic_res: 64
 synthetic_num_train: 2000
-synthetic_num_val: 200
+# Patch-pooled DCI flattens to (B, P*C) — 512 patches x 44 content channels is
+# ~22.5k features, so the ridge probes need far more than the old 200 val
+# samples to be anything but regularization-dominated.
+synthetic_num_val: 1500
 synthetic_num_test: 400
 
 # ---- Architecture (smaller, single-level) ----

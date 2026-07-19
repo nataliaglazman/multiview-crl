@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-projection
+tag: synthetic-causal-projection-new
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random

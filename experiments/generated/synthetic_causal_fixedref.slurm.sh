@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_fixedref.yaml
-# Generated at: 2026-07-19T03:15:29Z
-# Git SHA: 6fa51eb
+# Generated at: 2026-07-19T11:09:08Z
+# Git SHA: ee58c39
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-random-fixedref
+#SBATCH --job-name=synthetic-causal-random-fixedref-new
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-random-fixedref-%j.err
+#SBATCH --error=synthetic-causal-random-fixedref-new-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -90,9 +90,9 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
-    --synthetic-num-val 200 \
+    --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-random-fixedref \
+    --model-id synthetic-causal-random-fixedref-new \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 300000 \

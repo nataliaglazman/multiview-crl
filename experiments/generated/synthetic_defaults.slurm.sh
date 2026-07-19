@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-07-19T03:15:29Z
-# Git SHA: 6fa51eb
+# Generated at: 2026-07-19T11:09:08Z
+# Git SHA: ee58c39
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic_defaults
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -82,7 +82,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-mode pseudo_mri \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
-    --synthetic-num-val 200 \
+    --synthetic-num-val 1500 \
     --synthetic-res 64 \
     --tau 0.1 \
     --total-dim 512 \

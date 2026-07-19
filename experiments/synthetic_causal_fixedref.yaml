@@ -4,7 +4,7 @@
 # channels can recover gain/bias once the input-level eraser is removed.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-random-fixedref
+tag: synthetic-causal-random-fixedref-new
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random

@@ -2115,36 +2115,38 @@ def main(args):
                             import eval.dci as dci
 
                             logger.info(f"  [EVALUATION] Periodic synthetic DCI (step {step})...")
-                            # Match the pooling to the contrastive objective: patch
-                            # pooling preserves the spatial layout that spatial GT
-                            # factors live in, so identifiability isn't under-reported.
-                            _dci_pooling = (
-                                tuple(args.patch_grid)
-                                if getattr(args, "patch_contrastive", False) and getattr(args, "patch_grid", None)
-                                else "gap"
-                            )
-                            _dci_synth = dci.compute_dci_synthetic(
-                                encoder=encoders[0],
-                                dataset=val_dataset,
-                                device=device,
-                                batch_size=dataloader_kwargs.get("batch_size", 32),
-                                num_workers=0,
-                                pooling=_dci_pooling,
-                                per_encoder=getattr(args, "separate_encoders", False),
-                            )
-                            _dci_flat = dci.flatten_dci_results(_dci_synth)
-                            for _dci_k, _dci_v in _dci_flat.items():
-                                if not np.isnan(_dci_v):
-                                    tb_writer.add_scalar(f"dci_synthetic/{_dci_k}", _dci_v, step)
-                            if _use_wandb:
-                                wandb.log(
-                                    {
-                                        f"dci_synthetic/{_dci_k}": _dci_v
-                                        for _dci_k, _dci_v in _dci_flat.items()
-                                        if not np.isnan(_dci_v)
-                                    },
-                                    step=step,
+                            # Pooling is a measurement choice, not a mirror of the
+                            # training objective: global factors live in the channel
+                            # mean, localized ones (lesion_*) only survive patch
+                            # pooling. Log both under separate namespaces and leave
+                            # the headline to run_dci_compare's FACTOR_POOLING, so
+                            # this stays a diagnostic and never a max over poolings.
+                            _dci_poolings = [("gap", "gap")]
+                            if getattr(args, "patch_grid", None):
+                                _dci_poolings.append(("patch", tuple(args.patch_grid)))
+                            for _dci_label, _dci_pooling in _dci_poolings:
+                                _dci_synth = dci.compute_dci_synthetic(
+                                    encoder=encoders[0],
+                                    dataset=val_dataset,
+                                    device=device,
+                                    batch_size=dataloader_kwargs.get("batch_size", 32),
+                                    num_workers=0,
+                                    pooling=_dci_pooling,
+                                    per_encoder=getattr(args, "separate_encoders", False),
                                 )
+                                _dci_flat = dci.flatten_dci_results(_dci_synth)
+                                for _dci_k, _dci_v in _dci_flat.items():
+                                    if not np.isnan(_dci_v):
+                                        tb_writer.add_scalar(f"dci_synthetic/{_dci_label}/{_dci_k}", _dci_v, step)
+                                if _use_wandb:
+                                    wandb.log(
+                                        {
+                                            f"dci_synthetic/{_dci_label}/{_dci_k}": _dci_v
+                                            for _dci_k, _dci_v in _dci_flat.items()
+                                            if not np.isnan(_dci_v)
+                                        },
+                                        step=step,
+                                    )
                         except Exception as e:
                             logger.warning(f"  [WARNING] Periodic synthetic DCI failed: {e}")
                         finally:
@@ -2175,8 +2177,15 @@ def main(args):
                                 try:
                                     from eval.run_dci_compare import score_encoder_live
 
+                                    # Patch pooling is included whenever a grid exists,
+                                    # independent of the training objective: without it
+                                    # FACTOR_POOLING's lesion_* entries fall through
+                                    # _resolve_key to "stats", which is permutation-
+                                    # invariant over voxels and cannot expose position —
+                                    # scoring them near-null while looking like a real
+                                    # measurement in the composite.
                                     _sel_pool = [("gap", "gap"), ("stats", "stats")]
-                                    if getattr(args, "patch_contrastive", False) and getattr(args, "patch_grid", None):
+                                    if getattr(args, "patch_grid", None):
                                         _sel_pool.append(("patch", tuple(args.patch_grid)))
                                     logger.info(f"  [EVALUATION] Synthetic GT selection composite (step {step})...")
                                     _sel_row = score_encoder_live(
@@ -2592,29 +2601,37 @@ def main(args):
             import eval.dci as dci
 
             logger.info("[EVALUATION] Computing DCI metrics on synthetic GT factors...")
-            dci_synth = dci.compute_dci_synthetic(
-                encoder=encoders[0],
-                dataset=test_dataset,
-                device=args.device,
-                batch_size=dataloader_kwargs.get("batch_size", 32),
-                num_workers=dataloader_kwargs.get("num_workers", 0),
-                per_encoder=getattr(args, "separate_encoders", False),
-            )
-            dci_synth_path = os.path.join(args.save_dir, "dci_synthetic.csv")
-            rows = dci.dci_results_to_rows(dci_synth)
-            with open(dci_synth_path, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=dci.DCI_CSV_COLUMNS)
-                w.writeheader()
-                w.writerows(rows)
-            logger.info(f"  Synthetic DCI saved to: {dci_synth_path}")
+            # Same split as the periodic DCI above: gap keeps the historical
+            # filename, patch is written alongside it so localized factors
+            # (lesion_*) are recorded under a pooling that can expose them.
+            _final_poolings = [("gap", "gap", "dci_synthetic.csv")]
+            if getattr(args, "patch_grid", None):
+                _final_poolings.append(("patch", tuple(args.patch_grid), "dci_synthetic_patch.csv"))
+            for _f_label, _f_pooling, _f_name in _final_poolings:
+                dci_synth = dci.compute_dci_synthetic(
+                    encoder=encoders[0],
+                    dataset=test_dataset,
+                    device=args.device,
+                    batch_size=dataloader_kwargs.get("batch_size", 32),
+                    num_workers=dataloader_kwargs.get("num_workers", 0),
+                    pooling=_f_pooling,
+                    per_encoder=getattr(args, "separate_encoders", False),
+                )
+                dci_synth_path = os.path.join(args.save_dir, _f_name)
+                rows = dci.dci_results_to_rows(dci_synth)
+                with open(dci_synth_path, "w", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=dci.DCI_CSV_COLUMNS)
+                    w.writeheader()
+                    w.writerows(rows)
+                logger.info(f"  Synthetic DCI ({_f_label}) saved to: {dci_synth_path}")
 
-            flat = dci.flatten_dci_results(dci_synth)
-            if tb_writer is not None:
-                for k, v in flat.items():
-                    if not np.isnan(v):
-                        tb_writer.add_scalar(f"dci_synthetic/{k}", v, global_step=args.iterations)
-            if _use_wandb:
-                wandb.log({f"dci_synthetic/{k}": v for k, v in flat.items() if not np.isnan(v)})
+                flat = dci.flatten_dci_results(dci_synth)
+                if tb_writer is not None:
+                    for k, v in flat.items():
+                        if not np.isnan(v):
+                            tb_writer.add_scalar(f"dci_synthetic/{_f_label}/{k}", v, global_step=args.iterations)
+                if _use_wandb:
+                    wandb.log({f"dci_synthetic/{_f_label}/{k}": v for k, v in flat.items() if not np.isnan(v)})
 
         results = []
         for m_idx, m in enumerate(args.modalities):
