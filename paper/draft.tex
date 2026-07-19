@@ -1,0 +1,828 @@
+% =====================================================================
+% DRAFT v0.1 --- Multiview CRL on paired-modality brain MRI
+% Status: initial skeleton. All quantitative results are from the
+% synthetic pseudo-MRI benchmark. ADNI numbers are NOT yet in hand and
+% are marked \pending throughout.
+% =====================================================================
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{natbib}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+% --- drafting macros -------------------------------------------------
+\newcommand{\pending}[1]{{\color{red}\textbf{[PENDING: #1]}}}
+\newcommand{\suspect}[1]{{\color{orange}#1}}
+\newcommand{\todo}[1]{{\color{blue}\small[TODO: #1]}}
+\newcommand{\zc}{\mathbf{z}_c}
+\newcommand{\zs}{\mathbf{z}_s}
+\newcommand{\R}{\mathbb{R}}
+
+\title{\textbf{Contrastive Multiview Learning Re-Gauges Content Rather\\Than Identifying It: A Controlled Study on\\Paired-Modality Brain Imaging}}
+
+\author{Natalia Glazman \\ \todo{affiliation, co-authors, supervisor}}
+\date{Draft --- \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Multiview causal representation learning promises that content shared across
+views is identifiable up to an invertible transformation, and paired-modality
+medical imaging appears to be its ideal application: a T1- and a T2-weighted
+scan of the same subject are two renderings of one underlying anatomy, differing
+only in tissue contrast. We test this promise directly. Using a controlled
+pseudo-MRI benchmark with a known causal generative process, we compare a
+multiview contrastive objective against a pure reconstruction autoencoder
+sharing an identical backbone, and evaluate both under a \emph{gauge-aware}
+protocol that matches the probe's pooling to the identifiability claim being
+made.
+
+Our central finding is negative and, we argue, informative. The contrastive
+objective does not recover more shared content than reconstruction: at the
+pooling level where the two are fairly comparable, aggregate linear
+recoverability is $0.409$ versus $0.409$, and peak recoverability across all
+probe formats is tied to within $0.01$. The apparent contrastive advantage
+reported by the field's default protocol --- a globally average-pooled linear
+probe --- is largely a measurement artifact. We show by a no-retrain
+intervention that the normalisation layer preceding the pooled probe discards
+exactly the global channel statistics in which the reconstruction model stores
+its content: the discarded statistics alone recover brain size at $R^2=0.68$,
+better than the post-normalisation pooled representation they were removed from
+($0.34$). Per-factor analysis converts this from artifact to mechanism: for
+temporal atrophy, contrastive appears to win by $+0.31$ pooled, yet the
+reconstruction baseline holds \emph{more} of that factor spatially ($0.682$
+versus $0.623$). Contrastive learning relocates content from a spatial to a
+global format --- it re-gauges --- and slightly degrades peak recoverability
+while doing so.
+
+What the contrastive objective does buy is style exclusion, and this is real but
+partial: the dominant style factor still leaks into content at $0.481$, because
+global intensity scale is entangled with global geometric scale, a content
+factor the model must retain. It also carries a cost the pooled protocol cannot
+see. Probing the latent grid voxel-wise, contrastive representations are
+uniformly worse at localising content than the reconstruction baseline. For
+medical imaging, where the quantity of interest is usually \emph{where} an
+abnormality is and not merely whether a global embedding encodes it, this
+trade-off is the operative one. We conclude with a gauge-aware evaluation
+protocol, and argue that pooled linear probes systematically favour
+invariance-based objectives over reconstruction-based ones for reasons unrelated
+to identifiability.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+
+Representation learning for medical imaging is usually justified by an
+identifiability argument, whether or not it is stated formally: we want the
+learned latent variables to correspond to the physical or physiological factors
+that generated the image, so that downstream analysis is measuring anatomy
+rather than scanner. Recent multiview causal representation learning (CRL) makes
+this argument precise. Given two views of the same underlying latent, generated
+by distinct but invertible mixing functions, the \emph{shared} content block is
+identifiable up to an invertible transformation of that block, under
+contrastive-style objectives that align views while maintaining
+entropy~\citep{yao2024multiview,vonkugelgen2021self,daunhawer2023identifiability}.
+
+Paired-modality MRI looks like the canonical instance of this setting. A
+T1-weighted and a T2-weighted scan of the same session share anatomy exactly ---
+they are, after registration, two functions of one tissue geometry --- and
+differ in a low-dimensional contrast transformation determined by pulse sequence
+and scanner. Content is anatomy; style is contrast. Unlike the augmentation-based
+views of self-supervised learning, where the ``shared content'' is defined
+implicitly and somewhat circularly by the augmentation policy, here the split is
+physically grounded.
+
+This paper reports what happened when we took that correspondence seriously and
+measured it. Our conclusion is that the identifiability framing, applied
+naively, mismeasures what these objectives do. Three findings drive this:
+
+\begin{enumerate}
+\item \textbf{Content completeness is tied.} A multiview contrastive objective and
+a pure reconstruction autoencoder with the same backbone recover the same amount
+of ground-truth shared content, when both are read out at a pooling level that
+does not privilege one storage format (Section~\ref{sec:completeness}).
+
+\item \textbf{The reported advantage is a gauge artifact.} The default protocol ---
+globally average-pooled linear probe --- reports a contrastive win. We show by
+intervention that this win is produced by a normalisation layer that deletes the
+global channel statistics in which the reconstruction model stores content
+(Section~\ref{sec:gauge}). Reconstruction is not worse; it is being read in the
+wrong basis.
+
+\item \textbf{The genuine difference is a localisation--isolation trade-off.}
+Contrastive learning does exclude style from content more effectively, but it
+delocalises: at the voxel level it is uniformly worse at saying \emph{where} a
+factor is (Section~\ref{sec:voxel}). For clinical use this is the trade-off that
+matters, and the pooled protocol is blind to it.
+\end{enumerate}
+
+We frame these through a distinction we make explicit in
+Section~\ref{sec:gauge-theory}: between \emph{block identifiability}, which
+holds content up to an arbitrary invertible map and is therefore agnostic to
+spatial format, and what we call \emph{voxel-compositional identifiability},
+which additionally requires content to be recoverable at the spatial location it
+describes. Multiview CRL theory guarantees the first. Medical imaging
+applications almost always want the second. The two come apart precisely here,
+and the metrics used to certify the first are systematically miscalibrated for
+comparing methods that differ in the second.
+
+\paragraph{Contributions.}
+\begin{itemize}
+\item A controlled pseudo-MRI benchmark with a known causal content SCM,
+view-specific style, and --- importantly --- an explicit account of its own
+unlabeled shared nuisance dimensions (Section~\ref{sec:benchmark}).
+\item A gauge-aware evaluation protocol: pooling-matched probes, null-subtracted
+leakage, separated completeness and isolation axes, and voxel-level factor
+localisation (Section~\ref{sec:protocol}).
+\item The empirical characterisation above, with a mechanistic account of each
+result rather than a leaderboard (Sections~\ref{sec:results}--\ref{sec:why}).
+\item Practical guidance for evaluating disentanglement in paired-modality
+imaging, including two failure modes of patch-level contrastive objectives on
+spatially registered data (Section~\ref{sec:why}).
+\end{itemize}
+
+% =====================================================================
+\section{Background: identifiability and its gauge}
+\label{sec:gauge-theory}
+% =====================================================================
+
+\paragraph{Setup.} Let $\zc \in \R^{d_c}$ be content and $\zs^{(k)} \in
+\R^{d_s}$ be view-specific style for view $k \in \{1,2\}$. Observations are
+$x^{(k)} = g_k(\zc, \zs^{(k)})$ for injective mixing $g_k$. An encoder
+$f_\theta$ produces $\hat{\zc}$; the multiview result states that under
+suitable conditions the contrastive optimum satisfies $\hat{\zc} = h(\zc)$ for
+some invertible $h$, with $\hat{\zc}$ independent of $\zs^{(k)}$.
+
+\paragraph{The gauge group.} The theorem's guarantee is an equivalence class,
+not a representation. Any $h \in \mathrm{GL}$-like invertible family yields an
+equally valid solution. We call this the \emph{gauge freedom} of the claim, and
+two solutions related by such an $h$ are \emph{gauge-equivalent}. This matters
+for evaluation in a way that is easy to overlook:
+
+\begin{quote}
+\emph{A metric is only meaningful for an identifiability claim if it is
+invariant to that claim's gauge group.}
+\end{quote}
+
+A linear probe on globally average-pooled features is \emph{not} invariant to
+the gauge group of block identifiability. Two gauge-equivalent encoders --- both
+perfectly block-identified --- can score arbitrarily differently under it if
+$h$ redistributes information between spatial layout and channel statistics.
+This is not a hypothetical: it is exactly what we measure in
+Section~\ref{sec:gauge}.
+
+\paragraph{Two identifiability notions.} We distinguish:
+
+\begin{description}
+\item[Block identifiability (BI).] $\hat{\zc} = h(\zc)$, $h$ invertible. Gauge
+group: all invertible maps on the content block. Spatially blind. This is what
+the multiview theory delivers.
+
+\item[Voxel-compositional identifiability (VCI).] The representation is a field
+$\hat{c}(v)$ over spatial locations $v$, and content factors are recoverable
+from the neighbourhood of the locations they physically affect. Gauge group:
+permutation/invertible maps \emph{within} location, not across. Strictly
+stronger than BI.
+\end{description}
+
+VCI is the informal target of most medical imaging work --- lesion
+localisation, voxel-based morphometry, regional atrophy --- and it is what
+object-centric identifiability results in vision aim
+at~\citep{brendel2023objectcentric}. To our knowledge no identifiability theory
+covers the content/style structure of paired-modality anatomical imaging, and
+establishing that theory is beyond this paper's scope. Our contribution is to
+show empirically that BI and VCI dissociate here, in a direction that matters,
+and that the standard protocol reports only BI while practitioners read it as
+VCI. \todo{Decide how hard to push the VCI formalism --- either state it as a
+definition with a proposition about the gauge group, or keep it informal and
+purely as an evaluation-design argument. Currently informal.}
+
+% =====================================================================
+\section{A controlled pseudo-MRI benchmark}
+\label{sec:benchmark}
+% =====================================================================
+
+Real paired MRI has no ground-truth latents, so all identifiability claims on it
+are indirect. We therefore built a synthetic generator
+(\texttt{eval/synthetic\_dataset.py}) that renders two contrast-differing
+volumes from one explicit anatomical latent.
+
+\paragraph{Content.} Nine named scalar factors drive a 3D tissue-label
+geometry: brain size, ventricle size, cortical thickness, temporal-lobe
+atrophy, left--right asymmetry, sulcal widening, and a three-dimensional
+white-matter lesion position. Factors may be sampled i.i.d.\ or from a linear
+non-Gaussian structural causal model over a chain/random DAG
+(\texttt{build\_content\_scm}), so that content factors are \emph{dependent} ---
+the regime the multiview theory is designed for and where component-wise
+disentanglement metrics are inappropriate.
+
+\paragraph{Style.} Three view-specific scalars --- intensity gain, bias, and
+noise $\sigma$ --- are drawn \emph{independently per view}
+($\zs^{(1)} \perp \zs^{(2)}$), then applied together with a modality-specific
+tissue-intensity lookup table (T1: WM $0.8$, GM $0.5$; FLAIR: WM $0.4$,
+GM $0.8$) and a smooth multiplicative bias field, followed by Rician noise. The
+independent-per-view draw is deliberate: it means the contrastive objective has
+full leverage to remove style, since style genuinely differs between the aligned
+positive pair. Any failure to exclude style is therefore a property of the
+objective, not a structural impossibility.
+
+\paragraph{The benchmark's own confound (and why we report it).} The renderer
+also perturbs tissue boundaries with two unlabeled, view-invariant random
+fields: a deformation field on a $4^3$ grid ($64$ dimensions) and a fissure
+field on an $8^3$ grid ($512$ dimensions). These are \emph{shared content} by
+every definition --- identical across views, subject-specific --- but they are
+not in the probed ground truth. True shared content is therefore
+$\approx\!585$-dimensional while the evaluation probes $9$ of it.
+
+This has two consequences we believe generalise beyond our generator, and which
+we report rather than quietly fix:
+
+\begin{enumerate}
+\item \textbf{Aggregate factor-recovery ceilings are not what they appear.} An
+aggregate $R^2 \approx 0.35$ across the nine factors reads as a model failure
+but is largely a coverage artifact: the probe measures under $2\%$ of the shared
+content the model correctly encodes.
+\item \textbf{It creates a contrastive shortcut.} A $585$-dimensional
+view-invariant, subject-unique signature solves instance discrimination on its
+own. At batch size $B$, InfoNCE needs only $\log_2 B$ bits ($6$ bits at
+$B{=}64$), and the corrugation field supplies them. Top-1 accuracy saturates
+early and no further content is driven into the representation. Critically,
+\emph{scaling the task does not fix this} --- larger batches and harder
+negatives simply discriminate the same signature more sharply. Because these
+fields are trilinear upsamples of coarse grids, they are smooth and
+volume-spanning by construction, so an encoder that solves InfoNCE through them
+necessarily produces a low-frequency, spatially diffuse content map. Some of the
+delocalisation we report in Section~\ref{sec:voxel} is the model faithfully
+encoding a delocalised signal.
+\end{enumerate}
+
+We provide a \texttt{clean\_content} mode that zeroes both fields, isolating the
+nine labeled factors. \todo{Report the main comparison under BOTH modes. Current
+headline numbers are from the nuisance-on setting; the clean-mode replication is
+the single most valuable missing experiment.}
+
+\paragraph{Resolution caveat.} The lesion is a radius-$0.1$ sphere in
+$[-1,1]^3$ at $64^3$, i.e.\ $\approx\!3.2$ voxels in radius. At the $16^3$
+latent grid it occupies $\approx\!1.6$ latent voxels: resolvable in principle,
+but averaged away by pooled probes ($\approx\!3\%$ of a $4{\times}4{\times}4$
+patch, $0.4\%$ of a $2{\times}2{\times}2$ eval patch). Near-zero lesion recovery
+in pooled readouts is therefore \emph{not} evidence of absence
+(Section~\ref{sec:limitations}).
+
+% =====================================================================
+\section{Models and objectives}
+\label{sec:models}
+% =====================================================================
+
+All arms share one backbone so that the objective is the only manipulated
+variable: a hierarchical 3D VQ-VAE-2~\citep{razavi2019vqvae2} with three levels.
+At the finest level, hidden channels are partitioned into content and style
+groups by a mask (learned via Gumbel-softmax straight-through, or fixed
+first-$K$); content channels feed the codebook and the contrastive loss, style
+channels feed decoder injection (concatenation or spatial FiLM) and an optional
+independent style codebook. A \texttt{SplitGroupNorm} normalises content and
+style groups independently so that modality-specific style statistics cannot
+bias content activations before the mask --- a design choice that turns out to
+be central to Section~\ref{sec:gauge}.
+
+\paragraph{Arms.}
+\begin{description}
+\item[\textsc{Recon}] Reconstruction only. No contrastive term. The autoencoder
+baseline that multiview CRL is claimed to beat.
+\item[\textsc{Contrast}] Reconstruction plus a multiview contrastive term on
+content channels (InfoNCE by default; Barlow Twins and VICReg also implemented),
+at a $10{:}1$ contrastive-to-reconstruction weighting. Cross-view-negatives-only
+restricts the InfoNCE denominator to the opposite view.
+\item[\textsc{EncOnly}] \pending{not yet run} An encoder-only arm with no
+decoder, matching the multiview CRL formulation exactly (alignment minus
+entropy). Implemented in \texttt{models/multiview\_encoder.py} +
+\texttt{training/main\_conv\_synthetic.py}, reusing the same encoder stack for a
+controlled reconstruction-vs-no-reconstruction ablation.
+\end{description}
+
+\paragraph{A fidelity note.} The multiview CRL method is encoder-only:
+invertibility is enforced by an entropy term, not a decoder, and reconstruction
+is the \emph{baseline} it outperforms~\citep{yao2024multiview}. Our
+\textsc{Contrast} arm therefore is not a reproduction of that method but a test
+of whether its contrastive term adds identifiability \emph{on top of} a
+reconstruction model --- which is the realistic setting for medical imaging,
+where a decoder is usually wanted anyway. The \textsc{EncOnly} arm closes this
+gap and is the highest-priority missing experiment.
+
+\paragraph{No projection head.} Following the multiview CRL formulation, the
+contrastive loss is applied directly to content channels with no projection MLP,
+so the loss shapes exactly the representation that is subsequently probed. This
+departs from the SimCLR/MoCo/VICReg convention of interposing a
+2--3 layer head and probing pre-head features, a convention motivated precisely
+by the observation that the loss-facing space over-compresses toward invariance
+and loses linearly decodable information. We flag this as a candidate partial
+explanation for the tie in Section~\ref{sec:completeness}; a projection-head
+ablation is implemented (\texttt{--contrastive-proj-dim}) but
+\pending{not yet run}.
+
+% =====================================================================
+\section{Gauge-aware evaluation protocol}
+\label{sec:protocol}
+% =====================================================================
+
+Our protocol separates two axes that the literature routinely reports as one
+number, and matches probe pooling to the claim.
+
+\paragraph{Two axes.}
+\begin{description}
+\item[Completeness.] How much of $\zc$ is recoverable from $\hat{\zc}$. Measured
+by cross-validated probe $R^2$ (RidgeCV linear and a two-layer MLP, $5$-fold,
+multi-seed) and by \emph{block-MCC}: fit a readout $\hat{\zc} \to \zc$,
+Hungarian-match predicted to true dimensions on $|\rho|$, average the matched
+correlations. Block-MCC is the correct MCC under BI's gauge group; per-channel
+MCC is not, and we do not report it as a headline.
+\item[Isolation.] How much of $\zs$ leaks into $\hat{\zc}$. Measured by
+null-subtracted content$\to$style probe $R^2$, and by
+$\mathrm{separation} = \mathrm{MCC}(\hat{c}\to\zc) - \mathrm{MCC}(\hat{c}\to\zs)$.
+\end{description}
+
+\paragraph{Pooling-matched readout.} Every probe is run at three poolings ---
+global average (GAP), per-channel statistics, and a spatial patch grid --- and
+we report the \emph{best over poolings} per factor per model as the
+gauge-appropriate summary of BI completeness. Reporting a single pooling
+silently fixes a gauge and, as we show, decides the result.
+
+\paragraph{Null subtraction.} Every metric is accompanied by a
+label-permutation null computed under identical probe, pooling, and split, and
+we report the null-subtracted gap. This matters most for high-dimensional patch
+features where flat probes overfit.
+
+\paragraph{Voxel-level localisation.} For VCI, we probe the native latent grid
+per location: a shared probe predicts a ground-truth field (tissue class, lesion
+mask, deformation) from each latent voxel's feature vector, against a
+subject-shuffled null. We summarise with peak in-brain AUC/$R^2$, and with
+\emph{in-mass}: the fraction of above-null predictive mass falling inside the
+region the factor physically affects. Uniform mass would be $\approx\!0.145$.
+
+\paragraph{Controls.} Three controls gate every conclusion: (i) a positive
+control (tissue class must be decodable, verifying ground-truth$\leftrightarrow$
+feature alignment), (ii) a raw-pixel readout floor, and (iii) an effective-rank
+measure (Roy--Vetterli) to rule out dimensional collapse as an explanation for
+probe differences.
+
+% =====================================================================
+\section{Results}
+\label{sec:results}
+% =====================================================================
+
+Unless stated otherwise, all results are on the synthetic pseudo-MRI benchmark
+with causal (dependent) content, comparing \textsc{Contrast} against
+\textsc{Recon} at matched backbone and data. \pending{ADNI replication --- the
+training and evaluation pipeline is complete and the separation-score /
+recovery-map machinery is validated on synthetic, but no ADNI identifiability
+numbers are yet in hand. Every claim below is synthetic-only.}
+
+% ---------------------------------------------------------------
+\subsection{The default protocol reports a contrastive win}
+% ---------------------------------------------------------------
+
+Read out the way the field usually reads out --- linear probe on
+globally-average-pooled content --- and contrastive learning wins. Aggregate
+linear $R^2$ improves by $+0.060$ at GAP. The gain is concentrated in subtle,
+spatially distributed factors: temporal atrophy $+0.31$ (about $64\%$ of the
+aggregate gap), sulcal widening $+0.12$, left--right asymmetry $+0.10$,
+ventricle size $+0.07$, with ties on saturated factors (brain size, cortical
+thickness, both $\approx\!0.79$).
+
+Taken alone this is a clean positive result, and it is the result we would have
+reported under the standard protocol. The rest of this section is why it does
+not survive.
+
+% ---------------------------------------------------------------
+\subsection{The win vanishes under pooling-matched readout}
+\label{sec:completeness}
+% ---------------------------------------------------------------
+
+The advantage shrinks monotonically as pooling becomes more spatial: $+0.060$ at
+GAP, $+0.015$ at channel statistics, $+0.010$ at patch. At the patch level, peak
+recoverability is tied to three decimal places (Table~\ref{tab:completeness}).
+
+\begin{table}[t]
+\centering
+\caption{Content completeness, \textsc{Contrast} vs \textsc{Recon}. Aggregate
+over the nine labeled content factors. The contrastive advantage exists only at
+GAP.}
+\label{tab:completeness}
+\begin{tabular}{llccc}
+\toprule
+Readout & Pooling & \textsc{Contrast} & \textsc{Recon} & $\Delta$ \\
+\midrule
+Linear $R^2$        & GAP    & --- & --- & $+0.060$ \\
+Linear $R^2$        & stats  & --- & --- & $+0.015$ \\
+Linear $R^2$        & patch  & $0.398$ & $0.388$ & $+0.010$ \\
+Linear $R^2$ (mean, per-factor) & patch & $0.409$ & $0.409$ & $0.000$ \\
+MLP $R^2$           & patch  & $0.289$ & $0.334$ & $-0.045$ \\
+MLP $R^2$ (best pooling) & ---   & $0.323$ (gap) & $0.334$ (patch) & $-0.011$ \\
+Block-MCC           & patch  & $0.540$ & $0.535$ & $+0.005$ \\
+Best over poolings (mean) & --- & $0.419$ & $0.416$ & $+0.003$ \\
+\bottomrule
+\end{tabular}
+\todo{Fill the two missing absolute GAP/stats cells from
+\texttt{content\_rank\_out6}; add seed-level error bars (seeds 0--4 exist).}
+\end{table}
+
+Two secondary observations rule out the obvious alternative explanations. The
+MLP probe never exceeds the linear probe in any cell ($-0.02$ to $-0.11$), so
+there is no nonlinearly-hidden content that the linear probe misses --- and
+since the MLP uses early stopping and thus trains on less data, the honest
+reading is $\text{MLP} \approx \text{linear}$, i.e.\ zero nonlinear advantage.
+And effective rank rules out dimensional collapse: \textsc{Contrast} has
+\emph{higher} GAP effective rank ($29$ vs $13$) and patch rank is comparable
+($115$ vs $127$). The reconstruction model's low GAP rank is spatial storage,
+not collapse.
+
+A raw-pixel control confirms both models are doing real work: a $16^3$
+raw-intensity readout is strongly negative (linear $-0.44$, MLP $-2.5$) against
+model $R^2 \approx 0.36$. The encoders extract content that pixels do not
+linearly expose, as expected given inverted T1/FLAIR contrast.
+
+% ---------------------------------------------------------------
+\subsection{The GAP win is a normalisation artifact}
+\label{sec:gauge}
+% ---------------------------------------------------------------
+
+Why is the reconstruction model so much worse at GAP specifically? A no-retrain
+intervention answers this. We forward-hook \texttt{SplitGroupNorm} and probe
+content features immediately before and after it
+(\texttt{eval/probe\_prenorm\_groupnorm.py}):
+
+\begin{itemize}
+\item GAP recovery roughly \textbf{halves} across the layer: mean $R^2$
+$0.34 \to 0.18$; brain size $0.78 \to 0.34$; left--right asymmetry
+$0.59 \to 0.21$.
+\item Patch recovery is \textbf{unaffected}: $0.307 \to 0.309$. The norm
+preserves spatial pattern and destroys only the global per-channel statistic.
+\item \textbf{Smoking gun:} the discarded per-group $(\mu,\sigma)$ statistics
+\emph{alone} recover brain size at $R^2 = 0.68$ --- nearly double the $0.34$
+obtainable from the post-normalisation pooled features. The factor literally
+lives in what the normalisation subtracts.
+\end{itemize}
+
+This is a gauge effect in the precise sense of
+Section~\ref{sec:gauge-theory}. The reconstruction model stores global content
+in per-channel scale; normalisation deletes that channel; GAP pooling has
+nothing left to read. The contrastive model, trained on normalisation-immune
+patch features, stores the same content in a format that survives. Both encode
+it. Only one is legible to the standard probe.
+
+The practical consequence is a claim about the field's methodology, not just
+about our models: \textbf{globally-pooled linear probes are not a neutral
+instrument for comparing invariance-based against reconstruction-based
+objectives}, because the two systematically differ in the representational
+format the probe is sensitive to. \todo{Check how widely SplitGroupNorm-like
+normalisation appears in comparable SSL pipelines --- this determines whether
+the methodological claim generalises or is specific to our backbone. Important
+for the framing; currently overstated relative to the evidence.}
+
+% ---------------------------------------------------------------
+\subsection{Re-gauging, proven per factor}
+% ---------------------------------------------------------------
+
+Aggregates could hide a genuine mixed result, so we analyse per factor,
+comparing each model's \emph{best} recoverability across all four
+(probe $\times$ pooling) formats rather than its GAP-linear score
+(seeds $0$--$4$).
+
+The decisive case is temporal atrophy --- the factor responsible for most of the
+headline GAP gain:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Temporal atrophy, $R^2$ & \textsc{Contrast} & \textsc{Recon} \\
+\midrule
+Linear, GAP   & $\mathbf{0.486}$ & $0.173$ \\
+Linear, patch & $0.623$ & $\mathbf{0.682}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The direction \emph{reverses} with pooling. Contrastive learning does not add
+temporal-atrophy information; the reconstruction model holds more of it, stored
+spatially, where the normalisation-plus-GAP path cannot see it. The apparent
+$+0.31$ is a patch$\to$GAP relocation that slightly \emph{destroys} peak
+content.
+
+The pattern holds across factors. On best-format recovery, $\Delta$
+(\textsc{Contrast} $-$ \textsc{Recon}) is negative or flat for most factors
+(temporal atrophy $-0.06$, cortical thickness $-0.04$, left--right asymmetry
+$-0.02$, brain size $-0.02$); only sulcal widening ($+0.13$) and ventricle size
+($+0.06$) are genuine peak gains; lesions are $\approx\!0$ in both. Aggregate
+best-format means are $0.419$ vs $0.416$.
+
+\paragraph{Summary claim.} Contrastive learning does not improve content
+identifiability in the BI sense --- peak readout is tied --- but it
+\emph{reformats} subtle anatomical content from a spatially distributed encoding
+into a globally linearly-decodable one, at a small cost to peak recoverability
+for the most spatially-stored factors. In the language of
+Section~\ref{sec:gauge-theory}: it selects a different representative within the
+same equivalence class.
+
+% ---------------------------------------------------------------
+\subsection{Isolation: a real gain, but partial}
+\label{sec:isolation}
+% ---------------------------------------------------------------
+
+Completeness is only half of block identifiability; the other half is isolation
+--- $\hat{\zc}$ free of style --- and it is the half InfoNCE's mechanism
+actually targets. Here contrastive learning does win, but not cleanly.
+
+Qualitatively the win is clear: the reconstruction baseline shows symmetric
+style leakage into content ($+0.16$/$+0.28$ on the leakage diagonal) while the
+contrastive model's is clean, and content$\to$style leakage is much lower
+($0.18$ vs $0.49$). \suspect{However, the headline separation comparison
+($0.158$ vs $-0.087$) is confounded: the baseline was scored with all channels
+treated as content, so its ``leakage'' counts style channels as content. The
+per-block re-run is required before any of these numbers are reportable.}
+\pending{fair \texttt{--baseline-per-block} re-run --- highest-priority fix}
+
+The contrastive model's \emph{own} per-latent numbers are valid, and they
+complicate the story. Style has three factors, but only gain is substantively
+encoded at all (style$\to$style: gain $0.522$, bias $0.03$, noise $0.01$ --- the
+latter two are too weak to be represented). And gain leaks into content at
+$\mathbf{0.481}$. The low aggregate leak of $0.18$ is therefore misleading: it
+averages a genuine failure on the one real style factor against two factors
+neither model encodes. Symmetrically, the style block encodes brain size at
+$0.60$.
+
+The mechanism is a same-character entanglement. Gain is a global \emph{intensity}
+scale; brain size is a global \emph{geometric} scale. The encoder must retain
+brain size (it is content), and it apparently cannot separate the two global
+scale signals, so a shared global-scale feature carries both. We emphasise that
+this is not a structural impossibility: gain is drawn independently per view, so
+it differs across the aligned positive pair and the contrastive objective has
+full leverage to remove it. This is a genuine isolation failure.
+
+\paragraph{Writeable finding.} \emph{Even with view-varying style and an explicit
+contrastive objective, the dominant style factor is not isolated, because it is
+entangled with a content factor of the same character.} We suggest this
+generalises: content/style splits are hard exactly where the two blocks contain
+same-type quantities, and paired-modality MRI has this property (global
+intensity scaling versus global head size; regional contrast versus regional
+tissue change).
+
+% ---------------------------------------------------------------
+\subsection{The voxel-level trade-off}
+\label{sec:voxel}
+% ---------------------------------------------------------------
+
+Pooled metrics cannot see \emph{where} content lives. Probing the native latent
+grid per location tells a consistent and, for medical imaging, decisive story:
+\textbf{contrastive learning uniformly degrades localisation}.
+
+\begin{table}[t]
+\centering
+\caption{Voxel-level factor localisation on the native $16^3$ latent grid,
+shared probe vs subject-shuffled null, $300$ samples.}
+\label{tab:voxel}
+\begin{tabular}{lccc}
+\toprule
+Target & \textsc{Contrast} & \textsc{Recon} & Null \\
+\midrule
+Tissue (GM), AUC \emph{(positive control)} & $0.74$ & $\mathbf{0.88}$ & --- \\
+Lesion, AUC & \suspect{$0.78$} & \suspect{$\mathbf{0.95}$} & $0.46$/$0.57$ \\
+Deformation, $R^2$ & $0.007$ & $\mathbf{0.061}$ & --- \\
+\midrule
+Cross-view content consistency & $\mathbf{0.65}$ & $0.47$ & --- \\
+Style leakage & \textbf{clean} & $+0.16$/$+0.28$ & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Every localised target is worse under the contrastive objective, while
+cross-view consistency and style purity are better. This is an explicit
+trade-off, not a capacity limit: the lesion is voxel-identifiable in
+\emph{both} models (well above null in each), so it is not being quantised away.
+The global contrastive objective buys view-invariance and style exclusion by
+sacrificing local content fidelity --- it discards local content along with the
+style.
+
+A delocalisation signature supports this reading: content migrates outward, with
+brain size recovered better \emph{outside} the brain ($0.80$) than inside
+($0.60$), i.e.\ into background registers.
+
+\paragraph{Two honest qualifications.} First, \suspect{the lesion AUC numbers are
+suspect}: the evaluated checkpoint predates a generator fix that changed lesion
+rendering, so it was scored on out-of-distribution images. Tissue, brain size,
+and style findings are unaffected (those factors were unchanged), but the
+headline lesion gap needs re-running.
+\pending{lesion re-run under matched generator vintage}
+
+Second, on a generator-matched re-run of the broad morphometric factors
+(temporal atrophy, asymmetry, sulcal widening), the clean ``baseline localises,
+contrastive smears'' pattern only \emph{partially} replicates. Both models are
+heavily outside-biased (in-mass $0.02$--$0.18$ against a uniform $0.145$), with
+contrastive roughly twice as outside-biased ($0.07$ vs $0.16$--$0.18$) --- the
+same direction, but modest. The reason is instructive: those factors were, in
+that generator vintage, spatially broad (half-brain, whole-hemisphere), and a
+broad factor is legitimately decodable from boundary voxels' receptive fields.
+\textbf{Voxel localisation is only a well-posed question for focal factors.}
+Demonstrating it cleanly requires a focal factor and a generator-matched model,
+which is our primary planned experiment (Section~\ref{sec:next}).
+
+% =====================================================================
+\section{Why: mechanisms}
+\label{sec:why}
+% =====================================================================
+
+We collect the mechanistic account, since we think it is more transferable than
+the numbers.
+
+\paragraph{1. The objective has no locality term.} Global-pooled contrastive
+learning rewards the \emph{pooled} content for being view-invariant and
+discriminable. Nothing in the objective prefers that content sit at the location
+it describes. Delocalisation is therefore not a bug but the optimum of a
+localisation-blind objective.
+
+\paragraph{2. Invariance is not informativeness.} InfoNCE optimises instance
+discrimination. Once the task is solved --- and Section~\ref{sec:benchmark}
+shows it is solved early and cheaply via a high-dimensional shared nuisance
+signature --- gradients vanish and subtle factors are never driven into content.
+Reconstruction, by contrast, must encode every voxel-moving factor. Hence
+$\textsc{Recon} \geq \textsc{Contrast}$ on completeness is the \emph{predicted}
+ordering, not an anomaly.
+
+\paragraph{3. Patch-level InfoNCE has structural false negatives on registered
+data.} Spatial registration makes same-location patches from different subjects
+coincide by construction. At uniform interior or background patches, the only
+signal separating ``negatives'' is per-subject nuisance or style --- so InfoNCE
+is forced to inject nuisance and style \emph{into} content channels. We measured
+this: on a $4^3$ grid, $42\%$ of patches are dead background at the batch size
+actually used ($B{=}32$; $23\%$ at $B{=}128$, $16\%$ at $B{=}400$), and of the
+remainder roughly a third are uniform-interior false-negative zones. Global
+pooling launders this problem --- whole volumes differ in aggregate content, so
+negatives are clean --- which is why GAP contrastive reaches clean linear
+separation while patch block-MCC stays tied to the baseline.
+
+The prescription follows: use negatives where they are clean (InfoNCE at GAP)
+and negative-free objectives where they are not (Barlow Twins / VICReg on
+\emph{foreground} patches). A negative-free loss is trivially aligned at a
+uniform patch --- no gradient, no harm --- whereas InfoNCE must discriminate and
+therefore does harm. Patch-level readout remains perfectly sound as a
+\emph{probe}; it is only optimisation with negatives that is unsafe.
+
+\paragraph{4. No projection head.} Applying the loss directly to probed features
+means the invariance-induced over-compression is measured rather than shielded
+(Section~\ref{sec:models}). This is faithful to the multiview CRL formulation
+but confounds the comparison with the standard SSL recipe, and is a live
+alternative explanation for part of the completeness tie.
+
+% =====================================================================
+\section{Limitations and threats to validity}
+\label{sec:limitations}
+% =====================================================================
+
+We state these plainly; several materially qualify the results.
+
+\begin{enumerate}
+\item \textbf{No real-data results.} Every quantitative claim is on the
+synthetic benchmark. The ADNI pipeline is complete and the evaluation machinery
+validated, but no ADNI identifiability numbers exist yet. The paper's scope is
+currently ``a controlled study'', not ``a study of brain MRI''.
+\pending{ADNI replication of the completeness tie and the localisation gap}
+
+\item \textbf{The isolation headline is confounded.} The baseline was scored
+without a content/style split, inflating its apparent leakage. The
+separation numbers in Section~\ref{sec:isolation} must not be reported until the
+per-block re-run is done.
+
+\item \textbf{The lesion localisation gap is on out-of-distribution images} for
+the evaluated checkpoint (generator-fix boundary). Directionally consistent with
+the other factors, but not yet trustworthy on its own.
+
+\item \textbf{Near-zero lesion recovery is partly a probe artifact.} At a finer
+$8^3$ eval grid the flat probe overfits badly (feature dimension $22{,}528$
+against $\approx\!2{,}000$ samples), driving lesion $R^2$ \emph{more} negative;
+PCA truncation confirms this (patch $R^2$ at $24$ components $0.325$ exceeds
+full-block $0.228$). The lesion encodability question is genuinely open and
+needs a dimensionality-controlled probe.
+
+\item \textbf{Single split on voxel probes.} The voxel-level results use one
+$70/30$ split without seed replication. Error bars needed before publication.
+
+\item \textbf{Single backbone, single dataset, largely single seed} on the main
+comparison. The completeness tie is replicated across seeds $0$--$4$ for
+per-factor analysis, but the architectural generality of the gauge argument is
+untested.
+
+\item \textbf{The encoder-only arm is missing}, so we have not tested the actual
+multiview CRL method --- only the value of adding its contrastive term to a
+reconstruction model.
+\end{enumerate}
+
+% =====================================================================
+\section{Planned experiments}
+\label{sec:next}
+% =====================================================================
+
+The decisive experiment is an ablation grid trained on the current (focal-factor)
+generator: $\{$\textsc{Recon}, global InfoNCE, foreground-masked patch
+BT/VICReg, $+$ detached content injection$\}$, each evaluated with voxel-level
+localisation, null-subtracted style leakage, and recovery maps.
+
+\paragraph{Pre-registered outcome.} If foreground-masked patch objectives raise
+focal-factor in-brain localisation toward the reconstruction baseline
+\emph{while} keeping style leakage at or below zero, the trade-off is breakable
+and we have a positive methodological result. If localisation stays flat, the
+trade-off is fundamental to invariance-based objectives on registered imaging,
+and we have a characterisation result. Both are publishable; we commit to the
+criterion in advance to avoid selecting the framing post hoc.
+
+Secondary: the \texttt{clean\_content} replication (removing the nuisance
+shortcut), the encoder-only arm, the projection-head ablation, and the fair
+per-block isolation scoring.
+
+% =====================================================================
+\section{Conclusion}
+% =====================================================================
+
+Multiview contrastive learning is often adopted in medical imaging on the
+strength of an identifiability guarantee. We find that on paired-modality data
+the guarantee is being measured with an instrument that does not respect its own
+gauge group, and that the resulting comparisons systematically favour
+invariance-based objectives over reconstruction-based ones for reasons unrelated
+to how much content is identified.
+
+When measured in a gauge-appropriate way, a multiview contrastive term added to
+a reconstruction autoencoder does not identify more shared content. What it does
+is change the format in which content is stored --- from spatially distributed
+to globally linearly-decodable --- and exclude style from content more
+effectively, though incompletely, failing precisely where a style factor shares
+its character with a content factor. It pays for this with spatial localisation.
+
+For applications that want a single style-invariant global embedding per
+subject, that is a good trade. For applications that want to know where the
+pathology is --- most of medical imaging --- it is currently a bad one, and a
+plain reconstruction model localises better. Whether the two goals can be
+satisfied simultaneously, by applying invariance locally rather than globally,
+is the question our next experiment is designed to answer.
+
+% =====================================================================
+\section*{Reproducibility}
+% =====================================================================
+Code, synthetic generator, and evaluation protocol:
+\todo{repository URL}. All evaluation entry points
+(\texttt{eval/run\_dci\_compare.py}, \texttt{eval/content\_rank\_pca.py},
+\texttt{eval/probe\_prenorm\_groupnorm.py}, \texttt{eval/recovery\_maps.py})
+report null-subtracted metrics with fixed seeds. Because generator semantics
+changed during the project, every reported result should be paired with the
+generator commit SHA used at training time.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{99}
+
+\bibitem[Yao et al.(2024)]{yao2024multiview}
+D.~Yao, D.~Xu, S.~Lachapelle, S.~Magliacane, P.~Taslakian, G.~Martius,
+J.~von K\"ugelgen, and F.~Locatello.
+\newblock Multi-view causal representation learning with partial observability.
+\newblock \emph{ICLR}, 2024. arXiv:2311.04056.
+
+\bibitem[von K\"ugelgen et al.(2021)]{vonkugelgen2021self}
+J.~von K\"ugelgen, Y.~Sharma, L.~Gresele, W.~Brendel, B.~Sch\"olkopf,
+M.~Besserve, and F.~Locatello.
+\newblock Self-supervised learning with data augmentations provably isolates
+content from style.
+\newblock \emph{NeurIPS}, 2021.
+
+\bibitem[Daunhawer et al.(2023)]{daunhawer2023identifiability}
+I.~Daunhawer, A.~Bizeul, E.~Palumbo, A.~Marx, and J.~E. Vogt.
+\newblock Identifiability results for multimodal contrastive learning.
+\newblock \emph{ICLR}, 2023.
+
+\bibitem[Zimmermann et al.(2021)]{zimmermann2021contrastive}
+R.~S. Zimmermann, Y.~Sharma, S.~Schneider, M.~Bethge, and W.~Brendel.
+\newblock Contrastive learning inverts the data generating process.
+\newblock \emph{ICML}, 2021.
+
+\bibitem[Brendel et al.(2023)]{brendel2023objectcentric}
+W.~Brendel et al.
+\newblock Object-centric learning and identifiability.
+\newblock 2023. \todo{fix exact reference; also cite Kori et al.\ 2024}
+
+\bibitem[Eastwood et al.(2023)]{eastwood2023dcies}
+C.~Eastwood, A.~L. Nicolicioiu, J.~von K\"ugelgen, A.~Keki\'c, F.~Tr\"auble,
+A.~Dittadi, and B.~Sch\"olkopf.
+\newblock DCI-ES: An extended disentanglement framework with connections to
+identifiability.
+\newblock \emph{ICLR}, 2023.
+
+\bibitem[Razavi et al.(2019)]{razavi2019vqvae2}
+A.~Razavi, A.~van den Oord, and O.~Vinyals.
+\newblock Generating diverse high-fidelity images with VQ-VAE-2.
+\newblock \emph{NeurIPS}, 2019.
+
+\end{thebibliography}
+
+\end{document}

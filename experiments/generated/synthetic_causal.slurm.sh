@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-18T14:39:50Z
-# Git SHA: b23a78e
+# Generated at: 2026-07-19T02:39:14Z
+# Git SHA: edf4e3b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-independent-8-patch
+#SBATCH --job-name=synthetic-independent-8-patch-infonce
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-independent-8-patch-%j.err
+#SBATCH --error=synthetic-independent-8-patch-infonce-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -54,7 +54,7 @@ conda activate "${CONDA_ENV_NAME}"
     --content-ratios 0.95 \
     --content-size 44 \
     --content-style-levels 0 \
-    --contrastive-loss-type vicreg \
+    --contrastive-loss-type infonce \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -93,7 +93,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-independent-8-patch \
+    --model-id synthetic-independent-8-patch-infonce \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
