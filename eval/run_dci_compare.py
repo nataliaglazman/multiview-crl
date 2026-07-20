@@ -131,13 +131,13 @@ def _resolve_key(want, avail):
 # --------------------------------------------------------------------------- #
 
 
-def _null_cv_r2(X, y, n_null, seeds, rng):
-    vals = [cv_probe_r2(X, y[rng.permutation(len(y))], seeds=seeds)["mean"] for _ in range(n_null)]
+def _null_cv_r2(X, y, n_null, seeds, rng, kind="ridge"):
+    vals = [cv_probe_r2(X, y[rng.permutation(len(y))], seeds=seeds, kind=kind)["mean"] for _ in range(n_null)]
     return float(np.mean(vals)) if vals else float("nan")
 
 
-def _null_block_mcc(X, Z, n_null, seeds, rng):
-    vals = [block_mcc(X, Z[rng.permutation(len(Z))], seeds=seeds)["mean"] for _ in range(n_null)]
+def _null_block_mcc(X, Z, n_null, seeds, rng, kind="ridge"):
+    vals = [block_mcc(X, Z[rng.permutation(len(Z))], seeds=seeds, kind=kind)["mean"] for _ in range(n_null)]
     return float(np.mean(vals)) if vals else float("nan")
 
 
@@ -159,7 +159,7 @@ def _block_array(reprs, key, level, block_idx):
     return ld[level][block_idx]
 
 
-def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, rng, n_jobs=1):
+def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, rng, n_jobs=1, kind="ridge"):
     """Per-factor informativeness for one repr→factor block, under every pooling.
 
     ``block_idx`` selects the content (0) or style (1) array; ``factors``/``names``
@@ -198,7 +198,7 @@ def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, 
         return np.column_stack(cols)
 
     tasks = [(pk, X, _targets(pk)) for pk, X in pool_X]
-    results = Parallel(n_jobs=n_jobs)(delayed(cv_probe_r2_multi)(X, Y, seeds=seeds) for _pk, X, Y in tasks)
+    results = Parallel(n_jobs=n_jobs)(delayed(cv_probe_r2_multi)(X, Y, seeds=seeds, kind=kind) for _pk, X, Y in tasks)
 
     per = {name: {} for name in names}
     for (pk, _X, _Y), res in zip(tasks, results):
@@ -338,6 +338,7 @@ def _score_one_encoder(
     n_jobs,
     all_only=False,
     with_dci=False,
+    probe_kind="ridge",
 ):
     """Score the four split blocks (cc, cs, ss, sc) + block-MCC for one encoder's
     features, plus the split-free ``all``-channels capacity (full representation →
@@ -347,10 +348,16 @@ def _score_one_encoder(
     cnames, snames = info["content_names"], info["style_names"]
     has_split = info["has_split"]
 
+    # Bind the probe kind once so every block, null and MCC in this row is scored by
+    # the same estimator — a row mixing linear and nonlinear probes is not internally
+    # comparable.
+    def _sblock(*a, **kw):
+        return _score_block(*a, kind=probe_kind, **kw)
+
     # All-channels capacity: every factor predicted from content+style together.
     # Computed for every model so it is the one apples-to-apples axis (same total
     # width across models) whether or not the split means anything.
-    allb = _score_block(
+    allb = _sblock(
         reprs,
         level,
         (content_idx, style_idx),
@@ -448,7 +455,7 @@ def _score_one_encoder(
             },
         }
 
-    cc = _score_block(
+    cc = _sblock(
         reprs,
         level,
         content_idx,
@@ -460,7 +467,7 @@ def _score_one_encoder(
         rng,
         n_jobs=n_jobs,
     )
-    cs = _score_block(
+    cs = _sblock(
         reprs,
         level,
         content_idx,
@@ -473,7 +480,7 @@ def _score_one_encoder(
         n_jobs=n_jobs,
     )
     ss = (
-        _score_block(
+        _sblock(
             reprs,
             level,
             style_idx,
@@ -489,7 +496,7 @@ def _score_one_encoder(
         else None
     )
     sc = (
-        _score_block(
+        _sblock(
             reprs,
             level,
             style_idx,
@@ -507,12 +514,26 @@ def _score_one_encoder(
 
     mkey = _resolve_key("stats", avail)
     Cc = _block_array(reprs, mkey, level, content_idx)
-    mcc_cc = block_mcc(Cc, gt_content, seeds=seeds)["mean"] if Cc is not None and Cc.shape[1] else float("nan")
-    mcc_cc_null = (
-        _null_block_mcc(Cc, gt_content, n_null, seeds, rng) if Cc is not None and Cc.shape[1] else float("nan")
+    mcc_cc = (
+        block_mcc(Cc, gt_content, seeds=seeds, kind=probe_kind)["mean"]
+        if Cc is not None and Cc.shape[1]
+        else float("nan")
     )
-    mcc_cs = block_mcc(Cc, gt_style, seeds=seeds)["mean"] if Cc is not None and Cc.shape[1] else float("nan")
-    mcc_cs_null = _null_block_mcc(Cc, gt_style, n_null, seeds, rng) if Cc is not None and Cc.shape[1] else float("nan")
+    mcc_cc_null = (
+        _null_block_mcc(Cc, gt_content, n_null, seeds, rng, kind=probe_kind)
+        if Cc is not None and Cc.shape[1]
+        else float("nan")
+    )
+    mcc_cs = (
+        block_mcc(Cc, gt_style, seeds=seeds, kind=probe_kind)["mean"]
+        if Cc is not None and Cc.shape[1]
+        else float("nan")
+    )
+    mcc_cs_null = (
+        _null_block_mcc(Cc, gt_style, n_null, seeds, rng, kind=probe_kind)
+        if Cc is not None and Cc.shape[1]
+        else float("nan")
+    )
 
     sep = mcc_cc - mcc_cs if np.isfinite(mcc_cc) and np.isfinite(mcc_cs) else float("nan")
 
@@ -651,6 +672,7 @@ def score_reprs(
     with_dci=False,
     probe_dim=0,
     gt_style_v2=None,
+    probe_kind="ridge",
 ):
     """Turn extracted representations into one comparison row (torch-free).
 
@@ -697,6 +719,7 @@ def score_reprs(
         n_jobs,
         all_only=all_only,
         with_dci=with_dci,
+        probe_kind=probe_kind,
     )
 
     # View-invariance (uses both encoders).  Skipped for an all-channels-only
@@ -747,12 +770,24 @@ def score_reprs(
             n_jobs,
             all_only=all_only,
             with_dci=with_dci,
+            probe_kind=probe_kind,
         )
         for k, v in enc2.items():
             if k == "detail":
                 row["detail_v2"] = v
             else:
                 row[k + "_v2"] = v
+
+    # SCM-induced leakage floor: how well the GROUND-TRUTH content predicts style.
+    # Under a causal graph (synthetic_causal) style genuinely depends on content, so a
+    # nonzero leak_c2s is expected and does NOT by itself mean the encoder leaked — it
+    # must be read against this reference rather than against zero. Yao et al. (ICLR
+    # 2024, Tab. 6) do the same, reporting content->style R2 of 0.32-0.71 on their SCM.
+    # Pure ground truth, so it is model-independent and identical across compared runs.
+    if gt_content is not None and gt_style is not None and gt_content.shape[1] and gt_style.shape[1]:
+        _ref = cv_probe_r2_multi(gt_content, gt_style, seeds=seeds, kind=probe_kind)["mean"]
+        row["leak_c2s_ref"] = float(np.mean(_ref))
+        row["leak_c2s_excess"] = row.get("leak_c2s", float("nan")) - row["leak_c2s_ref"]
 
     return row
 
@@ -797,6 +832,7 @@ def evaluate_model(
     all_content=False,
     with_dci=False,
     probe_dim=0,
+    probe_kind="ridge",
 ):
     """Load a model, extract representations under each pooling, return a row."""
     from eval.dci import _extract_synthetic_representations
@@ -850,6 +886,7 @@ def evaluate_model(
         all_only=all_only,
         with_dci=with_dci,
         probe_dim=probe_dim,
+        probe_kind=probe_kind,
     )
     t_score = time.perf_counter() - t0
     logger.info(
@@ -2051,6 +2088,17 @@ def main():
         "sweeping channel width).  Set it to <= the smallest content width in the "
         "comparison.  0 (default) = no reduction.",
     )
+    p.add_argument(
+        "--probe-kind",
+        default="ridge",
+        choices=("ridge", "kernel", "mlp"),
+        help="Estimator for every informativeness / block-MCC probe. 'ridge' (default) measures "
+        "LINEAR accessibility only — a gain there can be re-formatting rather than added "
+        "identifiable content. 'kernel' is RBF kernel ridge, the probe Yao et al. evaluate with; "
+        "'mlp' was the most sensitive to purely nonlinear structure in testing. Run ridge and a "
+        "nonlinear kind and compare: linear-only movement means re-formatting, both moving means "
+        "the nonlinear ceiling actually rose.",
+    )
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
     p.add_argument(
         "--fresh",
@@ -2115,6 +2163,7 @@ def main():
                     per_encoder=cli.per_encoder,
                     with_dci=cli.with_dci,
                     probe_dim=cli.probe_dim,
+                    probe_kind=cli.probe_kind,
                     all_content=all_content,
                 )
             )

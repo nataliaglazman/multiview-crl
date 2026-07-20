@@ -26,9 +26,10 @@ import numpy as np
 from scipy import stats as _spstats
 from scipy.optimize import linear_sum_assignment
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.kernel_ridge import KernelRidge
 from sklearn.linear_model import LassoCV, LinearRegression, LogisticRegression, RidgeCV
 from sklearn.metrics import accuracy_score, r2_score
-from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, KFold, StratifiedKFold
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 
@@ -40,6 +41,14 @@ from sklearn.preprocessing import StandardScaler
 def _make_regressor(kind, seed):
     if kind == "ridge":
         return RidgeCV(alphas=(0.01, 0.1, 1.0, 10.0, 100.0, 1000.0))
+    if kind == "kernel":
+        # RBF kernel ridge — the probe Yao et al. (ICLR 2024) evaluate with. alpha is
+        # searched rather than fixed: on a pure-interaction target alpha=1.0 scores
+        # R²=0.77 where alpha=0.01 scores 0.90, so a fixed default understates the
+        # nonlinear ceiling — the one direction of error that would wrongly read as
+        # "no nonlinear gain". gamma keeps its 1/n_features default (inputs are already
+        # standardized); it mattered far less than alpha in testing.
+        return GridSearchCV(KernelRidge(kernel="rbf"), {"alpha": [0.01, 0.1, 1.0]}, cv=3)
     if kind == "mlp":
         return MLPRegressor(hidden_layer_sizes=(128, 128), max_iter=500, early_stopping=True, random_state=seed)
     raise ValueError(f"unknown regressor kind: {kind}")

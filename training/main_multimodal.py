@@ -63,6 +63,7 @@ from training.losses import (
     infonce_loss,
     moco_loss,
     patch_infonce_loss,
+    split_infonce_loss,
     style_infonce_loss,
     style_modality_ce_loss,
     vicreg_loss,
@@ -287,6 +288,7 @@ def train_step(
         # Eval/probes keep reading the pre-head encoder features, so the head only
         # shapes the loss-facing space.
         _proj_heads = getattr(_raw_vqvae, "_contrastive_proj_heads", None)
+        _proj_mode = getattr(args, "contrastive_proj_mode", "head")
 
         def _proj_head_for(_lvl):
             if _proj_heads is None:
@@ -532,8 +534,20 @@ def train_step(
                             else:
                                 _hz_c = (hz_level * soft_content_mask)[:, :, _c_idx]
                             _hz_proj = _project_contrastive_content(_ph, _hz_c, _is_patch)
-                            _proj_ci = [torch.arange(_hz_proj.shape[2], device=_hz_proj.device)] * len(args.subsets)
-                            level_loss = _lf(_hz_proj, _proj_ci, args.subsets, soft_content_mask=None)
+                            if _proj_mode == "entropy":
+                                # Yao eq. (3.3): alignment on the RAW block, entropy on the
+                                # projection. Reduces exactly to the branch of infonce_base_loss
+                                # it replaces when t is the identity, so mode is the only variable.
+                                level_loss = split_infonce_loss(
+                                    _hz_c,
+                                    _hz_proj,
+                                    tau=args.tau,
+                                    tau_entropy=getattr(args, "tau_entropy", None),
+                                    cross_view_negs_only=getattr(args, "cross_view_negs_only", False),
+                                )
+                            else:
+                                _proj_ci = [torch.arange(_hz_proj.shape[2], device=_hz_proj.device)] * len(args.subsets)
+                                level_loss = _lf(_hz_proj, _proj_ci, args.subsets, soft_content_mask=None)
                         else:
                             level_loss = _lf(
                                 hz_level,
@@ -1337,6 +1351,7 @@ def main(args):
     # optimizer + DataParallel wrap) so its params land in the optimizer and the
     # checkpoint state_dict, mirroring the aux-modality heads above.
     _proj_dim = getattr(args, "contrastive_proj_dim", 0)
+    _proj_mode = getattr(args, "contrastive_proj_mode", "head")
     if _proj_dim > 0:
         _proj_hidden = getattr(args, "contrastive_proj_hidden", 256)
         _proj_heads = torch.nn.ModuleDict()
@@ -1344,16 +1359,34 @@ def main(args):
             _cc = vqvae_model.content_channels_per_level.get(_lvl)
             if _cc is None:
                 continue
-            _proj_heads[f"L{_lvl}"] = torch.nn.Sequential(
-                torch.nn.Linear(_cc, _proj_hidden),
-                torch.nn.ReLU(inplace=True),
-                torch.nn.Linear(_proj_hidden, _proj_dim),
-            )
+            if _proj_mode == "entropy":
+                # Yao et al. Defn 3.6: t_k maps the view-specific latent space onto a
+                # hyper unit-cube of the SAME dimension |S_k| — hence _cc out and the
+                # sigmoid, not a SimCLR-style compression to _proj_dim.
+                _proj_heads[f"L{_lvl}"] = torch.nn.Sequential(
+                    torch.nn.Linear(_cc, _proj_hidden),
+                    torch.nn.ReLU(inplace=True),
+                    torch.nn.Linear(_proj_hidden, _cc),
+                    torch.nn.Sigmoid(),
+                )
+            else:
+                _proj_heads[f"L{_lvl}"] = torch.nn.Sequential(
+                    torch.nn.Linear(_cc, _proj_hidden),
+                    torch.nn.ReLU(inplace=True),
+                    torch.nn.Linear(_proj_hidden, _proj_dim),
+                )
         vqvae_model._contrastive_proj_heads = _proj_heads
-        logger.info(
-            f"  Contrastive projection head: dim={_proj_dim} hidden={_proj_hidden} "
-            f"levels={list(_proj_heads.keys())} (loss-facing only; probes read pre-head features)"
-        )
+        if _proj_mode == "entropy":
+            logger.info(
+                f"  Contrastive projection (Yao eq. 3.3, ENTROPY term only): dim-preserving "
+                f"-> unit cube, hidden={_proj_hidden} levels={list(_proj_heads.keys())}; "
+                f"alignment stays on the raw block. --contrastive-proj-dim={_proj_dim} ignored for width."
+            )
+        else:
+            logger.info(
+                f"  Contrastive projection head (SimCLR, WHOLE loss): dim={_proj_dim} hidden={_proj_hidden} "
+                f"levels={list(_proj_heads.keys())} (loss-facing only; probes read pre-head features)"
+            )
 
     if getattr(args, "compile_model", False):
         logger.warning(

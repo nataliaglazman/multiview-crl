@@ -631,6 +631,126 @@ def _patch_infonce_base(
     return total_loss
 
 
+def split_infonce_loss(
+    hz_align,
+    hz_entropy,
+    tau=1.0,
+    tau_entropy=None,
+    cross_view_negs_only=False,
+):
+    """Yao et al. (ICLR 2024) eq. (3.3): alignment on the raw block, entropy on the projection.
+
+    Standard InfoNCE fuses two terms inside one cross-entropy over a single
+    similarity matrix::
+
+        L_i = -s_ii + log Sum_j exp(s_ij)
+              ^^^^^   ^^^^^^^^^^^^^^^^^^^
+              align    entropy/uniformity
+
+    Their §5 maps the numerator to *content alignment* and the denominator to
+    *entropy regularization*, and Defn 3.6 applies the projection ``t_k`` to the
+    entropy term **only** — the alignment term keeps acting on the raw
+    representation. That placement is the point: uniformity implies independent
+    components, which fights disentanglement when the latents are causally
+    dependent, so ``t_k`` shields the representation from the uniformity pressure
+    while leaving the useful view-invariance signal direct. A SimCLR-style head
+    (``_project_contrastive_content``) instead sits in front of *both* terms.
+
+    Because the two terms are computed in different spaces this is no longer a
+    normalized log-likelihood — it is a sum of two separately-defined terms, exactly
+    as eq. (3.3) is written. Consequences: ``top1_acc`` is a projected-space proxy
+    (the diagonal no longer comes from the matrix the loss normalizes over), and the
+    two terms are reported separately since their balance is no longer automatic.
+
+    Setting ``hz_entropy is hz_align`` recovers standard InfoNCE exactly, which is
+    the invariant the numerical check in ``__main__`` asserts.
+
+    Args:
+        hz_align: Raw content block, ``(n_views, B, k)``. Drives the alignment term.
+        hz_entropy: Projected block ``t(content)``, ``(n_views, B, d)``. Drives entropy.
+        tau: Temperature for the alignment term.
+        tau_entropy: Temperature for the entropy term (defaults to ``tau``). Separate
+            because the two terms now live in different geometries.
+        cross_view_negs_only: When True the entropy sum runs over cross-view pairs
+            only; otherwise same-view pairs join it with the self-similarity masked.
+
+    Returns:
+        Scalar loss with ``._contrastive_diag`` attached.
+    """
+    n_view, B = hz_align.shape[0], hz_align.shape[1]
+    tau_u = tau if tau_entropy is None else tau_entropy
+    eps = 1e-6
+
+    a = F.normalize(hz_align, dim=-1, eps=eps)  # (V, B, k) — raw
+    p = F.normalize(hz_entropy, dim=-1, eps=eps)  # (V, B, d) — projected
+
+    total_loss = torch.zeros(1, device=hz_align.device, dtype=hz_align.dtype)
+    align_terms, entropy_terms, pos_sims, neg_sims = [], [], [], []
+    n_correct = 0
+    n_total = 0
+
+    for i in range(n_view):
+        for j in range(n_view):
+            if i >= j:
+                continue
+            # --- Alignment: positives only, in the RAW space ---
+            # Symmetric in (i, j), so the same vector serves both directions.
+            s_pos = (a[i] * a[j]).sum(-1) / tau  # (B,)
+
+            # --- Entropy: full similarity, in the PROJECTED space ---
+            s_cross = (p[i] @ p[j].transpose(-1, -2)) / tau_u  # (B, B)
+            if cross_view_negs_only:
+                den_i, den_j = s_cross, s_cross.transpose(-1, -2)
+            else:
+                # Same-view pairs join the sum; mask each sample against itself so a
+                # sample is never its own negative.
+                eye = torch.eye(B, dtype=torch.bool, device=hz_align.device)
+                s_ii = (p[i] @ p[i].transpose(-1, -2)) / tau_u
+                s_jj = (p[j] @ p[j].transpose(-1, -2)) / tau_u
+                s_ii = s_ii.masked_fill(eye, float("-inf"))
+                s_jj = s_jj.masked_fill(eye, float("-inf"))
+                den_i = torch.cat([s_cross, s_ii], dim=1)  # (B, 2B)
+                den_j = torch.cat([s_cross.transpose(-1, -2), s_jj], dim=1)
+
+            lse_i = torch.logsumexp(den_i, dim=1)  # (B,)
+            lse_j = torch.logsumexp(den_j, dim=1)  # (B,)
+
+            # Scale matches whichever branch of infonce_base_loss this replaces, so
+            # switching modes never silently rescales contrastive against recon: the
+            # cross-view branch there sums two per-view means (CE(s) + CE(s.T)), while
+            # the default branch takes ONE mean over the concatenated 2B rows.
+            term_i, term_j = (-s_pos + lse_i).mean(), (-s_pos + lse_j).mean()
+            total_loss = total_loss + (term_i + term_j if cross_view_negs_only else 0.5 * (term_i + term_j))
+
+            with torch.no_grad():
+                align_terms.append(s_pos * tau)  # undo 1/tau for reporting
+                entropy_terms.append((lse_i + lse_j) / 2)
+                pos_sims.append(s_pos * tau)
+                offdiag = ~torch.eye(B, dtype=torch.bool, device=hz_align.device)
+                neg_sims.append(s_cross[offdiag] * tau_u)
+                # Projected-space proxy: would the projection alone pair the views?
+                tgt = torch.arange(B, device=hz_align.device)
+                n_correct += (s_cross.argmax(dim=1) == tgt).sum().item()
+                n_correct += (s_cross.argmax(dim=0) == tgt).sum().item()
+                n_total += 2 * B
+
+    with torch.no_grad():
+        _pos = torch.cat(pos_sims)
+        _neg = torch.cat(neg_sims)
+        total_loss._contrastive_diag = {
+            "top1_acc": n_correct / max(n_total, 1),  # projected-space proxy
+            "pos_sim_mean": _pos.mean().item(),
+            "pos_sim_std": _pos.std().item(),
+            "neg_sim_mean": _neg.mean().item(),
+            "neg_sim_std": _neg.std().item(),
+            # The two eq. (3.3) terms, reported apart: their balance is no longer
+            # enforced by a shared softmax, so drift in either is worth watching.
+            "align_term": torch.cat(align_terms).mean().item(),
+            "entropy_term": torch.cat(entropy_terms).mean().item(),
+        }
+    return total_loss
+
+
 def moco_infonce_loss(
     q, k, queue, content_indices, tau=1.0, soft_content_mask=None, queue_v1=None, cross_view_negs_only=False
 ):

@@ -249,6 +249,28 @@ def parse_args() -> argparse.ArgumentParser:
         "(Linear -> ReLU -> Linear). Only used when --contrastive-proj-dim > 0. Default: 256.",
     )
     parser.add_argument(
+        "--contrastive-proj-mode",
+        default="head",
+        choices=("head", "entropy"),
+        help="Where the projection sits in the contrastive loss. 'head' (default) is the "
+        "SimCLR/MoCo recipe: an MLP in front of the WHOLE InfoNCE, so it shapes both the "
+        "alignment (numerator) and the uniformity (denominator) terms. 'entropy' is Yao et al. "
+        "(ICLR 2024) Defn 3.6: a dimension-preserving map onto the unit hypercube applied to the "
+        "ENTROPY term only, leaving alignment acting directly on the raw representation — "
+        "uniformity implies independent components and so fights disentanglement under causally "
+        "dependent latents, whereas view-invariance is signal you want reaching the encoder. In "
+        "'entropy' mode --contrastive-proj-dim only switches the map on; its width is forced to "
+        "the content channel count. Requires InfoNCE, no patch-contrastive, no MoCo.",
+    )
+    parser.add_argument(
+        "--tau-entropy",
+        type=float,
+        default=None,
+        help="Separate temperature for the entropy term under --contrastive-proj-mode entropy. "
+        "Defaults to --tau. Exists because alignment and entropy then live in different "
+        "geometries, so one temperature need not suit both. Hold it fixed across A/B arms.",
+    )
+    parser.add_argument(
         "--scale-style-contrastive-loss",
         type=float,
         default=0.0,
@@ -1105,6 +1127,27 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             "--contrastive-proj-dim is not supported with --use-moco yet (the MoCo queue stores "
             "un-projected features). Disable one of them."
         )
+
+    # 'entropy' mode splits the InfoNCE numerator from its denominator (see
+    # training.losses.split_infonce_loss), so it only exists on the pooled InfoNCE
+    # path. Fail loudly rather than silently falling back to the SimCLR head.
+    if getattr(args, "contrastive_proj_mode", "head") == "entropy":
+        if getattr(args, "contrastive_proj_dim", 0) <= 0:
+            raise ValueError(
+                "--contrastive-proj-mode entropy needs --contrastive-proj-dim > 0 to switch the "
+                "projection on (its width is then forced to the content channel count)."
+            )
+        if getattr(args, "contrastive_loss_type", "infonce") != "infonce":
+            raise ValueError(
+                "--contrastive-proj-mode entropy requires --contrastive-loss-type infonce: the "
+                "alignment/entropy split is defined by the InfoNCE numerator/denominator. "
+                f"Got '{args.contrastive_loss_type}'."
+            )
+        if getattr(args, "patch_contrastive", False):
+            raise ValueError(
+                "--contrastive-proj-mode entropy is not implemented for --patch-contrastive yet "
+                "(the split loss expects pooled (n_views, B, k) features)."
+            )
 
     # --content-size: directly set content channels, override ratio-based defaults.
     # cs == hidden_ch is the all-content baseline: no style channels, so downstream

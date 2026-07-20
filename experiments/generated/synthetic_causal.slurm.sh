@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-20T09:03:57Z
-# Git SHA: 2e32173
+# Generated at: 2026-07-20T10:25:44Z
+# Git SHA: c0eeee7
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-projection-new-16
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -57,6 +57,7 @@ conda activate "${CONDA_ENV_NAME}"
     --contrastive-loss-type infonce \
     --contrastive-proj-dim 16 \
     --contrastive-proj-hidden 128 \
+    --contrastive-proj-mode entropy \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
