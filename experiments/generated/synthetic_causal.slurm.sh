@@ -1,17 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-20T10:41:48Z
-# Git SHA: 3803235
+# Generated at: 2026-07-20T11:10:43Z
+# Git SHA: 4c6163b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-entropy-new
+#SBATCH --job-name=synthetic-causal-projection-entropy-new-correct
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-entropy-new-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-projection-entropy-new-correct-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -95,7 +96,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-entropy-new \
+    --model-id synthetic-causal-projection-entropy-new-correct \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \

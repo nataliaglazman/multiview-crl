@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-projection-entropy-new
+tag: synthetic-causal-projection-entropy-new-correct
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random

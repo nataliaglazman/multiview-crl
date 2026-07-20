@@ -90,9 +90,13 @@ def _project_contrastive_content(head, hz_c, is_patch):
     channel axis last, project, and move it back. Eval/probes never call this — they
     read the pre-head encoder features — which is the whole point of the head.
     """
-    if is_patch:
-        return head(hz_c.permute(0, 1, 3, 2)).permute(0, 1, 3, 2).contiguous()
-    return head(hz_c)
+    # Leading dims are flattened into the batch axis rather than broadcast over:
+    # Linear does not care, but BatchNorm1d in the entropy head would otherwise read
+    # (n_views, B, k) as (N=n_views, C=B, L=k) and normalise the wrong axis entirely.
+    x = hz_c.permute(0, 1, 3, 2) if is_patch else hz_c
+    shape = x.shape
+    out = head(x.reshape(-1, shape[-1])).reshape(*shape[:-1], -1)
+    return out.permute(0, 1, 3, 2).contiguous() if is_patch else out
 
 
 # ---------------------------------------------------------------------------
@@ -1369,10 +1373,23 @@ def main(args):
                 # and a (0,1) codomain confines every vector to the positive orthant,
                 # squeezing pairwise cosine into ~[0.75, 1]. Centering restores the
                 # full range and costs nothing theoretically.
+                # BatchNorm is load-bearing, not decoration. t is driven ONLY by the
+                # repulsive entropy term, and coincident projected vectors sit at
+                # cosine's maximum where its gradient w.r.t. direction vanishes — so a
+                # collapsed t is a stationary point with no escape. The final
+                # affine-free BN restores unit variance per dimension before the tanh,
+                # removing that absorbing state; the first BN is the standard
+                # SimCLR/BT placement for conditioning. This is not an unconditional
+                # guarantee — once pre-BN variance falls below BN's eps (1e-5) the
+                # rescaling stops working — which is why the head is ALSO excluded
+                # from weight decay in the optimizer: BN removes the trap, excluding
+                # decay removes the force that pushes into it. Neither alone suffices.
                 _proj_heads[f"L{_lvl}"] = torch.nn.Sequential(
                     torch.nn.Linear(_cc, _proj_hidden),
+                    torch.nn.BatchNorm1d(_proj_hidden),
                     torch.nn.ReLU(inplace=True),
                     torch.nn.Linear(_proj_hidden, _cc),
+                    torch.nn.BatchNorm1d(_cc, affine=False),
                     torch.nn.Tanh(),
                 )
             else:
@@ -1497,7 +1514,17 @@ def main(args):
                 continue
             # Skip weight decay for biases, LayerNorm/GroupNorm weights, and
             # ReZero alpha scalars — these should not be regularised.
-            if name.endswith(".bias") or "norm" in name.lower() or name.endswith(".alpha"):
+            # The contrastive projection heads are excluded too: decay drives W -> 0,
+            # leaving a constant (bias-only) output, and a constant projection is a
+            # stationary point of the entropy term — an absorbing state, not a soft
+            # penalty. Their BatchNorm weights would also miss the "norm" name test,
+            # since nn.Sequential names them by position.
+            if (
+                name.endswith(".bias")
+                or "norm" in name.lower()
+                or name.endswith(".alpha")
+                or "_contrastive_proj_heads" in name
+            ):
                 no_decay_params.append(param)
             else:
                 decay_params.append(param)
