@@ -1362,12 +1362,18 @@ def main(args):
             if _proj_mode == "entropy":
                 # Yao et al. Defn 3.6: t_k maps the view-specific latent space onto a
                 # hyper unit-cube of the SAME dimension |S_k| — hence _cc out and the
-                # sigmoid, not a SimCLR-style compression to _proj_dim.
+                # bounded activation, not a SimCLR-style compression to _proj_dim.
+                # Tanh gives (-1,1)^k rather than the paper's (0,1)^k: an affine
+                # reparameterisation, so the max-entropy-implies-uniform argument is
+                # untouched, but the entropy term is estimated with cosine similarity
+                # and a (0,1) codomain confines every vector to the positive orthant,
+                # squeezing pairwise cosine into ~[0.75, 1]. Centering restores the
+                # full range and costs nothing theoretically.
                 _proj_heads[f"L{_lvl}"] = torch.nn.Sequential(
                     torch.nn.Linear(_cc, _proj_hidden),
                     torch.nn.ReLU(inplace=True),
                     torch.nn.Linear(_proj_hidden, _cc),
-                    torch.nn.Sigmoid(),
+                    torch.nn.Tanh(),
                 )
             else:
                 _proj_heads[f"L{_lvl}"] = torch.nn.Sequential(
@@ -1379,7 +1385,7 @@ def main(args):
         if _proj_mode == "entropy":
             logger.info(
                 f"  Contrastive projection (Yao eq. 3.3, ENTROPY term only): dim-preserving "
-                f"-> unit cube, hidden={_proj_hidden} levels={list(_proj_heads.keys())}; "
+                f"-> tanh cube (-1,1)^k, hidden={_proj_hidden} levels={list(_proj_heads.keys())}; "
                 f"alignment stays on the raw block. --contrastive-proj-dim={_proj_dim} ignored for width."
             )
         else:

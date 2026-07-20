@@ -723,7 +723,10 @@ def split_infonce_loss(
             total_loss = total_loss + (term_i + term_j if cross_view_negs_only else 0.5 * (term_i + term_j))
 
             with torch.no_grad():
-                align_terms.append(s_pos * tau)  # undo 1/tau for reporting
+                # Both terms in LOSS units so they are directly comparable and
+                # 2*(align_term + entropy_term) reconstructs this pair's contribution.
+                # (Raw cosine is reported separately as pos_sim_mean.)
+                align_terms.append(-s_pos)
                 entropy_terms.append((lse_i + lse_j) / 2)
                 pos_sims.append(s_pos * tau)
                 offdiag = ~torch.eye(B, dtype=torch.bool, device=hz_align.device)
@@ -743,10 +746,19 @@ def split_infonce_loss(
             "pos_sim_std": _pos.std().item(),
             "neg_sim_mean": _neg.mean().item(),
             "neg_sim_std": _neg.std().item(),
-            # The two eq. (3.3) terms, reported apart: their balance is no longer
-            # enforced by a shared softmax, so drift in either is worth watching.
+            # The two eq. (3.3) terms, reported apart and on the same scale: their
+            # balance is no longer enforced by a shared softmax, so drift in either is
+            # worth watching.
             "align_term": torch.cat(align_terms).mean().item(),
             "entropy_term": torch.cat(entropy_terms).mean().item(),
+            # Health of t itself. Its codomain is the centered unit cube (-1,1)^k, so a
+            # collapse to a constant (std -> 0, mean drifting off 0) or to the corners
+            # (saturated -> 1) makes the entropy estimate degenerate while the loss can
+            # still look healthy — the failure mode with no counterpart in the
+            # SimCLR-head arm.
+            "t_out_mean": hz_entropy.mean().item(),
+            "t_out_std": hz_entropy.std().item(),
+            "t_out_saturated": (hz_entropy.abs() > 0.99).float().mean().item(),
         }
     return total_loss
 
