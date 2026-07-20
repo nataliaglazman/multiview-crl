@@ -449,6 +449,23 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
             'source "$(conda info --base)/etc/profile.d/conda.sh"',
             'conda activate "${CONDA_ENV_NAME}"',
             "",
+            "# -- GPU preflight --",
+            'echo "Node: $(hostname)  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"',
+            'nvidia-smi || echo "WARNING: nvidia-smi unavailable on $(hostname)"',
+            *(
+                []
+                if any("--no-cuda" in al for al in arg_lines)
+                else [
+                    # A silent CPU fallback burns the whole walltime doing nothing;
+                    # fail in seconds instead so the node can be reported.
+                    'if ! "$PYTHON" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then',
+                    '    echo "ERROR: GPU allocated but torch cannot use it on $(hostname). Aborting."',
+                    '    "$PYTHON" -c "import torch; print(f\'torch {torch.__version__} cuda={torch.version.cuda}\')"',
+                    "    exit 1",
+                    "fi",
+                ]
+            ),
+            "",
             "# -- Training --",
             '"$PYTHON" -m training.main_multimodal \\',
         ]

@@ -1,7 +1,9 @@
-# PyTorch
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
+# PyTorch — pinned to match the cu121 build installed by the SLURM env setup.
+# Unpinned ranges let this sync pull a wheel built against a different CUDA,
+# which breaks unpredictably across the mixed A100/H200/L40S nodes.
+torch==2.3.1
+torchvision==0.18.1
+torchaudio==2.3.1
 
 # TensorBoard
 tensorboard>=2.13.0

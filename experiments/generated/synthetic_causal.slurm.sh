@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-20T11:55:17Z
-# Git SHA: b6058c4
+# Generated at: 2026-07-20T13:41:38Z
+# Git SHA: edf66b3
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-entropy-tau
+#SBATCH --job-name=synthetic-causal-projection-entropy-tau-bounded
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-entropy-tau-%j.err
+#SBATCH --error=synthetic-causal-projection-entropy-tau-bounded-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -46,6 +46,15 @@ export PYTHONPATH="${SLURM_SUBMIT_DIR}"
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV_NAME}"
 
+# -- GPU preflight --
+echo "Node: $(hostname)  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+nvidia-smi || echo "WARNING: nvidia-smi unavailable on $(hostname)"
+if ! "$PYTHON" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
+    echo "ERROR: GPU allocated but torch cannot use it on $(hostname). Aborting."
+    "$PYTHON" -c "import torch; print(f'torch {torch.__version__} cuda={torch.version.cuda}')"
+    exit 1
+fi
+
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 64 \
@@ -58,7 +67,7 @@ conda activate "${CONDA_ENV_NAME}"
     --contrastive-loss-type infonce \
     --contrastive-proj-dim 16 \
     --contrastive-proj-hidden 128 \
-    --contrastive-proj-mode entropy \
+    --contrastive-proj-mode bounded \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -96,7 +105,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-entropy-tau \
+    --model-id synthetic-causal-projection-entropy-tau-bounded \
     --tau 1.0 \
     --tau-entropy 1 \
     --total-dim 512 \
