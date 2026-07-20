@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-20T11:52:30Z
-# Git SHA: 3194481
+# Generated at: 2026-07-20T11:55:17Z
+# Git SHA: b6058c4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-projection-entropy-tau
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -97,6 +97,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-res 64 \
     --model-id synthetic-causal-projection-entropy-tau \
     --tau 1.0 \
+    --tau-entropy 1 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
