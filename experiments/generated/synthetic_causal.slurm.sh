@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-20T10:27:51Z
-# Git SHA: 13e8561
+# Generated at: 2026-07-20T10:41:48Z
+# Git SHA: 3803235
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-entropy
+#SBATCH --job-name=synthetic-causal-projection-entropy-new
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-entropy-%j.err
+#SBATCH --error=synthetic-causal-projection-entropy-new-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -71,7 +71,6 @@ conda activate "${CONDA_ENV_NAME}"
     --moco-queue-size 0 \
     --no-final-recon-norm \
     --pass-full-to-next-level \
-    --patch-contrastive \
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
@@ -96,7 +95,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-entropy \
+    --model-id synthetic-causal-projection-entropy-new \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
