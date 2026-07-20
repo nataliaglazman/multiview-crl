@@ -3,9 +3,9 @@
 # Generated at: 2026-07-20T13:41:38Z
 # Git SHA: edf66b3
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-entropy-tau-bounded
+#SBATCH --job-name=synthetic-causal-projection-entropy-tau-bounded-2
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-entropy-tau-bounded-%j.err
+#SBATCH --error=synthetic-causal-projection-entropy-tau-bounded-2-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -104,7 +104,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-entropy-tau-bounded \
+    --model-id synthetic-causal-projection-entropy-tau-bounded-2 \
     --tau 1.0 \
     --tau-entropy 1 \
     --total-dim 512 \
