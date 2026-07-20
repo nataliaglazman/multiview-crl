@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-20T11:10:43Z
-# Git SHA: 4c6163b
+# Generated at: 2026-07-20T11:52:30Z
+# Git SHA: 3194481
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-entropy-new-correct
+#SBATCH --job-name=synthetic-causal-projection-entropy-tau
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-entropy-new-correct-%j.err
+#SBATCH --error=synthetic-causal-projection-entropy-tau-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -95,8 +95,8 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-entropy-new-correct \
-    --tau 0.07 \
+    --model-id synthetic-causal-projection-entropy-tau \
+    --tau 1.0 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
