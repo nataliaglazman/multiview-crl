@@ -12,7 +12,6 @@
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
