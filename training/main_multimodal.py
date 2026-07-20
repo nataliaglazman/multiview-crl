@@ -528,7 +528,7 @@ def train_step(
                     else:
                         _lf = patch_loss_func if _is_patch else loss_func
                         _ph = _proj_head_for(level_idx)
-                        if _ph is not None:
+                        if _ph is not None or _proj_mode == "bounded":
                             # Slice to content channels — keep the differentiable
                             # mask multiply so gradients still reach learned logits —
                             # then project before the loss.
@@ -537,11 +537,28 @@ def train_step(
                                 _hz_c = (hz_level * soft_content_mask.unsqueeze(-1))[:, :, _c_idx, :]
                             else:
                                 _hz_c = (hz_level * soft_content_mask)[:, :, _c_idx]
-                            _hz_proj = _project_contrastive_content(_ph, _hz_c, _is_patch)
-                            if _proj_mode == "entropy":
-                                # Yao eq. (3.3): alignment on the RAW block, entropy on the
-                                # projection. Reduces exactly to the branch of infonce_base_loss
-                                # it replaces when t is the identity, so mode is the only variable.
+                            _ci_all = [torch.arange(_hz_c.shape[2], device=_hz_c.device)] * len(args.subsets)
+
+                            if _proj_mode == "bounded":
+                                # Yao Thm 3.2 / Defn 3.1: with a single known content block the
+                                # ENCODER itself maps to the unit cube, g_k : X_k -> (0,1)^|C|,
+                                # and eq. (3.1) puts BOTH alignment and entropy on g_k — there is
+                                # no separate t. So this is plain InfoNCE on a bounded
+                                # representation, no extra parameters. Applying the squash
+                                # loss-facing only (rather than inside the encoder) is sound
+                                # because tanh is an elementwise diffeomorphism, and
+                                # block-identifiability is invariant to those — probing pre- or
+                                # post-squash differs by a fixed reparameterisation.
+                                level_loss = _lf(torch.tanh(_hz_c), _ci_all, args.subsets, soft_content_mask=None)
+                            elif _proj_mode == "entropy":
+                                # Yao eq. (3.3): alignment on the content-SELECTED block
+                                # (phi . r_k), entropy on t_k(r_k) over the FULL view-specific
+                                # representation — the entropy term carries no phi, and Defn 3.6
+                                # sizes t_k by |S_k|, not |C|. Entropy is what forces r_k to be
+                                # invertible, so restricting it to content would leave the style
+                                # channels free to be lossy and break the chain to
+                                # block-identifiability.
+                                _hz_proj = _project_contrastive_content(_ph, hz_level, _is_patch)
                                 level_loss = split_infonce_loss(
                                     _hz_c,
                                     _hz_proj,
@@ -550,6 +567,7 @@ def train_step(
                                     cross_view_negs_only=getattr(args, "cross_view_negs_only", False),
                                 )
                             else:
+                                _hz_proj = _project_contrastive_content(_ph, _hz_c, _is_patch)
                                 _proj_ci = [torch.arange(_hz_proj.shape[2], device=_hz_proj.device)] * len(args.subsets)
                                 level_loss = _lf(_hz_proj, _proj_ci, args.subsets, soft_content_mask=None)
                         else:
@@ -1363,6 +1381,9 @@ def main(args):
             _cc = vqvae_model.content_channels_per_level.get(_lvl)
             if _cc is None:
                 continue
+            # Defn 3.6 sizes t_k by |S_k| — the FULL view-specific latent width — because
+            # eq. (3.3)'s entropy term is over r_k(x_k) with no content selector applied.
+            _full = getattr(args, "vqvae_hidden_channels", None) or _cc
             if _proj_mode == "entropy":
                 # Yao et al. Defn 3.6: t_k maps the view-specific latent space onto a
                 # hyper unit-cube of the SAME dimension |S_k| — hence _cc out and the
@@ -1385,11 +1406,11 @@ def main(args):
                 # from weight decay in the optimizer: BN removes the trap, excluding
                 # decay removes the force that pushes into it. Neither alone suffices.
                 _proj_heads[f"L{_lvl}"] = torch.nn.Sequential(
-                    torch.nn.Linear(_cc, _proj_hidden),
+                    torch.nn.Linear(_full, _proj_hidden),
                     torch.nn.BatchNorm1d(_proj_hidden),
                     torch.nn.ReLU(inplace=True),
-                    torch.nn.Linear(_proj_hidden, _cc),
-                    torch.nn.BatchNorm1d(_cc, affine=False),
+                    torch.nn.Linear(_proj_hidden, _full),
+                    torch.nn.BatchNorm1d(_full, affine=False),
                     torch.nn.Tanh(),
                 )
             else:

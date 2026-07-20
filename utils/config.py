@@ -251,18 +251,21 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument(
         "--contrastive-proj-mode",
         default="head",
-        choices=("head", "entropy"),
+        choices=("head", "entropy", "bounded"),
         help="Where the projection sits in the contrastive loss. 'head' (default) is the "
         "SimCLR/MoCo recipe: an MLP in front of the WHOLE InfoNCE, so it shapes both the "
         "alignment (numerator) and the uniformity (denominator) terms. 'entropy' is Yao et al. "
         "(ICLR 2024) Defn 3.6: a dimension-preserving map onto a bounded hypercube (tanh, so "
         "(-1,1)^k — an affine reparameterisation of the paper's (0,1)^k that keeps cosine "
-        "similarity's full range) applied to the "
-        "ENTROPY term only, leaving alignment acting directly on the raw representation — "
-        "uniformity implies independent components and so fights disentanglement under causally "
-        "dependent latents, whereas view-invariance is signal you want reaching the encoder. In "
-        "'entropy' mode --contrastive-proj-dim only switches the map on; its width is forced to "
-        "the content channel count. Requires InfoNCE, no patch-contrastive, no MoCo.",
+        "similarity's full range) applied to the ENTROPY term only, over the FULL representation "
+        "(eq. 3.3 carries no content selector on that term and Defn 3.6 sizes t_k by |S_k|), while "
+        "alignment stays on the content-selected block. 'bounded' is Thm 3.2 / Defn 3.1 instead: "
+        "with a single known content block the encoder itself maps to the unit cube and eq. (3.1) "
+        "puts BOTH terms on it, so this is plain InfoNCE on tanh(content) with no extra parameters "
+        "— the more faithful choice for a fixed single content/style split, which is the regime "
+        "'--mask-mode fixed' puts you in. 'entropy' needs --contrastive-proj-dim > 0 to switch t_k "
+        "on (width then forced to the representation width); 'bounded' ignores it. Both require "
+        "InfoNCE, no patch-contrastive, no MoCo.",
     )
     parser.add_argument(
         "--tau-entropy",
@@ -1133,23 +1136,29 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
     # 'entropy' mode splits the InfoNCE numerator from its denominator (see
     # training.losses.split_infonce_loss), so it only exists on the pooled InfoNCE
     # path. Fail loudly rather than silently falling back to the SimCLR head.
-    if getattr(args, "contrastive_proj_mode", "head") == "entropy":
-        if getattr(args, "contrastive_proj_dim", 0) <= 0:
-            raise ValueError(
-                "--contrastive-proj-mode entropy needs --contrastive-proj-dim > 0 to switch the "
-                "projection on (its width is then forced to the content channel count)."
-            )
+    _pmode = getattr(args, "contrastive_proj_mode", "head")
+    if _pmode in ("entropy", "bounded"):
         if getattr(args, "contrastive_loss_type", "infonce") != "infonce":
             raise ValueError(
-                "--contrastive-proj-mode entropy requires --contrastive-loss-type infonce: the "
-                "alignment/entropy split is defined by the InfoNCE numerator/denominator. "
+                f"--contrastive-proj-mode {_pmode} requires --contrastive-loss-type infonce "
+                "(the alignment/entropy structure is defined by the InfoNCE numerator/denominator). "
                 f"Got '{args.contrastive_loss_type}'."
             )
         if getattr(args, "patch_contrastive", False):
             raise ValueError(
-                "--contrastive-proj-mode entropy is not implemented for --patch-contrastive yet "
-                "(the split loss expects pooled (n_views, B, k) features)."
+                f"--contrastive-proj-mode {_pmode} is not implemented for --patch-contrastive yet "
+                "(both expect pooled (n_views, B, k) features; the paper has no spatial axis)."
             )
+    if _pmode == "entropy" and getattr(args, "contrastive_proj_dim", 0) <= 0:
+        raise ValueError(
+            "--contrastive-proj-mode entropy needs --contrastive-proj-dim > 0 to switch t_k on "
+            "(its width is then forced to the full representation width, per Defn 3.6)."
+        )
+    if _pmode == "bounded" and getattr(args, "contrastive_proj_dim", 0) > 0:
+        logger.warning(
+            "--contrastive-proj-mode bounded ignores --contrastive-proj-dim: Thm 3.2 has no "
+            "separate projection, only a bounded encoder output. No head will be built."
+        )
 
     # --content-size: directly set content channels, override ratio-based defaults.
     # cs == hidden_ch is the all-content baseline: no style channels, so downstream
