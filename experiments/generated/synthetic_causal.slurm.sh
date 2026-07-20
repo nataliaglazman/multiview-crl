@@ -1,17 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-20T11:55:17Z
-# Git SHA: b6058c4
+# Generated at: 2026-07-20T12:31:20Z
+# Git SHA: cf32988
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-entropy-tau
+#SBATCH --job-name=synthetic-causal-projection-entropy-tau-bs-264
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-entropy-tau-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-projection-entropy-tau-bs-264-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -47,7 +48,7 @@ conda activate "${CONDA_ENV_NAME}"
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 64 \
+    --batch-size 264 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
@@ -95,7 +96,7 @@ conda activate "${CONDA_ENV_NAME}"
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-entropy-tau \
+    --model-id synthetic-causal-projection-entropy-tau-bs-264 \
     --tau 1.0 \
     --tau-entropy 1 \
     --total-dim 512 \
