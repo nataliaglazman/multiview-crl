@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-20T10:26:19Z
-# Git SHA: a137ed5
+# Generated at: 2026-07-20T10:27:51Z
+# Git SHA: 13e8561
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-projection-entropy
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -71,6 +71,7 @@ conda activate "${CONDA_ENV_NAME}"
     --moco-queue-size 0 \
     --no-final-recon-norm \
     --pass-full-to-next-level \
+    --patch-contrastive \
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
