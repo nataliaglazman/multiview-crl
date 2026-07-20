@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-projection-new
+tag: synthetic-causal-projection-new-16
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -30,7 +30,7 @@ separate_style_codebooks: true
 separate_content_codebooks: false
 # synthetic_clean_content: true
 patch_contrastive: false
-contrastive_proj_dim: 32     # >0 enables it; 0 (default) = off
+contrastive_proj_dim: 16     # >0 enables it; 0 (default) = off
 contrastive_proj_hidden: 128  # optional, defaults to 256
 # patch_foreground_mask: true
 # patch_foreground_thresh: 0.05
