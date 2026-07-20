@@ -426,7 +426,7 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
             "export PYTHONNOUSERSITE=1",
             "",
             "# Automatically repair/build the environment if numpy or torch are missing",
-            'if ! "$PYTHON" -c "import torch; import numpy" 2>/dev/null; then',
+            "if ! \"$PYTHON\" -c \"import importlib.util; raise SystemExit(0 if importlib.util.find_spec('torch') and importlib.util.find_spec('numpy') else 1)\" 2>/dev/null; then",
             "    echo \"Environment '${CONDA_ENV_NAME}' missing or broken -- rebuilding cleanly...\"",
             '    conda env remove -n "${CONDA_ENV_NAME}" --yes 2>/dev/null || true',
             '    conda create -n "${CONDA_ENV_NAME}" python=3.10 -y',
