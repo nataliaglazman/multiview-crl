@@ -23,7 +23,7 @@ vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
-content_size: 48
+content_size: 44
 style_injection_mode: input
 no_final_recon_norm: true
 separate_style_codebooks: true
@@ -32,7 +32,7 @@ separate_content_codebooks: false
 patch_contrastive: false
 contrastive_proj_dim: 16     # >0 enables it; 0 (default) = off
 contrastive_proj_hidden: 128  # optional, defaults to 256
-contrastive_proj_mode: head
+contrastive_proj_mode: entropy
 # patch_foreground_mask: true
 # patch_foreground_thresh: 0.05
 # contrastive_loss_type: vicreg
