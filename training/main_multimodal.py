@@ -573,7 +573,13 @@ def train_step(
                                 # invertible, so restricting it to content would leave the style
                                 # channels free to be lossy and break the chain to
                                 # block-identifiability.
-                                _hz_proj = _project_contrastive_content(_ph, hz_level, _is_patch)
+                                # Entropy is GLOBAL even under patch contrastive: pool
+                                # over positions BEFORE t, so t sees one vector per
+                                # sample. Alignment keeps its patch structure (_hz_c
+                                # stays (V,B,k,P)) — a per-sample distance extends over
+                                # space, a distributional quantity does not.
+                                _hz_global = hz_level.mean(-1) if _is_patch else hz_level
+                                _hz_proj = _project_contrastive_content(_ph, _hz_global, False)
                                 level_loss = split_infonce_loss(
                                     _hz_c,
                                     _hz_proj,

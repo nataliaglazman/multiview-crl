@@ -1200,10 +1200,11 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
                 "(the alignment/entropy structure is defined by the InfoNCE numerator/denominator). "
                 f"Got '{args.contrastive_loss_type}'."
             )
-        if getattr(args, "patch_contrastive", False):
+        if _pmode == "bounded" and getattr(args, "patch_contrastive", False):
             raise ValueError(
-                f"--contrastive-proj-mode {_pmode} is not implemented for --patch-contrastive yet "
-                "(both expect pooled (n_views, B, k) features; the paper has no spatial axis)."
+                "--contrastive-proj-mode bounded is not implemented for --patch-contrastive "
+                "(eq. 3.1 puts BOTH terms on one bounded encoding; there is no spatial axis "
+                "to split them across). Use --contrastive-proj-mode entropy for patch."
             )
     if _pmode == "entropy" and getattr(args, "contrastive_proj_dim", 0) <= 0:
         raise ValueError(

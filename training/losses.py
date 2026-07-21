@@ -719,12 +719,25 @@ def split_infonce_loss(
     (the diagonal no longer comes from the matrix the loss normalizes over), and the
     two terms are reported separately since their balance is no longer automatic.
 
-    Setting ``hz_entropy is hz_align`` recovers standard InfoNCE exactly, which is
-    the invariant the numerical check in ``__main__`` asserts.
+    The cross-view POSITIVE is excluded from the entropy sum. In standard InfoNCE the
+    positive sits in the denominator but is balanced by a same-space numerator (net
+    attractive); once the numerator moves to the raw space, a positive left in the
+    denominator is purely repulsive and fights alignment outright.
+
+    **Spatial alignment, global entropy.** ``hz_align`` may be patch-shaped
+    ``(n_views, B, k, P)``: alignment is a per-sample *distance*, so it is computed per
+    position and averaged, giving view-invariance at spatial resolution. ``hz_entropy``
+    is always reduced to a single global vector per sample, because entropy is a
+    property of the *distribution over samples* — maximizing it per position
+    independently does NOT imply the joint map is invertible (and neighbouring
+    positions are strongly correlated, so it would only add many weak, non-independent
+    constraints). This asymmetry is why the two terms are pooled differently.
 
     Args:
-        hz_align: Raw content block, ``(n_views, B, k)``. Drives the alignment term.
-        hz_entropy: Projected block ``t(content)``, ``(n_views, B, d)``. Drives entropy.
+        hz_align: Content block driving alignment — ``(n_views, B, k)`` pooled, or
+            ``(n_views, B, k, P)`` patch-shaped (cosine per position, then averaged).
+        hz_entropy: Projected block ``t(rep)``, ``(n_views, B, d)``. Drives entropy.
+            A patch-shaped input is mean-pooled over ``P`` first — entropy stays global.
         tau: Temperature for the alignment term.
         tau_entropy: Temperature for the entropy term (defaults to ``tau``). Separate
             because the two terms now live in different geometries.
@@ -738,8 +751,14 @@ def split_infonce_loss(
     tau_u = tau if tau_entropy is None else tau_entropy
     eps = 1e-6
 
-    a = F.normalize(hz_align, dim=-1, eps=eps)  # (V, B, k) — raw
-    p = F.normalize(hz_entropy, dim=-1, eps=eps)  # (V, B, d) — projected
+    # Alignment may arrive patch-shaped (V, B, k, P); the channel axis is then 2.
+    # Entropy must be GLOBAL, so a patch-shaped entropy input is pooled over P first
+    # (see the docstring: per-position entropy does not imply invertibility).
+    _align_is_patch = hz_align.dim() == 4
+    if hz_entropy.dim() == 4:
+        hz_entropy = hz_entropy.mean(-1)
+    a = F.normalize(hz_align, dim=2 if _align_is_patch else -1, eps=eps)  # raw
+    p = F.normalize(hz_entropy, dim=-1, eps=eps)  # (V, B, d) — projected, global
 
     total_loss = torch.zeros(1, device=hz_align.device, dtype=hz_align.dtype)
     align_terms, entropy_terms, pos_sims, neg_sims = [], [], [], []
@@ -752,7 +771,12 @@ def split_infonce_loss(
                 continue
             # --- Alignment: positives only, in the RAW space ---
             # Symmetric in (i, j), so the same vector serves both directions.
-            s_pos = (a[i] * a[j]).sum(-1) / tau  # (B,)
+            # Patch input: cosine per spatial position, averaged over positions —
+            # alignment is a per-sample DISTANCE, so it extends over space cleanly.
+            if _align_is_patch:
+                s_pos = (a[i] * a[j]).sum(dim=1).mean(dim=-1) / tau  # (B,)
+            else:
+                s_pos = (a[i] * a[j]).sum(-1) / tau  # (B,)
 
             # --- Entropy: negatives only, in the PROJECTED space ---
             s_cross = (p[i] @ p[j].transpose(-1, -2)) / tau_u  # (B, B)
