@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_patch_vicreg.yaml
-# Generated at: 2026-07-21T14:15:47Z
-# Git SHA: f804491
+# Generated at: 2026-07-21T15:03:08Z
+# Git SHA: bbe3d30
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-patch-vicreg
 #SBATCH --output=/scratch/users/%u/%j.out

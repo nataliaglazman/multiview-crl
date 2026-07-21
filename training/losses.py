@@ -444,6 +444,32 @@ def infonce_base_loss(
     return total_loss_value
 
 
+def _center_patch_features(hz_c, mode):
+    """Two-way centering of patch features, shape ``(n_views, B, C, P)``.
+
+    ``"position"`` removes the across-batch mean at each patch position — on
+    registered volumes that mean is the anatomy every subject shares there,
+    which is what makes same-position negatives largely false. ``"double"``
+    additionally removes each sample's mean over positions, i.e. any spatially
+    constant per-sample code (the cheapest solution to same-position
+    discrimination, and the one that flattens the spatial maps). What survives
+    is the sample x position interaction.
+    """
+    if mode == "none":
+        return hz_c
+    if mode not in ("position", "double"):
+        raise ValueError(f"Unknown patch centering mode: {mode!r}")
+
+    B, P = hz_c.shape[1], hz_c.shape[3]
+    if B < 2:
+        # Subtracting the mean over a single sample would zero the tensor outright.
+        return hz_c
+    hz_c = hz_c - hz_c.mean(dim=1, keepdim=True)
+    if mode == "double" and P > 1:
+        hz_c = hz_c - hz_c.mean(dim=3, keepdim=True)
+    return hz_c
+
+
 def patch_infonce_loss(
     hz,
     sim_metric,
@@ -454,6 +480,8 @@ def patch_infonce_loss(
     subsets=None,
     soft_content_mask=None,
     cross_view_negs_only=False,
+    center_mode="none",
+    center_weight=False,
 ):
     """
     Patch-level InfoNCE: aligns corresponding spatial patches across views.
@@ -465,6 +493,8 @@ def patch_infonce_loss(
     This preserves spatial correspondence between views — patches at the
     same anatomical location should align, providing a much richer training
     signal than global average pooling.
+
+    ``center_mode``/``center_weight`` are forwarded to ``_patch_infonce_base``.
     """
     if estimated_content_indices is None:
         content_indices = list(range(hz.shape[2]))
@@ -475,6 +505,8 @@ def patch_infonce_loss(
             tau,
             soft_content_mask=soft_content_mask,
             cross_view_negs_only=cross_view_negs_only,
+            center_mode=center_mode,
+            center_weight=center_weight,
         )
     else:
         total_loss = torch.zeros(1).type_as(hz)
@@ -487,6 +519,8 @@ def patch_infonce_loss(
                 tau,
                 soft_content_mask=soft_content_mask,
                 cross_view_negs_only=cross_view_negs_only,
+                center_mode=center_mode,
+                center_weight=center_weight,
             )
             total_loss = total_loss + sub_loss
             if hasattr(sub_loss, "_contrastive_diag"):
@@ -503,6 +537,8 @@ def _patch_infonce_base(
     tau=1.0,
     soft_content_mask=None,
     cross_view_negs_only=False,
+    center_mode="none",
+    center_weight=False,
 ):
     """
     Core patch-level InfoNCE computation.
@@ -514,6 +550,11 @@ def _patch_infonce_base(
         tau: Temperature.
         soft_content_mask: Optional (1, C) differentiable mask.
         cross_view_negs_only: Only use cross-view negatives.
+        center_mode: "none", "position" or "double" — see _center_patch_features.
+        center_weight: Weight each patch position's loss by its mean residual
+            magnitude, measured before L2 normalisation. Without it, positions
+            where every sample looks alike are renormalised back to unit vectors
+            and contribute full-magnitude random directions.
     """
     n_view, B, C, P = hz_subset.shape
 
@@ -523,6 +564,22 @@ def _patch_infonce_base(
         hz_c = hz_subset * soft_content_mask.view(1, 1, -1, 1)
     else:
         hz_c = hz_subset[:, :, content_indices, :]
+
+    hz_c = _center_patch_features(hz_c, center_mode)
+
+    if center_weight and center_mode != "none":
+        with torch.no_grad():
+            pos_w = hz_c.norm(dim=2).mean(dim=(0, 1))  # (P,)
+            pos_w = pos_w / pos_w.mean().clamp_min(1e-12)
+    else:
+        pos_w = None
+
+    def _ce(flat_scores, flat_targets, n_rows):
+        """Cross-entropy over (P * n_rows, ...) logits, optionally weighted per position."""
+        if pos_w is None:
+            return criterion(flat_scores, flat_targets)
+        per_row = F.cross_entropy(flat_scores, flat_targets, reduction="none")
+        return (per_row.view(P, n_rows).mean(dim=1) * pos_w).mean()
 
     # L2-normalize along channel dimension
     hz_n = F.normalize(hz_c, dim=2, eps=1e-6)  # (n_views, B, C', P)
@@ -543,10 +600,10 @@ def _patch_infonce_base(
 
                 targets = torch.arange(B, device=hz_subset.device)
                 # Reshape to (P*B, B) for batched cross-entropy
-                loss_ij = criterion(scores.reshape(P * B, B), targets.repeat(P))
+                loss_ij = _ce(scores.reshape(P * B, B), targets.repeat(P), B)
 
                 scores_ji = scores.transpose(-1, -2)
-                loss_ji = criterion(scores_ji.reshape(P * B, B), targets.repeat(P))
+                loss_ji = _ce(scores_ji.reshape(P * B, B), targets.repeat(P), B)
 
                 total_loss = total_loss + loss_ij + loss_ji
 
@@ -605,7 +662,7 @@ def _patch_infonce_base(
                 raw2 = torch.cat([SIM[j][j], SIM[j][i]], dim=-1)  # (P, B, 2B)
                 raw_scores = torch.cat([raw1, raw2], dim=-2)  # (P, 2B, 2B)
 
-                loss = criterion(raw_scores.reshape(P * 2 * B, 2 * B), targets.repeat(P))
+                loss = _ce(raw_scores.reshape(P * 2 * B, 2 * B), targets.repeat(P), 2 * B)
                 total_loss = total_loss + loss
 
                 with torch.no_grad():

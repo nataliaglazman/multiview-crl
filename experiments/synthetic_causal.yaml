@@ -1,13 +1,13 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-8-patch-real
+tag: synthetic-causal-baseline-final
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
 scale_contrastive_loss: 1
-scale_recon_loss: 1
+scale_recon_loss: 0
 # vq_commitment_weight: 0
 inject_style_to_decoder: true
 tau: 0.07
@@ -23,11 +23,11 @@ vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
-content_size: 44
+content_size: 48
 style_injection_mode: input
 no_final_recon_norm: true
 separate_style_codebooks: true
-separate_content_codebooks: false
+separate_content_codebooks: true
 # synthetic_clean_content: true
 patch_contrastive: true
 # contrastive_proj_dim: 16     # >0 enables it; 0 (default) = off

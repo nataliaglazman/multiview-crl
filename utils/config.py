@@ -622,6 +622,34 @@ def parse_args() -> argparse.ArgumentParser:
         "Default: 0.05.",
     )
     parser.add_argument(
+        "--patch-center-mode",
+        type=str,
+        default="none",
+        choices=["none", "position", "double"],
+        help="Centre patch features before the patch-InfoNCE similarity. On registered "
+        "volumes patch p of two subjects is the same anatomy, so same-position negatives "
+        "are largely false, and the cheapest way to solve the discrimination is a "
+        "spatially constant per-subject intensity code — which flattens the spatial maps. "
+        "'position' subtracts the across-batch mean at each patch position, removing the "
+        "shared anatomy so the negatives become genuine. 'double' additionally subtracts "
+        "each sample's mean over positions, removing the constant nuisance code so a "
+        "uniform channel contributes exactly zero; what is discriminated is then the "
+        "subject x location interaction. Expect top-1 accuracy to drop sharply — the task "
+        "is genuinely harder. Wants the largest batch you can fit (the per-position mean "
+        "is a B-sample estimate). Only used with --patch-contrastive and "
+        "--contrastive-loss-type infonce. Default: none.",
+    )
+    parser.add_argument(
+        "--patch-center-weight",
+        action="store_true",
+        help="Weight each patch position's contribution to the centred patch-InfoNCE loss "
+        "by its mean residual magnitude, measured before L2 normalisation. Without this, "
+        "positions where every subject looks alike (background, deep white matter) have a "
+        "near-zero residual but are still renormalised to unit vectors, so they contribute "
+        "full-magnitude random directions instead of dropping out. Requires "
+        "--patch-center-mode != none.",
+    )
+    parser.add_argument(
         "--contrastive-level-weights",
         type=float,
         nargs="+",
@@ -1077,6 +1105,22 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
     if getattr(args, "patch_foreground_mask", False) and not getattr(args, "patch_contrastive", False):
         logger.warning("--patch-foreground-mask is set but --patch-contrastive is not; it will be ignored.")
         args.patch_foreground_mask = False
+
+    # --patch-center-* only apply to the patch InfoNCE path (BT/VICReg fold patches
+    # into the batch and never reach _patch_infonce_base).
+    if getattr(args, "patch_center_mode", "none") != "none":
+        if not getattr(args, "patch_contrastive", False):
+            logger.warning("--patch-center-mode is set but --patch-contrastive is not; it will be ignored.")
+            args.patch_center_mode = "none"
+        elif getattr(args, "contrastive_loss_type", "infonce") != "infonce":
+            logger.warning(
+                f"--patch-center-mode is only implemented for --contrastive-loss-type infonce "
+                f"(got {args.contrastive_loss_type}); it will be ignored."
+            )
+            args.patch_center_mode = "none"
+    if getattr(args, "patch_center_weight", False) and getattr(args, "patch_center_mode", "none") == "none":
+        logger.warning("--patch-center-weight requires --patch-center-mode != none; it will be ignored.")
+        args.patch_center_weight = False
 
     # --mask-mode learned_split is incompatible with --inject-style-to-decoder
     # because the number of style channels varies per forward pass.

@@ -1186,7 +1186,14 @@ def main(args):
         patch_loss_func = loss_func
 
     else:
-        logger.info("[LOSS] InfoNCE")
+        _patch_center_mode = getattr(args, "patch_center_mode", "none")
+        _patch_center_weight = getattr(args, "patch_center_weight", False)
+        if _patch_center_mode != "none":
+            logger.info(
+                f"[LOSS] InfoNCE (patch centering={_patch_center_mode}, " f"magnitude-weighted={_patch_center_weight})"
+            )
+        else:
+            logger.info("[LOSS] InfoNCE")
 
         def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
             return infonce_loss(
@@ -1211,6 +1218,8 @@ def main(args):
                 subsets=subsets,
                 soft_content_mask=soft_content_mask,
                 cross_view_negs_only=_cross_view_negs,
+                center_mode=_patch_center_mode,
+                center_weight=_patch_center_weight,
             )
 
     def moco_loss_func(
