@@ -115,7 +115,9 @@ def _run_split(base_ds, seed):
     test_idx = perm[:n_test]
     val_idx = perm[n_test : n_test + n_val]
     train_idx = perm[n_test + n_val :]
-    return train_idx, val_idx, test_idx
+    # Return Python ints: Subset forwards these straight into the synthetic
+    # generator, and torch.Generator().manual_seed rejects np.int64.
+    return train_idx.tolist(), val_idx.tolist(), test_idx.tolist()
 
 
 def _targets_np(loader):
