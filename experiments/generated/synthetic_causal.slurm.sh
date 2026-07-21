@@ -1,18 +1,17 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-21T06:24:56Z
-# Git SHA: 7cf8d0a
+# Generated at: 2026-07-20T13:41:38Z
+# Git SHA: edf66b3
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-0
+#SBATCH --job-name=synthetic-causal-projection-entropy-tau-bounded-2
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-0-%j.err
+#SBATCH --error=synthetic-causal-projection-entropy-tau-bounded-2-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -65,7 +64,7 @@ fi
     --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
-    --contrastive-proj-dim 0 \
+    --contrastive-proj-dim 16 \
     --contrastive-proj-hidden 128 \
     --contrastive-proj-mode bounded \
     --cross-view-negs-only \
@@ -105,7 +104,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-0 \
+    --model-id synthetic-causal-projection-entropy-tau-bounded \
     --tau 1.0 \
     --tau-entropy 1 \
     --total-dim 512 \
