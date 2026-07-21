@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-21T10:29:02Z
-# Git SHA: 252dce6
+# Generated at: 2026-07-21T10:38:31Z
+# Git SHA: 5c23d7f
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-entropy-true
+#SBATCH --job-name=synthetic-causal-projection-0-entropy
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-entropy-true-%j.err
+#SBATCH --error=synthetic-causal-projection-0-entropy-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -65,7 +65,7 @@ fi
     --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
-    --contrastive-proj-dim 16 \
+    --contrastive-proj-dim 0 \
     --contrastive-proj-hidden 128 \
     --contrastive-proj-mode entropy \
     --cross-view-negs-only \
@@ -105,7 +105,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-entropy-true \
+    --model-id synthetic-causal-projection-0-entropy \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
