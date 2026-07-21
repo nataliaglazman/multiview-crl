@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-21T14:08:36Z
-# Git SHA: 8cbc02c
+# Generated at: 2026-07-21T14:15:47Z
+# Git SHA: f804491
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-barlow-twins
+#SBATCH --job-name=synthetic-causal-8-patch-real
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-barlow-twins-%j.err
+#SBATCH --error=synthetic-causal-8-patch-real-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -103,8 +103,8 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-barlow-twins \
-    --tau 0.5 \
+    --model-id synthetic-causal-8-patch-real \
+    --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
