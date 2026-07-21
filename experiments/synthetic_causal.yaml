@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-projection-entropy-tau-bounded
+tag: synthetic-causal-projection-0
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -30,7 +30,7 @@ separate_style_codebooks: true
 separate_content_codebooks: false
 # synthetic_clean_content: true
 patch_contrastive: false
-contrastive_proj_dim: 16     # >0 enables it; 0 (default) = off
+contrastive_proj_dim: 0     # >0 enables it; 0 (default) = off
 contrastive_proj_hidden: 128  # optional, defaults to 256
 contrastive_proj_mode: bounded
 tau_entropy: 1
