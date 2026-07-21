@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-21T13:35:52Z
-# Git SHA: 77f77ca
+# Generated at: 2026-07-21T14:08:36Z
+# Git SHA: 8cbc02c
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-entropy-05
+#SBATCH --job-name=synthetic-causal-barlow-twins
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-entropy-05-%j.err
+#SBATCH --error=synthetic-causal-barlow-twins-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -62,12 +62,9 @@ fi
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 48 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
-    --contrastive-proj-dim 16 \
-    --contrastive-proj-hidden 128 \
-    --contrastive-proj-mode head \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -81,6 +78,7 @@ fi
     --moco-queue-size 0 \
     --no-final-recon-norm \
     --pass-full-to-next-level \
+    --patch-contrastive \
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
@@ -105,7 +103,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-entropy-05 \
+    --model-id synthetic-causal-barlow-twins \
     --tau 0.5 \
     --total-dim 512 \
     --train-steps 300000 \
