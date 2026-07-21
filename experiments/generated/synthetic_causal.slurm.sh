@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-21T10:08:26Z
-# Git SHA: 918b74f
+# Generated at: 2026-07-21T10:29:02Z
+# Git SHA: 252dce6
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-projection-entropy-true
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -88,7 +88,7 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 1 \
-    --scale-recon-loss 0 \
+    --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
