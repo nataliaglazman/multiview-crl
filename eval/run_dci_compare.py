@@ -833,6 +833,7 @@ def evaluate_model(
     with_dci=False,
     probe_dim=0,
     probe_kind="ridge",
+    squash_content=False,
 ):
     """Load a model, extract representations under each pooling, return a row."""
     from eval.dci import _extract_synthetic_representations
@@ -849,6 +850,21 @@ def evaluate_model(
         level_data, gc, gsv1, gsv2 = _extract_synthetic_representations(
             model, dataset, device, batch_size, num_workers, pooling=value
         )
+        if squash_content:
+            # Post-squash view for a 'bounded'-mode model: the training loss shaped
+            # tanh(content), so probing raw content reads a DIFFERENT parameterisation
+            # than the one optimised. Applying tanh here matches them. Diagnostic only,
+            # meant for a single bounded run — it will (harmlessly but pointlessly)
+            # squash any other arm in the same call, so compare against the same
+            # models' un-squashed run rather than mixing squashed and raw in one table.
+            # Content lives at tuple positions 0 (view 1) and 2 (view 2); style is
+            # untouched because bounded mode squashes only the content block.
+            for _lvl, _ld in level_data.items():
+                _ld = list(_ld)
+                for _ci in (0, 2):
+                    if _ld[_ci] is not None:
+                        _ld[_ci] = np.tanh(_ld[_ci])
+                level_data[_lvl] = tuple(_ld)
         reprs[key] = level_data
         if gt_content is None:
             gt_content, gt_style, gt_style_v2 = gc, gsv1, gsv2
@@ -2099,6 +2115,16 @@ def main():
         "nonlinear kind and compare: linear-only movement means re-formatting, both moving means "
         "the nonlinear ceiling actually rose.",
     )
+    p.add_argument(
+        "--squash-content",
+        action="store_true",
+        help="Apply tanh to the extracted content block before probing — the post-squash view of a "
+        "'bounded'-mode (Thm 3.2) model, whose loss shaped tanh(content) while probes otherwise read "
+        "raw content. Diagnostic: run one bounded model with and without this flag and compare the "
+        "RIDGE score. A pre/post gap means the tanh is doing linear reformatting (and, if the model "
+        "saturated, that pre-squash is no longer diffeomorphism-equivalent). Applies to every arm in "
+        "the call, so use it on a single bounded run, not a mixed table.",
+    )
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
     p.add_argument(
         "--fresh",
@@ -2164,6 +2190,7 @@ def main():
                     with_dci=cli.with_dci,
                     probe_dim=cli.probe_dim,
                     probe_kind=cli.probe_kind,
+                    squash_content=cli.squash_content,
                     all_content=all_content,
                 )
             )

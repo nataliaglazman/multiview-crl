@@ -549,7 +549,22 @@ def train_step(
                                 # because tanh is an elementwise diffeomorphism, and
                                 # block-identifiability is invariant to those — probing pre- or
                                 # post-squash differs by a fixed reparameterisation.
-                                level_loss = _lf(torch.tanh(_hz_c), _ci_all, args.subsets, soft_content_mask=None)
+                                _t_bounded = torch.tanh(_hz_c)
+                                level_loss = _lf(_t_bounded, _ci_all, args.subsets, soft_content_mask=None)
+                                # Saturation gates the whole evaluation: tanh is a
+                                # diffeomorphism only while unsaturated, so a high
+                                # saturated-fraction means pre- vs post-squash probing
+                                # genuinely diverge and the diffeomorphism-invariance
+                                # argument for reading pre-squash features no longer
+                                # holds. Logged here because the plain InfoNCE path
+                                # (unlike split_infonce_loss) does not emit t_out_*.
+                                if hasattr(level_loss, "_contrastive_diag"):
+                                    with torch.no_grad():
+                                        level_loss._contrastive_diag["t_out_mean"] = _t_bounded.mean().item()
+                                        level_loss._contrastive_diag["t_out_std"] = _t_bounded.std().item()
+                                        level_loss._contrastive_diag["t_out_saturated"] = (
+                                            (_t_bounded.abs() > 0.99).float().mean().item()
+                                        )
                             elif _proj_mode == "entropy":
                                 # Yao eq. (3.3): alignment on the content-SELECTED block
                                 # (phi . r_k), entropy on t_k(r_k) over the FULL view-specific
