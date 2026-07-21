@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-21T15:03:08Z
-# Git SHA: bbe3d30
+# Generated at: 2026-07-21T15:10:01Z
+# Git SHA: ae08ec6
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-baseline-final
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -85,8 +85,8 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1 \
-    --scale-recon-loss 0 \
+    --scale-contrastive-loss 0 \
+    --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
