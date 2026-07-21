@@ -1,17 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-20T13:41:38Z
-# Git SHA: edf66b3
+# Generated at: 2026-07-21T07:27:33Z
+# Git SHA: 193c404
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-entropy-tau-bounded-2
+#SBATCH --job-name=synthetic-causal-projection-no-recon
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-entropy-tau-bounded-2-%j.err
+#SBATCH --error=synthetic-causal-projection-no-recon-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -56,7 +57,7 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 64 \
+    --batch-size 128 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
@@ -87,7 +88,7 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 1 \
-    --scale-recon-loss 1 \
+    --scale-recon-loss 0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
@@ -104,7 +105,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-entropy-tau-bounded \
+    --model-id synthetic-causal-projection-no-recon \
     --tau 1.0 \
     --tau-entropy 1 \
     --total-dim 512 \
