@@ -635,8 +635,13 @@ def parse_args() -> argparse.ArgumentParser:
         "each sample's mean over positions, removing the constant nuisance code so a "
         "uniform channel contributes exactly zero; what is discriminated is then the "
         "subject x location interaction. Expect top-1 accuracy to drop sharply — the task "
-        "is genuinely harder. Wants the largest batch you can fit (the per-position mean "
-        "is a B-sample estimate). Only used with --patch-contrastive and "
+        "is genuinely harder. Needs a large batch, and not only because the per-position "
+        "mean is a B-sample estimate: centering forces the B residuals to sum to zero, "
+        "which is itself discriminative. At B=2 the two residuals are exact antipodes and "
+        "the loss collapses to ~0 for free; on random view-consistent features the centred "
+        "loss runs 0.0000/0.0005/0.0043/0.0166/0.0436/0.0992 at B=2/4/8/16/32/64 against an "
+        "uncentred 0.0009/0.0086/0.0136/0.0246/0.0572/0.1102, i.e. still visibly inflated-easy "
+        "at B=8. Prefer B>=32. Only used with --patch-contrastive and "
         "--contrastive-loss-type infonce. Default: none.",
     )
     parser.add_argument(
@@ -1121,6 +1126,13 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
     if getattr(args, "patch_center_weight", False) and getattr(args, "patch_center_mode", "none") == "none":
         logger.warning("--patch-center-weight requires --patch-center-mode != none; it will be ignored.")
         args.patch_center_weight = False
+    elif getattr(args, "patch_center_mode", "none") != "none" and not getattr(args, "patch_center_weight", False):
+        logger.warning(
+            "--patch-center-mode is set without --patch-center-weight. Positions where every "
+            "subject looks alike have a near-zero residual but are still L2-normalised to unit "
+            "vectors, so they contribute chance-level loss that can swamp the informative "
+            "positions. Enable --patch-center-weight unless you are deliberately ablating it."
+        )
 
     # --mask-mode learned_split is incompatible with --inject-style-to-decoder
     # because the number of style channels varies per forward pass.
