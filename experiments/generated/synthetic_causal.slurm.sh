@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-21T11:05:14Z
-# Git SHA: d59000b
+# Generated at: 2026-07-21T11:06:16Z
+# Git SHA: f6a9f8f
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-projection-0-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -67,7 +67,7 @@ fi
     --contrastive-loss-type infonce \
     --contrastive-proj-dim 0 \
     --contrastive-proj-hidden 128 \
-    --contrastive-proj-mode entropy \
+    --contrastive-proj-mode head \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
