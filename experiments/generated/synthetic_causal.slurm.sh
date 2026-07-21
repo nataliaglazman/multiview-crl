@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-21T15:10:01Z
-# Git SHA: ae08ec6
+# Generated at: 2026-07-21T15:11:24Z
+# Git SHA: a5cfd94
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-baseline-final
+#SBATCH --job-name=synthetic-causal-double-patch
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-baseline-final-%j.err
+#SBATCH --error=synthetic-causal-double-patch-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -62,7 +62,7 @@ fi
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 48 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -78,19 +78,22 @@ fi
     --moco-queue-size 0 \
     --no-final-recon-norm \
     --pass-full-to-next-level \
+    --patch-center-mode double \
+    --patch-center-weight \
     --patch-contrastive \
+    --patch-foreground-mask \
+    --patch-foreground-thresh 0.05 \
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 1 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
@@ -104,7 +107,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-baseline-final \
+    --model-id synthetic-causal-double-patch \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
