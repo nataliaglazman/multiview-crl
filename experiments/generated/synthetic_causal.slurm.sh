@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-21T09:35:40Z
-# Git SHA: 14fe288
+# Generated at: 2026-07-21T10:08:26Z
+# Git SHA: 918b74f
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-projection-no-recon-264
+#SBATCH --job-name=synthetic-causal-projection-entropy-true
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-projection-no-recon-264-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --error=synthetic-causal-projection-entropy-true-%j.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -57,7 +57,7 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 264 \
+    --batch-size 128 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
@@ -67,7 +67,7 @@ fi
     --contrastive-loss-type infonce \
     --contrastive-proj-dim 16 \
     --contrastive-proj-hidden 128 \
-    --contrastive-proj-mode bounded \
+    --contrastive-proj-mode entropy \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -105,9 +105,8 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-projection-no-recon-264 \
-    --tau 1.0 \
-    --tau-entropy 1 \
+    --model-id synthetic-causal-projection-entropy-true \
+    --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
