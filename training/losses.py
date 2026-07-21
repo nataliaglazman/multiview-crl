@@ -697,20 +697,29 @@ def split_infonce_loss(
             # Symmetric in (i, j), so the same vector serves both directions.
             s_pos = (a[i] * a[j]).sum(-1) / tau  # (B,)
 
-            # --- Entropy: full similarity, in the PROJECTED space ---
+            # --- Entropy: negatives only, in the PROJECTED space ---
             s_cross = (p[i] @ p[j].transpose(-1, -2)) / tau_u  # (B, B)
+            eye = torch.eye(B, dtype=torch.bool, device=hz_align.device)
+            # Mask the cross-view DIAGONAL — the positive pair. In standard InfoNCE the
+            # positive sits in the denominator but is balanced by the same-space
+            # numerator (net attractive); here the numerator (alignment) is on the RAW
+            # space, so a projected positive left in the denominator is PURELY
+            # repulsive. That makes t reward the two views' raw content being
+            # DIFFERENT, directly opposing alignment — the views never align and
+            # pos_sim pins at 0. Excluding it (a same-sample pair is not a negative
+            # anyway) lets entropy repel only genuine negatives.
+            s_cross_neg = s_cross.masked_fill(eye, float("-inf"))
             if cross_view_negs_only:
-                den_i, den_j = s_cross, s_cross.transpose(-1, -2)
+                den_i, den_j = s_cross_neg, s_cross_neg.transpose(-1, -2)
             else:
                 # Same-view pairs join the sum; mask each sample against itself so a
                 # sample is never its own negative.
-                eye = torch.eye(B, dtype=torch.bool, device=hz_align.device)
                 s_ii = (p[i] @ p[i].transpose(-1, -2)) / tau_u
                 s_jj = (p[j] @ p[j].transpose(-1, -2)) / tau_u
                 s_ii = s_ii.masked_fill(eye, float("-inf"))
                 s_jj = s_jj.masked_fill(eye, float("-inf"))
-                den_i = torch.cat([s_cross, s_ii], dim=1)  # (B, 2B)
-                den_j = torch.cat([s_cross.transpose(-1, -2), s_jj], dim=1)
+                den_i = torch.cat([s_cross_neg, s_ii], dim=1)  # (B, 2B)
+                den_j = torch.cat([s_cross_neg.transpose(-1, -2), s_jj], dim=1)
 
             lse_i = torch.logsumexp(den_i, dim=1)  # (B,)
             lse_j = torch.logsumexp(den_j, dim=1)  # (B,)
