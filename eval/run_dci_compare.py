@@ -1849,6 +1849,8 @@ _CSV_LEGEND = """\
 #   With --per-encoder every DCI column also appears with a _v2 suffix (encoder 2).
 #
 # META: num_samples, poolings, probe_dim, run_dir
+#   generator   "current" or "legacy_pre_7ac56a3" (--old-generator). Rows with different
+#               values are NOT comparable on lesion_*, temporal_atrophy, sulcal_widening.
 #
 """
 
@@ -1895,7 +1897,7 @@ def write_outputs(rows, out_dir, baseline_name=None):
         "dci_complete_gap_content",
         "dci_complete_gap_patch",
     ]
-    meta_cols = ["num_samples", "poolings", "probe_dim", "run_dir"]
+    meta_cols = ["num_samples", "poolings", "probe_dim", "generator", "run_dir"]
     v2_cols = (
         [
             "grade_v2",
@@ -2196,6 +2198,16 @@ def main():
         "saturated, that pre-squash is no longer diffeomorphism-equivalent). Applies to every arm in "
         "the call, so use it on a single bounded run, not a mixed table.",
     )
+    p.add_argument(
+        "--old-generator",
+        action="store_true",
+        help="Render the frozen test set with the PRE-7ac56a3 render_structure (eval.legacy_renderer). "
+        "Use when the checkpoints were trained before 2026-07-05: they never saw the current "
+        "rendering, so scoring lesion_*/temporal_atrophy/sulcal_widening on it is invalid rather "
+        "than merely unflattering. Applies to every model in the run, and those factors' numbers "
+        "are not comparable with current-generator runs. brain_size / ventricle_size / "
+        "cortical_thickness / lr_asymmetry are unaffected by the fix and stay comparable.",
+    )
     p.add_argument("--out", default="dci_compare_out", help="Output directory.")
     p.add_argument(
         "--fresh",
@@ -2234,6 +2246,18 @@ def main():
         cli.num_samples,
         len(specs),
     )
+    if cli.old_generator:
+        # Applied to the single frozen dataset, so EVERY model in the comparison sees the
+        # legacy rendering — mixing vintages within one table would be worse than either
+        # vintage alone.
+        from eval.legacy_renderer import FIXED_FACTORS, use_legacy_renderer
+
+        use_legacy_renderer(dataset)
+        logger.warning(
+            "--old-generator: scoring on the pre-7ac56a3 renderer. %s are rendered the OLD way, "
+            "so these numbers are NOT comparable with current-generator runs for those factors.",
+            ", ".join(FIXED_FACTORS),
+        )
 
     rows = []
     for name, run_dir in zip(names, specs):
@@ -2280,6 +2304,10 @@ def main():
         "n_null": cli.n_null,
         "seeds": cli.seeds,
         "probe_dim": cli.probe_dim,
+        # Generator vintage is provenance, not a setting: a legacy-renderer row and a
+        # current-renderer row are different experiments on the fix-affected factors, and
+        # nothing else in the output would reveal the difference.
+        "generator": "legacy_pre_7ac56a3" if cli.old_generator else "current",
     }
     for r in rows:
         r.update(meta)
