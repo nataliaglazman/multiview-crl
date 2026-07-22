@@ -1517,6 +1517,16 @@ _ENC_METRICS = [
     ("info_all", "info_all"),
     ("content_rank", "content rank"),
     ("style_rank", "style rank"),
+    # DCI gaps per encoder (--with-dci only; the caller skips rows where both encoders
+    # are NaN, so these cost nothing when DCI is off).  Gaps rather than raw D/C because
+    # only the gap is comparable — the real - null decomposition is in the capacity
+    # table and the CSV.
+    ("dci_d_gap", "D gap all"),
+    ("dci_c_gap", "C gap all"),
+    ("dci_content_d_gap", "D gap cont"),
+    ("dci_content_c_gap", "C gap cont"),
+    ("dci_patch_d_gap", "D gap patch"),
+    ("dci_patch_c_gap", "C gap patch"),
 ]
 
 
@@ -1699,27 +1709,32 @@ def print_capacity_table(rows, baseline_name=None):
             mean = r.get("info_all" + suffix, float("nan"))
             head = f"    {enc_label}  " if enc_label else "    "
             print(f"{head}mean {_num(mean)} {_minibar(mean)}")
-            dgap = r.get("dci_d_gap" + suffix, float("nan"))
-            if np.isfinite(dgap):
-                cgap = r.get("dci_c_gap" + suffix, float("nan"))
-                print(
-                    f"      {'DCI all (gap)':18s} D {_num(dgap)} {_minibar(dgap)}   "
-                    f"C {_num(cgap)} {_minibar(cgap)}   (all chan x all factors)"
-                )
-                dcg = r.get("dci_content_d_gap" + suffix, float("nan"))
-                if np.isfinite(dcg):
-                    ccg = r.get("dci_content_c_gap" + suffix, float("nan"))
-                    print(
-                        f"      {'DCI content (gap)':18s} D {_num(dcg)} {_minibar(dcg)}   "
-                        f"C {_num(ccg)} {_minibar(ccg)}   (content chan x content factors)"
-                    )
-                dpg = r.get("dci_patch_d_gap" + suffix, float("nan"))
-                if np.isfinite(dpg):
-                    cpg = r.get("dci_patch_c_gap" + suffix, float("nan"))
-                    print(
-                        f"      {'DCI patch (gap)':18s} D {_num(dpg)} {_minibar(dpg)}   "
-                        f"C {_num(cpg)} {_minibar(cpg)}   (patch-grid chan x all factors)"
-                    )
+            # D/C as "real - null = gap" per scope.  The gap alone is not readable: raw
+            # D/C are shape artifacts (D is normalized by the factor count, C by the code
+            # count), so a model can look disentangled purely from its dimensions, and a
+            # null that saturates near 1 or collapses to 0 makes the gap meaningless in a
+            # way that is only visible next to the null.
+            if np.isfinite(r.get("dci_d_gap" + suffix, float("nan"))):
+                for prefix, label, note in (
+                    ("dci", "DCI all", "all chan x all factors"),
+                    ("dci_content", "DCI content", "content chan x content factors"),
+                    ("dci_patch", "DCI patch", "patch-grid chan x all factors"),
+                ):
+                    if not np.isfinite(r.get(f"{prefix}_d_gap{suffix}", float("nan"))):
+                        continue
+                    cells = []
+                    for m in ("d", "c"):
+                        real = r.get(f"{prefix}_{m}{suffix}", float("nan"))
+                        null = r.get(f"{prefix}_{m}_null{suffix}", float("nan"))
+                        gap = r.get(f"{prefix}_{m}_gap{suffix}", float("nan"))
+                        cells.append(f"{m.upper()} {_num(real)} - {_num(null)} = {_num(gap)} {_minibar(gap)}")
+                    print(f"      {label:14s} {cells[0]}   {cells[1]}   ({note})")
+                    nulls = [_fl(r.get(f"{prefix}_{m}_null{suffix}")) for m in ("d", "c")]
+                    if any(np.isfinite(v) and v > 0.9 for v in nulls):
+                        print(
+                            f"      {'':14s} ^ null saturated (>0.9) — the gap cannot go positive here; "
+                            "raise --n-null or reconsider the pooling"
+                        )
             if allb:
                 cset = set(allb.get("content_names", []))
                 fw = max([len(n) for n in allb["per_factor"]] + [16])
@@ -1769,6 +1784,22 @@ _CSV_RENAME = {
     "dci_c_gap": "dci_complete_gap",
     "dci_content_c_gap": "dci_complete_gap_content",
     "dci_patch_c_gap": "dci_complete_gap_patch",
+    # Raw D/C and their null floors, next to the gaps.  A gap on its own is not
+    # interpretable: raw D/C are shape artifacts (D is normalized by the factor count,
+    # C by the code count) and a null that saturates near 1 or collapses to 0 makes the
+    # gap meaningless — both are only visible with real and null in the table.
+    "dci_d": "dci_disent",
+    "dci_d_null": "dci_disent_null",
+    "dci_content_d": "dci_disent_content",
+    "dci_content_d_null": "dci_disent_null_content",
+    "dci_patch_d": "dci_disent_patch",
+    "dci_patch_d_null": "dci_disent_null_patch",
+    "dci_c": "dci_complete",
+    "dci_c_null": "dci_complete_null",
+    "dci_content_c": "dci_complete_content",
+    "dci_content_c_null": "dci_complete_null_content",
+    "dci_patch_c": "dci_complete_patch",
+    "dci_patch_c_null": "dci_complete_null_patch",
 }
 _CSV_TO_INTERNAL = {v: k for k, v in _CSV_RENAME.items()}
 for _old, _new in list(_CSV_RENAME.items()):
@@ -1807,6 +1838,15 @@ _CSV_LEGEND = """\
 #   mcc_content_to_*         block MCC scores and their null-permuted floors
 #   view_chance              chance-level view classification accuracy
 #   dci_complete_gap*        DCI Completeness score (real − null)
+#
+# DCI RAW (read these WITH the gaps — a gap alone is not interpretable):
+#   dci_disent, dci_complete            real D / C
+#   dci_disent_null, dci_complete_null  label-permutation floor for the same shape
+#   *_content, *_patch                  content-block and patch-pooled scopes
+#   Raw D/C are shape artifacts: D is normalized by the factor count and C by the code
+#   count, so both sit high when factors are few or codes many. Compare gaps, and treat
+#   a scope whose null exceeds ~0.9 (or collapses to ~0) as unreportable.
+#   With --per-encoder every DCI column also appears with a _v2 suffix (encoder 2).
 #
 # META: num_samples, poolings, probe_dim, run_dir
 #
@@ -1871,7 +1911,38 @@ def write_outputs(rows, out_dir, baseline_name=None):
         if has_v2
         else []
     )
-    flat_cols = id_cols + health_cols + capacity_cols + org_cols + delta_cols + detail_cols + meta_cols + v2_cols
+
+    def _dci_cols(suffix="", include_gap=True):
+        """DCI column names for one encoder: real, null and (optionally) gap for both
+        metrics across the three scopes.  Generated rather than listed so the two
+        encoders cannot drift apart."""
+        cols = []
+        for metric in ("disent", "complete"):
+            for scope in ("", "_content", "_patch"):
+                cols.append(f"dci_{metric}{scope}{suffix}")
+                cols.append(f"dci_{metric}_null{scope}{suffix}")
+                if include_gap:
+                    cols.append(f"dci_{metric}_gap{scope}{suffix}")
+        return cols
+
+    # Encoder 1's gap columns already live in capacity_cols / detail_cols, so only its
+    # real+null are added here.  Encoder 2 had NO dci columns at all, so it gets the set.
+    dci_cols = _dci_cols("", include_gap=False)
+    dci_v2_cols = _dci_cols("_v2", include_gap=True) if has_v2 else []
+
+    flat_cols = (
+        id_cols
+        + health_cols
+        + capacity_cols
+        + org_cols
+        + delta_cols
+        + detail_cols
+        + dci_cols
+        + meta_cols
+        + v2_cols
+        + dci_v2_cols
+    )
+    assert len(set(flat_cols)) == len(flat_cols), "duplicate CSV columns"
 
     def _cell(v):
         if isinstance(v, float):
