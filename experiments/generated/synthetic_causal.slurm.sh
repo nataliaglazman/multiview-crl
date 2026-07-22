@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-22T20:43:22Z
-# Git SHA: 02a8c6b
+# Generated at: 2026-07-22T21:16:01Z
+# Git SHA: 467ee35
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-independent-baseline-redo
+#SBATCH --job-name=synthetic-causal-8-patch-mask
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-independent-baseline-redo-%j.err
+#SBATCH --error=synthetic-causal-8-patch-mask-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -62,7 +62,7 @@ fi
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 48 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -79,22 +79,24 @@ fi
     --no-final-recon-norm \
     --pass-full-to-next-level \
     --patch-contrastive \
+    --patch-foreground-mask \
+    --patch-foreground-thresh 0.05 \
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 10 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --style-injection-mode input \
+    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
@@ -103,8 +105,8 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-independent-baseline-redo \
-    --tau 0.5 \
+    --model-id synthetic-causal-8-patch-mask \
+    --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
