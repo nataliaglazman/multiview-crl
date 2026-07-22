@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-independent-redo
+tag: synthetic-causal-tau-redo
 synthetic_normalize: fixed_reference
 synthetic_causal: false
 synthetic_causal_graph: random
@@ -24,7 +24,7 @@ vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
 content_size: 44
-style_injection_mode: input
+style_injection_mode: film
 no_final_recon_norm: true
 separate_style_codebooks: true
 separate_content_codebooks: false
