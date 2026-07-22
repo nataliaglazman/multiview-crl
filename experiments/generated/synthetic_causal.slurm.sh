@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-22T13:47:56Z
-# Git SHA: 404de30
+# Generated at: 2026-07-22T20:43:22Z
+# Git SHA: 02a8c6b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-independent-redo
+#SBATCH --job-name=synthetic-causal-independent-baseline-redo
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-independent-redo-%j.err
+#SBATCH --error=synthetic-causal-independent-baseline-redo-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -62,7 +62,7 @@ fi
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 44 \
+    --content-size 48 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -85,11 +85,12 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1 \
+    --scale-contrastive-loss 0 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
+    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
@@ -102,8 +103,8 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-independent-redo \
-    --tau 0.07 \
+    --model-id synthetic-causal-independent-baseline-redo \
+    --tau 0.5 \
     --total-dim 512 \
     --train-steps 300000 \
     --use-amp \
