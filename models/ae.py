@@ -18,6 +18,13 @@ are exactly the two things under test:
     information bottleneck matched to the synthetic data's intrinsic dimensionality,
     rather than the VAE's ~512x-redundant spatial latent.
 
+``encoder_only=True`` drops the decode path entirely, turning this into the
+Yao et al. (ICLR 2024) architecture: encoder -> Linear -> encoding vector, with
+invertibility left to the entropy term of the contrastive loss rather than a
+reconstruction objective (their App. E, "Trade-off between Invertibility and Feature
+Sharing").  Same class, same ``forward`` signature, so recon vs. no-recon is a
+one-flag ablation on an identical backbone.
+
 Because the latent is a vector, ``pool_only`` / ``patch_grid`` are no-ops: the model
 always returns the ``(B, latent_dim)`` code.  Evaluate it at ``pooling="gap"`` (the
 natural — and only sensible — readout for a dense vector).
@@ -50,6 +57,7 @@ class MultiviewAE(HelperModule):
         separate_encoders: bool = True,
         res: int = 32,
         use_checkpoint: bool = False,
+        encoder_only: bool = False,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -58,6 +66,7 @@ class MultiviewAE(HelperModule):
         self.latent_dim = latent_dim
         self.content_channels = content_channels
         self.separate_encoders = separate_encoders
+        self.encoder_only = encoder_only
 
         # --- View-specific encoders ---
         # Encoder 1 is a deep copy of encoder 0 so both views start in the same feature
@@ -80,26 +89,34 @@ class MultiviewAE(HelperModule):
         # --- Dense bottleneck (the one defining difference from the VAE) ---
         # flatten -> Linear -> (B, latent_dim). No spatial extent, nothing to pool.
         self.to_latent = nn.Sequential(nn.Flatten(1), nn.Linear(flat_dim, latent_dim))
-        self.from_latent = nn.Sequential(
-            nn.Linear(latent_dim, flat_dim),
-            nn.Unflatten(1, self.bottleneck_shape),
-            get_group_norm(self.bottleneck_shape[0]),
-            nn.ReLU(inplace=True),
-        )
 
-        # --- Decoder (shared across views; plain, no style injection) ---
-        # final_norm=False so the output can carry absolute per-sample intensity.
-        self.decoder = Decoder(
-            in_channels=self.bottleneck_shape[0],
-            hidden_channels=hidden_channels,
-            out_channels=in_channels,
-            res_channels=res_channels,
-            nb_res_layers=nb_res_layers,
-            upscale_factor=downscale_factor,
-            use_checkpoint=use_checkpoint,
-            style_channels=0,
-            final_norm=False,
-        )
+        if encoder_only:
+            # No decode path at all — not even unused parameters, so the optimizer and
+            # the state_dict stay clean and a recon-mode checkpoint can't be loaded here
+            # by accident.
+            self.from_latent = None
+            self.decoder = None
+        else:
+            self.from_latent = nn.Sequential(
+                nn.Linear(latent_dim, flat_dim),
+                nn.Unflatten(1, self.bottleneck_shape),
+                get_group_norm(self.bottleneck_shape[0]),
+                nn.ReLU(inplace=True),
+            )
+
+            # --- Decoder (shared across views; plain, no style injection) ---
+            # final_norm=False so the output can carry absolute per-sample intensity.
+            self.decoder = Decoder(
+                in_channels=self.bottleneck_shape[0],
+                hidden_channels=hidden_channels,
+                out_channels=in_channels,
+                res_channels=res_channels,
+                nb_res_layers=nb_res_layers,
+                upscale_factor=downscale_factor,
+                use_checkpoint=use_checkpoint,
+                style_channels=0,
+                final_norm=False,
+            )
 
         # --- Fixed content/style mask ---
         # First ``content_channels`` latent units are content, the rest style. Buffer so
@@ -140,7 +157,9 @@ class MultiviewAE(HelperModule):
         z = self.to_latent(h)  # (B, latent_dim) — the representation
 
         recon = None
-        if return_recon:
+        # ``self.decoder is None`` under encoder_only: the guard is load-bearing because
+        # eval.dci.compute_dci_synthetic calls the GAP path without return_recon=False.
+        if return_recon and self.decoder is not None:
             recon = self.decoder(self.from_latent(z))
             if recon.shape[2:] != in_size:
                 recon = F.interpolate(recon, size=in_size, mode="trilinear", align_corners=False)

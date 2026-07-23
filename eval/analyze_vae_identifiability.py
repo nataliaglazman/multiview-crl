@@ -56,6 +56,7 @@ def load_model(run_dir, device):
             content_channels=cfg.get("content_channels", 9),
             separate_encoders=not cfg.get("no_separate_encoders", False),
             res=cfg.get("res", 32),
+            encoder_only=cfg.get("encoder_only", False),
         ).to(device)
     else:
         model = MultiviewVAE(

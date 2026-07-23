@@ -12,6 +12,14 @@ Loss is per-view L1 reconstruction plus cross-view InfoNCE on the pooled content
 block.  The baseline ablation is just ``--contrastive-weight 0`` (recon-only), exactly
 as for the VAE.
 
+``--encoder-only`` removes the decoder and the reconstruction term, leaving the
+align-minus-entropy objective of Yao et al. (ICLR 2024, eq. 3.1/3.3) on this same
+backbone.  Together the three settings form a controlled ablation of the one axis
+their §5.2 isolates (they beat the Ada-GVAE autoencoder 0.42 vs 0.11 DCI and
+attribute it to "avoiding reconstructing the image"):
+
+  recon-only (--contrastive-weight 0)  |  recon + contrastive  |  contrastive-only
+
 The scientific point vs the VAE: with ``latent_dim`` (``--latent-channels``) set near
 the true generative dimensionality (``n_content + n_style``), the dense bottleneck is
 forced to *compress* to the factors instead of leaving them redundant across ~512
@@ -24,6 +32,9 @@ Example:
     # baseline ablation (recon-only):
     python -m training.main_ae_synthetic --model-id ae_synthetic_baseline \
         --contrastive-weight 0 --content-channels 9 --n-content 9
+    # paper-faithful ablation (encoder-only, no decoder):
+    python -m training.main_ae_synthetic --model-id ae_synthetic_enconly \
+        --encoder-only --content-channels 9 --n-content 9
 """
 
 import argparse
@@ -58,6 +69,20 @@ def parse_args():
     # Loss weights.
     p.add_argument("--recon-weight", type=float, default=1.0)
     p.add_argument("--contrastive-weight", type=float, default=1.0, help="0 → recon-only baseline ablation")
+    p.add_argument(
+        "--encoder-only",
+        action="store_true",
+        help="Drop the decoder and the recon term → Yao et al. align−entropy objective",
+    )
+    p.add_argument(
+        "--entropy-scope",
+        type=str,
+        default=None,
+        choices=["content", "full"],
+        help="Where the InfoNCE denominator (entropy) lives. 'content': Thm 3.2, both terms in "
+        "the |C|-dim content space. 'full': eq. (3.3), alignment on content but entropy over the "
+        "whole encoding. Defaults to 'full' under --encoder-only, else 'content'.",
+    )
     p.add_argument("--tau", type=float, default=1.0)
     p.add_argument(
         "--cross-view-negs-only",
@@ -119,19 +144,38 @@ def reconstruction_loss(recon, x, mask=None):
 
 
 def contrastive_loss(pooled, content_channels, sim_metric, criterion, args):
-    """InfoNCE on the content block across the two views."""
+    """Content alignment − entropy on the content block across the two views.
+
+    ``entropy_scope="content"`` is plain InfoNCE restricted to the content block: both
+    the numerator and the denominator live in the |C|-dim content space, matching Thm 3.2
+    where the content encoders map straight onto (0,1)^|C|.
+
+    ``"full"`` is eq. (3.3) instead — alignment on the *selected* block ``phi ⊘ r_k(x_k)``,
+    entropy over the whole ``|S_k|``-dim encoding.  Without a decoder that distinction is
+    load-bearing rather than cosmetic: under ``"content"`` nothing in the objective ever
+    touches the style units, so they would sit at their random initialisation and every
+    style-block metric would be scoring noise.
+    """
     b = pooled.shape[0] // 2
     hz = torch.stack([pooled[:b], pooled[b:]], dim=0)  # (2, B, C)
-    loss = losses.infonce_loss(
-        hz,
-        sim_metric=sim_metric,
-        criterion=criterion,
-        tau=args.tau,
-        projector=(lambda t: t),
-        estimated_content_indices=[list(range(content_channels))],
-        subsets=[(0, 1)],
-        cross_view_negs_only=args.cross_view_negs_only,
-    )
+    if args.entropy_scope == "full":
+        loss = losses.split_infonce_loss(
+            hz_align=hz[..., :content_channels],
+            hz_entropy=hz,
+            tau=args.tau,
+            cross_view_negs_only=args.cross_view_negs_only,
+        )
+    else:
+        loss = losses.infonce_loss(
+            hz,
+            sim_metric=sim_metric,
+            criterion=criterion,
+            tau=args.tau,
+            projector=(lambda t: t),
+            estimated_content_indices=[list(range(content_channels))],
+            subsets=[(0, 1)],
+            cross_view_negs_only=args.cross_view_negs_only,
+        )
     return loss.squeeze()
 
 
@@ -172,6 +216,15 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None):
 
 def main():
     args = parse_args()
+
+    # Resolve the coupled flags before anything reads them — settings.json must record
+    # what actually ran, since eval.analyze_vae_identifiability rebuilds the model from it.
+    if args.encoder_only:
+        assert args.contrastive_weight > 0, "--encoder-only with --contrastive-weight 0 leaves no loss at all"
+        args.recon_weight = 0.0
+    if args.entropy_scope is None:
+        args.entropy_scope = "full" if args.encoder_only else "content"
+
     save_dir = os.path.join(args.out_dir, args.model_id)
     os.makedirs(save_dir, exist_ok=True)
     # ``model_type`` lets eval.analyze_vae_identifiability.load_model rebuild the right class.
@@ -208,6 +261,7 @@ def main():
         content_channels=args.content_channels,
         separate_encoders=not args.no_separate_encoders,
         res=args.res,
+        encoder_only=args.encoder_only,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -231,12 +285,18 @@ def main():
             x = torch.cat(batch["image"], dim=0).to(device)  # (2B, 1, res, res, res)
             mask = torch.cat(batch["mask"], dim=0).to(device) if args.use_mask else None
 
-            recon, _diffs, feats, _, _, _, _, _ = model(x, return_recon=True, pool_only=True, n_views=2)
+            recon, _diffs, feats, _, _, _, _, _ = model(
+                x, return_recon=not args.encoder_only, pool_only=True, n_views=2
+            )
             pooled = feats[0]  # (2B, latent_dim)
 
-            recon_l = reconstruction_loss(recon, x, mask)
             contrast_l = contrastive_loss(pooled, args.content_channels, sim_metric, criterion, args)
-            loss = args.recon_weight * recon_l + args.contrastive_weight * contrast_l
+            if args.encoder_only:
+                recon_l = torch.zeros((), device=device)
+                loss = args.contrastive_weight * contrast_l
+            else:
+                recon_l = reconstruction_loss(recon, x, mask)
+                loss = args.recon_weight * recon_l + args.contrastive_weight * contrast_l
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
