@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-22T21:16:01Z
-# Git SHA: 467ee35
+# Generated at: 2026-07-23T07:35:43Z
+# Git SHA: a60dd67
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-8-patch-mask
+#SBATCH --job-name=synthetic-causal-8-patch-mask-film
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-8-patch-mask-%j.err
+#SBATCH --error=synthetic-causal-8-patch-mask-film-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -62,7 +62,7 @@ fi
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 44 \
+    --content-size 40 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -78,6 +78,8 @@ fi
     --moco-queue-size 0 \
     --no-final-recon-norm \
     --pass-full-to-next-level \
+    --patch-center-mode double \
+    --patch-center-weight \
     --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
@@ -95,7 +97,7 @@ fi
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode input \
+    --style-injection-mode film \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -105,7 +107,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-8-patch-mask \
+    --model-id synthetic-causal-8-patch-mask-film \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \

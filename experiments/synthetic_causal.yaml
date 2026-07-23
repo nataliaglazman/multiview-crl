@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-8-patch-mask
+tag: synthetic-causal-8-patch-mask-film
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -23,15 +23,15 @@ vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
-content_size: 44
-style_injection_mode: input
+content_size: 40
+style_injection_mode: film
 no_final_recon_norm: true
 separate_style_codebooks: true
 separate_content_codebooks: false
 # synthetic_clean_content: true
 patch_contrastive: true
-# patch_center_mode: double
-# patch_center_weight: true
+patch_center_mode: double
+patch_center_weight: true
 # contrastive_proj_dim: 16     # >0 enables it; 0 (default) = off
 # contrastive_proj_hidden: 128  # optional, defaults to 256
 # contrastive_proj_mode: entropy

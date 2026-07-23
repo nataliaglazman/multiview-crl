@@ -38,6 +38,7 @@ import torch
 import torch.nn.functional as F
 
 from eval.tau_diagnostic import build_score_rows
+from training.losses import _center_patch_features
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +99,19 @@ def stratify(frac, thresh):
     return {"dead": dead, "near-empty": near, "mixed": mixed, "pure": pure}
 
 
-def per_position_stats(hz, tau, cross_view_negs_only):
-    """Per-position loss, top-1 and gradient norm. Returns dict of (P,) tensors."""
+def per_position_stats(hz, tau, cross_view_negs_only, center_mode="none"):
+    """Per-position loss, top-1 and gradient norm. Returns dict of (P,) tensors.
+
+    ``center_mode`` must match the run's ``--patch-center-mode``: training
+    centres *before* L2 normalisation (``losses.py``: _patch_infonce_base), and
+    on registered volumes the uncentred cosine is dominated by the population
+    anatomy shared at that position, which compresses every similarity toward 1.
+    Scoring uncentred features from a centred run understates both the gap and
+    its spread.  The gradient is still taken w.r.t. the pre-centring features,
+    which is what reaches the encoder.
+    """
     hz = hz.detach().clone().requires_grad_(True)
-    hz_n = F.normalize(hz, dim=2, eps=1e-6)
+    hz_n = F.normalize(_center_patch_features(hz, center_mode), dim=2, eps=1e-6)
     logits, targets, _, _ = build_score_rows(hz_n, tau, cross_view_negs_only)
 
     P, R, _ = logits.shape
@@ -186,6 +196,13 @@ def main():
     p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--num-samples", type=int, default=None)
     p.add_argument("--tau", type=float, default=None)
+    p.add_argument(
+        "--center-mode",
+        default=None,
+        choices=["none", "position", "double"],
+        help="Override the run's --patch-center-mode. Must match training to score the geometry "
+        "the objective actually optimised.",
+    )
     p.add_argument("--device", default=None)
     cli = p.parse_args()
 
@@ -208,12 +225,14 @@ def main():
     hz, frac = extract_patches_with_coverage(model, dataset, args, device, batch_size, grid, cli.level)
     n_views, B, C, P = hz.shape
 
-    st = per_position_stats(hz, tau, cross_only)
+    center_mode = cli.center_mode or getattr(args, "patch_center_mode", "none")
+    st = per_position_stats(hz, tau, cross_only, center_mode=center_mode)
     strata = stratify(frac, thresh)
 
     print(f"\nrun: {cli.run_dir}")
     print(f"level {cli.level} | grid {list(grid)} | P={P} | B={B} | content channels={C} | tau={tau:g}")
     print(f"fg-mask active in training: {bool(getattr(args, 'patch_foreground_mask', False))} | thresh={thresh}")
+    print(f"center-mode (matched to run): {center_mode}")
     print(f"chance top-1 = {st['chance']:.3f} | max CE = log(R) = {st['max_ce']:.3f}\n")
 
     tot_loss = float(st["loss"].sum())
