@@ -19,6 +19,21 @@ z_content's 9 dims.  Read that column.
 z_style_v1 is the negative control: it is not shared across views and should
 read ~0 (Yao's Figure 2 reports exactly that for independent style).
 
+**Ceiling.** Measured through this exact pipeline on an ORACLE representation
+(per-patch tissue-class + lesion fractions at 8^3, which is what z_content
+modulates), N=800:
+
+    PCA dim     8     16     32     64    128    256    499
+    kernel   0.470  0.428  0.426  0.456  0.488  0.411  0.188
+    ridge    0.503  0.511  0.517  0.567  0.633  0.624  0.411
+
+Two consequences. z_content is NOT recoverable at R^2 1.0 even from perfect local
+anatomy -- the ceiling is ~0.63, so compare model numbers against that, not 1.0.
+And the probe degenerates above ~256 PCs, so a low reading at high --patch-pca-dim
+measures the probe, not the model. Oracle z_deformation for reference: 0.280
+(ridge, 256 PCs) -- well below z_content, so content-over-nuisance ordering is
+expected even from a perfect representation.
+
 Usage:
     python -m eval.factor_vs_nuisance_probe results/synthetic/<run> --rep gap
     python -m eval.factor_vs_nuisance_probe results/synthetic/<run> --rep patch --kind ridge
@@ -100,10 +115,25 @@ def main():
     p.add_argument("--checkpoint", default=None)
     p.add_argument("--rep", choices=["gap", "patch"], default="gap")
     p.add_argument("--level", type=int, default=0)
-    p.add_argument("--kind", choices=["ridge", "kernel", "mlp"], default="kernel", help="Yao use kernel ridge.")
+    p.add_argument(
+        "--kind",
+        choices=["ridge", "kernel", "mlp"],
+        default="ridge",
+        help="Yao use kernel ridge, but RBF distances concentrate in high dimension: on the "
+        "oracle control below, ridge beat kernel at EVERY PCA dim (0.633 vs 0.488 at 128). "
+        "Use kernel only at low --patch-pca-dim.",
+    )
     p.add_argument("--num-samples", type=int, default=1000)
     p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--patch-pca-dim", type=int, default=256)
+    p.add_argument(
+        "--patch-pca-dim",
+        type=int,
+        default=128,
+        help="Keep this LOW. Measured on an oracle representation that provably contains "
+        "z_content, probe R^2 peaks at ~128 PCs (ridge 0.633) and collapses by 499 (0.411 ridge, "
+        "0.188 kernel) as the probe degenerates. A large value zeroes the probe regardless of "
+        "what the representation holds, so it cannot be raised for 'rank' reasons.",
+    )
     p.add_argument("--n-pc", type=int, default=9, help="Equal-dimensionality control: top-k PCs per group.")
     p.add_argument("--device", default=None)
     cli = p.parse_args()
