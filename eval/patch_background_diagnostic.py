@@ -156,6 +156,26 @@ def dispersion(hz, sel):
     return float((sd.norm(dim=0) / mu.norm(dim=0).clamp_min(1e-12)).mean())
 
 
+def locality(hz, sel):
+    """Share of subject-specific variance that is SPATIAL rather than global.
+
+    Removes the across-batch mean at each position, then splits what remains
+    into each sample's mean over positions (a spatially-constant per-subject
+    code) and the sample x position residual.  ~0 means the representation is
+    global and patch pooling is buying nothing.
+
+    Reference values measured on the synthetic data itself at 8^3: oracle tissue
+    histograms 0.81, full within-patch one-hot 0.93, raw T1 voxels 0.81.  An
+    encoder far below those has discarded the local structure present in its input.
+    """
+    if int(sel.sum()) == 0:
+        return float("nan")
+    h = hz[..., sel].float()
+    h = h - h.mean(dim=1, keepdim=True)
+    g = h.mean(dim=3, keepdim=True)
+    return float((h - g).pow(2).sum() / h.pow(2).sum().clamp_min(1e-12))
+
+
 def coverage_leak(hz, frac, sel):
     """|corr| between each position's leading batch-direction and its coverage.
 
@@ -256,6 +276,13 @@ def main():
         )
     print("\nnote: CE and top1 are near-blind to this failure — in a controlled sweep they stay pinned")
     print("      at max-CE/chance while background gradient share moves 0% -> 80%. Read GRAD%.")
+
+    kept = ~strata["dead"]
+    print(
+        f"\nlocality (spatial share of subject-specific variance): {locality(hz, kept):.3f}"
+        "   [data reference at 8^3: oracle 0.81-0.93, raw voxels 0.81]"
+    )
+    print("  ~0 means the representation is spatially constant per subject and patch pooling buys nothing.")
 
     print("\ncoverage leak (|corr| between leading batch-direction and per-sample coverage):")
     for name in ("near-empty", "mixed", "pure"):
