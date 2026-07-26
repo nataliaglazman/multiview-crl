@@ -168,6 +168,16 @@ def main():
         res[k] = (float(np.mean(full)), float(np.mean(pcs)))
         print(f"{k:<18}{yk.shape[1]:>7}{res[k][0]:>11.3f}{res[k][1]:>13.3f}")
 
+    if "z_content" in Y:
+        from eval.dci import CONTENT_FACTOR_NAMES
+
+        per = cv_probe_r2_multi(X, Y["z_content"], kind=cli.kind)
+        print("\nper-factor R2 (the mean above hides this):")
+        order = np.argsort(-per["mean"])
+        for j in order:
+            nm = CONTENT_FACTOR_NAMES[j] if j < len(CONTENT_FACTOR_NAMES) else f"z_content[{j}]"
+            print(f"  {nm:<20}{per['mean'][j]:>8.3f}  +/-{per['std'][j]:.3f}")
+
     print("\nverdict:")
     if "z_content" in res and ("z_deformation" in res or "z_fissure" in res):
         c = res["z_content"][1]
