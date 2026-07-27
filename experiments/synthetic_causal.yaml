@@ -38,5 +38,5 @@ patch_center_weight: true
 # contrastive_proj_mode: entropy
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
-# contrastive_loss_type: vicreg
+contrastive_loss_type: barlowtwins
 norm_type: group
