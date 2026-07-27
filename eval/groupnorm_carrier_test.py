@@ -92,11 +92,18 @@ def main():
     inner = inner.online if hasattr(inner, "online") else inner
     model.eval()
 
-    # Locate the last GroupNorm in the level-0 encoder for the hook (Part B).
+    # Hook the last MAIN-PATH GroupNorm (a direct child of enc.layers or of a
+    # downsample Sequential) -- NOT one inside a ResidualStack, whose GN sits on a
+    # residual branch (pre-addition) and carries none of the feature signal.
     enc0 = inner.encoders[cli.level]
-    gns = [m for m in enc0.modules() if isinstance(m, nn.GroupNorm)]
-    last_gn = gns[-1] if gns else None
-    logger.info("level-%d encoder has %d GroupNorms; hooking the last one", cli.level, len(gns))
+    main_gns = []
+    for child in enc0.layers:
+        if isinstance(child, nn.GroupNorm):
+            main_gns.append(child)
+        elif isinstance(child, nn.Sequential):
+            main_gns += [m for m in child if isinstance(m, nn.GroupNorm)]
+    last_gn = main_gns[-1] if main_gns else None
+    logger.info("level-%d encoder: hooking last MAIN-PATH GroupNorm (%d found)", cli.level, len(main_gns))
     cap = {}
     if last_gn is not None:
         last_gn.register_forward_hook(lambda mod, inp, out: cap.update(pre=inp[0].detach(), post=out.detach(), mod=mod))
