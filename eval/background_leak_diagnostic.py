@@ -190,20 +190,27 @@ def main():
     else:
         dist = np.full(P, np.nan)
     bg_d = dist[bg]
-    edges = np.quantile(bg_d, [0.0, 1 / 3, 2 / 3, 1.0]) if len(bg_d) else [0, 1, 2, 3]
-    print("\ndistance-to-brain shells (background only):")
-    print(f"  {'shell':<12}{'dist range':>14}{'n':>7}{'R2':>9}")
+    # FIXED-WIDTH bins, not quantiles. The encoder receptive field has a hard radius;
+    # a wide quantile bin STRADDLES it, mixing positions that can legitimately see
+    # brain tissue with positions that cannot. The mixed mean stays predictable, so a
+    # coarse bin reads "flat" whether or not the far positions carry anything -- the
+    # same dilution trap as core|bg. 1-voxel bins resolve the RF cutoff.
+    print("\ndistance-to-brain profile (background only, 1-voxel bins):")
+    print(f"  {'dist':<14}{'n':>6}{'R2':>9}")
     shell_r2 = []
-    for i in range(3):
-        m = bg.copy()
-        d_lo, d_hi = edges[i], edges[i + 1]
-        keep = (dist >= d_lo) & (dist <= d_hi if i == 2 else dist < d_hi)
-        m &= keep
+    d_max = float(bg_d.max()) if len(bg_d) else 0.0
+    for d_lo in np.arange(0.0, np.ceil(d_max), 1.0):
+        m = bg & (dist >= d_lo) & (dist < d_lo + 1.0)
+        if int(m.sum()) < 20:  # too few positions for a stable probe
+            continue
         rr = probe(readout(X, m), y)
         shell_r2.append(rr)
-        print(
-            f"  {'near->far'[:1] if False else f'shell {i}':<12}{f'[{d_lo:.1f},{d_hi:.1f})':>14}{int(m.sum()):>7}{rr:>9.3f}"
-        )
+        print(f"  [{d_lo:.0f},{d_lo + 1:.0f})".ljust(14) + f"{int(m.sum()):>6}{rr:>9.3f}")
+    print(
+        "  NOTE: encoder RF radius at this grid is ~5-6 voxels. Bins INSIDE that radius can\n"
+        "  legitimately see brain tissue (a real local signal); only bins BEYOND it test for\n"
+        "  a non-local route. Read the far bins, not the average."
+    )
 
     # brain_size confound
     r_bg_bs = probe(f_bg, y_bs)
