@@ -1070,19 +1070,28 @@ def barlow_twins_loss(
 
         for i in range(n_view):
             for j in range(i + 1, n_view):
-                # Select content features
+                # Select content features.  In the mask path we index the
+                # active (content) channels instead of multiplying by the mask:
+                # the per-channel standardisation below divides the mask scale
+                # back out, and multiplying would leave the zeroed style channels
+                # in the correlation matrix, each adding a spurious (0-1)^2 to
+                # on_diag (a constant offset plus a straight-through gradient
+                # that pulls style channels toward content).
                 if soft_content_mask is not None:
-                    z_i = hz_sub[i] * soft_content_mask  # (B, C)
-                    z_j = hz_sub[j] * soft_content_mask
+                    active = soft_content_mask.reshape(-1).bool()  # (C,)
+                    z_i = hz_sub[i][:, active]  # (B, k)
+                    z_j = hz_sub[j][:, active]
                 else:
                     z_i = hz_sub[i][:, content_indices]  # (B, d)
                     z_j = hz_sub[j][:, content_indices]
 
                 B, d = z_i.shape
 
-                # Batch-normalise (zero mean, unit std per dimension)
-                z_i = (z_i - z_i.mean(dim=0)) / (z_i.std(dim=0) + 1e-6)
-                z_j = (z_j - z_j.mean(dim=0)) / (z_j.std(dim=0) + 1e-6)
+                # Batch-normalise (zero mean, unit std per dimension).  Biased
+                # std (÷B) matches the /B in the cross-correlation, so a perfectly
+                # correlated dimension reaches C_ii = 1 exactly.
+                z_i = (z_i - z_i.mean(dim=0)) / (z_i.std(dim=0, unbiased=False) + 1e-6)
+                z_j = (z_j - z_j.mean(dim=0)) / (z_j.std(dim=0, unbiased=False) + 1e-6)
 
                 # Cross-correlation matrix  (d, d)
                 c = (z_i.T @ z_j) / B
