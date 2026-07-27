@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-27T13:10:56Z
-# Git SHA: 2b58031
+# Generated at: 2026-07-27T13:18:16Z
+# Git SHA: b4932f2
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-contrastive-clean-content
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -12,7 +12,7 @@
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --constraint=a100|h200|l40s|a100_40g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
