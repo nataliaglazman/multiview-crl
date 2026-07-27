@@ -1045,6 +1045,7 @@ def build_vqvae(args) -> vqvae.VQVAE:
         detach_style_injection=getattr(args, "detach_style_injection", False),
         style_spatial_size=getattr(args, "style_spatial_size", 0),
         final_recon_norm=not getattr(args, "no_final_recon_norm", False),
+        norm_type=getattr(args, "norm_type", "group"),
     )
 
 

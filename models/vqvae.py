@@ -11,30 +11,47 @@ import utils.utils as utils
 from utils.helper import HelperModule
 
 
-def get_group_norm(channels, target_groups=32):
+class ChannelLayerNorm3d(nn.Module):
+    """LayerNorm for 5D tensors by normalizing over channels at each voxel."""
+
+    def __init__(self, channels: int, eps: float = 1e-5, elementwise_affine: bool = True):
+        super().__init__()
+        self.norm = nn.LayerNorm(channels, eps=eps, elementwise_affine=elementwise_affine)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(x.permute(0, 2, 3, 4, 1)).permute(0, 4, 1, 2, 3).contiguous()
+
+
+def get_group_norm(channels, target_groups=32, norm_type: str = "group"):
     """
-    Finds the largest divisor of 'channels' that is <= 'target_groups'.
-    Ensures num_groups is always valid for nn.GroupNorm.
+    Build the normalization layer used throughout the model.
+
+    norm_type may be "group" (default) or "layer".
     """
-    # Start at target_groups and work downwards to find the first divisor
+    if norm_type == "layer":
+        return ChannelLayerNorm3d(channels)
+    if norm_type != "group":
+        raise ValueError(f"Unknown norm_type: {norm_type!r}. Expected 'group' or 'layer'.")
+
+    # Start at target_groups and work downwards to find the first divisor.
     for g in range(target_groups, 0, -1):
         if channels % g == 0:
             return nn.GroupNorm(g, channels)
 
-    # Fallback (should theoretically never be reached as 1 divides everything)
+    # Fallback (should theoretically never be reached as 1 divides everything).
     return nn.GroupNorm(1, channels)
 
 
 class ReZero(HelperModule):
     """3D ReZero residual block with learnable scaling parameter."""
 
-    def build(self, in_channels: int, res_channels: int):
+    def build(self, in_channels: int, res_channels: int, norm_type: str = "group"):
         self.layers = nn.Sequential(
             nn.Conv3d(in_channels, res_channels, 3, stride=1, padding=1, bias=False),
-            get_group_norm(res_channels),
+            get_group_norm(res_channels, norm_type=norm_type),
             nn.ReLU(inplace=True),
             nn.Conv3d(res_channels, in_channels, 3, stride=1, padding=1, bias=False),
-            get_group_norm(in_channels),
+            get_group_norm(in_channels, norm_type=norm_type),
             nn.ReLU(inplace=True),
         )
         self.alpha = nn.Parameter(torch.tensor(0.0))
@@ -52,8 +69,9 @@ class ResidualStack(HelperModule):
         res_channels: int,
         nb_layers: int,
         use_checkpoint: bool = True,
+        norm_type: str = "group",
     ):
-        self.stack = nn.Sequential(*[ReZero(in_channels, res_channels) for _ in range(nb_layers)])
+        self.stack = nn.Sequential(*[ReZero(in_channels, res_channels, norm_type=norm_type) for _ in range(nb_layers)])
         self.use_checkpoint = use_checkpoint
 
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
@@ -75,6 +93,7 @@ class Encoder(HelperModule):
         nb_res_layers: int,
         downscale_factor: int,
         use_checkpoint: bool = True,
+        norm_type: str = "group",
     ):
         assert log2(downscale_factor) % 1 == 0, "Downscale must be a power of 2"
         downscale_steps = int(log2(downscale_factor))
@@ -84,14 +103,16 @@ class Encoder(HelperModule):
             layers.append(
                 nn.Sequential(
                     nn.Conv3d(c_channel, n_channel, 4, stride=2, padding=1),
-                    get_group_norm(n_channel),
+                    get_group_norm(n_channel, norm_type=norm_type),
                     nn.ReLU(inplace=True),
                 )
             )
             c_channel, n_channel = n_channel, hidden_channels
         layers.append(nn.Conv3d(c_channel, n_channel, 3, stride=1, padding=1))
-        layers.append(get_group_norm(n_channel))
-        layers.append(ResidualStack(n_channel, res_channels, nb_res_layers, use_checkpoint=use_checkpoint))
+        layers.append(get_group_norm(n_channel, norm_type=norm_type))
+        layers.append(
+            ResidualStack(n_channel, res_channels, nb_res_layers, use_checkpoint=use_checkpoint, norm_type=norm_type)
+        )
 
         self.layers = nn.Sequential(*layers)
 
@@ -139,19 +160,21 @@ class SpatialFiLM(nn.Module):
 
 
 class SplitGroupNorm(nn.Module):
-    """GroupNorm applied independently to content and style channel subsets.
+    """Normalization applied independently to content and style channel subsets.
 
     Prevents modality-specific style channel statistics from influencing
     content channel normalization.  Assumes content channels are the first
     ``content_channels`` channels (true for ``mask_mode="fixed"``).
     """
 
-    def __init__(self, content_channels: int, total_channels: int, target_groups: int = 32):
+    def __init__(self, content_channels: int, total_channels: int, target_groups: int = 32, norm_type: str = "group"):
         super().__init__()
         style_channels = total_channels - content_channels
         self.content_channels = content_channels
-        self.norm_content = get_group_norm(content_channels, target_groups)
-        self.norm_style = get_group_norm(style_channels, target_groups) if style_channels > 0 else None
+        self.norm_content = get_group_norm(content_channels, target_groups, norm_type=norm_type)
+        self.norm_style = (
+            get_group_norm(style_channels, target_groups, norm_type=norm_type) if style_channels > 0 else None
+        )
 
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
         c = self.content_channels
@@ -171,11 +194,11 @@ class ContentProjection(nn.Module):
     subsequent encoder layers).
     """
 
-    def __init__(self, content_channels: int, hidden_channels: int):
+    def __init__(self, content_channels: int, hidden_channels: int, norm_type: str = "group"):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Conv3d(content_channels, hidden_channels, 1, bias=False),
-            get_group_norm(hidden_channels),
+            get_group_norm(hidden_channels, norm_type=norm_type),
             nn.ReLU(inplace=True),
         )
 
@@ -214,6 +237,7 @@ class Decoder(HelperModule):
         style_channels: int = 0,
         style_injection_mode: str = "concat",
         final_norm: bool = True,
+        norm_type: str = "group",
     ):
         assert log2(upscale_factor) % 1 == 0, "Upscale must be a power of 2"
         assert style_injection_mode in ("concat", "film", "input"), (
@@ -235,6 +259,7 @@ class Decoder(HelperModule):
                 res_channels,
                 nb_res_layers,
                 use_checkpoint=use_checkpoint,
+                norm_type=norm_type,
             )
         )
         c_channel, n_channel = hidden_channels, hidden_channels // 2
@@ -242,7 +267,7 @@ class Decoder(HelperModule):
             layers.append(
                 nn.Sequential(
                     nn.ConvTranspose3d(c_channel, n_channel, 4, stride=2, padding=1),
-                    get_group_norm(n_channel),
+                    get_group_norm(n_channel, norm_type=norm_type),
                     nn.ReLU(inplace=True),
                 )
             )
@@ -260,7 +285,7 @@ class Decoder(HelperModule):
         # absolute per-sample intensity — needed when the input preserves global
         # gain/bias (e.g. ``--synthetic-normalize fixed_reference``); the norm
         # would otherwise pin every reconstruction to a fixed global mean/std.
-        final_tail = [get_group_norm(out_channels)] if final_norm else []
+        final_tail = [get_group_norm(out_channels, norm_type=norm_type)] if final_norm else []
 
         if style_channels > 0 and style_injection_mode == "film":
             # FiLM mode: store each layer separately so we can apply
@@ -494,6 +519,7 @@ class Upscaler(HelperModule):
         self,
         embed_dim: int,
         scaling_rates: list[int],
+        norm_type: str = "group",
     ):
         self.stages = nn.ModuleList()
         for sr in scaling_rates:
@@ -501,7 +527,7 @@ class Upscaler(HelperModule):
             layers = []
             for _ in range(upscale_steps):
                 layers.append(nn.ConvTranspose3d(embed_dim, embed_dim, 4, stride=2, padding=1))
-                layers.append(get_group_norm(embed_dim))
+                layers.append(get_group_norm(embed_dim, norm_type=norm_type))
                 layers.append(nn.ReLU(inplace=True))
             self.stages.append(nn.Sequential(*layers))
 
@@ -556,6 +582,7 @@ class VQVAE(HelperModule):
         detach_style_injection: bool = False,  # If True, detach style features before decoder injection so the reconstruction loss cannot push content information into style channels.
         style_spatial_size: int = 0,  # If > 0, average-pool each injected style tensor to an (N, N, N) grid (clamped per-axis) before quantization/injection, capping its spatial capacity so style carries the global contrast transform rather than anatomy. 0 = full-resolution (legacy).
         final_recon_norm: bool = True,  # If False, drop the GroupNorm on the level-0 (reconstruction) decoder's final conv so the output can carry per-sample global intensity (style gain/bias). True (legacy) instance-normalizes the output, pinning every reconstruction to a fixed global mean/std — fine under per-sample input z-scoring, but unrecoverable error under --synthetic-normalize fixed_reference.
+        norm_type: str = "group",  # Normalization used in conv blocks: "group" (default) or "layer".
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -570,6 +597,7 @@ class VQVAE(HelperModule):
         self.detach_style_injection = detach_style_injection
         assert style_spatial_size >= 0, f"style_spatial_size must be >= 0, got {style_spatial_size}"
         self.style_spatial_size = int(style_spatial_size)
+        self.norm_type = norm_type
 
         # --- Decoder-side level skipping ---
         # Zero out the contributions of the listed levels' code_q tensors in the
@@ -649,6 +677,7 @@ class VQVAE(HelperModule):
                         nb_res_layers,
                         scaling_rates[0],
                         use_checkpoint,
+                        norm_type=norm_type,
                     )
                 ]
             )
@@ -843,10 +872,10 @@ class VQVAE(HelperModule):
         if has_any_mask and not self.learned_split:
             for lvl in self.content_style_levels:
                 cc = self.content_channels_per_level[lvl]
-                self.content_norms[str(lvl)] = SplitGroupNorm(cc, hidden_channels)
+                self.content_norms[str(lvl)] = SplitGroupNorm(cc, hidden_channels, norm_type=norm_type)
                 # Only need a projection when there is a subsequent encoder level
                 if use_content_projection and lvl < nb_levels - 1:
-                    self.content_projections[str(lvl)] = ContentProjection(cc, hidden_channels)
+                    self.content_projections[str(lvl)] = ContentProjection(cc, hidden_channels, norm_type=norm_type)
 
         # --- Codebooks ---
         # Each level's codebook input channels depend on whether the level is
@@ -926,13 +955,14 @@ class VQVAE(HelperModule):
                     style_channels=sc,
                     style_injection_mode=style_injection_mode if sc > 0 else "concat",
                     final_norm=(final_recon_norm if lvl == 0 else True),
+                    norm_type=norm_type,
                 )
             )
 
         self.upscalers = nn.ModuleList()
         for i in range(nb_levels - 1):
             rates = scaling_rates[1 : len(scaling_rates) - i][::-1]  # noqa: E203
-            self.upscalers.append(Upscaler(embed_dim, rates))
+            self.upscalers.append(Upscaler(embed_dim, rates, norm_type=norm_type))
 
     def _bottleneck_style(self, style: torch.FloatTensor) -> torch.FloatTensor:
         """Optionally average-pool style to a coarse spatial grid before injection.

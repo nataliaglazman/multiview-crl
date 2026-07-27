@@ -19,6 +19,13 @@ Two discriminators, both validated on constructed features with known structure
 so the global mean is dominated by background and "global summary" and "background
 readout" become the same vector -- the test could not tell A from B).
 
+  CAVEAT (validated 2026-07-27): this test and core|bg are region-averaged, so they
+  STRUCTURALLY UNDERREAD compact local signals. A factor genuinely localized to a
+  few voxels (e.g. ventricle at the centre) can read core|bg ~0 / flat-ish here yet
+  have real local encoding -- averaging over the whole brain dilutes it ~10x at low
+  SNR. Trust the "global" verdict only for spatially EXTENDED signals; for a compact
+  factor, confirm with eval/central_ventricle_probe.py (location-specific readout).
+
   1. DISTANCE SHELLS. Background R^2 in shells of increasing distance from the
      brain. FLAT across shells => a global statistic present at every position
      equally (A). DECAYING => a signal that reaches out from the brain, i.e.

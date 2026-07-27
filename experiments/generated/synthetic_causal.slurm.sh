@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-23T07:35:43Z
-# Git SHA: a60dd67
+# Generated at: 2026-07-27T11:52:26Z
+# Git SHA: 50f3226
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-8-patch-mask-film
+#SBATCH --job-name=synthetic-causal-baseline-layernorm
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-8-patch-mask-film-%j.err
+#SBATCH --error=synthetic-causal-baseline-layernorm-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -62,7 +62,7 @@ fi
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 40 \
+    --content-size 48 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
@@ -77,23 +77,21 @@ fi
     --mask-mode fixed \
     --moco-queue-size 0 \
     --no-final-recon-norm \
+    --norm-type layer \
     --pass-full-to-next-level \
-    --patch-center-mode double \
-    --patch-center-weight \
     --patch-contrastive \
-    --patch-foreground-mask \
-    --patch-foreground-thresh 0.05 \
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 10 \
+    --scale-contrastive-loss 0 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
+    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
@@ -107,7 +105,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-8-patch-mask-film \
+    --model-id synthetic-causal-baseline-layernorm \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \

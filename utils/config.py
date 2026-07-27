@@ -201,6 +201,13 @@ def parse_args() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument(
+        "--norm-type",
+        type=str,
+        default="group",
+        choices=["group", "layer"],
+        help="Normalization used in the VQ-VAE conv blocks: group norm (default) or layer norm.",
+    )
+    parser.add_argument(
         "--use-amp",
         action="store_true",
         help="Use automatic mixed precision (fp16) to reduce memory",
