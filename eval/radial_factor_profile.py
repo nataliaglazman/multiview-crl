@@ -62,6 +62,124 @@ def resid_on(y, b):
     return y - LinearRegression().fit(b, y).predict(b)
 
 
+def shell_bins(g, n_shells):
+    """Radial bins from the volume centre, in feature voxels. Returns [((lo,hi), mask), ...]."""
+    ii, jj, kk = np.meshgrid(*[np.arange(g)] * 3, indexing="ij")
+    c = (g - 1) / 2.0
+    d = np.sqrt((ii - c) ** 2 + (jj - c) ** 2 + (kk - c) ** 2).reshape(-1)
+    out = []
+    for lo, hi in zip(np.linspace(0, d.max(), n_shells + 1)[:-1], np.linspace(0, d.max(), n_shells + 1)[1:]):
+        sel = (d >= lo) & (d < hi)
+        if int(sel.sum()) >= 20:
+            out.append(((lo, hi), sel))
+    return out
+
+
+def run_checkpoint(cli):
+    """Radial profile of a TRAINED model, using the run's own data settings."""
+    import torch.nn.functional as Fn
+    from torch.utils.data import DataLoader
+
+    _stub_utils_if_needed()
+    from eval.dci import CONTENT_FACTOR_NAMES
+    from eval.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir
+
+    device = torch.device(cli.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model, args, device = load_model_from_run_dir(cli.run_dir, cli.checkpoint, device)
+    model.eval()
+
+    res = int(getattr(args, "synthetic_res", 64))
+    rates = getattr(args, "vqvae_scaling_rates", [4]) or [4]
+    g = cli.grid or max(1, res // int(rates[0]))
+    grid = (g, g, g)
+
+    ds = build_synthetic_test_set(args, cli.num_samples)
+    if cli.causal_eval:
+        # build_synthetic_test_set drops the SCM; rebuild with it forwarded.
+        from data.datasets import SyntheticBrainDataset
+
+        ds = SyntheticBrainDataset(
+            mode="test",
+            spatial_size=getattr(args, "spatial_size", None) or (res, res, res),
+            cache=True,
+            synthetic_mode=getattr(args, "synthetic_mode", "pseudo_mri"),
+            synthetic_seed=getattr(args, "synthetic_seed", 42),
+            synthetic_num_samples=cli.num_samples,
+            synthetic_n_content=getattr(args, "synthetic_n_content", 9),
+            synthetic_n_style=getattr(args, "synthetic_n_style", 3),
+            synthetic_normalize=getattr(args, "synthetic_normalize", "per_sample"),
+            synthetic_clean_content=getattr(args, "synthetic_clean_content", False),
+            synthetic_causal=True,
+            synthetic_causal_graph=getattr(args, "synthetic_causal_graph", "random"),
+            synthetic_causal_edge_prob=getattr(args, "synthetic_causal_edge_prob", 0.5),
+        )
+
+    shells = shell_bins(g, cli.n_shells)
+    per_shell = [[] for _ in shells]
+    cov_acc, Z = [], []
+    for batch in DataLoader(ds, batch_size=cli.batch_size, shuffle=False, num_workers=0):
+        imgs = batch["image"]
+        nv = len(imgs)
+        x = torch.cat(imgs, 0).to(device)
+        with torch.no_grad():
+            out = model(x, pool_only=True, n_views=nv, patch_grid=grid)
+            f = (out[2] if isinstance(out, tuple) else out)[0]
+            f = f.reshape(nv, -1, *f.shape[1:])[0]  # view 0: (B, C, P)
+        for si, (_, sel) in enumerate(shells):
+            per_shell[si].append(f[:, :, torch.from_numpy(sel)].mean(2).cpu().numpy())
+        m = torch.cat(batch["mask"], 0).to(device).float()
+        cov_acc.append(Fn.adaptive_avg_pool3d(m, grid).flatten(1)[: f.shape[0]].cpu().numpy())
+        v = batch["gt_latents"]["z_content"]
+        Z.append(np.asarray(v).reshape(v.shape[0], -1))
+
+    Z = np.concatenate(Z, 0)
+    cov = np.concatenate(cov_acc, 0).mean(0)
+    cols = [np.concatenate(a, 0) for a in per_shell]
+
+    y_v = Z[:, CONTENT_FACTOR_NAMES.index("ventricle_size")]
+    y_b = Z[:, CONTENT_FACTOR_NAMES.index("brain_size")]
+    corr = float(np.corrcoef(y_v, y_b)[0, 1])
+    v_res = resid_on(y_v, y_b)
+
+    norm = getattr(args, "norm_type", "?")
+    dec = getattr(args, "decoder_norm_type", None) or norm
+    print(f"\nrun: {cli.run_dir}")
+    print(f"encoder norm: {norm} | decoder norm: {dec} | res {res}^3 stride {rates[0]} -> {g}^3 | N={Z.shape[0]}")
+    print(f"eval factors: {'SCM-coupled (--causal-eval)' if cli.causal_eval else 'i.i.d. (default test set)'}")
+    print(f"corr(ventricle_size, brain_size) = {corr:+.3f}")
+    print("\nR^2 by distance from the VOLUME CENTRE. '|bsize' = part of ventricle brain_size can't explain.\n")
+    hdr = f"{'shell (feat vox)':<18}{'n':>6}{'cov':>7}{'vent':>9}{'vent|bsize':>12}{'bsize':>9}"
+    print(hdr + "\n" + "-" * len(hdr))
+    vent = []
+    for si, ((lo, hi), sel) in enumerate(shells):
+        F_ = cols[si]
+        rv, rvb, rb = probe(F_, y_v), probe(F_, v_res), probe(F_, y_b)
+        vent.append(rv)
+        print(
+            f"{f'[{lo:.1f},{hi:.1f})':<18}{int(sel.sum()):>6}{float(cov[sel].mean()):>7.2f}"
+            f"{rv:>9.3f}{rvb:>12.3f}{rb:>9.3f}"
+        )
+
+    v = np.array(vent)
+    k = max(1, len(v) // 3)
+    inner, middle, outer = v[:k].max(), v[k:-k].min(), v[-k:].max()
+    lift = float(min(inner, outer) - middle)
+    print("\nverdict:")
+    if lift > 0.05 and outer > 0.05:
+        print(f"  BIMODAL: outer peak {outer:.3f} sits {lift:+.3f} above the mid-brain minimum {middle:.3f}.")
+        print("  A receptive-field route cannot produce a second peak at the far edge. If this run uses")
+        print("  norm_type=layer, the leak was NOT removed -- check that the checkpoint really is the")
+        print("  LayerNorm run (resume_training can silently continue an older GroupNorm checkpoint).")
+    else:
+        print(f"  MONOTONE: no second peak (outer {outer:.3f} vs mid-brain min {middle:.3f}, lift {lift:+.3f}).")
+        print("  The background hotspot is gone; what remains decays from the structure outward.")
+    if cli.causal_eval or abs(corr) > 0.3:
+        print(
+            f"\n  NOTE: corr(ventricle, brain_size) = {corr:+.2f}. Read the 'vent|bsize' column, not 'vent' --"
+            "\n  at this correlation the raw ventricle column is largely brain_size."
+        )
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--num-samples", type=int, default=400)
@@ -74,8 +192,28 @@ def main():
     ap.add_argument("--clean-content", action="store_true")
     ap.add_argument("--causal", action="store_true")
     ap.add_argument("--n-shells", type=int, default=10)
+    ap.add_argument(
+        "--run-dir",
+        default=None,
+        help="Profile a TRAINED checkpoint instead of the two untrained norm arms. res, stride, "
+        "normalization and clean_content are taken from the run's own settings.",
+    )
+    ap.add_argument("--checkpoint", default=None)
+    ap.add_argument("--grid", type=int, default=None, help="Feature grid per axis (default: run's native).")
+    ap.add_argument(
+        "--causal-eval",
+        action="store_true",
+        help="Build the eval set WITH the causal SCM. build_synthetic_test_set never forwards "
+        "synthetic_causal, so the default eval set has i.i.d. factors even for an SCM-trained run "
+        "-- and under the SCM ventricle_size and brain_size are ~0.8 correlated, which changes "
+        "what the ventricle columns mean. Run both.",
+    )
+    ap.add_argument("--device", default=None)
     cli = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    if cli.run_dir:
+        return run_checkpoint(cli)
 
     _stub_utils_if_needed()  # eval.dci imports utils.utils, which imports MONAI at module scope
     from eval.dci import CONTENT_FACTOR_NAMES
