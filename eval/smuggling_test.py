@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
 import numpy as np
 import torch
@@ -48,6 +49,8 @@ def main():
     ap.add_argument("--num-samples", type=int, default=128)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--centre-radius", type=float, default=6.0, help="Centre region radius, input voxels.")
+    ap.add_argument("--out", default=None, help="Figure path (default: <run-dir>/smuggling.png).")
+    ap.add_argument("--no-fig", action="store_true", help="Skip the reconstruction figure.")
     ap.add_argument("--device", default=None)
     cli = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -118,6 +121,8 @@ def main():
     }
 
     tot = {}
+    snap, snap_meta = {}, {}
+    first = True
     for batch in loader:
         x = batch["image"][0].to(device)
         m = batch["mask"][0].to(device).float()
@@ -141,6 +146,12 @@ def main():
                     r = Fn.interpolate(r, size=x.shape[2:], mode="trilinear", align_corners=False)
                 for reg, mask in (("centre", centre_out), ("brain", brain_out), ("bg", bg_out)):
                     tot.setdefault((name, reg), []).append(err(r, mask))
+                if first:
+                    snap[name] = r[0, 0].cpu().numpy()
+            if first:
+                snap_meta["x"] = x[0, 0].cpu().numpy()
+                snap_meta["m"] = m[0, 0].cpu().numpy()
+                first = False
             mode["which"] = None
 
     mean = lambda k: float(np.mean(tot[k]))
@@ -182,6 +193,63 @@ def main():
         print("  boundary-adjacent latents matter -- ordinary upsampling reach, not smuggling.")
     else:
         print(f"  No background-specific effect: near {near_db:+.0%}, far {far_db:+.0%}.")
+
+    if cli.no_fig:
+        return
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    xv, mv = snap_meta["x"], snap_meta["m"]
+    base = snap["baseline"]
+    sl = xv.shape[0] // 2
+    lsl = gz // 2
+    show = ["bg near", "bg mid", "bg FAR", "centre only"]
+    cols = [next(k for k in conds if k.startswith(p)) for p in show]
+
+    dmg = {k: np.abs(snap[k] - base) for k in cols}
+    dmax = max(float(d[sl].max()) for d in dmg.values()) or 1.0
+    vlo, vhi = float(xv.min()), float(xv.max())
+
+    fig, ax = plt.subplots(3, len(cols) + 1, figsize=(3.0 * (len(cols) + 1), 9.2))
+
+    def show_im(a, img, **kw):
+        a.imshow(img, **kw)
+        a.contour(mv[sl], levels=[0.5], colors="cyan", linewidths=0.9)
+        a.axis("off")
+
+    show_im(ax[0, 0], xv[sl], cmap="gray", vmin=vlo, vmax=vhi)
+    ax[0, 0].set_title("input", fontsize=10)
+    show_im(ax[1, 0], base[sl], cmap="gray", vmin=vlo, vmax=vhi)
+    ax[1, 0].set_title(f"baseline recon\nbrain MSE {b_brain:.4f}", fontsize=10)
+    show_im(ax[2, 0], np.abs(base - xv)[sl], cmap="inferno", vmin=0, vmax=dmax)
+    ax[2, 0].set_title("baseline error |recon-input|", fontsize=10)
+
+    for j, k in enumerate(cols, start=1):
+        lm = np.zeros(P, float)
+        lm[conds[k]] = 1.0
+        ax[0, j].imshow(lm.reshape(gz, gy, gx)[lsl], cmap="Greys", vmin=0, vmax=1, interpolation="nearest")
+        ax[0, j].axis("off")
+        ax[0, j].set_title(f"{k}\nablated latents (n={int(conds[k].sum())})", fontsize=9)
+        show_im(ax[1, j], snap[k][sl], cmap="gray", vmin=vlo, vmax=vhi)
+        db = (mean((k, "brain")) - b_brain) / max(b_brain, 1e-12)
+        ax[1, j].set_title(f"recon after ablation\nΔbrain {db:+.0%}", fontsize=10)
+        show_im(ax[2, j], dmg[k][sl], cmap="inferno", vmin=0, vmax=dmax)
+        ax[2, j].set_title("damage |ablated-baseline|", fontsize=10)
+
+    fig.suptitle(
+        "Ablating BACKGROUND latents damages the BRAIN (cyan outline), not the background",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    out = cli.out or os.path.join(cli.run_dir, "smuggling.png")
+    fig.savefig(out, dpi=140)
+    print(f"\nsaved figure -> {out}")
+    print("Read the bottom row: damage concentrated INSIDE the cyan brain outline, after ablating")
+    print("latents that sit OUTSIDE it, is smuggling made visible. All damage panels share a colour")
+    print("scale, so the far-background column being brightest is directly comparable.")
 
 
 if __name__ == "__main__":

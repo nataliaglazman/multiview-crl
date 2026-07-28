@@ -220,6 +220,27 @@ def parse_args() -> argparse.ArgumentParser:
         "reconstructs far worse (measured: brain MSE 0.35 vs 0.003).",
     )
     parser.add_argument(
+        "--latent-mask",
+        action="store_true",
+        help="Zero encoder-output positions whose input footprint contains no foreground. The "
+        "reconstruction loss is already brain-masked, so background latents are entirely "
+        "unconstrained and the encoder parks brain information in them ('codebook smuggling'): "
+        "ablating the FAR background band on a 300k baseline raised brain reconstruction error "
+        "+311%% while background error moved 0%%, and the effect GREW with distance from the brain "
+        "(+117%% near -> +311%% far) — spare capacity being exploited, not decoder receptive-field "
+        "reach. This removes the capacity itself, which also denies the contrastive objective the "
+        "per-sample signature it reads off background positions. NOTE: a model trained with this "
+        "must also be EVALUATED with masks passed to forward().",
+    )
+    parser.add_argument(
+        "--latent-mask-thresh",
+        type=float,
+        default=0.0,
+        help="Keep a latent position if its pooled foreground fraction exceeds this. Default 0.0 "
+        "keeps any position containing at least one foreground voxel — conservative, preserving "
+        "the boundary ring the decoder legitimately uses. Raise it to prune the boundary too.",
+    )
+    parser.add_argument(
         "--use-amp",
         action="store_true",
         help="Use automatic mixed precision (fp16) to reduce memory",

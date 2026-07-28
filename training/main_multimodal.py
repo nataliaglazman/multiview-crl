@@ -221,6 +221,7 @@ def train_step(
             n_views=n_views,
             subsets=args.subsets,
             patch_grid=_patch_grid,
+            mask=masks,
         )
 
         # Compute momentum-encoder key embeddings BEFORE deleting images.
@@ -1047,6 +1048,8 @@ def build_vqvae(args) -> vqvae.VQVAE:
         final_recon_norm=not getattr(args, "no_final_recon_norm", False),
         norm_type=getattr(args, "norm_type", "group"),
         decoder_norm_type=getattr(args, "decoder_norm_type", None),
+        latent_mask=getattr(args, "latent_mask", False),
+        latent_mask_thresh=getattr(args, "latent_mask_thresh", 0.0),
     )
 
 

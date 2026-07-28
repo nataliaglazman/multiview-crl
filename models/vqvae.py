@@ -1,4 +1,5 @@
 import copy
+import warnings
 from math import log2
 from typing import Tuple
 
@@ -585,6 +586,8 @@ class VQVAE(HelperModule):
         norm_type: str = "group",  # Normalization used in the ENCODER conv blocks: "group" (default) or "layer".
         decoder_norm_type: str
         | None = None,  # Decoder normalization; None = follow norm_type. Set "group" with norm_type="layer" to keep the encoder artefact-free without breaking reconstruction: per-voxel channel normalization forces every decoder feature voxel to unit scale, but emitting "0 here, bright there" IS a magnitude task, so a layer-normed decoder reconstructs far worse (measured: brain MSE 0.35 vs 0.003).
+        latent_mask: bool = False,  # Zero encoder-output positions whose input footprint has no foreground. Background latents are otherwise unconstrained (the recon loss is already brain-masked) and the encoder parks brain information in them — "codebook smuggling". Requires `mask` at forward(); a model trained with this MUST be evaluated with it too.
+        latent_mask_thresh: float = 0.0,  # Keep a latent position if its pooled foreground fraction exceeds this. 0.0 keeps any position containing at least one foreground voxel — conservative, preserves the boundary ring the decoder legitimately needs.
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -602,6 +605,9 @@ class VQVAE(HelperModule):
         self.norm_type = norm_type
         decoder_norm_type = norm_type if decoder_norm_type is None else decoder_norm_type
         self.decoder_norm_type = decoder_norm_type
+        self.latent_mask = bool(latent_mask)
+        self.latent_mask_thresh = float(latent_mask_thresh)
+        self._latent_mask_warned = False
 
         # --- Decoder-side level skipping ---
         # Zero out the contributions of the listed levels' code_q tensors in the
@@ -987,7 +993,9 @@ class VQVAE(HelperModule):
             return style
         return F.adaptive_avg_pool3d(style, target)
 
-    def forward(self, x, return_recon=True, pool_only=False, n_views=1, subsets=None, view_idx=None, patch_grid=None):
+    def forward(
+        self, x, return_recon=True, pool_only=False, n_views=1, subsets=None, view_idx=None, patch_grid=None, mask=None
+    ):
         """Forward pass through VQ-VAE-2.
 
         Args:
@@ -1199,6 +1207,31 @@ class VQVAE(HelperModule):
         # downscale factor (e.g. 91 → 46 → 23 → 12 → 24 → 48 → 96 ≠ 91).
         _input_spatial = x.shape[2:]
 
+        # Latent masking: zero every encoder-output position whose input footprint
+        # contains no foreground. Background positions otherwise sit unconstrained —
+        # the reconstruction loss is already brain-masked, so nothing penalises what
+        # they emit — and the encoder profitably parks brain information in them
+        # ("codebook smuggling"). Measured on a 300k baseline: ablating the FAR
+        # background band raised brain reconstruction error +311% while background
+        # error moved 0%, and the effect GREW with distance from the brain (+117%
+        # near → +311% far), which is the signature of spare capacity being used,
+        # not of decoder receptive-field reach. Masking removes the capacity itself.
+        if self.latent_mask and mask is None and not self._latent_mask_warned:
+            self._latent_mask_warned = True
+            warnings.warn(
+                "Model was built with latent_mask=True but forward() got mask=None. Features will "
+                "NOT match training — pass mask= (e.g. torch.cat(batch['mask'], 0)) in eval scripts.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        def _apply_latent_mask(t):
+            if mask is None or not self.latent_mask:
+                return t
+            m = mask if mask.shape[0] == t.shape[0] else mask[: t.shape[0]]
+            lm = F.adaptive_avg_pool3d(m.float(), t.shape[2:]) > self.latent_mask_thresh
+            return t * lm.to(t.dtype)
+
         # Encoder forward pass
         if self.separate_encoders and self.encoders_v1 is not None and n_views == 2:
             # View-specific encoders: split batch, encode through separate stacks,
@@ -1213,6 +1246,14 @@ class VQVAE(HelperModule):
             for i, (enc_v0, enc_v1) in enumerate(zip(self.encoders, self.encoders_v1)):
                 enc_in_v0 = enc_v0(enc_in_v0)
                 enc_in_v1 = enc_v1(enc_in_v1)
+                if mask is not None and self.latent_mask:
+                    _b = enc_in_v0.shape[0]
+                    enc_in_v0 = enc_in_v0 * (
+                        F.adaptive_avg_pool3d(mask[:_b].float(), enc_in_v0.shape[2:]) > self.latent_mask_thresh
+                    ).to(enc_in_v0.dtype)
+                    enc_in_v1 = enc_in_v1 * (
+                        F.adaptive_avg_pool3d(mask[_b:].float(), enc_in_v1.shape[2:]) > self.latent_mask_thresh
+                    ).to(enc_in_v1.dtype)
 
                 # ── Modification 2: SplitGroupNorm ──────────────────────
                 # Re-normalise content and style channels independently so
@@ -1300,6 +1341,7 @@ class VQVAE(HelperModule):
             enc_input = x
             for i, enc in enumerate(enc_stack):
                 enc_input = enc(enc_input)
+                enc_input = _apply_latent_mask(enc_input)
 
                 # ── Modification 2: SplitGroupNorm (single-view path) ──
                 enc_input_pool = enc_input
