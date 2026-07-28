@@ -51,6 +51,15 @@ def main():
     ap.add_argument("--centre-radius", type=float, default=6.0, help="Centre region radius, input voxels.")
     ap.add_argument("--out", default=None, help="Figure path (default: <run-dir>/smuggling.png).")
     ap.add_argument("--no-fig", action="store_true", help="Skip the reconstruction figure.")
+    ap.add_argument(
+        "--save-nifti",
+        nargs="?",
+        const="",
+        default=None,
+        help="Write full volumes as .nii.gz for a 3D viewer (input, mask, per-condition recon, "
+        "damage, and the ablated latent set upsampled to input resolution). Optional value sets "
+        "the directory; default <run-dir>/smuggling_nii/.",
+    )
     ap.add_argument("--device", default=None)
     cli = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -193,6 +202,54 @@ def main():
         print("  boundary-adjacent latents matter -- ordinary upsampling reach, not smuggling.")
     else:
         print(f"  No background-specific effect: near {near_db:+.0%}, far {far_db:+.0%}.")
+
+    if cli.save_nifti is not None:
+        import nibabel as nib
+
+        nd = cli.save_nifti or os.path.join(cli.run_dir, "smuggling_nii")
+        os.makedirs(nd, exist_ok=True)
+        xv, mv = snap_meta["x"], snap_meta["m"]
+        base = snap["baseline"]
+        aff = np.eye(4)
+        D = xv.shape[0]
+
+        def slug(s):
+            out = "".join(c if c.isalnum() else "_" for c in s)
+            while "__" in out:
+                out = out.replace("__", "_")
+            return out.strip("_").lower()
+
+        def w(name, vol):
+            p = os.path.join(nd, f"{name}.nii.gz")
+            nib.save(nib.Nifti1Image(np.asarray(vol, np.float32), aff), p)
+            return p
+
+        written = [
+            w("input", xv),
+            w("brain_mask", mv),
+            w("recon_baseline", base),
+            w("error_baseline", np.abs(base - xv)),
+        ]
+        for k, sel in conds.items():
+            if sel is None:
+                continue
+            s = slug(k)
+            written.append(w(f"recon_{s}", snap[k]))
+            written.append(w(f"damage_{s}", np.abs(snap[k] - base)))
+            lm = torch.zeros(P)
+            lm[torch.as_tensor(np.where(sel)[0])] = 1.0
+            up = Fn.interpolate(lm.reshape(1, 1, gz, gy, gx), size=(D, D, D), mode="nearest")[0, 0].numpy()
+            written.append(w(f"ablated_latents_{s}", up))
+
+        fs = slug(far_key)
+        print(f"\nwrote {len(written)} volumes -> {nd}")
+        print("  The ablated positions sit OUTSIDE the brain; the damage appears INSIDE it.")
+        print("  Load the input, then overlay the far-band damage and the latents that were zeroed:")
+        print(
+            f"    fsleyes {os.path.join(nd, 'input.nii.gz')} "
+            f"{os.path.join(nd, f'damage_{fs}.nii.gz')} -cm red-yellow -a 60 "
+            f"{os.path.join(nd, f'ablated_latents_{fs}.nii.gz')} -cm blue -a 30"
+        )
 
     if cli.no_fig:
         return
