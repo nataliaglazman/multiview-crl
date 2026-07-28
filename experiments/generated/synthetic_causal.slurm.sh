@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-28T14:16:28Z
-# Git SHA: ff64c98
+# Generated at: 2026-07-28T15:04:47Z
+# Git SHA: b62e253
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-layernorm-baseline-corrected
+#SBATCH --job-name=synthetic-causal-layernorm-baseline-corrected-high-res
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-layernorm-baseline-corrected-%j.err
+#SBATCH --error=synthetic-causal-layernorm-baseline-corrected-high-res-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -105,8 +105,8 @@ fi
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
-    --synthetic-res 64 \
-    --model-id synthetic-causal-layernorm-baseline-corrected \
+    --synthetic-res 128 \
+    --model-id synthetic-causal-layernorm-baseline-corrected-high-res \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \

@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-layernorm-baseline-corrected
+tag: synthetic-causal-layernorm-baseline-corrected-high-res
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -28,6 +28,7 @@ style_injection_mode: film
 no_final_recon_norm: true
 separate_style_codebooks: true
 separate_content_codebooks: true
+synthetic_res: 128
 # synthetic_clean_content: true
 # patch_contrastive: true
 # patch_center_mode: double
