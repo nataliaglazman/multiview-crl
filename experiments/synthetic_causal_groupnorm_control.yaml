@@ -26,6 +26,11 @@
 _base_: synthetic_defaults
 
 tag: synthetic-causal-groupnorm-control
+# res 128 at stride 4 -> 32^3 latent. This is the substrate that makes the norm ablation
+# measurable: 5,260 RF-clean far-background positions (850 even at a 2x safety margin),
+# versus 70 and 0 at res 64. It keeps the 1:64 latent:input ratio, so the VQ bottleneck is
+# unchanged from the res-64 runs.
+synthetic_res: 128
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -39,7 +44,7 @@ train_steps: 300000
 eval_dci: true
 checkpoint_steps: 1000
 scale_adv_loss: 0.0
-batch_size: 128
+batch_size: 32
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]

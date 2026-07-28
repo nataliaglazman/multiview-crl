@@ -144,6 +144,13 @@ def fixed_reference_constants(ds, n_ref=64, scale_quantile=0.99):
             if v.numel():
                 vals.append(v.flatten().float())
     vals = torch.cat(vals)
+    # torch.quantile caps at ~16M elements; the source subsamples to 4M and takes BOTH
+    # the mean and the quantile on the subsample, so mirror that exactly (at 128^3 the
+    # un-subsampled tensor overflows the cap and raises).
+    cap = 4_000_000
+    if vals.numel() > cap:
+        g = torch.Generator().manual_seed(0)
+        vals = vals[torch.randint(vals.numel(), (cap,), generator=g)]
     mean = float(vals.mean())
     return mean, max(float(torch.quantile((vals - mean).abs(), scale_quantile)), 1e-6)
 
