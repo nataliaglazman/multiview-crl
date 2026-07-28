@@ -51,15 +51,26 @@ with the data statistics, and no amount of training or loss redesign removes it.
 `--norm-type layer` arm is the matched control (`ChannelLayerNorm3d` normalizes across
 channels *within* a voxel, so it has no spatial coupling to leak through).
 
-RESOLUTION CAVEAT. Test 2 needs background positions whose receptive field genuinely
-misses the brain. That set shrinks fast as the stride grows: at `--downscale 2` (32^3
-features, conv RF 13 voxels vs 24.7 to the brain) there are ~2000 such positions with a
-2x safety margin and the signature is clean. At `--downscale 4` (16^3, conv RF 27 vs
-28.6) only ~70 survive even at the exact RF radius, they sit right at the RF edge, and
-the signature degrades accordingly (LayerNorm far-background stops being exactly frozen,
-R^2 ~0.06 rather than ~0.00). Tests 1 and 3 are unaffected — the injection algebra still
-comes out at R^2 = 1.0000 — so read Test 2 at the finer stride and treat the coarse-stride
-Test 2 as underpowered rather than as evidence against.
+TWO CORRECTIONS (2026-07-28) that changed this script's conclusions:
+
+  1. ReZero `alpha` is initialised to 0, so an UNTRAINED encoder's residual stack is the
+     identity and its receptive field is only the downsampling path. Every arm here now
+     forces alpha=1 (`open_residual`). Without it the untrained arms were far more local
+     than any trained model, and this script wrongly predicted "LayerNorm background
+     R^2 ~ 0" for trained runs that in fact show much more.
+
+  2. The corner position's measured reach IS the RF radius (its RF is clipped by the
+     volume edge); an interior position's span is ~2x that. An earlier version halved the
+     corner number to get a "radius", understating reach by 2x and admitting positions
+     that can plainly see the brain into the "far background" set.
+
+CONSEQUENCE — this test needs a volume that is large relative to the RF. At res 64 with
+stride 4 the RF radius is 27 input voxels while the corner sits only ~27 from the nearest
+brain voxel: EVERY position can see the brain, there are zero RF-clean positions, and the
+question is simply not decidable at those settings. res 128 at stride 4 works. Treat an
+untrained arm as a bound on the architecture, never as a prediction for a trained model;
+for that, profile the trained GroupNorm and LayerNorm checkpoints against each other with
+eval/radial_factor_profile.py --run-dir.
 
 Usage:
   python -m eval.background_leak_mechanism --num-samples 400
@@ -109,12 +120,27 @@ def _import_encoder():
     return Encoder
 
 
-def build_encoder(norm_type, seed, hidden=48, res_ch=32, nb_res=2, downscale=2):
+def build_encoder(norm_type, seed, hidden=48, res_ch=32, nb_res=2, downscale=2, open_residual=True):
     """Untrained level-0 encoder. Same seed -> identical conv weights across arms
-    (GroupNorm and LayerNorm both init to ones/zeros and consume no RNG)."""
+    (GroupNorm and LayerNorm both init to ones/zeros and consume no RNG).
+
+    `open_residual` sets every ReZero alpha to 1. This matters more than it looks:
+    `ReZero.forward` is `layers(x) * alpha + x` with **alpha initialised to 0**, so an
+    untrained encoder's residual stack is the IDENTITY and its effective receptive field
+    is only the downsampling path. Any trained model has alpha != 0 and therefore a
+    strictly larger reach. Leaving alpha at 0 makes an untrained arm look far more local
+    than the model it is supposed to stand in for -- which is exactly the error that made
+    an earlier version of this script predict "LayerNorm background R^2 ~ 0" for trained
+    runs that in fact show much more.
+    """
     Encoder = _import_encoder()
     torch.manual_seed(seed)
     enc = Encoder(1, hidden, res_ch, nb_res, downscale, False, norm_type)
+    if open_residual:
+        for m in enc.modules():
+            if hasattr(m, "alpha") and isinstance(m.alpha, nn.Parameter):
+                with torch.no_grad():
+                    m.alpha.fill_(1.0)
     return enc.eval()
 
 
@@ -207,9 +233,9 @@ def main():
     ap.add_argument(
         "--rf-margin",
         type=float,
-        default=0.5,
-        help="Far-background threshold as a multiple of the conv-RF SPAN. 0.5 = the exact RF "
-        "radius (correct); higher adds safety margin but empties the set at coarse strides.",
+        default=1.0,
+        help="Far-background threshold as a multiple of the conv-RF RADIUS. 1.0 = the exact "
+        "radius; higher adds safety margin but empties the set at coarse strides.",
     )
     ap.add_argument("--clean-content", action="store_true", help="match --synthetic-clean-content runs")
     ap.add_argument("--batch-size", type=int, default=8)
@@ -269,33 +295,43 @@ def main():
     # So measure three separate reaches. The gap between them IS the effect.
     print(f"\n{'=' * 78}\nTEST 1 — how far can the corner position see? (three separate reaches)\n{'=' * 78}")
 
-    def corner_reach(norm_type, strip_norms=False):
-        enc = build_encoder(norm_type, cli.seed, cli.hidden, downscale=cli.downscale)
-        # ReZero alpha is 0 at init, making the residual stack the identity and
-        # UNDERSTATING conv reach. Force it open so the bound covers any trained model.
-        for m in enc.modules():
-            if hasattr(m, "alpha") and isinstance(m.alpha, nn.Parameter):
-                with torch.no_grad():
-                    m.alpha.fill_(1.0)
+    def corner_reach(norm_type, strip_norms=False, interior=False):
+        """One-sided reach from the CORNER position, or the full span of an INTERIOR one.
+
+        These are different quantities and conflating them is a 2x error. The corner
+        position sits at the volume edge, so its RF is clipped: the returned value is the
+        RF *radius*. An interior position's RF extends both ways, so its span is ~2x that.
+        The far-background threshold must be compared against the RADIUS.
+        """
+        enc = build_encoder(norm_type, cli.seed, cli.hidden, downscale=cli.downscale, open_residual=True)
         if strip_norms:
             for name, mod in list(enc.named_modules()):
                 for cname, child in list(mod.named_children()):
                     if isinstance(child, nn.GroupNorm) or type(child).__name__ == "ChannelLayerNorm3d":
                         setattr(mod, cname, nn.Identity())
         xr = torch.zeros(1, 1, res, res, res, requires_grad=True)
-        enc(xr)[0, :, 0, 0, 0].sum().backward()
+        out = enc(xr)
+        if interior:
+            gc = out.shape[-1] // 2
+            out[0, :, gc, gc, gc].sum().backward()
+        else:
+            out[0, :, 0, 0, 0].sum().backward()
         gr = xr.grad.detach().abs()[0, 0].numpy()
         nz = np.argwhere(gr > gr.max() * 1e-6)
-        return int(nz.max()) + 1  # corner position: RF spans input voxels [0, reach)
+        if interior:
+            return float((nz.max(0) - nz.min(0) + 1).max())  # full span
+        return float(nz.max() + 1)  # corner: RF spans input voxels [0, reach) -> the RADIUS
 
     rf_conv = corner_reach("group", strip_norms=True)
+    rf_span = corner_reach("group", strip_norms=True, interior=True)
     rf_ln = corner_reach("layer")
     rf_gn = corner_reach("group")
     brain_vox = np.argwhere(ever_brain_vox.numpy())
     d_corner_to_brain = float(np.sqrt((brain_vox**2).sum(1)).min())
 
     print(f"  gradient reach of feature position (0,0,0), in input voxels per axis:")
-    print(f"    convolutions only (norms -> Identity) : {rf_conv:>4}   <- the true receptive field")
+    print(f"    convolutions only, corner (= RF RADIUS): {rf_conv:>6.0f}   <- compare distances against THIS")
+    print(f"    same encoder, interior position (span) : {rf_span:>6.0f}   <- ~2x the radius, as expected")
     print(f"    with per-voxel LayerNorm              : {rf_ln:>4}   <- LN adds no spatial coupling")
     print(f"    with GroupNorm                        : {rf_gn:>4}   <- couples to the WHOLE volume")
     print(f"\n  nearest brain voxel to the input corner : {d_corner_to_brain:.1f} voxels")
@@ -328,19 +364,20 @@ def main():
     dev0 = (f0 - v0).abs().max(dim=0).values.numpy().reshape(g, g, g)
     pad_clean = dev0 <= 1e-4 * max(float(v0.abs().max()), 1.0)
 
-    # `rf_conv` is the RF *span* measured at the corner; the radius around an interior
-    # position is half of it, and `d_pos` is measured from the position's input-space
-    # centre. So `d_pos > rf_conv/2` is the correct RF-clean criterion; larger multiples
-    # are extra safety margin. `--rf-margin` is in units of the span.
-    far = (~ever) & (d_pos > rf_conv * cli.rf_margin) & pad_clean
+    # `rf_conv` is the ONE-SIDED reach of the corner position, i.e. the RF RADIUS (the
+    # corner's RF is clipped by the volume edge). `rf_span` is the same encoder's interior
+    # span and should come out at roughly 2x it. `d_pos` is a centre-to-brain distance, so
+    # it must be compared against the RADIUS. `--rf-margin` multiplies the radius.
+    rf_radius = rf_conv
+    far = (~ever) & (d_pos > rf_radius * cli.rf_margin) & pad_clean
     print(f"\n  position sets at feature resolution {g}^3 ({g**3:,} positions):")
     print(f"    core (brain in EVERY sample)               : {int(core.sum()):,}")
     print(f"    background (brain in NO sample)            : {int((~ever).sum()):,}")
-    for mult in (0.5, 0.75, 1.0):
-        n_f = int(((~ever) & (d_pos > rf_conv * mult) & pad_clean).sum())
-        tag = "  <- exact RF radius" if mult == 0.5 else ("  <- 2x margin" if mult == 1.0 else "")
-        star = " *" if mult == cli.rf_margin else "  "
-        print(f"    far background (> {mult:.2f} x RF span, pad-clean){star}: {n_f:,}{tag}")
+    for mult in (1.0, 1.5, 2.0):
+        n_f = int(((~ever) & (d_pos > rf_radius * mult) & pad_clean).sum())
+        tag = "  <- exact RF radius" if mult == 1.0 else ""
+        star = " *" if abs(mult - cli.rf_margin) < 1e-9 else "  "
+        print(f"    far background (> {mult:.2f} x RF radius, pad-clean){star}: {n_f:,}{tag}")
     print(f"    padding-contaminated (excluded)            : {int((~pad_clean).sum()):,}")
     print(f"    (* = the set used below, --rf-margin {cli.rf_margin})")
     print("\n  Padding note: those excluded positions carry a fixed spatial pattern, but it is")
@@ -357,7 +394,6 @@ def main():
     # separates the two: LN R^2 should track RF reach and fall to ~0 past it, while GN R^2
     # stays high at every distance. Compare a trained run's edge readout against the LN
     # column at the same distance, not against zero.
-    rf_radius = rf_conv * 0.5
     shell_edges = [(0, 4), (4, 8), (8, 12), (12, 16), (16, 24), (24, 99)]
     shells = []
     for lo, hi in shell_edges:
