@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-28T20:31:02Z
-# Git SHA: c4dc40d
+# Generated at: 2026-07-28T20:32:13Z
+# Git SHA: e7cc306
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-layernorm-corrected-high-res
+#SBATCH --job-name=synthetic-causal-layernorm-corrected
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-layernorm-corrected-high-res-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --error=synthetic-causal-layernorm-corrected-%j.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -57,7 +57,7 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 32 \
+    --batch-size 128 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
@@ -108,8 +108,8 @@ fi
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
-    --synthetic-res 128 \
-    --model-id synthetic-causal-layernorm-corrected-high-res \
+    --synthetic-res 64 \
+    --model-id synthetic-causal-layernorm-corrected \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
