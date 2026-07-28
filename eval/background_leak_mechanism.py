@@ -343,6 +343,21 @@ def main():
     if far.sum() == 0:
         raise SystemExit("no far-background positions at this resolution; lower --res or --downscale")
 
+    # ── background positions binned by distance to the nearest brain voxel ─────────
+    # Test 2 asks about the *far corner*, where the conv route is excluded. That is the
+    # clean question but a small set. "The edges of the feature map" is a much larger set
+    # that is mostly INSIDE the RF, so LayerNorm is not expected to zero it. This profile
+    # separates the two: LN R^2 should track RF reach and fall to ~0 past it, while GN R^2
+    # stays high at every distance. Compare a trained run's edge readout against the LN
+    # column at the same distance, not against zero.
+    rf_radius = rf_conv * 0.5
+    shell_edges = [(0, 4), (4, 8), (8, 12), (12, 16), (16, 24), (24, 99)]
+    shells = []
+    for lo, hi in shell_edges:
+        sel = (~ever) & (d_pos >= lo) & (d_pos < hi) & pad_clean
+        if int(sel.sum()) >= 20:
+            shells.append(((lo, hi), torch.from_numpy(sel.reshape(-1)), float((d_pos[sel] <= rf_radius).mean())))
+
     # ── feature extraction for both norm arms ─────────────────────────────────────
     core_t = torch.from_numpy(core.reshape(-1))
     far_t = torch.from_numpy(far.reshape(-1))
@@ -365,6 +380,7 @@ def main():
             m.register_forward_hook(mk_hook(m))
 
         r_core, r_far, sp_mean, sp_std, gn_stats, first_far = [], [], [], [], [], []
+        shell_acc = [[] for _ in shells]
         for s in range(0, N, cli.batch_size):
             xb = X[s : s + cli.batch_size].to(dev)
             with torch.no_grad():
@@ -375,6 +391,8 @@ def main():
             r_far.append(ff.mean(2).numpy())
             sp_mean.append(ff.mean(2).numpy())
             sp_std.append(ff.std(2).numpy())  # across-POSITION spread, per sample+channel
+            for si, (_, sel_t, _) in enumerate(shells):
+                shell_acc[si].append(fl[:, :, sel_t].mean(2).numpy())
             # (mu, sigma) that EVERY GroupNorm computes and divides out
             st, layout = [], []
             for m in norms:
@@ -402,6 +420,7 @@ def main():
             gn=pack(gn_stats) if gn_stats else None,
             first_gn_groups=first_norm.num_groups if isinstance(first_norm, nn.GroupNorm) else 0,
             first_far=pack(first_far),
+            shells=[pack(a) for a in shell_acc],
         )
 
     # ── TEST 2. constant-background signature ─────────────────────────────────────
@@ -437,6 +456,26 @@ def main():
         print(f"{fname:<22}{row[0]:>10.3f}{row[1]:>12.3f}{row[2]:>10.3f}{row[3]:>12.3f}")
     print("\n  GN far-bg >> 0 on an UNTRAINED network -> the hotspot is architectural, not learned.")
     print("  LN far-bg ~ 0 with identical conv weights -> GroupNorm is the carrier.")
+
+    # ── background R^2 vs distance, both norms ────────────────────────────────────
+    print(f"\n{'=' * 78}\nBACKGROUND R^2 BY DISTANCE TO BRAIN — what LayerNorm should LEAVE\n{'=' * 78}")
+    print(f"conv RF radius = {rf_radius:.1f} input voxels; positions closer than that CAN see brain tissue.")
+    print(
+        f"\n{'dist (in vox)':<16}{'n pos':>7}{'% in RF':>9}{'GN vent':>10}{'LN vent':>10}{'GN bsize':>11}{'LN bsize':>11}"
+    )
+    print("-" * 74)
+    y_v = Z[:, CONTENT_FACTOR_NAMES.index("ventricle_size")]
+    y_b = Z[:, CONTENT_FACTOR_NAMES.index("brain_size")]
+    for si, ((lo, hi), sel_t, frac_in) in enumerate(shells):
+        gv, lv = (probe(results[nt]["shells"][si], y_v) for nt in ("group", "layer"))
+        gb, lb = (probe(results[nt]["shells"][si], y_b) for nt in ("group", "layer"))
+        lab = f"[{lo},{hi if hi < 99 else 'max'})"
+        print(f"{lab:<16}{int(sel_t.sum()):>7}{frac_in * 100:>8.0f}%{gv:>10.3f}{lv:>10.3f}{gb:>11.3f}{lb:>11.3f}")
+    print("\n  Read the LN columns as the BENIGN floor: signal that arrives through the convolutions")
+    print("  because the position genuinely sees brain. It is expected to be well above zero wherever")
+    print("  '% in RF' is high, and only collapses past the RF radius. A trained LayerNorm run whose")
+    print("  edge R^2 matches this profile has no leak left — it is reading anatomy it can actually see.")
+    print("  The GN-minus-LN gap at the SAME distance is the part attributable to the normalizer.")
 
     # ── TEST 3. injection point and sufficiency ───────────────────────────────────
     print(f"\n{'=' * 78}\nTEST 3 — is the background value exactly the FIRST norm's (mu, sigma)?\n{'=' * 78}")

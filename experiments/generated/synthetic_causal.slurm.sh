@@ -57,7 +57,7 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 64 \
+    --batch-size 32 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
