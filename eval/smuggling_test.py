@@ -147,7 +147,31 @@ def main():
             reg = region.expand_as(r)
             return float((((r - x) ** 2) * reg).sum() / reg.sum().clamp_min(1))
 
+        bmf = brain_out.float()
+        nvox = bmf.sum(dim=(1, 2, 3, 4)).clamp_min(1)
+
+        def affine_share(r, r_base):
+            """Fraction of the damage explained by a per-sample global scale+shift over the brain.
+
+            Fits r ~= s*r_base + c inside the brain and asks how much of (r - r_base) that
+            accounts for. ~1.0 means the ablation only rescaled/offset the image — a global
+            INTENSITY code was removed, not anatomy. Low means genuine structural change.
+            """
+            v = lambda t: t.view(-1, 1, 1, 1, 1)
+            mb = (r_base * bmf).sum(dim=(1, 2, 3, 4)) / nvox
+            ma = (r * bmf).sum(dim=(1, 2, 3, 4)) / nvox
+            db_, da_ = r_base - v(mb), r - v(ma)
+            cov = (db_ * da_ * bmf).sum(dim=(1, 2, 3, 4)) / nvox
+            var = (db_ * db_ * bmf).sum(dim=(1, 2, 3, 4)) / nvox
+            s = cov / var.clamp_min(1e-12)
+            c = ma - s * mb
+            resid = r - (v(s) * r_base + v(c))
+            num = (resid**2 * bmf).sum(dim=(1, 2, 3, 4))
+            den = ((r - r_base) ** 2 * bmf).sum(dim=(1, 2, 3, 4)).clamp_min(1e-12)
+            return float((1.0 - num / den).mean()), resid
+
         with torch.no_grad():
+            r_base = None
             for name, sel in conds.items():
                 mode["which"] = None if sel is None else torch.as_tensor(np.where(sel)[0], device=device)
                 r = model(x, return_recon=True, n_views=1)[0]
@@ -155,6 +179,16 @@ def main():
                     r = Fn.interpolate(r, size=x.shape[2:], mode="trilinear", align_corners=False)
                 for reg, mask in (("centre", centre_out), ("brain", brain_out), ("bg", bg_out)):
                     tot.setdefault((name, reg), []).append(err(r, mask))
+                if name == "baseline":
+                    r_base = r.clone()
+                else:
+                    frac, resid = affine_share(r, r_base)
+                    tot.setdefault((name, "affine"), []).append(frac)
+                    tot.setdefault((name, "struct_mse"), []).append(
+                        float((resid**2 * bmf).sum() / bmf.sum().clamp_min(1))
+                    )
+                    if first:
+                        snap[("resid", name)] = resid[0, 0].cpu().numpy()
                 if first:
                     snap[name] = r[0, 0].cpu().numpy()
             if first:
@@ -170,18 +204,24 @@ def main():
     )
     print("distances are in LATENT voxels to the nearest brain latent\n")
 
-    hdr = f"{'condition':<26}{'n':>6}{'brain MSE':>12}{'Δbrain':>10}{'bg MSE':>11}{'Δbg':>9}"
+    hdr = f"{'condition':<26}{'n':>6}{'brain MSE':>12}{'Δbrain':>10}{'Δbg':>8}{'affine%':>9}{'struct MSE':>12}"
     print(hdr + "\n" + "-" * len(hdr))
     b_brain, b_bg = mean(("baseline", "brain")), mean(("baseline", "bg"))
-    print(f"{'baseline':<26}{'-':>6}{b_brain:>12.5f}{'-':>10}{b_bg:>11.5f}{'-':>9}")
+    print(f"{'baseline':<26}{'-':>6}{b_brain:>12.5f}{'-':>10}{'-':>8}{'-':>9}{'-':>12}")
     for name, sel in conds.items():
         if sel is None:
             continue
         db = (mean((name, "brain")) - b_brain) / max(b_brain, 1e-12)
         dg = (mean((name, "bg")) - b_bg) / max(b_bg, 1e-12)
         print(
-            f"{name:<26}{int(sel.sum()):>6}{mean((name,'brain')):>12.5f}{db:>+9.0%}{mean((name,'bg')):>11.5f}{dg:>+8.0%}"
+            f"{name:<26}{int(sel.sum()):>6}{mean((name,'brain')):>12.5f}{db:>+9.0%}{dg:>+7.0%}"
+            f"{mean((name,'affine')):>9.1%}{mean((name,'struct_mse')):>12.5f}"
         )
+    print("\naffine% = share of the damage explained by a per-sample global scale+shift over the brain.")
+    print("  ~100%  -> the ablation only rescaled/offset the image: what was stored is a global")
+    print("            INTENSITY code, not anatomy. struct MSE (the residual) is then the real")
+    print("            structural damage — compare it against baseline brain MSE, not against Δbrain.")
+    print("  low    -> genuine structural change: anatomy was being reconstructed from those latents.")
 
     far_key = [k for k in bands if k.startswith("bg FAR")][0]
     far_db = (mean((far_key, "brain")) - b_brain) / max(b_brain, 1e-12)
@@ -189,14 +229,29 @@ def main():
     near_key = [k for k in bands if k.startswith("bg near")][0]
     near_db = (mean((near_key, "brain")) - b_brain) / max(b_brain, 1e-12)
 
+    far_aff = mean((far_key, "affine"))
+    far_struct = mean((far_key, "struct_mse"))
+
     print("\nverdict:")
     if b_brain > 0.05:
         print(f"  WARNING: baseline brain MSE is {b_brain:.4f} -- this model reconstructs poorly.")
         print("  Ablation results are not interpretable until reconstruction works.")
+    elif far_db > 0.10 and far_db > far_dg and far_aff > 0.9:
+        print(f"  GLOBAL INTENSITY CODE, not structural smuggling. The FAR band raises brain error")
+        print(f"  {far_db:+.0%}, but {far_aff:.0%} of that is a per-sample global scale+shift. Residual")
+        print(
+            f"  structural damage is {far_struct:.5f} vs baseline brain MSE {b_brain:.5f}"
+            f" ({far_struct / max(b_brain, 1e-12):.1f}x)."
+        )
+        print("  Those latents hold a whole-image brightness/contrast parameter (style gain/bias),")
+        print("  not anatomy. Still a real contrastive shortcut (per-sample code readable at every")
+        print("  position), but NOT evidence that anatomical detail is delocalised.")
     elif far_db > 0.10 and far_db > far_dg:
-        print(f"  SMUGGLING: ablating the FAR background band raises brain error {far_db:+.0%} while")
-        print(f"  background error moves {far_dg:+.0%}. Those latents sit beyond any plausible decoder")
-        print("  reach yet carry information the brain reconstruction depends on.")
+        print(f"  STRUCTURAL SMUGGLING: the FAR band raises brain error {far_db:+.0%} while background")
+        print(f"  error moves {far_dg:+.0%}, and only {far_aff:.0%} is a global scale+shift -- so")
+        print(f"  {far_struct:.5f} of residual structural damage remains (baseline {b_brain:.5f}).")
+        print("  Those latents sit beyond plausible decoder reach yet carry anatomy the brain")
+        print("  reconstruction depends on.")
     elif near_db > 0.10 and far_db < 0.5 * near_db:
         print(f"  DECODER RECEPTIVE FIELD: near band {near_db:+.0%} vs far band {far_db:+.0%}. Only")
         print("  boundary-adjacent latents matter -- ordinary upsampling reach, not smuggling.")
@@ -236,6 +291,9 @@ def main():
             s = slug(k)
             written.append(w(f"recon_{s}", snap[k]))
             written.append(w(f"damage_{s}", np.abs(snap[k] - base)))
+            if ("resid", k) in snap:
+                # damage with the global scale+shift removed: the STRUCTURAL part only
+                written.append(w(f"damage_structural_{s}", np.abs(snap[("resid", k)])))
             lm = torch.zeros(P)
             lm[torch.as_tensor(np.where(sel)[0])] = 1.0
             up = Fn.interpolate(lm.reshape(1, 1, gz, gy, gx), size=(D, D, D), mode="nearest")[0, 0].numpy()
