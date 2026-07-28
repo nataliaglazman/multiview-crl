@@ -98,6 +98,20 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
         detach_style_injection=getattr(args, "detach_style_injection", False),
         style_spatial_size=getattr(args, "style_spatial_size", 0),
         final_recon_norm=not getattr(args, "no_final_recon_norm", False),
+        # These were missing, and their absence was SILENT. norm_type in particular:
+        # ChannelLayerNorm3d stores its affine params under a nested `.norm.` prefix while
+        # GroupNorm stores them flat, so rebuilding a `--norm-type layer` run with the
+        # GroupNorm default made all 28 encoder-norm tensors mismatch by NAME. With
+        # strict=False below they were dropped without error, and the evaluated model was
+        # a hybrid that never existed in training: trained convolutions plus freshly
+        # initialised GroupNorms -- which re-introduces exactly the whole-volume statistic
+        # the run was configured to remove.
+        norm_type=getattr(args, "norm_type", "group"),
+        decoder_norm_type=getattr(args, "decoder_norm_type", None),
+        separate_content_codebooks=getattr(args, "separate_content_codebooks", False),
+        separate_style_codebooks=getattr(args, "separate_style_codebooks", False),
+        latent_mask=getattr(args, "latent_mask", False),
+        latent_mask_thresh=getattr(args, "latent_mask_thresh", 0.0),
     )
 
     ckpt_path = checkpoint or os.path.join(run_dir, "vqvae_model.pt")
@@ -105,7 +119,28 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("encoders", ckpt)
     cleaned = {k.removeprefix("module."): v for k, v in state_dict.items()}
-    model.load_state_dict(cleaned, strict=False)
+    incompat = model.load_state_dict(cleaned, strict=False)
+    # strict=False is kept on purpose (checkpoints legitimately carry extra state such as
+    # MoCo queues), but it must never be silent: a name mismatch here means the rebuilt
+    # architecture disagrees with the trained one and the eval is running a different model.
+    if incompat.missing_keys or incompat.unexpected_keys:
+        logger.warning(
+            "ARCHITECTURE MISMATCH: %d parameter(s) missing (left at INIT), %d unexpected (DISCARDED). "
+            "The rebuilt model does not match the checkpoint -- results from it are not this run's.",
+            len(incompat.missing_keys),
+            len(incompat.unexpected_keys),
+        )
+        for k in incompat.missing_keys[:5]:
+            logger.warning("    missing    (using fresh init): %s", k)
+        for k in incompat.unexpected_keys[:5]:
+            logger.warning("    unexpected (dropped from ckpt): %s", k)
+        if any(".norm." in k for k in incompat.unexpected_keys) or any(
+            k.endswith((".weight", ".bias")) and ".norm." not in k for k in incompat.missing_keys
+        ):
+            logger.warning(
+                "    Looks like a norm_type mismatch (layer <-> group). Check settings.json norm_type "
+                "against how this model was built."
+            )
     model.to(device)
     model.eval()
     logger.info(

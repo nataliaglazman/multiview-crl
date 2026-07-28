@@ -159,6 +159,14 @@ vqvae_model = vqvae.VQVAE(
     top_level_recon_only=_opt("top_level_recon_only", False),
     skip_decoder_concat_levels=_opt("skip_decoder_concat_levels", None),
     final_recon_norm=not _opt("no_final_recon_norm", False),
+    # norm_type MUST be passed: ChannelLayerNorm3d nests its affine params under
+    # `.norm.` while GroupNorm stores them flat, so omitting it rebuilds a
+    # `--norm-type layer` run as GroupNorm and every encoder-norm tensor is dropped
+    # by name under strict=False -- silently evaluating a model that never trained.
+    norm_type=_opt("norm_type", "group"),
+    decoder_norm_type=_opt("decoder_norm_type", None),
+    latent_mask=_opt("latent_mask", False),
+    latent_mask_thresh=_opt("latent_mask_thresh", 0.0),
 ).to(DEVICE)
 print(f"Built VQVAE with content_ratios={content_ratios_arg}")
 
