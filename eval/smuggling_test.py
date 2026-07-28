@@ -1,27 +1,29 @@
-"""Do BACKGROUND latent positions carry information the decoder needs for the CENTRE?
+"""Do BACKGROUND latent positions carry information the decoder needs for the BRAIN?
 
-"Codebook smuggling" hypothesis: empty background is trivially cheap to reconstruct, so
-its latent positions have spare capacity. If the decoder's receptive field lets those
-positions influence central output voxels, the encoder can profitably stash central
-information there -- which would show up as background positions predicting central
-factors, with no normalization artefact involved.
+"Codebook smuggling": empty background is trivially cheap to reconstruct, so its latent
+positions have spare capacity. If the encoder stashes brain information there, ablating
+those positions should damage BRAIN reconstruction.
 
-This is a DECODER-SIDE INCENTIVE, structurally different from an encoder-side artefact
-(GroupNorm broadcast, receptive-field reach), and it makes a different prediction: it
-should survive a change of normalization, because it is driven by reconstruction utility
-rather than by how activations are normalised.
+Confound to separate: decoder receptive field. Latents just OUTSIDE the brain legitimately
+help reconstruct the brain BOUNDARY -- ordinary upsampling, not smuggling. So background
+ablation is stratified by distance to the brain:
 
-Direct test (forward hook, no retraining):
-  1. normal forward                                  -> recon_base
-  2. forward with BACKGROUND latent positions replaced by their across-batch mean
-     (removes sample-specific information there, keeps the typical value) -> recon_ablate
-  3. compare reconstruction error inside the CENTRE region
+    near band only matters   -> decoder receptive field (expected, benign)
+    far band matters too     -> genuine smuggling (information placed where it is not needed)
 
-  centre error rises  -> background latents were carrying centre information: SMUGGLING
-  centre error flat   -> background latents contribute nothing to the centre: no smuggling
+Readouts per condition (latents replaced by their across-batch mean, removing
+sample-specific information while keeping the typical value):
 
-Controls: ablating the CENTRE and measuring BACKGROUND error (should barely move), and
-ablating a random position set of the same size (isolates "any ablation hurts").
+    brain MSE   the thing smuggled information would help
+    bg MSE      if these latents were FOR the background, ablating them should hurt HERE
+
+The decisive signature is the ASYMMETRY: background ablation that raises brain error while
+leaving (or improving) background error means those positions were not serving the
+background at all.
+
+NOTE: a "random positions" control is NOT size-matchable here -- 3066 random positions out
+of 4096 include most of the brain, so it is a strictly harsher ablation and cannot be
+compared against the background condition. It is reported for reference only.
 
 Usage:
   python -m eval.smuggling_test --run-dir results/synthetic/<run> --num-samples 128
@@ -33,6 +35,7 @@ import logging
 
 import numpy as np
 import torch
+import torch.nn.functional as Fn
 
 logger = logging.getLogger(__name__)
 
@@ -68,98 +71,117 @@ def main():
     def hook(mod, inp, out):
         if mode["which"] is None:
             return None
-        sel = mode["which"]
         o = out.clone()
         flat = o.reshape(o.shape[0], o.shape[1], -1)
-        flat[:, :, sel] = flat[:, :, sel].mean(dim=0, keepdim=True)
+        flat[:, :, mode["which"]] = flat[:, :, mode["which"]].mean(dim=0, keepdim=True)
         return flat.reshape(o.shape)
 
     enc.register_forward_hook(hook)
 
+    # ---- geometry from the first batch -------------------------------------------
+    b0 = next(iter(loader))
+    x0 = b0["image"][0].to(device)
+    m0 = b0["mask"][0].to(device).float()
+    with torch.no_grad():
+        lat = enc(x0).shape[2:]
+    gz, gy, gx = lat
+    P = gz * gy * gx
+    cov = Fn.adaptive_avg_pool3d(m0, lat).reshape(m0.shape[0], -1).mean(0).cpu().numpy()
+    brain_lat, bg_lat = cov >= 0.5, cov <= 0.1
+
+    coords = np.argwhere(np.ones(tuple(lat), bool))
+    bpos = coords[brain_lat]
+    if len(bpos) == 0:
+        raise SystemExit("no brain latent positions found")
+    d2 = ((coords[:, None, :] - bpos[None, :, :]) ** 2).sum(-1)
+    dist = np.sqrt(d2.min(1))  # latent-space distance to nearest brain position
+
+    bd = dist[bg_lat]
+    edges = np.quantile(bd, [0.0, 1 / 3, 2 / 3, 1.0])
+    bands = {
+        f"bg near [{edges[0]:.1f},{edges[1]:.1f})": bg_lat & (dist < edges[1]),
+        f"bg mid  [{edges[1]:.1f},{edges[2]:.1f})": bg_lat & (dist >= edges[1]) & (dist < edges[2]),
+        f"bg FAR  [{edges[2]:.1f},{edges[3]:.1f}]": bg_lat & (dist >= edges[2]),
+    }
+    cz, cy, cx = (gz - 1) / 2.0, (gy - 1) / 2.0, (gx - 1) / 2.0
+    dctr = np.sqrt(((coords - np.array([cz, cy, cx])) ** 2).sum(-1))
+    rng = np.random.default_rng(0)
+    rnd = np.zeros(P, bool)
+    rnd[rng.permutation(P)[: int(bg_lat.sum())]] = True
+
+    conds = {
+        "baseline": None,
+        "bg ALL": bg_lat,
+        **bands,
+        "centre only": dctr <= cli.centre_radius / (x0.shape[-1] / gx),
+        "random (unmatched)": rnd,
+    }
+
     tot = {}
-    n_batches = 0
     for batch in loader:
-        imgs = batch["image"]
-        x = imgs[0].to(device)
+        x = batch["image"][0].to(device)
         m = batch["mask"][0].to(device).float()
+        D = x.shape[-1]
+        ZZ, YY, XX = torch.meshgrid(*[torch.arange(D)] * 3, indexing="ij")
+        dout = torch.sqrt(((ZZ - (D - 1) / 2.0) ** 2 + (YY - (D - 1) / 2.0) ** 2 + (XX - (D - 1) / 2.0) ** 2)).to(
+            device
+        )
+        centre_out = (dout <= cli.centre_radius).unsqueeze(0).unsqueeze(0)
+        brain_out, bg_out = m > 0.5, ~(m > 0.5)
+
+        def err(r, region):
+            reg = region.expand_as(r)
+            return float((((r - x) ** 2) * reg).sum() / reg.sum().clamp_min(1))
+
         with torch.no_grad():
-            mode["which"] = None
-            out = model(x, return_recon=True, n_views=1)
-            rec0 = out[0]
-            if rec0.shape[2:] != x.shape[2:]:
-                rec0 = torch.nn.functional.interpolate(rec0, size=x.shape[2:], mode="trilinear", align_corners=False)
-            _, _, D, H, W = rec0.shape
-            lat = inner.encoders[cli.level](x).shape[2:]
-            gz, gy, gx = lat
-            zz, yy, xx = torch.meshgrid(torch.arange(gz), torch.arange(gy), torch.arange(gx), indexing="ij")
-            scale = D / gz
-            cz = (gz - 1) / 2.0
-            dl = torch.sqrt((zz - cz) ** 2 + (yy - (gy - 1) / 2.0) ** 2 + (xx - (gx - 1) / 2.0) ** 2).reshape(-1)
-            cov = torch.nn.functional.adaptive_avg_pool3d(m, lat).reshape(m.shape[0], -1).mean(0).cpu()
-            bg_lat = (cov <= 0.1).numpy()
-            ctr_lat = (dl <= cli.centre_radius / scale).numpy()
-            g = torch.Generator().manual_seed(0)
-            rnd_lat = np.zeros_like(bg_lat)
-            rnd_lat[torch.randperm(len(bg_lat), generator=g)[: int(bg_lat.sum())].numpy()] = True
-
-            # output-space regions
-            ZZ, YY, XX = torch.meshgrid(torch.arange(D), torch.arange(H), torch.arange(W), indexing="ij")
-            dout = torch.sqrt((ZZ - (D - 1) / 2.0) ** 2 + (YY - (H - 1) / 2.0) ** 2 + (XX - (W - 1) / 2.0) ** 2).to(
-                device
-            )
-            centre_out = (dout <= cli.centre_radius).unsqueeze(0).unsqueeze(0)
-            brain_out = m > 0.5
-            bg_out = ~brain_out
-
-            def err(r, region):
-                d = (r - x) ** 2
-                reg = region.expand_as(d)
-                return float((d * reg).sum() / reg.sum().clamp_min(1))
-
-            base = {"centre": err(rec0, centre_out), "brain": err(rec0, brain_out), "bg": err(rec0, bg_out)}
-
-            for name, sel in (("ablate_bg", bg_lat), ("ablate_centre", ctr_lat), ("ablate_random", rnd_lat)):
-                mode["which"] = torch.as_tensor(np.where(sel)[0], device=device)
-                o = model(x, return_recon=True, n_views=1)[0]
-                if o.shape[2:] != x.shape[2:]:
-                    o = torch.nn.functional.interpolate(o, size=x.shape[2:], mode="trilinear", align_corners=False)
+            for name, sel in conds.items():
+                mode["which"] = None if sel is None else torch.as_tensor(np.where(sel)[0], device=device)
+                r = model(x, return_recon=True, n_views=1)[0]
+                if r.shape[2:] != x.shape[2:]:
+                    r = Fn.interpolate(r, size=x.shape[2:], mode="trilinear", align_corners=False)
                 for reg, mask in (("centre", centre_out), ("brain", brain_out), ("bg", bg_out)):
-                    tot.setdefault((name, reg), []).append(err(o, mask))
-                tot.setdefault(("n_pos", name), []).append(int(sel.sum()))
+                    tot.setdefault((name, reg), []).append(err(r, mask))
             mode["which"] = None
-            for reg in ("centre", "brain", "bg"):
-                tot.setdefault(("baseline", reg), []).append(base[reg])
-        n_batches += 1
 
-    def mean(k):
-        return float(np.mean(tot[k])) if k in tot else float("nan")
-
-    P = int(np.prod(lat))
+    mean = lambda k: float(np.mean(tot[k]))
     print(f"\nrun: {cli.run_dir}")
-    print(f"latent grid {tuple(lat)} ({P} positions) | centre radius {cli.centre_radius:g} input voxels")
     print(
-        f"latent positions ablated: bg={int(np.mean(tot[('n_pos','ablate_bg')]))}  "
-        f"centre={int(np.mean(tot[('n_pos','ablate_centre')]))}  random={int(np.mean(tot[('n_pos','ablate_random')]))}\n"
+        f"latent grid {tuple(lat)} ({P} positions) | brain latents={int(brain_lat.sum())} bg latents={int(bg_lat.sum())}"
     )
+    print("distances are in LATENT voxels to the nearest brain latent\n")
 
-    hdr = f"{'condition':<18}{'centre MSE':>12}{'brain MSE':>12}{'background MSE':>16}"
+    hdr = f"{'condition':<26}{'n':>6}{'brain MSE':>12}{'Δbrain':>10}{'bg MSE':>11}{'Δbg':>9}"
     print(hdr + "\n" + "-" * len(hdr))
-    for name in ("baseline", "ablate_bg", "ablate_centre", "ablate_random"):
-        print(f"{name:<18}{mean((name,'centre')):>12.5f}{mean((name,'brain')):>12.5f}{mean((name,'bg')):>16.5f}")
+    b_brain, b_bg = mean(("baseline", "brain")), mean(("baseline", "bg"))
+    print(f"{'baseline':<26}{'-':>6}{b_brain:>12.5f}{'-':>10}{b_bg:>11.5f}{'-':>9}")
+    for name, sel in conds.items():
+        if sel is None:
+            continue
+        db = (mean((name, "brain")) - b_brain) / max(b_brain, 1e-12)
+        dg = (mean((name, "bg")) - b_bg) / max(b_bg, 1e-12)
+        print(
+            f"{name:<26}{int(sel.sum()):>6}{mean((name,'brain')):>12.5f}{db:>+9.0%}{mean((name,'bg')):>11.5f}{dg:>+8.0%}"
+        )
 
-    b, ab, ar = mean(("baseline", "centre")), mean(("ablate_bg", "centre")), mean(("ablate_random", "centre"))
-    rise_bg = (ab - b) / max(b, 1e-12)
-    rise_rnd = (ar - b) / max(b, 1e-12)
+    far_key = [k for k in bands if k.startswith("bg FAR")][0]
+    far_db = (mean((far_key, "brain")) - b_brain) / max(b_brain, 1e-12)
+    far_dg = (mean((far_key, "bg")) - b_bg) / max(b_bg, 1e-12)
+    near_key = [k for k in bands if k.startswith("bg near")][0]
+    near_db = (mean((near_key, "brain")) - b_brain) / max(b_brain, 1e-12)
+
     print("\nverdict:")
-    print(f"  ablating BACKGROUND latents changes CENTRE reconstruction error by {rise_bg:+.1%}")
-    print(f"  ablating RANDOM   latents changes CENTRE reconstruction error by {rise_rnd:+.1%}  (control)")
-    if rise_bg > 0.10 and rise_bg > 1.5 * max(rise_rnd, 0):
-        print("  -> SMUGGLING: background latents carry information the decoder uses for the centre.")
-    elif rise_bg > 0.10:
-        print("  -> centre degrades, but the random control degrades comparably: this is generic")
-        print("     ablation sensitivity, not background-specific smuggling.")
+    if b_brain > 0.05:
+        print(f"  WARNING: baseline brain MSE is {b_brain:.4f} -- this model reconstructs poorly.")
+        print("  Ablation results are not interpretable until reconstruction works.")
+    elif far_db > 0.10 and far_db > far_dg:
+        print(f"  SMUGGLING: ablating the FAR background band raises brain error {far_db:+.0%} while")
+        print(f"  background error moves {far_dg:+.0%}. Those latents sit beyond any plausible decoder")
+        print("  reach yet carry information the brain reconstruction depends on.")
+    elif near_db > 0.10 and far_db < 0.5 * near_db:
+        print(f"  DECODER RECEPTIVE FIELD: near band {near_db:+.0%} vs far band {far_db:+.0%}. Only")
+        print("  boundary-adjacent latents matter -- ordinary upsampling reach, not smuggling.")
     else:
-        print("  -> NO smuggling: background latents contribute nothing to central reconstruction.")
+        print(f"  No background-specific effect: near {near_db:+.0%}, far {far_db:+.0%}.")
 
 
 if __name__ == "__main__":

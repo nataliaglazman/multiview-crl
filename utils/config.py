@@ -205,7 +205,19 @@ def parse_args() -> argparse.ArgumentParser:
         type=str,
         default="group",
         choices=["group", "layer"],
-        help="Normalization used in the VQ-VAE conv blocks: group norm (default) or layer norm.",
+        help="Normalization used in the VQ-VAE ENCODER conv blocks: group norm (default) or layer norm.",
+    )
+    parser.add_argument(
+        "--decoder-norm-type",
+        type=str,
+        default=None,
+        choices=["group", "layer"],
+        help="Normalization for the DECODER conv blocks. Default: follow --norm-type. Use "
+        "'--norm-type layer --decoder-norm-type group' to remove the encoder's global-statistic "
+        "broadcast (which makes background positions predict content factors) without breaking "
+        "reconstruction: per-voxel channel norm forces every decoder feature voxel to unit scale, "
+        "but emitting '0 here, bright there' is a magnitude task, so a layer-normed decoder "
+        "reconstructs far worse (measured: brain MSE 0.35 vs 0.003).",
     )
     parser.add_argument(
         "--use-amp",

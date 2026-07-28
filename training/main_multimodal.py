@@ -1046,6 +1046,7 @@ def build_vqvae(args) -> vqvae.VQVAE:
         style_spatial_size=getattr(args, "style_spatial_size", 0),
         final_recon_norm=not getattr(args, "no_final_recon_norm", False),
         norm_type=getattr(args, "norm_type", "group"),
+        decoder_norm_type=getattr(args, "decoder_norm_type", None),
     )
 
 

@@ -582,7 +582,9 @@ class VQVAE(HelperModule):
         detach_style_injection: bool = False,  # If True, detach style features before decoder injection so the reconstruction loss cannot push content information into style channels.
         style_spatial_size: int = 0,  # If > 0, average-pool each injected style tensor to an (N, N, N) grid (clamped per-axis) before quantization/injection, capping its spatial capacity so style carries the global contrast transform rather than anatomy. 0 = full-resolution (legacy).
         final_recon_norm: bool = True,  # If False, drop the GroupNorm on the level-0 (reconstruction) decoder's final conv so the output can carry per-sample global intensity (style gain/bias). True (legacy) instance-normalizes the output, pinning every reconstruction to a fixed global mean/std — fine under per-sample input z-scoring, but unrecoverable error under --synthetic-normalize fixed_reference.
-        norm_type: str = "group",  # Normalization used in conv blocks: "group" (default) or "layer".
+        norm_type: str = "group",  # Normalization used in the ENCODER conv blocks: "group" (default) or "layer".
+        decoder_norm_type: str
+        | None = None,  # Decoder normalization; None = follow norm_type. Set "group" with norm_type="layer" to keep the encoder artefact-free without breaking reconstruction: per-voxel channel normalization forces every decoder feature voxel to unit scale, but emitting "0 here, bright there" IS a magnitude task, so a layer-normed decoder reconstructs far worse (measured: brain MSE 0.35 vs 0.003).
     ):
         assert len(scaling_rates) == nb_levels, "Number of scaling rates not equal to number of levels!"
         self.nb_levels = nb_levels
@@ -598,6 +600,8 @@ class VQVAE(HelperModule):
         assert style_spatial_size >= 0, f"style_spatial_size must be >= 0, got {style_spatial_size}"
         self.style_spatial_size = int(style_spatial_size)
         self.norm_type = norm_type
+        decoder_norm_type = norm_type if decoder_norm_type is None else decoder_norm_type
+        self.decoder_norm_type = decoder_norm_type
 
         # --- Decoder-side level skipping ---
         # Zero out the contributions of the listed levels' code_q tensors in the
@@ -955,14 +959,14 @@ class VQVAE(HelperModule):
                     style_channels=sc,
                     style_injection_mode=style_injection_mode if sc > 0 else "concat",
                     final_norm=(final_recon_norm if lvl == 0 else True),
-                    norm_type=norm_type,
+                    norm_type=decoder_norm_type,
                 )
             )
 
         self.upscalers = nn.ModuleList()
         for i in range(nb_levels - 1):
             rates = scaling_rates[1 : len(scaling_rates) - i][::-1]  # noqa: E203
-            self.upscalers.append(Upscaler(embed_dim, rates, norm_type=norm_type))
+            self.upscalers.append(Upscaler(embed_dim, rates, norm_type=decoder_norm_type))
 
     def _bottleneck_style(self, style: torch.FloatTensor) -> torch.FloatTensor:
         """Optionally average-pool style to a coarse spatial grid before injection.
