@@ -1,11 +1,11 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthetic_causal.yaml
+# Auto-generated from: experiments/synthetic_causal_groupnorm_control.yaml
 # Generated at: 2026-07-28T14:16:28Z
 # Git SHA: ff64c98
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-layernorm-baseline-corrected
+#SBATCH --job-name=synthetic-causal-groupnorm-control
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-layernorm-baseline-corrected-%j.err
+#SBATCH --error=synthetic-causal-groupnorm-control-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -78,7 +78,7 @@ fi
     --mask-mode fixed \
     --moco-queue-size 0 \
     --no-final-recon-norm \
-    --norm-type layer \
+    --norm-type group \
     --pass-full-to-next-level \
     --patch-contrastive \
     --patch-grid 8 8 8 \
@@ -106,7 +106,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-layernorm-baseline-corrected \
+    --model-id synthetic-causal-groupnorm-control \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \

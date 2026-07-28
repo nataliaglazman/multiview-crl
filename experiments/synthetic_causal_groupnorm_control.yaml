@@ -1,0 +1,53 @@
+# GroupNorm CONTROL for experiments/synthetic_causal.yaml.
+#
+# synthetic_causal.yaml is now the LayerNorm-encoder recon-only baseline. This file is its
+# matched control and differs in EXACTLY ONE line: `norm_type: group` instead of `layer`.
+# Diff the two before launching -- if anything else differs, the ablation is confounded:
+#   diff experiments/synthetic_causal.yaml experiments/synthetic_causal_groupnorm_control.yaml
+#
+# What the ablation tests: GroupNorm normalises with (mu, sigma) taken over ALL spatial
+# positions, so a feature position whose receptive field contains only zero-valued
+# background still emits gamma*(b - mu)/sigma + beta -- a pure readout of whole-volume
+# statistics. That is why empty background positions predict content factors. Established
+# architecturally, without a checkpoint, by eval/background_leak_mechanism.py: an UNTRAINED
+# encoder already reproduces it (far-background brain_size R^2 0.885, ventricle 0.662 at
+# these settings), the injection algebra is exact (R^2(far-bg <- [1/sigma, mu/sigma]) =
+# 1.0000), and swapping to ChannelLayerNorm3d with identical conv weights collapses it
+# (0.064 / 0.069).
+#
+# decoder_norm_type is pinned to "group" in BOTH arms so the only difference is the
+# encoder. A layer-normed decoder reconstructs far worse (brain MSE 0.35 vs 0.003), which
+# would otherwise confound a recon-only comparison.
+#
+# `_base_` does NOT chain in scripts/launch.py (it pops the nested key), so this cannot be
+# written as `_base_: synthetic_causal` without silently losing every synthetic_defaults
+# setting -- hence the verbatim copy below.
+
+_base_: synthetic_defaults
+
+tag: synthetic-causal-groupnorm-control
+synthetic_normalize: fixed_reference
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+scale_contrastive_loss: 0
+scale_recon_loss: 1
+inject_style_to_decoder: true
+tau: 0.07
+patch_grid: [8, 8, 8]
+train_steps: 300000
+eval_dci: true
+checkpoint_steps: 1000
+scale_adv_loss: 0.0
+batch_size: 128
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [4]
+deterministic: true
+content_size: 48
+style_injection_mode: film
+no_final_recon_norm: true
+separate_style_codebooks: true
+separate_content_codebooks: true
+norm_type: group
+decoder_norm_type: group
