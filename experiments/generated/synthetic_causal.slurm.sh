@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-28T15:04:47Z
-# Git SHA: b62e253
+# Generated at: 2026-07-28T15:48:21Z
+# Git SHA: fd8b85f
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-layernorm-baseline-corrected-high-res
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -57,7 +57,7 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 128 \
+    --batch-size 64 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
