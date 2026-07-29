@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-29T12:18:23Z
-# Git SHA: 47181fd
+# Generated at: 2026-07-29T15:11:36Z
+# Git SHA: 21d4b0c
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-layernorm-corrected-input
+#SBATCH --job-name=synthetic-causal-layernorm-corrected-4-patch
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-layernorm-corrected-input-%j.err
+#SBATCH --error=synthetic-causal-layernorm-corrected-4-patch-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -85,7 +85,7 @@ fi
     --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
-    --patch-grid 8 8 8 \
+    --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -99,7 +99,7 @@ fi
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode input \
+    --style-injection-mode film \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -109,7 +109,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-layernorm-corrected-input \
+    --model-id synthetic-causal-layernorm-corrected-4-patch \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
@@ -120,5 +120,6 @@ fi
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 4 \
+    --vqvae-nb-res-layers 1 \
+    --vqvae-scaling-rates 2 \
     --workers 8
