@@ -673,6 +673,9 @@ class SyntheticBrainDataset(MultiviewDataset):
             causal_edge_prob=synthetic_causal_edge_prob,
             causal_noise_scale=synthetic_causal_noise_scale,
             causal_nonlinearity=synthetic_causal_nonlinearity,
+            # UNadjusted seed on purpose: sample noise varies per split (split_seed above),
+            # but the causal graph must be shared, or train/val/test are different SCMs.
+            scm_seed=synthetic_seed,
             clean_content=synthetic_clean_content,
             field_prior=synthetic_field_prior,
             field_grid=synthetic_field_grid,

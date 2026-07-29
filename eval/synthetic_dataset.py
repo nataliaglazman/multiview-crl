@@ -462,6 +462,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         causal_edge_prob=0.5,
         causal_noise_scale=0.4,
         causal_nonlinearity="leaky_relu",
+        scm_seed=None,
         clean_content=False,
         style_scale=1.0,
         content_scale=1.0,
@@ -511,7 +512,16 @@ class Synthetic3DDisentanglementDataset(Dataset):
             raise ValueError(f"--synthetic-causal requires --synthetic-mode pseudo_mri, got '{mode}'")
 
         if causal:
-            self.scm = build_content_scm(n_content, causal_graph, causal_edge_prob, seed)
+            # The SCM is a property of the data-generating PROCESS, so it must not vary
+            # with the split. `seed` here is already split-adjusted by SyntheticBrainDataset
+            # (train/val/test = base+0/+1/+2), which is right for sample noise but wrong for
+            # the graph: with causal_graph="random" each split drew a DIFFERENT DAG, and
+            # corr(brain_size, ventricle_size) came out +0.78 / -0.79 / -0.07 on
+            # train / val / test. Any causal or per-factor claim compared across splits was
+            # therefore comparing different generative processes. `scm_seed` pins the graph.
+            self.scm = build_content_scm(
+                n_content, causal_graph, causal_edge_prob, seed if scm_seed is None else scm_seed
+            )
         else:
             self.scm = None
 

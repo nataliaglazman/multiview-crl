@@ -151,7 +151,7 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
     return model, args, device
 
 
-def build_synthetic_test_set(args, num_samples=None, cache=True):
+def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None):
     """Build the synthetic test dataset from a run's settings (shared helper).
 
     ``cache=True`` (default) renders each volume once into RAM and reuses it on
@@ -159,13 +159,34 @@ def build_synthetic_test_set(args, num_samples=None, cache=True):
     once per pooling and once per model, so without caching the procedural
     generator re-renders the whole set 3*N times.  Costs ~num_samples*4*res**3
     floats of RAM; pass ``cache=False`` if that is too much.
+
+    ``causal`` controls whether the eval set reproduces the training-time SCM:
+
+    * ``None`` (default) — i.i.d. factors, the long-standing behaviour. Kept as the default
+      so existing numbers stay comparable, but a WARNING is emitted when the run itself was
+      trained with an SCM, because the two distributions are not interchangeable: under a
+      random graph ventricle_size and brain_size correlate at ~0.8, so a "ventricle" probe
+      largely reads brain_size, while at i.i.d. it does not.
+    * ``True`` — forward the run's SCM, matching the training distribution.
+    * ``False`` — force i.i.d. deliberately and silently (the honest choice when you want
+      factors decorrelated so per-factor attribution is unambiguous).
     """
     from data.datasets import SyntheticBrainDataset
 
     n_samples = num_samples or getattr(args, "synthetic_num_test", 200)
     res = getattr(args, "synthetic_res", 64)
-    spatial_size = getattr(args, "spatial_size", (res, res, res))
-    logger.info("Generating %d synthetic test samples at resolution %s...", n_samples, spatial_size)
+    spatial_size = getattr(args, "spatial_size", None) or (res, res, res)
+    trained_causal = bool(getattr(args, "synthetic_causal", False))
+    if causal is None and trained_causal:
+        logger.warning(
+            "This run was TRAINED with synthetic_causal=True, but the eval set is being built with "
+            "i.i.d. factors. Factor correlations differ between train and eval, which can reorder "
+            "per-factor results. Pass causal=True to match training, or causal=False to silence this."
+        )
+    use_causal = trained_causal if causal else False
+    logger.info(
+        "Generating %d synthetic test samples at resolution %s (causal=%s)...", n_samples, spatial_size, use_causal
+    )
     return SyntheticBrainDataset(
         mode="test",
         spatial_size=spatial_size,
@@ -182,6 +203,11 @@ def build_synthetic_test_set(args, num_samples=None, cache=True):
         synthetic_hierarchical_content=getattr(args, "synthetic_hierarchical_content", False),
         synthetic_normalize=getattr(args, "synthetic_normalize", "per_sample"),
         synthetic_clean_content=getattr(args, "synthetic_clean_content", False),
+        synthetic_causal=use_causal,
+        synthetic_causal_graph=getattr(args, "synthetic_causal_graph", "chain"),
+        synthetic_causal_edge_prob=getattr(args, "synthetic_causal_edge_prob", 0.5),
+        synthetic_causal_noise_scale=getattr(args, "synthetic_causal_noise_scale", 0.4),
+        synthetic_causal_nonlinearity=getattr(args, "synthetic_causal_nonlinearity", "leaky_relu"),
     )
 
 
