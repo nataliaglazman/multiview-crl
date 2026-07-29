@@ -57,6 +57,28 @@ def _stub_optional_deps():
     from eval.background_leak_mechanism import _stub_utils_if_needed
 
     _stub_utils_if_needed()
+    # `training.losses` pulls further names (TBSummaryTypes, ...) out of utils.utils. When
+    # MONAI is absent the stub is a bare module, so give it a permissive module-level
+    # __getattr__ rather than enumerating every symbol these modules happen to import.
+    uu = sys.modules.get("utils.utils")
+    if uu is not None and getattr(uu, "__file__", None) is None:
+
+        class _AnyMeta(type):
+            def __getattr__(cls, k):
+                return k
+
+        class _Any(metaclass=_AnyMeta):
+            def __init__(self, *a, **k):
+                pass
+
+            def __call__(self, *a, **k):
+                return None
+
+            def __getattr__(self, k):
+                return _Any()
+
+        if not hasattr(uu, "__getattr__"):
+            uu.__getattr__ = lambda name: _Any
     for name, attrs in (("tensorboard", {}), ("lpips", {"LPIPS": object}), ("wandb", {})):
         try:
             __import__(name)
