@@ -84,6 +84,13 @@ def main():
     ap.add_argument("--patch-grid", type=int, default=8)
     ap.add_argument("--content-size", type=int, default=44, help="Only used without --run-dir.")
     ap.add_argument("--target-balance", type=float, default=None, help="Default: Zbontar's balance.")
+    ap.add_argument(
+        "--causal-eval",
+        action="store_true",
+        help="Score on SCM-correlated factors. MUST match between the untrained baseline and the "
+        "checkpoint run: correlated factors (corr(brain_size,ventricle)~0.8) make the channels "
+        "themselves more correlated, which inflates off_diag independently of the model.",
+    )
     ap.add_argument("--device", default=None)
     cli = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -101,7 +108,7 @@ def main():
         from eval.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir
 
         model, args, device = load_model_from_run_dir(cli.run_dir, cli.checkpoint, device)
-        ds = build_synthetic_test_set(args, cli.num_samples, causal=True)
+        ds = build_synthetic_test_set(args, cli.num_samples, causal=cli.causal_eval)
         content_size = int(getattr(args, "content_size", cli.content_size))
         src = f"{cli.run_dir} (loss type: {getattr(args, 'contrastive_loss_type', '?')})"
     else:
@@ -124,10 +131,12 @@ def main():
                 synthetic_n_content=9,
                 synthetic_n_style=3,
                 synthetic_normalize="fixed_reference",
-                synthetic_causal=False,
+                synthetic_causal=cli.causal_eval,
+                synthetic_causal_graph="random",
+                synthetic_causal_edge_prob=0.5,
             ),
             cli.num_samples,
-            causal=False,
+            causal=cli.causal_eval,
         )
         content_size = cli.content_size
         src = "UNTRAINED model at config defaults"

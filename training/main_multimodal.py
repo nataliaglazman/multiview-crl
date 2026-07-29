@@ -1015,7 +1015,7 @@ def build_vqvae(args) -> vqvae.VQVAE:
         in_channels=1,
         hidden_channels=args.vqvae_hidden_channels,
         res_channels=args.vqvae_res_channels,
-        nb_res_layers=2,
+        nb_res_layers=getattr(args, "vqvae_nb_res_layers", 2),
         nb_levels=args.vqvae_nb_levels,
         embed_dim=args.vqvae_embed_dim,
         nb_entries=args.vqvae_nb_entries,

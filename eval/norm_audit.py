@@ -115,7 +115,7 @@ def _get_builder():
                 in_channels=1,
                 hidden_channels=a.vqvae_hidden_channels,
                 res_channels=a.vqvae_res_channels,
-                nb_res_layers=2,
+                nb_res_layers=getattr(a, "vqvae_nb_res_layers", 2),
                 nb_levels=a.vqvae_nb_levels,
                 embed_dim=a.vqvae_embed_dim,
                 nb_entries=a.vqvae_nb_entries,
@@ -146,6 +146,7 @@ def _default_args(**over):
     a = types.SimpleNamespace(
         vqvae_hidden_channels=48,
         vqvae_res_channels=32,
+        vqvae_nb_res_layers=2,
         vqvae_nb_levels=1,
         vqvae_embed_dim=48,
         vqvae_nb_entries=[256],

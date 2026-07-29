@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-layernorm-corrected
+tag: synthetic-causal-layernorm-corrected-4-patch
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -11,7 +11,7 @@ scale_recon_loss: 1
 # vq_commitment_weight: 0
 inject_style_to_decoder: true
 tau: 0.07
-patch_grid: [8, 8, 8]
+patch_grid: [4, 4, 4]
 train_steps: 300000
 # spatial_size: 4
 eval_dci: true
@@ -21,7 +21,7 @@ scale_adv_loss: 0.0
 batch_size: 128
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
-vqvae_scaling_rates: [4]
+vqvae_scaling_rates: [2]
 deterministic: true
 content_size: 44
 style_injection_mode: film
@@ -45,3 +45,4 @@ norm_type: layer
 # bright there" IS a magnitude task, so a layer-normed decoder reconstructs far worse
 # (brain MSE 0.35 vs 0.003). This run is recon-only, so that would gut the objective.
 decoder_norm_type: group
+vqvae_nb_res_layers: 1

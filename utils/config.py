@@ -462,6 +462,19 @@ def parse_args() -> argparse.ArgumentParser:
     # VQ-VAE-2 specific
     parser.add_argument("--vqvae-hidden-channels", type=int, default=64)
     parser.add_argument("--vqvae-res-channels", type=int, default=32)
+    parser.add_argument(
+        "--vqvae-nb-res-layers",
+        type=int,
+        default=2,
+        help="ReZero residual blocks per encoder/decoder level (default 2, the previous "
+        "hardcoded value). This is the main driver of the encoder RECEPTIVE FIELD: the "
+        "downsampling path alone spans ~18 input voxels, and each block adds two 3^3 convs "
+        "at the downsampled resolution, i.e. ~16 more. At scaling_rate 4 that is a radius of "
+        "~27 voxels with 2 blocks and ~17 with 1. Lower it when patches need to be local — "
+        "adjacent patches overlap by 2*radius/(cell + 2*radius) regardless of patch size, so "
+        "shrinking the receptive field is the only lever a finer --patch-grid cannot provide. "
+        "Changes the architecture, so checkpoints are not compatible across values.",
+    )
     parser.add_argument("--vqvae-nb-levels", type=int, default=3)
     parser.add_argument("--vqvae-embed-dim", type=int, default=32)
     parser.add_argument(
