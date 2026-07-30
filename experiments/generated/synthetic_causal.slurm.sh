@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-29T15:11:36Z
-# Git SHA: 21d4b0c
+# Generated at: 2026-07-30T09:52:53Z
+# Git SHA: c67a6a4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-layernorm-corrected-4-patch
+#SBATCH --job-name=synthetic-causal-layernorm-1-nb
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-layernorm-corrected-4-patch-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-layernorm-1-nb-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -74,6 +74,7 @@ fi
     --eval-dci \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
+    --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
@@ -83,9 +84,7 @@ fi
     --patch-center-mode double \
     --patch-center-weight \
     --patch-contrastive \
-    --patch-foreground-mask \
-    --patch-foreground-thresh 0.05 \
-    --patch-grid 4 4 4 \
+    --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -96,6 +95,7 @@ fi
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
+    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
@@ -108,8 +108,8 @@ fi
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
-    --synthetic-res 64 \
-    --model-id synthetic-causal-layernorm-corrected-4-patch \
+    --synthetic-res 128 \
+    --model-id synthetic-causal-layernorm-1-nb \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
@@ -120,6 +120,5 @@ fi
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-nb-res-layers 1 \
-    --vqvae-scaling-rates 2 \
+    --vqvae-scaling-rates 4 \
     --workers 8

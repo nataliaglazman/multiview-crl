@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-07-29T15:11:36Z
-# Git SHA: 21d4b0c
+# Generated at: 2026-07-30T09:52:53Z
+# Git SHA: c67a6a4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthseg-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -72,6 +72,7 @@ fi
     --gradient-checkpointing \
     --image-spacing 1.0 \
     --labels-path /data/natalia/ADNI_synthseg/labels.csv \
+    --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \

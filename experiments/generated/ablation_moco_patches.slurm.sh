@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_moco_patches.yaml
-# Generated at: 2026-07-29T15:11:36Z
-# Git SHA: 21d4b0c
+# Generated at: 2026-07-30T09:52:53Z
+# Git SHA: c67a6a4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-moco-patches
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -76,6 +76,7 @@ fi
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --labels-path /users/k24058220/multiview-crl/labels_cleaned_3class.csv \
+    --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
     --masks-dir /scratch/users/k24058220/ADNI_stripped_masks \
