@@ -19,6 +19,7 @@ import os
 import random
 import signal
 import sys
+import time
 import traceback
 import uuid
 import warnings
@@ -1812,6 +1813,15 @@ def main(args):
         oom_count = 0
         MAX_OOM_RETRIES = 5
 
+        # Throughput accounting, reset at every log step. `_perf_data_s` is the
+        # wall time blocked in next(train_iterator): a large fraction means the
+        # loader is the bottleneck (raise --workers), a small one means the GPU is.
+        _perf_window_start = time.perf_counter()
+        _perf_window_steps = 0
+        _perf_data_s = 0.0
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
         try:
             while step <= args.train_steps:
                 try:
@@ -1826,7 +1836,9 @@ def main(args):
 
                     accum_level_losses = None
                     for accum_idx in range(accum_steps):
+                        _t_data = time.perf_counter()
                         data = next(train_iterator)
+                        _perf_data_s += time.perf_counter() - _t_data
                         (
                             total_loss,
                             contrastive_loss,
@@ -1990,7 +2002,28 @@ def main(args):
                         flush=True,
                     )
 
+                    _perf_window_steps += 1
+
                     if step % args.log_steps == 0:
+                        _perf_elapsed = time.perf_counter() - _perf_window_start
+                        _perf_sps = _perf_window_steps / max(_perf_elapsed, 1e-9)
+                        _perf_data_frac = _perf_data_s / max(_perf_elapsed, 1e-9)
+                        _perf_peak_gb = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                        tb_writer.add_scalar("Perf/steps_per_sec", _perf_sps, step)
+                        tb_writer.add_scalar("Perf/sec_per_step", 1.0 / max(_perf_sps, 1e-9), step)
+                        tb_writer.add_scalar("Perf/data_wait_frac", _perf_data_frac, step)
+                        tb_writer.add_scalar("Perf/peak_mem_gb", _perf_peak_gb, step)
+                        logger.info(
+                            f"  [PERF] step {step}: {_perf_sps:.2f} steps/s "
+                            f"({1.0 / max(_perf_sps, 1e-9):.3f} s/step) | "
+                            f"data wait {_perf_data_frac:.1%} | peak mem {_perf_peak_gb:.1f} GB"
+                        )
+                        _perf_window_start = time.perf_counter()
+                        _perf_window_steps = 0
+                        _perf_data_s = 0.0
+                        if torch.cuda.is_available():
+                            torch.cuda.reset_peak_memory_stats()
+
                         tb_writer.add_scalar("Loss/Total", accum_total, step)
                         tb_writer.add_scalar("Loss/Contrastive", accum_contrastive, step)
                         tb_writer.add_scalar("Loss/Recon", accum_recon, step)
@@ -2160,6 +2193,10 @@ def main(args):
                                 "loss/recon": accum_recon,
                                 "loss/vq": accum_vq,
                                 "lr": optimizer.param_groups[0]["lr"],
+                                "perf/steps_per_sec": _perf_sps,
+                                "perf/sec_per_step": 1.0 / max(_perf_sps, 1e-9),
+                                "perf/data_wait_frac": _perf_data_frac,
+                                "perf/peak_mem_gb": _perf_peak_gb,
                             }
                             if accum_level_losses:
                                 for _li, _lv in enumerate(accum_level_losses):
@@ -2197,23 +2234,22 @@ def main(args):
                                         wandb_log[f"codebook/style_perplexity_ratio_L{_sc_key}"] = _ppl / _sc_cb.n_embed
                             wandb.log(wandb_log, step=step)
 
-                        if step % args.log_steps == 1 or step == args.train_steps:
-                            with open(file_name, "a+") as f:
-                                csv.writer(f).writerow(
-                                    [
-                                        "Step",
-                                        step,
-                                        "Total",
-                                        f"{np.mean(loss_values):.3f}",
-                                        "Contrastive",
-                                        f"{np.mean(contrastive_losses):.3f}",
-                                        "Recon",
-                                        f"{np.mean(recon_losses):.3f}",
-                                        "VQ",
-                                        f"{np.mean(vq_losses):.3f}",
-                                    ]
-                                )
-                            tb_writer.flush()
+                        with open(file_name, "a+") as f:
+                            csv.writer(f).writerow(
+                                [
+                                    "Step",
+                                    step,
+                                    "Total",
+                                    f"{np.mean(loss_values):.3f}",
+                                    "Contrastive",
+                                    f"{np.mean(contrastive_losses):.3f}",
+                                    "Recon",
+                                    f"{np.mean(recon_losses):.3f}",
+                                    "VQ",
+                                    f"{np.mean(vq_losses):.3f}",
+                                ]
+                            )
+                        tb_writer.flush()
 
                     if (step % 200 == 0 or step == 1) and not getattr(args, "contrastive_only", False):
                         save_vqvae_decoded_images(encoders[0], data, args, step)

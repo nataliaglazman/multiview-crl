@@ -58,6 +58,9 @@ lr: 1.0e-3
 batch_size: 4
 train_steps: 20000
 checkpoint_steps: 500
+# Keep this well above 1: every log step drains the CUDA queue via ~50 .item()
+# calls, which blocks CPU run-ahead and stalls kernel launching.
+log_steps: 50
 gradient_checkpointing: true
 use_amp: true
 channels_last: true

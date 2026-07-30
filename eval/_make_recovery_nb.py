@@ -120,7 +120,11 @@ if levels_sorted:
     content_ratios_arg = settings.get("content_ratios") or detected_ratios
     _first_content = content_ch_per_level[levels_sorted[0]]
     content_size_arg = max(1, _first_content)
-    style_size_arg = max(1, hidden_channels - _first_content)
+    # No max(1, ...) here: a checkpoint whose detected content fills the whole width
+    # (ratio 1.0) was trained WITHOUT a content/style split, and clamping style to 1
+    # flips `has_content_style` on, fabricating a fixed_mask buffer and a zero-width
+    # style codebook per level that the checkpoint has no weights for.
+    style_size_arg = hidden_channels - _first_content
 else:
     content_ratios_arg = None
     content_size_arg = hidden_channels
