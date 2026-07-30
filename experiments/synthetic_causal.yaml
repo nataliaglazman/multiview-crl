@@ -1,7 +1,7 @@
 # Synthetic experiment with causal content SCM.
 _base_: synthetic_defaults
 
-tag: synthetic-causal-layernorm-1-nb-64
+tag: synthetic-causal-layernorm-64-input
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
@@ -24,12 +24,12 @@ vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
 content_size: 44
-style_injection_mode: film
+style_injection_mode: input
 no_final_recon_norm: true
 separate_style_codebooks: true
-separate_content_codebooks: true
+separate_content_codebooks: false
 synthetic_res: 64
-vqvae_nb_levels: 1
+vqvae_nb_levels: 2
 # synthetic_clean_content: true
 patch_contrastive: true
 patch_center_mode: double

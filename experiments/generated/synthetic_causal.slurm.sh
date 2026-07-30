@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-30T09:52:53Z
-# Git SHA: c67a6a4
+# Generated at: 2026-07-30T10:53:13Z
+# Git SHA: c088b4b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-layernorm-1-nb
+#SBATCH --job-name=synthetic-causal-layernorm-64-input
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-layernorm-1-nb-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --error=synthetic-causal-layernorm-64-input-%j.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -57,7 +57,7 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 32 \
+    --batch-size 128 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
@@ -95,11 +95,10 @@ fi
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode film \
+    --style-injection-mode input \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -108,8 +107,8 @@ fi
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
-    --synthetic-res 128 \
-    --model-id synthetic-causal-layernorm-1-nb \
+    --synthetic-res 64 \
+    --model-id synthetic-causal-layernorm-64-input \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
@@ -119,6 +118,6 @@ fi
     --vqvae-embed-dim 48 \
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
-    --vqvae-nb-levels 1 \
+    --vqvae-nb-levels 2 \
     --vqvae-scaling-rates 4 \
     --workers 8
