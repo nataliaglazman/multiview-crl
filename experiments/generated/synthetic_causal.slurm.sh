@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-07-30T10:53:13Z
-# Git SHA: c088b4b
+# Generated at: 2026-07-30T10:53:56Z
+# Git SHA: a2587e9
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-layernorm-64-input
+#SBATCH --job-name=synthetic-causal-layernorm-64-input-1-nb
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-layernorm-64-input-%j.err
+#SBATCH --error=synthetic-causal-layernorm-64-input-1-nb-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -108,7 +108,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-layernorm-64-input \
+    --model-id synthetic-causal-layernorm-64-input-1-nb \
     --tau 0.07 \
     --total-dim 512 \
     --train-steps 300000 \
@@ -118,6 +118,6 @@ fi
     --vqvae-embed-dim 48 \
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
-    --vqvae-nb-levels 2 \
+    --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
     --workers 8
