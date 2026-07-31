@@ -23,6 +23,10 @@ Usage:
     python scripts/launch.py --from-config results/my-run/settings.json --cluster slurm \
         --partition cpu --no-constraint --set resume_training=True
 
+    # Re-launch on a specific partition and node constraint:
+    python scripts/launch.py --from-config results/my-run/settings.json --cluster slurm \
+        --partition gpu --constraint "h200|l40s" --set resume_training=True
+
     # Save a settings.json as an experiment YAML (for version control):
     python scripts/launch.py --from-config results/my-run/settings.json --save-yaml experiments/rerun.yaml
 """
@@ -650,6 +654,14 @@ def main():
         help="Drop the SLURM --constraint header (clears _slurm.constraint). Useful "
         "when re-launching on a partition where the original node constraint no longer applies.",
     )
+    parser.add_argument(
+        "--constraint",
+        type=str,
+        default=None,
+        metavar="EXPR",
+        help="Override the SLURM node constraint (sets _slurm.constraint), e.g. "
+        "'a100' or 'h200|l40s'. Takes precedence over --no-constraint.",
+    )
     args = parser.parse_args()
 
     # --generate mode: batch-generate scripts for all experiments.
@@ -706,12 +718,14 @@ def main():
 
     # -- SLURM resource overrides (apply to the nested _slurm block, which
     # --set cannot reach since it only updates top-level keys). --
-    if args.partition is not None or args.no_constraint:
+    if args.partition is not None or args.no_constraint or args.constraint is not None:
         slurm_cfg = config.setdefault("_slurm", {})
         if args.partition is not None:
             slurm_cfg["partition"] = args.partition
         if args.no_constraint:
             slurm_cfg["constraint"] = None
+        if args.constraint is not None:
+            slurm_cfg["constraint"] = args.constraint
 
     # -- Provenance snapshot --
     snapshot = save_resolved_config(config, experiment_source)
