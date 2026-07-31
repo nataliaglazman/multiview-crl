@@ -694,8 +694,10 @@ def parse_args() -> argparse.ArgumentParser:
         "the loss collapses to ~0 for free; on random view-consistent features the centred "
         "loss runs 0.0000/0.0005/0.0043/0.0166/0.0436/0.0992 at B=2/4/8/16/32/64 against an "
         "uncentred 0.0009/0.0086/0.0136/0.0246/0.0572/0.1102, i.e. still visibly inflated-easy "
-        "at B=8. Prefer B>=32. Only used with --patch-contrastive and "
-        "--contrastive-loss-type infonce. Default: none.",
+        "at B=8. Prefer B>=32. Applies to every patch objective: InfoNCE centres inside the "
+        "loss, Barlow Twins / VICReg centre before folding patches into the batch (without it "
+        "their invariance term is satisfied by the shared anatomy at each position). Only used "
+        "with --patch-contrastive. Default: none.",
     )
     parser.add_argument(
         "--patch-center-weight",
@@ -1164,22 +1166,28 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         logger.warning("--patch-foreground-mask is set but --patch-contrastive is not; it will be ignored.")
         args.patch_foreground_mask = False
 
-    # --patch-center-* only apply to the patch InfoNCE path (BT/VICReg fold patches
-    # into the batch and never reach _patch_infonce_base).
-    if getattr(args, "patch_center_mode", "none") != "none":
-        if not getattr(args, "patch_contrastive", False):
-            logger.warning("--patch-center-mode is set but --patch-contrastive is not; it will be ignored.")
-            args.patch_center_mode = "none"
-        elif getattr(args, "contrastive_loss_type", "infonce") != "infonce":
-            logger.warning(
-                f"--patch-center-mode is only implemented for --contrastive-loss-type infonce "
-                f"(got {args.contrastive_loss_type}); it will be ignored."
-            )
-            args.patch_center_mode = "none"
+    # --patch-center-mode applies to every patch objective: InfoNCE centres inside
+    # _patch_infonce_base, BT/VICReg centre before folding patches into the batch.
+    _cl_type_pc = getattr(args, "contrastive_loss_type", "infonce")
+    if getattr(args, "patch_center_mode", "none") != "none" and not getattr(args, "patch_contrastive", False):
+        logger.warning("--patch-center-mode is set but --patch-contrastive is not; it will be ignored.")
+        args.patch_center_mode = "none"
+    # --patch-center-weight, by contrast, IS InfoNCE-only: it reweights positions by their
+    # pre-normalisation residual magnitude, and BT/VICReg never L2-normalise per position.
+    if getattr(args, "patch_center_weight", False) and _cl_type_pc != "infonce":
+        logger.warning(
+            f"--patch-center-weight is only implemented for --contrastive-loss-type infonce "
+            f"(got {_cl_type_pc}); it will be ignored. --patch-center-mode still applies."
+        )
+        args.patch_center_weight = False
     if getattr(args, "patch_center_weight", False) and getattr(args, "patch_center_mode", "none") == "none":
         logger.warning("--patch-center-weight requires --patch-center-mode != none; it will be ignored.")
         args.patch_center_weight = False
-    elif getattr(args, "patch_center_mode", "none") != "none" and not getattr(args, "patch_center_weight", False):
+    elif (
+        _cl_type_pc == "infonce"
+        and getattr(args, "patch_center_mode", "none") != "none"
+        and not getattr(args, "patch_center_weight", False)
+    ):
         logger.warning(
             "--patch-center-mode is set without --patch-center-weight. Positions where every "
             "subject looks alike have a near-zero residual but are still L2-normalised to unit "

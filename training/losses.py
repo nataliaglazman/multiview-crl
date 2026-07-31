@@ -1034,6 +1034,7 @@ def barlow_twins_loss(
     subsets=None,
     soft_content_mask=None,
     lambd=0.005,
+    center_mode="none",
     **_kwargs,
 ):
     """Barlow Twins loss over content channels of paired views.
@@ -1049,12 +1050,21 @@ def barlow_twins_loss(
         subsets: View subsets (same length as *estimated_content_indices*).
         soft_content_mask: Optional differentiable ``(1, C)`` mask.
         lambd: Weight on the off-diagonal (redundancy-reduction) term.
+        center_mode: Patch centering, applied only in patch mode — see
+            ``_center_patch_features``. Without it the folded batch mixes samples and
+            positions, so the per-channel standardisation below removes only the grand
+            mean and the *positional* pattern survives. On registered volumes both views
+            agree on that pattern almost exactly, so the on-diagonal term reaches ~1 on
+            shared anatomy alone, carrying no subject information. ``"position"`` removes
+            it and makes the diagonal a statement about subjects.
 
     Returns:
         Scalar loss with ``._contrastive_diag`` attached.
     """
-    # Patch mode: fold patches into batch  (n_views, B, C, P) → (n_views, B*P, C)
+    # Patch mode: fold patches into batch  (n_views, B, C, P) → (n_views, B*P, C).
+    # Centering must happen BEFORE the fold, while the position axis still exists.
     if hz.ndim == 4:
+        hz = _center_patch_features(hz, center_mode)
         hz = hz.permute(0, 1, 3, 2).reshape(hz.shape[0], -1, hz.shape[2])
 
     if subsets is None or estimated_content_indices is None:
@@ -1128,6 +1138,7 @@ def vicreg_loss(
     sim_coeff=25.0,
     std_coeff=25.0,
     cov_coeff=1.0,
+    center_mode="none",
     **_kwargs,
 ):
     """VICReg (Variance-Invariance-Covariance) loss over content channels.
@@ -1145,12 +1156,21 @@ def vicreg_loss(
         sim_coeff: Weight on the invariance (MSE) term.
         std_coeff: Weight on the variance (hinge) term.
         cov_coeff: Weight on the covariance (decorrelation) term.
+        center_mode: Patch centering, applied only in patch mode — see
+            ``_center_patch_features``. Without it the folded batch mixes samples and
+            positions, so most of the per-channel variance the hinge sees is positional
+            rather than across-subject: the invariance term is satisfied by the shared
+            anatomy every subject has at that voxel, and the variance term can be met by
+            spatial variation alone. ``"position"`` removes the shared pattern so both
+            terms are about subjects.
 
     Returns:
         Scalar loss with ``._contrastive_diag`` attached.
     """
-    # Patch mode: fold patches into batch  (n_views, B, C, P) → (n_views, B*P, C)
+    # Patch mode: fold patches into batch  (n_views, B, C, P) → (n_views, B*P, C).
+    # Centering must happen BEFORE the fold, while the position axis still exists.
     if hz.ndim == 4:
+        hz = _center_patch_features(hz, center_mode)
         hz = hz.permute(0, 1, 3, 2).reshape(hz.shape[0], -1, hz.shape[2])
 
     if subsets is None or estimated_content_indices is None:

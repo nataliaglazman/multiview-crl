@@ -1163,9 +1163,13 @@ def main(args):
     _cross_view_negs = getattr(args, "cross_view_negs_only", False)
     _contrastive_type = getattr(args, "contrastive_loss_type", "infonce")
 
+    # Patch centering applies to the PATCH variant only: on pooled features there is no
+    # position axis to centre over, and _center_patch_features is a no-op there anyway.
+    _nce_center = getattr(args, "patch_center_mode", "none")
+
     if _contrastive_type == "barlow_twins":
         _bt_lambda = getattr(args, "bt_lambda", 0.005)
-        logger.info(f"[LOSS] Barlow Twins (λ={_bt_lambda})")
+        logger.info(f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center})")
 
         def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
             return barlow_twins_loss(
@@ -1176,13 +1180,21 @@ def main(args):
                 lambd=_bt_lambda,
             )
 
-        patch_loss_func = loss_func  # BT works identically on pooled or patch features
+        def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+            return barlow_twins_loss(
+                z_rec_tuple,
+                estimated_content_indices=estimated_content_indices,
+                subsets=subsets,
+                soft_content_mask=soft_content_mask,
+                lambd=_bt_lambda,
+                center_mode=_nce_center,
+            )
 
     elif _contrastive_type == "vicreg":
         _sim_c = getattr(args, "vicreg_sim_coeff", 25.0)
         _std_c = getattr(args, "vicreg_std_coeff", 25.0)
         _cov_c = getattr(args, "vicreg_cov_coeff", 1.0)
-        logger.info(f"[LOSS] VICReg (sim={_sim_c}, std={_std_c}, cov={_cov_c})")
+        logger.info(f"[LOSS] VICReg (sim={_sim_c}, std={_std_c}, cov={_cov_c}, patch centering={_nce_center})")
 
         def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
             return vicreg_loss(
@@ -1195,7 +1207,17 @@ def main(args):
                 cov_coeff=_cov_c,
             )
 
-        patch_loss_func = loss_func
+        def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+            return vicreg_loss(
+                z_rec_tuple,
+                estimated_content_indices=estimated_content_indices,
+                subsets=subsets,
+                soft_content_mask=soft_content_mask,
+                sim_coeff=_sim_c,
+                std_coeff=_std_c,
+                cov_coeff=_cov_c,
+                center_mode=_nce_center,
+            )
 
     else:
         _patch_center_mode = getattr(args, "patch_center_mode", "none")

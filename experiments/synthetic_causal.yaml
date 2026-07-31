@@ -1,48 +1,85 @@
-# Synthetic experiment with causal content SCM.
-_base_: synthetic_defaults
+# # Synthetic experiment with causal content SCM.
+# _base_: synthetic_defaults
 
-tag: synthetic-causal-layernorm-64-input-1-nb
+# tag: synthetic-causal-layernorm-redo
+# synthetic_normalize: fixed_reference
+# synthetic_causal: true
+# synthetic_causal_graph: random
+# synthetic_causal_edge_prob: 0.5
+# scale_contrastive_loss: 1
+# scale_recon_loss: 1
+# # vq_commitment_weight: 0
+# inject_style_to_decoder: true
+# tau: 0.07
+# patch_grid: [8, 8, 8]
+# train_steps: 300000
+# # spatial_size: 4
+# eval_dci: true
+# checkpoint_steps: 1000
+# scale_adv_loss: 0.0
+# # style_dropout_prob: 0.2
+# batch_size: 128
+# vqvae_hidden_channels: 48
+# vqvae_embed_dim: 48
+# vqvae_scaling_rates: [4]
+# deterministic: true
+# content_size: 44
+# style_injection_mode: input
+# no_final_recon_norm: true
+# separate_style_codebooks: true
+# separate_content_codebooks: false
+# synthetic_res: 64
+# vqvae_nb_levels: 2
+# # synthetic_clean_content: true
+# patch_contrastive: true
+# patch_center_mode: double
+# patch_center_weight: true
+# # contrastive_proj_dim: 16     # >0 enables it; 0 (default) = off
+# # contrastive_proj_hidden: 128  # optional, defaults to 256
+# # contrastive_proj_mode: entropy
+# # patch_foreground_mask: true
+# # patch_foreground_thresh: 0.05
+# # contrastive_loss_type: vicreg
+# norm_type: layer
+# # Keep the DECODER on GroupNorm. Only the encoder needs the change: per-voxel channel
+# # normalisation forces every decoder feature voxel to unit scale, but emitting "0 here,
+# # bright there" IS a magnitude task, so a layer-normed decoder reconstructs far worse
+# # (brain MSE 0.35 vs 0.003). This run is recon-only, so that would gut the objective.
+# decoder_norm_type: group
+
+_base_: synthetic_defaults
+tag: synthetic-causal-patch-bt
+
+contrastive_loss_type: barlow_twins
+bt_lambda: 1.0                 # NOT 0.005 — see the calibration note above
+patch_contrastive: true
+patch_grid: [8, 8, 8]
+patch_center_mode: position    # now wired for BT; do NOT use double
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+
+scale_contrastive_loss: 1      # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_recon_loss: 1
+batch_size: 64
+
+content_size: 44               # match the baseline; fixes the 44-vs-48 confound
+
+# unchanged from synthetic_causal.yaml so the comparison stays valid
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
-scale_contrastive_loss: 10
-scale_recon_loss: 1
-# vq_commitment_weight: 0
+synthetic_res: 64
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
 inject_style_to_decoder: true
-tau: 0.07
-patch_grid: [8, 8, 8]
-train_steps: 300000
-# spatial_size: 4
-eval_dci: true
-checkpoint_steps: 1000
-scale_adv_loss: 0.0
-# style_dropout_prob: 0.2
-batch_size: 128
+style_injection_mode: input
+separate_style_codebooks: true
+vqvae_nb_levels: 1
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
-content_size: 44
-style_injection_mode: input
-no_final_recon_norm: true
-separate_style_codebooks: true
-separate_content_codebooks: false
-synthetic_res: 64
-vqvae_nb_levels: 1
-# synthetic_clean_content: true
-patch_contrastive: true
-patch_center_mode: double
-patch_center_weight: true
-# contrastive_proj_dim: 16     # >0 enables it; 0 (default) = off
-# contrastive_proj_hidden: 128  # optional, defaults to 256
-# contrastive_proj_mode: entropy
-# patch_foreground_mask: true
-# patch_foreground_thresh: 0.05
-# contrastive_loss_type: vicreg
-norm_type: layer
-# Keep the DECODER on GroupNorm. Only the encoder needs the change: per-voxel channel
-# normalisation forces every decoder feature voxel to unit scale, but emitting "0 here,
-# bright there" IS a magnitude task, so a layer-normed decoder reconstructs far worse
-# (brain MSE 0.35 vs 0.003). This run is recon-only, so that would gut the objective.
-decoder_norm_type: group
+checkpoint_steps: 1000
+eval_dci: true
