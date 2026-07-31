@@ -1,8 +1,11 @@
 """Checkpoint save and load helpers for multiview-CRL training."""
 
+import glob
 import logging
 import os
 import random
+import time
+import uuid
 
 import numpy as np
 import torch
@@ -60,6 +63,43 @@ def _as_byte_tensor(t) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------
+
+
+def _atomic_torch_save(obj, path: str) -> None:
+    """Write a checkpoint via a unique temp file + ``os.replace``.
+
+    A bare ``torch.save`` to the final path leaves a truncated file if the job
+    is killed mid-write (SLURM time limit, OOM, node failure), destroying the
+    previous good checkpoint and making the next resume fail with
+    ``EOFError: Ran out of input``.  Writing to a temp file first means an
+    interrupted save only ever damages the temp file.  Mirrors the NFS-safe
+    cache writes in ``data/datasets.py``.
+    """
+    tmp_path = f"{path}.tmp.{uuid.uuid4().hex[:8]}"
+    try:
+        with open(tmp_path, "wb") as f:
+            torch.save(obj, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    # A SIGKILL'd job (SLURM time limit, OOM reaper) never reaches the handler
+    # above, stranding a multi-GB temp file.  Sweep leftovers old enough that no
+    # live job could still be writing them.
+    cutoff = time.time() - 24 * 3600
+    for stale in glob.glob(f"{path}.tmp.*"):
+        try:
+            if os.path.getmtime(stale) < cutoff:
+                os.remove(stale)
+                logger.info(f"[CHECKPOINT] Removed stale temp file from an interrupted save: {stale}")
+        except OSError:
+            pass
 
 
 def save_checkpoint(
@@ -131,7 +171,7 @@ def save_checkpoint(
                 if encoders[0]._separate_queues:
                     checkpoint["moco_queues_v1"] = [q.cpu() for q in encoders[0].queues_v1]
                     checkpoint["moco_queue_v1_ptrs"] = encoders[0].queue_v1_ptrs.tolist()
-        torch.save(checkpoint, checkpoint_path)
+        _atomic_torch_save(checkpoint, checkpoint_path)
         logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
 
     else:
@@ -155,8 +195,8 @@ def save_checkpoint(
         for m_idx, m in enumerate(args.modalities):
             checkpoint[f"encoder_{m}"] = encoders[m_idx].state_dict()
             encoder_path = os.path.join(args.save_dir, f"encoder_{m}.pt")
-            torch.save(encoders[m_idx].state_dict(), encoder_path)
-        torch.save(checkpoint, checkpoint_path)
+            _atomic_torch_save(encoders[m_idx].state_dict(), encoder_path)
+        _atomic_torch_save(checkpoint, checkpoint_path)
         logger.info(f"[CHECKPOINT] Step {step}: Saved checkpoint to {args.save_dir}")
 
     # ── Best-model tracking ─────────────────────────────────────────────
@@ -165,14 +205,14 @@ def save_checkpoint(
         best_path = os.path.join(args.save_dir, suffix)
         checkpoint["best_metric_name"] = best_metric_name
         checkpoint["best_metric_value"] = float(best_loss)
-        torch.save(checkpoint, best_path)
+        _atomic_torch_save(checkpoint, best_path)
         logger.info(f"[CHECKPOINT] Step {step}: New best model " f"({best_metric_name}={best_loss:.4f}) → {best_path}")
 
     if args.save_all_checkpoints:
         m_idx = len(args.modalities) - 1
         m = args.modalities[m_idx]
         versioned_path = os.path.join(args.save_dir, f"encoder_{m}_{step:07d}.pt")
-        torch.save(encoders[m_idx].state_dict(), versioned_path)
+        _atomic_torch_save(encoders[m_idx].state_dict(), versioned_path)
         logger.info(f"[CHECKPOINT] Step {step}: Saved versioned checkpoint to {versioned_path}")
 
 
@@ -219,7 +259,7 @@ def save_emergency_checkpoint(
             ckpt["scheduler_state_dict"] = scheduler.state_dict()
         if train_sampler is not None and hasattr(train_sampler, "state_dict"):
             ckpt["train_sampler_state_dict"] = train_sampler.state_dict()
-        torch.save(ckpt, emergency_path)
+        _atomic_torch_save(ckpt, emergency_path)
         logger.warning(f"[EMERGENCY] Saved emergency checkpoint to {emergency_path} (reason: {reason})")
     except Exception as save_err:
         logger.error(f"[EMERGENCY] Failed to save emergency checkpoint: {save_err}")
@@ -228,6 +268,36 @@ def save_emergency_checkpoint(
 # ---------------------------------------------------------------------------
 # Load
 # ---------------------------------------------------------------------------
+
+
+def _load_first_readable(save_dir: str, candidates: list, device):
+    """Load the first readable checkpoint from ``candidates`` (filenames relative
+    to ``save_dir``, highest priority first).
+
+    A checkpoint left truncated by a pre-atomic-save job raises ``EOFError`` or
+    an unpickling error rather than loading as silently-wrong weights, so an
+    unreadable file is skipped in favour of the next candidate (``*_best.pt``,
+    then the emergency checkpoint) instead of killing the resumed job.
+
+    Returns:
+        tuple: ``(checkpoint_dict, path)``, or ``(None, None)`` if nothing loaded.
+    """
+    for name in candidates:
+        path = os.path.join(save_dir, name)
+        if not os.path.exists(path):
+            continue
+        try:
+            return torch.load(path, map_location=device, weights_only=False), path
+        except Exception as exc:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = -1
+            logger.warning(
+                f"  Checkpoint {path} is unreadable ({type(exc).__name__}: {exc}; {size} bytes) — "
+                "likely truncated by an interrupted save. Falling back to the next candidate."
+            )
+    return None, None
 
 
 def _move_optimizer_to_device(optimizer: torch.optim.Optimizer, device) -> None:
@@ -411,12 +481,12 @@ def load_checkpoint(
         return 1
 
     if args.encoder_type == "vqvae":
-        checkpoint_path = os.path.join(args.save_dir, "vqvae_model.pt")
-        if not os.path.exists(checkpoint_path):
-            logger.info("  No VQ-VAE checkpoint found, starting fresh training.")
+        checkpoint, checkpoint_path = _load_first_readable(
+            args.save_dir, ["vqvae_model.pt", "vqvae_best.pt", "emergency_checkpoint.pt"], device
+        )
+        if checkpoint is None:
+            logger.info("  No readable VQ-VAE checkpoint found, starting fresh training.")
             return 1
-
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
         if not _try_load_state_dict(encoders[0], checkpoint["encoders"], label="VQ-VAE"):
             logger.warning(
@@ -517,12 +587,12 @@ def load_checkpoint(
         return step
 
     else:
-        checkpoint_path = os.path.join(args.save_dir, "checkpoint.pt")
-        if not os.path.exists(checkpoint_path):
-            logger.info("  No VAE checkpoint found, starting fresh training.")
+        checkpoint, checkpoint_path = _load_first_readable(
+            args.save_dir, ["checkpoint.pt", "checkpoint_best.pt", "emergency_checkpoint.pt"], device
+        )
+        if checkpoint is None:
+            logger.info("  No readable VAE checkpoint found, starting fresh training.")
             return 1
-
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
         # Try to load all encoders and the decoder, tolerating minor differences.
         any_failed = False
