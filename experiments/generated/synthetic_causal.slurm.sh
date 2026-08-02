@@ -3,9 +3,9 @@
 # Generated at: 2026-08-02T22:21:51Z
 # Git SHA: 4af2da1
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-bt-gap-patch-128
+#SBATCH --job-name=synthetic-causal-bt-gap-patch-128-lambda
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-bt-gap-patch-128-%j.err
+#SBATCH --error=synthetic-causal-bt-gap-patch-128-lambda-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -60,6 +60,7 @@ fi
     --batch-size 128 \
     --bt-gap-weight 1 \
     --bt-lambda 1.0 \
+    --bt_gap_lambda 0.05 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
@@ -112,7 +113,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-bt-gap-patch-128 \
+    --model-id synthetic-causal-bt-gap-patch-128-lambda \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

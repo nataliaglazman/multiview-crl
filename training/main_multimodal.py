@@ -1171,9 +1171,13 @@ def main(args):
         _bt_lambda = getattr(args, "bt_lambda", 0.005)
         _bt_stat = getattr(args, "bt_patch_stat", "fold")
         _bt_gap_w = getattr(args, "bt_gap_weight", 0.0)
+        # The GAP term is estimated from B rows, not B*P, so its off-diagonal has a large
+        # sampling floor (~d(d-1)/B) that is pure noise. Let it carry its own lambda.
+        _bt_gap_lam = getattr(args, "bt_gap_lambda", None)
+        _bt_gap_lam = _bt_lambda if _bt_gap_lam is None else _bt_gap_lam
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
-            f"patch stat={_bt_stat}, gap term weight={_bt_gap_w})"
+            f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam})"
         )
         if _bt_gap_w > 0 and args.batch_size < 128:
             logger.warning(
@@ -1212,7 +1216,7 @@ def main(args):
                     estimated_content_indices=estimated_content_indices,
                     subsets=subsets,
                     soft_content_mask=soft_content_mask,
-                    lambd=_bt_lambda,
+                    lambd=_bt_gap_lam,
                 )
                 _total = _l + _bt_gap_w * _lg
                 # Arithmetic drops the attribute; carry the patch diagnostics and add the

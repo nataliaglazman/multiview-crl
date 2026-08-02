@@ -450,6 +450,18 @@ def parse_args() -> argparse.ArgumentParser:
         "Use batch_size >= 128, or a small weight, or both.",
     )
     parser.add_argument(
+        "--bt-gap-lambda",
+        type=float,
+        default=None,
+        help="Off-diagonal weight for the --bt-gap-weight companion term. Defaults to --bt-lambda, "
+        "but that is usually WRONG for it: the GAP term's cross-correlation is estimated from only "
+        "B rows, so its off-diagonal carries a sampling floor of about d(d-1)/B (~15 at d=44, "
+        "B=128) with no real redundancy behind it. At lambda=1 that noise floor is comparable to "
+        "the whole useful range of the on-diagonal, so most of the term's gradient goes into "
+        "decorrelating noise. Set it low (0.01-0.1) to make the GAP term primarily an ALIGNMENT "
+        "term and leave redundancy reduction to the patch term, which has B*P rows to estimate from.",
+    )
+    parser.add_argument(
         "--bt-patch-stat",
         type=str,
         default="fold",
