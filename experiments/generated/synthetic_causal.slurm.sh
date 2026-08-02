@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-02T18:56:19Z
-# Git SHA: dd4ade1
+# Generated at: 2026-08-02T19:19:12Z
+# Git SHA: 0b03cd7
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-baseline-44
+#SBATCH --job-name=synthetic-causal-bt-GAP
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-baseline-44-%j.err
+#SBATCH --error=synthetic-causal-bt-GAP-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -83,7 +83,6 @@ fi
     --norm-type layer \
     --pass-full-to-next-level \
     --patch-center-mode position \
-    --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
     --patch-grid 4 4 4 \
@@ -92,7 +91,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 1 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -110,15 +109,15 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-baseline-44 \
+    --model-id synthetic-causal-bt-GAP \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 44 \
-    --vqvae-hidden-channels 44 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
