@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-02T18:52:40Z
-# Git SHA: 7364f3a
+# Generated at: 2026-08-02T18:55:18Z
+# Git SHA: d799dd4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-patch-bt
+#SBATCH --job-name=synthetic-causal-patch-bt-film
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-patch-bt-%j.err
+#SBATCH --error=synthetic-causal-patch-bt-film-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -86,7 +86,7 @@ fi
     --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
-    --patch-grid 8 8 8 \
+    --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -100,7 +100,7 @@ fi
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode input \
+    --style-injection-mode film \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -110,7 +110,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-patch-bt \
+    --model-id synthetic-causal-patch-bt-film \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
