@@ -60,7 +60,7 @@ fi
     --batch-size 128 \
     --bt-gap-weight 1 \
     --bt-lambda 1.0 \
-    --bt_gap_lambda 0.05 \
+    --bt-gap-lambda 0.05 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
