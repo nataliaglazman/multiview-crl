@@ -1035,6 +1035,7 @@ def barlow_twins_loss(
     soft_content_mask=None,
     lambd=0.005,
     center_mode="none",
+    patch_stat="fold",
     **_kwargs,
 ):
     """Barlow Twins loss over content channels of paired views.
@@ -1057,15 +1058,44 @@ def barlow_twins_loss(
             agree on that pattern almost exactly, so the on-diagonal term reaches ~1 on
             shared anatomy alone, carrying no subject information. ``"position"`` removes
             it and makes the diagonal a statement about subjects.
+        patch_stat: ``"fold"`` or ``"per_position"`` — see the note below. Patch mode only.
 
     Returns:
         Scalar loss with ``._contrastive_diag`` attached.
     """
-    # Patch mode: fold patches into batch  (n_views, B, C, P) → (n_views, B*P, C).
-    # Centering must happen BEFORE the fold, while the position axis still exists.
+    # Patch mode. Two ways to turn (n_views, B, C, P) into a cross-correlation:
+    #
+    #   "fold"         — flatten to (n_views, B*P, C) and standardise each channel over all
+    #                    B*P rows (the original behaviour).
+    #   "per_position" — standardise each (channel, position) across the B samples and
+    #                    average the per-position cross-correlations.
+    #
+    # MEASURED, so nobody re-derives it: with centering already applied these are very nearly
+    # the SAME objective. Once each (c, p) has zero mean across samples, the folded
+    # cross-correlation is *already* the average of the per-position cross-covariances; the
+    # only thing "per_position" adds is per-position variance normalisation (a
+    # heteroscedasticity correction). On matched synthetic data the two agree to ~0.1%:
+    # subject-collapsed input gives RMS off-diagonal 0.5225 (fold) vs 0.5236 (per_position),
+    # healthy input 0.0642 vs 0.0643.
+    #
+    # It also does NOT rescue the subject dimension, and the reason is worth recording: the
+    # same test shows BT's off-diagonal DOES respond to across-subject collapse (0.52 against
+    # 0.064 healthy) under both formulations. So "the fold hides subject collapse from the
+    # off-diagonal" is false. If a run collapses across subjects with a healthy-looking loss,
+    # look at the variance SHARE instead — on a real run the across-subject component was 0.6%
+    # of what BT normalises by, so a fully collapsed subject dimension perturbs the correlation
+    # matrix by <1% and lambda cannot reach it. The lever there is a GAP-pooled BT term, whose
+    # rows are subjects, not a different patch statistic.
+    #
+    # Centering happens first either way. "per_position" removes the per-position mean and
+    # scale, so center_mode "position" is redundant with it; "double" still contributes.
+    _per_pos = False
     if hz.ndim == 4:
         hz = _center_patch_features(hz, center_mode)
-        hz = hz.permute(0, 1, 3, 2).reshape(hz.shape[0], -1, hz.shape[2])
+        if patch_stat == "per_position":
+            _per_pos = True
+        else:
+            hz = hz.permute(0, 1, 3, 2).reshape(hz.shape[0], -1, hz.shape[2])
 
     if subsets is None or estimated_content_indices is None:
         subsets = [list(range(hz.shape[0]))]
@@ -1095,16 +1125,21 @@ def barlow_twins_loss(
                     z_i = hz_sub[i][:, content_indices]  # (B, d)
                     z_j = hz_sub[j][:, content_indices]
 
-                B, d = z_i.shape
-
-                # Batch-normalise (zero mean, unit std per dimension).  Biased
-                # std (÷B) matches the /B in the cross-correlation, so a perfectly
-                # correlated dimension reaches C_ii = 1 exactly.
-                z_i = (z_i - z_i.mean(dim=0)) / (z_i.std(dim=0, unbiased=False) + 1e-6)
-                z_j = (z_j - z_j.mean(dim=0)) / (z_j.std(dim=0, unbiased=False) + 1e-6)
-
-                # Cross-correlation matrix  (d, d)
-                c = (z_i.T @ z_j) / B
+                # Standardise (zero mean, unit std per dimension).  Biased std (÷B) matches
+                # the /B in the cross-correlation, so a perfectly correlated dimension
+                # reaches C_ii = 1 exactly.  Under "per_position" the statistics are taken
+                # across SAMPLES at each (dimension, position), so the correlation below is
+                # an across-subject quantity averaged over positions.
+                if _per_pos:
+                    B, d, P = z_i.shape
+                    z_i = (z_i - z_i.mean(0, keepdim=True)) / (z_i.std(0, unbiased=False, keepdim=True) + 1e-6)
+                    z_j = (z_j - z_j.mean(0, keepdim=True)) / (z_j.std(0, unbiased=False, keepdim=True) + 1e-6)
+                    c = torch.einsum("bip,bjp->ij", z_i, z_j) / (B * P)
+                else:
+                    B, d = z_i.shape
+                    z_i = (z_i - z_i.mean(dim=0)) / (z_i.std(dim=0, unbiased=False) + 1e-6)
+                    z_j = (z_j - z_j.mean(dim=0)) / (z_j.std(dim=0, unbiased=False) + 1e-6)
+                    c = (z_i.T @ z_j) / B
 
                 # Loss: push diagonal toward 1, off-diagonal toward 0
                 on_diag = (c.diagonal() - 1).pow(2).sum()

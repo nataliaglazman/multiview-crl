@@ -1169,7 +1169,8 @@ def main(args):
 
     if _contrastive_type == "barlow_twins":
         _bt_lambda = getattr(args, "bt_lambda", 0.005)
-        logger.info(f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center})")
+        _bt_stat = getattr(args, "bt_patch_stat", "fold")
+        logger.info(f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, patch stat={_bt_stat})")
 
         def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
             return barlow_twins_loss(
@@ -1188,6 +1189,7 @@ def main(args):
                 soft_content_mask=soft_content_mask,
                 lambd=_bt_lambda,
                 center_mode=_nce_center,
+                patch_stat=_bt_stat,
             )
 
     elif _contrastive_type == "vicreg":

@@ -435,6 +435,21 @@ def parse_args() -> argparse.ArgumentParser:
         "Only used when --contrastive-loss-type barlow_twins. Default: 0.005.",
     )
     parser.add_argument(
+        "--bt-patch-stat",
+        type=str,
+        default="fold",
+        choices=["fold", "per_position"],
+        help="How Barlow Twins turns patch features into a cross-correlation. 'fold' (default) "
+        "flattens (B, C, P) to B*P rows and standardises each channel over all of them. "
+        "'per_position' standardises each (channel, position) across the B samples and averages "
+        "the per-position cross-correlations. NOTE: with --patch-center-mode set these are very "
+        "nearly the same objective (measured: RMS off-diagonal 0.5225 vs 0.5236 on collapsed "
+        "input, 0.0642 vs 0.0643 on healthy) — once each (c,p) is zero-mean across samples the "
+        "fold already averages the per-position covariances, so this only adds a per-position "
+        "variance normalisation. Offered as an ablation; it is NOT a fix for across-subject "
+        "collapse. Only used with --patch-contrastive and barlow_twins.",
+    )
+    parser.add_argument(
         "--vicreg-sim-coeff",
         type=float,
         default=25.0,
