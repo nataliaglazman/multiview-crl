@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-02T19:26:48Z
-# Git SHA: bf71f10
+# Generated at: 2026-08-02T19:44:16Z
+# Git SHA: 8076b7b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-patch-bt-4
+#SBATCH --job-name=synthetic-causal-bt-GAP-input
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-patch-bt-4-%j.err
+#SBATCH --error=synthetic-causal-bt-GAP-input-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -83,7 +83,6 @@ fi
     --norm-type layer \
     --pass-full-to-next-level \
     --patch-center-mode position \
-    --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
     --patch-grid 4 4 4 \
@@ -110,7 +109,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-patch-bt-4 \
+    --model-id synthetic-causal-bt-GAP-input \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

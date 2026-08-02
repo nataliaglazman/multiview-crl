@@ -48,11 +48,11 @@
 # decoder_norm_type: group
 
 _base_: synthetic_defaults
-tag: synthetic-causal-patch-bt-4
+tag: synthetic-causal-bt-GAP-input
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1.0                 # NOT 0.005 — see the calibration note above
-patch_contrastive: true
+patch_contrastive: false
 patch_grid: [4, 4, 4]
 patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
