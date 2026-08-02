@@ -48,11 +48,11 @@
 # decoder_norm_type: group
 
 _base_: synthetic_defaults
-tag: synthetic-causal-bt-GAP
+tag: synthetic-causal-patch-bt-4
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1.0                 # NOT 0.005 — see the calibration note above
-patch_contrastive: false
+patch_contrastive: true
 patch_grid: [4, 4, 4]
 patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
@@ -74,7 +74,7 @@ norm_type: layer
 decoder_norm_type: group
 no_final_recon_norm: true
 inject_style_to_decoder: true
-style_injection_mode: film
+style_injection_mode: input
 separate_style_codebooks: true
 vqvae_nb_levels: 1
 vqvae_hidden_channels: 48
