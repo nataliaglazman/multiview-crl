@@ -48,17 +48,18 @@
 # decoder_norm_type: group
 
 _base_: synthetic_defaults
-tag: synthetic-causal-baseline-44-sep
+tag: synthetic-causal-bt-gap-patch
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1.0                 # NOT 0.005 — see the calibration note above
-patch_contrastive: false
-patch_grid: [4, 4, 4]
+patch_contrastive: true
+patch_grid: [8, 8, 8]
 patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
+bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 
-scale_contrastive_loss: 0      # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_contrastive_loss: 1      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
 batch_size: 64
 
@@ -78,8 +79,8 @@ style_injection_mode: input
 separate_style_codebooks: true
 separate_content_codebooks: true
 vqvae_nb_levels: 1
-vqvae_hidden_channels: 44
-vqvae_embed_dim: 44
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
 vqvae_scaling_rates: [4]
 deterministic: true
 checkpoint_steps: 1000

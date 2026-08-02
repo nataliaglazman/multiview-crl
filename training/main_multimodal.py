@@ -1170,7 +1170,17 @@ def main(args):
     if _contrastive_type == "barlow_twins":
         _bt_lambda = getattr(args, "bt_lambda", 0.005)
         _bt_stat = getattr(args, "bt_patch_stat", "fold")
-        logger.info(f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, patch stat={_bt_stat})")
+        _bt_gap_w = getattr(args, "bt_gap_weight", 0.0)
+        logger.info(
+            f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
+            f"patch stat={_bt_stat}, gap term weight={_bt_gap_w})"
+        )
+        if _bt_gap_w > 0 and args.batch_size < 128:
+            logger.warning(
+                f"--bt-gap-weight is on with batch_size={args.batch_size}. The GAP term's "
+                f"cross-correlation has only B rows for a d x d matrix, so its off-diagonal "
+                f"carries a sampling floor of ~d(d-1)/B. Prefer batch_size >= 128."
+            )
 
         def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
             return barlow_twins_loss(
@@ -1182,7 +1192,7 @@ def main(args):
             )
 
         def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
-            return barlow_twins_loss(
+            _l = barlow_twins_loss(
                 z_rec_tuple,
                 estimated_content_indices=estimated_content_indices,
                 subsets=subsets,
@@ -1191,6 +1201,28 @@ def main(args):
                 center_mode=_nce_center,
                 patch_stat=_bt_stat,
             )
+            # Optional GAP-pooled companion term. The patch fold's cross-covariance is
+            # Cov_subject + Cov_interaction and the interaction dominates on registered
+            # volumes, so the patch off-diagonal barely constrains subject identity.
+            # Averaging over positions recovers the subject term exactly (the interaction
+            # integrates to zero there), so this is the term whose rows are SUBJECTS.
+            if _bt_gap_w > 0 and z_rec_tuple.ndim == 4:
+                _lg = barlow_twins_loss(
+                    z_rec_tuple.mean(-1),  # (n_views, B, C) — one row per subject
+                    estimated_content_indices=estimated_content_indices,
+                    subsets=subsets,
+                    soft_content_mask=soft_content_mask,
+                    lambd=_bt_lambda,
+                )
+                _total = _l + _bt_gap_w * _lg
+                # Arithmetic drops the attribute; carry the patch diagnostics and add the
+                # GAP ones under gap_* so both show up as Contrastive/*_L{level}.
+                _d = dict(getattr(_l, "_contrastive_diag", None) or {})
+                for _k, _v in (getattr(_lg, "_contrastive_diag", None) or {}).items():
+                    _d[f"gap_{_k}"] = _v
+                _total._contrastive_diag = _d
+                return _total
+            return _l
 
     elif _contrastive_type == "vicreg":
         _sim_c = getattr(args, "vicreg_sim_coeff", 25.0)

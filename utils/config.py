@@ -435,6 +435,21 @@ def parse_args() -> argparse.ArgumentParser:
         "Only used when --contrastive-loss-type barlow_twins. Default: 0.005.",
     )
     parser.add_argument(
+        "--bt-gap-weight",
+        type=float,
+        default=0.0,
+        help="Weight on an ADDITIONAL Barlow Twins term computed on GAP-pooled features, added to "
+        "the patch term. Motivation: writing the patch features as z[n,p,c] = s[n,c] + r[n,p,c] "
+        "(subject term + interaction), the folded cross-covariance splits exactly into "
+        "Cov_subject + Cov_interaction, and on registered volumes the interaction dominates — so "
+        "the patch off-diagonal decorrelates within-subject spatial structure rather than subject "
+        "identity. Averaging over positions recovers s exactly (r integrates to zero), so a "
+        "GAP-pooled term is the only one whose rows are SUBJECTS. 0 disables (default). "
+        "NOTE: the GAP term sees only B rows for a d x d matrix, so its off-diagonal has a "
+        "sampling floor of about d(d-1)/B — at d=44, B=64 that is ~30 of spurious penalty. "
+        "Use batch_size >= 128, or a small weight, or both.",
+    )
+    parser.add_argument(
         "--bt-patch-stat",
         type=str,
         default="fold",

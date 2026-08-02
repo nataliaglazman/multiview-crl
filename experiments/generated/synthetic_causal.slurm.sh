@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-02T19:54:27Z
-# Git SHA: d36f598
+# Generated at: 2026-08-02T22:11:35Z
+# Git SHA: df8a8ca
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-baseline-44-sep
+#SBATCH --job-name=synthetic-causal-bt-gap-patch
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-baseline-44-sep-%j.err
+#SBATCH --error=synthetic-causal-bt-gap-patch-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -58,6 +58,7 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 64 \
+    --bt-gap-weight 1 \
     --bt-lambda 1.0 \
     --channels-last \
     --checkpoint-steps 1000 \
@@ -83,15 +84,16 @@ fi
     --norm-type layer \
     --pass-full-to-next-level \
     --patch-center-mode position \
+    --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
-    --patch-grid 4 4 4 \
+    --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 1 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -110,15 +112,15 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-baseline-44-sep \
+    --model-id synthetic-causal-bt-gap-patch \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 44 \
-    --vqvae-hidden-channels 44 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
