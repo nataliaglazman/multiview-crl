@@ -2437,6 +2437,15 @@ def main(args):
                                         "selection/content_to_style_leak": _sel_row.get("leak_c2s"),
                                         "selection/mcc_cc_gap": _mcc_gap,
                                         "selection/content_view_acc": _sel_row.get("content_view"),
+                                        # All-channels capacity + the style-side leaks. These are
+                                        # already computed by score_reprs; logging them makes the
+                                        # "is content DEGRADING or MIGRATING to the style block?"
+                                        # question answerable from the curves: info_all flat while
+                                        # mcc_cc_gap falls = migration, both falling = real loss.
+                                        "selection/info_all": _sel_row.get("info_all"),
+                                        "selection/style_to_content_leak": _sel_row.get("leak_s2c"),
+                                        "selection/style_sufficiency": _sel_row.get("suff_s2s"),
+                                        "selection/content_rank": _sel_row.get("content_rank"),
                                     }
                                     for _sel_k, _sel_v in _sel_log.items():
                                         if _sel_v is not None and np.isfinite(_sel_v):
