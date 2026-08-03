@@ -1130,16 +1130,26 @@ def barlow_twins_loss(
                 # reaches C_ii = 1 exactly.  Under "per_position" the statistics are taken
                 # across SAMPLES at each (dimension, position), so the correlation below is
                 # an across-subject quantity averaged over positions.
-                if _per_pos:
-                    B, d, P = z_i.shape
-                    z_i = (z_i - z_i.mean(0, keepdim=True)) / (z_i.std(0, unbiased=False, keepdim=True) + 1e-6)
-                    z_j = (z_j - z_j.mean(0, keepdim=True)) / (z_j.std(0, unbiased=False, keepdim=True) + 1e-6)
-                    c = torch.einsum("bip,bjp->ij", z_i, z_j) / (B * P)
-                else:
-                    B, d = z_i.shape
-                    z_i = (z_i - z_i.mean(dim=0)) / (z_i.std(dim=0, unbiased=False) + 1e-6)
-                    z_j = (z_j - z_j.mean(dim=0)) / (z_j.std(dim=0, unbiased=False) + 1e-6)
-                    c = (z_i.T @ z_j) / B
+                # Forced to fp32 with autocast OFF. The contraction runs over B*P rows in
+                # patch mode and the /B lands AFTER it, so under AMP the raw Gram is emitted
+                # in fp16 and overflows (65504) once the diagonal correlation passes
+                # 65504/(B*P) — only 0.50 at B=256, P=512, which BT reaches by construction.
+                # off_diag below then evaluates inf - inf = NaN. Casting the operands alone
+                # does NOT fix it: autocast re-casts matmul inputs to fp16 whatever dtype
+                # they arrive in, so the region has to be disabled explicitly.
+                with torch.amp.autocast("cuda", enabled=False):
+                    z_i = z_i.float()
+                    z_j = z_j.float()
+                    if _per_pos:
+                        B, d, P = z_i.shape
+                        z_i = (z_i - z_i.mean(0, keepdim=True)) / (z_i.std(0, unbiased=False, keepdim=True) + 1e-6)
+                        z_j = (z_j - z_j.mean(0, keepdim=True)) / (z_j.std(0, unbiased=False, keepdim=True) + 1e-6)
+                        c = torch.einsum("bip,bjp->ij", z_i, z_j) / (B * P)
+                    else:
+                        B, d = z_i.shape
+                        z_i = (z_i - z_i.mean(dim=0)) / (z_i.std(dim=0, unbiased=False) + 1e-6)
+                        z_j = (z_j - z_j.mean(dim=0)) / (z_j.std(dim=0, unbiased=False) + 1e-6)
+                        c = (z_i.T @ z_j) / B
 
                 # Loss: push diagonal toward 1, off-diagonal toward 0
                 on_diag = (c.diagonal() - 1).pow(2).sum()
@@ -1239,10 +1249,17 @@ def vicreg_loss(
                 var_loss = F.relu(1.0 - std_i).mean() + F.relu(1.0 - std_j).mean()
 
                 # --- Covariance: decorrelate dimensions ---
-                z_i_c = z_i - z_i.mean(dim=0)
-                z_j_c = z_j - z_j.mean(dim=0)
-                cov_i = (z_i_c.T @ z_i_c) / max(B - 1, 1)
-                cov_j = (z_j_c.T @ z_j_c) / max(B - 1, 1)
+                # fp32 with autocast off, for the same reason as barlow_twins_loss: in patch
+                # mode these Gram matrices contract over B*P rows and the /(B-1) lands after
+                # the matmul, so fp16 output overflows to inf. fill_diagonal_ below happens to
+                # delete the entries that overflow first, but any strongly correlated PAIR
+                # overflows too and survives into cov_loss.
+                with torch.amp.autocast("cuda", enabled=False):
+                    z_i_f, z_j_f = z_i.float(), z_j.float()
+                    z_i_c = z_i_f - z_i_f.mean(dim=0)
+                    z_j_c = z_j_f - z_j_f.mean(dim=0)
+                    cov_i = (z_i_c.T @ z_i_c) / max(B - 1, 1)
+                    cov_j = (z_j_c.T @ z_j_c) / max(B - 1, 1)
                 # Zero out diagonal (we only penalise off-diagonal)
                 cov_i.fill_diagonal_(0)
                 cov_j.fill_diagonal_(0)
