@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-04T18:17:50Z
-# Git SHA: 521068d
+# Generated at: 2026-08-04T18:20:25Z
+# Git SHA: cfa2b75
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-clean-content-128-lambda
 #SBATCH --output=/scratch/users/%u/%j.out
