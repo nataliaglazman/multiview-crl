@@ -47,11 +47,17 @@ What is reported
   immune to the capacity confound that makes ``run_dci_compare``'s leakage numbers
   baseline-sensitive.
 * ``snr_nuisance`` — the same ratio against the *nuisance-field* response instead.
-  **This, not ``snr_content``, is the number to compare across objectives.**  The
-  two views differ only in modality and in the render-noise seed, so a cross-view
-  contrastive loss is trained to be invariant to the render-noise null and shrinks
-  its own denominator; the nuisance fields are shared across views, so no
-  cross-view objective is pushed to discard them.
+  **Neither denominator is objective-neutral, and they are biased in OPPOSITE
+  directions**, so the pair brackets the answer rather than either one settling it:
+  the two views differ only in modality and render-noise seed, so a cross-view
+  contrastive loss is trained to be *invariant* to the render-noise null (shrinking
+  that denominator, flattering contrastive), while the nuisance fields are *shared*
+  across views and so are exactly what a cross-view objective is trained to *keep*
+  (inflating this denominator, flattering reconstruction).  On the measured runs the
+  two bracket ``brain_size`` at [1.1x, 8.3x] — an order of magnitude apart.  Report
+  both bounds, or use the scale-free metrics below, which need no denominator at all
+  (``rank_signal``, ``spectral_gap``, ``max_alias``, ``id_acc``/recall,
+  ``concentration``, ``gap_frac``) and are the only genuinely neutral comparisons.
 * ``pop_snr`` — ``||mean_i Delta_j||`` over the sign-flip null row norm: the
   population-level version, and the quantity ``rank_signal`` actually thresholds.
 * ``concentration`` — ``in_mass / uniform``.  ``in_mass`` alone conflates locality
@@ -114,15 +120,25 @@ Two, and they answer different questions.
 
 Caveats
 -------
+* **The renderer clamps, so some interventions are no-ops.**  With
+  ``clean_content`` off, ``render_structure`` applies ``clamp(-1, 1)`` to every
+  ``z_content`` entry, so for a sample with ``|z_j| > 1`` both conditions clamp to the
+  same value and the image is bit-identical.  Measured on the causal generator at
+  ``eps=0.5``: **7-12% of samples fully saturated and 27-50% partially**, varying by
+  factor (0% for ``lesion_z``, 12% for ``lesion_x``).  Those samples contribute an
+  exact zero to every mean, diluting ``pop_snr`` and ``consist``.  ``active_frac``
+  reports it per factor.  Cross-MODEL comparisons survive (both models see identical
+  images); cross-FACTOR ones do not — use ``latent_per_image``.  Lower ``eps`` or use
+  ``--synthetic-clean-content`` (tanh, monotone, no saturation) to remove it.
 * ``eps`` must be small enough that the first-order reading holds and large enough
   to clear the noise null.  ``--linearity-check`` re-measures response norms at
-  ``eps/2``; the ratio should be ~2.  Below 2 has **two** causes and they need
-  opposite responses — read the ratio together with ``snr_content``:
-  saturation (a renderer floor/ceiling, as documented for the ventricle) when
-  ``snr`` is high, in which case shrink ``eps``; or simply noise-limited when
-  ``snr ~ 1``, since a response of ``s + n`` at ``eps`` and ``s/2 + n`` at ``eps/2``
-  gives a ratio tending to 1 as ``n`` dominates, in which case ``eps`` is fine and
-  the factor is just weak.
+  ``eps/2``; the ratio should be ~2.  Below 2 has **three** causes, separable by
+  reading the ratio with ``active_frac`` and ``snr_content``: clamp saturation
+  (``active_frac`` < 1 — the dominant cause on this generator); genuine encoder
+  saturation when ``snr`` is high and ``active_frac`` is 1, in which case shrink
+  ``eps``; or noise-limited when ``snr ~ 1``, since ``s + n`` at ``eps`` against
+  ``s/2 + n`` at ``eps/2`` tends to 1 as ``n`` dominates — there ``eps`` is fine and
+  the factor is simply weak.
 * The normalization mode matters and is not cosmetic.  Under ``per_sample``
   z-scoring the normalizer partially cancels interventions on global intensity,
   so a low ``gain`` response is a property of the *pipeline*, not only the
@@ -359,9 +375,20 @@ def collect_responses(
         ca, sa, grid = _encode_all(x1a, x2a)
         cb, sb, _ = _encode_all(x1b, x2b)
 
+        # Per-sample image-space response. Two uses, both of which the latent-side
+        # numbers need: (a) the generator's effect size for this factor at this eps,
+        # so cross-FACTOR comparisons can divide it out — eps is in latent units and
+        # each factor's renderer coefficient differs; (b) saturation detection.  With
+        # clean_content off, render_structure applies clamp(-1, 1), so for a sample
+        # whose |z_j| already exceeds 1 both conditions clamp to the same value and
+        # the intervention is a literal no-op (bit-identical image, zero norm).
+        _img = (x1b - x1a).reshape(len(x1b), -1)
+        _img_norm = _img.norm(dim=1).float().numpy()
+
         out[name] = {
             "content": cb - ca,
             "style": (sb - sa) if (sa is not None and sb is not None) else None,
+            "image_norm": _img_norm,
             # Image-space response: the factor's ground-truth influence field, with
             # no hard-coded knowledge of the renderer.
             "image": (x1b - x1a).abs().mean(dim=0).float().numpy(),
@@ -580,7 +607,14 @@ def identification_accuracy(responses, names, key="content", n_folds=5, seed=0):
     """
     x = np.stack([_flat(responses[n][key]) for n in names])  # (J, N, dim)
     j, n, _ = x.shape
-    x = x / np.clip(np.linalg.norm(x, axis=2, keepdims=True), 1e-12, None)
+    norms = np.linalg.norm(x, axis=2)
+    # A sample whose response is EXACTLY zero carries no information: the renderer's
+    # clamp mapped both conditions to the same value, so nothing was measured. It must
+    # be dropped, not scored — normalising it leaves the zero vector, every cosine is
+    # then 0.0, and argmax silently returns class 0, marking every other factor wrong
+    # and inflating class 0's recall by its own saturation rate.
+    valid = norms > 0
+    x = x / np.clip(norms[:, :, None], 1e-12, None)
     rng = np.random.RandomState(seed)
     folds = rng.permutation(n) % n_folds
     confusion = np.zeros((j, j), dtype=np.int64)
@@ -588,10 +622,17 @@ def identification_accuracy(responses, names, key="content", n_folds=5, seed=0):
         tr, te = folds != f, folds == f
         if not tr.any() or not te.any():
             continue
-        cent = x[:, tr, :].mean(1)
+        # Centroids from valid training samples only (zeros would just shrink them,
+        # which cosine ignores, but keep it explicit).
+        cent = np.stack(
+            [x[c, tr & valid[c], :].mean(0) if (tr & valid[c]).any() else np.zeros(x.shape[2]) for c in range(j)]
+        )
         cent = cent / np.clip(np.linalg.norm(cent, axis=1, keepdims=True), 1e-12, None)
         for cls in range(j):
-            pred = (x[cls, te, :] @ cent.T).argmax(1)
+            sel = te & valid[cls]
+            if not sel.any():
+                continue
+            pred = (x[cls, sel, :] @ cent.T).argmax(1)
             for p in pred:
                 confusion[cls, int(p)] += 1
     totals = confusion.sum(axis=1)
@@ -654,6 +695,20 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
             # comparable statistic across factors.
             "concentration": float(in_mass / uniform) if uniform and uniform > 0 else float("nan"),
         }
+        # Generator effect size and saturation, from the image-space response.
+        img = d.get("image_norm")
+        if img is not None and len(img):
+            img = np.asarray(img, dtype=np.float64)
+            per_factor[name]["image_resp"] = float(img.mean())
+            # An exactly-zero image difference means the renderer's clamp(-1,1) mapped
+            # both conditions to the same value: the intervention did not happen for
+            # that sample, and it contributes a pure zero to every mean below.
+            per_factor[name]["active_frac"] = float((img > 0).mean())
+            # Latent response per unit of image change — divides out the fact that eps
+            # is in latent units while each factor's renderer coefficient differs.
+            # Cross-FACTOR comparisons need this; cross-MODEL ones do not (both models
+            # see identical images), which is why it is reported separately.
+            per_factor[name]["latent_per_image"] = float(rc / img.mean()) if img.mean() > 0 else float("nan")
 
     # The render-noise null is NOT neutral between objectives: the two views differ
     # only in modality and in the render-noise seed, so a cross-view contrastive loss
@@ -729,6 +784,14 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
                 "spectral_gap_at": gap_k,
                 "spectral_gap_ratio": gap_ratio,
                 "cond_number": float(sv[0] / sv[-1]) if sv[-1] > 0 else float("inf"),
+                # cond_number is set by sv[-1], which belongs to whichever directions are
+                # dead OR merely not-estimable-by-mean (position coordinates). Reporting it
+                # as "anisotropy" then double-counts a measurement artifact this same report
+                # flags. cond_live restricts to the live subspace and is the comparable one.
+                "cond_live": (
+                    float(sv[0] / sv[gap_k - 1]) if gap_k and gap_k <= len(sv) and sv[gap_k - 1] > 0 else float("nan")
+                ),
+                "cond_live_k": gap_k,
                 "alias_matrix": alias.tolist(),
                 "alias_floor": alias_floor(null["content"], len(present)),
                 "id_acc": float(acc),
@@ -819,10 +882,22 @@ def print_report(rows, baseline_name=None):
         print("  snr_c: per-SAMPLE, vs render noise   snr_nu: vs the shared nuisance field")
         print("  pop_snr: ||mean response|| vs the null row norm — what rank_signal thresholds")
         print("  conc = in_mass / uniform, the support-size-corrected locality number")
+        print("  act  = fraction of samples where the intervention CHANGED the image at all")
+        _sat = [f for f, m in row["per_factor"].items() if (m.get("active_frac") or 1.0) < 0.98]
+        if _sat:
+            print(
+                f"  ! saturated targets (act < 0.98): {', '.join(_sat)}\n"
+                "    render_structure clamps z to [-1,1] when clean_content is off, so for samples\n"
+                "    with |z_j| > 1 both conditions clamp to the same value and the intervention is a\n"
+                "    NO-OP. Those samples contribute an exact zero to every mean, diluting pop_snr and\n"
+                "    consist, and they are the main reason lin sits below 2. Cross-MODEL comparisons\n"
+                "    survive (identical images); cross-FACTOR ones need latent_per_image (in the CSV).\n"
+                "    Fix by lowering eps or training/evaluating with --synthetic-clean-content (tanh)."
+            )
         print("  '~' on max_alias = at or below the null floor, i.e. not distinguishable from unrelated")
         has_lin = any("linearity_ratio" in m for m in row["per_factor"].values())
         hdr = (
-            f"  {'target':<18}{'snr_c':>8}{'snr_nu':>8}{'pop_snr':>9}{'snr_s':>8}{'consist':>9}"
+            f"  {'target':<18}{'act':>6}{'snr_c':>8}{'snr_nu':>8}{'pop_snr':>9}{'snr_s':>8}{'consist':>9}"
             f"{'gap_frac':>10}{'conc':>8}{'rho_loc':>9}{'max_alias':>11}{'nuis_cos':>10}"
             + (f"{'lin(~2)':>9}" if has_lin else "")
         )
@@ -840,7 +915,8 @@ def print_report(rows, baseline_name=None):
                 if al is not None and floor is not None and np.isfinite(al) and al <= floor:
                     al_s = al_s.strip() + "~"
                 print(
-                    f"  {fn:<18}{_f(m['snr_content'], 2):>8}{_f(m.get('snr_nuisance'), 2):>8}"
+                    f"  {fn:<18}{_f(m.get('active_frac'), 2):>6}"
+                    f"{_f(m['snr_content'], 2):>8}{_f(m.get('snr_nuisance'), 2):>8}"
                     f"{_f(m.get('pop_snr'), 1):>9}{_f(m['snr_style'], 2):>8}"
                     f"{_f(m['consistency']):>9}{_f(m['gap_frac']):>10}"
                     f"{_f(m.get('concentration'), 1):>8}{_f(m['rho_loc']):>9}"
@@ -868,7 +944,10 @@ def print_report(rows, baseline_name=None):
             print("    singular values: " + "  ".join(_f(v, 3) for v in row["singular_values"]))
             gk, gr = row.get("spectral_gap_at"), row.get("spectral_gap_ratio")
             print(
-                f"    largest spectral gap: {gr:.1f}x after direction {gk}   condition number {_f(row['cond_number'], 1)}"
+                f"    largest spectral gap: {gr:.1f}x after direction {gk}   "
+                f"condition number {_f(row.get('cond_live'), 1)} on the live top-{row.get('cond_live_k')} "
+                f"({_f(row['cond_number'], 1)} over all {row['rank_target']}, "
+                "inflated by the not-estimable directions)"
             )
             if gk is not None and np.isfinite(gr):
                 if gr >= 3.0 and gk < row["rank_target"]:
@@ -911,6 +990,8 @@ def print_report(rows, baseline_name=None):
                     f"      {'factor':<20}{'pop_snr':>9}{'resid':>8}{'recall':>8}{'max_alias':>11}   "
                     f"verdict  (recall chance {_f(chance, 2)})"
                 )
+                if any((m.get("active_frac") or 1.0) < 1.0 for m in row["per_factor"].values()):
+                    print("      (recall is computed on MEASURED samples only — clamp no-ops are dropped, not scored)")
                 ranked = sorted(
                     row["content_names"],
                     key=lambda n: -(row["per_factor"][n].get("subspace_residual") or 0.0),
@@ -996,6 +1077,35 @@ def print_report(rows, baseline_name=None):
                 win = (delta > 0) if better == "higher" else (delta < 0)
                 mark = "WIN " if abs(delta) > 1e-9 and win else ("LOSS" if abs(delta) > 1e-9 else "TIE ")
                 print(f"    {mark}  {label:<26}{_f(mv)}  vs  {_f(bv)}   (delta {delta:+.3f}, {better} is better)")
+            # Which factors each model encodes best. Scale-free and denominator-free, so
+            # unlike every snr ratio it cannot be moved by the choice of null — but note
+            # both models see IDENTICAL images, so part of any agreement is the
+            # generator's own effect sizes rather than the objectives agreeing.
+            _rank = lambda r: [  # noqa: E731
+                n for n in sorted(r["content_names"], key=lambda n: -(r["per_factor"][n].get("pop_snr") or 0.0))
+            ]
+            ra, rb = _rank(r), _rank(base)
+            common = [n for n in ra if n in rb]
+            if len(common) >= 3:
+                pa = {n: i for i, n in enumerate(ra)}
+                pb = {n: i for i, n in enumerate(rb)}
+                disc = sum(
+                    1
+                    for i in range(len(common))
+                    for j in range(i + 1, len(common))
+                    if (pa[common[i]] - pa[common[j]]) * (pb[common[i]] - pb[common[j]]) < 0
+                )
+                npairs = len(common) * (len(common) - 1) // 2
+                tau = 1.0 - 2.0 * disc / npairs if npairs else float("nan")
+                print(f"\n    factor ordering by pop_snr (Kendall tau {tau:+.2f}, {disc}/{npairs} pairs discordant)")
+                print(f"      {'rank':<6}{r['name'][:26]:<28}{base['name'][:26]:<28}")
+                for i in range(max(len(ra), len(rb))):
+                    a = f"{ra[i]} ({_f(r['per_factor'][ra[i]].get('pop_snr'), 1)})" if i < len(ra) else ""
+                    b = f"{rb[i]} ({_f(base['per_factor'][rb[i]].get('pop_snr'), 1)})" if i < len(rb) else ""
+                    print(
+                        f"      {i + 1:<6}{a:<28}{b:<28}{'' if a.split(' ')[0] == b.split(' ')[0] else '  <- differs'}"
+                    )
+
             # Nuisance-relative throughout: both snr_content and pop_snr are normalised
             # by the render-noise null, which the contrastive objective is trained to
             # shrink. pop_snr_nuisance is the sensitive AND objective-neutral one.

@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-04T17:13:44Z
-# Git SHA: 360804d
+# Generated at: 2026-08-04T18:17:50Z
+# Git SHA: 521068d
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-clean-content-128-lambda
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -63,7 +63,6 @@ fi
     --bt-lambda 1 \
     --channels-last \
     --checkpoint-steps 1000 \
-    --clean-content \
     --content-dim 128 \
     --content-ratios 0.95 \
     --content-size 44 \
@@ -108,6 +107,7 @@ fi
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
+    --synthetic-clean-content \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \

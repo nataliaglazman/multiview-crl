@@ -88,4 +88,4 @@ deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
 
-clean_content: true
+synthetic_clean_content: true
