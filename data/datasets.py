@@ -714,6 +714,17 @@ class SyntheticBrainDataset(MultiviewDataset):
             mask_t1 = (x_v1 > 0.05).float()
             mask_t2 = (x_v2 > 0.05).float()
 
+        x_v1, x_v2 = self.normalize_views(x_v1, x_v2, mask_t1, mask_t2)
+        return x_v1, x_v2, mask_t1, mask_t2, latents
+
+    def normalize_views(self, x_v1, x_v2, mask_t1, mask_t2):
+        """Apply the run's ``--synthetic-normalize`` mode to a rendered view pair.
+
+        Public because an interventional evaluator renders its own pairs and must
+        put them through the *identical* normalization the encoder saw in training —
+        the mode is not cosmetic (``per_sample`` divides out global gain, so an
+        intervention on a global factor is partly cancelled by the normalizer).
+        """
         if self.synthetic_normalize == "shared":
             m = mask_t1 > 0
             if m.any():
@@ -731,7 +742,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             x_v1 = self._znorm_nonzero(x_v1, mask_t1)
             x_v2 = self._znorm_nonzero(x_v2, mask_t2)
 
-        return x_v1, x_v2, mask_t1, mask_t2, latents
+        return x_v1, x_v2
 
     def _compute_fixed_reference(self, n_ref=64, scale_quantile=0.99):
         """Estimate global foreground centering/scaling constants.

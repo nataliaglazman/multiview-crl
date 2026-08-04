@@ -623,6 +623,53 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 z_content[idx] = weight * z_global.item() + self._HIER_RESIDUAL_SCALE * z_residuals[idx]
         return z_content, z_global, z_residuals
 
+    def sample_seed_for(self, idx):
+        """The per-sample RNG seed used by ``_pseudo_mri_item``.
+
+        Exposed so an interventional evaluator can re-render a sample with one
+        latent overwritten while keeping the *rendering* noise identical to the
+        observational draw.
+        """
+        return self.seed * 1000003 + idx
+
+    def render_pseudo_mri(self, z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed):
+        """Render a view pair from explicit latents. Deterministic given its inputs.
+
+        The single place that fixes the structure/modality call order, the
+        ``clean_content`` flag, the per-view modality names and the view-seed
+        convention, so ``_pseudo_mri_item`` and ``eval.interventional_identifiability``
+        cannot drift apart on any of them.
+
+        Returns ``(x_v1, x_v2, brain_mask)`` — unnormalized; the
+        ``SyntheticBrainDataset`` wrapper owns normalization.
+        """
+        device = torch.device("cpu")
+        with torch.no_grad():
+            tissue, lesion = self.renderer.render_structure(
+                z_content,
+                z_deformation,
+                z_fissure,
+                device=device,
+                clean=self.clean_content,
+            )
+            x_v1 = self.renderer.render_modality(
+                tissue,
+                lesion,
+                z_style_v1,
+                "T1",
+                view_seed=sample_seed * 2,
+                device=device,
+            )
+            x_v2 = self.renderer.render_modality(
+                tissue,
+                lesion,
+                z_style_v2,
+                "FLAIR",
+                view_seed=sample_seed * 2 + 1,
+                device=device,
+            )
+        return x_v1, x_v2, (tissue > 0).unsqueeze(0).float()
+
     def _pseudo_mri_item(self, idx):
         sample_seed = self.seed * 1000003 + idx
         sample_gen = torch.Generator().manual_seed(sample_seed)
@@ -674,33 +721,9 @@ class Synthetic3DDisentanglementDataset(Dataset):
         z_style_v1 = torch.randn(self.n_style, generator=sample_gen)
         z_style_v2 = torch.randn(self.n_style, generator=sample_gen)
 
-        device = torch.device("cpu")
-        with torch.no_grad():
-            tissue, lesion = self.renderer.render_structure(
-                z_content,
-                z_deformation,
-                z_fissure,
-                device=device,
-                clean=self.clean_content,
-            )
-            x_v1 = self.renderer.render_modality(
-                tissue,
-                lesion,
-                z_style_v1,
-                "T1",
-                view_seed=sample_seed * 2,
-                device=device,
-            )
-            x_v2 = self.renderer.render_modality(
-                tissue,
-                lesion,
-                z_style_v2,
-                "FLAIR",
-                view_seed=sample_seed * 2 + 1,
-                device=device,
-            )
-
-        brain_mask = (tissue > 0).unsqueeze(0).float()
+        x_v1, x_v2, brain_mask = self.render_pseudo_mri(
+            z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed
+        )
 
         latents = {
             "z_content": z_content,
