@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-03T21:17:58Z
-# Git SHA: 6721b01
+# Generated at: 2026-08-04T12:01:04Z
+# Git SHA: f78db38
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-independent-bt-gap-patch-128
+#SBATCH --job-name=synthetic-independent-baseline-final
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-independent-bt-gap-patch-128-%j.err
+#SBATCH --error=synthetic-independent-baseline-final-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -65,7 +65,7 @@ fi
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 44 \
+    --content-size 48 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
@@ -94,7 +94,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1 \
+    --scale-contrastive-loss 0 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -112,7 +112,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-independent-bt-gap-patch-128 \
+    --model-id synthetic-independent-baseline-final \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

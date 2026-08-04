@@ -781,6 +781,22 @@ def train_step(
                     _keys.append(_k_flat)
                 vqvae_model.enqueue(_keys, n_views=n_views)
 
+        # Non-finite guard. AMP's GradScaler skips a step whose GRADIENTS are inf/NaN, but a
+        # non-finite loss in the FORWARD is not caught by anything, and clip_grad_norm_ then
+        # spreads it: the total norm goes NaN and the rescale multiplies EVERY gradient by NaN,
+        # poisoning the model permanently. Zeroing here turns a fatal event into a skipped
+        # batch, and the message says which component went first so it is diagnosable in one run.
+        if not torch.isfinite(total_contrastive_loss):
+            _bad = [f"L{_l}={_v.item():.4g}" for _l, _v in enumerate(level_losses) if not torch.isfinite(_v)]
+            _feat_ok = all(bool(torch.isfinite(_e).all()) for _e in encoder_outputs)
+            logger.warning(
+                "[NaN] contrastive loss is non-finite — batch SKIPPED. "
+                f"levels={_bad or 'none (came from an auxiliary term)'} | "
+                f"encoder features finite={_feat_ok} | "
+                f"recon={recon_loss.item():.4g} vq={vq_loss.item():.4g}"
+            )
+            total_contrastive_loss = torch.zeros((), device=total_contrastive_loss.device)
+
         contrastive_loss = total_contrastive_loss
         total_loss = contrastive_loss + recon_loss + vq_loss
 
@@ -2055,11 +2071,14 @@ def main(args):
                         if f"Style/infonce_L{_li}" in step_moco_diag
                     ]
                     _style_str = f" | StyleNCE: {', '.join(_style_parts)}" if _style_parts else ""
-                    print(
+                    # logger, not print: print() only reaches stdout, which cluster schedulers
+                    # do not always capture — and when a loss goes non-finite these are the
+                    # numbers you need. TensorBoard renders NaN ambiguously (often as 0), so a
+                    # text record is the only unambiguous one.
+                    logger.info(
                         f"Step {step}: Total={accum_total:.4f} | "
                         f"Contrastive={accum_contrastive:.4f} | "
-                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}{_cb_str}{_gan_str}{_style_str}",
-                        flush=True,
+                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}{_cb_str}{_gan_str}{_style_str}"
                     )
 
                     _perf_window_steps += 1
