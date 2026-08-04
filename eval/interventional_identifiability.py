@@ -71,6 +71,11 @@ What is reported
   it did: a large gap at ``k`` means the remaining directions are genuinely dead,
   while no gap anywhere means the null threshold merely landed mid-spectrum and the
   rank will climb with ``N``.
+* ``subspace_residual`` — **which** factors the rank deficit belongs to.  Rank and
+  spectral gap are statements about the *span*, and singular vectors are mixtures of
+  factors, so neither names the degenerate ones; this reports each factor's energy
+  fraction outside the dominant subspace.  Read with ``pop_snr`` (they are coupled —
+  see the function docstring), not as an independent axis.
 * ``max_alias`` — largest ``|cos|`` between a factor's response direction and any
   other factor's.  A probe-free, fit-free DCI matrix.
 * ``id_acc`` — nearest-centroid cross-validated accuracy at identifying *which*
@@ -439,6 +444,37 @@ def signal_rank(r_matrix, null_response, n_rep=64, quantile=0.95, seed=0):
     return int((sv > thr).sum()), sv, thr
 
 
+def subspace_residual(r_matrix, k):
+    """Per-factor energy fraction lying OUTSIDE the top-``k`` response subspace.
+
+    ``signal_rank`` and ``spectral_gap`` are statements about the *span* of the ``J``
+    response directions — "effectively k-dimensional" — and singular vectors are
+    linear combinations of factors, so neither says **which** factors are degenerate.
+    This does: writing ``R = U diag(s) V^T`` with orthonormal ``V``, row ``j`` has
+    energy ``sum_m (U[j,m] s[m])**2``, and the part beyond ``k`` is the share that
+    does not fit in the dominant subspace.
+
+    **The residual is not independent of ``pop_snr``.**  A row is signal plus a mean
+    of ``N`` noise draws; the noise part is near-orthogonal to a ``k``-dimensional
+    subspace of a ``C*P``-dimensional space, so it lands almost entirely outside.
+    That gives ``resid ~ 1/pop_snr**2`` when the *signal* is inside the subspace, and
+    ``resid ~ 1`` when it is not.  Use the pair for **attribution** — which factors
+    sit in the dead space — not as two independent axes:
+
+    * ``resid ~ 1`` with ``pop_snr`` at the floor → **dead**: the whole row is noise.
+    * ``resid`` well below 1 with ``pop_snr`` at the floor → weak, but pointing inside
+      the dominant subspace; ``max_alias`` says which factor already owns it.
+    * ``resid`` high with ``pop_snr`` high → strong, on a direction of its own that the
+      top ``k`` do not cover.
+    """
+    u, sv, _ = np.linalg.svd(r_matrix, full_matrices=False)
+    k = int(np.clip(k, 1, len(sv)))
+    energy = (u * sv) ** 2  # (J, J): row j's energy along each singular direction
+    total = energy.sum(axis=1)
+    outside = energy[:, k:].sum(axis=1)
+    return np.where(total > 0, outside / np.where(total > 0, total, 1.0), np.nan)
+
+
 def spectral_gap(sv):
     """Largest drop between consecutive singular values → ``(k, ratio)``.
 
@@ -653,9 +689,18 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
                 "id_chance": float(chance),
             }
         )
+        # Attribute the rank deficit to factors. Anchor the subspace on the spectral
+        # gap when there is one (N-free); fall back to rank_signal when the spectrum
+        # decays smoothly and the gap position is meaningless.
+        resid_k = gap_k if (gap_k is not None and np.isfinite(gap_ratio) and gap_ratio >= 2.0) else rank
+        resid = subspace_residual(r, resid_k)
+        out["resid_k"] = int(resid_k)
+        out["resid_k_source"] = "spectral_gap" if resid_k == gap_k and gap_ratio >= 2.0 else "rank_signal"
+
         for k, name in enumerate(present):
             per_factor[name]["max_alias"] = float(alias[k].max())
             per_factor[name]["alias_with"] = present[int(alias[k].argmax())]
+            per_factor[name]["subspace_residual"] = float(resid[k])
 
         nz = [n for n in nuisance_names if n in responses]
         if nz:
@@ -784,6 +829,41 @@ def print_report(rows, baseline_name=None):
                     "    => necessary condition MET. Rank alone proves nothing further — read id_acc "
                     "and max_alias for whether the directions are usefully distinct."
                 )
+
+            # Rank is a statement about the SPAN; singular vectors are combinations of
+            # factors, so it never names the degenerate ones. This does.
+            rk = row.get("resid_k")
+            if rk is not None:
+                print(
+                    f"\n    WHICH FACTORS ARE OUTSIDE THE TOP-{rk} SUBSPACE  " f"(k from {row.get('resid_k_source')})"
+                )
+                print("      (resid ~ 1/pop_snr^2 is expected when the response IS inside; the two")
+                print("       columns are not independent — read them together, for attribution)")
+                print(f"      {'factor':<20}{'pop_snr':>9}{'resid':>8}{'max_alias':>11}   verdict")
+                ranked = sorted(
+                    row["content_names"],
+                    key=lambda n: -(row["per_factor"][n].get("subspace_residual") or 0.0),
+                )
+                dead, inside = [], []
+                for fn in ranked:
+                    m = row["per_factor"][fn]
+                    rs, ps = m.get("subspace_residual"), m.get("pop_snr")
+                    verdict = ""
+                    if rs is not None and ps is not None and np.isfinite(rs) and np.isfinite(ps):
+                        if ps < 1.5 and rs > 0.9:
+                            verdict = "DEAD — the whole row is noise"
+                            dead.append(fn)
+                        elif ps < 1.5:
+                            verdict = f"weak, but inside — see max_alias ({m.get('alias_with')})"
+                            inside.append(fn)
+                        elif rs > 0.5:
+                            verdict = "strong, on a direction the top-k do not cover"
+                    print(f"      {fn:<20}{_f(ps, 1):>9}{_f(rs):>8}{_f(m.get('max_alias')):>11}   {verdict}")
+                if dead:
+                    print(f"      => the dead directions are: {', '.join(dead)}")
+                if inside:
+                    print(f"      => weak but inside the dominant subspace: {', '.join(inside)}")
+
             print(
                 f"\n    intervention id_acc {_f(row['id_acc'])} (chance {_f(row['id_chance'])})  "
                 f"— naming the intervened factor from ONE response"
