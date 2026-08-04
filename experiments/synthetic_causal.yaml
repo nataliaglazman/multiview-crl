@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-baseline
+tag: synthetic-causal-clean-content-128-lambda
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
@@ -59,13 +59,13 @@ patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
-bt_gap_lambda: 1               # NOT 0.005 — see the calibration note above
+bt_gap_lambda: 0.5               # NOT 0.005 — see the calibration note above
 
-scale_contrastive_loss: 0      # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_contrastive_loss: 1      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
 batch_size: 128
 
-content_size: 48              # match the baseline; fixes the 44-vs-48 confound
+content_size: 44              # match the baseline; fixes the 44-vs-48 confound
 
 # unchanged from synthetic_causal.yaml so the comparison stays valid
 synthetic_normalize: fixed_reference

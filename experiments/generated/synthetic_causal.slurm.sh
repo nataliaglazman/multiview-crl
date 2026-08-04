@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-04T17:11:10Z
-# Git SHA: e9d643c
+# Generated at: 2026-08-04T17:13:44Z
+# Git SHA: 360804d
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-baseline
+#SBATCH --job-name=synthetic-causal-clean-content-128-lambda
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-baseline-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-clean-content-128-lambda-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -58,7 +58,7 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 1 \
+    --bt-gap-lambda 0.5 \
     --bt-gap-weight 1 \
     --bt-lambda 1 \
     --channels-last \
@@ -66,7 +66,7 @@ fi
     --clean-content \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 48 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
@@ -95,7 +95,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 1 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -114,7 +114,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-baseline \
+    --model-id synthetic-causal-clean-content-128-lambda \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
