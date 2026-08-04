@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-04T13:48:12Z
-# Git SHA: d858d38
+# Generated at: 2026-08-04T14:08:10Z
+# Git SHA: 42a3e49
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-24-baseline
+#SBATCH --job-name=synthetic-independent-barlow-128
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-24-baseline-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-independent-barlow-128-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -58,14 +58,14 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 1 \
+    --bt-gap-lambda 0.5 \
     --bt-gap-weight 1 \
     --bt-lambda 1 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 24 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
@@ -94,7 +94,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 1 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -104,7 +104,6 @@ fi
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --style-injection-mode input \
-    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
@@ -113,15 +112,15 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-24-baseline \
+    --model-id synthetic-independent-barlow-128 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 24 \
-    --vqvae-hidden-channels 24 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
