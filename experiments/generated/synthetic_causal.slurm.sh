@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-04T15:18:41Z
-# Git SHA: 41636b0
+# Generated at: 2026-08-04T17:11:10Z
+# Git SHA: e9d643c
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-24-baseline
+#SBATCH --job-name=synthetic-causal-clean-content-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-24-baseline-%j.err
+#SBATCH --error=synthetic-causal-clean-content-baseline-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -63,9 +63,10 @@ fi
     --bt-lambda 1 \
     --channels-last \
     --checkpoint-steps 1000 \
+    --clean-content \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 24 \
+    --content-size 48 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
@@ -113,15 +114,15 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-24-baseline \
+    --model-id synthetic-causal-clean-content-baseline \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 24 \
-    --vqvae-hidden-channels 24 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
