@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-gap-lambda-05-128
+tag: synthetic-causal-bt-gap-patch-256-lambda
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
@@ -63,7 +63,7 @@ bt_gap_lambda: 0.5               # NOT 0.005 — see the calibration note above
 
 scale_contrastive_loss: 1      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
-batch_size: 128
+batch_size: 256
 
 content_size: 44               # match the baseline; fixes the 44-vs-48 confound
 

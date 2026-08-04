@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-04T14:16:14Z
-# Git SHA: 4567e79
+# Generated at: 2026-08-04T14:33:44Z
+# Git SHA: dfc525d
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-gap-lambda-05-128
+#SBATCH --job-name=synthetic-causal-bt-gap-patch-256-lambda
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-gap-lambda-05-128-%j.err
+#SBATCH --error=synthetic-causal-bt-gap-patch-256-lambda-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -57,7 +57,7 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 128 \
+    --batch-size 256 \
     --bt-gap-lambda 0.5 \
     --bt-gap-weight 1 \
     --bt-lambda 1 \
@@ -113,7 +113,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-gap-lambda-05-128 \
+    --model-id synthetic-causal-bt-gap-patch-256-lambda \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
