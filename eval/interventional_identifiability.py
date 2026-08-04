@@ -168,7 +168,14 @@ NUISANCE_PREFIX = "~"
 
 
 def _resolve_blocks(model_out, level, all_content):
-    """Content / style channel indices for ``level`` from the run's own Gumbel mask."""
+    """Content / style channel indices for ``level`` from the run's own Gumbel mask.
+
+    Returns ``(content_idx, style_idx, reason)``.  ``reason`` explains an *absent*
+    style block, because "no style metrics" has three very different causes and the
+    report should never leave them ambiguous: the caller merged the blocks on
+    purpose, the run's mask does not cover this level, or the mask covers it but
+    assigns every channel to content.
+    """
     import torch
 
     from eval.dci import _parse_content_indices
@@ -176,15 +183,31 @@ def _resolve_blocks(model_out, level, all_content):
     feat = model_out[2][level]
     n_channels = feat.shape[1]
     soft_masks = model_out[6] if len(model_out) > 6 else {}
+    has_mask = isinstance(soft_masks, dict) and level in soft_masks
     content_idx = None
-    if isinstance(soft_masks, dict) and level in soft_masks:
+    if has_mask:
         mask = soft_masks[level]
         mask = mask[0] if isinstance(mask, tuple) else mask
         content_idx = _parse_content_indices(torch.where(mask.bool())[-1])
-    if all_content or not content_idx:
+
+    reason = None
+    if all_content:
+        reason = "merged on purpose (baseline scored all-content; pass --baseline-per-block to split)"
+        content_idx = list(range(n_channels))
+    elif not content_idx:
+        levels = sorted(soft_masks) if isinstance(soft_masks, dict) else []
+        reason = (
+            f"the run's forward pass emits no content/style mask at level {level} "
+            f"(masked levels present: {levels or 'none'}) — --baseline-per-block cannot split "
+            "a model that has no split; check --content-style-levels and style_size in settings.json"
+        )
         content_idx = list(range(n_channels))
     style_idx = sorted(set(range(n_channels)) - set(content_idx))
-    return content_idx, style_idx
+    if style_idx:
+        reason = None
+    elif reason is None:
+        reason = f"the mask at level {level} assigns all {n_channels} channels to content (style_size=0)"
+    return content_idx, style_idx, reason
 
 
 def _encode_pair(model, x1, x2, level, device, all_content, field_pool=None, blocks=None):
@@ -215,7 +238,7 @@ def _encode_pair(model, x1, x2, level, device, all_content, field_pool=None, blo
     grid = tuple(feat.shape[2:])
     if blocks is None:
         blocks = _resolve_blocks(out, level, all_content)
-    content_idx, style_idx = blocks
+    content_idx, style_idx = blocks[0], blocks[1]
 
     b = feat.shape[0] // 2
     flat = feat.reshape(feat.shape[0], feat.shape[1], -1).float().cpu().numpy()
@@ -547,13 +570,20 @@ def identification_accuracy(responses, names, key="content", n_folds=5, seed=0):
     with ``N`` samples per class any fitted probe is capacity-bound, and the
     question here is whether the responses are *separated*, not whether a probe can
     be made to separate them.
+
+    Returns ``(accuracy, chance, per_class_recall, confusion)``.  The per-class recall
+    matters as much as the total: it is a **per-sample** measure, so a factor whose
+    responses are individually informative but whose *mean* direction cancels — a
+    position coordinate, where the intervention moves a structure from wherever it
+    currently sits — can score well here while reading dead on ``pop_snr``.  When the
+    two disagree, the mean-direction metrics are the ones that do not apply.
     """
     x = np.stack([_flat(responses[n][key]) for n in names])  # (J, N, dim)
     j, n, _ = x.shape
     x = x / np.clip(np.linalg.norm(x, axis=2, keepdims=True), 1e-12, None)
     rng = np.random.RandomState(seed)
     folds = rng.permutation(n) % n_folds
-    correct = 0
+    confusion = np.zeros((j, j), dtype=np.int64)
     for f in range(n_folds):
         tr, te = folds != f, folds == f
         if not tr.any() or not te.any():
@@ -562,8 +592,12 @@ def identification_accuracy(responses, names, key="content", n_folds=5, seed=0):
         cent = cent / np.clip(np.linalg.norm(cent, axis=1, keepdims=True), 1e-12, None)
         for cls in range(j):
             pred = (x[cls, te, :] @ cent.T).argmax(1)
-            correct += int((pred == cls).sum())
-    return correct / float(j * n), 1.0 / j
+            for p in pred:
+                confusion[cls, int(p)] += 1
+    totals = confusion.sum(axis=1)
+    recall = np.divide(np.diag(confusion), totals, out=np.full(j, np.nan), where=totals > 0)
+    acc = float(np.diag(confusion).sum() / max(confusion.sum(), 1))
+    return acc, 1.0 / j, recall, confusion
 
 
 def locality(d_content, image_response, grid, support_frac=0.9):
@@ -638,6 +672,14 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
     pop, pop_floor = population_snr(responses, list(responses), null["content"])
     for name, v in pop.items():
         per_factor[name]["pop_snr"] = v
+    # pop_snr is normalised by the render-noise row norm, so it carries the same
+    # objective bias as snr_content. Renormalise on the nuisance response for the
+    # cross-model comparison, exactly as snr_nuisance does for snr_content.
+    nuis_pop = max((pop.get(n, float("nan")) for n in nuis_present), default=float("nan"))
+    for name in per_factor:
+        per_factor[name]["pop_snr_nuisance"] = (
+            float(pop[name] / nuis_pop) if np.isfinite(nuis_pop) and nuis_pop > 0 else float("nan")
+        )
 
     present = [n for n in content_names if n in responses]
     # With one channel per normalization group the encoder output has an exactly
@@ -656,7 +698,11 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
         "null_resp_style": float(null_s),
         "null_row_norm": float(pop_floor),
         "nuisance_floor": float(nuis_floor),
+        "nuisance_pop_snr": float(nuis_pop),
         "nuisance_ref": nuis_ref,
+        # LOO consistency of the render-noise responses: the value a factor with no
+        # common direction across samples would show.
+        "consistency_floor": loo_consistency(null["content"]),
         # Chance level for gap_frac: a spatially uncorrelated response puts 1/P of its
         # energy in the position mean, so gap_frac ~ 1/P means "no global component",
         # not "a small one".
@@ -673,7 +719,7 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
         gap_k, gap_ratio = spectral_gap(sv)
         alias = alias_matrix(r)
         np.fill_diagonal(alias, 0.0)
-        acc, chance = identification_accuracy(responses, present)
+        acc, chance, recall, confusion = identification_accuracy(responses, present)
         out.update(
             {
                 "rank_signal": rank,
@@ -687,6 +733,7 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
                 "alias_floor": alias_floor(null["content"], len(present)),
                 "id_acc": float(acc),
                 "id_chance": float(chance),
+                "id_confusion": confusion.tolist(),
             }
         )
         # Attribute the rank deficit to factors. Anchor the subspace on the spectral
@@ -701,6 +748,17 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
             per_factor[name]["max_alias"] = float(alias[k].max())
             per_factor[name]["alias_with"] = present[int(alias[k].argmax())]
             per_factor[name]["subspace_residual"] = float(resid[k])
+            per_factor[name]["id_recall"] = float(recall[k])
+            # The mean direction is the input to pop_snr, subspace_residual and every
+            # alias number. It is only a valid summary when the per-sample responses
+            # share a direction. A factor that is separable per-sample (id_recall well
+            # above chance) while its mean cancels (pop_snr at the floor) is not
+            # unencoded — it is encoded in a way this family of statistics cannot see,
+            # which is the generic situation for a POSITION coordinate: the response is
+            # a local change at wherever the structure currently sits.
+            per_factor[name]["direction_estimable"] = bool(
+                not (pop[name] < 1.5 and np.isfinite(recall[k]) and recall[k] > 2.0 * chance)
+            )
 
         nz = [n for n in nuisance_names if n in responses]
         if nz:
@@ -739,8 +797,17 @@ def print_report(rows, baseline_name=None):
         )
         print(
             f"  nuisance floor: {_f(row.get('nuisance_floor'))} ({row.get('nuisance_ref')})   "
-            f"gap_frac chance (1/P): {_f(row.get('gap_frac_chance'), 4)}"
+            f"pop {_f(row.get('nuisance_pop_snr'), 1)}   "
+            f"gap_frac chance (1/P): {_f(row.get('gap_frac_chance'), 4)}   "
+            f"consist floor: {_f(row.get('consistency_floor'))}"
         )
+        if row.get("style_block_reason"):
+            print(f"  ! no style block — {row['style_block_reason']}")
+        if np.isfinite(row.get("nuisance_pop_snr", float("nan"))) and row["nuisance_pop_snr"] < 1.0:
+            print(
+                "  ! the nuisance response is itself at the noise floor, so pop_snr_nuisance uses a\n"
+                "    noisy denominator — treat those ratios as indicative, not precise."
+            )
         print(
             "  ! the render-noise null is not objective-neutral — the two views differ only in\n"
             "    modality and noise seed, so a cross-view contrastive loss is trained to be\n"
@@ -839,18 +906,25 @@ def print_report(rows, baseline_name=None):
                 )
                 print("      (resid ~ 1/pop_snr^2 is expected when the response IS inside; the two")
                 print("       columns are not independent — read them together, for attribution)")
-                print(f"      {'factor':<20}{'pop_snr':>9}{'resid':>8}{'max_alias':>11}   verdict")
+                chance = row.get("id_chance", float("nan"))
+                print(
+                    f"      {'factor':<20}{'pop_snr':>9}{'resid':>8}{'recall':>8}{'max_alias':>11}   "
+                    f"verdict  (recall chance {_f(chance, 2)})"
+                )
                 ranked = sorted(
                     row["content_names"],
                     key=lambda n: -(row["per_factor"][n].get("subspace_residual") or 0.0),
                 )
-                dead, inside = [], []
+                dead, inside, not_est = [], [], []
                 for fn in ranked:
                     m = row["per_factor"][fn]
-                    rs, ps = m.get("subspace_residual"), m.get("pop_snr")
+                    rs, ps, rc = m.get("subspace_residual"), m.get("pop_snr"), m.get("id_recall")
                     verdict = ""
                     if rs is not None and ps is not None and np.isfinite(rs) and np.isfinite(ps):
-                        if ps < 1.5 and rs > 0.9:
+                        if not m.get("direction_estimable", True):
+                            verdict = "response present, MEAN DIRECTION NOT ESTIMABLE"
+                            not_est.append(fn)
+                        elif ps < 1.5 and rs > 0.9:
                             verdict = "DEAD — the whole row is noise"
                             dead.append(fn)
                         elif ps < 1.5:
@@ -858,11 +932,21 @@ def print_report(rows, baseline_name=None):
                             inside.append(fn)
                         elif rs > 0.5:
                             verdict = "strong, on a direction the top-k do not cover"
-                    print(f"      {fn:<20}{_f(ps, 1):>9}{_f(rs):>8}{_f(m.get('max_alias')):>11}   {verdict}")
+                    print(
+                        f"      {fn:<20}{_f(ps, 1):>9}{_f(rs):>8}{_f(rc, 2):>8}"
+                        f"{_f(m.get('max_alias')):>11}   {verdict}"
+                    )
                 if dead:
                     print(f"      => the dead directions are: {', '.join(dead)}")
                 if inside:
                     print(f"      => weak but inside the dominant subspace: {', '.join(inside)}")
+                if not_est:
+                    print(
+                        f"      => {', '.join(not_est)}: separable per-sample but the mean cancels, so\n"
+                        "         pop_snr / resid / max_alias DO NOT APPLY to them and 'dead' is unproven.\n"
+                        "         Expected for position coordinates (the response is a local change at\n"
+                        "         wherever the structure currently sits). Read recall and conc instead."
+                    )
 
             print(
                 f"\n    intervention id_acc {_f(row['id_acc'])} (chance {_f(row['id_chance'])})  "
@@ -912,18 +996,23 @@ def print_report(rows, baseline_name=None):
                 win = (delta > 0) if better == "higher" else (delta < 0)
                 mark = "WIN " if abs(delta) > 1e-9 and win else ("LOSS" if abs(delta) > 1e-9 else "TIE ")
                 print(f"    {mark}  {label:<26}{_f(mv)}  vs  {_f(bv)}   (delta {delta:+.3f}, {better} is better)")
-            # snr_nuisance, not snr_content: see the note above the per-factor table.
-            print("\n    per-factor snr_nuisance — objective-neutral floor (snr_content in brackets):")
+            # Nuisance-relative throughout: both snr_content and pop_snr are normalised
+            # by the render-noise null, which the contrastive objective is trained to
+            # shrink. pop_snr_nuisance is the sensitive AND objective-neutral one.
+            print("\n    per-factor pop_snr_nuisance — sensitive and objective-neutral")
+            print("    (snr_nuisance in brackets; '!' = mean direction not estimable, ratio meaningless)")
             for fn in r["content_names"]:
                 if fn not in base["per_factor"]:
                     continue
-                mv, bv = r["per_factor"][fn]["snr_nuisance"], base["per_factor"][fn]["snr_nuisance"]
-                mc, bc = r["per_factor"][fn]["snr_content"], base["per_factor"][fn]["snr_content"]
-                d = mv - bv
-                flip = "  <- sign flips vs snr_c" if np.isfinite(d) and d * (mc - bc) < 0 else ""
+                mm, bm = r["per_factor"][fn], base["per_factor"][fn]
+                mv, bv = mm.get("pop_snr_nuisance", float("nan")), bm.get("pop_snr_nuisance", float("nan"))
+                ms, bs = mm["snr_nuisance"], bm["snr_nuisance"]
+                flag = (
+                    "  !" if not (mm.get("direction_estimable", True) and bm.get("direction_estimable", True)) else ""
+                )
                 print(
-                    f"      {fn:<20}{_f(mv, 2):>8}  {_f(bv, 2):>8}   {d:+.2f}"
-                    f"    [{_f(mc, 2):>6} {_f(bc, 2):>6}  {mc - bc:+.2f}]{flip}"
+                    f"      {fn:<20}{_f(mv, 2):>8}  {_f(bv, 2):>8}   {mv - bv:+.2f}"
+                    f"    [{_f(ms, 2):>6} {_f(bs, 2):>6}  {ms - bs:+.2f}]{flag}"
                 )
 
 
@@ -1149,6 +1238,9 @@ def main():
                     "num_samples": cli.num_samples,
                     "grid": list(grid),
                     "baseline_all_content": all_content,
+                    # Why the style block is missing, when it is: "flag not passed" and
+                    # "the model has no split" look identical in the output otherwise.
+                    "style_block_reason": blocks[2] if len(blocks) > 2 else None,
                     "normalize": getattr(run_args, "synthetic_normalize", "per_sample"),
                     "causal_base": (not cli.iid_base) and bool(getattr(run_args, "synthetic_causal", False)),
                     "generator": "legacy_pre_7ac56a3" if cli.old_generator else "current",
