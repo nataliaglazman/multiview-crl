@@ -161,13 +161,19 @@ def _resolve_blocks(model_out, level, all_content):
     return content_idx, style_idx
 
 
-def _encode_pair(model, x1, x2, level, device, all_content, field_pool=None):
+def _encode_pair(model, x1, x2, level, device, all_content, field_pool=None, blocks=None):
     """Encode a paired batch to native latent fields.
 
-    Returns ``(content_v1, style_v1, content_v2, style_v2, grid)`` with each array
-    shaped ``(B, C_block, P)`` and ``grid`` the ``(D, H, W)`` of the latent map.
+    Returns ``(content_v1, style_v1, content_v2, style_v2, grid, blocks)`` with each
+    array shaped ``(B, C_block, P)`` and ``grid`` the ``(D, H, W)`` of the latent map.
     Both views go through one ``n_views=2`` call so ``--separate-encoders`` routing
     matches training.
+
+    ``blocks`` pins the content/style channel split.  It must be pinned: under
+    ``--mask-mode onthefly`` the split is recomputed from each batch's mean
+    activations, and under ``learned`` the forward pass draws fresh Gumbel noise, so
+    an unpinned split can differ between the two conditions — and the difference
+    would then be taken across *different channels*, which is not a response at all.
     """
     import torch
     import torch.nn.functional as F
@@ -181,7 +187,9 @@ def _encode_pair(model, x1, x2, level, device, all_content, field_pool=None):
     if field_pool is not None:
         feat = F.adaptive_avg_pool3d(feat, tuple(field_pool))
     grid = tuple(feat.shape[2:])
-    content_idx, style_idx = _resolve_blocks(out, level, all_content)
+    if blocks is None:
+        blocks = _resolve_blocks(out, level, all_content)
+    content_idx, style_idx = blocks
 
     b = feat.shape[0] // 2
     flat = feat.reshape(feat.shape[0], feat.shape[1], -1).float().cpu().numpy()
@@ -189,7 +197,7 @@ def _encode_pair(model, x1, x2, level, device, all_content, field_pool=None):
     c2 = flat[b:, content_idx, :]
     s1 = flat[:b, style_idx, :] if style_idx else None
     s2 = flat[b:, style_idx, :] if style_idx else None
-    return c1, s1, c2, s2, grid
+    return c1, s1, c2, s2, grid, blocks
 
 
 def _perturb(latents, block, index, delta, direction=None):
@@ -248,25 +256,40 @@ def collect_responses(
     batch_size=16,
     field_pool=None,
     null_seed_offset=7919,
+    blocks=None,
 ):
     """Render, encode and difference every intervention.
 
-    Returns ``responses`` (``name -> dict`` of ``content``/``style``/``image`` arrays),
-    plus ``null`` under the same keys and the latent ``grid``.
+    Returns ``(responses, null, grid, blocks)`` — ``responses`` maps ``name`` to
+    ``content``/``style``/``image`` arrays, ``null`` carries the same keys, and
+    ``blocks`` is the pinned content/style split so a follow-up call (the
+    ``--linearity-check`` pass) can be forced onto the identical channels.
     """
     import torch
 
+    # Pinned on the first encode and reused for every condition thereafter — see
+    # ``_encode_pair``: an unpinned split silently differences across channels.
+    pinned = {"blocks": blocks}
+
     def _encode_all(x1, x2):
-        c1, s1, _c2, _s2, grid = [], [], None, None, None
+        content, style, grid = [], [], None
         for k in range(0, len(x1), batch_size):
-            a, b, _c, _s, g = _encode_pair(
-                model, x1[k : k + batch_size], x2[k : k + batch_size], level, device, all_content, field_pool
+            a, b, _c, _s, g, blocks = _encode_pair(
+                model,
+                x1[k : k + batch_size],
+                x2[k : k + batch_size],
+                level,
+                device,
+                all_content,
+                field_pool,
+                blocks=pinned["blocks"],
             )
-            c1.append(a)
+            pinned["blocks"] = blocks
+            content.append(a)
             if b is not None:
-                s1.append(b)
+                style.append(b)
             grid = g
-        return np.concatenate(c1), (np.concatenate(s1) if s1 else None), grid
+        return np.concatenate(content), (np.concatenate(style) if style else None), grid
 
     model.eval()
     out, grid = {}, None
@@ -300,7 +323,7 @@ def collect_responses(
             torch.cuda.empty_cache()
 
     null = out.pop("__null__")
-    return out, null, grid
+    return out, null, grid, pinned["blocks"]
 
 
 # --------------------------------------------------------------------------- #
@@ -847,7 +870,7 @@ def main():
             model, run_args, device = load_model_from_run_dir(
                 run_dir, _resolve_checkpoint(run_dir, cli.checkpoint_name)
             )
-            responses, null, grid = collect_responses(
+            responses, null, grid, blocks = collect_responses(
                 model,
                 dataset,
                 base,
@@ -864,7 +887,7 @@ def main():
             )
 
             if cli.linearity_check:
-                half, _null_h, _g = collect_responses(
+                half, _null_h, _g, _b = collect_responses(
                     model,
                     dataset,
                     base,
@@ -875,6 +898,7 @@ def main():
                     all_content=all_content,
                     batch_size=cli.batch_size,
                     field_pool=cli.field_pool,
+                    blocks=blocks,  # identical channels, or the ratio is not a linearity check
                 )
                 for fn, d in half.items():
                     r_half = _fro(d["content"]).mean()
