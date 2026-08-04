@@ -39,21 +39,38 @@ proxied by an MCC.  The metrics below all read off that response set.
 
 What is reported
 ----------------
-* ``snr_content`` / ``snr_style`` — response magnitude in each block over a
-  matched null (see below).  ``snr ~ 1`` means the encoder does not respond to
-  the factor at all; no amount of probing can recover it.  For a *style* target,
-  ``snr_content`` **is** the leakage measure — probe-free, and immune to the
-  capacity confound that makes ``run_dci_compare``'s leakage numbers
+* ``snr_content`` / ``snr_style`` — **per-sample** response magnitude in each block
+  over the render-noise null.  ``snr ~ 1`` means one intervention is invisible in
+  one sample; it does *not* mean the factor is unencoded, because averaging over
+  ``N`` samples gains ``sqrt(N)`` (read ``pop_snr`` for that question).  For a
+  *style* target, ``snr_content`` **is** the leakage measure — probe-free, and
+  immune to the capacity confound that makes ``run_dci_compare``'s leakage numbers
   baseline-sensitive.
+* ``snr_nuisance`` — the same ratio against the *nuisance-field* response instead.
+  **This, not ``snr_content``, is the number to compare across objectives.**  The
+  two views differ only in modality and in the render-noise seed, so a cross-view
+  contrastive loss is trained to be invariant to the render-noise null and shrinks
+  its own denominator; the nuisance fields are shared across views, so no
+  cross-view objective is pushed to discard them.
+* ``pop_snr`` — ``||mean_i Delta_j||`` over the sign-flip null row norm: the
+  population-level version, and the quantity ``rank_signal`` actually thresholds.
+* ``concentration`` — ``in_mass / uniform``.  ``in_mass`` alone conflates locality
+  with support size (a factor covering 25% of the volume cannot exceed ~4x uniform
+  however tight it is); the ratio is comparable across factors.
 * ``consistency`` — leave-one-out cosine between each sample's response and the
   mean direction.  The mean direction is only a meaningful summary when this is
   high; low values mean ``J_h`` varies strongly across the support (so read the
   per-sample identification accuracy instead).
-* ``rank_signal`` — the honest answer to "how many factors are separately
-  encoded": singular values of the ``J x dim`` response matrix that exceed a
-  sign-flip null threshold.  This is the rank that matters for identifiability,
-  and unlike an observational ``eff_rank`` it is *causally* estimated and has a
-  calibrated floor.  ``rank_signal < J`` falsifies block identifiability.
+* ``rank_signal`` — how many factors are separately encoded: singular values of
+  the ``J x dim`` response matrix above a sign-flip null threshold.  Unlike an
+  observational ``eff_rank`` it is *causally* estimated and has a calibrated floor.
+  It is a **statistical** rank at the current ``N``: the threshold falls as
+  ``1/sqrt(N)``, so it is only comparable between models at equal ``N``.
+* ``spectral_gap`` — the largest drop between consecutive singular values, and its
+  position.  N-free, so it is the companion that says *why* the rank came out where
+  it did: a large gap at ``k`` means the remaining directions are genuinely dead,
+  while no gap anywhere means the null threshold merely landed mid-spectrum and the
+  rank will climb with ``N``.
 * ``max_alias`` — largest ``|cos|`` between a factor's response direction and any
   other factor's.  A probe-free, fit-free DCI matrix.
 * ``id_acc`` — nearest-centroid cross-validated accuracy at identifying *which*
@@ -94,9 +111,13 @@ Caveats
 -------
 * ``eps`` must be small enough that the first-order reading holds and large enough
   to clear the noise null.  ``--linearity-check`` re-measures response norms at
-  ``eps/2``; the ratio should be ~2.  A ratio well below 2 means saturation
-  (a floor/ceiling effect in the renderer, as documented for the ventricle) and
-  the first-order interpretation does not apply to that factor.
+  ``eps/2``; the ratio should be ~2.  Below 2 has **two** causes and they need
+  opposite responses — read the ratio together with ``snr_content``:
+  saturation (a renderer floor/ceiling, as documented for the ventricle) when
+  ``snr`` is high, in which case shrink ``eps``; or simply noise-limited when
+  ``snr ~ 1``, since a response of ``s + n`` at ``eps`` and ``s/2 + n`` at ``eps/2``
+  gives a ratio tending to 1 as ``n`` dominates, in which case ``eps`` is fine and
+  the factor is just weak.
 * The normalization mode matters and is not cosmetic.  Under ``per_sample``
   z-scoring the normalizer partially cancels interventions on global intensity,
   so a low ``gain`` response is a property of the *pipeline*, not only the
@@ -402,6 +423,13 @@ def _null_rows(null_response, j, rng):
 def signal_rank(r_matrix, null_response, n_rep=64, quantile=0.95, seed=0):
     """Number of singular values of ``r_matrix`` above a sign-flip null threshold.
 
+    **This is a statistical rank at the current N, not an algebraic one.**  The null
+    rows are means over N, so the threshold falls as ``1/sqrt(N)`` while a true signal
+    row does not — enough samples make any nonzero direction detectable.  Two models
+    are only comparable on it at equal N, and a model whose rank is limited by the
+    threshold rather than by a dead direction will climb as N grows.  ``spectral_gap``
+    is the N-free companion.
+
     Returns ``(rank, singular_values, threshold)``.
     """
     sv = np.linalg.svd(r_matrix, compute_uv=False)
@@ -409,6 +437,48 @@ def signal_rank(r_matrix, null_response, n_rep=64, quantile=0.95, seed=0):
     tops = [np.linalg.svd(_null_rows(null_response, len(r_matrix), rng), compute_uv=False)[0] for _ in range(n_rep)]
     thr = float(np.quantile(tops, quantile))
     return int((sv > thr).sum()), sv, thr
+
+
+def spectral_gap(sv):
+    """Largest drop between consecutive singular values → ``(k, ratio)``.
+
+    N-free, unlike ``signal_rank``: a clean ``k``-dimensional response subspace shows a
+    large ratio at ``k`` regardless of sample size, whereas a spectrum that simply
+    decays smoothly has no ratio much above 1 anywhere.  Reading the two together
+    separates "``J-k`` directions are genuinely dead" from "the null threshold happened
+    to land mid-spectrum".
+    """
+    sv = np.asarray(sv, dtype=np.float64)
+    sv = sv[sv > 0]
+    if len(sv) < 2:
+        return None, float("nan")
+    ratios = sv[:-1] / sv[1:]
+    k = int(np.argmax(ratios))
+    return k + 1, float(ratios[k])
+
+
+def population_snr(responses, names, null_response, key="content", n_rep=64, quantile=0.95, seed=2):
+    """Per-factor ``||mean_i Delta_j||`` over the sign-flip null row norm.
+
+    This is the quantity ``signal_rank`` actually thresholds, exposed per factor.  It
+    is *not* the same question as ``snr_content``: that one is a ratio of per-sample
+    norms and answers "is one intervention visible in one sample", which averaging
+    over N improves by ``sqrt(N)``.  A factor can sit near 1 on ``snr_content`` and
+    well above 1 here — meaning it is encoded, just not detectable sample-by-sample.
+
+    Returns ``(name -> snr, floor)``.
+    """
+    rng = np.random.RandomState(seed)
+    norms = [float(np.linalg.norm(_null_rows(null_response, 1, rng))) for _ in range(n_rep)]
+    floor = float(np.quantile(norms, quantile))
+    out = {}
+    for n in names:
+        mean_dir = responses[n][key]
+        if mean_dir is None:
+            out[n] = float("nan")
+            continue
+        out[n] = float(np.linalg.norm(mean_dir.astype(np.float64).mean(0))) / floor if floor > 0 else float("nan")
+    return out, floor
 
 
 def alias_matrix(r_matrix):
@@ -508,7 +578,30 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
             "rho_loc": rho,
             "in_mass": in_mass,
             "in_mass_uniform": uniform,
+            # in_mass alone conflates concentration with support size: a factor whose
+            # support is 25% of the volume cannot exceed ~4x uniform however tightly it
+            # concentrates, while a 1.4% support can reach 70x. The ratio is the
+            # comparable statistic across factors.
+            "concentration": float(in_mass / uniform) if uniform and uniform > 0 else float("nan"),
         }
+
+    # The render-noise null is NOT neutral between objectives: the two views differ
+    # only in modality and in the render-noise seed, so a cross-view contrastive loss
+    # is trained to be invariant to exactly this null, shrinking its denominator.
+    # The nuisance fields are shared across views, so no cross-view objective is
+    # pushed to discard them — which makes them the objective-neutral floor, and the
+    # one to use when comparing a contrastive model against a reconstruction model.
+    nuis_present = [n for n in nuisance_names if n in responses]
+    nuis_floor = max((per_factor[n]["resp_content"] for n in nuis_present), default=float("nan"))
+    nuis_ref = max(nuis_present, key=lambda n: per_factor[n]["resp_content"], default=None) if nuis_present else None
+    for m in per_factor.values():
+        m["snr_nuisance"] = (
+            float(m["resp_content"] / nuis_floor) if np.isfinite(nuis_floor) and nuis_floor > 0 else float("nan")
+        )
+
+    pop, pop_floor = population_snr(responses, list(responses), null["content"])
+    for name, v in pop.items():
+        per_factor[name]["pop_snr"] = v
 
     present = [n for n in content_names if n in responses]
     # With one channel per normalization group the encoder output has an exactly
@@ -525,15 +618,23 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
         "per_factor": per_factor,
         "null_resp_content": float(null_c),
         "null_resp_style": float(null_s),
+        "null_row_norm": float(pop_floor),
+        "nuisance_floor": float(nuis_floor),
+        "nuisance_ref": nuis_ref,
+        # Chance level for gap_frac: a spatially uncorrelated response puts 1/P of its
+        # energy in the position mean, so gap_frac ~ 1/P means "no global component",
+        # not "a small one".
+        "gap_frac_chance": float(1.0 / np.prod(grid)) if grid else float("nan"),
         "gap_void": bool(gap_void),
         "content_names": present,
         "style_names": [n for n in style_names if n in responses],
-        "nuisance_names": [n for n in nuisance_names if n in responses],
+        "nuisance_names": nuis_present,
     }
 
     if len(present) >= 2:
         r = response_matrix(responses, present)
         rank, sv, thr = signal_rank(r, null["content"])
+        gap_k, gap_ratio = spectral_gap(sv)
         alias = alias_matrix(r)
         np.fill_diagonal(alias, 0.0)
         acc, chance = identification_accuracy(responses, present)
@@ -543,6 +644,8 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
                 "rank_target": len(present),
                 "singular_values": [float(v) for v in sv],
                 "sv_null_threshold": thr,
+                "spectral_gap_at": gap_k,
+                "spectral_gap_ratio": gap_ratio,
                 "cond_number": float(sv[0] / sv[-1]) if sv[-1] > 0 else float("inf"),
                 "alias_matrix": alias.tolist(),
                 "alias_floor": alias_floor(null["content"], len(present)),
@@ -586,16 +689,29 @@ def print_report(rows, baseline_name=None):
             f"normalize={row['normalize']}  causal_base={row['causal_base']}  generator={row['generator']}"
         )
         print(
-            f"  null (render-noise) response: content {_f(row['null_resp_content'])}  style {_f(row['null_resp_style'])}"
+            f"  null (render-noise) response: content {_f(row['null_resp_content'])}  "
+            f"style {_f(row['null_resp_style'])}   row-norm floor {_f(row.get('null_row_norm'))}"
+        )
+        print(
+            f"  nuisance floor: {_f(row.get('nuisance_floor'))} ({row.get('nuisance_ref')})   "
+            f"gap_frac chance (1/P): {_f(row.get('gap_frac_chance'), 4)}"
+        )
+        print(
+            "  ! the render-noise null is not objective-neutral — the two views differ only in\n"
+            "    modality and noise seed, so a cross-view contrastive loss is trained to be\n"
+            "    invariant to it and gets a smaller denominator. Compare models on snr_nu\n"
+            "    (nuisance-relative) and pop_snr, not on snr_c."
         )
 
         print("\n  PER-FACTOR RESPONSE")
-        print("  snr>1 = responds above render noise | gap_frac: 1.0 = purely global, 0.0 = purely local")
+        print("  snr_c: per-SAMPLE, vs render noise   snr_nu: vs the shared nuisance field")
+        print("  pop_snr: ||mean response|| vs the null row norm — what rank_signal thresholds")
+        print("  conc = in_mass / uniform, the support-size-corrected locality number")
         print("  '~' on max_alias = at or below the null floor, i.e. not distinguishable from unrelated")
         has_lin = any("linearity_ratio" in m for m in row["per_factor"].values())
         hdr = (
-            f"  {'target':<18}{'snr_c':>8}{'snr_s':>8}{'consist':>9}{'gap_frac':>10}"
-            f"{'rho_loc':>9}{'in_mass':>9}{'(unif)':>8}{'max_alias':>11}{'nuis_cos':>10}"
+            f"  {'target':<18}{'snr_c':>8}{'snr_nu':>8}{'pop_snr':>9}{'snr_s':>8}{'consist':>9}"
+            f"{'gap_frac':>10}{'conc':>8}{'rho_loc':>9}{'max_alias':>11}{'nuis_cos':>10}"
             + (f"{'lin(~2)':>9}" if has_lin else "")
         )
         print(hdr)
@@ -612,9 +728,10 @@ def print_report(rows, baseline_name=None):
                 if al is not None and floor is not None and np.isfinite(al) and al <= floor:
                     al_s = al_s.strip() + "~"
                 print(
-                    f"  {fn:<18}{_f(m['snr_content'], 2):>8}{_f(m['snr_style'], 2):>8}"
-                    f"{_f(m['consistency']):>9}{_f(m['gap_frac']):>10}{_f(m['rho_loc']):>9}"
-                    f"{_f(m['in_mass']):>9}{_f(m['in_mass_uniform']):>8}"
+                    f"  {fn:<18}{_f(m['snr_content'], 2):>8}{_f(m.get('snr_nuisance'), 2):>8}"
+                    f"{_f(m.get('pop_snr'), 1):>9}{_f(m['snr_style'], 2):>8}"
+                    f"{_f(m['consistency']):>9}{_f(m['gap_frac']):>10}"
+                    f"{_f(m.get('concentration'), 1):>8}{_f(m['rho_loc']):>9}"
                     f"{al_s:>11}{_f(m.get('nuisance_cos')):>10}"
                     + (f"{_f(m.get('linearity_ratio'), 2):>9}" if has_lin else "")
                 )
@@ -637,15 +754,30 @@ def print_report(rows, baseline_name=None):
                 f"(singular values above the sign-flip null threshold {_f(row['sv_null_threshold'], 4)})"
             )
             print("    singular values: " + "  ".join(_f(v, 3) for v in row["singular_values"]))
-            print(f"    condition number {_f(row['cond_number'], 1)}")
+            gk, gr = row.get("spectral_gap_at"), row.get("spectral_gap_ratio")
+            print(
+                f"    largest spectral gap: {gr:.1f}x after direction {gk}   condition number {_f(row['cond_number'], 1)}"
+            )
+            if gk is not None and np.isfinite(gr):
+                if gr >= 3.0 and gk < row["rank_target"]:
+                    print(
+                        f"      => a clean {gk}-dimensional response subspace; the remaining "
+                        f"{row['rank_target'] - gk} direction(s) are genuinely dead, not threshold-limited."
+                    )
+                elif gr < 2.0:
+                    print(
+                        "      => no meaningful gap: the spectrum decays smoothly, so rank_signal is set by "
+                        "where the null threshold happens to land. Re-run at larger N before comparing it."
+                    )
             print(
                 f"    alias floor {_f(row['alias_floor'])} — max_alias below this is indistinguishable "
                 "from two unrelated directions at this N"
             )
             if row["rank_signal"] < row["rank_target"]:
                 print(
-                    f"    => FALSIFIED at this level: {row['rank_target'] - row['rank_signal']} factor "
-                    "direction(s) are not separable from the null, so no invertible h exists."
+                    f"    => {row['rank_target'] - row['rank_signal']} factor direction(s) are not separable "
+                    "from the null AT THIS N. Read with the spectral gap: a large gap means genuinely dead, "
+                    "no gap means the threshold (which falls as 1/sqrt(N)) is the binding constraint."
                 )
             else:
                 print(
@@ -670,10 +802,26 @@ def print_report(rows, baseline_name=None):
         print("\n" + "=" * 100)
         print(f"  HEAD-TO-HEAD vs {baseline_name}")
         print("=" * 100)
+        if base.get("baseline_all_content"):
+            print(
+                "  ! the baseline is scored ALL-CONTENT, so its content block is wider. rank_signal\n"
+                "    and id_acc are not capacity-normalised — re-run with --baseline-per-block before\n"
+                "    reading either as a model difference."
+            )
         for r in others:
             print(f"\n  {r['name']} vs {baseline_name}")
+            # Gap ratio alone is not comparable when the gaps sit at different
+            # positions — a 6x drop after direction 6 and a 6x drop after direction 1
+            # describe opposite situations — so print both sides in full instead of
+            # a delta.
+            if r.get("spectral_gap_at") is not None and base.get("spectral_gap_at") is not None:
+                print(
+                    f"          spectral gap              {r['spectral_gap_ratio']:.1f}x @ {r['spectral_gap_at']}"
+                    f"  vs  {base['spectral_gap_ratio']:.1f}x @ {base['spectral_gap_at']}"
+                    "   (a large ratio at a HIGH position = a clean subspace of that size)"
+                )
             for label, key, better in (
-                ("rank_signal", "rank_signal", "higher"),
+                ("rank_signal (N-dependent)", "rank_signal", "higher"),
                 ("id_acc", "id_acc", "higher"),
                 ("nuisance contamination", "nuisance_contamination", "lower"),
             ):
@@ -683,14 +831,20 @@ def print_report(rows, baseline_name=None):
                 delta = mv - bv
                 win = (delta > 0) if better == "higher" else (delta < 0)
                 mark = "WIN " if abs(delta) > 1e-9 and win else ("LOSS" if abs(delta) > 1e-9 else "TIE ")
-                print(f"    {mark}  {label:<24}{_f(mv)}  vs  {_f(bv)}   (delta {delta:+.3f}, {better} is better)")
-            print("    per-factor snr_content (model / baseline):")
+                print(f"    {mark}  {label:<26}{_f(mv)}  vs  {_f(bv)}   (delta {delta:+.3f}, {better} is better)")
+            # snr_nuisance, not snr_content: see the note above the per-factor table.
+            print("\n    per-factor snr_nuisance — objective-neutral floor (snr_content in brackets):")
             for fn in r["content_names"]:
                 if fn not in base["per_factor"]:
                     continue
-                mv = r["per_factor"][fn]["snr_content"]
-                bv = base["per_factor"][fn]["snr_content"]
-                print(f"      {fn:<20}{_f(mv, 2):>8}  {_f(bv, 2):>8}   {mv - bv:+.2f}")
+                mv, bv = r["per_factor"][fn]["snr_nuisance"], base["per_factor"][fn]["snr_nuisance"]
+                mc, bc = r["per_factor"][fn]["snr_content"], base["per_factor"][fn]["snr_content"]
+                d = mv - bv
+                flip = "  <- sign flips vs snr_c" if np.isfinite(d) and d * (mc - bc) < 0 else ""
+                print(
+                    f"      {fn:<20}{_f(mv, 2):>8}  {_f(bv, 2):>8}   {d:+.2f}"
+                    f"    [{_f(mc, 2):>6} {_f(bc, 2):>6}  {mc - bc:+.2f}]{flip}"
+                )
 
 
 def write_outputs(rows, out_dir):
