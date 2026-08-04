@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-04T12:01:04Z
-# Git SHA: f78db38
+# Generated at: 2026-08-04T12:37:00Z
+# Git SHA: c1d5ed5
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-independent-baseline-final
+#SBATCH --job-name=synthetic-causal-24-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-independent-baseline-final-%j.err
+#SBATCH --error=synthetic-causal-24-baseline-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -65,7 +65,7 @@ fi
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 48 \
+    --content-size 24 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
@@ -104,6 +104,7 @@ fi
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --style-injection-mode input \
+    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-mode pseudo_mri \
@@ -112,15 +113,15 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-independent-baseline-final \
+    --model-id synthetic-causal-24-baseline \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 24 \
+    --vqvae-hidden-channels 24 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \

@@ -105,6 +105,13 @@ def _project_contrastive_content(head, hz_c, is_patch):
 # ---------------------------------------------------------------------------
 
 
+# Count of steps whose loss went non-finite and were skipped. A skipped step returns a
+# total of 0.0, so Loss/Total flatlines at zero while Loss/Contrastive keeps logging plausible
+# values from frozen weights — a run can sit dead for hundreds of thousands of steps and look
+# fine. Surfaced as Perf/nan_skipped_steps so a stall is unmistakable.
+NAN_SKIPPED_STEPS = 0
+
+
 def train_step(
     data,
     encoders,
@@ -828,11 +835,14 @@ def train_step(
         # Guard against NaN: skip the entire backward + step to avoid
         # corrupting model parameters and optimizer state.
         if torch.isnan(scaled_loss) or torch.isinf(scaled_loss):
-            print(
-                f"  ⚠ NaN/Inf detected in loss (contrastive={contrastive_loss_value:.4f}, "
-                f"recon={recon_loss_value:.4f}, vq={vq_loss_value:.4f}). "
-                f"Skipping backward pass for this step.",
-                flush=True,
+            global NAN_SKIPPED_STEPS
+            NAN_SKIPPED_STEPS += 1
+            # logger, not print: cluster schedulers do not always capture stdout, and this is
+            # the message that explains a flatlined Loss/Total.
+            logger.warning(
+                f"NaN/Inf in loss — backward SKIPPED (skip #{NAN_SKIPPED_STEPS}). "
+                f"contrastive={contrastive_loss_value:.4f} recon={recon_loss_value:.4f} "
+                f"vq={vq_loss_value:.4f}. Consecutive skips mean the model is FROZEN."
             )
             optimizer.zero_grad(set_to_none=True)
             return (
@@ -2092,6 +2102,7 @@ def main(args):
                         tb_writer.add_scalar("Perf/sec_per_step", 1.0 / max(_perf_sps, 1e-9), step)
                         tb_writer.add_scalar("Perf/data_wait_frac", _perf_data_frac, step)
                         tb_writer.add_scalar("Perf/peak_mem_gb", _perf_peak_gb, step)
+                        tb_writer.add_scalar("Perf/nan_skipped_steps", NAN_SKIPPED_STEPS, step)
                         logger.info(
                             f"  [PERF] step {step}: {_perf_sps:.2f} steps/s "
                             f"({1.0 / max(_perf_sps, 1e-9):.3f} s/step) | "

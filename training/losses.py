@@ -1490,6 +1490,15 @@ class BaselineLoss(torch.nn.Module):
         x = y.float()
         y = network_output["reconstruction"][0].float()
 
+        # The clamp below bounds large FINITE values but does NOT stop NaN — torch.clamp
+        # propagates it (clamp(nan, -1, 1) == nan). The decoder runs in fp16 under autocast
+        # with no output normalisation (--no-final-recon-norm), so once its activations pass
+        # 65504 they become inf, and the decoder's own GroupNorm turns inf - inf into NaN.
+        # Without this the whole run dies: the step-level guard skips every subsequent batch,
+        # so one bad forward pass paralyses training permanently rather than costing one batch.
+        if not torch.isfinite(y).all():
+            y = torch.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)
+
         # The decoder has no output activation, so y can have arbitrarily
         # large values.  Clamp to the expected input range [-1, 1] to
         # prevent the FFT magnitude and LPIPS from amplifying outliers
