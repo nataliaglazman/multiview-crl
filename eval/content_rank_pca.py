@@ -550,6 +550,17 @@ def main():
     p.add_argument("--names", nargs="*", default=None, help="Labels (default: basename of each run-dir).")
     p.add_argument("--checkpoint-name", default="vqvae_best.pt", help="Checkpoint file (falls back to vqvae_model.pt).")
     p.add_argument("--num-samples", type=int, default=2000, help="Frozen test-set size, shared across runs.")
+    p.add_argument(
+        "--causal",
+        choices=("match", "iid"),
+        default=None,
+        help="Factor distribution of the frozen test set, for runs trained with --synthetic-causal. "
+        "'match' reproduces the training SCM; 'iid' forces independent factors silently. Unset = i.i.d. "
+        "with a warning (the long-standing behaviour, kept so existing numbers stay comparable). Not "
+        "cosmetic: under a random graph the dependent factors are largely determined by their parents, "
+        "so scoring them i.i.d. reads as lost information — and that gap WIDENS the better the model "
+        "fits the training distribution, which looks exactly like degradation over training.",
+    )
     p.add_argument("--poolings", default="gap,stats,2x2x2", help="Comma list: gap, stats, and/or DxHxW.")
     p.add_argument("--level", type=int, default=0, help="Encoder level to analyse.")
     p.add_argument("--max-pcs", type=int, default=48, help="Cap on PCs in the truncation sweep.")
@@ -587,7 +598,9 @@ def main():
     from eval.run_dci_synthetic import build_synthetic_test_set, load_run_args
 
     ref_args = load_run_args(cli.run_dirs[0])
-    dataset = build_synthetic_test_set(ref_args, cli.num_samples)
+    dataset = build_synthetic_test_set(
+        ref_args, cli.num_samples, causal=None if cli.causal is None else cli.causal == "match"
+    )
     logger.info("Frozen test set: %d samples, shared across %d run(s).", cli.num_samples, len(cli.run_dirs))
 
     all_rows = []

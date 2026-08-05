@@ -2132,6 +2132,17 @@ def main():
         help="Frozen test-set size, shared across models.",
     )
     p.add_argument(
+        "--causal",
+        choices=("match", "iid"),
+        default=None,
+        help="Factor distribution of the frozen test set, for runs trained with --synthetic-causal. "
+        "'match' reproduces the training SCM; 'iid' forces independent factors silently. Unset = i.i.d. "
+        "with a warning (the long-standing behaviour, kept so existing numbers stay comparable). Not "
+        "cosmetic: under a random graph the dependent factors are largely determined by their parents, "
+        "so scoring them i.i.d. reads as lost information — and that gap WIDENS the better the model "
+        "fits the training distribution, which looks exactly like degradation over training.",
+    )
+    p.add_argument(
         "--poolings",
         default="gap,stats,2x2x2",
         help="Comma list: gap, stats, and/or DxHxW (e.g. 2x2x2).",
@@ -2240,7 +2251,9 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ref_args = load_run_args(specs[0])
-    dataset = build_synthetic_test_set(ref_args, cli.num_samples)
+    dataset = build_synthetic_test_set(
+        ref_args, cli.num_samples, causal=None if cli.causal is None else cli.causal == "match"
+    )
     logger.info(
         "Frozen test set: %d samples, shared across %d model(s).",
         cli.num_samples,
