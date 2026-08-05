@@ -160,6 +160,7 @@ def fidelity_stats(content, gt_content, seeds, n_splits=5):
         )
         r2_acc.append(r2)
     out = {k: float(np.mean([s[k] for s in per_seed])) for k in per_seed[0]}
+    out["n_pairs_used"] = int(round(out["n_pairs_used"]))
     out["slope_corrected_std"] = float(np.std([s["slope_corrected"] for s in per_seed]))
     out["rms_true"] = float(np.sqrt((r_true**2).mean()))
     out["r2_per_factor"] = np.mean(r2_acc, axis=0)
