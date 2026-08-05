@@ -163,6 +163,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import logging
 import os
@@ -471,12 +472,26 @@ def collect_responses(
 
 
 def _fro(a):
-    """Per-sample Frobenius norm of a (N, C, P) response stack."""
-    return np.sqrt((a.astype(np.float64) ** 2).sum(axis=(1, 2)))
+    """Per-sample Frobenius norm of a (N, C, P) response stack.
+
+    ``einsum`` with a float64 accumulator instead of ``a.astype(float64) ** 2``: the
+    latter materialises two full-size float64 copies (2.8 GB at N=512, C=44, P=4096)
+    for a result of N floats, and this is called once per target per block.
+    """
+    flat = np.asarray(a).reshape(len(a), -1)
+    return np.sqrt(np.einsum("nd,nd->n", flat, flat, dtype=np.float64))
 
 
 def _flat(a):
-    return a.reshape(len(a), -1).astype(np.float64)
+    """(N, C, P) -> (N, C*P), kept in float32.
+
+    Everything downstream of this is norms, cosines and sign-flipped means, where
+    float32 costs ~5e-5 of relative accuracy on a 180k-dim dot product — invisible at
+    the three decimals reported — and halves the largest allocations in the module.
+    Small derived quantities (the J x dim response matrix, correlation matrices) are
+    accumulated in float64 where it matters.
+    """
+    return np.ascontiguousarray(a.reshape(len(a), -1), dtype=np.float32)
 
 
 def loo_consistency(d):
@@ -489,7 +504,7 @@ def loo_consistency(d):
     n = len(x)
     if n < 3:
         return float("nan")
-    total = x.sum(0)
+    total = x.sum(0, dtype=np.float64)
     cos = []
     for i in range(n):
         other = (total - x[i]) / (n - 1)
@@ -507,11 +522,12 @@ def gap_fraction(d):
     position-centred residual is ``r``, and the two are orthogonal, so this is an
     exact energy split rather than a heuristic.
     """
-    x = d.astype(np.float64)
+    x = np.asarray(d)
     p = x.shape[2]
-    s = x.mean(axis=2, keepdims=True)
-    e_s = float((s**2).sum() * p)
-    e_all = float((x**2).sum())
+    s = x.mean(axis=2, dtype=np.float64)  # (N, C) — small; avoids a full-size upcast
+    e_s = float(np.einsum("nc,nc->", s, s) * p)
+    flat = x.reshape(len(x), -1)
+    e_all = float(np.einsum("nd,nd->", flat, flat, dtype=np.float64))
     return e_s / e_all if e_all > 0 else float("nan")
 
 
@@ -522,20 +538,24 @@ def response_matrix(responses, names, key="content"):
     rows on the same scale, and unit-normalizing would turn a set of pure-noise
     rows into near-orthogonal unit vectors (apparent full rank).
     """
-    rows = [responses[n][key].astype(np.float64).mean(0).ravel() for n in names]
+    # mean(dtype=float64) accumulates in float64 without upcasting the whole stack.
+    rows = [np.asarray(responses[n][key]).mean(0, dtype=np.float64).ravel() for n in names]
     return np.vstack(rows)
 
 
-def _null_rows(null_response, j, rng):
+def _null_rows(null_flat, j, rng):
     """``j`` rows of the form ``mean_i(+-1 * Delta_null[i])``.
 
     Same sample-size scaling as a real response row, under the hypothesis that the
     mean response is zero — so singular values and cosines computed on these are
     directly comparable to the real ones.
+
+    Takes the **already-flattened** null: this is called ~160 times per model across
+    ``signal_rank``, ``alias_floor`` and ``population_snr``, and re-flattening inside
+    would allocate the full (N, C*P) array on every one of them.
     """
-    x = _flat(null_response)
-    signs = rng.choice([-1.0, 1.0], size=(j, len(x)))
-    return (signs @ x) / len(x)
+    signs = rng.choice([-1.0, 1.0], size=(j, len(null_flat))).astype(np.float32)
+    return np.asarray(signs @ null_flat, dtype=np.float64) / len(null_flat)
 
 
 def signal_rank(r_matrix, null_response, n_rep=64, quantile=0.95, seed=0):
@@ -552,7 +572,8 @@ def signal_rank(r_matrix, null_response, n_rep=64, quantile=0.95, seed=0):
     """
     sv = np.linalg.svd(r_matrix, compute_uv=False)
     rng = np.random.RandomState(seed)
-    tops = [np.linalg.svd(_null_rows(null_response, len(r_matrix), rng), compute_uv=False)[0] for _ in range(n_rep)]
+    xnull = _flat(null_response)  # hoisted: n_rep re-flattens would be n_rep full copies
+    tops = [np.linalg.svd(_null_rows(xnull, len(r_matrix), rng), compute_uv=False)[0] for _ in range(n_rep)]
     thr = float(np.quantile(tops, quantile))
     return int((sv > thr).sum()), sv, thr
 
@@ -618,7 +639,8 @@ def population_snr(responses, names, null_response, key="content", n_rep=64, qua
     Returns ``(name -> snr, floor)``.
     """
     rng = np.random.RandomState(seed)
-    norms = [float(np.linalg.norm(_null_rows(null_response, 1, rng))) for _ in range(n_rep)]
+    xnull = _flat(null_response)
+    norms = [float(np.linalg.norm(_null_rows(xnull, 1, rng))) for _ in range(n_rep)]
     floor = float(np.quantile(norms, quantile))
     out = {}
     for n in names:
@@ -626,7 +648,8 @@ def population_snr(responses, names, null_response, key="content", n_rep=64, qua
         if mean_dir is None:
             out[n] = float("nan")
             continue
-        out[n] = float(np.linalg.norm(mean_dir.astype(np.float64).mean(0))) / floor if floor > 0 else float("nan")
+        m = np.asarray(mean_dir).mean(0, dtype=np.float64)
+        out[n] = float(np.linalg.norm(m)) / floor if floor > 0 else float("nan")
     return out, floor
 
 
@@ -645,9 +668,10 @@ def alias_floor(null_response, j, n_rep=32, quantile=0.95, seed=1):
     — so the raw number is only interpretable against this floor.
     """
     rng = np.random.RandomState(seed)
+    xnull = _flat(null_response)
     tops = []
     for _ in range(n_rep):
-        a = alias_matrix(_null_rows(null_response, j, rng))
+        a = alias_matrix(_null_rows(xnull, j, rng))
         np.fill_diagonal(a, 0.0)
         tops.append(float(a.max()))
     return float(np.quantile(tops, quantile))
@@ -668,7 +692,9 @@ def identification_accuracy(responses, names, key="content", n_folds=5, seed=0):
     currently sits — can score well here while reading dead on ``pop_snr``.  When the
     two disagree, the mean-direction metrics are the ones that do not apply.
     """
-    x = np.stack([_flat(responses[n][key]) for n in names])  # (J, N, dim)
+    # float32 and normalised IN PLACE: the float64 stack plus a normalised copy was
+    # 12.4 GB at J=9, N=512, dim=180224, and was the single largest allocation here.
+    x = np.stack([_flat(responses[n][key]) for n in names])  # (J, N, dim) float32
     j, n, _ = x.shape
     norms = np.linalg.norm(x, axis=2)
     # A sample whose response is EXACTLY zero carries no information: the renderer's
@@ -677,7 +703,7 @@ def identification_accuracy(responses, names, key="content", n_folds=5, seed=0):
     # then 0.0, and argmax silently returns class 0, marking every other factor wrong
     # and inflating class 0's recall by its own saturation rate.
     valid = norms > 0
-    x = x / np.clip(norms[:, :, None], 1e-12, None)
+    np.divide(x, np.clip(norms[:, :, None], 1e-12, None), out=x)
     rng = np.random.RandomState(seed)
     folds = rng.permutation(n) % n_folds
     confusion = np.zeros((j, j), dtype=np.int64)
@@ -1450,6 +1476,35 @@ def main():
         2 * cli.num_samples,
     )
 
+    # Up-front RAM estimate. The response stacks are (N, C, P) per target and are all
+    # held at once; without this the run just gets OOM-killed with no Python traceback.
+    _res = int(getattr(ref_args, "synthetic_res", 64))
+    _p = _res
+    for _s in getattr(ref_args, "vqvae_scaling_rates", [4]):
+        _p //= int(_s)
+    _p = _p**3 if cli.field_pool is None else int(np.prod(cli.field_pool))
+    _c = getattr(ref_args, "content_size", None) or len(getattr(ref_args, "content_indices", [[0]])[0])
+    _ctot = int(getattr(ref_args, "vqvae_hidden_channels", _c))  # content + style are both stored
+    _gb = (len(targets) + 1) * cli.num_samples * _ctot * _p * 4 / 2**30
+    _peak = _gb + len(content_names) * cli.num_samples * int(_c) * _p * 4 / 2**30
+    logger.info(
+        "estimated RAM: %.1f GB for the response stacks (%d conditions x %d x %d ch x %d pos), "
+        "~%.1f GB peak during scoring",
+        _gb,
+        len(targets) + 1,
+        cli.num_samples,
+        _ctot,
+        _p,
+        _peak,
+    )
+    if _peak > 8:
+        logger.warning(
+            "estimated peak %.0f GB. If this is killed with no traceback it was the OOM killer. "
+            "Reduce with --field-pool D H W (coarsens locality), a smaller --num-samples, or drop "
+            "--linearity-check (it holds a second full set).",
+            _peak,
+        )
+
     rows = []
     for name, run_dir in zip(names, specs):
         logger.info("=== %s (%s) ===", name, run_dir)
@@ -1473,6 +1528,10 @@ def main():
             row = score_run(
                 responses, null, grid, content_names, style_names, nuisance_names, support_frac=cli.support_frac
             )
+            # score_run returns scalars, so the response stacks (5+ GB at N=512) can go
+            # before the linearity pass allocates a second full set.
+            del responses, null
+            gc.collect()
 
             if cli.linearity_check:
                 half, _null_h, _g, _b = collect_responses(
@@ -1492,6 +1551,8 @@ def main():
                     r_half = _fro(d["content"]).mean()
                     full = row["per_factor"][fn]["resp_content"]
                     row["per_factor"][fn]["linearity_ratio"] = float(full / r_half) if r_half > 0 else float("nan")
+                del half, _null_h
+                gc.collect()
 
             row.update(
                 {
@@ -1516,6 +1577,8 @@ def main():
             logger.error("Skipping %s (%s): %s", name, run_dir, e)
         finally:
             model = None
+            responses = null = None
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
