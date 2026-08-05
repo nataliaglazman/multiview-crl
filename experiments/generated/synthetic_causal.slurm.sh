@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-05T00:53:47Z
-# Git SHA: 42563e7
+# Generated at: 2026-08-05T09:45:58Z
+# Git SHA: faa42dd
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-clean-content-128-lambda-005
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -13,7 +13,6 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
 #SBATCH --constraint=a100_80g
-
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
 
@@ -58,7 +57,7 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 0.05 \
+    --bt-gap-lambda 0.03 \
     --bt-gap-weight 1 \
     --bt-lambda 1 \
     --channels-last \

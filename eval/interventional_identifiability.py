@@ -877,10 +877,18 @@ def score_run(responses, null, grid, content_names, style_names, nuisance_names,
                 # dead OR merely not-estimable-by-mean (position coordinates). Reporting it
                 # as "anisotropy" then double-counts a measurement artifact this same report
                 # flags. cond_live restricts to the live subspace and is the comparable one.
+                # Anchored on the SAME k as subspace_residual: when the gap is not
+                # meaningful its position is arbitrary, and at gap_k=1 cond_live would be
+                # sv[0]/sv[0] = 1.0 — a number that looks like perfect conditioning and is
+                # in fact no measurement at all.
                 "cond_live": (
-                    float(sv[0] / sv[gap_k - 1]) if gap_k and gap_k <= len(sv) and sv[gap_k - 1] > 0 else float("nan")
+                    float(sv[0] / sv[_ck - 1])
+                    if (_ck := (gap_k if (gap_k and np.isfinite(gap_ratio) and gap_ratio >= 2.0) else rank))
+                    and _ck <= len(sv)
+                    and sv[_ck - 1] > 0
+                    else float("nan")
                 ),
-                "cond_live_k": gap_k,
+                "cond_live_k": (gap_k if (gap_k and np.isfinite(gap_ratio) and gap_ratio >= 2.0) else rank),
                 "alias_matrix": alias.tolist(),
                 "alias_floor": alias_floor(null["content"], len(present)),
                 "id_acc": float(acc),
