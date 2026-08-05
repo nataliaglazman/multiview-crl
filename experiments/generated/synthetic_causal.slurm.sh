@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-04T22:36:27Z
-# Git SHA: 6d24bf3
+# Generated at: 2026-08-05T00:53:47Z
+# Git SHA: 42563e7
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-24-patch-barlow
+#SBATCH --job-name=synthetic-causal-clean-content-128-lambda-005
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-24-patch-barlow-%j.err
+#SBATCH --error=synthetic-causal-clean-content-128-lambda-005-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -58,14 +58,14 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 0.5 \
+    --bt-gap-lambda 0.05 \
     --bt-gap-weight 1 \
     --bt-lambda 1 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 20 \
+    --content-size 44 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
@@ -107,21 +107,22 @@ fi
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
+    --synthetic-clean-content \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-24-patch-barlow \
+    --model-id synthetic-causal-clean-content-128-lambda-005 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 24 \
-    --vqvae-hidden-channels 24 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-scaling-rates 4 \
