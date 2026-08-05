@@ -265,6 +265,69 @@ def _encode_pair(model, x1, x2, level, device, all_content, field_pool=None, blo
     return c1, s1, c2, s2, grid, blocks
 
 
+class OracleEncoder:
+    """A stand-in encoder whose interventional response is analytically known.
+
+    The planted tests validate the metric layer and the render round-trip validates
+    the data layer, but nothing validates the **composition** — perturb, render,
+    normalise, encode, split content/style, reshape ``(B,C,D,H,W) -> (B,C,P)``,
+    difference, score.  A transposed reshape, a mis-indexed block, a swapped view or
+    a sign error in ``_perturb`` all produce plausible numbers that no unit test sees.
+    Running a known-answer encoder through the identical path catches them.
+
+    ``linear`` — ``f(x)[c] = w_c * pool(x)``, an invertible linear map of the image
+    pooled to the latent grid.  Then ``Delta_latent[n,c,p] = w_c * Delta_pooled[n,p]``
+    exactly, so every metric has an image-side expected value: ``gap_frac`` equals the
+    pooled image response's own, aliasing equals the cosine between two factors' mean
+    pooled responses, and the response rank equals theirs.  It is also a **ceiling** —
+    an encoder that provably loses nothing at this resolution — so where it falls
+    short, the limit is the benchmark or the protocol, not any model.
+
+    ``collapse`` — ``f(x)[c] = w_c * mean(x)``, spatially constant and channel-rank 1.
+    The negative control: every factor must collapse onto one direction, giving rank 1,
+    aliasing at ~1.0 and identification at chance.  If the pipeline reports structure
+    here, the metrics are inventing it.
+
+    Note the linear oracle's expectations share the pooling operator with the pipeline,
+    so this tests the chain around the pooling, not the pooling itself.
+    """
+
+    def __init__(self, mode, grid, channels, content_size, seed=0):
+        import torch
+
+        if mode not in ("linear", "collapse"):
+            raise ValueError(f"oracle mode must be linear|collapse, got {mode!r}")
+        self.mode = mode
+        self.grid = tuple(grid)
+        self.channels = int(channels)
+        self.content_size = int(content_size)
+        g = torch.Generator().manual_seed(seed)
+        # Non-degenerate per-channel weights so the content/style split is not trivially
+        # symmetric; the map stays invertible on the pooled image either way.
+        self.w = torch.randn(self.channels, generator=g) * 0.5 + 1.0
+
+    def eval(self):
+        return self
+
+    def to(self, *_a, **_k):
+        return self
+
+    def __call__(self, x, return_recon=True, pool_only=False, n_views=1, **_kw):
+        import torch
+        import torch.nn.functional as F
+
+        if self.mode == "linear":
+            base = F.adaptive_avg_pool3d(x, self.grid)  # (B, 1, d, h, w)
+        else:
+            m = x.mean(dim=[1, 2, 3, 4])  # (B,)
+            base = m[:, None, None, None, None].expand(x.shape[0], 1, *self.grid)
+        feat = base * self.w.to(x.device)[None, :, None, None, None]  # (B, C, d, h, w)
+        mask = torch.zeros(self.channels, dtype=torch.bool, device=x.device)
+        mask[: self.content_size] = True
+        # Same 8-tuple shape the VQVAE returns: features at index 2, masks at index 6.
+        return (None, None, [feat], None, None, None, {0: mask}, None)
+
+
 def _perturb(latents, block, index, delta, direction=None):
     """Copy ``latents`` with one target shifted by ``delta``. Everything else identical."""
     out = {k: (v.clone() if hasattr(v, "clone") else v) for k, v in latents.items()}
@@ -1126,6 +1189,85 @@ def print_report(rows, baseline_name=None):
                 )
 
 
+def verify_oracles(rows):
+    """Assert each oracle arm reports what its construction guarantees.
+
+    Returns a list of ``(label, ok, detail)``.  A failure localises the bug: a broken
+    ``rho_loc``/``conc`` on the linear oracle points at the reshape or the latent-grid
+    alignment in ``locality``; a collapse oracle with rank > 1 means the rank machinery
+    is manufacturing directions; a mismatched ``active_frac`` means the intervention is
+    not reaching the renderer.
+    """
+    checks = []
+    for row in rows:
+        mode = row.get("oracle")
+        if not mode:
+            continue
+        tag = row["name"]
+        pf = row["per_factor"]
+        content = row["content_names"]
+
+        if mode == "collapse":
+            # Every factor maps to the same spatially-constant direction.
+            checks.append((f"{tag}: rank_signal == 1", row.get("rank_signal") == 1, f"got {row.get('rank_signal')}"))
+            al = max((pf[f].get("max_alias", 0.0) for f in content), default=0.0)
+            checks.append((f"{tag}: max_alias ~ 1.0", al > 0.95, f"got {al:.3f}"))
+            acc, ch = row.get("id_acc", 0.0), row.get("id_chance", 0.0)
+            checks.append((f"{tag}: id_acc ~ chance", abs(acc - ch) < 0.15, f"got {acc:.3f} vs chance {ch:.3f}"))
+            gf = max((pf[f].get("gap_frac", 0.0) for f in content), default=0.0)
+            checks.append((f"{tag}: gap_frac ~ 1.0 (constant in space)", gf > 0.95, f"got {gf:.3f}"))
+
+        if mode == "linear":
+            # The latent response map is a fixed multiple of the pooled image response,
+            # so it must track the image-side support closely.
+            rl = [pf[f].get("rho_loc", 0.0) for f in content if np.isfinite(pf[f].get("rho_loc", np.nan))]
+            checks.append(
+                (
+                    f"{tag}: rho_loc high for every factor",
+                    bool(rl) and min(rl) > 0.7,
+                    f"min {min(rl):.3f}" if rl else "n/a",
+                )
+            )
+            # Not assertions — the ceiling is a RESULT, reported so model numbers can be
+            # read against it rather than against 9.
+            checks.append(
+                (
+                    f"{tag}: CEILING rank at this latent grid",
+                    None,
+                    f"{row.get('rank_signal')}/{row.get('rank_target')} "
+                    f"(gap {_f(row.get('spectral_gap_ratio'), 1)}x @ {row.get('spectral_gap_at')}) — "
+                    "a model matching this is saturating the benchmark, not failing",
+                )
+            )
+            notest = [f for f in content if not pf[f].get("direction_estimable", True)]
+            checks.append(
+                (
+                    f"{tag}: unmeasurable EVEN LOSSLESSLY",
+                    None,
+                    ", ".join(notest) if notest else "none — every factor's mean direction is estimable",
+                )
+            )
+    return checks
+
+
+def print_oracle_report(checks):
+    if not checks:
+        return
+    print("\n" + "=" * 100)
+    print("  ORACLE VERIFICATION — known-answer encoders through the identical pipeline")
+    print("=" * 100)
+    for label, ok, detail in checks:
+        mark = "INFO" if ok is None else ("PASS" if ok else "FAIL")
+        print(f"  [{mark}]  {label:<50} {detail}")
+    bad = [c for c in checks if c[1] is False]
+    if bad:
+        print(f"\n  {len(bad)} CHECK(S) FAILED — the pipeline does not reproduce a known answer.")
+        print("  Treat every model number in this report as unverified until this passes.")
+    else:
+        print("\n  All oracle checks passed: the render->encode->split->reshape->score chain")
+        print("  reproduces the analytically known answer.")
+
+
 def write_outputs(rows, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "interventional.json"), "w") as fh:
@@ -1236,6 +1378,19 @@ def main():
         "--old-generator",
         action="store_true",
         help="Render with the PRE-7ac56a3 render_structure, for checkpoints trained before 2026-07-05.",
+    )
+    p.add_argument(
+        "--oracle",
+        nargs="*",
+        default=None,
+        choices=["linear", "collapse"],
+        help="Add known-answer encoder arms scored through the identical pipeline. 'linear' is an "
+        "invertible linear map of the image pooled to the latent grid — it loses nothing, so its "
+        "numbers are the CEILING this benchmark supports at this resolution, and a model falling "
+        "short of it is the model's doing while the oracle falling short is the benchmark's. "
+        "'collapse' is the negative control (spatially constant, channel-rank 1): it must read "
+        "rank 1, aliasing ~1.0 and identification at chance. Both are verified against their "
+        "construction and reported as PASS/FAIL. Use '--oracle linear collapse' for both.",
     )
     p.add_argument("--out", default="interventional_out", help="Output directory.")
     cli = p.parse_args()
@@ -1364,11 +1519,56 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    # Oracle arms: same dataset, same base samples, same targets, same scoring path —
+    # only the encoder is swapped for one whose answer is known by construction.
+    for mode in cli.oracle or []:
+        _grid = int(getattr(ref_args, "synthetic_res", 64))
+        for _s in getattr(ref_args, "vqvae_scaling_rates", [4]):
+            _grid //= int(_s)
+        _ch = int(getattr(ref_args, "vqvae_hidden_channels", 48))
+        _cs = getattr(ref_args, "content_size", None) or len(getattr(ref_args, "content_indices", [[0]])[0])
+        logger.info("=== oracle:%s (grid %d^3, %d ch, content %d) ===", mode, _grid, _ch, _cs)
+        try:
+            oracle = OracleEncoder(mode, (_grid, _grid, _grid), _ch, min(int(_cs), _ch))
+            responses, null, grid, _b = collect_responses(
+                oracle,
+                dataset,
+                base,
+                targets,
+                0,
+                torch.device("cpu"),
+                cli.eps,
+                batch_size=cli.batch_size,
+                field_pool=cli.field_pool,
+            )
+            row = score_run(
+                responses, null, grid, content_names, style_names, nuisance_names, support_frac=cli.support_frac
+            )
+            row.update(
+                {
+                    "name": f"oracle:{mode}",
+                    "run_dir": "(synthetic)",
+                    "checkpoint": "(none)",
+                    "oracle": mode,
+                    "eps": cli.eps,
+                    "level": 0,
+                    "num_samples": cli.num_samples,
+                    "grid": list(grid),
+                    "normalize": getattr(ref_args, "synthetic_normalize", "per_sample"),
+                    "causal_base": (not cli.iid_base) and bool(getattr(ref_args, "synthetic_causal", False)),
+                    "generator": "legacy_pre_7ac56a3" if cli.old_generator else "current",
+                }
+            )
+            rows.append(row)
+        except Exception as e:
+            logger.error("Oracle %s failed: %s", mode, e)
+
     if not rows:
         logger.error("No models evaluated successfully.")
         return
 
     print_report(rows, baseline_name)
+    print_oracle_report(verify_oracles(rows))
     write_outputs(rows, cli.out)
 
 
