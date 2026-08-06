@@ -63,11 +63,26 @@ pair rather than one number.  ``productive_align`` is NaN in the diffuse row BY 
 — the informative directions are all low-variance there, so the (hi-var AND hi-info) set is
 empty.  Read ``surplus_align``; ``productive_align`` is context, not the discriminator.
 
+``--provenance`` then asks WHERE a direction's content comes from, validated on planted
+directions with known provenance (1200 samples, 9 factors, 200 pixel features):
+
+    planted direction                info_mlp   raw_own   raw_cross
+    linear in gt                        0.996     0.999       0.999
+    NONLINEAR in gt (gt0*gt1)           0.956     0.000       0.000
+    shared structure beyond gt          0.000     0.999       0.999   <- the case of interest
+    view-1-specific noise               0.000     0.000       0.000
+
+All four separate.  Note ``raw_cross`` uses a LINEAR readout, which is why the nonlinear-in-gt
+row reads 0.000 there — that provenance is caught by ``info_mlp`` instead.  The gap in the
+coverage is a direction that is a *nonlinear* function of shared anatomy outside the 9
+factors: both columns would read ~0 and the verdict falls through to "neither explains
+these", which is the honest answer rather than a wrong one.
+
 Usage
 -----
     python -m eval.direction_diffusion \
         --run-dirs results/synthetic/BASELINE results/synthetic/CONTRASTIVE \
-        --names baseline contrastive --poolings gap --causal match
+        --names baseline contrastive --poolings gap --causal match --provenance
 """
 
 from __future__ import annotations
@@ -109,6 +124,28 @@ def direction_stats(p1, p2, gt, seeds):
     return align, np.clip(np.nan_to_num(info, nan=0.0), 0.0, None)
 
 
+def provenance(p1, gt, raw_v1, raw_v2, seeds):
+    """Where does each direction's content come from?
+
+    ``info_mlp``   nonlinear readout from the 9 GT factors. High while the linear ``info``
+                   is ~0 means the factors ARE there, just not linearly — the direction is
+                   not surplus at all.
+    ``raw_cross``  linear readout from the OTHER view's pixels. This is the load-bearing
+                   column: the two views share only the anatomy, so anything predictable
+                   from view 2 is genuinely shared content. Predicting the direction from
+                   its OWN view would be circular — the encoder is a function of that
+                   view — which is why ``raw_own`` is reported only as a sanity ceiling.
+    """
+    n = p1.shape[1]
+    out = {k: np.empty(n) for k in ("info_mlp", "raw_own", "raw_cross")}
+    for k in range(n):
+        y = p1[:, k]
+        out["info_mlp"][k] = cv_probe_r2(gt, y, seeds=seeds, kind="mlp")["mean"]
+        out["raw_own"][k] = cv_probe_r2(raw_v1, y, seeds=seeds)["mean"]
+        out["raw_cross"][k] = cv_probe_r2(raw_v2, y, seeds=seeds)["mean"]
+    return {k: np.clip(np.nan_to_num(v, nan=0.0), 0.0, None) for k, v in out.items()}
+
+
 def summarise(var_share, info, align):
     """Diffusion (Spearman) plus the surplus-vs-productive alignment split."""
     rho = spearmanr(var_share, info).statistic if len(var_share) > 2 else float("nan")
@@ -144,6 +181,14 @@ def main():
     p.add_argument("--poolings", default="gap", help="gap first: 44 dims, and where the GAP-BT term acts.")
     p.add_argument("--n-comp", type=int, default=44, help="Directions to score (capped by block width).")
     p.add_argument("--top", type=int, default=12, help="Rows of the per-direction table to print.")
+    p.add_argument(
+        "--provenance",
+        action="store_true",
+        help="For each direction also ask WHERE its content comes from: a nonlinear (MLP) readout "
+        "from the GT factors, and a linear readout from the OTHER view's raw pixels. Separates "
+        "'the factors, encoded nonlinearly' from 'shared anatomy the 9 factors do not describe'.",
+    )
+    p.add_argument("--raw-grid", type=int, default=8, help="Pixel grid for the provenance readout (8^3 = 512 feats).")
     p.add_argument("--level", type=int, default=0)
     p.add_argument("--seeds", default="0,1")
     p.add_argument("--batch-size", type=int, default=32)
@@ -180,19 +225,41 @@ def main():
             align, info = direction_stats(p1, p2, gt, seeds)
             s = summarise(var_share, info, align)
 
-            print("\n" + "=" * 78)
+            prov = None
+            if cli.provenance:
+                from eval.view_asymmetry_probe import extract_views
+
+                _x1, _x2, _ = extract_views(dataset, cli.raw_grid, cli.batch_size, cli.num_workers)
+                prov = provenance(p1, gt, _x1, _x2, seeds)
+
+            print("\n" + "=" * 92)
             print(f"  DIRECTION PROFILE — {name}, pooling '{key}', {p1.shape[1]} directions scored")
-            print("=" * 78)
-            print(f"  {'PC':>4}{'var share':>12}{'cum var':>10}{'info R²':>10}{'alignment':>12}")
-            print("  " + "-" * 46)
+            print("=" * 92)
+            _extra = f"{'info_mlp':>10}{'raw_own':>10}{'raw_cross':>11}" if prov else ""
+            print(f"  {'PC':>4}{'var share':>12}{'cum var':>10}{'info R²':>10}{'alignment':>12}{_extra}")
+            print("  " + "-" * (46 + (31 if prov else 0)))
             cum = np.cumsum(var_share)
+
+            def _prov_cells(k):
+                if not prov:
+                    return ""
+                return f"{prov['info_mlp'][k]:>10.3f}{prov['raw_own'][k]:>10.3f}{prov['raw_cross'][k]:>11.3f}"
+
             for k in range(min(cli.top, len(var_share))):
-                print(f"  {k:>4}{var_share[k]:>12.4f}{cum[k]:>10.3f}{info[k]:>10.3f}{align[k]:>12.3f}")
+                print(
+                    f"  {k:>4}{var_share[k]:>12.4f}{cum[k]:>10.3f}{info[k]:>10.3f}" f"{align[k]:>12.3f}{_prov_cells(k)}"
+                )
             if len(var_share) > cli.top:
                 tail = slice(cli.top, None)
+                _tx = ""
+                if prov:
+                    _tx = (
+                        f"{prov['info_mlp'][tail].mean():>10.3f}{prov['raw_own'][tail].mean():>10.3f}"
+                        f"{prov['raw_cross'][tail].mean():>11.3f}"
+                    )
                 print(
                     f"  {'tail':>4}{var_share[tail].sum():>12.4f}{cum[-1]:>10.3f}"
-                    f"{info[tail].mean():>10.3f}{align[tail].mean():>12.3f}   (mean over the rest)"
+                    f"{info[tail].mean():>10.3f}{align[tail].mean():>12.3f}{_tx}   (mean over the rest)"
                 )
             print(
                 f"\n  spearman(variance, information) = {s['spearman_var_info']:+.3f}"
@@ -206,6 +273,34 @@ def main():
                 f"  productive (hi var, hi info):         n={int((var_share >= np.median(var_share)).sum()) - s['n_surplus']}, "
                 f"{100 * s['productive_var']:.0f}% of variance, mean alignment {s['productive_align']:.3f}"
             )
+            if prov:
+                n = len(var_share)
+                hi_var = np.argsort(np.argsort(-var_share)) < n // 2
+                surplus = hi_var & ~(np.argsort(np.argsort(-info)) < n // 2)
+                if surplus.any():
+                    _sm, _sc = prov["info_mlp"][surplus].mean(), prov["raw_cross"][surplus].mean()
+                    s.update(surplus_info_mlp=float(_sm), surplus_raw_cross=float(_sc))
+                    print(f"\n  PROVENANCE of the {int(surplus.sum())} surplus directions:")
+                    print(f"    nonlinear readout from the 9 GT factors : {_sm:.3f}")
+                    print(f"    linear readout from the OTHER view      : {_sc:.3f}")
+                    # Consistency gate: a direction aligned at ~0.97 across views MUST be
+                    # predictable from the other view — that is what alignment means. High
+                    # alignment with low raw_cross would indict the measurement, not the model.
+                    _rho = np.corrcoef(align, prov["raw_cross"])[0, 1]
+                    print(f"    corr(alignment, raw_cross) over all dirs: {_rho:+.3f}")
+                    if s["surplus_align"] > 0.8 and _sc < 0.2:
+                        print("    [!] INCONSISTENT: directions align across views but are not")
+                        print("        predictable from the other view. Suspect the measurement.")
+                    elif _sm > 0.5:
+                        print("    => THE FACTORS ARE THERE, encoded NONLINEARLY. Not surplus at all;")
+                        print("       the linear info column was understating this block.")
+                    elif _sc > 0.5:
+                        print("    => GENUINE SHARED ANATOMY THE 9 FACTORS DO NOT DESCRIBE. The")
+                        print("       objective is encoding real cross-view content that the probe")
+                        print("       set cannot see, so 'diffusion' is partly a benchmark artifact.")
+                    else:
+                        print("    => Neither factors nor cross-view image structure explains these")
+                        print("       directions. Worth chasing — they should not exist.")
             rows.append({"model": name, "pooling": key, **s})
         del model
 
