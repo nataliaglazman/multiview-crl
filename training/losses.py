@@ -1036,6 +1036,8 @@ def barlow_twins_loss(
     lambd=0.005,
     center_mode="none",
     patch_stat="fold",
+    sim_coeff=0.0,
+    std_coeff=0.0,
     **_kwargs,
 ):
     """Barlow Twins loss over content channels of paired views.
@@ -1059,6 +1061,13 @@ def barlow_twins_loss(
             shared anatomy alone, carrying no subject information. ``"position"`` removes
             it and makes the diagonal a statement about subjects.
         patch_stat: ``"fold"`` or ``"per_position"`` — see the note below. Patch mode only.
+        sim_coeff: Weight on an MSE alignment term over the RAW (unstandardised) features.
+            BT's ``on_diag`` is a correlation, which is invariant to a per-view constant
+            offset and so cannot require the two views to coincide — only to co-vary. This
+            is the term that can. 0 disables (default), leaving the loss bit-identical.
+        std_coeff: Weight on VICReg's variance hinge ``relu(1 - std)`` over the same raw
+            features. Mandatory whenever ``sim_coeff > 0``: MSE alone is minimised by
+            collapsing both views to zero, and every other term here is scale-invariant.
 
     Returns:
         Scalar loss with ``._contrastive_diag`` attached.
@@ -1140,6 +1149,33 @@ def barlow_twins_loss(
                 with torch.amp.autocast("cuda", enabled=False):
                     z_i = z_i.float()
                     z_j = z_j.float()
+                    # Distance + variance terms, on the RAW features, BEFORE the per-channel
+                    # standardisation below.
+                    #
+                    # That standardisation is precisely what makes on_diag blind to a per-view
+                    # CONSTANT offset. Measured: adding one leaves on_diag at 0.3084 unchanged
+                    # to four decimals while the two views become perfectly separable (view
+                    # probe 0.503 -> 1.000) and MSE rises 105x. On this project every content
+                    # channel had view-AUC 1.000 under BT and 0/44 above 0.7 under VICReg,
+                    # whose invariance term is exactly this MSE. Correlation measures whether
+                    # the two views move together; only a distance measures whether they are
+                    # in the same place, and block-identifiability needs the latter
+                    # (Yao et al. Lemma C.2 requires g_k(x_k) = g_k'(x_k') almost surely).
+                    #
+                    # The variance hinge is NOT optional once sim_coeff > 0: MSE alone is
+                    # minimised by z_i = z_j = 0, and on_diag/off_diag are both scale-invariant,
+                    # so no other term here can see that collapse. They ship together.
+                    # Computed UNCONDITIONALLY, and weighted only when the coefficients are
+                    # set. Gating the computation on the coefficient would log zeros exactly
+                    # when you need the value — the calibration workflow is to run with both
+                    # coefficients at 0, read these off TensorBoard, and pick weights from
+                    # the measured ratio. Both are a single reduction; the cost is noise.
+                    sim_loss = F.mse_loss(z_i, z_j)
+                    _raw_std_i = z_i.std(dim=0, unbiased=False)
+                    var_loss = F.relu(1.0 - _raw_std_i).mean() + F.relu(1.0 - z_j.std(dim=0, unbiased=False)).mean()
+                    # Captured HERE: z_i is overwritten by its standardised self below, after
+                    # which its std is 1.0 by construction and tells you nothing.
+                    _raw_std_mean = _raw_std_i.mean()
                     if _per_pos:
                         B, d, P = z_i.shape
                         z_i = (z_i - z_i.mean(0, keepdim=True)) / (z_i.std(0, unbiased=False, keepdim=True) + 1e-6)
@@ -1154,7 +1190,7 @@ def barlow_twins_loss(
                 # Loss: push diagonal toward 1, off-diagonal toward 0
                 on_diag = (c.diagonal() - 1).pow(2).sum()
                 off_diag = c.pow(2).sum() - c.diagonal().pow(2).sum()
-                loss = on_diag + lambd * off_diag
+                loss = on_diag + lambd * off_diag + sim_coeff * sim_loss + std_coeff * var_loss
                 total_loss = total_loss + loss
 
                 with torch.no_grad():
@@ -1167,6 +1203,12 @@ def barlow_twins_loss(
                             "neg_sim_std": 0.0,
                             "on_diag_loss": on_diag.item(),
                             "off_diag_loss": off_diag.item(),
+                            # Logged unweighted so the four terms can be balanced from what
+                            # they actually are, rather than by transplanting VICReg's 25/25/1
+                            # (the mistake that made bt_lambda 200x too weak at d=44).
+                            "sim_loss": sim_loss.item(),
+                            "var_loss": var_loss.item(),
+                            "feat_std_mean": _raw_std_mean.item(),
                         }
                     )
 

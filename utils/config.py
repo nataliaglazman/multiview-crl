@@ -997,6 +997,29 @@ def parse_args() -> argparse.ArgumentParser:
         "offline run_dci_compare --num-samples convention).",
     )
     parser.add_argument(
+        "--bt-sim-coeff",
+        type=float,
+        default=0.0,
+        help="Weight on an MSE alignment term added to Barlow Twins, computed on the RAW "
+        "(unstandardised) content features. BT's on_diag is a correlation on per-channel "
+        "standardised features, so it is invariant to a per-view constant offset and cannot "
+        "require the two views to COINCIDE — only to co-vary. Measured consequence: every "
+        "content channel identifies the modality at AUC 1.000 under BT, versus 0/44 above "
+        "0.7 under VICReg, whose invariance term is exactly this MSE. 0 disables (default), "
+        "leaving existing runs bit-identical. Requires --bt-std-coeff > 0.",
+    )
+    parser.add_argument(
+        "--bt-std-coeff",
+        type=float,
+        default=0.0,
+        help="Weight on VICReg's variance hinge relu(1 - std) over the raw content features. "
+        "NOT optional when --bt-sim-coeff > 0: MSE alone is minimised by collapsing both "
+        "views to zero, and BT's on_diag/off_diag are both scale-invariant, so nothing else "
+        "in the loss can detect that. Also a floor-free anti-collapse term — d independent "
+        "per-channel estimates, with none of the d(d-1)/B sampling floor that limits the "
+        "off-diagonal.",
+    )
+    parser.add_argument(
         "--selection-info-tolerance",
         type=float,
         default=0.05,

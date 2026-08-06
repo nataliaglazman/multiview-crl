@@ -1205,10 +1205,20 @@ def main(args):
         # sampling floor (~d(d-1)/B) that is pure noise. Let it carry its own lambda.
         _bt_gap_lam = getattr(args, "bt_gap_lambda", None)
         _bt_gap_lam = _bt_lambda if _bt_gap_lam is None else _bt_gap_lam
+        _bt_sim_c = getattr(args, "bt_sim_coeff", 0.0)
+        _bt_std_c = getattr(args, "bt_std_coeff", 0.0)
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
-            f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam})"
+            f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
+            f"sim={_bt_sim_c}, std={_bt_std_c})"
         )
+        if _bt_sim_c > 0 and _bt_std_c <= 0:
+            raise ValueError(
+                "--bt-sim-coeff > 0 requires --bt-std-coeff > 0. MSE alignment alone is "
+                "minimised by collapsing both views to zero, and every other Barlow Twins "
+                "term is scale-invariant, so nothing in the loss can detect that. The "
+                "variance hinge is what makes the MSE term safe — they ship together."
+            )
         if _bt_gap_w > 0 and args.batch_size < 128:
             logger.warning(
                 f"--bt-gap-weight is on with batch_size={args.batch_size}. The GAP term's "
@@ -1223,6 +1233,8 @@ def main(args):
                 subsets=subsets,
                 soft_content_mask=soft_content_mask,
                 lambd=_bt_lambda,
+                sim_coeff=_bt_sim_c,
+                std_coeff=_bt_std_c,
             )
 
         def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
@@ -1234,6 +1246,8 @@ def main(args):
                 lambd=_bt_lambda,
                 center_mode=_nce_center,
                 patch_stat=_bt_stat,
+                sim_coeff=_bt_sim_c,
+                std_coeff=_bt_std_c,
             )
             # Optional GAP-pooled companion term. The patch fold's cross-covariance is
             # Cov_subject + Cov_interaction and the interaction dominates on registered
@@ -1247,6 +1261,8 @@ def main(args):
                     subsets=subsets,
                     soft_content_mask=soft_content_mask,
                     lambd=_bt_gap_lam,
+                    sim_coeff=_bt_sim_c,
+                    std_coeff=_bt_std_c,
                 )
                 _total = _l + _bt_gap_w * _lg
                 # Arithmetic drops the attribute; carry the patch diagnostics and add the
