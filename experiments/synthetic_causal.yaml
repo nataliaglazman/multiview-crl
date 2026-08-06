@@ -49,12 +49,12 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-128-lambda-003-same-content
+tag: synthetic-causal-clean-content-vicreg-redo
 
-contrastive_loss_type: barlow_twins
+contrastive_loss_type: vicreg
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
-patch_grid: [8, 8 ,8 ]                 # 4x4x4 patches for 64^3 volumes
+patch_grid: [4,4,4]                 # 4x4x4 patches for 64^3 volumes
 patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
