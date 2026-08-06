@@ -49,17 +49,17 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-128-lambda-003-4-patch
+tag: synthetic-causal-clean-content-128-lambda-003-detach
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
-patch_grid: [4,4,4]                 # 4x4x4 patches for 64^3 volumes
+patch_grid: [8,8,8]                 # 4x4x4 patches for 64^3 volumes
 patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
-bt_gap_lambda: 0.01               # NOT 0.005 — see the calibration note above
+bt_gap_lambda: 0.03               # NOT 0.005 — see the calibration note above
 
 scale_contrastive_loss: 1      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
@@ -87,5 +87,6 @@ vqvae_scaling_rates: [4]
 deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
+detach_style_injection: true
 
 synthetic_clean_content: true
