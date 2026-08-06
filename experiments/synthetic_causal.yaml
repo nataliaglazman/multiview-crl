@@ -49,12 +49,12 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-128-lambda-003-4-patch
+tag: synthetic-causal-clean-content-128-lambda-003-same-content
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
-patch_grid: [4, 4,4]                 # 4x4x4 patches for 64^3 volumes
+patch_grid: [8, 8 ,8 ]                 # 4x4x4 patches for 64^3 volumes
 patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
@@ -79,7 +79,7 @@ no_final_recon_norm: true
 inject_style_to_decoder: true
 style_injection_mode: input
 separate_style_codebooks: true
-separate_content_codebooks: true
+separate_content_codebooks: false
 vqvae_nb_levels: 1
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
