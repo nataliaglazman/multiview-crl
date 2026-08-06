@@ -91,10 +91,12 @@ import argparse
 import csv
 import logging
 import os
+import warnings
 
 import numpy as np
 from scipy.stats import spearmanr
 from sklearn.decomposition import PCA
+from sklearn.exceptions import DataConversionWarning
 
 from eval.identifiability_metrics import cv_probe_r2
 
@@ -138,11 +140,17 @@ def provenance(p1, gt, raw_v1, raw_v2, seeds):
     """
     n = p1.shape[1]
     out = {k: np.empty(n) for k in ("info_mlp", "raw_own", "raw_cross")}
-    for k in range(n):
-        y = p1[:, k]
-        out["info_mlp"][k] = cv_probe_r2(gt, y, seeds=seeds, kind="mlp")["mean"]
-        out["raw_own"][k] = cv_probe_r2(raw_v1, y, seeds=seeds)["mean"]
-        out["raw_cross"][k] = cv_probe_r2(raw_v2, y, seeds=seeds)["mean"]
+    # cv_probe_r2 reshapes a 1-D target to (N, 1) for its multioutput path, and single-output
+    # estimators (MLPRegressor here) emit a DataConversionWarning for every fold. That is
+    # ~1300 identical lines over this sweep, which buries anything real. Scoped to this
+    # category and this loop so genuine warnings still surface; the fits are unaffected.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DataConversionWarning)
+        for k in range(n):
+            y = p1[:, k]
+            out["info_mlp"][k] = cv_probe_r2(gt, y, seeds=seeds, kind="mlp")["mean"]
+            out["raw_own"][k] = cv_probe_r2(raw_v1, y, seeds=seeds)["mean"]
+            out["raw_cross"][k] = cv_probe_r2(raw_v2, y, seeds=seeds)["mean"]
     return {k: np.clip(np.nan_to_num(v, nan=0.0), 0.0, None) for k, v in out.items()}
 
 
