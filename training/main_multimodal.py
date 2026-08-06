@@ -715,7 +715,11 @@ def train_step(
             if (_adv_scale > 0.0 or _patch_adv_scale > 0.0 or _suf_scale > 0.0) and _style_hz_v0 is not None:
                 # Pull content features for this level (shared-mask path).
                 _ci = level_content_indices[0] if level_content_indices else None
-                if _ci:
+                # Length check, not truthiness: _ci is a multi-element index tensor, and
+                # `if _ci:` raises "Boolean value of Tensor with more than one value is
+                # ambiguous". Never hit before because every scale_*_modality_* weight
+                # defaults to 0.0, so this whole branch was dead code until first use.
+                if _ci is not None and len(_ci) > 0:
                     if _is_patch:
                         _content_hz_v0_patch = hz_level[0][:, _ci, :]  # (B, k, P)
                         _content_hz_v1_patch = hz_level[1][:, _ci, :]
@@ -2515,6 +2519,16 @@ def main(args):
                                         "selection/style_sufficiency": _sel_row.get("suff_s2s"),
                                         "selection/content_rank": _sel_row.get("content_rank"),
                                     }
+                                    # Block-MCC at every pooling, side by side. content_anatomy
+                                    # (and so a quarter of overall_score) is derived from mcc_cc,
+                                    # which is scored at STATS only — permutation-invariant over
+                                    # voxels, so lesion_x/y/z cannot register there. Offline that
+                                    # single choice flips the baseline comparison from +0.011 to
+                                    # -0.043. Logging the ladder makes the reversal readable from
+                                    # the curves rather than only from an offline re-run.
+                                    for _pk, _pv in _sel_row.items():
+                                        if _pk.startswith("mcc_cc_pool_"):
+                                            _sel_log[f"selection/mcc_by_pool/{_pk[len('mcc_cc_pool_'):]}"] = _pv
                                     for _sel_k, _sel_v in _sel_log.items():
                                         if _sel_v is not None and np.isfinite(_sel_v):
                                             tb_writer.add_scalar(_sel_k, _sel_v, step)

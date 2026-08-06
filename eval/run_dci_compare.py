@@ -991,6 +991,20 @@ def score_encoder_live(
         probe_dim=probe_dim,
     )
     attach_scores([row])
+
+    # Block-MCC at EVERY pooling, not just the one `mcc_cc` uses.
+    #
+    # `_score_one_encoder` hardcodes stats pooling for block-MCC, and stats is
+    # `[mean, std, amax, amin]` over space — all permutation-invariant over voxels, so
+    # lesion_x/y/z (positions) are structurally unreadable there. That silently drops 3 of
+    # the 9 content factors, and they are the ones a reconstruction model recovers best:
+    # measured offline, baseline vs contrastive flips from stats +0.011 to patch -0.043.
+    # Reporting the whole ladder makes the reversal visible in-training instead of only
+    # showing the rung that happens to flatter the contrastive arm.
+    for _k in reprs:
+        _blk = _block_array(reprs, _k, level, _CONTENT)
+        if _blk is not None and _blk.shape[1] and gt_content is not None:
+            row[f"mcc_cc_pool_{_k}"] = block_mcc(_blk, gt_content, seeds=seeds)["mean"]
     return row
 
 
