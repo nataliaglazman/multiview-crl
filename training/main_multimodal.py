@@ -1842,6 +1842,11 @@ def main(args):
         # For other encoders: best is chosen by rolling training loss (lower is better).
         best_total_loss = float("inf")
         best_separation_score = float("-inf")
+        # Running peak of the all-channels capacity, for the completeness gate below.
+        # NOT restored from the checkpoint (it is not stored there), so a resumed run
+        # re-arms the gate from its first eval. That is permissive, not wrong: right
+        # after a resume the gate can miss a decline that started before it.
+        _info_all_peak = float("-inf")
         best_ckpt_path = os.path.join(args.save_dir, "vqvae_best.pt")
         # Fallback: if the dedicated best file is missing, read the bookkeeping
         # from the rolling checkpoint (which now mirrors best_metric_*).
@@ -2450,6 +2455,36 @@ def main(args):
                                     )
                                     separation_score = _sel_row.get("disentanglement")  # overall_score
                                     selection_name = "synthetic_overall_score"
+                                    # Completeness gate. overall_score averages four terms and only
+                                    # ONE (content_anatomy) measures information PRESENT in the
+                                    # content block; the other three reward what is ABSENT, and
+                                    # measurably peak on a DEGRADED representation (verified by
+                                    # deliberately truncating the rank of a real checkpoint in
+                                    # eval/metric_degeneracy_sweep.py: separation 0.414 -> 0.546 and
+                                    # content_purity 0.370 -> 0.499 while rank went 37.9 -> 6.5). So
+                                    # overall_score can climb while the model quietly discards
+                                    # content: measured on this project, 0.49 -> 0.53 between two
+                                    # checkpoints whose eff. rank fell 37.9 -> 28.3 and whose
+                                    # all-channels capacity fell 0.604 -> 0.541 — the later, worse
+                                    # one would have been selected. info_all is the only aggregate
+                                    # here that falls when information genuinely leaves the model,
+                                    # so a step well below its own running peak is disqualified
+                                    # rather than ranked.
+                                    _info_all = _sel_row.get("info_all")
+                                    _info_tol = float(getattr(args, "selection_info_tolerance", 0.05) or 0.0)
+                                    if _info_tol > 0 and _info_all is not None and np.isfinite(_info_all):
+                                        if _info_all > _info_all_peak:
+                                            _info_all_peak = _info_all
+                                        elif _info_all_peak > 0 and _info_all < (1.0 - _info_tol) * _info_all_peak:
+                                            logger.warning(
+                                                f"  [SELECTION] step {step} NOT eligible for best: "
+                                                f"info_all={_info_all:.4f} is "
+                                                f"{100 * (1 - _info_all / _info_all_peak):.1f}% below its peak "
+                                                f"{_info_all_peak:.4f} (tolerance {100 * _info_tol:.0f}%). "
+                                                f"overall_score={separation_score:.4f} is rising on a shrinking "
+                                                f"representation. Disable with --selection-info-tolerance 0."
+                                            )
+                                            separation_score = None
                                     _mcc_cc = _sel_row.get("mcc_cc", float("nan"))
                                     _mcc_null = _sel_row.get("mcc_cc_null", float("nan"))
                                     _mcc_gap = (
@@ -2473,6 +2508,9 @@ def main(args):
                                         # question answerable from the curves: info_all flat while
                                         # mcc_cc_gap falls = migration, both falling = real loss.
                                         "selection/info_all": _sel_row.get("info_all"),
+                                        # The gate's own state, so a run where selection has frozen
+                                        # is readable from the curves rather than only from the log.
+                                        "selection/info_all_peak": _info_all_peak if _info_all_peak > 0 else None,
                                         "selection/style_to_content_leak": _sel_row.get("leak_s2c"),
                                         "selection/style_sufficiency": _sel_row.get("suff_s2s"),
                                         "selection/content_rank": _sel_row.get("content_rank"),
@@ -2489,9 +2527,16 @@ def main(args):
                                             },
                                             step=step,
                                         )
+                                    # Read the score off the row, not off separation_score: the
+                                    # completeness gate sets the latter to None, and formatting
+                                    # None with :.4f would raise into the except below and be
+                                    # reported as "selection failed" rather than as a gated step.
                                     logger.info(
-                                        f"  [SELECTION] synthetic overall_score={separation_score:.4f} "
-                                        f"grade={_sel_row.get('grade')} at step {step}"
+                                        f"  [SELECTION] synthetic overall_score="
+                                        f"{_sel_row.get('disentanglement', float('nan')):.4f} "
+                                        f"grade={_sel_row.get('grade')} "
+                                        f"{'(GATED — not eligible for best)' if separation_score is None else ''}"
+                                        f"at step {step}"
                                     )
                                 except Exception as e:
                                     logger.warning(f"  [WARNING] Synthetic GT selection failed: {e}")

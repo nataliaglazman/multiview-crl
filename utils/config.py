@@ -997,6 +997,17 @@ def parse_args() -> argparse.ArgumentParser:
         "offline run_dci_compare --num-samples convention).",
     )
     parser.add_argument(
+        "--selection-info-tolerance",
+        type=float,
+        default=0.05,
+        help="Completeness gate on checkpoint selection: a step whose all-channels capacity "
+        "(info_all) has fallen more than this fraction below its own running peak is not eligible "
+        "to become the best checkpoint, whatever its overall_score. Guards against the failure "
+        "where overall_score keeps climbing on a shrinking representation — three of its four "
+        "terms reward what is ABSENT from the content block, so only content_anatomy notices "
+        "content being discarded. 0 disables the gate (pre-2026-08 behaviour).",
+    )
+    parser.add_argument(
         "--content-dim",
         type=int,
         default=128,

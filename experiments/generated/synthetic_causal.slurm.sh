@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-05T09:53:08Z
-# Git SHA: 810d0ad
+# Generated at: 2026-08-06T10:12:58Z
+# Git SHA: 72f5541
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-128-lambda-003
+#SBATCH --job-name=synthetic-causal-clean-content-128-lambda-001
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-128-lambda-003-%j.err
+#SBATCH --error=synthetic-causal-clean-content-128-lambda-001-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -58,7 +58,7 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 0.03 \
+    --bt-gap-lambda 0.01 \
     --bt-gap-weight 1 \
     --bt-lambda 1 \
     --channels-last \
@@ -114,7 +114,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-128-lambda-003 \
+    --model-id synthetic-causal-clean-content-128-lambda-001 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
