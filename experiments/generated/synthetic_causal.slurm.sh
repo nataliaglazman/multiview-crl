@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-06T21:53:52Z
-# Git SHA: b223403
+# Generated at: 2026-08-06T21:56:05Z
+# Git SHA: 0af9200
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-baseline-44-final
+#SBATCH --job-name=synthetic-causal-clean-content-mse
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-baseline-44-final-%j.err
+#SBATCH --error=synthetic-causal-clean-content-mse-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -58,13 +58,18 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
+    --bt-gap-lambda 0 \
+    --bt-gap-weight 1 \
+    --bt-lambda 1 \
+    --bt-sim-coeff <from step 0> \
+    --bt-std-coeff <from step 0> \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
     --content-size 44 \
     --content-style-levels 0 \
-    --contrastive-loss-type infonce \
+    --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -81,18 +86,21 @@ fi
     --no-final-recon-norm \
     --norm-type layer \
     --pass-full-to-next-level \
+    --patch-center-mode position \
     --patch-contrastive \
+    --patch-foreground-mask \
+    --patch-foreground-thresh 0.05 \
+    --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 1 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
@@ -107,7 +115,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-baseline-44-final \
+    --model-id synthetic-causal-clean-content-mse \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
