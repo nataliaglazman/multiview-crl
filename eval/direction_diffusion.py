@@ -243,8 +243,12 @@ def main():
             print("\n" + "=" * 92)
             print(f"  DIRECTION PROFILE — {name}, pooling '{key}', {p1.shape[1]} directions scored")
             print("=" * 92)
-            _extra = f"{'info_mlp':>10}{'raw_own':>10}{'raw_cross':>11}" if prov else ""
-            print(f"  {'PC':>4}{'var share':>12}{'cum var':>10}{'info R²':>10}{'alignment':>12}{_extra}")
+            # Column names carry the regression DIRECTION, because `info` predicts the
+            # factors FROM the direction while every provenance column predicts the
+            # direction FROM something else. Reading them as "linear vs MLP on the same
+            # problem" is wrong and the old names invited exactly that.
+            _extra = f"{'dir<-fac':>10}{'dir<-v1':>10}{'dir<-v2':>11}" if prov else ""
+            print(f"  {'PC':>4}{'var share':>12}{'cum var':>10}{'fac<-dir':>10}{'alignment':>12}{_extra}")
             print("  " + "-" * (46 + (31 if prov else 0)))
             cum = np.cumsum(var_share)
 
@@ -289,8 +293,8 @@ def main():
                     _sm, _sc = prov["info_mlp"][surplus].mean(), prov["raw_cross"][surplus].mean()
                     s.update(surplus_info_mlp=float(_sm), surplus_raw_cross=float(_sc))
                     print(f"\n  PROVENANCE of the {int(surplus.sum())} surplus directions:")
-                    print(f"    nonlinear readout from the 9 GT factors : {_sm:.3f}")
-                    print(f"    linear readout from the OTHER view      : {_sc:.3f}")
+                    print(f"    direction <- 9 GT factors (MLP)         : {_sm:.3f}")
+                    print(f"    direction <- OTHER view's pixels (ridge): {_sc:.3f}")
                     # Consistency gate: a direction aligned at ~0.97 across views MUST be
                     # predictable from the other view — that is what alignment means. High
                     # alignment with low raw_cross would indict the measurement, not the model.
