@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-mse
+tag: synthetic-causal-clean-content-mse-calibration
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
@@ -89,8 +89,8 @@ checkpoint_steps: 1000
 eval_dci: true
 # detach_style_injection: true
 synthetic_clean_content: true
-bt_sim_coeff: <from step 0>
-bt_std_coeff: <from step 0>
+bt_sim_coeff: 0
+bt_std_coeff: 0
 
 
 # _base_: synthetic_defaults
