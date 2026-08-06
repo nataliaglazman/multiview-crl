@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-128-lambda-003-adv
+tag: synthetic-causal-clean-content-128-lambda-0
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
@@ -59,7 +59,7 @@ patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
-bt_gap_lambda: 0.03               # NOT 0.005 — see the calibration note above
+bt_gap_lambda: 0               # NOT 0.005 — see the calibration note above
 
 scale_contrastive_loss: 1      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
@@ -88,5 +88,4 @@ deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
 # detach_style_injection: true
-scale_content_modality_adv: 1
 synthetic_clean_content: true
