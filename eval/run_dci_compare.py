@@ -2123,7 +2123,17 @@ def main():
         "--checkpoint-name",
         default="vqvae_model.pt",
         help="Checkpoint filename loaded from every run-dir. Use vqvae_best.pt for the best-by-loss copy "
-        "(recommended for a final comparison; same choice for all models keeps it fair).",
+        "(recommended for a final comparison; same choice for all models keeps it fair). Also the "
+        "checkpoint used for a --baseline directory that is not itself listed in --run-dirs.",
+    )
+    p.add_argument(
+        "--checkpoint-names",
+        nargs="*",
+        default=None,
+        help="Per-run checkpoint filenames, one per --run-dirs (or exactly one, reused for all). "
+        "Overrides --checkpoint-name. Repeat a run directory to compare two of its own checkpoints: "
+        "--run-dirs RUN RUN --checkpoint-names vqvae_model.pt vqvae_model_late.pt. Default labels are "
+        "disambiguated with the checkpoint stem when a directory repeats.",
     )
     p.add_argument(
         "--num-samples",
@@ -2232,17 +2242,38 @@ def main():
 
     # Assemble the model list; the baseline (if separate) is evaluated too.
     specs = list(cli.run_dirs)
-    names = cli.names or [os.path.basename(os.path.normpath(d)) for d in specs]
+    ckpts = list(cli.checkpoint_names) if cli.checkpoint_names else [cli.checkpoint_name]
+    if len(ckpts) == 1:
+        ckpts = ckpts * len(specs)
+    if len(ckpts) != len(specs):
+        p.error("--checkpoint-names must have one entry per --run-dirs (or exactly one)")
+    if cli.names:
+        names = cli.names
+    else:
+        # Repeating a run-dir to compare its own checkpoints would collide on the basename,
+        # so fold the checkpoint stem into the default label in that case only.
+        _repeats = len(set(specs)) != len(specs)
+        names = [
+            os.path.basename(os.path.normpath(d)) + (f":{os.path.splitext(c)[0]}" if _repeats else "")
+            for d, c in zip(specs, ckpts)
+        ]
     if len(names) != len(specs):
         p.error("--names must have one entry per --run-dirs")
     baseline_name = None
     if cli.baseline:
         if cli.baseline in specs:
+            if specs.count(cli.baseline) > 1:
+                p.error(
+                    f"--baseline {cli.baseline} appears more than once in --run-dirs, so which "
+                    "checkpoint anchors Δ is ambiguous. Point --baseline at a separate run "
+                    "directory, or drop it."
+                )
             baseline_name = names[specs.index(cli.baseline)]
         else:
             baseline_name = os.path.basename(os.path.normpath(cli.baseline))
             specs = [cli.baseline] + specs
             names = [baseline_name] + names
+            ckpts = [cli.checkpoint_name] + ckpts
 
     # One frozen test set, built from the first run's settings, reused for all.
     import torch
@@ -2273,7 +2304,7 @@ def main():
         )
 
     rows = []
-    for name, run_dir in zip(names, specs):
+    for name, run_dir, ckpt_name in zip(names, specs, ckpts):
         is_baseline = baseline_name is not None and name == baseline_name
         # Baseline default = all-content: style is merged into content (one content
         # block, no style), so its content-side metrics + capacity line up with the
@@ -2292,7 +2323,7 @@ def main():
                     cli.batch_size,
                     cli.num_workers,
                     device,
-                    checkpoint=_resolve_checkpoint(run_dir, cli.checkpoint_name),
+                    checkpoint=_resolve_checkpoint(run_dir, ckpt_name),
                     n_jobs=cli.n_jobs,
                     per_encoder=cli.per_encoder,
                     with_dci=cli.with_dci,

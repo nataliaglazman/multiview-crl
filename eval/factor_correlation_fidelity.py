@@ -180,21 +180,22 @@ def channel_offdiag(c_v1, c_v2, batch_size, draws=32, seed=0):
     rng = np.random.RandomState(seed)
     n, d = c_v1.shape
     b = min(batch_size, n)
-    vals = []
+    vals, diags = [], []
     for _ in range(draws):
         idx = rng.choice(n, size=b, replace=False)
         zi, zj = c_v1[idx].astype(np.float64), c_v2[idx].astype(np.float64)
         zi = (zi - zi.mean(0)) / (zi.std(0) + 1e-6)
         zj = (zj - zj.mean(0)) / (zj.std(0) + 1e-6)
         c = zi.T @ zj / b
-        off = (c**2).sum() - (np.diag(c) ** 2).sum()
-        vals.append(off)
+        vals.append((c**2).sum() - (np.diag(c) ** 2).sum())
+        diags.append(np.diag(c).mean())
     off_mean = float(np.mean(vals))
     return {
         "off_diag": off_mean,
         "floor": float(d * (d - 1) / b),
         "rms_offdiag": float(np.sqrt(off_mean / max(d * d - d, 1))),
-        "diag_mean": float(np.mean(np.diag((zi.T @ zj) / b))),
+        "diag_mean": float(np.mean(diags)),
+        "diag_std": float(np.std(diags)),
         "d": d,
         "b": b,
     }
