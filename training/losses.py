@@ -1,5 +1,6 @@
 """Definition of loss functions."""
 
+import contextlib
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple
 
@@ -1185,36 +1186,41 @@ def barlow_twins_loss(
                     # The variance hinge is NOT optional once sim_coeff > 0: MSE alone is
                     # minimised by z_i = z_j = 0, and on_diag/off_diag are both scale-invariant,
                     # so no other term here can see that collapse. They ship together.
-                    # Computed UNCONDITIONALLY, and weighted only when the coefficients are
-                    # set. Gating the computation on the coefficient would log zeros exactly
-                    # when you need the value — the calibration workflow is to run with both
-                    # coefficients at 0, read these off TensorBoard, and pick weights from
-                    # the measured ratio. Both are a single reduction; the cost is noise.
-                    r_i = r_i.float()
-                    r_j = r_j.float()
-                    if sim_normalize:
-                        # Per-channel, scale-free MSE. For zero-mean equal-variance views with
-                        # per-channel correlation rho_c, MSE_c = 2*sigma_c^2*(1 - rho_c), so this
-                        # reads (1 - mean rho) when the means match and EXCESS over that is the
-                        # per-view offset. Two reasons to prefer it here:
-                        #
-                        # 1. Raw MSE scales as sigma^2, and the variance hinge is simultaneously
-                        #    driving sigma up (measured: GAP feat_std 0.004 against a hinge target
-                        #    of 1, a 250x rescale => up to 62500x on the raw term). The two terms
-                        #    fight, and sim_loss rises while alignment IMPROVES — which is exactly
-                        #    what was observed at both coeff 1 and 0.1.
-                        # 2. Per-channel normalisation equalises directions, so the term stops
-                        #    being magnitude-weighted toward the top PCs. That matters because the
-                        #    factor information sits in the low-variance tail (n@95% = 44 of 44).
-                        #
-                        # The denominator is DETACHED: without it, shrinking sigma is a free way to
-                        # cut the ratio, which is the collapse the hinge exists to prevent.
-                        _den = (0.5 * (r_i.var(dim=0, unbiased=False) + r_j.var(dim=0, unbiased=False))).detach()
-                        sim_loss = (((r_i - r_j) ** 2) / (2.0 * _den + 1e-8)).mean()
-                    else:
-                        sim_loss = F.mse_loss(r_i, r_j)
-                    _raw_std_i = r_i.std(dim=0, unbiased=False)
-                    var_loss = F.relu(1.0 - _raw_std_i).mean() + F.relu(1.0 - r_j.std(dim=0, unbiased=False)).mean()
+                    # Computed UNCONDITIONALLY so the calibration workflow works — run with
+                    # both coefficients at 0, read these off TensorBoard, pick weights from the
+                    # measured ratio. But under no_grad when neither coefficient is set, so a
+                    # run that does not use the terms pays no autograd graph for them. That
+                    # matters: the uncentered copy of the patch fold is (2, B*P, d), which at
+                    # patch_grid 8^3 and B=128 is ~25 MB plus its graph, and cuDNN reports
+                    # workspace exhaustion as "unable to find an engine" rather than as OOM.
+                    _weighted = sim_coeff > 0 or std_coeff > 0
+                    _ctx = contextlib.nullcontext() if _weighted else torch.no_grad()
+                    with _ctx:
+                        r_i = r_i.float()
+                        r_j = r_j.float()
+                        if sim_normalize:
+                            # Per-channel, scale-free MSE. For zero-mean equal-variance views with
+                            # per-channel correlation rho_c, MSE_c = 2*sigma_c^2*(1 - rho_c), so this
+                            # reads (1 - mean rho) when the means match and EXCESS over that is the
+                            # per-view offset. Two reasons to prefer it here:
+                            #
+                            # 1. Raw MSE scales as sigma^2, and the variance hinge is simultaneously
+                            #    driving sigma up (measured: GAP feat_std 0.004 against a hinge target
+                            #    of 1, a 250x rescale => up to 62500x on the raw term). The two terms
+                            #    fight, and sim_loss rises while alignment IMPROVES — which is exactly
+                            #    what was observed at both coeff 1 and 0.1.
+                            # 2. Per-channel normalisation equalises directions, so the term stops
+                            #    being magnitude-weighted toward the top PCs. That matters because the
+                            #    factor information sits in the low-variance tail (n@95% = 44 of 44).
+                            #
+                            # The denominator is DETACHED: without it, shrinking sigma is a free way to
+                            # cut the ratio, which is the collapse the hinge exists to prevent.
+                            _den = (0.5 * (r_i.var(dim=0, unbiased=False) + r_j.var(dim=0, unbiased=False))).detach()
+                            sim_loss = (((r_i - r_j) ** 2) / (2.0 * _den + 1e-8)).mean()
+                        else:
+                            sim_loss = F.mse_loss(r_i, r_j)
+                        _raw_std_i = r_i.std(dim=0, unbiased=False)
+                        var_loss = F.relu(1.0 - _raw_std_i).mean() + F.relu(1.0 - r_j.std(dim=0, unbiased=False)).mean()
                     # Captured HERE: z_i is overwritten by its standardised self below, after
                     # which its std is 1.0 by construction and tells you nothing.
                     _raw_std_mean = _raw_std_i.mean()

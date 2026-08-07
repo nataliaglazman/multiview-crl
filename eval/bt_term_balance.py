@@ -146,7 +146,14 @@ def main():
         results[key] = measure(hz, B, cli.draws, center_mode, patch_stat)
 
     # Reconstruction scale, for sizing the contrastive terms against what they compete with.
-    recon_mse = float("nan")
+    #
+    # Must match `Loss/Reconstruction` in TensorBoard, which is NOT a plain volume MSE. It is
+    # masked L1 over BRAIN VOXELS ONLY, on predictions clamped to [-1, 1]:
+    #   diff = (x - y).abs() * mask ;  loss = diff.sum() / mask.sum()
+    # A whole-volume unclamped MSE reads ~6x higher (0.31 vs 0.05 measured), because the
+    # background dominates the average and the decoder has no output activation to bound it.
+    # Getting this wrong makes every "match reconstruction" suggestion below wrong too.
+    recon = float("nan")
     try:
         from torch.utils.data import DataLoader, Subset
 
@@ -156,12 +163,21 @@ def main():
         with torch.no_grad():
             for batch in loader:
                 imgs = batch["image"]
-                x = torch.cat(imgs, dim=0).to(device)
+                x = torch.cat(imgs, dim=0).to(device).float()
                 out = model(x, n_views=len(imgs))
                 rec = out[0]
-                if rec is not None:
-                    errs.append(float(((rec.float() - x.float()) ** 2).mean()))
-        recon_mse = float(np.mean(errs)) if errs else float("nan")
+                if rec is None:
+                    continue
+                y = rec.float().clamp(-1.0, 1.0)
+                m = batch.get("mask")
+                if m is not None:
+                    m = m[0] if isinstance(m, (list, tuple)) else m
+                    m = torch.as_tensor(m).float().to(device)
+                    m = torch.cat([m] * len(imgs), dim=0)
+                    errs.append(float(((x - y).abs() * m).sum() / m.sum().clamp_min(1.0)))
+                else:
+                    errs.append(float((x - y).abs().mean()))
+        recon = float(np.mean(errs)) if errs else float("nan")
     except Exception as e:  # noqa: BLE001 - diagnostic only, never worth failing the run
         logger.warning("recon probe skipped: %s", e)
     del model
@@ -180,7 +196,7 @@ def main():
             f"{_fmt(r['floor'], 2):>9}{_fmt(r['sim_loss'], 3):>12}{_fmt(r['var_loss'], 3):>8}"
             f"{_fmt(r['feat_std_mean'], 3):>8}"
         )
-    print(f"\n  reconstruction MSE (for scale): {_fmt(recon_mse, 5)}")
+    print(f"\n  reconstruction (masked L1, matches Loss/Reconstruction): {_fmt(recon, 5)}")
 
     for k, r in results.items():
         print("\n" + "=" * 88)
@@ -210,7 +226,7 @@ def main():
         for tag, target in (
             ("match off_diag (real part)", max(excess, 1e-9)),
             ("match on_diag", max(r["on_diag_loss"], 1e-9)),
-            ("match reconstruction MSE", recon_mse),
+            ("match reconstruction", recon),
         ):
             if np.isfinite(target) and np.isfinite(s) and s > 0:
                 print(f"    {tag:<28} {target / s:.3e}")
