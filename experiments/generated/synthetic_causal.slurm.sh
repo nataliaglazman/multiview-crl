@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-07T09:15:05Z
-# Git SHA: 405e17a
+# Generated at: 2026-08-07T09:51:40Z
+# Git SHA: b1f12ac
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-mse-real
+#SBATCH --job-name=synthetic-causal-clean-content-mse-real-lambda
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-mse-real-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --error=synthetic-causal-clean-content-mse-real-lambda-%j.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -58,7 +58,7 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 0 \
+    --bt-gap-lambda 0.01 \
     --bt-gap-weight 1 \
     --bt-lambda 1 \
     --bt-sim-coeff 1 \
@@ -115,7 +115,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-mse-real \
+    --model-id synthetic-causal-clean-content-mse-real-lambda \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
