@@ -1009,6 +1009,17 @@ def parse_args() -> argparse.ArgumentParser:
         "leaving existing runs bit-identical. Requires --bt-std-coeff > 0.",
     )
     parser.add_argument(
+        "--bt-sim-normalize",
+        action="store_true",
+        default=False,
+        help="Divide the MSE alignment term by a detached per-channel 2*sigma^2, so it reads "
+        "(1 - correlation) instead of an absolute distance. Recommended whenever --bt-std-coeff "
+        "is active: the hinge drives sigma toward 1 while raw MSE scales as sigma^2, so the two "
+        "fight and sim_loss RISES while alignment improves (observed at both coeff 1 and 0.1, "
+        "with GAP feat_std measured at 0.004 against a hinge target of 1). Also equalises "
+        "directions, which matters because the factor information sits in the low-variance tail.",
+    )
+    parser.add_argument(
         "--bt-std-coeff",
         type=float,
         default=0.0,

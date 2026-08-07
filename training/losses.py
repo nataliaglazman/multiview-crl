@@ -1038,6 +1038,7 @@ def barlow_twins_loss(
     patch_stat="fold",
     sim_coeff=0.0,
     std_coeff=0.0,
+    sim_normalize=False,
     **_kwargs,
 ):
     """Barlow Twins loss over content channels of paired views.
@@ -1065,6 +1066,10 @@ def barlow_twins_loss(
             BT's ``on_diag`` is a correlation, which is invariant to a per-view constant
             offset and so cannot require the two views to coincide — only to co-vary. This
             is the term that can. 0 disables (default), leaving the loss bit-identical.
+        sim_normalize: Divide the MSE by a detached per-channel ``2*sigma^2`` so it reads
+            ``1 - rho`` rather than an absolute distance. Makes the term scale-free (it
+            stops fighting the variance hinge, which is simultaneously rescaling sigma) and
+            direction-equalised (it stops being magnitude-weighted toward the top PCs).
         std_coeff: Weight on VICReg's variance hinge ``relu(1 - std)`` over the same raw
             features. Mandatory whenever ``sim_coeff > 0``: MSE alone is minimised by
             collapsing both views to zero, and every other term here is scale-invariant.
@@ -1187,7 +1192,27 @@ def barlow_twins_loss(
                     # the measured ratio. Both are a single reduction; the cost is noise.
                     r_i = r_i.float()
                     r_j = r_j.float()
-                    sim_loss = F.mse_loss(r_i, r_j)
+                    if sim_normalize:
+                        # Per-channel, scale-free MSE. For zero-mean equal-variance views with
+                        # per-channel correlation rho_c, MSE_c = 2*sigma_c^2*(1 - rho_c), so this
+                        # reads (1 - mean rho) when the means match and EXCESS over that is the
+                        # per-view offset. Two reasons to prefer it here:
+                        #
+                        # 1. Raw MSE scales as sigma^2, and the variance hinge is simultaneously
+                        #    driving sigma up (measured: GAP feat_std 0.004 against a hinge target
+                        #    of 1, a 250x rescale => up to 62500x on the raw term). The two terms
+                        #    fight, and sim_loss rises while alignment IMPROVES — which is exactly
+                        #    what was observed at both coeff 1 and 0.1.
+                        # 2. Per-channel normalisation equalises directions, so the term stops
+                        #    being magnitude-weighted toward the top PCs. That matters because the
+                        #    factor information sits in the low-variance tail (n@95% = 44 of 44).
+                        #
+                        # The denominator is DETACHED: without it, shrinking sigma is a free way to
+                        # cut the ratio, which is the collapse the hinge exists to prevent.
+                        _den = (0.5 * (r_i.var(dim=0, unbiased=False) + r_j.var(dim=0, unbiased=False))).detach()
+                        sim_loss = (((r_i - r_j) ** 2) / (2.0 * _den + 1e-8)).mean()
+                    else:
+                        sim_loss = F.mse_loss(r_i, r_j)
                     _raw_std_i = r_i.std(dim=0, unbiased=False)
                     var_loss = F.relu(1.0 - _raw_std_i).mean() + F.relu(1.0 - r_j.std(dim=0, unbiased=False)).mean()
                     # Captured HERE: z_i is overwritten by its standardised self below, after

@@ -89,9 +89,9 @@ checkpoint_steps: 1000
 eval_dci: true
 # detach_style_injection: true
 synthetic_clean_content: true
-bt_sim_coeff: 0.1
+bt_sim_normalize: true
+bt_sim_coeff: 2e-5       # ≈ on_diag_gap 0.38 / current normalised sim 16624
 bt_std_coeff: 1
-
 
 # _base_: synthetic_defaults
 # tag: synthetic-causal-baseline-44-final
