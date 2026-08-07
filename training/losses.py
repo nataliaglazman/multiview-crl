@@ -1099,12 +1099,22 @@ def barlow_twins_loss(
     # Centering happens first either way. "per_position" removes the per-position mean and
     # scale, so center_mode "position" is redundant with it; "double" still contributes.
     _per_pos = False
+    # UNCENTERED parallel copy, for the sim/var terms only.
+    #
+    # `_center_patch_features` subtracts each view's OWN across-batch mean per (channel,
+    # position). That is exactly the per-view constant offset the MSE term exists to
+    # penalise — computing the MSE downstream of it would make the distance term blind for
+    # precisely the reason the correlation term is. The correlation terms still use the
+    # centered tensor: removing the shared anatomy at each position is what makes their
+    # diagonal a statement about subjects rather than about anatomy.
+    hz_raw = hz
     if hz.ndim == 4:
         hz = _center_patch_features(hz, center_mode)
         if patch_stat == "per_position":
             _per_pos = True
         else:
             hz = hz.permute(0, 1, 3, 2).reshape(hz.shape[0], -1, hz.shape[2])
+            hz_raw = hz_raw.permute(0, 1, 3, 2).reshape(hz_raw.shape[0], -1, hz_raw.shape[2])
 
     if subsets is None or estimated_content_indices is None:
         subsets = [list(range(hz.shape[0]))]
@@ -1115,6 +1125,7 @@ def barlow_twins_loss(
 
     for content_indices, subset in zip(estimated_content_indices, subsets):
         hz_sub = hz[list(subset)]  # (n_views_sub, B, C)
+        hz_raw_sub = hz_raw[list(subset)]  # same slice, uncentered — sim/var only
         n_view = hz_sub.shape[0]
 
         for i in range(n_view):
@@ -1130,9 +1141,13 @@ def barlow_twins_loss(
                     active = soft_content_mask.reshape(-1).bool()  # (C,)
                     z_i = hz_sub[i][:, active]  # (B, k)
                     z_j = hz_sub[j][:, active]
+                    r_i = hz_raw_sub[i][:, active]
+                    r_j = hz_raw_sub[j][:, active]
                 else:
                     z_i = hz_sub[i][:, content_indices]  # (B, d)
                     z_j = hz_sub[j][:, content_indices]
+                    r_i = hz_raw_sub[i][:, content_indices]
+                    r_j = hz_raw_sub[j][:, content_indices]
 
                 # Standardise (zero mean, unit std per dimension).  Biased std (÷B) matches
                 # the /B in the cross-correlation, so a perfectly correlated dimension
@@ -1170,9 +1185,11 @@ def barlow_twins_loss(
                     # when you need the value — the calibration workflow is to run with both
                     # coefficients at 0, read these off TensorBoard, and pick weights from
                     # the measured ratio. Both are a single reduction; the cost is noise.
-                    sim_loss = F.mse_loss(z_i, z_j)
-                    _raw_std_i = z_i.std(dim=0, unbiased=False)
-                    var_loss = F.relu(1.0 - _raw_std_i).mean() + F.relu(1.0 - z_j.std(dim=0, unbiased=False)).mean()
+                    r_i = r_i.float()
+                    r_j = r_j.float()
+                    sim_loss = F.mse_loss(r_i, r_j)
+                    _raw_std_i = r_i.std(dim=0, unbiased=False)
+                    var_loss = F.relu(1.0 - _raw_std_i).mean() + F.relu(1.0 - r_j.std(dim=0, unbiased=False)).mean()
                     # Captured HERE: z_i is overwritten by its standardised self below, after
                     # which its std is 1.0 by construction and tells you nothing.
                     _raw_std_mean = _raw_std_i.mean()
