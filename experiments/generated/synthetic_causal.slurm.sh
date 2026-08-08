@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-08T15:36:50Z
-# Git SHA: f6a7a33
+# Generated at: 2026-08-08T21:11:39Z
+# Git SHA: a6630c1
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-clean-content-mse-real-lambda-01-normalized-no-patch
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -61,10 +61,11 @@ fi
     --bt-gap-lambda 0.01 \
     --bt-gap-weight 1 \
     --bt-lambda 1 \
-    --bt-patch-weight 0 \
-    --bt-sim-coeff 2e-5 \
+    --bt-patch-weight 1 \
+    --bt-sim-coeff 0 \
     --bt-sim-normalize \
-    --bt-std-coeff 1 \
+    --bt-std-coeff 0 \
+    --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
@@ -91,7 +92,7 @@ fi
     --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
-    --patch-grid 8 8 8 \
+    --patch-grid 16 16 16 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
