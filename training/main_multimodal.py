@@ -1208,11 +1208,19 @@ def main(args):
         _bt_sim_c = getattr(args, "bt_sim_coeff", 0.0)
         _bt_std_c = getattr(args, "bt_std_coeff", 0.0)
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
+        _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
             f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
-            f"sim={_bt_sim_c}, std={_bt_std_c})"
+            f"sim={_bt_sim_c}, std={_bt_std_c}, patch weight={_bt_patch_w})"
         )
+        if _bt_patch_w == 0 and _bt_gap_w <= 0:
+            raise ValueError(
+                "--bt-patch-weight 0 with --bt-gap-weight 0 leaves no Barlow Twins term at "
+                "all. GAP-only means patch weight 0 AND gap weight > 0; keep "
+                "--patch-contrastive on so the GAP companion still receives a patch-shaped "
+                "tensor to pool."
+            )
         if _bt_sim_c > 0 and _bt_std_c <= 0:
             raise ValueError(
                 "--bt-sim-coeff > 0 requires --bt-std-coeff > 0. MSE alignment alone is "
@@ -1268,7 +1276,18 @@ def main(args):
                     std_coeff=_bt_std_c,
                     sim_normalize=_bt_sim_norm,
                 )
-                _total = _l + _bt_gap_w * _lg
+                # bt_patch_weight scales the PATCH term only. Setting it to 0 (with
+                # patch_contrastive still on, so the forward hands us the patch-shaped
+                # tensor the .mean(-1) above needs) gives a GAP-ONLY objective.
+                #
+                # Worth having as one config line because every patch term is compromised by
+                # the same 200:1 dominance of the within-subject interaction: on_diag and
+                # sim are diluted by it, off_diag barely constrains subject identity (the
+                # reason this GAP companion exists at all), and the variance hinge is
+                # outright BLIND to subject collapse — its std(dim=0) runs over folded
+                # (subject, position) rows, so position variance alone satisfies it. Every
+                # GAP term instead acts on (1/P)sum_p z = s, the subject term exactly.
+                _total = _bt_patch_w * _l + _bt_gap_w * _lg
                 # Arithmetic drops the attribute; carry the patch diagnostics and add the
                 # GAP ones under gap_* so both show up as Contrastive/*_L{level}.
                 _d = dict(getattr(_l, "_contrastive_diag", None) or {})
@@ -1276,7 +1295,13 @@ def main(args):
                     _d[f"gap_{_k}"] = _v
                 _total._contrastive_diag = _d
                 return _total
-            return _l
+            if _bt_patch_w == 1.0:
+                return _l
+            # Re-attach: the multiply produces a new tensor and drops the attribute, which
+            # would silently blank every Contrastive/* curve for this level.
+            _scaled = _bt_patch_w * _l
+            _scaled._contrastive_diag = dict(getattr(_l, "_contrastive_diag", None) or {})
+            return _scaled
 
     elif _contrastive_type == "vicreg":
         _sim_c = getattr(args, "vicreg_sim_coeff", 25.0)

@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-07T14:45:00Z
-# Git SHA: 19c8940
+# Generated at: 2026-08-08T15:36:50Z
+# Git SHA: f6a7a33
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-mse-real-lambda-01-normalized
+#SBATCH --job-name=synthetic-causal-clean-content-mse-real-lambda-01-normalized-no-patch
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-mse-real-lambda-01-normalized-%j.err
+#SBATCH --error=synthetic-causal-clean-content-mse-real-lambda-01-normalized-no-patch-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -61,6 +61,7 @@ fi
     --bt-gap-lambda 0.01 \
     --bt-gap-weight 1 \
     --bt-lambda 1 \
+    --bt-patch-weight 0 \
     --bt-sim-coeff 2e-5 \
     --bt-sim-normalize \
     --bt-std-coeff 1 \
@@ -115,7 +116,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-mse-real-lambda-01-normalized \
+    --model-id synthetic-causal-clean-content-mse-real-lambda-01-normalized-no-patch \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

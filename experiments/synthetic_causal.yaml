@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-mse-real-lambda-01-normalized
+tag: synthetic-causal-clean-content-mse-real-lambda-01-normalized-no-patch
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
@@ -60,6 +60,7 @@ patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_gap_lambda: 0.01               # NOT 0.005 — see the calibration note above
+bt_patch_weight: 0
 
 scale_contrastive_loss: 1      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
@@ -93,6 +94,7 @@ bt_sim_normalize: true
 bt_sim_coeff: 2e-5       # ≈ on_diag_gap 0.38 / current normalised sim 16624
 bt_std_coeff: 1
 channels_last: false
+
 
 # _base_: synthetic_defaults
 # tag: synthetic-causal-baseline-44-final

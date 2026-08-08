@@ -1009,6 +1009,18 @@ def parse_args() -> argparse.ArgumentParser:
         "leaving existing runs bit-identical. Requires --bt-std-coeff > 0.",
     )
     parser.add_argument(
+        "--bt-patch-weight",
+        type=float,
+        default=1.0,
+        help="Scale on the PATCH Barlow Twins term. 0 (with --bt-gap-weight > 0 and "
+        "--patch-contrastive still on) gives a GAP-ONLY objective. Motivated because every "
+        "patch term is compromised by the same 200:1 dominance of the within-subject "
+        "interaction on registered volumes: on_diag and the MSE are diluted by it, off_diag "
+        "barely constrains subject identity, and the variance hinge is blind to subject "
+        "collapse because its std runs over folded (subject, position) rows. The GAP terms "
+        "act on (1/P)sum_p z = s, the subject term exactly.",
+    )
+    parser.add_argument(
         "--bt-sim-normalize",
         action="store_true",
         default=False,
