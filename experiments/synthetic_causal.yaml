@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-mse-real-lambda-01-normalized-no-patch
+tag: synthetic-causal-clean-content-mse-real-lambda-01-normalized-16
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
