@@ -114,7 +114,15 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
         latent_mask_thresh=getattr(args, "latent_mask_thresh", 0.0),
     )
 
+    # A bare filename ("vqvae_best.pt") means that checkpoint inside THIS run dir, not a path
+    # relative to the caller's cwd. Callers that compare several runs pass one name for all of
+    # them; without this join it silently became a cwd lookup and failed with a FileNotFoundError
+    # naming a file that does exist -- in the run dir.
+    if checkpoint and not os.path.dirname(checkpoint):
+        checkpoint = os.path.join(run_dir, checkpoint)
     ckpt_path = checkpoint or os.path.join(run_dir, "vqvae_model.pt")
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
     logger.info("Loading checkpoint: %s", ckpt_path)
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     state_dict = ckpt.get("encoders", ckpt)

@@ -247,6 +247,8 @@ def test_curves(run_dir, level=0, sat_tol=0.1):
                 f"\n  → MCC peak @ {peak_step:.0f} vs on_diag saturation @ {sat:.0f} (ratio {ratio:.2f}): "
                 + ("aligned" if 0.4 <= ratio <= 2.5 else "NOT aligned — the peak is not the saturation point")
             )
+    else:
+        logger.warning("BT diagnostics (%s) not in the logs — is this an InfoNCE run?", on_tag)
 
     # --- Which BT term is still exerting force after the peak? ---
     #
@@ -256,21 +258,26 @@ def test_curves(run_dir, level=0, sat_tol=0.1):
     # descending past the peak it is the only one-way contraction left in the objective.
     # A term whose value is large but whose gradient has vanished is not eroding anything
     # — read the post-peak DESCENT, not the level.
-    print("\n  BT terms, post-peak descent (share of each term's own total, after the MCC peak):")
+    rows, shares = [], []
     for name in ("on_diag_loss", "off_diag_loss", "sim_loss", "var_loss"):
         tag = f"Contrastive/{name}_L{level}"
         if tag not in scalars:
             continue
         t_steps, t_vals = scalars[tag]
         total = t_vals[0] - t_vals.min()
-        at_peak = np.interp(peak_step, t_steps, t_vals)
-        share = (at_peak - t_vals[-1]) / total if total > 0 else 0.0
-        print(
+        share = (np.interp(peak_step, t_steps, t_vals) - t_vals[-1]) / total if total > 0 else 0.0
+        shares.append(share)
+        rows.append(
             f"    {name:<14}{t_vals[0]:>12.4g} → {t_vals[-1]:<12.4g}"
             f"post-peak {100 * share:>5.1f}%" + ("   ← still working" if share > 0.25 else "")
         )
-    else:
-        logger.warning("BT diagnostics (%s) not in the logs — is this an InfoNCE run?", on_tag)
+    if rows:
+        print("\n  BT terms, post-peak descent (share of each term's own total, after the MCC peak):")
+        print("\n".join(rows))
+        if max(shares) <= 0.25:
+            print("\n  → EVERY term converged BEFORE the peak. The contrastive objective is at a fixed")
+            print("    point while the metric decays, so it is not the cause: what follows the peak is")
+            print("    recon/VQ-phase drift. Changing the contrastive loss cannot fix this curve.")
 
     # --- Is the variance hinge, the only anti-collapse term, actually holding? ---
     std_tag = f"Contrastive/feat_std_mean_L{level}"
@@ -311,6 +318,50 @@ def test_curves(run_dir, level=0, sat_tol=0.1):
             p_steps, p_vals = scalars[tag]
             at_peak = np.interp(peak_step, p_steps, p_vals)
             print(f"  mcc {pool:<6} @patch-peak {at_peak:.4f} → final {p_vals[-1]:.4f} ({p_vals[-1] - at_peak:+.4f})")
+
+    # --- Is the STYLE BOTTLENECK forcing view-specific detail into content? ---
+    #
+    # The decoder has to produce BOTH views from shared content plus per-view style. If
+    # style is too narrow to express the view difference, the only remaining way to lower
+    # the reconstruction loss is to put view-specific information into the CONTENT
+    # channels. That is not information leaving the model, it is capacity being
+    # reallocated — which is why it can move the MCC much more than it moves info_all.
+    #
+    # content→view accuracy is the direct witness: it is 0.5 when content is view-
+    # invariant and climbs toward 1.0 as content absorbs view-specific signal. A rise
+    # here across the post-peak window, while the MCC falls, IS the mechanism.
+    print("\n  Style bottleneck — is content absorbing view-specific detail?")
+    _any = False
+    for tag, label, ref in (
+        ("selection/content_view_acc", "content→view acc", "0.5 = view-invariant"),
+        ("selection/style_sufficiency", "style→style suff", "1.0 = style captures its factors"),
+        ("selection/style_modality", "style_modality", "higher = better"),
+        ("selection/style_to_content_leak", "style→content leak", "lower = better"),
+        ("selection/content_to_style_leak", "content→style leak", "lower = better"),
+    ):
+        if tag not in scalars:
+            continue
+        _any = True
+        t_steps, t_vals = scalars[tag]
+        at_peak = np.interp(peak_step, t_steps, t_vals)
+        print(
+            f"    {label:<20}@peak {at_peak:>7.4f} → final {t_vals[-1]:>7.4f} " f"({t_vals[-1] - at_peak:+.4f})   {ref}"
+        )
+    if "selection/content_view_acc" in scalars:
+        cv_steps, cv_vals = scalars["selection/content_view_acc"]
+        cv_peak = np.interp(peak_step, cv_steps, cv_vals)
+        rise = cv_vals[-1] - cv_peak
+        excess = cv_vals[-1] - 0.5
+        if rise > 0.02 or excess > 0.1:
+            print("\n    → content→view is climbing away from chance while the MCC falls. Content is")
+            print("      being used to carry view-specific detail, which is a STYLE CAPACITY problem,")
+            print("      not a contrastive-objective problem. Widen style (content_size down at fixed")
+            print("      hidden width, or more style codebook entries) and the pressure goes away.")
+        else:
+            print("\n    → content→view is flat and near chance, so content is NOT absorbing view")
+            print("      detail. The style bottleneck does not explain this decay.")
+    elif not _any:
+        logger.warning("No selection/style_* or content_view_acc tags — style-side scoring was off for this run.")
 
 
 # --------------------------------------------------------------------------- #
