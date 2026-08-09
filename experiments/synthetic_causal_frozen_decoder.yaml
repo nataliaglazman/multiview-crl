@@ -1,0 +1,82 @@
+# Phase 2 of the two-phase recipe: pin the representation, train the decoder out.
+#
+# WHY. On synthetic-causal-clean-content-mse-real-lambda-01-normalized every Barlow Twins
+# term was >=93% converged by step 2k of 88k (on_diag 90%-saturated at step 450), while
+# selection/mcc_by_pool/patch peaked at 2001 and then fell 0.049 over the remaining 86k.
+# The contrastive objective is at a fixed point during the entire decay, so the decay is
+# recon/VQ-phase drift and no contrastive-side knob can reach it.
+#
+# That leaves one question unanswered: is there actually a TRADE-OFF? Reconstruction at
+# the peak is poor, but the decoder has only had 2k steps at that point — which says
+# nothing about whether the peak REPRESENTATION is decodable. This run separates the two.
+#
+# WHAT IT MEASURES. With --freeze-encoder the pre-quantization encoder features are
+# bit-identical for the whole run, so every identifiability metric is constant BY
+# CONSTRUCTION. The only thing that moves is reconstruction. Compare its final recon
+# against the joint 88k run's:
+#
+#   comparable recon  -> NO trade-off. Two-phase is strictly better: peak MCC and full
+#                        recon quality. Adopt it as the recipe.
+#   clearly worse     -> real trade-off. The peak representation genuinely lacks what the
+#                        decoder needs, and the Pareto front has to be chosen on purpose.
+#
+# HOW TO RUN. Point init_from_checkpoint at phase 1's BEST checkpoint (the selection
+# composite picks a step near the MCC peak; confirm with
+# `python -m eval.patch_mcc_decay --run-dir <phase1> --tests curves`), then score this run
+# with notebook Section 23 against the phase-1 final checkpoint.
+#
+# Everything below the frozen-phase block is copied verbatim from synthetic_causal.yaml.
+# It MUST stay in sync — --init-from-checkpoint loads with strict=False, so a width or
+# norm mismatch is a warning, not an error, and would silently give you a hybrid model.
+
+_base_: synthetic_defaults
+tag: synthetic-causal-frozen-decoder
+
+# ---- Phase-2 block ----
+freeze_encoder: true
+# EDIT ME: phase 1's best checkpoint.
+init_from_checkpoint: results/synthetic/synthetic-causal-clean-content-mse-real-lambda-01-normalized/vqvae_best.pt
+# The contrastive term cannot reach a parameter once the encoder is frozen, so it would
+# only cost compute. Its diagnostics keep logging either way.
+scale_contrastive_loss: 0
+scale_recon_loss: 1
+# The decoder needs the same budget the joint run gave it, so the comparison is fair.
+train_steps: 88000
+
+# ---- Copied from synthetic_causal.yaml — keep in sync ----
+contrastive_loss_type: barlow_twins
+bt_lambda: 1
+patch_contrastive: true
+patch_grid: [8, 8, 8]
+patch_center_mode: position
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+bt_gap_weight: 1
+bt_gap_lambda: 0.01
+bt_patch_weight: 1
+batch_size: 128
+content_size: 44
+synthetic_normalize: fixed_reference
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_res: 64
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
+inject_style_to_decoder: true
+style_injection_mode: input
+separate_style_codebooks: true
+separate_content_codebooks: false
+vqvae_nb_levels: 1
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [4]
+deterministic: true
+checkpoint_steps: 1000
+eval_dci: true
+synthetic_clean_content: true
+bt_sim_normalize: true
+bt_sim_coeff: 2e-5
+bt_std_coeff: 1
+channels_last: false

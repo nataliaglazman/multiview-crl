@@ -57,6 +57,7 @@ _STORE_TRUE_FLAGS = {
     "use_amp",
     "save_all_checkpoints",
     "resume_training",
+    "freeze_encoder",
     "use_gan",
     "separate_encoders",
     "quantize_style",

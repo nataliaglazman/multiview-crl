@@ -1682,6 +1682,61 @@ def main(args):
                 encoders[0].queue_ptrs.copy_(torch.tensor(checkpoint["moco_queue_ptrs"], dtype=torch.long))
         logger.info(f"  Loaded VQ-VAE-2 from {path}")
 
+    # Phase-2 init: another run's weights, but a fresh optimizer and step counter.
+    # --resume-training continues a run in place; this starts a NEW one from given weights.
+    _init_ckpt = getattr(args, "init_from_checkpoint", None)
+    if _init_ckpt:
+        logger.info("")
+        logger.info("[INIT FROM CHECKPOINT]")
+        _ck = torch.load(_init_ckpt, map_location=device, weights_only=False)
+        _missing, _unexpected = encoders[0].load_state_dict(_ck.get("encoders", _ck), strict=False)
+        logger.info(f"  Loaded {_init_ckpt} (source step {_ck.get('step', '?')})")
+        if _missing or _unexpected:
+            # strict=False silently drops mismatched tensors, which is how a run ends up
+            # evaluating a hybrid of trained convolutions and freshly initialised norms.
+            logger.warning(
+                f"  state_dict MISMATCH: {len(_missing)} missing, {len(_unexpected)} unexpected. "
+                f"First missing: {list(_missing)[:4]}. First unexpected: {list(_unexpected)[:4]}. "
+                "Check --norm-type, --content-size and --vqvae-hidden-channels against the source run."
+            )
+        else:
+            logger.info("  state_dict matched exactly.")
+
+    # --freeze-encoder: pin the representation, train the decoder out.  Freezing BEFORE the
+    # optimizer is built matters — the param-group loop below skips requires_grad=False, so
+    # frozen tensors never enter AdamW and cannot drift via weight decay either.
+    if getattr(args, "freeze_encoder", False):
+        _frozen_names = []
+        for _mod_name in ("encoders", "encoders_v1", "content_norms", "content_projections"):
+            _mod = getattr(vqvae_model, _mod_name, None)
+            if _mod is not None:
+                for _p in _mod.parameters():
+                    _p.requires_grad_(False)
+                _frozen_names.append(_mod_name)
+        # The mask logits select which channels ARE content, so they are part of the
+        # representation even though they do not live in the encoder stack.
+        for _pn, _pp in vqvae_model.named_parameters():
+            if "channel_logits" in _pn or "split_gate_logits" in _pn:
+                _pp.requires_grad_(False)
+                _frozen_names.append(_pn)
+        _n_frozen = sum(p.numel() for p in vqvae_model.parameters() if not p.requires_grad)
+        _n_train = sum(p.numel() for p in vqvae_model.parameters() if p.requires_grad)
+        logger.info("")
+        logger.info("[FREEZE ENCODER]")
+        logger.info(f"  Frozen: {', '.join(_frozen_names) if _frozen_names else '(nothing matched!)'}")
+        logger.info(f"  {_n_frozen:,} params frozen, {_n_train:,} trainable (decoder + codebooks)")
+        if _n_train == 0:
+            raise ValueError(
+                "--freeze-encoder left zero trainable parameters. Combining it with "
+                "--contrastive-only removes the decoder too, so there is nothing to train."
+            )
+        if float(getattr(args, "scale_contrastive_loss", 1.0)) != 0.0:
+            logger.warning(
+                "  --freeze-encoder with --scale-contrastive-loss "
+                f"{getattr(args, 'scale_contrastive_loss', 1.0)}: the contrastive term can no "
+                "longer reach any parameter, so it only costs compute. Set it to 0."
+            )
+
     # Optimizer — separate param groups so weight decay skips biases & norms.
     # Mask parameters (channel_logits) get their own group with a scaled LR
     # so the content/style mask evolves slowly relative to the encoder,

@@ -813,8 +813,8 @@ def test_strata(label, content, gt, coverage, thresh, seeds, n_splits, n_null):
     rng = np.random.RandomState(0)
     n = content.shape[0]
     print(f"\n  {label}:  N={n}  positions={content.shape[1]}  content channels={content.shape[2]}")
-    print(f"  {'stratum':<16}{'n_pos':>7}{'n_feat':>9}{'mcc':>9}{'null':>8}{'gap':>9}")
-    print("  " + "-" * 58)
+    print(f"  {'stratum':<16}{'n_pos':>7}{'n_feat':>9}{'mcc':>9}{'+-sd':>9}{'null':>8}{'gap':>9}")
+    print("  " + "-" * 67)
 
     out = {}
     for name, sel in strata.items():
@@ -822,7 +822,11 @@ def test_strata(label, content, gt, coverage, thresh, seeds, n_splits, n_null):
             print(f"  {name:<16}{0:>7}  (empty)")
             continue
         x = content[:, sel, :].reshape(n, -1)  # patch-major, as dci.py builds it
-        mcc = block_mcc(x, gt, seeds=seeds, n_splits=n_splits)["mean"]
+        # std is the spread ACROSS SEEDS, which the selection path computes and discards.
+        # The whole patch-MCC phenomenon spans ~0.04, so a drop is only a finding if it
+        # clears this band — print it next to the value rather than making it a re-run.
+        _m = block_mcc(x, gt, seeds=seeds, n_splits=n_splits)
+        mcc, mcc_sd = _m["mean"], _m["std"]
         # A permutation null, because mcc_by_pool/* is logged RAW and its floor moves with
         # the block's rank: a falling rank lowers the null and the raw number drops free.
         null = (
@@ -837,8 +841,10 @@ def test_strata(label, content, gt, coverage, thresh, seeds, n_splits, n_null):
             if n_null > 0
             else 0.0
         )
-        out[name] = {"n_pos": int(sel.sum()), "mcc": mcc, "null": null, "gap": mcc - null}
-        print(f"  {name:<16}{int(sel.sum()):>7}{x.shape[1]:>9}{mcc:>9.4f}{null:>8.4f}{mcc - null:>9.4f}")
+        out[name] = {"n_pos": int(sel.sum()), "mcc": mcc, "mcc_sd": mcc_sd, "null": null, "gap": mcc - null}
+        print(
+            f"  {name:<16}{int(sel.sum()):>7}{x.shape[1]:>9}{mcc:>9.4f}{mcc_sd:>9.4f}" f"{null:>8.4f}{mcc - null:>9.4f}"
+        )
 
     fg, bg = strata["fg_train_rule"], strata["background"]
     if bg.any():

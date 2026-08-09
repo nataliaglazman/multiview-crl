@@ -252,6 +252,31 @@ def parse_args() -> argparse.ArgumentParser:
         help="Resume training from last checkpoint if available",
     )
     parser.add_argument(
+        "--init-from-checkpoint",
+        type=str,
+        default=None,
+        help="Start from another run's weights WITHOUT inheriting its optimizer state or step "
+        "counter (unlike --resume-training, which continues the same run in place). Intended "
+        "for the two-phase recipe: train phase 1 normally, then start phase 2 from that run's "
+        "vqvae_best.pt into a fresh --save-dir. Loaded with strict=False, so a width or "
+        "--norm-type mismatch against the source run is reported as a warning rather than an "
+        "error — read that warning, a silent mismatch gives you a model that never trained.",
+    )
+    parser.add_argument(
+        "--freeze-encoder",
+        action="store_true",
+        help="Freeze the encoder stack, the content/style norms, the content projections and "
+        "the mask logits, leaving only the decoder and codebooks trainable. Phase 2 of the "
+        "two-phase recipe. The contrastive objective converges long before the decoder does "
+        "(measured: every Barlow Twins term >=93%% done by step 2k of 88k), so this pins the "
+        "representation at its converged state and spends the remaining budget on "
+        "reconstruction. Everything the identifiability metrics read is the pre-quantization "
+        "encoder feature, so it is bit-identical for the whole run BY CONSTRUCTION: the run "
+        "measures exactly one thing, how well a fully-trained decoder reconstructs from a "
+        "fixed representation. Pair with --scale-contrastive-loss 0 (the contrastive term can "
+        "no longer reach any parameter) and --init-from-checkpoint.",
+    )
+    parser.add_argument(
         "--scale-recon-loss",
         type=float,
         default=1,
