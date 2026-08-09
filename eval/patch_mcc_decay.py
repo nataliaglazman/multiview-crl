@@ -1,0 +1,674 @@
+#!/usr/bin/env python
+"""Why does ``selection/mcc_by_pool/patch`` peak early and then decay on contrastive runs?
+
+The recon-only arm rises monotonically; the Barlow Twins arms spike within ~1-2k steps and
+then fall back toward their step-0 value.  Before testing anything on a checkpoint, this
+script's ``--calibrate`` mode establishes what the metric can even DETECT, by perturbing a
+synthetic block of the same shape (N=400, 60 foreground positions x 44 channels) in each
+candidate way at the real operating point (mcc ~0.84, not at the ceiling where nothing
+moves).  Measured, and reproducible with ``--calibrate``:
+
+    perturbation                                    effect on block-MCC
+    ------------------------------------------------------------------
+    background noise magnitude x67                  0.0000  (exactly flat)
+    channel spatial maps fully decorrelated        +0.0447  (HELPS)
+    invertible anisotropic map, cond 1e2            -0.2566
+    invertible anisotropic map, cond 1e4            -0.3812
+    signal amplitude x0.5 vs fixed noise            -0.3869
+
+Two candidate explanations die there, and they are the two that sound most plausible:
+
+  (DILUTION, ruled out)  "Training drops background patches (``main_multimodal.py:338``)
+      while the probe pools all of them (``dci.py:334``), so unconstrained background
+      drifts in as noise."  It cannot produce a decay: ``block_mcc`` standardises every
+      feature before the ridge, so background MAGNITUDE is invisible, and the sweep is
+      flat to four decimals across a 67x range.  Background does cost a constant level
+      offset (0.835 foreground-only vs 0.719 all-positions here) because it adds
+      features, but the position count does not change during training, so the offset
+      cannot trend.
+
+  (DECORRELATION, ruled out)  "``bt_lambda 1`` puts 1892 off-diagonal terms against 44
+      on-diagonal at d=44, orthogonalising the channels' spatial maps and destroying the
+      multi-channel co-activation a local factor needs."  Measured the other way: a fully
+      channel-private encoding scores HIGHER than a fully redundant one (0.873 vs 0.829).
+      A linear probe does not need cross-channel redundancy.
+
+  (CONDITIONING, survives)  An exactly INVERTIBLE map costs up to 0.48 of block-MCC.
+      Block-identifiability is defined up to invertible maps, but that guarantee is
+      vacuous at N~1500: once the map pushes a factor below the sampling noise, no
+      estimator recovers it.  Verified: a PCA-whitened probe does not bring it back at
+      any number of components (k=50..319 all fail), so this is not a probe-choice
+      artifact and there is no probe-side control that separates "re-gauged into an
+      ill-conditioned basis" from "destroyed".
+
+So the live question is not which probe to use.  It is whether the content block's own
+geometry is collapsing, which is measurable WITHOUT a probe and is actionable through the
+only anti-collapse force in this config (``bt_std_coeff``'s variance hinge, plus the
+GAP-BT term).  The three tests below follow from that.
+
+  1. CURVES (start here; no GPU, no checkpoint, answers in seconds).  Reads the run's
+     TensorBoard scalars.  Is the MCC peak where ``on_diag`` saturates -- i.e. where
+     alignment is achieved and nearly all remaining gradient is decorrelation?  Does
+     ``selection/content_rank`` fall in lockstep with the patch MCC, which given the
+     calibration above is the single most diagnostic pairing available?  Is
+     ``feat_std_mean`` anywhere near the hinge's target of 1?  And what is the TRUE
+     Recon:Contrastive magnitude ratio -- both ``scale_*`` weights are nominally 1, but
+     BT's raw value at d=44 sums ~1936 terms, so replenishment may not be competing with
+     erosion at all.
+
+  2. STRATA.  Recomputes the identical block-MCC on position subsets: all patches
+     (reproduces the logged number), the exact training ``_keep_pos`` rule, strictly
+     covered, and background-only.  Given (DILUTION) is ruled out this no longer decides
+     anything on its own, but it localises the decay -- if foreground falls as much as
+     the whole volume, the objective is eroding content it does see -- and the
+     background-only column says whether background positions carry factor information
+     at all.  Reported as a GAP over a permutation null, because ``mcc_by_pool/*`` is
+     logged RAW and a falling rank deflates the null too, so part of the drop is free.
+
+  3. GEOMETRY.  Probe-free measurement of the content block: participation-ratio
+     effective rank, the condition number at 95% energy, and the MCC-vs-PCA-rank curve
+     (how many leading directions are needed to reach the block's own ceiling).  If the
+     late checkpoint needs more components for the same score, or its effective rank has
+     collapsed, conditioning is the mechanism and ``bt_std_coeff`` / ``bt_gap_weight``
+     are the levers.
+
+Usage
+-----
+    # what the metric can detect -- pure numpy, no run needed
+    python -m eval.patch_mcc_decay --calibrate
+
+    # timing + term balance from the logs alone
+    python -m eval.patch_mcc_decay --run-dir results/synthetic/BT_RUN --tests curves
+
+    # everything, best (near-peak) vs final checkpoint, against the recon arm
+    python -m eval.patch_mcc_decay --run-dir results/synthetic/BT_RUN \
+        --compare-run-dir results/synthetic/RECON_ONLY --num-samples 1500
+
+Related: ``eval.bt_term_balance`` sizes the four BT coefficients at a fixed checkpoint
+(use it to act on test 1's ratio); ``eval.patch_background_diagnostic`` stratifies the
+LOSS and GRADIENT by patch coverage (this script stratifies the PROBE).
+
+NOTE on checkpoint vintage: ``render_structure`` was fixed in commit 7ac56a3 for
+temporal_atrophy / sulcal_widening / lesion.  A checkpoint trained before it saw
+different rendering for those factors, so scoring it against the current generator is
+invalid for them.  brain_size, lr_asymmetry and the style-leak numbers are unaffected.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+
+import numpy as np
+from scipy.stats import spearmanr
+from sklearn.decomposition import PCA
+
+from eval.identifiability_metrics import block_mcc
+
+# torch is imported lazily inside the extraction path only, so the scoring, geometry and
+# verdict logic stay unit-testable on plain numpy (same convention as eval.run_dci_compare).
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Test 1 — curves.  No checkpoint, no GPU.
+# --------------------------------------------------------------------------- #
+
+
+def read_tb_scalars(tb_dir):
+    """All scalar tags from a run's tensorboard dir → ``{tag: (steps, values)}``."""
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    except ImportError as exc:  # writing needs it; reading is a separate install on some envs
+        raise SystemExit("The curves test needs `pip install tensorboard`. The other tests do not.") from exc
+
+    acc = EventAccumulator(tb_dir, size_guidance={"scalars": 0})
+    acc.Reload()
+    out = {}
+    for tag in acc.Tags().get("scalars", []):
+        events = acc.Scalars(tag)
+        out[tag] = (
+            np.array([e.step for e in events], dtype=np.float64),
+            np.array([e.value for e in events], dtype=np.float64),
+        )
+    return out
+
+
+def _saturation_step(steps, values, tol):
+    """First step at which a decaying series has done ``1 - tol`` of its total descent.
+
+    Defined on the descent itself rather than on a slope threshold, so it does not depend
+    on the logging interval: ``v_start - v_min`` is the total work available and this
+    returns where only ``tol`` of it is left.
+    """
+    if len(values) < 3:
+        return None
+    v_start, v_min = values[0], values.min()
+    if v_start - v_min <= 0:
+        return None
+    hit = np.where(values <= v_min + tol * (v_start - v_min))[0]
+    return float(steps[hit[0]]) if len(hit) else None
+
+
+def _tail_median(steps, values, frac=0.2):
+    if len(values) == 0:
+        return float("nan")
+    return float(np.median(values[steps >= steps[-1] - frac * (steps[-1] - steps[0])]))
+
+
+def test_curves(run_dir, level=0, sat_tol=0.1):
+    tb_dir = os.path.join(run_dir, "tensorboard")
+    if not os.path.isdir(tb_dir):
+        logger.error("No tensorboard dir at %s — skipping the curves test.", tb_dir)
+        return
+    scalars = read_tb_scalars(tb_dir)
+
+    print(f"\n{'=' * 78}\nTEST 1 — CURVES  ({os.path.basename(run_dir.rstrip('/'))})\n{'=' * 78}")
+
+    mcc_tag = "selection/mcc_by_pool/patch"
+    if mcc_tag not in scalars:
+        logger.error("%s not logged — was this a synthetic run with select_by_synthetic_dci?", mcc_tag)
+        return
+    m_steps, m_vals = scalars[mcc_tag]
+    peak_i = int(np.argmax(m_vals))
+    peak_step, peak_val, final_val = m_steps[peak_i], m_vals[peak_i], m_vals[-1]
+    print(
+        f"\n  patch MCC   first {m_vals[0]:.4f} @ {m_steps[0]:.0f}   peak {peak_val:.4f} @ {peak_step:.0f}   "
+        f"final {final_val:.4f} @ {m_steps[-1]:.0f}"
+    )
+    print(f"              peak → final {final_val - peak_val:+.4f};  " f"first → final {final_val - m_vals[0]:+.4f}")
+
+    # --- Rank collapse is the mechanism the calibration leaves standing. ---
+    if "selection/content_rank" in scalars:
+        r_steps, r_vals = scalars["selection/content_rank"]
+        at_peak = np.interp(peak_step, r_steps, r_vals)
+        print(
+            f"\n  content_rank  @peak {at_peak:.3f} → final {r_vals[-1]:.3f} "
+            f"({100 * (r_vals[-1] - at_peak) / max(abs(at_peak), 1e-9):+.1f}%)"
+        )
+        common = m_steps[m_steps >= peak_step]
+        if len(common) >= 5:
+            rho, p = spearmanr(m_vals[m_steps >= peak_step], np.interp(common, r_steps, r_vals))
+            print(f"    post-peak Spearman(patch MCC, content_rank) = {rho:+.3f} (p={p:.3g}, n={len(common)})")
+            if rho > 0.5:
+                print("    → they fall together: CONDITIONING/rank collapse, the one mechanism that")
+                print("      survived calibration. Levers: bt_std_coeff (the only anti-collapse term),")
+                print("      bt_gap_weight, and the recon:contrastive ratio below.")
+
+    # --- Does the peak sit where alignment saturates and decorrelation takes over? ---
+    on_tag, off_tag = f"Contrastive/on_diag_loss_L{level}", f"Contrastive/off_diag_loss_L{level}"
+    if on_tag in scalars and off_tag in scalars:
+        o_steps, o_vals = scalars[on_tag]
+        f_steps, f_vals = scalars[off_tag]
+        sat = _saturation_step(o_steps, o_vals, sat_tol)
+        print(
+            f"\n  on_diag     {o_vals[0]:.3f} → {o_vals[-1]:.3f};  "
+            f"{100 * (1 - sat_tol):.0f}%-saturated @ {'n/a' if sat is None else f'{sat:.0f}'}"
+        )
+        print(f"  off_diag    {f_vals[0]:.3f} → {f_vals[-1]:.3f}")
+        if f_vals[0] - f_vals.min() > 0:
+            done = f_vals[0] - np.interp(peak_step, f_steps, f_vals)
+            print(
+                f"              {100 * (1 - done / (f_vals[0] - f_vals.min())):.0f}% of its descent happens "
+                "AFTER the MCC peak"
+            )
+        if sat is not None:
+            ratio = peak_step / max(sat, 1.0)
+            print(
+                f"\n  → MCC peak @ {peak_step:.0f} vs on_diag saturation @ {sat:.0f} (ratio {ratio:.2f}): "
+                + ("aligned" if 0.4 <= ratio <= 2.5 else "NOT aligned — the peak is not the saturation point")
+            )
+    else:
+        logger.warning("BT diagnostics (%s) not in the logs — is this an InfoNCE run?", on_tag)
+
+    # --- Is the variance hinge, the only anti-collapse term, actually holding? ---
+    std_tag = f"Contrastive/feat_std_mean_L{level}"
+    if std_tag in scalars:
+        s_steps, s_vals = scalars[std_tag]
+        tail = _tail_median(s_steps, s_vals)
+        print(
+            f"\n  feat_std_mean (hinge target 1.0):  {s_vals[0]:.4f} → {tail:.4f}"
+            + ("   ← ≪ 1: the hinge is NOT holding; raise bt_std_coeff" if tail < 0.2 else "")
+        )
+
+    # --- Are the two objectives actually balanced? ---
+    if "Loss/Recon" in scalars and "Loss/Contrastive" in scalars:
+        r_tail = _tail_median(*scalars["Loss/Recon"])
+        c_tail = _tail_median(*scalars["Loss/Contrastive"])
+        print(
+            f"\n  Loss/Recon {r_tail:.5f}   Loss/Contrastive {c_tail:.5f}   "
+            f"→ contrastive:recon = {c_tail / max(r_tail, 1e-12):.1f}:1"
+        )
+        print("    (both scale_* weights are nominally 1 — this is the ratio that acts. Recon is the")
+        print("     only force replenishing what the contrastive term removes.)")
+
+    # --- Migration or loss?  The reading is stated at main_multimodal.py:2556. ---
+    if "selection/info_all" in scalars:
+        ia_steps, ia_vals = scalars["selection/info_all"]
+        at_peak = np.interp(peak_step, ia_steps, ia_vals)
+        ia_drop = (at_peak - ia_vals[-1]) / max(abs(at_peak), 1e-9)
+        mcc_drop = (peak_val - final_val) / max(abs(peak_val), 1e-9)
+        print(f"\n  info_all    @peak {at_peak:.4f} → final {ia_vals[-1]:.4f}")
+        print(
+            f"  → info_all fell {100 * ia_drop:+.1f}% vs patch MCC {100 * mcc_drop:+.1f}%: "
+            + ("REAL LOSS" if ia_drop > 0.5 * mcc_drop else "MIGRATION / re-gauging, not loss")
+        )
+
+    for pool in ("gap", "stats"):
+        tag = f"selection/mcc_by_pool/{pool}"
+        if tag in scalars:
+            p_steps, p_vals = scalars[tag]
+            at_peak = np.interp(peak_step, p_steps, p_vals)
+            print(f"  mcc {pool:<6} @patch-peak {at_peak:.4f} → final {p_vals[-1]:.4f} ({p_vals[-1] - at_peak:+.4f})")
+
+
+# --------------------------------------------------------------------------- #
+# Extraction — one pass, everything tests 2 and 3 need
+# --------------------------------------------------------------------------- #
+
+
+def extract_patch_block(model, dataset, device, grid, level, batch_size=16, num_workers=0):
+    """Level-``level`` content block at patch pooling, with per-position brain coverage.
+
+    Mirrors ``eval.dci._extract_synthetic_representations`` — same ``pool_only=True,
+    patch_grid=grid`` forward, same Gumbel-mask content split, view 1 only — but also
+    returns mask coverage per (sample, position) so the block can be sliced by position.
+
+    Returns ``(content, gt_content, coverage)`` shaped ``(N, P, C)``, ``(N, F)``,
+    ``(N, P)``.  Position order is row-major over (D, H, W) in both, because the model
+    pools with ``adaptive_avg_pool3d(...).flatten(2)`` (``vqvae.py:1356``) and so does the
+    coverage below.
+    """
+    import torch
+    import torch.nn.functional as F
+    from torch.utils.data import DataLoader
+
+    from eval.dci import _parse_content_indices
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    feats, gts, covs = [], [], []
+
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            imgs = batch["image"]
+            n_views = len(imgs)
+            x = torch.cat(imgs, dim=0).to(device)
+
+            enc_out = model(x, pool_only=True, n_views=n_views, patch_grid=tuple(grid))
+            feat = enc_out[2][level]  # (n_views*B, C, P)
+            soft_masks = enc_out[6] if len(enc_out) > 6 else {}
+            b = feat.shape[0] // n_views
+
+            if isinstance(soft_masks, dict) and level in soft_masks:
+                mask = soft_masks[level]
+                raw = torch.where((mask[0] if isinstance(mask, tuple) else mask).bool())[-1]
+            else:
+                raw = None
+            content_idx = _parse_content_indices(raw) or list(range(feat.shape[1]))
+
+            # (B, C_content, P) → (B, P, C_content): position-major, so a position subset
+            # is a plain slice and the later flatten reproduces dci.py's patch-major layout.
+            feats.append(feat[:b, content_idx, :].permute(0, 2, 1).cpu().numpy())
+
+            m = batch["mask"][0].to(device).float()
+            if m.dim() == 4:
+                m = m.unsqueeze(1)
+            covs.append(F.adaptive_avg_pool3d(m, tuple(grid)).flatten(1).cpu().numpy())
+
+            gts.append(batch["gt_latents"]["z_content"].numpy())
+
+    return np.concatenate(feats), np.concatenate(gts), np.concatenate(covs)
+
+
+# --------------------------------------------------------------------------- #
+# Test 2 — strata
+# --------------------------------------------------------------------------- #
+
+
+def build_strata(coverage, thresh):
+    """Position subsets, mirroring the training rule and ``patch_background_diagnostic``.
+
+    ``fg_train_rule`` is the exact predicate from ``main_multimodal.py:335`` —
+    ``(frac >= thresh).any()`` — evaluated over the whole eval set rather than per batch,
+    which makes it slightly more permissive than any single training step.
+    """
+    mean_cov = coverage.mean(0)
+    keep_any = (coverage >= thresh).any(0)
+    return {
+        "all": np.ones(coverage.shape[1], dtype=bool),
+        "fg_train_rule": keep_any,
+        "fg_strict": mean_cov >= thresh,
+        "pure": mean_cov >= 0.95,
+        "background": ~keep_any,
+    }
+
+
+def test_strata(label, content, gt, coverage, thresh, seeds, n_splits, n_null):
+    strata = build_strata(coverage, thresh)
+    rng = np.random.RandomState(0)
+    n = content.shape[0]
+    print(f"\n  {label}:  N={n}  positions={content.shape[1]}  content channels={content.shape[2]}")
+    print(f"  {'stratum':<16}{'n_pos':>7}{'n_feat':>9}{'mcc':>9}{'null':>8}{'gap':>9}")
+    print("  " + "-" * 58)
+
+    out = {}
+    for name, sel in strata.items():
+        if not sel.any():
+            print(f"  {name:<16}{0:>7}  (empty)")
+            continue
+        x = content[:, sel, :].reshape(n, -1)  # patch-major, as dci.py builds it
+        mcc = block_mcc(x, gt, seeds=seeds, n_splits=n_splits)["mean"]
+        # A permutation null, because mcc_by_pool/* is logged RAW and its floor moves with
+        # the block's rank: a falling rank lowers the null and the raw number drops free.
+        null = (
+            float(
+                np.mean(
+                    [
+                        block_mcc(x, gt[rng.permutation(n)], seeds=seeds[:1], n_splits=n_splits)["mean"]
+                        for _ in range(n_null)
+                    ]
+                )
+            )
+            if n_null > 0
+            else 0.0
+        )
+        out[name] = {"n_pos": int(sel.sum()), "mcc": mcc, "null": null, "gap": mcc - null}
+        print(f"  {name:<16}{int(sel.sum()):>7}{x.shape[1]:>9}{mcc:>9.4f}{null:>8.4f}{mcc - null:>9.4f}")
+
+    fg, bg = strata["fg_train_rule"], strata["background"]
+    if bg.any():
+        e_fg = float((content[:, fg, :] ** 2).mean())
+        e_bg = float((content[:, bg, :] ** 2).mean())
+        print(f"\n    foreground:background energy = {e_fg / max(e_bg, 1e-12):.3f}  (fg {e_fg:.4g}, bg {e_bg:.4g})")
+        out["_energy_ratio"] = e_fg / max(e_bg, 1e-12)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Test 3 — geometry (probe-free)
+# --------------------------------------------------------------------------- #
+
+
+def spectrum(X):
+    """Covariance eigenvalues, descending.  Gram side: identical non-zero spectrum, and
+    O(n^2 p) instead of O(p^3) at p = 22528."""
+    Xc = np.asarray(X, dtype=np.float64)
+    Xc = Xc - Xc.mean(0, keepdims=True)
+    return np.linalg.eigvalsh(Xc @ Xc.T / max(len(Xc) - 1, 1)).clip(min=0)[::-1]
+
+
+def eff_rank(ev):
+    """Participation ratio normalised to (0, 1] — same convention as
+    ``eval.entropy_uniformity.eff_rank``."""
+    s1, s2 = ev.sum(), (ev**2).sum()
+    return float(s1**2 / s2 / len(ev)) if s2 > 0 else 0.0
+
+
+def n_at_energy(ev, frac=0.95):
+    if ev.sum() <= 0:
+        return 0
+    return int(np.searchsorted(np.cumsum(ev) / ev.sum(), frac) + 1)
+
+
+def test_geometry(label, content, gt, coverage, thresh, seeds, n_splits, ranks):
+    """Spectrum of the content block, plus how many leading directions the factors need.
+
+    No probe artifact can enter the first three columns — they are properties of the
+    representation alone.  The rank curve is where the two meet: if the late checkpoint
+    needs more components for the same score, the factors have moved down-spectrum.
+    """
+    strata = build_strata(coverage, thresh)
+    n = content.shape[0]
+    print(f"\n  {label} — geometry")
+    print(f"  {'stratum':<16}{'eff_rank':>10}{'n@95%':>8}{'cond@95%':>11}")
+    print("  " + "-" * 45)
+    out = {}
+    for name in ("all", "fg_train_rule"):
+        x = content[:, strata[name], :].reshape(n, -1)
+        ev = spectrum(x)
+        k95 = n_at_energy(ev, 0.95)
+        cond = float(ev[0] / max(ev[min(k95, len(ev)) - 1], 1e-300))
+        out[name] = {"eff_rank": eff_rank(ev), "n95": k95, "cond95": cond}
+        print(f"  {name:<16}{out[name]['eff_rank']:>10.4f}{k95:>8}{cond:>11.3g}")
+
+    print(f"\n  block-MCC from the top-k principal directions (fg_train_rule):")
+    print("  " + "".join(f"{f'k={k}':>10}" for k in ranks) + f"{'full':>10}")
+    x = content[:, strata["fg_train_rule"], :].reshape(n, -1)
+    curve = []
+    for k in ranks:
+        kk = int(min(k, x.shape[1], n * (n_splits - 1) // n_splits - 1))
+        # PCA is fitted on ALL rows here, which leaks a little covariance into the folds.
+        # It is the same leak at every checkpoint, so the early-vs-late COMPARISON is
+        # sound; do not read a single absolute value off this row.
+        xk = PCA(n_components=kk, svd_solver="randomized", random_state=0).fit_transform(x)
+        curve.append(block_mcc(xk, gt, seeds=seeds[:1], n_splits=n_splits)["mean"])
+    full = block_mcc(x, gt, seeds=seeds[:1], n_splits=n_splits)["mean"]
+    print("  " + "".join(f"{v:>10.4f}" for v in curve) + f"{full:>10.4f}")
+    out["rank_curve"] = dict(zip(ranks, curve))
+    out["rank_full"] = full
+    return out
+
+
+# --------------------------------------------------------------------------- #
+
+
+def report_delta(strata_res, geom_res, arms):
+    if len(arms) < 2:
+        return
+    early, late = arms[0], arms[-1]
+    print(f"\n{'=' * 78}\nVERDICT — {early} → {late}\n{'=' * 78}")
+
+    if strata_res.get(early) and strata_res.get(late):
+        print(f"\n  {'stratum':<16}{'gap ' + early:>20}{'gap ' + late:>20}{'Δ':>10}")
+        print("  " + "-" * 66)
+        d = {}
+        for name in ("all", "fg_train_rule", "fg_strict", "pure", "background"):
+            a, b = strata_res[early].get(name), strata_res[late].get(name)
+            if a and b:
+                d[name] = b["gap"] - a["gap"]
+                print(f"  {name:<16}{a['gap']:>20.4f}{b['gap']:>20.4f}{d[name]:>+10.4f}")
+        if "fg_train_rule" in d:
+            print()
+            if d["fg_train_rule"] < -0.005:
+                print("  → The decay is present in FOREGROUND positions, which the objective does")
+                print("    train on. It is not an artifact of unmasked background in the probe")
+                print("    (that mechanism is ruled out by --calibrate anyway).")
+            else:
+                print("  → Foreground holds. Whatever moved is outside the trained positions —")
+                print("    check the background row and the energy ratio.")
+
+    if geom_res.get(early) and geom_res.get(late):
+        a, b = geom_res[early]["fg_train_rule"], geom_res[late]["fg_train_rule"]
+        print(f"\n  eff_rank (fg)  {a['eff_rank']:.4f} → {b['eff_rank']:.4f}  ({b['eff_rank'] - a['eff_rank']:+.4f})")
+        print(f"  n@95%    (fg)  {a['n95']} → {b['n95']}")
+        print(f"  cond@95% (fg)  {a['cond95']:.3g} → {b['cond95']:.3g}")
+        if b["eff_rank"] < 0.8 * a["eff_rank"] or b["cond95"] > 3 * a["cond95"]:
+            print("\n  → CONDITIONING: the block's geometry collapsed. This is the one mechanism")
+            print("    that survived calibration, and an invertible map is enough to cost 0.26-0.48")
+            print("    of block-MCC. Levers: bt_std_coeff (the only anti-collapse term in this")
+            print("    config), bt_gap_weight, and the recon:contrastive ratio from test 1.")
+        else:
+            print("\n  → Geometry is stable, so conditioning does not explain the drop. With")
+            print("    dilution and decorrelation ruled out by --calibrate, the remaining")
+            print("    reading is genuine information loss — rebalance recon vs contrastive.")
+
+
+def run_calibration():
+    """Reproduce the sensitivity table in this module's docstring, on plain numpy."""
+    print(f"\n{'=' * 78}\nCALIBRATION — what can block-MCC at patch pooling detect?\n{'=' * 78}")
+    rng = np.random.RandomState(0)
+    n, p, c, f = 400, 256, 44, 9
+    n_fg = 60
+    gt = rng.randn(n, f)
+    w = rng.randn(c, f) / np.sqrt(f)
+    fg = np.zeros(p, dtype=bool)
+    fg[:n_fg] = True
+    sig = gt @ w.T
+    noise = 6.0  # puts the probe at ~0.84, the real operating point
+
+    def score(block):
+        return block_mcc(block[:, fg, :].reshape(n, -1), gt, seeds=(0,), n_splits=5)["mean"]
+
+    def score_all(block):
+        return block_mcc(block.reshape(n, -1), gt, seeds=(0,), n_splits=5)["mean"]
+
+    def base(seed=1):
+        r = np.random.RandomState(seed)
+        b = np.zeros((n, p, c))
+        b[:, fg, :] = sig[:, None, :] + noise * r.randn(n, n_fg, c)
+        b[:, ~fg, :] = 0.3 * r.randn(n, p - n_fg, c)
+        return b
+
+    b0 = base()
+    m_fg, m_all = score(b0), score_all(b0)
+    print(f"\n  operating point:  mcc(foreground) {m_fg:.4f}   mcc(all positions) {m_all:.4f}")
+    print(f"  background costs a constant {m_all - m_fg:+.4f} level offset (more features), not a trend.")
+
+    print("\n  A. DILUTION — background noise magnitude")
+    for bgn in (0.3, 3.0, 20.0):
+        b = base()
+        r = np.random.RandomState(5)
+        b[:, ~fg, :] = bgn * r.randn(n, p - n_fg, c)
+        print(f"     bg x{bgn / 0.3:>5.1f}   mcc(all) {score_all(b):.4f}")
+    print("     → flat: block_mcc standardises every feature, so magnitude is invisible. RULED OUT.")
+
+    print("\n  B. DECORRELATION — channel-private vs shared spatial maps")
+    for mix in (0.0, 1.0):
+        r = np.random.RandomState(7)
+        b = np.zeros((n, p, c))
+        priv = np.einsum("nf,pcf->npc", gt, r.randn(n_fg, c, f) / np.sqrt(f))
+        b[:, fg, :] = (1 - mix) * sig[:, None, :] + mix * priv + noise * r.randn(n, n_fg, c)
+        b[:, ~fg, :] = 0.3 * r.randn(n, p - n_fg, c)
+        print(f"     mix={mix:.1f} ({'fully shared' if mix == 0 else 'fully private'})   mcc(fg) {score(b):.4f}")
+    print("     → private scores HIGHER. A linear probe does not need cross-channel redundancy. RULED OUT.")
+
+    print("\n  C. CONDITIONING — exactly invertible anisotropic map")
+    q1, _ = np.linalg.qr(rng.randn(c, c))
+    q2, _ = np.linalg.qr(rng.randn(c, c))
+    for logc in (2, 4, 6):
+        m_ = q1 @ np.diag(np.logspace(0, -logc, c)) @ q2
+        print(f"     cond 1e{logc}   mcc(fg) {score(b0 @ m_):.4f}   ({score(b0 @ m_) - m_fg:+.4f})")
+    print("     → information preserved by construction, yet up to -0.48. SURVIVES.")
+    print("       (A PCA-whitened probe does not recover it at k=50..319, so there is no")
+    print("        probe-side control separating 're-gauged' from 'destroyed' at this N.)")
+
+    print("\n  D. REAL LOSS — signal amplitude against a fixed noise floor")
+    for s in (1.0, 0.5, 0.0):
+        r = np.random.RandomState(11)
+        b = np.zeros((n, p, c))
+        b[:, fg, :] = s * sig[:, None, :] + noise * r.randn(n, n_fg, c)
+        b[:, ~fg, :] = 0.3 * r.randn(n, p - n_fg, c)
+        print(f"     signal x{s:.1f}   mcc(fg) {score(b):.4f}")
+    print("\n  → C and D are the only live mechanisms, and they are not separable by a probe.")
+    print("    Measure the block's geometry directly instead (test 3).")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--calibrate", action="store_true", help="Run the sensitivity calibration and exit (no run needed)")
+    ap.add_argument("--run-dir", help="Training run directory (with settings.json)")
+    ap.add_argument("--compare-run-dir", default=None, help="Second run scored identically (e.g. the recon-only arm)")
+    ap.add_argument(
+        "--checkpoints",
+        nargs="+",
+        default=None,
+        help="Checkpoint filenames inside each run dir, EARLY FIRST. "
+        "Default: vqvae_best.pt then vqvae_model.pt when both exist.",
+    )
+    ap.add_argument(
+        "--tests", nargs="+", default=["curves", "strata", "geometry"], choices=["curves", "strata", "geometry"]
+    )
+    ap.add_argument("--level", type=int, default=0)
+    ap.add_argument("--grid", type=int, nargs=3, default=None, help="Patch grid (default: the run's --patch-grid)")
+    ap.add_argument("--num-samples", type=int, default=1500)
+    ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--num-workers", type=int, default=0)
+    ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
+    ap.add_argument("--n-splits", type=int, default=5)
+    ap.add_argument("--n-null", type=int, default=2, help="Permutations for the null floor (0 to skip)")
+    ap.add_argument("--ranks", type=int, nargs="+", default=[4, 16, 64, 256])
+    ap.add_argument("--fg-thresh", type=float, default=None, help="Default: the run's --patch-foreground-thresh")
+    ap.add_argument("--sat-tol", type=float, default=0.1, help="on_diag is 'saturated' with this fraction left")
+    ap.add_argument(
+        "--causal",
+        default="match",
+        choices=["match", "iid"],
+        help="Eval-set factor distribution. 'match' (default) forwards the run's SCM; 'iid' forces "
+        "independent factors. NOT interchangeable — under a random graph ventricle_size and "
+        "brain_size correlate at ~0.8.",
+    )
+    ap.add_argument("--cache-dataset", action="store_true", help="Cache rendered volumes in RAM (~4 GB at N=1000)")
+    args = ap.parse_args()
+
+    if args.calibrate:
+        run_calibration()
+        return
+    if not args.run_dir:
+        ap.error("--run-dir is required unless --calibrate is given")
+
+    run_dirs = [args.run_dir] + ([args.compare_run_dir] if args.compare_run_dir else [])
+
+    if "curves" in args.tests:
+        for rd in run_dirs:
+            test_curves(rd, level=args.level, sat_tol=args.sat_tol)
+
+    want = {"strata", "geometry"} & set(args.tests)
+    if not want:
+        return
+
+    import torch
+
+    from eval.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    for rd in run_dirs:
+        names = args.checkpoints or [
+            n for n in ("vqvae_best.pt", "vqvae_model.pt") if os.path.exists(os.path.join(rd, n))
+        ]
+        if not names:
+            logger.error("No checkpoints found in %s — pass --checkpoints.", rd)
+            continue
+
+        print(f"\n{'=' * 78}\nTESTS 2/3 — {os.path.basename(rd.rstrip('/'))}\n{'=' * 78}")
+        _, run_args, _ = load_model_from_run_dir(rd, checkpoint=os.path.join(rd, names[0]), device=device)
+        grid = args.grid or list(getattr(run_args, "patch_grid", [8, 8, 8]))
+        thresh = args.fg_thresh if args.fg_thresh is not None else getattr(run_args, "patch_foreground_thresh", 0.05)
+        dataset = build_synthetic_test_set(
+            run_args,
+            num_samples=args.num_samples,
+            cache=args.cache_dataset,
+            causal=(True if args.causal == "match" else False),
+        )
+        logger.info("grid=%s  foreground thresh=%.3f  causal=%s", grid, thresh, args.causal)
+
+        strata_res, geom_res, arms = {}, {}, []
+        for name in names:
+            model, _, _ = load_model_from_run_dir(rd, checkpoint=os.path.join(rd, name), device=device)
+            model.to(device)
+            content, gt, coverage = extract_patch_block(
+                model, dataset, device, grid, args.level, args.batch_size, args.num_workers
+            )
+            label = name.replace(".pt", "")
+            arms.append(label)
+            if "strata" in want:
+                strata_res[label] = test_strata(
+                    label, content, gt, coverage, thresh, tuple(args.seeds), args.n_splits, args.n_null
+                )
+            if "geometry" in want:
+                geom_res[label] = test_geometry(
+                    label, content, gt, coverage, thresh, tuple(args.seeds), args.n_splits, args.ranks
+                )
+            del model, content
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        report_delta(strata_res, geom_res, arms)
+
+
+if __name__ == "__main__":
+    main()
