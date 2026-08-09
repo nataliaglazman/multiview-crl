@@ -349,17 +349,30 @@ def test_curves(run_dir, level=0, sat_tol=0.1):
         )
     if "selection/content_view_acc" in scalars:
         cv_steps, cv_vals = scalars["selection/content_view_acc"]
-        cv_peak = np.interp(peak_step, cv_steps, cv_vals)
-        rise = cv_vals[-1] - cv_peak
-        excess = cv_vals[-1] - 0.5
-        if rise > 0.02 or excess > 0.1:
-            print("\n    → content→view is climbing away from chance while the MCC falls. Content is")
-            print("      being used to carry view-specific detail, which is a STYLE CAPACITY problem,")
-            print("      not a contrastive-objective problem. Widen style (content_size down at fixed")
-            print("      hidden width, or more style codebook entries) and the pressure goes away.")
+        cv_peak = float(np.interp(peak_step, cv_steps, cv_vals))
+        rise, excess = cv_vals[-1] - cv_peak, cv_vals[-1] - 0.5
+        # "High" and "rising" are different findings and only the second can explain a
+        # decay that happens over the same window. Keep them apart.
+        if rise > 0.02:
+            print("\n    → content→view RISES across the post-peak window while the MCC falls. Content")
+            print("      is progressively absorbing view-specific detail — a style CAPACITY problem.")
+            print("      Widen style (content_size down at fixed hidden width, more style codebook")
+            print("      entries, or quantize_style off) to remove the incentive.")
+        elif excess > 0.1:
+            print(f"\n    → content→view is PINNED at {cv_vals[-1]:.4f} and flat ({rise:+.4f}), so it does")
+            print("      NOT explain the decay — but content is not view-invariant at ANY point, which")
+            print("      breaks the premise of the identifiability claim (Yao Lemma C.2 needs")
+            print("      g_k(x_k) = g_k'(x_k') a.s., not merely correlated across views).")
+            print("      Mechanism is documented at losses.py:1176: the per-channel standardisation")
+            print("      makes on_diag/off_diag BLIND to a per-view constant offset (measured there:")
+            print("      on_diag unchanged to 4 dp while the view probe goes 0.503 → 1.000). Only the")
+            print("      `sim` distance term can see it — check bt_sim_coeff, and note that")
+            print("      bt_sim_normalize divides by the total across-sample-and-position variance,")
+            print("      so a consistent offset can read ~0 in the loss and still be perfectly")
+            print("      separable at the `stats` pooling content_view is scored on.")
         else:
-            print("\n    → content→view is flat and near chance, so content is NOT absorbing view")
-            print("      detail. The style bottleneck does not explain this decay.")
+            print("\n    → content→view is flat and near chance: content IS view-invariant, and the")
+            print("      style bottleneck does not explain this decay.")
     elif not _any:
         logger.warning("No selection/style_* or content_view_acc tags — style-side scoring was off for this run.")
 
