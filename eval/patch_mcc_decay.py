@@ -437,6 +437,222 @@ def extract_patch_block(model, dataset, device, grid, level, batch_size=16, num_
 
 
 # --------------------------------------------------------------------------- #
+# Test 4 — view gap.  How BIG is the content/view dependence, not whether it exists.
+# --------------------------------------------------------------------------- #
+#
+# `selection/content_view_acc` is a multivariate L2-regularised logistic probe on ~176
+# standardised features with ~2000 rows per view (identifiability_metrics.py:136). With a
+# BINARY label that saturates at 1.0 the moment any consistent linear direction separates
+# the views, at essentially any effect size, and then has no headroom left. So 1.0 proves
+# that g_1(x) = g_2(x') a.s. fails and says nothing about magnitude — and with
+# --separate-encoders, g_1 and g_2 are different networks, so exact agreement was never
+# on offer.
+#
+# What matters is which KIND of failure it is:
+#
+#   OFFSET-ONLY   content_v2 ~ content_v1 + b for a constant b. The content INFORMATION is
+#                 the same in both views. This is provably free for every metric in this
+#                 project: block_mcc, DCI and mcc_by_pool are all computed on VIEW 1 ONLY
+#                 and StandardScaler centres each feature, so a per-view constant cannot
+#                 move them by construction. Nothing to fix.
+#   STRUCTURAL    the views still separate after each view's mean is removed, so content
+#                 carries view-specific information beyond a shift. This is the case that
+#                 justifies acting on the invariance term.
+#
+# The per-view-mean-removed probe is what tells them apart, and per-channel AUC says how
+# widely it is spread: losses.py:1180 records "every content channel had view-AUC 1.000
+# under BT and 0/44 above 0.7 under VICReg", so 1-of-44 and 44-of-44 are both live
+# outcomes on this project and they mean very different things.
+
+
+def _auc(x, labels):
+    """Direction-free AUC of a single scalar, via the Mann-Whitney rank statistic."""
+    from scipy.stats import rankdata
+
+    r = rankdata(x)
+    n1 = int(labels.sum())
+    n0 = len(labels) - n1
+    if n0 == 0 or n1 == 0:
+        return float("nan")
+    a = (r[labels == 1].sum() - n1 * (n1 + 1) / 2.0) / (n0 * n1)
+    return float(max(a, 1.0 - a))
+
+
+def _grouped_view_acc(X, labels, groups, kind="linear", seeds=(0, 1), n_splits=5):
+    """View-classification accuracy with a subject's TWO ROWS kept in the same fold.
+
+    The shipped ``cv_probe_acc`` uses StratifiedKFold on the stacked pair, so subject i's
+    view-1 row can train while its view-2 row tests. The classifier then learns subject
+    identity off the shared content and predicts the paired test row's OPPOSITE label,
+    which puts the floor BELOW chance: measured 0.3550 on statistically identical views
+    where the true chance is 0.5 (grouped: 0.4975; unpaired controls: 0.4987). It does not
+    inflate a genuine positive — with a real offset, shipped 0.9062 vs grouped 0.9019 —
+    so a high ``content_view_acc`` is real, but its floor is not 0.5 and "how far above
+    chance" cannot be read off it.
+
+    ``kind="nonlinear"`` matters for a separate reason: logistic regression on standardised
+    features can only respond to a MEAN SHIFT. A view difference in variance or covariance
+    is invisible to it by construction, so a linear probe cannot distinguish "offset only"
+    from "no structural difference" — only a nonlinear probe can.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score
+    from sklearn.model_selection import GroupKFold
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.preprocessing import StandardScaler
+
+    accs = []
+    for seed in seeds:
+        # GroupKFold is deterministic, so vary folds by permuting the group ids.
+        g = np.random.RandomState(seed).permutation(int(groups.max()) + 1)[groups]
+        fold = []
+        for tr, te in GroupKFold(n_splits=n_splits).split(X, labels, g):
+            sc = StandardScaler().fit(X[tr])
+            clf = (
+                LogisticRegression(max_iter=1000, random_state=seed)
+                if kind == "linear"
+                else MLPClassifier(hidden_layer_sizes=(64,), max_iter=500, early_stopping=True, random_state=seed)
+            )
+            clf.fit(sc.transform(X[tr]), labels[tr])
+            fold.append(accuracy_score(labels[te], clf.predict(sc.transform(X[te]))))
+        accs.append(float(np.mean(fold)))
+    return float(np.mean(accs))
+
+
+def view_gap_stats(c1, c2, seeds=(0, 1)):
+    """Effect size of the content block's view dependence. Pure numpy/sklearn.
+
+    ``c1``/``c2`` are the same content block for view 1 and view 2, ``(N, D)``.
+    """
+    from eval.identifiability_metrics import cv_probe_acc
+
+    c1, c2 = np.asarray(c1, dtype=np.float64), np.asarray(c2, dtype=np.float64)
+    n = c1.shape[0]
+    labels = np.array([0] * n + [1] * n)
+    groups = np.concatenate([np.arange(n), np.arange(n)])
+
+    stacked = np.vstack([c1, c2])
+    # Reported so this reconciles with the selection/content_view_acc curve, not because
+    # it is the number to judge on — see _grouped_view_acc.
+    acc_shipped = cv_probe_acc(stacked, labels, seeds=seeds)["mean"]
+    acc_raw = _grouped_view_acc(stacked, labels, groups, "linear", seeds)
+    # Remove EACH view's own mean, then ask again — linear first (must collapse if the raw
+    # signal was a shift, since that is all a linear probe can see), then nonlinear, which
+    # is the only one of the two that can detect a structural difference.
+    centred = np.vstack([c1 - c1.mean(0), c2 - c2.mean(0)])
+    acc_centred = _grouped_view_acc(centred, labels, groups, "linear", seeds)
+    acc_centred_nl = _grouped_view_acc(centred, labels, groups, "nonlinear", seeds)
+
+    # Between-view variance share and Cohen's d, per feature.
+    m1, m2 = c1.mean(0), c2.mean(0)
+    sd_pool = np.sqrt(0.5 * (c1.var(0, ddof=1) + c2.var(0, ddof=1)))
+    cohen_d = np.abs(m1 - m2) / np.maximum(sd_pool, 1e-12)
+    grand = stacked.mean(0)
+    ss_between = n * ((m1 - grand) ** 2 + (m2 - grand) ** 2)
+    ss_total = ((stacked - grand) ** 2).sum(0)
+    eta2 = ss_between / np.maximum(ss_total, 1e-12)
+
+    aucs = np.array([_auc(stacked[:, j], labels) for j in range(stacked.shape[1])])
+    # Sample-wise tracking after the shift is removed: do the two views carry the same
+    # per-subject signal in each feature?
+    a, b = c1 - m1, c2 - m2
+    denom = a.std(0) * b.std(0)
+    track = np.where(denom > 1e-12, (a * b).mean(0) / np.maximum(denom, 1e-12), np.nan)
+
+    return {
+        "acc_shipped": acc_shipped,
+        "acc_raw": acc_raw,
+        "acc_centred": acc_centred,
+        "acc_centred_nl": acc_centred_nl,
+        "auc": aucs,
+        "eta2": eta2,
+        "cohen_d": cohen_d,
+        "track": track,
+        "n_feat": stacked.shape[1],
+    }
+
+
+def _print_view_gap(label, pooling, s):
+    aucs, eta2 = s["auc"], s["eta2"]
+    print(f"\n  {label} — view gap @ {pooling} pooling ({s['n_feat']} features)")
+    print(f"    view probe   shipped {s['acc_shipped']:.4f}  (== selection/content_view_acc; floor is NOT 0.5)")
+    print(f"                 subject-grouped, linear    raw {s['acc_raw']:.4f}   mean-removed {s['acc_centred']:.4f}")
+    print(f"                 subject-grouped, NONLINEAR                        mean-removed {s['acc_centred_nl']:.4f}")
+    print(
+        f"    per-feature AUC     median {np.nanmedian(aucs):.3f}   "
+        f">0.7: {int((aucs > 0.7).sum())}/{len(aucs)}   "
+        f">0.9: {int((aucs > 0.9).sum())}/{len(aucs)}   "
+        f"=1.00: {int((aucs >= 0.999).sum())}/{len(aucs)}"
+    )
+    print(
+        f"    between-view var    eta^2 mean {np.nanmean(eta2):.4f}  median {np.nanmedian(eta2):.4f}  max {np.nanmax(eta2):.4f}"
+    )
+    print(f"    Cohen's d           median {np.nanmedian(s['cohen_d']):.3f}  max {np.nanmax(s['cohen_d']):.3f}")
+    print(f"    cross-view tracking median r {np.nanmedian(s['track']):+.3f} (after removing each view's mean)")
+
+
+def view_gap_verdict(s):
+    """Report the OFFSET and STRUCTURAL components separately — they are independent.
+
+    A run can have either, both, or neither, so collapsing them onto one axis mislabels
+    the pure cases. The linear mean-removed probe cannot decide the structural question at
+    all: logistic regression on standardised features responds only to a mean shift, so
+    removing the means must collapse it whether or not structure remains. Only the
+    nonlinear mean-removed probe can, and its empirical floor is ~0.50 (validated on
+    matched synthetic controls).
+    """
+    offset = (s["acc_raw"] - s["acc_centred"]) > 0.10 or float(np.nanmax(s["cohen_d"])) > 0.3
+    nl = s["acc_centred_nl"]
+    print("\n    → OFFSET component:     ", end="")
+    if offset:
+        print(
+            f"PRESENT (linear probe {s['acc_raw']:.3f} → {s['acc_centred']:.3f} on mean removal, "
+            f"max Cohen's d {np.nanmax(s['cohen_d']):.2f})"
+        )
+        print("        A per-view constant carries NO view-specific information, and every metric")
+        print("        here is scored on VIEW 1 with per-feature standardisation — so it cannot move")
+        print("        block_mcc / DCI / mcc_by_pool at all. Exactly zero, not approximately.")
+    else:
+        print("none detected")
+    print("      STRUCTURAL component: ", end="")
+    if nl < 0.55:
+        print(f"none detected (nonlinear mean-removed probe {nl:.3f}, floor ~0.50)")
+        print("        Content carries no view-specific INFORMATION. There is nothing here for the")
+        print("        invariance term to fix; judge the objective on the style-side numbers instead.")
+    elif nl < 0.70:
+        print(f"WEAK ({nl:.3f} vs a ~0.50 floor)")
+        print("        Some view-specific information survives mean removal. Size it against eta^2")
+        print("        and the AUC census before acting on it.")
+    else:
+        print(f"STRONG ({nl:.3f} vs a ~0.50 floor)")
+        print("        Content carries real view-specific information, not just a shift. This is the")
+        print("        case that justifies raising bt_sim_coeff / disabling bt_sim_normalize — the")
+        print("        sim distance is the only term in the objective that can see it (losses.py:1176).")
+
+
+def test_viewgap(label, model, dataset, device, level, batch_size, seeds):
+    from eval.dci import _extract_synthetic_representations
+
+    out = {}
+    for pooling in ("stats", "gap"):
+        # "stats" is the pooling selection/content_view_acc itself uses
+        # (run_dci_compare.py:727), so the raw number here should reproduce that curve.
+        ld, _, _, _ = _extract_synthetic_representations(model, dataset, device, batch_size, 0, pooling=pooling)
+        if level not in ld:
+            continue
+        c1, _, c2, _, _ = ld[level]
+        if c1 is None or c2 is None:
+            logger.warning("No second view at %s pooling — view gap needs both.", pooling)
+            continue
+        s = view_gap_stats(c1, c2, seeds=seeds)
+        _print_view_gap(label, pooling, s)
+        out[pooling] = s
+    if "stats" in out:
+        view_gap_verdict(out["stats"])
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Test 2 — strata
 # --------------------------------------------------------------------------- #
 
@@ -692,7 +908,10 @@ def main():
         "Default: vqvae_best.pt then vqvae_model.pt when both exist.",
     )
     ap.add_argument(
-        "--tests", nargs="+", default=["curves", "strata", "geometry"], choices=["curves", "strata", "geometry"]
+        "--tests",
+        nargs="+",
+        default=["curves", "strata", "geometry", "viewgap"],
+        choices=["curves", "strata", "geometry", "viewgap"],
     )
     ap.add_argument("--level", type=int, default=0)
     ap.add_argument("--grid", type=int, nargs=3, default=None, help="Patch grid (default: the run's --patch-grid)")
@@ -728,7 +947,7 @@ def main():
         for rd in run_dirs:
             test_curves(rd, level=args.level, sat_tol=args.sat_tol)
 
-    want = {"strata", "geometry"} & set(args.tests)
+    want = {"strata", "geometry", "viewgap"} & set(args.tests)
     if not want:
         return
 
@@ -762,19 +981,25 @@ def main():
         for name in names:
             model, _, _ = load_model_from_run_dir(rd, checkpoint=os.path.join(rd, name), device=device)
             model.to(device)
-            content, gt, coverage = extract_patch_block(
-                model, dataset, device, grid, args.level, args.batch_size, args.num_workers
-            )
             label = name.replace(".pt", "")
             arms.append(label)
-            if "strata" in want:
-                strata_res[label] = test_strata(
-                    label, content, gt, coverage, thresh, tuple(args.seeds), args.n_splits, args.n_null
+
+            if "viewgap" in want:
+                test_viewgap(label, model, dataset, device, args.level, args.batch_size, tuple(args.seeds))
+
+            content = None
+            if {"strata", "geometry"} & want:
+                content, gt, coverage = extract_patch_block(
+                    model, dataset, device, grid, args.level, args.batch_size, args.num_workers
                 )
-            if "geometry" in want:
-                geom_res[label] = test_geometry(
-                    label, content, gt, coverage, thresh, tuple(args.seeds), args.n_splits, args.ranks
-                )
+                if "strata" in want:
+                    strata_res[label] = test_strata(
+                        label, content, gt, coverage, thresh, tuple(args.seeds), args.n_splits, args.n_null
+                    )
+                if "geometry" in want:
+                    geom_res[label] = test_geometry(
+                        label, content, gt, coverage, thresh, tuple(args.seeds), args.n_splits, args.ranks
+                    )
             del model, content
             if device.type == "cuda":
                 torch.cuda.empty_cache()

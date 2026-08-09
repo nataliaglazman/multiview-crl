@@ -54,7 +54,7 @@ tag: synthetic-causal-clean-content-mse-real-lambda-01-normalized-16-mse
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
-patch_grid: [16, 16, 16]                 # 4x4x4 patches for 64^3 volumes
+patch_grid: [8,8,8]                 # 4x4x4 patches for 64^3 volumes
 patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
@@ -94,7 +94,7 @@ bt_sim_normalize: true
 bt_sim_coeff: 2e-5       # ≈ on_diag_gap 0.38 / current normalised sim 16624
 # bt_sim_coeff: 0       # ≈ on_diag_gap 0.38 / current normalised sim 16624
 bt_std_coeff: 1
-# channels_last: false
+channels_last: false
 
 
 # _base_: synthetic_defaults
