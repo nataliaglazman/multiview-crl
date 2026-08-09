@@ -30,7 +30,7 @@
 # norm mismatch is a warning, not an error, and would silently give you a hybrid model.
 
 _base_: synthetic_defaults
-tag: synthetic-causal-frozen-decoder
+tag: synthetic-causal-frozen-encoder
 
 # ---- Phase-2 block ----
 freeze_encoder: true

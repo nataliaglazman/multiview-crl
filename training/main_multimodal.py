@@ -1000,6 +1000,26 @@ def _run_validation(
 # ---------------------------------------------------------------------------
 
 
+def _encoder_l2(model):
+    """L2 norm of every parameter that shapes the representation.
+
+    Covers exactly the modules ``--freeze-encoder`` pins, which are also exactly the ones
+    ``enc_out[2]`` depends on (``vqvae.py`` single-view path: ``enc_stack`` is
+    ``self.encoders`` / ``self.encoders_v1``, and ``encoder_pools`` is built from the
+    pre-norm activation). Flat under a working freeze; drifting means it did not take.
+    """
+    # Unwrap here rather than relying on a `_raw` bound in some other branch of the loop.
+    model = getattr(model, "online", model)
+    model = getattr(model, "module", model)
+    total = 0.0
+    for name in ("encoders", "encoders_v1", "content_norms", "content_projections"):
+        mod = getattr(model, name, None)
+        if mod is not None:
+            for p in mod.parameters():
+                total += float(p.detach().double().pow(2).sum())
+    return total**0.5
+
+
 def _seed_dataset_transforms(dataset, seed):
     """Seed any MONAI ``Compose`` pipelines a dataset carries (no-op if absent).
 
@@ -2618,6 +2638,16 @@ def main(args):
                                         "selection/style_to_content_leak": _sel_row.get("leak_s2c"),
                                         "selection/style_sufficiency": _sel_row.get("suff_s2s"),
                                         "selection/content_rank": _sel_row.get("content_rank"),
+                                        # Encoder weight norm, logged on the SAME steps as the
+                                        # metrics above so "did the representation move?" is
+                                        # answerable from one glance at TensorBoard. Under
+                                        # --freeze-encoder this MUST be a flat line: every
+                                        # selection/* metric is computed from enc_out[2], which
+                                        # depends only on self.encoders / self.encoders_v1, so a
+                                        # frozen encoder makes them constant by construction. If
+                                        # this drifts, the freeze did not take and the run is not
+                                        # the experiment it claims to be.
+                                        "selection/encoder_l2": _encoder_l2(encoders[0]),
                                     }
                                     # Block-MCC at every pooling, side by side. content_anatomy
                                     # (and so a quarter of overall_score) is derived from mcc_cc,

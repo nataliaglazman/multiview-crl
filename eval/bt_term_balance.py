@@ -61,7 +61,7 @@ def _as_views(content_v1, content_v2, n_patches):
     return torch.from_numpy(np.stack([a, b]).astype(np.float32))
 
 
-def measure(hz, batch_size, draws, center_mode, patch_stat, seed=0):
+def measure(hz, batch_size, draws, center_mode, patch_stat, sim_normalize=False, seed=0):
     """Average the shipped loss's own diagnostics over random batches of the TRAINING size."""
     from training.losses import barlow_twins_loss
 
@@ -82,6 +82,12 @@ def measure(hz, batch_size, draws, center_mode, patch_stat, seed=0):
             lambd=1.0,
             center_mode=center_mode if sub.ndim == 4 else "none",
             patch_stat=patch_stat,
+            # MUST match the run. barlow_twins_loss defaults sim_normalize=False, so
+            # omitting it measures the RAW MSE while a --bt-sim-normalize run optimises the
+            # variance-normalised one — and every suggestion below is `target / sim`, so it
+            # comes out wrong by a factor of 2*feat_std^2. That is 5674x at patch pooling on
+            # this project's runs, which turns a correct 0.35 into a useless 6e-5.
+            sim_normalize=sim_normalize,
             sim_coeff=1.0,
             std_coeff=1.0,
         )
@@ -123,6 +129,7 @@ def main():
     grid = getattr(args_, "patch_grid", None)
     center_mode = getattr(args_, "patch_center_mode", "none") or "none"
     patch_stat = getattr(args_, "bt_patch_stat", "fold") or "fold"
+    sim_normalize = bool(getattr(args_, "bt_sim_normalize", False))
 
     dataset = build_synthetic_test_set(args_, cli.num_samples, causal=cli.causal == "match")
     ckpt = os.path.join(cli.run_dir, cli.checkpoint_name)
@@ -143,7 +150,7 @@ def main():
             continue
         npatch = int(np.prod(value)) if key == "patch" else 1
         hz = _as_views(c1, c2, npatch)
-        results[key] = measure(hz, B, cli.draws, center_mode, patch_stat)
+        results[key] = measure(hz, B, cli.draws, center_mode, patch_stat, sim_normalize)
 
     # Reconstruction scale, for sizing the contrastive terms against what they compete with.
     #
