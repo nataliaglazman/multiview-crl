@@ -559,11 +559,26 @@ def view_gap_stats(c1, c2, seeds=(0, 1)):
     denom = a.std(0) * b.std(0)
     track = np.where(denom > 1e-12, (a * b).mean(0) / np.maximum(denom, 1e-12), np.nan)
 
+    # AFFINE control. With --separate-encoders the two views have different encoders and
+    # therefore different output SCALES. A per-view scale is an affine nuisance carrying no
+    # information, exactly like an offset — but mean-removal does not remove it, so the
+    # centred probe above would report it as "structural". It also shows up specifically in
+    # std/amax/amin while leaving a mean-only (gap) probe at the floor, which is precisely
+    # the signature this project produces. Standardising each view removes scale as well as
+    # shift, so whatever survives HERE is not affine and is the only thing an invariance
+    # term needs to fix.
+    z1 = (c1 - m1) / np.maximum(c1.std(0), 1e-12)
+    z2 = (c2 - m2) / np.maximum(c2.std(0), 1e-12)
+    acc_affine_nl = _grouped_view_acc(np.vstack([z1, z2]), labels, groups, "nonlinear", seeds)
+    scale_ratio = c2.std(0) / np.maximum(c1.std(0), 1e-12)
+
     return {
         "acc_shipped": acc_shipped,
         "acc_raw": acc_raw,
         "acc_centred": acc_centred,
         "acc_centred_nl": acc_centred_nl,
+        "acc_affine_nl": acc_affine_nl,
+        "scale_ratio": scale_ratio,
         "auc": aucs,
         "eta2": eta2,
         "cohen_d": cohen_d,
@@ -578,6 +593,14 @@ def _print_view_gap(label, pooling, s):
     print(f"    view probe   shipped {s['acc_shipped']:.4f}  (== selection/content_view_acc; floor is NOT 0.5)")
     print(f"                 subject-grouped, linear    raw {s['acc_raw']:.4f}   mean-removed {s['acc_centred']:.4f}")
     print(f"                 subject-grouped, NONLINEAR                        mean-removed {s['acc_centred_nl']:.4f}")
+    print(
+        f"                 subject-grouped, NONLINEAR         per-view STANDARDISED {s['acc_affine_nl']:.4f}  <- non-affine only"
+    )
+    _sr = s["scale_ratio"]
+    print(
+        f"    per-view scale      std(v2)/std(v1) median {np.nanmedian(_sr):.3f}  "
+        f"range [{np.nanmin(_sr):.3f}, {np.nanmax(_sr):.3f}]"
+    )
     print(
         f"    per-feature AUC     median {np.nanmedian(aucs):.3f}   "
         f">0.7: {int((aucs > 0.7).sum())}/{len(aucs)}   "
@@ -601,7 +624,11 @@ def view_gap_verdict(s):
     nonlinear mean-removed probe can, and its empirical floor is ~0.50 (validated on
     matched synthetic controls).
     """
-    offset = (s["acc_raw"] - s["acc_centred"]) > 0.10 or float(np.nanmax(s["cohen_d"])) > 0.3
+    # The raw probe must itself be above chance first: the centred LINEAR probe sits
+    # BELOW 0.5 whenever the views share content (it learns subject identity and inverts
+    # the paired row), so a raw-minus-centred "drop" appears even in a fully invariant
+    # control. Requiring acc_raw > 0.60 removes that false positive.
+    offset = s["acc_raw"] > 0.60 and ((s["acc_raw"] - s["acc_centred"]) > 0.10 or float(np.nanmax(s["cohen_d"])) > 0.3)
     nl = s["acc_centred_nl"]
     print("\n    → OFFSET component:     ", end="")
     if offset:
@@ -614,20 +641,30 @@ def view_gap_verdict(s):
         print("        block_mcc / DCI / mcc_by_pool at all. Exactly zero, not approximately.")
     else:
         print("none detected")
-    print("      STRUCTURAL component: ", end="")
-    if nl < 0.55:
-        print(f"none detected (nonlinear mean-removed probe {nl:.3f}, floor ~0.50)")
-        print("        Content carries no view-specific INFORMATION. There is nothing here for the")
-        print("        invariance term to fix; judge the objective on the style-side numbers instead.")
-    elif nl < 0.70:
-        print(f"WEAK ({nl:.3f} vs a ~0.50 floor)")
-        print("        Some view-specific information survives mean removal. Size it against eta^2")
-        print("        and the AUC census before acting on it.")
+    print("      BEYOND-SHIFT:         ", end="")
+    print(f"{'none' if nl < 0.55 else 'yes'} (nonlinear, mean-removed {nl:.3f}; floor ~0.50)")
+    aff = s["acc_affine_nl"]
+    print("      NON-AFFINE component: ", end="")
+    if aff < 0.55:
+        print(f"none detected (per-view standardised {aff:.3f})")
+        if nl >= 0.55:
+            print("        The beyond-shift signal above is a per-view SCALE, which standardising each")
+            print("        view removes. With --separate-encoders the two encoders have independent")
+            print("        output scales, so this is expected. Scale is an affine nuisance carrying no")
+            print("        information — like the offset, it costs the view-1-only metrics nothing.")
+        print("        Nothing here needs an invariance term; judge the objective on the style side.")
+        print("        (A null here is a LOWER bound: the MLP detector misses subtle non-affine")
+        print("         differences — validated, it fails to flag a tanh applied to one view.)")
+    elif aff < 0.70:
+        print(f"WEAK ({aff:.3f} vs a ~0.50 floor)")
+        print("        A little genuinely non-affine view information survives. Weigh it against eta^2")
+        print("        and the AUC census before spending a run on it.")
     else:
-        print(f"STRONG ({nl:.3f} vs a ~0.50 floor)")
-        print("        Content carries real view-specific information, not just a shift. This is the")
-        print("        case that justifies raising bt_sim_coeff / disabling bt_sim_normalize — the")
-        print("        sim distance is the only term in the objective that can see it (losses.py:1176).")
+        print(f"STRONG ({aff:.3f} vs a ~0.50 floor)")
+        print("        Content carries view-specific information that is NOT an affine nuisance. This")
+        print("        is the case that justifies raising bt_sim_coeff / disabling bt_sim_normalize —")
+        print("        the sim distance is the only term that can see it (losses.py:1176) — and the")
+        print("        case where widening style has a real incentive to remove.")
 
 
 def test_viewgap(label, model, dataset, device, level, batch_size, seeds):
