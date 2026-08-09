@@ -323,6 +323,29 @@ def test_curves(run_dir, level=0, sat_tol=0.1):
             at_peak = np.interp(peak_step, p_steps, p_vals)
             print(f"  mcc {pool:<6} @patch-peak {at_peak:.4f} → final {p_vals[-1]:.4f} ({p_vals[-1] - at_peak:+.4f})")
 
+    # --- Which style knob is actually binding? ---
+    #
+    # A low style_sufficiency says the style block is underpowered, but not WHY. The
+    # codebook utilisation separates the two candidates for free: a ratio near 1 means the
+    # discrete bottleneck is saturated and more entries would help, while a low ratio means
+    # the encoder is not even using the codes it already has — so the constraint is the
+    # style CHANNEL COUNT (hidden_channels - content_size), and adding entries is wasted.
+    _ppl_tags = sorted(t for t in scalars if t.startswith("Codebook/StylePerplexityRatio_L"))
+    if _ppl_tags:
+        print("\n  Style codebook utilisation (decides codes-vs-channels before you spend a run):")
+        for tag in _ppl_tags:
+            r_steps, r_vals = scalars[tag]
+            tail = _tail_median(r_steps, r_vals)
+            lvl = tag.rsplit("_L", 1)[-1]
+            _act = scalars.get(f"Codebook/StyleActive_L{lvl}")
+            _act_s = f", {_tail_median(*_act):.0f} entries active" if _act else ""
+            verdict = (
+                "saturated → more style_nb_entries"
+                if tail > 0.6
+                else "under-used → the CHANNEL count binds, not the codebook"
+            )
+            print(f"    L{lvl}  perplexity ratio {tail:.3f}{_act_s}   {verdict}")
+
     # --- Is the STYLE BOTTLENECK forcing view-specific detail into content? ---
     #
     # The decoder has to produce BOTH views from shared content plus per-view style. If
@@ -954,10 +977,17 @@ def report_delta(strata_res, geom_res, arms):
         print(f"  n@95%    (fg)  {a['n95']} → {b['n95']}")
         print(f"  cond@95% (fg)  {a['cond95']:.3g} → {b['cond95']:.3g}")
         if b["eff_rank"] < 0.8 * a["eff_rank"] or b["cond95"] > 3 * a["cond95"]:
-            print("\n  → CONDITIONING: the block's geometry collapsed. This is the one mechanism")
-            print("    that survived calibration, and an invertible map is enough to cost 0.26-0.48")
-            print("    of block-MCC. Levers: bt_std_coeff (the only anti-collapse term in this")
-            print("    config), bt_gap_weight, and the recon:contrastive ratio from test 1.")
+            print("\n  → GEOMETRY COLLAPSED. Conditioning is the one mechanism that survived")
+            print("    calibration, so this is a candidate cause — but check the magnitude before")
+            print("    concluding: the calibration's 0.26-0.48 figures are for cond 1e2-1e4, far")
+            print("    beyond anything seen here, and the observed MCC drop is usually ~10x smaller.")
+            print("    Two readings to separate, using the rank curve above:")
+            print("      * lower at every k, including k values both blocks support  -> real loss")
+            print("      * lower only where the late block ran out of components      -> geometry")
+            print("    Also check feat_std_mean (test 1): an exploding feature scale creates one")
+            print("    dominant variance direction, which collapses the participation ratio without")
+            print("    any information leaving. Levers: bt_std_coeff (the only anti-collapse term")
+            print("    in this config), bt_gap_weight, and the recon:contrastive ratio.")
         else:
             print("\n  → Geometry is stable, so conditioning does not explain the drop. With")
             print("    dilution and decorrelation ruled out by --calibrate, the remaining")
