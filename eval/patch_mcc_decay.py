@@ -639,8 +639,9 @@ def _print_view_gap(label, pooling, s):
     print(f"    view probe   shipped {s['acc_shipped']:.4f}  (== selection/content_view_acc; floor is NOT 0.5)")
     print(f"                 subject-grouped, linear    raw {s['acc_raw']:.4f}   mean-removed {s['acc_centred']:.4f}")
     print(f"                 subject-grouped, NONLINEAR                        mean-removed {s['acc_centred_nl']:.4f}")
+    print(f"                 subject-grouped, NONLINEAR         per-view STANDARDISED {s['acc_affine_nl']:.4f}")
     print(
-        f"                 subject-grouped, NONLINEAR         per-view STANDARDISED {s['acc_affine_nl']:.4f}  <- non-affine only"
+        f"                 subject-grouped, NONLINEAR      LINEARLY ALIGNED v2->v1 {s['acc_linear_nl']:.4f}  <- decisive"
     )
     _sr = s["scale_ratio"]
     print(
@@ -697,28 +698,38 @@ def view_gap_verdict(s):
         print("none detected")
     print("      BEYOND-SHIFT:         ", end="")
     print(f"{'none' if nl < 0.55 else 'yes'} (nonlinear, mean-removed {nl:.3f}; floor ~0.50)")
-    aff = s["acc_affine_nl"]
-    print("      NON-AFFINE component: ", end="")
-    if aff < 0.55:
-        print(f"none detected (per-view standardised {aff:.3f})")
-        if nl >= 0.55:
-            print("        The beyond-shift signal above is a per-view SCALE, which standardising each")
-            print("        view removes. With --separate-encoders the two encoders have independent")
-            print("        output scales, so this is expected. Scale is an affine nuisance carrying no")
-            print("        information — like the offset, it costs the view-1-only metrics nothing.")
+    aff, lin = s["acc_affine_nl"], s["acc_linear_nl"]
+    print(f"      NON-DIAGONAL:         {'none' if aff < 0.55 else 'yes'} (per-view standardised {aff:.3f})")
+    # The DECIDING number. Standardising each view removes only a DIAGONAL map; a per-view
+    # invertible MATRIX still reads as "non-affine" there — validated, a random invertible
+    # matrix scores 0.954 standardised and 0.497 linearly aligned. And an invertible matrix
+    # is exactly the equivalence class block-identifiability is stated up to, so it is not
+    # a violation at all.
+    print("      NON-LINEAR component: ", end="")
+    if lin < 0.55:
+        print(f"none detected (linearly aligned {lin:.3f})")
+        if aff >= 0.55:
+            print("        The signal above is a per-view invertible LINEAR map — different bases, not")
+            print("        different information. That is precisely the equivalence class")
+            print("        block-identifiability is stated up to, and with --separate-encoders (two")
+            print("        distinct networks) it is the expected outcome, not a defect.")
         print("        Nothing here needs an invariance term; judge the objective on the style side.")
-        print("        (A null here is a LOWER bound: the MLP detector misses subtle non-affine")
+        print("        (A null here is a LOWER bound: the MLP detector misses subtle nonlinear")
         print("         differences — validated, it fails to flag a tanh applied to one view.)")
-    elif aff < 0.70:
-        print(f"WEAK ({aff:.3f} vs a ~0.50 floor)")
-        print("        A little genuinely non-affine view information survives. Weigh it against eta^2")
-        print("        and the AUC census before spending a run on it.")
+    elif lin < 0.70:
+        print(f"WEAK ({lin:.3f} vs a ~0.50 floor)")
+        print("        A little view information survives even a fitted linear alignment. Weigh it")
+        print("        against eta^2 and the AUC census before spending a run on it.")
     else:
-        print(f"STRONG ({aff:.3f} vs a ~0.50 floor)")
-        print("        Content carries view-specific information that is NOT an affine nuisance. This")
-        print("        is the case that justifies raising bt_sim_coeff / disabling bt_sim_normalize —")
+        print(f"STRONG ({lin:.3f} vs a ~0.50 floor)")
+        print("        Content carries view-specific information that NO linear map removes. This is")
+        print("        the case that justifies raising bt_sim_coeff / disabling bt_sim_normalize —")
         print("        the sim distance is the only term that can see it (losses.py:1176) — and the")
         print("        case where widening style has a real incentive to remove.")
+        print("        NOTE: check the gap-pooling block above first. gap/patch are pooled BEFORE")
+        print("        SplitGroupNorm and stats is read AFTER it (vqvae.py:1346), so a result that")
+        print("        appears only at stats is attributable to that per-sample normalisation rather")
+        print("        than to the encoder.")
 
 
 def stats_group_breakdown(c1, c2, seeds=(0, 1)):
