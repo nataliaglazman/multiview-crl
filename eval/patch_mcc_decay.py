@@ -138,6 +138,10 @@ from eval.identifiability_metrics import block_mcc
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
+# Matches identifiability_metrics._make_regressor, so the view-alignment map is fitted with
+# the same regularisation path as every other ridge in this project.
+RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0, 1000.0)
+
 
 # --------------------------------------------------------------------------- #
 # Test 1 — curves.  No checkpoint, no GPU.
@@ -519,6 +523,39 @@ def _grouped_view_acc(X, labels, groups, kind="linear", seeds=(0, 1), n_splits=5
     return float(np.mean(accs))
 
 
+def _grouped_linear_aligned_acc(c1, c2, labels, groups, seeds=(0, 1), n_splits=5):
+    """View accuracy after aligning view 2 onto view 1 with a per-fold LINEAR map.
+
+    The map is fitted on training subjects only and applied to everyone, so an alignment
+    that only works by memorising the test rows cannot help. If the views stop being
+    separable here, they differ by an invertible linear transform — information-preserving,
+    and the exact equivalence class block-identifiability is stated up to.
+    """
+    from sklearn.linear_model import RidgeCV
+    from sklearn.metrics import accuracy_score
+    from sklearn.model_selection import GroupKFold
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.preprocessing import StandardScaler
+
+    n = c1.shape[0]
+    accs = []
+    for seed in seeds:
+        g = np.random.RandomState(seed).permutation(n)[np.arange(n)]
+        fold = []
+        for tr_s, te_s in GroupKFold(n_splits=n_splits).split(np.arange(n), groups=g):
+            aligner = RidgeCV(alphas=RIDGE_ALPHAS).fit(c2[tr_s], c1[tr_s])
+            c2a = np.asarray(aligner.predict(c2))
+            X = np.vstack([c1, c2a])
+            tr = np.concatenate([tr_s, tr_s + n])
+            te = np.concatenate([te_s, te_s + n])
+            sc = StandardScaler().fit(X[tr])
+            clf = MLPClassifier(hidden_layer_sizes=(64,), max_iter=500, early_stopping=True, random_state=seed)
+            clf.fit(sc.transform(X[tr]), labels[tr])
+            fold.append(accuracy_score(labels[te], clf.predict(sc.transform(X[te]))))
+        accs.append(float(np.mean(fold)))
+    return float(np.mean(accs))
+
+
 def view_gap_stats(c1, c2, seeds=(0, 1)):
     """Effect size of the content block's view dependence. Pure numpy/sklearn.
 
@@ -572,12 +609,21 @@ def view_gap_stats(c1, c2, seeds=(0, 1)):
     acc_affine_nl = _grouped_view_acc(np.vstack([z1, z2]), labels, groups, "nonlinear", seeds)
     scale_ratio = c2.std(0) / np.maximum(c1.std(0), 1e-12)
 
+    # FULL-LINEAR control. Standardising each view removes only a DIAGONAL affine map. A
+    # per-view invertible MATRIX is precisely the nuisance block-identifiability permits
+    # (the theory identifies the block up to an invertible map), and it would still show
+    # up as "non-affine" above. So align view 2 onto view 1 with a linear map fitted on
+    # the training rows only, and ask again: what survives THIS is not a linear nuisance
+    # and is the only thing an invariance term is needed for.
+    acc_linear_nl = _grouped_linear_aligned_acc(c1, c2, labels, groups, seeds)
+
     return {
         "acc_shipped": acc_shipped,
         "acc_raw": acc_raw,
         "acc_centred": acc_centred,
         "acc_centred_nl": acc_centred_nl,
         "acc_affine_nl": acc_affine_nl,
+        "acc_linear_nl": acc_linear_nl,
         "scale_ratio": scale_ratio,
         "auc": aucs,
         "eta2": eta2,
@@ -612,6 +658,14 @@ def _print_view_gap(label, pooling, s):
     )
     print(f"    Cohen's d           median {np.nanmedian(s['cohen_d']):.3f}  max {np.nanmax(s['cohen_d']):.3f}")
     print(f"    cross-view tracking median r {np.nanmedian(s['track']):+.3f} (after removing each view's mean)")
+    if s.get("by_stat"):
+        cells = "   ".join(f"{k} {v:.3f}" for k, v in s["by_stat"].items())
+        print(f"    non-affine BY STAT  {cells}   (each per-view standardised; floor ~0.50)")
+        _ex = {k: v for k, v in s["by_stat"].items() if k != "mean" and v >= 0.70}
+        if _ex and set(_ex) <= {"amax", "amin"}:
+            print("      ← confined to the ORDER STATISTICS. amax/amin are outlier-driven and scale-")
+            print("        sensitive (this run reaches feat_std 66.9), so this is a much weaker")
+            print("        finding than the same signal in std would be.")
 
 
 def view_gap_verdict(s):
@@ -667,6 +721,35 @@ def view_gap_verdict(s):
         print("        case where widening style has a real incentive to remove.")
 
 
+def stats_group_breakdown(c1, c2, seeds=(0, 1)):
+    """Which of [mean | std | amax | amin] carries the non-affine view signal?
+
+    ``_pool_and_split_view`` builds the stats block stat-major — 44 means, then 44 stds,
+    then amax, then amin (dci.py:277) — so the block splits cleanly into four equal groups.
+    The distinction matters: a difference in ``std`` is a real difference in the spatial
+    DISTRIBUTION of a content channel, whereas ``amax``/``amin`` are order statistics over
+    the map, dominated by outliers and highly sensitive to the unbounded feature scale
+    (this project's runs reach feat_std 66.9). Non-affine signal confined to the extremes
+    is a much weaker finding than the same signal in std.
+    """
+    c1, c2 = np.asarray(c1, dtype=np.float64), np.asarray(c2, dtype=np.float64)
+    d = c1.shape[1]
+    if d % 4:
+        return {}
+    n_ch = d // 4
+    n = c1.shape[0]
+    labels = np.array([0] * n + [1] * n)
+    groups = np.concatenate([np.arange(n), np.arange(n)])
+    out = {}
+    for gi, name in enumerate(("mean", "std", "amax", "amin")):
+        sl = slice(gi * n_ch, (gi + 1) * n_ch)
+        a, b = c1[:, sl], c2[:, sl]
+        za = (a - a.mean(0)) / np.maximum(a.std(0), 1e-12)
+        zb = (b - b.mean(0)) / np.maximum(b.std(0), 1e-12)
+        out[name] = _grouped_view_acc(np.vstack([za, zb]), labels, groups, "nonlinear", seeds)
+    return out
+
+
 def test_viewgap(label, model, dataset, device, level, batch_size, seeds):
     from eval.dci import _extract_synthetic_representations
 
@@ -682,6 +765,8 @@ def test_viewgap(label, model, dataset, device, level, batch_size, seeds):
             logger.warning("No second view at %s pooling — view gap needs both.", pooling)
             continue
         s = view_gap_stats(c1, c2, seeds=seeds)
+        if pooling == "stats":
+            s["by_stat"] = stats_group_breakdown(c1, c2, seeds=seeds)
         _print_view_gap(label, pooling, s)
         out[pooling] = s
     if "stats" in out:
