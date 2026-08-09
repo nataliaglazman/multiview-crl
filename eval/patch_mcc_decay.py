@@ -46,6 +46,32 @@ geometry is collapsing, which is measurable WITHOUT a probe and is actionable th
 only anti-collapse force in this config (``bt_std_coeff``'s variance hinge, plus the
 GAP-BT term).  The three tests below follow from that.
 
+MEASURED on the first real run (``synthetic-causal-clean-content-mse-real-lambda-01-normalized``,
+88k steps): CONDITIONING did not happen either.  ``content_rank`` ROSE 18.7 -> 39.7 (+112%)
+and its post-peak correlation with the MCC was +0.045 (p=0.77).  What that run showed
+instead, and what to check first on any other:
+
+  * ``on_diag`` 28.5 -> 0.006 (90%-saturated by step 450) and ``off_diag`` 4.76 -> 0.023
+    with 94% of its descent done BY the MCC peak.  The correlation terms are converged
+    before the decay starts, so they cannot be driving it.  Read a term's post-peak
+    DESCENT, not its level -- ``Loss/Contrastive`` was still 3.1x ``Loss/Recon`` at the
+    end while contributing almost no gradient.
+  * The decay is NOT patch-specific: patch -0.049, gap -0.039, stats -0.036 over the same
+    window.  Any explanation that turns on patch pooling or on local-vs-global content is
+    excluded by that alone.
+  * ``feat_std_mean`` 0.29 -> 66.9.  Nothing in this objective bounds the feature scale:
+    on_diag/off_diag are correlations, sim is normalised by a detached denominator, and
+    the variance hinge ``relu(1 - std)`` is ONE-SIDED.  Calibration case G confirms this
+    cannot move the metric directly (StandardScaler), but it is an uncontrolled degree of
+    freedom worth knowing about.
+  * ``info_all`` fell 2.9% against the MCC's 5.4%, so roughly half the drop is matched by
+    genuine loss on the all-channels capacity measure.
+
+The whole phenomenon lived in ~0.04 of range: first 0.8606 -> peak 0.8994 -> final 0.8508,
+i.e. the final checkpoint is 0.0098 BELOW an essentially untrained encoder.  Get error bars
+(``block_mcc`` returns a per-seed std that the selection path does not log) before
+engineering around a difference this size.
+
   1. CURVES (start here; no GPU, no checkpoint, answers in seconds).  Reads the run's
      TensorBoard scalars.  Is the MCC peak where ``on_diag`` saturates -- i.e. where
      alignment is achieved and nearly all remaining gradient is decorrelation?  Does
@@ -221,6 +247,28 @@ def test_curves(run_dir, level=0, sat_tol=0.1):
                 f"\n  → MCC peak @ {peak_step:.0f} vs on_diag saturation @ {sat:.0f} (ratio {ratio:.2f}): "
                 + ("aligned" if 0.4 <= ratio <= 2.5 else "NOT aligned — the peak is not the saturation point")
             )
+
+    # --- Which BT term is still exerting force after the peak? ---
+    #
+    # on_diag and off_diag are CORRELATIONS, so they bottom out and stop asking for
+    # anything; sim is a DISTANCE (Lemma C.2 needs g_k(x_k) = g_k'(x_k') a.s., which a
+    # correlation cannot see) and has no informativeness counterpart, so if it is still
+    # descending past the peak it is the only one-way contraction left in the objective.
+    # A term whose value is large but whose gradient has vanished is not eroding anything
+    # — read the post-peak DESCENT, not the level.
+    print("\n  BT terms, post-peak descent (share of each term's own total, after the MCC peak):")
+    for name in ("on_diag_loss", "off_diag_loss", "sim_loss", "var_loss"):
+        tag = f"Contrastive/{name}_L{level}"
+        if tag not in scalars:
+            continue
+        t_steps, t_vals = scalars[tag]
+        total = t_vals[0] - t_vals.min()
+        at_peak = np.interp(peak_step, t_steps, t_vals)
+        share = (at_peak - t_vals[-1]) / total if total > 0 else 0.0
+        print(
+            f"    {name:<14}{t_vals[0]:>12.4g} → {t_vals[-1]:<12.4g}"
+            f"post-peak {100 * share:>5.1f}%" + ("   ← still working" if share > 0.25 else "")
+        )
     else:
         logger.warning("BT diagnostics (%s) not in the logs — is this an InfoNCE run?", on_tag)
 
