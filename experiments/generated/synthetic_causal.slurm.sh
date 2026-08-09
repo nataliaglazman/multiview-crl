@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-08T21:36:49Z
-# Git SHA: 31bfcb3
+# Generated at: 2026-08-09T10:31:41Z
+# Git SHA: b121f4e
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-mse-real-lambda-01-normalized-16
+#SBATCH --job-name=synthetic-causal-clean-content-mse-real-lambda-01-normalized-16-mse
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-mse-real-lambda-01-normalized-16-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --error=synthetic-causal-clean-content-mse-real-lambda-01-normalized-16-mse-%j.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -62,9 +62,9 @@ fi
     --bt-gap-weight 1 \
     --bt-lambda 1 \
     --bt-patch-weight 1 \
-    --bt-sim-coeff 0 \
+    --bt-sim-coeff 2e-5 \
     --bt-sim-normalize \
-    --bt-std-coeff 0 \
+    --bt-std-coeff 1 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
@@ -117,7 +117,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-mse-real-lambda-01-normalized-16 \
+    --model-id synthetic-causal-clean-content-mse-real-lambda-01-normalized-16-mse \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
