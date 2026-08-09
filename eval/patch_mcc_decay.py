@@ -339,12 +339,21 @@ def test_curves(run_dir, level=0, sat_tol=0.1):
             lvl = tag.rsplit("_L", 1)[-1]
             _act = scalars.get(f"Codebook/StyleActive_L{lvl}")
             _act_s = f", {_tail_median(*_act):.0f} entries active" if _act else ""
-            verdict = (
-                "saturated → more style_nb_entries"
-                if tail > 0.6
-                else "under-used → the CHANNEL count binds, not the codebook"
-            )
+            verdict = "SATURATED → capacity binds; more style_nb_entries" if tail > 0.6 else "UNDER-USED"
             print(f"    L{lvl}  perplexity ratio {tail:.3f}{_act_s}   {verdict}")
+        if _tail_median(*scalars[_ppl_tags[0]]) <= 0.6:
+            # Spare codebook capacity does NOT localise the constraint on its own: a style
+            # pathway too narrow to produce diverse patterns under-uses its codes for the
+            # same reason one that is simply never driven does. The discriminator is
+            # style→content leak below — if the style channels are full of CONTENT, they
+            # plainly had room, so the information is misdirected rather than squeezed out,
+            # and widening style is the wrong lever.
+            _leak = scalars.get("selection/style_to_content_leak")
+            _lk = _tail_median(*_leak) if _leak else float("nan")
+            print(f"      Spare code capacity. Cross-check style→content leak ({_lk:.3f}): if it is high,")
+            print("      the style channels had room and are carrying the wrong information — widening")
+            print("      style will not help. Drive style instead (scale_style_modality_ce), or remove")
+            print("      the decoder's alternative view channel (bt_sim_coeff, see below).")
 
     # --- Is the STYLE BOTTLENECK forcing view-specific detail into content? ---
     #
