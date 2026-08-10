@@ -447,16 +447,33 @@ def _verdict(a, b, kinds):
     d_lab = (lab_b - lab_a) / max(abs(lab_a), 1e-12)
     d_unl = (unl_b - unl_a) / max(abs(unl_a), 1e-12)
 
+    # The discriminator is the labeled SHARE, not the absolute unlabeled growth.  Crowding
+    # means unlabeled anatomy displaces the labeled factors, so the share must FALL; both
+    # parts growing together is a block that simply gained subject signal, which is the
+    # opposite finding.  (An earlier rule fired on `d_unl > 0.15 and d_lab > -0.10` and
+    # therefore called crowding on a run where labeled variance grew four times faster than
+    # unlabeled.  Read the share.)
+    share_a, share_b = ea[kind]["r2_w"], eb[kind]["r2_w"]
+    d_share = share_b - share_a
+
     out = [
         f"    labeled subject variance   {lab_a:.4f} -> {lab_b:.4f}  ({d_lab:+.1%})",
         f"    UNlabeled subject variance {unl_a:.4f} -> {unl_b:.4f}  ({d_unl:+.1%})",
+        f"    labeled SHARE (R2_w)       {share_a:.3f} -> {share_b:.3f}  ({d_share:+.3f})",
     ]
-    if d_unl > 0.15 and d_lab > -0.10:
-        out.append("    => CROWDING. The block gained anatomy the benchmark does not label.")
+    if d_share < -0.03 and d_unl > 0.15:
+        out.append("    => CROWDING. Unlabeled anatomy displaced the labeled factors.")
         out.append("       The MCC decay is a scoring artifact; the seed gate would reproduce the artifact.")
     elif d_lab < -0.10:
         out.append("    => LABELED FACTORS DEGRADED. Crowding is not the mechanism.")
         out.append("       Run --per-factor, then patch_mcc_decay --tests geometry.")
+    elif d_share > 0.03 and d_lab > 0.10:
+        out.append("    => BLOCK IMPROVED. More labeled subject variance AND a higher labeled share.")
+        out.append("       Nothing here explains an MCC decay. CONFIRM the decay exists between these two")
+        out.append("       checkpoints (patch_mcc_decay --tests curves) before treating it as a paradox.")
+        out.append("       If it does, the remaining suspect is WEIGHTING: block_mcc StandardScaler's every")
+        out.append("       feature, this test weights by variance. Compare R2_w against unweighted above —")
+        out.append("       a widening gap means the labeled signal is concentrating into fewer features.")
     else:
         out.append("    => NEITHER moved much. The decay is in the readout geometry, not this split.")
         out.append("       Next instrument: patch_mcc_decay --tests geometry (MCC-vs-PCA-rank).")

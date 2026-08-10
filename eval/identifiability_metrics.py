@@ -20,6 +20,7 @@ Conventions
 * ``groups``     : (D,) int array mapping each repr column to its channel id, so
   importance can be aggregated to the channel (the unit the Gumbel mask splits).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -248,18 +249,44 @@ def block_mcc(X, Z, kind="ridge", seeds=(0, 1, 2), n_splits=5):
 
     This is the *correct* MCC for block identifiability — it allows the
     invertible transform the theory permits (unlike per-channel MCC).
+
+    ``mean`` is an unweighted average over factors, so it hides sign splits: a
+    representation that concentrates onto one dominant factor while losing several
+    mid-scale ones reads as a uniform decline.  The per-factor breakdown that makes such a
+    split visible is computed here anyway (``corr[row, col]`` is one matched |corr| per
+    factor) and used to be discarded by the ``.mean()``, so these extra keys are free:
+
+        per_factor      matched |corr| per TRUE factor, averaged over folds and seeds
+        per_factor_std  across-seed spread of the above — per-factor curves are noisier
+                        than the mean over 9, so never read one without it
+        per_factor_diag UNMATCHED |corr| between factor j's own predictor and factor j.
+                        Immune to assignment permutation; read it when per_factor jumps.
+        assignment_identity
+                        fraction of factors matched to their own predictor (1.0 = clean).
+                        Below 1.0 the Hungarian assignment has permuted — likely between
+                        correlated factors under an SCM — and per_factor entries have
+                        swapped for reasons that are not about the representation.
     """
     X = np.asarray(X, dtype=np.float64)
     Z = np.asarray(Z, dtype=np.float64)
     if Z.ndim == 1:
         Z = Z[:, None]
     if X.shape[1] == 0 or Z.shape[1] == 0 or X.shape[0] < n_splits * 4:
-        return {"mean": float("nan"), "std": float("nan")}
+        nanvec = np.full(max(Z.shape[1], 1), float("nan"))
+        return {
+            "mean": float("nan"),
+            "std": float("nan"),
+            "per_factor": nanvec,
+            "per_factor_std": nanvec.copy(),
+            "per_factor_diag": nanvec.copy(),
+            "assignment_identity": float("nan"),
+        }
 
-    per_seed = []
+    n_factors = Z.shape[1]
+    per_seed, per_seed_factor, per_seed_diag, per_seed_ident = [], [], [], []
     for seed in seeds:
         kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-        fold_mcc = []
+        fold_mcc, fold_factor, fold_diag, fold_ident = [], [], [], []
         for tr, te in kf.split(X):
             sc = StandardScaler().fit(X[tr])
             model = _make_regressor(kind, seed)
@@ -268,8 +295,31 @@ def block_mcc(X, Z, kind="ridge", seeds=(0, 1, 2), n_splits=5):
             corr = _abs_corr_matrix(Zhat, Z[te])
             row, col = linear_sum_assignment(-corr)
             fold_mcc.append(float(corr[row, col].mean()))
+
+            # Index by TRUE factor (``col``), not by predicted dim, so a permuted
+            # assignment still lands each score under the factor it describes.
+            pf = np.full(n_factors, np.nan)
+            pf[col] = corr[row, col]
+            fold_factor.append(pf)
+            dg = np.full(n_factors, np.nan)
+            diag = np.diag(corr)
+            dg[: len(diag)] = diag
+            fold_diag.append(dg)
+            fold_ident.append(float(np.mean(row == col)))
         per_seed.append(float(np.mean(fold_mcc)))
-    return {"mean": float(np.mean(per_seed)), "std": float(np.std(per_seed))}
+        per_seed_factor.append(np.nanmean(np.stack(fold_factor), axis=0))
+        per_seed_diag.append(np.nanmean(np.stack(fold_diag), axis=0))
+        per_seed_ident.append(float(np.mean(fold_ident)))
+
+    pf_arr = np.stack(per_seed_factor)
+    return {
+        "mean": float(np.mean(per_seed)),
+        "std": float(np.std(per_seed)),
+        "per_factor": np.nanmean(pf_arr, axis=0),
+        "per_factor_std": np.nanstd(pf_arr, axis=0),
+        "per_factor_diag": np.nanmean(np.stack(per_seed_diag), axis=0),
+        "assignment_identity": float(np.mean(per_seed_ident)),
+    }
 
 
 def _abs_corr_matrix(A, B):

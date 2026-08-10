@@ -2678,9 +2678,41 @@ def main(args):
                                     # single choice flips the baseline comparison from +0.011 to
                                     # -0.043. Logging the ladder makes the reversal readable from
                                     # the curves rather than only from an offline re-run.
+                                    #
+                                    # mcc_by_factor/* is the same ladder broken out per content
+                                    # factor at PATCH pooling (requires --patch-grid; nothing is
+                                    # emitted without it, deliberately — at stats the lesion_*
+                                    # entries would read near-null and look like measurements).
+                                    # The aggregate is an unweighted mean over 9, so it reports a
+                                    # sign split as a uniform decline: measured offline, brain_size
+                                    # ROSE while cortical_thickness, lr_asymmetry, temporal_atrophy
+                                    # and sulcal_widening FELL. block_mcc computes these on its way
+                                    # to the mean, so the breakdown is free.
+                                    #
+                                    # Read /std alongside — per-factor curves are ~3x noisier than
+                                    # the mean, and two inits differ by 0.023 on the aggregate
+                                    # alone. If assignment_identity drops below 1.0 the Hungarian
+                                    # match has permuted (likely between SCM-correlated factors)
+                                    # and a jump in mcc_by_factor/* is an artefact — cross-check
+                                    # against mcc_by_factor_diag/*, which needs no assignment.
+                                    #
+                                    # All of these are LOG-ONLY: none reaches overall_score or the
+                                    # selection gate, so runs stay comparable across this change.
                                     for _pk, _pv in _sel_row.items():
                                         if _pk.startswith("mcc_cc_pool_"):
                                             _sel_log[f"selection/mcc_by_pool/{_pk[len('mcc_cc_pool_'):]}"] = _pv
+                                        elif _pk.startswith("mcc_cc_factor_std_"):
+                                            _sel_log[
+                                                f"selection/mcc_by_factor_std/{_pk[len('mcc_cc_factor_std_'):]}"
+                                            ] = _pv
+                                        elif _pk.startswith("mcc_cc_factor_diag_"):
+                                            _sel_log[
+                                                f"selection/mcc_by_factor_diag/{_pk[len('mcc_cc_factor_diag_'):]}"
+                                            ] = _pv
+                                        elif _pk.startswith("mcc_cc_factor_"):
+                                            _sel_log[f"selection/mcc_by_factor/{_pk[len('mcc_cc_factor_'):]}"] = _pv
+                                        elif _pk == "mcc_cc_assignment_identity":
+                                            _sel_log["selection/mcc_assignment_identity"] = _pv
                                     for _sel_k, _sel_v in _sel_log.items():
                                         if _sel_v is not None and np.isfinite(_sel_v):
                                             tb_writer.add_scalar(_sel_k, _sel_v, step)

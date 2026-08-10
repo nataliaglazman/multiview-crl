@@ -933,6 +933,7 @@ def score_encoder_live(
     per_encoder=False,
     probe_dim=0,
     max_samples=None,
+    per_factor_pooling="patch",
 ):
     """In-training counterpart of ``evaluate_model`` for a live (in-memory) encoder.
 
@@ -1001,10 +1002,34 @@ def score_encoder_live(
     # measured offline, baseline vs contrastive flips from stats +0.011 to patch -0.043.
     # Reporting the whole ladder makes the reversal visible in-training instead of only
     # showing the rung that happens to flatter the contrastive arm.
+    #
+    # The pooling ladder is still an unweighted MEAN over factors, which hides a sign split:
+    # measured offline on one run, brain_size ROSE while cortical_thickness, lr_asymmetry,
+    # temporal_atrophy and sulcal_widening all FELL, and the average reported a uniform
+    # decline. `block_mcc` computes the per-factor breakdown on its way to that mean, so
+    # emitting it for one pooling is free. Log-only by construction: nothing below feeds
+    # `attach_scores`, `overall_score` or the selection gate, so existing runs stay
+    # comparable. Defaults to `patch` — that is where the open question lives, and doing all
+    # three poolings would add 27 scalars to the dashboard for no extra information.
+    _names = (info or {}).get("content_names") or []
     for _k in reprs:
         _blk = _block_array(reprs, _k, level, _CONTENT)
-        if _blk is not None and _blk.shape[1] and gt_content is not None:
-            row[f"mcc_cc_pool_{_k}"] = block_mcc(_blk, gt_content, seeds=seeds)["mean"]
+        if _blk is None or not _blk.shape[1] or gt_content is None:
+            continue
+        _res = block_mcc(_blk, gt_content, seeds=seeds)
+        row[f"mcc_cc_pool_{_k}"] = _res["mean"]
+        if _k != per_factor_pooling:
+            continue
+        _pf, _sd = _res.get("per_factor"), _res.get("per_factor_std")
+        _dg = _res.get("per_factor_diag")
+        if _pf is None:
+            continue
+        for _j in range(len(_pf)):
+            _fn = _names[_j] if _j < len(_names) else f"factor{_j}"
+            row[f"mcc_cc_factor_{_fn}"] = float(_pf[_j])
+            row[f"mcc_cc_factor_std_{_fn}"] = float(_sd[_j])
+            row[f"mcc_cc_factor_diag_{_fn}"] = float(_dg[_j])
+        row["mcc_cc_assignment_identity"] = _res.get("assignment_identity", float("nan"))
     return row
 
 
