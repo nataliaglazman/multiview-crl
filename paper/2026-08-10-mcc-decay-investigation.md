@@ -1,9 +1,10 @@
 # The patch-MCC decay: what it is, what it is not
 
-Investigation of 2026-08-09/10. Subject run:
+Investigation of 2026-08-09/10. Reference run:
 `results/synthetic/synthetic-causal-clean-content-mse-real-lambda-01-normalized`
 (Barlow Twins, patch+GAP, `content_size 44` of `hidden 48`, `clean_content`, 89k steps).
-Comparators: `synthetic-causal-baseline-44-final` (recon-only) and a frozen-encoder arm.
+Comparators: `synthetic-causal-baseline-44-final` (recon-only, 34k), a frozen-encoder arm,
+a frozen-random arm, and a short contrastive-only arm.
 
 **Starting question.** `selection/mcc_by_pool/patch` peaks at step 2001 and decays for the
 remaining 86k steps, while the recon-only baseline rises monotonically. Why, and can it be
@@ -11,143 +12,118 @@ prevented without giving up reconstruction?
 
 ---
 
-## 1. Headline findings
+## 1. The four arms, side by side
 
-**The decay is real but small, and it sits on a large floor.** Peak 0.8994 @2001, final
-0.8508 @88001, per-seed sd 0.0009–0.0016, so the drop is ~30 sigma. But an untrained
-encoder already scores ~0.86 on the same probe: the trained model ends **+0.008** above
-random initialisation and peaked at **+0.039**. The permutation null (0.08) is not the
-relevant baseline; random init is.
-
-**The metric is dominated by globally-available information.** At the final checkpoint,
-background positions score 0.8574 against foreground's 0.8760, and 32 "pure brain"
-positions (1408 features) match 148 strictly-covered positions (6512 features) to within
-the error bar. Patch pooling is therefore not delivering what it was introduced for
-(exposing `lesion_x/y/z`).
-
-**Reconstruction causes the decay; the contrastive objective does not.** Measured directly
-by stepping along each loss's gradient and re-measuring block-MCC, against a random
-direction matched to the same per-tensor energy profile. At the final checkpoint,
-excess over the matched-random control:
-
-| direction | eta=0.05 | eta=0.2 | eta=0.8 |
+| arm | patch-MCC | masked L1 | content→style leak |
 |---|---|---|---|
-| recon | −0.0040 | **−0.0087** | −0.1158 |
-| contrastive | −0.0000 | +0.0017 | −0.0038 |
-| vq | −0.0002 | −0.0035 | +0.0023 |
+| recon-only baseline (34k) | 0.8929 @24k, **holds** 0.8926 | **0.0194** | 0.5716 |
+| joint contrastive (89k) | 0.8994 @2k → **0.8508** | 0.0250 | **0.0316** |
+| contrastive-only (4k only) | 0.9021 @2k → 0.8969 @4k | n/a | 0.1889 |
+| frozen encoder @peak | 0.8859 (pinned) | 0.0450 | — |
+| frozen random encoder | below all trained arms | — | — |
 
-Recon's raw dMCC is linear in eta (R^2 0.957–0.999); the contrastive rows are flagged
-non-linear (R^2 0.475) and straddle zero. Quote the eta=0.2 column; eta=0.8 is outside the
-local regime.
+**The joint run at 1:1 is Pareto-dominated by the recon-only baseline** on both MCC and
+reconstruction. Its only win is content purity, and that win is 18x. That is the single
+most important number to carry forward: *what the contrastive objective currently buys is
+purity, not identifiability.*
 
-**The objective is inactive for 98% of training — but not because it converges unusually
-fast.** All four Barlow Twins terms complete >=93% of their descent before the MCC peak
-(post-peak shares: on_diag 0.2%, off_diag 5.8%, sim 6.6%, var 0.0%), and `on_diag` is
-90%-saturated by step 450. With 2000 training samples at batch 128 that is 15.6 steps per
-epoch, so **step 2001 is epoch 128 and step 88001 is epoch 5632**. Convergence at 128
-epochs is ordinary; the budget is ~44x longer than the objective needs.
-
-**Consequence for the comparison.** The contrastive arm spends 98% of its training as a
-reconstruction-only model with a 2k contrastive warm-start. Contrastive-vs-baseline as run
-is therefore not a test of contrastive learning, and the **+29% reconstruction cost**
-measured against the recon-only baseline is the cost of the *architecture* (content/style
-split, 4 quantised style channels, SplitGroupNorm), not of an active objective. It should
-not be reported as the objective's cost.
-
-**Freezing the encoder trades reconstruction for identifiability, structurally.** Frozen at
-the peak with the decoder trained out for 88k steps: masked L1 0.0450/0.0539 against the
-joint run's 0.0250/0.0282 (+80%/+91%), with block-MCC pinned at 0.8859. The deficit is not
-intensity calibration — a per-sample optimal gain+offset removes only 8% of it, and a
-per-sample optimal *pointwise* map removes only 9%. The frozen representation encodes less
-anatomy.
+The decay is real (per-seed sd 0.0009-0.0016, so ~30 sigma) but sits on a large floor: a
+randomly-initialised encoder already scores ~0.86, so the trained model ends **+0.008**
+above random and peaked at **+0.039**.
 
 ---
 
-## 2. Hypotheses tested and rejected
+## 2. Established mechanism
 
-Seven mechanisms were proposed from the configuration and theory. All were rejected by
-measurement, not argument. Recording them because the negatives constrain the conclusion.
+**Recon's effect on identifiability is configuration-dependent, sign and all.** Excess over
+a matched-random direction at eta=0.2:
+
+| configuration | recon excess | recon↔vq cosine | ‖g_recon‖ |
+|---|---|---|---|
+| baseline (recon-only, 34k) | **+0.0048** | **+0.346** | 0.150 |
+| contrastive @ peak (2k) | +0.0002 | −0.144 | 0.763 |
+| contrastive @ final (89k) | **−0.0087** | **−0.532** | 0.272 |
+
+Reconstruction *improves* block-MCC along its own trajectory and *degrades* it from the
+configuration the contrastive objective produces. Reconstruction and vector quantisation
+move from agreement to conflict over the same span.
+
+**But the decay tracks the contrastive objective's presence, not recon's.** Recon-only does
+not decay; both arms containing a contrastive term do. Those two facts are not yet
+reconciled, and reconciling them is the open scientific question.
+
+**The decay is a real loss, not a re-gauging.** At GAP pooling, best -> final: ridge
+0.8309 -> 0.7992 (−0.0317), kernel 0.8458 -> 0.8251 (−0.0207). A nonlinear readout recovers
+35%; **65% survives every probe tried**. A linear map from the late block into the early
+basis reaches 0.7899 against the true early 0.8233 — it cannot manufacture what is not
+there. The map R^2 asymmetry (late->early 0.780, early->late 0.504) says the late block
+holds *new* information while having lost factor-decodable structure: a trade, not decay.
+
+**The decay is brain-localised**, best -> final gap: pure brain −0.0469, fg strict −0.0324,
+fg train-rule −0.0284, **background −0.0053**.
+
+---
+
+## 3. Hypotheses tested and rejected
+
+Ten mechanisms, all argued from configuration or theory, all killed by measurement.
 
 | hypothesis | how it died |
 |---|---|
-| Background dilution of the probe (training masks background, the probe does not) | `block_mcc` standardises every feature, so background magnitude is invisible: flat to 4 dp across a 67x sweep |
-| `bt_lambda` decorrelation destroys the multi-channel co-activation local factors need | Measured the other way: a fully channel-private encoding scores **higher** than a redundant one (0.873 vs 0.829) |
+| Background dilution of the probe | `block_mcc` standardises every feature; flat to 4 dp across a 67x background-noise sweep |
+| `bt_lambda` decorrelation destroys local co-activation | Measured the other way: fully channel-private scores **higher** (0.873 vs 0.829) |
 | Conditioning / rank collapse | `content_rank` **rose** 18.7 -> 39.7; post-peak correlation with MCC +0.045 (p=0.77) |
-| Style bottleneck drives the decay | `content_view_acc` is pinned at 1.0000 at both checkpoints — flat, so it cannot explain a change |
-| The benchmark is too easy for the objective | `view_difficulty`: only 74% of view 2 is pointwise-explainable, contrast map is non-monotone (0.45), edge agreement 0.544. A genuine task |
-| The frozen-run recon deficit is global intensity calibration | 92% of the error survives an optimal per-sample gain+offset; fitted gains are 1.01–1.03 |
-| ...or a per-subject nonlinear intensity remap | 91% survives an optimal per-sample pointwise map (control: the joint run reads 99–102%, i.e. nothing to fit) |
+| Style bottleneck drives the decay | `content_view_acc` pinned at 1.0000 at both checkpoints — flat cannot explain a change |
+| The benchmark is too easy | Only 74% of view 2 is pointwise-explainable; contrast map non-monotone (0.45); edge agreement 0.544 |
+| Frozen-arm recon deficit is global intensity calibration | 92% of the error survives an optimal per-sample gain+offset; fitted gains 1.01-1.03 |
+| ...or a per-subject nonlinear intensity remap | 91% survives an optimal per-sample pointwise map (control: joint run reads 99-102%) |
+| The joint run relaxes toward recon's solution | It would then land at 0.8926; it lands at 0.8508, *below* the baseline |
+| block-MCC measures proximity to a random projection | The frozen-random arm scores below both trained arms |
+| `off_diag` noise-fitting random-walks the encoder | Gradient SNR: contrastive EXPECTED 11.11, signal share 0.654 — a genuine descent direction |
 
 ---
 
-## 3. Measurement problems found
+## 4. Measurement problems found
 
-Several conclusions in this project rest on instruments that were reading the wrong thing.
+Five instruments were reading the wrong thing. Any earlier result touching these needs
+re-checking.
 
 **`--freeze-encoder` was a silent no-op.** `vqvae_model` is wrapped in
 `torch.nn.DataParallel` (`main_multimodal.py:1633`) before the freeze block (:1728), and
-DataParallel does not proxy arbitrary attribute access, so every
-`getattr(vqvae_model, "encoders")` returned `None`. Nothing was frozen; the run still
-logged `[FREEZE ENCODER]`. One 88k run was voided. Fixed by unwrapping `.module`/`.online`
-first, and the block now raises rather than proceeding when nothing matches.
+DataParallel does not proxy attribute access, so every `getattr(..., "encoders")` returned
+`None`. **One 88k run voided.** Fixed by unwrapping first; the block now raises rather than
+proceeding, and `selection/encoder_l2` logs whether the freeze held.
 
-**`eval/bt_term_balance.py` measured the wrong `sim`.** It called `barlow_twins_loss`
-without `sim_normalize`, which defaults to `False`, while the run optimises the normalised
-form. Every suggested `bt_sim_coeff` was off by a factor of `2*feat_std^2` — **5674x at
-patch pooling**, turning a correct ~0.35 into 6e-5. Fixed.
+**`bt_term_balance` measured the wrong `sim`.** It called `barlow_twins_loss` without
+`sim_normalize`, which defaults False, while the run optimises the normalised form. Every
+suggested `bt_sim_coeff` was off by `2*feat_std^2` — **5674x at patch**. Fixed.
 
-**`content_view_acc`'s floor is 0.355, not 0.5.** `cv_probe_acc` runs StratifiedKFold on
-the stacked view pair, so a subject's two rows land in different folds; the classifier
-learns subject identity and inverts the paired test row. Measured on statistically
-identical views: shipped 0.3550, subject-grouped 0.4975, unpaired control 0.4987. It does
-not inflate a genuine positive (0.9062 vs 0.9019 with a real offset). Being linear, it can
-also only ever detect a mean shift — a purely structural view difference reads 0.2631.
-Deliberately **not** patched, since every recorded result depends on it.
+**`content_view_acc`'s floor is 0.355, not 0.5.** `cv_probe_acc` runs StratifiedKFold on the
+stacked view pair, so a subject's two rows land in different folds; the classifier learns
+subject identity and inverts the paired row. Measured on identical views: shipped 0.3550,
+subject-grouped 0.4975, unpaired control 0.4987. Being linear it also only ever detects a
+mean shift (a purely structural difference reads 0.2631). Deliberately **not patched** —
+every recorded result depends on it.
 
-**Pooling modes read different tensors** (fixed in a parallel session). `gap`/`patch` pool
-before `SplitGroupNorm`; `stats` was read after it. `mcc_cc` and `content_anatomy` are
-stats-pooled, so they were scoring a different representation from `mcc_by_pool/gap`.
-Now unified on `norm_source="prenorm"`; **all stats-derived numbers for existing runs have
+**Poolings read different tensors** (fixed in a parallel session): `gap`/`patch` pool before
+`SplitGroupNorm`, `stats` was read after. **All stats-derived numbers for existing runs have
 moved and need re-scoring.**
 
-**VQ is counted twice.** `BaselineLoss` adds `quantization_losses` into its own return
-(`losses.py:1611`) and `main_multimodal` then adds `sum(diffs) * vq_commitment_weight` on
-top. The effective commitment weight exceeds the configured 0.25.
+**VQ is counted twice.** `BaselineLoss` adds `quantization_losses` into its return
+(`losses.py:1611`) and `main_multimodal` adds `sum(diffs) * vq_commitment_weight` on top.
+`scale_recon_loss` therefore also scales VQ.
 
-**`Loss-MAE-Reconstruction` never reaches TensorBoard.** `BaselineLoss` records it but
-`get_summaries()` is never called, so there is no training-side pixel-L1 curve. `Loss/Recon`
-is a different quantity (it includes the perceptual term and the VQ losses).
+**`Loss-MAE-Reconstruction` never reaches TensorBoard** — `get_summaries()` is never called.
+`Loss/Recon` is a different quantity (it includes perceptual + VQ).
 
----
-
-## 4. What the view structure actually is
-
-`eval/view_difficulty.py` (data only, no model), 200 test subjects:
-
-| map from view 1 -> view 2 | held-out R^2 |
-|---|---|
-| linear, per subject | 0.3751 |
-| pointwise, shared across all subjects | 0.1040 |
-| pointwise, per subject | 0.7391 |
-
-Per-subject gain over a shared map: **+0.6350**. Shared-map monotonicity 0.45 (the contrast
-*reorders* tissue intensities, as a real T1/T2 change does). Edge agreement between views
-0.5440.
-
-So the views differ by a **per-subject, nonlinear, non-monotone intensity remapping**, and
-63.5% of view-2 variance requires the per-subject part. That is what a style code has to
-carry; `style_sufficiency` is 0.38 and the style codebook is 44% utilised (perplexity ratio
-0.438 with all 256 entries active). The gap between requirement and delivery is large.
-
-Separately: the pre-norm content differs between views by a **pure constant offset and
-nothing else** — a linear-alignment probe reads 0.5022, the floor. The strong nonlinear
-view separability seen at `stats` pooling (0.9460) is manufactured by SplitGroupNorm's
-per-sample statistics. Internal control from the same run: the stats `mean` group scores
-0.779 while the gap block scores 0.5075 — the identical statistic on either side of the norm.
+**The matched-random control has a blind spot.** It subtracts generic perturbation
+sensitivity, which is correct — but that is exactly the signature a noise-driven mechanism
+would produce, so a loss whose gradient is near-random shows zero excess by construction.
+Worth stating whenever the dMCC table is quoted.
 
 ---
 
-## 5. Objective diagnostics
+## 5. The objective, measured
 
 At the final checkpoint (`bt_term_balance`, batch 128, unweighted):
 
@@ -156,80 +132,112 @@ At the final checkpoint (`bt_term_balance`, batch 128, unweighted):
 | patch | 44 | 65536 | 0.0076 | 0.0370 | 0.029 | 0.022 | 0.013 | 53.26 |
 | GAP | 44 | 128 | 0.0538 | 17.999 | 14.78 | 2.113 | 0.029 | 1.405 |
 
-- The patch `off_diag` is **78% sampling noise**; the GAP one is **82%**. Neither is a
-  useful optimisation target as configured.
-- At GAP the **offset dominates the view disagreement by 73x**. That is what the `sim`
-  distance term exists to remove and what the standardised correlations are blind to — and
-  `bt_sim_coeff` was 2e-5, contributing ~2.4e-7 of the loss. Effectively off.
-- `feat_std_mean` ran 0.2937 -> 66.9396. Nothing bounds the scale: `on_diag`/`off_diag` are
-  correlations, `sim` was off, and the patch variance hinge is **structurally blind to
-  subject collapse** — its `std(dim=0)` runs over folded (subject, position) rows, so
-  spatial variance alone satisfies it (documented at `main_multimodal.py:1305`). Only the
-  GAP hinge acts on subjects.
+- `off_diag` is **78% sampling noise at patch, 82% at GAP**.
+- At GAP the **offset dominates the view disagreement 73:1**. That is what the `sim` distance
+  term exists to remove and what the standardised correlations are structurally blind to —
+  and `bt_sim_coeff` was 2e-5, contributing 2.4e-7 of the loss.
+- Normalised `sim` puts **99% of its weight at GAP** (2.113 vs 0.0215); unnormalised puts
+  94% at patch (122.157 vs 8.349), where there is no offset. Normalisation is what aims the
+  term at the problem.
 
-**A retry at `bt_sim_coeff 0.25` collapsed the run** (style perplexity and utilisation
-down, reconstruction ~10x worse). Mechanism: the sim denominator is detached, so its
-effective gradient scales as `sim_coeff / var` while the hinge's scales as `std_coeff`.
-Below `std ~ sqrt(sim_coeff/std_coeff)` = 0.5 the collapse is self-reinforcing, and the run
-had to traverse that on its way down from 53. Because the encoder trunk is shared, the
-collapse propagated to style and to reconstruction. The fix is to raise the hinge
-(`bt_std_coeff 10`, one-sided so it costs nothing above std 1) rather than lower `sim`.
+**The objective's activity is contingent on reconstruction.** Both runs start at
+`feat_std` ~0.28 with `var_loss` ~1.46. In the joint run recon drives `feat_std` to **66.9**
+and the one-sided hinge goes dormant (`var_loss` -> 0) — all four terms genuinely converge.
+In contrastive-only nothing pushes the scale up, `feat_std` falls to **0.239**, and the
+hinge stays engaged and *losing* (`var_loss` 1.477 -> 1.512, `sim` 0.0999 -> 0.1217).
+
+**Why the objective converges by epoch 128.** Not because the data is easy. At d=44 it
+imposes 44 diagonal + 1892 off-diagonal constraints on two *independently parameterised*
+encoders (~600k params), of which 1892 are 78-82% noise, the hinge is dormant, and `sim` is
+off. With `separate_encoders`, correlating two independent networks never requires
+invariance. `on_diag` is a *correlation* — satisfied by a per-channel linear relationship,
+strictly weaker than the a.s. equality Yao's Lemma C.2 requires.
+
+**`sim` attempts so far both failed.** 0.25 with `bt_std_coeff` 1 collapsed the run (style
+perplexity and utilisation down, recon ~10x worse); 0.25 with `bt_std_coeff` 10 explodes
+reconstruction at ~10k. The principled anchor **0.025** (matching GAP `on_diag`) is untested.
 
 ---
 
-## 6. Tooling produced
+## 6. The data
+
+`eval/view_difficulty.py` (no model, 200 test subjects):
+
+| map view 1 -> view 2 | held-out R^2 |
+|---|---|
+| linear, per subject | 0.3751 |
+| pointwise, shared across all | 0.1040 |
+| pointwise, per subject | 0.7391 |
+
+Per-subject gain **+0.6350**; shared-map monotonicity 0.45 (contrast *reorders* tissue
+intensities); edge agreement 0.544. The views differ by a **per-subject, nonlinear,
+non-monotone intensity remap**, and 63.5% of view-2 variance needs the per-subject part.
+That is what a style code must carry; `style_sufficiency` is 0.38 with the style codebook
+44% utilised (perplexity ratio 0.438, all 256 entries active).
+
+Pre-norm content differs between views by a **pure constant offset and nothing else**
+(linear-alignment probe 0.5022, the floor). The nonlinear view separability at `stats`
+(0.9460) is manufactured by SplitGroupNorm's per-sample statistics. `content_view_acc` is
+1.0000 in the **recon-only baseline too**, so it is architectural, not an objective failure.
+
+---
+
+## 7. Tooling produced
 
 | file | purpose |
 |---|---|
-| `eval/patch_mcc_decay.py` | `--calibrate` (what the metric can detect), `curves`, `strata`, `geometry`, `viewgap` |
-| `eval/gradient_attribution.py` | per-loss gradients on encoder params; dMCC per step with matched-random controls |
-| `eval/view_difficulty.py` | how hard cross-view alignment is, from the data alone |
-| notebook Section 23 | reconstruction quality, with affine and pointwise correction columns |
-| `--freeze-encoder`, `--init-from-checkpoint` | two-phase training; `selection/encoder_l2` logs whether the freeze held |
-| `experiments/synthetic_causal_frozen_encoder.yaml` | phase-2 config |
+| `eval/patch_mcc_decay.py` | `--calibrate`, `--summarise`, and `curves` / `strata` / `geometry` / `viewgap` |
+| `eval/gradient_attribution.py` | per-loss gradients, matched-random controls, dMCC sweep, `--snr` decomposition |
+| `eval/view_difficulty.py` | alignment difficulty from the data alone |
+| `eval/reformat_vs_loss.py` | probe ladder + cross-checkpoint linear recoverability |
+| notebook Section 23 | reconstruction quality with affine and pointwise correction columns |
+| `--freeze-encoder`, `--init-from-checkpoint`, `selection/encoder_l2` | two-phase training with a freeze that fails loudly |
 
-`--calibrate` is the reusable part: it establishes, on synthetic data of the same shape at
-the real operating point, which perturbations block-MCC can even detect. Background noise
-magnitude x67: 0.0000. Channel decorrelation: +0.0447 (helps). An **exactly invertible**
-anisotropic map: −0.2566 at cond 1e2, −0.3812 at cond 1e4. Signal x0.5: −0.3869. Run it
-before attributing any movement in that curve to a mechanism.
-
----
-
-## 7. Open question and the next experiment
-
-Four surviving observations point one way: recon (not contrastive) drives the decay; the
-objective is done at epoch 128 of 5632; the metric is ~95% floor; and the 2k representation
-is structurally poorer than the 88k one. All are consistent with a single deflating reading
-— **the 2k "peak" is close to an untrained encoder, and block-MCC is largely measuring
-proximity to a random projection.** A random projection preserves linear decodability of
-everything, which would explain the 0.86 floor, background scoring as well as brain, and
-the score falling as the encoder specialises for reconstruction.
-
-**Decisive test, not yet run:** freeze a *randomly initialised* encoder and train the
-decoder out for 88k steps.
-
-- Random reaches ~0.045 masked L1 and ~0.86 block-MCC -> the 2k checkpoint is no better
-  than a random projection on either axis, and the peak-vs-final story is a floor artifact.
-- Random is clearly worse on both -> the 2k representation is real and the
-  identifiability/reconstruction trade-off is genuine and structural.
-
-Everything else (style capacity, `bt_sim_coeff` with the hinge rail, the freeze-point Pareto
-sweep, a localised-factor probe with usable dynamic range) is worth doing but should wait on
-this, since a null result would change what they mean.
+`--calibrate` is the reusable part: what block-MCC can detect, at the real operating point.
+Background noise magnitude x67: **0.0000**. Channel decorrelation: **+0.0447** (helps). An
+*exactly invertible* anisotropic map: **−0.2566** at cond 1e2, **−0.3812** at 1e4. Signal
+x0.5: **−0.3869**. Run it before attributing any movement in that curve to a mechanism.
 
 ---
 
-## 8. Caveats to carry into any writeup
+## 8. Where it stands and what to run
+
+**The open question** is why the decay tracks the contrastive objective's presence while
+recon carries the local attribution. Ten mechanisms have died; the pattern each time was
+that the effect was smaller than the noise, or the run was too short, or a control was
+missing.
+
+**Next: six runs, seed as the only variable, 34k steps, no config changes.**
+
+Baseline x3 (`scale_contrastive_loss=0`) and reference-config x3. The result at n=1 —
+baseline beats contrastive on MCC and reconstruction, contrastive wins 18x on purity — is
+the gate on everything else, and altering any coefficient severs the link to every number
+above. Read with `patch_mcc_decay --summarise`; **if the between-config difference does not
+exceed the within-config seed spread, there is no effect to report.**
+
+Deferred until that reports: the `bt_sim_coeff 0.025` run (judged on the GAP offset, not
+MCC), the recon-weight Pareto sweep, a long contrastive-only arm, and the freeze-point
+sweep.
+
+**Still unbuilt, and the largest measurement gap:** a probe restricted to where the
+localised factors actually are. `lesion_x/y/z` are what patch pooling was introduced to
+expose, and background scores 0.8574 against foreground's 0.8760.
+
+---
+
+## 9. Caveats for any writeup
 
 - Quote block-MCC against the **random-init value (~0.86)**, never the permutation null
   (0.08). The latter makes 0.87 look like a strong result.
-- Report the contrastive arm's +29% recon cost and the freeze arm's +80% separately. They
-  have different causes and merging them misattributes the freeze penalty to the objective.
+- Report the contrastive arm's **+29%** reconstruction cost (vs the recon-only baseline) and
+  the freeze arm's **+80%** separately. Different causes; merging them misattributes the
+  freeze penalty to the objective.
+- The contrastive arm spends **98% of training as a reconstruction-only model** with a 2k
+  warm-start, so the +29% is the cost of the *architecture*, not of an active objective.
 - The gradient-attribution eta=0.8 column is superlinear and must not be quoted as a
-  derivative. The contrastive rows there are the least reliable in the table: the
-  batch-to-batch sd of that gradient is 87–104% of its mean.
-- All stats-pooled metrics (`mcc_cc`, `content_anatomy`, `selection/overall_score`) moved
-  when the pooling fix landed. Re-score before comparing any run to another.
-- Everything here is one training seed. The ±0.001 error bars are probe-seed spread only
-  and say nothing about run-to-run variance.
+  derivative. The contrastive rows there are least reliable: batch-to-batch sd is 87-104%
+  of the mean.
+- All stats-pooled metrics moved when the pooling fix landed. Re-score before comparing.
+- **Two random initialisations differ by 0.023** in step-1 patch-MCC — larger than most
+  config effects measured here (0.005-0.011). Everything is n=1 and the error bars quoted
+  are probe-seed spread only.
