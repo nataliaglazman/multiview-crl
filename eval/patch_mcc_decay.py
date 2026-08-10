@@ -993,6 +993,17 @@ def spectrum(X):
     return np.linalg.eigvalsh(Xc @ Xc.T / max(len(Xc) - 1, 1)).clip(min=0)[::-1]
 
 
+def _factor_names(n):
+    """Content factor names, lazily — ``eval.dci`` imports torch at module level and this
+    module keeps the scoring/verdict path importable on plain numpy."""
+    try:
+        from eval.dci import CONTENT_FACTOR_NAMES
+    except ImportError:  # pragma: no cover - torch-less environments
+        CONTENT_FACTOR_NAMES = []
+    names = list(CONTENT_FACTOR_NAMES[:n])
+    return names + [f"factor{i}" for i in range(len(names), n)]
+
+
 def eff_rank(ev):
     """Participation ratio normalised to (0, 1] — same convention as
     ``eval.entropy_uniformity.eff_rank``."""
@@ -1006,7 +1017,7 @@ def n_at_energy(ev, frac=0.95):
     return int(np.searchsorted(np.cumsum(ev) / ev.sum(), frac) + 1)
 
 
-def test_geometry(label, content, gt, coverage, thresh, seeds, n_splits, ranks):
+def test_geometry(label, content, gt, coverage, thresh, seeds, n_splits, ranks, depth_max_pcs=64):
     """Spectrum of the content block, plus how many leading directions the factors need.
 
     No probe artifact can enter the first three columns — they are properties of the
@@ -1043,6 +1054,7 @@ def test_geometry(label, content, gt, coverage, thresh, seeds, n_splits, ranks):
     out["rank_curve"] = dict(zip(ranks, curve))
     out["rank_full"] = full
     out.update(test_pc_loading(x, gt, seeds, n_splits, n_pcs=8))
+    out.update(test_factor_depth(x, gt, seeds, n_splits, max_pcs=depth_max_pcs))
     return out
 
 
@@ -1078,7 +1090,11 @@ def test_pc_loading(x, gt, seeds, n_splits, n_pcs=8):
         return {}
     pca = PCA(n_components=k, svd_solver="randomized", random_state=0).fit(x)
     scores = pca.transform(x)
-    share = pca.explained_variance_ / max(float(np.sum(pca.explained_variance_)), 1e-300)
+    # explained_variance_RATIO_, not explained_variance_ normalised by its own sum: with a
+    # truncated PCA the latter renormalises within the retained components, so the column
+    # sums to 1.0 by construction and reads "share of the top-k energy". That is not
+    # comparable to n@95% and overstates PC1. The ratio is against the FULL trace.
+    share = pca.explained_variance_ratio_
 
     print("\n  leading PCs — variance share vs how factor-loaded they are:")
     print(f"    {'pc':<5}{'var share':>11}{'R2(factors->pc)':>18}")
@@ -1089,15 +1105,71 @@ def test_pc_loading(x, gt, seeds, n_splits, n_pcs=8):
         r2s.append(float(r2))
         print(f"    {j + 1:<5}{share[j]:>11.4f}{r2:>18.4f}")
     r2s = np.asarray(r2s)
+    # Invariant to how `share` is normalised (a weighted mean does not care about a common
+    # scale on the weights), so this number was correct even under the truncation bug above.
     weighted = float(np.sum(share * r2s) / max(float(share.sum()), 1e-300))
-    print(f"    variance-weighted mean R2 over these {k} PCs: {weighted:.4f}")
+    print(f"    these {k} PCs hold {share.sum():.1%} of total variance")
+    print(f"    variance-weighted mean R2 over them: {weighted:.4f}")
     return {
         "pc1_share": float(share[0]),
         "pc1_r2": r2s[0],
+        "topk_share": float(share.sum()),
         "pc_share": share.tolist(),
         "pc_r2": r2s.tolist(),
         "var_share_informative": weighted,
     }
+
+
+def test_factor_depth(x, gt, seeds, n_splits, max_pcs=64, frac=0.9):
+    """How deep in the spectrum does each factor live?
+
+    ``test_pc_loading`` shows the factors concentrated in ~3 leading directions, but there
+    are NINE factors and nine cannot be separately recovered from three.  The rest must live
+    further down the spectrum — and the spectrum is exactly what collapsed (n@95% 32 -> 11).
+    This measures where each factor actually sits.
+
+    For every factor: the R^2 recoverable from the WHOLE block, then the smallest number of
+    leading principal directions that reaches ``frac`` of it.  ``>k_max`` means the factor is
+    not recoverable from the leading ``k_max`` directions at all.
+
+    The prediction this exists to test: factors whose depth EXCEEDS the late block's surviving
+    rank are precisely the ones that lost per-factor MCC.  Shallow factors (brain_size,
+    lr_asymmetry) sit in PC1-PC3 and are untouched by a tail collapse; deep ones (the lesion
+    positions) go with the tail.  If depth at the early checkpoint predicts the per-factor
+    drop, the mechanism is closed: the block is collapsing onto a low-dimensional
+    factor-aligned subspace and discarding the factors that do not fit.
+
+    Uses ``cv_probe_r2_multi`` so all factors share one ridge decomposition per (seed, fold),
+    which is what makes the ladder affordable.
+    """
+    from eval.identifiability_metrics import cv_probe_r2_multi
+
+    names = _factor_names(gt.shape[1])
+    k_max = int(min(max_pcs, x.shape[1], x.shape[0] - 2))
+    if k_max < 2:
+        return {}
+    scores = PCA(n_components=k_max, svd_solver="randomized", random_state=0).fit_transform(x)
+
+    # Reference is the whole block, not the top-k_max subspace: a factor living beyond k_max
+    # must show up as ">k_max" rather than as satisfied at k_max by construction.
+    full = cv_probe_r2_multi(x, gt, n_splits=n_splits, seeds=seeds[:1])["mean"]
+    ladder = sorted({int(round(v)) for v in np.geomspace(1, k_max, 12)})
+    curve = {k: cv_probe_r2_multi(scores[:, :k], gt, n_splits=n_splits, seeds=seeds[:1])["mean"] for k in ladder}
+
+    print(f"\n  spectral depth — leading PCs needed for {frac:.0%} of each factor's whole-block R2:")
+    print(f"    {'factor':<20}{'R2_full':>9}{'depth':>8}")
+    print("    " + "-" * 37)
+    depth = {}
+    for j, nm in enumerate(names):
+        if full[j] <= 0.02:
+            depth[nm] = None
+            print(f"    {nm:<20}{full[j]:>9.4f}{'n/a':>8}   (not recoverable at all)")
+            continue
+        target = frac * full[j]
+        hit = next((k for k in ladder if curve[k][j] >= target), None)
+        depth[nm] = hit
+        print(f"    {nm:<20}{full[j]:>9.4f}{(str(hit) if hit else f'>{k_max}'):>8}")
+    return {"depth": depth, "r2_full": {nm: float(full[j]) for j, nm in enumerate(names)}, "k_max": k_max}
 
 
 # --------------------------------------------------------------------------- #
@@ -1137,15 +1209,8 @@ def test_factors(label, content, gt, coverage, thresh, seeds, n_splits, foregrou
         sel = np.ones(content.shape[1], dtype=bool)
     x = content[:, sel, :].reshape(n, -1)
 
-    # Lazy, because ``eval.dci`` imports torch at module level and this module keeps the
-    # scoring/verdict path importable on plain numpy (see the note under the imports).
-    try:
-        from eval.dci import CONTENT_FACTOR_NAMES
-    except ImportError:  # pragma: no cover - torch-less environments
-        CONTENT_FACTOR_NAMES = [f"factor{i}" for i in range(gt.shape[1])]
-
     res = block_mcc(x, gt, seeds=seeds, n_splits=n_splits)
-    names = list(CONTENT_FACTOR_NAMES[: gt.shape[1]]) or [f"factor{i}" for i in range(gt.shape[1])]
+    names = _factor_names(gt.shape[1])
     print(f"\n  {label}:  N={n}  positions={int(sel.sum())}  mean {res['mean']:.4f}")
     print(
         f"    assignment_identity {res['assignment_identity']:.3f}"
@@ -1251,6 +1316,38 @@ def report_delta(strata_res, geom_res, arms):
             elif gb["var_share_informative"] < 0.8 * ga["var_share_informative"]:
                 print("  → PC1 stable but the leading energy became less factor-explainable: variance")
                 print("    is moving into noise directions rather than concentrating.")
+
+        # Does spectral depth at the EARLY checkpoint predict which factors the tail
+        # collapse took? That is the whole mechanism, stated as one comparison.
+        if "depth" in ga and "depth" in gb:
+            surviving = b["n95"]
+            kmax = ga.get("k_max", 64)
+            print(f"\n  spectral depth (early) vs surviving rank (late n@95% = {surviving})")
+            print(f"    {'factor':<20}{'depth@2k':>10}{'depth@end':>11}{'ΔR2_full':>10}")
+            print("    " + "-" * 51)
+            deep_lost, shallow_held = [], []
+            for nm, da in ga["depth"].items():
+                db = gb["depth"].get(nm)
+                d_r2 = gb["r2_full"].get(nm, float("nan")) - ga["r2_full"].get(nm, float("nan"))
+                fa = str(da) if da else f">{kmax}"
+                fb = str(db) if db else f">{gb.get('k_max', kmax)}"
+                print(f"    {nm:<20}{fa:>10}{fb:>11}{d_r2:>+10.4f}")
+                if da is None or da > surviving:
+                    deep_lost.append((nm, d_r2))
+                else:
+                    shallow_held.append((nm, d_r2))
+            if deep_lost and shallow_held:
+                md = float(np.mean([v for _, v in deep_lost]))
+                ms = float(np.mean([v for _, v in shallow_held]))
+                print(f"\n    mean ΔR2_full — deeper than surviving rank: {md:+.4f}  ({len(deep_lost)} factors)")
+                print(f"                    within surviving rank:      {ms:+.4f}  ({len(shallow_held)} factors)")
+                if md < ms - 0.01:
+                    print("    => MECHANISM CONFIRMED. The factors that lived below the surviving rank are")
+                    print("       the ones that lost. The block collapsed onto a low-dimensional")
+                    print("       factor-aligned subspace and discarded what did not fit.")
+                else:
+                    print("    => Depth does NOT predict the loss. The tail collapse and the per-factor")
+                    print("       decline are separate phenomena; do not merge them in the writeup.")
 
         if b["eff_rank"] < 0.8 * a["eff_rank"] or b["cond95"] > 3 * a["cond95"]:
             print("\n  → GEOMETRY COLLAPSED. Conditioning is the one mechanism that survived")
@@ -1368,6 +1465,12 @@ def main():
         choices=["curves", "strata", "geometry", "viewgap", "factors"],
     )
     ap.add_argument(
+        "--depth-max-pcs",
+        type=int,
+        default=64,
+        help="Deepest principal direction the spectral-depth ladder searches (geometry test).",
+    )
+    ap.add_argument(
         "--factors-all-positions",
         action="store_true",
         help="Score the factor breakdown over every position instead of the foreground stratum.",
@@ -1467,7 +1570,15 @@ def main():
                     )
                 if "geometry" in want:
                     geom_res[label] = test_geometry(
-                        label, content, gt, coverage, thresh, tuple(args.seeds), args.n_splits, args.ranks
+                        label,
+                        content,
+                        gt,
+                        coverage,
+                        thresh,
+                        tuple(args.seeds),
+                        args.n_splits,
+                        args.ranks,
+                        depth_max_pcs=args.depth_max_pcs,
                     )
                 if "factors" in want:
                     factor_res[label] = test_factors(
