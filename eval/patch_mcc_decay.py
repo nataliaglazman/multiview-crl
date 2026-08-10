@@ -1046,6 +1046,101 @@ def test_geometry(label, content, gt, coverage, thresh, seeds, n_splits, ranks):
 
 
 # --------------------------------------------------------------------------- #
+# Test 4 — factors.  The aggregate is a MEAN; read the terms.
+# --------------------------------------------------------------------------- #
+
+
+def test_factors(label, content, gt, coverage, thresh, seeds, n_splits, foreground_only=True):
+    """Per-factor matched |corr| at patch pooling — the breakdown ``mcc`` averages away.
+
+    ``block_mcc`` reports an unweighted mean over factors, so a representation that
+    concentrates onto one dominant factor while shedding several mid-scale ones reads as a
+    uniform decline.  Measured offline on one run, brain_size ROSE while cortical_thickness,
+    lr_asymmetry, temporal_atrophy and sulcal_widening all FELL.  The per-factor vector is
+    computed inside ``block_mcc`` on its way to the mean, so this costs one extra fit only
+    because it re-scores the foreground stratum.
+
+    Two columns beyond the matched score, both guards rather than results:
+
+      ``diag``   the UNMATCHED |corr| between factor j's own predictor and factor j.  Needs
+                 no assignment, so it cannot move for permutation reasons.
+      ``ident``  fraction of factors matched to their own predictor.  Below 1.0 the
+                 Hungarian assignment has permuted — likely between SCM-correlated factors —
+                 and a jump in the matched column is an artefact.  On a near-uninformative
+                 block this was measured at 0.100, with matched 0.186 against diag 0.099:
+                 the matching nearly doubles the score by assigning factors to whichever
+                 predictor happened to correlate with them in noise.  Read ``diag`` whenever
+                 ``ident`` is not 1.0.
+    """
+    n = content.shape[0]
+    if foreground_only:
+        strata = build_strata(coverage, thresh)
+        sel = strata.get("fg_strict")
+        if sel is None or not sel.any():
+            sel = np.ones(content.shape[1], dtype=bool)
+    else:
+        sel = np.ones(content.shape[1], dtype=bool)
+    x = content[:, sel, :].reshape(n, -1)
+
+    # Lazy, because ``eval.dci`` imports torch at module level and this module keeps the
+    # scoring/verdict path importable on plain numpy (see the note under the imports).
+    try:
+        from eval.dci import CONTENT_FACTOR_NAMES
+    except ImportError:  # pragma: no cover - torch-less environments
+        CONTENT_FACTOR_NAMES = [f"factor{i}" for i in range(gt.shape[1])]
+
+    res = block_mcc(x, gt, seeds=seeds, n_splits=n_splits)
+    names = list(CONTENT_FACTOR_NAMES[: gt.shape[1]]) or [f"factor{i}" for i in range(gt.shape[1])]
+    print(f"\n  {label}:  N={n}  positions={int(sel.sum())}  mean {res['mean']:.4f}")
+    print(
+        f"    assignment_identity {res['assignment_identity']:.3f}"
+        + ("" if res["assignment_identity"] >= 0.999 else "   <- PERMUTED, read diag")
+    )
+    print(f"    {'factor':<20}{'matched':>10}{'+-sd':>8}{'diag':>9}")
+    print("    " + "-" * 47)
+    for j, nm in enumerate(names):
+        print(
+            f"    {nm:<20}{res['per_factor'][j]:>10.4f}{res['per_factor_std'][j]:>8.4f}{res['per_factor_diag'][j]:>9.4f}"
+        )
+    return {
+        "mean": res["mean"],
+        "per_factor": {nm: float(res["per_factor"][j]) for j, nm in enumerate(names)},
+        "per_factor_std": {nm: float(res["per_factor_std"][j]) for j, nm in enumerate(names)},
+        "identity": res["assignment_identity"],
+    }
+
+
+def report_factor_delta(factor_res, arms):
+    """Which factors carry the change, sorted by it. This is the whole point of the test."""
+    if len(arms) < 2 or not (factor_res.get(arms[0]) and factor_res.get(arms[-1])):
+        return
+    early, late = arms[0], arms[-1]
+    a, b = factor_res[early], factor_res[late]
+    print(f"\n  PER-FACTOR Δ  ({early} → {late}, foreground)")
+    print(f"    {'factor':<20}{'early':>9}{'late':>9}{'Δ':>10}{'sd_pool':>10}")
+    print("    " + "-" * 58)
+    rows = []
+    for nm in a["per_factor"]:
+        if nm not in b["per_factor"]:
+            continue
+        d = b["per_factor"][nm] - a["per_factor"][nm]
+        sd = float(np.hypot(a["per_factor_std"][nm], b["per_factor_std"][nm]))
+        rows.append((nm, a["per_factor"][nm], b["per_factor"][nm], d, sd))
+    for nm, va, vb, d, sd in sorted(rows, key=lambda r: r[3]):
+        flag = "" if abs(d) > 2 * sd else "   (within sd)"
+        print(f"    {nm:<20}{va:>9.4f}{vb:>9.4f}{d:>+10.4f}{sd:>10.4f}{flag}")
+    up = [r[0] for r in rows if r[3] > 2 * r[4]]
+    down = [r[0] for r in rows if r[3] < -2 * r[4]]
+    print(f"\n    mean {a['mean']:.4f} → {b['mean']:.4f} ({b['mean'] - a['mean']:+.4f})")
+    if up and down:
+        print(f"    => SIGN SPLIT: up {', '.join(up)} | down {', '.join(down)}")
+        print("       The aggregate is averaging opposite movements. Report the split, not the mean.")
+    elif down and not up:
+        print(f"    => UNIFORM DECLINE across {len(down)} factors — no concentration, the whole block lost.")
+    elif up and not down:
+        print(f"    => UNIFORM GAIN across {len(up)} factors; the mean must be moving for another reason.")
+    else:
+        print("    => Nothing clears 2 sd. The per-factor split cannot support any claim at this N.")
 
 
 def report_delta(strata_res, geom_res, arms):
@@ -1191,7 +1286,12 @@ def main():
         "--tests",
         nargs="+",
         default=["curves", "strata", "geometry", "viewgap"],
-        choices=["curves", "strata", "geometry", "viewgap"],
+        choices=["curves", "strata", "geometry", "viewgap", "factors"],
+    )
+    ap.add_argument(
+        "--factors-all-positions",
+        action="store_true",
+        help="Score the factor breakdown over every position instead of the foreground stratum.",
     )
     ap.add_argument("--level", type=int, default=0)
     ap.add_argument("--grid", type=int, nargs=3, default=None, help="Patch grid (default: the run's --patch-grid)")
@@ -1262,7 +1362,7 @@ def main():
         )
         logger.info("grid=%s  foreground thresh=%.3f  causal=%s", grid, thresh, args.causal)
 
-        strata_res, geom_res, arms = {}, {}, []
+        strata_res, geom_res, factor_res, arms = {}, {}, {}, []
         for name in names:
             model, _, _ = load_model_from_run_dir(rd, checkpoint=os.path.join(rd, name), device=device)
             model.to(device)
@@ -1273,7 +1373,7 @@ def main():
                 test_viewgap(label, model, dataset, device, args.level, args.batch_size, tuple(args.seeds))
 
             content = None
-            if {"strata", "geometry"} & want:
+            if {"strata", "geometry", "factors"} & want:
                 content, gt, coverage = extract_patch_block(
                     model, dataset, device, grid, args.level, args.batch_size, args.num_workers
                 )
@@ -1285,11 +1385,23 @@ def main():
                     geom_res[label] = test_geometry(
                         label, content, gt, coverage, thresh, tuple(args.seeds), args.n_splits, args.ranks
                     )
+                if "factors" in want:
+                    factor_res[label] = test_factors(
+                        label,
+                        content,
+                        gt,
+                        coverage,
+                        thresh,
+                        tuple(args.seeds),
+                        args.n_splits,
+                        foreground_only=not args.factors_all_positions,
+                    )
             del model, content
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
         report_delta(strata_res, geom_res, arms)
+        report_factor_delta(factor_res, arms)
 
 
 if __name__ == "__main__":
