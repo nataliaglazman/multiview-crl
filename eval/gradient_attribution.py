@@ -339,8 +339,6 @@ def main():
         )
         print(f"\n  block-MCC at this checkpoint: {base:.4f}")
         print(f"\n  dMCC after one step of size eta along -g/||g||  (negative = degrades identifiability)")
-        print(f"  {'loss':<14}" + "".join(f"{'eta=' + str(e):>12}" for e in cli.etas) + f"{'linearity R2':>15}")
-        print("  " + "-" * (14 + 12 * len(cli.etas) + 15))
         backup = [p.detach().clone() for p in params]
 
         def _sweep(direction):
