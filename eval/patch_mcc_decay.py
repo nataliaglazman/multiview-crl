@@ -1042,7 +1042,62 @@ def test_geometry(label, content, gt, coverage, thresh, seeds, n_splits, ranks):
     print("  " + "".join(f"{v:>10.4f}" for v in curve) + f"{full:>10.4f}")
     out["rank_curve"] = dict(zip(ranks, curve))
     out["rank_full"] = full
+    out.update(test_pc_loading(x, gt, seeds, n_splits, n_pcs=8))
     return out
+
+
+def test_pc_loading(x, gt, seeds, n_splits, n_pcs=8):
+    """Is the leading principal direction FACTOR-loaded, or just the biggest variance?
+
+    This is the confound on every rank number above.  ``feat_std_mean`` runs 0.29 -> 66.9
+    over training, and a single exploding variance direction collapses the participation
+    ratio and ``n@95%`` without any information leaving the block — it also depresses the
+    low-k rank curve, by spending the first components on a direction that carries no
+    factors.  Rank collapse and compression are indistinguishable from the spectrum alone.
+
+    So: for each leading PC, report its share of total variance and the CV R^2 of predicting
+    it FROM the 9 ground-truth factors.  Read the two together.
+
+        PC1 share UP and PC1 R^2 LOW
+            The collapse is a scale artefact.  The spectrum is measuring the norm, not the
+            representation; restate any rank claim in whitened coordinates (or standardise
+            per feature before ``spectrum``).
+        PC1 share UP and PC1 R^2 HIGH
+            Compression is real: the factors genuinely moved into fewer directions, which
+            makes the forward map (factors -> content) easier and the inverse map
+            (content -> each factor separately) harder, because factors now share directions.
+
+    ``var_share_informative`` is the summary: the variance-weighted mean factor-R^2 over the
+    leading PCs, i.e. what fraction of the block's leading energy is factor-explainable.
+    A rank collapse with this FALLING is energy moving into noise directions.
+    """
+    from eval.identifiability_metrics import cv_probe_r2
+
+    k = int(min(n_pcs, x.shape[1], x.shape[0] - 1))
+    if k < 1:
+        return {}
+    pca = PCA(n_components=k, svd_solver="randomized", random_state=0).fit(x)
+    scores = pca.transform(x)
+    share = pca.explained_variance_ / max(float(np.sum(pca.explained_variance_)), 1e-300)
+
+    print("\n  leading PCs — variance share vs how factor-loaded they are:")
+    print(f"    {'pc':<5}{'var share':>11}{'R2(factors->pc)':>18}")
+    print("    " + "-" * 34)
+    r2s = []
+    for j in range(k):
+        r2 = cv_probe_r2(gt, scores[:, j], n_splits=n_splits, seeds=seeds[:1], clip=True)["mean"]
+        r2s.append(float(r2))
+        print(f"    {j + 1:<5}{share[j]:>11.4f}{r2:>18.4f}")
+    r2s = np.asarray(r2s)
+    weighted = float(np.sum(share * r2s) / max(float(share.sum()), 1e-300))
+    print(f"    variance-weighted mean R2 over these {k} PCs: {weighted:.4f}")
+    return {
+        "pc1_share": float(share[0]),
+        "pc1_r2": r2s[0],
+        "pc_share": share.tolist(),
+        "pc_r2": r2s.tolist(),
+        "var_share_informative": weighted,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1173,6 +1228,30 @@ def report_delta(strata_res, geom_res, arms):
         print(f"\n  eff_rank (fg)  {a['eff_rank']:.4f} → {b['eff_rank']:.4f}  ({b['eff_rank'] - a['eff_rank']:+.4f})")
         print(f"  n@95%    (fg)  {a['n95']} → {b['n95']}")
         print(f"  cond@95% (fg)  {a['cond95']:.3g} → {b['cond95']:.3g}")
+
+        # The scale confound, settled rather than warned about: a rank collapse driven by an
+        # exploding feat_std puts the energy in a direction that carries no factors.
+        ga, gb = geom_res[early], geom_res[late]
+        if "pc1_share" in ga and "pc1_share" in gb:
+            print(f"\n  PC1 var share  {ga['pc1_share']:.4f} → {gb['pc1_share']:.4f}")
+            print(f"  PC1 R2(factors→pc1)  {ga['pc1_r2']:.4f} → {gb['pc1_r2']:.4f}")
+            print(
+                f"  var-weighted mean R2 over leading PCs  "
+                f"{ga['var_share_informative']:.4f} → {gb['var_share_informative']:.4f}"
+            )
+            grew = gb["pc1_share"] > 1.25 * ga["pc1_share"]
+            if grew and gb["pc1_r2"] < 0.25:
+                print("  → PC1 grew and carries almost NO factor information: the rank collapse is a")
+                print("    SCALE ARTEFACT. Restate any rank claim in whitened coordinates (standardise")
+                print("    per feature before `spectrum`) before attributing the MCC drop to geometry.")
+            elif grew:
+                print("  → PC1 grew AND is factor-loaded: COMPRESSION is real. The factors moved into")
+                print("    fewer shared directions, which is why the forward map (factors→content)")
+                print("    improves while each factor gets harder to recover separately.")
+            elif gb["var_share_informative"] < 0.8 * ga["var_share_informative"]:
+                print("  → PC1 stable but the leading energy became less factor-explainable: variance")
+                print("    is moving into noise directions rather than concentrating.")
+
         if b["eff_rank"] < 0.8 * a["eff_rank"] or b["cond95"] > 3 * a["cond95"]:
             print("\n  → GEOMETRY COLLAPSED. Conditioning is the one mechanism that survived")
             print("    calibration, so this is a candidate cause — but check the magnitude before")
