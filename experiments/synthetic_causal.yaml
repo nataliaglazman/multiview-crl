@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-lambda-01-mse-025-10
+tag: synthetic-causal-clean-content-lambda-01-redo
 
 contrastive_loss_type: barlow_twins
 bt_lambda: 1                 # NOT 0.005 — see the calibration note above
@@ -90,10 +90,10 @@ checkpoint_steps: 1000
 eval_dci: true
 # detach_style_injection: true
 synthetic_clean_content: true
-bt_sim_normalize: true
-bt_sim_coeff: 0.25       # ≈ on_diag_gap 0.38 / current normalised sim 16624
-bt_std_coeff: 10
-channels_last: false
+# bt_sim_normalize: true
+bt_sim_coeff: 0       # ≈ on_diag_gap 0.38 / current normalised sim 16624
+bt_std_coeff: 0
+# channels_last: false
 
 
 # _base_: synthetic_defaults
