@@ -227,6 +227,74 @@ def collect_gradients(model, dataset, args_, device, grid, level, n_batches, bat
     return named, params, grads, per_batch
 
 
+def snr_decomposition(G):
+    """Split a stack of per-batch gradients into expected-gradient and per-batch noise.
+
+    ``G`` is ``(B, D)``: one flattened gradient per batch. For independent batches
+
+        E||mean(G)||^2 = ||E[g]||^2 + tr(Cov)/B
+
+    so the naive norm of the averaged gradient OVERSTATES the true expected gradient by
+    exactly the noise term, and does so more the fewer batches you average. Subtracting it
+    gives an unbiased estimate of ||E[g]||^2, which can come out NEGATIVE when the true
+    expected gradient is zero — that is the signature, not a bug, so it is reported rather
+    than clipped.
+
+    Why this decides the question: a loss whose target is attainable converges to a genuine
+    descent direction and keeps a non-zero ||E[g]||. A loss chasing an unattainable target
+    (an off-diagonal that cannot go below its d(d-1)/rows sampling floor) ends up with
+    E[g] ~ 0 and large per-batch variance — it never stops moving the weights, but the
+    motion is a random walk rather than optimisation.
+    """
+    G = np.asarray(G, dtype=np.float64)
+    b = G.shape[0]
+    if b < 2:
+        return {"n_batches": b}
+    gbar = G.mean(0)
+    naive = float((gbar**2).sum())
+    # E||g - gbar||^2 underestimates tr(Cov) by (B-1)/B; correct it.
+    tr_cov = float(((G - gbar) ** 2).sum(1).mean()) * b / (b - 1)
+    sig2 = naive - tr_cov / b
+    per_batch = float(np.sqrt((G**2).sum(1).mean()))
+    return {
+        "n_batches": b,
+        "naive_norm": float(np.sqrt(naive)),
+        "signal_norm": float(np.sign(sig2) * np.sqrt(abs(sig2))),
+        "signal_sq": sig2,
+        "noise_norm": float(np.sqrt(tr_cov)),
+        "per_batch_norm": per_batch,
+        # Batches needed for the averaged gradient to be majority signal. Infinite when the
+        # expected gradient is not distinguishable from zero.
+        "batches_for_snr1": (tr_cov / sig2) if sig2 > 0 else float("inf"),
+    }
+
+
+def collect_per_batch_gradients(model, dataset, args_, device, grid, level, n_batches, batch_size):
+    """One flattened encoder gradient per batch, for the SNR decomposition."""
+    import torch
+    from torch.utils.data import DataLoader, Subset
+
+    named = _encoder_params(model)
+    params = [p for _n, p in named]
+    for p in params:
+        p.requires_grad_(True)
+
+    loader = DataLoader(
+        Subset(dataset, range(min(n_batches * batch_size, len(dataset)))), batch_size=batch_size, shuffle=False
+    )
+    out = {}
+    for batch in loader:
+        losses = _losses_at(model, batch, args_, device, grid, level)
+        for key, loss in losses.items():
+            if not torch.is_tensor(loss) or not loss.requires_grad:
+                continue
+            g = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+            g = [torch.zeros_like(p) if gi is None else gi for gi, p in zip(g, params)]
+            out.setdefault(key, []).append(_flat(g).float().cpu().numpy())
+        del losses
+    return {k: np.stack(v) for k, v in out.items()}
+
+
 def _mcc_now(model, dataset, device, grid, level, batch_size, gt_cache, seeds, n_splits):
     from eval.identifiability_metrics import block_mcc
     from eval.patch_mcc_decay import extract_patch_block
@@ -259,6 +327,15 @@ def main():
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--n-splits", type=int, default=5)
     ap.add_argument("--precondition", action="store_true", help="Divide by sqrt(v) from the optimizer state")
+    ap.add_argument(
+        "--snr",
+        action="store_true",
+        help="Run the gradient signal-to-noise decomposition instead of the dMCC sweep. "
+        "Decides whether a loss has a genuine expected descent direction or is only chasing "
+        "sampling noise. The latter never stops moving the weights but is a random walk, "
+        "which the matched-random control in the dMCC table subtracts out by construction "
+        "-- so a loss can drive a decay and still show zero excess there.",
+    )
     ap.add_argument(
         "--random-controls",
         type=int,
@@ -313,6 +390,38 @@ def main():
                     )
                 else:
                     precond = cat.to(device)
+
+        if cli.snr:
+            per_b = collect_per_batch_gradients(
+                model, dataset, args_, device, grid, cli.level, cli.grad_batches, cli.grad_batch_size
+            )
+            print(f"\n  gradient signal/noise over {cli.grad_batches} batches of {cli.grad_batch_size}")
+            print(
+                f"  {'loss':<14}{'per-batch':>12}{'mean of B':>12}{'EXPECTED':>12}"
+                f"{'noise':>12}{'signal share':>14}{'batches->SNR1':>15}"
+            )
+            print("  " + "-" * 91)
+            for k in ("recon", "contrastive", "vq"):
+                if k not in per_b:
+                    continue
+                d = snr_decomposition(per_b[k])
+                if "naive_norm" not in d:
+                    continue
+                share = (d["signal_norm"] / d["per_batch_norm"]) if d["per_batch_norm"] > 0 else float("nan")
+                need = d["batches_for_snr1"]
+                need_s = "inf" if not np.isfinite(need) else f"{need:.0f}"
+                print(
+                    f"  {k:<14}{d['per_batch_norm']:>12.4e}{d['naive_norm']:>12.4e}"
+                    f"{d['signal_norm']:>12.4e}{d['noise_norm']:>12.4e}{share:>14.3f}{need_s:>15}"
+                )
+            print("\n    EXPECTED is bias-corrected: ||mean||^2 - tr(Cov)/B. At or below zero means the")
+            print("    loss has NO detectable descent direction left, so every step it takes is")
+            print("    sampling noise and it random-walks the encoder indefinitely instead of")
+            print("    converging. A loss with an attainable target keeps EXPECTED clearly positive.")
+            del model, per_b
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            continue
 
         named, params, grads, per_batch = collect_gradients(
             model, dataset, args_, device, grid, cli.level, cli.grad_batches, cli.grad_batch_size, precond
