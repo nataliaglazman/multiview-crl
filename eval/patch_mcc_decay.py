@@ -1120,7 +1120,7 @@ def test_pc_loading(x, gt, seeds, n_splits, n_pcs=8):
     }
 
 
-def test_factor_depth(x, gt, seeds, n_splits, max_pcs=64, frac=0.9):
+def test_factor_depth(x, gt, seeds, n_splits, max_pcs=64, frac=0.9, abs_target=0.5):
     """How deep in the spectrum does each factor live?
 
     ``test_pc_loading`` shows the factors concentrated in ~3 leading directions, but there
@@ -1156,20 +1156,29 @@ def test_factor_depth(x, gt, seeds, n_splits, max_pcs=64, frac=0.9):
     ladder = sorted({int(round(v)) for v in np.geomspace(1, k_max, 12)})
     curve = {k: cv_probe_r2_multi(scores[:, :k], gt, n_splits=n_splits, seeds=seeds[:1])["mean"] for k in ladder}
 
-    print(f"\n  spectral depth — leading PCs needed for {frac:.0%} of each factor's whole-block R2:")
-    print(f"    {'factor':<20}{'R2_full':>9}{'depth':>8}")
-    print("    " + "-" * 37)
-    depth = {}
+    print(f"\n  spectral depth — leading PCs needed to recover each factor:")
+    print(f"    rel = {frac:.0%} of that checkpoint's OWN whole-block R2 (moves with it — see below)")
+    print(f"    abs = a fixed R2 of {abs_target:.2f} (checkpoint-independent; use this to compare)")
+    print(f"    {'factor':<20}{'R2_full':>9}{'rel':>8}{'abs':>8}")
+    print("    " + "-" * 45)
+    depth, depth_abs = {}, {}
     for j, nm in enumerate(names):
+        over = f">{k_max}"
         if full[j] <= 0.02:
-            depth[nm] = None
-            print(f"    {nm:<20}{full[j]:>9.4f}{'n/a':>8}   (not recoverable at all)")
+            depth[nm] = depth_abs[nm] = None
+            print(f"    {nm:<20}{full[j]:>9.4f}{'n/a':>8}{'n/a':>8}   (not recoverable at all)")
             continue
-        target = frac * full[j]
-        hit = next((k for k in ladder if curve[k][j] >= target), None)
-        depth[nm] = hit
-        print(f"    {nm:<20}{full[j]:>9.4f}{(str(hit) if hit else f'>{k_max}'):>8}")
-    return {"depth": depth, "r2_full": {nm: float(full[j]) for j, nm in enumerate(names)}, "k_max": k_max}
+        hit = next((k for k in ladder if curve[k][j] >= frac * full[j]), None)
+        hit_a = next((k for k in ladder if curve[k][j] >= abs_target), None)
+        depth[nm], depth_abs[nm] = hit, hit_a
+        fa = str(hit_a) if hit_a else (over if full[j] >= abs_target else "n/a")
+        print(f"    {nm:<20}{full[j]:>9.4f}{(str(hit) if hit else over):>8}{fa:>8}")
+    return {
+        "depth": depth,
+        "depth_abs": depth_abs,
+        "r2_full": {nm: float(full[j]) for j, nm in enumerate(names)},
+        "k_max": k_max,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1325,26 +1334,43 @@ def report_delta(strata_res, geom_res, arms):
             print(f"\n  spectral depth (early) vs surviving rank (late n@95% = {surviving})")
             print(f"    {'factor':<20}{'depth@2k':>10}{'depth@end':>11}{'ΔR2_full':>10}")
             print("    " + "-" * 51)
-            deep_lost, shallow_held = [], []
+            deep_lost, shallow_held, dvec, rvec = [], [], [], []
             for nm, da in ga["depth"].items():
                 db = gb["depth"].get(nm)
                 d_r2 = gb["r2_full"].get(nm, float("nan")) - ga["r2_full"].get(nm, float("nan"))
                 fa = str(da) if da else f">{kmax}"
                 fb = str(db) if db else f">{gb.get('k_max', kmax)}"
                 print(f"    {nm:<20}{fa:>10}{fb:>11}{d_r2:>+10.4f}")
-                if da is None or da > surviving:
-                    deep_lost.append((nm, d_r2))
-                else:
-                    shallow_held.append((nm, d_r2))
+                # None ("deeper than the ladder") sorts last, which is what a rank test wants.
+                dvec.append(da if da else kmax * 2)
+                rvec.append(d_r2)
+                (shallow_held if (da and da <= surviving) else deep_lost).append((nm, d_r2))
+
+            # The threshold split is only meaningful when both sides are populated. It is
+            # routinely degenerate: if EVERY factor needs more directions than the late block
+            # retains at 95% energy, there is no "shallow" group to contrast against, and the
+            # rank correlation below is the test that still works.
             if deep_lost and shallow_held:
                 md = float(np.mean([v for _, v in deep_lost]))
                 ms = float(np.mean([v for _, v in shallow_held]))
                 print(f"\n    mean ΔR2_full — deeper than surviving rank: {md:+.4f}  ({len(deep_lost)} factors)")
                 print(f"                    within surviving rank:      {ms:+.4f}  ({len(shallow_held)} factors)")
-                if md < ms - 0.01:
-                    print("    => MECHANISM CONFIRMED. The factors that lived below the surviving rank are")
-                    print("       the ones that lost. The block collapsed onto a low-dimensional")
-                    print("       factor-aligned subspace and discarded what did not fit.")
+            else:
+                side = "deeper than" if not shallow_held else "within"
+                print(f"\n    NOTE: all {len(dvec)} factors are {side} the surviving rank, so the threshold")
+                print("    split is degenerate. Read the rank correlation instead.")
+
+            if len(dvec) > 3:
+                from scipy.stats import spearmanr as _sp
+
+                rho = _sp(np.asarray(dvec, float), np.asarray(rvec, float))
+                print(f"\n    Spearman(depth@early, ΔR2_full) = {rho.statistic:+.3f}  p={rho.pvalue:.4f}")
+                if rho.statistic < -0.5 and rho.pvalue < 0.05:
+                    print("    => DEPTH PREDICTS THE LOSS. The deeper a factor sat in the spectrum, the more")
+                    print("       of it went. Note this does NOT mean factors live in the leading PCs: check")
+                    print("       the depth column — if every factor needs many directions, the leading PCs")
+                    print("       are a MIXTURE of factors, not any single one, and what is being lost is the")
+                    print("       tail energy that separates them. Entanglement rising, not factors deleted.")
                 else:
                     print("    => Depth does NOT predict the loss. The tail collapse and the per-factor")
                     print("       decline are separate phenomena; do not merge them in the writeup.")
