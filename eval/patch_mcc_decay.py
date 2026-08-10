@@ -1332,7 +1332,10 @@ def main():
         for rd in run_dirs:
             test_curves(rd, level=args.level, sat_tol=args.sat_tol)
 
-    want = {"strata", "geometry", "viewgap"} & set(args.tests)
+    # Every test that needs a checkpoint. Anything added to --tests choices must be listed
+    # here too, or it silently no-ops: this intersection also drives the per-test dispatch
+    # below, so a missing entry both skips the work and returns before printing anything.
+    want = {"strata", "geometry", "viewgap", "factors"} & set(args.tests)
     if not want:
         return
 
@@ -1350,7 +1353,9 @@ def main():
             logger.error("No checkpoints found in %s — pass --checkpoints.", rd)
             continue
 
-        print(f"\n{'=' * 78}\nTESTS 2/3 — {os.path.basename(rd.rstrip('/'))}\n{'=' * 78}")
+        print(
+            f"\n{'=' * 78}\nCHECKPOINT TESTS ({', '.join(sorted(want))}) — {os.path.basename(rd.rstrip('/'))}\n{'=' * 78}"
+        )
         _, run_args, _ = load_model_from_run_dir(rd, checkpoint=os.path.join(rd, names[0]), device=device)
         grid = args.grid or list(getattr(run_args, "patch_grid", [8, 8, 8]))
         thresh = args.fg_thresh if args.fg_thresh is not None else getattr(run_args, "patch_foreground_thresh", 0.05)
