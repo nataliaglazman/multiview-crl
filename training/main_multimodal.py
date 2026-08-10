@@ -1726,25 +1726,42 @@ def main(args):
     # optimizer is built matters — the param-group loop below skips requires_grad=False, so
     # frozen tensors never enter AdamW and cannot drift via weight decay either.
     if getattr(args, "freeze_encoder", False):
+        # UNWRAP FIRST. By this point vqvae_model has already been wrapped in
+        # torch.nn.DataParallel (above), and DataParallel does NOT proxy arbitrary
+        # attribute access — it only exposes `.module`. So `getattr(vqvae_model,
+        # "encoders")` returns None on the wrapper, every lookup below silently misses,
+        # and the run trains with nothing frozen while still logging "[FREEZE ENCODER]".
+        # That produced a whole 88k run whose selection/* metrics moved freely.
+        _fm = getattr(vqvae_model, "module", vqvae_model)
+        _fm = getattr(_fm, "online", _fm)
         _frozen_names = []
         for _mod_name in ("encoders", "encoders_v1", "content_norms", "content_projections"):
-            _mod = getattr(vqvae_model, _mod_name, None)
-            if _mod is not None:
+            _mod = getattr(_fm, _mod_name, None)
+            if _mod is not None and any(True for _ in _mod.parameters()):
                 for _p in _mod.parameters():
                     _p.requires_grad_(False)
                 _frozen_names.append(_mod_name)
         # The mask logits select which channels ARE content, so they are part of the
         # representation even though they do not live in the encoder stack.
-        for _pn, _pp in vqvae_model.named_parameters():
+        for _pn, _pp in _fm.named_parameters():
             if "channel_logits" in _pn or "split_gate_logits" in _pn:
                 _pp.requires_grad_(False)
                 _frozen_names.append(_pn)
-        _n_frozen = sum(p.numel() for p in vqvae_model.parameters() if not p.requires_grad)
-        _n_train = sum(p.numel() for p in vqvae_model.parameters() if p.requires_grad)
+        _n_frozen = sum(p.numel() for p in _fm.parameters() if not p.requires_grad)
+        _n_train = sum(p.numel() for p in _fm.parameters() if p.requires_grad)
         logger.info("")
         logger.info("[FREEZE ENCODER]")
-        logger.info(f"  Frozen: {', '.join(_frozen_names) if _frozen_names else '(nothing matched!)'}")
+        logger.info(f"  Frozen: {', '.join(_frozen_names) if _frozen_names else '(NOTHING MATCHED)'}")
         logger.info(f"  {_n_frozen:,} params frozen, {_n_train:,} trainable (decoder + codebooks)")
+        # Hard failure, not a warning: a freeze that silently does nothing does not
+        # degrade the experiment, it invalidates it — every metric the run exists to hold
+        # constant is then free to move, and the output looks superficially normal.
+        if not _frozen_names or _n_frozen == 0:
+            raise RuntimeError(
+                "--freeze-encoder matched no parameters on "
+                f"{type(_fm).__name__}. Expected attributes 'encoders' / 'content_norms' on the "
+                "bare VQVAE — check the unwrapping above if the model is wrapped differently."
+            )
         if _n_train == 0:
             raise ValueError(
                 "--freeze-encoder left zero trainable parameters. Combining it with "
