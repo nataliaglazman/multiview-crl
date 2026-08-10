@@ -1194,15 +1194,16 @@ def main():
     ap.add_argument("--cache-dataset", action="store_true", help="Cache rendered volumes in RAM (~4 GB at N=1000)")
     args = ap.parse_args()
 
+    # Both of these stand alone and take no --run-dir, so they must be checked BEFORE the
+    # requirement below rejects the command.
     if args.calibrate:
         run_calibration()
         return
-    if not args.run_dir:
-        ap.error("--run-dir is required unless --calibrate is given")
-
     if args.summarise:
         summarise_runs(args.summarise, level=args.level)
         return
+    if not args.run_dir:
+        ap.error("--run-dir is required unless --calibrate or --summarise is given")
 
     run_dirs = [args.run_dir] + ([args.compare_run_dir] if args.compare_run_dir else [])
 
