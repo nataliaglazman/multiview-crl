@@ -351,9 +351,18 @@ def test_curves(run_dir, level=0, sat_tol=0.1):
         print("\n  BT terms, post-peak descent (share of each term's own total, after the MCC peak):")
         print("\n".join(rows))
         if max(shares) <= 0.25:
-            print("\n  → EVERY term converged BEFORE the peak. The contrastive objective is at a fixed")
-            print("    point while the metric decays, so it is not the cause: what follows the peak is")
-            print("    recon/VQ-phase drift. Changing the contrastive loss cannot fix this curve.")
+            _rec_tail = _tail_median(*scalars["Loss/Recon"]) if "Loss/Recon" in scalars else float("nan")
+            print("\n  → Every term's DESCENT finished before the peak.")
+            if np.isfinite(_rec_tail) and _rec_tail > 1e-9:
+                print("    The contrastive objective is at a fixed point while the metric decays, so it")
+                print("    is not the cause: what follows is recon/VQ-phase drift, and changing the")
+                print("    contrastive loss cannot fix this curve.")
+            else:
+                print("    But Loss/Recon is ~0, so there is NO reconstruction term to blame — this is a")
+                print("    contrastive-only run and the contrastive objective is the only thing training.")
+                print("    'Descent finished' is about the loss VALUE; check var_loss and feat_std below,")
+                print("    because a hinge that is engaged and LOSING has a large gradient while its")
+                print("    value sits still.")
 
     # --- Is the variance hinge, the only anti-collapse term, actually holding? ---
     std_tag = f"Contrastive/feat_std_mean_L{level}"
@@ -364,15 +373,27 @@ def test_curves(run_dir, level=0, sat_tol=0.1):
             f"\n  feat_std_mean (hinge target 1.0):  {s_vals[0]:.4f} → {tail:.4f}"
             + ("   ← ≪ 1: the hinge is NOT holding; raise bt_std_coeff" if tail < 0.2 else "")
         )
+        # The hinge is bounded at 2.0 (one per view). Engaged AND rising means the feature
+        # scale is collapsing faster than std_coeff can resist -- and because the
+        # correlation terms are scale-invariant, nothing else in the objective defends it.
+        _vt = f"Contrastive/var_loss_L{level}"
+        if _vt in scalars:
+            v_steps, v_vals = scalars[_vt]
+            v_tail = _tail_median(v_steps, v_vals)
+            if v_tail > 0.05:
+                _dir = "RISING" if v_vals[-1] > v_vals[0] else "falling"
+                print(f"    var_loss {v_vals[0]:.3f} → {v_tail:.3f} of a max 2.0, and {_dir}.")
+                print("      The variance hinge is ENGAGED. If it is rising, it is losing: the feature")
+                print("      scale is collapsing and only bt_std_coeff opposes it, since on_diag and")
+                print("      off_diag are scale-invariant. Raise bt_std_coeff — it is one-sided and")
+                print("      costs exactly nothing once std exceeds 1.")
 
     # --- Are the two objectives actually balanced? ---
     if "Loss/Recon" in scalars and "Loss/Contrastive" in scalars:
         r_tail = _tail_median(*scalars["Loss/Recon"])
         c_tail = _tail_median(*scalars["Loss/Contrastive"])
-        print(
-            f"\n  Loss/Recon {r_tail:.5f}   Loss/Contrastive {c_tail:.5f}   "
-            f"→ contrastive:recon = {c_tail / max(r_tail, 1e-12):.1f}:1"
-        )
+        _ratio = "n/a (no recon term)" if r_tail <= 1e-9 else f"{c_tail / r_tail:.1f}:1"
+        print(f"\n  Loss/Recon {r_tail:.5f}   Loss/Contrastive {c_tail:.5f}   → contrastive:recon = {_ratio}")
         print("    (both scale_* weights are nominally 1 — this is the ratio that acts. Recon is the")
         print("     only force replenishing what the contrastive term removes.)")
 

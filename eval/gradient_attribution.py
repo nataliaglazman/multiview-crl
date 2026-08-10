@@ -140,6 +140,11 @@ def _losses_at(model, batch, args_, device, grid, level):
         m = m.unsqueeze(1)
 
     out = {}
+    # Under --contrastive-only the decoder and codebook were NEVER TRAINED: that flag skips
+    # the whole quantization + decoding path. Computing a reconstruction loss through those
+    # random weights produces a large, meaningless gradient that looks like a real force in
+    # the table. Skip them rather than report a number that invites the wrong comparison.
+    _con_only = bool(getattr(args_, "contrastive_only", False))
 
     # --- contrastive (Barlow Twins on the content channels, patch-pooled) ---
     enc = model(x, pool_only=True, n_views=n_views, patch_grid=tuple(grid))
@@ -172,6 +177,8 @@ def _losses_at(model, batch, args_, device, grid, level):
     ) * float(getattr(args_, "scale_contrastive_loss", 1.0))
 
     # --- reconstruction (BaselineLoss, exactly as training scores it) ---
+    if _con_only:
+        return out
     dec = model(x, return_recon=True, pool_only=False, n_views=n_views, subsets=[(0, 1)])
     recon, diffs = dec[0], dec[1]
     if recon.shape[2:] != x.shape[2:]:

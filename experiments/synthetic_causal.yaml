@@ -90,7 +90,7 @@ checkpoint_steps: 1000
 eval_dci: true
 # detach_style_injection: true
 synthetic_clean_content: true
-# bt_sim_normalize: true
+bt_sim_normalize: true
 bt_sim_coeff: 6e-5       # ≈ on_diag_gap 0.38 / current normalised sim 16624
 bt_std_coeff: 10
 # channels_last: false
