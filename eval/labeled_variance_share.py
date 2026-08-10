@@ -149,6 +149,27 @@ def _install_encoder_hooks(model_inner):
     return captured, handles, sep
 
 
+def _brain_mask(batch, x_v1):
+    """Per-sample brain mask as ``(B, 1, D, H, W)`` float, whatever the dataset exposes.
+
+    ``SyntheticBrainDataset._render`` POPS ``brain_mask`` out of ``gt_latents`` and moves it
+    to ``batch["mask"]`` (data/datasets.py:709), so reading it from ``gt_latents`` raises
+    KeyError on every synthetic run.  ADNI datasets also carry ``mask``.  The intensity
+    fallback is last resort and matches the generator's own rule when it has no mask.
+    """
+    bm = None
+    if "mask" in batch and isinstance(batch["mask"], (list, tuple)) and len(batch["mask"]):
+        bm = batch["mask"][0]
+    elif "brain_mask" in batch.get("gt_latents", {}):
+        bm = batch["gt_latents"]["brain_mask"]
+    if bm is None:
+        bm = (x_v1 > 0.05).float()
+    bm = torch.as_tensor(bm).float()
+    if bm.dim() == 4:
+        bm = bm[:, None]
+    return bm
+
+
 def _content_indices(soft_masks, level, n_channels):
     """Content channel indices for one level, or all channels when the level has no mask."""
     if isinstance(soft_masks, dict) and level in soft_masks:
@@ -203,10 +224,7 @@ def extract_prenorm_content(model, dataset, device, level=0, batch_size=8, num_w
         Z2.append(s2[:, c_idx].cpu())
         GT.append(batch["gt_latents"]["z_content"].cpu().numpy())
 
-        bm = batch["gt_latents"]["brain_mask"].float()
-        if bm.dim() == 4:
-            bm = bm[:, None]
-        MASK.append(F.adaptive_avg_pool3d(bm, s1.shape[2:]).cpu())
+        MASK.append(F.adaptive_avg_pool3d(_brain_mask(batch, imgs[0]), s1.shape[2:]).cpu())
 
         seen += s1.shape[0]
         if max_samples and seen >= max_samples:
@@ -360,6 +378,7 @@ def score_checkpoint(model, dataset, device, cli):
         "c_idx": c_idx,
         "min_std": float(min(sd1.min(), sd2.min())),
         "fg_positions": int(fg.sum()),
+        "n_positions": int(fg.size),
         "n_samples": int(len(gt)),
         "strata": {},
     }
@@ -398,8 +417,12 @@ def _fmt_block(label, res, kinds):
         f"    samples {res['n_samples']}   content channels {len(res['c_idx'])}"
         f"   min per-channel std {res['min_std']:.3e}",
     ]
+    frac = res["fg_positions"] / max(res["n_positions"], 1)
+    lines.append(f"    latent foreground {res['fg_positions']}/{res['n_positions']} positions ({frac:.1%})")
     if res["min_std"] < 1e-4:
         lines.append("    WARNING: a channel is near-constant; zc's 1e-6 floor is amplifying it into noise")
+    if not 0.02 < frac < 0.98:
+        lines.append("    WARNING: degenerate brain mask — the foreground/background split is not meaningful")
     for sname, entry in res["strata"].items():
         lines.append(f"    {sname:<11} V_S/feature {entry['V_S']:.4f}")
         for kind in kinds:
