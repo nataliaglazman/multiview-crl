@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_frozen_encoder.yaml
-# Generated at: 2026-08-10T07:58:23Z
-# Git SHA: ef1e7d2
+# Generated at: 2026-08-10T12:50:51Z
+# Git SHA: d5dba2b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-frozen-encoder
+#SBATCH --job-name=synthetic-causal-frozen-encoder-random
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-frozen-encoder-%j.err
+#SBATCH --error=synthetic-causal-frozen-encoder-random-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -80,7 +80,6 @@ fi
     --eval-dci \
     --freeze-encoder \
     --image-spacing 1.0 \
-    --init-from-checkpoint results/synthetic/synthetic-causal-clean-content-mse-real-lambda-01-normalized/vqvae_best.pt \
     --inject-style-to-decoder \
     --log-steps 50 \
     --lr 0.001 \
@@ -118,7 +117,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-frozen-encoder \
+    --model-id synthetic-causal-frozen-encoder-random \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 88000 \

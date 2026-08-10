@@ -30,12 +30,12 @@
 # norm mismatch is a warning, not an error, and would silently give you a hybrid model.
 
 _base_: synthetic_defaults
-tag: synthetic-causal-frozen-encoder
+tag: synthetic-causal-frozen-encoder-random
 
 # ---- Phase-2 block ----
 freeze_encoder: true
 # EDIT ME: phase 1's best checkpoint.
-init_from_checkpoint: results/synthetic/synthetic-causal-clean-content-mse-real-lambda-01-normalized/vqvae_best.pt
+# init_from_checkpoint: results/synthetic/synthetic-causal-clean-content-mse-real-lambda-01-normalized/vqvae_best.pt
 # The contrastive term cannot reach a parameter once the encoder is frozen, so it would
 # only cost compute. Its diagnostics keep logging either way.
 scale_contrastive_loss: 0
