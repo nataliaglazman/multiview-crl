@@ -1704,7 +1704,12 @@ def main(args):
 
     # Phase-2 init: another run's weights, but a fresh optimizer and step counter.
     # --resume-training continues a run in place; this starts a NEW one from given weights.
+    # Treat the literal strings as unset: `--set init_from_checkpoint=None` through
+    # launch.py arrives as the STRING "None", which is truthy and would send the loader
+    # looking for a file called None. Wanted when building the random-init control.
     _init_ckpt = getattr(args, "init_from_checkpoint", None)
+    if str(_init_ckpt).strip().lower() in ("none", "null", ""):
+        _init_ckpt = None
     if _init_ckpt:
         logger.info("")
         logger.info("[INIT FROM CHECKPOINT]")
