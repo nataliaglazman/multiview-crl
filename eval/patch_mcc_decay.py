@@ -189,6 +189,78 @@ def _tail_median(steps, values, frac=0.2):
     return float(np.median(values[steps >= steps[-1] - frac * (steps[-1] - steps[0])]))
 
 
+def summarise_runs(run_dirs, level=0):
+    """One row per run, from TensorBoard only.
+
+    Exists because the comparisons that matter on this project are between numbers whose
+    differences (~0.01 between configs) are SMALLER than the spread this table makes
+    visible: two random initialisations of the same architecture differed by 0.023 in
+    patch-MCC at step 1. Reading `first` across runs is therefore the calibration for how
+    much of any `peak` difference is the config and how much is the draw.
+
+    `peak` is also a max over however many evaluations the run logged, which is upward
+    biased, and biased MORE for a long decaying curve than for a short plateau. The `n_eval`
+    column is there so that asymmetry is visible rather than silent.
+    """
+    rows = []
+    for rd in run_dirs:
+        tb = os.path.join(rd, "tensorboard")
+        if not os.path.isdir(tb):
+            logger.warning("no tensorboard dir in %s", rd)
+            continue
+        sc = read_tb_scalars(tb)
+        mt = sc.get("selection/mcc_by_pool/patch")
+        if mt is None:
+            logger.warning("%s has no selection/mcc_by_pool/patch", rd)
+            continue
+        st, va = mt
+        pk = int(np.argmax(va))
+
+        def tail(tag):
+            return _tail_median(*sc[tag]) if tag in sc else float("nan")
+
+        rows.append(
+            {
+                "name": os.path.basename(rd.rstrip("/"))[:38],
+                "first": va[0],
+                "peak": va[pk],
+                "peak_step": st[pk],
+                "final": va[-1],
+                "n_eval": len(va),
+                "last_step": st[-1],
+                "leak_c2s": tail("selection/content_to_style_leak"),
+                "suff": tail("selection/style_sufficiency"),
+                "recon": tail("Loss/Recon"),
+            }
+        )
+    if not rows:
+        print("  nothing to summarise")
+        return
+
+    print(f"\n{'=' * 112}\nRUN SUMMARY (TensorBoard only)\n{'=' * 112}")
+    hdr = f"  {'run':<38}{'first':>8}{'peak':>8}{'@step':>8}{'final':>8}{'evals':>7}{'c2s leak':>10}{'style suff':>12}{'recon':>9}"
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+    for r in rows:
+        print(
+            f"  {r['name']:<38}{r['first']:>8.4f}{r['peak']:>8.4f}{r['peak_step']:>8.0f}{r['final']:>8.4f}"
+            f"{r['n_eval']:>7}{r['leak_c2s']:>10.4f}{r['suff']:>12.4f}{r['recon']:>9.4f}"
+        )
+
+    firsts = np.array([r["first"] for r in rows])
+    peaks = np.array([r["peak"] for r in rows])
+    if len(rows) > 1:
+        print(f"\n  spread in `first` (initialisation only): {firsts.max() - firsts.min():.4f}")
+        print(f"  spread in `peak`  (config + init)       : {peaks.max() - peaks.min():.4f}")
+        if peaks.max() - peaks.min() <= firsts.max() - firsts.min():
+            print("    → the peak spread does NOT exceed the initialisation spread. No config")
+            print("      difference here is established without seed replicates.")
+        else:
+            print("    → peak spread exceeds initialisation spread, but that is a comparison of")
+            print("      ranges from one run each. Replicate seeds before claiming a config effect.")
+    print()
+
+
 def test_curves(run_dir, level=0, sat_tol=0.1):
     tb_dir = os.path.join(run_dir, "tensorboard")
     if not os.path.isdir(tb_dir):
@@ -1079,6 +1151,15 @@ def main():
     ap.add_argument("--run-dir", help="Training run directory (with settings.json)")
     ap.add_argument("--compare-run-dir", default=None, help="Second run scored identically (e.g. the recon-only arm)")
     ap.add_argument(
+        "--summarise",
+        nargs="+",
+        default=None,
+        help="Run dirs to tabulate side by side from TensorBoard alone (no GPU, no checkpoints), "
+        "then exit. Use this before comparing configs: the peak-vs-peak differences between "
+        "configs on this project are ~0.01 while two random inits differ by ~0.023 at step 1, so "
+        "the spread across runs is the thing to look at first.",
+    )
+    ap.add_argument(
         "--checkpoints",
         nargs="+",
         default=None,
@@ -1118,6 +1199,10 @@ def main():
         return
     if not args.run_dir:
         ap.error("--run-dir is required unless --calibrate is given")
+
+    if args.summarise:
+        summarise_runs(args.summarise, level=args.level)
+        return
 
     run_dirs = [args.run_dir] + ([args.compare_run_dir] if args.compare_run_dir else [])
 

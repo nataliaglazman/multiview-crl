@@ -99,10 +99,30 @@ def linear_recoverability(x_from, x_to, z, seeds=(0, 1), n_splits=5, seed=0):
 
 
 def verdict(ladder_a, ladder_b, rec_late_to_early, label_a, label_b, sd=0.002):
+    # The two tests are not alternatives and the real answer is usually a MIXTURE, so lead
+    # with the split rather than with whichever branch fires. What matters is how much of
+    # the linear decay a nonlinear readout buys back, and how much survives every probe.
+    lin_decay = ladder_a.get("ridge", np.nan) - ladder_b.get("ridge", np.nan)
+    best_a = max((v for v in ladder_a.values() if np.isfinite(v)), default=np.nan)
+    best_b = max((v for v in ladder_b.values() if np.isfinite(v)), default=np.nan)
+    irreducible = best_a - best_b
+    print("\n  Verdict")
+    if np.isfinite(lin_decay) and np.isfinite(irreducible) and lin_decay > 0:
+        share = 100 * max(lin_decay - irreducible, 0.0) / lin_decay
+        print(f"    linear (ridge) decay        {lin_decay:+.4f}")
+        print(f"    best-probe decay            {irreducible:+.4f}   <- survives EVERY readout tried")
+        print(f"    recovered by going nonlinear {share:.0f}% of the linear decay")
+        if irreducible > 3 * sd:
+            print("      So this is a MIXTURE: some reformatting, but most of the drop is factor")
+            print("      information no probe here can recover. Report the best-probe decay as the")
+            print("      loss; the ridge decay overstates it.")
+        else:
+            print("      Essentially all of the linear decay is recovered nonlinearly — the factors")
+            print("      are still present and the ridge probe is what is failing.")
+
     gain_a = ladder_a.get("kernel", np.nan) - ladder_a.get("ridge", np.nan)
     gain_b = ladder_b.get("kernel", np.nan) - ladder_b.get("ridge", np.nan)
-    print("\n  Verdict")
-    print(f"    nonlinear gain (kernel - ridge):  {label_a} {gain_a:+.4f}   {label_b} {gain_b:+.4f}")
+    print(f"\n    nonlinear gain (kernel - ridge):  {label_a} {gain_a:+.4f}   {label_b} {gain_b:+.4f}")
     if np.isfinite(gain_a) and np.isfinite(gain_b) and (gain_b - gain_a) > 3 * sd:
         print("      The LATE block gains much more from a nonlinear readout, so the factors")
         print("      became less LINEARLY readable rather than less present. Under clean_content")
