@@ -244,7 +244,14 @@ def main():
     ap.add_argument("--checkpoints", nargs="+", default=["vqvae_best.pt", "vqvae_model.pt"])
     ap.add_argument("--level", type=int, default=0)
     ap.add_argument("--grid", type=int, nargs=3, default=None)
-    ap.add_argument("--grad-batches", type=int, default=4, help="Batches to average each gradient over")
+    ap.add_argument(
+        "--grad-batches",
+        type=int,
+        default=16,
+        help="Batches to average each gradient over. The contrastive gradient's batch-to-batch "
+        "sd has been measured at ~69%% of its mean, so a handful of batches does not resolve "
+        "its expectation from zero — which is exactly the quantity convergence claims is small.",
+    )
     ap.add_argument("--grad-batch-size", type=int, default=8)
     ap.add_argument("--mcc-samples", type=int, default=600, help="Volumes for each block-MCC re-measurement")
     ap.add_argument("--mcc-batch", type=int, default=16)
@@ -252,6 +259,14 @@ def main():
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--n-splits", type=int, default=5)
     ap.add_argument("--precondition", action="store_true", help="Divide by sqrt(v) from the optimizer state")
+    ap.add_argument(
+        "--random-controls",
+        type=int,
+        default=1,
+        help="Matched-random directions per loss (0 disables). Without at least one the dMCC "
+        "table cannot separate the loss from generic perturbation sensitivity, so this "
+        "defaults ON despite roughly doubling runtime.",
+    )
     ap.add_argument("--causal", choices=("match", "iid"), default="match")
     cli = ap.parse_args()
 
@@ -327,9 +342,9 @@ def main():
         print(f"  {'loss':<14}" + "".join(f"{'eta=' + str(e):>12}" for e in cli.etas) + f"{'linearity R2':>15}")
         print("  " + "-" * (14 + 12 * len(cli.etas) + 15))
         backup = [p.detach().clone() for p in params]
-        for k in keys:
-            direction = grads[k] / max(grads[k].norm().item(), 1e-12)
-            deltas = []
+
+        def _sweep(direction):
+            out = []
             for eta in cli.etas:
                 off = 0
                 with torch.no_grad():
@@ -340,17 +355,56 @@ def main():
                 mcc, _ = _mcc_now(
                     model, dataset, device, grid, cli.level, cli.mcc_batch, gt_cache, tuple(cli.seeds), cli.n_splits
                 )
-                deltas.append(mcc - base)
+                out.append(mcc - base)
             with torch.no_grad():
                 for p, b0 in zip(params, backup):
                     p.copy_(b0)
-            r2 = linearity_check(cli.etas, deltas)
-            flag = "   <- non-linear, eta too large" if np.isfinite(r2) and r2 < 0.9 else ""
-            print(f"  {k:<14}" + "".join(f"{d:>+12.4f}" for d in deltas) + f"{r2:>15.3f}{flag}")
+            return out
 
-        print("\n  Reading it: the loss with the most negative dMCC is the one degrading")
-        print("  identifiability. Compare against the per-seed sd of block-MCC (~0.001 at")
-        print("  N=1500) — a dMCC inside that band is noise, not attribution.")
+        def _matched_random(g, seed):
+            """A random direction with the SAME per-tensor energy profile as ``g``.
+
+            The control this table is meaningless without. Every direction is unit-norm, so
+            each row perturbs the weights by the same amount — and block-MCC degrades under
+            almost ANY perturbation of sufficient size. Without a baseline you cannot tell
+            "this loss degrades identifiability" from "0.8 of parameter noise degrades
+            identifiability". Matching per-tensor norms rather than drawing a flat Gaussian
+            keeps the comparison honest: the control spreads its energy across layers the
+            same way the real gradient does, so what is left is the DIRECTION within that
+            profile, which is the only part attributable to the loss.
+            """
+            gen = torch.Generator(device="cpu").manual_seed(seed)
+            parts, off = [], 0
+            for p in params:
+                n = p.numel()
+                blk = g[off : off + n]
+                r = torch.randn(n, generator=gen).to(g.device)
+                r = r / max(r.norm().item(), 1e-12) * blk.norm()
+                parts.append(r)
+                off += n
+            r = torch.cat(parts)
+            return r / max(r.norm().item(), 1e-12)
+
+        print(f"  {'direction':<20}" + "".join(f"{'eta=' + str(e):>12}" for e in cli.etas) + f"{'linearity R2':>15}")
+        print("  " + "-" * (20 + 12 * len(cli.etas) + 15))
+        for k in keys:
+            deltas = _sweep(grads[k] / max(grads[k].norm().item(), 1e-12))
+            r2 = linearity_check(cli.etas, deltas)
+            flag = "   <- non-linear" if np.isfinite(r2) and r2 < 0.9 else ""
+            print(f"  {k:<20}" + "".join(f"{d:>+12.4f}" for d in deltas) + f"{r2:>15.3f}{flag}")
+            if cli.random_controls > 0:
+                ctrl = np.mean(
+                    [_sweep(_matched_random(grads[k], 1000 + 7 * i)) for i in range(cli.random_controls)], axis=0
+                )
+                print(f"  {'  random (matched)':<20}" + "".join(f"{d:>+12.4f}" for d in ctrl) + "        [control]")
+                excess = [d - c for d, c in zip(deltas, ctrl)]
+                print(f"  {'  EXCESS over random':<20}" + "".join(f"{d:>+12.4f}" for d in excess) + "   <- attribution")
+
+        print("\n  Reading it: the EXCESS row is the attribution — how much worse this loss's")
+        print("  direction is than a random direction with the same per-layer energy. The raw")
+        print("  dMCC row conflates that with generic perturbation sensitivity, which is large.")
+        print("  Compare the excess against block-MCC's per-seed sd (~0.001 at N=1500); inside")
+        print("  that band there is no attribution, whatever the raw row says.")
         del model
         if device.type == "cuda":
             torch.cuda.empty_cache()
