@@ -1223,6 +1223,10 @@ def main(args):
         _bt_gap_w = getattr(args, "bt_gap_weight", 0.0)
         # The GAP term is estimated from B rows, not B*P, so its off-diagonal has a large
         # sampling floor (~d(d-1)/B) that is pure noise. Let it carry its own lambda.
+        # One EMA state dict per TERM: the patch and GAP correlations are different matrices
+        # (folded (subject, position) rows vs subject rows) and must never share a buffer.
+        _bt_corr_ema = float(getattr(args, "bt_corr_ema", 0.0) or 0.0)
+        _bt_ema_patch, _bt_ema_gap, _bt_ema_plain = {}, {}, {}
         _bt_gap_lam = getattr(args, "bt_gap_lambda", None)
         _bt_gap_lam = _bt_lambda if _bt_gap_lam is None else _bt_gap_lam
         _bt_sim_c = getattr(args, "bt_sim_coeff", 0.0)
@@ -1265,6 +1269,8 @@ def main(args):
                 sim_coeff=_bt_sim_c,
                 std_coeff=_bt_std_c,
                 sim_normalize=_bt_sim_norm,
+                corr_ema=_bt_ema_plain,
+                corr_ema_decay=_bt_corr_ema,
             )
 
         def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
@@ -1279,6 +1285,8 @@ def main(args):
                 sim_coeff=_bt_sim_c,
                 std_coeff=_bt_std_c,
                 sim_normalize=_bt_sim_norm,
+                corr_ema=_bt_ema_patch,
+                corr_ema_decay=_bt_corr_ema,
             )
             # Optional GAP-pooled companion term. The patch fold's cross-covariance is
             # Cov_subject + Cov_interaction and the interaction dominates on registered
@@ -1295,6 +1303,8 @@ def main(args):
                     sim_coeff=_bt_sim_c,
                     std_coeff=_bt_std_c,
                     sim_normalize=_bt_sim_norm,
+                    corr_ema=_bt_ema_gap,
+                    corr_ema_decay=_bt_corr_ema,
                 )
                 # bt_patch_weight scales the PATCH term only. Setting it to 0 (with
                 # patch_contrastive still on, so the forward hands us the patch-shaped

@@ -487,6 +487,22 @@ def parse_args() -> argparse.ArgumentParser:
         "term and leave redundancy reduction to the patch term, which has B*P rows to estimate from.",
     )
     parser.add_argument(
+        "--bt-corr-ema",
+        type=float,
+        default=0.0,
+        help="EMA momentum for the Barlow Twins cross-correlation matrix, averaged across STEPS. "
+        "0 disables (default; the loss is bit-identical). off_diag sums d(d-1) squared "
+        "correlations estimated from B rows, so it carries a sampling floor of d(d-1)/B even at "
+        "the optimum: 1892/128 = 14.78 at d=44, against a measured 17.999 at GAP, i.e. 82% noise. "
+        "Averaging across steps cuts that floor by (1-m)/(1+m) — an effective row count of "
+        "B*(1+m)/(1-m), so m=0.99 at B=128 behaves like ~25k rows. Reaching the same floor by "
+        "batch size alone would need ~5900 subjects per step. The GAP term benefits most: it is "
+        "the only one whose rows are SUBJECTS, and subjects are the scarce resource. "
+        "NOTE: the gradient on the off-diagonal scales with (1-m), so raise --bt-lambda when "
+        "enabling this. `off_diag_inst` is logged un-EMA'd so runs stay comparable with pre-EMA "
+        "numbers. Try 0.99.",
+    )
+    parser.add_argument(
         "--bt-patch-stat",
         type=str,
         default="fold",

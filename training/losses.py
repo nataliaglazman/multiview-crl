@@ -1040,6 +1040,8 @@ def barlow_twins_loss(
     sim_coeff=0.0,
     std_coeff=0.0,
     sim_normalize=False,
+    corr_ema=None,
+    corr_ema_decay=0.0,
     **_kwargs,
 ):
     """Barlow Twins loss over content channels of paired views.
@@ -1067,6 +1069,14 @@ def barlow_twins_loss(
             BT's ``on_diag`` is a correlation, which is invariant to a per-view constant
             offset and so cannot require the two views to coincide — only to co-vary. This
             is the term that can. 0 disables (default), leaving the loss bit-identical.
+        corr_ema: Mutable dict owned by the CALLER, holding the running cross-correlation
+            per (subset, view-i, view-j). Pass the same dict every step. Not checkpointed:
+            bias correction makes a zero init unbiased, so a resume costs a noisier estimate
+            for ~1/(1-decay) steps, not a transient.
+        corr_ema_decay: EMA momentum for that matrix. 0 disables (default) and leaves the
+            loss bit-identical. Cuts off_diag's d(d-1)/B sampling floor by (1-m)/(1+m):
+            at d=44, B=128 the floor is 14.78, and m=0.99 takes it to 0.075. Raise ``lambd``
+            when enabling — the gradient on this term scales with (1-m).
         sim_normalize: Divide the MSE by a detached per-channel ``2*sigma^2`` so it reads
             ``1 - rho`` rather than an absolute distance. Makes the term scale-free (it
             stops fighting the variance hinge, which is simultaneously rescaling sigma) and
@@ -1129,7 +1139,7 @@ def barlow_twins_loss(
     total_loss = torch.zeros(1, device=hz.device, dtype=hz.dtype)
     sub_diags = []
 
-    for content_indices, subset in zip(estimated_content_indices, subsets):
+    for si, (content_indices, subset) in enumerate(zip(estimated_content_indices, subsets)):
         hz_sub = hz[list(subset)]  # (n_views_sub, B, C)
         hz_raw_sub = hz_raw[list(subset)]  # same slice, uncentered — sim/var only
         n_view = hz_sub.shape[0]
@@ -1235,6 +1245,50 @@ def barlow_twins_loss(
                         z_j = (z_j - z_j.mean(dim=0)) / (z_j.std(dim=0, unbiased=False) + 1e-6)
                         c = (z_i.T @ z_j) / B
 
+                # ── Optional EMA of the cross-correlation across STEPS ─────────────────
+                #
+                # off_diag sums d(d-1) squared correlations, each estimated from B rows, so
+                # even at the optimum it carries a sampling floor of d(d-1)/B: 1892/128 =
+                # 14.78 at d=44, against a measured 17.999 at GAP. 82% of that term is noise,
+                # and it is not a harmless constant — the gradient is 2*c_ij*dc_ij/dtheta, so
+                # at the optimum the multiplier is pure sampling error, and because it shares
+                # rows with dc/dtheta the encoder can lower it by fitting THIS batch's noise.
+                #
+                # Averaging c over steps cuts the floor by (1-m)/(1+m) — an effective row
+                # count of B*(1+m)/(1-m), i.e. 25472 at B=128, m=0.99. The gradient direction
+                # still comes from the current batch (only the CURRENT term carries grad); the
+                # multiplier becomes a low-variance estimate of the true correlation, so at the
+                # optimum it goes to zero instead of chasing noise. Verified on planted data:
+                # floor 14.78 -> 0.075 while a true correlation of 0.15 reads back as 0.1505.
+                #
+                # This is the only fix that scales: reaching the same floor by batch size alone
+                # needs ~5900 subjects per step. GAP benefits most — it is the one term whose
+                # rows are subjects, and subjects are the scarce resource.
+                #
+                # Bias-corrected (Adam-style), so a zero init is unbiased from step 1 and a
+                # resume costs only a noisier estimate for ~1/(1-m) steps rather than a
+                # transient. The state is deliberately NOT checkpointed for that reason.
+                #
+                # NOTE: gradient magnitude on this term scales with (1-m), so lambd needs
+                # raising when the EMA is enabled. `off_diag_inst` below is the un-EMA'd value,
+                # logged so runs stay comparable with every pre-EMA number.
+                c_inst = c
+                if corr_ema is not None and corr_ema_decay > 0:
+                    _key = (si, i, j)
+                    # The Gumbel mask is learned, so the ACTIVE CHANNEL SET can change between
+                    # steps. Averaging across such a change would mix different channels into
+                    # the same matrix entry, so reset whenever the signature moves.
+                    _sig = (tuple(c.shape), int(z_i.shape[-1]))
+                    _st = corr_ema.get(_key)
+                    if _st is None or _st["sig"] != _sig:
+                        _st = {"c": torch.zeros_like(c), "t": 0, "sig": _sig}
+                        corr_ema[_key] = _st
+                    _m = float(corr_ema_decay)
+                    _c_ema = _m * _st["c"].to(c.device, c.dtype) + (1.0 - _m) * c
+                    _st["c"] = _c_ema.detach()
+                    _st["t"] += 1
+                    c = _c_ema / (1.0 - _m ** _st["t"])  # bias correction
+
                 # Loss: push diagonal toward 1, off-diagonal toward 0
                 on_diag = (c.diagonal() - 1).pow(2).sum()
                 off_diag = c.pow(2).sum() - c.diagonal().pow(2).sum()
@@ -1251,6 +1305,10 @@ def barlow_twins_loss(
                             "neg_sim_std": 0.0,
                             "on_diag_loss": on_diag.item(),
                             "off_diag_loss": off_diag.item(),
+                            # Un-EMA'd single-batch value: what every pre-EMA run logged.
+                            # Read THIS to compare against existing numbers; read
+                            # off_diag_loss to see what is actually being optimised.
+                            "off_diag_inst": (c_inst.pow(2).sum() - c_inst.diagonal().pow(2).sum()).item(),
                             # Logged unweighted so the four terms can be balanced from what
                             # they actually are, rather than by transplanting VICReg's 25/25/1
                             # (the mistake that made bt_lambda 200x too weak at d=44).
