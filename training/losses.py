@@ -1589,25 +1589,40 @@ class BaselineLoss(torch.nn.Module):
         if not torch.isfinite(y).all():
             y = torch.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)
 
-        # The decoder has no output activation, so y can have arbitrarily
-        # large values.  Clamp to the expected input range [-1, 1] to
-        # prevent the FFT magnitude and LPIPS from amplifying outliers
-        # into NaN.  Gradients still flow through non-clamped voxels;
-        # the clamp only kills gradient for values already far outside
-        # the valid range (desired — push them back via the pixel loss,
-        # not via an exploding FFT gradient).
-        y = y.clamp(-1.0, 1.0)
+        # The decoder has no output activation, so y can have arbitrarily large values, and
+        # LPIPS amplifies outliers into NaN.  Bound it for the PERCEPTUAL path only.
+        #
+        # It used to be clamped for BOTH terms, which made saturation an ABSORBING STATE:
+        # torch.clamp has zero gradient outside its bounds, so a voxel whose raw output left
+        # [-1, 1] stopped contributing any gradient and the pixel loss could not pull it back
+        # (the previous comment here claimed it could — it cannot, it was reading the clamped
+        # tensor).  Because each saturated voxel removes its own corrective signal, the
+        # failure is self-reinforcing: output scale drifts up, saturation spreads, the
+        # remaining gradient shrinks, and past a threshold it runs away and Loss/Recon jumps
+        # to a permanent plateau at the cost of predicting +-1.  Observed at ~10k steps across
+        # nearly every run, VQ unaffected.  The same dead gradient is why the fixed_reference
+        # cross-style swap failed.
+        #
+        # Feeding the RAW y to the pixel term is safe: L1's gradient w.r.t. y is sign(x - y),
+        # bounded at +-1 per voxel however large y gets, so there is no gradient explosion to
+        # protect against here — only a loss VALUE that grows, which is the signal we want.
+        y_percep = y.clamp(-1.0, 1.0)
+        with torch.no_grad():
+            _sat = (y.abs() > 1.0).float().mean()
+            self.summaries[TBSummaryTypes.SCALAR]["Recon-Saturated_Fraction"] = _sat
+            self.summaries[TBSummaryTypes.SCALAR]["Recon-Raw_Output_Std"] = y.std()
 
         q_losses = network_output["quantization_losses"]
 
         mask = network_output.get("mask")
         if mask is not None:
             mask = mask.float()
-            # Zero reconstruction outside the brain so the FFT / perceptual
-            # terms see the same support as the pixel term.
+            # Zero reconstruction outside the brain so the perceptual term sees the same
+            # support as the pixel term.
             y = y * mask
+            y_percep = y_percep * mask
 
-        loss = self._calculate_pixel_loss(x, y, mask=mask) + self._calculate_perceptual_loss(x, y)
+        loss = self._calculate_pixel_loss(x, y, mask=mask) + self._calculate_perceptual_loss(x, y_percep)
 
         for idx, q_loss in enumerate(q_losses):
             q_loss = q_loss.float()

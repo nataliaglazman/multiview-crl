@@ -296,7 +296,22 @@ def _verdict(a, b, early, late):
 
     clustering = d_rel < -0.02 * max(a["res"]["rel_qerr"], 1e-9) and d_rel < -0.005
     converging = d_gap < -0.002
-    if clustering and converging:
+    # Falling quantization error is NOT evidence of coarsening on its own. A codebook that
+    # goes from badly under-used to fully used has denser centroids, so the error falls while
+    # resolution IMPROVES — the opposite of the hypothesis. Coarsening requires utilisation
+    # to fall or hold; check that before reading the error at all.
+    if d_perp > 0.05:
+        print("\n  => HYPOTHESIS REFUTED, and in the informative direction. Quantization got FINER")
+        print(f"     (rel error {a['res']['rel_qerr']:.4f} → {b['res']['rel_qerr']:.4f}) because the codebook")
+        print(f"     went from under-used to well-used (perplexity ratio {a['util']['perp_ratio']:.3f} →")
+        print(f"     {b['util']['perp_ratio']:.3f}, active {a['util']['active']} → {b['util']['active']}).")
+        print("     The discretization is LESS lossy at the end, so it cannot be what the readout lost.")
+        if b["read"]["mcc_post"] < a["read"]["mcc_post"]:
+            print(f"     Note mcc(z_q) ALSO fell ({a['read']['mcc_post']:.4f} → {b['read']['mcc_post']:.4f}) despite")
+            print("     more codes, better used. So the codes carry less factor information while being")
+            print("     more numerous: this is not a resolution problem, it is a question of WHAT is")
+            print("     being encoded. Do not reach for a codebook hyperparameter.")
+    elif clustering and converging:
         print("\n  => CONFIRMED. The encoder outputs collapsed onto the centroids and the pre/post-VQ")
         print("     readouts converged with them. Fix order: (1) the VQ double-count —")
         print("     BaselineLoss returns quantization_losses (losses.py:1611) AND main_multimodal")
