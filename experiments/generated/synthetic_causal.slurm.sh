@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-11T16:37:19Z
-# Git SHA: 522d957
+# Generated at: 2026-08-11T21:27:43Z
+# Git SHA: fe3e341
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-2-scaling-baseline
+#SBATCH --job-name=synthetic-causal-clean-content-25-10-fixed-recon-2
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-2-scaling-baseline-%j.err
+#SBATCH --error=synthetic-causal-clean-content-25-10-fixed-recon-2-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -84,6 +84,7 @@ fi
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
+    --no-final-recon-norm \
     --norm-type layer \
     --pass-full-to-next-level \
     --patch-center-mode position \
@@ -96,7 +97,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 1 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -115,7 +116,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-2-scaling-baseline \
+    --model-id synthetic-causal-clean-content-25-10-fixed-recon-2 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -126,5 +127,5 @@ fi
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 2 \
+    --vqvae-scaling-rates 4 \
     --workers 8
