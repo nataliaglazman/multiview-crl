@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-11T13:39:43Z
-# Git SHA: 069eb45
+# Generated at: 2026-08-11T14:46:22Z
+# Git SHA: d94f2ed
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-lambda-01-mse-25-10-ema
+#SBATCH --job-name=synthetic-causal-clean-content-lambda-01-mse-25-10-ema-8-patch
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-lambda-01-mse-25-10-ema-%j.err
+#SBATCH --error=synthetic-causal-clean-content-lambda-01-mse-25-10-ema-8-patch-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -93,7 +93,7 @@ fi
     --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
-    --patch-grid 16 16 16 \
+    --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -118,7 +118,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-lambda-01-mse-25-10-ema \
+    --model-id synthetic-causal-clean-content-lambda-01-mse-25-10-ema-8-patch \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
