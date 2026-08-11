@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-11T14:46:22Z
-# Git SHA: d94f2ed
+# Generated at: 2026-08-11T14:49:27Z
+# Git SHA: 02c337a
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-clean-content-lambda-01-mse-25-10-ema-8-patch
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -13,7 +13,6 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
 #SBATCH --constraint=a100_80g
-
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
 
@@ -86,7 +85,6 @@ fi
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
-    --no-final-recon-norm \
     --norm-type layer \
     --pass-full-to-next-level \
     --patch-center-mode position \
