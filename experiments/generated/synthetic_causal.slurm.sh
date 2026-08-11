@@ -1,17 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-11T16:13:53Z
-# Git SHA: 3e1a348
+# Generated at: 2026-08-11T16:30:02Z
+# Git SHA: fa02117
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-contrastive-only
+#SBATCH --job-name=synthetic-causal-clean-content-2-scaling
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-contrastive-only-%j.err
+#SBATCH --error=synthetic-causal-clean-content-2-scaling-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=48:00:00_80g
+#SBATCH --time=48:00:00
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -96,7 +97,7 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 1 \
-    --scale-recon-loss 0 \
+    --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
@@ -114,7 +115,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-contrastive-only \
+    --model-id synthetic-causal-clean-content-2-scaling \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -125,5 +126,5 @@ fi
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 4 \
+    --vqvae-scaling-rates 2 \
     --workers 8
