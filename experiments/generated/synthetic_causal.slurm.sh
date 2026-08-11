@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-11T12:43:34Z
-# Git SHA: 3c46722
+# Generated at: 2026-08-11T13:16:57Z
+# Git SHA: 203158b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-lambda-01-mse-25-10-recon-fixed
+#SBATCH --job-name=synthetic-causal-clean-content-lambda-01-mse-25-10-recon-fixed-16-patches
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-lambda-01-mse-25-10-recon-fixed-%j.err
+#SBATCH --error=synthetic-causal-clean-content-lambda-01-mse-25-10-recon-fixed-16-patches-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -92,7 +92,7 @@ fi
     --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
-    --patch-grid 8 8 8 \
+    --patch-grid 16 16 16 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
@@ -117,7 +117,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-lambda-01-mse-25-10-recon-fixed \
+    --model-id synthetic-causal-clean-content-lambda-01-mse-25-10-recon-fixed-16-patches \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
