@@ -25,7 +25,7 @@
 #     --lesion-radius 0.14 --cortex-parameterization patterned --center-local-deformations
 
 _base_: synthetic_defaults
-tag: synthetic-identifiable-generator
+tag: synthetic-identifiable-generator-4-scaling
 
 # ─── generator fixes (the only difference from synthetic_causal.yaml) ───────────────
 
