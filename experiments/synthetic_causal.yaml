@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-baseline-scaling-2-redo
+tag: synthetic-causal-clean-content-scaling-2-redo
 contrastive_loss_type: barlow_twins
 # bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -61,7 +61,7 @@ bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_gap_lambda: 0.01               # NOT 0.005 — see the calibration note above
 bt_patch_weight: 1
 
-scale_contrastive_loss: 0       # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_contrastive_loss: 1       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
 batch_size: 128
 
@@ -97,31 +97,5 @@ bt_std_coeff: 10
 # bt_lambda: 2.0
 # bt_gap_lambda: 0.2
 
-
-# _base_: synthetic_defaults
-# tag: synthetic-causal-baseline-44-final
-
-# scale_contrastive_loss: 1
-# scale_recon_loss: 1
-# content_size: 44          # <- the fix; was 48 = all channels, so no style block existed
-# batch_size: 128
-# synthetic_clean_content: true
-# synthetic_normalize: fixed_reference
-# synthetic_causal: true
-# synthetic_causal_graph: random
-# synthetic_causal_edge_prob: 0.5
-# synthetic_res: 64
-# norm_type: layer
-# decoder_norm_type: group
-# no_final_recon_norm: true
-# inject_style_to_decoder: true
-# style_injection_mode: input
-# separate_style_codebooks: true
-# separate_content_codebooks: true
-# vqvae_nb_levels: 1
-# vqvae_hidden_channels: 48
-# vqvae_embed_dim: 48
-# vqvae_scaling_rates: [4]
-# deterministic: true
-# checkpoint_steps: 1000
-# eval_dci: true
+# synthetic_content_prior: uniform
+# synthetic_content_squash: auto

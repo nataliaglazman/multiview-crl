@@ -55,6 +55,7 @@ Defaults mirror the *shipped defaults* (`utils/config.py`), NOT the flagship con
 """
 
 import argparse
+import warnings
 
 import numpy as np
 import torch
@@ -80,7 +81,24 @@ STYLE_NAMES = ["gain", "bias", "noise_sigma"]
 CONTENT_AMPS = [0.1, 0.05, None, None, None, 0.06, 0.12, 0.08, 0.06]
 
 
-def build_dataset(args, normalize=None):
+def build_dataset(args, normalize=None, quiet=False):
+    """`quiet=True` for tests that deliberately enumerate the flagged configurations.
+
+    Tests 3 and 4 construct `per_sample`/`shared` and `lesion_mode="field"` on purpose —
+    that IS the measurement — so `SyntheticBrainDataset`'s warnings about them would fire
+    on every row and interleave with the table. They stay on everywhere else.
+    """
+    ctx = warnings.catch_warnings()
+    ctx.__enter__()
+    if quiet:
+        warnings.simplefilter("ignore", UserWarning)
+    try:
+        return _build_dataset(args, normalize)
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def _build_dataset(args, normalize=None):
     return SyntheticBrainDataset(
         mode="train",
         spatial_size=(args.res,) * 3,
@@ -99,6 +117,8 @@ def build_dataset(args, normalize=None):
         synthetic_content_squash=args.content_squash,
         synthetic_content_amp_scale=args.content_amp_scale,
         synthetic_lesion_radius=args.lesion_radius,
+        synthetic_cortex_parameterization=args.cortex_parameterization,
+        synthetic_center_local_deformations=args.center_local_deformations,
     )
 
 
@@ -341,7 +361,7 @@ def test_style(args):
     print("     Same measurement as [2], per style dim, under each --synthetic-normalize mode.\n")
     for mode in ("raw (none)", "per_sample", "shared", "fixed_reference"):
         norm = mode != "raw (none)"
-        ds = build_dataset(args, normalize=mode if norm else "per_sample")
+        ds = build_dataset(args, normalize=mode if norm else "per_sample", quiet=True)
         rows = _run_sensitivity(ds, args, "style", normalize=norm)
         cells = "  ".join(f"{n}: rms {r:.3f} / mf {m:>8.1f}" for _, n, r, m in rows)
         print(f"    {mode:<16} {cells}")
@@ -350,7 +370,7 @@ def test_style(args):
     print(f"    {'mode':<16} {'residual/contrast':>18} {'corr(x_a, x_b)':>16}   style information left in the input")
     for mode in ("raw (none)", "per_sample", "shared", "fixed_reference"):
         norm = mode != "raw (none)"
-        ds = build_dataset(args, normalize=mode if norm else "per_sample")
+        ds = build_dataset(args, normalize=mode if norm else "per_sample", quiet=True)
         resid, corr = _style_blindness(ds, args, normalize=norm)
         verdict = "erased" if resid < 0.1 else ("mostly erased" if resid < 0.25 else "preserved")
         print(f"    {mode:<16} {resid:>18.4f} {corr:>16.5f}   {verdict}")
@@ -372,7 +392,7 @@ def test_inert(args):
     for mode in ("sphere", "field"):
         a = argparse.Namespace(**vars(args))
         a.lesion_mode = mode
-        ds = build_dataset(a)
+        ds = build_dataset(a, quiet=True)
         inner = ds._inner
         worst_max, worst_mean, worst_n = 0.0, 0.0, 0
         for i in range(min(args.n_samples, 8)):
@@ -393,13 +413,18 @@ def test_inert(args):
     # Positional resolution in sphere mode: how many distinguishable lesion centres per axis.
     a = argparse.Namespace(**vars(args))
     a.lesion_mode = "sphere"
-    ds = build_dataset(a)
+    ds = build_dataset(a, quiet=True)
     r = ds._inner.renderer
     vox = 2.0 / args.res
-    reach = (0.5 - 0.12) / (3**0.5)
-    print(f"\n    sphere mode: lesion radius {0.1 / vox:.1f} vox, centre travel +/-{reach / vox:.1f} vox per axis")
-    print(f"    -> ~{2 * reach / vox:.0f} voxels of travel; distinguishable positions per axis are")
-    print(f"       bounded by that, not by the 0.1 radius. lesion_mode={r.lesion_mode} in this run.")
+    # Read the geometry off the renderer, not off the defaults: --lesion-radius moves BOTH
+    # the ball and the WM margin, and they pull in opposite directions.
+    rad = r.lesion_radius
+    reach = (0.5 - (rad + 0.02)) / (3**0.5)
+    print(f"\n    sphere mode: lesion radius {rad / vox:.1f} vox, centre travel +/-{reach / vox:.1f} vox per axis")
+    print(f"    -> ~{2 * reach / vox:.1f} voxels of travel. Note the TRADE-OFF: the WM margin tracks the")
+    print("       radius, so a bigger lesion carries more contrast energy (higher SNR) but travels")
+    print("       LESS, and its extreme positions overlap more — which is why the +/-1 sweep above")
+    print(f"       can change fewer voxels at a larger radius. lesion_mode={r.lesion_mode} in this run.")
 
 
 # ─────────────────────────── 5. brain_size / thickness ──────────────────────────
@@ -492,6 +517,8 @@ def main():
     p.add_argument("--content-squash", default="auto", choices=["auto", "clamp", "tanh", "none"])
     p.add_argument("--content-amp-scale", type=float, nargs="+", default=None)
     p.add_argument("--lesion-radius", type=float, default=0.1)
+    p.add_argument("--cortex-parameterization", default="additive", choices=["additive", "nested", "midsurface"])
+    p.add_argument("--center-local-deformations", action="store_true")
     args = p.parse_args()
 
     if args.preset == "flagship":

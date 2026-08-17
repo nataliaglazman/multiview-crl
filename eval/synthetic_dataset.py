@@ -132,6 +132,8 @@ class PseudoMRIRenderer(nn.Module):
         content_squash="auto",
         content_amp_scale=None,
         lesion_radius=0.1,
+        cortex_parameterization="additive",
+        center_local_deformations=False,
     ):
         super().__init__()
         self.res = res
@@ -164,6 +166,12 @@ class PseudoMRIRenderer(nn.Module):
         # not boundary displacements and ignore this — use lesion_radius for those.
         self.content_amp_scale = content_amp_scale
         self.lesion_radius = lesion_radius
+        if cortex_parameterization not in ("additive", "nested", "midsurface"):
+            raise ValueError(
+                f"cortex_parameterization must be additive|nested|midsurface, got {cortex_parameterization!r}"
+            )
+        self.cortex_parameterization = cortex_parameterization
+        self.center_local_deformations = center_local_deformations
         # When True, the ventricle is made recoverable: larger effect size, read off
         # the UNdeformed radius (no gyral-field swamping), and the fissure gets its own
         # tissue label so "total CSF" is no longer fissure-dominated. Default False =
@@ -256,9 +264,59 @@ class PseudoMRIRenderer(nn.Module):
                 return base
             return base * float(self.content_amp_scale[dim])
 
-        radii_wm = 0.5 + _sq(z_content[0]) * _amp(0, 0.1) * self.content_scale
-        cortical_thickness = 0.15 + _sq(z_content[5]) * _amp(5, 0.06) * self.content_scale
-        radii_gm = radii_wm + cortical_thickness
+        dist = torch.norm(self.coords, dim=-1)
+        x_coords = self.coords[..., 0]
+        y_coords = self.coords[..., 1]
+        z_coords = self.coords[..., 2]
+
+        # How brain_size (z0) and cortical_thickness (z5) share the two spherical
+        # boundaries. This choice IS the dim0/dim5 degeneracy, so it is a flag.
+        #
+        # The three RADIAL options can only trade the degeneracy around, never remove it:
+        # both Jacobians live in the 2-D space spanned by the two concentric shells, so
+        # their cosine is fixed by the shells' relative energy. And that energy is NOT what
+        # geometry suggests — under fixed_reference the global mean (0.552) lands on the GM
+        # intensity (0.5), so after centring the outer GM/background edge nearly vanishes
+        # and the WM/GM edge dominates ~20:1. Measured cos(z0, z5): additive +0.43,
+        # midsurface -0.49, nested -0.67.
+        #   "additive"   (default, legacy) radii_gm = radii_wm + thickness. The DOMINANT
+        #                inner edge is z0-only, which is why it is the best of the three.
+        #   "nested"     outer surface is z0 alone, thickness cuts inward — puts BOTH
+        #                factors on the dominant inner edge, so it is the worst.
+        #   "midsurface" z0 shifts both boundaries together, z5 splits them apart.
+        #   "patterned"  the only option that actually removes the degeneracy. Thickness is
+        #                modulated by the l=2 zonal harmonic along the A-P axis, which is
+        #                zero-mean over the sphere and orthogonal to both the l=0 monopole
+        #                (brain_size) and the l=1 x-dipole (lr_asymmetry). The Jacobian
+        #                leaves the radial subspace entirely, so no uniform radius change
+        #                can mimic it. This is the same property that already makes
+        #                lr_asymmetry and sulcal_widening the two most uniquely-identified
+        #                dims. NOTE it redefines the factor: z5 becomes REGIONAL cortical
+        #                thinning (front/back contrast) at unchanged mean thickness, rather
+        #                than global thickness. Anatomically that is arguably the better
+        #                proxy for AD-pattern thinning, but it is a different factor.
+        # Ranges match across all options: radii_wm ~ 0.5, radii_gm ~ 0.65, thickness ~ 0.15.
+        size_shift = _sq(z_content[0]) * _amp(0, 0.1) * self.content_scale
+        thick_shift = _sq(z_content[5]) * _amp(5, 0.06) * self.content_scale
+        if self.cortex_parameterization == "nested":
+            radii_gm = 0.65 + size_shift
+            cortical_thickness = 0.15 + thick_shift
+            radii_wm = radii_gm - cortical_thickness
+        elif self.cortex_parameterization == "midsurface":
+            mid = 0.575 + size_shift
+            half = 0.075 + 0.5 * thick_shift
+            radii_wm = mid - half
+            radii_gm = mid + half
+        elif self.cortex_parameterization == "patterned":
+            radii_wm = 0.5 + size_shift
+            y_hat = y_coords / dist.clamp_min(1e-6)
+            harmonic = 1.5 * y_hat**2 - 0.5
+            cortical_thickness = 0.15 + thick_shift * 2.0 * harmonic
+            radii_gm = radii_wm + cortical_thickness
+        else:
+            radii_wm = 0.5 + size_shift
+            cortical_thickness = 0.15 + thick_shift
+            radii_gm = radii_wm + cortical_thickness
         # identifiable_ventricle: re-centre to a larger, more salient ventricle whose
         # SMALLEST radius (0.12) still clears the |x|>0.05 septum split. A naive
         # amplitude bump around the 0.15 base instead drops the low end to ~0.05, where
@@ -298,6 +356,17 @@ class PseudoMRIRenderer(nn.Module):
         tw_y = y_coords - 0.05
         tw_z = z_coords + 0.35  # inferior
         temporal_weight = torch.exp(-(tw_x**2 + tw_y**2 + tw_z**2) / (2 * 0.18**2))
+        if self.center_local_deformations:
+            # A strictly-positive bump has a DC component, and a uniform radial offset IS
+            # brain_size — exactly the confound sample_gp_field centres its fields to avoid
+            # ("that DC is a uniform radius shift, i.e. a brain_size confound"). Centring
+            # turns temporal atrophy into a pure SHAPE factor: the temporal lobe shrinks and
+            # the rest expands slightly, so net volume is unchanged. The reference region is
+            # the NOMINAL brain (fixed radius), never the sample's own radii_gm — using the
+            # latter would make the correction latent-dependent and reintroduce coupling.
+            # Anatomically the compensating expansion is an artefact; it is the price of
+            # making this factor orthogonal to brain_size.
+            temporal_weight = temporal_weight - temporal_weight[dist < 0.65].mean()
         temporal_shrink = _sq(z_content[6]) * _amp(6, 0.12) * self.content_scale
         deformed_dist = deformed_dist + temporal_weight * temporal_shrink
 
@@ -561,6 +630,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
         content_squash="auto",
         content_amp_scale=None,
         lesion_radius=0.1,
+        cortex_parameterization="additive",
+        center_local_deformations=False,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -702,6 +773,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 content_squash=content_squash,
                 content_amp_scale=content_amp_scale,
                 lesion_radius=lesion_radius,
+                cortex_parameterization=cortex_parameterization,
+                center_local_deformations=center_local_deformations,
             )
             if lesion_mode == "field" and n_content > 2:
                 import warnings

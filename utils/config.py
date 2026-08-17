@@ -128,6 +128,27 @@ def parse_args() -> argparse.ArgumentParser:
         "margin tracks it, so the lesion stays inside the white matter as it grows.",
     )
     parser.add_argument(
+        "--synthetic-cortex-parameterization",
+        type=str,
+        default="additive",
+        choices=["additive", "nested", "midsurface"],
+        help="How brain_size (z0) and cortical_thickness (z5) share the two spherical boundaries "
+        "-- this choice IS the dim0/dim5 degeneracy. 'additive' (legacy) puts 0.1*s(z0)+0.06*s(z5) "
+        "on the OUTER surface, the highest-energy surface in the volume, so both Jacobians align "
+        "(cosine +0.43). 'nested' gives the outer surface to z0 alone. 'midsurface' has z0 shift "
+        "both boundaries together and z5 split them apart, i.e. orthogonal combinations. "
+        "Measure with: python -m eval.generator_defects --tests degeneracy.",
+    )
+    parser.add_argument(
+        "--synthetic-center-local-deformations",
+        action="store_true",
+        help="Subtract the DC component of the temporal-atrophy bump over the nominal brain. A "
+        "strictly-positive bump shrinks total volume, and a uniform radial offset IS brain_size "
+        "(cosine -0.43) -- the same confound sample_gp_field already centres its fields to avoid. "
+        "Makes temporal atrophy a pure shape factor; the compensating slight expansion elsewhere "
+        "is an anatomical artefact.",
+    )
+    parser.add_argument(
         "--synthetic-hierarchical-content",
         action="store_true",
         help="Enable hierarchical content latents: a shared global-atrophy "

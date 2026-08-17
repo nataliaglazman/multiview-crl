@@ -639,6 +639,8 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_content_squash="auto",
         synthetic_content_amp_scale=None,
         synthetic_lesion_radius=0.1,
+        synthetic_cortex_parameterization="additive",
+        synthetic_center_local_deformations=False,
         **kwargs,
     ):
         super().__init__()
@@ -702,6 +704,8 @@ class SyntheticBrainDataset(MultiviewDataset):
             content_squash=synthetic_content_squash,
             content_amp_scale=synthetic_content_amp_scale,
             lesion_radius=synthetic_lesion_radius,
+            cortex_parameterization=synthetic_cortex_parameterization,
+            center_local_deformations=synthetic_center_local_deformations,
         )
         if synthetic_normalize in ("per_sample", "shared") and synthetic_n_style > 0:
             import warnings
