@@ -101,7 +101,7 @@ separate_content_codebooks: false
 vqvae_nb_levels: 1
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
-vqvae_scaling_rates: [2]
+vqvae_scaling_rates: [4]
 deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
