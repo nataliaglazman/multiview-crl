@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-gap-std-0p2
+tag: synthetic-causal-clean-content-baseline-scaling-2-redo
 contrastive_loss_type: barlow_twins
 # bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -61,7 +61,7 @@ bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_gap_lambda: 0.01               # NOT 0.005 — see the calibration note above
 bt_patch_weight: 1
 
-scale_contrastive_loss: 1       # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_contrastive_loss: 0       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
 batch_size: 128
 
@@ -83,7 +83,7 @@ separate_content_codebooks: false
 vqvae_nb_levels: 1
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
-vqvae_scaling_rates: [4]
+vqvae_scaling_rates: [2]
 deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
@@ -91,12 +91,7 @@ eval_dci: true
 synthetic_clean_content: true
 bt_sim_normalize: true
 bt_sim_coeff: 0.025       # ≈ on_diag_gap 0.38 / current normalised sim 16624
-bt_std_coeff: 10          # patch term: std runs over folded (subject,position) rows, ~0.35
-bt_gap_std_coeff: 0.2     # GAP term: std runs over SUBJECT rows only, ~0.004. At 10 this hinge
-                          # drove gap_feat_std 0.004 -> 1.8, then hit exactly 0 and stayed —
-                          # a ~450x information-free per-channel rescale of the encoder output,
-                          # which is what stepped the recon loss up. 0.2 ≈ on_diag_gap 0.38 /
-                          # var_loss 1.99, the same calibration rule used for bt_sim_coeff.
+bt_std_coeff: 10
 # channels_last: false
 # bt_corr_ema: 0.9
 # bt_lambda: 2.0

@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-17T09:38:50Z
-# Git SHA: b4e8dfd
+# Generated at: 2026-08-17T12:14:06Z
+# Git SHA: a86fbae
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-gap-std-0p2
+#SBATCH --job-name=synthetic-causal-clean-content-baseline-scaling-2-redo
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-gap-std-0p2-%j.err
+#SBATCH --error=synthetic-causal-clean-content-baseline-scaling-2-redo-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -59,7 +59,6 @@ fi
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
     --bt-gap-lambda 0.01 \
-    --bt-gap-std-coeff 0.2 \
     --bt-gap-weight 1 \
     --bt-patch-weight 1 \
     --bt-sim-coeff 0.025 \
@@ -98,7 +97,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1 \
+    --scale-contrastive-loss 0 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -117,7 +116,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-gap-std-0p2 \
+    --model-id synthetic-causal-clean-content-baseline-scaling-2-redo \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -128,5 +127,5 @@ fi
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 4 \
+    --vqvae-scaling-rates 2 \
     --workers 8
