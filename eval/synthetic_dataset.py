@@ -166,7 +166,7 @@ class PseudoMRIRenderer(nn.Module):
         # not boundary displacements and ignore this — use lesion_radius for those.
         self.content_amp_scale = content_amp_scale
         self.lesion_radius = lesion_radius
-        if cortex_parameterization not in ("additive", "nested", "midsurface"):
+        if cortex_parameterization not in ("additive", "nested", "midsurface", "patterned"):
             raise ValueError(
                 f"cortex_parameterization must be additive|nested|midsurface, got {cortex_parameterization!r}"
             )
@@ -324,11 +324,6 @@ class PseudoMRIRenderer(nn.Module):
         # recoverability (R^2 0.92 -> 0.81). Range [0.12, 0.28], all inside the WM.
         vent_base, vent_amp = (0.20, 0.08) if self.identifiable_ventricle else (0.15, 0.05)
         ventricle_size = vent_base + _sq(z_content[1]) * _amp(1, vent_amp) * self.content_scale
-
-        dist = torch.norm(self.coords, dim=-1)
-        x_coords = self.coords[..., 0]
-        y_coords = self.coords[..., 1]
-        z_coords = self.coords[..., 2]
 
         # Nuisance gyral field (z_deformation): a per-sample random corrugation,
         # zeroed in clean-content mode. Pure nuisance — no named factor rides on

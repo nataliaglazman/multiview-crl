@@ -131,7 +131,7 @@ def parse_args() -> argparse.ArgumentParser:
         "--synthetic-cortex-parameterization",
         type=str,
         default="additive",
-        choices=["additive", "nested", "midsurface"],
+        choices=["additive", "nested", "midsurface", "patterned"],
         help="How brain_size (z0) and cortical_thickness (z5) share the two spherical boundaries "
         "-- this choice IS the dim0/dim5 degeneracy. 'additive' (legacy) puts 0.1*s(z0)+0.06*s(z5) "
         "on the OUTER surface, the highest-energy surface in the volume, so both Jacobians align "

@@ -517,7 +517,9 @@ def main():
     p.add_argument("--content-squash", default="auto", choices=["auto", "clamp", "tanh", "none"])
     p.add_argument("--content-amp-scale", type=float, nargs="+", default=None)
     p.add_argument("--lesion-radius", type=float, default=0.1)
-    p.add_argument("--cortex-parameterization", default="additive", choices=["additive", "nested", "midsurface"])
+    p.add_argument(
+        "--cortex-parameterization", default="additive", choices=["additive", "nested", "midsurface", "patterned"]
+    )
     p.add_argument("--center-local-deformations", action="store_true")
     args = p.parse_args()
 

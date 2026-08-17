@@ -1,0 +1,107 @@
+# synthetic_causal.yaml with every GENERATOR-SIDE identifiability defect closed.
+#
+# The model/objective half is copied verbatim from synthetic_causal.yaml so this is a
+# clean A/B against it: the only differences are in the data-generating process. Every
+# number quoted below is from `eval/generator_defects.py` at --res 64 (this run's
+# resolution), comparing this config against synthetic_causal.yaml.
+#
+#   what it buys                              before -> after
+#   ------------------------------------------------------------------
+#   linear recovery ceiling (all dims)         0.933 -> 1.000
+#   cos(brain_size, cortical_thickness)        +0.345 -> +0.090
+#   cos(brain_size, temporal_atrophy)          -0.39  -> +0.17
+#   unique variance: brain_size                0.768 -> 0.965
+#   unique variance: cortical_thickness        0.871 -> 0.988
+#   unique variance: temporal_atrophy          0.783 -> 0.980
+#   ventricle_size matched-filter SNR          21.3  -> 57.0
+#   lesion_x/y/z per-voxel signal-to-noise     0.32  -> 0.55
+#
+# After this, the WEAKEST dim has unique variance 0.946 and the lowest SNR is 7.6, so a
+# low per-factor R^2 is attributable to the model rather than to the benchmark.
+#
+# Reproduce the audit for this exact config with:
+#   python -m eval.generator_defects --tests all --preset flagship --res 64 \
+#     --identifiable-ventricle --content-prior uniform --content-squash none \
+#     --lesion-radius 0.14 --cortex-parameterization patterned --center-local-deformations
+
+_base_: synthetic_defaults
+tag: synthetic-identifiable-generator
+
+# ─── generator fixes (the only difference from synthetic_causal.yaml) ───────────────
+
+# Ceiling. The clamp saturates ~32% of N(0,1) draws (ceiling 0.906 linear); clean_content's
+# tanh is injective but still caps a LINEAR probe at 0.933 — and cv_probe_r2 / block_mcc
+# both default to kind="ridge". A uniform prior puts every factor in [-1,1] where the
+# squash is the identity, so the ceiling is 1.000 for every probe class. Applied as a
+# per-dim monotone PIT under synthetic_causal, so the SCM's dependence survives intact.
+synthetic_content_prior: uniform
+synthetic_content_squash: none
+
+# Degeneracy. radii_gm = radii_wm + thickness makes brain_size and cortical_thickness act
+# on the same two concentric shells, and no radial re-parameterization escapes that 2-D
+# space (measured: nested is far WORSE at cos -0.92). "patterned" modulates thickness by
+# the l=2 zonal harmonic along A-P — zero-mean, and orthogonal to the l=0 monopole
+# (brain_size) and the l=1 x-dipole (lr_asymmetry) — so its Jacobian leaves the radial
+# subspace and no uniform radius change can mimic it.
+# CAVEAT: this REDEFINES z5 as regional (front/back) cortical thinning at unchanged mean
+# thickness, not global thickness. Arguably the better AD proxy, but it is a different
+# factor — do not compare its per-factor R^2 against an "additive" run.
+synthetic_cortex_parameterization: patterned
+
+# Same fix for temporal_atrophy: a strictly-positive bump carries a DC component, and a
+# uniform radial offset IS brain_size (cos -0.39). Centring it over the nominal brain makes
+# it a pure shape factor. Cost: a slight compensating expansion outside the temporal lobe.
+synthetic_center_local_deformations: true
+
+# Amplitude. The ventricle is a small cavity, so its boundary AREA — not its displacement —
+# is what put it near the floor. This reads it off the undeformed radius and enlarges it
+# without dropping the low end onto the |x|>0.05 septum split.
+synthetic_identifiable_ventricle: true
+
+# The lesion is the weakest dim in every config. 0.14 is a compromise: the WM margin tracks
+# the radius, so a bigger lesion is easier to SEE but travels less (+/-6.3 vs +/-7.0 voxels),
+# and travel is what the three position dims actually encode. Drop back to 0.1 if positional
+# resolution matters more to you than per-voxel detectability.
+synthetic_lesion_radius: 0.14
+
+# ─── everything below is verbatim from synthetic_causal.yaml ────────────────────────
+
+contrastive_loss_type: barlow_twins
+patch_contrastive: true
+patch_grid: [8,8,8]
+patch_center_mode: position    # do NOT use double — it annihilates global factors
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+bt_gap_weight: 1
+bt_gap_lambda: 0.01
+bt_patch_weight: 1
+bt_sim_normalize: true
+bt_sim_coeff: 0.025
+bt_std_coeff: 10
+
+scale_contrastive_loss: 1
+scale_recon_loss: 1
+batch_size: 128
+content_size: 44
+
+synthetic_normalize: fixed_reference   # per_sample would erase style gain/bias
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_res: 64
+synthetic_clean_content: true
+
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
+inject_style_to_decoder: true
+style_injection_mode: input
+separate_style_codebooks: true
+separate_content_codebooks: false
+vqvae_nb_levels: 1
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [2]
+deterministic: true
+checkpoint_steps: 1000
+eval_dci: true
