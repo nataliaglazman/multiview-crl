@@ -629,6 +629,11 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_field_lengthscales=(1.0, 2.5),
         synthetic_field_tp_dof=8.0,
         synthetic_field_scale=1.0,
+        synthetic_lesion_mode="sphere",
+        synthetic_lesion_lengthscale=0.4,
+        synthetic_lesion_sharpness=10.0,
+        synthetic_lesion_threshold=1.0,
+        synthetic_wm_softness=0.0,
         synthetic_identifiable_ventricle=False,
         **kwargs,
     ):
@@ -683,6 +688,11 @@ class SyntheticBrainDataset(MultiviewDataset):
             field_lengthscales=synthetic_field_lengthscales,
             field_tp_dof=synthetic_field_tp_dof,
             field_scale=synthetic_field_scale,
+            lesion_mode=synthetic_lesion_mode,
+            lesion_lengthscale=synthetic_lesion_lengthscale,
+            lesion_sharpness=synthetic_lesion_sharpness,
+            lesion_threshold=synthetic_lesion_threshold,
+            wm_softness=synthetic_wm_softness,
             identifiable_ventricle=synthetic_identifiable_ventricle,
         )
         self.num_samples = synthetic_num_samples

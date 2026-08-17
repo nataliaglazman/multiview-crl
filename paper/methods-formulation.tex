@@ -1,0 +1,193 @@
+% Methods — formulation. Requires amsmath, amsthm, amssymb.
+% \newtheorem{assumption}{Assumption}
+% \newtheorem{definition}{Definition}
+% \newtheorem{proposition}{Proposition}
+% \newtheorem{corollary}{Corollary}
+
+\section{Method}
+\label{sec:method}
+
+\subsection{Generative model}
+\label{sec:gen}
+
+For each subject we observe two spatially registered views (modalities)
+$x_1, x_2 : \mathcal{V} \to \mathbb{R}$ on a common image domain
+$\mathcal{V} \subset \mathbb{R}^3$. We model the underlying anatomy as a pair
+\begin{equation}
+  \big(\gamma,\; c\big), \qquad
+  \gamma \in \mathbb{R}^{n_g}, \qquad
+  c : \Omega \to \mathbb{R}^{n_\ell},
+\end{equation}
+where $\gamma$ collects \emph{global} scalar factors (e.g.\ intracranial volume, overall
+atrophy severity) and $c$ is a \emph{local content field} over a finite template lattice
+$\Omega \subset \mathbb{Z}^3$, carrying spatially distributed structure (e.g.\ the
+deformation-based morphometry Jacobian, cortical thickness, lesion load). Each view carries a
+style variable $s_k \in \mathbb{R}^{n_s}$ describing modality-specific contrast, and
+\begin{equation}
+  x_k = F_k(\gamma,\, c,\, s_k), \qquad k \in \{1,2\}.
+\end{equation}
+Content $(\gamma, c)$ is shared across views and style $s_k$ is view-specific, following
+\citet{vonkugelgen2021} and \citet{yao2024}. Our departure is that content is
+\emph{spatially indexed}: identifiability up to an arbitrary invertible transform of a
+flattened content vector permits arbitrary rearrangement of $\Omega$ and therefore supports no
+spatial claim. The separation of content from style is given by the multi-view result of
+\citet{yao2024}; this section supplies the within-view spatial structure that result leaves
+open.
+
+Fix a radius $\rho > 0$ and let $N_\rho(u) \subset \Omega$ be the $\rho$-neighbourhood of a
+site $u$. Write the local restriction of the content field as
+\begin{equation}
+  c_u \;:=\; c\big|_{N_\rho(u)} \;\in\; \mathbb{R}^{d_c},
+  \qquad d_c = n_\ell \, |N_\rho| .
+\end{equation}
+
+\begin{assumption}[Local stationary mixing]
+\label{asm:local}
+There exist maps $f_k$, \emph{independent of $u$}, such that
+\begin{equation}
+  x_k\big|_{N_\rho(u)} \;=\; f_k\big(c_u,\, \gamma,\, s_k\big)
+  \qquad \text{for all } u \in \Omega,
+\end{equation}
+and each $f_k$ is injective.
+\end{assumption}
+
+\begin{assumption}[Regularity]
+\label{asm:reg}
+The joint latent space of $(\gamma, c, s_1, s_2)$ --- finite-dimensional, since $\Omega$ is a
+finite lattice --- is open and simply connected, and the latent density is smooth and strictly
+positive on it.
+\end{assumption}
+
+Assumption~\ref{asm:local} requires the map from local anatomy to local intensity to be the
+same everywhere. This is false of the anatomical template itself; \S\ref{sec:repr} shows it is
+required below only of the subject-varying residual.
+
+\paragraph{Practical parameterisation.} $d_c = n_\ell|N_\rho|$ is large. When the correlation
+length of $c$ exceeds $\rho$ --- the smoothness assumption already standard in voxelwise
+neuroimaging analysis --- the restriction $c_u$ is well approximated by its $r$-jet, of
+dimension $n_\ell\binom{r+3}{3}$ (e.g.\ $10 n_\ell$ for $r=2$). We use the jet as the working
+parameterisation and the restriction in the statements below, where exactness matters.
+
+\subsection{Representation}
+\label{sec:repr}
+
+An encoder $g_k$ maps each view to a feature field $\hat c_k : \Omega \to \mathbb{R}^{m}$;
+write $\hat c_k(n,u)$ for subject $n$ at site $u$. We decompose it into a subject-independent
+template and a residual,
+\begin{equation}
+  \hat c_k(n,u) \;=\; \underbrace{T_k(u)}_{\text{template}} \;+\;
+                      \underbrace{r_k(n,u)}_{\text{residual}},
+  \qquad T_k(u) := \mathbb{E}_n\!\left[\hat c_k(n,u)\right],
+  \label{eq:decomp}
+\end{equation}
+and apply the objective of \S\ref{sec:obj} to $r_k$ alone. Removing $T_k$ is what allows
+Assumption~\ref{asm:local} to be imposed on the residual mechanism --- how anatomy varies
+between subjects at a given location --- rather than on the anatomy itself, which is plainly
+non-stationary.
+
+Let $\rho_f$ be the radius in Assumption~\ref{asm:local} and $\rho_g$ the encoder receptive
+field. Since $\hat c(u)$ is computed from $x_k|_{N_{\rho_g}(u)}$, its dependence on $c$ extends
+over $N_\rho(u)$ with $\rho := \rho_f + \rho_g$; $\rho$ denotes this effective radius
+throughout.
+
+\subsection{Identifiability target}
+\label{sec:target}
+
+\begin{definition}[Pointwise block identifiability]
+\label{def:pbi}
+A representation $\hat c : \Omega \to \mathbb{R}^m$ \emph{pointwise block-identifies}
+$(c,\gamma)$ if there exists an \emph{injective} map
+$h_0 : \mathbb{R}^{d_c + n_g} \to \mathbb{R}^{m}$, \emph{the same for every site}, with
+\begin{equation}
+  \hat c(u) \;=\; h_0\big(c_u,\, \gamma\big)
+  \qquad \text{for all } u \in \Omega, \; \text{a.s.}
+\end{equation}
+\end{definition}
+
+Both halves of block identifiability are present: \emph{exclusion} is carried by the functional
+form, since $\hat c(u)$ is a function of $(c_u,\gamma)$ and of nothing else --- in particular
+not of $s_k$; \emph{sufficiency} is injectivity, which makes $(c_u,\gamma)$ recoverable from
+$\hat c(u)$. We require injectivity rather than invertibility because $m \ll d_c$ in any
+practical encoder; invertibility is the special case $m = d_c + n_g$. Definition~\ref{def:pbi}
+sits strictly between block identifiability of a flattened field, which permits arbitrary
+spatial rearrangement, and component-wise identifiability, which further requires the
+coordinates of $h_0$ to be separated. It is the natural target for a weight-shared
+convolutional encoder, whose parameters are by construction shared across sites.
+
+\subsection{Objective}
+\label{sec:obj}
+
+Let $\tilde r_k$ denote the channel-wise standardisation of $r_k$ over the \emph{joint} index
+$(n,u)$, and let
+\begin{equation}
+  C_{ij} \;=\; \mathbb{E}_{n,u}\!\left[\tilde r_{1,i}(n,u)\, \tilde r_{2,j}(n,u)\right].
+\end{equation}
+We minimise
+\begin{equation}
+  \mathcal{L} \;=\; \underbrace{\textstyle\sum_i (C_{ii}-1)^2}_{\text{alignment}}
+   \;+\; \lambda \underbrace{\textstyle\sum_{i\neq j} C_{ij}^2}_{\text{redundancy}}
+   \;+\; \mu\, \mathcal{L}_{\mathrm{unif}},
+  \label{eq:obj}
+\end{equation}
+where $\mathcal{L}_{\mathrm{unif}}$ stands in for the entropy regulariser of
+\citet{yao2024}. Pooling over $(n,u)$ is not a statistical convenience: because $h_0$ is shared
+across sites, this population is exactly the sample on which a site-shared map should be
+assessed.
+
+\begin{proposition}[Site-shared gauge]
+\label{prop:gauge}
+If $C_{ii} = 1$ for all $i$, then there exists $a \in \mathbb{R}^m_{>0}$ with
+\begin{equation}
+  r_2(n,u) \;=\; \operatorname{diag}(a)\, r_1(n,u)
+  \qquad \text{for all } (n,u), \; \text{a.s.}
+\end{equation}
+\end{proposition}
+
+\noindent\emph{Sketch.} Unit correlation between zero-mean, unit-variance variables implies
+equality almost surely; undoing the standardisation leaves a per-channel scale. The additive
+term vanishes because \eqref{eq:decomp} makes both residuals zero-mean at each $(i,u)$, hence
+zero-mean under the joint index. \hfill$\square$
+
+Proposition~\ref{prop:gauge} establishes the \emph{alignment} half: the two encoders agree
+pointwise up to a single scalar per channel, constant over space, which is exactly the
+site-shared reparameterisation Definition~\ref{def:pbi} tolerates. Had the statistics been
+taken per site rather than jointly, the gauge would be free to vary with $u$ and this would not
+hold.
+
+It does not by itself establish Definition~\ref{def:pbi}, which is a statement relating the
+representation to the ground truth rather than the two encoders to each other. Closing that gap
+requires $\mathcal{L}_{\mathrm{unif}}$ to enforce injectivity of $h_0$, in the manner of
+\citet{yao2024}'s entropy term. Definition~\ref{def:pbi} is therefore the target of the
+objective, not a consequence of Proposition~\ref{prop:gauge}, and we report separately the
+extent to which the second-order surrogate used here attains it.
+
+\subsection{Consequences}
+\label{sec:conseq}
+
+Say a content component $c^{(j)}$ is \emph{inactive} on $A \subseteq \Omega$ if
+$c^{(j)}(u')$ is constant across subjects for every $u' \in A$, and write
+$\operatorname{supp}(c^{(j)})$ for the set of sites at which it varies across subjects.
+
+\begin{proposition}[Support recovery]
+\label{prop:support}
+Let $\hat c(u) = h_0(c_u, \gamma)$ with $h_0$ injective and $u$-independent. Then $\hat c(u)$ is
+constant in $c^{(j)}$ whenever $N_\rho(u) \cap \operatorname{supp}(c^{(j)}) = \emptyset$, and
+varies with it otherwise. Consequently
+\begin{equation}
+  \big\{\, u : \hat c(u) \text{ depends on } c^{(j)} \,\big\}
+  \;=\; \operatorname{supp}\big(c^{(j)}\big) \oplus B_\rho ,
+\end{equation}
+the support dilated by the effective radius $\rho = \rho_f + \rho_g$.
+\end{proposition}
+
+\begin{corollary}[Resolution bound]
+\label{cor:res}
+Spatial localisation of any content component is bounded below by $\rho$, irrespective of the
+training objective.
+\end{corollary}
+
+Proposition~\ref{prop:support} is what makes spatial claims admissible: localisation follows
+from Definition~\ref{def:pbi} rather than being assumed, and it needs only injectivity of
+$h_0$, not invertibility. Corollary~\ref{cor:res} identifies the generative locality and the
+encoder receptive field --- not the loss --- as the binding constraint on how finely a
+spatially compact factor can be localised.

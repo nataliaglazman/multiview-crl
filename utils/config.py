@@ -1084,6 +1084,24 @@ def parse_args() -> argparse.ArgumentParser:
         "off-diagonal.",
     )
     parser.add_argument(
+        "--bt-gap-std-coeff",
+        type=float,
+        default=None,
+        help="Separate variance-hinge weight for the --bt-gap-weight companion term. Defaults to "
+        "--bt-std-coeff, but that is usually WRONG for it, for the same reason --bt-gap-lambda "
+        "exists: the two terms measure std over completely different rows. The patch hinge runs "
+        "over folded (subject, position) rows, where position variance alone puts std near 1; the "
+        "GAP hinge runs over subjects only, and the across-subject component is ~0.6% of what BT "
+        "normalises by, which puts GAP feat_std at ~0.004 against a target of 1. Sharing one "
+        "coefficient therefore asks the GAP term for a ~250x rescale of the encoder output at full "
+        "weight. Measured consequence on this project at --bt-std-coeff 10: gap_feat_std_mean ran "
+        "0.004 -> 1.8 (the hinge has no restoring force above 1, so it overshoots and parks), "
+        "gap_var_loss hit exactly 0 and stayed, and the reconstruction loss stepped to a higher "
+        "plateau because that inflation is PER-CHANNEL and so survives the content "
+        "normalisation (a uniform gain would have been cancelled exactly). Set this low (0.1-0.5) "
+        "to keep the anti-collapse guarantee without the rescale.",
+    )
+    parser.add_argument(
         "--selection-info-tolerance",
         type=float,
         default=0.05,

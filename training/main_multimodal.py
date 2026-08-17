@@ -1231,12 +1231,20 @@ def main(args):
         _bt_gap_lam = _bt_lambda if _bt_gap_lam is None else _bt_gap_lam
         _bt_sim_c = getattr(args, "bt_sim_coeff", 0.0)
         _bt_std_c = getattr(args, "bt_std_coeff", 0.0)
+        # The GAP hinge measures std over SUBJECT rows, the patch hinge over folded
+        # (subject, position) rows. Position variance alone puts the patch std near 1,
+        # while the across-subject component leaves the GAP std around 0.004 — so one
+        # shared coefficient asks the GAP term for a ~250x rescale of the encoder output.
+        # Same split, same reason, as _bt_gap_lam above.
+        _bt_gap_std_c = getattr(args, "bt_gap_std_coeff", None)
+        _bt_gap_std_c = _bt_std_c if _bt_gap_std_c is None else _bt_gap_std_c
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
             f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
-            f"sim={_bt_sim_c}, std={_bt_std_c}, patch weight={_bt_patch_w})"
+            f"sim={_bt_sim_c}, std={_bt_std_c}, gap std={_bt_gap_std_c}, "
+            f"patch weight={_bt_patch_w})"
         )
         if _bt_patch_w == 0 and _bt_gap_w <= 0:
             raise ValueError(
@@ -1251,6 +1259,13 @@ def main(args):
                 "minimised by collapsing both views to zero, and every other Barlow Twins "
                 "term is scale-invariant, so nothing in the loss can detect that. The "
                 "variance hinge is what makes the MSE term safe — they ship together."
+            )
+        if _bt_sim_c > 0 and _bt_gap_w > 0 and _bt_gap_std_c <= 0:
+            raise ValueError(
+                "--bt-gap-std-coeff 0 with --bt-sim-coeff > 0 and --bt-gap-weight > 0 leaves the "
+                "GAP term's MSE with no variance hinge behind it — the same collapse-to-zero the "
+                "check above rejects, on the one term whose rows are subjects. Lower it (0.1-0.5) "
+                "rather than disabling it."
             )
         if _bt_gap_w > 0 and args.batch_size < 128:
             logger.warning(
@@ -1301,7 +1316,7 @@ def main(args):
                     soft_content_mask=soft_content_mask,
                     lambd=_bt_gap_lam,
                     sim_coeff=_bt_sim_c,
-                    std_coeff=_bt_std_c,
+                    std_coeff=_bt_gap_std_c,
                     sim_normalize=_bt_sim_norm,
                     corr_ema=_bt_ema_gap,
                     corr_ema_decay=_bt_corr_ema,

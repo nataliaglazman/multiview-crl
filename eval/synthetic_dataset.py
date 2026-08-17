@@ -119,9 +119,27 @@ CLEAN_NUISANCE_SCALE = 0.0
 
 
 class PseudoMRIRenderer(nn.Module):
-    def __init__(self, res=64, style_scale=1.0, content_scale=1.0, identifiable_ventricle=False):
+    def __init__(
+        self,
+        res=64,
+        style_scale=1.0,
+        content_scale=1.0,
+        identifiable_ventricle=False,
+        lesion_mode="sphere",
+        lesion_sharpness=10.0,
+        lesion_threshold=1.0,
+        wm_softness=0.0,
+    ):
         super().__init__()
         self.res = res
+        # See Synthetic3DDisentanglementDataset for why "field" exists. Render-side
+        # knobs live here; the sampling-side length-scale lives on the dataset.
+        if lesion_mode not in ("sphere", "field"):
+            raise ValueError(f"lesion_mode must be sphere|field, got {lesion_mode!r}")
+        self.lesion_mode = lesion_mode
+        self.lesion_sharpness = lesion_sharpness
+        self.lesion_threshold = lesion_threshold
+        self.wm_softness = wm_softness
         self.style_scale = style_scale
         self.content_scale = content_scale
         # When True, the ventricle is made recoverable: larger effect size, read off
@@ -171,7 +189,7 @@ class PseudoMRIRenderer(nn.Module):
     # [7] left–right asymmetry, [8] sulcal widening.
     N_CONTENT_COMPONENTS = 9
 
-    def render_structure(self, z_content, z_deformation, z_fissure, device, clean=False):
+    def render_structure(self, z_content, z_deformation, z_fissure, device, clean=False, z_lesion=None):
         """Deterministic given (z_content, z_deformation, z_fissure). Shared across views.
 
         z_content layout (9 components, extras default to 0):
@@ -284,19 +302,39 @@ class PseudoMRIRenderer(nn.Module):
         # WM regardless of direction. (Old code scaled to ±0.6 per axis → centre
         # norm up to ~1.04 ≫ radii_wm≈0.5, so the lesion was absent in ~95% of
         # samples and its 3 position dims were near-dead / unidentifiable.)
-        lesion_dir = _sq(z_content[2:5], 1.0).to(device)
-        lesion_reach = (radii_wm - 0.12).clamp_min(0.05)
-        lesion_xyz = lesion_dir * (lesion_reach / (3**0.5))
-        lesion_mask = (torch.norm(self.coords - lesion_xyz, dim=-1) < 0.1) & mask_wm
+        # Returned as a FLOAT load in [0, 1], not a boolean. In sphere mode it takes
+        # only {0, 1}, and render_modality's blend then reduces exactly to the old
+        # torch.where — the legacy path stays bit-identical.
+        if self.lesion_mode == "field":
+            # WM membership: soft when wm_softness > 0, so the lesion's support does
+            # not jump discontinuously with brain_size (a hard mask makes one content
+            # component's support a function of another's).
+            if self.wm_softness > 0:
+                wm_weight = torch.sigmoid((radii_wm - deformed_dist) / self.wm_softness)
+            else:
+                wm_weight = mask_wm.to(dist.dtype)
+            if z_lesion is None:
+                lesion_load = torch.zeros_like(dist)
+            else:
+                z_les_up = self._upsample_field(z_lesion, device)
+                # SIGMOID, not a threshold: strictly monotone, so the image depends on
+                # the local field value everywhere and the local mixing stays injective.
+                lesion_load = torch.sigmoid(self.lesion_sharpness * (z_les_up - self.lesion_threshold))
+                lesion_load = lesion_load * wm_weight
+        else:
+            lesion_dir = _sq(z_content[2:5], 1.0).to(device)
+            lesion_reach = (radii_wm - 0.12).clamp_min(0.05)
+            lesion_xyz = lesion_dir * (lesion_reach / (3**0.5))
+            lesion_load = ((torch.norm(self.coords - lesion_xyz, dim=-1) < 0.1) & mask_wm).to(dist.dtype)
 
-        return tissue_map, lesion_mask
+        return tissue_map, lesion_load
 
     # render_modality consumes 3 style components (gain, bias, noise sigma).
     # Shorter z_style is right-padded with zeros so it never IndexErrors —
     # missing components simply default to "no modulation".
     N_STYLE_COMPONENTS = 3
 
-    def render_modality(self, tissue_map, lesion_mask, z_style, modality, view_seed, device):
+    def render_modality(self, tissue_map, lesion_load, z_style, modality, view_seed, device):
         """View-specific rendering. z_style drives gain, bias, and noise sigma."""
         gen = torch.Generator(device=device).manual_seed(int(view_seed))
 
@@ -324,7 +362,10 @@ class PseudoMRIRenderer(nn.Module):
         lut = base * gain + bias
         volume = lut[tissue_map]
 
-        volume = torch.where(lesion_mask, torch.full_like(volume, lesion_int), volume)
+        # Convex blend, smooth and strictly monotone in the load. With a binary load
+        # this is exactly the old torch.where, so sphere mode is unchanged.
+        lesion_load = lesion_load.to(volume.dtype)
+        volume = (1.0 - lesion_load) * volume + lesion_load * lesion_int
 
         bias_field = 1.0 + self._seeded_noise(scale=4, gen=gen, device=device) * 0.15 * self.style_scale
         volume = volume * bias_field
@@ -473,6 +514,11 @@ class Synthetic3DDisentanglementDataset(Dataset):
         field_tp_dof=8.0,
         field_scale=1.0,
         identifiable_ventricle=False,
+        lesion_mode="sphere",
+        lesion_lengthscale=0.4,
+        lesion_sharpness=10.0,
+        lesion_threshold=1.0,
+        wm_softness=0.0,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -500,6 +546,26 @@ class Synthetic3DDisentanglementDataset(Dataset):
             raise ValueError(f"field_kernels must be distinct|repeated, got {field_kernels!r}")
         self.field_prior = field_prior
         self.field_grid = field_grid
+        # ── lesion as a latent FIELD (lesion_mode="field") ────────────────────
+        # "sphere" (default) is the legacy path: z_content[2:5] place a hard
+        # 0.1-radius ball. It is bit-identical to before, and it is why the lesion
+        # sits outside both identifiability frameworks: the image at a site far from
+        # the ball is CONSTANT in lesion position, so the local mixing is not
+        # injective in it, and equivalently the per-site index set S_{k,u} becomes a
+        # function of the latents.
+        #
+        # "field" replaces the position triple with a third GP/TP component on the
+        # shared lattice, at its own (shorter) length-scale. Two consequences:
+        #   * every site carries a lesion value, so S_{k,u} is fixed and the local
+        #     mixing is injective in it -> Assumption (L1) holds;
+        #   * three components with three DISTINCT kernels satisfies the condition of
+        #     Halva et al. (2024) Thm 2 by construction, rather than by the accident
+        #     of the iid branch's differing lattice resolutions.
+        # In "field" mode z_content[2:5] are INERT — the eval side must drop them.
+        if lesion_mode not in ("sphere", "field"):
+            raise ValueError(f"lesion_mode must be sphere|field, got {lesion_mode!r}")
+        self.lesion_mode = lesion_mode
+        self.lesion_lengthscale = lesion_lengthscale
         self.field_kernels = field_kernels
         self.field_lengthscales = tuple(field_lengthscales)
         self.field_tp_dof = field_tp_dof
@@ -573,6 +639,10 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 style_scale=style_scale,
                 content_scale=content_scale,
                 identifiable_ventricle=identifiable_ventricle,
+                lesion_mode=lesion_mode,
+                lesion_sharpness=lesion_sharpness,
+                lesion_threshold=lesion_threshold,
+                wm_softness=wm_softness,
             )
         else:
             # Fallback to the Conv-based random decoders
@@ -632,7 +702,9 @@ class Synthetic3DDisentanglementDataset(Dataset):
         """
         return self.seed * 1000003 + idx
 
-    def render_pseudo_mri(self, z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed):
+    def render_pseudo_mri(
+        self, z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed, z_lesion=None
+    ):
         """Render a view pair from explicit latents. Deterministic given its inputs.
 
         The single place that fixes the structure/modality call order, the
@@ -651,6 +723,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 z_fissure,
                 device=device,
                 clean=self.clean_content,
+                z_lesion=z_lesion,
             )
             x_v1 = self.renderer.render_modality(
                 tissue,
@@ -681,6 +754,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         else:
             z_content = torch.randn(self.n_content, generator=sample_gen)
 
+        z_lesion = None
         if self.field_prior == "iid":
             z_deformation = torch.randn(
                 self.n_deformation_grid,
@@ -694,6 +768,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 self.n_fissure_grid,
                 generator=sample_gen,
             )
+            if self.lesion_mode == "field":
+                z_lesion = torch.randn(self.field_grid, self.field_grid, self.field_grid, generator=sample_gen)
             field_lengthscales = None
         else:
             # GP / t-process fields on a COMMON lattice so the only difference
@@ -717,12 +793,28 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 dof=self.field_tp_dof,
                 tau_seed=sample_seed * 7 + 2,
             )
-            field_lengthscales = torch.tensor([ls_def, ls_fis], dtype=torch.float32)
+            if self.lesion_mode == "field":
+                # Third component, own (shorter) length-scale. Three distinct kernels
+                # is exactly the condition of Halva et al. (2024) Thm 2.
+                ls_les = self.lesion_lengthscale
+                if self.field_kernels == "repeated":
+                    ls_les = ls_def
+                z_lesion = self.field_scale * sample_gp_field(
+                    self.field_grid,
+                    ls_les,
+                    sample_gen,
+                    prior=self.field_prior,
+                    dof=self.field_tp_dof,
+                    tau_seed=sample_seed * 7 + 3,
+                )
+                field_lengthscales = torch.tensor([ls_def, ls_fis, ls_les], dtype=torch.float32)
+            else:
+                field_lengthscales = torch.tensor([ls_def, ls_fis], dtype=torch.float32)
         z_style_v1 = torch.randn(self.n_style, generator=sample_gen)
         z_style_v2 = torch.randn(self.n_style, generator=sample_gen)
 
         x_v1, x_v2, brain_mask = self.render_pseudo_mri(
-            z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed
+            z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed, z_lesion=z_lesion
         )
 
         latents = {
@@ -733,6 +825,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
             "z_style_v2": z_style_v2,
             "brain_mask": brain_mask,
         }
+        if z_lesion is not None:
+            latents["z_lesion"] = z_lesion
         if field_lengthscales is not None:
             latents["field_lengthscales"] = field_lengthscales
         if self.causal:

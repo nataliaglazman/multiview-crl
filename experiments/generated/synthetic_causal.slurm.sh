@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-11T21:27:43Z
-# Git SHA: fe3e341
+# Generated at: 2026-08-17T09:38:50Z
+# Git SHA: b4e8dfd
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-25-10-fixed-recon-2
+#SBATCH --job-name=synthetic-causal-gap-std-0p2
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-25-10-fixed-recon-2-%j.err
+#SBATCH --error=synthetic-causal-gap-std-0p2-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -59,6 +59,7 @@ fi
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
     --bt-gap-lambda 0.01 \
+    --bt-gap-std-coeff 0.2 \
     --bt-gap-weight 1 \
     --bt-patch-weight 1 \
     --bt-sim-coeff 0.025 \
@@ -116,7 +117,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-25-10-fixed-recon-2 \
+    --model-id synthetic-causal-gap-std-0p2 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
