@@ -239,6 +239,10 @@ def main():
                     "synthetic_causal",
                     "synthetic_causal_graph",
                     "synthetic_causal_edge_prob",
+                    "synthetic_content_prior",
+                    "synthetic_content_squash",
+                    "synthetic_content_amp_scale",
+                    "synthetic_lesion_radius",
                 )
                 if hasattr(args_, k)
             },

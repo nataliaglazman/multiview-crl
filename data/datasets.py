@@ -635,6 +635,10 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_lesion_threshold=1.0,
         synthetic_wm_softness=0.0,
         synthetic_identifiable_ventricle=False,
+        synthetic_content_prior="normal",
+        synthetic_content_squash="auto",
+        synthetic_content_amp_scale=None,
+        synthetic_lesion_radius=0.1,
         **kwargs,
     ):
         super().__init__()
@@ -694,7 +698,25 @@ class SyntheticBrainDataset(MultiviewDataset):
             lesion_threshold=synthetic_lesion_threshold,
             wm_softness=synthetic_wm_softness,
             identifiable_ventricle=synthetic_identifiable_ventricle,
+            content_prior=synthetic_content_prior,
+            content_squash=synthetic_content_squash,
+            content_amp_scale=synthetic_content_amp_scale,
+            lesion_radius=synthetic_lesion_radius,
         )
+        if synthetic_normalize in ("per_sample", "shared") and synthetic_n_style > 0:
+            import warnings
+
+            warnings.warn(
+                f"synthetic_normalize={synthetic_normalize!r} z-scores each volume over its "
+                "foreground, which removes exactly the affine intensity map that style applies "
+                "(lut = base*gain + bias). Measured: a style swap at fixed anatomy leaves a "
+                "residual of 0.08 of the volume's own contrast, vs 0.76 under fixed_reference "
+                "(eval/generator_defects.py --tests style). z_style[0] (gain) and z_style[1] "
+                "(bias) are effectively erased from the encoder input, so any style-recovery "
+                "number from this run is bounded by the normalizer, not by the model. Use "
+                "--synthetic-normalize fixed_reference for runs that report style recovery.",
+                stacklevel=2,
+            )
         self.num_samples = synthetic_num_samples
         self.synthetic_mode = synthetic_mode
 

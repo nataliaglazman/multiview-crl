@@ -86,6 +86,48 @@ def parse_args() -> argparse.ArgumentParser:
         "<1 = subtle content (low reconstruction salience).",
     )
     parser.add_argument(
+        "--synthetic-content-prior",
+        type=str,
+        default="normal",
+        choices=["normal", "uniform"],
+        help="Marginal prior for the content factors. 'normal' is N(0,1) (or the SCM), which "
+        "the renderer must fold into [-1,1]: the hard clamp saturates ~32%% of draws and caps "
+        "recovery at R^2 0.906 linear / 0.940 nonlinear, and even tanh caps the LINEAR ceiling "
+        "at 0.933 -- which binds, since cv_probe_r2 and block_mcc default to ridge. 'uniform' "
+        "puts every factor in [-1,1] where the squash is the identity and the ceiling is 1.0 "
+        "for every probe class. Under --synthetic-causal / --synthetic-hierarchical-content it "
+        "is applied as a per-dim monotone probability-integral transform, so the dependence "
+        "structure is unchanged. Verify with: python -m eval.generator_defects --tests squash.",
+    )
+    parser.add_argument(
+        "--synthetic-content-squash",
+        type=str,
+        default="auto",
+        choices=["auto", "clamp", "tanh", "none"],
+        help="Squash applied to content factors before they drive geometry. 'auto' keeps the "
+        "historical coupling to --synthetic-clean-content (tanh when clean, clamp otherwise); "
+        "the other values decouple the two so tanh is usable in the main setting. 'none' is "
+        "only safe with --synthetic-content-prior uniform.",
+    )
+    parser.add_argument(
+        "--synthetic-content-amp-scale",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Per-dim multiplier on content effect-sizes, indexed like z_content (unlike "
+        "--synthetic-content-scale, which multiplies all of them together). Lifts a factor that "
+        "renders below the noise floor without touching the rest. Dims 2:5 are lesion POSITION, "
+        "not a boundary displacement, and ignore this -- use --synthetic-lesion-radius. "
+        "Calibrate with: python -m eval.generator_defects --tests amplitude.",
+    )
+    parser.add_argument(
+        "--synthetic-lesion-radius",
+        type=float,
+        default=0.1,
+        help="Sphere-mode lesion radius in [-1,1] coords (0.1 = 1.6 voxels at res=32). The WM "
+        "margin tracks it, so the lesion stays inside the white matter as it grows.",
+    )
+    parser.add_argument(
         "--synthetic-hierarchical-content",
         action="store_true",
         help="Enable hierarchical content latents: a shared global-atrophy "

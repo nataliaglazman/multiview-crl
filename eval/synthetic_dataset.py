@@ -129,6 +129,9 @@ class PseudoMRIRenderer(nn.Module):
         lesion_sharpness=10.0,
         lesion_threshold=1.0,
         wm_softness=0.0,
+        content_squash="auto",
+        content_amp_scale=None,
+        lesion_radius=0.1,
     ):
         super().__init__()
         self.res = res
@@ -142,6 +145,25 @@ class PseudoMRIRenderer(nn.Module):
         self.wm_softness = wm_softness
         self.style_scale = style_scale
         self.content_scale = content_scale
+        # Squash applied to every content factor before it drives geometry. "auto" ties it
+        # to clean_content (tanh when clean, hard clamp otherwise) — the historical
+        # coupling, kept as the default so runs stay byte-identical. The clamp is
+        # non-injective on the ~32% of N(0,1) draws outside [-1,1] and caps recovery at
+        # R^2 0.906 (linear) / 0.940 (nonlinear); tanh is injective, so its NONLINEAR
+        # ceiling is 1.0 — but its linear ceiling is only 0.933, and cv_probe_r2 /
+        # block_mcc default to kind="ridge". "none" removes the squash entirely and is
+        # only safe with content_prior="uniform", where every draw already lies in
+        # [-1, 1] and the squash is the identity: that is the setting with no ceiling at
+        # all. Measured by eval/generator_defects.py --tests squash.
+        if content_squash not in ("auto", "clamp", "tanh", "none"):
+            raise ValueError(f"content_squash must be auto|clamp|tanh|none, got {content_squash!r}")
+        self.content_squash = content_squash
+        # Per-dim multiplier on the geometric effect size, indexed like z_content. Lets a
+        # factor that renders below the noise floor be lifted WITHOUT touching the others
+        # (content_scale multiplies all of them together). Dims 2:5 (lesion position) are
+        # not boundary displacements and ignore this — use lesion_radius for those.
+        self.content_amp_scale = content_amp_scale
+        self.lesion_radius = lesion_radius
         # When True, the ventricle is made recoverable: larger effect size, read off
         # the UNdeformed radius (no gyral-field swamping), and the fissure gets its own
         # tissue label so "total CSF" is no longer fissure-dominated. Default False =
@@ -218,11 +240,24 @@ class PseudoMRIRenderer(nn.Module):
         # zero out the unlabeled deformation/fissure nuisance so the named factors dominate.
         nuisance = CLEAN_NUISANCE_SCALE if clean else 1.0
 
-        def _sq(z, a=1.0):
-            return a * torch.tanh(z) if clean else z.clamp(-a, a)
+        squash = self.content_squash
+        if squash == "auto":
+            squash = "tanh" if clean else "clamp"
 
-        radii_wm = 0.5 + _sq(z_content[0]) * 0.1 * self.content_scale
-        cortical_thickness = 0.15 + _sq(z_content[5]) * 0.06 * self.content_scale
+        def _sq(z, a=1.0):
+            if squash == "tanh":
+                return a * torch.tanh(z)
+            if squash == "none":
+                return z if a == 1.0 else a * z
+            return z.clamp(-a, a)
+
+        def _amp(dim, base):
+            if self.content_amp_scale is None:
+                return base
+            return base * float(self.content_amp_scale[dim])
+
+        radii_wm = 0.5 + _sq(z_content[0]) * _amp(0, 0.1) * self.content_scale
+        cortical_thickness = 0.15 + _sq(z_content[5]) * _amp(5, 0.06) * self.content_scale
         radii_gm = radii_wm + cortical_thickness
         # identifiable_ventricle: re-centre to a larger, more salient ventricle whose
         # SMALLEST radius (0.12) still clears the |x|>0.05 septum split. A naive
@@ -230,7 +265,7 @@ class PseudoMRIRenderer(nn.Module):
         # the split erases the ventricle entirely for z1<0 -- a floor effect that CAPS
         # recoverability (R^2 0.92 -> 0.81). Range [0.12, 0.28], all inside the WM.
         vent_base, vent_amp = (0.20, 0.08) if self.identifiable_ventricle else (0.15, 0.05)
-        ventricle_size = vent_base + _sq(z_content[1]) * vent_amp * self.content_scale
+        ventricle_size = vent_base + _sq(z_content[1]) * _amp(1, vent_amp) * self.content_scale
 
         dist = torch.norm(self.coords, dim=-1)
         x_coords = self.coords[..., 0]
@@ -249,7 +284,7 @@ class PseudoMRIRenderer(nn.Module):
         # recoverable named factor. Sign flips the gyral phase (map stays
         # injective); |z| sets sulcal depth → surface roughness.
         gyral_pattern = torch.sin(12 * x_coords) * torch.sin(12 * y_coords) * torch.sin(12 * z_coords)
-        sulcal_amp = _sq(z_content[8]) * 0.06 * self.content_scale
+        sulcal_amp = _sq(z_content[8]) * _amp(8, 0.06) * self.content_scale
         deformed_dist = deformed_dist + gyral_pattern * sulcal_amp
 
         # Temporal-lobe atrophy (z_content[6]): shrink the WM/GM boundary inside a
@@ -263,13 +298,13 @@ class PseudoMRIRenderer(nn.Module):
         tw_y = y_coords - 0.05
         tw_z = z_coords + 0.35  # inferior
         temporal_weight = torch.exp(-(tw_x**2 + tw_y**2 + tw_z**2) / (2 * 0.18**2))
-        temporal_shrink = _sq(z_content[6]) * 0.12 * self.content_scale
+        temporal_shrink = _sq(z_content[6]) * _amp(6, 0.12) * self.content_scale
         deformed_dist = deformed_dist + temporal_weight * temporal_shrink
 
         # Left–right asymmetry: differential atrophy across hemispheres.
         # Positive z_content[7] → left hemisphere (x < 0) more atrophied.
         lr_weight = torch.tanh(-3 * x_coords)  # smooth L/R gradient, ∈ (−1, 1)
-        lr_shift = _sq(z_content[7]) * 0.08 * self.content_scale
+        lr_shift = _sq(z_content[7]) * _amp(7, 0.08) * self.content_scale
         deformed_dist = deformed_dist + lr_weight * lr_shift
 
         mask_gm = deformed_dist < radii_gm
@@ -323,9 +358,12 @@ class PseudoMRIRenderer(nn.Module):
                 lesion_load = lesion_load * wm_weight
         else:
             lesion_dir = _sq(z_content[2:5], 1.0).to(device)
-            lesion_reach = (radii_wm - 0.12).clamp_min(0.05)
+            # Margin tracks the lesion radius (+0.02) so a larger lesion still lands
+            # inside the WM for every direction, instead of poking through the boundary
+            # and turning its own support into a function of brain_size.
+            lesion_reach = (radii_wm - (self.lesion_radius + 0.02)).clamp_min(0.05)
             lesion_xyz = lesion_dir * (lesion_reach / (3**0.5))
-            lesion_load = ((torch.norm(self.coords - lesion_xyz, dim=-1) < 0.1) & mask_wm).to(dist.dtype)
+            lesion_load = ((torch.norm(self.coords - lesion_xyz, dim=-1) < self.lesion_radius) & mask_wm).to(dist.dtype)
 
         return tissue_map, lesion_load
 
@@ -519,6 +557,10 @@ class Synthetic3DDisentanglementDataset(Dataset):
         lesion_sharpness=10.0,
         lesion_threshold=1.0,
         wm_softness=0.0,
+        content_prior="normal",
+        content_squash="auto",
+        content_amp_scale=None,
+        lesion_radius=0.1,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -533,6 +575,20 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.causal_noise_scale = causal_noise_scale
         self.causal_nonlinearity = causal_nonlinearity
         self.clean_content = clean_content
+
+        # Content prior. "normal" is z ~ N(0,1) (or the SCM), which the renderer's squash
+        # then has to fold into [-1, 1] — non-injectively for the clamp, and with a linear
+        # ceiling of ~0.93 even for tanh. "uniform" maps each factor onto U(-1, 1), where
+        # the squash is the identity and the recovery ceiling is exactly 1.0 for every
+        # probe class. Under --synthetic-causal the map is the per-dim probability-integral
+        # transform 2*Phi((z-mu)/sigma) - 1 with (mu, sigma) estimated once from the SCM:
+        # strictly monotone per dim, so it preserves each factor's information and the DAG's
+        # dependence structure exactly, and only reshapes the marginals. Pair with
+        # content_squash="none" (or leave "auto" — on [-1,1] the clamp is already inert).
+        if content_prior not in ("normal", "uniform"):
+            raise ValueError(f"content_prior must be normal|uniform, got {content_prior!r}")
+        self.content_prior = content_prior
+        self._pit_stats = None
 
         # Field latents (Halva et al. 2024): the shared z_deformation / z_fissure
         # fields are, by default, iid grids (a fixed triangular kernel). When
@@ -643,7 +699,22 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 lesion_sharpness=lesion_sharpness,
                 lesion_threshold=lesion_threshold,
                 wm_softness=wm_softness,
+                content_squash=content_squash,
+                content_amp_scale=content_amp_scale,
+                lesion_radius=lesion_radius,
             )
+            if lesion_mode == "field" and n_content > 2:
+                import warnings
+
+                warnings.warn(
+                    "lesion_mode='field': render_structure never reads z_content[2:5], so those 3 "
+                    "dims are INERT — they vary in the ground-truth latents but cannot change the "
+                    "image (verified: max|dx| == 0 across sign sweeps, eval/generator_defects.py "
+                    "--tests inert). Any per-factor R^2 or block_mcc over the full z_content will "
+                    "average in 3 unrecoverable columns and understate recovery by ~1/3. Drop them "
+                    "on the eval side, or use lesion_mode='sphere'.",
+                    stacklevel=2,
+                )
         else:
             # Fallback to the Conv-based random decoders
             self.renderer_v1 = Random3DRenderer(8, 16, res)
@@ -692,6 +763,26 @@ class Synthetic3DDisentanglementDataset(Dataset):
             if idx < self.n_content:
                 z_content[idx] = weight * z_global.item() + self._HIER_RESIDUAL_SCALE * z_residuals[idx]
         return z_content, z_global, z_residuals
+
+    def _pit_to_uniform(self, z, sampler):
+        """Map a structured content draw onto U(-1, 1) per dim, monotonically.
+
+        Neither the SCM (leaky_relu of a weighted parent sum plus noise) nor the
+        hierarchical prior has closed-form marginals, so (mu, sigma) are estimated once
+        from a fixed 8192-draw pilot of ``sampler`` and cached. The transform is
+        2*Phi((z-mu)/sigma) - 1 == erf((z-mu)/(sigma*sqrt(2))): strictly increasing in
+        z_d, so it is information-preserving per factor, and it leaves the DAG's / the
+        global factor's dependence structure untouched — only the marginal shape changes.
+        Not exactly uniform (those marginals are not exactly Gaussian), which is fine:
+        what matters is that the result lands inside [-1, 1], where the renderer's squash
+        is the identity and the recovery ceiling is 1.0.
+        """
+        if self._pit_stats is None:
+            gen = torch.Generator().manual_seed(20240717)
+            pilot = torch.stack([sampler(gen) for _ in range(8192)])
+            self._pit_stats = (pilot.mean(0), pilot.std(0).clamp_min(1e-6))
+        mu, sd = self._pit_stats
+        return torch.erf((z - mu) / (sd * (2.0**0.5)))
 
     def sample_seed_for(self, idx):
         """The per-sample RNG seed used by ``_pseudo_mri_item``.
@@ -749,8 +840,17 @@ class Synthetic3DDisentanglementDataset(Dataset):
 
         if self.causal:
             z_content = sample_content_from_scm(self.scm, sample_gen, self.causal_noise_scale, self.causal_nonlinearity)
+            if self.content_prior == "uniform":
+                z_content = self._pit_to_uniform(
+                    z_content,
+                    lambda g: sample_content_from_scm(self.scm, g, self.causal_noise_scale, self.causal_nonlinearity),
+                )
         elif self.hierarchical_content:
             z_content, z_global, z_residuals = self._sample_hierarchical_content(sample_gen)
+            if self.content_prior == "uniform":
+                z_content = self._pit_to_uniform(z_content, lambda g: self._sample_hierarchical_content(g)[0])
+        elif self.content_prior == "uniform":
+            z_content = torch.rand(self.n_content, generator=sample_gen) * 2.0 - 1.0
         else:
             z_content = torch.randn(self.n_content, generator=sample_gen)
 

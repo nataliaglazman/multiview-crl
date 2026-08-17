@@ -1460,6 +1460,10 @@ def main(args):
                 "synthetic_causal_nonlinearity": getattr(args, "synthetic_causal_nonlinearity", "leaky_relu"),
                 "synthetic_clean_content": getattr(args, "synthetic_clean_content", False),
                 "synthetic_identifiable_ventricle": getattr(args, "synthetic_identifiable_ventricle", False),
+                "synthetic_content_prior": getattr(args, "synthetic_content_prior", "normal"),
+                "synthetic_content_squash": getattr(args, "synthetic_content_squash", "auto"),
+                "synthetic_content_amp_scale": getattr(args, "synthetic_content_amp_scale", None),
+                "synthetic_lesion_radius": getattr(args, "synthetic_lesion_radius", 0.1),
                 "synthetic_num_samples_per_mode": {
                     "train": getattr(args, "synthetic_num_train", 1000),
                     "val": getattr(args, "synthetic_num_val", 100),
