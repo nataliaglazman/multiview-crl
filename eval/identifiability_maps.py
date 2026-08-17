@@ -48,18 +48,26 @@ What z_content and z_style are here
 The abstract contract is ``decode(z_content, z_style) -> (*volume_shape)`` on 1-D
 latents.  This repo's decoder takes spatial tensors, so ``decoder_closure`` binds a
 real operating point ``(base_z, base_style)`` captured from a forward pass and lets
-``z_content`` / ``z_style`` be **per-channel offsets broadcast over the latent grid**:
+``z_content`` / ``z_style`` be **coordinates in a probe basis, broadcast over the latent
+grid** as per-channel offsets:
 
-    decode(z_c, z_s) = decoder(base_z + z_c[None, :, None, None, None],
-                               style=base_style + z_s[None, :, None, None, None])
+    decode(z_c, z_s) = decoder(base_z + (B_c z_c)[None, :, None, None, None],
+                               style=base_style + (B_s z_s)[None, :, None, None, None])
 
-so ``d_content`` is the channel count of the level-0 decoder input (the concatenated,
-upscaled content codes of every level) and ``d_style`` is the injected style tensor's
-channel count.  This is a genuine restriction: the maps describe the ``d_content``
-*global channel* directions, not all ``C x D x H x W`` latent directions.  It is the
-right restriction for this project — the recovered factors measured so far are global
-scalars — but it is a restriction, and a direction that is invisible here may still be
-carried by a spatially structured latent perturbation.
+The basis matters more than it looks.  A codebook sits between the encoder's mask split
+and the decoder's input: content is lifted to ``embed_dim`` by ``CodeLayer.conv_in``, and
+under ``quantize_style`` so is style (``style_embed_dim`` defaults to ``embed_dim``).  A
+44/4 encoder split therefore presents a 48/48 decoder interface.  Probing that interface
+directly (``--basis decoder``) explores 44 style directions the encoder cannot produce,
+which inflates leakage toward 1 and lets conditioning read untrained weights.  The default
+``--basis encoder`` composes ``conv_in`` into the closure so the probe coordinates are the
+encoder's own 44 content and 4 style channels; ``--basis pca`` uses the principal
+directions of the realized codes, which additionally reflects what quantization collapses.
+
+One restriction survives every basis choice: these are *global channel* directions, not
+all ``C x D x H x W`` latent directions.  That is the right restriction for this project —
+the recovered factors measured so far are global scalars — but a direction invisible here
+may still be carried by a spatially structured latent perturbation.
 
 Two arms, because a spatially reduced normalization breaks locality
 -------------------------------------------------------------------
@@ -588,18 +596,193 @@ def footprint_gram(truth: np.ndarray) -> np.ndarray:
 # ----------------------------------------------------------------------------
 
 
-def decoder_closure(dec: torch.nn.Module, base_z: torch.Tensor, base_style: torch.Tensor | None) -> Decoder:
-    """Bind an operating point and expose the module's 1-D ``decode(z_c, z_s)`` contract.
+@dataclass
+class ProbeBasis:
+    """The directions the Jacobian is measured along, and their natural scale.
 
-    ``z_c`` / ``z_s`` are per-channel offsets broadcast over the latent grid (see the
-    module docstring).  ``base_z`` and ``base_style`` must be single-sample tensors.
+    ``content`` maps a probe coordinate vector to a channel offset on the decoder's
+    content input; ``style`` does the same for the injected style tensor.  Identity
+    bases reproduce the raw per-decoder-channel probe.  See ``build_probe_basis`` for
+    why the identity is usually the wrong choice.
     """
 
+    content: torch.Tensor  # (dec_content_channels, d_content)
+    style: torch.Tensor | None  # (dec_style_channels, d_style)
+    content_scale: torch.Tensor  # (d_content,)
+    style_scale: torch.Tensor  # (d_style,)
+    mode: str
+    meta: dict = field(default_factory=dict)
+
+    @property
+    def d_content(self) -> int:
+        return int(self.content.shape[1])
+
+    @property
+    def d_style(self) -> int:
+        return 0 if self.style is None else int(self.style.shape[1])
+
+
+def capture_codebook_inputs(model, x, level: int):
+    """The tensors the level-``level`` content and style codebooks were handed.
+
+    These are the *pre-quantization, pre-``conv_in``* activations, i.e. the encoder's
+    own content and style channels — the split the Gumbel mask actually makes.  Grabbed
+    with a forward pre-hook rather than reconstructed, so padding and conditioning
+    branches inside ``VQVAE.forward`` cannot silently change what is measured.
+    """
+    caps, handles = {}, []
+    codebooks = getattr(model, "codebooks", None)
+    if codebooks is not None and level < len(codebooks):
+        handles.append(
+            codebooks[level].conv_in.register_forward_pre_hook(lambda _m, a: caps.__setitem__("content", a[0].detach()))
+        )
+    style_cbs = getattr(model, "style_codebooks", None)
+    if style_cbs is not None and str(level) in style_cbs:
+        handles.append(
+            style_cbs[str(level)].conv_in.register_forward_pre_hook(
+                lambda _m, a: caps.__setitem__("style", a[0].detach())
+            )
+        )
+    try:
+        with torch.no_grad():
+            model(x, n_views=x.shape[0])
+    finally:
+        for h in handles:
+            h.remove()
+    return caps.get("content"), caps.get("style")
+
+
+def _conv_in_matrix(codebook) -> torch.Tensor:
+    """The 1x1 ``conv_in`` of a ``CodeLayer`` as a plain (embed_dim, in_channels) matrix."""
+    return codebook.conv_in.weight.detach()[:, :, 0, 0, 0].clone()
+
+
+def build_probe_basis(model, level, base_z, base_style, subjects, mode="encoder") -> ProbeBasis:
+    """Choose the directions to differentiate along.
+
+    ``decoder`` — one direction per decoder-input channel.  Simple, and wrong in most
+    configurations: the decoder's content input is a ``embed_dim``-wide codebook
+    embedding and, under ``quantize_style``, so is its style input (``style_embed_dim``
+    defaults to ``embed_dim``).  A model with a 44/4 encoder mask therefore presents a
+    48/48 decoder interface, and probing it as 48/48 explores directions no input can
+    produce — 44 fictitious style degrees of freedom in that example.  Leakage is the
+    casualty: finding a style direction that mimics a content direction is nearly free
+    when style has an order of magnitude more freedom than the encoder can supply.
+    Conditioning suffers too, more mildly — a direction orthogonal to the realized code
+    manifold was never exercised in training, so the decoder's response along it is
+    arbitrary and a small sigma_min there is untrained weights, not a real blind spot.
+
+    ``encoder`` (default) — compose the codebook's ``conv_in`` into the closure so the
+    probe coordinates ARE the encoder's content and style channels (44 and 4 above).
+    ``conv_in`` is 1x1, so a per-channel offset upstream stays a per-channel offset
+    downstream and the whole correction is one matrix multiply.  Quantization is
+    bypassed, matching the continuous pre-quantization convention of
+    ``eval/phase0_extract.py``.
+
+    ``pca`` — principal directions of the *realized* decoder inputs across the sample.
+    Catches the further collapse quantization imposes on top of the linear lift, so
+    comparing its retained rank against ``encoder`` measures what the codebook discards.
+    """
+    dec_c = int(base_z.shape[1])
+    dec_s = 0 if base_style is None else int(base_style.shape[1])
+    meta = {"decoder_content_channels": dec_c, "decoder_style_channels": dec_s}
+
+    def _identity():
+        c = torch.eye(dec_c, dtype=torch.float64)
+        s = torch.eye(dec_s, dtype=torch.float64) if dec_s else None
+        sc_c = torch.stack([sj["z"].reshape(dec_c, -1).std(dim=1).double() for sj in subjects]).mean(0)
+        sc_s = (
+            torch.stack([sj["style"].reshape(dec_s, -1).std(dim=1).double() for sj in subjects]).mean(0)
+            if dec_s
+            else torch.zeros(0, dtype=torch.float64)
+        )
+        return c, s, sc_c, sc_s
+
+    if mode == "decoder":
+        c, s, sc_c, sc_s = _identity()
+        return ProbeBasis(c, s, sc_c, sc_s, mode, meta)
+
+    if mode == "encoder":
+        c, s, sc_c, sc_s = _identity()
+        codebooks = getattr(model, "codebooks", None)
+        if codebooks is not None and level < len(codebooks):
+            w = _conv_in_matrix(codebooks[level]).double()  # (embed_dim, enc_ch [+ embed_dim])
+            # At any level but the coarsest, the codebook is fed
+            # ``[content_channels | conditioning_from_the_level_above]`` -- see the
+            # ``enc_ch + embed_dim`` branch of the CodeLayer construction.  The
+            # conditioning block is the coarser level's decoded output, not a free encoder
+            # channel, so it is held at the operating point rather than probed.
+            n_cond = 0 if level == getattr(model, "nb_levels", 1) - 1 else int(codebooks[level].dim)
+            n_content_in = w.shape[1] - n_cond
+            w = w[:, :n_content_in]
+            # Only the level-`level` block of the decoder input comes from this codebook;
+            # coarser levels are other levels' content and are held at the operating point.
+            c = torch.zeros(dec_c, n_content_in, dtype=torch.float64)
+            c[: w.shape[0]] = w
+            pre = torch.stack(
+                [sj["pre_content"][:, :n_content_in].reshape(n_content_in, -1).std(dim=1).double() for sj in subjects]
+            )
+            sc_c = pre.mean(0)
+            meta["content_source"] = "codebook conv_in (encoder content channels)"
+            meta["content_conditioning_channels_held_fixed"] = n_cond
+        style_cbs = getattr(model, "style_codebooks", None)
+        if dec_s and style_cbs is not None and str(level) in style_cbs:
+            ws = _conv_in_matrix(style_cbs[str(level)]).double()  # (style_embed_dim, enc_style_ch)
+            s = ws
+            pre = torch.stack([sj["pre_style"].reshape(ws.shape[1], -1).std(dim=1).double() for sj in subjects])
+            sc_s = pre.mean(0)
+            meta["style_source"] = "style codebook conv_in (encoder style channels)"
+        elif dec_s:
+            # No style codebook: the injected tensor already IS the encoder's style
+            # channels, so the identity basis is correct and needs no correction.
+            meta["style_source"] = "raw style channels (no style codebook; identity basis is exact)"
+        return ProbeBasis(c, s, sc_c, sc_s, mode, meta)
+
+    if mode == "pca":
+
+        def _pca(key, d):
+            x = torch.cat([sj[key].reshape(d, -1) for sj in subjects], dim=1).double()  # (d, N)
+            x = x - x.mean(dim=1, keepdim=True)
+            u, sv, _ = torch.linalg.svd(x, full_matrices=False)
+            var = sv**2 / max(x.shape[1] - 1, 1)
+            keep = int((var > var.max() * 1e-6).sum()) if float(var.max()) > 0 else 0
+            keep = max(keep, 1)
+            return u[:, :keep], var[:keep].sqrt(), keep, var
+
+        c, sc_c, keep_c, var_c = _pca("z", dec_c)
+        meta["content_retained_rank"] = keep_c
+        meta["content_variance_spectrum"] = var_c[: min(len(var_c), 64)].tolist()
+        if dec_s:
+            s, sc_s, keep_s, var_s = _pca("style", dec_s)
+            meta["style_retained_rank"] = keep_s
+            meta["style_variance_spectrum"] = var_s[: min(len(var_s), 64)].tolist()
+        else:
+            s, sc_s = None, torch.zeros(0, dtype=torch.float64)
+        return ProbeBasis(c, s, sc_c, sc_s, mode, meta)
+
+    raise ValueError(f"unknown basis mode {mode!r}")
+
+
+def decoder_closure(
+    dec: torch.nn.Module,
+    base_z: torch.Tensor,
+    base_style: torch.Tensor | None,
+    basis: ProbeBasis,
+) -> Decoder:
+    """Bind an operating point and expose the module's 1-D ``decode(z_c, z_s)`` contract.
+
+    ``z_c`` / ``z_s`` are coordinates in ``basis``, mapped to channel offsets that are
+    broadcast over the latent grid.  ``base_z`` and ``base_style`` must be single-sample
+    tensors.
+    """
+    b_c = basis.content.to(base_z.dtype)
+    b_s = None if basis.style is None else basis.style.to(base_z.dtype)
+
     def decode(z_c: torch.Tensor, z_s: torch.Tensor) -> torch.Tensor:
-        z = base_z + z_c.reshape(1, -1, 1, 1, 1)
-        if base_style is None:
+        z = base_z + (b_c @ z_c).reshape(1, -1, 1, 1, 1)
+        if base_style is None or b_s is None:
             return dec(z)[0, 0]
-        return dec(z, style=base_style + z_s.reshape(1, -1, 1, 1, 1))[0, 0]
+        return dec(z, style=base_style + (b_s @ z_s).reshape(1, -1, 1, 1, 1))[0, 0]
 
     return decode
 
@@ -625,18 +808,17 @@ def renderer_closure(inner, lat: dict, clean: bool) -> Callable[[np.ndarray], np
     return render
 
 
-def latent_draws(base_z: torch.Tensor, base_style: torch.Tensor | None, n: int, scale: float, seed: int):
-    """``n`` offset draws around the operating point.
+def latent_draws(basis: ProbeBasis, n: int, scale: float, seed: int):
+    """``n`` offset draws around the operating point, in ``basis`` coordinates.
 
-    ``scale`` is relative to the per-channel spread of the captured latent, so the
+    ``scale`` is relative to the spread of each probe coordinate over the dataset, so the
     linearisation point moves by a comparable amount whatever the code scale.  ``scale=0``
     evaluates the Jacobian exactly at the operating point.
     """
     gen = torch.Generator().manual_seed(seed)
-    d_c = base_z.shape[1]
-    d_s = 0 if base_style is None else base_style.shape[1]
-    sd_c = base_z.reshape(d_c, -1).std(dim=1) if scale else torch.zeros(d_c)
-    sd_s = base_style.reshape(d_s, -1).std(dim=1) if (scale and d_s) else torch.zeros(d_s)
+    d_c, d_s = basis.d_content, basis.d_style
+    sd_c = basis.content_scale.float() if scale else torch.zeros(d_c)
+    sd_s = basis.style_scale.float() if (scale and d_s) else torch.zeros(d_s)
     for _ in range(n):
         z_c = torch.randn(d_c, generator=gen) * sd_c * scale
         z_s = torch.randn(d_s, generator=gen) * sd_s * scale
@@ -689,12 +871,11 @@ def group_mask(subjects) -> torch.Tensor:
     return m
 
 
-def run_arm(decoder, arm_name, norm_mode, subjects, cli, vol_shape, mask=None):
+def run_arm(decoder, arm_name, norm_mode, subjects, cli, vol_shape, basis, mask=None):
     """Accumulate the Gram for one arm across subjects, then reduce to maps."""
-    d_c, d_s = content_style_dims(subjects[0]["z"], subjects[0]["style"])
     acc = GramAccumulator(
-        d_content=d_c,
-        d_style=d_s,
+        d_content=basis.d_content,
+        d_style=basis.d_style,
         vol_shape=vol_shape,
         patch=cli.patch,
         mask=mask,
@@ -703,8 +884,8 @@ def run_arm(decoder, arm_name, norm_mode, subjects, cli, vol_shape, mask=None):
     t0 = time.time()
     for si, subj in enumerate(subjects):
         dec = jspread.build_arm(decoder, None, norm_mode, subj["z"], subj["style"])
-        decode = decoder_closure(dec, subj["z"], subj["style"])
-        acc.run(decode, latent_draws(subj["z"], subj["style"], cli.draws, cli.jitter, cli.seed * 31 + si))
+        decode = decoder_closure(dec, subj["z"], subj["style"], basis)
+        acc.run(decode, latent_draws(basis, cli.draws, cli.jitter, cli.seed * 31 + si))
         del dec
     acc.check_rank(strict=not cli.allow_rank_deficient)
     logger.info("arm %-12s %d samples in %.0fs", arm_name, acc.count, time.time() - t0)
@@ -725,6 +906,15 @@ def main():
         default=0.25,
         help="Latent offset scale, relative to the per-channel std of the captured code. 0 = evaluate at "
         "the operating point exactly.",
+    )
+    ap.add_argument(
+        "--basis",
+        choices=["encoder", "decoder", "pca"],
+        default="encoder",
+        help="Directions to differentiate along. 'encoder' (default) probes the encoder's own "
+        "content/style channels through the codebook conv_in; 'decoder' probes raw decoder-input "
+        "channels (the codebook embedding, usually far wider than the mask split); 'pca' probes the "
+        "principal directions of the realized decoder inputs.",
     )
     ap.add_argument("--mask", action="store_true", help="Restrict each Gram to in-brain voxels.")
     ap.add_argument("--reduce", choices=["max", "mean"], default="max", help="Leakage reduction over angles.")
@@ -854,10 +1044,13 @@ def main():
         item = ds[i]
         x = torch.stack([item["image"][0], item["image"][1]], 0).to(device)
         z, style = jspread.capture_decoder_inputs(model, x, cli.level)
+        pre_c, pre_s = capture_codebook_inputs(model, x, cli.level)
         subjects.append(
             {
                 "z": z[:1].contiguous(),
                 "style": None if style is None else style[:1].contiguous(),
+                "pre_content": None if pre_c is None else pre_c[:1].contiguous(),
+                "pre_style": None if pre_s is None else pre_s[:1].contiguous(),
                 "mask": item["mask"][0][0],
             }
         )
@@ -865,7 +1058,7 @@ def main():
     with torch.no_grad():
         probe_out = decoder(subjects[0]["z"], style=subjects[0]["style"])
     vol_shape = tuple(probe_out.shape[2:])
-    d_c, d_s = content_style_dims(subjects[0]["z"], subjects[0]["style"])
+    dec_c, dec_s = content_style_dims(subjects[0]["z"], subjects[0]["style"])
     for subj in subjects:
         subj["subject_mask"] = subj["mask"].bool() if tuple(subj["mask"].shape) == vol_shape else None
     gmask = None
@@ -877,24 +1070,40 @@ def main():
         gmask = group_mask(subjects)
         report["group_mask_voxel_fraction"] = float(gmask.double().mean())
 
+    basis = build_probe_basis(model, cli.level, subjects[0]["z"], subjects[0]["style"], subjects, mode=cli.basis)
     report.update(
         {
             "volume_shape": list(vol_shape),
             "padded_shape": list(padded_shape(vol_shape, cli.patch)),
             "patch_grid": list(patch_grid_shape(padded_shape(vol_shape, cli.patch), cli.patch)),
-            "d_content": d_c,
-            "d_style": d_s,
+            "basis": basis.mode,
+            "basis_meta": basis.meta,
+            # What is DIFFERENTIATED along (the probe), vs what the decoder's interface is.
+            # These differ whenever a codebook sits between the encoder split and the
+            # decoder: `embed_dim` is not the mask split, and conflating them is what makes
+            # a 44/4 model look like 48/48.
+            "d_content_probe": basis.d_content,
+            "d_style_probe": basis.d_style,
+            "d_content_decoder_input": dec_c,
+            "d_style_decoder_input": dec_s,
             "latent_grid": list(subjects[0]["z"].shape[2:]),
         }
     )
     print(f"\n  decoder {cli.level}: latent {tuple(subjects[0]['z'].shape[1:])} -> volume {vol_shape}")
-    print(f"  d_content = {d_c}, d_style = {d_s}, patch = {cli.patch} ({cli.patch ** 3} voxels)")
+    print(f"  probe basis '{basis.mode}': content {basis.d_content}, style {basis.d_style}")
+    print(f"  decoder interface:          content {dec_c}, style {dec_s}")
+    if basis.mode != "decoder" and (basis.d_content, basis.d_style) != (dec_c, dec_s):
+        print("  (differentiating along the encoder's own channels, not the codebook embedding)")
+    for k in ("content_retained_rank", "style_retained_rank", "content_conditioning_channels_held_fixed"):
+        if basis.meta.get(k):
+            print(f"  {k}: {basis.meta[k]}")
+    print(f"  patch = {cli.patch} ({cli.patch ** 3} voxels)")
 
     # ---------------- arms -------------------------------------------------------------
     arms = [("full", "live")] + ([] if cli.skip_frozen else [("frozen_norm", "frozen")])
     accs, maps = {}, {}
     for arm_name, norm_mode in arms:
-        acc = run_arm(decoder, arm_name, norm_mode, subjects, cli, vol_shape, mask=gmask)
+        acc = run_arm(decoder, arm_name, norm_mode, subjects, cli, vol_shape, basis, mask=gmask)
         accs[arm_name] = acc
         cond = conditioning_map(acc)
         leak = leakage_map(acc, reduce=cli.reduce)
