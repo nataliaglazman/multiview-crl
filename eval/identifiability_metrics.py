@@ -389,7 +389,7 @@ def crossview_consistency(content_v1, content_v2, style_v1, style_v2):
 # --------------------------------------------------------------------------- #
 
 
-def _grouped_perm_importance(model, X, y, groups, n_repeats, rng):
+def _grouped_perm_importance(model, X, y, groups, n_repeats, rng, clip=True):
     base = r2_score(y, model.predict(X))
     uniq = np.unique(groups)
     imp = np.zeros(len(uniq))
@@ -401,20 +401,46 @@ def _grouped_perm_importance(model, X, y, groups, n_repeats, rng):
             order = rng.permutation(X.shape[0])
             Xp[:, cols] = X[np.ix_(order, cols)]
             drop += base - r2_score(y, model.predict(Xp))
-        imp[gi] = max(0.0, drop / n_repeats)
+        mean_drop = drop / n_repeats
+        # clip=True keeps only the positive half of the drop distribution. Under a label
+        # permutation the drops are symmetric noise about zero, so the clip zeroes ~half the
+        # entries and leaves SPARSE rows — low entropy, hence a high D for the null. |drop|
+        # keeps the same ranking of real importance without that sign selection; measured on
+        # a permuted-label fit, D of the clipped null is 0.37 against 0.13 for |drop|.
+        imp[gi] = max(0.0, mean_drop) if clip else abs(mean_drop)
     return imp
 
 
-def importance_matrix(repr_arr, factors, groups, method="rf_perm", train_ratio=0.8, n_repeats=3, seed=0):
+def importance_matrix(
+    repr_arr,
+    factors,
+    groups,
+    method="rf_perm",
+    train_ratio=0.8,
+    n_repeats=3,
+    seed=0,
+    clip=True,
+    shuffle_split=False,
+):
     """Channel×factor importance matrix from a regularized probe.
 
     method: ``"rf_perm"`` (grouped permutation, correlation-robust), ``"l1"``
     (|LassoCV coef| summed per channel). Importance is always at the channel
     granularity (``groups``), so D/C are computed on the unit the mask splits on.
+
+    ``clip`` and ``shuffle_split`` default to the original behaviour so existing
+    callers are unchanged. ``clip=False`` scores ``|drop|`` instead of
+    ``max(0, drop)`` (see ``_grouped_perm_importance``); ``shuffle_split=True``
+    draws a fresh train/test partition per ``seed`` instead of always splitting the
+    array in place, so a spread taken across seeds is a sampling band rather than
+    just probe stochasticity.
     """
     rng = np.random.RandomState(seed)
     N = repr_arr.shape[0]
     split = int(N * train_ratio)
+    if shuffle_split:
+        order = rng.permutation(N)
+        repr_arr, factors = repr_arr[order], factors[order]
     sc = StandardScaler().fit(repr_arr[:split])
     Xtr, Xte = sc.transform(repr_arr[:split]), sc.transform(repr_arr[split:])
     Ytr, Yte = factors[:split], factors[split:]
@@ -427,8 +453,38 @@ def importance_matrix(repr_arr, factors, groups, method="rf_perm", train_ratio=0
             R[:, j] = np.array([fi[groups == g].sum() for g in range(n_groups)])
         else:  # rf_perm
             m = RandomForestRegressor(n_estimators=200, max_features="sqrt", random_state=seed).fit(Xtr, Ytr[:, j])
-            R[:, j] = _grouped_perm_importance(m, Xte, Yte[:, j], groups, n_repeats, rng)
+            R[:, j] = _grouped_perm_importance(m, Xte, Yte[:, j], groups, n_repeats, rng, clip=clip)
     return R
+
+
+def rotate_code_groups(repr_arr, groups, rng):
+    """Random orthogonal mixing across code groups, preserving the group layout.
+
+    Block identifiability recovers content only up to an invertible map, so an
+    arbitrary basis for the same content is an equally valid solution. Rotating the
+    group axis produces exactly that: the information is preserved (the map is
+    orthogonal, hence invertible) while any axis alignment the model happened to have
+    is destroyed. D/C over rotated codes are therefore the floor that answers the only
+    question block identifiability leaves open — *is this basis more axis-aligned than
+    an arbitrary one carrying the same content?* — which a label permutation does not
+    ask, because it destroys the signal rather than re-expressing it.
+
+    Requires every group to hold the same number of columns (true for both poolings
+    used here: ``arange(Cc)`` and ``repeat(arange(Cc), P)``).
+    """
+    repr_arr = np.asarray(repr_arr, dtype=np.float64)
+    uniq = np.unique(groups)
+    idx = [np.where(groups == g)[0] for g in uniq]
+    sizes = {len(c) for c in idx}
+    if len(sizes) != 1:
+        raise ValueError(f"rotate_code_groups needs equal-sized groups, got sizes {sorted(sizes)}")
+    stacked = np.stack([repr_arr[:, c] for c in idx], axis=1)  # (N, G, S)
+    Q = np.linalg.qr(rng.normal(size=(len(uniq), len(uniq))))[0]
+    rotated = np.einsum("gh,nhs->ngs", Q, stacked)
+    out = np.empty_like(repr_arr)
+    for gi, c in enumerate(idx):
+        out[:, c] = rotated[:, gi, :]
+    return out
 
 
 def dci_DC(importance):
