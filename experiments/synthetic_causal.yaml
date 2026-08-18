@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-4-scaling-recon-correction
+tag: synthetic-causal-clean-content-2-scaling-independent
 contrastive_loss_type: barlow_twins
 # bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -69,7 +69,7 @@ content_size: 44              # match the baseline; fixes the 44-vs-48 confound
 
 # unchanged from synthetic_causal.yaml so the comparison stays valid
 synthetic_normalize: fixed_reference
-synthetic_causal: true
+synthetic_causal: false
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
 synthetic_res: 64
@@ -84,7 +84,7 @@ vqvae_nb_levels: 1
 vqvae_nb_res_layers: 1
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
-vqvae_scaling_rates: [4]
+vqvae_scaling_rates: [2]
 deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
@@ -93,7 +93,7 @@ synthetic_clean_content: true
 bt_sim_normalize: true
 bt_sim_coeff: 0.025       # ≈ on_diag_gap 0.38 / current normalised sim 16624
 bt_std_coeff: 10
-recon_view-balance: 1
+# recon_view_balance: 1
 # channels_last: false
 # bt_corr_ema: 0.9
 # bt_lambda: 2.0
