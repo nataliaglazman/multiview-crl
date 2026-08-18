@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-17T13:31:36Z
-# Git SHA: 13cbecd
+# Generated at: 2026-08-18T15:14:04Z
+# Git SHA: 5e7e307
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-scaling-2-redo
+#SBATCH --job-name=synthetic-causal-clean-content-scaling-4-nb-1
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-scaling-2-redo-%j.err
+#SBATCH --error=synthetic-causal-clean-content-scaling-4-nb-1-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -116,7 +116,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-scaling-2-redo \
+    --model-id synthetic-causal-clean-content-scaling-4-nb-1 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -127,5 +127,6 @@ fi
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 2 \
+    --vqvae-nb-res-layers 1 \
+    --vqvae-scaling-rates 4 \
     --workers 8
