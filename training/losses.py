@@ -1745,7 +1745,19 @@ class BaselineLoss(torch.nn.Module):
         if per_view is not None and view_balance > 0:
             stacked = torch.stack(per_view)
             w = stacked.detach().clamp_min(1e-8) ** float(view_balance)
+            # Two-stage normalisation. The first line only sets the mean weight to 1; that is
+            # NOT enough to leave the loss VALUE alone, because a weighted mean with weights
+            # proportional to the values is the contraharmonic mean, which exceeds the plain
+            # mean whenever the views disagree (measured: +71% at a 12x view imbalance). Left
+            # uncorrected the recon term would silently gain weight against the contrastive and
+            # commitment terms exactly when a view breaks, confounding the very comparison this
+            # flag exists to make. The second line rescales so the weighted mean equals the
+            # plain mean again. Both factors are detached and uniform across views, so the
+            # RATIO between the views' gradients — the entire point — is untouched.
             w = w * (n_views / w.sum().clamp_min(1e-12))
+            _plain = stacked.detach().sum()
+            _weighted = (w * stacked.detach()).sum()
+            w = w * (_plain / _weighted.clamp_min(1e-12))
             loss = (w * stacked).sum() / n_views
             self.summaries[TBSummaryTypes.SCALAR]["Recon-View_Weight_Max"] = w.max()
             self.summaries[TBSummaryTypes.SCALAR]["Recon-View_Weight_Ratio"] = w.max() / w.min().clamp_min(1e-12)
