@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-scaling-2-redo
+tag: synthetic-causal-clean-content-scaling-4-nb-1
 contrastive_loss_type: barlow_twins
 # bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -81,9 +81,10 @@ style_injection_mode: input
 separate_style_codebooks: true
 separate_content_codebooks: false
 vqvae_nb_levels: 1
+vqvae_nb_res_layers: 1
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
-vqvae_scaling_rates: [2]
+vqvae_scaling_rates: [4]
 deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
