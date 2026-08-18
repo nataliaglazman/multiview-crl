@@ -859,18 +859,32 @@ def train_step(
                 _diag,
             )
 
+        # clip_grad_norm_ RETURNS the pre-clip total norm, and it used to be discarded. At
+        # max_norm=2.0 the clip is a global rescale by min(1, 2/total_norm), so it sets the
+        # effective learning rate for EVERY parameter jointly: while one term dominates the
+        # gradient, every other term is throttled by the same factor, and when that term's
+        # gradient collapses the effective LR for the whole model jumps. Neither event is
+        # visible in any loss curve — which is why a step change in training dynamics can
+        # look causeless. Logged as Perf/grad_norm (pre-clip) and Perf/grad_clip_factor
+        # (1.0 = not clipping; smaller = how hard the optimizer is being held back).
+        _grad_norm = None
         if use_amp:
             scaler.scale(scaled_loss).backward()
             if accumulation_step == total_accumulation_steps - 1:
                 scaler.unscale_(optimizer)
-                clip_grad_norm_(params, max_norm=2.0, norm_type=2)
+                _grad_norm = clip_grad_norm_(params, max_norm=2.0, norm_type=2)
                 scaler.step(optimizer)
                 scaler.update()
         else:
             scaled_loss.backward()
             if accumulation_step == total_accumulation_steps - 1:
-                clip_grad_norm_(params, max_norm=2.0, norm_type=2)
+                _grad_norm = clip_grad_norm_(params, max_norm=2.0, norm_type=2)
                 optimizer.step()
+        if _grad_norm is not None:
+            _gn = _grad_norm.item() if torch.is_tensor(_grad_norm) else float(_grad_norm)
+            if math.isfinite(_gn):
+                _diag["Perf/grad_norm"] = _gn
+                _diag["Perf/grad_clip_factor"] = min(1.0, 2.0 / _gn) if _gn > 0 else 1.0
 
         # MoCo momentum update: must happen AFTER optimizer.step() so the
         # momentum encoder trails the online encoder by one step.
@@ -2300,6 +2314,24 @@ def main(args):
                         tb_writer.add_scalar("Loss/Contrastive", accum_contrastive, step)
                         tb_writer.add_scalar("Loss/Recon", accum_recon, step)
                         tb_writer.add_scalar("Loss/VQ", accum_vq, step)
+
+                        # Reconstruction-loss DECOMPOSITION. These were computed inside
+                        # BaselineLoss/JukeboxPerceptualLoss from the start but nothing ever
+                        # called get_summaries(), so the only recon curve anyone could see was
+                        # Loss/Recon — which is NOT the pixel error: BaselineLoss adds the VQ
+                        # commitment cost into its own return value (losses.py, "loss = loss +
+                        # q_loss"), and main adds the same diffs again as Loss/VQ. So a jump in
+                        # Loss/Recon can be entirely the commitment term tracking a change in
+                        # encoder feature SCALE, with the reconstruction itself unaffected.
+                        # Loss-MAE-Reconstruction is the curve to read for reconstruction
+                        # quality; Recon-Saturated_Fraction and Recon-Raw_Output_Std catch the
+                        # unbounded-decoder runaway that --no-final-recon-norm allows.
+                        if hasattr(recon_loss_fn, "get_summaries"):
+                            for _rk, _rv in recon_loss_fn.get_summaries().get(utils.TBSummaryTypes.SCALAR, {}).items():
+                                _rv = _rv.item() if torch.is_tensor(_rv) else float(_rv)
+                                tb_writer.add_scalar(f"Recon/{_rk}", _rv, step)
+                                if _use_wandb:
+                                    wandb.log({f"Recon/{_rk}": _rv}, step=step)
 
                         # GAN diagnostics
                         for _gan_key in (
