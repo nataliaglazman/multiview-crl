@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-18T15:37:27Z
-# Git SHA: 7ce82f4
+# Generated at: 2026-08-18T15:44:53Z
+# Git SHA: de6d857
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-scaling-4-nb-1-baseline
+#SBATCH --job-name=synthetic-causal-clean-content-4-scaling-recon-correction
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-scaling-4-nb-1-baseline-%j.err
+#SBATCH --error=synthetic-causal-clean-content-4-scaling-recon-correction-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -94,10 +94,11 @@ fi
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
+    --recon-view-balance 1 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 1 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -116,7 +117,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-scaling-4-nb-1-baseline \
+    --model-id synthetic-causal-clean-content-4-scaling-recon-correction \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
