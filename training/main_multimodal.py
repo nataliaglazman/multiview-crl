@@ -264,6 +264,10 @@ def train_step(
                         "reconstruction": [recon],
                         "quantization_losses": diffs,
                         "mask": masks,
+                        # Per-view split, so the pixel loss can report and optionally
+                        # re-weight each view instead of averaging a dead one away.
+                        "n_views": n_views,
+                        "view_balance": getattr(args, "recon_view_balance", 0.0),
                     },
                     images,
                 )

@@ -1147,6 +1147,23 @@ def parse_args() -> argparse.ArgumentParser:
         "off-diagonal.",
     )
     parser.add_argument(
+        "--recon-view-balance",
+        type=float,
+        default=0.0,
+        help="Weight each view's reconstruction loss by its own DETACHED error to this power, "
+        "renormalised to mean 1 so the overall loss scale is unchanged. 0 (default) keeps the "
+        "original single mean over the concatenated [v0; v1] batch and is bit-identical. "
+        "Exists because L1's gradient is sign(x-y) — constant magnitude however wrong the output "
+        "is — so a view that collapses or overshoots generates no more corrective pull than a "
+        "near-perfect one, making the bad state a STABLE equilibrium. Measured on this project: "
+        "a contrastive run sat at view0 MAE 0.073 / view1 MAE 0.576 indefinitely while the "
+        "aggregate Loss/Recon showed only a modest rise, and the recon-only baseline held both "
+        "views at a constant 1.28 ratio over 59k steps. At p=1 that run's view 1 would receive "
+        "~7.9x the gradient of view 0. Start at 1.0. Unlike switching the pixel term to MSE this "
+        "leaves the per-voxel metric alone, so it adds no blur. Per-view MAE is logged as "
+        "Recon/Loss-MAE-Reconstruction_view* whatever this is set to.",
+    )
+    parser.add_argument(
         "--bt-gap-std-coeff",
         type=float,
         default=None,

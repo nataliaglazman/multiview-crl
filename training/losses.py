@@ -1680,7 +1680,13 @@ class BaselineLoss(torch.nn.Module):
             y = y * mask
             y_percep = y_percep * mask
 
-        loss = self._calculate_pixel_loss(x, y, mask=mask) + self._calculate_perceptual_loss(x, y_percep)
+        loss = self._calculate_pixel_loss(
+            x,
+            y,
+            mask=mask,
+            n_views=int(network_output.get("n_views", 1) or 1),
+            view_balance=float(network_output.get("view_balance", 0.0) or 0.0),
+        ) + self._calculate_perceptual_loss(x, y_percep)
 
         for idx, q_loss in enumerate(q_losses):
             q_loss = q_loss.float()
@@ -1691,12 +1697,61 @@ class BaselineLoss(torch.nn.Module):
 
         return loss
 
-    def _calculate_pixel_loss(self, x, y, mask=None) -> torch.Tensor:
+    def _masked_mae(self, x, y, mask):
         if mask is None:
+            return F.l1_loss(x, y)
+        # Mean over brain voxels only — avoids diluting the loss with
+        # background zeros whose target and prediction are both ~0.
+        return ((x - y).abs() * mask).sum() / mask.sum().clamp_min(1.0)
+
+    def _calculate_pixel_loss(self, x, y, mask=None, n_views=1, view_balance=0.0) -> torch.Tensor:
+        """Masked L1, optionally re-weighted so each view's gradient scales with its own error.
+
+        The default path is a single mean over the CONCATENATED [v0; v1] batch. That has two
+        consequences worth stating, both measured on this project:
+
+        1. It cannot show which view is failing. A run was found with view0 MAE 0.073 and view1
+           MAE 0.576 whose aggregate looked like a modest global rise.
+        2. L1's gradient is sign(x - y) — constant magnitude however wrong the output is. A view
+           at 0.576 therefore generates exactly the same per-voxel pull as one at 0.073, so a
+           collapsed or overshooting view is a STABLE equilibrium and training never leaves it.
+
+        ``view_balance`` p > 0 fixes (2) by weighting view v by its own DETACHED error^p,
+        renormalised to mean 1 so the overall loss scale (and hence its balance against the
+        contrastive and commitment terms) is unchanged. At p=1 the example above gives view 1
+        about 7.9x the gradient of view 0 — the pull the plain mean is missing — while leaving
+        the per-voxel L1 metric alone, so it does not introduce the blur an MSE term would.
+        The weight is detached deliberately: it is a gradient re-scaling, not a new objective,
+        so it cannot be reduced by making a view look worse.
+
+        p=0 (default) falls through to the original computation and is bit-identical.
+        """
+        per_view = None
+        if n_views >= 2 and x.shape[0] % n_views == 0:
+            B = x.shape[0] // n_views
+            per_view = [
+                self._masked_mae(
+                    x[v * B : (v + 1) * B],
+                    y[v * B : (v + 1) * B],
+                    None if mask is None else mask[v * B : (v + 1) * B],
+                )
+                for v in range(n_views)
+            ]
+            # Logged unconditionally: the per-view split is the readout this loss was missing,
+            # independent of whether the re-weighting is switched on.
+            for v, pv in enumerate(per_view):
+                self.summaries[TBSummaryTypes.SCALAR][f"Loss-MAE-Reconstruction_view{v}"] = pv.detach()
+
+        if per_view is not None and view_balance > 0:
+            stacked = torch.stack(per_view)
+            w = stacked.detach().clamp_min(1e-8) ** float(view_balance)
+            w = w * (n_views / w.sum().clamp_min(1e-12))
+            loss = (w * stacked).sum() / n_views
+            self.summaries[TBSummaryTypes.SCALAR]["Recon-View_Weight_Max"] = w.max()
+            self.summaries[TBSummaryTypes.SCALAR]["Recon-View_Weight_Ratio"] = w.max() / w.min().clamp_min(1e-12)
+        elif mask is None:
             loss = F.l1_loss(x, y)
         else:
-            # Mean over brain voxels only — avoids diluting the loss with
-            # background zeros whose target and prediction are both ~0.
             diff = (x - y).abs() * mask
             denom = mask.sum().clamp_min(1.0)
             loss = diff.sum() / denom

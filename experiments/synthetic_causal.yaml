@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-scaling-4-nb-1
+tag: synthetic-causal-clean-content-scaling-4-nb-1-baseline
 contrastive_loss_type: barlow_twins
 # bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -61,7 +61,7 @@ bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_gap_lambda: 0.01               # NOT 0.005 — see the calibration note above
 bt_patch_weight: 1
 
-scale_contrastive_loss: 1       # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_contrastive_loss: 0       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
 batch_size: 128
 
