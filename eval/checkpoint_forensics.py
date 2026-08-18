@@ -150,6 +150,103 @@ def _norm_gamma_stats(sd):
         res["split_gamma_max"] = float(sv.abs().max())
         # Heterogeneity across channels is what survives a channel-LayerNorm downstream.
         res["split_gamma_spread"] = float(sv.abs().max() / sv.abs().clamp_min(1e-9).min())
+        # EFFECTIVE CODEBOOK DIMENSION. The quantizer assigns by squared Euclidean distance
+        # (models/vqvae.py: flatten^2 - 2*flatten@embed + embed^2), so a channel's influence on
+        # which code is chosen scales as gamma_c^2. The participation ratio of gamma^2,
+        # (sum g^2)^2 / sum g^4, is the number of channels that actually drive that decision:
+        # it equals C when all gammas are equal and collapses toward 1 as they spread. Channels
+        # far below it are effectively NOT quantized — the codebook spends no resolution on
+        # them, so whatever content they carry does not reach the decoder. That failure is
+        # invisible in the commitment loss, which is dominated by the high-gamma channels the
+        # codebook does fit well.
+        g2 = sv.double().pow(2)
+        res["split_eff_dim"] = float(g2.sum().pow(2) / g2.pow(2).sum())
+        res["split_n_channels"] = int(sv.numel())
+        res["split_eff_dim_frac"] = res["split_eff_dim"] / max(1, sv.numel())
+    return res
+
+
+# ---------------------------------------------------------------------------
+# Tier 2: reconstruction decomposition, PER VIEW. Needs torch + the run's
+# settings.json + the synthetic generator; one batch per checkpoint.
+# ---------------------------------------------------------------------------
+def _recon_stats(run_dir, ckpt_path, device, n_samples, batch_size, causal):
+    """Per-view pixel error, saturation and commitment cost from one forward pass.
+
+    Split out per view because the two encoders are separate under --separate-encoders
+    and keep their own style codebooks (vqvae.py: view 0 -> style_codebooks, view 1 ->
+    style_codebooks_v1). A capacity change confined to one of them shows up here as a
+    per-view asymmetry in pixel error and NOWHERE in the aggregate Loss/Recon curve.
+
+    Mirrors BaselineLoss._calculate_pixel_loss: masked L1 averaged over brain voxels
+    only, so the numbers are comparable to Recon/Loss-MAE-Reconstruction.
+    """
+    import torch as _t
+    from torch.utils.data import DataLoader
+
+    from eval.phase0_extract import load_args, load_model
+    from eval.run_dci_synthetic import build_synthetic_test_set
+
+    args = load_args(run_dir, None)
+    model = load_model(args, ckpt_path, device)
+    model.eval()
+
+    ds = build_synthetic_test_set(args, num_samples=n_samples, cache=True, causal=causal)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    _pg = (
+        tuple(args.patch_grid)
+        if getattr(args, "patch_contrastive", False) and getattr(args, "patch_grid", None)
+        else None
+    )
+    acc = {}
+    with _t.no_grad():
+        for data in loader:
+            imgs = data["image"]
+            n_views = len(imgs)
+            x = _t.cat(imgs, 0).to(device)
+            m = data.get("mask")
+            m = _t.cat(m, 0).to(device).float() if m is not None else None
+            out = model(
+                x,
+                return_recon=True,
+                pool_only=True,
+                n_views=n_views,
+                subsets=getattr(args, "subsets", [(0, 1)]),
+                patch_grid=_pg,
+                mask=m,
+            )
+            recon, diffs = out[0], out[1]
+            if recon is None:
+                raise SystemExit("Model returned no reconstruction (contrastive_only run?).")
+            if recon.shape[2:] != x.shape[2:]:
+                recon = _t.nn.functional.interpolate(recon, size=x.shape[2:], mode="trilinear", align_corners=False)
+            B = x.shape[0] // n_views
+            for v in range(n_views):
+                xv, yv = x[v * B : (v + 1) * B].float(), recon[v * B : (v + 1) * B].float()
+                mv = m[v * B : (v + 1) * B] if m is not None else None
+                sat = (yv.abs() > 1.0).float().mean().item()
+                raw_std = yv.std().item()
+                if mv is not None:
+                    mae = ((xv - yv).abs() * mv).sum().item() / mv.sum().clamp_min(1.0).item()
+                else:
+                    mae = (xv - yv).abs().mean().item()
+                d = acc.setdefault(v, {"mae": 0.0, "sat": 0.0, "std": 0.0, "n": 0})
+                d["mae"] += mae
+                d["sat"] += sat
+                d["std"] += raw_std
+                d["n"] += 1
+            acc.setdefault("commit", 0.0)
+            acc["commit"] += float(sum(dd.float().mean() for dd in diffs))
+            acc["nb"] = acc.get("nb", 0) + 1
+            break  # one batch is enough; raise --batch-size for a tighter estimate
+    res = {"commit": acc.get("commit", 0.0) / max(1, acc.get("nb", 1))}
+    for v, d in acc.items():
+        if not isinstance(v, int):
+            continue
+        res[f"view{v}_mae"] = d["mae"] / d["n"]
+        res[f"view{v}_sat"] = d["sat"] / d["n"]
+        res[f"view{v}_raw_std"] = d["std"] / d["n"]
     return res
 
 
@@ -157,6 +254,23 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("targets", nargs="+", help="Run directory (searched recursively) or explicit .pt paths")
     ap.add_argument("--csv", default=None, help="Also write the table to this CSV")
+    ap.add_argument(
+        "--recon",
+        action="store_true",
+        help="Tier 2: also run ONE forward pass per checkpoint and report PER-VIEW pixel error, "
+        "decoder saturation and raw output std. Needs the run's settings.json and the synthetic "
+        "generator. This is the readout that separates a per-view capacity loss from a uniform one.",
+    )
+    ap.add_argument("--run-dir", default=None, help="Run dir with settings.json (defaults to the checkpoint's dir)")
+    ap.add_argument("--recon-samples", type=int, default=64, help="Synthetic samples to render for --recon")
+    ap.add_argument("--batch-size", type=int, default=16, help="Batch size for --recon")
+    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument(
+        "--iid",
+        action="store_true",
+        help="Force i.i.d. eval factors. Default forwards the run's SCM so the reconstruction is "
+        "measured on the distribution the model was trained on.",
+    )
     args = ap.parse_args()
 
     paths = _find_checkpoints(args.targets)
@@ -189,17 +303,32 @@ def main():
         raise SystemExit("No readable checkpoints.")
     rows.sort(key=lambda r: (r.get("step") if isinstance(r.get("step"), int) else -1))
 
+    if len(rows) < 2:
+        print("\n" + "!" * 78)
+        print("ONLY ONE CHECKPOINT FOUND — every reading below is COMPARATIVE and cannot be")
+        print("interpreted alone. VQ-VAE mode overwrites a single vqvae_model.pt (see")
+        print("utils/checkpointing.py), so a run keeps no history. Comparison points that")
+        print("usually exist anyway:")
+        print("  * vqvae_best.pt in the same directory — full optimizer state, and usually a")
+        print("    PRE-jump snapshot, since a jump degrades whatever metric drives selection.")
+        print("  * the matching recon-only / baseline run — the control for the gamma numbers.")
+        print("  * emergency_*.pt from any OOM or crash, which also carry optimizer state.")
+        print("Point this script at several at once:  python -m eval.checkpoint_forensics a.pt b.pt")
+        print("For future runs, --save-all-checkpoints keeps versioned encoders (weights only,")
+        print("no optimizer state, so they give gammas and codebook but no gradient/clip row).")
+        print("!" * 78)
+
     print("\n" + "=" * 78)
     print("GRADIENT / CLIP REGIME  (from Adam exp_avg_sq; clip max_norm = %.1f)" % CLIP_MAX_NORM)
     print("=" * 78)
-    print(f"  {'step':>8}  {'grad_norm':>10}  {'vs clip':>8}  {'clip binding?':>14}")
+    print(f"  {'step':>8}  {'grad_norm':>10}  {'vs clip':>8}  {'clip binding?':>14}  {'file':<28}")
     for r in rows:
         gn = r.get("grad_norm_rms")
         if gn is None:
             continue
         frac = r["clip_binding"]
         verdict = "YES (throttled)" if frac > 0.95 else ("partial" if frac > 0.5 else "no")
-        print(f"  {r['step']:>8}  {gn:>10.4f}  {frac:>7.2f}x  {verdict:>14}")
+        print(f"  {r['step']:>8}  {gn:>10.4f}  {frac:>7.2f}x  {verdict:>14}  {r['file']:<28}")
     print("\n  Reading: grad_norm is the POST-clip norm, so it cannot exceed the clip. Pinned at")
     print("  ~%.1f => the clip was binding and every parameter was rescaled by 2/||g||." % CLIP_MAX_NORM)
     print("  A DROP between two checkpoints means the clip stopped binding and the effective")
@@ -218,10 +347,44 @@ def main():
         print("\n" + "=" * 78)
         print("NORM GAMMAS  (feature-scale inflation)")
         print("=" * 78)
-        hdr = ["gamma_mean", "gamma_p99", "split_gamma_mean", "split_gamma_max", "split_gamma_spread"]
+        hdr = [
+            "gamma_mean",
+            "gamma_p99",
+            "split_gamma_mean",
+            "split_gamma_spread",
+            "split_eff_dim",
+            "split_n_channels",
+        ]
         print("  " + f"{'step':>8}  " + "  ".join(f"{h:>18}" for h in hdr))
         for r in rows:
             print("  " + f"{r['step']:>8}  " + "  ".join(f"{r.get(h, float('nan')):>18.4f}" for h in hdr))
+        print("\n  split_eff_dim = participation ratio of gamma^2 over the SplitGroupNorm channels:")
+        print("  how many of split_n_channels actually influence which codebook entry is chosen.")
+        print("  Well below the channel count means the codebook resolves only a few directions")
+        print("  and the rest of the content block is effectively discarded at the quantizer —")
+        print("  which degrades reconstruction while leaving the commitment loss LOW.")
+
+    if args.recon:
+        print("\n" + "=" * 78)
+        print("RECONSTRUCTION, PER VIEW  (one forward pass per checkpoint)")
+        print("=" * 78)
+        hdr = ["view0_mae", "view1_mae", "view0_sat", "view1_sat", "view0_raw_std", "view1_raw_std", "commit"]
+        print("  " + f"{'step':>8}  " + "  ".join(f"{h:>13}" for h in hdr))
+        for r in rows:
+            ck = os.path.join(os.path.dirname(paths[0]), r["file"])
+            ck = ck if os.path.exists(ck) else next((p for p in paths if os.path.basename(p) == r["file"]), None)
+            rd = args.run_dir or os.path.dirname(ck)
+            try:
+                st = _recon_stats(rd, ck, args.device, args.recon_samples, args.batch_size, None if args.iid else True)
+            except Exception as e:
+                print(f"  {r['step']:>8}  [failed] {type(e).__name__}: {e}")
+                continue
+            r.update(st)
+            print("  " + f"{r['step']:>8}  " + "  ".join(f"{st.get(h, float('nan')):>13.5f}" for h in hdr))
+        print("\n  view0_mae vs view1_mae is the discriminator: a gap that OPENS between two")
+        print("  checkpoints localises the degradation to one encoder / style codebook. Both")
+        print("  rising together means the cause is shared and the per-view split is a bystander.")
+        print("  view*_sat > 0 with raw_std growing is the unbounded-decoder runaway instead.")
 
     if args.csv:
         import csv as _csv
