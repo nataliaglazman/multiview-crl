@@ -46,7 +46,7 @@ def load_run_args(run_dir):
         return _namespace_from_dict(json.load(f))
 
 
-def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
+def load_model_from_run_dir(run_dir, checkpoint=None, device=None, random_init=False):
     """Rebuild the VQVAE from a run's settings.json and load its checkpoint.
 
     Returns ``(model, args, device)``.  Shared by the single-run eval and the
@@ -113,6 +113,18 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None):
         latent_mask=getattr(args, "latent_mask", False),
         latent_mask_thresh=getattr(args, "latent_mask_thresh", 0.0),
     )
+
+    if random_init:
+        # The zero point for every DCI/MCC curve: this run's EXACT architecture, pooling,
+        # dataset and GBT estimator, with untrained weights. block_mcc fits a readout, so it
+        # permits the invertible transform the theory allows -- and a random projection is
+        # invertible, which is why an untrained encoder already scores ~0.88 at patch pooling
+        # (eval/init_baseline.py). Report a trained number as a GAP over this, not as an
+        # absolute. Disentanglement/completeness start far lower and are the metrics with
+        # real headroom.
+        logger.warning("--random-init: NO checkpoint loaded. These are UNTRAINED-baseline scores.")
+        model.eval()
+        return model, args, device
 
     # A bare filename ("vqvae_best.pt") means that checkpoint inside THIS run dir, not a path
     # relative to the caller's cwd. Callers that compare several runs pass one name for all of
@@ -216,6 +228,17 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None):
         synthetic_causal_edge_prob=getattr(args, "synthetic_causal_edge_prob", 0.5),
         synthetic_causal_noise_scale=getattr(args, "synthetic_causal_noise_scale", 0.4),
         synthetic_causal_nonlinearity=getattr(args, "synthetic_causal_nonlinearity", "leaky_relu"),
+        # Generator-shape flags. These MUST be forwarded: they change the rendering, so a
+        # model trained with them and scored without them is being evaluated on a different
+        # data distribution than it saw. Every default here matches utils/config.py, so a
+        # run whose settings.json predates a flag still builds the generator it trained on.
+        synthetic_identifiable_ventricle=getattr(args, "synthetic_identifiable_ventricle", False),
+        synthetic_content_prior=getattr(args, "synthetic_content_prior", "normal"),
+        synthetic_content_squash=getattr(args, "synthetic_content_squash", "auto"),
+        synthetic_content_amp_scale=getattr(args, "synthetic_content_amp_scale", None),
+        synthetic_lesion_radius=getattr(args, "synthetic_lesion_radius", 0.1),
+        synthetic_cortex_parameterization=getattr(args, "synthetic_cortex_parameterization", "additive"),
+        synthetic_center_local_deformations=getattr(args, "synthetic_center_local_deformations", False),
     )
 
 
@@ -248,6 +271,19 @@ def main():
         "shape yields from noise alone. Real minus null is the non-structural signal.",
     )
     parser.add_argument("--n-null", type=int, default=5, help="Permutations to average for the null floor")
+    parser.add_argument(
+        "--random-init",
+        action="store_true",
+        help="Skip the checkpoint and score this run's architecture UNTRAINED. The zero point "
+        "every DCI/MCC number should be read against: block_mcc allows an invertible readout, "
+        "so a random projection already scores ~0.88 at patch pooling.",
+    )
+    parser.add_argument(
+        "--causal-eval",
+        action="store_true",
+        help="Build the eval set with the run's SCM instead of i.i.d. factors, matching the "
+        "training distribution. Off by default to keep historical numbers comparable.",
+    )
     cli = parser.parse_args()
 
     if cli.pooling in ("gap", "stats"):
@@ -260,8 +296,8 @@ def main():
     if not os.path.exists(os.path.join(cli.run_dir, "settings.json")):
         logger.error("settings.json not found in %s", cli.run_dir)
         sys.exit(1)
-    model, args, device = load_model_from_run_dir(cli.run_dir, cli.checkpoint)
-    test_dataset = build_synthetic_test_set(args, cli.num_samples)
+    model, args, device = load_model_from_run_dir(cli.run_dir, cli.checkpoint, random_init=cli.random_init)
+    test_dataset = build_synthetic_test_set(args, cli.num_samples, causal=True if cli.causal_eval else None)
 
     # ── Run DCI ───────────────────────────────────────────────────────────
     from eval.dci import compute_dci_synthetic

@@ -23,7 +23,10 @@ method is a faithful restoration rather than an approximation.
 Numbers produced with the legacy renderer are NOT comparable with current-generator
 numbers for ``lesion_*``, ``temporal_atrophy`` or ``sulcal_widening``.  ``brain_size``,
 ``ventricle_size``, ``cortical_thickness`` and ``lr_asymmetry`` are untouched by the fix
-and stay comparable across both.
+and stay comparable across both -- but ONLY for runs at the generator defaults. The later
+``--synthetic-cortex-parameterization`` and ``--synthetic-identifiable-ventricle`` flags
+redefine ``cortical_thickness`` and ``ventricle_size`` respectively, so those two are NOT
+comparable for a run that sets them; ``use_legacy_renderer`` refuses such runs outright.
 """
 
 from __future__ import annotations
@@ -44,8 +47,19 @@ UNAFFECTED_FACTORS = ("brain_size", "ventricle_size", "cortical_thickness", "lr_
 FIX_COMMIT = "7ac56a3"
 
 
-def render_structure_legacy(r, z_content, z_deformation, z_fissure, device, clean=False):
-    """``PseudoMRIRenderer.render_structure`` as of ``7ac56a3^`` (verbatim; ``self`` -> ``r``)."""
+def render_structure_legacy(r, z_content, z_deformation, z_fissure, device, clean=False, z_lesion=None):
+    """``PseudoMRIRenderer.render_structure`` as of ``7ac56a3^`` (verbatim; ``self`` -> ``r``).
+
+    ``z_lesion`` is accepted only so the current ``render_pseudo_mri`` call signature binds —
+    it always passes the kwarg. The legacy renderer predates ``lesion_mode="field"`` and has
+    no field-lesion path, so a non-None value cannot be honoured and is refused rather than
+    silently dropped.
+    """
+    if z_lesion is not None:
+        raise ValueError(
+            "legacy renderer cannot reproduce lesion_mode='field' (it predates it). "
+            "Score this run on the current generator, or retrain with lesion_mode='sphere'."
+        )
     # Right-pad z_content with zeros when the caller supplies fewer dims
     # than the renderer consumes (back-compat with n_content=5 runs).
     if z_content.numel() < r.N_CONTENT_COMPONENTS:
@@ -178,6 +192,32 @@ def use_legacy_renderer(dataset, verify=True):
     if hasattr(holder, "_legacy_orig_render_structure"):
         logger.warning("legacy renderer already active — not re-applying")
         return lambda: None
+
+    # The legacy body hardcodes the pre-7ac56a3 geometry, so every generator knob added
+    # since is silently ignored by it. Mixing a run's new-generator training with legacy
+    # scoring produces numbers that describe neither configuration — refuse instead.
+    _incompatible = {
+        "content_squash": ("auto",),
+        "cortex_parameterization": ("additive",),
+        "center_local_deformations": (False,),
+        "identifiable_ventricle": (False,),
+        "lesion_radius": (0.1,),
+        "content_amp_scale": (None,),
+    }
+    _bad = {
+        name: getattr(renderer, name)
+        for name, allowed in _incompatible.items()
+        if hasattr(renderer, name) and getattr(renderer, name) not in allowed
+    }
+    if _bad:
+        raise ValueError(
+            "legacy renderer cannot reproduce this run's generator settings: "
+            + ", ".join(f"{k}={v!r}" for k, v in sorted(_bad.items()))
+            + ". The pre-%s body hardcodes the old geometry, so those knobs would be ignored and "
+            "the scores would describe neither configuration. Drop --old-generator (the run is "
+            "current-generator anyway), or score a genuinely old checkpoint whose settings.json "
+            "has these at their defaults." % FIX_COMMIT
+        )
 
     before = lesion_present_fraction(renderer) if verify else float("nan")
     holder._legacy_orig_render_structure = renderer.render_structure
