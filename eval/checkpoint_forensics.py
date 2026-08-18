@@ -144,6 +144,26 @@ def _norm_gamma_stats(sd):
         "gamma_max": float(allv.abs().max()),
         "gamma_p99": float(allv.abs().quantile(0.99)),
     }
+    # Content and style blocks separately: the BT variance hinge acts on the CONTENT
+    # channels only (losses.py selects content_indices before relu(1-std)), and it is the
+    # only term in the objective that is sensitive to PER-CHANNEL scale — on_diag/off_diag
+    # standardise each channel, and sim_loss has a detached per-channel denominator under
+    # bt_sim_normalize. So if the gamma heterogeneity is concentrated in the content block
+    # and absent from style, the hinge is the only thing in the loss that could have put it
+    # there. If both blocks are equally spread, something scale-blind is responsible and the
+    # hinge is exonerated.
+    for _tag, _sub in (
+        ("content", {k: g for k, g in gammas.items() if "norm_content" in k}),
+        ("style", {k: g for k, g in gammas.items() if "norm_style" in k}),
+    ):
+        if not _sub:
+            continue
+        _v = torch.cat([g.flatten() for g in _sub.values()])
+        _g2 = _v.double().pow(2)
+        res[f"{_tag}_gamma_spread"] = float(_v.abs().max() / _v.abs().clamp_min(1e-9).min())
+        res[f"{_tag}_eff_dim"] = float(_g2.sum().pow(2) / _g2.pow(2).sum())
+        res[f"{_tag}_n"] = int(_v.numel())
+
     if split:
         sv = torch.cat([g.flatten() for g in split.values()])
         res["split_gamma_mean"] = float(sv.mean())
@@ -236,11 +256,49 @@ def _recon_stats(run_dir, ckpt_path, device, n_samples, batch_size, causal):
                 d["sat"] += sat
                 d["std"] += raw_std
                 d["n"] += 1
+            # ── View-difference fidelity ────────────────────────────────────────
+            # The two views are the SAME subjects, so (x_v0 - x_v1) is exactly the
+            # view-specific signal the model is supposed to reproduce, and
+            # (y_v0 - y_v1) is how much of it actually survives to the output.
+            #
+            # This is the number that says whether a low per-view MAE means the model
+            # RECONSTRUCTS each view, or merely that the two targets are so similar that
+            # emitting one image scores well on both. A ratio near 0 with a good MAE is
+            # the latter, and such a run is not a control for anything about view
+            # identity. The correlation is the stronger of the two: magnitude can be
+            # right while the difference is put in the wrong places.
+            if n_views == 2:
+                x0, x1 = x[:B].float(), x[B : 2 * B].float()
+                y0, y1 = recon[:B].float(), recon[B : 2 * B].float()
+                dx, dy = x0 - x1, y0 - y1
+                if m is not None:
+                    mm = (m[:B] * m[B : 2 * B]).float()
+                    den = mm.sum().clamp_min(1.0)
+                    t_l1 = float((dx.abs() * mm).sum() / den)
+                    r_l1 = float((dy.abs() * mm).sum() / den)
+                    sel = mm.flatten() > 0
+                    a, b = dx.flatten()[sel], dy.flatten()[sel]
+                else:
+                    t_l1, r_l1 = float(dx.abs().mean()), float(dy.abs().mean())
+                    a, b = dx.flatten(), dy.flatten()
+                a = a - a.mean()
+                b = b - b.mean()
+                denom = (a.norm() * b.norm()).clamp_min(1e-12)
+                acc["tgt_view_l1"] = acc.get("tgt_view_l1", 0.0) + t_l1
+                acc["rec_view_l1"] = acc.get("rec_view_l1", 0.0) + r_l1
+                acc["view_diff_r"] = acc.get("view_diff_r", 0.0) + float((a @ b) / denom)
+
             acc.setdefault("commit", 0.0)
             acc["commit"] += float(sum(dd.float().mean() for dd in diffs))
             acc["nb"] = acc.get("nb", 0) + 1
             break  # one batch is enough; raise --batch-size for a tighter estimate
-    res = {"commit": acc.get("commit", 0.0) / max(1, acc.get("nb", 1))}
+    _nb = max(1, acc.get("nb", 1))
+    res = {"commit": acc.get("commit", 0.0) / _nb}
+    if "tgt_view_l1" in acc:
+        res["tgt_view_l1"] = acc["tgt_view_l1"] / _nb
+        res["rec_view_l1"] = acc["rec_view_l1"] / _nb
+        res["view_diff_ratio"] = res["rec_view_l1"] / max(res["tgt_view_l1"], 1e-12)
+        res["view_diff_r"] = acc["view_diff_r"] / _nb
     for v, d in acc.items():
         if not isinstance(v, int):
             continue
@@ -348,16 +406,18 @@ def main():
         print("NORM GAMMAS  (feature-scale inflation)")
         print("=" * 78)
         hdr = [
-            "gamma_mean",
             "gamma_p99",
-            "split_gamma_mean",
             "split_gamma_spread",
             "split_eff_dim",
-            "split_n_channels",
+            "content_gamma_spread",
+            "content_eff_dim",
+            "content_n",
+            "style_gamma_spread",
+            "style_eff_dim",
         ]
-        print("  " + f"{'step':>8}  " + "  ".join(f"{h:>18}" for h in hdr))
+        print("  " + f"{'step':>8}  " + "  ".join(f"{h:>13}" for h in hdr))
         for r in rows:
-            print("  " + f"{r['step']:>8}  " + "  ".join(f"{r.get(h, float('nan')):>18.4f}" for h in hdr))
+            print("  " + f"{r['step']:>8}  " + "  ".join(f"{r.get(h, float('nan')):>13.3f}" for h in hdr))
         print("\n  split_eff_dim = participation ratio of gamma^2 over the SplitGroupNorm channels:")
         print("  how many of split_n_channels actually influence which codebook entry is chosen.")
         print("  Well below the channel count means the codebook resolves only a few directions")
@@ -368,7 +428,17 @@ def main():
         print("\n" + "=" * 78)
         print("RECONSTRUCTION, PER VIEW  (one forward pass per checkpoint)")
         print("=" * 78)
-        hdr = ["view0_mae", "view1_mae", "view0_sat", "view1_sat", "view0_raw_std", "view1_raw_std", "commit"]
+        hdr = [
+            "view0_mae",
+            "view1_mae",
+            "tgt_view_l1",
+            "rec_view_l1",
+            "view_diff_ratio",
+            "view_diff_r",
+            "view0_sat",
+            "view1_sat",
+            "commit",
+        ]
         print("  " + f"{'step':>8}  " + "  ".join(f"{h:>13}" for h in hdr))
         for r in rows:
             ck = os.path.join(os.path.dirname(paths[0]), r["file"])
@@ -385,6 +455,16 @@ def main():
         print("  checkpoints localises the degradation to one encoder / style codebook. Both")
         print("  rising together means the cause is shared and the per-view split is a bystander.")
         print("  view*_sat > 0 with raw_std growing is the unbounded-decoder runaway instead.")
+        print("\n  tgt_view_l1  how much the two views' TARGETS differ (the signal to reproduce)")
+        print("  rec_view_l1  how much the two RECONSTRUCTIONS differ (what survives to output)")
+        print("  view_diff_ratio = rec/tgt: 1.0 = the view difference is fully reproduced,")
+        print("                   ~0 = the model emits essentially the same image for both views")
+        print("                   and a low per-view MAE only means the targets are similar.")
+        print("  view_diff_r  correlation of (x_v0-x_v1) with (y_v0-y_v1) — whether the")
+        print("               difference is placed CORRECTLY, not just scaled right. This is the")
+        print("               stronger of the two; ratio near 1 with r near 0 is a model")
+        print("               manufacturing view difference in the wrong places.")
+        print("  A run with view_diff_ratio ~0 is NOT a control for anything about view identity.")
 
     if args.csv:
         import csv as _csv
