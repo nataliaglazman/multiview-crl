@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/ablation_moco_patches.yaml
-# Generated at: 2026-08-19T15:08:48Z
-# Git SHA: 88ba97e
+# Generated at: 2026-08-19T15:09:29Z
+# Git SHA: 1fa895f
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -81,5 +81,5 @@ runai training standard submit ablation-moco-patches \
     --cpu-core-limit 32 \
     --cpu-memory-request 64G \
     --cpu-memory-limit 128G \
-    --host-path path=/nfs:/nfs, mount=/nfs:/nfs \
+    --host-path path=/nfs:/nfs,mount=/nfs:/nfs \
     --command -- bash -c "${TRAIN_CMD}"

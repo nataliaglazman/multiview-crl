@@ -392,7 +392,7 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
             f'    --cpu-core-limit {runai.get("cpu_limit", 32)} \\',
             f'    --cpu-memory-request {runai.get("memory", "64G")} \\',
             f'    --cpu-memory-limit {runai.get("memory_limit", "128G")} \\',
-            f'    --host-path path={runai.get("volume", "/nfs:/nfs")}, mount={runai.get("volume", "/nfs:/nfs")} \\',
+            f'    --host-path path={runai.get("volume", "/nfs:/nfs")},mount={runai.get("volume", "/nfs:/nfs")} \\',
             f'    --command -- bash -c "${{TRAIN_CMD}}"',
         ]
 
