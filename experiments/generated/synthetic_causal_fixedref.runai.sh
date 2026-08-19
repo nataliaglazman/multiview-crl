@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_fixedref.yaml
-# Generated at: 2026-08-19T15:05:06Z
-# Git SHA: 9e9e17e
+# Generated at: 2026-08-19T15:06:55Z
+# Git SHA: bb19a47
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -79,8 +79,6 @@ runai training standard submit synthetic-causal-random-fixedref-new \
     --large-shm \
     --node-type A100 \
     --gpu-devices-request 1 \
-    --cpu 16 \
-    --cpu-limit 32 \
     --memory 64G \
     --memory-limit 128G \
     --host-path path=/nfs:/nfs, mount=/nfs:/nfs \
