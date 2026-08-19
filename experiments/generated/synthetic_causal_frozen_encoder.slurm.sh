@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_frozen_encoder.yaml
-# Generated at: 2026-08-19T13:29:27Z
-# Git SHA: c44324b
+# Generated at: 2026-08-19T14:03:48Z
+# Git SHA: 4ecf890
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-frozen-encoder-random
 #SBATCH --output=/scratch/users/%u/%j.out

@@ -864,31 +864,41 @@ def train_step(
             )
 
         # clip_grad_norm_ RETURNS the pre-clip total norm, and it used to be discarded. At
-        # max_norm=2.0 the clip is a global rescale by min(1, 2/total_norm), so it sets the
+        # the default max_norm=2.0 the clip is a global rescale by min(1, 2/total_norm), so it sets the
         # effective learning rate for EVERY parameter jointly: while one term dominates the
         # gradient, every other term is throttled by the same factor, and when that term's
         # gradient collapses the effective LR for the whole model jumps. Neither event is
         # visible in any loss curve — which is why a step change in training dynamics can
         # look causeless. Logged as Perf/grad_norm (pre-clip) and Perf/grad_clip_factor
         # (1.0 = not clipping; smaller = how hard the optimizer is being held back).
+        # Measured on this project: with Barlow Twins off-diagonal terms in the hundreds, the
+        # gradient norm starts near 98 against the historical hardcoded max_norm of 2.0 — a 49x
+        # throttle. That is not outlier clipping; while it binds, EVERY update has magnitude
+        # exactly max_norm regardless of the true gradient, so the optimizer loses all
+        # information about gradient scale. Adam does not rescue this: it is invariant to a
+        # CONSTANT rescaling, but the clip's factor is 2/||g||, which varies per step, so the
+        # clip compresses the dynamic range rather than passing it through. When ||g|| finally
+        # falls below max_norm the behaviour changes qualitatively, and on the run this was
+        # traced through, the codebook perplexity collapsed at exactly that step.
+        _clip_norm = float(getattr(args, "grad_clip_norm", 2.0))
         _grad_norm = None
         if use_amp:
             scaler.scale(scaled_loss).backward()
             if accumulation_step == total_accumulation_steps - 1:
                 scaler.unscale_(optimizer)
-                _grad_norm = clip_grad_norm_(params, max_norm=2.0, norm_type=2)
+                _grad_norm = clip_grad_norm_(params, max_norm=_clip_norm, norm_type=2)
                 scaler.step(optimizer)
                 scaler.update()
         else:
             scaled_loss.backward()
             if accumulation_step == total_accumulation_steps - 1:
-                _grad_norm = clip_grad_norm_(params, max_norm=2.0, norm_type=2)
+                _grad_norm = clip_grad_norm_(params, max_norm=_clip_norm, norm_type=2)
                 optimizer.step()
         if _grad_norm is not None:
             _gn = _grad_norm.item() if torch.is_tensor(_grad_norm) else float(_grad_norm)
             if math.isfinite(_gn):
                 _diag["Perf/grad_norm"] = _gn
-                _diag["Perf/grad_clip_factor"] = min(1.0, 2.0 / _gn) if _gn > 0 else 1.0
+                _diag["Perf/grad_clip_factor"] = min(1.0, _clip_norm / _gn) if _gn > 0 else 1.0
 
         # MoCo momentum update: must happen AFTER optimizer.step() so the
         # momentum encoder trails the online encoder by one step.

@@ -1147,6 +1147,20 @@ def parse_args() -> argparse.ArgumentParser:
         "off-diagonal.",
     )
     parser.add_argument(
+        "--grad-clip-norm",
+        type=float,
+        default=2.0,
+        help="max_norm for clip_grad_norm_. 2.0 is the historical hardcoded value and remains the "
+        "default so existing runs are bit-identical. Raise it when the loss scale is large: with "
+        "Barlow Twins off-diagonal terms in the hundreds the gradient norm starts near 98, i.e. a "
+        "49x throttle, and while the clip binds every update has magnitude exactly max_norm "
+        "whatever the true gradient is — the clip becomes the effective learning rate. Adam does "
+        "not absorb this, because the clip's 2/||g|| factor varies per step rather than being a "
+        "constant rescale. Watch Perf/grad_norm (pre-clip) and Perf/grad_clip_factor: a factor "
+        "pinned well below 1 for many thousands of steps means the optimizer never sees gradient "
+        "scale, and the step where it finally releases is a qualitative change in the dynamics.",
+    )
+    parser.add_argument(
         "--recon-view-balance",
         type=float,
         default=0.0,

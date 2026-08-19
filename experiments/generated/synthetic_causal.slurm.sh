@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-19T13:29:27Z
-# Git SHA: c44324b
+# Generated at: 2026-08-19T14:03:48Z
+# Git SHA: 4ecf890
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-recon-film
+#SBATCH --job-name=synthetic-causal-clean-content-recon-grad-clip-norm
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-recon-film-%j.err
+#SBATCH --error=synthetic-causal-clean-content-recon-grad-clip-norm-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -78,6 +78,7 @@ fi
     --decoder-norm-type group \
     --deterministic \
     --eval-dci \
+    --grad-clip-norm 100 \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --log-steps 50 \
@@ -105,7 +106,7 @@ fi
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode film \
+    --style-injection-mode input \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -116,7 +117,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-recon-film \
+    --model-id synthetic-causal-clean-content-recon-grad-clip-norm \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

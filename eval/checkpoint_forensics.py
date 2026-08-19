@@ -421,6 +421,14 @@ def main():
     ap.add_argument("targets", nargs="+", help="Run directory (searched recursively) or explicit .pt paths")
     ap.add_argument("--csv", default=None, help="Also write the table to this CSV")
     ap.add_argument(
+        "--clip-max-norm",
+        type=float,
+        default=CLIP_MAX_NORM,
+        help=f"max_norm the run was trained with (default {CLIP_MAX_NORM}, the historical hardcoded value). "
+        "Set this to match --grad-clip-norm if the run used a different one, otherwise the "
+        "'clip binding?' column is scored against the wrong ceiling.",
+    )
+    ap.add_argument(
         "--recon",
         action="store_true",
         help="Tier 2: also run ONE forward pass per checkpoint and report PER-VIEW pixel error, "
@@ -501,14 +509,14 @@ def main():
         print("!" * 78)
 
     print("\n" + "=" * 78)
-    print("GRADIENT / CLIP REGIME  (from Adam exp_avg_sq; clip max_norm = %.1f)" % CLIP_MAX_NORM)
+    print("GRADIENT / CLIP REGIME  (from Adam exp_avg_sq; clip max_norm = %.4g)" % args.clip_max_norm)
     print("=" * 78)
     print(f"  {'step':>8}  {'grad_norm':>10}  {'vs clip':>8}  {'clip binding?':>14}  {'file':<28}")
     for r in rows:
         gn = r.get("grad_norm_rms")
         if gn is None:
             continue
-        frac = r["clip_binding"]
+        frac = gn / args.clip_max_norm
         verdict = "YES (throttled)" if frac > 0.95 else ("partial" if frac > 0.5 else "no")
         print(f"  {r['step']:>8}  {gn:>10.4f}  {frac:>7.2f}x  {verdict:>14}  {r['file']:<28}")
     print("\n  Reading: grad_norm is the POST-clip norm, so it cannot exceed the clip. Pinned at")
