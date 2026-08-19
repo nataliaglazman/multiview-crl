@@ -190,7 +190,7 @@ def _norm_gamma_stats(sd):
 # Tier 2: reconstruction decomposition, PER VIEW. Needs torch + the run's
 # settings.json + the synthetic generator; one batch per checkpoint.
 # ---------------------------------------------------------------------------
-def _recon_stats(run_dir, ckpt_path, device, n_samples, batch_size, causal):
+def _recon_stats(run_dir, ckpt_path, device, n_samples, batch_size, causal, do_swap=False):
     """Per-view pixel error, saturation and commitment cost from one forward pass.
 
     Split out per view because the two encoders are separate under --separate-encoders
@@ -288,12 +288,72 @@ def _recon_stats(run_dir, ckpt_path, device, n_samples, batch_size, causal):
                 acc["rec_view_l1"] = acc.get("rec_view_l1", 0.0) + r_l1
                 acc["view_diff_r"] = acc.get("view_diff_r", 0.0) + float((a @ b) / denom)
 
+            # ── Swap test: which INPUT to the shared decoder is bad? ────────────
+            # Wrapping decoder.forward and reversing the two halves of `style` yields
+            # both cross-pairs in one pass, at exactly the point the decoder consumes
+            # them (post-quantization, post-mask):
+            #     out[:B] = decode(content_v0, style_v1)  -> should render view 1
+            #     out[B:] = decode(content_v1, style_v0)  -> should render view 0
+            # Compare each against the NORMAL per-view MAE above:
+            #   cross_v1 (vs x1) collapses toward view0_mae  => content_v1 was the bad
+            #     input; a good content code plus view 1's own style reconstructs fine.
+            #   cross_v0 (vs x0) blows up toward view1_mae   => same conclusion, checked
+            #     from the other side: content_v1 ruins even a known-good style.
+            #   cross_v1 stays high AND cross_v0 stays low   => style_v1 is the bad input.
+            #   both bad                                     => the shared decoder itself,
+            #     or an interaction neither input carries alone.
+            if do_swap and n_views == 2:
+                _dec = [d for d in model.decoders]
+
+                def _swap(t):
+                    b = t.shape[0] // 2
+                    return _t.cat([t[b:], t[:b]], dim=0)
+
+                _orig = [d.forward for d in _dec]
+                try:
+                    for _d, _f in zip(_dec, _orig):
+
+                        def _mk(f):
+                            def _patched(dec_in, style=None, **kw):
+                                if style is not None and style.shape[0] % 2 == 0:
+                                    style = _swap(style)
+                                return f(dec_in, style=style, **kw) if style is not None else f(dec_in, **kw)
+
+                            return _patched
+
+                        _d.forward = _mk(_f)
+                    sw = model(
+                        x,
+                        return_recon=True,
+                        pool_only=True,
+                        n_views=n_views,
+                        subsets=getattr(args, "subsets", [(0, 1)]),
+                        patch_grid=_pg,
+                        mask=m,
+                    )[0]
+                finally:
+                    for _d, _f in zip(_dec, _orig):
+                        _d.forward = _f
+                if sw.shape[2:] != x.shape[2:]:
+                    sw = _t.nn.functional.interpolate(sw, size=x.shape[2:], mode="trilinear", align_corners=False)
+                # out[:B] carries style_v1, so its target is view 1; out[B:] targets view 0.
+                for tag, sl, tgt in (("cross_v1", slice(0, B), x[:B]), ("cross_v0", slice(B, 2 * B), x[B : 2 * B])):
+                    yv, xv = sw[sl].float(), tgt.float()
+                    mv = m[sl] if m is not None else None
+                    if mv is not None:
+                        acc[tag] = ((xv - yv).abs() * mv).sum().item() / mv.sum().clamp_min(1.0).item()
+                    else:
+                        acc[tag] = (xv - yv).abs().mean().item()
+
             acc.setdefault("commit", 0.0)
             acc["commit"] += float(sum(dd.float().mean() for dd in diffs))
             acc["nb"] = acc.get("nb", 0) + 1
             break  # one batch is enough; raise --batch-size for a tighter estimate
     _nb = max(1, acc.get("nb", 1))
     res = {"commit": acc.get("commit", 0.0) / _nb}
+    for _k in ("cross_v0", "cross_v1"):
+        if _k in acc:
+            res[_k] = acc[_k]
     if "tgt_view_l1" in acc:
         res["tgt_view_l1"] = acc["tgt_view_l1"] / _nb
         res["rec_view_l1"] = acc["rec_view_l1"] / _nb
@@ -320,6 +380,14 @@ def main():
         "generator. This is the readout that separates a per-view capacity loss from a uniform one.",
     )
     ap.add_argument("--run-dir", default=None, help="Run dir with settings.json (defaults to the checkpoint's dir)")
+    ap.add_argument(
+        "--swap",
+        action="store_true",
+        help="With --recon, also decode each view's content against the OTHER view's style, to "
+        "localise which input to the shared decoder is bad. Reports cross_v1 = decode(content_v0, "
+        "style_v1) scored against view 1, and cross_v0 = decode(content_v1, style_v0) scored "
+        "against view 0. Read them against the normal per-view MAE in the same row.",
+    )
     ap.add_argument("--recon-samples", type=int, default=64, help="Synthetic samples to render for --recon")
     ap.add_argument("--batch-size", type=int, default=16, help="Batch size for --recon")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -439,13 +507,17 @@ def main():
             "view1_sat",
             "commit",
         ]
+        if args.swap:
+            hdr = hdr[:2] + ["cross_v0", "cross_v1"] + hdr[2:]
         print("  " + f"{'step':>8}  " + "  ".join(f"{h:>13}" for h in hdr))
         for r in rows:
             ck = os.path.join(os.path.dirname(paths[0]), r["file"])
             ck = ck if os.path.exists(ck) else next((p for p in paths if os.path.basename(p) == r["file"]), None)
             rd = args.run_dir or os.path.dirname(ck)
             try:
-                st = _recon_stats(rd, ck, args.device, args.recon_samples, args.batch_size, None if args.iid else True)
+                st = _recon_stats(
+                    rd, ck, args.device, args.recon_samples, args.batch_size, None if args.iid else True, args.swap
+                )
             except Exception as e:
                 print(f"  {r['step']:>8}  [failed] {type(e).__name__}: {e}")
                 continue
@@ -465,6 +537,15 @@ def main():
         print("               stronger of the two; ratio near 1 with r near 0 is a model")
         print("               manufacturing view difference in the wrong places.")
         print("  A run with view_diff_ratio ~0 is NOT a control for anything about view identity.")
+        if args.swap:
+            print("\n  cross_v1 = decode(content_v0, style_v1) scored against view 1")
+            print("  cross_v0 = decode(content_v1, style_v0) scored against view 0")
+            print("    cross_v1 << view1_mae  AND  cross_v0 >> view0_mae  => CONTENT_v1 is the bad")
+            print("      input: a good content code renders view 1 fine, and view 1's content ruins")
+            print("      an otherwise-good style. Both sides of the same conclusion.")
+            print("    cross_v1 ~ view1_mae   AND  cross_v0 ~ view0_mae   => STYLE_v1 is the bad input.")
+            print("    both degraded                                     => the shared DECODER, or an")
+            print("      interaction that neither input carries on its own.")
 
     if args.csv:
         import csv as _csv
