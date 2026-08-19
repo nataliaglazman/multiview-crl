@@ -81,7 +81,15 @@ def _specificity(steps, vals, at, w, n_probe=40):
     if len(others) < 5:
         return None
     ref = float(np.median(others))
-    return abs(d), d, (abs(d) / ref if ref > 1e-12 else float("inf")), ref
+    # A series that is constant everywhere has ref == 0. If it also does not move at the
+    # jump it carries NO information and must score 0, not inf — otherwise every hard-coded
+    # zero (BT's top1_acc, nan_skipped_steps on a healthy run) floats to the top of the
+    # ranking and buries the real candidates. Only a genuinely flat series that DOES step
+    # at the jump earns an unbounded score.
+    scale = max(abs(float(np.median(np.abs(vals)))), 1e-12)
+    if ref <= 1e-12:
+        return (abs(d), d, 0.0, ref) if abs(d) <= 1e-9 * scale else (abs(d), d, float("inf"), ref)
+    return abs(d), d, abs(d) / ref, ref
 
 
 def main():
