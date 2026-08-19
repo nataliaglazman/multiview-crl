@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/synthetic_causal.yaml
+# Auto-generated from: experiments/synthetic_identifiable.yaml
 # Generated at: 2026-08-19T15:05:06Z
 # Git SHA: 9e9e17e
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -31,7 +31,6 @@ python -m training.main_multimodal \
     --decoder-norm-type group \
     --deterministic \
     --eval-dci \
-    --grad-clip-norm 100 \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --log-steps 50 \
@@ -63,14 +62,20 @@ python -m training.main_multimodal \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
+    --synthetic-center-local-deformations \
     --synthetic-clean-content \
+    --synthetic-content-prior uniform \
+    --synthetic-content-squash none \
+    --synthetic-cortex-parameterization patterned \
+    --synthetic-identifiable-ventricle \
+    --synthetic-lesion-radius 0.14 \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-recon-grad-clip-norm \
+    --model-id synthetic-identifiable-generator-4-scaling-2 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -81,14 +86,13 @@ python -m training.main_multimodal \
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-nb-res-layers 2 \
     --vqvae-scaling-rates 4 \
     --workers 8
 TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-clean-content-recon-grad-clip-norm \
+runai training standard submit synthetic-identifiable-generator-4-scaling-2 \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \

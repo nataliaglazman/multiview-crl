@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/synthetic_causal.yaml
+# Auto-generated from: experiments/synthetic_causal_frozen_encoder.yaml
 # Generated at: 2026-08-19T15:05:06Z
 # Git SHA: 9e9e17e
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -13,11 +13,11 @@ python -m training.main_multimodal \
     --batch-size 128 \
     --bt-gap-lambda 0.01 \
     --bt-gap-weight 1 \
+    --bt-lambda 1 \
     --bt-patch-weight 1 \
-    --bt-sim-coeff 0.025 \
+    --bt-sim-coeff 2e-5 \
     --bt-sim-normalize \
-    --bt-std-coeff 10 \
-    --channels-last \
+    --bt-std-coeff 1 \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
@@ -31,7 +31,7 @@ python -m training.main_multimodal \
     --decoder-norm-type group \
     --deterministic \
     --eval-dci \
-    --grad-clip-norm 100 \
+    --freeze-encoder \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --log-steps 50 \
@@ -51,7 +51,7 @@ python -m training.main_multimodal \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1 \
+    --scale-contrastive-loss 0 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -70,10 +70,10 @@ python -m training.main_multimodal \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-recon-grad-clip-norm \
+    --model-id synthetic-causal-frozen-encoder-random \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 200000 \
+    --train-steps 88000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
@@ -81,14 +81,13 @@ python -m training.main_multimodal \
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-nb-res-layers 2 \
     --vqvae-scaling-rates 4 \
     --workers 8
 TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-clean-content-recon-grad-clip-norm \
+runai training standard submit synthetic-causal-frozen-encoder-random \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/ablation_baseline.yaml
-# Generated at: 2026-06-08T18:07:38Z
-# Git SHA: 42c6a26
+# Generated at: 2026-08-19T15:05:06Z
+# Git SHA: 9e9e17e
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -14,6 +14,7 @@ python -m training.main_multimodal \
     --cache-dataset \
     --cache-dir /nfs/home/nglazman/cache/multiview \
     --channels-last \
+    --checkpoint-steps 500 \
     --content-dim 128 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
@@ -24,6 +25,7 @@ python -m training.main_multimodal \
     --gradient-checkpointing \
     --image-spacing 1.0 \
     --labels-path /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv \
+    --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
     --masks-dir /nfs/home/nglazman/data/ADNI_stripped_masks \
@@ -58,16 +60,16 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai submit ablation-baseline \
+runai training standard submit ablation-baseline \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \
     --large-shm \
     --node-type A100 \
-    --gpu 1 \
+    --gpu-devices-request 1 \
     --cpu 16 \
     --cpu-limit 32 \
     --memory 64G \
     --memory-limit 128G \
-    --volume /nfs:/nfs \
+    --host-path path=/nfs:/nfs, mount=/nfs:/nfs \
     --command -- bash -c "${TRAIN_CMD}"

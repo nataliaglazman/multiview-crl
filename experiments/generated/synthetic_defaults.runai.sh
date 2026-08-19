@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-06-08T18:07:38Z
-# Git SHA: 42c6a26
+# Generated at: 2026-08-19T15:05:06Z
+# Git SHA: 9e9e17e
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -12,6 +12,7 @@ cd /nfs/home/nglazman/crl-2/multiview-crl && PYTHONPATH=/nfs/home/nglazman/crl-2
 python -m training.main_multimodal \
     --batch-size 32 \
     --channels-last \
+    --checkpoint-steps 500 \
     --content-dim 128 \
     --content-ratios 0.95 \
     --content-style-levels 0 \
@@ -23,6 +24,7 @@ python -m training.main_multimodal \
     --deterministic \
     --eval-dci \
     --image-spacing 1.0 \
+    --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
@@ -34,7 +36,7 @@ python -m training.main_multimodal \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 1.0 \
-    --scale-recon-loss 1.0 \
+    --scale-recon-loss 0.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
@@ -43,7 +45,7 @@ python -m training.main_multimodal \
     --synthetic-mode pseudo_mri \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
-    --synthetic-num-val 200 \
+    --synthetic-num-val 1500 \
     --synthetic-res 64 \
     --tau 0.1 \
     --total-dim 512 \
@@ -61,16 +63,16 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai submit synthetic_defaults \
+runai training standard submit synthetic_defaults \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \
     --large-shm \
     --node-type A100 \
-    --gpu 1 \
+    --gpu-devices-request 1 \
     --cpu 16 \
     --cpu-limit 32 \
     --memory 64G \
     --memory-limit 128G \
-    --volume /nfs:/nfs \
+    --host-path path=/nfs:/nfs, mount=/nfs:/nfs \
     --command -- bash -c "${TRAIN_CMD}"

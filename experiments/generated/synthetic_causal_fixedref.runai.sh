@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/synthetic_causal.yaml
+# Auto-generated from: experiments/synthetic_causal_fixedref.yaml
 # Generated at: 2026-08-19T15:05:06Z
 # Git SHA: 9e9e17e
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -10,70 +10,55 @@ set -euo pipefail
 TRAIN_CMD=$(cat <<'TRAIN_EOF'
 cd /nfs/home/nglazman/crl-2/multiview-crl && PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl \
 python -m training.main_multimodal \
-    --batch-size 128 \
-    --bt-gap-lambda 0.01 \
-    --bt-gap-weight 1 \
-    --bt-patch-weight 1 \
-    --bt-sim-coeff 0.025 \
-    --bt-sim-normalize \
-    --bt-std-coeff 10 \
+    --batch-size 32 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
     --content-size 44 \
     --content-style-levels 0 \
-    --contrastive-loss-type barlow_twins \
+    --contrastive-loss-type infonce \
     --cross-view-negs-only \
     --dataroot /nfs/home/nglazman/data \
     --dataset-name synthetic \
     --dci-every 2000 \
-    --decoder-norm-type group \
     --deterministic \
     --eval-dci \
-    --grad-clip-norm 100 \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
-    --no-final-recon-norm \
-    --norm-type layer \
     --pass-full-to-next-level \
-    --patch-center-mode position \
     --patch-contrastive \
-    --patch-foreground-mask \
-    --patch-foreground-thresh 0.05 \
-    --patch-grid 8 8 8 \
+    --patch-grid 4 4 4 \
     --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1 \
-    --scale-recon-loss 1 \
+    --scale-contrastive-loss 100 \
+    --scale-recon-loss 0.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
-    --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode input \
+    --style-injection-mode concat \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
-    --synthetic-clean-content \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-recon-grad-clip-norm \
+    --model-id synthetic-causal-random-fixedref-new \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 200000 \
+    --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
@@ -81,14 +66,13 @@ python -m training.main_multimodal \
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
-    --vqvae-nb-res-layers 2 \
     --vqvae-scaling-rates 4 \
     --workers 8
 TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-clean-content-recon-grad-clip-norm \
+runai training standard submit synthetic-causal-random-fixedref-new \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \
