@@ -88,7 +88,11 @@ def _specificity(steps, vals, at, w, n_probe=40):
     # at the jump earns an unbounded score.
     scale = max(abs(float(np.median(np.abs(vals)))), 1e-12)
     if ref <= 1e-12:
-        return (abs(d), d, 0.0, ref) if abs(d) <= 1e-9 * scale else (abs(d), d, float("inf"), ref)
+        # Near-constant series. Only award an unbounded score if the step is actually
+        # MEANINGFUL relative to the series' own magnitude — otherwise a 0.10 wobble on a
+        # value of 256 (0.04%) outranks every real finding purely because its reference
+        # happens to be zero.
+        return (abs(d), d, float("inf"), ref) if abs(d) > 1e-3 * scale else (abs(d), d, 0.0, ref)
     return abs(d), d, abs(d) / ref, ref
 
 
@@ -97,6 +101,15 @@ def main():
     ap.add_argument("logdir", help="Run directory or TensorBoard log directory (searched recursively)")
     ap.add_argument("--target", default="Loss/Recon", help="Scalar whose jump to locate (default: Loss/Recon)")
     ap.add_argument("--step", type=float, default=None, help="Jump step, if you already know it from the curves")
+    ap.add_argument(
+        "--direction",
+        choices=("any", "up", "down"),
+        default="any",
+        help="Which way the TARGET moves at the event. 'up' finds the largest increase, 'down' "
+        "the largest decrease, 'any' (default) the largest move either way. This matters: a "
+        "collapse in a metric like Codebook/Perplexity_L0 is a DECREASE, and searching for "
+        "increases finds the earlier recovery instead.",
+    )
     ap.add_argument("--window", type=float, default=None, help="Half-width in steps (default: 5%% of the run)")
     ap.add_argument("--top", type=int, default=25, help="How many scalars to print")
     ap.add_argument("--min-points", type=int, default=8, help="Skip scalars with fewer points than this")
@@ -116,14 +129,15 @@ def main():
     if args.step is not None:
         jump = args.step
     else:
+        _key = {"up": lambda v: v, "down": lambda v: -v, "any": abs}[args.direction]
         best, jump = -np.inf, None
         for p in np.linspace(ts.min() + w, ts.max() - w, 200):
             d = _window_delta(ts, tv, p, w)
-            if d is not None and d > best:  # a JUMP UP in the target
-                best, jump = d, p
+            if d is not None and _key(d) > best:
+                best, jump = _key(d), p
         if jump is None:
             raise SystemExit("Could not locate a jump; pass --step explicitly.")
-    print(f"Jump located at step ~{jump:.0f} on {args.target} (window +-{w:.0f} steps)")
+    print(f"Jump located at step ~{jump:.0f} on {args.target} " f"(window +-{w:.0f} steps, direction={args.direction})")
     d0 = _window_delta(ts, tv, jump, w)
     print(f"  {args.target}: {d0:+.6g} across the jump\n")
 
