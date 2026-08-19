@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-19T11:50:15Z
-# Git SHA: 2c9417d
+# Generated at: 2026-08-19T13:29:27Z
+# Git SHA: c44324b
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-clean-content-recon-film
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -98,7 +98,7 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 1 \
-    --scale-recon-loss 10 \
+    --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \

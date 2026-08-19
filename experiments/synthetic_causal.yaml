@@ -62,7 +62,7 @@ bt_gap_lambda: 0.01               # NOT 0.005 — see the calibration note above
 bt_patch_weight: 1
 
 scale_contrastive_loss: 1       # NOT 10 — BT's raw scale is ~10x InfoNCE's
-scale_recon_loss: 10
+scale_recon_loss: 1
 batch_size: 128
 
 content_size: 44              # match the baseline; fixes the 44-vs-48 confound
