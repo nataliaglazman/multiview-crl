@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-2-scaling-independent-baseline
+tag: synthetic-causal-clean-content-recon-rebalanced
 contrastive_loss_type: barlow_twins
 # bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -61,15 +61,15 @@ bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_gap_lambda: 0.01               # NOT 0.005 — see the calibration note above
 bt_patch_weight: 1
 
-scale_contrastive_loss: 0       # NOT 10 — BT's raw scale is ~10x InfoNCE's
-scale_recon_loss: 1
+scale_contrastive_loss: 1       # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_recon_loss: 10
 batch_size: 128
 
 content_size: 44              # match the baseline; fixes the 44-vs-48 confound
 
 # unchanged from synthetic_causal.yaml so the comparison stays valid
 synthetic_normalize: fixed_reference
-synthetic_causal: false
+synthetic_causal: true
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
 synthetic_res: 64
@@ -81,10 +81,10 @@ style_injection_mode: input
 separate_style_codebooks: true
 separate_content_codebooks: false
 vqvae_nb_levels: 1
-vqvae_nb_res_layers: 1
+vqvae_nb_res_layers: 2
 vqvae_hidden_channels: 48
 vqvae_embed_dim: 48
-vqvae_scaling_rates: [2]
+vqvae_scaling_rates: [4]
 deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
