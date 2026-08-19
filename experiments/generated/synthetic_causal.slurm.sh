@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-19T10:02:52Z
-# Git SHA: 718be8c
+# Generated at: 2026-08-19T11:50:15Z
+# Git SHA: 2c9417d
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-recon-rebalanced
+#SBATCH --job-name=synthetic-causal-clean-content-recon-film
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-recon-rebalanced-%j.err
+#SBATCH --error=synthetic-causal-clean-content-recon-film-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -105,7 +105,7 @@ fi
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --style-injection-mode input \
+    --style-injection-mode film \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -116,7 +116,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-recon-rebalanced \
+    --model-id synthetic-causal-clean-content-recon-film \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
