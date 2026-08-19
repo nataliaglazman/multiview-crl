@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-recon-grad-clip-norm
+tag: synthetic-causal-clean-content-runai-trial
 contrastive_loss_type: barlow_twins
 # bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true

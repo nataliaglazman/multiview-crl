@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/ablation_multilevel_patches.yaml
-# Generated at: 2026-08-19T15:09:29Z
-# Git SHA: 1fa895f
+# Generated at: 2026-08-19T15:10:26Z
+# Git SHA: 1289adc
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
