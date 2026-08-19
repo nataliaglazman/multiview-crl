@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-runai-trial
+tag: synthetic-causal-clean-content-bt-sim-05
 contrastive_loss_type: barlow_twins
 # bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -92,7 +92,7 @@ eval_dci: true
 # detach_style_injection: true
 synthetic_clean_content: true
 bt_sim_normalize: true
-bt_sim_coeff: 0.025       # ≈ on_diag_gap 0.38 / current normalised sim 16624
+bt_sim_coeff: 0.5       # ≈ on_diag_gap 0.38 / current normalised sim 16624
 bt_std_coeff: 10
 # recon_view_balance: 1
 # channels_last: false

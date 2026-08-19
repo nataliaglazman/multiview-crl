@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-19T15:10:26Z
-# Git SHA: 1289adc
+# Generated at: 2026-08-19T17:40:46Z
+# Git SHA: 87534db
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -14,7 +14,7 @@ python -m training.main_multimodal \
     --bt-gap-lambda 0.01 \
     --bt-gap-weight 1 \
     --bt-patch-weight 1 \
-    --bt-sim-coeff 0.025 \
+    --bt-sim-coeff 0.5 \
     --bt-sim-normalize \
     --bt-std-coeff 10 \
     --channels-last \
@@ -70,7 +70,7 @@ python -m training.main_multimodal \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-runai-trial \
+    --model-id synthetic-causal-clean-content-bt-sim-05 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -88,7 +88,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-clean-content-runai-trial \
+runai training standard submit synthetic-causal-clean-content-bt-sim-05 \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
     --run-as-user \
