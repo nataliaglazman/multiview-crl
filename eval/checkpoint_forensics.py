@@ -190,7 +190,7 @@ def _norm_gamma_stats(sd):
 # Tier 2: reconstruction decomposition, PER VIEW. Needs torch + the run's
 # settings.json + the synthetic generator; one batch per checkpoint.
 # ---------------------------------------------------------------------------
-def _recon_stats(run_dir, ckpt_path, device, n_samples, batch_size, causal, do_swap=False):
+def _recon_stats(run_dir, ckpt_path, device, n_samples, batch_size, causal, do_swap=False, no_quant=False):
     """Per-view pixel error, saturation and commitment cost from one forward pass.
 
     Split out per view because the two encoders are separate under --separate-encoders
@@ -288,6 +288,54 @@ def _recon_stats(run_dir, ckpt_path, device, n_samples, batch_size, causal, do_s
                 acc["rec_view_l1"] = acc.get("rec_view_l1", 0.0) + r_l1
                 acc["view_diff_r"] = acc.get("view_diff_r", 0.0) + float((a @ b) / denom)
 
+            # ── Quantization bypass: is the failure mediated by the CODEBOOK? ───
+            # CodeLayer.forward is `self.quantize(self.project(x))`, and `project` already
+            # returns (B, embed_dim, D, H, W) — the exact layout `quantize` permutes back to.
+            # So returning the projection alone feeds the decoder the CONTINUOUS
+            # representation through an otherwise identical path.
+            #
+            #   view1_mae collapses toward view0_mae  => the codebook is the mediator; the
+            #     encoder features are fine and quantization is destroying them.
+            #   view1_mae stays high                  => the encoder features are themselves
+            #     broken and the codebook contraction is a symptom, not the cause.
+            if no_quant:
+                _cbs = [m for m in model.modules() if hasattr(m, "quantize") and hasattr(m, "project")]
+                _orig_q = [c.forward for c in _cbs]
+                try:
+                    for _c in _cbs:
+
+                        def _mk(c):
+                            def _bypass(z):
+                                pz = c.project(z)
+                                zero = _t.zeros((), device=pz.device, dtype=pz.dtype)
+                                ids = _t.zeros(pz.shape[0], *pz.shape[2:], dtype=_t.long, device=pz.device)
+                                return pz, zero, ids
+
+                            return _bypass
+
+                        _c.forward = _mk(_c)
+                    nq = model(
+                        x,
+                        return_recon=True,
+                        pool_only=True,
+                        n_views=n_views,
+                        subsets=getattr(args, "subsets", [(0, 1)]),
+                        patch_grid=_pg,
+                        mask=m,
+                    )[0]
+                finally:
+                    for _c, _f in zip(_cbs, _orig_q):
+                        _c.forward = _f
+                if nq.shape[2:] != x.shape[2:]:
+                    nq = _t.nn.functional.interpolate(nq, size=x.shape[2:], mode="trilinear", align_corners=False)
+                for v in range(n_views):
+                    xv, yv = x[v * B : (v + 1) * B].float(), nq[v * B : (v + 1) * B].float()
+                    mv = m[v * B : (v + 1) * B] if m is not None else None
+                    if mv is not None:
+                        acc[f"noq_v{v}_mae"] = ((xv - yv).abs() * mv).sum().item() / mv.sum().clamp_min(1.0).item()
+                    else:
+                        acc[f"noq_v{v}_mae"] = (xv - yv).abs().mean().item()
+
             # ── Swap test: which INPUT to the shared decoder is bad? ────────────
             # Wrapping decoder.forward and reversing the two halves of `style` yields
             # both cross-pairs in one pass, at exactly the point the decoder consumes
@@ -351,7 +399,7 @@ def _recon_stats(run_dir, ckpt_path, device, n_samples, batch_size, causal, do_s
             break  # one batch is enough; raise --batch-size for a tighter estimate
     _nb = max(1, acc.get("nb", 1))
     res = {"commit": acc.get("commit", 0.0) / _nb}
-    for _k in ("cross_v0", "cross_v1"):
+    for _k in ("cross_v0", "cross_v1", "noq_v0_mae", "noq_v1_mae"):
         if _k in acc:
             res[_k] = acc[_k]
     if "tgt_view_l1" in acc:
@@ -387,6 +435,14 @@ def main():
         "localise which input to the shared decoder is bad. Reports cross_v1 = decode(content_v0, "
         "style_v1) scored against view 1, and cross_v0 = decode(content_v1, style_v0) scored "
         "against view 0. Read them against the normal per-view MAE in the same row.",
+    )
+    ap.add_argument(
+        "--no-quant",
+        action="store_true",
+        help="With --recon, also reconstruct with the codebook BYPASSED (continuous features "
+        "through the same decoder), reported as noq_v0_mae / noq_v1_mae. Tests whether the "
+        "failure is mediated by quantization: if the per-view MAE recovers without the "
+        "codebook, the encoder features are fine and the codebook is destroying them.",
     )
     ap.add_argument("--recon-samples", type=int, default=64, help="Synthetic samples to render for --recon")
     ap.add_argument("--batch-size", type=int, default=16, help="Batch size for --recon")
@@ -509,6 +565,8 @@ def main():
         ]
         if args.swap:
             hdr = hdr[:2] + ["cross_v0", "cross_v1"] + hdr[2:]
+        if args.no_quant:
+            hdr = hdr[:2] + ["noq_v0_mae", "noq_v1_mae"] + hdr[2:]
         print("  " + f"{'step':>8}  " + "  ".join(f"{h:>13}" for h in hdr))
         for r in rows:
             ck = os.path.join(os.path.dirname(paths[0]), r["file"])
@@ -516,7 +574,14 @@ def main():
             rd = args.run_dir or os.path.dirname(ck)
             try:
                 st = _recon_stats(
-                    rd, ck, args.device, args.recon_samples, args.batch_size, None if args.iid else True, args.swap
+                    rd,
+                    ck,
+                    args.device,
+                    args.recon_samples,
+                    args.batch_size,
+                    None if args.iid else True,
+                    args.swap,
+                    args.no_quant,
                 )
             except Exception as e:
                 print(f"  {r['step']:>8}  [failed] {type(e).__name__}: {e}")
@@ -537,6 +602,13 @@ def main():
         print("               stronger of the two; ratio near 1 with r near 0 is a model")
         print("               manufacturing view difference in the wrong places.")
         print("  A run with view_diff_ratio ~0 is NOT a control for anything about view identity.")
+        if args.no_quant:
+            print("\n  noq_v*_mae = same decoder, codebook BYPASSED (continuous features).")
+            print("    noq_v1_mae ~ noq_v0_mae, both low  => the codebook is the MEDIATOR: the")
+            print("      encoder features still carry the view, quantization is destroying them.")
+            print("      Fix on the quantization side (entries, commitment weight, continuous path).")
+            print("    noq_v1_mae still high              => the ENCODER features are broken and")
+            print("      the codebook contraction is a symptom. Fix upstream of the quantizer.")
         if args.swap:
             print("\n  cross_v1 = decode(content_v0, style_v1) scored against view 1")
             print("  cross_v0 = decode(content_v1, style_v0) scored against view 0")
