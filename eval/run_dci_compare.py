@@ -2183,13 +2183,16 @@ def main():
     p.add_argument(
         "--causal",
         choices=("match", "iid"),
-        default=None,
+        default="match",
         help="Factor distribution of the frozen test set, for runs trained with --synthetic-causal. "
-        "'match' reproduces the training SCM; 'iid' forces independent factors silently. Unset = i.i.d. "
-        "with a warning (the long-standing behaviour, kept so existing numbers stay comparable). Not "
+        "'match' (default) reproduces the training SCM; 'iid' forces independent factors. Not "
         "cosmetic: under a random graph the dependent factors are largely determined by their parents, "
         "so scoring them i.i.d. reads as lost information — and that gap WIDENS the better the model "
-        "fits the training distribution, which looks exactly like degradation over training.",
+        "fits the training distribution, which looks exactly like degradation over training. The "
+        "default was 'iid-with-a-warning' until 19 Aug 2026; it produced a phantom 0.2-mean-R² gap "
+        "between two runs that differed only in scaling rate, so numbers printed before that date are "
+        "not comparable to these unless they passed --causal explicitly. Pass 'iid' when you WANT the "
+        "factors decorrelated so per-factor attribution is unambiguous.",
     )
     p.add_argument(
         "--poolings",
@@ -2321,9 +2324,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ref_args = load_run_args(specs[0])
-    dataset = build_synthetic_test_set(
-        ref_args, cli.num_samples, causal=None if cli.causal is None else cli.causal == "match"
-    )
+    dataset = build_synthetic_test_set(ref_args, cli.num_samples, causal=cli.causal == "match")
     logger.info(
         "Frozen test set: %d samples, shared across %d model(s).",
         cli.num_samples,
