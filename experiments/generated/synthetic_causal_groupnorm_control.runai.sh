@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_groupnorm_control.yaml
-# Generated at: 2026-08-19T15:06:55Z
-# Git SHA: bb19a47
+# Generated at: 2026-08-19T15:08:48Z
+# Git SHA: 88ba97e
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -84,7 +84,9 @@ runai training standard submit synthetic-causal-groupnorm-control \
     --large-shm \
     --node-type A100 \
     --gpu-devices-request 1 \
-    --memory 64G \
-    --memory-limit 128G \
+    --cpu-core-request 16 \
+    --cpu-core-limit 32 \
+    --cpu-memory-request 64G \
+    --cpu-memory-limit 128G \
     --host-path path=/nfs:/nfs, mount=/nfs:/nfs \
     --command -- bash -c "${TRAIN_CMD}"
