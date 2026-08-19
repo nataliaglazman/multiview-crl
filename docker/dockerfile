@@ -36,14 +36,19 @@ RUN apt-get update && \
 # Make python3.12 the default python
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
-# Install pip
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python
+# Install pip from the wheel bundled with python3.12-venv. `curl | python`
+# silently no-ops when curl cannot reach bootstrap.pypa.io, because the
+# pipeline's exit status is python's and python exits 0 on empty stdin.
+RUN python3.12 -m ensurepip --upgrade && \
+    python3.12 -m pip install --no-cache-dir --upgrade pip
 
 # Verify
-RUN python --version
+RUN python --version && python3.12 -m pip --version
 
-# Install PyTorch (CUDA 12.1 wheels support Python 3.12)
-RUN pip install --no-cache-dir \
+# Install PyTorch (CUDA 12.1 wheels support Python 3.12). Invoked as
+# `python3.12 -m pip` so the target interpreter cannot drift with the
+# `python` alternatives link set below.
+RUN python3.12 -m pip install --no-cache-dir \
     torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu121
 
@@ -59,5 +64,5 @@ RUN apt-get update && \
 
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
-RUN pip install wandb
+RUN python3.12 -m pip install --no-cache-dir -r requirements.txt
+RUN python3.12 -m pip install --no-cache-dir wandb
