@@ -2347,6 +2347,44 @@ def main(args):
                                 if _use_wandb:
                                     wandb.log({f"Recon/{_rk}": _rv}, step=step)
 
+                        # ── Content/style norm GEOMETRY ─────────────────────────────
+                        # SplitGroupNorm's per-channel gamma sets each channel's amplitude going
+                        # into the codebook and decoder. Its SPREAD is the thing that separates a
+                        # healthy run from a collapsed one on this project, and it was only ever
+                        # visible at checkpoints — which are overwritten, so the progression was
+                        # invisible. Measured end states: content_eff_dim 34/44 with spread 3.0
+                        # (recon-only baseline) versus 5/44 with spread 1.7e6 (contrastive).
+                        #
+                        # eff_dim is the participation ratio of gamma^2, (sum g^2)^2 / sum g^4:
+                        # how many channels actually influence the quantizer's squared-Euclidean
+                        # assignment. It equals the channel count when gammas are equal and falls
+                        # toward 1 as they spread, so a decaying eff_dim is the representation
+                        # pruning itself. Pure parameter statistics — no forward pass, no cost.
+                        _cn = getattr(_raw, "content_norms", None)
+                        if _cn:
+                            for _lvl_key, _sn in _cn.items():
+                                for _which in ("norm_content", "norm_style"):
+                                    _mod = getattr(_sn, _which, None)
+                                    _w = getattr(getattr(_mod, "norm", _mod), "weight", None)
+                                    if _w is None or _w.ndim != 1:
+                                        continue
+                                    _g = _w.detach().float().abs()
+                                    _g2 = _g.pow(2).double()
+                                    _eff = float(_g2.sum().pow(2) / _g2.pow(2).sum().clamp_min(1e-30))
+                                    _spread = float(_g.max() / _g.min().clamp_min(1e-12))
+                                    _tag = "content" if _which == "norm_content" else "style"
+                                    tb_writer.add_scalar(f"Norm/{_tag}_eff_dim_L{_lvl_key}", _eff, step)
+                                    tb_writer.add_scalar(f"Norm/{_tag}_gamma_spread_L{_lvl_key}", _spread, step)
+                                    tb_writer.add_scalar(f"Norm/{_tag}_gamma_max_L{_lvl_key}", float(_g.max()), step)
+                                    if _use_wandb:
+                                        wandb.log(
+                                            {
+                                                f"Norm/{_tag}_eff_dim_L{_lvl_key}": _eff,
+                                                f"Norm/{_tag}_gamma_spread_L{_lvl_key}": _spread,
+                                            },
+                                            step=step,
+                                        )
+
                         # GAN diagnostics
                         for _gan_key in (
                             "GAN/G_adv_loss",
