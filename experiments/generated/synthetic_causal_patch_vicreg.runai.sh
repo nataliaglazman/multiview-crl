@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_patch_vicreg.yaml
-# Generated at: 2026-08-20T14:08:13Z
-# Git SHA: a09bb07
+# Generated at: 2026-08-20T14:53:52Z
+# Git SHA: 594ce95
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
