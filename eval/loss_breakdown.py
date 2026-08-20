@@ -66,7 +66,7 @@ def _settings(run_dir, override):
         return json.load(f)
 
 
-def build_terms(cfg, level):
+def build_terms(cfg, level, series):
     """(display name, tb tag, multiplier) for every term that reaches the loss.
 
     Multipliers mirror the call chain exactly:
@@ -103,12 +103,33 @@ def build_terms(cfg, level):
         ("BT gap    off_diag", f"Contrastive/gap_off_diag_loss{L}", sc * lw * gw * glam),
         ("BT gap    sim", f"Contrastive/gap_sim_loss{L}", sc * lw * gw * sim),
         ("BT gap    var hinge", f"Contrastive/gap_var_loss{L}", sc * lw * gw * gstd),
-        ("recon     pixel L1", "Recon/Loss-MAE-Reconstruction", sr),
-        ("recon     perceptual", "Recon/Loss-Perceptual-Reconstruction", sr),
     ]
     commit_w = vqw + (0.0 if single else sr)
-    terms.append(("VQ        commitment", f"Recon/Loss-MSE-VQ0_Commitment_Cost", commit_w))
-    return terms, commit_w, single
+
+    # Two ways to account for reconstruction and VQ.
+    #
+    # FINE needs the Recon/* summaries (added 2026-08-17). It splits reconstruction into
+    # pixel and perceptual and shows the commitment cost at its true effective weight —
+    # which is the only way to see the double-count.
+    #
+    # COARSE falls back to Loss/Recon and Loss/VQ, which every run has ever logged. Those
+    # are ALREADY weighted (Loss/Recon = scale_recon_loss * BaselineLoss, and BaselineLoss
+    # already contains the commitment cost unless single-counted; Loss/VQ =
+    # vq_commitment_weight * sum(diffs)), so their multiplier here is 1.0 and adding both
+    # is correct rather than double-counting.
+    fine = "Recon/Loss-MAE-Reconstruction" in series
+    if fine:
+        terms += [
+            ("recon     pixel L1", "Recon/Loss-MAE-Reconstruction", sr),
+            ("recon     perceptual", "Recon/Loss-Perceptual-Reconstruction", sr),
+            ("VQ        commitment", "Recon/Loss-MSE-VQ0_Commitment_Cost", commit_w),
+        ]
+    else:
+        terms += [
+            ("recon     (Loss/Recon)", "Loss/Recon", 1.0),
+            ("VQ        (Loss/VQ)", "Loss/VQ", 1.0),
+        ]
+    return terms, commit_w, single, fine
 
 
 def main():
@@ -123,7 +144,7 @@ def main():
 
     cfg = _settings(args.run_dir, args.settings)
     series = _load_scalars(args.run_dir)
-    terms, commit_w, single = build_terms(cfg, args.level)
+    terms, commit_w, single, fine = build_terms(cfg, args.level, series)
 
     if "Loss/Total" not in series:
         raise SystemExit("Loss/Total not found — is this a training log directory?")
@@ -159,23 +180,29 @@ def main():
                 continue
             print(f"  {name:<24}{raw:>12.5g}{mult:>11.5g}{w:>13.5g}{100*w/ssum if ssum else 0:>9.2f}%")
         print(f"  {'-'*80}\n  {'SUM of weighted parts':<24}{'':>23}{ssum:>13.5g}")
-        missing = [n for n, (raw, _, _) in vals.items() if raw is None]
-        if total_logged is not None:
-            resid = total_logged - ssum
-            if missing:
-                # Runs from before the Recon/* logging have no pixel/perceptual/commitment
-                # tags, so the residual IS those terms — not an accounting error. Say so,
-                # and attribute it, rather than crying MISMATCH at a complete breakdown.
-                flag = f"= the {len(missing)} unlogged term(s): {', '.join(m.split()[-1] for m in missing)}"
-            elif abs(resid) <= 0.02 * max(abs(total_logged), 1e-9):
-                flag = "OK — breakdown is complete"
-            else:
-                flag = "MISMATCH — a logged term is unaccounted for"
-            print(f"  {'Loss/Total logged':<24}{'':>23}{total_logged:>13.5g}")
-            print(f"  {'residual':<24}{'':>23}{resid:>13.5g}   {flag}")
-            if missing and abs(total_logged) > 1e-12:
-                print(f"  {'-> contrastive share':<24}{'':>23}{100*ssum/total_logged:>12.1f}%")
-                print(f"  {'-> residual share':<24}{'':>23}{100*resid/total_logged:>12.1f}%")
+        # TWO independent reconciliations, so a mismatch is attributable rather than just
+        # flagged: the BT sum against Loss/Contrastive validates the contrastive
+        # coefficients, and the full sum against Loss/Total validates completeness.
+        bt_sum = sum(v[2] for k, v in vals.items() if k.startswith("BT ") and v[2] is not None)
+        rv_sum = ssum - bt_sum
+        c_logged = _at(series, "Loss/Contrastive", st, tol)
+
+        def _rec(label, got, want):
+            if want is None:
+                return
+            r = want - got
+            ok = abs(r) <= 0.02 * max(abs(want), 1e-9)
+            print(f"  {label:<24}{'':>23}{want:>13.5g}   residual {r:+.4g}  {'OK' if ok else 'MISMATCH'}")
+
+        print(f"  {'  BT terms':<24}{'':>23}{bt_sum:>13.5g}")
+        _rec("Loss/Contrastive logged", bt_sum, c_logged)
+        print(f"  {'  recon + VQ':<24}{'':>23}{rv_sum:>13.5g}")
+        _rec("Loss/Total logged", ssum, total_logged)
+        if total_logged and abs(total_logged) > 1e-12:
+            print(
+                f"\n  share of Loss/Total:   contrastive {100*bt_sum/total_logged:>5.1f}%"
+                f"   recon+VQ {100*rv_sum/total_logged:>5.1f}%"
+            )
         r = {"step": st, "Loss/Total": total_logged, "sum_weighted": ssum}
         r.update({k: v[2] for k, v in vals.items()})
         rows.append(r)
