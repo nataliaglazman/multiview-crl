@@ -321,6 +321,55 @@ def _group_cli_args(cli_args: list[str]) -> list[str]:
     return arg_lines
 
 
+def _runai_host_path(runai: dict) -> tuple[str, str]:
+    """Split the docker-style ``volume: "host:container"`` into RunAI's two keys.
+
+    The v1 CLI took ``--volume /nfs:/nfs``; the v2 CLI wants
+    ``--host-path path=/nfs,mount=/nfs``.  Passing the un-split ``/nfs:/nfs``
+    to either key silently produces a job with nothing mounted, so the repo
+    path is missing inside the container.
+    """
+    volume = str(runai.get("volume", "/nfs:/nfs"))
+    host, _, container = volume.partition(":")
+    return host, (container or host)
+
+
+def _runai_container_command(config: dict, repo_path: str, mount_path: str) -> str:
+    """Build the body of the container command, one statement per line.
+
+    Lines are folded into a single line before submission (see
+    ``build_training_script``), so every statement ends in an explicit ``;``
+    and no backslash line-continuations are used.
+    """
+    arg_lines = _group_cli_args(config_to_cli_args(config))
+    lines = [
+        f"cd {repo_path} || {{ echo ERROR: {repo_path} is missing inside the container - check the "
+        f"--host-path mount of {mount_path} >&2 ; exit 1 ; }} ;",
+        f"export PYTHONPATH={repo_path} ;",
+        "python -m training.main_multimodal",
+    ]
+    lines.extend(f"    {al}" for al in arg_lines)
+    return "\n".join(lines)
+
+
+def _runai_submit_flags(runai: dict) -> list[tuple[str, str | None]]:
+    """RunAI v2 CLI (``runai training standard submit``) resource flags."""
+    host_path, mount_path = _runai_host_path(runai)
+    return [
+        ("--project", runai.get("project", "nglazman")),
+        ("--image", runai.get("image", "")),
+        ("--run-as-user", None),
+        ("--large-shm", None),
+        ("--node-type", runai.get("node_type", "A100")),
+        ("--gpu-devices-request", str(runai.get("gpu", 1))),
+        ("--cpu-core-request", str(runai.get("cpu", 16))),
+        ("--cpu-core-limit", str(runai.get("cpu_limit", 32))),
+        ("--cpu-memory-request", str(runai.get("memory", "64G"))),
+        ("--cpu-memory-limit", str(runai.get("memory_limit", "128G"))),
+        ("--host-path", f"path={host_path},mount={mount_path}"),
+    ]
+
+
 def save_resolved_config(config: dict, experiment_path: Path) -> dict:
     """Add provenance metadata to the config for the snapshot saved alongside results."""
     snapshot = copy.deepcopy(config)
@@ -364,35 +413,23 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
     if cluster_name == "runai":
         runai = config.get("_runai", {})
         repo_path = runai.get("repo_path", "/nfs/home/nglazman/crl-2/multiview-crl")
+        _, mount_path = _runai_host_path(runai)
 
-        # Build the training command as a single string for bash -c.
-        train_parts = ["python -m training.main_multimodal \\"]
-        for j, al in enumerate(arg_lines):
-            suffix = " \\" if j < len(arg_lines) - 1 else ""
-            train_parts.append(f"    {al}{suffix}")
-        train_cmd = "\n".join(train_parts)
-
+        # `tr` folds the heredoc to a single line: backslash line-continuations do
+        # not survive the trip through `runai ... --command -- bash -c "$TRAIN_CMD"`
+        # (the newlines arrive, the trailing `\` do not), which leaves the container
+        # running each `--flag value` line as its own command.
+        submit_flags = _runai_submit_flags(runai)
         lines = header + [
-            "# --- Training command ---",
-            f"TRAIN_CMD=$(cat <<'TRAIN_EOF'",
-            f"cd {repo_path} && PYTHONPATH={repo_path} \\",
-            train_cmd,
+            "# --- Training command (folded to one line: see note in scripts/launch.py) ---",
+            "TRAIN_CMD=$(tr '\\n' ' ' <<'TRAIN_EOF'",
+            _runai_container_command(config, repo_path, mount_path),
             "TRAIN_EOF",
             ")",
             "",
             "# --- RunAI submission ---",
             f"runai training standard submit {tag} \\",
-            f'    --project {runai.get("project", "nglazman")} \\',
-            f'    --image {runai.get("image", "")} \\',
-            f"    --run-as-user \\",
-            f"    --large-shm \\",
-            f'    --node-type {runai.get("node_type", "A100")} \\',
-            f'    --gpu-devices-request {runai.get("gpu", 1)} \\',
-            f'    --cpu-core-request {runai.get("cpu", 16)} \\',
-            f'    --cpu-core-limit {runai.get("cpu_limit", 32)} \\',
-            f'    --cpu-memory-request {runai.get("memory", "64G")} \\',
-            f'    --cpu-memory-limit {runai.get("memory_limit", "128G")} \\',
-            f'    --host-path path={runai.get("volume", "/nfs:/nfs")},mount={runai.get("volume", "/nfs:/nfs")} \\',
+            *[f"    {flag}{'' if value is None else ' ' + value} \\" for flag, value in submit_flags],
             f'    --command -- bash -c "${{TRAIN_CMD}}"',
         ]
 
@@ -491,41 +528,18 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
 
 
 def build_runai_command(config: dict, tag: str) -> list[str]:
+    """Direct-submit form of the generated script — same v2 CLI, same container command."""
     runai = config.get("_runai", {})
     repo_path = runai.get("repo_path", "/nfs/home/nglazman/crl-2/multiview-crl")
-    cli_args = config_to_cli_args(config)
-    train_cmd = f"cd {repo_path} && PYTHONPATH={repo_path} python -m training.main_multimodal {' '.join(cli_args)}"
+    _, mount_path = _runai_host_path(runai)
+    train_cmd = " ".join(_runai_container_command(config, repo_path, mount_path).split())
 
-    cmd = [
-        "runai",
-        "submit",
-        tag,
-        "--project",
-        runai.get("project", "nglazman"),
-        "--image",
-        runai.get("image", ""),
-        "--run-as-user",
-        "--large-shm",
-        "--node-type",
-        runai.get("node_type", "A100"),
-        "--gpu",
-        str(runai.get("gpu", 1)),
-        "--cpu",
-        str(runai.get("cpu", 16)),
-        "--cpu-limit",
-        str(runai.get("cpu_limit", 32)),
-        "--memory",
-        runai.get("memory", "64G"),
-        "--memory-limit",
-        runai.get("memory_limit", "128G"),
-        "--volume",
-        runai.get("volume", "/nfs:/nfs"),
-        "--command",
-        "--",
-        "bash",
-        "-c",
-        train_cmd,
-    ]
+    cmd = ["runai", "training", "standard", "submit", tag]
+    for flag, value in _runai_submit_flags(runai):
+        cmd.append(flag)
+        if value is not None:
+            cmd.append(value)
+    cmd += ["--command", "--", "bash", "-c", train_cmd]
     return cmd
 
 

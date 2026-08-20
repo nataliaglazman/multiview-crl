@@ -20,26 +20,27 @@ PROJECT="nglazman"       # e.g. natalia
 GPU=1
 CPU=16
 MEMORY="64Gi"
-VOLUME_MOUNT="/nfs:/nfs"          # Map cluster's /nfs to container's /nfs
+HOST_PATH="/nfs"                  # Cluster path to mount
+MOUNT_PATH="/nfs"                 # Where it appears inside the container
 WORKDIR="/nfs/home/nglazman/crl-2/multiview-crl"               # Working directory inside container
 WANDB_API_KEY="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"
 # -----------------------------------------
 
 JOB_NAME="sweep-${AGENT_IDX}"
 
-runai submit "${JOB_NAME}" \
+runai training standard submit "${JOB_NAME}" \
     --project "${PROJECT}" \
     --image "${IMAGE}" \
     --run-as-user \
     --large-shm \
     --node-type A100 \
-    --gpu "${GPU}" \
-    --cpu "${CPU}" \
-    --memory "${MEMORY}" \
-    --memory-limit 128G \
-    --volume "${VOLUME_MOUNT}" \
+    --gpu-devices-request "${GPU}" \
+    --cpu-core-request "${CPU}" \
+    --cpu-memory-request "${MEMORY}" \
+    --cpu-memory-limit 128G \
+    --host-path "path=${HOST_PATH},mount=${MOUNT_PATH}" \
     --environment "WANDB_DIR=/tmp" \
     --environment "WANDB_API_KEY=${WANDB_API_KEY}" \
-    --command -- bash -c "cd ${WORKDIR} && wandb agent --count 10 ${SWEEP_ID} "
+    --command -- bash -c "cd ${WORKDIR} && wandb agent --count 10 ${SWEEP_ID}"
 
 echo "Submitted Run:AI job: ${JOB_NAME}"
