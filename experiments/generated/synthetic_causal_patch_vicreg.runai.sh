@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_patch_vicreg.yaml
-# Generated at: 2026-08-20T14:04:44Z
-# Git SHA: a09bb07
+# Generated at: 2026-08-20T14:51:04Z
+# Git SHA: f798103
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -92,5 +92,5 @@ runai training standard submit synthetic-causal-patch-vicreg \
     --cpu-core-limit 32 \
     --cpu-memory-request 64G \
     --cpu-memory-limit 128G \
-    --host-path path=/nfs,mount=/nfs \
+    --host-path path=/nfs,mount=/nfs,readwrite \
     --command -- bash -c "${TRAIN_CMD}"

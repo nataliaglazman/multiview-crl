@@ -38,7 +38,7 @@ runai training standard submit "${JOB_NAME}" \
     --cpu-core-request "${CPU}" \
     --cpu-memory-request "${MEMORY}" \
     --cpu-memory-limit 128G \
-    --host-path "path=${HOST_PATH},mount=${MOUNT_PATH}" \
+    --host-path "path=${HOST_PATH},mount=${MOUNT_PATH},readwrite" \
     --environment "WANDB_DIR=/tmp" \
     --environment "WANDB_API_KEY=${WANDB_API_KEY}" \
     --command -- bash -c "cd ${WORKDIR} && wandb agent --count 10 ${SWEEP_ID}"

@@ -366,7 +366,10 @@ def _runai_submit_flags(runai: dict) -> list[tuple[str, str | None]]:
         ("--cpu-core-limit", str(runai.get("cpu_limit", 32))),
         ("--cpu-memory-request", str(runai.get("memory", "64G"))),
         ("--cpu-memory-limit", str(runai.get("memory_limit", "128G"))),
-        ("--host-path", f"path={host_path},mount={mount_path}"),
+        # `readwrite` is opt-in: without it the v2 CLI mounts read-only and the
+        # first os.makedirs(save_dir) dies with "Errno 30: Read-only file system".
+        # The v1 `--volume` was read-write by default.
+        ("--host-path", f"path={host_path},mount={mount_path},readwrite"),
     ]
 
 
