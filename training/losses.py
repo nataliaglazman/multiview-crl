@@ -1688,12 +1688,26 @@ class BaselineLoss(torch.nn.Module):
             view_balance=float(network_output.get("view_balance", 0.0) or 0.0),
         ) + self._calculate_perceptual_loss(x, y_percep)
 
+        # The VQ commitment cost is added HERE and again in main_multimodal as Loss/VQ
+        # (`vq_loss = sum(diffs) * args.vq_commitment_weight`), so the effective weight has
+        # always been 1.0 + vq_commitment_weight — five times what --vq-commitment-weight 0.25
+        # advertises. That matters beyond bookkeeping: `diff` is (quantize.detach() - x)^2, so
+        # this term is minimised by SHRINKING the representation entering the codebook, and
+        # under a decorrelating contrastive objective a 256-entry codebook cannot cover the
+        # code at full rank, making the cost irreducible except by collapsing rank. Over-
+        # weighting that pressure by 5x is not a neutral accounting error.
+        #
+        # single_count keeps the per-level summaries (they are the only place the commitment
+        # cost is broken out per level) but drops the addition, so --vq-commitment-weight
+        # becomes the single source of truth. Default False = bit-identical to every prior run.
+        _single = bool(network_output.get("single_count_commitment", False))
         for idx, q_loss in enumerate(q_losses):
             q_loss = q_loss.float()
 
             self.summaries[TBSummaryTypes.SCALAR][f"Loss-MSE-VQ{idx}_Commitment_Cost"] = q_loss.detach()
 
-            loss = loss + q_loss
+            if not _single:
+                loss = loss + q_loss
 
         return loss
 
@@ -1948,10 +1962,13 @@ class JukeboxPerceptualLoss(torch.nn.Module):
             self.summaries[TBSummaryTypes.SCALAR][key] = pixel_loss.detach()
             loss = loss + pixel_loss
 
+        # Same double-count as BaselineLoss — see the note there.
+        _single = bool(network_output.get("single_count_commitment", False))
         for idx, q_loss in enumerate(q_losses):
             q_loss = q_loss.float()
             self.summaries[TBSummaryTypes.SCALAR][f"Loss-MSE-VQ{idx}_Commitment_Cost"] = q_loss.detach()
-            loss = loss + q_loss
+            if not _single:
+                loss = loss + q_loss
 
         return loss
 

@@ -268,6 +268,7 @@ def train_step(
                         # re-weight each view instead of averaging a dead one away.
                         "n_views": n_views,
                         "view_balance": getattr(args, "recon_view_balance", 0.0),
+                        "single_count_commitment": getattr(args, "single_count_commitment", False),
                     },
                     images,
                 )

@@ -1147,6 +1147,23 @@ def parse_args() -> argparse.ArgumentParser:
         "off-diagonal.",
     )
     parser.add_argument(
+        "--single-count-commitment",
+        action="store_true",
+        default=False,
+        help="Count the VQ commitment cost ONCE, at --vq-commitment-weight, instead of twice. "
+        "BaselineLoss/JukeboxPerceptualLoss add it into their own return value AND "
+        "main_multimodal adds the same diffs again as Loss/VQ, so the effective weight has "
+        "always been 1.0 + vq_commitment_weight (1.25 at the 0.25 default, 5x what the flag "
+        "says). Not just bookkeeping: `diff` is (quantize.detach() - x)^2, minimised by "
+        "SHRINKING the representation entering the codebook. Under a decorrelating contrastive "
+        "objective a 256-entry codebook cannot cover a full-rank 44-dim code at all (1.13 "
+        "levels/dim), so the commitment cost is irreducible except by collapsing rank — and "
+        "on this project the content block pruned itself to ~5 effective channels, which is "
+        "exactly where 256 codes become adequate (3.0 levels/dim). Over-weighting that "
+        "pressure 5x is the wrong direction. Default False keeps every prior run bit-identical; "
+        "set it and Loss/Recon also becomes pure reconstruction error.",
+    )
+    parser.add_argument(
         "--grad-clip-norm",
         type=float,
         default=2.0,
