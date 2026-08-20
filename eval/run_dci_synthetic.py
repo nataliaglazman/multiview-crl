@@ -123,6 +123,12 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None, random_init=F
         # absolute. Disentanglement/completeness start far lower and are the metrics with
         # real headroom.
         logger.warning("--random-init: NO checkpoint loaded. These are UNTRAINED-baseline scores.")
+        # .to(device) BEFORE returning: this branch skips the checkpoint path below, which is
+        # where the only other model.to(device) lives. Without it the weights stay on CPU while
+        # _extract_synthetic_representations sends the batch to CUDA, and the first conv raises
+        # "Input type (torch.cuda.FloatTensor) and weight type (torch.FloatTensor) should be the
+        # same" -- so the untrained zero point was unobtainable on any GPU machine.
+        model.to(device)
         model.eval()
         return model, args, device
 
