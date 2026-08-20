@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-20T14:53:52Z
-# Git SHA: 594ce95
+# Generated at: 2026-08-20T15:52:43Z
+# Git SHA: c5deaf4
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -11,7 +11,7 @@ TRAIN_CMD=$(cat <<'TRAIN_EOF'
 cd /nfs/home/nglazman/crl-2/multiview-crl && PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl \
 python -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 0.01 \
+    --bt-gap-lambda 0.001 \
     --bt-gap-weight 1 \
     --bt-patch-weight 1 \
     --bt-sim-coeff 0.5 \
@@ -72,7 +72,7 @@ python -m training.main_multimodal \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-commitment \
+    --model-id synthetic-causal-clean-content-commitment-bt-gap-0001 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -90,7 +90,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-clean-content-commitment \
+runai training standard submit synthetic-causal-clean-content-commitment-bt-gap-0001 \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
