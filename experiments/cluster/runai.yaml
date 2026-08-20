@@ -9,7 +9,7 @@ cache_dir: /nfs/home/nglazman/cache/multiview
 
 # ---- RunAI job resources ----
 _runai:
-  image: "aicregistry:5000/nglazman:multiview-crl-vqvae-final"
+  image: "aicregistry:5000/nglazman:multiview-crl"
   project: nglazman
   node_type: A100
   gpu: 1

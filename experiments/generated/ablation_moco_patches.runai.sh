@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/ablation_moco_patches.yaml
-# Generated at: 2026-08-19T17:40:46Z
-# Git SHA: 87534db
+# Generated at: 2026-08-20T14:08:13Z
+# Git SHA: a09bb07
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -72,7 +72,7 @@ TRAIN_EOF
 # --- RunAI submission ---
 runai training standard submit ablation-moco-patches \
     --project nglazman \
-    --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
+    --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
     --large-shm \
     --node-type A100 \

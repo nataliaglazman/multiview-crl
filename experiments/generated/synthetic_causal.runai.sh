@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-19T17:40:46Z
-# Git SHA: 87534db
+# Generated at: 2026-08-20T14:08:13Z
+# Git SHA: a09bb07
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -59,18 +59,20 @@ python -m training.main_multimodal \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
+    --single-count-commitment \
     --style-injection-mode input \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-clean-content \
+    --synthetic-identifiable-ventricle \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-bt-sim-05 \
+    --model-id synthetic-causal-clean-content-commitment \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -88,9 +90,9 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-clean-content-bt-sim-05 \
+runai training standard submit synthetic-causal-clean-content-commitment \
     --project nglazman \
-    --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
+    --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
     --large-shm \
     --node-type A100 \
