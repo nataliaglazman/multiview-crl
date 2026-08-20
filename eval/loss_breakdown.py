@@ -159,11 +159,23 @@ def main():
                 continue
             print(f"  {name:<24}{raw:>12.5g}{mult:>11.5g}{w:>13.5g}{100*w/ssum if ssum else 0:>9.2f}%")
         print(f"  {'-'*80}\n  {'SUM of weighted parts':<24}{'':>23}{ssum:>13.5g}")
+        missing = [n for n, (raw, _, _) in vals.items() if raw is None]
         if total_logged is not None:
             resid = total_logged - ssum
-            flag = "OK" if abs(resid) <= 0.02 * max(abs(total_logged), 1e-9) else "MISMATCH — a term is missing"
+            if missing:
+                # Runs from before the Recon/* logging have no pixel/perceptual/commitment
+                # tags, so the residual IS those terms — not an accounting error. Say so,
+                # and attribute it, rather than crying MISMATCH at a complete breakdown.
+                flag = f"= the {len(missing)} unlogged term(s): {', '.join(m.split()[-1] for m in missing)}"
+            elif abs(resid) <= 0.02 * max(abs(total_logged), 1e-9):
+                flag = "OK — breakdown is complete"
+            else:
+                flag = "MISMATCH — a logged term is unaccounted for"
             print(f"  {'Loss/Total logged':<24}{'':>23}{total_logged:>13.5g}")
             print(f"  {'residual':<24}{'':>23}{resid:>13.5g}   {flag}")
+            if missing and abs(total_logged) > 1e-12:
+                print(f"  {'-> contrastive share':<24}{'':>23}{100*ssum/total_logged:>12.1f}%")
+                print(f"  {'-> residual share':<24}{'':>23}{100*resid/total_logged:>12.1f}%")
         r = {"step": st, "Loss/Total": total_logged, "sum_weighted": ssum}
         r.update({k: v[2] for k, v in vals.items()})
         rows.append(r)
