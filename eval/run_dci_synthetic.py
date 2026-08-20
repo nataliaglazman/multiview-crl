@@ -190,10 +190,10 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None):
 
     * ``True`` — forward the run's SCM, matching the training distribution. This is what the
       ``run_dci_synthetic`` / ``run_dci_compare`` / ``content_rank_pca`` CLIs pass by default
-      as of 19 Aug 2026.
+      as of 20 Aug 2026.
     * ``False`` — force i.i.d. deliberately and silently (the honest choice when you want
       factors decorrelated so per-factor attribution is unambiguous).
-    * ``None`` — i.i.d. with a WARNING. The pre-19-Aug-2026 CLI default, kept only for direct
+    * ``None`` — i.i.d. with a WARNING. The pre-20-Aug-2026 CLI default, kept only for direct
       callers that have not been updated. Do not reach for it: the two distributions are not
       interchangeable (under a random graph ventricle_size and brain_size correlate at ~0.8,
       so a "ventricle" probe largely reads brain_size, while at i.i.d. it does not), and the
@@ -298,7 +298,7 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Build the eval set with the run's SCM instead of i.i.d. factors, matching the "
-        "training distribution. ON by default since 19 Aug 2026 (it was opt-in before, and the "
+        "training distribution. ON by default since 20 Aug 2026 (it was opt-in before, and the "
         "i.i.d. default produced a phantom 0.2-mean-R² gap between two runs that differed only in "
         "scaling rate). Pass --no-causal-eval when you WANT the factors decorrelated so per-factor "
         "attribution is unambiguous; numbers from before that date match --no-causal-eval.",
