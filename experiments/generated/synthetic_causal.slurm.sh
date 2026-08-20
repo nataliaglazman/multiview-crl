@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-20T12:14:51Z
-# Git SHA: e287c87
+# Generated at: 2026-08-20T12:48:50Z
+# Git SHA: bf5b099
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-bt-lambda-0
+#SBATCH --job-name=synthetic-causal-clean-content-identifiable-ventricle
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-bt-lambda-0-%j.err
+#SBATCH --error=synthetic-causal-clean-content-identifiable-ventricle-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -60,7 +60,6 @@ fi
     --batch-size 128 \
     --bt-gap-lambda 0.01 \
     --bt-gap-weight 1 \
-    --bt-lambda 0 \
     --bt-patch-weight 1 \
     --bt-sim-coeff 0.5 \
     --bt-sim-normalize \
@@ -112,13 +111,14 @@ fi
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-clean-content \
+    --synthetic-identifiable-ventricle \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-bt-lambda-0 \
+    --model-id synthetic-causal-clean-content-identifiable-ventricle \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
