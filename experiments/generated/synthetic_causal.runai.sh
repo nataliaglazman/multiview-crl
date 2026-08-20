@@ -101,5 +101,5 @@ runai training standard submit synthetic-causal-clean-content-commitment \
     --cpu-core-limit 32 \
     --cpu-memory-request 64G \
     --cpu-memory-limit 128G \
-    --host-path path=/nfs:/nfs,mount=/nfs:/nfs \
+    --host-path path=/nfs,mount=/nfs \
     --command -- bash -c "${TRAIN_CMD}"
