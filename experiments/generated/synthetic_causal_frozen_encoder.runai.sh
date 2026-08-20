@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_frozen_encoder.yaml
+<<<<<<< HEAD
 # Generated at: 2026-08-20T15:10:39Z
 # Git SHA: 612e1b5
+=======
+# Generated at: 2026-08-20T15:52:43Z
+# Git SHA: c5deaf4
+>>>>>>> ff6501635d8f8ce7ffb67dab76cc0f6111d7bfdf
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
