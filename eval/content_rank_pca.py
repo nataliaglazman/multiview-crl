@@ -38,6 +38,13 @@ Usage
 PCA is fit on all samples (unsupervised, transductive but label-free — the same
 choice ``run_dci_compare._reduce_reprs`` makes).  The MLP ceiling is the slow part;
 pass ``--no-mlp`` to skip it, ``--raw-grid 0`` to skip the raw-pixel row.
+
+Two defaults changed on 19 Aug 2026 after both of them together manufactured a
+0.2-mean-R² difference between two runs that differed only in ``vqvae_scaling_rates``
+(see the METHODOLOGY_REPORT changelog).  ``--causal`` now defaults to ``match`` rather
+than i.i.d.-with-a-warning, and ``--probe-dim`` now defaults to ``auto`` rather than 0.
+Per-factor numbers printed before that date are not comparable to these unless the run
+passed both flags explicitly.
 """
 from __future__ import annotations
 
@@ -56,6 +63,9 @@ from eval.run_dci_compare import _CONTENT, FACTOR_POOLING, _effective_rank, pars
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
+# --probe-dim sentinel: reduce only the blocks that are actually in the p>>n regime.
+PROBE_DIM_AUTO = "auto"
+
 
 def _pc_grid(ncomp):
     """Coarse-but-dense grid of cumulative-PC counts up to ``ncomp`` (always incl. ncomp)."""
@@ -63,13 +73,31 @@ def _pc_grid(ncomp):
     return sorted({k for k in base if k <= ncomp} | {ncomp}) if ncomp >= 1 else []
 
 
+def _auto_probe_dim(n, d):
+    """``--probe-dim auto``: the width to reduce a (n, d) block to, or 0 for "leave alone".
+
+    Only blocks in the p>>n regime are touched. The patch block is the one that gets
+    there: at patch_grid 8^3 x 44 channels it is 22528 features against N~2000 samples,
+    where a ridge probe on a signal-free target returns a NEGATIVE R^2 — measured, and
+    it inverted the sign of the lesion dims in the scaling-2-vs-4 comparison until the
+    reduction was applied. ``gap`` (44) and ``stats`` (176) are well-conditioned at that
+    N and are left at full width, so this does not silently reshape the readouts that
+    were never overfitting.
+    """
+    budget = max(1, n // 4)
+    return min(64, budget) if d > budget else 0
+
+
 def _pca_reduce(X, n_comp):
     """PCA-reduce ``X`` to ``n_comp`` components (unsupervised, fit on all samples — the
-    same transductive choice ``pca_truncation_curve`` makes). No-op if ``n_comp<=0`` or
-    ``>=`` the current width."""
+    same transductive choice ``pca_truncation_curve`` makes). ``"auto"`` reduces only the
+    p>>n blocks (see ``_auto_probe_dim``). No-op if ``n_comp<=0`` or ``>=`` the current
+    width."""
+    n, d = X.shape
+    if n_comp == PROBE_DIM_AUTO:
+        n_comp = _auto_probe_dim(n, d)
     if n_comp is None or n_comp <= 0:
         return X
-    n, d = X.shape
     k = int(min(n_comp, d, n - 1))
     if k >= d:
         return X
@@ -553,13 +581,16 @@ def main():
     p.add_argument(
         "--causal",
         choices=("match", "iid"),
-        default=None,
+        default="match",
         help="Factor distribution of the frozen test set, for runs trained with --synthetic-causal. "
-        "'match' reproduces the training SCM; 'iid' forces independent factors silently. Unset = i.i.d. "
-        "with a warning (the long-standing behaviour, kept so existing numbers stay comparable). Not "
+        "'match' (default) reproduces the training SCM; 'iid' forces independent factors. Not "
         "cosmetic: under a random graph the dependent factors are largely determined by their parents, "
         "so scoring them i.i.d. reads as lost information — and that gap WIDENS the better the model "
-        "fits the training distribution, which looks exactly like degradation over training.",
+        "fits the training distribution, which looks exactly like degradation over training. The "
+        "default was 'iid-with-a-warning' until 19 Aug 2026; it produced a phantom 0.2-mean-R² gap "
+        "between two runs that differed only in scaling rate, so numbers printed before that date are "
+        "not comparable to these unless they passed --causal explicitly. Pass 'iid' when you WANT the "
+        "factors decorrelated so per-factor attribution is unambiguous.",
     )
     p.add_argument("--poolings", default="gap,stats,2x2x2", help="Comma list: gap, stats, and/or DxHxW.")
     p.add_argument("--level", type=int, default=0, help="Encoder level to analyse.")
@@ -576,12 +607,14 @@ def main():
     p.add_argument("--raw-grid", type=int, default=16, help="Raw-pixel ceiling grid GxGxG (0 = skip the raw row).")
     p.add_argument(
         "--probe-dim",
-        type=int,
-        default=0,
-        help="PCA-reduce every block to this many components before the probes (ceiling, per-factor, "
-        "block-MCC, raw-pixel). Removes the p>>n overfit on the huge patch block and the capacity "
-        "confound when models/baselines differ in channel count. eff_rank/feat_dim stay on the full "
-        "block. 0 = no reduction.",
+        default=PROBE_DIM_AUTO,
+        help="PCA-reduce a block to this many components before the probes (ceiling, per-factor, "
+        "block-MCC, raw-pixel); eff_rank/feat_dim stay on the full block. 'auto' (default) reduces "
+        "ONLY blocks in the p>>n regime (d > N/4) to min(64, N/4), so the patch block is capped "
+        "while gap/stats keep their full width. An explicit integer reduces EVERY block to that "
+        "width, which is what you want when models or baselines differ in channel count and the "
+        "capacity confound has to be equalised. 0 = never reduce (the pre-19-Aug-2026 default; on a "
+        "22528-feature patch block against N=2000 it returns negative R² on weak factors).",
     )
     p.add_argument("--out", default="content_rank_out", help="Output directory.")
     cli = p.parse_args()
@@ -592,15 +625,27 @@ def main():
     poolings = parse_poolings(cli.poolings)
     seeds = tuple(int(s) for s in cli.seeds.split(","))
     compute_mlp = not cli.no_mlp
-    if cli.probe_dim and cli.probe_dim > 0:
+    if cli.probe_dim != PROBE_DIM_AUTO:
+        try:
+            cli.probe_dim = int(cli.probe_dim)
+        except ValueError:
+            p.error(f"--probe-dim must be an integer or '{PROBE_DIM_AUTO}' (got {cli.probe_dim!r})")
+    if cli.probe_dim == PROBE_DIM_AUTO:
+        _auto_cap = _auto_probe_dim(cli.num_samples, 10**9)
+        logger.info(
+            "Probes PCA-reduced to %d components for blocks wider than %d features at N=%d; narrower "
+            "blocks keep full width (eff_rank/feat_dim always on the full block).",
+            _auto_cap,
+            max(1, cli.num_samples // 4),
+            cli.num_samples,
+        )
+    elif cli.probe_dim > 0:
         logger.info("Probes PCA-reduced to %d components (eff_rank/feat_dim stay on the full block).", cli.probe_dim)
 
     from eval.run_dci_synthetic import build_synthetic_test_set, load_run_args
 
     ref_args = load_run_args(cli.run_dirs[0])
-    dataset = build_synthetic_test_set(
-        ref_args, cli.num_samples, causal=None if cli.causal is None else cli.causal == "match"
-    )
+    dataset = build_synthetic_test_set(ref_args, cli.num_samples, causal=cli.causal == "match")
     logger.info("Frozen test set: %d samples, shared across %d run(s).", cli.num_samples, len(cli.run_dirs))
 
     all_rows = []

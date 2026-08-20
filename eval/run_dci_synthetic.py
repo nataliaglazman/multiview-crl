@@ -123,6 +123,12 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None, random_init=F
         # absolute. Disentanglement/completeness start far lower and are the metrics with
         # real headroom.
         logger.warning("--random-init: NO checkpoint loaded. These are UNTRAINED-baseline scores.")
+        # .to(device) BEFORE returning: this branch skips the checkpoint path below, which is
+        # where the only other model.to(device) lives. Without it the weights stay on CPU while
+        # _extract_synthetic_representations sends the batch to CUDA, and the first conv raises
+        # "Input type (torch.cuda.FloatTensor) and weight type (torch.FloatTensor) should be the
+        # same" -- so the untrained zero point was unobtainable on any GPU machine.
+        model.to(device)
         model.eval()
         return model, args, device
 
@@ -182,14 +188,18 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None):
 
     ``causal`` controls whether the eval set reproduces the training-time SCM:
 
-    * ``None`` (default) — i.i.d. factors, the long-standing behaviour. Kept as the default
-      so existing numbers stay comparable, but a WARNING is emitted when the run itself was
-      trained with an SCM, because the two distributions are not interchangeable: under a
-      random graph ventricle_size and brain_size correlate at ~0.8, so a "ventricle" probe
-      largely reads brain_size, while at i.i.d. it does not.
-    * ``True`` — forward the run's SCM, matching the training distribution.
+    * ``True`` — forward the run's SCM, matching the training distribution. This is what the
+      ``run_dci_synthetic`` / ``run_dci_compare`` / ``content_rank_pca`` CLIs pass by default
+      as of 19 Aug 2026.
     * ``False`` — force i.i.d. deliberately and silently (the honest choice when you want
       factors decorrelated so per-factor attribution is unambiguous).
+    * ``None`` — i.i.d. with a WARNING. The pre-19-Aug-2026 CLI default, kept only for direct
+      callers that have not been updated. Do not reach for it: the two distributions are not
+      interchangeable (under a random graph ventricle_size and brain_size correlate at ~0.8,
+      so a "ventricle" probe largely reads brain_size, while at i.i.d. it does not), and the
+      resulting gap WIDENS the better a model fits the training distribution. Measured: it
+      manufactured a 0.2-mean-R² difference between two runs that differed only in scaling
+      rate, inverting the sign of the lesion dims.
     """
     from data.datasets import SyntheticBrainDataset
 
@@ -199,9 +209,14 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None):
     trained_causal = bool(getattr(args, "synthetic_causal", False))
     if causal is None and trained_causal:
         logger.warning(
-            "This run was TRAINED with synthetic_causal=True, but the eval set is being built with "
-            "i.i.d. factors. Factor correlations differ between train and eval, which can reorder "
-            "per-factor results. Pass causal=True to match training, or causal=False to silence this."
+            "!!! TRAIN/EVAL FACTOR-DISTRIBUTION MISMATCH !!! This run was TRAINED with "
+            "synthetic_causal=True but the eval set is being built with i.i.d. factors. This is NOT "
+            "cosmetic and it is NOT a wash across models: scoring SCM-trained runs on i.i.d. factors "
+            "reads dependence-through-parents as lost information, and the penalty GROWS with how "
+            "well a model fits the training distribution. Measured on this project: it manufactured "
+            "a 0.2-mean-R2 gap between two runs differing only in scaling rate, and flipped the "
+            "lesion dims negative. Pass causal=True to match training, or causal=False if you "
+            "deliberately want decorrelated factors (and to silence this)."
         )
     use_causal = trained_causal if causal else False
     logger.info(
@@ -280,9 +295,13 @@ def main():
     )
     parser.add_argument(
         "--causal-eval",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Build the eval set with the run's SCM instead of i.i.d. factors, matching the "
-        "training distribution. Off by default to keep historical numbers comparable.",
+        "training distribution. ON by default since 19 Aug 2026 (it was opt-in before, and the "
+        "i.i.d. default produced a phantom 0.2-mean-R² gap between two runs that differed only in "
+        "scaling rate). Pass --no-causal-eval when you WANT the factors decorrelated so per-factor "
+        "attribution is unambiguous; numbers from before that date match --no-causal-eval.",
     )
     cli = parser.parse_args()
 
@@ -297,7 +316,7 @@ def main():
         logger.error("settings.json not found in %s", cli.run_dir)
         sys.exit(1)
     model, args, device = load_model_from_run_dir(cli.run_dir, cli.checkpoint, random_init=cli.random_init)
-    test_dataset = build_synthetic_test_set(args, cli.num_samples, causal=True if cli.causal_eval else None)
+    test_dataset = build_synthetic_test_set(args, cli.num_samples, causal=bool(cli.causal_eval))
 
     # ── Run DCI ───────────────────────────────────────────────────────────
     from eval.dci import compute_dci_synthetic
