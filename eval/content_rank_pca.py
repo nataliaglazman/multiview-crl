@@ -39,7 +39,7 @@ PCA is fit on all samples (unsupervised, transductive but label-free — the sam
 choice ``run_dci_compare._reduce_reprs`` makes).  The MLP ceiling is the slow part;
 pass ``--no-mlp`` to skip it, ``--raw-grid 0`` to skip the raw-pixel row.
 
-Two defaults changed on 19 Aug 2026 after both of them together manufactured a
+Two defaults changed on 20 Aug 2026 after both of them together manufactured a
 0.2-mean-R² difference between two runs that differed only in ``vqvae_scaling_rates``
 (see the METHODOLOGY_REPORT changelog).  ``--causal`` now defaults to ``match`` rather
 than i.i.d.-with-a-warning, and ``--probe-dim`` now defaults to ``auto`` rather than 0.
@@ -587,7 +587,7 @@ def main():
         "cosmetic: under a random graph the dependent factors are largely determined by their parents, "
         "so scoring them i.i.d. reads as lost information — and that gap WIDENS the better the model "
         "fits the training distribution, which looks exactly like degradation over training. The "
-        "default was 'iid-with-a-warning' until 19 Aug 2026; it produced a phantom 0.2-mean-R² gap "
+        "default was 'iid-with-a-warning' until 20 Aug 2026; it produced a phantom 0.2-mean-R² gap "
         "between two runs that differed only in scaling rate, so numbers printed before that date are "
         "not comparable to these unless they passed --causal explicitly. Pass 'iid' when you WANT the "
         "factors decorrelated so per-factor attribution is unambiguous.",
@@ -613,7 +613,7 @@ def main():
         "ONLY blocks in the p>>n regime (d > N/4) to min(64, N/4), so the patch block is capped "
         "while gap/stats keep their full width. An explicit integer reduces EVERY block to that "
         "width, which is what you want when models or baselines differ in channel count and the "
-        "capacity confound has to be equalised. 0 = never reduce (the pre-19-Aug-2026 default; on a "
+        "capacity confound has to be equalised. 0 = never reduce (the pre-20-Aug-2026 default; on a "
         "22528-feature patch block against N=2000 it returns negative R² on weak factors).",
     )
     p.add_argument("--out", default="content_rank_out", help="Output directory.")

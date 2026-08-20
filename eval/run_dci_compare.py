@@ -2189,7 +2189,7 @@ def main():
         "cosmetic: under a random graph the dependent factors are largely determined by their parents, "
         "so scoring them i.i.d. reads as lost information — and that gap WIDENS the better the model "
         "fits the training distribution, which looks exactly like degradation over training. The "
-        "default was 'iid-with-a-warning' until 19 Aug 2026; it produced a phantom 0.2-mean-R² gap "
+        "default was 'iid-with-a-warning' until 20 Aug 2026; it produced a phantom 0.2-mean-R² gap "
         "between two runs that differed only in scaling rate, so numbers printed before that date are "
         "not comparable to these unless they passed --causal explicitly. Pass 'iid' when you WANT the "
         "factors decorrelated so per-factor attribution is unambiguous.",
