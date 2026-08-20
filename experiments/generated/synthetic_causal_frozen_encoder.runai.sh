@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_frozen_encoder.yaml
-# Generated at: 2026-08-20T14:51:04Z
-# Git SHA: f798103
+# Generated at: 2026-08-20T15:02:36Z
+# Git SHA: 4618851
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -90,7 +90,7 @@ TRAIN_EOF
 # --- RunAI submission ---
 runai training standard submit synthetic-causal-frozen-encoder-random \
     --project nglazman \
-    --image aicregistry:5000/nglazman:multiview-crl-vqvae-final \
+    --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
     --large-shm \
     --node-type A100 \
