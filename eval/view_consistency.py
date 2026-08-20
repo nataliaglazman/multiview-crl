@@ -38,31 +38,59 @@ the two views' render deltas:
     cos(dx_T1, dx_FLAIR)   sign/shape agreement of the evidence
     ||dx_FLAIR|| / ||dx_T1||   amplitude asymmetry
 
+RESULT (res 64, flagship preset, 20 Aug 2026) -- the sign hypothesis is DEAD
+----------------------------------------------------------------------------
+    factor                cos      ratio    model delta (contrastive - baseline)
+    ventricle_size      +0.992     0.431          -0.608
+    lesion_y            -0.317     4.129          -0.173
+    lesion_x            -0.409     2.697          -0.134
+    lesion_z            -0.306     3.964          -0.128
+    brain_size          +0.031     1.047          +0.028
+    cortical_thickness  +0.654     0.807          +0.086
+    sulcal_widening     +0.483     0.765          +0.137
+    lr_asymmetry        +0.283     0.814          +0.416
+    temporal_atrophy    +0.018     0.894          +0.519
+
+`ventricle_size` is the MOST view-consistent factor measured (+0.992) and it is the one
+most completely destroyed; `brain_size` and `temporal_atrophy` are near zero and are kept
+and improved. Spearman(cos, model delta) = +0.150. Sign consistency does not order the
+outcome, so the "the lesion's contrast reverses, therefore a view-shared code cannot carry
+it" story is falsified even though the reversal is real.
+
+What DOES order it is the AMPLITUDE RATIO. Spearman(|log2 ratio|, model delta) = -0.700,
+and the separation is clean with no overlap: every kept factor has |log2 ratio| <= 0.386,
+every destroyed one >= 1.214 -- a 3x gap. A cross-view objective has to emit the same code
+from evidence that is 2.3x weaker (ventricle) or 4x stronger (lesion) in one view than the
+other; the factors it keeps are the ones whose evidence arrives at comparable strength in
+both. Caveat on the statistics: the three lesion dims are one factor group, not three
+independent ones, so the honest count is 2 destroyed groups vs 5 kept, and n=9 overstates
+the rank correlation's significance. The clean separation is the stronger evidence.
+
+The measurement validates against the LUT to three digits: CSF-minus-WM is -0.70 in T1 and
+-0.30 in FLAIR, predicting a ventricle ratio of 0.3/0.7 = 0.4286 -- measured 0.431.
+
+Why the "geometric" positive controls do NOT come out near +1
+-------------------------------------------------------------
+Because the WM/GM edge itself inverts: WM-minus-GM is +0.30 in T1 and -0.40 in FLAIR,
+while the outer GM/background edge does not (+0.50 vs +0.80). A factor that moves both
+boundaries -- brain_size moves radii_wm and the outer shell together -- gets one inverting
+and one agreeing contribution, and they partially cancel to a near-zero cosine with a large
+spread (brain_size +0.031 +/- 0.387). So a mid-range cosine here means "mixed evidence",
+not "weak evidence", and the cosine column should not be read as a quality score.
+
 Reading it
 ----------
-    cos ~ +1                 view-consistent. A shared linear detector works. Expected
-                             for every boundary-displacing (geometric) factor -- these
-                             are the positive controls, and if they do NOT come out near
-                             +1 the measurement itself is wrong.
-    cos ~ -1                 the evidence INVERTS between views. No view-shared linear
-                             detector exists. This is the hypothesis under test.
-    cos ~ 0                  the two views carry unrelated evidence.
-    ratio far from 1         same sign, but one view carries the factor far more
-                             strongly; a shared code has to compromise.
+    ratio far from 1         the factor's evidence arrives at very different strength in
+                             the two views. THIS is the column that predicts what a
+                             contrastive objective discards.
+    cos ~ -1                 the evidence inverts between views. Real, and true of the
+                             lesion dims -- but it does not predict the outcome.
+    cos ~ 0 with large sd    mixed: the factor moves both an inverting and an agreeing
+                             boundary. Not the same as weak.
 
-Pre-registered predictions, so this cannot be read after the fact
-----------------------------------------------------------------
-    lesion_x/y/z    cos ~ -1.  The LUT reverses the lesion's contrast sign. CONFIRMS.
-    ventricle_size  cos ~ +1, ratio ~ 0.43.  CSF-minus-WM is -0.70 in T1 and -0.30 in
-                    FLAIR: same sign, 2.3x weaker. So the sign-flip story does NOT
-                    explain ventricle_size's loss, and a +1 here means the hypothesis
-                    covers the lesion half ONLY and something else is needed for the
-                    ventricle -- amplitude asymmetry is the next candidate, not a
-                    conclusion.
-    the other five  cos ~ +1.  Positive control.
-
-A style-dim control block runs too: perturbing `z_style_v1` must leave view 2 untouched
-(||dx_FLAIR|| ~ 0). If it does not, the harness is wrong and nothing above is readable.
+A style-dim control block runs too: perturbing `z_style_v1` must leave view 2 untouched.
+Its cosine is NaN by construction (view 2 does not move at all, so the angle is undefined)
+and the verdict is carried by ||dx_FLAIR||/||dx_T1|| ~ 0 in the ratio column.
 
 Usage
 -----
@@ -73,6 +101,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+from math import log2
 
 import torch
 
@@ -113,14 +142,23 @@ def _scan(ds, args, key, names, n_dims):
                 alt = _resampled(inner, i, j, key, dim, lat)
                 d1, d2 = _deltas(ds, lat, seed, key, alt, normalize=not args.raw)
                 c, r = _cos_and_ratio(d1, d2)
-                if c == c:  # drop NaN (a dim with no render effect at all)
+                # Accumulated SEPARATELY: the cosine is undefined when either view does
+                # not move, but the ratio is exactly the number that case is asking for.
+                # The style control lives here — view 2 must not move, so its cosine is
+                # NaN by construction and only the ~0 ratio carries the verdict.
+                if c == c:
                     cosines.append(c)
+                if r == r:
                     ratios.append(r)
-        if not cosines:
-            rows.append((names[dim], float("nan"), float("nan"), float("nan")))
-            continue
-        c = torch.tensor(cosines)
-        rows.append((names[dim], float(c.mean()), float(c.std()), float(torch.tensor(ratios).median())))
+        c = torch.tensor(cosines) if cosines else None
+        rows.append(
+            (
+                names[dim],
+                float(c.mean()) if c is not None else float("nan"),
+                float(c.std()) if c is not None and len(cosines) > 1 else float("nan"),
+                float(torch.tensor(ratios).median()) if ratios else float("nan"),
+            )
+        )
     return rows
 
 
@@ -158,9 +196,15 @@ def _print(title, rows, note=None):
     print(f"  {'factor':<20}{'cos(T1, FLAIR)':>18}{'+/- sd':>10}{'||FLAIR||/||T1||':>20}")
     print(f"  {'-' * 68}")
     for name, mean_c, sd_c, ratio in rows:
+        # Flag on the AMPLITUDE, not the cosine: measured on this generator, |log2 ratio|
+        # separates the factors a contrastive run keeps from the ones it destroys with no
+        # overlap (kept <= 0.386, lost >= 1.214), while the cosine does not order them at
+        # all. See the module docstring.
         flag = ""
-        if mean_c == mean_c:
-            flag = "  <- INVERTS" if mean_c < -0.3 else ("" if mean_c > 0.7 else "  <- unrelated")
+        if ratio == ratio and ratio > 0 and abs(log2(ratio)) > 1.0:
+            flag = "  <- VIEW-ASYMMETRIC"
+        if mean_c == mean_c and mean_c < -0.3:
+            flag += "  (inverts)"
         print(f"  {name:<20}{mean_c:>18.3f}{sd_c:>10.3f}{ratio:>20.3f}{flag}")
     if note:
         print(f"  {note}")
@@ -215,14 +259,16 @@ def main():
     _print(
         "CROSS-VIEW CONSISTENCY OF THE RENDER JACOBIAN  (content factors)",
         _scan(ds, args, "z_content", CONTENT_NAMES, args.n_content),
-        note="cos ~ +1 view-consistent | cos ~ -1 evidence inverts between views | ratio = amplitude asymmetry",
+        note="ratio is the column that predicts what a contrastive objective discards; "
+        "cos ~ 0 with a large sd means MIXED evidence (see the module docstring), not weak.",
     )
 
     if not args.no_style_control:
         _print(
             "CONTROL: perturbing z_style_v1 must not move view 2",
             _scan(ds, args, "z_style_v1", STYLE_NAMES, ds._inner.n_style),
-            note="||FLAIR||/||T1|| ~ 0 expected; anything else means the harness is wrong.",
+            note="cos is NaN by construction here (view 2 does not move, so the angle is undefined); "
+            "the verdict is ||FLAIR||/||T1|| ~ 0. Anything else means the harness is wrong.",
         )
 
 
