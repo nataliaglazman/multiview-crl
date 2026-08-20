@@ -210,6 +210,40 @@ def _print(title, rows, note=None):
         print(f"  {note}")
 
 
+def _scm_correlations(inner, n, top=6):
+    """|corr| between content dims under THIS run's sampler — the substitution shortcut.
+
+    A second route by which a cross-view objective can drop a factor, distinct from view
+    asymmetry: if factor A is largely predictable from factor B in the TRAINING
+    distribution, agreement across views is satisfiable by encoding B alone and letting A
+    collapse onto it. The training distribution never charges for the conflation.
+    Reconstruction cannot take that shortcut — it has to render A's voxels either way.
+
+    This is why the pair matters for `ventricle_size` specifically: it is the most
+    destroyed factor AND `build_synthetic_test_set`'s own docstring records that under a
+    random graph ventricle_size and brain_size correlate ~0.8, with brain_size the
+    best-retained factor of all (0.922). A high value here is not proof, but a LOW one
+    would rule the route out.
+    """
+    z = torch.stack([draw_content(inner, i) for i in range(n)])
+    z = z - z.mean(0, keepdim=True)
+    sd = z.std(0, unbiased=False).clamp_min(1e-12)
+    c = ((z / sd).T @ (z / sd)) / z.shape[0]
+    pairs = [
+        (float(c[i, j].abs()), CONTENT_NAMES[i], CONTENT_NAMES[j])
+        for i in range(c.shape[0])
+        for j in range(i + 1, c.shape[0])
+    ]
+    pairs.sort(reverse=True)
+    print(f"\n{'=' * 74}\n  CONTENT-FACTOR CORRELATION UNDER THE TRAINING SAMPLER (N={n})\n{'=' * 74}")
+    print(f"  {'pair':<45}{'|corr|':>10}")
+    print(f"  {'-' * 55}")
+    for v, a, b in pairs[:top]:
+        print(f"  {a + '  vs  ' + b:<45}{v:>10.3f}")
+    print("  A factor strongly correlated with a WELL-RETAINED one can be dropped for free")
+    print("  in the training distribution; the loss only shows up at --causal iid.")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--preset", choices=["defaults", "flagship"], default="flagship")
@@ -241,6 +275,12 @@ def main():
     )
     p.add_argument("--raw", action="store_true", help="Skip normalize_views; measure the raw render.")
     p.add_argument("--no-style-control", action="store_true", help="Skip the style sanity block.")
+    p.add_argument(
+        "--scm-samples",
+        type=int,
+        default=4000,
+        help="Draws for the content-factor correlation block (the substitution shortcut). 0 skips it.",
+    )
     args = p.parse_args()
 
     if args.preset == "flagship":
@@ -270,6 +310,9 @@ def main():
             note="cos is NaN by construction here (view 2 does not move, so the angle is undefined); "
             "the verdict is ||FLAIR||/||T1|| ~ 0. Anything else means the harness is wrong.",
         )
+
+    if args.scm_samples > 0:
+        _scm_correlations(ds._inner, args.scm_samples)
 
 
 if __name__ == "__main__":
