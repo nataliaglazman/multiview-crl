@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/ablation_baseline.yaml
-# Generated at: 2026-08-20T15:02:35Z
-# Git SHA: 4618851
+# Generated at: 2026-08-20T15:10:39Z
+# Git SHA: 612e1b5
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -73,4 +73,6 @@ runai training standard submit ablation-baseline \
     --cpu-memory-request 64G \
     --cpu-memory-limit 128G \
     --host-path path=/nfs,mount=/nfs,readwrite \
+    --environment "WANDB_DIR=/tmp" \
+    --environment "WANDB_API_KEY=${WANDB_API_KEY:?export WANDB_API_KEY before submitting - get it from https://wandb.ai/authorize}" \
     --command -- bash -c "${TRAIN_CMD}"

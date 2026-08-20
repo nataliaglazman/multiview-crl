@@ -352,6 +352,33 @@ def _runai_container_command(config: dict, repo_path: str, mount_path: str) -> s
     return "\n".join(lines)
 
 
+WANDB_KEY_HINT = "export WANDB_API_KEY before submitting - get it from https://wandb.ai/authorize"
+
+
+def _runai_env_flags(config: dict, runai: dict, literal: bool) -> list[tuple[str, str]]:
+    """``--environment`` flags for the job: the cluster's own map plus W&B auth.
+
+    The container has no ``~/.netrc``, so ``--use-wandb`` needs ``WANDB_API_KEY``
+    passed in or ``wandb.init`` raises "No API key configured".  The key is read
+    from the submitting shell, never baked into a file: ``literal=False`` emits
+    the unexpanded ``${WANDB_API_KEY:?...}`` for the generated bash script,
+    ``literal=True`` resolves it now for direct ``subprocess`` submission.
+    """
+    env = [(str(k), str(v)) for k, v in (runai.get("environment") or {}).items()]
+
+    if config.get("use_wandb"):
+        if literal:
+            key = os.environ.get("WANDB_API_KEY", "")
+            if not key:
+                print(f"Error: use_wandb is set but WANDB_API_KEY is unset. {WANDB_KEY_HINT}", file=sys.stderr)
+                sys.exit(1)
+            env.append(("WANDB_API_KEY", key))
+        else:
+            env.append(("WANDB_API_KEY", f"${{WANDB_API_KEY:?{WANDB_KEY_HINT}}}"))
+
+    return [("--environment", f"{name}={value}") for name, value in env]
+
+
 def _runai_submit_flags(runai: dict) -> list[tuple[str, str | None]]:
     """RunAI v2 CLI (``runai training standard submit``) resource flags."""
     host_path, mount_path = _runai_host_path(runai)
@@ -422,7 +449,11 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
         # not survive the trip through `runai ... --command -- bash -c "$TRAIN_CMD"`
         # (the newlines arrive, the trailing `\` do not), which leaves the container
         # running each `--flag value` line as its own command.
-        submit_flags = _runai_submit_flags(runai)
+        flag_lines = [
+            f"    {flag}{'' if value is None else ' ' + value} \\" for flag, value in _runai_submit_flags(runai)
+        ]
+        # Quoted: the values carry `${...}` expansions and spaces.
+        flag_lines += [f'    {flag} "{value}" \\' for flag, value in _runai_env_flags(config, runai, literal=False)]
         lines = header + [
             "# --- Training command (folded to one line: see note in scripts/launch.py) ---",
             "TRAIN_CMD=$(tr '\\n' ' ' <<'TRAIN_EOF'",
@@ -432,7 +463,7 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
             "",
             "# --- RunAI submission ---",
             f"runai training standard submit {tag} \\",
-            *[f"    {flag}{'' if value is None else ' ' + value} \\" for flag, value in submit_flags],
+            *flag_lines,
             f'    --command -- bash -c "${{TRAIN_CMD}}"',
         ]
 
@@ -530,15 +561,19 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
     return "\n".join(lines) + "\n"
 
 
-def build_runai_command(config: dict, tag: str) -> list[str]:
-    """Direct-submit form of the generated script — same v2 CLI, same container command."""
+def build_runai_command(config: dict, tag: str, resolve_secrets: bool = True) -> list[str]:
+    """Direct-submit form of the generated script — same v2 CLI, same container command.
+
+    ``resolve_secrets=False`` leaves ``WANDB_API_KEY`` as its unexpanded
+    placeholder so ``--dry-run`` can print the command without echoing the key.
+    """
     runai = config.get("_runai", {})
     repo_path = runai.get("repo_path", "/nfs/home/nglazman/crl-2/multiview-crl")
     _, mount_path = _runai_host_path(runai)
     train_cmd = " ".join(_runai_container_command(config, repo_path, mount_path).split())
 
     cmd = ["runai", "training", "standard", "submit", tag]
-    for flag, value in _runai_submit_flags(runai):
+    for flag, value in _runai_submit_flags(runai) + _runai_env_flags(config, runai, literal=resolve_secrets):
         cmd.append(flag)
         if value is not None:
             cmd.append(value)
@@ -767,7 +802,7 @@ def main():
             )
 
     elif args.cluster == "runai" or (CLUSTER_DIR / f"{args.cluster}.yaml").exists() and "_runai" in config:
-        cmd = build_runai_command(config, tag)
+        cmd = build_runai_command(config, tag, resolve_secrets=not args.dry_run)
         if args.dry_run:
             print(f"RUNAI COMMAND:\n  {' '.join(cmd)}")
         else:

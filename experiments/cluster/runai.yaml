@@ -19,3 +19,7 @@ _runai:
   memory_limit: 128G
   volume: "/nfs:/nfs"
   repo_path: /nfs/home/nglazman/crl-2/multiview-crl
+  # Passed to the job as --environment. WANDB_API_KEY is added automatically
+  # when use_wandb is set, read from the submitting shell (never stored here).
+  environment:
+    WANDB_DIR: /tmp
