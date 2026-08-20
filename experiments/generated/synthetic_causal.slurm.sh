@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-20T13:46:02Z
-# Git SHA: 086bbe6
+# Generated at: 2026-08-20T21:55:40Z
+# Git SHA: 415a82d
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-clean-content-commitment
+#SBATCH --job-name=synthetic-causal-clean-content-commitment-ema
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-clean-content-commitment-%j.err
+#SBATCH --error=synthetic-causal-clean-content-commitment-ema-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -58,7 +58,8 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 0.01 \
+    --bt-corr-ema 0.99 \
+    --bt-gap-lambda 0.16 \
     --bt-gap-weight 1 \
     --bt-patch-weight 1 \
     --bt-sim-coeff 0.5 \
@@ -119,7 +120,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-clean-content-commitment \
+    --model-id synthetic-causal-clean-content-commitment-ema \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
