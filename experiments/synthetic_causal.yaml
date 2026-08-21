@@ -49,25 +49,24 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-commitment-bt-gap-00005
+tag: synthetic-causal-clean-content-redo-norm
 contrastive_loss_type: barlow_twins
-# bt_lambda: 1                 # NOT 0.005 — see the calibration note above
+# bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
 patch_grid: [8,8,8]                 # 4x4x4 patches for 64^3 volumes
 patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
-bt_gap_lambda: 0.0005               # NOT 0.005 — see the calibration note above
+# bt_gap_lambda: 0.16               # NOT 0.005 — see the calibration note above
 bt_patch_weight: 1
-# bt_lambda: 0.005
 single_count_commitment: true
 
 scale_contrastive_loss: 1       # NOT 10 — BT's raw scale is ~10x InfoNCE's
-scale_recon_loss: 1
+# scale_recon_loss: 10
 grad_clip_norm: 100
 batch_size: 128
-synthetic_identifiable_ventricle: true
+# synthetic_identifiable_ventricle: true
 
 content_size: 44              # match the baseline; fixes the 44-vs-48 confound
 
@@ -95,13 +94,21 @@ eval_dci: true
 # detach_style_injection: true
 synthetic_clean_content: true
 bt_sim_normalize: true
-bt_sim_coeff: 0.5       # ≈ on_diag_gap 0.38 / current normalised sim 16624
-bt_std_coeff: 10
-# recon_view_balance: 1
-# channels_last: false
-# bt_corr_ema: 0.9
+# bt_sim_coeff: 0.5       # ≈ on_diag_gap 0.38 / current normalised sim 16624
+# bt_std_coeff: 10
+# # recon_view_balance: 1
+# # channels_last: false
+# bt_corr_ema: 0.99
 # bt_lambda: 2.0
 # bt_gap_lambda: 0.2
+
+bt_normalize_terms: true
+bt_lambda: 7
+bt_gap_lambda: 7
+bt_sim_coeff: 0.0114     # 0.5 / 44
+bt_std_coeff: 0.227      # 10 / 44
+bt_corr_ema: 0.99
+scale_recon_loss: 16
 
 # synthetic_content_prior: uniform
 # synthetic_content_squash: auto
