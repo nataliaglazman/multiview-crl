@@ -120,6 +120,15 @@ def encoder_receptive_field(scaling_rate, nb_res_layers, hidden_channels=48, res
     identity and only the downsampling path counts ("init"); once alpha moves off zero the
     residual convs are live ("trained"). A trained model is at the trained number, and it
     is the one every annotation in these figures uses.
+
+    The walk reduces to a closed form, verified equal for s in {2,4,8} x L in {0..3}:
+
+        RF = s * (4L + 5) - 2          s = scaling_rate, L = nb_res_layers
+
+    log2(s) stride-2 kernel-4 convs contribute 3s - 2, the stride-1 3x3 that follows adds
+    2s, and each ReZero block adds two more 3x3s at 2s each. Every term after the
+    downsampling path is LINEAR IN s, which is why the scaling rate moves the receptive
+    field at all -- doubling it doubles the physical span of every later kernel tap.
     """
     import models.vqvae as vqvae
 
@@ -181,6 +190,40 @@ def patch_overlap_fraction(rf, patch_voxels):
     """
     r = (rf - 1) / 2.0
     return 2 * r / (patch_voxels + 2 * r)
+
+
+def print_overlap_sweep(res, brain_diameter, scalings, res_layers, patch_ns, hidden, norm_type):
+    """The three levers on patch overlap, priced against each other.
+
+    There are only two ways to move 2r/(cell + 2r): shrink the receptive field, or grow
+    the cell. `--patch-grid` is the cell lever and it runs BACKWARDS from intuition -- a
+    FINER grid makes overlap worse, because the halo is fixed and the cell it is compared
+    against gets smaller. The receptive field lever is `--vqvae-nb-res-layers` and
+    `--vqvae-scaling-rates`, both of which change the architecture.
+
+    The last column is the honest capacity number: how many non-overlapping receptive
+    fields fit across the brain, (brain / RF)^3. Below 1 the receptive field is wider than
+    the head and no configuration of the patch grid buys back any locality at all.
+    """
+    print(f"\npatch overlap = (RF-1) / (cell + RF-1),  cell = {res}/n_patch input voxels")
+    print(f"RF = scaling * (4*nb_res_layers + 5) - 2   |   brain {brain_diameter:.0f} voxels across\n")
+    head = f"{'scaling':>7} {'res_lyr':>7} {'RF':>5} |"
+    for n in patch_ns:
+        head += f"{'n=' + str(n) + ' (cell ' + str(res // n) + ')':>18}"
+    print(head + f"{'indep. RFs':>12}")
+    for s in scalings:
+        for lay in res_layers:
+            rf, _, _ = encoder_receptive_field(s, lay, hidden, norm_type=norm_type)
+            row = f"{s:>7} {lay:>7} {rf:>5} |"
+            for n in patch_ns:
+                row += f"{100 * patch_overlap_fraction(rf, res / n):>17.0f}%"
+            print(row + f"{(brain_diameter / rf) ** 3:>12.2f}")
+    print(
+        "\n  A finer patch grid does NOT reduce overlap -- it raises it. Only a smaller\n"
+        "  receptive field or a coarser grid does, and they trade different things:\n"
+        "  fewer res layers keeps the token count and makes each token local, a coarser\n"
+        "  grid keeps the architecture and buys independence with spatial resolution.\n"
+    )
 
 
 def patch_rf_counts(res, scaling_rate, rf, n_patch):
@@ -767,6 +810,17 @@ def generator_args(cli):
     )
 
 
+def arch_params(cli, run_args):
+    """(nb_res_layers, hidden_channels, norm_type) -- the run's if there is one, else the CLI's."""
+    if run_args is None:
+        return cli.nb_res_layers, cli.hidden_channels, "group"
+    return (
+        getattr(run_args, "vqvae_nb_res_layers", 2),
+        getattr(run_args, "vqvae_hidden_channels", 48),
+        getattr(run_args, "norm_type", "group"),
+    )
+
+
 def build_context(cli, gargs, run_args):
     """Everything the three figures share: one rendered sample plus the measured tables."""
     ds = build_dataset(gargs)
@@ -812,9 +866,7 @@ def build_context(cli, gargs, run_args):
     ctx["lesion_span_x"] = (float(lx.min()), float(lx.max()) + 1)
 
     # Architecture geometry, per scaling rate.
-    nb_res = cli.nb_res_layers if run_args is None else getattr(run_args, "vqvae_nb_res_layers", 2)
-    hidden = cli.hidden_channels if run_args is None else getattr(run_args, "vqvae_hidden_channels", 48)
-    norm = "group" if run_args is None else getattr(run_args, "norm_type", "group")
+    nb_res, hidden, norm = arch_params(cli, run_args)
     ctx["rf"] = {s: encoder_receptive_field(s, nb_res, hidden, norm_type=norm) for s in cli.scalings}
     ctx["vent_cells"] = {s: box_average(vent.astype(np.float32), s).astype(bool).sum() / s**3 for s in cli.scalings}
     ctx["les_cells"] = {s: box_average(les.astype(np.float32), s).astype(bool).sum() / s**3 for s in cli.scalings}
@@ -970,6 +1022,22 @@ def main():
     ap.add_argument("--independent-style", action="store_true", help="do not match the two views' style vectors")
     ap.add_argument("--dpi", type=int, default=150)
 
+    ap.add_argument(
+        "--overlap-sweep",
+        action="store_true",
+        help="Print patch overlap across scaling rate x --vqvae-nb-res-layers x patch grid, then exit "
+        "without rendering anything. Architecture-only, so it runs in a second.",
+    )
+    ap.add_argument("--sweep-res-layers", type=int, nargs="+", default=[2, 1, 0])
+    ap.add_argument("--sweep-patch-grids", type=int, nargs="+", default=[8, 4, 2], help="patches per axis")
+    ap.add_argument(
+        "--brain-diameter",
+        type=float,
+        default=0.0,
+        help="Brain extent in voxels for the sweep's capacity column. 0 measures it from a render; "
+        "pass a number to skip the render entirely.",
+    )
+
     ap.add_argument("--run-dir", default=None, help="take generator + architecture settings from this run")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--measure-rf", action="store_true", help="also measure the gradient RF (needs --run-dir)")
@@ -1023,7 +1091,26 @@ def main():
         gargs.lesion_radius,
     )
 
+    nb_res, hidden, norm = arch_params(cli, run_args)
+
+    if cli.overlap_sweep and cli.brain_diameter > 0:
+        # Architecture-only path: nothing here needs a render, so skip the generator.
+        print_overlap_sweep(
+            gargs.res, cli.brain_diameter, cli.scalings, cli.sweep_res_layers, cli.sweep_patch_grids, hidden, norm
+        )
+        return
+
     ctx = build_context(cli, gargs, run_args)
+    if cli.overlap_sweep:
+        print_overlap_sweep(
+            gargs.res,
+            ctx["brain_diameter"],
+            cli.scalings,
+            cli.sweep_res_layers,
+            cli.sweep_patch_grids,
+            hidden,
+            norm,
+        )
 
     if cli.measure_rf:
         if not cli.run_dir:
