@@ -1195,6 +1195,23 @@ def parse_args() -> argparse.ArgumentParser:
         "Recon/Loss-MAE-Reconstruction_view* whatever this is set to.",
     )
     parser.add_argument(
+        "--bt-normalize-terms",
+        action="store_true",
+        default=False,
+        help="Divide Barlow Twins' on_diag by d and off_diag by d(d-1), so all four BT terms are "
+        "O(1) and commensurate. Without it their ratio is set by dimensionality rather than by "
+        "intent: on_diag sums d terms, off_diag sums d(d-1). Two measured consequences at d=44 — "
+        "(1) the DIMENSIONAL-COLLAPSE THRESHOLD scales as 1/(d-1)=0.023, and below it making "
+        "every channel identical is the global optimum (at bt_gap_lambda 0.013 that trade halved "
+        "the loss and the run collapsed to RMS cross-channel correlation 0.943); (2) the "
+        "contrastive loss sits at O(d) against a reconstruction term of O(0.05), so recon lands "
+        "at ~0.06% of the objective whatever --scale-recon-loss says. Normalised, the collapse "
+        "threshold is lambda > 1 for EVERY d and --scale-recon-loss becomes interpretable. To "
+        "carry an existing objective over unchanged (up to a global 1/d): lambda -> lambda*(d-1), "
+        "and divide --bt-sim-coeff and --bt-std-coeff by d. Default False keeps prior runs "
+        "bit-identical.",
+    )
+    parser.add_argument(
         "--bt-gap-std-coeff",
         type=float,
         default=None,

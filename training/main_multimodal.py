@@ -1269,6 +1269,7 @@ def main(args):
         _bt_gap_std_c = _bt_std_c if _bt_gap_std_c is None else _bt_gap_std_c
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
+        _bt_norm = bool(getattr(args, "bt_normalize_terms", False))
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
             f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
@@ -1315,6 +1316,7 @@ def main(args):
                 sim_normalize=_bt_sim_norm,
                 corr_ema=_bt_ema_plain,
                 corr_ema_decay=_bt_corr_ema,
+                normalize_terms=_bt_norm,
             )
 
         def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
@@ -1331,6 +1333,7 @@ def main(args):
                 sim_normalize=_bt_sim_norm,
                 corr_ema=_bt_ema_patch,
                 corr_ema_decay=_bt_corr_ema,
+                normalize_terms=_bt_norm,
             )
             # Optional GAP-pooled companion term. The patch fold's cross-covariance is
             # Cov_subject + Cov_interaction and the interaction dominates on registered
@@ -1349,6 +1352,7 @@ def main(args):
                     sim_normalize=_bt_sim_norm,
                     corr_ema=_bt_ema_gap,
                     corr_ema_decay=_bt_corr_ema,
+                    normalize_terms=_bt_norm,
                 )
                 # bt_patch_weight scales the PATCH term only. Setting it to 0 (with
                 # patch_contrastive still on, so the forward hands us the patch-shaped
