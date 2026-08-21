@@ -49,16 +49,16 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-commitment-ema-bt-0013
+tag: synthetic-causal-clean-content-commitment-ema-bt-1
 contrastive_loss_type: barlow_twins
-# bt_lambda: 1                 # NOT 0.005 — see the calibration note above
+bt_lambda: 1                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
 patch_grid: [8,8,8]                 # 4x4x4 patches for 64^3 volumes
 patch_center_mode: position    # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
-bt_gap_lambda: 0.013               # NOT 0.005 — see the calibration note above
+bt_gap_lambda: 1               # NOT 0.005 — see the calibration note above
 bt_patch_weight: 1
 # bt_lambda: 0.005
 single_count_commitment: true
@@ -67,7 +67,7 @@ scale_contrastive_loss: 1       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 scale_recon_loss: 1
 grad_clip_norm: 100
 batch_size: 128
-synthetic_identifiable_ventricle: true
+# synthetic_identifiable_ventricle: true
 
 content_size: 44              # match the baseline; fixes the 44-vs-48 confound
 
