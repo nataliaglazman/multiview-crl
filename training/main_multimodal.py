@@ -1269,6 +1269,7 @@ def main(args):
         _bt_gap_std_c = _bt_std_c if _bt_gap_std_c is None else _bt_gap_std_c
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
+        _bt_norm = bool(getattr(args, "bt_normalize_terms", False))
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
             f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
@@ -1315,6 +1316,7 @@ def main(args):
                 sim_normalize=_bt_sim_norm,
                 corr_ema=_bt_ema_plain,
                 corr_ema_decay=_bt_corr_ema,
+                normalize_terms=_bt_norm,
             )
 
         def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
@@ -1331,6 +1333,7 @@ def main(args):
                 sim_normalize=_bt_sim_norm,
                 corr_ema=_bt_ema_patch,
                 corr_ema_decay=_bt_corr_ema,
+                normalize_terms=_bt_norm,
             )
             # Optional GAP-pooled companion term. The patch fold's cross-covariance is
             # Cov_subject + Cov_interaction and the interaction dominates on registered
@@ -1349,6 +1352,7 @@ def main(args):
                     sim_normalize=_bt_sim_norm,
                     corr_ema=_bt_ema_gap,
                     corr_ema_decay=_bt_corr_ema,
+                    normalize_terms=_bt_norm,
                 )
                 # bt_patch_weight scales the PATCH term only. Setting it to 0 (with
                 # patch_contrastive still on, so the forward hands us the patch-shaped
@@ -2347,6 +2351,82 @@ def main(args):
                                 tb_writer.add_scalar(f"Recon/{_rk}", _rv, step)
                                 if _use_wandb:
                                     wandb.log({f"Recon/{_rk}": _rv}, step=step)
+
+                        # ── WEIGHTED loss contributions ─────────────────────────────
+                        # Every Contrastive/* term is logged UNWEIGHTED (losses.py logs the raw
+                        # on_diag/off_diag/sim/var so coefficients can be calibrated from measured
+                        # magnitudes). That makes the raw curves useless for the question people
+                        # actually ask — "what is this model optimising?" — because a term with a
+                        # huge raw value and a tiny coefficient looks dominant and is not, and vice
+                        # versa. Measured here: raw off_diag ~314 sits at 0.005, contributing 1.57,
+                        # while on_diag at ~0.87 contributes 0.87 with no coefficient at all.
+                        #
+                        # These mirror the call chain exactly, so Weighted/* IS the number the
+                        # optimiser receives. Weighted/residual is the audit: Loss/Total minus the
+                        # sum of everything below. Near zero means this accounting is complete;
+                        # large means a term is missing and the fractions cannot be trusted.
+                        _wsc = float(getattr(args, "scale_contrastive_loss", 1.0) or 0.0)
+                        _wsr = float(getattr(args, "scale_recon_loss", 1.0) or 0.0)
+                        _wpw = float(getattr(args, "bt_patch_weight", 1.0))
+                        _wgw = float(getattr(args, "bt_gap_weight", 0.0) or 0.0)
+                        _wlam = float(getattr(args, "bt_lambda", 0.005))
+                        _wglam = getattr(args, "bt_gap_lambda", None)
+                        _wglam = _wlam if _wglam is None else float(_wglam)
+                        _wsim = float(getattr(args, "bt_sim_coeff", 0.0) or 0.0)
+                        _wstd = float(getattr(args, "bt_std_coeff", 0.0) or 0.0)
+                        _wgstd = getattr(args, "bt_gap_std_coeff", None)
+                        _wgstd = _wstd if _wgstd is None else float(_wgstd)
+                        _wvq = float(getattr(args, "vq_commitment_weight", 0.25))
+                        _wsingle = bool(getattr(args, "single_count_commitment", False))
+                        _wcommit = _wvq + (0.0 if _wsingle else _wsr)
+                        _wlvl = getattr(args, "contrastive_level_weights", None)
+
+                        _weighted = {}
+                        if _contrastive_type == "barlow_twins":
+                            for _li in range(args.vqvae_nb_levels):
+                                _lw = float(_wlvl[_li]) if _wlvl and _li < len(_wlvl) else 1.0
+                                for _pfx, _w, _lm, _sd in (("", _wpw, _wlam, _wstd), ("gap_", _wgw, _wglam, _wgstd)):
+                                    for _term, _coef in (
+                                        ("on_diag_loss", 1.0),
+                                        ("off_diag_loss", _lm),
+                                        ("sim_loss", _wsim),
+                                        ("var_loss", _sd),
+                                    ):
+                                        _v = step_moco_diag.get(f"Contrastive/{_pfx}{_term}_L{_li}")
+                                        if _v is None:
+                                            continue
+                                        _name = f"{'gap' if _pfx else 'patch'}_{_term.replace('_loss', '')}"
+                                        _weighted[f"Weighted/bt_{_name}_L{_li}"] = _v * _wsc * _lw * _w * _coef
+                        _rs = recon_loss_fn.get_summaries().get(utils.TBSummaryTypes.SCALAR, {})
+
+                        def _sv(k):
+                            _x = _rs.get(k)
+                            return None if _x is None else (_x.item() if torch.is_tensor(_x) else float(_x))
+
+                        if _sv("Loss-MAE-Reconstruction") is not None:
+                            _weighted["Weighted/recon_pixel"] = _sv("Loss-MAE-Reconstruction") * _wsr
+                        if _sv("Loss-Perceptual-Reconstruction") is not None:
+                            _weighted["Weighted/recon_perceptual"] = _sv("Loss-Perceptual-Reconstruction") * _wsr
+                        _cq = sum(v for k in _rs if k.endswith("_Commitment_Cost") for v in [_sv(k)] if v is not None)
+                        _weighted["Weighted/commitment"] = _cq * _wcommit
+                        if _weighted:
+                            _wsum = sum(_weighted.values())
+                            _weighted["Weighted/sum"] = _wsum
+                            _weighted["Weighted/residual"] = accum_total - _wsum
+                            _wfrac_keys = {
+                                "Weighted/recon_pixel",
+                                "Weighted/recon_perceptual",
+                                "Weighted/commitment",
+                            }
+                            for _wk, _wv in _weighted.items():
+                                tb_writer.add_scalar(_wk, _wv, step)
+                                # Component terms only — never sum/residual, and never when the
+                                # denominator is degenerate.
+                                _is_part = _wk.startswith("Weighted/bt_") or _wk in _wfrac_keys
+                                if abs(_wsum) > 1e-12 and _is_part:
+                                    tb_writer.add_scalar(_wk.replace("Weighted/", "WeightedFrac/"), _wv / _wsum, step)
+                            if _use_wandb:
+                                wandb.log(_weighted, step=step)
 
                         # ── Content/style norm GEOMETRY ─────────────────────────────
                         # SplitGroupNorm's per-channel gamma sets each channel's amplitude going

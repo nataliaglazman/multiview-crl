@@ -35,7 +35,6 @@ python -m training.main_multimodal
     --decoder-norm-type group
     --deterministic
     --eval-dci
-    --grad-clip-norm 100
     --image-spacing 1.0
     --inject-style-to-decoder
     --log-steps 50

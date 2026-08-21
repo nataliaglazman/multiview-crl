@@ -1042,6 +1042,7 @@ def barlow_twins_loss(
     sim_normalize=False,
     corr_ema=None,
     corr_ema_decay=0.0,
+    normalize_terms=False,
     **_kwargs,
 ):
     """Barlow Twins loss over content channels of paired views.
@@ -1292,6 +1293,28 @@ def barlow_twins_loss(
                 # Loss: push diagonal toward 1, off-diagonal toward 0
                 on_diag = (c.diagonal() - 1).pow(2).sum()
                 off_diag = c.pow(2).sum() - c.diagonal().pow(2).sum()
+
+                # Optional per-entry normalisation. on_diag sums d terms and off_diag sums
+                # d(d-1), so their RATIO is set by the dimensionality rather than by how much
+                # you care about alignment versus redundancy. Two consequences, both measured
+                # on this project at d=44:
+                #
+                #  1. The collapse threshold scales as 1/(d-1). Below it, driving every channel
+                #     to be identical is the global optimum: it zeroes on_diag (saving up to d)
+                #     for a cost of lambda*d(d-1). At lambda 0.013 that trade HALVED the loss and
+                #     the model duly collapsed to RMS cross-channel correlation 0.943.
+                #  2. The contrastive loss sits at O(d) while the reconstruction term is a single
+                #     mean at O(0.05), so reconstruction ends up at ~0.06% of the objective
+                #     whatever scale_recon_loss says.
+                #
+                # Normalising makes all four terms O(1) and commensurate: the threshold becomes
+                # lambda > 1 for every d, and scale_recon_loss becomes a number you can reason
+                # about. To keep an existing objective identical up to a global 1/d, translate
+                # lambda -> lambda*(d-1) and divide sim_coeff and std_coeff by d.
+                if normalize_terms:
+                    _dd = c.shape[0]
+                    on_diag = on_diag / _dd
+                    off_diag = off_diag / max(_dd * (_dd - 1), 1)
                 loss = on_diag + lambd * off_diag + sim_coeff * sim_loss + std_coeff * var_loss
                 total_loss = total_loss + loss
 

@@ -67,6 +67,7 @@ scale_contrastive_loss: 1       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 grad_clip_norm: 100
 batch_size: 128
 # synthetic_identifiable_ventricle: true
+# synthetic_identifiable_ventricle: true
 
 content_size: 44              # match the baseline; fixes the 44-vs-48 confound
 
