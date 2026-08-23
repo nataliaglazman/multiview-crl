@@ -880,14 +880,24 @@ def evaluate_model(
     probe_dim=0,
     probe_kind="ridge",
     squash_content=False,
+    random_init=False,
 ):
-    """Load a model, extract representations under each pooling, return a row."""
+    """Load a model, extract representations under each pooling, return a row.
+
+    ``random_init=True`` skips the checkpoint and scores this run's exact architecture
+    UNTRAINED — the zero point every other row should be read as a gap over. It has to be
+    produced by this function rather than by ``run_dci_synthetic --random-init`` so the
+    floor and the trained rows share the pooling, probe width, null count, factor
+    distribution and FACTOR_POOLING routing; a floor measured on any other axis is not
+    subtractable, which is the failure mode that has repeatedly produced phantom results
+    on this project.
+    """
     from eval.dci import _extract_synthetic_representations
     from eval.run_dci_synthetic import load_model_from_run_dir
 
-    logger.info("=== evaluating %s (%s) ===", name, run_dir)
+    logger.info("=== evaluating %s (%s)%s ===", name, run_dir, " [UNTRAINED FLOOR]" if random_init else "")
     t0 = time.perf_counter()
-    model, _args, device = load_model_from_run_dir(run_dir, checkpoint, device)
+    model, _args, device = load_model_from_run_dir(run_dir, checkpoint, device, random_init=random_init)
     t_load = time.perf_counter() - t0
 
     reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
@@ -2250,6 +2260,17 @@ def main():
     p.add_argument("--level", type=int, default=0, help="Encoder level to compare on.")
     p.add_argument("--seeds", default="0,1,2", help="Probe CV seeds.")
     p.add_argument("--n-null", type=int, default=3, help="Permutations for the null floor.")
+    p.add_argument(
+        "--floor",
+        action="store_true",
+        help="Also score an UNTRAINED twin of every run (row '<name>-floor'), on the same "
+        "pooling, probe width, null count and factor distribution. The label-permutation null "
+        "already in every row asks 'is there any signal at all'; this asks the different and "
+        "usually harder question 'is there more signal than a random projection of this same "
+        "architecture'. At patch pooling an untrained encoder reads six of nine content factors "
+        "above R^2 0.8, so an absolute per-factor number there is close to meaningless without "
+        "it. Roughly doubles runtime.",
+    )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument(
@@ -2402,9 +2423,19 @@ def main():
             ", ".join(FIXED_FACTORS),
         )
 
+    # --floor appends an untrained twin of each run, scored by the identical path, so the
+    # zero point sits in the same table on the same axis instead of being carried over from
+    # a separate run_dci_synthetic invocation with its own defaults.
+    # `base` is the row this one is scored alongside: a floor row must inherit its twin's
+    # baseline status, or the baseline's floor would be scored on a different content/style
+    # split than the baseline and stop being subtractable from it.
+    plan = [(n, n, d, c, False) for n, d, c in zip(names, specs, ckpts)]
+    if cli.floor:
+        plan += [(f"{n}-floor", n, d, c, True) for n, d, c in zip(names, specs, ckpts)]
+
     rows = []
-    for name, run_dir, ckpt_name in zip(names, specs, ckpts):
-        is_baseline = baseline_name is not None and name == baseline_name
+    for name, base, run_dir, ckpt_name, random_init in plan:
+        is_baseline = baseline_name is not None and base == baseline_name
         # Baseline default = all-content: style is merged into content (one content
         # block, no style), so its content-side metrics + capacity line up with the
         # models.  --baseline-per-block instead scores its own (arbitrary) split.
@@ -2430,6 +2461,7 @@ def main():
                     probe_kind=cli.probe_kind,
                     squash_content=cli.squash_content,
                     all_content=all_content,
+                    random_init=random_init,
                 )
             )
         except Exception as e:
