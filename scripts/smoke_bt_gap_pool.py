@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 
 from models.vqvae import GapPositionPool
@@ -271,6 +272,42 @@ check("variance mode exposes no parameters", len(list(pv.parameters())) == 0)
 check("learned mode exposes exactly one parameter tensor", len(list(pl.parameters())) == 1)
 # Buffers must checkpoint, so they have to be in the state_dict.
 check("variance EMA state is checkpointed", {"var_ema", "var_ema_t"} <= set(pv.state_dict()))
+
+print("\n11. eval.gap_pool_profile's verdict discriminates (calibration regression)")
+# The probe decides whether --bt-gap-pool is worth a training run at all, so a
+# miscalibrated verdict costs either GPU hours or a real effect. Pinned here because the
+# first version gated on profile ENTROPY and returned NO on the 4-of-256 focal case — the
+# exact regime the flag exists for — since entropy barely moves under a mild reweighting
+# spread over many positions. The permutation test replaced it; these four scenarios are
+# what "replaced it correctly" means.
+from eval.gap_pool_profile import pooled_metrics  # noqa: E402
+
+
+def verdict_for(focal, gain, grid=256, n_subj=512, n_ch=16, null_draws=12, min_effect=0.01):
+    if focal == 0:  # same total signal spread over EVERY position -> flat profile
+        s = torch.randn(n_subj, n_ch) * gain
+        zz_ = torch.randn(2, n_subj, n_ch, grid) + s.unsqueeze(0).unsqueeze(-1) / math.sqrt(grid)
+    else:
+        zz_ = planted(n_subj=n_subj, n_ch=n_ch, grid=grid, n_focal=focal, focal_gain=gain)
+    w_ = GapPositionPool(grid, mode="variance", ema=0.0).weights(zz_, None).numpy()
+    rng_ = np.random.RandomState(0)
+    var_ = pooled_metrics(zz_, w_, 128, 8)["xview_corr"]
+    null_ = [
+        pooled_metrics(zz_, w_[rng_.permutation(grid)], 128, 8, seed=1 + k)["xview_corr"] for k in range(null_draws)
+    ]
+    gain_ = var_ - float(np.mean(null_))
+    z_ = gain_ / max(float(np.std(null_)), 1e-6)
+    return ("NO" if z_ <= 3.0 else ("MARGINAL" if gain_ < min_effect else "YES")), z_
+
+
+for _name, _focal, _gain, _want in (
+    ("focal 4/256 (the target regime)", 4, 1.0, "YES"),
+    ("focal 32/256", 32, 1.0, "YES"),
+    ("signal spread evenly (flat)", 0, 1.0, "NO"),
+    ("pure noise, no subject signal", 0, 0.0, "NO"),
+):
+    _got, _z = verdict_for(_focal, _gain)
+    check(f"{_name} -> {_want}", _got == _want, f"got {_got} (z={_z:.1f})")
 
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)
