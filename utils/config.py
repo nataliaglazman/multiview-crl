@@ -555,13 +555,27 @@ def parse_args() -> argparse.ArgumentParser:
         default="mean",
         choices=["mean", "variance", "learned"],
         help="How the --bt-gap-weight companion term pools over patch positions. 'mean' (default) "
-        "is the plain uniform average and is bit-identical to every existing run. The other two "
-        "address the ONE thing the uniform mean does badly: it dilutes focal subject signal by "
-        "roughly the fraction of positions carrying it, which is why gap_feat_std sits at ~0.004 "
-        "and why --bt-gap-std-coeff had to be split off in the first place. 'variance' weights "
-        "positions by their across-SUBJECT variance (detached, no parameters) and is the cheap "
-        "test of that hypothesis — run it first, and if gap_feat_std does not move, 'learned' "
-        "will not help either. 'learned' fits one logit per position, softmax over positions, "
+        "is the plain uniform average and is bit-identical to every existing run. "
+        "MEASURED AND NOT RECOMMENDED ON THIS PROJECT'S DATA, 23 Aug 2026 — read before "
+        "enabling. The hypothesis was that the uniform mean dilutes focal subject signal by "
+        "roughly the fraction of positions carrying it. `eval.gap_pool_profile` tested that on "
+        "two step-60k synthetic checkpoints and rejected it twice, for two different reasons. "
+        "On the CONTRASTIVE run the variance profile is only mildly peaked and weighting by it "
+        "does not beat its own permutation (z = 0.5) — consistent with contrastive training "
+        "moving content into channel identity rather than spatial layout, where no position "
+        "weighting has anything to grip. On the RECON-ONLY baseline the profile IS strongly "
+        "peaked (top-10% mass 0.45 vs 0.23) and weighting by it is significantly WORSE than its "
+        "permutation (z = -3.7): the highest-across-subject-variance positions carry per-view "
+        "style (the global gain/bias transforms eval/style_leak_by_position.py tracks), so "
+        "upweighting them strips out cross-view agreement. The original motivation was also "
+        "wrong on its own terms: it read gap_feat_std ~0.004 as evidence of dilution, but that "
+        "number is set by the variance hinge (see --bt-gap-std-coeff), and on_diag/off_diag are "
+        "scale-invariant, so feat_std cannot diagnose pooling at all. Run "
+        "`python -m eval.gap_pool_profile --run-dir <run>` before enabling this on any new "
+        "dataset; the flag is kept because the probe and the negative result are the useful "
+        "artifacts, not because the pooling is expected to help. "
+        "'variance' weights positions by their across-SUBJECT variance (detached, no "
+        "parameters). 'learned' fits one logit per position, softmax over positions, "
         "zero-initialised so it starts exactly at the mean. "
         "NEITHER weights by sample: the uniform mean recovers the subject term s EXACTLY because "
         "the interaction r is defined as the deviation from it and sums to zero over positions, "
@@ -1191,7 +1205,8 @@ def parse_args() -> argparse.ArgumentParser:
         "(1 - correlation) instead of an absolute distance. Recommended whenever --bt-std-coeff "
         "is active: the hinge drives sigma toward 1 while raw MSE scales as sigma^2, so the two "
         "fight and sim_loss RISES while alignment improves (observed at both coeff 1 and 0.1, "
-        "with GAP feat_std measured at 0.004 against a hinge target of 1). Also equalises "
+        "with GAP feat_std measured at 0.004 PRE-hinge against a hinge target of 1; once the hinge "
+        "has run it parks past the target — ~1.1 measured 23 Aug 2026 — see --bt-gap-std-coeff). Also equalises "
         "directions, which matters because the factor information sits in the low-variance tail.",
     )
     parser.add_argument(
@@ -1269,7 +1284,16 @@ def parse_args() -> argparse.ArgumentParser:
         "gap_var_loss hit exactly 0 and stayed, and the reconstruction loss stepped to a higher "
         "plateau because that inflation is PER-CHANNEL and so survives the content "
         "normalisation (a uniform gain would have been cancelled exactly). Set this low (0.1-0.5) "
-        "to keep the anti-collapse guarantee without the rescale.",
+        "to keep the anti-collapse guarantee without the rescale. "
+        "STATUS 23 Aug 2026: NO experiment YAML sets this, so every one of them inherits "
+        "--bt-std-coeff 10 and is running the failure mode above. A live synthetic_causal run "
+        "reads gap_feat_std_mean ~1.1, i.e. already parked past the hinge's target, so the term "
+        "is contributing no gradient while its per-channel inflation stands. 0.004 is the "
+        "PRE-hinge state and ~1.1-1.8 the post-hinge parked state; check gap_var_loss (exactly 0 "
+        "= fully inert) before assuming this flag is doing anything. Corollary worth stating "
+        "because it misled a whole investigation: feat_std reports what the HINGE did, not how "
+        "much subject signal survives pooling — on_diag and off_diag are scale-invariant, so no "
+        "pooling question can be diagnosed from it.",
     )
     parser.add_argument(
         "--selection-info-tolerance",

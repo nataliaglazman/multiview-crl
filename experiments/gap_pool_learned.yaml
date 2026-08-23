@@ -1,15 +1,18 @@
 # Learned position prior for the Barlow Twins GAP term.
 #
-# Run gap_pool_variance.yaml FIRST. This variant costs P parameters and an extra loss term
-# to answer the same question, so it is only worth running if the detached version already
-# showed the position profile is non-flat.
+# READ THIS BEFORE LAUNCHING: the cheaper `gap_pool_variance.yaml` has already been run and
+# REJECTED on this project's checkpoints (z = 0.5 on the contrastive run, z = -3.7 on the
+# recon baseline -- see that file's header). This variant costs P parameters and an extra
+# loss term to answer the same question, so it is only worth running if the detached version
+# shows a non-flat, content-aligned position profile on whatever data you are revisiting.
+# Check with `python -m eval.gap_pool_profile --run-dir <run>` first.
 #
-# One logit per position, softmax over positions, zero-initialised — so at step 0 this is
+# One logit per position, softmax over positions, zero-initialised -- so at step 0 this is
 # EXACTLY the uniform mean and the run starts from the objective it is being compared
-# against. The weights are shared across views and independent of the sample, deliberately:
-# a sample-conditioned attention module trained by this loss can raise on_diag by selecting
-# positions where the two views already agree, which costs nothing to learn and buys no
-# representation (barlow_twins_loss records on_diag reaching ~1 on shared anatomy alone).
+# against. Weights are shared across views and independent of the sample, deliberately: a
+# sample-conditioned attention module can raise on_diag by selecting positions where the two
+# views already agree, which costs nothing to learn and buys no representation
+# (barlow_twins_loss records on_diag reaching ~1 on shared anatomy alone).
 #
 # The entropy floor is not optional here. With bt_std_coeff active, putting all mass on the
 # single highest-variance position minimises the variance hinge outright, and that collapses
@@ -18,17 +21,17 @@
 # What to read, in order:
 #   Contrastive/gap_pool_entropy_L0    1.0 = uniform, 0.0 = collapsed. WATCH THIS ONE.
 #                                      The hinge cannot recover a fully collapsed softmax
-#                                      (its gradient vanishes there — see
+#                                      (its gradient vanishes there -- see
 #                                      GapPositionPool.entropy_penalty), so if this parks
 #                                      near 0, restart from an earlier checkpoint with a
-#                                      higher bt_gap_pool_entropy_coeff rather than
-#                                      raising it mid-run.
-#   Contrastive/gap_feat_std_mean_L0   the payoff, same as the variance run.
+#                                      higher bt_gap_pool_entropy_coeff rather than raising
+#                                      it mid-run.
 #   Weighted/bt_gap_pool_entropy_L0    what the hinge is actually contributing. Sustained
 #                                      and large means the floor is fighting the objective
-#                                      rather than backstopping it — lower the floor
+#                                      rather than backstopping it -- lower the floor
 #                                      instead of the coefficient.
 #   Contrastive/gap_pool_max_weight_L0 heaviest weight relative to uniform (1.0 = uniform).
+# NOT gap_feat_std: the variance hinge sets it, not the pooling.
 #
 # NOTE ON INHERITANCE: launch.py does not chain _base_, so the block below mirrors
 # synthetic_causal.yaml verbatim rather than inheriting through it. Keep them in sync.

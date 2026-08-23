@@ -5,10 +5,9 @@
 concentrated in a minority of patch positions, so averaging uniformly over all P dilutes
 the subject signal by roughly the fraction of positions carrying it.
 
-If it does not, both pooling modes are fitting noise and the lever is elsewhere (most
-likely ``--bt-corr-ema``, which attacks the off-diagonal's d(d-1)/B sampling floor — a
-different problem). This settles that on a checkpoint you already have, with no training
-run. The weights come from the shipped ``GapPositionPool`` itself, so the profile measured
+If it does not, both pooling modes are fitting noise and the lever is elsewhere. This
+settles that on a checkpoint you already have, with no training run. (Do not read a NO as
+"go turn on ``--bt-corr-ema``" — every synthetic experiment YAML already sets it to 0.99.) The weights come from the shipped ``GapPositionPool`` itself, so the profile measured
 here cannot drift from the one training would use.
 
 A NO IS NOT ONE ANSWER — the script separates four, because they call for different things:
@@ -432,8 +431,8 @@ def main():
             "ANY position weighting to exploit — shared or per-channel.\n"
             "This is consistent with content being stored in channel identity rather than\n"
             "spatial layout. Cross-check with eval/receptive_field_test.py and\n"
-            "eval/plot_local_vs_global.py, and spend the GPU time on the off-diagonal\n"
-            "sampling floor (--bt-corr-ema) instead."
+            "eval/plot_local_vs_global.py. Note --bt-corr-ema is already 0.99 in every\n"
+            "synthetic config, so the off-diagonal sampling floor is not the fallback."
         )
     print()
 

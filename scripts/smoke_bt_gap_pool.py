@@ -159,7 +159,9 @@ uniform = z.mean(-1)  # (2, B, C)
 pv = GapPositionPool(256, mode="variance", ema=0.0)
 weighted, a = pv(z, None)
 # Across-SUBJECT std of the pooled feature: the quantity gap_feat_std reports and the
-# one the variance hinge is trying to lift off ~0.004 on real runs.
+# one the variance hinge acts on. (On real runs that hinge, not the pooling, is what sets
+# feat_std — 0.004 pre-hinge, ~1.1 parked after. It cannot diagnose pooling; see
+# --bt-gap-std-coeff. The scale-invariant cross-view correlation below is the real test.)
 std_u = uniform.std(dim=1, unbiased=False).mean().item()
 std_w = weighted.std(dim=1, unbiased=False).mean().item()
 

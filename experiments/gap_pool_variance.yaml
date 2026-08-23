@@ -1,35 +1,39 @@
-# Cheap test of the GAP-dilution hypothesis: weight positions by their across-subject
-# variance instead of averaging them uniformly.
+# Weight patch positions by their across-subject variance instead of averaging uniformly.
 #
-# The GAP companion term averages over all P positions, which recovers the subject term s
-# exactly but dilutes any FOCAL subject signal by roughly the fraction of positions
-# carrying it. That is the suspected cause of gap_feat_std sitting at ~0.004 against a
-# hinge target of 1 — the measurement that forced --bt-gap-std-coeff to be split off from
-# --bt-std-coeff in the first place.
+# READ THIS BEFORE LAUNCHING: this configuration has already been tested against the
+# checkpoints it was designed for, and it was REJECTED. `eval/gap_pool_profile.py` on a
+# step-60k contrastive run found the variance profile only mildly peaked and no better than
+# its own permutation (z = 0.5); on the recon-only baseline the profile IS strongly peaked
+# (top-10% mass 0.45) and weighting by it is significantly WORSE than the permutation
+# (z = -3.7, cross-view correlation 0.157 -> 0.055), because the highest-variance positions
+# carry per-view style rather than shared content.
 #
-# This run changes ONE thing against synthetic_causal.yaml (bt_gap_pool), adds no
-# parameters, and is fully detached — so anything that moves is the pooling, not a new
-# optimisation problem. Run it BEFORE gap_pool_learned.yaml: if the curves below do not
-# move here, the learned variant is fitting noise and should not be run at all.
+# The motivating measurement was also misread: gap_feat_std parking low was taken as
+# evidence of dilution, but feat_std is set by the VARIANCE HINGE, not by the pooling
+# (0.004 pre-hinge, ~1.1 parked after), and BT's on_diag/off_diag are scale-invariant, so it
+# cannot diagnose a pooling question at all.
 #
-# What to read, in order:
-#   Contrastive/gap_feat_std_mean_L0   the headline. Uniform pooling parks it near 0.004.
-#   Contrastive/gap_on_diag_loss_L0    should FALL if the subject signal is less diluted.
-#   Contrastive/gap_pool_entropy_L0    1.0 = uniform. How far the profile actually moved;
-#                                      near 1.0 means the variance profile is flat and the
-#                                      dilution hypothesis is wrong for this data.
+# This file is kept as the reproducible form of that negative result, and as the thing to
+# run FIRST if the hypothesis is ever revisited on different data. Before spending GPU time,
+# run the probe on a checkpoint instead -- it answers the same question in minutes:
+#
+#     python -m eval.gap_pool_profile --run-dir results/synthetic/<run>
+#
+# If you do launch it, what to read, in order:
+#   Contrastive/gap_pool_entropy_L0    1.0 = uniform. How far the profile actually moved.
 #   Contrastive/gap_pool_eff_pos_L0    effective positions contributing (P at uniform).
+#   Contrastive/gap_on_diag_loss_L0    should FALL if subject signal is less diluted.
 #   WeightedFrac/bt_gap_*_L0           whether the GAP term's share of the loss shifted.
+# NOT gap_feat_std: the hinge sets it, so it reports the hinge, not the pooling.
+# NOT off_diag: it keeps its d(d-1)/B sampling floor either way -- pooling changes the
+#               signal per row, not the number of rows.
 #
-# Off_diag is NOT the metric here: it keeps its d(d-1)/B sampling floor either way, since
-# pooling changes the signal per row and not the number of rows.
-#
-# NOTE ON INHERITANCE: launch.py does not chain _base_ (it pops the key from the base
-# config with "Don't chain further"), so this cannot say `_base_: synthetic_causal` and
-# inherit the synthetic defaults through it — that would silently resolve against
-# defaults.yaml and run this on ADNI. The block below therefore mirrors
-# synthetic_causal.yaml verbatim; keep the two in sync, and diff them before reading any
-# comparison as an ablation of the pooling alone.
+# NOTE ON INHERITANCE: launch.py does not chain _base_ (it pops the key from the base config
+# with "Don't chain further"), so this cannot say `_base_: synthetic_causal` and inherit the
+# synthetic defaults through it -- that would silently resolve against defaults.yaml and run
+# this on ADNI. The block below therefore mirrors synthetic_causal.yaml verbatim; keep the
+# two in sync, and diff them before reading any comparison as an ablation of the pooling
+# alone.
 
 _base_: synthetic_defaults
 tag: gap-pool-variance

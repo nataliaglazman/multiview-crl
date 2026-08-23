@@ -1292,9 +1292,12 @@ def main(args):
         _bt_std_c = getattr(args, "bt_std_coeff", 0.0)
         # The GAP hinge measures std over SUBJECT rows, the patch hinge over folded
         # (subject, position) rows. Position variance alone puts the patch std near 1,
-        # while the across-subject component leaves the GAP std around 0.004 — so one
-        # shared coefficient asks the GAP term for a ~250x rescale of the encoder output.
-        # Same split, same reason, as _bt_gap_lam above.
+        # while the across-subject component leaves the GAP std around 0.004 BEFORE the hinge
+        # runs — so one shared coefficient asks the GAP term for a ~250x rescale of the
+        # encoder output. Same split, same reason, as _bt_gap_lam above.
+        # NOTE 23 Aug 2026: no experiment YAML sets bt_gap_std_coeff, so they all inherit
+        # bt_std_coeff 10 and run exactly that rescale. Measured downstream: gap_feat_std_mean
+        # ~1.1, i.e. parked past the hinge target with gap_var_loss contributing nothing.
         _bt_gap_std_c = getattr(args, "bt_gap_std_coeff", None)
         _bt_gap_std_c = _bt_std_c if _bt_gap_std_c is None else _bt_gap_std_c
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
@@ -1396,11 +1399,14 @@ def main(args):
             # Averaging over positions recovers the subject term exactly (the interaction
             # integrates to zero there), so this is the term whose rows are SUBJECTS.
             if _bt_gap_w > 0 and z_rec_tuple.ndim == 4:
-                # --bt-gap-pool replaces the uniform mean with a weighted one, to stop
-                # focal subject signal being diluted by the ~P-1 positions that do not
-                # carry it (the reason gap_feat_std sits at ~0.004). The weights are
-                # shared across views and independent of the sample — see
+                # --bt-gap-pool replaces the uniform mean with a weighted one, to stop focal
+                # subject signal being diluted by the ~P-1 positions that do not carry it.
+                # Weights are shared across views and independent of the sample — see
                 # models.vqvae.GapPositionPool for why both are load-bearing.
+                # MEASURED AND REJECTED on this project's data (see --bt-gap-pool's help and
+                # eval/gap_pool_profile.py): rejected on the contrastive run at z=0.5 and on
+                # the recon baseline at z=-3.7, where the variance profile tracks per-view
+                # style. Default stays 'mean'; probe a new dataset before enabling.
                 _pool_pen, _pool_diag = None, None
                 if gap_pool is None:
                     _gap_in = z_rec_tuple.mean(-1)  # (n_views, B, C) — one row per subject
