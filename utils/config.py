@@ -262,6 +262,16 @@ def parse_args() -> argparse.ArgumentParser:
         help="DataLoader workers. For 3D MRI with pin_memory, each worker holds "
         "prefetch_factor batches in pinned memory (~330 MB each). Keep this low (4-8).",
     )
+    parser.add_argument(
+        "--eval-workers",
+        type=int,
+        default=-1,
+        help="DataLoader workers for the in-training synthetic evaluations (periodic DCI "
+        "and the GT selection composite). -1 (default) means auto: --workers on synthetic "
+        "runs, where samples are generated on access and loading is the bottleneck, and 0 "
+        "elsewhere, because multi-worker eval loaders hung on NFS reading the ADNI .pt cache. "
+        "Set explicitly to override either way.",
+    )
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument(
         "--norm-type",
@@ -1085,6 +1095,15 @@ def parse_args() -> argparse.ArgumentParser:
         default=2,
         help="CV probe seeds (0..N-1) for the synthetic GT selection composite. Only used "
         "when selecting by synthetic DCI.",
+    )
+    parser.add_argument(
+        "--selection-dci-n-jobs",
+        type=int,
+        default=1,
+        help="Parallel jobs for the selection composite's probe phase (one job per pooling). "
+        "Default 1 (in-process). Raise only with spare cores: joblib ships each pooling's "
+        "feature matrix to a worker, and at patch pooling that array is big enough for the "
+        "transfer to cost more than the parallelism saves.",
     )
     parser.add_argument(
         "--selection-dci-level",

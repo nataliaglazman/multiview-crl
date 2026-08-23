@@ -934,6 +934,7 @@ def score_encoder_live(
     probe_dim=0,
     max_samples=None,
     per_factor_pooling="patch",
+    n_jobs=1,
 ):
     """In-training counterpart of ``evaluate_model`` for a live (in-memory) encoder.
 
@@ -952,6 +953,11 @@ def score_encoder_live(
     ``max_samples`` (when set) caps the dataset to its first N items so the
     periodic selection cost stays bounded regardless of val-set size.
 
+    ``n_jobs`` is forwarded to the probe phase (``_score_block``), which fits one
+    batched probe per pooling and can run them in parallel.  Keep it at 1 unless the
+    box has cores to spare — joblib ships each pooling's ``X`` to a worker, and at
+    patch pooling that array is large enough for the transfer to outweigh the win.
+
     Note: ``_extract_synthetic_representations`` calls ``model.eval()`` and does
     not restore train mode — the caller must save/restore it.
 
@@ -959,23 +965,25 @@ def score_encoder_live(
     scores: ``disentanglement`` (= overall_score), ``content_anatomy``,
     ``content_purity``, ``style_modality``, ``style_purity``, ``grade``.
     """
-    from eval.dci import _extract_synthetic_representations
+    from eval.dci import extract_synthetic_representations_multi
 
     if max_samples and hasattr(dataset, "__len__") and len(dataset) > max_samples:
         from torch.utils.data import Subset
 
         dataset = Subset(dataset, range(max_samples))
 
-    reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
-    for key, value in poolings:
-        level_data, gc, gsv1, gsv2 = _extract_synthetic_representations(
-            model, dataset, device, batch_size, num_workers, pooling=value
-        )
-        reprs[key] = level_data
-        if gt_content is None:
-            gt_content, gt_style, gt_style_v2 = gc, gsv1, gsv2
-        if info is None and level in level_data:
+    # One pass over the dataset for every pooling. Synthetic samples are generated
+    # on access, so a pass per pooling used to re-render the whole val set once per
+    # pooling — the bulk of this call's wall time on an in-training selection step.
+    reprs, gt_content, gt_style, gt_style_v2 = extract_synthetic_representations_multi(
+        model, dataset, device, batch_size, num_workers, poolings=poolings
+    )
+    info = None
+    for key, _ in poolings:
+        level_data = reprs[key]
+        if level in level_data:
             info = level_data[level][4]
+            break
     if info is None:
         raise RuntimeError(f"level {level} not found in encoder outputs")
 
@@ -990,6 +998,7 @@ def score_encoder_live(
         seeds=seeds,
         per_encoder=per_encoder,
         probe_dim=probe_dim,
+        n_jobs=n_jobs,
     )
     attach_scores([row])
 

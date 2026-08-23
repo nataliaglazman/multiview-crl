@@ -994,7 +994,16 @@ class VQVAE(HelperModule):
         return F.adaptive_avg_pool3d(style, target)
 
     def forward(
-        self, x, return_recon=True, pool_only=False, n_views=1, subsets=None, view_idx=None, patch_grid=None, mask=None
+        self,
+        x,
+        return_recon=True,
+        pool_only=False,
+        n_views=1,
+        subsets=None,
+        view_idx=None,
+        patch_grid=None,
+        mask=None,
+        skip_codebook=None,
     ):
         """Forward pass through VQ-VAE-2.
 
@@ -1014,6 +1023,13 @@ class VQVAE(HelperModule):
                         returning (B, hidden_channels, D*H*W) per level. Accepts:
                           - tuple/list of 3 ints (D, H, W): same grid at every level.
                           - list of 3-int tuples/lists, one per level: per-level grids.
+            skip_codebook: Override for whether the quantizer loop runs. None (default)
+                        derives it as ``pool_only and not return_recon``, the historical
+                        behaviour. Pass True to skip quantization when only the spatial
+                        maps are wanted (``pool_only=False, return_recon=False``), which
+                        otherwise runs the whole codebook for outputs the caller drops.
+                        ``diffs`` and ``id_outputs`` are then zeros/None, as in the
+                        derived-skip case.
 
         Returns:
             final_output: Reconstruction (or None if return_recon=False)
@@ -1388,7 +1404,8 @@ class VQVAE(HelperModule):
         # When we only need pooled encoder features (contrastive-only), skip the
         # codebook entirely — its commitment loss conflicts with contrastive learning
         # and the zero-padded input produces meaningless gradients.
-        skip_codebook = pool_only and not return_recon
+        if skip_codebook is None:
+            skip_codebook = pool_only and not return_recon
 
         # --- Style quantization (independent codebooks, no cross-level conditioning) ---
         style_id_outputs = {}

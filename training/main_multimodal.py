@@ -966,8 +966,16 @@ def _run_validation(
     moco_loss_func,
     device,
     max_batches=20,
+    scaler=None,
 ):
-    """Run a short validation pass and return averaged (total, contrastive, recon, vq) losses."""
+    """Run a short validation pass and return averaged (total, contrastive, recon, vq) losses.
+
+    ``scaler`` only selects the forward precision here — ``train_step`` gates the whole
+    backward on ``optimizer is not None``, so nothing is scaled or stepped. Passing the
+    training scaler runs validation under the same autocast as training instead of in
+    fp32, which is both faster and makes the val loss directly comparable to the train
+    loss it is plotted against. Runs without ``--use-amp`` pass None and are unchanged.
+    """
     # Temporarily switch to eval mode
     was_training = {}
     for i, enc in enumerate(encoders):
@@ -991,7 +999,7 @@ def _run_validation(
                 optimizer=None,  # no backward
                 params=[],
                 args=args,
-                scaler=None,
+                scaler=scaler,
                 recon_loss_fn=recon_loss_fn,
                 moco_loss_func=moco_loss_func,
                 step=getattr(args, "recon_loss_start_step", 0),  # ensure recon is always active in val
@@ -1027,6 +1035,20 @@ def _run_validation(
 # ---------------------------------------------------------------------------
 # Deterministic data loading
 # ---------------------------------------------------------------------------
+
+
+def _eval_workers(args):
+    """DataLoader workers for the in-training synthetic evaluations.
+
+    ``-1`` (the default) resolves to ``--workers`` on synthetic runs and 0 elsewhere.
+    The split is deliberate: ``SyntheticBrainDataset`` renders each pseudo-MRI pair on
+    access, so those evals are loader-bound and parallelise nearly linearly, whereas
+    multi-worker eval loaders on ADNI hung on NFS reading the cached ``.pt`` volumes.
+    """
+    n = getattr(args, "eval_workers", -1)
+    if n is not None and n >= 0:
+        return n
+    return args.workers if getattr(args, "dataset_name", None) == "synthetic" else 0
 
 
 def _encoder_l2(model):
@@ -2724,7 +2746,7 @@ def main(args):
                                     dataset=val_dataset,
                                     device=device,
                                     batch_size=dataloader_kwargs.get("batch_size", 32),
-                                    num_workers=0,
+                                    num_workers=_eval_workers(args),
                                     pooling=_dci_pooling,
                                     per_encoder=getattr(args, "separate_encoders", False),
                                 )
@@ -2791,9 +2813,10 @@ def main(args):
                                         n_null=getattr(args, "selection_dci_n_null", 3),
                                         seeds=tuple(range(getattr(args, "selection_dci_n_seeds", 2))),
                                         batch_size=dataloader_kwargs.get("batch_size", 32),
-                                        num_workers=0,
+                                        num_workers=_eval_workers(args),
                                         per_encoder=getattr(args, "separate_encoders", False),
                                         max_samples=getattr(args, "selection_dci_max_samples", 2000) or None,
+                                        n_jobs=getattr(args, "selection_dci_n_jobs", 1),
                                     )
                                     separation_score = _sel_row.get("disentanglement")  # overall_score
                                     selection_name = "synthetic_overall_score"
@@ -3040,6 +3063,7 @@ def main(args):
                             recon_loss_fn,
                             moco_loss_func,
                             device,
+                            scaler=scaler,
                         )
                         tb_writer.add_scalar("Val/Total", val_total, step)
                         tb_writer.add_scalar("Val/Contrastive", val_con, step)

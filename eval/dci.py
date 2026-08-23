@@ -289,111 +289,80 @@ def _pool_and_split_view(feat_view, content_indices, pooling, use_patch_grid, us
     return content, style
 
 
-def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, num_workers=0, pooling="gap"):
-    """Run the encoder over a synthetic dataset and collect per-level representations + GT factors.
+def _encode_for_pooling(encoder, x, n_views, pooling):
+    """One encoder forward shaped for ``pooling``.  Returns ``(features, soft_masks)``.
 
-    A single forward pass extracts features from every encoder level.  Each level's
-    content/style split uses that level's own ``soft_content_masks`` entry (from the
-    Gumbel mask), so levels without a mask have no split (all channels → content).
+    ``"stats"`` needs the spatial maps (``pool_only=False``); the others are produced
+    by the model's own pooling path.  Every variant asks for the encoder only:
 
-    Args:
-        encoder: VQVAE (or compatible) model.
-        dataset: SyntheticBrainDataset.
-        device: torch device.
-        batch_size: DataLoader batch size.
-        num_workers: DataLoader workers.
-        pooling: How to reduce spatial maps to feature vectors.
-            ``"gap"``   — global average pool → (B, C).
-            ``(D,H,W)`` — patch-grid pool → (B, C*D*H*W).  E.g. ``(2,2,2)``
-                          gives 8 patches per channel.
-            ``"stats"`` — per-channel (mean, std, max, min) → (B, C*4).
+    * ``return_recon=False`` — this caller reads ``encoder_features`` and
+      ``soft_content_masks``, both built during the encoder pass. ``return_recon``
+      defaults to True, so the gap and patch extractions used to run the codebook AND
+      the full decoder stack per batch and throw the reconstruction away.
+    * ``skip_codebook=True`` — needed for ``"stats"``, where ``pool_only=False`` makes
+      the model derive ``skip_codebook`` as False and quantize anyway. Redundant but
+      harmless for the pooled variants, which already derive it as True.
 
-    Returns:
-        level_data: ``{level_idx: (content_repr, style_repr, content_v2, style_v2, factor_info)}``
-            where the ``_v2`` arrays are the second view's features (``None`` when
-            only one view is present), used for the content->view leakage probe.
-        gt_content, gt_style_v1, gt_style_v2: shared GT arrays ``(N, n_factors)``
+    Nothing skipped here feeds the returned arrays, and in ``eval()`` mode the codebook
+    and decoder consume no RNG and update no state (EMA, Gumbel sampling and style
+    dropout are all gated on ``self.training``), so the features are unchanged.
     """
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    use_patch_grid = isinstance(pooling, (list, tuple))
+    if use_patch_grid:
+        enc_out = encoder(x, pool_only=True, return_recon=False, n_views=n_views, patch_grid=pooling)
+    elif pooling == "stats":
+        enc_out = encoder(x, pool_only=False, return_recon=False, n_views=n_views, skip_codebook=True)
+    else:
+        enc_out = encoder(x, pool_only=True, return_recon=False, n_views=n_views)
 
+    if isinstance(enc_out, tuple):
+        return enc_out[2], (enc_out[6] if len(enc_out) > 6 else {})
+    return [enc_out], {}
+
+
+def _accumulate_batch(per_level, encoder_features, soft_masks, n_views, pooling):
+    """Pool + split one forward's features into the running ``per_level`` buffers."""
     use_patch_grid = isinstance(pooling, (list, tuple))
     use_stats = pooling == "stats"
 
-    per_level = {}
-    all_gt_content = []
-    all_gt_style_v1 = []
-    all_gt_style_v2 = []
+    for lvl_idx, feat in enumerate(encoder_features):
+        B_per_view = feat.shape[0] // n_views
 
-    encoder.eval()
-    with torch.no_grad():
-        for batch in loader:
-            imgs = batch["image"]
-            x = torch.cat(imgs, dim=0).to(device)
-
-            if use_patch_grid:
-                enc_out = encoder(x, pool_only=True, n_views=len(imgs), patch_grid=pooling)
-            elif use_stats:
-                enc_out = encoder(x, pool_only=False, return_recon=False, n_views=len(imgs))
+        # Content/style channel split from this level's Gumbel mask
+        # (shared across views — symmetric masks use the view-0 indices).
+        if isinstance(soft_masks, dict) and lvl_idx in soft_masks:
+            mask = soft_masks[lvl_idx]
+            if isinstance(mask, tuple):
+                content_idx_raw = torch.where(mask[0].bool())[-1]
             else:
-                enc_out = encoder(x, pool_only=True, n_views=len(imgs))
+                content_idx_raw = torch.where(mask.bool())[-1]
+        else:
+            content_idx_raw = None
+        content_indices = _parse_content_indices(content_idx_raw)
 
-            if isinstance(enc_out, tuple):
-                encoder_features = enc_out[2]
-                soft_masks = enc_out[6] if len(enc_out) > 6 else {}
-            else:
-                encoder_features = [enc_out]
-                soft_masks = {}
+        if lvl_idx not in per_level:
+            per_level[lvl_idx] = {"content": [], "style": [], "content_v2": [], "style_v2": []}
 
-            n_views = len(imgs)
+        # View 1 (primary) — unchanged behaviour.
+        content, style = _pool_and_split_view(feat[:B_per_view], content_indices, pooling, use_patch_grid, use_stats)
+        per_level[lvl_idx]["content"].append(content)
+        if style is not None:
+            per_level[lvl_idx]["style"].append(style)
 
-            for lvl_idx, feat in enumerate(encoder_features):
-                B_per_view = feat.shape[0] // n_views
+        # View 2 — needed for the content->view leakage probe. Same
+        # content_indices (symmetric mask), processed identically.
+        if n_views >= 2:
+            content2, style2 = _pool_and_split_view(
+                feat[B_per_view : 2 * B_per_view], content_indices, pooling, use_patch_grid, use_stats
+            )
+            per_level[lvl_idx]["content_v2"].append(content2)
+            if style2 is not None:
+                per_level[lvl_idx]["style_v2"].append(style2)
 
-                # Content/style channel split from this level's Gumbel mask
-                # (shared across views — symmetric masks use the view-0 indices).
-                if isinstance(soft_masks, dict) and lvl_idx in soft_masks:
-                    mask = soft_masks[lvl_idx]
-                    if isinstance(mask, tuple):
-                        content_idx_raw = torch.where(mask[0].bool())[-1]
-                    else:
-                        content_idx_raw = torch.where(mask.bool())[-1]
-                else:
-                    content_idx_raw = None
-                content_indices = _parse_content_indices(content_idx_raw)
 
-                if lvl_idx not in per_level:
-                    per_level[lvl_idx] = {"content": [], "style": [], "content_v2": [], "style_v2": []}
-
-                # View 1 (primary) — unchanged behaviour.
-                content, style = _pool_and_split_view(
-                    feat[:B_per_view], content_indices, pooling, use_patch_grid, use_stats
-                )
-                per_level[lvl_idx]["content"].append(content)
-                if style is not None:
-                    per_level[lvl_idx]["style"].append(style)
-
-                # View 2 — needed for the content->view leakage probe. Same
-                # content_indices (symmetric mask), processed identically.
-                if n_views >= 2:
-                    content2, style2 = _pool_and_split_view(
-                        feat[B_per_view : 2 * B_per_view], content_indices, pooling, use_patch_grid, use_stats
-                    )
-                    per_level[lvl_idx]["content_v2"].append(content2)
-                    if style2 is not None:
-                        per_level[lvl_idx]["style_v2"].append(style2)
-
-            gt = batch["gt_latents"]
-            all_gt_content.append(gt["z_content"].numpy())
-            all_gt_style_v1.append(gt["z_style_v1"].numpy())
-            all_gt_style_v2.append(gt["z_style_v2"].numpy())
-
-    gt_content = np.concatenate(all_gt_content, axis=0)
-    gt_style_v1 = np.concatenate(all_gt_style_v1, axis=0)
-    gt_style_v2 = np.concatenate(all_gt_style_v2, axis=0)
-
-    n_c = gt_content.shape[1]
-    n_s = gt_style_v1.shape[1]
-    pooling_label = f"patch{list(pooling)}" if use_patch_grid else str(pooling)
+def _finalize_level_data(per_level, pooling, n_c, n_s):
+    """Concatenate the per-batch buffers into the ``{level: (...)}`` return shape."""
+    pooling_label = f"patch{list(pooling)}" if isinstance(pooling, (list, tuple)) else str(pooling)
 
     level_data = {}
     for lvl, data in per_level.items():
@@ -418,7 +387,108 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
                 "level": lvl,
             },
         )
-    return level_data, gt_content, gt_style_v1, gt_style_v2
+    return level_data
+
+
+def extract_synthetic_representations_multi(
+    encoder, dataset, device, batch_size=32, num_workers=0, poolings=(("gap", "gap"),)
+):
+    """Extract representations under several poolings in ONE pass over the dataset.
+
+    ``poolings`` is a list of ``(key, pooling)`` pairs; ``pooling`` takes the same
+    values as :func:`_extract_synthetic_representations`.  Each batch is loaded once
+    and encoded once per pooling, so the dataset is iterated a single time instead of
+    once per pooling.  ``SyntheticBrainDataset`` regenerates each pseudo-MRI pair on
+    access (``cache=False`` on synthetic runs), so the old pass-per-pooling loop
+    re-rendered the whole val set once per pooling.
+
+    Measured on 96 val samples at res 32 with a 1-level 48-channel model, the two
+    changes here are worth ~3.7x together, and the split is not the intuitive one:
+    dropping the wasted decoder/codebook work in :func:`_encode_for_pooling` accounts
+    for most of it (10.7s -> 2.6s of forward), while collapsing the three dataset
+    passes saves ~2.4s of a 3.6s render cost.  Loading is the smaller half — size the
+    two accordingly before optimising further.
+
+    The per-pooling forwards are equivalent, so the returned arrays are bit-identical
+    to calling :func:`_extract_synthetic_representations` once per pooling.
+
+    Returns:
+        reprs: ``{key: level_data}`` — one ``level_data`` mapping per pooling key.
+        gt_content, gt_style_v1, gt_style_v2: shared GT arrays ``(N, n_factors)``
+    """
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+    poolings = list(poolings)
+    per_pooling = {key: {} for key, _ in poolings}
+    all_gt_content = []
+    all_gt_style_v1 = []
+    all_gt_style_v2 = []
+
+    encoder.eval()
+    with torch.no_grad():
+        for batch in loader:
+            imgs = batch["image"]
+            n_views = len(imgs)
+            x = torch.cat(imgs, dim=0).to(device)
+
+            for key, pooling in poolings:
+                encoder_features, soft_masks = _encode_for_pooling(encoder, x, n_views, pooling)
+                _accumulate_batch(per_pooling[key], encoder_features, soft_masks, n_views, pooling)
+
+            gt = batch["gt_latents"]
+            all_gt_content.append(gt["z_content"].numpy())
+            all_gt_style_v1.append(gt["z_style_v1"].numpy())
+            all_gt_style_v2.append(gt["z_style_v2"].numpy())
+
+    gt_content = np.concatenate(all_gt_content, axis=0)
+    gt_style_v1 = np.concatenate(all_gt_style_v1, axis=0)
+    gt_style_v2 = np.concatenate(all_gt_style_v2, axis=0)
+
+    n_c = gt_content.shape[1]
+    n_s = gt_style_v1.shape[1]
+
+    reprs = {key: _finalize_level_data(per_pooling[key], pooling, n_c, n_s) for key, pooling in poolings}
+    return reprs, gt_content, gt_style_v1, gt_style_v2
+
+
+def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, num_workers=0, pooling="gap"):
+    """Run the encoder over a synthetic dataset and collect per-level representations + GT factors.
+
+    A single forward pass extracts features from every encoder level.  Each level's
+    content/style split uses that level's own ``soft_content_masks`` entry (from the
+    Gumbel mask), so levels without a mask have no split (all channels → content).
+
+    Single-pooling wrapper around :func:`extract_synthetic_representations_multi`;
+    callers that need several poolings should use that directly and pay for one
+    pass over the dataset instead of one per pooling.
+
+    Args:
+        encoder: VQVAE (or compatible) model.
+        dataset: SyntheticBrainDataset.
+        device: torch device.
+        batch_size: DataLoader batch size.
+        num_workers: DataLoader workers.
+        pooling: How to reduce spatial maps to feature vectors.
+            ``"gap"``   — global average pool → (B, C).
+            ``(D,H,W)`` — patch-grid pool → (B, C*D*H*W).  E.g. ``(2,2,2)``
+                          gives 8 patches per channel.
+            ``"stats"`` — per-channel (mean, std, max, min) → (B, C*4).
+
+    Returns:
+        level_data: ``{level_idx: (content_repr, style_repr, content_v2, style_v2, factor_info)}``
+            where the ``_v2`` arrays are the second view's features (``None`` when
+            only one view is present), used for the content->view leakage probe.
+        gt_content, gt_style_v1, gt_style_v2: shared GT arrays ``(N, n_factors)``
+    """
+    reprs, gt_content, gt_style_v1, gt_style_v2 = extract_synthetic_representations_multi(
+        encoder,
+        dataset,
+        device,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        poolings=[("_single", pooling)],
+    )
+    return reprs["_single"], gt_content, gt_style_v1, gt_style_v2
 
 
 def _null_permuted_dci(repr_arr, factor_arr, split, factor_types, n_null, rng):

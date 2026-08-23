@@ -728,6 +728,15 @@ class SyntheticBrainDataset(MultiviewDataset):
         # higher res, and DataLoader workers re-render every epoch otherwise.
         self._cache = [None] * synthetic_num_samples if cache else None
 
+        # Estimate the fixed_reference constants here rather than on first access.
+        # The estimate renders n_ref samples, and a lazy one lands inside the first
+        # batch of whichever DataLoader touches the dataset first — so every worker
+        # process pays it again on its own forked copy. Computing it in __init__ means
+        # workers inherit it. Deterministic either way (the renders are seeded per
+        # index), so the constants are identical to the lazy path.
+        if synthetic_normalize == "fixed_reference":
+            self._compute_fixed_reference()
+
     def __len__(self):
         return self.num_samples
 
