@@ -91,6 +91,33 @@ FACTOR_POOLING = {
 _CONTENT, _STYLE = 0, 1
 _CONTENT_V2, _STYLE_V2 = 2, 3
 
+# --probe-dim sentinel: reduce only the blocks that are actually in the p>>n regime.
+# Lives here rather than in content_rank_pca (which already imports from this module) so
+# the two scripts cannot drift on the rule.
+PROBE_DIM_AUTO = "auto"
+
+
+def _auto_probe_dim(n, d):
+    """``--probe-dim auto``: the width to reduce a (n, d) block to, or 0 for "leave alone".
+
+    Only blocks in the p>>n regime are touched. The patch block is the one that gets
+    there: at patch_grid 8^3 x 44 channels it is 22528 features against N~2000 samples,
+    where a ridge probe on a signal-free target returns a NEGATIVE R^2 — measured, and
+    it inverted the sign of the lesion dims in the scaling-2-vs-4 comparison until the
+    reduction was applied. ``gap`` (44) and ``stats`` (176) are well-conditioned at that
+    N and are left at full width, so this does not silently reshape the readouts that
+    were never overfitting.
+
+    Measured on this generator (untrained encoder, patch 8^3, N=200, iid factors): with
+    the labels SHUFFLED, the unreduced probe returns mean R^2 -0.270 while every reduced
+    width returns ~-0.04. The bias is roughly constant, so it is invisible on a strong
+    factor (brain_size reads 0.991 either way) and decisive on a weak one (lesion_y
+    -0.173 unreduced, +0.047 at 64). That asymmetry is why this cannot be left to the
+    caller: it silently penalises exactly the factors under investigation.
+    """
+    budget = max(1, n // 4)
+    return min(64, budget) if d > budget else 0
+
 
 # --------------------------------------------------------------------------- #
 # Pooling parsing
@@ -564,18 +591,37 @@ def _reduce_reprs(reprs, level, probe_dim, seed=0):
     ``min(probe_dim, width)`` components, so every model's probes see the same
     feature capacity regardless of its channel count.
 
+    ``probe_dim=PROBE_DIM_AUTO`` resolves per block via ``_auto_probe_dim``: only the
+    p>>n blocks are touched, and a well-conditioned one is left at full width. An
+    explicit integer still reduces EVERY block, which is the setting to use when
+    equalising a channel-count confound across models of different width — that is a
+    different goal from fixing the conditioning, and only the integer serves it.
+
     View-1 and view-2 of a block share one PCA basis (fit on view 1) so the
     view-invariance probe is not confounded by mismatched bases.  PCA is
     unsupervised and fit on all samples — a transductive but label-free step.  The
     ``info`` dict is left untouched, so the tables still report the model's real
     channel count.  Blocks already at or below ``probe_dim`` are left unchanged.
+
+    PCA keeps top-VARIANCE directions, not top-signal ones, so an over-aggressive width
+    deletes weak factors outright (measured, same setup as ``_auto_probe_dim``:
+    sulcal_widening reads 0.866 at 64 and 0.073 at 16). Treat the width as a reported
+    parameter, and never compare two models scored at different values.
     """
     from sklearn.decomposition import PCA
 
+    def _width(A):
+        if probe_dim == PROBE_DIM_AUTO:
+            return _auto_probe_dim(A.shape[0], A.shape[1])
+        return probe_dim
+
     def _fit(A):
-        if A is None or A.shape[1] == 0 or A.shape[1] <= probe_dim:
+        if A is None or A.shape[1] == 0:
             return None
-        return PCA(n_components=min(probe_dim, A.shape[0]), random_state=seed).fit(A)
+        k = _width(A)
+        if k <= 0 or A.shape[1] <= k:
+            return None
+        return PCA(n_components=min(k, A.shape[0]), random_state=seed).fit(A)
 
     def _apply(pca, A):
         return pca.transform(A) if (pca is not None and A is not None) else A
@@ -699,7 +745,7 @@ def score_reprs(
         ranks["style_rank_v2"] = _effective_rank(_block_array(reprs, _rk, level, _STYLE_V2))
         ranks["all_rank_v2"] = _effective_rank(_block_array(reprs, _rk, level, (_CONTENT_V2, _STYLE_V2)))
 
-    if probe_dim and probe_dim > 0:
+    if probe_dim == PROBE_DIM_AUTO or (isinstance(probe_dim, int) and probe_dim > 0):
         reprs = _reduce_reprs(reprs, level, probe_dim)
     avail = set(reprs.keys())
     rng = np.random.RandomState(0)
@@ -1725,7 +1771,9 @@ def print_capacity_table(rows, baseline_name=None):
     print()
     print("  ALL-CHANNELS CAPACITY   (GAP = real - null; full representation -> each factor)")
     print("  higher = more factor information present somewhere in the representation")
-    if pdim:
+    if pdim == PROBE_DIM_AUTO:
+        print("  NOTE: --probe-dim auto — p>>n blocks (d > N/4) reduced to min(64, N/4) PCs; others full width")
+    elif pdim:
         print(f"  NOTE: scored on top-{pdim} PCs per block (--probe-dim) — capacity equalized across widths")
     for r in ranked:
         if r["name"] == baseline_name:
@@ -2232,13 +2280,16 @@ def main():
     )
     p.add_argument(
         "--probe-dim",
-        type=int,
-        default=0,
-        help="If >0, PCA-reduce every block to this many components before scoring, "
-        "so informativeness/MCC/DCI are compared at EQUAL probe capacity across "
-        "models of different channel counts (removes the capacity confound when "
-        "sweeping channel width).  Set it to <= the smallest content width in the "
-        "comparison.  0 (default) = no reduction.",
+        default=PROBE_DIM_AUTO,
+        help="PCA width for every probe block. 'auto' (default) reduces ONLY blocks in the "
+        "p>>n regime (d > N/4) to min(64, N/4): at --poolings 8x8x8 the patch block is ~22528 "
+        "features, where a ridge probe returns R^2 -0.27 on a SHUFFLED target and drags the weak "
+        "factors negative, while gap (44) and stats (176) are well-conditioned and stay at full "
+        "width. An explicit integer reduces EVERY block instead, which is what you want to "
+        "equalise a channel-count confound when sweeping width — set it <= the smallest content "
+        "width in the comparison. 0 disables reduction entirely and reproduces pre-2026 numbers; "
+        "it is not a safe default at patch pooling. The width is a reported parameter, not "
+        "preprocessing: two models must be scored at the same value.",
     )
     p.add_argument(
         "--probe-kind",
@@ -2278,6 +2329,14 @@ def main():
         help="Overwrite any existing results in --out instead of merging the new models into them.",
     )
     cli = p.parse_args()
+
+    if cli.probe_dim != PROBE_DIM_AUTO:
+        try:
+            cli.probe_dim = int(cli.probe_dim)
+        except (TypeError, ValueError):
+            p.error(f"--probe-dim must be an integer or '{PROBE_DIM_AUTO}' (got {cli.probe_dim!r})")
+        if cli.probe_dim < 0:
+            p.error(f"--probe-dim must be >= 0 or '{PROBE_DIM_AUTO}' (got {cli.probe_dim})")
 
     poolings = parse_poolings(cli.poolings)
     seeds = tuple(int(s) for s in cli.seeds.split(","))
