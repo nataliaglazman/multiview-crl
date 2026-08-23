@@ -211,7 +211,7 @@ def _ridge_r2(x_tr, y_tr, x_te, y_te, alpha=1.0):
     return 1.0 - ss_res / ss_tot
 
 
-def per_factor_recovery(hz, gt, fit_idx, alpha=1.0):
+def per_factor_recovery(hz, gt, fit_idx, alpha=1.0, null_subtract=True, seed=0):
     """Per-position recovery R^2 for EACH factor separately: returns (K, P).
 
     The averaged profile is misleading on this project's factor set, and the reason is
@@ -230,8 +230,16 @@ def per_factor_recovery(hz, gt, fit_idx, alpha=1.0):
     a_idx, b_idx = fit_idx[: n_fit // 2], fit_idx[n_fit // 2 :]
     out = np.zeros((gt.shape[1], x.shape[2]))
     for p in range(x.shape[2]):
-        out[:, p] = np.maximum(0.0, _ridge_r2(x[a_idx, :, p], gt[a_idx], x[b_idx, :, p], gt[b_idx], alpha))
-    return out
+        out[:, p] = _ridge_r2(x[a_idx, :, p], gt[a_idx], x[b_idx, :, p], gt[b_idx], alpha)
+    if null_subtract:
+        # Per-position permutation floor. A ridge on C features at every position returns a
+        # positive R^2 on pure chance, and that floor is the same at every position, so it
+        # ADDS A CONSTANT to the profile — which pulls the concentration toward flat and
+        # hides exactly the mild localisation this is trying to resolve. Subtract it.
+        g_null = gt[np.random.RandomState(seed + 991).permutation(len(gt))]
+        for p in range(x.shape[2]):
+            out[:, p] -= _ridge_r2(x[a_idx, :, p], g_null[a_idx], x[b_idx, :, p], g_null[b_idx], alpha)
+    return np.maximum(0.0, out)
 
 
 def profile_reliability(hz, gt, idx, alpha=1.0):
@@ -254,11 +262,15 @@ def profile_reliability(hz, gt, idx, alpha=1.0):
     h = len(idx) // 2
     a = per_factor_recovery(hz, gt, idx[:h], alpha)
     b = per_factor_recovery(hz, gt, idx[h:], alpha)
-    out = np.full(a.shape[0], np.nan)
+    rel = np.full(a.shape[0], np.nan)
+    con = np.full((a.shape[0], 2), np.nan)
     for k in range(a.shape[0]):
         if a[k].std() > 1e-9 and b[k].std() > 1e-9:
-            out[k] = float(np.corrcoef(a[k], b[k])[0, 1])
-    return out
+            rel[k] = float(np.corrcoef(a[k], b[k])[0, 1])
+        for j, arr in enumerate((a[k], b[k])):
+            if arr.max() > 0:
+                con[k, j] = profile_stats(arr / arr.sum())["top10pct_mass"]
+    return rel, con
 
 
 def profile_overlap(profiles):
@@ -320,7 +332,21 @@ def main():
     p.add_argument("--run-dir", required=True)
     p.add_argument("--checkpoint-name", default="vqvae_model.pt")
     p.add_argument("--num-samples", type=int, default=2000)
-    p.add_argument("--causal", choices=("match", "iid"), default="match")
+    p.add_argument(
+        "--causal",
+        choices=("match", "iid"),
+        default="iid",
+        help="Factor distribution for the test set. Defaults to 'iid' — NOT 'match', which is "
+        "the default in the aggregate-ranking tools — because this script's headline output is "
+        "PER-FACTOR, and METHODOLOGY_REPORT is explicit that 'match is for aggregate ranking, "
+        "iid is for per-factor attribution; match inflates every factor with a recoverable "
+        "parent'. Under a random SCM with edge_prob 0.5, brain_size is recovered at 0.92 and "
+        "correlates ~0.8 with ventricle_size, so under 'match' a probe reads brain_size in "
+        "disguise at every position and every factor inherits brain_size's flat, global "
+        "profile. That compresses exactly the localisation this script exists to measure. Pass "
+        "'match' only for the aggregate/variance sections, and do not read the per-factor table "
+        "from a 'match' run.",
+    )
     p.add_argument("--batch-size", type=int, default=0, help="Training batch size (0 = read from the run's settings).")
     p.add_argument("--draws", type=int, default=16, help="Random batches to average the pooled metrics over.")
     p.add_argument("--level", type=int, default=0)
@@ -396,6 +422,13 @@ def main():
     print(f"\nrun          {cli.run_dir}")
     print(f"level {cli.level}   grid {tuple(grid)} = {P} positions   C={C}   N={N}   batch={B}   draws={cli.draws}")
     print(f"run had --patch-foreground-mask: {fg_masked}")
+    print(f"factor distribution: --causal {cli.causal}")
+    if cli.causal == "match":
+        print("  WARNING: the per-factor table below is NOT VALID under 'match'. Every factor")
+        print("  with a recoverable parent reads partly as that parent, and brain_size is both")
+        print("  recovered at 0.92 and globally visible, so all factors inherit its flat")
+        print("  profile and real localisation is compressed away. Re-run with --causal iid")
+        print("  before drawing any per-factor conclusion.")
 
     print("\n--- shape of the across-subject variance profile (DESCRIPTIVE ONLY) ---------")
     print(f"{'':12s} {'top10%mass':>11s} {'max/unif':>9s} {'eff_pos':>9s} {'entropy':>9s} {'P':>7s}")
@@ -541,30 +574,51 @@ def main():
     # factor at peak R^2 0.39, was the only one to clear a raw 0.15 threshold). So give each
     # factor its own noise floor: the same measurement with subject labels shuffled, which
     # destroys the factor-feature relationship while preserving every other property.
-    reliab = profile_reliability(hz, gt, fit_idx)
+    reliab, con = profile_reliability(hz, gt, fit_idx)
     names = (CONTENT_FACTOR_NAMES + [f"factor_{i}" for i in range(pf.shape[0])])[: pf.shape[0]]
     print("\n--- per-factor spatial profiles (the averaged one hides localised factors) ---")
-    print(f"  {'factor':20s} {'peak R^2':>9s} {'mean R^2':>9s} {'top10%':>8s} {'split-half':>11s}")
+    print(f"  {'factor':20s} {'peak R^2':>9s} {'top10%':>8s} {'+/-':>7s} {'sigma':>7s} {'split-half':>11s}")
     rows = []
     for k, nm in enumerate(names):
         prof = pf[k]
         if prof.max() <= 0:
-            print(f"  {nm:20s} {0.0:9.4f} {0.0:9.4f} {'-':>8s} {'-':>11s}   (not recovered)")
+            print(f"  {nm:20s} {0.0:9.4f} {'-':>8s} {'-':>7s} {'-':>7s} {'-':>11s}   (not recovered)")
             continue
         s = profile_stats(prof / prof.sum())
+        # Error bar from the two disjoint subject halves. NOT compared against 0.10: top10%
+        # is the mass of the largest 10% of entries, so it sits above 0.10 in any finite
+        # sample even when the true profile is flat, and the bias is far larger than this
+        # error bar. Measured: a genuinely global planted factor reads 0.115 +/- 0.001, i.e.
+        # 22 "sigma" above 0.10 while being flat by construction. The reference has to be an
+        # empirically flat profile, so it is the LEAST concentrated factor in this set —
+        # filled in after the loop, once that minimum is known.
+        err = abs(con[k, 0] - con[k, 1]) / 2.0 if np.all(np.isfinite(con[k])) else np.nan
         r = reliab[k]
-        rows.append((nm, prof, s, r))
-        _r = "     n/a" if not np.isfinite(r) else f"{r:11.3f}"
-        print(f"  {nm:20s} {prof.max():9.4f} {prof.mean():9.4f} {s['top10pct_mass']:8.3f} {_r}")
-    print("  top10% 0.10 = readable equally everywhere; higher = concentrated.")
-    print("  split-half = correlation between the profile estimated on two disjoint halves of")
-    print("  the subjects. It is the check that keeps this honest: concentration on a NOISY")
-    print("  profile is inflated, so a weakly-recovered factor looks localised when it is not.")
-    print("  Localised means BOTH concentrated AND reproducible; high top10% with low")
-    print("  split-half is noise.")
+        rows.append((nm, prof, s, r, err))
+    # Reference = the least concentrated factor measured here: an empirically flat profile at
+    # this data's own noise level, which 0.10 is not.
+    ref_i = int(np.argmin([s["top10pct_mass"] for _, _, s, _, _ in rows])) if rows else -1
+    ref = rows[ref_i][2]["top10pct_mass"] if rows else 0.10
+    ref_err = rows[ref_i][4] if rows else np.nan
+    scored = []
+    for nm, prof, s, r, err in rows:
+        den = np.sqrt(err**2 + ref_err**2) if np.isfinite(err) and np.isfinite(ref_err) else np.nan
+        sigma = (s["top10pct_mass"] - ref) / den if np.isfinite(den) and den > 1e-9 else np.nan
+        scored.append((nm, prof, s, r, err, sigma))
+        _r = "        n/a" if not np.isfinite(r) else f"{r:11.3f}"
+        _e = "    n/a" if not np.isfinite(err) else f"{err:7.3f}"
+        _s = "    n/a" if not np.isfinite(sigma) else f"{sigma:7.1f}"
+        print(f"  {nm:20s} {prof.max():9.4f} {s['top10pct_mass']:8.3f} {_e} {_s} {_r}")
+    print("  R^2 is null-subtracted per position (a ridge on C features returns a positive R^2")
+    print("  by chance, and that floor is constant across positions, so it flattens the profile).")
+    print(f"  +/- is half the spread between two disjoint subject halves. sigma is measured")
+    print(f"  against the LEAST concentrated factor here ({rows[ref_i][0] if rows else '-'}, top10% {ref:.3f}),")
+    print("  NOT against 0.10 — top10% takes the largest 10% of entries, so it exceeds 0.10 in")
+    print("  any finite sample even for a flat profile (a planted global factor reads 0.115).")
+    print("  Localised = sigma above ~2 with a split-half correlation that holds up.")
     # Do the localised ones agree about WHERE? This is what decides whether one shared
     # weight vector could serve them, which is what --bt-gap-pool actually implements.
-    loc = [(nm, prof) for nm, prof, s, r in rows if s["top10pct_mass"] > 0.15 and np.isfinite(r) and r > 0.5]
+    loc = [(nm, prof) for nm, prof, s, r, err, sg in scored if np.isfinite(sg) and sg > 2.0 and np.isfinite(r) and r > 0.3]  # fmt: skip
     if len(loc) >= 2:
         ov = profile_overlap([p for _, p in loc])
         print(f"  localised factors ({', '.join(nm for nm, _ in loc)}):")

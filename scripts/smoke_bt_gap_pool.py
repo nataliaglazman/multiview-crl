@@ -469,26 +469,89 @@ _z2[:, :, :, 0:8] += _fac2(1) * 3.0  # f1 localised, strongly recovered
 _z2[:, :, :, 60:68] += _fac2(2) * 0.9  # f2 localised, WEAKLY recovered (the sensitivity case)
 _z2 += _fac2(3) * 0.25  # f3 global and near-unrecoverable (the noise trap)
 
-_idx2 = np.random.RandomState(0).permutation(_n2)[: _n2 // 2]
-_pf2 = per_factor_recovery(_z2, _gt2, _idx2)
-_rl2 = profile_reliability(_z2, _gt2, _idx2)
+
+def _localised(z_, gt_, k_count):
+    """Replicates main()'s decision: sigma against the LEAST concentrated factor, plus
+    split-half reliability. Returns [(is_localised, top10, sigma, r), ...]."""
+    _ix = np.random.RandomState(0).permutation(len(gt_))[: len(gt_) // 2]
+    _pf_ = per_factor_recovery(z_, gt_, _ix)
+    _rl_, _cn_ = profile_reliability(z_, gt_, _ix)
+    _rows = []
+    for k in range(k_count):
+        if _pf_[k].max() <= 0:
+            _rows.append(None)
+            continue
+        _t = profile_stats(_pf_[k] / _pf_[k].sum())["top10pct_mass"]
+        _e = abs(_cn_[k, 0] - _cn_[k, 1]) / 2.0 if np.all(np.isfinite(_cn_[k])) else np.nan
+        _rows.append((_t, _e, _rl_[k]))
+    _ok = [r for r in _rows if r is not None]
+    _ri = int(np.argmin([r[0] for r in _ok]))
+    _ref, _rerr = _ok[_ri][0], _ok[_ri][1]
+    _out = []
+    for r in _rows:
+        if r is None:
+            _out.append((False, float("nan"), float("nan"), float("nan")))
+            continue
+        _t, _e, _r = r
+        _den = math.sqrt(_e**2 + _rerr**2) if np.isfinite(_e) and np.isfinite(_rerr) else float("nan")
+        _sg = (_t - _ref) / _den if np.isfinite(_den) and _den > 1e-9 else float("nan")
+        _out.append((np.isfinite(_sg) and _sg > 2.0 and np.isfinite(_r) and _r > 0.3, _t, _sg, _r))
+    return _out
 
 
-def _is_loc(k):
-    if _pf2[k].max() <= 0:
-        return False
-    _s = profile_stats(_pf2[k] / _pf2[k].sum())["top10pct_mass"]
-    return _s > 0.15 and np.isfinite(_rl2[k]) and _rl2[k] > 0.5
-
-
+_res2 = _localised(_z2, _gt2, 4)
 for _k, _nm, _want in (
     (0, "strong global -> not localised", False),
     (1, "strongly-recovered localised -> localised", True),
     (2, "WEAKLY-recovered localised -> still localised", True),
     (3, "near-unrecoverable global -> not localised (noise trap)", False),
 ):
-    _pk = _pf2[_k].max()
-    check(_nm, _is_loc(_k) == _want, f"peakR2={_pk:.3f} reliability={_rl2[_k]:.3f}")
+    check(_nm, _res2[_k][0] == _want, f"top10%={_res2[_k][1]:.3f} sigma={_res2[_k][2]:.1f} r={_res2[_k][3]:.2f}")
+
+print("\n16. the decision is calibrated for MILD localisation, and 0.10 is the wrong reference")
+# Two failures this pins. (a) A fixed 0.15 cut was calibrated on planted extremes (top10%
+# ~1.0, all mass in 8 of 128 positions); real localisation seen through a wide receptive
+# field is far milder and that cut calls it flat. (b) top10% takes the largest 10% of
+# entries, so it exceeds 0.10 in ANY finite sample -- a planted GLOBAL factor reads 0.115,
+# and against a 0.10 reference with a split-half error bar that is 22 "sigma" of nothing.
+# The reference has to be an empirically flat profile: the least concentrated factor here.
+torch.manual_seed(0)
+np.random.seed(0)
+_n3, _p3, _c3 = 2000, 128, 24
+_gt3 = np.random.randn(_n3, 3)
+_z3 = torch.randn(2, _n3, _c3, _p3) * 0.5
+_f3 = lambda k: torch.tensor(_gt3[:, k], dtype=torch.float32)[None, :, None, None]  # noqa: E731
+_z3 += _f3(0) * 2.0  # global
+_z3 += _f3(1) * 0.8
+_z3[:, :, :, 0:16] += _f3(1) * 0.8  # MILD: visible everywhere, stronger in a region
+_z3 += _f3(2) * 0.8
+_z3[:, :, :, 96:112] += _f3(2) * 0.8  # MILD, elsewhere
+_mild = _localised(_z3, _gt3, 3)
+check("mild: global factor not localised", not _mild[0][0], f"top10%={_mild[0][1]:.3f} sigma={_mild[0][2]:.1f}")
+for _k in (1, 2):
+    check(
+        f"mild: localised factor {_k} detected despite top10% only {_mild[_k][1]:.2f}",
+        _mild[_k][0],
+        f"sigma={_mild[_k][2]:.1f} r={_mild[_k][3]:.2f}",
+    )
+check("mild: the old fixed 0.15 cut would have been needed", _mild[1][1] > 0.15 or _mild[2][1] > 0.15)
+
+torch.manual_seed(0)
+np.random.seed(0)
+_gt4 = np.random.randn(_n3, 3)
+_z4 = torch.randn(2, _n3, _c3, _p3) * 0.5
+_f4 = lambda k: torch.tensor(_gt4[:, k], dtype=torch.float32)[None, :, None, None]  # noqa: E731
+for _k, _g in ((0, 2.0), (1, 1.5), (2, 1.0)):
+    _z4 += _f4(_k) * _g  # ALL global, none localised
+_allg = _localised(_z4, _gt4, 3)
+check(
+    "all-global: none flagged as localised", not any(r[0] for r in _allg), f"top10%={[round(r[1], 3) for r in _allg]}"
+)
+check(
+    "all-global: raw top10% still reaches 0.12+ on pure noise (why eyeballing fails)",
+    max(r[1] for r in _allg) > 0.115,
+    f"max raw top10%={max(r[1] for r in _allg):.3f} — comparable to real lesion_y/cortical values",
+)
 
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)
