@@ -2777,7 +2777,17 @@ def main(args):
                                     _sel_pool = [("gap", "gap"), ("stats", "stats")]
                                     if getattr(args, "patch_grid", None):
                                         _sel_pool.append(("patch", tuple(args.patch_grid)))
-                                    logger.info(f"  [EVALUATION] Synthetic GT selection composite (step {step})...")
+                                    # Timed and logged: this block is CPU-bound sklearn with the
+                                    # GPU idle, and at --selection-probe-dim 0 it can run for
+                                    # hours per firing without anything in the log saying so.
+                                    _sel_t0 = time.perf_counter()
+                                    logger.info(
+                                        f"  [EVALUATION] Synthetic GT selection composite (step {step}) "
+                                        f"| N={getattr(args, 'selection_dci_max_samples', 2000)} "
+                                        f"poolings={[k for k, _ in _sel_pool]} "
+                                        f"probe_dim={getattr(args, 'selection_probe_dim', 0)} "
+                                        f"n_jobs={getattr(args, 'selection_n_jobs', -1)}..."
+                                    )
                                     _sel_row = score_encoder_live(
                                         encoders[0],
                                         val_dataset,
@@ -2790,7 +2800,18 @@ def main(args):
                                         num_workers=0,
                                         per_encoder=getattr(args, "separate_encoders", False),
                                         max_samples=getattr(args, "selection_dci_max_samples", 2000) or None,
+                                        # Both default to the historical behaviour. n_jobs=-1 is
+                                        # free (sklearn on CPU, GPU idle, joblib preserves task
+                                        # order); probe_dim=0 is the dominant cost AND the source
+                                        # of the p>>n negative bias, but changing it changes which
+                                        # checkpoint this run calls best — see --selection-probe-dim.
+                                        n_jobs=getattr(args, "selection_n_jobs", -1),
+                                        probe_dim=getattr(args, "selection_probe_dim", 0),
                                     )
+                                    _sel_dt = time.perf_counter() - _sel_t0
+                                    logger.info(f"  [EVALUATION] selection composite took {_sel_dt:.1f}s")
+                                    if tb_writer is not None:
+                                        tb_writer.add_scalar("Perf/selection_eval_seconds", _sel_dt, step)
                                     separation_score = _sel_row.get("disentanglement")  # overall_score
                                     selection_name = "synthetic_overall_score"
                                     # Completeness gate. overall_score averages four terms and only

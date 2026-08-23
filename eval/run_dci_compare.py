@@ -990,6 +990,7 @@ def score_encoder_live(
     probe_dim=0,
     max_samples=None,
     per_factor_pooling="patch",
+    n_jobs=1,
 ):
     """In-training counterpart of ``evaluate_model`` for a live (in-memory) encoder.
 
@@ -1046,6 +1047,7 @@ def score_encoder_live(
         seeds=seeds,
         per_encoder=per_encoder,
         probe_dim=probe_dim,
+        n_jobs=n_jobs,
     )
     attach_scores([row])
 
