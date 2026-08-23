@@ -550,6 +550,65 @@ def parse_args() -> argparse.ArgumentParser:
         "term and leave redundancy reduction to the patch term, which has B*P rows to estimate from.",
     )
     parser.add_argument(
+        "--bt-gap-pool",
+        type=str,
+        default="mean",
+        choices=["mean", "variance", "learned"],
+        help="How the --bt-gap-weight companion term pools over patch positions. 'mean' (default) "
+        "is the plain uniform average and is bit-identical to every existing run. The other two "
+        "address the ONE thing the uniform mean does badly: it dilutes focal subject signal by "
+        "roughly the fraction of positions carrying it, which is why gap_feat_std sits at ~0.004 "
+        "and why --bt-gap-std-coeff had to be split off in the first place. 'variance' weights "
+        "positions by their across-SUBJECT variance (detached, no parameters) and is the cheap "
+        "test of that hypothesis — run it first, and if gap_feat_std does not move, 'learned' "
+        "will not help either. 'learned' fits one logit per position, softmax over positions, "
+        "zero-initialised so it starts exactly at the mean. "
+        "NEITHER weights by sample: the uniform mean recovers the subject term s EXACTLY because "
+        "the interaction r is defined as the deviation from it and sums to zero over positions, "
+        "and a sample-conditioned weight both revives that interaction and hands the BT loss a "
+        "shortcut (put mass where the views already agree, which on_diag rewards without any "
+        "representational gain). Neither mode changes the number of ROWS, so the d(d-1)/B "
+        "off-diagonal floor is untouched — compose with --bt-corr-ema for that.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-temp",
+        type=float,
+        default=1.0,
+        help="Softmax temperature for --bt-gap-pool learned. >1 flattens the weights, <1 sharpens. "
+        "Only a starting scale — the logits are free to reach any concentration the entropy floor "
+        "permits, so prefer tuning --bt-gap-pool-entropy over this.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-entropy",
+        type=float,
+        default=0.5,
+        help="Entropy floor for --bt-gap-pool learned, as a fraction of log(P). The weights are held "
+        "above it by a hinge, so it costs nothing until concentration reaches the floor. NOT "
+        "decoration: with the variance hinge active, putting all mass on the single "
+        "highest-variance position minimises it outright, and that reduces the effective sample "
+        "behind every GAP statistic to one patch — throwing away exactly the averaging that keeps "
+        "the term's noise below the patch term's. 0 disables the floor.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-entropy-coeff",
+        type=float,
+        default=1.0,
+        help="Weight on the --bt-gap-pool-entropy hinge. Logged unweighted as "
+        "Contrastive/gap_pool_entropy_loss_L* and weighted as Weighted/bt_gap_pool_entropy_L*, so "
+        "size it from the measured magnitude like every other Barlow Twins coefficient rather "
+        "than by transplanting a number.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-ema",
+        type=float,
+        default=0.9,
+        help="Momentum on the per-position variance profile for --bt-gap-pool variance. The profile "
+        "is estimated from B subjects per batch and is noisy for the same reason the "
+        "cross-correlation is, so it is smoothed across steps with Adam-style bias correction "
+        "(per position, because --patch-foreground-mask can drop a position for some batches and "
+        "not others). 0 disables and uses the current batch alone.",
+    )
+    parser.add_argument(
         "--bt-corr-ema",
         type=float,
         default=0.0,

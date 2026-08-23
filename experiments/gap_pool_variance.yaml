@@ -1,0 +1,82 @@
+# Cheap test of the GAP-dilution hypothesis: weight positions by their across-subject
+# variance instead of averaging them uniformly.
+#
+# The GAP companion term averages over all P positions, which recovers the subject term s
+# exactly but dilutes any FOCAL subject signal by roughly the fraction of positions
+# carrying it. That is the suspected cause of gap_feat_std sitting at ~0.004 against a
+# hinge target of 1 — the measurement that forced --bt-gap-std-coeff to be split off from
+# --bt-std-coeff in the first place.
+#
+# This run changes ONE thing against synthetic_causal.yaml (bt_gap_pool), adds no
+# parameters, and is fully detached — so anything that moves is the pooling, not a new
+# optimisation problem. Run it BEFORE gap_pool_learned.yaml: if the curves below do not
+# move here, the learned variant is fitting noise and should not be run at all.
+#
+# What to read, in order:
+#   Contrastive/gap_feat_std_mean_L0   the headline. Uniform pooling parks it near 0.004.
+#   Contrastive/gap_on_diag_loss_L0    should FALL if the subject signal is less diluted.
+#   Contrastive/gap_pool_entropy_L0    1.0 = uniform. How far the profile actually moved;
+#                                      near 1.0 means the variance profile is flat and the
+#                                      dilution hypothesis is wrong for this data.
+#   Contrastive/gap_pool_eff_pos_L0    effective positions contributing (P at uniform).
+#   WeightedFrac/bt_gap_*_L0           whether the GAP term's share of the loss shifted.
+#
+# Off_diag is NOT the metric here: it keeps its d(d-1)/B sampling floor either way, since
+# pooling changes the signal per row and not the number of rows.
+#
+# NOTE ON INHERITANCE: launch.py does not chain _base_ (it pops the key from the base
+# config with "Don't chain further"), so this cannot say `_base_: synthetic_causal` and
+# inherit the synthetic defaults through it — that would silently resolve against
+# defaults.yaml and run this on ADNI. The block below therefore mirrors
+# synthetic_causal.yaml verbatim; keep the two in sync, and diff them before reading any
+# comparison as an ablation of the pooling alone.
+
+_base_: synthetic_defaults
+tag: gap-pool-variance
+
+# ── the one line under test ──────────────────────────────────────────────────────────
+bt_gap_pool: variance
+bt_gap_pool_ema: 0.9 # the per-position profile is estimated from B subjects; smooth it
+
+# ── mirrored from synthetic_causal.yaml, unchanged ───────────────────────────────────
+contrastive_loss_type: barlow_twins
+patch_contrastive: true
+patch_grid: [8, 8, 8]
+patch_center_mode: position
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+bt_gap_weight: 1
+bt_gap_lambda: 0.013
+bt_patch_weight: 1
+bt_sim_normalize: true
+bt_sim_coeff: 0.5
+bt_std_coeff: 10
+bt_corr_ema: 0.99
+single_count_commitment: true
+scale_contrastive_loss: 1
+scale_recon_loss: 1
+grad_clip_norm: 100
+batch_size: 128
+synthetic_identifiable_ventricle: true
+content_size: 44
+synthetic_normalize: fixed_reference
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_res: 64
+synthetic_clean_content: true
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
+inject_style_to_decoder: true
+style_injection_mode: input
+separate_style_codebooks: true
+separate_content_codebooks: false
+vqvae_nb_levels: 1
+vqvae_nb_res_layers: 2
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [4]
+deterministic: true
+checkpoint_steps: 1000
+eval_dci: true

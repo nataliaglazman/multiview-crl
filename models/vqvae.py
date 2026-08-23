@@ -1,4 +1,5 @@
 import copy
+import math
 import warnings
 from math import log2
 from typing import Tuple
@@ -1707,6 +1708,212 @@ class VQVAE(HelperModule):
         if target_spatial_size is not None and out.shape[2:] != target_spatial_size:
             out = F.interpolate(out, size=target_spatial_size, mode="trilinear", align_corners=False)
         return out
+
+
+class GapPositionPool(nn.Module):
+    """Weighted position pooling for the Barlow Twins GAP companion term.
+
+    Replaces the plain ``z.mean(-1)`` in ``main_multimodal.patch_loss_func``. The GAP
+    term exists because writing the patch features as ``z[n,p,c] = s[n,c] + r[n,p,c]``
+    makes the uniform mean recover the subject term ``s`` EXACTLY — ``r`` is *defined*
+    as the deviation from that mean, so it sums to zero over ``p`` by construction, and
+    the 200:1 within-subject interaction that swamps the patch term integrates away.
+
+    Any reweighting gives ``sum_p a_p z[n,p] = s[n] + sum_p a_p r[n,p]``, and that
+    residual no longer vanishes. Two design constraints follow, and both are
+    load-bearing rather than stylistic:
+
+    - ``a`` is shared across VIEWS. Per-view weights make the two pooled vectors sample
+      different spatial supports, after which BT's ``on_diag`` reads "the two weightings
+      agreed" as if it were "the content agreed".
+    - ``a`` does not depend on the sample. A module conditioned on ``z[n]`` and trained
+      by the BT loss has a cheap shortcut — put mass where the two views already agree —
+      and ``barlow_twins_loss`` documents that ``on_diag`` reaches ~1 on shared anatomy
+      alone on registered volumes, so that shortcut is the cheapest direction available,
+      not a hypothetical. Sample-independence also keeps ``sum_p a_p r[n,p]`` a fixed
+      linear functional of the interaction instead of one correlated with it.
+
+    With per-position centering active (``--patch-center-mode position``) the residual
+    has zero mean across the batch at every position, so what survives adds variance
+    rather than a systematic bias.
+
+    What this does NOT fix: the correlation still has B subject rows, so ``off_diag``
+    keeps its ``d(d-1)/B`` sampling floor untouched. This raises the signal, not the
+    sample count — ``--bt-corr-ema`` is the lever for the latter, and the two compose.
+
+    Modes:
+        ``variance`` — no parameters, nothing learned. ``a_p`` tracks the across-SUBJECT
+            variance at position p, detached. Each (view, channel) variance profile is
+            normalised over positions BEFORE averaging, so one high-amplitude channel
+            cannot set the profile on its own — the same direction-equalisation argument
+            that motivates ``--bt-sim-normalize``. This is the cheap test of the
+            dilution hypothesis: if it does not move ``gap_feat_std``, ``learned`` will
+            not either.
+        ``learned`` — one logit per position, softmax over positions, zero-initialised
+            so ``a_p = 1/P`` and the GAP term is bit-identical to the plain mean at
+            step 0. Needs the entropy floor: with the variance hinge active, dumping all
+            mass on the single highest-variance position minimises it while reducing the
+            effective sample to one patch.
+
+    Args:
+        n_positions: Size of the FULL patch grid (``prod(patch_grid)``), not the
+            per-batch kept count — ``--patch-foreground-mask`` recomputes which
+            positions survive every batch, so weights are indexed by full-grid position
+            and sliced afterwards.
+        mode: ``"variance"`` or ``"learned"``.
+        temperature: Softmax temperature, ``learned`` only. >1 flattens.
+        entropy_floor: Fraction of ``log(P)`` the weight entropy is held above,
+            ``learned`` only. 0 disables the hinge.
+        ema: Momentum on the per-position variance profile, ``variance`` only. The
+            profile is estimated from B subjects per batch, so it is noisy for the same
+            reason the cross-correlation is.
+    """
+
+    def __init__(
+        self,
+        n_positions: int,
+        mode: str = "variance",
+        temperature: float = 1.0,
+        entropy_floor: float = 0.5,
+        ema: float = 0.9,
+    ):
+        super().__init__()
+        if mode not in ("variance", "learned"):
+            raise ValueError(f"GapPositionPool mode must be 'variance' or 'learned', got {mode!r}.")
+        if n_positions < 1:
+            raise ValueError(f"GapPositionPool needs n_positions >= 1, got {n_positions}.")
+        self.n_positions = int(n_positions)
+        self.mode = mode
+        self.temperature = float(temperature)
+        self.entropy_floor = float(entropy_floor)
+        self.ema = float(ema)
+        if mode == "learned":
+            # Zero init => softmax is exactly uniform => pooling is exactly the mean it
+            # replaces. A resumed or freshly-enabled run therefore starts from the old
+            # objective rather than a random reweighting.
+            self.logits = nn.Parameter(torch.zeros(self.n_positions))
+        else:
+            # Per-position EMA state, with a PER-POSITION step count for Adam-style bias
+            # correction. Per-position and not one scalar because the foreground mask can
+            # drop a position for some batches and not others, so they do not all update
+            # the same number of times. Registered as buffers so they checkpoint with the
+            # model; a zero init is unbiased under the correction, so a resume costs a
+            # noisier profile for ~1/(1-m) steps rather than a transient.
+            self.register_buffer("var_ema", torch.zeros(self.n_positions))
+            self.register_buffer("var_ema_t", torch.zeros(self.n_positions))
+
+    def _slice(self, keep_pos):
+        """Validate the per-batch keep mask and return an index usable on (P_full,)."""
+        if keep_pos is None:
+            return slice(None)
+        if keep_pos.dtype != torch.bool:
+            raise TypeError(f"GapPositionPool expects a boolean keep mask, got dtype {keep_pos.dtype}.")
+        if keep_pos.numel() != self.n_positions:
+            raise ValueError(
+                f"GapPositionPool was built for {self.n_positions} positions but the keep mask "
+                f"covers {keep_pos.numel()}. The mask must index the FULL patch grid — check "
+                "--patch-grid / --patch-grid-per-level against the level this pooler belongs to."
+            )
+        return keep_pos
+
+    def weights(self, z, keep_pos=None):
+        """Pooling weights ``(P,)`` summing to 1, aligned to ``z``'s last axis.
+
+        ``z`` is ``(n_views, B, C, P)``; ``keep_pos`` is the full-grid boolean mask that
+        produced that P, or None when every position survived.
+        """
+        idx = self._slice(keep_pos)
+        n_kept = z.shape[-1]
+        expected = self.n_positions if keep_pos is None else int(keep_pos.sum())
+        if n_kept != expected:
+            raise ValueError(
+                f"GapPositionPool got {n_kept} positions but its weights cover {expected}. "
+                "The features and the keep mask disagree about the patch grid."
+            )
+
+        if self.mode == "learned":
+            w = self.logits if keep_pos is None else self.logits[idx]
+            return torch.softmax(w.float() / self.temperature, dim=0)
+
+        # --- variance mode: detached, no gradient path to anything ---
+        if z.shape[1] < 2:
+            # Across-subject variance is identically zero at B=1 and the normalisation
+            # below would divide noise by noise. Fall back to the uniform mean.
+            return z.new_full((n_kept,), 1.0 / n_kept, dtype=torch.float32)
+        with torch.no_grad():
+            v = z.detach().float().var(dim=1, unbiased=False)  # (n_views, C, P), across SUBJECTS
+            v = v / (v.sum(-1, keepdim=True) + 1e-12)  # per (view, channel) profile over positions
+            v = v.mean(dim=(0, 1))  # (P,)
+            if self.ema > 0:
+                m = self.ema
+                prev = self.var_ema[idx].to(device=v.device, dtype=v.dtype)
+                cur = m * prev + (1.0 - m) * v
+                self.var_ema[idx] = cur.to(device=self.var_ema.device, dtype=self.var_ema.dtype)
+                self.var_ema_t[idx] = self.var_ema_t[idx] + 1.0
+                t = self.var_ema_t[idx].to(device=v.device, dtype=v.dtype)
+                v = cur / (1.0 - m**t).clamp_min(1e-8)  # bias correction
+            return v / (v.sum() + 1e-12)
+
+    def forward(self, z, keep_pos=None):
+        """Pool ``(n_views, B, C, P)`` to ``(n_views, B, C)``. Returns ``(pooled, a)``."""
+        a = self.weights(z, keep_pos)
+        # matmul rather than (z * a).sum(-1): the elementwise form materialises a second
+        # copy of the patch tensor (~25 MB at B=128, C=48, P=512, two views) plus its
+        # autograd graph, and cuDNN reports that kind of workspace pressure as "unable to
+        # find an engine" rather than as an OOM — the same trap documented in
+        # losses.barlow_twins_loss for the uncentered sim/var copy.
+        return torch.matmul(z, a.to(z.dtype)), a
+
+    def entropy_penalty(self, a):
+        """Raw hinge ``relu(floor*log(P) - H(a))``. None when it cannot bite.
+
+        Returned UNWEIGHTED so the caller can log it next to the other raw Barlow Twins
+        terms and apply its coefficient in one place, matching how ``off_diag`` and the
+        variance hinge are handled.
+
+        KNOWN LIMIT, measured, so nobody rediscovers it from a dead run: this hinge is a
+        restoring force over the band it is meant to police and a NO-OP once the softmax
+        has fully saturated. Differentiating the entropy of a softmax gives
+
+            dH/dw_j = -a_j * (log a_j + H)
+
+        which tends to 0 as a_j -> 1 and H -> 0, so a completely collapsed weighting is a
+        stationary point of the penalty — the same absorbing-state shape as the collapsed
+        projection head documented in main_multimodal's optimizer setup, and for the same
+        reason (the parameterisation's own Jacobian vanishes, so no smooth function of
+        ``a`` can pull it back). Measured at P=64, floor 0.5, by peak logit:
+
+            peak  4 -> a_0 0.46, H/logP 0.70, hinge 0.00, grad 0.0     (below the floor)
+            peak  6 -> a_0 0.86, H/logP 0.23, hinge 1.12, grad 0.70    (working)
+            peak 10 -> a_0 1.00, H/logP 0.01, hinge 2.05, grad 0.028
+            peak 20 -> a_0 1.00, H/logP 0.00, hinge 2.08, grad 3e-6    (absorbing)
+
+        In practice the weights START uniform and the hinge is active with a healthy
+        gradient across the whole descent, so reaching the dead zone takes a BT gradient
+        that overpowers it continuously — and ``gap_pool_entropy`` shows that happening
+        long before it completes. Watch that curve; if it ever parks near 0, raising
+        --bt-gap-pool-entropy-coeff will NOT recover the run, so restart from an earlier
+        checkpoint with the higher coefficient.
+        """
+        if self.mode != "learned" or self.entropy_floor <= 0 or a.numel() < 2:
+            return None
+        h = -(a * torch.log(a + 1e-12)).sum()
+        return F.relu(self.entropy_floor * math.log(a.numel()) - h)
+
+    @staticmethod
+    def diagnostics(a):
+        """Readouts for how concentrated the pooling has become."""
+        with torch.no_grad():
+            p = a.numel()
+            h = -(a * torch.log(a + 1e-12)).sum()
+            return {
+                # 1.0 = uniform, 0.0 = all mass on one position.
+                "gap_pool_entropy": (h / math.log(p)).item() if p > 1 else 1.0,
+                # Effective number of positions actually contributing.
+                "gap_pool_eff_pos": h.exp().item(),
+                # Heaviest weight RELATIVE to uniform: 1.0 = uniform, P = collapsed.
+                "gap_pool_max_weight": (a.max() * p).item(),
+            }
 
 
 class MoCoEncoder(nn.Module):

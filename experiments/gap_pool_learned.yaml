@@ -1,0 +1,86 @@
+# Learned position prior for the Barlow Twins GAP term.
+#
+# Run gap_pool_variance.yaml FIRST. This variant costs P parameters and an extra loss term
+# to answer the same question, so it is only worth running if the detached version already
+# showed the position profile is non-flat.
+#
+# One logit per position, softmax over positions, zero-initialised — so at step 0 this is
+# EXACTLY the uniform mean and the run starts from the objective it is being compared
+# against. The weights are shared across views and independent of the sample, deliberately:
+# a sample-conditioned attention module trained by this loss can raise on_diag by selecting
+# positions where the two views already agree, which costs nothing to learn and buys no
+# representation (barlow_twins_loss records on_diag reaching ~1 on shared anatomy alone).
+#
+# The entropy floor is not optional here. With bt_std_coeff active, putting all mass on the
+# single highest-variance position minimises the variance hinge outright, and that collapses
+# every GAP statistic to a one-patch sample.
+#
+# What to read, in order:
+#   Contrastive/gap_pool_entropy_L0    1.0 = uniform, 0.0 = collapsed. WATCH THIS ONE.
+#                                      The hinge cannot recover a fully collapsed softmax
+#                                      (its gradient vanishes there — see
+#                                      GapPositionPool.entropy_penalty), so if this parks
+#                                      near 0, restart from an earlier checkpoint with a
+#                                      higher bt_gap_pool_entropy_coeff rather than
+#                                      raising it mid-run.
+#   Contrastive/gap_feat_std_mean_L0   the payoff, same as the variance run.
+#   Weighted/bt_gap_pool_entropy_L0    what the hinge is actually contributing. Sustained
+#                                      and large means the floor is fighting the objective
+#                                      rather than backstopping it — lower the floor
+#                                      instead of the coefficient.
+#   Contrastive/gap_pool_max_weight_L0 heaviest weight relative to uniform (1.0 = uniform).
+#
+# NOTE ON INHERITANCE: launch.py does not chain _base_, so the block below mirrors
+# synthetic_causal.yaml verbatim rather than inheriting through it. Keep them in sync.
+
+_base_: synthetic_defaults
+tag: gap-pool-learned
+
+# ── the lines under test ─────────────────────────────────────────────────────────────
+bt_gap_pool: learned
+bt_gap_pool_temp: 1.0
+bt_gap_pool_entropy: 0.5 # hold entropy above 0.5*log(P)
+bt_gap_pool_entropy_coeff: 1.0 # size from the measured hinge, as with every other BT coeff
+
+# ── mirrored from synthetic_causal.yaml, unchanged ───────────────────────────────────
+contrastive_loss_type: barlow_twins
+patch_contrastive: true
+patch_grid: [8, 8, 8]
+patch_center_mode: position
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+bt_gap_weight: 1
+bt_gap_lambda: 0.013
+bt_patch_weight: 1
+bt_sim_normalize: true
+bt_sim_coeff: 0.5
+bt_std_coeff: 10
+bt_corr_ema: 0.99
+single_count_commitment: true
+scale_contrastive_loss: 1
+scale_recon_loss: 1
+grad_clip_norm: 100
+batch_size: 128
+synthetic_identifiable_ventricle: true
+content_size: 44
+synthetic_normalize: fixed_reference
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_res: 64
+synthetic_clean_content: true
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
+inject_style_to_decoder: true
+style_injection_mode: input
+separate_style_codebooks: true
+separate_content_codebooks: false
+vqvae_nb_levels: 1
+vqvae_nb_res_layers: 2
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [4]
+deterministic: true
+checkpoint_steps: 1000
+eval_dci: true
