@@ -442,5 +442,53 @@ check(
     f"{profile_overlap([_pf[1], _pf[2]]):+.3f}",
 )
 
+print("\n15. split-half reliability separates real localisation from noise concentration")
+# Concentration on a NOISY profile is inflated, so raw top10% alone makes the WORST
+# recovered factor look the MOST localised. A permutation null does not fix this: shuffling
+# labels drives R^2 to zero everywhere, and an all-zeros profile with one surviving entry
+# normalises to MAXIMAL concentration, so the null reads more localised than the data.
+# Split-half does fix it. The case that matters is f2: genuinely localised but recovered at
+# only peak R^2 ~0.12, the same level as this project's lesion factors — it must still be
+# detected, or a negative result on those factors would be a sensitivity failure, not a
+# finding.
+from eval.gap_pool_profile import profile_reliability  # noqa: E402
+
+torch.manual_seed(0)
+np.random.seed(0)
+_p2, _n2, _c2 = 128, 2000, 24
+_gt2 = np.random.randn(_n2, 4)
+_z2 = torch.randn(2, _n2, _c2, _p2) * 0.5
+
+
+def _fac2(k):
+    return torch.tensor(_gt2[:, k], dtype=torch.float32)[None, :, None, None]
+
+
+_z2 += _fac2(0) * 2.0  # f0 strong, global
+_z2[:, :, :, 0:8] += _fac2(1) * 3.0  # f1 localised, strongly recovered
+_z2[:, :, :, 60:68] += _fac2(2) * 0.9  # f2 localised, WEAKLY recovered (the sensitivity case)
+_z2 += _fac2(3) * 0.25  # f3 global and near-unrecoverable (the noise trap)
+
+_idx2 = np.random.RandomState(0).permutation(_n2)[: _n2 // 2]
+_pf2 = per_factor_recovery(_z2, _gt2, _idx2)
+_rl2 = profile_reliability(_z2, _gt2, _idx2)
+
+
+def _is_loc(k):
+    if _pf2[k].max() <= 0:
+        return False
+    _s = profile_stats(_pf2[k] / _pf2[k].sum())["top10pct_mass"]
+    return _s > 0.15 and np.isfinite(_rl2[k]) and _rl2[k] > 0.5
+
+
+for _k, _nm, _want in (
+    (0, "strong global -> not localised", False),
+    (1, "strongly-recovered localised -> localised", True),
+    (2, "WEAKLY-recovered localised -> still localised", True),
+    (3, "near-unrecoverable global -> not localised (noise trap)", False),
+):
+    _pk = _pf2[_k].max()
+    check(_nm, _is_loc(_k) == _want, f"peakR2={_pk:.3f} reliability={_rl2[_k]:.3f}")
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)

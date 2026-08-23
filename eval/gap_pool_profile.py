@@ -234,6 +234,33 @@ def per_factor_recovery(hz, gt, fit_idx, alpha=1.0):
     return out
 
 
+def profile_reliability(hz, gt, idx, alpha=1.0):
+    """Split-half correlation of each factor's per-position R^2 profile: is its SHAPE real?
+
+    Concentration measured on a noisy profile is inflated, so without this the WORST
+    recovered factor reliably looks the MOST localised — backwards, and it happened on this
+    project's baseline (lesion_z, weakest at peak R^2 0.39, was the only factor to clear a
+    raw concentration threshold).
+
+    A permutation null does NOT fix it: shuffling subject labels drives R^2 to zero at every
+    position, and a profile of all zeros with one surviving positive entry normalises to a
+    MAXIMALLY concentrated profile. The null then looks more localised than the data.
+
+    Split-half does fix it, and is the standard tool. Estimate each factor's profile on two
+    disjoint halves of the subjects and correlate them. Real spatial structure reproduces;
+    estimation noise does not. Read alongside the concentration: high top10% with low
+    reliability is noise, high top10% with high reliability is localisation.
+    """
+    h = len(idx) // 2
+    a = per_factor_recovery(hz, gt, idx[:h], alpha)
+    b = per_factor_recovery(hz, gt, idx[h:], alpha)
+    out = np.full(a.shape[0], np.nan)
+    for k in range(a.shape[0]):
+        if a[k].std() > 1e-9 and b[k].std() > 1e-9:
+            out[k] = float(np.corrcoef(a[k], b[k])[0, 1])
+    return out
+
+
 def profile_overlap(profiles):
     """Mean pairwise cosine between per-factor position profiles, centred at uniform.
 
@@ -507,22 +534,37 @@ def main():
     from eval.dci import CONTENT_FACTOR_NAMES
 
     pf = per_factor_recovery(hz, gt, fit_idx)
+    # Concentration measured on a NOISY profile is inflated: a factor recovered at R^2 0.1
+    # has a per-position profile that is mostly estimation noise, and noise concentrates.
+    # Uncorrected, the WORST-recovered factor reliably looks the MOST localised — which is
+    # backwards, and did exactly that on this project's baseline (lesion_z, the weakest
+    # factor at peak R^2 0.39, was the only one to clear a raw 0.15 threshold). So give each
+    # factor its own noise floor: the same measurement with subject labels shuffled, which
+    # destroys the factor-feature relationship while preserving every other property.
+    reliab = profile_reliability(hz, gt, fit_idx)
     names = (CONTENT_FACTOR_NAMES + [f"factor_{i}" for i in range(pf.shape[0])])[: pf.shape[0]]
     print("\n--- per-factor spatial profiles (the averaged one hides localised factors) ---")
-    print(f"  {'factor':20s} {'peak R^2':>9s} {'mean R^2':>9s} {'top10%':>8s} {'peak pos':>9s}")
+    print(f"  {'factor':20s} {'peak R^2':>9s} {'mean R^2':>9s} {'top10%':>8s} {'split-half':>11s}")
     rows = []
     for k, nm in enumerate(names):
         prof = pf[k]
         if prof.max() <= 0:
-            print(f"  {nm:20s} {0.0:9.4f} {0.0:9.4f} {'-':>8s} {'-':>9s}   (not recovered anywhere)")
+            print(f"  {nm:20s} {0.0:9.4f} {0.0:9.4f} {'-':>8s} {'-':>11s}   (not recovered)")
             continue
         s = profile_stats(prof / prof.sum())
-        rows.append((nm, prof, s))
-        print(f"  {nm:20s} {prof.max():9.4f} {prof.mean():9.4f} {s['top10pct_mass']:8.3f} " f"{int(prof.argmax()):9d}")
-    print("  top10% 0.10 = that factor is readable equally everywhere; higher = localised.")
+        r = reliab[k]
+        rows.append((nm, prof, s, r))
+        _r = "     n/a" if not np.isfinite(r) else f"{r:11.3f}"
+        print(f"  {nm:20s} {prof.max():9.4f} {prof.mean():9.4f} {s['top10pct_mass']:8.3f} {_r}")
+    print("  top10% 0.10 = readable equally everywhere; higher = concentrated.")
+    print("  split-half = correlation between the profile estimated on two disjoint halves of")
+    print("  the subjects. It is the check that keeps this honest: concentration on a NOISY")
+    print("  profile is inflated, so a weakly-recovered factor looks localised when it is not.")
+    print("  Localised means BOTH concentrated AND reproducible; high top10% with low")
+    print("  split-half is noise.")
     # Do the localised ones agree about WHERE? This is what decides whether one shared
     # weight vector could serve them, which is what --bt-gap-pool actually implements.
-    loc = [(nm, prof) for nm, prof, s in rows if s["top10pct_mass"] > 0.15]
+    loc = [(nm, prof) for nm, prof, s, r in rows if s["top10pct_mass"] > 0.15 and np.isfinite(r) and r > 0.5]
     if len(loc) >= 2:
         ov = profile_overlap([p for _, p in loc])
         print(f"  localised factors ({', '.join(nm for nm, _ in loc)}):")
