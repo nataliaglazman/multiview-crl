@@ -1516,6 +1516,66 @@ def _minibar(gap, width=10):
     return "[" + "#" * filled + "." * (width - filled) + "]"
 
 
+# Suffix --floor appends to a run's name for its untrained twin. One definition, shared
+# by the row builder and the readers below.
+_FLOOR_SUFFIX = "-floor"
+
+
+def _dnum(x, nd=3):
+    """Signed delta, so a floor-subtracted column reads at a glance."""
+    return f"{x:+.{nd}f}" if x is not None and np.isfinite(x) else "   -  "
+
+
+def _floor_map(rows):
+    """``{model name: its --floor twin row}``, empty when --floor was not passed."""
+    by_name = {r.get("name"): r for r in rows}
+    return {
+        n: by_name[n + _FLOOR_SUFFIX] for n in by_name if not n.endswith(_FLOOR_SUFFIX) and n + _FLOOR_SUFFIX in by_name
+    }
+
+
+def _floor_gap(floor_row, block_key, fname, detail_key="detail"):
+    """That factor's GAP in the floor twin's ``block_key``, or NaN if absent.
+
+    ``detail_key`` must track the row being printed: under --per-encoder, encoder 2's
+    numbers have to be differenced against encoder 2's floor, not encoder 1's.
+    """
+    if floor_row is None:
+        return float("nan")
+    block = (floor_row.get(detail_key) or {}).get(block_key)
+    if not block:
+        return float("nan")
+    return _fl((block.get("per_factor", {}).get(fname) or {}).get("gap"))
+
+
+# A factor beaten this far at another pooling is very likely mis-assigned rather than
+# unrecovered. Deliberately blunt: the point is to prompt a look at FACTOR_POOLING, NOT
+# to rescore on the max — scoring on the best-of-N pooling is what the fixed assignment
+# exists to prevent.
+_ROUTING_MARGIN = 0.15
+
+
+def _routing_note(fd):
+    """Flag a factor whose assigned pooling is far from the best one available.
+
+    Caught sulcal_widening, which FACTOR_POOLING files under "present in the channel
+    mean" while the generator renders it as sin(12x)sin(12y)sin(12z) — zero-mean by
+    construction, so it cannot be in a channel average. Measured on an untrained
+    encoder: gap -0.08, stats -0.09, patch +0.87. Read at gap it looks like a factor no
+    model recovers; it is a factor no model was ever asked about.
+    """
+    by_pool = (fd or {}).get("by_pooling") or {}
+    assigned, g = fd.get("pooling"), _fl(fd.get("gap"))
+    best_k, best_g = None, float("-inf")
+    for k, v in by_pool.items():
+        gk = _fl(v.get("gap"))
+        if np.isfinite(gk) and gk > best_g:
+            best_k, best_g = k, gk
+    if best_k is None or best_k == assigned or not np.isfinite(g):
+        return ""
+    return f"   <- {best_g:.2f} at {best_k}; check FACTOR_POOLING" if best_g - g > _ROUTING_MARGIN else ""
+
+
 def print_per_latent(rows):
     """Per-model, per-factor breakdown: for every ground-truth factor, the GAP
     test-R² of predicting it from its OWN block (signal, want high) next to the
@@ -1525,9 +1585,12 @@ def print_per_latent(rows):
     a content factor should light up the signal bar and leave the leak bar empty,
     and vice-versa for style.  The full per-pooling sweep lives in the CSV.
     """
+    floors = _floor_map(rows)
     print()
     print("  PER-LATENT BREAKDOWN   (GAP = real - null at each factor's assigned pooling)")
     print("  SIGNAL = predicted from its own block (want high)   LEAK = from the other block (want low)")
+    if floors:
+        print("  Signed number after each cell = minus the --floor twin. That is the learned part.")
 
     _NUMW, _CELLW = 5, 18  # "0.650" and "0.650 [##########]"
 
@@ -1535,6 +1598,7 @@ def print_per_latent(rows):
         return f"{_num(g):>{_NUMW}s} {_minibar(g)}"
 
     for r in rows:
+        fl = floors.get(r["name"])
         for detail_key, enc_label in [("detail", ""), ("detail_v2", "  [enc2]")]:
             detail = r.get(detail_key)
             if not detail:
@@ -1550,18 +1614,27 @@ def print_per_latent(rows):
             fw = max([len(n) for n in names] + [14])
             sep_w = fw + 2 + 6 + 2 + _CELLW + 4 + _CELLW
 
-            def _emit(kind, signal_pf, leak_pf, sig_src, leak_src):
+            def _emit(kind, signal_pf, leak_pf, sig_src, leak_src, sig_key, leak_key):
+                dh = "  Δflr " if fl else ""
                 print(
                     f"    {kind + ' factor':<{fw}s}  {'pool':<6s}  "
-                    f"{'SIGNAL: ' + sig_src:<{_CELLW}s}    {'LEAK: ' + leak_src:<{_CELLW}s}"
+                    f"{'SIGNAL: ' + sig_src:<{_CELLW}s}{dh}    {'LEAK: ' + leak_src:<{_CELLW}s}{dh}"
                 )
-                print("    " + "-" * sep_w)
+                print("    " + "-" * (sep_w + (14 if fl else 0)))
                 for fname, fd in signal_pf.items():
                     pool = fd.get("pooling") or "?"
                     sgap = fd.get("gap")
                     lgap = (leak_pf.get(fname, {}) or {}).get("gap") if leak_pf else None
                     leak_cell = _cell(lgap) if leak_pf is not None else f"{'n/a':>{_NUMW}s}"
-                    print(f"    {fname:<{fw}s}  {pool:<6s}  {_cell(sgap)}    {leak_cell}")
+                    ds = f"  {_dnum(_fl(sgap) - _floor_gap(fl, sig_key, fname, detail_key))}" if fl else ""
+                    dl = ""
+                    if fl:
+                        dl = (
+                            f"  {_dnum(_fl(lgap) - _floor_gap(fl, leak_key, fname, detail_key))}"
+                            if leak_pf is not None
+                            else ""
+                        )
+                    print(f"    {fname:<{fw}s}  {pool:<6s}  {_cell(sgap)}{ds}    {leak_cell}{dl}")
 
             print()
             print(f"  {r['name']}{enc_label}  ({r.get('checkpoint', '?')})")
@@ -1571,6 +1644,8 @@ def print_per_latent(rows):
                 sc["per_factor"] if sc else None,
                 "from content",
                 "from style",
+                "content2content",
+                "style2content",
             )
             if ss:
                 print()
@@ -1580,6 +1655,8 @@ def print_per_latent(rows):
                     cs["per_factor"] if cs else None,
                     "from style",
                     "from content",
+                    "style2style",
+                    "content2style",
                 )
     print()
 
@@ -1778,9 +1855,15 @@ def print_capacity_table(rows, baseline_name=None):
         return
     ranked = sorted(have, key=lambda r: r.get("info_all", float("-inf")), reverse=True)
     pdim = next((r.get("probe_dim") for r in have if r.get("probe_dim")), 0)
+    floors = _floor_map(rows)
     print()
     print("  ALL-CHANNELS CAPACITY   (GAP = real - null; full representation -> each factor)")
     print("  higher = more factor information present somewhere in the representation")
+    if floors:
+        print(
+            "  TRAILING SIGNED NUMBER = this row minus its --floor twin. Read THAT, not the "
+            "absolute:\n  at patch pooling an untrained encoder alone scores >0.8 on most factors."
+        )
     if pdim == PROBE_DIM_AUTO:
         print("  NOTE: --probe-dim auto — p>>n blocks (d > N/4) reduced to min(64, N/4) PCs; others full width")
     elif pdim:
@@ -1801,11 +1884,14 @@ def print_capacity_table(rows, baseline_name=None):
         # baseline (all-channels) is scored on both encoders, not just the first.
         has_v2 = np.isfinite(r.get("info_all_v2", float("nan")))
 
+        fl = floors.get(r["name"])
+
         def _emit_enc(suffix, enc_label):
             allb = (r.get("detail_v2" if suffix else "detail") or {}).get("all")
             mean = r.get("info_all" + suffix, float("nan"))
             head = f"    {enc_label}  " if enc_label else "    "
-            print(f"{head}mean {_num(mean)} {_minibar(mean)}")
+            dmean = f"  {_dnum(_fl(mean) - _fl(fl.get('info_all' + suffix)))}" if fl else ""
+            print(f"{head}mean {_num(mean)} {_minibar(mean)}{dmean}")
             # D/C as "real - null = gap" per scope.  The gap alone is not readable: raw
             # D/C are shape artifacts (D is normalized by the factor count, C by the code
             # count), so a model can look disentangled purely from its dimensions, and a
@@ -1835,11 +1921,16 @@ def print_capacity_table(rows, baseline_name=None):
             if allb:
                 cset = set(allb.get("content_names", []))
                 fw = max([len(n) for n in allb["per_factor"]] + [16])
+                fl_all = ((fl or {}).get("detail_v2" if suffix else "detail") or {}).get("all") if fl else None
                 for fname, fd in allb["per_factor"].items():
                     kind = "content" if fname in cset else "style"
                     g = fd.get("gap")
                     pool = fd.get("pooling") or "?"
-                    print(f"      {kind:7s} {fname:<{fw}s} {pool:<6s} {_num(g)} {_minibar(g)}")
+                    d = ""
+                    if fl_all:
+                        fg = _fl((fl_all.get("per_factor", {}).get(fname) or {}).get("gap"))
+                        d = f"  {_dnum(_fl(g) - fg)}"
+                    print(f"      {kind:7s} {fname:<{fw}s} {pool:<6s} {_num(g)} {_minibar(g)}{d}{_routing_note(fd)}")
 
         print()
         print(f"  {r['name']}{tag}   {chans}ch")
