@@ -211,6 +211,48 @@ def _ridge_r2(x_tr, y_tr, x_te, y_te, alpha=1.0):
     return 1.0 - ss_res / ss_tot
 
 
+def per_factor_recovery(hz, gt, fit_idx, alpha=1.0):
+    """Per-position recovery R^2 for EACH factor separately: returns (K, P).
+
+    The averaged profile is misleading on this project's factor set, and the reason is
+    arithmetic rather than subtle. Measured per-factor R^2 on a contrastive run: brain_size
+    0.92, lr_asymmetry 0.88, cortical_thickness 0.88 — all globally visible, since any patch
+    of a bigger brain looks different — against lesion_x/y/z at 0.10-0.15, which are the
+    spatially localised ones. A mean over that set is roughly "how well does this position
+    predict brain size", so it reads flat across positions whatever the localised factors
+    do, and averaging is what hid them.
+
+    Same non-circular split as ``factor_recovery_profile``: scored on a held-out half of
+    ``fit_idx``.
+    """
+    x = hz.mean(0).numpy()  # (N, C, P), views averaged
+    n_fit = len(fit_idx)
+    a_idx, b_idx = fit_idx[: n_fit // 2], fit_idx[n_fit // 2 :]
+    out = np.zeros((gt.shape[1], x.shape[2]))
+    for p in range(x.shape[2]):
+        out[:, p] = np.maximum(0.0, _ridge_r2(x[a_idx, :, p], gt[a_idx], x[b_idx, :, p], gt[b_idx], alpha))
+    return out
+
+
+def profile_overlap(profiles):
+    """Mean pairwise cosine between per-factor position profiles, centred at uniform.
+
+    This is the question that decides whether a SHARED weighting could ever work: if the
+    localised factors peak in the same places, one weight vector can serve them all; if they
+    peak in different places, no single vector can, however well each factor is localised.
+    Centred at uniform because non-negative profiles that sum to 1 have high raw cosine
+    whatever they do.
+    """
+    if len(profiles) < 2:
+        return float("nan")
+    m = np.asarray(profiles, dtype=np.float64)
+    m = m / (m.sum(axis=1, keepdims=True) + 1e-12)
+    c = m - 1.0 / m.shape[1]
+    c = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-12)
+    g = c @ c.T
+    return float(g[~np.eye(len(g), dtype=bool)].mean())
+
+
 def factor_recovery_profile(hz, gt, fit_idx, alpha=1.0):
     """Weight each position by how well ITS features predict the ground-truth factors.
 
@@ -458,6 +500,43 @@ def main():
     print(f"  pooled factor R^2  uniform {r2_uniform:.4f} -> factor-weighted {r2_factor:.4f}")
     print(f"    permutation null {r2_null_mean:.4f} (sd {r2_null_std:.4f})   z = {z_fac:.1f}")
     print("  Profile fitted on half the subjects, probe scored on the held-out half.")
+
+    # ── PER-FACTOR spatial profiles ──────────────────────────────────────────────────
+    # The averaged profile above is dominated by whichever factors are globally visible,
+    # so it cannot see a localised factor at all. Split it.
+    from eval.dci import CONTENT_FACTOR_NAMES
+
+    pf = per_factor_recovery(hz, gt, fit_idx)
+    names = (CONTENT_FACTOR_NAMES + [f"factor_{i}" for i in range(pf.shape[0])])[: pf.shape[0]]
+    print("\n--- per-factor spatial profiles (the averaged one hides localised factors) ---")
+    print(f"  {'factor':20s} {'peak R^2':>9s} {'mean R^2':>9s} {'top10%':>8s} {'peak pos':>9s}")
+    rows = []
+    for k, nm in enumerate(names):
+        prof = pf[k]
+        if prof.max() <= 0:
+            print(f"  {nm:20s} {0.0:9.4f} {0.0:9.4f} {'-':>8s} {'-':>9s}   (not recovered anywhere)")
+            continue
+        s = profile_stats(prof / prof.sum())
+        rows.append((nm, prof, s))
+        print(f"  {nm:20s} {prof.max():9.4f} {prof.mean():9.4f} {s['top10pct_mass']:8.3f} " f"{int(prof.argmax()):9d}")
+    print("  top10% 0.10 = that factor is readable equally everywhere; higher = localised.")
+    # Do the localised ones agree about WHERE? This is what decides whether one shared
+    # weight vector could serve them, which is what --bt-gap-pool actually implements.
+    loc = [(nm, prof) for nm, prof, s in rows if s["top10pct_mass"] > 0.15]
+    if len(loc) >= 2:
+        ov = profile_overlap([p for _, p in loc])
+        print(f"  localised factors ({', '.join(nm for nm, _ in loc)}):")
+        print(f"    mean pairwise profile cosine {ov:+.3f}   (1.0 = same places, ~0 = different places)")
+        if ov < 0.3:
+            print("    => they peak in DIFFERENT places, so no single shared position weighting")
+            print("       can serve them — which is exactly what --bt-gap-pool implements.")
+        else:
+            print("    => they peak in the SAME places; a shared weighting is at least coherent")
+            print("       for them, even if the aggregate test above did not clear its bar.")
+    elif len(loc) == 1:
+        print(f"  only one factor is localised ({loc[0][0]}); a shared weighting would serve it alone.")
+    else:
+        print("  no factor is meaningfully localised — every one is readable everywhere.")
 
     # ── combined verdict ─────────────────────────────────────────────────────────────
     var_wins = z > 3.0 and gain_vs_null >= cli.min_effect

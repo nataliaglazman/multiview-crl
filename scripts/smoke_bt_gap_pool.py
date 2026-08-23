@@ -387,5 +387,60 @@ for _name, _scale, _want_below in (("below target", 0.3, True), ("pinned", 1.05,
         f"below1={_fs['frac_below_1']:.0%} pinned={_fs['frac_pinned']:.0%}",
     )
 
+print("\n14. per-factor profiles see localisation the AVERAGED profile cannot")
+# Why this exists: the averaged factor-recovery profile was used to conclude "the factor
+# information is delocalised" on two real checkpoints (top10% 0.115 / 0.117 against a 0.10
+# flat floor). This plants three PERFECTLY localised factors plus one global one and shows
+# the averaged profile still reads 0.10 — indistinguishable from the real data. The
+# averaged measurement cannot support that conclusion, and this pins the fact.
+from eval.gap_pool_profile import per_factor_recovery, profile_overlap, profile_stats  # noqa: E402
+
+torch.manual_seed(0)
+np.random.seed(0)
+_p, _n, _c = 128, 1000, 24
+_gt = np.random.randn(_n, 4)
+_z = torch.randn(2, _n, _c, _p) * 0.5
+
+
+def _fac(k):
+    return torch.tensor(_gt[:, k], dtype=torch.float32)[None, :, None, None]
+
+
+_z += _fac(0) * 0.5  # global: readable everywhere
+_z[:, :, :, 0:8] += _fac(1) * 3.0  # localised at 0-7
+_z[:, :, :, 60:68] += _fac(2) * 3.0  # localised at 60-67, a DIFFERENT place
+_z[:, :, :, 0:8] += _fac(3) * 3.0  # localised at 0-7, the SAME place as factor 1
+
+_pf = per_factor_recovery(_z, _gt, np.random.RandomState(0).permutation(_n)[: _n // 2])
+_stats = [profile_stats(_pf[k] / _pf[k].sum()) for k in range(4)]
+check("global factor reads flat", _stats[0]["top10pct_mass"] < 0.15, f"top10%={_stats[0]['top10pct_mass']:.3f}")
+check(
+    "all three localised factors read concentrated",
+    all(_stats[k]["top10pct_mass"] > 0.5 for k in (1, 2, 3)),
+    f"top10%={[round(_stats[k]['top10pct_mass'], 2) for k in (1, 2, 3)]}",
+)
+check(
+    "each localised factor peaks where it was planted",
+    int(_pf[1].argmax()) < 8 and 60 <= int(_pf[2].argmax()) < 68 and int(_pf[3].argmax()) < 8,
+    f"peaks={[int(_pf[k].argmax()) for k in (1, 2, 3)]}",
+)
+_avg = _pf.mean(0)
+_avg_top10 = profile_stats(_avg / _avg.sum())["top10pct_mass"]
+check(
+    "THE POINT: averaging hides all of it (reads flat despite 3 localised factors)",
+    _avg_top10 < 0.15,
+    f"averaged top10%={_avg_top10:.3f} vs real-data 0.115/0.117 — indistinguishable",
+)
+check(
+    "same-place factors have cosine ~1",
+    profile_overlap([_pf[1], _pf[3]]) > 0.9,
+    f"{profile_overlap([_pf[1], _pf[3]]):+.3f}",
+)
+check(
+    "different-place factors have cosine ~0",
+    abs(profile_overlap([_pf[1], _pf[2]])) < 0.3,
+    f"{profile_overlap([_pf[1], _pf[2]]):+.3f}",
+)
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)
