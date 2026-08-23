@@ -161,6 +161,43 @@ def channel_profiles(hz):
     }
 
 
+def feature_scale(hz):
+    """Per-channel across-subject std of the GAP-pooled feature, and the hinge it implies.
+
+    ``--bt-gap-std-coeff`` applies ``relu(1 - std)`` per channel, and it has no restoring
+    force above 1 — so once a channel passes the target the term stops pulling and the scale
+    parks wherever momentum left it. That makes ``gap_feat_std`` a readout of what the HINGE
+    did, not of anything about the representation, and it is why it cannot be used to
+    diagnose pooling (``on_diag``/``off_diag`` are scale-invariant anyway).
+
+    What this separates is the state the hinge is actually in:
+
+        below      most channels under 1     hinge pulling hard, scale still climbing
+        pinned     tight band just above 1   hinge boundary-active, holding the scale there
+        parked     broad, well above 1       hinge inert, inflation already applied
+
+    ``implied_var_loss`` reproduces ``losses.barlow_twins_loss``'s formula exactly (mean over
+    channels per view, summed over the two views), so compare it against the run's logged
+    ``Contrastive/gap_var_loss_L*``. If they roughly agree, these features are the ones
+    training sees; if they diverge badly, that discrepancy is itself the finding and nothing
+    below should be trusted until it is explained.
+    """
+    pooled = hz.mean(-1)  # (2, N, C) — the plain GAP the loss consumes
+    std = pooled.std(dim=1, unbiased=False)  # (2, C) across SUBJECTS
+    flat = std.reshape(-1).numpy()
+    return {
+        "std_mean": float(flat.mean()),
+        "std_median": float(np.median(flat)),
+        "std_min": float(flat.min()),
+        "std_max": float(flat.max()),
+        "frac_below_1": float((flat < 1.0).mean()),
+        "frac_pinned": float(((flat >= 1.0) & (flat < 1.3)).mean()),
+        # Exactly losses.barlow_twins_loss's var_loss: relu(1-std).mean() per view, summed.
+        "implied_var_loss": float(torch.relu(1.0 - std).mean(dim=1).sum()),
+        "n_channels": int(std.shape[1]),
+    }
+
+
 def _ridge_r2(x_tr, y_tr, x_te, y_te, alpha=1.0):
     """Closed-form multi-output ridge. Returns per-target R^2 on the test split."""
     mx = x_tr.mean(0)
@@ -350,6 +387,32 @@ def main():
     print(f"  channel-averaged top10% mass : {ch['pooled_top10']:.4f}")
     print(f"  agreement (survives averaging): {ch['agreement']:.4f}   (1.0 = same places, 0.0 = cancel out)")
     print(f"  mean pairwise cosine          : {ch['mean_pairwise_cosine']:+.4f}   (profiles centred at uniform)")
+
+    # ── what state is the variance hinge in? ─────────────────────────────────────────
+    # Not a pooling question — but this is the number that motivated the pooling work, it
+    # was misread, and every run inherits bt_gap_std_coeff from bt_std_coeff, so report it
+    # where someone will see it.
+    fs = feature_scale(hz)
+    gap_std_c = getattr(args_, "bt_gap_std_coeff", None)
+    gap_std_c = getattr(args_, "bt_std_coeff", 0.0) if gap_std_c is None else gap_std_c
+    inherited = getattr(args_, "bt_gap_std_coeff", None) is None
+    print("\n--- variance-hinge state (NOT a pooling readout — see --bt-gap-std-coeff) ---")
+    print(f"  bt_gap_std_coeff  : {gap_std_c}{'  (INHERITED from --bt-std-coeff)' if inherited else ''}")
+    print(f"  per-channel std   : mean {fs['std_mean']:.4f}  median {fs['std_median']:.4f}  "
+          f"min {fs['std_min']:.4f}  max {fs['std_max']:.4f}")  # fmt: skip
+    print(f"  below the target 1: {fs['frac_below_1']:.1%} of {fs['n_channels']} channels")
+    print(f"  pinned in [1, 1.3): {fs['frac_pinned']:.1%}")
+    print(f"  implied var_loss  : {fs['implied_var_loss']:.4f}   <- compare to logged Contrastive/gap_var_loss_L*")
+    if float(gap_std_c) > 0:
+        if fs["frac_below_1"] < 0.02:
+            print("  => INERT: essentially every channel is past the target, so the term contributes")
+            print("     no gradient while its per-channel inflation stands.")
+        elif fs["frac_pinned"] + fs["frac_below_1"] > 0.5:
+            print("  => BOUNDARY-ACTIVE: the hinge is holding the scale at the target, spending")
+            print("     gradient continuously on a quantity on_diag/off_diag cannot see. This is")
+            print("     the state where lowering --bt-gap-std-coeff to 0.1-0.5 changes the most.")
+        else:
+            print("  => PULLING: much of the block is still below the target and climbing.")
 
     # ── weight by FACTOR RECOVERY instead of variance ────────────────────────────────
     # Variance is a proxy, and this project measured the factor information to sit in the

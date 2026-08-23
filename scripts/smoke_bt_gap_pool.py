@@ -360,5 +360,32 @@ for _kind, _want_loc, _want_dis in (
         f"p75={_c['per_channel_top10_p75']:.3f} agreement={_c['agreement']:+.2f}",
     )
 
+print("\n13. feature_scale reproduces the shipped var_loss and classifies the hinge state")
+# The probe reports the variance hinge's state so a run can tell "inert" from
+# "boundary-active" without guessing from a noisy TensorBoard curve. Its implied_var_loss
+# has to equal what barlow_twins_loss actually computes, or the comparison against the
+# logged Contrastive/gap_var_loss_L* is meaningless.
+from eval.gap_pool_profile import feature_scale  # noqa: E402
+
+for _name, _scale, _want_below in (("below target", 0.3, True), ("pinned", 1.05, False), ("parked", 3.0, False)):
+    _n, _c, _p = 400, 20, 64
+    _b = torch.randn(2, _n, _c, _p)
+    _b = _b / _b.mean(-1).std(dim=1, unbiased=False).mean() * _scale
+    _fs = feature_scale(_b)
+    _l = barlow_twins_loss(
+        _b.mean(-1), estimated_content_indices=[list(range(_c))], subsets=[[0, 1]], lambd=1.0, std_coeff=1.0
+    )
+    _shipped = _l._contrastive_diag["var_loss"]
+    check(
+        f"{_name}: implied_var_loss == shipped var_loss",
+        abs(_fs["implied_var_loss"] - _shipped) < 1e-4,
+        f"implied={_fs['implied_var_loss']:.4f} shipped={_shipped:.4f}",
+    )
+    check(
+        f"{_name}: below-target fraction reads {'high' if _want_below else 'low'}",
+        (_fs["frac_below_1"] > 0.5) == _want_below,
+        f"below1={_fs['frac_below_1']:.0%} pinned={_fs['frac_pinned']:.0%}",
+    )
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)
