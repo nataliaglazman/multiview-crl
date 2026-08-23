@@ -403,16 +403,37 @@ def main():
     print(f"  below the target 1: {fs['frac_below_1']:.1%} of {fs['n_channels']} channels")
     print(f"  pinned in [1, 1.3): {fs['frac_pinned']:.1%}")
     print(f"  implied var_loss  : {fs['implied_var_loss']:.4f}   <- compare to logged Contrastive/gap_var_loss_L*")
-    if float(gap_std_c) > 0:
+    # The hinge only exists inside the Barlow Twins term. A recon-only baseline carries
+    # bt_std_coeff in its settings.json without ever applying it, so classifying its "hinge
+    # state" would be inventing a mechanism that never ran.
+    _cl_type = getattr(args_, "contrastive_loss_type", "infonce")
+    _cl_scale = float(getattr(args_, "scale_contrastive_loss", 1.0) or 0.0)
+    if _cl_type != "barlow_twins" or _cl_scale == 0.0:
+        print(f"  => NOT APPLICABLE: contrastive_loss_type={_cl_type}, scale_contrastive_loss={_cl_scale}.")
+        print("     The variance hinge is inside the Barlow Twins term, so it never ran here —")
+        print("     bt_std_coeff is an inherited config value with no effect. The std numbers")
+        print("     above describe the representation this model happens to have, not a hinge.")
+    elif float(gap_std_c) > 0:
         if fs["frac_below_1"] < 0.02:
             print("  => INERT: essentially every channel is past the target, so the term contributes")
             print("     no gradient while its per-channel inflation stands.")
-        elif fs["frac_pinned"] + fs["frac_below_1"] > 0.5:
-            print("  => BOUNDARY-ACTIVE: the hinge is holding the scale at the target, spending")
-            print("     gradient continuously on a quantity on_diag/off_diag cannot see. This is")
-            print("     the state where lowering --bt-gap-std-coeff to 0.1-0.5 changes the most.")
+        elif fs["frac_pinned"] > 0.5:
+            print("  => BOUNDARY-ACTIVE: most channels sit just above the target, so the hinge")
+            print("     crosses in and out of active every step (a gap_var_loss curve that")
+            print("     alternates between 0 and small positive is this). It is spending gradient")
+            print("     continuously on a quantity on_diag/off_diag cannot see — the state where")
+            print("     lowering --bt-gap-std-coeff to 0.1-0.5 changes the most.")
         else:
-            print("  => PULLING: much of the block is still below the target and climbing.")
+            print(f"  => PULLING: {fs['frac_below_1']:.0%} of channels are still below the target, so the hinge")
+            print("     is applying its full force and the scale has not converged. A gap_var_loss")
+            print("     that is never exactly 0 is this state.")
+    if fg_masked:
+        print("  CAVEAT: this run used --patch-foreground-mask, and the features above are pooled")
+        print("     over ALL positions while training pools over the kept subset only. That alone")
+        print("     shifts the scale, so if implied_var_loss disagrees with the logged")
+        print("     gap_var_loss (e.g. logged sometimes exactly 0 against a large implied value),")
+        print("     believe the logged one and treat this whole section as indicative only. The")
+        print("     scale-invariant sections above are unaffected either way.")
 
     # ── weight by FACTOR RECOVERY instead of variance ────────────────────────────────
     # Variance is a proxy, and this project measured the factor information to sit in the
@@ -443,6 +464,12 @@ def main():
     fac_wins = z_fac > 3.0 and (r2_factor - r2_null_mean) >= cli.min_effect
     channels_localised = ch["per_channel_top10_p75"] > 0.13  # meaningfully above the 0.10 floor
     channels_disagree = not (ch["agreement"] > 0.5) if channels_localised else False
+    # Is the FACTOR information spread evenly, regardless of what the variance does? If most
+    # positions independently predict the factors about as well as the best one, there is
+    # nothing for any weighting to concentrate on — this is the decisive statistic, and it
+    # is independent of the variance profile's shape.
+    frac_carrying = float((r2_map >= 0.5 * r2_map.max()).mean()) if r2_map.max() > 0 else 0.0
+    factor_delocalised = frac_carrying > 0.8 and s_fac["top10pct_mass"] < 0.15
 
     print("\n--- verdict ------------------------------------------------------------------")
     # A significantly NEGATIVE z is not "no signal" — it is a finding. It says the
@@ -485,17 +512,42 @@ def main():
             "Do NOT run --bt-gap-pool as built. Per-channel weights are the version of this\n"
             "idea that could work, at C x P parameters and a much larger collapse surface."
         )
+    elif channels_localised and factor_delocalised:
+        # The case both of this project's step-60k checkpoints land in, and the one the
+        # earlier version of this script mislabelled as "channels are flat" while printing
+        # a per-channel concentration 3-5x the flat floor. Variance structure and factor
+        # structure are DIFFERENT THINGS and only the second one matters here.
+        print(
+            f"NO — and the reason is precise. Spatial structure EXISTS: per-channel variance\n"
+            f"profiles are concentrated (p75 top10% {ch['per_channel_top10_p75']:.3f} vs 0.10 flat) and the\n"
+            f"channels agree about where (agreement {ch['agreement']:.2f}). But the FACTOR INFORMATION is\n"
+            f"delocalised: {frac_carrying:.0%} of positions independently predict the factors at half the\n"
+            f"best position's R^2 or better (per-position R^2 mean {r2_map.mean():.3f}, max {r2_map.max():.3f}), and\n"
+            f"the factor-recovery profile is nearly flat (top10% {s_fac['top10pct_mass']:.3f}).\n"
+            "So there is nothing to concentrate ON: essentially every position already\n"
+            "carries the factors, and reweighting cannot add information that uniform\n"
+            "averaging did not already collect. What the variance profile is peaked on is\n"
+            "something else — anatomy and per-view intensity structure, not factor content.\n"
+            "Consistent with eval/receptive_field_test.py's finding that far-background\n"
+            "positions predict brain_size at R^2 0.77: a feature at position p is not about\n"
+            "the anatomy at p. Cross-check with eval/plot_local_vs_global.py."
+        )
     else:
         print(
             f"NO — no weighting beats its own permutation (variance z = {z:.1f}, factor z = {z_fac:.1f})\n"
-            f"and individual channels are flat too (mean top10% {ch['per_channel_top10_mean']:.3f} against a\n"
+            f"and individual channels are flat too (p75 top10% {ch['per_channel_top10_p75']:.3f} against a\n"
             "0.10 floor). The representation is spatially delocalised: a feature at position p\n"
             "is not about the anatomy at position p, so there is no positional structure for\n"
             "ANY position weighting to exploit — shared or per-channel.\n"
             "This is consistent with content being stored in channel identity rather than\n"
             "spatial layout. Cross-check with eval/receptive_field_test.py and\n"
-            "eval/plot_local_vs_global.py. Note --bt-corr-ema is already 0.99 in every\n"
-            "synthetic config, so the off-diagonal sampling floor is not the fallback."
+            "eval/plot_local_vs_global.py."
+        )
+    if z_fac > 3.0 and not fac_wins:
+        print(
+            f"\n  (Factor weighting DID beat its permutation, z = {z_fac:.1f}, but by only\n"
+            f"  {r2_factor - r2_null_mean:+.4f} against --min-effect {cli.min_effect:g}. Statistically real,\n"
+            "  practically nothing — and it is supervised, so it could not ship anyway.)"
         )
     print()
 
