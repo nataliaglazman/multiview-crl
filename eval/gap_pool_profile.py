@@ -3,16 +3,27 @@
 
 ``--bt-gap-pool`` rests on one unverified claim: that the across-SUBJECT variance is
 concentrated in a minority of patch positions, so averaging uniformly over all P dilutes
-the subject signal by roughly the fraction of positions carrying it. That is the suspected
-cause of ``gap_feat_std`` parking at ~0.004 against a hinge target of 1.
+the subject signal by roughly the fraction of positions carrying it.
 
-If the profile is flat, uniform pooling is not diluting anything, both pooling modes are
-fitting noise, and the lever is elsewhere (most likely ``--bt-corr-ema``, which attacks the
-off-diagonal's d(d-1)/B sampling floor — a different problem). This settles that on a
-checkpoint you already have, with no training run.
+If it does not, both pooling modes are fitting noise and the lever is elsewhere (most
+likely ``--bt-corr-ema``, which attacks the off-diagonal's d(d-1)/B sampling floor — a
+different problem). This settles that on a checkpoint you already have, with no training
+run. The weights come from the shipped ``GapPositionPool`` itself, so the profile measured
+here cannot drift from the one training would use.
 
-The weights come from the shipped ``GapPositionPool`` itself, so the profile measured here
-cannot drift from the one training would use.
+A NO IS NOT ONE ANSWER — the script separates four, because they call for different things:
+
+    delocalised     every channel's profile is flat. A feature at position p is not about
+                    the anatomy at p, so no position weighting can work, shared or not.
+    disagree        channels ARE localised, in DIFFERENT places. A shared weight vector is
+                    the wrong instrument by construction; per-channel weights could work.
+    anti-aligned    weighting by variance is significantly WORSE than its own permutation,
+                    which means the high-variance positions carry per-view style rather
+                    than shared content. Variance is then actively the wrong statistic.
+    wrong statistic variance fails but per-position FACTOR RECOVERY succeeds. Measurable
+                    here because synthetic ground truth exists — but it is supervised and
+                    cannot ship as a training signal, so it is evidence that a better
+                    unsupervised surrogate exists, not a green light.
 
 THE NULL IS THE POINT
 ---------------------
@@ -107,6 +118,96 @@ def pooled_metrics(hz, weights, batch_size, draws, seed=0):
         "xview_corr": float(np.mean(corrs)),
         "on_diag": float(np.nanmean(on_diags)),
     }
+
+
+def channel_profiles(hz):
+    """Per-(view, channel) position profiles, and how much they AGREE about position.
+
+    The pooled profile averages over channels, so it cannot tell "no channel is spatially
+    organised" apart from "channels are organised in DIFFERENT places" — and the second is
+    what you would expect from a representation that stores content in channel identity.
+    Those two have opposite implications: the first says drop the idea, the second says a
+    SHARED position weighting is the wrong instrument (it is one vector for all channels
+    by construction) while per-channel weights could still work.
+
+    ``agreement`` is the fraction of the average channel's concentration that survives
+    averaging: 1.0 = every channel peaks in the same places, 0.0 = they cancel out. The
+    cosine is computed on profiles CENTERED at uniform, because raw profiles are
+    non-negative and sum to 1, which makes their cosine high whatever they do.
+    """
+    v = hz.detach().float().var(dim=1, unbiased=False)  # (2, C, P) across SUBJECTS
+    v = (v / (v.sum(-1, keepdim=True) + 1e-12)).reshape(-1, v.shape[-1]).numpy()  # (2C, P)
+    p = v.shape[1]
+    per = np.array([profile_stats(row)["top10pct_mass"] for row in v])
+    pooled = profile_stats(v.mean(0))["top10pct_mass"]
+    # Excess over the 0.10 a flat profile gives, so "agreement" is not inflated by the floor.
+    per_excess, pooled_excess = float(per.mean()) - 0.10, pooled - 0.10
+    c = v - 1.0 / p  # centre at uniform before measuring alignment
+    c = c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-12)
+    g = c @ c.T
+    off = g[~np.eye(len(g), dtype=bool)]
+    return {
+        "per_channel_top10_mean": float(per.mean()),
+        # The MEAN is diluted by channels that carry nothing — and with a learned content
+        # mask most of them may. The upper quartile is what "are ANY channels spatially
+        # organised" actually asks, so the verdict gates on p75, not the mean.
+        "per_channel_top10_p75": float(np.percentile(per, 75)),
+        "per_channel_top10_max": float(per.max()),
+        "pooled_top10": pooled,
+        "agreement": float(pooled_excess / per_excess) if per_excess > 1e-6 else float("nan"),
+        # Diluted the same way: dead channels contribute random profiles at cosine ~0, so
+        # read this next to p75 rather than on its own.
+        "mean_pairwise_cosine": float(off.mean()),
+        "n_profiles": int(v.shape[0]),
+    }
+
+
+def _ridge_r2(x_tr, y_tr, x_te, y_te, alpha=1.0):
+    """Closed-form multi-output ridge. Returns per-target R^2 on the test split."""
+    mx = x_tr.mean(0)
+    sx = x_tr.std(0) + 1e-8
+    my = y_tr.mean(0)
+    a = (x_tr - mx) / sx
+    w = np.linalg.solve(a.T @ a + alpha * np.eye(a.shape[1]), a.T @ (y_tr - my))
+    pred = ((x_te - mx) / sx) @ w + my
+    ss_res = ((y_te - pred) ** 2).sum(0)
+    ss_tot = ((y_te - y_te.mean(0)) ** 2).sum(0) + 1e-12
+    return 1.0 - ss_res / ss_tot
+
+
+def factor_recovery_profile(hz, gt, fit_idx, alpha=1.0):
+    """Weight each position by how well ITS features predict the ground-truth factors.
+
+    Variance is a proxy for "carries subject signal" and a poor one here: this project's own
+    measurement is that the factor information sits in the LOW-variance tail, so a position
+    can have large across-subject variance and carry no factor at all (background intensity
+    is the obvious case). On synthetic data the factors are known, so this measures the
+    thing directly instead of proxying it.
+
+    Computed on ``fit_idx`` only — the pooled probe that consumes these weights is scored on
+    the held-out half, or the weighting would be fitted and evaluated on the same subjects.
+    """
+    x = hz.mean(0).numpy()  # (N, C, P), views averaged: content is the shared part
+    n_fit = len(fit_idx)
+    inner = fit_idx[: n_fit // 2], fit_idx[n_fit // 2 :]  # split again, to score each position
+    r2 = np.zeros(x.shape[2])
+    for p in range(x.shape[2]):
+        s = _ridge_r2(x[inner[0], :, p], gt[inner[0]], x[inner[1], :, p], gt[inner[1]], alpha)
+        r2[p] = max(0.0, float(np.mean(s)))
+    if r2.sum() <= 0:
+        return np.full(x.shape[2], 1.0 / x.shape[2]), r2
+    return r2 / r2.sum(), r2
+
+
+def pooled_factor_r2(hz, gt, weights, fit_idx, eval_idx, alpha=1.0):
+    """Mean factor R^2 of the POOLED feature: probe trained on fit_idx, scored on eval_idx."""
+    w = torch.as_tensor(np.asarray(weights), dtype=torch.float32)
+    pooled = torch.matmul(hz, w).numpy()  # (2, N, C)
+    out = []
+    for v in range(pooled.shape[0]):
+        s = _ridge_r2(pooled[v][fit_idx], gt[fit_idx], pooled[v][eval_idx], gt[eval_idx], alpha)
+        out.append(float(np.mean(s)))
+    return float(np.mean(out))
 
 
 def main():
@@ -230,35 +331,109 @@ def main():
     null_share = null_mean - res["uniform"]["xview_corr"]
     z = gain_vs_null / max(null_std, 1e-6)
 
-    print("\n--- verdict ------------------------------------------------------------------")
+    print("\nvariance-weighting result")
     print(
-        f"cross-view corr   uniform {res['uniform']['xview_corr']:.4f} -> variance {res['variance']['xview_corr']:.4f}"
+        f"  cross-view corr uniform {res['uniform']['xview_corr']:.4f} -> variance {res['variance']['xview_corr']:.4f}"
     )
-    print(f"  concentration alone (shuffled - uniform):   {null_share:+.4f}")
-    print(f"  POSITION information (variance - shuffled): {gain_vs_null:+.4f}   z = {z:.1f}")
-    print(f"feat_std          uniform {res['uniform']['feat_std']:.5f} -> variance {res['variance']['feat_std']:.5f}")
+    print(f"    concentration alone (shuffled - uniform):   {null_share:+.4f}")
+    print(f"    POSITION information (variance - shuffled): {gain_vs_null:+.4f}   z = {z:.1f}")
+    print(f"  feat_std        uniform {res['uniform']['feat_std']:.5f} -> variance {res['variance']['feat_std']:.5f}")
 
-    if z <= 3.0:
+    # ── do the CHANNELS agree about position? ────────────────────────────────────────
+    # The profile above averages over channels, so on its own it cannot separate "nothing
+    # is spatially organised" from "channels are organised in different places". Those
+    # need different responses, so measure it rather than assume.
+    ch = channel_profiles(hz)
+    print("\n--- is the flatness real, or channel disagreement? --------------------------")
+    print(f"  mean per-channel top10% mass : {ch['per_channel_top10_mean']:.4f}   (0.10 = that channel is flat)")
+    print(f"  p75  per-channel top10% mass : {ch['per_channel_top10_p75']:.4f}   <- the verdict gates on this")
+    print(f"  max  per-channel top10% mass : {ch['per_channel_top10_max']:.4f}")
+    print(f"  channel-averaged top10% mass : {ch['pooled_top10']:.4f}")
+    print(f"  agreement (survives averaging): {ch['agreement']:.4f}   (1.0 = same places, 0.0 = cancel out)")
+    print(f"  mean pairwise cosine          : {ch['mean_pairwise_cosine']:+.4f}   (profiles centred at uniform)")
+
+    # ── weight by FACTOR RECOVERY instead of variance ────────────────────────────────
+    # Variance is a proxy, and this project measured the factor information to sit in the
+    # low-variance tail. On synthetic the factors are known, so ask them directly.
+    gt = np.asarray(_gt, dtype=np.float64)
+    perm = np.random.RandomState(cli.seed).permutation(N)
+    fit_idx, eval_idx = perm[: N // 2], perm[N // 2 :]
+    a_fac, r2_map = factor_recovery_profile(hz, gt, fit_idx)
+    s_fac = profile_stats(a_fac)
+    r2_uniform = pooled_factor_r2(hz, gt, a_uniform, fit_idx, eval_idx)
+    r2_factor = pooled_factor_r2(hz, gt, a_fac, fit_idx, eval_idx)
+    rng2 = np.random.RandomState(cli.seed + 977)
+    r2_null = [pooled_factor_r2(hz, gt, a_fac[rng2.permutation(P)], fit_idx, eval_idx) for _ in range(cli.null_draws)]
+    r2_null_mean, r2_null_std = float(np.mean(r2_null)), float(np.std(r2_null))
+    z_fac = (r2_factor - r2_null_mean) / max(r2_null_std, 1e-6)
+
+    print("\n--- weighting by FACTOR RECOVERY rather than variance -----------------------")
+    print(
+        f"  per-position factor R^2: max {r2_map.max():.4f}  mean {r2_map.mean():.4f}  nonzero {int((r2_map>0).sum())}/{P}"
+    )
+    print(f"  profile top10% mass    : {s_fac['top10pct_mass']:.4f}   (0.10 = flat)")
+    print(f"  pooled factor R^2  uniform {r2_uniform:.4f} -> factor-weighted {r2_factor:.4f}")
+    print(f"    permutation null {r2_null_mean:.4f} (sd {r2_null_std:.4f})   z = {z_fac:.1f}")
+    print("  Profile fitted on half the subjects, probe scored on the held-out half.")
+
+    # ── combined verdict ─────────────────────────────────────────────────────────────
+    var_wins = z > 3.0 and gain_vs_null >= cli.min_effect
+    fac_wins = z_fac > 3.0 and (r2_factor - r2_null_mean) >= cli.min_effect
+    channels_localised = ch["per_channel_top10_p75"] > 0.13  # meaningfully above the 0.10 floor
+    channels_disagree = not (ch["agreement"] > 0.5) if channels_localised else False
+
+    print("\n--- verdict ------------------------------------------------------------------")
+    # A significantly NEGATIVE z is not "no signal" — it is a finding. It says the
+    # high-across-subject-variance positions are anti-aligned with shared content, i.e.
+    # the variance is tracking VIEW-SPECIFIC signal (gain/bias/noise, background
+    # intensity) rather than subject anatomy. Report it separately or it reads as a null.
+    if z < -3.0:
         print(
-            f"\nNO — variance weighting does not beat its own permutation (z = {z:.1f}).\n"
-            "Either the profile is flat, or its concentration is not in positions that carry\n"
-            "subject signal; either way any gain over uniform is just averaging fewer things,\n"
-            "and a learned prior would be fitting noise. Spend the GPU time on the\n"
-            "off-diagonal sampling floor (--bt-corr-ema) instead."
+            f"VARIANCE IS ANTI-ALIGNED WITH CONTENT (z = {z:.1f}, significantly WORSE than its own\n"
+            f"permutation: {gain_vs_null:+.4f}). Upweighting the highest-variance positions REMOVES\n"
+            "cross-view agreement, so across-subject variance here is dominated by per-view\n"
+            "style — the global intensity transforms this project already tracks with\n"
+            "eval/style_leak_by_position.py and eval/background_leak_diagnostic.py.\n"
+            "--bt-gap-pool variance would actively hurt this model. Read the factor-recovery\n"
+            "section below, which does not use variance as a proxy.\n"
         )
-    elif gain_vs_null < cli.min_effect:
+    if var_wins or fac_wins:
+        which = "variance" if var_wins else "factor-recovery"
         print(
-            f"\nMARGINAL — the effect is real (z = {z:.1f}) but small ({gain_vs_null:+.4f} against a\n"
-            f"--min-effect of {cli.min_effect:g}). Position information exists and is not worth a\n"
-            "training run on its own. Revisit if something else raises the stakes."
+            f"YES via {which} weighting. The concentration carries real positional information\n"
+            "rather than just averaging fewer positions."
+        )
+        if fac_wins and not var_wins:
+            print(
+                "  NOTE: variance weighting FAILED and factor weighting passed, so variance was\n"
+                "  simply the wrong statistic — the shipped --bt-gap-pool variance mode will not\n"
+                "  reproduce this. Weighting by factor recovery is supervised and cannot ship as\n"
+                "  an unsupervised training signal; treat this as evidence that a better\n"
+                "  UNSUPERVISED surrogate is worth looking for, not as a green light."
+            )
+        else:
+            print(f"  Run experiments/gap_pool_variance.yaml; effect to reproduce: {gain_vs_unif:+.4f} xview corr.")
+    elif channels_disagree:
+        print(
+            f"NO for a SHARED position weighting, but not because the representation is flat.\n"
+            f"Individual channels ARE spatially organised (mean top10% {ch['per_channel_top10_mean']:.3f} vs 0.10\n"
+            f"flat) and they disagree about WHERE (agreement {ch['agreement']:.2f}). One weight vector\n"
+            "shared across channels is the wrong instrument by construction — it can only\n"
+            "express a position preference every channel shares, and there isn't one.\n"
+            "Do NOT run --bt-gap-pool as built. Per-channel weights are the version of this\n"
+            "idea that could work, at C x P parameters and a much larger collapse surface."
         )
     else:
         print(
-            f"\nYES — variance weighting beats its permutation by {gain_vs_null:+.4f} (z = {z:.1f}), so the\n"
-            "concentration carries real positional information rather than just averaging\n"
-            "fewer positions. Run experiments/gap_pool_variance.yaml.\n"
-            f"Effect size to reproduce in training: {gain_vs_unif:+.4f} cross-view correlation,\n"
-            f"feat_std {res['uniform']['feat_std']:.5f} -> {res['variance']['feat_std']:.5f}."
+            f"NO — no weighting beats its own permutation (variance z = {z:.1f}, factor z = {z_fac:.1f})\n"
+            f"and individual channels are flat too (mean top10% {ch['per_channel_top10_mean']:.3f} against a\n"
+            "0.10 floor). The representation is spatially delocalised: a feature at position p\n"
+            "is not about the anatomy at position p, so there is no positional structure for\n"
+            "ANY position weighting to exploit — shared or per-channel.\n"
+            "This is consistent with content being stored in channel identity rather than\n"
+            "spatial layout. Cross-check with eval/receptive_field_test.py and\n"
+            "eval/plot_local_vs_global.py, and spend the GPU time on the off-diagonal\n"
+            "sampling floor (--bt-corr-ema) instead."
         )
     print()
 

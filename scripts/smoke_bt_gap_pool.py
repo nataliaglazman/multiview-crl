@@ -309,5 +309,54 @@ for _name, _focal, _gain, _want in (
     _got, _z = verdict_for(_focal, _gain)
     check(f"{_name} -> {_want}", _got == _want, f"got {_got} (z={_z:.1f})")
 
+print("\n12. channel-agreement diagnostic separates the three ways a profile goes flat")
+# A flat channel-AVERAGED profile has three causes with three different responses, and the
+# probe has to tell them apart or its NO is uninterpretable:
+#   delocalised     every channel flat            -> drop the idea entirely
+#   disagree        channels peaked, different places -> a SHARED weight vector cannot help,
+#                                                     per-channel weights could
+#   style_variance  variance peaked on view-specific signal -> variance is the wrong statistic
+from eval.gap_pool_profile import channel_profiles  # noqa: E402
+
+
+def _regime(kind, grid=128, n_subj=800, n_ch=16, n_fac=4):
+    gt_ = np.random.RandomState(0).randn(n_subj, n_fac)
+    zz_ = torch.randn(2, n_subj, n_ch, grid) * 0.5
+
+    def f(k):
+        return torch.tensor(gt_[:, k], dtype=torch.float32)[None, :, None]
+
+    if kind == "agree":  # all channels encode factors in the SAME positions
+        for k in range(n_fac):
+            zz_[:, :, k, :8] += f(k)
+    elif kind == "disagree":  # each channel localises somewhere different
+        for k in range(n_fac):
+            zz_[:, :, k, 8 * k : 8 * k + 8] += f(k)
+    elif kind == "style_variance":  # content spread thin, huge PER-VIEW variance in a few positions
+        for k in range(n_fac):
+            zz_[:, :, k, :] += f(k) / math.sqrt(grid)
+        zz_[..., 120:] += torch.randn(2, n_subj, 1, 1) * 6.0
+    elif kind == "delocalised":  # factors equally visible at every position
+        for k in range(n_fac):
+            zz_[:, :, k, :] += f(k)
+    c_ = channel_profiles(zz_)
+    loc_ = c_["per_channel_top10_p75"] > 0.13
+    return loc_, ((not (c_["agreement"] > 0.5)) if loc_ else False), c_
+
+
+torch.manual_seed(0)
+for _kind, _want_loc, _want_dis in (
+    ("agree", True, False),
+    ("disagree", True, True),
+    ("style_variance", True, False),
+    ("delocalised", False, False),
+):
+    _loc, _dis, _c = _regime(_kind)
+    check(
+        f"{_kind}: localised={_want_loc} disagree={_want_dis}",
+        (_loc, _dis) == (_want_loc, _want_dis),
+        f"p75={_c['per_channel_top10_p75']:.3f} agreement={_c['agreement']:+.2f}",
+    )
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)
