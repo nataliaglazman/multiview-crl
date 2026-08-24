@@ -26,6 +26,18 @@ Two questions, two methods:
 Read the sign convention carefully: a NEGATIVE dMCC means stepping along that loss's
 descent direction REDUCES block-MCC, i.e. that loss is degrading identifiability.
 
+``--metric rank`` re-measures the effective rank of the GAP-pooled content block instead —
+the same ``content_rank`` ``run_dci_compare`` prints — which is what to use when the
+representation has collapsed rather than merely lost identifiability.
+
+Barlow Twins is reported as its four ADDITIVE terms (``bt_on``/``bt_off``/``bt_sim``/
+``bt_var``, and the ``btgap_*`` companion when ``--bt-gap-weight`` is on), not as one
+"contrastive" force, because on rank they are OPPOSED rather than merely different: d copies
+of a single unit-variance signal is a global optimum of on_diag, sim AND var simultaneously,
+and only off_diag objects to it. A lumped gradient therefore cannot say whether the objective
+is building the representation or flattening it. See ``_bt_split`` for how the four are
+recovered exactly from the shipped loss.
+
 Caveats, none of which the numbers announce on their own
 --------------------------------------------------------
 * Training uses AdamW, which does NOT follow the raw gradient — it rescales per-parameter
@@ -49,6 +61,10 @@ Usage
 
     # closer to the real update direction
     python -m eval.gradient_attribution --run-dir results/synthetic/RUN --precondition
+
+    # which term is collapsing the content block
+    python -m eval.gradient_attribution --run-dir results/synthetic/RUN \\
+        --checkpoints vqvae_model.pt --metric rank --precondition
 """
 
 from __future__ import annotations
@@ -65,6 +81,25 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
 ENCODER_MODULES = ("encoders", "encoders_v1", "content_norms", "content_projections")
+
+# Display order for the loss terms. Reconstruction first (it is the reference force), then the
+# Barlow Twins pieces grouped by pooling, so on_diag sits next to the off_diag it trades against.
+_TERM_ORDER = (
+    "recon",
+    "vq",
+    "bt_on",
+    "bt_off",
+    "bt_sim",
+    "bt_var",
+    "btgap_on",
+    "btgap_off",
+    "btgap_sim",
+    "btgap_var",
+)
+
+
+def _ordered_keys(d):
+    return [k for k in _TERM_ORDER if k in d] + [k for k in d if k not in _TERM_ORDER]
 
 
 def cosine(a, b):
@@ -119,6 +154,47 @@ def _flat(grads):
     return torch.cat([g.reshape(-1) for g in grads]).detach()
 
 
+def _bt_split(hz, c_idx, out, prefix, weight, ema_factor, *, lambd, sim_coeff, std_coeff, **kw):
+    """Split one Barlow Twins term into its four ADDITIVE pieces, each as its own loss.
+
+    A single lumped "contrastive" gradient cannot answer which part of the objective moves a
+    metric, because the four terms want different things: ``on_diag`` and ``sim`` align the
+    views, ``var`` fixes per-channel scale, and only ``off_diag`` decorrelates channels. For
+    effective rank in particular they are not merely different, they are OPPOSED — 44 copies
+    of one unit-variance signal is a global optimum of the first three and the worst case for
+    the fourth — so attributing a rank change to "contrastive" says nothing.
+
+    ``barlow_twins_loss`` returns ``on_diag + lambd*off_diag + sim_coeff*sim + std_coeff*var``
+    as one scalar and ``on_diag`` carries no coefficient of its own, so no choice of
+    coefficients isolates the other three. But the loss is a SUM and autograd is linear, so
+    four calls with different coefficients recover each piece exactly by subtraction. Done
+    this way rather than by reimplementing the terms here so the numbers cannot drift from
+    what training computes — the same reason eval.bt_term_balance calls the shipped loss.
+
+    ``ema_factor`` models --bt-corr-ema on the two CORRELATION terms only. With momentum m the
+    EMA'd matrix is ``m*c_prev.detach() + (1-m)*c``, so only the current batch carries gradient
+    and ``dc/dtheta`` is scaled by ``(1-m)`` once the bias correction has converged; ``sim`` and
+    ``var`` read the raw features and are not attenuated. This reproduces the SIGNAL component
+    exactly and overstates the noise component, because training's multiplier is the low-noise
+    ``c_ema`` where this uses the single-batch ``c`` — read --snr for how large that gap is.
+    """
+    from training.losses import barlow_twins_loss
+
+    def _call(lam, sim, std):
+        return barlow_twins_loss(
+            hz, estimated_content_indices=[c_idx], subsets=[[0, 1]], lambd=lam, sim_coeff=sim, std_coeff=std, **kw
+        )
+
+    base = _call(0.0, 0.0, 0.0)  # on_diag alone: every other coefficient is zero
+    out[f"{prefix}on"] = (weight * ema_factor) * base
+    if lambd:
+        out[f"{prefix}off"] = (weight * ema_factor) * (_call(lambd, 0.0, 0.0) - base)
+    if sim_coeff:
+        out[f"{prefix}sim"] = weight * (_call(0.0, sim_coeff, 0.0) - base)
+    if std_coeff:
+        out[f"{prefix}var"] = weight * (_call(0.0, 0.0, std_coeff) - base)
+
+
 def _losses_at(model, batch, args_, device, grid, level):
     """Recon (+VQ) and contrastive losses for one batch, with the graph intact.
 
@@ -130,7 +206,7 @@ def _losses_at(model, batch, args_, device, grid, level):
     import torch
     import torch.nn.functional as F
 
-    from training.losses import BaselineLoss, barlow_twins_loss
+    from training.losses import BaselineLoss
 
     imgs, msks = batch["image"], batch["mask"]
     n_views = len(imgs)
@@ -164,17 +240,55 @@ def _losses_at(model, batch, args_, device, grid, level):
         hz = hz[..., keep]
 
     c_idx = list(range(int(getattr(args_, "content_dim", hz.shape[2]))))
-    out["contrastive"] = barlow_twins_loss(
+    _scale = float(getattr(args_, "scale_contrastive_loss", 1.0))
+    _sim_c = float(getattr(args_, "bt_sim_coeff", 0.0))
+    _norm_terms = bool(getattr(args_, "bt_normalize_terms", False))
+    _sim_norm = bool(getattr(args_, "bt_sim_normalize", False))
+    # See _bt_split: (1-m) is what training's optimizer actually receives on the two
+    # correlation terms once --bt-corr-ema is on. Omitting it would report those gradients
+    # at up to 100x the size the run was trained with.
+    _ema_f = 1.0 - float(getattr(args_, "bt_corr_ema", 0.0) or 0.0)
+
+    _bt_split(
         hz,
-        estimated_content_indices=[c_idx],
-        subsets=[[0, 1]],
+        c_idx,
+        out,
+        "bt_",
+        _scale * float(getattr(args_, "bt_patch_weight", 1.0)),
+        _ema_f,
         lambd=float(getattr(args_, "bt_lambda", 1.0)),
+        sim_coeff=_sim_c,
+        std_coeff=float(getattr(args_, "bt_std_coeff", 0.0)),
         center_mode=getattr(args_, "patch_center_mode", "none") or "none",
         patch_stat=getattr(args_, "bt_patch_stat", "fold") or "fold",
-        sim_normalize=bool(getattr(args_, "bt_sim_normalize", False)),
-        sim_coeff=float(getattr(args_, "bt_sim_coeff", 0.0)),
-        std_coeff=float(getattr(args_, "bt_std_coeff", 0.0)),
-    ) * float(getattr(args_, "scale_contrastive_loss", 1.0))
+        sim_normalize=_sim_norm,
+        normalize_terms=_norm_terms,
+    )
+
+    # The GAP companion (--bt-gap-weight), reproduced because it is the only term whose rows
+    # are SUBJECTS: the patch fold's cross-covariance is Cov_subject + Cov_interaction and the
+    # interaction dominates on registered volumes, so the patch terms barely constrain subject
+    # identity. Effective rank is measured on GAP-pooled features, so leaving this out would
+    # omit precisely the term acting on the quantity being attributed. Its lambda and variance
+    # hinge carry their own coefficients (--bt-gap-lambda / --bt-gap-std-coeff), which default
+    # to the patch ones; center_mode and patch_stat do not apply — there is no position axis.
+    _gap_w = float(getattr(args_, "bt_gap_weight", 0.0) or 0.0)
+    if _gap_w > 0:
+        _gap_lam = getattr(args_, "bt_gap_lambda", None)
+        _gap_std = getattr(args_, "bt_gap_std_coeff", None)
+        _bt_split(
+            hz.mean(-1),  # (2, B, C) — one row per subject
+            c_idx,
+            out,
+            "btgap_",
+            _scale * _gap_w,
+            _ema_f,
+            lambd=float(getattr(args_, "bt_lambda", 1.0) if _gap_lam is None else _gap_lam),
+            sim_coeff=_sim_c,
+            std_coeff=float(getattr(args_, "bt_std_coeff", 0.0) if _gap_std is None else _gap_std),
+            sim_normalize=_sim_norm,
+            normalize_terms=_norm_terms,
+        )
 
     # --- reconstruction (BaselineLoss, exactly as training scores it) ---
     if _con_only:
@@ -313,6 +427,31 @@ def _mcc_now(model, dataset, device, grid, level, batch_size, gt_cache, seeds, n
     return block_mcc(x, gt_cache, seeds=seeds, n_splits=n_splits)["mean"], gt_cache
 
 
+def _rank_now(model, dataset, device, grid, level, batch_size, gt_cache, seeds, n_splits):
+    """Effective rank of the GAP-pooled content block — the same number run_dci_compare reports.
+
+    Deliberately measured at GAP, not at patch: ``score_reprs`` scores ``content_rank`` at the
+    gap pooling so it reads as "effective channels", and the patch fold mixes subjects with
+    positions, whose variance is ~200x larger on registered volumes and would swamp the
+    across-subject spectrum this is asking about.
+
+    Cheaper than the block-MCC readout it parallels — no probe, no cross-validation, no
+    Hungarian match, just one SVD of an (N, C) matrix — so the eta sweep costs little beyond
+    the forward passes. It is also DETERMINISTIC given the features, so unlike block-MCC there
+    is no per-seed band to clear; the floor on a real reading is set by sampling N subjects,
+    which the eta sweep holds fixed by reusing one frozen test set.
+
+    ``gt_cache``/``seeds``/``n_splits`` are unused; kept so this is interchangeable with
+    ``_mcc_now`` in the sweep.
+    """
+    from eval.patch_mcc_decay import extract_patch_block
+    from eval.run_dci_compare import _effective_rank
+
+    content, gt, _cov = extract_patch_block(model, dataset, device, grid, level, batch_size, 0)
+    # extract_patch_block returns (N, P, C), position-major — so GAP is a mean over axis 1.
+    return _effective_rank(content.mean(axis=1)), gt if gt_cache is None else gt_cache
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", required=True)
@@ -352,6 +491,17 @@ def main():
         "defaults ON despite roughly doubling runtime.",
     )
     ap.add_argument("--causal", choices=("match", "iid"), default="match")
+    ap.add_argument(
+        "--metric",
+        choices=("mcc", "rank"),
+        default="mcc",
+        help="What the finite-difference step re-measures. 'mcc' (default) is block-MCC, unchanged. "
+        "'rank' is the effective rank of the GAP-pooled content block — the same content_rank "
+        "run_dci_compare prints — for attributing a rank collapse to a specific term. Note the four "
+        "Barlow Twins terms are OPPOSED on rank: on_diag, sim and var are all satisfied exactly by "
+        "d copies of one unit-variance signal, and only off_diag objects, so 'which term' is the "
+        "whole question and a lumped contrastive gradient cannot answer it.",
+    )
     cli = ap.parse_args()
 
     import os
@@ -408,9 +558,7 @@ def main():
                 f"{'noise':>12}{'signal share':>14}{'batches->SNR1':>15}"
             )
             print("  " + "-" * 91)
-            for k in ("recon", "contrastive", "vq"):
-                if k not in per_b:
-                    continue
+            for k in _ordered_keys(per_b):
                 d = snr_decomposition(per_b[k])
                 if "naive_norm" not in d:
                     continue
@@ -437,7 +585,7 @@ def main():
         print(f"\n  encoder parameters: {n_enc:,} across {len(named)} tensors")
         print(f"  gradients averaged over {cli.grad_batches} batches of {cli.grad_batch_size}")
 
-        keys = [k for k in ("recon", "contrastive", "vq") if k in grads]
+        keys = _ordered_keys(grads)
         print(f"\n  {'loss':<14}{'||grad||':>14}{'batch-to-batch sd':>20}")
         print("  " + "-" * 48)
         for k in keys:
@@ -445,16 +593,25 @@ def main():
             print(f"  {k:<14}{grads[k].norm().item():>14.4e}{sd:>20.4e}")
 
         np_g = {k: grads[k].detach().float().cpu().numpy() for k in keys}
+        # Printed as a matrix rather than a list of pairs: splitting Barlow Twins into its four
+        # terms takes the pair count from 3 to 45, which is unreadable one per line.
         print(f"\n  pairwise cosine (negative = the two losses pull the encoder apart):")
-        for i, a in enumerate(keys):
-            for bkey in keys[i + 1 :]:
-                print(f"    {a} vs {bkey:<14}{cosine(np_g[a], np_g[bkey]):>+8.4f}")
+        _short = {k: k.replace("btgap_", "g_").replace("bt_", "") for k in keys}
+        print(f"    {'':<12}" + "".join(f"{_short[k]:>9}" for k in keys))
+        for a in keys:
+            row = "".join("        ." if a == b else f"{cosine(np_g[a], np_g[b]):>+9.3f}" for b in keys)
+            print(f"    {a:<12}{row}")
 
-        base, gt_cache = _mcc_now(
+        _measure = _rank_now if cli.metric == "rank" else _mcc_now
+        _mname = "content eff. rank (GAP)" if cli.metric == "rank" else "block-MCC"
+        _dname = "d(eff. rank)" if cli.metric == "rank" else "dMCC"
+        _degrades = "collapses the representation" if cli.metric == "rank" else "degrades identifiability"
+
+        base, gt_cache = _measure(
             model, dataset, device, grid, cli.level, cli.mcc_batch, None, tuple(cli.seeds), cli.n_splits
         )
-        print(f"\n  block-MCC at this checkpoint: {base:.4f}")
-        print(f"\n  dMCC after one step of size eta along -g/||g||  (negative = degrades identifiability)")
+        print(f"\n  {_mname} at this checkpoint: {base:.4f}")
+        print(f"\n  {_dname} after one step of size eta along -g/||g||  (negative = {_degrades})")
         backup = [p.detach().clone() for p in params]
 
         def _sweep(direction):
@@ -466,10 +623,10 @@ def main():
                         n = p.numel()
                         p.copy_(b0 - eta * direction[off : off + n].view_as(p))
                         off += n
-                mcc, _ = _mcc_now(
+                val, _ = _measure(
                     model, dataset, device, grid, cli.level, cli.mcc_batch, gt_cache, tuple(cli.seeds), cli.n_splits
                 )
-                out.append(mcc - base)
+                out.append(val - base)
             with torch.no_grad():
                 for p, b0 in zip(params, backup):
                     p.copy_(b0)
@@ -516,9 +673,17 @@ def main():
 
         print("\n  Reading it: the EXCESS row is the attribution — how much worse this loss's")
         print("  direction is than a random direction with the same per-layer energy. The raw")
-        print("  dMCC row conflates that with generic perturbation sensitivity, which is large.")
-        print("  Compare the excess against block-MCC's per-seed sd (~0.001 at N=1500); inside")
-        print("  that band there is no attribution, whatever the raw row says.")
+        print(f"  {_dname} row conflates that with generic perturbation sensitivity, which is large.")
+        if cli.metric == "rank":
+            print("  Effective rank is deterministic given the features, so there is no per-seed band")
+            print("  to clear — but it IS sampled: re-run with a different --mcc-samples to see how")
+            print("  much of a small excess is the finite test set. A term with a NEGATIVE excess is")
+            print("  collapsing the representation beyond what its step size alone would do; on this")
+            print("  objective only off_diag can carry a positive one, since on_diag, sim and var are")
+            print("  each minimised exactly by d copies of a single unit-variance signal.")
+        else:
+            print("  Compare the excess against block-MCC's per-seed sd (~0.001 at N=1500); inside")
+            print("  that band there is no attribution, whatever the raw row says.")
         del model
         if device.type == "cuda":
             torch.cuda.empty_cache()
