@@ -1,0 +1,85 @@
+# Base config for the rank-collapse grid (scripts/launch_rank_grid.sh).
+#
+# This is the `synthetic-causal-clean-content-redo-norm-100` configuration, checked in so
+# the grid has a fixed reference. The grid varies ONLY bt_gap_on_coeff and bt_patch_weight;
+# everything below is held constant, so the gon=1.0 / pw=1.0 cell is the control.
+#
+# Measured force budget for the control cell (eval.gradient_attribution --metric rank,
+# excess-at-eta-0.05 x preconditioned gradient norm), which is what the grid is testing:
+#
+#     recon +0.550   vq +0.014          patch block -1.010      gap block +0.148
+#     btgap_on -1.381  vs  btgap_off +1.466   ->  net -0.298, i.e. slow collapse
+#
+# bt_gap_on_coeff attacks the -1.381; bt_patch_weight attacks the -1.010.
+
+_base_: synthetic_defaults
+tag: synthetic-causal-clean-content
+
+contrastive_loss_type: barlow_twins
+patch_contrastive: true
+patch_grid: [8, 8, 8]
+patch_center_mode: position    # do NOT use double
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+
+# ---- The two knobs the grid varies (control values here) ----
+bt_gap_on_coeff: 1.0
+bt_patch_weight: 1.0
+
+bt_gap_weight: 1
+single_count_commitment: true
+grad_clip_norm: 100
+batch_size: 128
+
+# 44 content + 4 style. NOT the all-content baseline: content_size == vqvae_hidden_channels
+# (48) is what turns the split off entirely (utils/config.py, --content-size). 44 is kept
+# because every coefficient below is derived for d=44 under bt_normalize_terms, and because
+# it matches the checkpoints all the force-budget numbers above were measured on.
+content_size: 44
+
+# ---- Unchanged from synthetic_causal.yaml so the comparison stays valid ----
+synthetic_normalize: fixed_reference
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_res: 64
+synthetic_clean_content: true
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
+inject_style_to_decoder: true
+style_injection_mode: input
+separate_style_codebooks: true
+separate_content_codebooks: false
+vqvae_nb_levels: 1
+vqvae_nb_res_layers: 2
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [4]
+deterministic: true
+checkpoint_steps: 1000
+eval_dci: true
+
+# ---- Barlow Twins ----
+# Three of these values exist only to cancel two others. Do not "tidy" any of them alone:
+#
+#   bt_normalize_terms divides on_diag by d and off_diag by d(d-1), so the translation is
+#   lambda -> lambda*(d-1) and sim/std -> sim/std / d:  7 = 0.163*43, and the raw 0.5 / 10
+#   become 0.5/44 and 10/44.
+#
+#   bt_corr_ema then scales the gradient of BOTH correlation terms by (1-m) = 0.01, so
+#   scale_contrastive_loss = 100 cancels it -- and sim/std are divided by a further 100 to
+#   stay where the translation put them (1.14e-4 = 0.0114/100, 2.27e-3 = 0.227/100).
+#
+# So bt_corr_ema and scale_contrastive_loss are a matched pair, and changing content_size
+# moves d underneath bt_lambda, bt_sim_coeff and bt_std_coeff at the same time.
+bt_normalize_terms: true
+bt_sim_normalize: true
+bt_lambda: 7
+bt_gap_lambda: 7
+bt_sim_coeff: 1.14e-4
+bt_std_coeff: 2.27e-3
+bt_corr_ema: 0.99
+scale_contrastive_loss: 100
+
+scale_recon_loss: 50
