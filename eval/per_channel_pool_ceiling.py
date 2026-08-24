@@ -124,6 +124,24 @@ def unsupervised_allocation(hz, fit_idx, redundancy_weight=1.0):
 
     Greedy, strongest channel first. Greedy is a lower bound on what gradient descent would
     find, which keeps this conservative in the same direction as the hard-selection choice.
+
+    WHY GREEDY AND NOT COMPETITION, measured. Slot Attention (Locatello et al. 2020; Biza
+    et al. ICML 2023) gets allocation structurally: attention is a softmax over SLOTS at each
+    token, so slots must partition the input and cannot duplicate each other. Borrowing just
+    that -- normalising the weight matrix across CHANNELS at each position instead of across
+    positions per channel -- looks like it should replace the redundancy term for free. It
+    does not. On the starvation regime, against uniform GAP at 0.288:
+
+        independent softmax over positions   0.319 / 0.325 / 0.326   (T = 0.02 / 0.05 / 0.1)
+        COMPETITIVE softmax over channels    0.312 / 0.295 / 0.290
+        greedy with the redundancy term      0.822
+
+    Competition on symmetric logits is a no-op: when every channel scores a position about
+    equally, a softmax across channels hands each an equal share everywhere, and after the
+    per-channel renormalisation that is uniform pooling again. Slot Attention breaks the
+    symmetry with distinct learned per-slot queries refined over iterations -- the iteration
+    is load-bearing, not incidental. The sequential redundancy penalty here breaks it
+    explicitly instead, which is why it works at a fraction of the machinery.
     """
     v0 = hz[0][fit_idx].numpy()
     v1 = hz[1][fit_idx].numpy()
