@@ -1776,10 +1776,14 @@ class GapPositionPool(nn.Module):
         temperature: float = 1.0,
         entropy_floor: float = 0.5,
         ema: float = 0.9,
+        n_channels: int = 0,
+        grid=None,
+        coarsen: int = 1,
+        init_std: float = 0.0,
     ):
         super().__init__()
-        if mode not in ("variance", "learned"):
-            raise ValueError(f"GapPositionPool mode must be 'variance' or 'learned', got {mode!r}.")
+        if mode not in ("variance", "learned", "per_channel"):
+            raise ValueError(f"GapPositionPool mode must be 'variance', 'learned' or 'per_channel', got {mode!r}.")
         if n_positions < 1:
             raise ValueError(f"GapPositionPool needs n_positions >= 1, got {n_positions}.")
         self.n_positions = int(n_positions)
@@ -1787,7 +1791,58 @@ class GapPositionPool(nn.Module):
         self.temperature = float(temperature)
         self.entropy_floor = float(entropy_floor)
         self.ema = float(ema)
-        if mode == "learned":
+        self.coarsen = int(coarsen)
+        self.n_channels = int(n_channels)
+        if mode == "per_channel":
+            if self.n_channels < 1:
+                raise ValueError("GapPositionPool mode 'per_channel' needs n_channels >= 1.")
+            n_groups = self.n_positions
+            if self.coarsen > 1:
+                if grid is None or len(grid) != 3:
+                    raise ValueError("GapPositionPool coarsening needs the 3-D patch `grid`.")
+                d, h, w = (int(v) for v in grid)
+                if d * h * w != self.n_positions:
+                    raise ValueError(f"grid {tuple(grid)} has {d * h * w} positions, expected {self.n_positions}.")
+                if d % self.coarsen or h % self.coarsen or w % self.coarsen:
+                    raise ValueError(f"grid {tuple(grid)} is not divisible by --bt-gap-pool-coarsen {self.coarsen}.")
+                gd, gh, gw = d // self.coarsen, h // self.coarsen, w // self.coarsen
+                n_groups = gd * gh * gw
+                # Which coarse region each FULL-grid position belongs to. Stored as a mapping
+                # rather than done by reshape because --patch-foreground-mask drops positions
+                # before the pooler sees them, which destroys the grid layout a reshape needs.
+                idx = torch.arange(self.n_positions).reshape(d, h, w)
+                gid = (
+                    (torch.arange(d)[:, None, None] // self.coarsen) * gh * gw
+                    + (torch.arange(h)[None, :, None] // self.coarsen) * gw
+                    + (torch.arange(w)[None, None, :] // self.coarsen)
+                )
+                group_of = torch.zeros(self.n_positions, dtype=torch.long)
+                group_of[idx.reshape(-1)] = gid.reshape(-1)
+                self.register_buffer("group_of", group_of)
+            self.n_groups = n_groups
+            # (C, G) logits. Zero-init makes step 0 EXACTLY the mean it replaces, per
+            # channel, so a run starts from the objective it is compared against.
+            #
+            # But zero-init alone does NOT reliably break the symmetry between channels, and
+            # this mode is worthless without that break -- if every channel learns the same
+            # profile it is the shared `learned` mode with C times the parameters, and that
+            # mode is already measured not to work here. Observed on a 4-step run:
+            # gap_pool_channel_agreement went NaN (uniform) -> 1.00 immediately. The reason is
+            # structural: every channel sees the same anatomy, so the first-order gradient
+            # pushes them all the same way, while off_diag's pressure to differentiate them is
+            # second-order. The measurement that motivated this mode broke symmetry
+            # SEQUENTIALLY (each channel avoided what earlier ones took); gradient descent
+            # updates all channels at once and has no such sequencing.
+            #
+            # init_std > 0 breaks it explicitly. Keep it small: at 0.01 the softmax is still
+            # uniform to ~1%, so step 0 is the mean to within that, and the channels start
+            # distinguishable. Watch gap_pool_channel_agreement to see whether it was needed.
+            self.init_std = float(init_std)
+            if self.init_std > 0:
+                self.logits = nn.Parameter(torch.randn(self.n_channels, n_groups) * self.init_std)
+            else:
+                self.logits = nn.Parameter(torch.zeros(self.n_channels, n_groups))
+        elif mode == "learned":
             # Zero init => softmax is exactly uniform => pooling is exactly the mean it
             # replaces. A resumed or freshly-enabled run therefore starts from the old
             # objective rather than a random reweighting.
@@ -1831,6 +1886,31 @@ class GapPositionPool(nn.Module):
                 "The features and the keep mask disagree about the patch grid."
             )
 
+        if self.mode == "per_channel":
+            if self.coarsen > 1:
+                # Slice the FULL-grid group map by the same mask that produced these
+                # positions, so weights stay tied to anatomy rather than to an index into a
+                # per-batch survivor list.
+                g = self.group_of if keep_pos is None else self.group_of[idx]
+                w = self.logits.float()[:, g]  # (C, P_kept), broadcast from group -> position
+            else:
+                w = self.logits.float() if keep_pos is None else self.logits.float()[:, idx]
+            # Softmax per channel over the positions it can see. Independent across channels
+            # by design: BT's off-diagonal is what pushes them apart, and a softmax ACROSS
+            # channels instead is a no-op on symmetric logits (measured, see
+            # eval/per_channel_pool_ceiling.unsupervised_allocation).
+            a = torch.softmax(w / self.temperature, dim=1)
+            if self.coarsen > 1:
+                # Positions in the same coarse group share a logit, so the softmax above has
+                # already given each of them the group's weight. Divide by the group's
+                # surviving size to make the group contribute its MEAN, not its sum -- which
+                # is what makes coarsen=1 and coarsen>1 comparable, and what keeps a group
+                # whose positions were mostly masked out from being silently downweighted.
+                counts = torch.bincount(g, minlength=self.n_groups).clamp_min(1).float()
+                a = a / counts[g]
+                a = a / a.sum(dim=1, keepdim=True).clamp_min(1e-12)
+            return a
+
         if self.mode == "learned":
             w = self.logits if keep_pos is None else self.logits[idx]
             return torch.softmax(w.float() / self.temperature, dim=0)
@@ -1855,8 +1935,20 @@ class GapPositionPool(nn.Module):
             return v / (v.sum() + 1e-12)
 
     def forward(self, z, keep_pos=None):
-        """Pool ``(n_views, B, C, P)`` to ``(n_views, B, C)``. Returns ``(pooled, a)``."""
+        """Pool ``(n_views, B, C, P)`` to ``(n_views, B, C)``. Returns ``(pooled, a)``.
+
+        ``a`` is ``(P,)`` for the shared modes and ``(C, P)`` for ``per_channel``.
+        """
         a = self.weights(z, keep_pos)
+        if a.dim() == 2:
+            if a.shape[0] != z.shape[2]:
+                raise ValueError(
+                    f"GapPositionPool 'per_channel' was built for {a.shape[0]} channels but got "
+                    f"{z.shape[2]}. A contrastive projection head changes the channel count the "
+                    "loss sees — build the pooler for that width or disable the head."
+                )
+            # Per-channel contraction: each channel reads its own positions.
+            return torch.einsum("vbcp,cp->vbc", z, a.to(z.dtype)), a
         # matmul rather than (z * a).sum(-1): the elementwise form materialises a second
         # copy of the patch tensor (~25 MB at B=128, C=48, P=512, two views) plus its
         # autograd graph, and cuDNN reports that kind of workspace pressure as "unable to
@@ -1895,25 +1987,63 @@ class GapPositionPool(nn.Module):
         --bt-gap-pool-entropy-coeff will NOT recover the run, so restart from an earlier
         checkpoint with the higher coefficient.
         """
-        if self.mode != "learned" or self.entropy_floor <= 0 or a.numel() < 2:
+        if self.mode not in ("learned", "per_channel") or self.entropy_floor <= 0:
             return None
-        h = -(a * torch.log(a + 1e-12)).sum()
-        return F.relu(self.entropy_floor * math.log(a.numel()) - h)
+        n_pos = a.shape[-1]
+        if n_pos < 2:
+            return None
+        # PER CHANNEL, then averaged: a mean over channels of one scalar entropy would let a
+        # few diffuse channels pay for the rest collapsing, which is exactly the failure the
+        # floor exists to prevent when every channel has its own softmax.
+        h = -(a * torch.log(a + 1e-12)).sum(dim=-1)
+        hinge = F.relu(self.entropy_floor * math.log(n_pos) - h)
+        return hinge.mean()
 
     @staticmethod
     def diagnostics(a):
-        """Readouts for how concentrated the pooling has become."""
+        """Readouts for how concentrated the pooling has become.
+
+        Accepts ``(P,)`` for the shared modes and ``(C, P)`` for ``per_channel``, where the
+        concentration figures are averaged over channels and one extra readout appears.
+        """
         with torch.no_grad():
-            p = a.numel()
-            h = -(a * torch.log(a + 1e-12)).sum()
-            return {
+            per_channel = a.dim() == 2
+            p = a.shape[-1]
+            h = -(a * torch.log(a + 1e-12)).sum(dim=-1)
+            out = {
                 # 1.0 = uniform, 0.0 = all mass on one position.
-                "gap_pool_entropy": (h / math.log(p)).item() if p > 1 else 1.0,
+                "gap_pool_entropy": (h / math.log(p)).mean().item() if p > 1 else 1.0,
                 # Effective number of positions actually contributing.
-                "gap_pool_eff_pos": h.exp().item(),
+                "gap_pool_eff_pos": h.exp().mean().item(),
                 # Heaviest weight RELATIVE to uniform: 1.0 = uniform, P = collapsed.
-                "gap_pool_max_weight": (a.max() * p).item(),
+                "gap_pool_max_weight": (a.max(dim=-1).values * p).mean().item(),
             }
+            if per_channel:
+                # THE curve for this mode. Per-channel pooling only earns its parameters if
+                # the channels end up reading DIFFERENT places; if they converge on one
+                # profile it is the shared `learned` mode with C times the parameters, and
+                # the shared mode is already measured not to work here. Centred at uniform
+                # because non-negative profiles summing to 1 have high raw cosine whatever
+                # they do. 0.0 = fully diversified, 1.0 = every channel identical.
+                c = a.float() - 1.0 / p
+                norms = c.norm(dim=-1, keepdim=True)
+                if bool((norms < 1e-9).all()):
+                    # Every profile is exactly uniform, which is the zero-init state. There
+                    # are no deviations to compare, so agreement is undefined -- NOT 0.0,
+                    # which would read as "fully diversified" at the one moment the channels
+                    # are provably identical.
+                    out["gap_pool_channel_agreement"] = float("nan")
+                else:
+                    c = c / (norms + 1e-12)
+                    g = c @ c.T
+                    n = g.shape[0]
+                    off = (g.sum() - g.diagonal().sum()) / max(n * (n - 1), 1)
+                    out["gap_pool_channel_agreement"] = off.item()
+                # How much of the grid the channels collectively touch: the entropy of the
+                # summed profile. Near 1.0 with LOW agreement is the healthy state.
+                tot = a.float().mean(dim=0)
+                out["gap_pool_coverage"] = (-(tot * torch.log(tot + 1e-12)).sum() / math.log(p)).item()
+            return out
 
 
 class MoCoEncoder(nn.Module):

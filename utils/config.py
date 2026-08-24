@@ -553,7 +553,7 @@ def parse_args() -> argparse.ArgumentParser:
         "--bt-gap-pool",
         type=str,
         default="mean",
-        choices=["mean", "variance", "learned"],
+        choices=["mean", "variance", "learned", "per_channel"],
         help="How the --bt-gap-weight companion term pools over patch positions. 'mean' (default) "
         "is the plain uniform average and is bit-identical to every existing run. "
         "MEASURED AND REJECTED ON THIS PROJECT'S DATA, 23 Aug 2026 — read before enabling. "
@@ -580,12 +580,53 @@ def parse_args() -> argparse.ArgumentParser:
         "'variance' weights positions by their across-SUBJECT variance (detached, no "
         "parameters). 'learned' fits one logit per position, softmax over positions, "
         "zero-initialised so it starts exactly at the mean. "
+        "'per_channel' is the one mode the measurements support: (C, P) logits, a softmax "
+        "over positions PER CHANNEL, so different channels can read different anatomy. It is "
+        "the direct answer to the orthogonality result above -- the factors are localised in "
+        "different places, and one shared vector cannot serve them, but C vectors can. "
+        "Measured with eval/per_channel_pool_ceiling on a step-60k contrastive checkpoint: "
+        "mean factor R^2 0.290 under uniform GAP against 0.532 for an allocation built only "
+        "from cross-view agreement and channel decorrelation -- both of which Barlow Twins "
+        "already optimises, which is why no separate allocation mechanism is needed. "
+        "ventricle_size 0.173 -> 0.596, sulcal_widening -0.014 -> 0.616. Pair it with "
+        "--bt-gap-pool-coarsen 2, which measured BETTER than the full grid, not merely "
+        "cheaper. Also zero-initialised, so step 0 is exactly the mean, per channel. "
         "NEITHER weights by sample: the uniform mean recovers the subject term s EXACTLY because "
         "the interaction r is defined as the deviation from it and sums to zero over positions, "
         "and a sample-conditioned weight both revives that interaction and hands the BT loss a "
         "shortcut (put mass where the views already agree, which on_diag rewards without any "
         "representational gain). Neither mode changes the number of ROWS, so the d(d-1)/B "
         "off-diagonal floor is untouched — compose with --bt-corr-ema for that.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-coarsen",
+        type=int,
+        default=1,
+        help="Average-pool the position grid by this factor per axis before weighting it "
+        "(--bt-gap-pool per_channel only). 1 = the full grid; 2 on an 8x8x8 grid gives 4x4x4 "
+        "= 64 regions and 8x fewer parameters. Not primarily a saving: C*P is 22.5k against a "
+        "~977k model, which is nothing. It shrinks the number of places each of the C "
+        "independent softmaxes can collapse to, which is the real cost of this mode -- at a "
+        "coarse enough grid the entropy floor stops being load-bearing, removing a "
+        "hyper-parameter rather than adding one. And because the measured localisation is "
+        "REGIONAL rather than point-like, averaging over a region denoises the estimate: "
+        "measured on planted regional factors, 4x4x4 recovered 129% of the full-grid gain and "
+        "2x2x2 recovered 101%. Must divide the patch grid on every axis.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-init-std",
+        type=float,
+        default=0.0,
+        help="Std of the random init for --bt-gap-pool per_channel logits. 0 (default) is "
+        "zero-init, which makes step 0 EXACTLY the uniform mean but does not reliably break "
+        "the symmetry between channels -- and this mode is worthless without that break, "
+        "since C identical profiles are the shared 'learned' mode with C times the "
+        "parameters. Observed on a short run: gap_pool_channel_agreement went to 1.00 "
+        "immediately under zero-init. Every channel sees the same anatomy, so the first-order "
+        "gradient pushes them the same way while off_diag's pressure to differentiate is "
+        "second-order. Try 0.01 if Contrastive/gap_pool_channel_agreement_L* pins near 1.0: "
+        "small enough that the softmax is still uniform to ~1%, large enough that the "
+        "channels start distinguishable.",
     )
     parser.add_argument(
         "--bt-gap-pool-temp",

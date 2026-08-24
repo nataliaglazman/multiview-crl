@@ -1349,16 +1349,41 @@ def main(args):
                     f"--bt-gap-pool {_bt_pool_mode} with --bt-gap-weight 0 does nothing — the "
                     "pooling only feeds the GAP companion term, which is off."
                 )
-            if _bt_pool_mode == "learned" and getattr(args, "bt_gap_pool_entropy", 0.5) <= 0:
+            if _bt_pool_mode in ("learned", "per_channel") and getattr(args, "bt_gap_pool_entropy", 0.5) <= 0:
                 logger.warning(
-                    "--bt-gap-pool learned with --bt-gap-pool-entropy 0 removes the entropy "
+                    f"--bt-gap-pool {_bt_pool_mode} with --bt-gap-pool-entropy 0 removes the entropy "
                     "floor. With --bt-gap-std-coeff > 0 the weights can then collapse onto the "
                     "single highest-variance position, which minimises the variance hinge while "
                     "reducing every GAP statistic to a one-patch sample."
                 )
-            if _bt_pool_mode == "learned" and _bt_pool_ent_c <= 0:
+            if _bt_pool_mode == "per_channel" and int(getattr(args, "contrastive_proj_dim", 0) or 0) > 0:
+                raise ValueError(
+                    "--bt-gap-pool per_channel is incompatible with --contrastive-proj-dim: the "
+                    "pooler is built for the encoder's hidden width but the projection head "
+                    "changes the channel count the loss sees, so the (C, P) weights would not "
+                    "line up. Drop the head, or use a shared pooling mode."
+                )
+            if _bt_pool_mode == "per_channel":
+                _cz = int(getattr(args, "bt_gap_pool_coarsen", 1) or 1)
+                _pg_chk = getattr(args, "patch_grid_per_level", None) or [tuple(args.patch_grid)] * args.vqvae_nb_levels
+                for _lv, _g in enumerate(_pg_chk):
+                    if any(int(v) % _cz for v in _g):
+                        raise ValueError(
+                            f"--bt-gap-pool-coarsen {_cz} does not divide the level-{_lv} patch grid "
+                            f"{tuple(_g)} on every axis. Coarsening groups whole regions, so the grid "
+                            "must be divisible; pick a factor that divides all three axes."
+                        )
+                logger.info(
+                    f"  --bt-gap-pool per_channel: {args.vqvae_hidden_channels} channels x "
+                    f"{int(np.prod(tuple(_pg_chk[0]))) // (_cz ** 3)} regions of weights per level. "
+                    "Watch Contrastive/gap_pool_channel_agreement — this mode only earns its "
+                    "parameters if the channels end up reading DIFFERENT places, and an agreement "
+                    "near 1.0 means it collapsed to the shared 'learned' mode, which is already "
+                    "measured not to work here."
+                )
+            if _bt_pool_mode in ("learned", "per_channel") and _bt_pool_ent_c <= 0:
                 logger.warning(
-                    "--bt-gap-pool learned with --bt-gap-pool-entropy-coeff 0 leaves the entropy "
+                    f"--bt-gap-pool {_bt_pool_mode} with --bt-gap-pool-entropy-coeff 0 leaves the entropy "
                     "hinge computed and logged but unweighted, so it cannot restrain collapse."
                 )
 
@@ -1793,10 +1818,19 @@ def main(args):
                 temperature=getattr(args, "bt_gap_pool_temp", 1.0),
                 entropy_floor=getattr(args, "bt_gap_pool_entropy", 0.5),
                 ema=getattr(args, "bt_gap_pool_ema", 0.9),
+                # per_channel needs the channel count and the grid layout. The pooler runs
+                # BEFORE content selection (that happens inside barlow_twins_loss), so the
+                # width it sees is the encoder's full hidden width, not the content block.
+                n_channels=int(getattr(args, "vqvae_hidden_channels", 0) or 0),
+                grid=_grid,
+                coarsen=int(getattr(args, "bt_gap_pool_coarsen", 1) or 1),
+                init_std=float(getattr(args, "bt_gap_pool_init_std", 0.0) or 0.0),
             )
         vqvae_model._bt_gap_pools = _gap_pools
+        _npar = sum(p_.numel() for p_ in _gap_pools.parameters())
         logger.info(
             f"  Barlow Twins GAP pooling: mode={args.bt_gap_pool} levels={list(_gap_pools.keys())} "
+            f"coarsen={getattr(args, 'bt_gap_pool_coarsen', 1)} params={_npar} "
             f"(weights shared across views and independent of the sample, so the "
             f"subject/interaction split the GAP term relies on stays intact)"
         )

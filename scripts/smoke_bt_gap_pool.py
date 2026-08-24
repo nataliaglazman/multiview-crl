@@ -792,5 +792,76 @@ try:
 except ValueError:
     check("non-divisible factor raises", True)
 
+print("\n21. --bt-gap-pool per_channel: (C,P) weights, coarsening, and the collapse readout")
+_pc = GapPositionPool(64, mode="per_channel", n_channels=8)
+_zp = torch.randn(2, 32, 8, 64)
+_op, _ap = _pc(_zp, None)
+check("per_channel weights are (C, P)", tuple(_ap.shape) == (8, 64), str(tuple(_ap.shape)))
+check("zero-init pooling is EXACTLY the mean, per channel", torch.allclose(_op, _zp.mean(-1), atol=1e-6))
+check("each channel's weights sum to 1", torch.allclose(_ap.sum(-1), torch.ones(8), atol=1e-6))
+
+# channel_agreement is the curve this mode lives or dies by: it separates "channels read
+# different places" (the point) from "channels converged on one profile" (the shared
+# `learned` mode with C times the parameters, already measured not to work). Per-channel
+# ENTROPY cannot make that distinction -- it is identical in both states below.
+_div = GapPositionPool(64, mode="per_channel", n_channels=8)
+with torch.no_grad():
+    for _c in range(8):
+        _div.logits[_c, _c * 8 : (_c + 1) * 8] = 6.0  # each channel its own region
+_same = GapPositionPool(64, mode="per_channel", n_channels=8)
+with torch.no_grad():
+    _same.logits[:, :8] = 6.0  # every channel the same region
+_dd = GapPositionPool.diagnostics(_div.weights(_zp, None))
+_ds = GapPositionPool.diagnostics(_same.weights(_zp, None))
+check(
+    "diversified reads LOW agreement",
+    _dd["gap_pool_channel_agreement"] < 0.3,
+    f"{_dd['gap_pool_channel_agreement']:+.3f}",
+)
+check(
+    "collapsed reads agreement ~1.0",
+    _ds["gap_pool_channel_agreement"] > 0.9,
+    f"{_ds['gap_pool_channel_agreement']:+.3f}",
+)
+check("coverage separates them too", _dd["gap_pool_coverage"] > _ds["gap_pool_coverage"] + 0.3,
+      f"{_dd['gap_pool_coverage']:.3f} vs {_ds['gap_pool_coverage']:.3f}")  # fmt: skip
+check("...while per-channel ENTROPY cannot", abs(_dd["gap_pool_entropy"] - _ds["gap_pool_entropy"]) < 1e-3,
+      f"{_dd['gap_pool_entropy']:.3f} vs {_ds['gap_pool_entropy']:.3f} — identical, which is why agreement exists")  # fmt: skip
+check(
+    "agreement is NaN at zero-init, not 0.0", math.isnan(GapPositionPool.diagnostics(_ap)["gap_pool_channel_agreement"])
+)
+
+# Coarsening: logits live on the coarse grid, weights broadcast back to full positions, and
+# the foreground keep-mask still lines up because groups are indexed by FULL-grid position.
+_cz = GapPositionPool(512, mode="per_channel", n_channels=6, grid=(8, 8, 8), coarsen=2)
+_zc = torch.randn(2, 8, 6, 512)
+_oc, _ac = _cz(_zc, None)
+check("coarsen=2 gives 4^3=64 groups of logits", tuple(_cz.logits.shape) == (6, 64), str(tuple(_cz.logits.shape)))
+check("weights broadcast back to full positions", tuple(_ac.shape) == (6, 512))
+check("coarsened zero-init is still exactly the mean", torch.allclose(_oc, _zc.mean(-1), atol=1e-6))
+_keepc = torch.zeros(512, dtype=torch.bool)
+_keepc[::2] = True
+_zk = torch.randn(2, 8, 6, 256)
+_ok, _ak = _cz(_zk, _keepc)
+check("coarsening composes with the foreground mask", tuple(_ak.shape) == (6, 256))
+check("masked weights still sum to 1", torch.allclose(_ak.sum(-1), torch.ones(6), atol=1e-5))
+check("masked zero-init is the mean over KEPT positions", torch.allclose(_ok, _zk.mean(-1), atol=1e-5))
+try:
+    GapPositionPool(512, mode="per_channel", n_channels=4, grid=(8, 8, 8), coarsen=3)
+    check("indivisible coarsen raises", False, "no exception")
+except ValueError as e:
+    check("indivisible coarsen raises", "not divisible" in str(e))
+try:
+    GapPositionPool(64, mode="per_channel", n_channels=0)
+    check("per_channel without n_channels raises", False, "no exception")
+except ValueError as e:
+    check("per_channel without n_channels raises", "n_channels" in str(e))
+_wrong = GapPositionPool(64, mode="per_channel", n_channels=8)
+try:
+    _wrong(torch.randn(2, 4, 5, 64), None)  # 5 channels against 8 built
+    check("channel-count mismatch raises", False, "no exception")
+except ValueError as e:
+    check("channel-count mismatch raises", "projection head" in str(e))
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)

@@ -1,0 +1,105 @@
+# Per-channel position weighting for the Barlow Twins GAP term.
+#
+# THE ONE POOLING VARIANT THE MEASUREMENTS SUPPORT. The shared-vector modes
+# (gap_pool_variance.yaml, gap_pool_learned.yaml) are both rejected: the factors are
+# localised in mutually ORTHOGONAL places, so one weight vector shared across every channel
+# cannot serve them -- mass moved toward the ventricles is mass taken from the lesions. This
+# gives each channel its own profile, which is the smallest change that removes that
+# obstacle.
+#
+# Evidence, from `python -m eval.per_channel_pool_ceiling --run-dir <run>` on a step-60k
+# contrastive checkpoint (--causal iid, held-out subjects, mean factor R^2):
+#
+#     uniform GAP                       0.290   what the current objective pools with
+#     per-channel, UNSUPERVISED alloc   0.532   cross-view agreement + decorrelation only
+#     per-channel, per-factor alloc     0.575   supervised reference
+#     full patch                        0.753   absolute ceiling for using spatial layout
+#
+# Per factor, the starved ones come back: ventricle_size 0.173 -> 0.596, sulcal_widening
+# -0.014 -> 0.616, temporal_atrophy 0.183 -> 0.590, lesion_x -0.020 -> 0.221.
+#
+# WHY NO NEW ALLOCATION MECHANISM IS NEEDED. The 0.532 above uses only cross-view agreement
+# (BT's on_diag) and decorrelation from already-chosen channels (BT's off_diag). Both are
+# already in the loss, so the pressure that spreads channels across different anatomy is
+# what the existing objective applies once each channel can choose where to read. Note the
+# obvious alternative does NOT work: normalising the weights across CHANNELS at each
+# position, Slot-Attention style, is a no-op on symmetric logits (measured -- see
+# eval/per_channel_pool_ceiling.unsupervised_allocation).
+#
+# coarsen: 2 turns the 8^3 grid into 4^3 = 64 regions. Not a saving -- C*P is 22.5k against
+# a ~977k model. It shrinks how far each of the C independent softmaxes can collapse, and on
+# planted regional factors it measured BETTER than the full grid (129% of the gain), because
+# averaging over a region denoises an estimate of something that is regional anyway.
+#
+# What to read, in order:
+#   Contrastive/gap_pool_channel_agreement_L0  THE curve for this mode. Near 0 = channels
+#                                      read different places, which is the whole point.
+#                                      Near 1.0 = they converged on one profile, i.e. this
+#                                      collapsed into the shared `learned` mode, which is
+#                                      already measured not to work. NaN at step 0 is
+#                                      correct: zero-init weights are exactly uniform, so
+#                                      there are no deviations to compare yet.
+#   Contrastive/gap_pool_coverage_L0   how much of the grid the channels collectively touch.
+#                                      HIGH coverage with LOW agreement is the healthy state.
+#   Contrastive/gap_pool_entropy_L0    per-channel concentration, averaged. Watch for 0.
+#   Contrastive/gap_on_diag_loss_L0    should FALL if the pooled feature carries more subject.
+# NOT gap_feat_std: the variance hinge sets it, not the pooling.
+#
+# Zero-initialised, so step 0 is EXACTLY the uniform mean per channel and this starts from
+# the objective it is being compared against. Symmetry across channels is broken by the data
+# (each channel's gradient comes from its own features), so no random init is needed.
+#
+# NOTE ON INHERITANCE: launch.py does not chain _base_, so the block below mirrors
+# synthetic_causal.yaml verbatim rather than inheriting through it. Keep them in sync.
+
+_base_: synthetic_defaults
+tag: gap-pool-per-channel
+
+# ── the lines under test ─────────────────────────────────────────────────────────────
+bt_gap_pool: per_channel
+bt_gap_pool_coarsen: 2 # 8^3 -> 4^3 = 64 regions. Measured BETTER than the full grid.
+bt_gap_pool_entropy: 0.5
+bt_gap_pool_entropy_coeff: 1.0
+
+# ── mirrored from synthetic_causal.yaml, unchanged ───────────────────────────────────
+contrastive_loss_type: barlow_twins
+patch_contrastive: true
+patch_grid: [8, 8, 8]
+patch_center_mode: position
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+bt_gap_weight: 1
+bt_gap_lambda: 0.013
+bt_patch_weight: 1
+bt_sim_normalize: true
+bt_sim_coeff: 0.5
+bt_std_coeff: 10
+bt_corr_ema: 0.99
+single_count_commitment: true
+scale_contrastive_loss: 1
+scale_recon_loss: 1
+grad_clip_norm: 100
+batch_size: 128
+synthetic_identifiable_ventricle: true
+content_size: 44
+synthetic_normalize: fixed_reference
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_res: 64
+synthetic_clean_content: true
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
+inject_style_to_decoder: true
+style_injection_mode: input
+separate_style_codebooks: true
+separate_content_codebooks: false
+vqvae_nb_levels: 1
+vqvae_nb_res_layers: 2
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [4]
+deterministic: true
+checkpoint_steps: 1000
+eval_dci: true
