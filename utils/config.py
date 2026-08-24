@@ -523,6 +523,31 @@ def parse_args() -> argparse.ArgumentParser:
         "Only used when --contrastive-loss-type barlow_twins. Default: 0.005.",
     )
     parser.add_argument(
+        "--bt-on-coeff",
+        type=float,
+        default=1.0,
+        help="Barlow Twins ON-diagonal (alignment) weight. 1.0 is the standard formulation and "
+        "is bit-identical to every prior run. Exists because on_diag is otherwise the bare first "
+        "term, so --bt-lambda is the only handle on the alignment/decorrelation balance — and "
+        "raising lambda is NOT equivalent: it shifts on_diag against off_diag and simultaneously "
+        "shifts the whole correlation block against reconstruction, VQ and the sim term, while "
+        "this moves only the first. Measured with eval.gradient_attribution --metric rank: "
+        "on_diag carries a rank force of -2.311 against the off-diagonal's +1.466, making "
+        "alignment the largest single force collapsing the representation. Lower it (0.2-0.5) "
+        "when effective rank is falling while on_diag keeps improving.",
+    )
+    parser.add_argument(
+        "--bt-gap-on-coeff",
+        type=float,
+        default=None,
+        help="Separate on-diagonal weight for the --bt-gap-weight companion term. Defaults to "
+        "--bt-on-coeff. Split for the same reason as --bt-gap-lambda and --bt-gap-std-coeff: the "
+        "two terms measure over completely different rows, and the GAP one is the only one whose "
+        "rows are SUBJECTS — which is also the axis effective rank is measured on. Note "
+        "--bt-patch-weight already scales the whole patch block, so this is the knob that "
+        "separates the two on-diagonals.",
+    )
+    parser.add_argument(
         "--bt-gap-weight",
         type=float,
         default=0.0,

@@ -154,7 +154,7 @@ def _flat(grads):
     return torch.cat([g.reshape(-1) for g in grads]).detach()
 
 
-def _bt_split(hz, c_idx, out, prefix, weight, ema_factor, *, lambd, sim_coeff, std_coeff, **kw):
+def _bt_split(hz, c_idx, out, prefix, weight, ema_factor, *, lambd, sim_coeff, std_coeff, on_coeff=1.0, **kw):
     """Split one Barlow Twins term into its four ADDITIVE pieces, each as its own loss.
 
     A single lumped "contrastive" gradient cannot answer which part of the objective moves a
@@ -185,8 +185,11 @@ def _bt_split(hz, c_idx, out, prefix, weight, ema_factor, *, lambd, sim_coeff, s
             hz, estimated_content_indices=[c_idx], subsets=[[0, 1]], lambd=lam, sim_coeff=sim, std_coeff=std, **kw
         )
 
+    # ``on_coeff`` is applied to the extracted term rather than passed into ``_call``: the three
+    # subtractions below need the SAME on_diag in both operands for it to cancel, so the calls
+    # stay at the default 1.0 and the weight goes on here.
     base = _call(0.0, 0.0, 0.0)  # on_diag alone: every other coefficient is zero
-    out[f"{prefix}on"] = (weight * ema_factor) * base
+    out[f"{prefix}on"] = (weight * ema_factor * on_coeff) * base
     if lambd:
         out[f"{prefix}off"] = (weight * ema_factor) * (_call(lambd, 0.0, 0.0) - base)
     if sim_coeff:
@@ -257,6 +260,7 @@ def _losses_at(model, batch, args_, device, grid, level):
         _scale * float(getattr(args_, "bt_patch_weight", 1.0)),
         _ema_f,
         lambd=float(getattr(args_, "bt_lambda", 1.0)),
+        on_coeff=float(getattr(args_, "bt_on_coeff", 1.0)),
         sim_coeff=_sim_c,
         std_coeff=float(getattr(args_, "bt_std_coeff", 0.0)),
         center_mode=getattr(args_, "patch_center_mode", "none") or "none",
@@ -276,6 +280,7 @@ def _losses_at(model, batch, args_, device, grid, level):
     if _gap_w > 0:
         _gap_lam = getattr(args_, "bt_gap_lambda", None)
         _gap_std = getattr(args_, "bt_gap_std_coeff", None)
+        _gap_on = getattr(args_, "bt_gap_on_coeff", None)
         _bt_split(
             hz.mean(-1),  # (2, B, C) — one row per subject
             c_idx,
@@ -284,6 +289,7 @@ def _losses_at(model, batch, args_, device, grid, level):
             _scale * _gap_w,
             _ema_f,
             lambd=float(getattr(args_, "bt_lambda", 1.0) if _gap_lam is None else _gap_lam),
+            on_coeff=float(getattr(args_, "bt_on_coeff", 1.0) if _gap_on is None else _gap_on),
             sim_coeff=_sim_c,
             std_coeff=float(getattr(args_, "bt_std_coeff", 0.0) if _gap_std is None else _gap_std),
             sim_normalize=_sim_norm,

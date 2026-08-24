@@ -88,6 +88,9 @@ def build_terms(cfg, level, series):
     std = float(g("bt_std_coeff", 0.0) or 0.0)
     gstd = g("bt_gap_std_coeff", None)
     gstd = std if gstd is None else float(gstd)
+    on = float(g("bt_on_coeff", 1.0))
+    gon = g("bt_gap_on_coeff", None)
+    gon = on if gon is None else float(gon)
     lvlw = g("contrastive_level_weights", None)
     lw = float(lvlw[level]) if lvlw and level < len(lvlw) else 1.0
     single = bool(g("single_count_commitment", False))
@@ -95,11 +98,11 @@ def build_terms(cfg, level, series):
 
     L = f"_L{level}"
     terms = [
-        ("BT patch  on_diag", f"Contrastive/on_diag_loss{L}", sc * lw * pw * 1.0),
+        ("BT patch  on_diag", f"Contrastive/on_diag_loss{L}", sc * lw * pw * on),
         ("BT patch  off_diag", f"Contrastive/off_diag_loss{L}", sc * lw * pw * lam),
         ("BT patch  sim", f"Contrastive/sim_loss{L}", sc * lw * pw * sim),
         ("BT patch  var hinge", f"Contrastive/var_loss{L}", sc * lw * pw * std),
-        ("BT gap    on_diag", f"Contrastive/gap_on_diag_loss{L}", sc * lw * gw * 1.0),
+        ("BT gap    on_diag", f"Contrastive/gap_on_diag_loss{L}", sc * lw * gw * gon),
         ("BT gap    off_diag", f"Contrastive/gap_off_diag_loss{L}", sc * lw * gw * glam),
         ("BT gap    sim", f"Contrastive/gap_sim_loss{L}", sc * lw * gw * sim),
         ("BT gap    var hinge", f"Contrastive/gap_var_loss{L}", sc * lw * gw * gstd),

@@ -1035,6 +1035,7 @@ def barlow_twins_loss(
     subsets=None,
     soft_content_mask=None,
     lambd=0.005,
+    on_coeff=1.0,
     center_mode="none",
     patch_stat="fold",
     sim_coeff=0.0,
@@ -1058,6 +1059,16 @@ def barlow_twins_loss(
         subsets: View subsets (same length as *estimated_content_indices*).
         soft_content_mask: Optional differentiable ``(1, C)`` mask.
         lambd: Weight on the off-diagonal (redundancy-reduction) term.
+        on_coeff: Weight on the on-diagonal (alignment) term. 1.0 is the standard
+            formulation, in which ``on_diag`` is the bare first term and the only way to
+            change the alignment/decorrelation balance is through ``lambd``. Exists because
+            that is not equivalent when other terms are present: raising ``lambd`` shifts
+            on_diag against off_diag AND shifts the whole correlation block against
+            reconstruction, VQ and sim, while this moves only the first. Measured on this
+            project by ``eval.gradient_attribution --metric rank``: on_diag carries a rank
+            force of -2.311 against the off-diagonal's +1.466, i.e. alignment is the largest
+            single force collapsing the representation, and before this it was the one term
+            with no coefficient to turn down.
         center_mode: Patch centering, applied only in patch mode — see
             ``_center_patch_features``. Without it the folded batch mixes samples and
             positions, so the per-channel standardisation below removes only the grand
@@ -1315,10 +1326,25 @@ def barlow_twins_loss(
                     _dd = c.shape[0]
                     on_diag = on_diag / _dd
                     off_diag = off_diag / max(_dd * (_dd - 1), 1)
-                loss = on_diag + lambd * off_diag + sim_coeff * sim_loss + std_coeff * var_loss
+                loss = on_coeff * on_diag + lambd * off_diag + sim_coeff * sim_loss + std_coeff * var_loss
                 total_loss = total_loss + loss
 
                 with torch.no_grad():
+                    # Distribution of the RAW per-channel std, not just its mean. The mean
+                    # cannot separate "every channel at 0.82" from "30 channels at 1.1 and 10
+                    # at 0.05" — both give the same var_loss — and only the second is a lambda
+                    # killing dimensions, since a channel driven to zero variance satisfies the
+                    # off-diagonal for free. Cut RELATIVE to the mean rather than absolutely,
+                    # because the feature scale itself moves two orders of magnitude between
+                    # configurations (GAP feat_std measured at 0.004 in one run, 0.8 in
+                    # another); uniform shrinkage already shows up in feat_std_mean, and this is
+                    # for the bimodal case that hides.
+                    #
+                    # Only meaningful for a GAP term. The patch std runs over folded
+                    # (subject, position) rows, where position variance alone puts every channel
+                    # near 1, so a patch dead_frac reads ~0 whatever the subject dimension does.
+                    _std_flat = _raw_std_i.reshape(-1)
+                    _dead_frac = (_std_flat < 0.1 * _raw_std_mean).float().mean()
                     sub_diags.append(
                         {
                             "top1_acc": 0.0,  # not applicable for BT
@@ -1338,6 +1364,8 @@ def barlow_twins_loss(
                             "sim_loss": sim_loss.item(),
                             "var_loss": var_loss.item(),
                             "feat_std_mean": _raw_std_mean.item(),
+                            "feat_std_min": _std_flat.min().item(),
+                            "dead_frac": _dead_frac.item(),
                         }
                     )
 

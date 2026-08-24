@@ -1267,12 +1267,18 @@ def main(args):
         # Same split, same reason, as _bt_gap_lam above.
         _bt_gap_std_c = getattr(args, "bt_gap_std_coeff", None)
         _bt_gap_std_c = _bt_std_c if _bt_gap_std_c is None else _bt_gap_std_c
+        # On-diagonal weight. Split patch/GAP for the same reason as the lambda and the hinge:
+        # the GAP term's rows are subjects, and that is the axis effective rank is measured on.
+        _bt_on_c = float(getattr(args, "bt_on_coeff", 1.0))
+        _bt_gap_on_c = getattr(args, "bt_gap_on_coeff", None)
+        _bt_gap_on_c = _bt_on_c if _bt_gap_on_c is None else float(_bt_gap_on_c)
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
         _bt_norm = bool(getattr(args, "bt_normalize_terms", False))
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
             f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
+            f"on={_bt_on_c}, gap on={_bt_gap_on_c}, "
             f"sim={_bt_sim_c}, std={_bt_std_c}, gap std={_bt_gap_std_c}, "
             f"patch weight={_bt_patch_w})"
         )
@@ -1311,6 +1317,7 @@ def main(args):
                 subsets=subsets,
                 soft_content_mask=soft_content_mask,
                 lambd=_bt_lambda,
+                on_coeff=_bt_on_c,
                 sim_coeff=_bt_sim_c,
                 std_coeff=_bt_std_c,
                 sim_normalize=_bt_sim_norm,
@@ -1326,6 +1333,7 @@ def main(args):
                 subsets=subsets,
                 soft_content_mask=soft_content_mask,
                 lambd=_bt_lambda,
+                on_coeff=_bt_on_c,
                 center_mode=_nce_center,
                 patch_stat=_bt_stat,
                 sim_coeff=_bt_sim_c,
@@ -1347,6 +1355,7 @@ def main(args):
                     subsets=subsets,
                     soft_content_mask=soft_content_mask,
                     lambd=_bt_gap_lam,
+                    on_coeff=_bt_gap_on_c,
                     sim_coeff=_bt_sim_c,
                     std_coeff=_bt_gap_std_c,
                     sim_normalize=_bt_sim_norm,
