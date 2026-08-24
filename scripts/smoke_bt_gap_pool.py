@@ -553,5 +553,61 @@ check(
     f"max raw top10%={max(r[1] for r in _allg):.3f} — comparable to real lesion_y/cortical values",
 )
 
+print("\n17. the per-channel ceiling test discriminates the three regimes it must")
+# eval/per_channel_pool_ceiling.py answers "would giving each channel its own position
+# weighting help?" by handing the scheme ground truth and asking how much it beats uniform
+# GAP even then. It has to separate three cases that call for different decisions, and the
+# third is the one that would otherwise be mistaken for a win.
+from eval.per_channel_pool_ceiling import _pca_reduce, _ridge_r2, best_position_per_channel  # noqa: E402
+
+_rng = np.random.RandomState(0)
+
+
+def _ceiling(x_, gt_):
+    _nn = len(gt_)
+    _pm = _rng.permutation(_nn)
+    _ft, _ev = _pm[: _nn // 2], _pm[_nn // 2 :]
+    _bp, _ = best_position_per_channel(x_, gt_, _ft)
+    _gap = x_.mean(-1)
+    _pc = np.stack([x_[:, c, _bp[c]] for c in range(x_.shape[1])], 1)
+    _fl = x_.reshape(_nn, -1)
+    _tr, _te = _pca_reduce(_fl[_ft], _fl[_ev], min(128, max(8, len(_ft) // 4)))
+    _u = float(np.mean(_ridge_r2(_gap[_ft], gt_[_ft], _gap[_ev], gt_[_ev])))
+    _p = float(np.mean(_ridge_r2(_pc[_ft], gt_[_ft], _pc[_ev], gt_[_ev])))
+    _f = float(np.mean(_ridge_r2(_tr, gt_[_ft], _te, gt_[_ev])))
+    return _p - _u, _f - _u, len(np.unique(_bp))
+
+
+_N, _C, _P, _K = 2000, 24, 64, 4
+_g = _rng.randn(_N, _K)
+
+_xa = _rng.randn(_N, _C, _P) * 0.5  # channels specialise: channel c reads factor c%K at 8*(c%K)
+for _c in range(_C):
+    _xa[:, _c, 8 * (_c % _K)] += _g[:, _c % _K] * 3.0
+_ga, _ca, _ua = _ceiling(_xa, _g)
+check("specialised channels -> large gain", _ga > 0.05, f"gain={_ga:+.3f} ceil={_ca:+.3f}")
+check("specialised channels -> gain captures most of the ceiling", _ga >= 0.5 * _ca, f"{_ga / _ca:.0%}")
+
+_xb = _rng.randn(_N, _C, _P) * 0.5  # every channel carries every factor everywhere
+for _k in range(_K):
+    _xb += _g[:, _k][:, None, None] * 0.8
+_gb, _cb, _ub = _ceiling(_xb, _g)
+check("fully distributed -> no gain (idea is dead)", _gb < 0.01, f"gain={_gb:+.3f}")
+
+_xc = _rng.randn(_N, _C, _P) * 0.5  # factor is a CONTRAST between two positions
+for _k in range(_K):
+    _xc[:, :, 4 * _k] += _g[:, _k][:, None] * 2.0
+    _xc[:, :, 4 * _k + 1] -= _g[:, _k][:, None] * 2.0
+_gc, _cc, _uc = _ceiling(_xc, _g)
+check("spatial pattern -> full patch beats per-channel", _cc > _gc * 1.5, f"gain={_gc:+.3f} ceil={_cc:+.3f}")
+
+# The distinct-position count is descriptive, and reading it as evidence of specialisation is
+# BACKWARDS — pinned because the first version of the script did exactly that.
+check(
+    "distinct-position count is NOT evidence of specialisation",
+    _ua < _ub,
+    f"specialised used {_ua}/{_C} distinct, distributed(dead) used {_ub}/{_C}",
+)
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)
