@@ -42,7 +42,14 @@ cd "$(dirname "$0")/.."
 
 for gon in ${GON_VALUES}; do
     for pw in ${PW_VALUES}; do
-        tag="rank-grid-gon${gon}-pw${pw}"
+        # RunAI workload names accept lowercase alphanumeric and hyphen ONLY, so the decimal
+        # point becomes 'p': 0.25 -> 0p25. Checked rather than assumed, because a bad name
+        # fails at submit time with a message that does not name the offending character.
+        tag="rank-grid-gon${gon//./p}-pw${pw//./p}"
+        if [[ ! "${tag}" =~ ^[a-z0-9-]+$ ]]; then
+            echo "Invalid workload name '${tag}': RunAI allows lowercase alphanumeric and hyphen only." >&2
+            exit 1
+        fi
         echo "=== ${tag} (bt_gap_on_coeff=${gon}, bt_patch_weight=${pw}, ${STEPS} steps)"
         python scripts/launch.py "${EXPERIMENT}" \
             --cluster "${CLUSTER}" \
