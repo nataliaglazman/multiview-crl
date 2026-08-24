@@ -75,6 +75,52 @@ def _pca_reduce(x_tr, x_te, dim):
     return (x_tr - mu) @ comp.T, (x_te - mu) @ comp.T
 
 
+def unsupervised_allocation(hz, fit_idx, redundancy_weight=1.0):
+    """Choose one position per channel using ONLY signals Barlow Twins can see.
+
+    This is the measurement that decides whether per-channel pooling is buildable. The
+    supervised ceilings show the information IS reachable one-position-per-channel — the
+    factors that GAP destroys come back at 0.27-0.74 under a per-factor allocation — but a
+    per-factor allocation needs labels and cannot ship. The question is whether an
+    unsupervised criterion lands near that ceiling or near the much worse shared allocation.
+
+    Two label-free signals, and they are exactly the two terms of the BT loss:
+
+        cross-view agreement at (c, p)    on_diag: does this position agree across views,
+                                          i.e. does it carry CONTENT rather than style
+        decorrelation from chosen         off_diag: BT's redundancy-reduction term already
+                                          rewards channels for carrying different things,
+                                          which is precisely the allocation pressure needed
+
+    So if this works, the allocation is not an extra mechanism to design — it is what the
+    existing objective would apply on its own once each channel can choose where to read.
+
+    Greedy, strongest channel first. Greedy is a lower bound on what gradient descent would
+    find, which keeps this conservative in the same direction as the hard-selection choice.
+    """
+    v0 = hz[0][fit_idx].numpy()
+    v1 = hz[1][fit_idx].numpy()
+    n, c_n, p_n = v0.shape
+    z0 = (v0 - v0.mean(0)) / (v0.std(0) + 1e-8)
+    z1 = (v1 - v1.mean(0)) / (v1.std(0) + 1e-8)
+    xview = (z0 * z1).mean(0)  # (C, P) cross-view correlation — no labels used
+    zm = 0.5 * (z0 + z1)
+    zm = (zm - zm.mean(0)) / (zm.std(0) + 1e-8)  # what pooling would actually read
+    chosen = np.zeros(c_n, dtype=int)
+    order = np.argsort(-xview.max(1))  # strongest channels claim first
+    sel = []
+    for c in order:
+        score = xview[c].copy()
+        if sel:
+            s_mat = np.stack(sel, 1)  # (n, k)
+            corr = (zm[:, c, :].T @ s_mat) / n  # (P, k)
+            score = score - redundancy_weight * (corr**2).sum(1)
+        p_star = int(np.argmax(score))
+        chosen[c] = p_star
+        sel.append(zm[:, c, p_star])
+    return chosen
+
+
 def best_position_per_channel_for_factor(x, gt, fit_idx, k):
     """Each channel's best position FOR ONE FACTOR — the most generous per-channel ceiling.
 
@@ -140,6 +186,15 @@ def main():
         "project's --probe-dim auto convention: at C*P=22528 features against ~1000 fit "
         "subjects, unreduced ridge returns negative R^2 on weak targets).",
     )
+    p.add_argument(
+        "--redundancy-weight",
+        type=float,
+        default=1.0,
+        help="Weight on the decorrelation term in the UNSUPERVISED allocation, relative to "
+        "cross-view agreement. 0 selects purely on cross-view agreement and channels pile "
+        "onto the same position; large values spread them at the cost of picking positions "
+        "that carry nothing. This is the one knob of the shippable variant.",
+    )
     p.add_argument("--seed", type=int, default=0)
     cli = p.parse_args()
 
@@ -197,6 +252,12 @@ def main():
         pk = np.stack([x[:, c, bpk[c]] for c in range(C)], axis=1)
         per_fac[k] = _ridge_r2(pk[fit_idx], gt[fit_idx, k : k + 1], pk[eval_idx], gt[eval_idx, k : k + 1])[0]
     res["per-channel PER-FACTOR"] = per_fac
+    # The one row that could actually ship: allocation from cross-view agreement and
+    # channel decorrelation, both of which BT already optimises and neither of which uses a
+    # label. Inserted before the patch ceiling so the table reads GAP -> shippable -> ceilings.
+    unsup_p = unsupervised_allocation(hz, fit_idx, cli.redundancy_weight)
+    unsup = np.stack([x[:, c, unsup_p[c]] for c in range(C)], axis=1)
+    res["per-channel UNSUPERVISED"] = _ridge_r2(unsup[fit_idx], gt[fit_idx], unsup[eval_idx], gt[eval_idx])
     res[f"full patch (PCA {pdim})"] = _ridge_r2(f_tr, gt[fit_idx], f_te, gt[eval_idx])
 
     print("--- factor R^2 by pooling (held-out subjects) -------------------------------")
@@ -212,15 +273,18 @@ def main():
     pc_ = res["per-channel best"]
     pf_ = res["per-channel PER-FACTOR"]
     fp_ = res[f"full patch (PCA {pdim})"]
+    us_ = res["per-channel UNSUPERVISED"]
     gain = float(np.mean(pc_)) - float(np.mean(u_))
     ceil = float(np.mean(fp_)) - float(np.mean(u_))
+    gain_us = float(np.mean(us_)) - float(np.mean(u_))
+    gain_pf = float(np.mean(pf_)) - float(np.mean(u_))
 
     # PER FACTOR, because the mean hides the whole result. On this project's contrastive
     # checkpoint the mean reads "+0.15, weak" while sulcal_widening goes -0.014 -> 0.745 and
     # ventricle_size goes 0.173 -> -0.021. Those need different responses and the average
     # describes neither.
     print("\n--- per factor: who does per-channel selection actually serve? --------------")
-    print(f"  {'factor':20s} {'GAP':>8s} {'per-ch':>8s} {'per-fac':>8s} {'patch':>8s}   diagnosis")
+    print(f"  {'factor':20s} {'GAP':>8s} {'per-ch':>8s} {'unsup':>8s} {'per-fac':>8s} {'patch':>8s}   diagnosis")
     served, starved, pattern_only = [], [], []
     for k, nm in enumerate(names):
         d = ""
@@ -235,7 +299,7 @@ def main():
         else:
             d = "PATTERN-ONLY — no per-channel read works"
             pattern_only.append(nm)
-        print(f"  {nm:20s} {u_[k]:8.3f} {pc_[k]:8.3f} {pf_[k]:8.3f} {fp_[k]:8.3f}   {d}")
+        print(f"  {nm:20s} {u_[k]:8.3f} {pc_[k]:8.3f} {us_[k]:8.3f} {pf_[k]:8.3f} {fp_[k]:8.3f}   {d}")
     print("  per-fac = each channel picks its best position FOR THAT FACTOR: unshippable, and")
     print("  the most generous per-channel ceiling there is. A factor still flat there cannot")
     print("  be reached by any per-channel pooling, however the weights are learned.")
@@ -252,33 +316,52 @@ def main():
     print("  dead. The R^2 comparison decides; this line only says what the selection did.")
 
     print("\n--- verdict ----------------------------------------------------------------")
-    print(f"  per-channel - uniform : {gain:+.4f} mean factor R^2")
-    print(f"  full patch  - uniform : {ceil:+.4f}  (absolute ceiling for using spatial layout)")
-    if gain < 0.01:
+    print(f"  uniform GAP                     {float(np.mean(u_)):.4f}   the current objective")
+    print(f"  per-channel, UNSUPERVISED       {float(np.mean(us_)):.4f}  ({gain_us:+.4f})  <- the only shippable row")
+    print(f"  per-channel, shared allocation  {float(np.mean(pc_)):.4f}  ({gain:+.4f})   supervised")
+    print(f"  per-channel, PER-FACTOR alloc   {float(np.mean(pf_)):.4f}  ({gain_pf:+.4f})   supervised ceiling")
+    print(f"  full patch                      {float(np.mean(fp_)):.4f}  ({ceil:+.4f})   absolute ceiling")
+
+    # The supervised rows say whether the information is REACHABLE one-position-per-channel.
+    # The unsupervised row says whether it is reachable WITHOUT LABELS, which is the only
+    # question that decides whether to build the thing. Judging on the supervised rows is how
+    # a promising ceiling turns into a training run that cannot reproduce it.
+    if gain_pf < 0.05:
         print(
-            "\n  DEAD. Even choosing each channel's best position WITH GROUND TRUTH barely beats\n"
-            "  the uniform mean, so no unsupervised per-channel weighting will do better.\n"
-            "  Do not build it."
+            "\n  DEAD. Even a per-FACTOR allocation with ground truth barely beats the uniform\n"
+            "  mean, so the information is not reachable one-position-per-channel at all and no\n"
+            "  weighting scheme recovers it. Do not build it."
         )
-        if ceil > 0.05:
+        if ceil > 0.1:
             print(
-                f"  Note the full-patch ceiling is much higher ({ceil:+.4f}): the spatial information\n"
-                "  is real, but it lives in the PATTERN across positions, not in one position per\n"
-                "  channel. That argues for keeping the patch term, not for weighting the GAP one."
+                f"  The full-patch ceiling is much higher ({ceil:+.4f}): the information is real but\n"
+                "  lives in the spatial PATTERN, which argues for the patch term, not for pooling."
             )
-    elif gain < 0.5 * ceil:
+    elif gain_us >= 0.6 * gain_pf:
         print(
-            f"\n  WEAK. Per-channel selection recovers {gain / ceil:.0%} of what the full spatial layout\n"
-            "  offers. Some headroom, but most of the information is in the spatial pattern that\n"
-            "  a per-channel pooling cannot express, and this is the SUPERVISED ceiling — an\n"
-            "  unsupervised objective would get less. Weigh that against C x P parameters."
+            f"\n  WORTH BUILDING. The unsupervised allocation reaches {gain_us / gain_pf:.0%} of the supervised\n"
+            "  per-factor ceiling using only cross-view agreement and channel decorrelation --\n"
+            "  both of which the Barlow Twins loss already optimises. That means the allocation\n"
+            "  is not a mechanism to design: it is what the existing objective applies on its\n"
+            "  own once each channel can choose where to read. Greedy selection is a LOWER\n"
+            "  bound on what gradient descent would find, so this is conservative."
+        )
+    elif gain_us > 0.02:
+        print(
+            f"\n  PROMISING BUT UNPROVEN. The information is reachable ({gain_pf:+.4f} with a per-factor\n"
+            f"  allocation, {gain_pf / ceil:.0%} of the full-patch ceiling), but the unsupervised criterion\n"
+            f"  only recovers {gain_us / gain_pf:.0%} of that. Worth one training run, not a research programme:\n"
+            "  the gap between the two is the allocation problem, and closing it needs a signal\n"
+            "  that distinguishes channels the BT loss currently cannot. Try tuning\n"
+            "  --redundancy-weight first, it is the one knob here."
         )
     else:
         print(
-            f"\n  WORTH BUILDING. Per-channel selection captures {gain / ceil:.0%} of the full-patch\n"
-            "  ceiling at the same dimensionality as GAP, so the information is in fact\n"
-            "  reachable one-position-per-channel. Next question is whether an UNSUPERVISED\n"
-            "  objective can find those positions — this used labels to pick them."
+            f"\n  DO NOT BUILD. The information is reachable with labels ({gain_pf:+.4f}) but the\n"
+            f"  unsupervised criterion recovers almost none of it ({gain_us:+.4f}). The allocation is\n"
+            "  the whole problem and Barlow Twins cannot see what it needs to solve it, so a\n"
+            "  learned per-channel pooling would find the same bad allocation the shared one\n"
+            "  finds. The supervised rows are a ceiling, not a forecast."
         )
     print()
 

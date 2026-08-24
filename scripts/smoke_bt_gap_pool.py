@@ -669,5 +669,66 @@ for _k, _nm, _want in (
         f"GAP {_u5[_k]:.3f} per-ch {_p5[_k]:.3f} per-fac {_pf5[_k]:.3f} patch {_f5[_k]:.3f}",
     )
 
+print("\n19. the UNSUPERVISED allocation escapes starvation")
+# The decisive question for per-channel pooling. Supervised ceilings show the information is
+# reachable one-position-per-channel, but a per-factor allocation needs labels. This checks
+# whether an allocation built only from signals BT already optimises -- cross-view agreement
+# (on_diag) and decorrelation from already-chosen channels (off_diag) -- finds the same
+# positions. If it does, the allocation is not a mechanism to design: it is what the existing
+# objective applies once each channel can choose where to read.
+from eval.per_channel_pool_ceiling import unsupervised_allocation  # noqa: E402
+
+_r6 = np.random.RandomState(0)
+torch.manual_seed(0)
+_N6, _C6, _P6, _K6 = 2000, 24, 64, 3
+_gt6 = _r6.randn(_N6, _K6)
+_base6 = torch.randn(_N6, _C6, _P6) * 0.5
+# Two views: shared content plus independent per-view noise, so cross-view agreement is a
+# real signal rather than an artifact of using one tensor twice.
+_hz6 = torch.stack([_base6 + torch.randn(_N6, _C6, _P6) * 0.4, _base6 + torch.randn(_N6, _C6, _P6) * 0.4])
+# Starvation regime: one dominant factor and two weak ones elsewhere. A factor-summed
+# allocation piles every channel onto the dominant factor and starves the rest, which is what
+# the real checkpoint does (ventricle_size 0.173 -> -0.021 under the shared allocation).
+for _k, _pos, _amp in ((0, 0, 4.0), (1, 20, 1.0), (2, 40, 1.0)):
+    _hz6[:, :, :, _pos] += torch.tensor(_gt6[:, _k], dtype=torch.float32)[:, None] * _amp
+_x6 = _hz6.mean(0).numpy()
+_pm6 = _r6.permutation(_N6)
+_ft6, _ev6 = _pm6[: _N6 // 2], _pm6[_N6 // 2 :]
+
+
+def _score6(sel_pos):
+    _f = np.stack([_x6[:, c, sel_pos[c]] for c in range(_C6)], 1)
+    return float(np.mean(_ridge_r2(_f[_ft6], _gt6[_ft6], _f[_ev6], _gt6[_ev6])))
+
+
+_gap6 = float(np.mean(_ridge_r2(_x6.mean(-1)[_ft6], _gt6[_ft6], _x6.mean(-1)[_ev6], _gt6[_ev6])))
+_bp6, _ = best_position_per_channel(_x6, _gt6, _ft6)
+_shared6 = _score6(_bp6)
+_up6 = unsupervised_allocation(_hz6, _ft6)
+_unsup6 = _score6(_up6)
+_pf6 = np.empty(_K6)
+for _k in range(_K6):
+    _bk6 = best_position_per_channel_for_factor(_x6, _gt6, _ft6, _k)
+    _pk6 = np.stack([_x6[:, c, _bk6[c]] for c in range(_C6)], 1)
+    _pf6[_k] = _ridge_r2(_pk6[_ft6], _gt6[_ft6, _k : _k + 1], _pk6[_ev6], _gt6[_ev6, _k : _k + 1])[0]
+_ceil6 = float(np.mean(_pf6))
+
+check("shared allocation starves the weak factors", _shared6 - _gap6 < 0.2, f"shared {_shared6:.3f} vs GAP {_gap6:.3f}")
+check(
+    "UNSUPERVISED allocation beats the shared one",
+    _unsup6 > _shared6 + 0.2,
+    f"unsup {_unsup6:.3f} vs shared {_shared6:.3f}",
+)
+check(
+    "UNSUPERVISED reaches most of the supervised per-factor ceiling",
+    (_unsup6 - _gap6) / max(_ceil6 - _gap6, 1e-9) > 0.6,
+    f"{(_unsup6 - _gap6) / max(_ceil6 - _gap6, 1e-9):.0%} of ceiling {_ceil6:.3f}",
+)
+check(
+    "decorrelation actually spreads the channels",
+    len(np.unique(_up6)) > _C6 / 2,
+    f"{len(np.unique(_up6))}/{_C6} distinct positions",
+)
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)
