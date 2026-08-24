@@ -1,11 +1,13 @@
 # Learned position prior for the Barlow Twins GAP term.
 #
-# READ THIS BEFORE LAUNCHING: the cheaper `gap_pool_variance.yaml` has already been run and
-# REJECTED on this project's checkpoints (z = 0.5 on the contrastive run, z = -3.7 on the
-# recon baseline -- see that file's header). This variant costs P parameters and an extra
-# loss term to answer the same question, so it is only worth running if the detached version
-# shows a non-flat, content-aligned position profile on whatever data you are revisiting.
-# Check with `python -m eval.gap_pool_profile --run-dir <run>` first.
+# READ THIS BEFORE LAUNCHING: rejected on this project's data, and learning the weights
+# does NOT rescue it. The measured obstacle is not that the position profile is unknown --
+# it is that the factors are localised in mutually orthogonal places (ventricle_size,
+# temporal_atrophy and the lesions all concentrate, mean pairwise profile cosine +0.098).
+# A single shared weight vector cannot serve orthogonal targets however it is fitted, so
+# the extra P parameters buy nothing. See gap_pool_variance.yaml's header and
+# `python -m eval.gap_pool_profile --run-dir <run>` -- read its PER-FACTOR table, not the
+# aggregate, which is dominated by the globally-visible factors and reads flat regardless.
 #
 # One logit per position, softmax over positions, zero-initialised -- so at step 0 this is
 # EXACTLY the uniform mean and the run starts from the objective it is being compared

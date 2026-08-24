@@ -619,8 +619,8 @@ def main():
     # Do the localised ones agree about WHERE? This is what decides whether one shared
     # weight vector could serve them, which is what --bt-gap-pool actually implements.
     loc = [(nm, prof) for nm, prof, s, r, err, sg in scored if np.isfinite(sg) and sg > 2.0 and np.isfinite(r) and r > 0.3]  # fmt: skip
+    ov = profile_overlap([p for _, p in loc]) if len(loc) >= 2 else float("nan")
     if len(loc) >= 2:
-        ov = profile_overlap([p for _, p in loc])
         print(f"  localised factors ({', '.join(nm for nm, _ in loc)}):")
         print(f"    mean pairwise profile cosine {ov:+.3f}   (1.0 = same places, ~0 = different places)")
         if ov < 0.3:
@@ -639,12 +639,17 @@ def main():
     fac_wins = z_fac > 3.0 and (r2_factor - r2_null_mean) >= cli.min_effect
     channels_localised = ch["per_channel_top10_p75"] > 0.13  # meaningfully above the 0.10 floor
     channels_disagree = not (ch["agreement"] > 0.5) if channels_localised else False
-    # Is the FACTOR information spread evenly, regardless of what the variance does? If most
-    # positions independently predict the factors about as well as the best one, there is
-    # nothing for any weighting to concentrate on — this is the decisive statistic, and it
-    # is independent of the variance profile's shape.
+    # DRIVEN BY THE PER-FACTOR TABLE, not by the averaged profile. The averaged profile is
+    # dominated by whichever factors are globally visible, and this project's are: measured
+    # under --causal iid, brain_size and cortical_thickness sit at top10% ~0.12 while
+    # ventricle_size reaches 0.66 and the lesions 0.48-0.80. Averaging those together reads
+    # flat and says nothing. `loc` already applies both gates (concentration above the
+    # least-concentrated factor, and split-half reliability), so use it.
     frac_carrying = float((r2_map >= 0.5 * r2_map.max()).mean()) if r2_map.max() > 0 else 0.0
-    factor_delocalised = frac_carrying > 0.8 and s_fac["top10pct_mass"] < 0.15
+    factors_localised = len(loc) > 0
+    # No factor cleared the gates AND the averaged profile is flat: genuinely nothing to
+    # concentrate on. Both conditions, because either alone has a known failure mode.
+    factor_delocalised = (not factors_localised) and frac_carrying > 0.8 and s_fac["top10pct_mass"] < 0.15
 
     print("\n--- verdict ------------------------------------------------------------------")
     # A significantly NEGATIVE z is not "no signal" — it is a finding. It says the
@@ -687,6 +692,29 @@ def main():
             "Do NOT run --bt-gap-pool as built. Per-channel weights are the version of this\n"
             "idea that could work, at C x P parameters and a much larger collapse surface."
         )
+    elif factors_localised and len(loc) >= 2 and np.isfinite(ov) and ov < 0.3:
+        print(
+            f"NO for a SHARED position weighting — and NOT because the factors are spread out.\n"
+            f"{len(loc)} factors are genuinely localised ({', '.join(nm for nm, _ in loc)}),\n"
+            f"but they peak in DIFFERENT places (mean pairwise profile cosine {ov:+.3f}).\n"
+            "--bt-gap-pool implements ONE weight vector shared across every channel and every\n"
+            "factor, so it can only express a position preference they all share, and there\n"
+            "isn't one: mass moved toward the ventricles is mass taken from the lesions.\n"
+            "That is a structural mismatch between the instrument and the data, not a\n"
+            "tuning problem — do not run it, and do not expect the learned variant to fix it.\n"
+            "The version of this idea that could work is PER-FACTOR or per-channel weighting,\n"
+            "at C x P parameters and a much larger collapse surface, and it would need a\n"
+            "target other than the aggregate BT loss to be worth the complexity."
+        )
+    elif factors_localised:
+        print(
+            f"NO on the aggregate test, though {len(loc)} factor(s) are localised\n"
+            f"({', '.join(nm for nm, _ in loc)})"
+            + (f" and they peak in SIMILAR places (cosine {ov:+.3f}).\n" if np.isfinite(ov) else ".\n")
+            + "A shared weighting is at least coherent for them, so the aggregate result is\n"
+            "worth re-checking on more subjects before dropping the idea — the permutation\n"
+            "tests above may simply lack the power to see an effect this size."
+        )
     elif channels_localised and factor_delocalised:
         # The case both of this project's step-60k checkpoints land in, and the one the
         # earlier version of this script mislabelled as "channels are flat" while printing
@@ -709,13 +737,14 @@ def main():
         )
     else:
         print(
-            f"NO — no weighting beats its own permutation (variance z = {z:.1f}, factor z = {z_fac:.1f})\n"
-            f"and individual channels are flat too (p75 top10% {ch['per_channel_top10_p75']:.3f} against a\n"
-            "0.10 floor). The representation is spatially delocalised: a feature at position p\n"
-            "is not about the anatomy at position p, so there is no positional structure for\n"
-            "ANY position weighting to exploit — shared or per-channel.\n"
-            "This is consistent with content being stored in channel identity rather than\n"
-            "spatial layout. Cross-check with eval/receptive_field_test.py and\n"
+            f"NO — no weighting beats its own permutation (variance z = {z:.1f}, factor z = {z_fac:.1f}),\n"
+            f"and no individual FACTOR cleared the localisation gates either (per-channel\n"
+            f"variance p75 top10% {ch['per_channel_top10_p75']:.3f}, but that is variance structure, not\n"
+            "factor content). Nothing here for a position weighting to exploit.\n"
+            "Before believing that: check the run used --causal iid. Under 'match' every\n"
+            "factor reads partly as its recoverable parent, and a globally-visible parent\n"
+            "flattens every child's profile — which produced a false 'delocalised' reading on\n"
+            "this project once already. Cross-check with eval/receptive_field_test.py and\n"
             "eval/plot_local_vs_global.py."
         )
     if z_fac > 3.0 and not fac_wins:

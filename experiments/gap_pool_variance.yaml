@@ -1,12 +1,18 @@
 # Weight patch positions by their across-subject variance instead of averaging uniformly.
 #
-# READ THIS BEFORE LAUNCHING: this configuration has already been tested against the
-# checkpoints it was designed for, and it was REJECTED. `eval/gap_pool_profile.py` on a
-# step-60k contrastive run found the variance profile only mildly peaked and no better than
-# its own permutation (z = 0.5); on the recon-only baseline the profile IS strongly peaked
-# (top-10% mass 0.45) and weighting by it is significantly WORSE than the permutation
-# (z = -3.7, cross-view correlation 0.157 -> 0.055), because the highest-variance positions
-# carry per-view style rather than shared content.
+# READ THIS BEFORE LAUNCHING: already tested on the checkpoints it was designed for, and
+# REJECTED -- twice over, for two independent reasons.
+#
+# 1. Variance is the wrong statistic. z = 0.7 against its own permutation on the contrastive
+#    run, and z = -4.4 on the recon-only baseline, i.e. significantly WORSE than permuting
+#    the same weights: the highest-across-subject-variance positions carry per-view style,
+#    not shared content, so upweighting them removes cross-view agreement.
+# 2. The deeper reason, which also kills the `learned` variant. The factors ARE localised --
+#    ventricle_size top-10% mass 0.662, temporal_atrophy 0.351, lesion_y/z 0.74/0.80 against
+#    a 0.10 flat floor -- but their profiles are mutually orthogonal (mean pairwise cosine
+#    +0.098). This file weights positions with ONE vector shared across every channel and
+#    factor, so mass moved toward the ventricles is mass taken from the lesions. No setting
+#    of a shared weighting can serve them.
 #
 # The motivating measurement was also misread: gap_feat_std parking low was taken as
 # evidence of dilution, but feat_std is set by the VARIANCE HINGE, not by the pooling
