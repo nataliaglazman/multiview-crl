@@ -730,5 +730,67 @@ check(
     f"{len(np.unique(_up6))}/{_C6} distinct positions",
 )
 
+print("\n20. coarsening the position grid keeps the gain (the lightweight build)")
+# "Is there a lighter way" -- the answer is a coarser grid, and the reason is not the
+# parameter count (C*P is 22.5k against a ~977k model, negligible). It is that a per-channel
+# weighting over 512 positions has C independent softmaxes each able to collapse onto one
+# patch, which is what makes the entropy floor load-bearing and adds hyper-parameters. Over
+# 64 or 8 regions it structurally cannot. And because the measured localisation is REGIONAL
+# rather than point-like, averaging over a region denoises the estimate, so coarser can beat
+# finer rather than merely matching it.
+from eval.per_channel_pool_ceiling import coarsen  # noqa: E402
+
+_r7 = np.random.RandomState(0)
+torch.manual_seed(0)
+_N7, _C7, _K7, _G7 = 2000, 24, 3, (8, 8, 8)
+_P7 = 512
+_gt7 = _r7.randn(_N7, _K7)
+_b7 = torch.randn(_N7, _C7, _P7) * 0.5
+_hz7 = torch.stack([_b7 + torch.randn(_N7, _C7, _P7) * 0.4, _b7 + torch.randn(_N7, _C7, _P7) * 0.4])
+
+
+def _region(d0, d1, h0, h1, w0, w1):
+    m = torch.zeros(*_G7)
+    m[d0:d1, h0:h1, w0:w1] = 1.0
+    return m.reshape(-1)
+
+
+# Regional factors a few patches wide -- what ventricle_size and temporal_atrophy look like,
+# as opposed to the single-position plants used elsewhere in this file.
+for _k, (_reg, _amp) in enumerate(
+    [(_region(0, 2, 0, 2, 0, 2), 4.0), (_region(4, 6, 4, 6, 0, 2), 1.0), (_region(2, 4, 6, 8, 4, 6), 1.0)]
+):
+    _hz7 += torch.tensor(_gt7[:, _k], dtype=torch.float32)[None, :, None, None] * _reg[None, None, None, :] * _amp
+_x7 = _hz7.mean(0).numpy()
+_pm7 = _r7.permutation(_N7)
+_ft7, _ev7 = _pm7[: _N7 // 2], _pm7[_N7 // 2 :]
+_gap7 = float(np.mean(_ridge_r2(_x7.mean(-1)[_ft7], _gt7[_ft7], _x7.mean(-1)[_ev7], _gt7[_ev7])))
+
+_kept = {}
+for _fac in (1, 2, 4):
+    _hzc, _xc = coarsen(_hz7, _G7, _fac), coarsen(_x7, _G7, _fac)
+    _al = unsupervised_allocation(_hzc, _ft7)
+    _f7 = np.stack([_xc[:, c, _al[c]] for c in range(_C7)], 1)
+    _kept[_fac] = float(np.mean(_ridge_r2(_f7[_ft7], _gt7[_ft7], _f7[_ev7], _gt7[_ev7]))) - _gap7
+
+check("coarsening preserves shape/count", coarsen(_x7, _G7, 2).shape[-1] == 64, f"{coarsen(_x7, _G7, 2).shape[-1]}")
+check("coarsen(factor=1) is a no-op", coarsen(_x7, _G7, 1).shape[-1] == 512)
+check(
+    "4^3 grid keeps the gain (8x fewer params, 64 collapse targets not 512)",
+    _kept[2] >= 0.8 * _kept[1],
+    f"{_kept[2] / _kept[1]:.0%} of the 8^3 gain, C*P 2816 vs 22528",
+)
+check(
+    "2^3 grid still keeps most of it",
+    _kept[4] >= 0.8 * _kept[1],
+    f"{_kept[4] / _kept[1]:.0%} of the 8^3 gain, C*P 192",
+)
+check("a non-divisible factor raises rather than silently reshaping", True)
+try:
+    coarsen(_x7, (8, 8, 8), 3)
+    check("non-divisible factor raises", False, "no exception")
+except ValueError:
+    check("non-divisible factor raises", True)
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)

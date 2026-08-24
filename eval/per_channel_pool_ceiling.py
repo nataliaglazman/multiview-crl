@@ -75,6 +75,33 @@ def _pca_reduce(x_tr, x_te, dim):
     return (x_tr - mu) @ comp.T, (x_te - mu) @ comp.T
 
 
+def coarsen(t, grid, factor):
+    """Average-pool the POSITION grid by ``factor`` per axis: (..., P) -> (..., P/factor^3).
+
+    The point of coarsening is not to save parameters — C*P is 22.5k against a ~977k model,
+    which is nothing. It is to shrink the number of independent softmaxes and the number of
+    places each one can collapse to. A per-channel weighting over 512 positions has 44
+    independent ways to concentrate onto a single patch; over 8 regions it structurally
+    cannot, so the entropy floor stops being load-bearing and one hyper-parameter disappears.
+
+    The measured localisation is regional, not point-like — ventricle_size and
+    temporal_atrophy concentrate over anatomy several patches wide — so most of the gain
+    should survive coarsening. That is an empirical claim, and the sweep below tests it
+    rather than assuming it.
+    """
+    d, h, w = grid
+    if factor == 1:
+        return t
+    if d % factor or h % factor or w % factor:
+        raise ValueError(f"grid {grid} not divisible by {factor}")
+    lead = t.shape[:-1]
+    x = t.reshape(*lead, d, h, w)
+    x = x.reshape(*lead, d // factor, factor, h // factor, factor, w // factor, factor)
+    axes = (len(lead) + 1, len(lead) + 3, len(lead) + 5)
+    x = x.mean(axis=axes) if isinstance(x, np.ndarray) else x.mean(dim=axes)
+    return x.reshape(*lead, -1)
+
+
 def unsupervised_allocation(hz, fit_idx, redundancy_weight=1.0):
     """Choose one position per channel using ONLY signals Barlow Twins can see.
 
@@ -312,6 +339,30 @@ def main():
     print("  lr_asymmetry 0.879 unsup against 0.395 per-fac). Read a factor that is flat even")
     print("  there as hard to reach one-position-per-channel, not as proven unreachable, and")
     print("  read the unsup/per-fac ratio as an understatement.")
+
+    # ── how coarse can the position grid be before the gain goes away? ──────────────
+    # Answers "is there a lighter way": fewer, larger regions mean fewer independent
+    # softmaxes and a far smaller collapse surface, which is the real cost of per-channel
+    # weighting -- not the parameter count.
+    print("\n--- how coarse can the grid be before the gain disappears? ------------------")
+    print(f"  {'grid':>12s} {'positions':>10s} {'C*P params':>11s} {'unsup R^2':>10s} {'kept':>7s}")
+    base_gain = float(np.mean(res["per-channel UNSUPERVISED"])) - float(np.mean(u_))
+    for fac in (1, 2, 4):
+        try:
+            hz_c = coarsen(hz, tuple(grid), fac)
+            x_c = coarsen(x, tuple(grid), fac)
+        except ValueError:
+            continue
+        p_c = x_c.shape[-1]
+        alloc = unsupervised_allocation(hz_c, fit_idx, cli.redundancy_weight)
+        feat = np.stack([x_c[:, c, alloc[c]] for c in range(C)], axis=1)
+        r = float(np.mean(_ridge_r2(feat[fit_idx], gt[fit_idx], feat[eval_idx], gt[eval_idx])))
+        g = tuple(int(v // fac) for v in grid)
+        kept = (r - float(np.mean(u_))) / base_gain if abs(base_gain) > 1e-9 else float("nan")
+        print(f"  {str(g):>12s} {p_c:10d} {C * p_c:11d} {r:10.4f} {kept:6.0%}")
+    print("  A coarse grid that keeps most of the gain is the lighter build: fewer independent")
+    print("  softmaxes, structurally less room to collapse, and the entropy floor stops being")
+    print("  load-bearing — which removes a hyper-parameter rather than adding one.")
 
     print("\n--- how much do the channels actually differ? ------------------------------")
     uniq = len(np.unique(best_p))
