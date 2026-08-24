@@ -132,8 +132,13 @@ def best_position_per_channel_for_factor(x, gt, fit_idx, k):
     This relaxes that by letting the allocation depend on the factor, which no unsupervised
     objective could ever do. It answers a narrower question: is a factor unreachable because
     the ALLOCATION went elsewhere, or because no single-position-per-channel read can express
-    it at all? If a factor stays near zero even here, its information lives in the spatial
-    PATTERN and no per-channel pooling recovers it.
+    it at all? If a factor stays near zero even here, its information most likely lives in the
+    spatial PATTERN rather than at any single position.
+
+    NOT a true upper bound, despite being supervised: selection is greedy and univariate,
+    which is not optimal for a multivariate readout. Measured on this project, the
+    UNSUPERVISED allocation beats it on lr_asymmetry (0.879 against 0.395), so treat any
+    "fraction of ceiling" computed against it as an understatement.
     """
     xf, yf = x[fit_idx], gt[fit_idx, k]
     xz = (xf - xf.mean(0)) / (xf.std(0) + 1e-8)
@@ -300,9 +305,13 @@ def main():
             d = "PATTERN-ONLY — no per-channel read works"
             pattern_only.append(nm)
         print(f"  {nm:20s} {u_[k]:8.3f} {pc_[k]:8.3f} {us_[k]:8.3f} {pf_[k]:8.3f} {fp_[k]:8.3f}   {d}")
-    print("  per-fac = each channel picks its best position FOR THAT FACTOR: unshippable, and")
-    print("  the most generous per-channel ceiling there is. A factor still flat there cannot")
-    print("  be reached by any per-channel pooling, however the weights are learned.")
+    print("  per-fac = each channel picks its best position FOR THAT FACTOR: unshippable, and a")
+    print("  strong reference -- but NOT a true upper bound. It selects by univariate")
+    print("  correlation, greedily, which is not optimal for a multivariate ridge readout, so")
+    print("  the unsupervised column can and does beat it on individual factors (measured:")
+    print("  lr_asymmetry 0.879 unsup against 0.395 per-fac). Read a factor that is flat even")
+    print("  there as hard to reach one-position-per-channel, not as proven unreachable, and")
+    print("  read the unsup/per-fac ratio as an understatement.")
 
     print("\n--- how much do the channels actually differ? ------------------------------")
     uniq = len(np.unique(best_p))
