@@ -75,6 +75,27 @@ def _pca_reduce(x_tr, x_te, dim):
     return (x_tr - mu) @ comp.T, (x_te - mu) @ comp.T
 
 
+def best_position_per_channel_for_factor(x, gt, fit_idx, k):
+    """Each channel's best position FOR ONE FACTOR — the most generous per-channel ceiling.
+
+    ``best_position_per_channel`` picks one position per channel by summing signal over ALL
+    factors, which is what any shippable scheme must do: there is one pooled representation,
+    not one per factor. That single allocation is dominated by whichever factors correlate
+    most strongly, and the rest starve — the same orthogonality problem one level down.
+
+    This relaxes that by letting the allocation depend on the factor, which no unsupervised
+    objective could ever do. It answers a narrower question: is a factor unreachable because
+    the ALLOCATION went elsewhere, or because no single-position-per-channel read can express
+    it at all? If a factor stays near zero even here, its information lives in the spatial
+    PATTERN and no per-channel pooling recovers it.
+    """
+    xf, yf = x[fit_idx], gt[fit_idx, k]
+    xz = (xf - xf.mean(0)) / (xf.std(0) + 1e-8)
+    yz = (yf - yf.mean()) / (yf.std() + 1e-8)
+    corr = np.einsum("ncp,n->cp", xz, yz) / len(fit_idx)
+    return (corr**2).argmax(1)
+
+
 def best_position_per_channel(x, gt, fit_idx):
     """For each channel, the position whose scalar feature carries the most factor signal.
 
@@ -167,6 +188,15 @@ def main():
     res = {}
     res["uniform GAP"] = _ridge_r2(gap[fit_idx], gt[fit_idx], gap[eval_idx], gt[eval_idx])
     res["per-channel best"] = _ridge_r2(per_ch[fit_idx], gt[fit_idx], per_ch[eval_idx], gt[eval_idx])
+    # Most generous per-channel ceiling: allocation chosen per factor. Unshippable (no
+    # unsupervised objective can allocate per factor), but it separates "this factor lost the
+    # allocation" from "no single-position read can express this factor at all".
+    per_fac = np.empty(gt.shape[1])
+    for k in range(gt.shape[1]):
+        bpk = best_position_per_channel_for_factor(x, gt, fit_idx, k)
+        pk = np.stack([x[:, c, bpk[c]] for c in range(C)], axis=1)
+        per_fac[k] = _ridge_r2(pk[fit_idx], gt[fit_idx, k : k + 1], pk[eval_idx], gt[eval_idx, k : k + 1])[0]
+    res["per-channel PER-FACTOR"] = per_fac
     res[f"full patch (PCA {pdim})"] = _ridge_r2(f_tr, gt[fit_idx], f_te, gt[eval_idx])
 
     print("--- factor R^2 by pooling (held-out subjects) -------------------------------")
@@ -178,8 +208,37 @@ def main():
     print("  uniform GAP and per-channel best have the SAME dimensionality (C), so the only")
     print("  difference between them is where each channel reads from.")
 
-    gain = float(np.mean(res["per-channel best"])) - float(np.mean(res["uniform GAP"]))
-    ceil = float(np.mean(res[f"full patch (PCA {pdim})"])) - float(np.mean(res["uniform GAP"]))
+    u_ = res["uniform GAP"]
+    pc_ = res["per-channel best"]
+    pf_ = res["per-channel PER-FACTOR"]
+    fp_ = res[f"full patch (PCA {pdim})"]
+    gain = float(np.mean(pc_)) - float(np.mean(u_))
+    ceil = float(np.mean(fp_)) - float(np.mean(u_))
+
+    # PER FACTOR, because the mean hides the whole result. On this project's contrastive
+    # checkpoint the mean reads "+0.15, weak" while sulcal_widening goes -0.014 -> 0.745 and
+    # ventricle_size goes 0.173 -> -0.021. Those need different responses and the average
+    # describes neither.
+    print("\n--- per factor: who does per-channel selection actually serve? --------------")
+    print(f"  {'factor':20s} {'GAP':>8s} {'per-ch':>8s} {'per-fac':>8s} {'patch':>8s}   diagnosis")
+    served, starved, pattern_only = [], [], []
+    for k, nm in enumerate(names):
+        d = ""
+        if fp_[k] - max(u_[k], 0) < 0.05:
+            d = "no spatial info to recover"
+        elif pc_[k] - u_[k] > 0.05:
+            d = "SERVED by the shared allocation"
+            served.append(nm)
+        elif pf_[k] - max(u_[k], 0) > 0.05:
+            d = "STARVED — reachable, lost the allocation"
+            starved.append(nm)
+        else:
+            d = "PATTERN-ONLY — no per-channel read works"
+            pattern_only.append(nm)
+        print(f"  {nm:20s} {u_[k]:8.3f} {pc_[k]:8.3f} {pf_[k]:8.3f} {fp_[k]:8.3f}   {d}")
+    print("  per-fac = each channel picks its best position FOR THAT FACTOR: unshippable, and")
+    print("  the most generous per-channel ceiling there is. A factor still flat there cannot")
+    print("  be reached by any per-channel pooling, however the weights are learned.")
 
     print("\n--- how much do the channels actually differ? ------------------------------")
     uniq = len(np.unique(best_p))

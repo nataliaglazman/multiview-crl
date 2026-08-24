@@ -609,5 +609,65 @@ check(
     f"specialised used {_ua}/{_C} distinct, distributed(dead) used {_ub}/{_C}",
 )
 
+print("\n18. per-factor diagnosis: SERVED vs STARVED vs PATTERN-ONLY")
+# The mean over factors hides the whole result -- on the real contrastive checkpoint it reads
+# "+0.15, weak" while sulcal_widening goes -0.014 -> 0.745 and ventricle_size goes
+# 0.173 -> -0.021. Those need opposite responses. The per-FACTOR allocation ceiling is what
+# separates a factor that lost the shared allocation (fixable by allocating deliberately)
+# from one no single-position-per-channel read can express at all (not fixable by pooling).
+from eval.per_channel_pool_ceiling import best_position_per_channel_for_factor  # noqa: E402
+
+_r = np.random.RandomState(0)
+_N5, _C5, _P5, _K5 = 2000, 24, 64, 3
+_gt5 = _r.randn(_N5, _K5)
+_x5 = _r.randn(_N5, _C5, _P5) * 0.5
+_x5[:, :, 0] += _gt5[:, 0][:, None] * 4.0  # strong single-position: wins the allocation
+_x5[:, :, 30] += _gt5[:, 1][:, None] * 1.2  # weaker single-position: reachable, loses it
+# Recoverable ONLY as a difference: a large shared nuisance swamps each position on its own
+# and cancels exactly in the contrast. Planting the same contrast without the nuisance does
+# NOT test this -- one position still reads the factor cleanly, and the first version of this
+# test made exactly that mistake and never exercised the PATTERN-ONLY branch.
+_nu = _r.randn(_N5, 1) * 6.0
+_x5[:, :, 50] += _gt5[:, 2][:, None] + _nu
+_x5[:, :, 51] += -_gt5[:, 2][:, None] + _nu
+
+_pm5 = _r.permutation(_N5)
+_ft5, _ev5 = _pm5[: _N5 // 2], _pm5[_N5 // 2 :]
+_gap5 = _x5.mean(-1)
+_bp5, _ = best_position_per_channel(_x5, _gt5, _ft5)
+_pc5 = np.stack([_x5[:, c, _bp5[c]] for c in range(_C5)], 1)
+_pf5 = np.empty(_K5)
+for _k in range(_K5):
+    _bk = best_position_per_channel_for_factor(_x5, _gt5, _ft5, _k)
+    _pk = np.stack([_x5[:, c, _bk[c]] for c in range(_C5)], 1)
+    _pf5[_k] = _ridge_r2(_pk[_ft5], _gt5[_ft5, _k : _k + 1], _pk[_ev5], _gt5[_ev5, _k : _k + 1])[0]
+_fl5 = _x5.reshape(_N5, -1)
+_tr5, _te5 = _pca_reduce(_fl5[_ft5], _fl5[_ev5], 128)
+_u5 = _ridge_r2(_gap5[_ft5], _gt5[_ft5], _gap5[_ev5], _gt5[_ev5])
+_p5 = _ridge_r2(_pc5[_ft5], _gt5[_ft5], _pc5[_ev5], _gt5[_ev5])
+_f5 = _ridge_r2(_tr5, _gt5[_ft5], _te5, _gt5[_ev5])
+
+
+def _diagnose(k):
+    if _f5[k] - max(_u5[k], 0) < 0.05:
+        return "no spatial info"
+    if _p5[k] - _u5[k] > 0.05:
+        return "SERVED"
+    if _pf5[k] - max(_u5[k], 0) > 0.05:
+        return "STARVED"
+    return "PATTERN-ONLY"
+
+
+for _k, _nm, _want in (
+    (0, "strong single-position", "SERVED"),
+    (1, "weak single-position", "STARVED"),
+    (2, "contrast-only", "PATTERN-ONLY"),
+):
+    check(
+        f"{_nm} -> {_want}",
+        _diagnose(_k) == _want,
+        f"GAP {_u5[_k]:.3f} per-ch {_p5[_k]:.3f} per-fac {_pf5[_k]:.3f} patch {_f5[_k]:.3f}",
+    )
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)
