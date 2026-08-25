@@ -56,6 +56,7 @@ import csv
 import json
 import logging
 import os
+import re
 import time
 
 import numpy as np
@@ -359,6 +360,44 @@ def _blank_dci(prefix):
         f"{prefix}_pooling": None,
         f"{prefix}_n_codes": float("nan"),
     }
+
+
+def mean_std_structs(structs):
+    """Elementwise ``(mean, std)`` over a list of identically-shaped nested dicts.
+
+    Used to collapse several untrained-floor scorings — one per init seed — into a single
+    floor plus its across-seed spread.  That spread is the point: an unseeded floor is one
+    draw of a random projection, and every ``learned = trained - floor`` number inherits
+    its noise silently.  Measured on this project, three near-equivalent lesion axes drew
+    floors spanning 0.16 of block-MCC, which is the same order as the effects being
+    claimed over them.
+
+    Numeric leaves are averaged over the finite values; dicts recurse; anything else
+    (pooling names, factor-name lists, None) is taken from the first struct unchanged
+    since it is metadata, not a measurement.  With one struct the std is 0.0.
+    """
+    if not structs:
+        return {}, {}
+    first = structs[0]
+    if isinstance(first, dict):
+        mean, std = {}, {}
+        for k in first:
+            vals = [s[k] for s in structs if isinstance(s, dict) and k in s]
+            mean[k], std[k] = mean_std_structs(vals)
+        return mean, std
+    if isinstance(first, bool) or not isinstance(first, (int, float, np.floating, np.integer)):
+        return first, first
+    finite = [float(v) for v in structs if np.isfinite(_as_float(v))]
+    if not finite:
+        return float("nan"), float("nan")
+    return float(np.mean(finite)), float(np.std(finite))
+
+
+def _as_float(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def _select_codes(X, max_codes):
@@ -1024,6 +1063,7 @@ def evaluate_model(
     random_init=False,
     dci_max_codes=0,
     factor_pooling="assigned",
+    init_seed=None,
 ):
     """Load a model, extract representations under each pooling, return a row.
 
@@ -1040,7 +1080,7 @@ def evaluate_model(
 
     logger.info("=== evaluating %s (%s)%s ===", name, run_dir, " [UNTRAINED FLOOR]" if random_init else "")
     t0 = time.perf_counter()
-    model, _args, device = load_model_from_run_dir(run_dir, checkpoint, device, random_init=random_init)
+    model, _args, device = load_model_from_run_dir(run_dir, checkpoint, device, random_init=random_init, seed=init_seed)
     t_load = time.perf_counter() - t0
 
     reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
@@ -2578,6 +2618,18 @@ def main():
         "above R^2 0.8, so an absolute per-factor number there is close to meaningless without "
         "it. Roughly doubles runtime.",
     )
+    p.add_argument(
+        "--floor-seeds",
+        type=int,
+        default=3,
+        help="How many untrained draws to average the floor over (>=1). The untrained weights "
+        "ARE the measurement, and they were unseeded: one draw of a random projection, different "
+        "every invocation, whose noise went silently into every reported delta. Measured here, "
+        "three near-equivalent lesion axes drew floors spanning 0.16 of block-MCC — the same order "
+        "as the effects claimed over them. Seeds are 0..N-1, so a floor is now reproducible, and "
+        "the across-seed std is reported so a delta can be read against it. Costs one extra "
+        "extraction per seed; use 1 for a fast, still-reproducible floor.",
+    )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument(
@@ -2760,12 +2812,22 @@ def main():
     # `base` is the row this one is scored alongside: a floor row must inherit its twin's
     # baseline status, or the baseline's floor would be scored on a different content/style
     # split than the baseline and stop being subtractable from it.
-    plan = [(n, n, d, c, False) for n, d, c in zip(names, specs, ckpts)]
+    #
+    # Each floor is scored `--floor-seeds` times with a fixed torch seed per draw and then
+    # averaged into one `<name>-floor` row (see `mean_std_structs`). Unseeded, the floor was
+    # a single random projection redrawn on every invocation, so the zero point everything
+    # is subtracted from carried noise nobody could reproduce or bound.
+    n_floor_seeds = max(1, cli.floor_seeds)
+    plan = [(n, n, d, c, False, None) for n, d, c in zip(names, specs, ckpts)]
     if cli.floor:
-        plan += [(f"{n}-floor", n, d, c, True) for n, d, c in zip(names, specs, ckpts)]
+        plan += [
+            (f"{n}{_FLOOR_SUFFIX}-s{seed}", n, d, c, True, seed)
+            for seed in range(n_floor_seeds)
+            for n, d, c in zip(names, specs, ckpts)
+        ]
 
     rows = []
-    for name, base, run_dir, ckpt_name, random_init in plan:
+    for name, base, run_dir, ckpt_name, random_init, init_seed in plan:
         is_baseline = baseline_name is not None and base == baseline_name
         # Baseline default = all-content: style is merged into content (one content
         # block, no style), so its content-side metrics + capacity line up with the
@@ -2792,6 +2854,7 @@ def main():
                     probe_kind=cli.probe_kind,
                     dci_max_codes=cli.dci_max_codes,
                     factor_pooling=cli.factor_pooling,
+                    init_seed=init_seed,
                     squash_content=cli.squash_content,
                     all_content=all_content,
                     random_init=random_init,
@@ -2803,6 +2866,32 @@ def main():
     if not rows:
         logger.error("No models evaluated successfully.")
         return
+
+    # Collapse the per-seed floor draws into one `<name>-floor` row. The across-seed std is
+    # kept on the row as `floor_std` (same nested shape) so a delta can be read against the
+    # floor's own spread rather than treated as exact.
+    if cli.floor:
+        keep, by_base = [], {}
+        for r in rows:
+            m = re.match(rf"^(?P<base>.+){re.escape(_FLOOR_SUFFIX)}-s\d+$", r["name"])
+            if m:
+                by_base.setdefault(m.group("base"), []).append(r)
+            else:
+                keep.append(r)
+        for base, draws in by_base.items():
+            avg, std = mean_std_structs(draws)
+            avg["name"] = base + _FLOOR_SUFFIX
+            avg["floor_seeds"] = len(draws)
+            avg["floor_std"] = std
+            keep.append(avg)
+            spread = _as_float(std.get("info_all"))
+            logger.info(
+                "floor for %s: averaged over %d untrained draws (info_all across-seed std %.4f)",
+                base,
+                len(draws),
+                spread,
+            )
+        rows = keep
 
     # Stamp eval settings on each row (provenance + the merge-comparability check).
     meta = {

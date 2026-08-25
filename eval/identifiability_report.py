@@ -64,6 +64,7 @@ from eval.run_dci_compare import (
     _auto_probe_dim,
     _block_array,
     _resolve_key,
+    mean_std_structs,
     parse_poolings,
 )
 
@@ -187,9 +188,15 @@ def _rule(title, w=92):
     return head + "─" * max(4, w - len(head))
 
 
-def print_report(res, floor=None, with_dci=False):
-    """The whole report.  ``floor`` is the same structure scored on an untrained twin."""
+def print_report(res, floor=None, with_dci=False, floor_std=None):
+    """The whole report.
+
+    ``floor`` is the same structure scored on an untrained twin; ``floor_std`` is its
+    across-seed spread when several draws were averaged.  A 'learned' value inside that
+    spread is not a finding — it is which floor you happened to draw.
+    """
     has_floor = floor is not None
+    fstd = floor_std or {}
     print()
     print("=" * 92)
     print(f"  IDENTIFIABILITY REPORT — {res['name']}")
@@ -220,8 +227,10 @@ def print_report(res, floor=None, with_dci=False):
         r2d = _delta(d["r2"], (fpf.get(name) or {}).get("r2")) if has_floor else float("nan")
         m_raw = mpf.get(name, float("nan"))
         mccd = _delta(m_raw, fmpf.get(name)) if has_floor else float("nan")
+        sd = _f(((fstd.get("per_factor") or {}).get(name) or {}).get("r2")) if has_floor else float("nan")
+        sds = f" +-{sd:.3f}" if np.isfinite(sd) else ""
         print(
-            f"   {name:<{fw}s} {d['pooling']:<6s} {_n(d['r2'])} {_n(r2d)} {_bar(r2d)}  "
+            f"   {name:<{fw}s} {d['pooling']:<6s} {_n(d['r2'])} {_n(r2d)}{sds} {_bar(r2d)}  "
             f"{_n(m_raw)} {_n(mccd)} {_bar(mccd)}"
         )
     fp = res.get("factor_pooling", "assigned")
@@ -247,7 +256,9 @@ def print_report(res, floor=None, with_dci=False):
         ident = _f(m.get("assignment_identity"))
         istr = f"{ident:.2f}" if np.isfinite(ident) else "  - "
         warn = "  <- Hungarian permuted" if np.isfinite(ident) and ident < 1.0 else ""
-        print(f"   {key:<8s} {_n(m['mean'])} {_n(m.get('std'))} {_n(d)} {_bar(d)}  {istr}{warn}")
+        sd = _f(((fstd.get("mcc") or {}).get(key) or {}).get("mean")) if has_floor else float("nan")
+        sds = f" +-{sd:.3f}" if np.isfinite(sd) else ""
+        print(f"   {key:<8s} {_n(m['mean'])} {_n(m.get('std'))} {_n(d)}{sds} {_bar(d)}  {istr}{warn}")
 
     # 3. dci ------------------------------------------------------------------
     if not (with_dci and res.get("dci")):
@@ -296,12 +307,34 @@ def print_report(res, floor=None, with_dci=False):
     r2_learned = [_delta(d["r2"], (fpf.get(name) or {}).get("r2")) for name, d in pf.items()]
     r2_learned = [v for v in r2_learned if np.isfinite(v)]
     mean_r2 = float(np.mean(r2_learned)) if r2_learned else float("nan")
-    resolved = [name for name, d in pf.items() if abs(_delta(d["r2"], (fpf.get(name) or {}).get("r2"))) > NOISE_FLOOR]
+
+    # A factor counts as resolved only if its learned delta clears BOTH bars: the fixed
+    # probe-noise floor, and 2x this factor's own across-seed floor spread.  The second is
+    # the one that catches a delta that is really just which untrained draw came up — and
+    # it is per factor, because the spread is not uniform across them.
+    def _bar_for(name):
+        sd = _f(((fstd.get("per_factor") or {}).get(name) or {}).get("r2"))
+        return max(NOISE_FLOOR, 2.0 * sd) if np.isfinite(sd) else NOISE_FLOOR
+
+    resolved, borderline = [], []
+    for name, d in pf.items():
+        delta = abs(_delta(d["r2"], (fpf.get(name) or {}).get("r2")))
+        if not np.isfinite(delta):
+            continue
+        (resolved if delta > _bar_for(name) else borderline).append(name)
+    nseeds = _f((floor or {}).get("floor_seeds"))
     print(f"   mean learned R2 over {len(r2_learned)} factors: {_n(mean_r2)}")
+    if np.isfinite(nseeds) and nseeds > 1:
+        print(f"   floor averaged over {int(nseeds)} untrained draws; a factor is RESOLVED only if its")
+        print(f"   learned delta clears max({NOISE_FLOOR}, 2x its own across-seed floor spread).")
+    elif np.isfinite(nseeds):
+        print(f"   floor is ONE untrained draw — no spread to test against. Raise --floor-seeds;")
+        print(f"   only the fixed {NOISE_FLOOR} probe-noise floor is applied below.")
     if np.isfinite(mean_r2) and abs(mean_r2) <= NOISE_FLOOR:
         print(f"   INSIDE NOISE (|delta| <= {NOISE_FLOOR}). This checkpoint is not distinguishable")
         print("   from its own untrained architecture on aggregate factor recovery.")
-    print(f"   factors resolved above the {NOISE_FLOOR} noise floor: " f"{', '.join(resolved) if resolved else 'NONE'}")
+    print(f"   RESOLVED: {', '.join(resolved) if resolved else 'NONE'}")
+    print(f"   not resolved: {', '.join(borderline) if borderline else '-'}")
     for key in ("gap", "stats", "patch"):
         if key not in mladder:
             continue
@@ -334,6 +367,7 @@ def score_run(
     probe_kind="ridge",
     n_jobs=1,
     factor_pooling="assigned",
+    init_seed=None,
     name=None,
 ):
     """Extract this run's representations under every pooling and score them.
@@ -352,6 +386,7 @@ def score_run(
         None if random_init else _resolve_checkpoint(run_dir, checkpoint),
         device,
         random_init=random_init,
+        seed=init_seed,
     )
     reprs, gt_content, info = {}, None, None
     for key, value in poolings:
@@ -593,6 +628,18 @@ def _assert_dci_basis():
         )
         == "gap,stats,8x8x8"
     )
+    # Floor averaging: numeric leaves averaged, metadata passed through, std reported.
+    _a = {"per_factor": {"brain_size": {"r2": 0.90, "pooling": "gap"}}}
+    _b = {"per_factor": {"brain_size": {"r2": 0.94, "pooling": "gap"}}}
+    _c = {"per_factor": {"brain_size": {"r2": 0.86, "pooling": "gap"}}}
+    _m, _sd = mean_std_structs([_a, _b, _c])
+    assert abs(_m["per_factor"]["brain_size"]["r2"] - 0.90) < 1e-9, _m
+    assert abs(_sd["per_factor"]["brain_size"]["r2"] - float(np.std([0.90, 0.94, 0.86]))) < 1e-9, _sd
+    assert _m["per_factor"]["brain_size"]["pooling"] == "gap", "metadata must not be averaged"
+    assert mean_std_structs([_a])[1]["per_factor"]["brain_size"]["r2"] == 0.0, "one draw => zero spread"
+    assert mean_std_structs([])[0] == {}, "empty input must not raise"
+    assert abs(mean_std_structs([{"x": float("nan")}, {"x": 0.5}])[0]["x"] - 0.5) < 1e-9, "nan leaves dropped"
+    print("  self-test: floor averaging — means, spreads, metadata passthrough OK")
     print("  self-test: DCI reads the unreduced block (probes still reduced to 64) — basis OK")
 
 
@@ -620,6 +667,16 @@ def main():
         type=int,
         default=4096,
         help="Cap DCI width by selecting highest-variance codes (0 = no cap). Never a rotation.",
+    )
+    p.add_argument(
+        "--floor-seeds",
+        type=int,
+        default=3,
+        help="How many untrained draws to average the floor over (>=1). The untrained weights ARE "
+        "the measurement, and nothing in the eval path seeded them: the floor was one random "
+        "projection, redrawn every invocation, and its noise went silently into every 'learned' "
+        "number. Seeds are 0..N-1, so the floor is reproducible, and the across-seed std is printed "
+        "beside each delta so you can see which ones clear it.",
     )
     p.add_argument(
         "--no-floor", action="store_true", help="Skip the untrained twin. The report then refuses to give a verdict."
@@ -693,17 +750,34 @@ def main():
         factor_pooling=cli.factor_pooling,
     )
     logger.info("Scoring checkpoint ...")
-    res = score_run(cli.run_dir, name=cli.name, random_init=False, **common)
-    floor = None
+    # init_seed=0 for the checkpoint too: strict=False leaves any unmatched parameter at
+    # its random init, so an unseeded load is not quite deterministic either.
+    res = score_run(cli.run_dir, name=cli.name, random_init=False, init_seed=0, **common)
+    floor = floor_std = None
     if not cli.no_floor:
-        logger.info("Scoring untrained twin (the floor) ...")
-        floor = score_run(cli.run_dir, name=(cli.name or "run") + "-floor", random_init=True, **common)
+        # Several untrained draws, each seeded, averaged into one floor. A single draw is a
+        # single random projection whose noise lands in every 'learned' number unbounded.
+        draws = []
+        for seed in range(max(1, cli.floor_seeds)):
+            logger.info("Scoring untrained twin (floor draw %d/%d) ...", seed + 1, max(1, cli.floor_seeds))
+            draws.append(
+                score_run(
+                    cli.run_dir,
+                    name=f"{cli.name or 'run'}-floor-s{seed}",
+                    random_init=True,
+                    init_seed=seed,
+                    **common,
+                )
+            )
+        floor, floor_std = mean_std_structs(draws)
+        floor["name"] = (cli.name or "run") + "-floor"
+        floor["floor_seeds"] = len(draws)
 
-    print_report(res, floor=floor, with_dci=cli.with_dci)
+    print_report(res, floor=floor, floor_std=floor_std, with_dci=cli.with_dci)
     if cli.out:
         os.makedirs(os.path.dirname(os.path.abspath(cli.out)), exist_ok=True)
         with open(cli.out, "w") as fh:
-            json.dump({"run": res, "floor": floor}, fh, indent=2, default=float)
+            json.dump({"run": res, "floor": floor, "floor_std": floor_std}, fh, indent=2, default=float)
         logger.info("Wrote %s", cli.out)
 
 
