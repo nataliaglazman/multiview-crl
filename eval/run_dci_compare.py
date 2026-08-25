@@ -70,12 +70,12 @@ logger = logging.getLogger(__name__)
 # in advance so the headline number is not a max over noisy pooling estimates.
 FACTOR_POOLING = {
     # global morphometry — present in the channel mean
-    "brain_size": "gap",
-    "ventricle_size": "gap",
-    "cortical_thickness": "gap",
-    "temporal_atrophy": "gap",
-    "lr_asymmetry": "gap",
-    "sulcal_widening": "gap",
+    "brain_size": "patch",
+    "ventricle_size": "patch",
+    "cortical_thickness": "patch",
+    "temporal_atrophy": "patch",
+    "lr_asymmetry": "patch",
+    "sulcal_widening": "patch",
     # localized — needs spatial layout
     "lesion_x": "patch",
     "lesion_y": "patch",
