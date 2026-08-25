@@ -372,6 +372,7 @@ def _score_dci(
     pooling_key=None,
     train_ratio=0.8,
     max_codes=0,
+    n_jobs=1,
 ):
     """GAP DCI disentanglement + completeness on one representation block.
 
@@ -405,13 +406,13 @@ def _score_dci(
     from eval.dci import _compute_dci, _null_permuted_dci  # pulls torch in lazily
 
     try:
-        real, _ = _compute_dci(X[:split].T, F[:split].T, X[split:].T, F[split:].T, factor_types)
+        real, _ = _compute_dci(X[:split].T, F[:split].T, X[split:].T, F[split:].T, factor_types, n_jobs=n_jobs)
         rd, rc = real["disentanglement"], real["completeness"]
     except Exception as e:
         logger.warning("DCI (real) failed: %s", e)
         return {**blank, f"{key_prefix}_pooling": mkey, f"{key_prefix}_n_codes": n_codes}
 
-    null = _null_permuted_dci(X, F, split, factor_types, n_null, rng)
+    null = _null_permuted_dci(X, F, split, factor_types, n_null, rng, n_jobs=n_jobs)
     nd, nc = null.get("disentanglement", nan), null.get("completeness", nan)
     return {
         f"{key_prefix}_d": rd,
@@ -510,6 +511,7 @@ def _score_one_encoder(
             rng,
             key_prefix="dci",
             max_codes=dci_max_codes,
+            n_jobs=n_jobs,
         )
         if not all_only and has_split:
             dci.update(
@@ -524,6 +526,7 @@ def _score_one_encoder(
                     rng,
                     key_prefix="dci_content",
                     max_codes=dci_max_codes,
+                    n_jobs=n_jobs,
                 )
             )
         else:
@@ -542,6 +545,7 @@ def _score_one_encoder(
                     key_prefix="dci_patch",
                     pooling_key="patch",
                     max_codes=dci_max_codes,
+                    n_jobs=n_jobs,
                 )
             )
         else:

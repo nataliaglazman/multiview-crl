@@ -54,6 +54,7 @@ import logging
 import os
 
 import numpy as np
+from joblib import Parallel, delayed
 
 from eval.identifiability_metrics import block_mcc, cv_probe_r2
 from eval.run_dci_compare import (
@@ -82,26 +83,43 @@ NOISE_FLOOR = 0.05
 # --------------------------------------------------------------------------- #
 
 
-def per_factor_scores(reprs, level, gt, names, seeds, n_null, rng, kind="ridge"):
+def per_factor_scores(reprs, level, gt, names, seeds, n_null, rng, kind="ridge", n_jobs=1, factor_pooling="assigned"):
     """R² gap per factor at its assigned pooling, plus that pooling's key.
 
     One factor is scored under exactly one pooling — the one ``FACTOR_POOLING`` says can
     physically expose it — so this is never a max over noisy pooling estimates.  Returns
     ``{name: {"r2": gap, "pooling": key}}``.
+
+    The permutations are drawn up-front, in factor order, so the shared ``rng`` is
+    consumed deterministically no matter which worker finishes first — the null floor is
+    identical whatever ``n_jobs`` is set to.
     """
-    out = {}
     avail = set(reprs.keys())
+    tasks = []
     for j, name in enumerate(names):
-        pkey = _resolve_key(FACTOR_POOLING.get(name, "stats"), avail)
+        # ``factor_pooling`` overrides FACTOR_POOLING's per-factor routing and scores every
+        # factor on one axis.  The routing is the honest default (each factor read where it
+        # can physically appear, fixed in advance so the headline is not a max over
+        # poolings); the override exists to ask the different question "how does this
+        # factor read at THIS pooling", e.g. to compare all factors on one rung.
+        want = FACTOR_POOLING.get(name, "stats") if factor_pooling == "assigned" else factor_pooling
+        pkey = _resolve_key(want, avail)
         X = _block_array(reprs, pkey, level, _CONTENT)
         if X is None or not X.shape[1]:
             continue
-        y = gt[:, j]
+        perms = [rng.permutation(gt.shape[0]) for _ in range(n_null)]
+        tasks.append((name, pkey, X, gt[:, j], perms))
+
+    def _one(X, y, perms):
         real = cv_probe_r2(X, y, seeds=seeds, kind=kind)["mean"]
-        nulls = [cv_probe_r2(X, y[rng.permutation(len(y))], seeds=seeds, kind=kind)["mean"] for _ in range(n_null)]
-        null = float(np.mean(nulls)) if nulls else float("nan")
-        out[name] = {"r2": real - null, "r2_raw": real, "pooling": pkey}
-    return out
+        nulls = [cv_probe_r2(X, y[p], seeds=seeds, kind=kind)["mean"] for p in perms]
+        return real, (float(np.mean(nulls)) if nulls else float("nan"))
+
+    results = Parallel(n_jobs=n_jobs)(delayed(_one)(X, y, perms) for _n, _p, X, y, perms in tasks)
+    return {
+        name: {"r2": real - null, "r2_raw": real, "pooling": pkey}
+        for (name, pkey, _X, _y, _perms), (real, null) in zip(tasks, results)
+    }
 
 
 def mcc_ladder(reprs, level, gt_content, seeds, kind="ridge", names=()):
@@ -206,7 +224,12 @@ def print_report(res, floor=None, with_dci=False):
             f"   {name:<{fw}s} {d['pooling']:<6s} {_n(d['r2'])} {_n(r2d)} {_bar(r2d)}  "
             f"{_n(m_raw)} {_n(mccd)} {_bar(mccd)}"
         )
-    print(f"   R2 gap = null-subtracted, at each factor's own assigned pooling (FACTOR_POOLING).")
+    fp = res.get("factor_pooling", "assigned")
+    if fp == "assigned":
+        print("   R2 gap = null-subtracted, at each factor's own assigned pooling (FACTOR_POOLING).")
+    else:
+        print(f"   R2 gap = null-subtracted, ALL factors forced to '{fp}' (--factor-pooling), not their")
+        print("   assigned pooling. Same axis for every factor; not comparable to an 'assigned' run.")
     print(f"   MCC raw = matched |corr| at {mpool} pooling; block-MCC has no permutation null here,")
     print(f"   which is exactly why its 'learned' column is the only one worth reading.")
 
@@ -297,6 +320,8 @@ def score_run(
     dci_max_codes=4096,
     random_init=False,
     probe_kind="ridge",
+    n_jobs=1,
+    factor_pooling="assigned",
     name=None,
 ):
     """Extract this run's representations under every pooling and score them.
@@ -346,7 +371,10 @@ def score_run(
         # 2x2x2 or 8x8x8, and that is a 64x difference in code count.
         "poolings": ",".join("x".join(str(d) for d in v) if isinstance(v, tuple) else str(v) for _k, v in poolings),
         "probe_dim": probe_dim,
-        "per_factor": per_factor_scores(probed, level, gt_content, names, seeds, n_null, rng, probe_kind),
+        "factor_pooling": factor_pooling,
+        "per_factor": per_factor_scores(
+            probed, level, gt_content, names, seeds, n_null, rng, probe_kind, n_jobs, factor_pooling
+        ),
         "mcc": mcc_ladder(probed, level, gt_content, seeds, probe_kind, names),
         "mcc_per_factor_pooling": "patch" if "patch" in probed else _resolve_key("stats", set(probed)),
     }
@@ -372,6 +400,7 @@ def score_run(
                 key_prefix="dci",
                 pooling_key=pooling_key,
                 max_codes=dci_max_codes,
+                n_jobs=n_jobs,
             )
             dci[scope] = {
                 "d_gap": d.get("dci_d_gap"),
@@ -499,6 +528,22 @@ def _assert_dci_basis():
     assert k == 10 and np.allclose(Xs, X[:, 40:]), "cap must SELECT top-variance codes, in order"
     assert _select_codes(X, 0)[1] == 50, "max_codes=0 must disable the cap"
 
+    # n_jobs must not change any number: permutations are drawn up-front in factor order,
+    # and each GBT fit owns its own importance column.
+    _rng_a, _rng_b = np.random.RandomState(7), np.random.RandomState(7)
+    _gt = np.random.RandomState(1).randn(200, 3)
+    _A = np.random.RandomState(2).randn(3, 8)
+    _rp = {p: {0: (_gt @ _A, None, None, None, {})} for p in ("gap", "stats", "patch")}
+    _nm = ["brain_size", "lesion_x", "gain"]
+    _s1 = per_factor_scores(_rp, 0, _gt, _nm, (0,), 2, _rng_a, n_jobs=1)
+    _s4 = per_factor_scores(_rp, 0, _gt, _nm, (0,), 2, _rng_b, n_jobs=4)
+    for _k in _s1:
+        assert abs(_s1[_k]["r2"] - _s4[_k]["r2"]) < 1e-9, f"n_jobs changed {_k}: {_s1[_k]} vs {_s4[_k]}"
+    # --factor-pooling forces every factor onto one rung instead of its assigned one.
+    _forced = per_factor_scores(_rp, 0, _gt, _nm, (0,), 0, np.random.RandomState(7), factor_pooling="patch")
+    assert {d["pooling"] for d in _forced.values()} == {"patch"}, _forced
+    assert {d["pooling"] for d in _s1.values()} == {"gap", "patch", "stats"}, _s1
+
     # --checkpoint defaulting to None used to reach os.path.join and raise a TypeError that
     # said nothing about checkpoints. Both the guard and this script's default are asserted.
     from eval.run_dci_compare import _resolve_checkpoint
@@ -553,6 +598,26 @@ def main():
         choices=("match", "iid"),
         help="'match' for aggregate ranking, 'iid' for per-factor attribution.",
     )
+    p.add_argument(
+        "--factor-pooling",
+        default="assigned",
+        choices=("assigned", "gap", "stats", "patch"),
+        help="Which pooling each factor's R2 is read at. 'assigned' (default) uses "
+        "FACTOR_POOLING — each factor read where it can physically appear, fixed in advance so "
+        "the headline is never a max over poolings. Naming one pooling scores EVERY factor "
+        "there, which answers a different question ('how does this factor read at this rung') "
+        "and is the honest way to put all factors on one axis. The pooling must be in "
+        "--poolings or it falls back. Patch has a high floor, so read the learned column.",
+    )
+    p.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="Parallel workers for the probes and the DCI factor fits (-1 = all cores, 1 = "
+        "sequential). sklearn's GBT is single-threaded, so this is the main lever on "
+        "--with-dci wall time. Results are identical at any setting: permutations are drawn "
+        "up-front in factor order and each DCI fit owns its own importance column.",
+    )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--device", default=None)
@@ -592,6 +657,8 @@ def main():
         with_dci=cli.with_dci,
         dci_max_codes=cli.dci_max_codes,
         probe_kind=cli.probe_kind,
+        n_jobs=cli.n_jobs,
+        factor_pooling=cli.factor_pooling,
     )
     logger.info("Scoring checkpoint ...")
     res = score_run(cli.run_dir, name=cli.name, random_init=False, **common)

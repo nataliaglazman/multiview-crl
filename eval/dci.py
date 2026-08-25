@@ -18,6 +18,7 @@
 Based on "A Framework for the Quantitative Evaluation of Disentangled
 Representations" (https://openreview.net/forum?id=By-7dz-AZ).
 """
+
 from __future__ import absolute_import, division, print_function
 
 import logging
@@ -25,6 +26,7 @@ import logging
 import numpy as np
 import scipy
 import torch
+from joblib import Parallel, delayed
 from six.moves import range
 from sklearn import ensemble
 from torch.utils.data import DataLoader
@@ -75,8 +77,10 @@ def compute_dci(
     return scores
 
 
-def _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types):
+def _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types, n_jobs=1, seed=0):
     """Computes score based on both training and testing codes and factors.
+
+    ``n_jobs`` parallelises the per-factor GBT fits (see ``compute_importance_gbt``).
 
     Returns:
         scores: dict with scalar summary metrics.
@@ -84,7 +88,7 @@ def _compute_dci(mus_train, ys_train, mus_test, ys_test, factor_types):
     """
     scores = {}
     importance_matrix, train_err, test_err, pf_train, pf_test = compute_importance_gbt(
-        mus_train, ys_train, mus_test, ys_test, factor_types
+        mus_train, ys_train, mus_test, ys_test, factor_types, n_jobs=n_jobs, seed=seed
     )
     assert importance_matrix.shape[0] == mus_train.shape[0]
     assert importance_matrix.shape[1] == ys_train.shape[0]
@@ -125,8 +129,45 @@ def compute_dci_on_fixed_data(observations, labels, representation_function, tra
     return _compute_dci(mus_train, ys_train, mus_test, ys_test)
 
 
-def compute_importance_gbt(x_train, y_train, x_test, y_test, factor_types):
-    """Compute importance based on gradient boosted trees."""
+def _gbt_one_factor(x_train, y_i, x_test, y_test_i, ftype, max_features, seed):
+    """Fit one factor's GBT and return ``(importance column, train score, test score)``.
+
+    Split out so the per-factor loop can run in parallel: each factor writes its own
+    column of the importance matrix and reads nothing the others write, so the result is
+    identical to the serial version regardless of completion order.
+    """
+    kw = dict(max_features=max_features, random_state=seed)
+    if ftype == "discrete":
+        model = ensemble.GradientBoostingClassifier(**kw)
+        model.fit(x_train, y_i)
+        return (
+            np.abs(model.feature_importances_),
+            float(np.mean(model.predict(x_train) == y_i)),
+            float(np.mean(model.predict(x_test) == y_test_i)),
+        )
+    model = ensemble.GradientBoostingRegressor(**kw)
+    model.fit(x_train, y_i)
+    return (
+        np.abs(model.feature_importances_),
+        float(model.score(x_train, y_i)),
+        float(model.score(x_test, y_test_i)),
+    )
+
+
+def compute_importance_gbt(x_train, y_train, x_test, y_test, factor_types, n_jobs=1, seed=0):
+    """Compute importance based on gradient boosted trees.
+
+    ``n_jobs`` parallelises over FACTORS (joblib).  The fits are independent — each owns
+    one column of the importance matrix — so this changes wall time only.  It is the
+    dominant cost of ``--with-dci``: at patch pooling one report is ~144 of these fits,
+    and sklearn's GBT is single-threaded, so the loop was leaving every core but one idle.
+
+    ``seed`` fixes the estimators' ``random_state``.  That matters whenever
+    ``max_features="sqrt"`` is active (num_codes > 2000, i.e. any patch-pooled block):
+    the feature subsampling is random, so before this the DCI numbers in that regime were
+    not reproducible run to run.  Below the threshold ``max_features=None`` scans every
+    code deterministically, so historical gap/stats numbers are unaffected.
+    """
     num_factors = y_train.shape[0]
     assert num_factors == len(factor_types)
     num_codes = x_train.shape[0]
@@ -135,22 +176,19 @@ def compute_importance_gbt(x_train, y_train, x_test, y_test, factor_types):
     # thousands. Subsample features only in that regime, so gap/stats pooling (tens
     # of codes) keeps its historical numbers bit-for-bit.
     _max_features = "sqrt" if num_codes > 2000 else None
+    # Transpose once, not once per factor: (num_codes, n) -> (n, num_codes) is what
+    # sklearn wants, and re-doing it inside the loop copied the whole block each time.
+    xt_train, xt_test = x_train.T, x_test.T
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(_gbt_one_factor)(xt_train, y_train[i, :], xt_test, y_test[i, :], ftype, _max_features, seed)
+        for i, ftype in enumerate(factor_types)
+    )
     importance_matrix = np.zeros(shape=[num_codes, num_factors], dtype=np.float64)
-    train_loss = []
-    test_loss = []
-    for i, ftype in zip(range(num_factors), factor_types):
-        if ftype == "discrete":
-            model = ensemble.GradientBoostingClassifier(max_features=_max_features)
-            model.fit(x_train.T, y_train[i, :])
-            importance_matrix[:, i] = np.abs(model.feature_importances_)
-            train_loss.append(np.mean(model.predict(x_train.T) == y_train[i, :]))
-            test_loss.append(np.mean(model.predict(x_test.T) == y_test[i, :]))
-        else:
-            model = ensemble.GradientBoostingRegressor(max_features=_max_features)
-            model.fit(x_train.T, y_train[i, :])
-            importance_matrix[:, i] = np.abs(model.feature_importances_)
-            train_loss.append(model.score(x_train.T, y_train[i, :]))
-            test_loss.append(model.score(x_test.T, y_test[i, :]))
+    train_loss, test_loss = [], []
+    for i, (col, tr, te) in enumerate(results):
+        importance_matrix[:, i] = col
+        train_loss.append(tr)
+        test_loss.append(te)
     return (
         importance_matrix,
         np.mean(train_loss),
@@ -421,7 +459,7 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
     return level_data, gt_content, gt_style_v1, gt_style_v2
 
 
-def _null_permuted_dci(repr_arr, factor_arr, split, factor_types, n_null, rng):
+def _null_permuted_dci(repr_arr, factor_arr, split, factor_types, n_null, rng, n_jobs=1):
     """DCI scores under row-permuted factors — the structural floor for a block.
 
     Permuting the factor rows destroys the representation↔factor correspondence,
@@ -442,7 +480,9 @@ def _null_permuted_dci(repr_arr, factor_arr, split, factor_types, n_null, rng):
     for _ in range(n_null):
         f = factor_arr[rng.permutation(n)]
         try:
-            scores, _ = _compute_dci(mus_train, f[:split].T, mus_test, f[split:].T, factor_types)
+            # Permutations stay serial: the parallelism lives one level down, over
+            # factors, and nesting two joblib pools oversubscribes the cores.
+            scores, _ = _compute_dci(mus_train, f[:split].T, mus_test, f[split:].T, factor_types, n_jobs=n_jobs)
             for k in keys:
                 acc[k].append(scores[k])
         except Exception as e:
