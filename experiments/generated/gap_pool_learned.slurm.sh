@@ -1,11 +1,11 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthetic_identifiable.yaml
+# Auto-generated from: experiments/gap_pool_learned.yaml
 # Generated at: 2026-08-25T12:34:48Z
 # Git SHA: d804979
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-identifiable-generator-4-scaling-2
+#SBATCH --job-name=gap-pool-learned
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-identifiable-generator-4-scaling-2-%j.err
+#SBATCH --error=gap-pool-learned-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -58,10 +58,15 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 0.01 \
+    --bt-corr-ema 0.99 \
+    --bt-gap-lambda 0.013 \
+    --bt-gap-pool learned \
+    --bt-gap-pool-entropy 0.5 \
+    --bt-gap-pool-entropy-coeff 1.0 \
+    --bt-gap-pool-temp 1.0 \
     --bt-gap-weight 1 \
     --bt-patch-weight 1 \
-    --bt-sim-coeff 0.025 \
+    --bt-sim-coeff 0.5 \
     --bt-sim-normalize \
     --bt-std-coeff 10 \
     --channels-last \
@@ -78,6 +83,7 @@ fi
     --decoder-norm-type group \
     --deterministic \
     --eval-dci \
+    --grad-clip-norm 100 \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --log-steps 50 \
@@ -105,24 +111,20 @@ fi
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
+    --single-count-commitment \
     --style-injection-mode input \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
-    --synthetic-center-local-deformations \
     --synthetic-clean-content \
-    --synthetic-content-prior uniform \
-    --synthetic-content-squash none \
-    --synthetic-cortex-parameterization patterned \
     --synthetic-identifiable-ventricle \
-    --synthetic-lesion-radius 0.14 \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-identifiable-generator-4-scaling-2 \
+    --model-id gap-pool-learned \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -133,5 +135,6 @@ fi
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
+    --vqvae-nb-res-layers 2 \
     --vqvae-scaling-rates 4 \
     --workers 8

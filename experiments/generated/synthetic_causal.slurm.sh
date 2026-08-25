@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-21T09:43:56Z
-# Git SHA: 1bdc036
+# Generated at: 2026-08-25T12:34:48Z
+# Git SHA: d804979
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-clean-content-commitment-ema-bt-0013
 #SBATCH --output=/scratch/users/%u/%j.out
 #SBATCH --error=synthetic-causal-clean-content-commitment-ema-bt-0013-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
