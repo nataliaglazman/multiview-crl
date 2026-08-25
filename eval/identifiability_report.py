@@ -540,9 +540,13 @@ def _assert_dci_basis():
     for _k in _s1:
         assert abs(_s1[_k]["r2"] - _s4[_k]["r2"]) < 1e-9, f"n_jobs changed {_k}: {_s1[_k]} vs {_s4[_k]}"
     # --factor-pooling forces every factor onto one rung instead of its assigned one.
+    # Asserted against FACTOR_POOLING itself rather than against hardcoded pooling names:
+    # the table is a research parameter that gets retuned, and a test that pins its values
+    # fails on every retune while testing nothing about the routing mechanism.
     _forced = per_factor_scores(_rp, 0, _gt, _nm, (0,), 0, np.random.RandomState(7), factor_pooling="patch")
     assert {d["pooling"] for d in _forced.values()} == {"patch"}, _forced
-    assert {d["pooling"] for d in _s1.values()} == {"gap", "patch", "stats"}, _s1
+    for _k, _d in _s1.items():
+        assert _d["pooling"] == FACTOR_POOLING[_k], f"{_k} routed to {_d['pooling']}, table says {FACTOR_POOLING[_k]}"
 
     # --checkpoint defaulting to None used to reach os.path.join and raise a TypeError that
     # said nothing about checkpoints. Both the guard and this script's default are asserted.
