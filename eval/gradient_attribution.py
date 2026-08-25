@@ -32,11 +32,19 @@ representation has collapsed rather than merely lost identifiability.
 
 Barlow Twins is reported as its four ADDITIVE terms (``bt_on``/``bt_off``/``bt_sim``/
 ``bt_var``, and the ``btgap_*`` companion when ``--bt-gap-weight`` is on), not as one
-"contrastive" force, because on rank they are OPPOSED rather than merely different: d copies
-of a single unit-variance signal is a global optimum of on_diag, sim AND var simultaneously,
-and only off_diag objects to it. A lumped gradient therefore cannot say whether the objective
-is building the representation or flattening it. See ``_bt_split`` for how the four are
-recovered exactly from the shipped loss.
+"contrastive" force, because they pull in different directions and a lumped gradient cannot
+say which one moved a metric. See ``_bt_split`` for how the four are recovered exactly from
+the shipped loss.
+
+Do NOT predict the SIGN of a term's rank excess from its global optimum. It is tempting to
+argue that only off_diag can build rank, since d copies of a single unit-variance signal
+minimise on_diag, sim and var simultaneously — but that describes where a term would end up
+running alone forever, not the direction it pulls from the current parameters. Measured on
+this project at two checkpoints of one run, the signs of ``btgap_on`` and ``btgap_off`` came
+out OPPOSITE to that argument at rank 10.3 (+0.267 / -0.405, both at linearity R^2 = 1.000).
+Effective rank is the entropy of the singular-value spectrum, so it rewards BALANCE, and
+which term balances the spectrum from here is an empirical question. Read the signs off the
+table; do not assume them.
 
 Caveats, none of which the numbers announce on their own
 --------------------------------------------------------
@@ -159,10 +167,10 @@ def _bt_split(hz, c_idx, out, prefix, weight, ema_factor, *, lambd, sim_coeff, s
 
     A single lumped "contrastive" gradient cannot answer which part of the objective moves a
     metric, because the four terms want different things: ``on_diag`` and ``sim`` align the
-    views, ``var`` fixes per-channel scale, and only ``off_diag`` decorrelates channels. For
-    effective rank in particular they are not merely different, they are OPPOSED — 44 copies
-    of one unit-variance signal is a global optimum of the first three and the worst case for
-    the fourth — so attributing a rank change to "contrastive" says nothing.
+    views, ``var`` fixes per-channel scale, and only ``off_diag`` decorrelates channels. Their
+    gradients are measurably opposed — cos(on_diag, off_diag) runs -0.27 to -0.83 across
+    checkpoints — so attributing a metric change to "contrastive" says nothing about which of
+    them caused it. Which one HELPS a given metric is empirical; see the module docstring.
 
     ``barlow_twins_loss`` returns ``on_diag + lambd*off_diag + sim_coeff*sim + std_coeff*var``
     as one scalar and ``on_diag`` carries no coefficient of its own, so no choice of
@@ -503,10 +511,10 @@ def main():
         default="mcc",
         help="What the finite-difference step re-measures. 'mcc' (default) is block-MCC, unchanged. "
         "'rank' is the effective rank of the GAP-pooled content block — the same content_rank "
-        "run_dci_compare prints — for attributing a rank collapse to a specific term. Note the four "
-        "Barlow Twins terms are OPPOSED on rank: on_diag, sim and var are all satisfied exactly by "
-        "d copies of one unit-variance signal, and only off_diag objects, so 'which term' is the "
-        "whole question and a lumped contrastive gradient cannot answer it.",
+        "run_dci_compare prints — for attributing a rank change to a specific term. Read the signs "
+        "off the table rather than predicting them from each term's global optimum: measured on "
+        "this project, on_diag BUILT rank and off_diag destroyed it at one checkpoint, which is the "
+        "opposite of what that argument gives. See the module docstring.",
     )
     cli = ap.parse_args()
 
@@ -684,9 +692,11 @@ def main():
             print("  Effective rank is deterministic given the features, so there is no per-seed band")
             print("  to clear — but it IS sampled: re-run with a different --mcc-samples to see how")
             print("  much of a small excess is the finite test set. A term with a NEGATIVE excess is")
-            print("  collapsing the representation beyond what its step size alone would do; on this")
-            print("  objective only off_diag can carry a positive one, since on_diag, sim and var are")
-            print("  each minimised exactly by d copies of a single unit-variance signal.")
+            print("  collapsing the representation beyond what its step size alone would do.")
+            print("  These signs are LOCAL to this checkpoint and have been observed to flip between")
+            print("  checkpoints of one run — replicate at 2-3 before acting on one. Do not predict")
+            print("  them from each term's global optimum: that argument says only off_diag can build")
+            print("  rank, and it came out backwards here at R^2 = 1.000.")
         else:
             print("  Compare the excess against block-MCC's per-seed sd (~0.001 at N=1500); inside")
             print("  that band there is no attribution, whatever the raw row says.")
