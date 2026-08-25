@@ -201,6 +201,14 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
     print("=" * 92)
     print(f"  IDENTIFIABILITY REPORT — {res['name']}")
     print(f"  N={res['n_samples']}  level={res['level']}  poolings={res['poolings']}  probe-dim={res['probe_dim']}")
+    _cz = res.get("causal")
+    if _cz:
+        _note = (
+            "factors correlated as in training — aggregate ranking only, per-factor numbers are\n           inflated by recoverable parents"
+            if _cz == "match"
+            else "factors forced independent — per-factor attribution; a LOW value here is\n           ambiguous between not-identified and out-of-distribution"
+        )
+        print(f"  causal={_cz}  ({_note})")
     print("=" * 92)
     if has_floor:
         print("  LEARNED = this checkpoint minus the same architecture UNTRAINED. Read that column.")
@@ -368,6 +376,7 @@ def score_run(
     n_jobs=1,
     factor_pooling="assigned",
     init_seed=None,
+    causal=None,
     name=None,
 ):
     """Extract this run's representations under every pooling and score them.
@@ -419,6 +428,7 @@ def score_run(
         "poolings": ",".join("x".join(str(d) for d in v) if isinstance(v, tuple) else str(v) for _k, v in poolings),
         "probe_dim": probe_dim,
         "factor_pooling": factor_pooling,
+        "causal": causal,
         "per_factor": per_factor_scores(
             probed, level, gt_content, names, seeds, n_null, rng, probe_kind, n_jobs, factor_pooling
         ),
@@ -748,6 +758,7 @@ def main():
         probe_kind=cli.probe_kind,
         n_jobs=cli.n_jobs,
         factor_pooling=cli.factor_pooling,
+        causal=cli.causal,
     )
     logger.info("Scoring checkpoint ...")
     # init_seed=0 for the checkpoint too: strict=False leaves any unmatched parameter at
