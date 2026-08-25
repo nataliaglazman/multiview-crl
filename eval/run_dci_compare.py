@@ -168,6 +168,51 @@ def _null_block_mcc(X, Z, n_null, seeds, rng, kind="ridge"):
     return float(np.mean(vals)) if vals else float("nan")
 
 
+def mcc_by_pooling(reprs, level, gt_content, seeds=(0, 1, 2), kind="ridge", per_factor_pooling="patch", names=()):
+    """Block-MCC of the content block against ``gt_content`` at EVERY available pooling.
+
+    ``_score_one_encoder`` hardcodes stats pooling for its headline ``mcc_cc``, and stats
+    is ``[mean, std, amax, amin]`` over space — all permutation-invariant over voxels, so
+    ``lesion_x/y/z`` (positions) are structurally unreadable there.  That silently drops 3
+    of the 9 content factors, and they are the ones a reconstruction model recovers best:
+    measured, baseline vs contrastive flips from stats +0.011 to patch -0.043.  Reporting
+    the whole ladder makes the reversal visible instead of only showing the rung that
+    happens to flatter the contrastive arm.
+
+    The ladder is an unweighted MEAN over factors, which hides a sign split: measured on
+    one run, brain_size ROSE while cortical_thickness, lr_asymmetry, temporal_atrophy and
+    sulcal_widening all FELL, and the average reported a uniform decline.  ``block_mcc``
+    computes the per-factor breakdown on its way to that mean, so it is emitted for
+    ``per_factor_pooling`` at no extra cost.
+
+    Returns ``{"mcc_cc_pool_<key>": mean, ...}`` plus, for ``per_factor_pooling``, the
+    ``mcc_cc_factor_*`` / ``mcc_cc_assignment_identity`` keys.  Read every one of these as
+    a gap over an untrained twin (``--floor``): at patch pooling a random projection of
+    this architecture already scores ~0.86, so the absolute value is nearly all floor.
+    """
+    out = {}
+    if gt_content is None:
+        return out
+    for key in reprs:
+        blk = _block_array(reprs, key, level, _CONTENT)
+        if blk is None or not blk.shape[1]:
+            continue
+        res = block_mcc(blk, gt_content, seeds=seeds, kind=kind)
+        out[f"mcc_cc_pool_{key}"] = res["mean"]
+        if key != per_factor_pooling:
+            continue
+        pf, sd, dg = res.get("per_factor"), res.get("per_factor_std"), res.get("per_factor_diag")
+        if pf is None:
+            continue
+        for j in range(len(pf)):
+            fname = names[j] if j < len(names) else f"factor{j}"
+            out[f"mcc_cc_factor_{fname}"] = float(pf[j])
+            out[f"mcc_cc_factor_std_{fname}"] = float(sd[j])
+            out[f"mcc_cc_factor_diag_{fname}"] = float(dg[j])
+        out["mcc_cc_assignment_identity"] = res.get("assignment_identity", float("nan"))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Scoring (pure numpy — no torch, unit-testable)
 # --------------------------------------------------------------------------- #
@@ -289,7 +334,29 @@ def _blank_dci(prefix):
     return {
         **{f"{prefix}_{s}": float("nan") for s in _DCI_BASE},
         f"{prefix}_pooling": None,
+        f"{prefix}_n_codes": float("nan"),
     }
+
+
+def _select_codes(X, max_codes):
+    """Cap a DCI block's width by SELECTING the highest-variance codes, never rotating.
+
+    DCI is basis-dependent by construction: ``disentanglement`` asks "is this CODE
+    dedicated to few factors", which is a statement about one specific feature, and
+    ``completeness`` normalises by the code count.  So the block handed to DCI must be
+    made of the model's own features.  Projecting onto principal components — what
+    ``_reduce_reprs`` does for the probes — replaces every code with a variance-ordered
+    MIXTURE of channels, and then D/C describe the PCA basis rather than the encoder.
+    Selection keeps each retained code a real ``(channel, patch)`` feature, so the score
+    still refers to the representation.
+
+    Returns ``(X, n_codes)``.  ``max_codes <= 0`` disables the cap.
+    """
+    if not max_codes or X.shape[1] <= max_codes:
+        return X, X.shape[1]
+    keep = np.argsort(-X.var(axis=0), kind="stable")[:max_codes]
+    keep.sort()  # original column order, so a code index still maps back to a channel
+    return X[:, keep], int(max_codes)
 
 
 def _score_dci(
@@ -304,6 +371,7 @@ def _score_dci(
     key_prefix="dci",
     pooling_key=None,
     train_ratio=0.8,
+    max_codes=0,
 ):
     """GAP DCI disentanglement + completeness on one representation block.
 
@@ -316,6 +384,11 @@ def _score_dci(
     same path as ``compute_dci_synthetic``).  Returns real / null / gap for D and C
     under ``key_prefix``; ``gap = real - null`` cancels the shape advantage of a
     wider latent so different channel counts stay comparable.
+
+    Callers must pass the UNREDUCED ``reprs`` — see ``_select_codes`` for why a
+    PCA-projected block cannot carry a D/C score.  ``max_codes`` bounds the GBT cost by
+    selecting codes instead, and the width actually used is returned as ``_n_codes`` so
+    two rows can be checked for commensurability before they are compared.
     """
     nan = float("nan")
     blank = _blank_dci(key_prefix)
@@ -323,6 +396,7 @@ def _score_dci(
     X = _block_array(reprs, mkey, level, block_idx)
     if X is None or X.shape[1] == 0 or X.shape[0] < 20:
         return blank
+    X, n_codes = _select_codes(X, max_codes)
 
     F = np.hstack([gt_content, gt_style]) if gt_style is not None and gt_style.shape[1] else gt_content
     split = int(X.shape[0] * train_ratio)
@@ -335,7 +409,7 @@ def _score_dci(
         rd, rc = real["disentanglement"], real["completeness"]
     except Exception as e:
         logger.warning("DCI (real) failed: %s", e)
-        return {**blank, f"{key_prefix}_pooling": mkey}
+        return {**blank, f"{key_prefix}_pooling": mkey, f"{key_prefix}_n_codes": n_codes}
 
     null = _null_permuted_dci(X, F, split, factor_types, n_null, rng)
     nd, nc = null.get("disentanglement", nan), null.get("completeness", nan)
@@ -347,6 +421,7 @@ def _score_dci(
         f"{key_prefix}_c_null": nc,
         f"{key_prefix}_c_gap": rc - nc,
         f"{key_prefix}_pooling": mkey,
+        f"{key_prefix}_n_codes": n_codes,
     }
 
 
@@ -366,14 +441,23 @@ def _score_one_encoder(
     all_only=False,
     with_dci=False,
     probe_kind="ridge",
+    dci_reprs=None,
+    dci_max_codes=0,
 ):
     """Score the four split blocks (cc, cs, ss, sc) + block-MCC for one encoder's
     features, plus the split-free ``all``-channels capacity (full representation →
     every factor).  ``all_only`` skips the split blocks and returns only that
     capacity — for a baseline with no meaningful content/style distinction.
-    ``with_dci`` adds GAP DCI disentanglement/completeness on the all-channels rep."""
+    ``with_dci`` adds GAP DCI disentanglement/completeness on the all-channels rep.
+
+    ``dci_reprs`` is the pre-``_reduce_reprs`` representation, used for the DCI scopes
+    only: the probes want a well-conditioned block, DCI wants the model's own basis, and
+    those are different requirements.  Defaults to ``reprs`` for callers that never
+    reduced."""
     cnames, snames = info["content_names"], info["style_names"]
     has_split = info["has_split"]
+    # DCI reads the unreduced block; every probe/MCC below keeps reading `reprs`.
+    dreprs = reprs if dci_reprs is None else dci_reprs
 
     # Bind the probe kind once so every block, null and MCC in this row is scored by
     # the same estimator — a row mixing linear and nonlinear probes is not internally
@@ -407,9 +491,16 @@ def _score_one_encoder(
     #   dci_patch_*    — all-channels × all-factors at the PATCH pooling: spatial-grid
     #                    codes, so localized factors (lesions) contribute; NaN if no
     #                    patch pooling was requested.
+    #
+    # All three read `dreprs`, so the three scopes are always in the SAME basis (the
+    # encoder's own channels) and stay commensurable with each other.  Before this they
+    # read the probe-reduced blocks, which under `--probe-dim auto` reduces whichever
+    # scope happens to be in the p>>n regime and leaves the others alone: at N=2000 that
+    # put `dci_patch` on 64 principal components while `dci`/`dci_content` stayed on raw
+    # channels, and the three rows printed together were not comparable.
     if with_dci:
         dci = _score_dci(
-            reprs,
+            dreprs,
             level,
             (content_idx, style_idx),
             gt_content,
@@ -418,11 +509,12 @@ def _score_one_encoder(
             n_null,
             rng,
             key_prefix="dci",
+            max_codes=dci_max_codes,
         )
         if not all_only and has_split:
             dci.update(
                 _score_dci(
-                    reprs,
+                    dreprs,
                     level,
                     content_idx,
                     gt_content,
@@ -431,6 +523,7 @@ def _score_one_encoder(
                     n_null,
                     rng,
                     key_prefix="dci_content",
+                    max_codes=dci_max_codes,
                 )
             )
         else:
@@ -438,7 +531,7 @@ def _score_one_encoder(
         if "patch" in avail:
             dci.update(
                 _score_dci(
-                    reprs,
+                    dreprs,
                     level,
                     (content_idx, style_idx),
                     gt_content,
@@ -448,6 +541,7 @@ def _score_one_encoder(
                     rng,
                     key_prefix="dci_patch",
                     pooling_key="patch",
+                    max_codes=dci_max_codes,
                 )
             )
         else:
@@ -719,6 +813,7 @@ def score_reprs(
     probe_dim=0,
     gt_style_v2=None,
     probe_kind="ridge",
+    dci_max_codes=0,
 ):
     """Turn extracted representations into one comparison row (torch-free).
 
@@ -728,8 +823,11 @@ def score_reprs(
     When ``per_encoder`` is True and view-2 features exist, the four score blocks
     and block-MCC are computed separately for each encoder and reported with a
     ``_v2`` suffix.  ``with_dci`` adds the split-free GAP DCI scores.  ``probe_dim``
-    (>0) PCA-reduces every block to that many components first, so informativeness /
-    MCC / DCI are compared at equal capacity across models of different width.
+    (>0) PCA-reduces every block to that many components first, so informativeness and
+    MCC are compared at equal capacity across models of different width.  DCI is scored
+    on the UNREDUCED blocks regardless (``_select_codes``) and bounded by
+    ``dci_max_codes`` instead, because D/C are basis-dependent and a PCA-projected block
+    describes the PCA basis rather than the encoder.
     """
     # Effective rank (collapse diagnostic) on the ORIGINAL representation, before any
     # probe_dim PCA — how many dims a block actually uses vs its nominal width.  Use
@@ -745,6 +843,9 @@ def score_reprs(
         ranks["style_rank_v2"] = _effective_rank(_block_array(reprs, _rk, level, _STYLE_V2))
         ranks["all_rank_v2"] = _effective_rank(_block_array(reprs, _rk, level, (_CONTENT_V2, _STYLE_V2)))
 
+    # Keep a handle on the unreduced blocks: the probes want conditioning, DCI wants the
+    # encoder's own basis, and `_reduce_reprs` can only serve the first.
+    dci_reprs = reprs
     if probe_dim == PROBE_DIM_AUTO or (isinstance(probe_dim, int) and probe_dim > 0):
         reprs = _reduce_reprs(reprs, level, probe_dim)
     avail = set(reprs.keys())
@@ -766,6 +867,8 @@ def score_reprs(
         all_only=all_only,
         with_dci=with_dci,
         probe_kind=probe_kind,
+        dci_reprs=dci_reprs,
+        dci_max_codes=dci_max_codes,
     )
 
     # View-invariance (uses both encoders).  Skipped for an all-channels-only
@@ -817,6 +920,8 @@ def score_reprs(
             all_only=all_only,
             with_dci=with_dci,
             probe_kind=probe_kind,
+            dci_reprs=dci_reprs,
+            dci_max_codes=dci_max_codes,
         )
         for k, v in enc2.items():
             if k == "detail":
@@ -881,6 +986,7 @@ def evaluate_model(
     probe_kind="ridge",
     squash_content=False,
     random_init=False,
+    dci_max_codes=0,
 ):
     """Load a model, extract representations under each pooling, return a row.
 
@@ -959,6 +1065,7 @@ def evaluate_model(
         with_dci=with_dci,
         probe_dim=probe_dim,
         probe_kind=probe_kind,
+        dci_max_codes=dci_max_codes,
     )
     t_score = time.perf_counter() - t0
     logger.info(
@@ -1051,43 +1158,20 @@ def score_encoder_live(
     )
     attach_scores([row])
 
-    # Block-MCC at EVERY pooling, not just the one `mcc_cc` uses.
-    #
-    # `_score_one_encoder` hardcodes stats pooling for block-MCC, and stats is
-    # `[mean, std, amax, amin]` over space — all permutation-invariant over voxels, so
-    # lesion_x/y/z (positions) are structurally unreadable there. That silently drops 3 of
-    # the 9 content factors, and they are the ones a reconstruction model recovers best:
-    # measured offline, baseline vs contrastive flips from stats +0.011 to patch -0.043.
-    # Reporting the whole ladder makes the reversal visible in-training instead of only
-    # showing the rung that happens to flatter the contrastive arm.
-    #
-    # The pooling ladder is still an unweighted MEAN over factors, which hides a sign split:
-    # measured offline on one run, brain_size ROSE while cortical_thickness, lr_asymmetry,
-    # temporal_atrophy and sulcal_widening all FELL, and the average reported a uniform
-    # decline. `block_mcc` computes the per-factor breakdown on its way to that mean, so
-    # emitting it for one pooling is free. Log-only by construction: nothing below feeds
-    # `attach_scores`, `overall_score` or the selection gate, so existing runs stay
-    # comparable. Defaults to `patch` — that is where the open question lives, and doing all
-    # three poolings would add 27 scalars to the dashboard for no extra information.
-    _names = (info or {}).get("content_names") or []
-    for _k in reprs:
-        _blk = _block_array(reprs, _k, level, _CONTENT)
-        if _blk is None or not _blk.shape[1] or gt_content is None:
-            continue
-        _res = block_mcc(_blk, gt_content, seeds=seeds)
-        row[f"mcc_cc_pool_{_k}"] = _res["mean"]
-        if _k != per_factor_pooling:
-            continue
-        _pf, _sd = _res.get("per_factor"), _res.get("per_factor_std")
-        _dg = _res.get("per_factor_diag")
-        if _pf is None:
-            continue
-        for _j in range(len(_pf)):
-            _fn = _names[_j] if _j < len(_names) else f"factor{_j}"
-            row[f"mcc_cc_factor_{_fn}"] = float(_pf[_j])
-            row[f"mcc_cc_factor_std_{_fn}"] = float(_sd[_j])
-            row[f"mcc_cc_factor_diag_{_fn}"] = float(_dg[_j])
-        row["mcc_cc_assignment_identity"] = _res.get("assignment_identity", float("nan"))
+    # Block-MCC at every pooling, not just the stats rung `mcc_cc` uses — see
+    # `mcc_by_pooling` for why the stats rung alone is misleading.  Log-only by
+    # construction: nothing here feeds `attach_scores`, `overall_score` or the selection
+    # gate, so existing runs stay comparable.
+    row.update(
+        mcc_by_pooling(
+            reprs,
+            level,
+            gt_content,
+            seeds=seeds,
+            per_factor_pooling=per_factor_pooling,
+            names=(info or {}).get("content_names") or [],
+        )
+    )
     return row
 
 
@@ -1289,6 +1373,63 @@ def _verdict_lines(row):
 def _disent_of(r):
     v = r.get("disentanglement", float("nan"))
     return v if (v is not None and np.isfinite(v)) else -1.0
+
+
+_N_SECTIONS = 6
+
+
+def _section(n, title, subtitle=""):
+    """Slim numbered rule before each section.
+
+    Deliberately NOT a banner box: every section below already prints its own header
+    with context the divider should not duplicate (which baseline, which mode).  This
+    only makes a long report navigable — "look at section 3" beats "scroll down a bit".
+    """
+    head = f"── {n}/{_N_SECTIONS} ─ {title} "
+    print("\n" + head + "─" * max(4, 96 - len(head)))
+    if subtitle:
+        print(f"   {subtitle}")
+
+
+def print_reading_guide(rows, baseline_name=None):
+    """The four rules that decide whether any number below means anything.
+
+    Printed first and kept short on purpose: every one of these corresponds to a mistake
+    that has actually been made on this project and cost an investigation.
+    """
+    w = 96
+    has_floor = bool(_floor_map(rows))
+    pdim = next((r.get("probe_dim") for r in rows if r.get("probe_dim")), 0)
+    print()
+    print("=" * w)
+    print("  HOW TO READ THIS REPORT")
+    print("=" * w)
+    print("  1. GAP, not absolute.  Every informativeness number is real - null, where null is the")
+    print("     same probe on permuted labels.  A raw R2 or MCC includes whatever the block's SHAPE")
+    print("     yields from noise, which is large for wide blocks.")
+    if has_floor:
+        print("  2. FLOOR delta.  The trailing signed number is this row minus its untrained twin.")
+        print("     THAT is the learned part.  At patch pooling an untrained encoder alone scores")
+        print("     >0.8 on most factors and ~0.86 block-MCC, so the absolute is nearly all floor.")
+    else:
+        print("  2. NO FLOOR MEASURED.  Without --floor you cannot tell a learned number from what")
+        print("     a random projection of this architecture scores. At patch pooling that floor is")
+        print("     ~0.86 block-MCC. Re-run with --floor before reporting anything below.")
+    print("  3. Compare LIKE with LIKE.  Never difference two numbers from different poolings,")
+    print("     probe widths, --causal modes or DCI code counts.  Cross-axis differencing is what")
+    print("     produced the phantom scaling-rate gap and the 0.695-vs-0.001 ventricle reading.")
+    print("  4. MCC is not invariant to re-gauging.  An exactly INVERTIBLE map costs up to 0.38 of")
+    print("     block-MCC, and block identifiability permits exactly such maps.  A fall in MCC is")
+    print("     therefore 'harder to read linearly', not necessarily 'lost'.")
+    if pdim == PROBE_DIM_AUTO:
+        print("  NOTE  --probe-dim auto: blocks with d > N/4 are PCA-reduced to min(64, N/4) for the")
+        print("        PROBES only.  DCI is scored on the unreduced block (its scores are")
+        print("        basis-dependent); effective rank likewise.")
+    elif pdim:
+        print(f"  NOTE  --probe-dim {pdim}: every probe block PCA-reduced to {pdim} components.")
+        print("        DCI and effective rank are scored on the unreduced block.")
+    if baseline_name:
+        print(f"  Baseline row: {baseline_name}")
 
 
 def print_scorecard(rows, baseline_name=None):
@@ -1903,7 +2044,7 @@ def print_capacity_table(rows, baseline_name=None):
                 for prefix, label, note in (
                     ("dci", "DCI all", "all chan x all factors"),
                     ("dci_content", "DCI content", "content chan x content factors"),
-                    ("dci_patch", "DCI patch", "patch-grid chan x all factors"),
+                    ("dci_patch", "DCI patch", "patch-grid cells x all factors"),
                 ):
                     if not np.isfinite(r.get(f"{prefix}_d_gap{suffix}", float("nan"))):
                         continue
@@ -1912,14 +2053,32 @@ def print_capacity_table(rows, baseline_name=None):
                         real = r.get(f"{prefix}_{m}{suffix}", float("nan"))
                         null = r.get(f"{prefix}_{m}_null{suffix}", float("nan"))
                         gap = r.get(f"{prefix}_{m}_gap{suffix}", float("nan"))
-                        cells.append(f"{m.upper()} {_num(real)} - {_num(null)} = {_num(gap)} {_minibar(gap)}")
-                    print(f"      {label:14s} {cells[0]}   {cells[1]}   ({note})")
+                        d = f" {_dnum(_fl(gap) - _fl(fl.get(f'{prefix}_{m}_gap{suffix}')))}" if fl else ""
+                        cells.append(f"{m.upper()} {_num(real)} -{_num(null)} ={_num(gap)}{d}")
+                    ncodes = _fl(r.get(f"{prefix}_n_codes{suffix}"))
+                    cw = f"{int(ncodes):>6d}" if np.isfinite(ncodes) else "     ?"
+                    print(f"      {label:14s} {cells[0]}   {cells[1]}   {cw} codes  ({note})")
                     nulls = [_fl(r.get(f"{prefix}_{m}_null{suffix}")) for m in ("d", "c")]
                     if any(np.isfinite(v) and v > 0.9 for v in nulls):
                         print(
                             f"      {'':14s} ^ null saturated (>0.9) — the gap cannot go positive here; "
                             "raise --n-null or reconsider the pooling"
                         )
+                # C is normalised by log(n_codes) and D by log(n_factors), so two scopes
+                # with different code counts are on different scales even after the null
+                # subtraction: 512 near-duplicate patch cells dilute one channel's
+                # importance by construction.  Compare a scope against the SAME scope in
+                # another model, never one scope against another.
+                _ncs = {
+                    _fl(r.get(f"{p}_n_codes{suffix}"))
+                    for p in ("dci", "dci_content", "dci_patch")
+                    if np.isfinite(_fl(r.get(f"{p}_n_codes{suffix}")))
+                }
+                if len(_ncs) > 1:
+                    print(
+                        f"      {'':14s} rows above differ in code count — read each DOWN the model "
+                        "column, not ACROSS scopes"
+                    )
             if allb:
                 cset = set(allb.get("content_names", []))
                 fw = max([len(n) for n in allb["per_factor"]] + [16])
@@ -1990,6 +2149,11 @@ _CSV_RENAME = {
     "dci_content_c_null": "dci_complete_null_content",
     "dci_patch_c": "dci_complete_patch",
     "dci_patch_c_null": "dci_complete_null_patch",
+    # Width the scope was actually scored at. Not cosmetic: C is normalised by
+    # log(n_codes), so two rows with different counts are on different scales.
+    "dci_n_codes": "dci_n_codes",
+    "dci_content_n_codes": "dci_n_codes_content",
+    "dci_patch_n_codes": "dci_n_codes_patch",
 }
 _CSV_TO_INTERNAL = {v: k for k, v in _CSV_RENAME.items()}
 for _old, _new in list(_CSV_RENAME.items()):
@@ -2033,9 +2197,17 @@ _CSV_LEGEND = """\
 #   dci_disent, dci_complete            real D / C
 #   dci_disent_null, dci_complete_null  label-permutation floor for the same shape
 #   *_content, *_patch                  content-block and patch-pooled scopes
+#   dci_n_codes*                        width each scope was scored at
 #   Raw D/C are shape artifacts: D is normalized by the factor count and C by the code
 #   count, so both sit high when factors are few or codes many. Compare gaps, and treat
 #   a scope whose null exceeds ~0.9 (or collapses to ~0) as unreportable.
+#   DCI ignores --probe-dim by design and is scored on the encoder's own basis, capped by
+#   --dci-max-codes (highest-variance SELECTION, never a rotation): D asks "is this CODE
+#   dedicated to few factors", so a PCA-projected block would describe the PCA basis.
+#   Compare a scope only against the SAME scope in another row, and only when
+#   dci_n_codes matches — C is normalized by log(n_codes), so different widths are
+#   different scales. At patch pooling one channel becomes many near-duplicate cells,
+#   which dilutes C and inflates D by construction; that is the pooling, not the model.
 #   With --per-encoder every DCI column also appears with a _v2 suffix (encoder 2).
 #
 # META: num_samples, poolings, probe_dim, run_dir
@@ -2115,6 +2287,9 @@ def write_outputs(rows, out_dir, baseline_name=None):
                 cols.append(f"dci_{metric}_null{scope}{suffix}")
                 if include_gap:
                     cols.append(f"dci_{metric}_gap{scope}{suffix}")
+        # One code count per scope, not per metric — it is a property of the block.
+        for scope in ("", "_content", "_patch"):
+            cols.append(f"dci_n_codes{scope}{suffix}")
         return cols
 
     # Encoder 1's gap columns already live in capacity_cols / detail_cols, so only its
@@ -2393,6 +2568,18 @@ def main():
         "baseline).  Uses GBT importance — noticeably slower; off by default.",
     )
     p.add_argument(
+        "--dci-max-codes",
+        type=int,
+        default=4096,
+        help="Cap the DCI blocks at this many codes, keeping the highest-variance ones "
+        "(0 = no cap).  DCI is NOT subject to --probe-dim: D asks 'is this CODE dedicated "
+        "to few factors' and C normalises by the code count, so both are statements about "
+        "one specific basis, and a PCA projection replaces every code with a mixture of "
+        "channels — the score then describes the PCA basis, not the encoder.  Selection "
+        "keeps each retained code a real (channel, patch) feature while bounding the GBT "
+        "cost, which at 8x8x8 would otherwise be ~22528 features per fit.",
+    )
+    p.add_argument(
         "--probe-dim",
         default=PROBE_DIM_AUTO,
         help="PCA width for every probe block. 'auto' (default) reduces ONLY blocks in the "
@@ -2552,6 +2739,7 @@ def main():
                     with_dci=cli.with_dci,
                     probe_dim=cli.probe_dim,
                     probe_kind=cli.probe_kind,
+                    dci_max_codes=cli.dci_max_codes,
                     squash_content=cli.squash_content,
                     all_content=all_content,
                     random_init=random_init,
@@ -2598,13 +2786,21 @@ def main():
         baseline_name = existing_baseline
 
     attach_scores(merged)
+    print_reading_guide(merged, baseline_name)
+    _section(1, "HEAD-TO-HEAD vs BASELINE", "the headline: does the objective organize better?")
     print_comparison(merged, baseline_name)
+    _section(2, "ENCODER SUMMARY", "per-encoder split, when --per-encoder gave each view its own")
     print_encoder_summary(merged)
+    _section(3, "CAPACITY + DCI", "how much factor information is present, and how it is spread")
     print_capacity_table(merged, baseline_name)
+    _section(4, "SCORECARD", "derived 0-100% health scores — a summary, never the evidence")
     print_scorecard(merged, baseline_name)
+    _section(5, "RAW METRICS", "the protocol numbers the scores above are derived from")
     print_table(merged, baseline_name)
+    _section(6, "PER-LATENT BREAKDOWN", "per factor: signal vs leak, at its assigned pooling")
     print_per_latent(merged)
     write_outputs(merged, cli.out, baseline_name)
+    print(f"\n  Wrote CSV + JSON to {cli.out}/\n")
 
 
 if __name__ == "__main__":
