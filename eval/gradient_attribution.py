@@ -697,6 +697,12 @@ def main():
             print("  checkpoints of one run — replicate at 2-3 before acting on one. Do not predict")
             print("  them from each term's global optimum: that argument says only off_diag can build")
             print("  rank, and it came out backwards here at R^2 = 1.000.")
+            print("  CHECK --snr FIRST. Every row steps along g/||g|| for the AVERAGED gradient, so a")
+            print("  term whose signal share is low is being probed along a direction that is mostly")
+            print("  sampling noise — reproducible within the run (fixed batches) and therefore")
+            print("  linear, but not the expected gradient. Measured here: the on_diag terms sit near")
+            print("  0.44 signal share and are exactly the ones whose sign flipped between runs,")
+            print("  while off_diag at 0.66 did not. A high linearity R^2 does NOT rescue this.")
         else:
             print("  Compare the excess against block-MCC's per-seed sd (~0.001 at N=1500); inside")
             print("  that band there is no attribution, whatever the raw row says.")
