@@ -69,13 +69,17 @@ logger = logging.getLogger(__name__)
 # Each factor is scored under the pooling that can physically expose it.  Fixed
 # in advance so the headline number is not a max over noisy pooling estimates.
 FACTOR_POOLING = {
-    # global morphometry — present in the channel mean
-    "brain_size": "patch",
-    "ventricle_size": "patch",
-    "cortical_thickness": "patch",
-    "temporal_atrophy": "patch",
-    "lr_asymmetry": "patch",
-    "sulcal_widening": "patch",
+    # global morphometry — present in the channel mean.  Routed to gap, not patch: at
+    # patch pooling an untrained encoder already reads these at R2 0.78-0.92 (measured:
+    # brain_size floor 0.897, lr_asymmetry 0.923), leaving under 0.07 of headroom, so two
+    # models cannot be told apart there.  Use --factor-pooling patch for a one-off
+    # all-on-one-rung view instead of editing this table.
+    "brain_size": "gap",
+    "ventricle_size": "gap",
+    "cortical_thickness": "gap",
+    "temporal_atrophy": "gap",
+    "lr_asymmetry": "gap",
+    "sulcal_widening": "gap",
     # localized — needs spatial layout
     "lesion_x": "patch",
     "lesion_y": "patch",
@@ -231,7 +235,20 @@ def _block_array(reprs, key, level, block_idx):
     return ld[level][block_idx]
 
 
-def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, rng, n_jobs=1, kind="ridge"):
+def _score_block(
+    reprs,
+    level,
+    block_idx,
+    factors,
+    names,
+    avail,
+    n_null,
+    seeds,
+    rng,
+    n_jobs=1,
+    kind="ridge",
+    factor_pooling="assigned",
+):
     """Per-factor informativeness for one repr→factor block, under every pooling.
 
     ``block_idx`` selects the content (0) or style (1) array; ``factors``/``names``
@@ -284,7 +301,13 @@ def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, 
 
     for name in list(per):
         by_pooling = per[name]
-        assigned = _resolve_key(FACTOR_POOLING.get(name, "stats"), avail)
+        # ``factor_pooling`` overrides FACTOR_POOLING's per-factor routing and reads every
+        # factor at one rung.  The routing is the default because it keeps each factor off
+        # its ceiling as well as on a pooling that can express it: at patch an untrained
+        # encoder reads the morphometry factors at 0.78-0.92, leaving no headroom to
+        # compare models in.  The override is for asking "how does this factor read HERE".
+        want = FACTOR_POOLING.get(name, "stats") if factor_pooling == "assigned" else factor_pooling
+        assigned = _resolve_key(want, avail)
         head = by_pooling.get(
             assigned,
             {
@@ -444,6 +467,7 @@ def _score_one_encoder(
     probe_kind="ridge",
     dci_reprs=None,
     dci_max_codes=0,
+    factor_pooling="assigned",
 ):
     """Score the four split blocks (cc, cs, ss, sc) + block-MCC for one encoder's
     features, plus the split-free ``all``-channels capacity (full representation →
@@ -460,11 +484,11 @@ def _score_one_encoder(
     # DCI reads the unreduced block; every probe/MCC below keeps reading `reprs`.
     dreprs = reprs if dci_reprs is None else dci_reprs
 
-    # Bind the probe kind once so every block, null and MCC in this row is scored by
-    # the same estimator — a row mixing linear and nonlinear probes is not internally
-    # comparable.
+    # Bind the probe kind and the factor routing once so every block, null and MCC in this
+    # row is scored by the same estimator on the same rung — a row mixing linear and
+    # nonlinear probes, or mixing routings, is not internally comparable.
     def _sblock(*a, **kw):
-        return _score_block(*a, kind=probe_kind, **kw)
+        return _score_block(*a, kind=probe_kind, factor_pooling=factor_pooling, **kw)
 
     # All-channels capacity: every factor predicted from content+style together.
     # Computed for every model so it is the one apples-to-apples axis (same total
@@ -818,6 +842,7 @@ def score_reprs(
     gt_style_v2=None,
     probe_kind="ridge",
     dci_max_codes=0,
+    factor_pooling="assigned",
 ):
     """Turn extracted representations into one comparison row (torch-free).
 
@@ -873,6 +898,7 @@ def score_reprs(
         probe_kind=probe_kind,
         dci_reprs=dci_reprs,
         dci_max_codes=dci_max_codes,
+        factor_pooling=factor_pooling,
     )
 
     # View-invariance (uses both encoders).  Skipped for an all-channels-only
@@ -926,6 +952,7 @@ def score_reprs(
             probe_kind=probe_kind,
             dci_reprs=dci_reprs,
             dci_max_codes=dci_max_codes,
+            factor_pooling=factor_pooling,
         )
         for k, v in enc2.items():
             if k == "detail":
@@ -996,6 +1023,7 @@ def evaluate_model(
     squash_content=False,
     random_init=False,
     dci_max_codes=0,
+    factor_pooling="assigned",
 ):
     """Load a model, extract representations under each pooling, return a row.
 
@@ -1075,6 +1103,7 @@ def evaluate_model(
         probe_dim=probe_dim,
         probe_kind=probe_kind,
         dci_max_codes=dci_max_codes,
+        factor_pooling=factor_pooling,
     )
     t_score = time.perf_counter() - t0
     logger.info(
@@ -2268,7 +2297,7 @@ def write_outputs(rows, out_dir, baseline_name=None):
         "dci_complete_gap_content",
         "dci_complete_gap_patch",
     ]
-    meta_cols = ["num_samples", "poolings", "probe_dim", "generator", "run_dir"]
+    meta_cols = ["num_samples", "poolings", "probe_dim", "factor_pooling", "generator", "run_dir"]
     v2_cols = (
         [
             "grade_v2",
@@ -2466,6 +2495,7 @@ def _settings_of(row):
         row.get("n_null"),
         row.get("seeds"),
         row.get("probe_dim"),
+        row.get("factor_pooling"),
     )
 
 
@@ -2575,6 +2605,18 @@ def main():
         help="Also compute split-free GAP DCI disentanglement/completeness on the "
         "all-channels representation for every model (incl. a no-split vanilla "
         "baseline).  Uses GBT importance — noticeably slower; off by default.",
+    )
+    p.add_argument(
+        "--factor-pooling",
+        default="assigned",
+        choices=("assigned", "gap", "stats", "patch"),
+        help="Which pooling each factor is scored at. 'assigned' (default) uses FACTOR_POOLING: "
+        "each factor read at the coarsest pooling that can physically expose it, fixed in advance "
+        "so the headline is never a max over poolings. That routing also keeps factors off their "
+        "ceiling — at patch an untrained encoder reads the morphometry factors at R2 0.78-0.92, "
+        "leaving under 0.07 of headroom to tell two models apart. Naming a pooling scores EVERY "
+        "factor there; use it for a deliberate one-rung view rather than editing FACTOR_POOLING, "
+        "which changes the routing for every script that imports it and leaves no record in the CSV.",
     )
     p.add_argument(
         "--dci-max-codes",
@@ -2749,6 +2791,7 @@ def main():
                     probe_dim=cli.probe_dim,
                     probe_kind=cli.probe_kind,
                     dci_max_codes=cli.dci_max_codes,
+                    factor_pooling=cli.factor_pooling,
                     squash_content=cli.squash_content,
                     all_content=all_content,
                     random_init=random_init,
@@ -2769,6 +2812,7 @@ def main():
         "n_null": cli.n_null,
         "seeds": cli.seeds,
         "probe_dim": cli.probe_dim,
+        "factor_pooling": cli.factor_pooling,
         # Generator vintage is provenance, not a setting: a legacy-renderer row and a
         # current-renderer row are different experiments on the fix-affected factors, and
         # nothing else in the output would reveal the difference.
