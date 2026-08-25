@@ -948,13 +948,18 @@ def score_reprs(
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_checkpoint(run_dir, name):
+def _resolve_checkpoint(run_dir, name=None):
     """Prefer ``<run_dir>/<name>``; fall back to vqvae_model.pt if it is missing.
 
     Lets a comparison mix runs that have a best-by-loss checkpoint with runs that
     only have a latest one, instead of dropping the latter.  Returns the preferred
     path unchanged when neither exists so the loader can raise a clear error.
+
+    ``name=None`` means "the default checkpoint" — callers whose own CLI defaults the
+    filename to None would otherwise land in ``os.path.join`` with a TypeError that says
+    nothing about checkpoints.
     """
+    name = name or "vqvae_model.pt"
     preferred = os.path.join(run_dir, name)
     if os.path.exists(preferred):
         return preferred

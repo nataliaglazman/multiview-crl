@@ -342,7 +342,9 @@ def score_run(
         "name": name or os.path.basename(os.path.normpath(run_dir)),
         "level": level,
         "n_samples": int(gt_content.shape[0]),
-        "poolings": ",".join(k for k, _ in poolings),
+        # Render the VALUE, not the bucket key: "patch" alone hides whether the grid was
+        # 2x2x2 or 8x8x8, and that is a 64x difference in code count.
+        "poolings": ",".join("x".join(str(d) for d in v) if isinstance(v, tuple) else str(v) for _k, v in poolings),
         "probe_dim": probe_dim,
         "per_factor": per_factor_scores(probed, level, gt_content, names, seeds, n_null, rng, probe_kind),
         "mcc": mcc_ladder(probed, level, gt_content, seeds, probe_kind, names),
@@ -496,6 +498,24 @@ def _assert_dci_basis():
     Xs, k = _select_codes(X, 10)
     assert k == 10 and np.allclose(Xs, X[:, 40:]), "cap must SELECT top-variance codes, in order"
     assert _select_codes(X, 0)[1] == 50, "max_codes=0 must disable the cap"
+
+    # --checkpoint defaulting to None used to reach os.path.join and raise a TypeError that
+    # said nothing about checkpoints. Both the guard and this script's default are asserted.
+    from eval.run_dci_compare import _resolve_checkpoint
+
+    assert _resolve_checkpoint("/nonexistent/run").endswith("vqvae_model.pt")
+    assert _resolve_checkpoint("/nonexistent/run", None).endswith("vqvae_model.pt")
+    assert _resolve_checkpoint("/nonexistent/run", "vqvae_best.pt").endswith("vqvae_best.pt")
+
+    # The header must record the grid, not just the bucket: 2x2x2 and 8x8x8 are a 64x
+    # difference in code count and would otherwise both print as "patch".
+    assert (
+        ",".join(
+            "x".join(str(d) for d in v) if isinstance(v, tuple) else str(v)
+            for _k, v in parse_poolings("gap,stats,8x8x8")
+        )
+        == "gap,stats,8x8x8"
+    )
     print("  self-test: DCI reads the unreduced block (probes still reduced to 64) — basis OK")
 
 
@@ -503,7 +523,13 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run-dir", help="Run directory to score.")
     p.add_argument("--name", default=None, help="Label for the report (default: basename of --run-dir).")
-    p.add_argument("--checkpoint", default=None, help="Checkpoint filename inside the run dir.")
+    p.add_argument(
+        "--checkpoint",
+        default="vqvae_model.pt",
+        help="Checkpoint filename inside the run dir (same default as run_dci_compare "
+        "--checkpoint-name). Use vqvae_best.pt for the best-by-loss copy; whichever you pick, use "
+        "the same one for every run you intend to compare.",
+    )
     p.add_argument("--num-samples", type=int, default=2000)
     p.add_argument("--poolings", default="gap,stats,8x8x8", help="Comma list: gap, stats, DxHxW.")
     p.add_argument("--level", type=int, default=0)
