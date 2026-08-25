@@ -261,15 +261,27 @@ def print_report(res, floor=None, with_dci=False):
         print("   Both are basis-dependent, so these are scored on the encoder's OWN channels, never")
         print("   on principal components. Compare a row only with the same row in another model,")
         print("   and only at equal n_codes: C is normalised by log(n_codes).")
-        print(f"   {'scope':<14s} {'D raw':>7s} {'D learn':>8s}   {'C raw':>7s} {'C learn':>8s}   {'n_codes':>8s}")
+        # "gap" is this codebase's word for real-minus-null everywhere (`*_gap`), but it is
+        # also a pooling name, and `content@gap` sits in the very next column. Say which.
+        print("   'gap' COLUMN = real - permutation null. Not the same thing as the gap POOLING")
+        print("   in the scope names below. Read the null too: raw D/C sit high from shape alone")
+        print("   (D normalised by log(n_factors), C by log(n_codes)), so a null near 1 - or at")
+        print("   0 - leaves a gap that means nothing.")
+        print(f"   {'scope':<14s} {'':>2s} {'real':>7s} {'null':>7s} {'gap':>7s} {'learned':>8s}   {'n_codes':>8s}")
         fdci = (floor or {}).get("dci", {})
         for scope, d in res["dci"].items():
             fd = fdci.get(scope, {})
-            dd = _delta(d.get("d_gap"), fd.get("d_gap")) if has_floor else float("nan")
-            cd = _delta(d.get("c_gap"), fd.get("c_gap")) if has_floor else float("nan")
             nc = _f(d.get("n_codes"))
             ncs = f"{int(nc):>8d}" if np.isfinite(nc) else "       ?"
-            print(f"   {scope:<14s} {_n(d.get('d_gap'))} {_n(dd)}   {_n(d.get('c_gap'))} {_n(cd)}   {ncs}")
+            for m in ("d", "c"):
+                learned = _delta(d.get(f"{m}_gap"), fd.get(f"{m}_gap")) if has_floor else float("nan")
+                print(
+                    f"   {scope:<14s} {m.upper():>2s} {_n(d.get(m))} {_n(d.get(f'{m}_null'))} "
+                    f"{_n(d.get(f'{m}_gap'))} {_n(learned)}   {ncs}"
+                )
+                null = _f(d.get(f"{m}_null"))
+                if np.isfinite(null) and null > 0.9:
+                    print(f"   {'':<17s} ^ null saturated (>0.9) — this gap cannot go positive; not reportable")
         ncs = {_f(d.get("n_codes")) for d in res["dci"].values() if np.isfinite(_f(d.get("n_codes")))}
         if len(ncs) > 1:
             print("   ! rows differ in n_codes — they are on different scales. Do not compare them.")
@@ -381,13 +393,21 @@ def score_run(
     if with_dci:
         avail = set(dci_reprs.keys())
         dci = {}
-        # Content block x content factors at each pooling — the whole report is
+        # Content block x content factors at EVERY requested pooling — the whole report is
         # content-side, so mixing the style block in here would make the DCI rows answer a
         # different question from every other row.  `dci_reprs`, not `probed`: D/C are
         # basis-dependent and only mean something on the encoder's own channels.
-        for scope, pooling_key in (("content@stats", "stats"), ("content@patch", "patch")):
+        #
+        # gap is included and listed first because it is the only rung where a "code" IS a
+        # latent dimension, which is the object DCI is defined over.  stats splits each
+        # channel into 4 codes (mean/std/max/min) and patch into one per cell, so a single
+        # clean channel arrives as many near-duplicate codes: that dilutes C and inflates D
+        # by construction, and no null subtraction undoes it.  Omitting gap left the report
+        # showing only the two rungs where D/C are hardest to interpret.
+        for pooling_key in ("gap", "stats", "patch"):
             if pooling_key not in avail:
                 continue
+            scope = f"content@{pooling_key}"
             d = _score_dci(
                 dci_reprs,
                 level,
@@ -402,8 +422,16 @@ def score_run(
                 max_codes=dci_max_codes,
                 n_jobs=n_jobs,
             )
+            # Keep real and null, not just the gap: a gap alone is not interpretable.
+            # D is normalised by log(n_factors) and C by log(n_codes), so both sit high
+            # from shape alone, and a null saturating near 1 (or collapsing to 0) makes
+            # the gap meaningless in a way that is only visible next to the null.
             dci[scope] = {
+                "d": d.get("dci_d"),
+                "d_null": d.get("dci_d_null"),
                 "d_gap": d.get("dci_d_gap"),
+                "c": d.get("dci_c"),
+                "c_null": d.get("dci_c_null"),
                 "c_gap": d.get("dci_c_gap"),
                 "n_codes": d.get("dci_n_codes"),
             }
