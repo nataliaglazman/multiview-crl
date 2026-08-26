@@ -41,6 +41,7 @@ import logging
 import os
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 THEME = {
     "light": {
         "series": ["#2a78d6", "#eb6834"],
-        "surface": "#fcfcfb",
+        "surface": "#ffffff",
         "ink": "#0b0b0b",
         "ink2": "#52514e",
         "muted": "#898781",
@@ -234,7 +235,7 @@ def fig_learned_per_factor(models, t, path):
         t,
         xlabel="learned R²  (trained − untrained, null-subtracted)",
         title="What training added, per factor",
-        subtitle="whiskers = 2× the floor's across-seed spread — a bar inside its whisker is not a finding",
+        # subtitle="whiskers = 2× the floor's across-seed spread — a bar inside its whisker is not a finding",
     )
     if len(per) > 1:
         leg = ax.legend(frameon=False, loc="lower right", fontsize=8.5)
@@ -253,13 +254,92 @@ def fig_learned_per_factor(models, t, path):
     )
 
 
-def fig_floor_decomposition(models, t, path):
-    """Stacked horizontal bars, one panel per model: how much of the raw score is floor.
+# def fig_floor_decomposition(models, t, path):
+#     """Stacked horizontal bars, one panel per model: how much of the raw score is floor.
 
-    Part-to-whole within one entity, so the floor segment is recessive grey and only the
-    learned segment carries the model's colour — the colour still means the model, and the
-    eye goes to the part that is about training.
-    """
+#     Part-to-whole within one entity, so the floor segment is recessive grey and only the
+#     learned segment carries the model's colour — the colour still means the model, and the
+#     eye goes to the part that is about training.
+#     """
+#     parts = [(label, raw_and_floor(run, fl)) for label, run, fl, _ in models]
+#     factors = list(parts[0][1].keys())
+#     if not factors:
+#         logger.warning("no per-factor overlap with the floor — skipping %s", path)
+#         return
+#     factors.sort(key=lambda f: sum(parts[0][1].get(f, (0, 0))))
+
+#     fig, axes = plt.subplots(
+#         1,
+#         len(parts),
+#         figsize=(4.6 * len(parts) + 0.6, 0.42 * len(factors) + 2.0),
+#         sharex=True,
+#         sharey=True,
+#         facecolor=t["surface"],
+#     )
+#     axes = [axes] if len(parts) == 1 else list(axes)
+#     for i, ((label, vals), ax) in enumerate(zip(parts, axes)):
+#         ys = range(len(factors))
+#         base = [vals.get(f, (0, 0))[0] for f in factors]
+#         learned = [vals.get(f, (0, 0))[1] for f in factors]
+#         ax.barh(ys, base, height=BAR_H, color=t["floor_fill"], zorder=3, label="untrained floor")
+#         ax.barh(
+#             ys,
+#             learned,
+#             left=[b + GAP for b in base],
+#             height=BAR_H,
+#             color=t["series"][i],
+#             zorder=3,
+#             label="added by training",
+#         )
+#         ax.set_yticks(list(ys))
+#         ax.set_yticklabels(factors)
+#         _style(ax, t, xlabel="R² (null-subtracted)", title=label)
+#     # axes[0].text(
+#     #     0.0,
+#     #     1.10,
+#     #     "Most of each raw score is what an untrained encoder already gets",
+#     #     transform=axes[0].transAxes,
+#     #     color=t["muted"],
+#     #     fontsize=8.5,
+#     #     va="bottom",
+#     #     ha="left",
+#     # )
+#     leg = axes[-1].legend(frameon=False, loc="lower right", fontsize=8.5)
+#     for txt in leg.get_texts():
+#         txt.set_color(t["ink2"])
+
+#     # add title
+#     fig.suptitle(
+#         "R2 values",
+#         color=t["ink"],
+#         fontsize=11,
+#         x=0.01,
+#         y=0.99,
+#         ha="left",
+#         va="top",
+#     )
+#     _save(fig, path, t)
+#     _write_csv(
+#         os.path.splitext(path)[0] + ".csv",
+#         ["factor"] + [c for lab, _ in parts for c in (f"{lab}_floor", f"{lab}_learned", f"{lab}_raw")],
+#         [
+#             [f]
+#             + [
+#                 x
+#                 for _, v in parts
+#                 for x in (
+#                     f"{v.get(f, (0, 0))[0]:.4f}",
+#                     f"{v.get(f, (0, 0))[1]:.4f}",
+#                     f"{sum(v.get(f, (0, 0))):.4f}",
+#                 )
+#             ]
+#             for f in reversed(factors)
+#         ],
+#     )
+
+
+def fig_floor_decomposition(models, t, path):
+    """Stacked horizontal bars, one panel per model: how much of the raw score is floor."""
     parts = [(label, raw_and_floor(run, fl)) for label, run, fl, _ in models]
     factors = list(parts[0][1].keys())
     if not factors:
@@ -276,10 +356,13 @@ def fig_floor_decomposition(models, t, path):
         facecolor=t["surface"],
     )
     axes = [axes] if len(parts) == 1 else list(axes)
+
     for i, ((label, vals), ax) in enumerate(zip(parts, axes)):
         ys = range(len(factors))
         base = [vals.get(f, (0, 0))[0] for f in factors]
         learned = [vals.get(f, (0, 0))[1] for f in factors]
+
+        # Plot stacked horizontal bars
         ax.barh(ys, base, height=BAR_H, color=t["floor_fill"], zorder=3, label="untrained floor")
         ax.barh(
             ys,
@@ -290,22 +373,83 @@ def fig_floor_decomposition(models, t, path):
             zorder=3,
             label="added by training",
         )
+
+        # Add numeric values to bars
+        for y, b_val, l_val in zip(ys, base, learned):
+            if b_val > 0.08:
+                ax.text(
+                    b_val / 2.0,
+                    y,
+                    f"{b_val:.2f}",
+                    color=t.get("surface", "white"),
+                    fontsize=7.5,
+                    ha="center",
+                    va="center",
+                    zorder=4,
+                    fontweight="bold",
+                )
+
+            if l_val > 0.08:
+                ax.text(
+                    b_val + GAP + (l_val / 2.0),
+                    y,
+                    f"+{l_val:.2f}",
+                    color="white",
+                    fontsize=7.5,
+                    ha="center",
+                    va="center",
+                    zorder=4,
+                    fontweight="bold",
+                )
+
+            total_r2 = b_val + l_val
+            if total_r2 > 0:
+                ax.text(
+                    total_r2 + GAP + 0.02,
+                    y,
+                    f"{total_r2:.2f}",
+                    color=t["ink2"],
+                    fontsize=8,
+                    ha="left",
+                    va="center",
+                    zorder=4,
+                )
+
         ax.set_yticks(list(ys))
         ax.set_yticklabels(factors)
-        _style(ax, t, xlabel="R² (null-subtracted)", title=label)
-    axes[0].text(
-        0.0,
-        1.10,
-        "Most of each raw score is what an untrained encoder already gets",
-        transform=axes[0].transAxes,
-        color=t["muted"],
-        fontsize=8.5,
-        va="bottom",
-        ha="left",
-    )
+
+        # Apply standard styling first
+        _style(ax, t, xlabel="R² (null-subtracted)", title="")
+
+        # BOLD, CENTERED, AND CAPITALIZED PANEL TITLE
+        ax.set_title(label.upper(), fontsize=10, fontweight="bold", ha="center", color=t["ink"], pad=10)
+
     leg = axes[-1].legend(frameon=False, loc="lower right", fontsize=8.5)
     for txt in leg.get_texts():
         txt.set_color(t["ink2"])
+
+    # Hierarchical main figure title
+    fig.suptitle(
+        "FACTOR IDENTIFIABILITY: UNTRAINED INITIALIZATION VS. LEARNED GAIN",
+        color=t["ink"],
+        fontsize=11,
+        fontweight="bold",
+        x=0.01,
+        y=0.98,
+        ha="left",
+        va="top",
+    )
+    fig.text(
+        0.01,
+        0.93,
+        "Decomposition of raw R² scores into baseline architectural floor and signal added by training",
+        color=t["ink2"],
+        fontsize=8.5,
+        ha="left",
+        va="top",
+    )
+    plt.subplots_adjust(top=0.82)
+
     _save(fig, path, t)
     _write_csv(
         os.path.splitext(path)[0] + ".csv",
@@ -375,8 +519,8 @@ def fig_mcc_ladder(models, t, path):
         ax,
         t,
         xlabel="pooling  (coarse → fine)",
-        title="Where the content lives",
-        subtitle="rising = information is in the spatial layout, not channel identity",
+        title="Block-MCC across scales",
+        # subtitle="rising = information is in the spatial layout, not channel identity",
     )
     # After _style: it sets the grid for the horizontal-bar case (value on x), and here the
     # value axis is y. Flipping it back afterwards is the whole difference.
@@ -410,35 +554,184 @@ def fig_mcc_ladder(models, t, path):
     )
 
 
+# def fig_dci(models, t, path):
+#     """Learned D and C per scope, grouped by Metric (D/C) -> Scope -> Model."""
+#     series = [(label, learned_dci(run, fl)) for label, run, fl, _ in models]
+
+#     # 1. Custom sort keys: Group first by Metric (D then C), then by Scope (patch then gap)
+#     raw_keys = {k for _, v in series for k in v}
+#     if not raw_keys:
+#         return
+
+#     metric_order = {"disentanglement": 0, "D": 0, "completeness": 1, "C": 1}
+#     scope_order = {"patch": 0, "gap": 1}
+
+#     keys = sorted(
+#         raw_keys,
+#         key=lambda kv: (
+#             metric_order.get(kv[1], 2),  # Primary: Metric (D/C)
+#             scope_order.get(kv[0], 2),   # Secondary: Scope (patch/gap)
+#             kv[0],                       # Fallback string sort
+#             kv[1]
+#         )
+#     )
+
+#     fig, ax = plt.subplots(
+#         figsize=(7.2, 0.45 * len(keys) + 1.9),
+#         facecolor=t["surface"]
+#     )
+
+#     n = len(series)
+#     step = BAR_H + GAP
+#     offs = [(i - (n - 1) / 2) * step for i in range(n)]
+
+#     # 2. Draw bars grouped by model (baseline vs contrastive) per key row
+#     for i, (label, vals) in enumerate(series):
+#         ys = [j + offs[i] for j in range(len(keys))]
+#         bars = ax.barh(
+#             ys,
+#             [vals.get(k, float("nan")) for k in keys],
+#             height=BAR_H,
+#             color=t["series"][i],
+#             label=label.upper(),  # Capitalized model title
+#             zorder=3
+#         )
+
+#         # Add value labels on bars
+#         for y, k in zip(ys, keys):
+#             val = vals.get(k, float("nan"))
+#             if not np.isnan(val) and abs(val) > 0.01:
+#                 ha = "left" if val >= 0 else "right"
+#                 offset = 0.01 if val >= 0 else -0.01
+#                 ax.text(
+#                     val + offset, y, f"{val:+.3f}",
+#                     color=t["ink2"], fontsize=7.5,
+#                     va="center", ha=ha, zorder=4
+#                 )
+
+#     ax.axvline(0, color=t["axis"], linewidth=1.0, zorder=2)
+#     ax.set_yticks(range(len(keys)))
+
+#     # Format labels as "METRIC — scope"
+#     ax.set_yticklabels([f"{m.upper()} — {scope}" for scope, m in keys], fontweight="bold")
+
+#     _style(
+#         ax,
+#         t,
+#         xlabel="learned (trained − untrained)",
+#         title="",
+#     )
+
+#     # 3. Capitalized, bolded, centered main title
+#     fig.suptitle(
+#         "DISENTANGLEMENT & COMPLETENESS (DCI)",
+#         color=t["ink"],
+#         fontsize=11,
+#         fontweight="bold",
+#         x=0.01,
+#         y=0.98,
+#         ha="left",
+#         va="top",
+#     )
+
+#     if n > 1:
+#         leg = ax.legend(frameon=False, loc="lower right", fontsize=8.5)
+#         for txt in leg.get_texts():
+#             txt.set_color(t["ink2"])
+
+#     _save(fig, path, t)
+#     _write_csv(
+#         os.path.splitext(path)[0] + ".csv",
+#         ["scope", "metric"] + [f"{lab}_learned" for lab, _ in series],
+#         [[s, m] + [f"{v.get((s, m), float('nan')):.4f}" for _, v in series] for s, m in keys],
+#     )
+
+
 def fig_dci(models, t, path):
-    """Learned D and C per scope. Skipped unless the report was run with --with-dci."""
+    """Learned D and C per scope, grouped by Metric (D/C) -> Scope -> Model."""
     series = [(label, learned_dci(run, fl)) for label, run, fl, _ in models]
-    keys = sorted({k for _, v in series for k in v}, key=lambda kv: (kv[1], kv[0]))
-    if not keys:
+
+    # # 1. Sort keys by Metric (D then C), then by Scope (patch then gap)
+    # raw_keys = {k for _, v in series for k in v}
+    # if not raw_keys:
+    #     return
+
+    # 1. Collect and filter out 'stats' scope
+    raw_keys = {k for _, v in series for k in v if k[0] != "content@stats"}
+    if not raw_keys:
         return
-    fig, ax = plt.subplots(figsize=(7.2, 0.42 * len(keys) + 1.9), facecolor=t["surface"])
+    print(f"Filtered keys (excluding 'stats'): {raw_keys}")
+
+    metric_order = {"disentanglement": 0, "D": 0, "completeness": 1, "C": 1}
+    scope_order = {"patch": 0, "gap": 1}
+
+    keys = sorted(
+        raw_keys,
+        key=lambda kv: (
+            metric_order.get(kv[1], 2),  # Primary: Metric (D/C)
+            scope_order.get(kv[0], 2),  # Secondary: Scope (patch/gap)
+            kv[0],  # Fallback string sort
+            kv[1],
+        ),
+    )
+
+    fig, ax = plt.subplots(figsize=(7.2, 0.45 * len(keys) + 1.9), facecolor=t["surface"])
+
     n = len(series)
     step = BAR_H + GAP
     offs = [(i - (n - 1) / 2) * step for i in range(n)]
+
+    # 2. Draw bars grouped by model per key row
     for i, (label, vals) in enumerate(series):
         ys = [j + offs[i] for j in range(len(keys))]
-        ax.barh(
-            ys, [vals.get(k, float("nan")) for k in keys], height=BAR_H, color=t["series"][i], label=label, zorder=3
+        bars = ax.barh(
+            ys,
+            [vals.get(k, float("nan")) for k in keys],
+            height=BAR_H,
+            color=t["series"][i],
+            label=label,  # De-capitalized legend label
+            zorder=3,
         )
+
+        # Add value labels on bars
+        for y, k in zip(ys, keys):
+            val = vals.get(k, float("nan"))
+            if not np.isnan(val) and abs(val) > 0.01:
+                ha = "left" if val >= 0 else "right"
+                offset = 0.01 if val >= 0 else -0.01
+                ax.text(val + offset, y, f"{val:.3f}", color=t["ink2"], fontsize=7.5, va="center", ha=ha, zorder=4)
+
     ax.axvline(0, color=t["axis"], linewidth=1.0, zorder=2)
     ax.set_yticks(range(len(keys)))
-    ax.set_yticklabels([f"{scope}  {m}" for scope, m in keys])
+
+    # Format tick labels as "metric — scope"
+    # Format tick labels and replace '@' with '-'
+    ax.set_yticklabels([f"{m} - {scope}".replace("@", " - ") for scope, m in keys])
     _style(
         ax,
         t,
         xlabel="learned (trained − untrained)",
-        title="Disentanglement / Completeness",
-        subtitle="compare a row only with the same row in the other model — code counts differ",
+        title="",
     )
+
+    # 3. De-capitalized sentence-case main title
+    fig.suptitle(
+        "Disentanglement & completeness (DC)",
+        color=t["ink"],
+        fontsize=11,
+        fontweight="bold",
+        x=0.01,
+        y=0.98,
+        ha="left",
+        va="top",
+    )
+
+    # 4. Legend positioned in top right corner
     if n > 1:
-        leg = ax.legend(frameon=False, loc="lower right", fontsize=8.5)
+        leg = ax.legend(frameon=False, loc="upper right", fontsize=8.5)
         for txt in leg.get_texts():
             txt.set_color(t["ink2"])
+
     _save(fig, path, t)
     _write_csv(
         os.path.splitext(path)[0] + ".csv",
