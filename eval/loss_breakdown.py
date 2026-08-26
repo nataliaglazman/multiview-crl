@@ -140,6 +140,17 @@ def main():
     ap.add_argument("--level", type=int, default=0)
     ap.add_argument("--tol", type=float, default=None, help="Max step distance when matching a tag")
     ap.add_argument("--csv", default=None)
+    ap.add_argument(
+        "--series",
+        nargs="?",
+        type=int,
+        const=25,
+        default=None,
+        help="Compact one-row-per-step view of the FRACTIONAL contributions over training, "
+        "instead of a full block per step. Optionally takes the number of sample points "
+        "(default 25). This is the view for 'what is my model optimising, and when did that "
+        "change' — the per-step blocks are for auditing a single moment.",
+    )
     args = ap.parse_args()
 
     cfg = _settings(args.run_dir, args.settings)
@@ -160,6 +171,43 @@ def main():
         f"commitment effective weight = {commit_w:g}"
         f"  ({'single-count' if single else 'DOUBLE-COUNTED: scale_recon_loss + vq_commitment_weight'})"
     )
+
+    if args.series is not None:
+        steps = list(np.linspace(steps_all.min(), steps_all.max(), args.series))
+        short = {
+            "BT patch  on_diag": "p_on",
+            "BT patch  off_diag": "p_off",
+            "BT patch  sim": "p_sim",
+            "BT patch  var hinge": "p_var",
+            "BT gap    on_diag": "g_on",
+            "BT gap    off_diag": "g_off",
+            "BT gap    sim": "g_sim",
+            "BT gap    var hinge": "g_var",
+            "recon     pixel L1": "recon",
+            "recon     perceptual": "percep",
+            "VQ        commitment": "VQ",
+            "recon     (Loss/Recon)": "recon",
+            "VQ        (Loss/VQ)": "VQ",
+        }
+        cols = [(n, short.get(n, n)) for n, _, _ in terms]
+        print("\n  Fractional contribution to the summed objective, over training.")
+        print("  (each row sums to 100%; 'total' is the logged Loss/Total)\n")
+        print("  " + f"{'step':>8}" + "".join(f"{c:>8}" for _, c in cols) + f"{'total':>11}")
+        for st in steps:
+            vals = {}
+            for name, tag, mult in terms:
+                raw = _at(series, tag, st, tol)
+                vals[name] = None if raw is None else raw * mult
+            ssum = sum(v for v in vals.values() if v is not None)
+            tl = _at(series, "Loss/Total", st, tol)
+            line = "  " + f"{st:>8.0f}"
+            for name, _ in cols:
+                v = vals.get(name)
+                line += f"{'':>8}" if v is None else f"{100 * v / ssum:>7.1f}%"
+            line += f"{tl:>11.4g}" if tl is not None else f"{'':>11}"
+            print(line)
+        print("\n  Read the columns that MOVE. A term whose share is flat is not what changed.")
+        return
 
     rows = []
     for st in steps:
