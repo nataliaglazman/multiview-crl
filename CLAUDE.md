@@ -18,6 +18,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `eval/cross_reconstruction.py`, `eval/dci.py` — disentanglement metrics.
 - `eval/run_dci_compare.py` — full cross-model protocol (R²/MCC/DCI, nulls, `--floor`, CSV). The source of truth for the metric rules; other eval scripts import them from here rather than re-deriving.
 - `eval/identifiability_report.py` — one-page readable R²/MCC/DCI report for a single run vs its untrained floor. Thin layer over the above; `--self-test` runs torch-free.
+- `eval/plot_identifiability.py` — PNG figures from `identifiability_report --out` JSON (one or two models). Never re-scores; each figure ships a `.csv` twin.
 - `eval/view_latents.ipynb`, `eval/dino.ipynb` — analysis notebooks.
 - `utils/config.py` — `parse_args`, `update_args`. CLI surface lives here. Datasets: ADNI, synthetic, custom only.
 - `utils/checkpointing.py` — save/load/emergency checkpoints, auto-resume, architecture compat check.
