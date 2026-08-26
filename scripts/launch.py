@@ -355,8 +355,24 @@ def _runai_container_command(config: dict, repo_path: str, mount_path: str) -> s
 WANDB_KEY_HINT = "export WANDB_API_KEY before submitting - get it from https://wandb.ai/authorize"
 
 
+THREAD_ENV_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+
+
+def _thread_env(n_cpus) -> dict[str, str]:
+    """Cap native thread pools at the job's CPU allocation.
+
+    OpenMP and OpenBLAS size their pools from the *host* core count, not the
+    job's cgroup quota.  On a shared A100 node that means the sklearn probes in
+    the evaluation step spawn ~100 threads against a handful of guaranteed
+    cores and spend their time in scheduler contention — and how bad it gets
+    depends on which node the job landed on.  None of these are set by
+    default, so pin them all to what the job actually asked for.
+    """
+    return {name: str(max(1, int(n_cpus))) for name in THREAD_ENV_VARS}
+
+
 def _runai_env_flags(config: dict, runai: dict, literal: bool) -> list[tuple[str, str]]:
-    """``--environment`` flags for the job: the cluster's own map plus W&B auth.
+    """``--environment`` flags for the job: thread caps, the cluster's own map, W&B auth.
 
     The container has no ``~/.netrc``, so ``--use-wandb`` needs ``WANDB_API_KEY``
     passed in or ``wandb.init`` raises "No API key configured".  The key is read
@@ -364,7 +380,9 @@ def _runai_env_flags(config: dict, runai: dict, literal: bool) -> list[tuple[str
     the unexpanded ``${WANDB_API_KEY:?...}`` for the generated bash script,
     ``literal=True`` resolves it now for direct ``subprocess`` submission.
     """
-    env = [(str(k), str(v)) for k, v in (runai.get("environment") or {}).items()]
+    env = _thread_env(runai.get("cpu", 16))
+    # The cluster YAML's own map wins, so a run can still override the caps.
+    env.update({str(k): str(v) for k, v in (runai.get("environment") or {}).items()})
 
     if config.get("use_wandb"):
         if literal:
@@ -372,11 +390,11 @@ def _runai_env_flags(config: dict, runai: dict, literal: bool) -> list[tuple[str
             if not key:
                 print(f"Error: use_wandb is set but WANDB_API_KEY is unset. {WANDB_KEY_HINT}", file=sys.stderr)
                 sys.exit(1)
-            env.append(("WANDB_API_KEY", key))
+            env["WANDB_API_KEY"] = key
         else:
-            env.append(("WANDB_API_KEY", f"${{WANDB_API_KEY:?{WANDB_KEY_HINT}}}"))
+            env["WANDB_API_KEY"] = f"${{WANDB_API_KEY:?{WANDB_KEY_HINT}}}"
 
-    return [("--environment", f"{name}={value}") for name, value in env]
+    return [("--environment", f"{name}={value}") for name, value in env.items()]
 
 
 def _runai_submit_flags(runai: dict) -> list[tuple[str, str | None]]:
@@ -500,6 +518,7 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
             'PYTHON="${HOME}/.conda/envs/${CONDA_ENV_NAME}/bin/python"',
             "",
             "export PYTHONNOUSERSITE=1",
+            *[f"export {name}={value}" for name, value in _thread_env(slurm.get("cpus_per_task", 8)).items()],
             "",
             "# Automatically repair/build the environment if numpy or torch are missing",
             "if ! \"$PYTHON\" -c \"import importlib.util; raise SystemExit(0 if importlib.util.find_spec('torch') and importlib.util.find_spec('numpy') else 1)\" 2>/dev/null; then",

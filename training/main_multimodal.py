@@ -1544,6 +1544,13 @@ def main(args):
             spacing=getattr(args, "image_spacing", 2.0),
             crop_margin=getattr(args, "crop_margin", 0),
             spatial_size=getattr(args, "spatial_size", None),
+            # Same cache as train. MyCustomDataset does not split by mode, so the
+            # fingerprint (spacing / crop_margin / spatial_size / mask flags / paths)
+            # matches the train cache and val hits it with no build cost. Without
+            # this every eval sample re-ran the full NFS load + MONAI pipeline,
+            # which dominated evaluation wall time.
+            cache=getattr(args, "cache_dataset", False),
+            cache_dir=getattr(args, "cache_dir", None),
             **dataset_kwargs,
         )
         val_kwargs = dict(dataloader_kwargs)
@@ -1562,6 +1569,8 @@ def main(args):
             spacing=getattr(args, "image_spacing", 2.0),
             crop_margin=getattr(args, "crop_margin", 0),
             spatial_size=getattr(args, "spatial_size", None),
+            cache=getattr(args, "cache_dataset", False),
+            cache_dir=getattr(args, "cache_dir", None),
             **dataset_kwargs,
         )
     else:
@@ -3253,25 +3262,48 @@ def main(args):
         logger.info("STARTING EVALUATION")
         logger.info("=" * 60)
 
-        logger.info("[EVALUATION] Collecting validation encodings...")
+        # Single-process, in-order eval loader — same reasoning as the periodic
+        # separation eval above: multi-worker eval hung on NFS with workers stuck
+        # in torch.load of the cached .pt files. shuffle/drop_last are training
+        # settings and are wrong here: shuffling turns the pass into random access
+        # over the NFS tree for no benefit, and drop_last silently drops the tail
+        # (yielding *zero* batches when the split is smaller than a batch, which
+        # leaves InfiniteIterator returning None).
+        eval_dataloader_kwargs = {
+            **dataloader_kwargs,
+            "shuffle": False,
+            "drop_last": False,
+            "num_workers": 0,
+            "persistent_workers": False,
+            "prefetch_factor": None,
+            "pin_memory": False,
+        }
+
+        logger.info(
+            f"[EVALUATION] Collecting validation encodings "
+            f"({args.val_size or len(val_dataset)} samples @ batch {args.batch_size})..."
+        )
         val_dict = get_data(
             val_dataset,
             encoders,
             decoders,
             loss_func,
-            dataloader_kwargs,
+            eval_dataloader_kwargs,
             args=args,
             num_samples=args.val_size,
             recon_loss_fn=recon_loss_fn,
             moco_loss_func=moco_loss_func,
         )
-        logger.info("[EVALUATION] Collecting test encodings...")
+        logger.info(
+            f"[EVALUATION] Collecting test encodings "
+            f"({args.test_size or len(test_dataset)} samples @ batch {args.batch_size})..."
+        )
         test_dict = get_data(
             test_dataset,
             encoders,
             decoders,
             loss_func,
-            dataloader_kwargs,
+            eval_dataloader_kwargs,
             args=args,
             num_samples=args.test_size,
             recon_loss_fn=recon_loss_fn,
