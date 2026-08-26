@@ -141,6 +141,15 @@ def main():
     ap.add_argument("--tol", type=float, default=None, help="Max step distance when matching a tag")
     ap.add_argument("--csv", default=None)
     ap.add_argument(
+        "--change",
+        action="store_true",
+        help="Rank terms by how much they actually FELL over training. A loss term that drops is "
+        "one the model is solving; one that is flat or rising is one it is stuck on or losing. "
+        "Reports the minimum as well as the endpoint, because a term that fell and then REBOUNDED "
+        "(off_diag under dimensional collapse) reads identically to one that never fell if you "
+        "only compare first against last.",
+    )
+    ap.add_argument(
         "--series",
         nargs="?",
         type=int,
@@ -171,6 +180,39 @@ def main():
         f"commitment effective weight = {commit_w:g}"
         f"  ({'single-count' if single else 'DOUBLE-COUNTED: scale_recon_loss + vq_commitment_weight'})"
     )
+
+    if args.change:
+        lo, hi = steps_all.min(), steps_all.max()
+        grid = np.linspace(lo, hi, 60)
+        print(f"\n  Trajectory of each WEIGHTED term over steps {lo:.0f} -> {hi:.0f}\n")
+        print(f"  {'term':<24}{'first':>11}{'min':>11}{'last':>11}{'max drop':>11}{'net':>10}  shape")
+        out = []
+        for name, tag, mult in terms:
+            vs = [(_at(series, tag, g, tol) or np.nan) * mult for g in grid]
+            vs = np.array([v for v in vs if np.isfinite(v)])
+            if vs.size < 3:
+                continue
+            first, last, mn = float(vs[0]), float(vs[-1]), float(vs.min())
+            den = max(abs(first), 1e-12)
+            drop, net = 100 * (mn - first) / den, 100 * (last - first) / den
+            # A term that reached its minimum and stayed is solved; one that bounced off it is not.
+            rebound = 100 * (last - mn) / max(abs(mn), 1e-12)
+            if net < -50 and rebound < 50:
+                shape = "SOLVED — fell and stayed"
+            elif drop < -50 <= net or rebound > 100:
+                shape = "REBOUNDED — fell then came back"
+            elif abs(net) < 15:
+                shape = "FLAT — stuck"
+            elif net > 15:
+                shape = "ROSE — losing"
+            else:
+                shape = "falling"
+            out.append((net, name, first, mn, last, drop, shape))
+        for net, name, first, mn, last, drop, shape in sorted(out):
+            print(f"  {name:<24}{first:>11.4g}{mn:>11.4g}{last:>11.4g}{drop:>10.1f}%{net:>9.1f}%  {shape}")
+        print("\n  'max drop' is the best the term ever reached; 'net' is where it ended up.")
+        print("  A large gap between them means the term was solved and then given back.")
+        return
 
     if args.series is not None:
         steps = list(np.linspace(steps_all.min(), steps_all.max(), args.series))
