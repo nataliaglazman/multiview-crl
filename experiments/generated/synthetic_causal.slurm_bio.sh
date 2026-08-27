@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-27T14:51:19Z
-# Git SHA: d848347
+# Generated at: 2026-08-27T15:20:31Z
+# Git SHA: cef3ab8
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-40-100-lambda-6
+#SBATCH --job-name=synthetic-clean-content-40-100-lambda-6-codebook
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-40-100-lambda-6-%j.err
+#SBATCH --error=synthetic-clean-content-40-100-lambda-6-codebook-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -105,7 +105,6 @@ fi
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
@@ -121,7 +120,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-40-100-lambda-6 \
+    --model-id synthetic-clean-content-40-100-lambda-6-codebook \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
