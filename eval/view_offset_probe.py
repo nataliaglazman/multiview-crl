@@ -6,7 +6,15 @@ vector came from, perfectly, at every checkpoint and in both arms.  That is the 
 thing a "content" block is supposed not to do.
 
 This asks whether the leak is the specific transform Barlow Twins is **structurally blind
-to**.  BT's alignment term is a correlation on per-channel standardised features, so a
+    logger.info("Wrote %s", path)
+    run_view_offset_probe(cli)
+    ...
+    from eval.view_leak_shared import offset_size, per_view_center, per_view_standardise, run_view_offset_probe, view_acc
+    ...
+    p = argparse.ArgumentParser(description="Is the content view-leak a per-view constant offset?")
+    ...
+    if __name__ == "__main__":
+        main()
 per-view *constant* mean/scale shift costs it exactly nothing — verified numerically:
 
     view-2 features                    BT on_diag       MSE   view-probe acc
