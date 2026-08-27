@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-21T14:56:46Z
-# Git SHA: fac6124
+# Generated at: 2026-08-20T16:49:10Z
+# Git SHA: ee42447
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -12,15 +12,12 @@ cd /nfs/home/nglazman/crl-2/multiview-crl || { echo ERROR: /nfs/home/nglazman/cr
 export PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl ;
 python -m training.main_multimodal
     --batch-size 128
-    --bt-corr-ema 0.99
-    --bt-gap-lambda 7
+    --bt-gap-lambda 0.0005
     --bt-gap-weight 1
-    --bt-lambda 7
-    --bt-normalize-terms
     --bt-patch-weight 1
-    --bt-sim-coeff 0.0114
+    --bt-sim-coeff 0.5
     --bt-sim-normalize
-    --bt-std-coeff 0.227
+    --bt-std-coeff 10
     --channels-last
     --checkpoint-steps 1000
     --content-dim 128
@@ -35,6 +32,7 @@ python -m training.main_multimodal
     --decoder-norm-type group
     --deterministic
     --eval-dci
+    # --grad-clip-norm 100
     --image-spacing 1.0
     --inject-style-to-decoder
     --log-steps 50
@@ -55,7 +53,7 @@ python -m training.main_multimodal
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
     --scale-contrastive-loss 1
-    --scale-recon-loss 16
+    --scale-recon-loss 1
     --scale-style-contrastive-loss 0.0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
@@ -68,13 +66,14 @@ python -m training.main_multimodal
     --synthetic-causal-edge-prob 0.5
     --synthetic-causal-graph random
     --synthetic-clean-content
+    --synthetic-identifiable-ventricle
     --synthetic-mode pseudo_mri
     --synthetic-normalize fixed_reference
     --synthetic-num-test 400
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-causal-clean-content-redo-norm
+    --model-id synthetic-causal-clean-content-commitment-bt-gap-00005
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -92,7 +91,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-clean-content-redo-norm \
+runai training standard submit synthetic-causal-clean-content-commitment-bt-gap-00005 \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
