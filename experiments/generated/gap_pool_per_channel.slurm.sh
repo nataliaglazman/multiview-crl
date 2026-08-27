@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/gap_pool_per_channel.yaml
-# Generated at: 2026-08-27T16:20:56Z
-# Git SHA: 304f0a7
+# Generated at: 2026-08-27T16:18:26Z
+# Git SHA: 607f3e4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=gap-pool-per-channel-rescaled
 #SBATCH --output=/scratch/users/%u/%j.out
 #SBATCH --error=gap-pool-per-channel-rescaled-%j.err
-#SBATCH --partition=gpu
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --constraint=a100_80g
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
