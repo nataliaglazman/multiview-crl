@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_patch_vicreg.yaml
-# Generated at: 2026-08-27T15:20:31Z
-# Git SHA: cef3ab8
+# Generated at: 2026-08-27T16:30:17Z
+# Git SHA: a893a79
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-patch-vicreg
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -104,7 +104,7 @@ fi
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
-    --synthetic-num-val 200 \
+    --synthetic-num-val 1500 \
     --synthetic-res 64 \
     --model-id synthetic-causal-patch-vicreg \
     --tau 0.07 \

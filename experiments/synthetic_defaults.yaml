@@ -18,7 +18,7 @@ cache_dir: null
 synthetic_mode: pseudo_mri
 synthetic_res: 64
 synthetic_num_train: 2000
-synthetic_num_val: 200
+synthetic_num_val: 1500
 synthetic_num_test: 400
 
 # ---- Architecture (smaller, single-level) ----
