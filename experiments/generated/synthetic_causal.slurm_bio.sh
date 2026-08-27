@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-27T21:59:04Z
-# Git SHA: b710ce5
+# Generated at: 2026-08-27T22:00:13Z
+# Git SHA: 9f15471
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-40-100-codebook
+#SBATCH --job-name=synthetic-clean-content-40-baseline-true
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-40-100-codebook-%j.err
+#SBATCH --error=synthetic-clean-content-40-baseline-true-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -100,7 +100,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 100 \
+    --scale-contrastive-loss 0 \
     --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -121,7 +121,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-40-100-codebook \
+    --model-id synthetic-clean-content-40-baseline-true \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
