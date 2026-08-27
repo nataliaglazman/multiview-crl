@@ -53,7 +53,7 @@
 # synthetic_causal.yaml verbatim rather than inheriting through it. Keep them in sync.
 
 _base_: synthetic_defaults
-tag: gap-pool-per-channel
+tag: gap-pool-per-channel-rescaled
 
 # ── the lines under test ─────────────────────────────────────────────────────────────
 bt_gap_pool: per_channel
@@ -69,19 +69,19 @@ patch_center_mode: position
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1
-bt_gap_lambda: 0.013
+bt_gap_lambda: 0.005
 bt_patch_weight: 1
 bt_sim_normalize: true
-bt_sim_coeff: 0.5
-bt_std_coeff: 10
+bt_sim_coeff: 0.000114     # 0.5 / 44
+bt_std_coeff: 0.00227      # 10 / 44
 bt_corr_ema: 0.99
 single_count_commitment: true
-scale_contrastive_loss: 1
-scale_recon_loss: 1
+scale_contrastive_loss: 100
+scale_recon_loss: 16
 grad_clip_norm: 100
 batch_size: 128
-synthetic_identifiable_ventricle: true
-content_size: 44
+# synthetic_identifiable_ventricle: true
+content_size: 40
 synthetic_normalize: fixed_reference
 synthetic_causal: true
 synthetic_causal_graph: random

@@ -1,18 +1,18 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/gap_pool_per_channel.yaml
-# Generated at: 2026-08-25T12:34:48Z
-# Git SHA: d804979
+# Generated at: 2026-08-27T16:18:26Z
+# Git SHA: 607f3e4
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=gap-pool-per-channel
+#SBATCH --job-name=gap-pool-per-channel-rescaled
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=gap-pool-per-channel-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --error=gap-pool-per-channel-rescaled-%j.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -59,21 +59,21 @@ fi
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
     --bt-corr-ema 0.99 \
-    --bt-gap-lambda 0.013 \
+    --bt-gap-lambda 0.005 \
     --bt-gap-pool per_channel \
     --bt-gap-pool-coarsen 2 \
     --bt-gap-pool-entropy 0.5 \
     --bt-gap-pool-entropy-coeff 1.0 \
     --bt-gap-weight 1 \
     --bt-patch-weight 1 \
-    --bt-sim-coeff 0.5 \
+    --bt-sim-coeff 0.000114 \
     --bt-sim-normalize \
-    --bt-std-coeff 10 \
+    --bt-std-coeff 0.00227 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 44 \
+    --content-size 40 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
@@ -103,8 +103,8 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1 \
-    --scale-recon-loss 1 \
+    --scale-contrastive-loss 100 \
+    --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
@@ -117,14 +117,13 @@ fi
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-clean-content \
-    --synthetic-identifiable-ventricle \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id gap-pool-per-channel \
+    --model-id gap-pool-per-channel-rescaled \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
