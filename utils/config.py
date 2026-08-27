@@ -1321,6 +1321,16 @@ def parse_args() -> argparse.ArgumentParser:
         help="W&B group name. Use to bundle seeds/variants of the same experiment "
         "for analysis (e.g. --wandb-group phase1-L0).",
     )
+    parser.add_argument(
+        "--wandb-run-id",
+        type=str,
+        default=None,
+        help="Force a specific W&B run id instead of the one stored in "
+        "<save-dir>/wandb_run_id.txt. Normally unnecessary: an interrupted job that is "
+        "relaunched with --resume-training picks up that stored id automatically and "
+        "keeps writing to the same W&B run. Set this to reattach to a run whose id file "
+        "was lost, or to point a relaunch at a different run.",
+    )
     # Early stopping
     parser.add_argument(
         "--early-stopping-patience",

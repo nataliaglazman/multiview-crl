@@ -71,6 +71,7 @@ from training.losses import (
 )
 from utils.checkpointing import (
     load_checkpoint,
+    resolve_wandb_run_id,
     save_checkpoint,
     save_emergency_checkpoint,
 )
@@ -1984,17 +1985,36 @@ def main(args):
     _use_wandb = getattr(args, "use_wandb", False) and HAS_WANDB
     if _use_wandb:
         wandb_config = {k: v for k, v in vars(args).items() if k != "DATASETCLASS"}
-        wandb_dir = os.environ.get("WANDB_DIR", args.save_dir)
-        wandb.init(
-            project=getattr(args, "wandb_project", "multiview-crl-sweep"),
-            entity=getattr(args, "wandb_entity", None),
-            group=getattr(args, "wandb_group", None),
-            config=wandb_config,
-            name=str(args.model_id),
-            dir=wandb_dir,
-            settings=wandb.Settings(init_timeout=300),
-        )
-        logger.info("[WANDB] Logging enabled")
+        if wandb.run is not None:
+            # A sweep agent (scripts/sweep_train.py) already opened the run for
+            # this process and owns its id — log into that one rather than
+            # opening a second run on top of it.
+            wandb.run.name = str(args.model_id)
+            wandb.run.config.update(wandb_config, allow_val_change=True)
+            logger.info(f"[WANDB] Logging into the active sweep run {wandb.run.id}")
+        else:
+            wandb_dir = os.environ.get("WANDB_DIR", args.save_dir)
+            wandb.init(
+                project=getattr(args, "wandb_project", "multiview-crl-sweep"),
+                entity=getattr(args, "wandb_entity", None),
+                group=getattr(args, "wandb_group", None),
+                config=wandb_config,
+                name=str(args.model_id),
+                dir=wandb_dir,
+                id=resolve_wandb_run_id(args),
+                resume="allow",
+                allow_val_change=True,
+                settings=wandb.Settings(init_timeout=300),
+            )
+            if wandb.run.resumed:
+                logger.info(
+                    f"[WANDB] Resumed run {wandb.run.id} at its step {wandb.run.step} — this "
+                    "restart continues the original run's charts. W&B drops metrics re-logged "
+                    "for steps it already holds (the interval between the last checkpoint and "
+                    "the interruption), so the curve stays continuous."
+                )
+            else:
+                logger.info(f"[WANDB] Logging enabled | run id {wandb.run.id}")
     elif getattr(args, "use_wandb", False) and not HAS_WANDB:
         logger.warning("[WANDB] --use-wandb set but wandb not installed. Skipping.")
 

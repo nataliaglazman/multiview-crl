@@ -12,6 +12,9 @@ import torch
 
 logger = logging.getLogger("multiview_crl")
 
+# Persisted inside args.save_dir so a relaunched job rejoins its original W&B run.
+WANDB_RUN_ID_FILE = "wandb_run_id.txt"
+
 
 def _capture_rng_state() -> dict:
     """Snapshot all RNGs so a resumed run reproduces the same augmentation /
@@ -100,6 +103,79 @@ def _atomic_torch_save(obj, path: str) -> None:
                 logger.info(f"[CHECKPOINT] Removed stale temp file from an interrupted save: {stale}")
         except OSError:
             pass
+
+
+def _atomic_write_text(text: str, path: str) -> None:
+    """Text-file counterpart of ``_atomic_torch_save`` (NFS-safe, no partial writes)."""
+    tmp_path = f"{path}.tmp.{uuid.uuid4().hex[:8]}"
+    try:
+        with open(tmp_path, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def resolve_wandb_run_id(args) -> str:
+    """Return the W&B run id this job should write into.
+
+    A preempted job (SLURM time limit, RunAI eviction, node failure) re-enters
+    ``main`` from scratch, and a plain ``wandb.init`` then opens a *second* W&B
+    run — so one training curve ends up split across several dashboard entries
+    even though the checkpoint resumed correctly.  The run id is therefore
+    persisted next to the checkpoints in ``args.save_dir``: the first launch
+    writes it, and every relaunch reads it back and hands it to
+    ``wandb.init(id=..., resume="allow")``, which appends to the original run.
+    It is written *before* ``wandb.init``, so even a job that dies in its first
+    seconds leaves an id behind for the relaunch to pick up.
+
+    A stored id is only reused when the process is continuing an existing
+    ``save_dir`` (``--resume-training`` or ``--evaluate``).  Training that
+    restarts from step 1 gets a fresh id instead: replaying steps W&B has
+    already recorded would just have them dropped, leaving the run looking
+    frozen at its old length.
+
+    ``--wandb-run-id`` overrides both, for attaching to a run whose id file was
+    lost (e.g. a ``save_dir`` on scratch storage that got cleaned).
+    """
+    id_path = os.path.join(args.save_dir, WANDB_RUN_ID_FILE)
+    stored = None
+    if os.path.exists(id_path):
+        try:
+            with open(id_path) as f:
+                stored = f.read().strip() or None
+        except OSError as exc:
+            logger.warning(f"  Could not read the W&B run id from {id_path} ({exc}); starting a new run.")
+
+    explicit = getattr(args, "wandb_run_id", None)
+    continuing = getattr(args, "resume_training", False) or getattr(args, "evaluate", False)
+    if explicit:
+        run_id = explicit
+    elif stored and continuing:
+        run_id = stored
+    else:
+        if stored:
+            logger.info(
+                f"  Ignoring the W&B run id in {id_path}: neither --resume-training nor "
+                "--evaluate is set, so this is a fresh run and gets a fresh id."
+            )
+        run_id = uuid.uuid4().hex[:16]
+
+    if run_id != stored:
+        try:
+            _atomic_write_text(run_id + "\n", id_path)
+        except OSError as exc:
+            logger.warning(
+                f"  Could not persist the W&B run id to {id_path} ({exc}); if this job is "
+                "interrupted, the relaunch will open a new W&B run instead of resuming this one."
+            )
+    return run_id
 
 
 def save_checkpoint(
