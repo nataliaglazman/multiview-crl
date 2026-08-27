@@ -467,8 +467,11 @@ def build_training_script(config: dict, tag: str, cluster_name: str, experiment_
             f'    --command -- bash -c "${{TRAIN_CMD}}"',
         ]
 
-    elif cluster_name == "slurm":
-        slurm = config.get("_slurm", {})
+    elif "slurm" in cluster_name:
+        if cluster_name == "slurm_bio":
+            slurm = config.get("_slurm_bio", {})
+        else:
+            slurm = config.get("_slurm", {})
         conda_env = slurm.get("conda_env", "multiview-env")
         req_txt = slurm.get("requirements_txt", "docker/requirements.txt")
         try:

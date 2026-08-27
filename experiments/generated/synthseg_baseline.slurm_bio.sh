@@ -1,18 +1,17 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-08-27T14:48:57Z
+# Generated at: 2026-08-27T14:51:19Z
 # Git SHA: d848347
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthseg-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
 #SBATCH --error=synthseg-baseline-%j.err
-#SBATCH --partition=gpu
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --time=24:00:00
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0

@@ -1,0 +1,23 @@
+# SLURM cluster (CREATE HPC) paths and job defaults.
+# Merged into every experiment when launched with --cluster slurm.
+
+# ---- Paths ----
+dataroot: /scratch/users/k24058220
+labels_path: /users/k24058220/multiview-crl/labels_cleaned_3class.csv
+masks_dir: /scratch/users/k24058220/ADNI_stripped_masks
+cache_dir: /scratch/users/k24058220/cache/multiview
+
+# ---- SLURM job resources ----
+_slurm:
+  partition: biomed_a100_gpu
+  gres: "gpu:1"
+  nodes: 1
+  mem: 64G
+  cpus_per_task: 8
+  conda_env: multiview-env
+  time: "48:00:00"
+  # Excludes only erc-hpc-comp246 (B200 / sm_100): torch 2.3.1+cu121 has no
+  # kernel image for Blackwell. A100 (sm_80), H200 (sm_90) and L40S (sm_89,
+  # runs the sm_86 cubin) are all supported by this build.
+  constraint: "a100_80g"
+  requirements_txt: docker/requirements.txt

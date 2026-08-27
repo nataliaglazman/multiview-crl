@@ -1,18 +1,17 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-08-27T14:48:57Z
+# Auto-generated from: experiments/synthetic_causal_groupnorm_control.yaml
+# Generated at: 2026-08-27T14:51:19Z
 # Git SHA: d848347
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthseg-baseline
+#SBATCH --job-name=synthetic-causal-groupnorm-control
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthseg-baseline-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=synthetic-causal-groupnorm-control-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --time=24:00:00
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -57,48 +56,66 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 4 \
-    --cache-dataset \
-    --cache-dir /scratch/users/k24058220/cache/multiview \
+    --batch-size 32 \
     --channels-last \
-    --checkpoint-steps 500 \
+    --checkpoint-steps 1000 \
     --content-dim 128 \
+    --content-ratios 0.95 \
+    --content-size 48 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
-    --dataroot /data/natalia/ADNI_synthseg \
-    --dataset-name ADNI_stripped_masks \
+    --dataroot /scratch/users/k24058220 \
+    --dataset-name synthetic \
+    --dci-every 2000 \
+    --decoder-norm-type group \
     --deterministic \
-    --gradient-checkpointing \
+    --eval-dci \
     --image-spacing 1.0 \
-    --labels-path /data/natalia/ADNI_synthseg/labels.csv \
+    --inject-style-to-decoder \
     --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
     --moco-queue-size 0 \
+    --no-final-recon-norm \
+    --norm-type group \
     --pass-full-to-next-level \
+    --patch-contrastive \
+    --patch-grid 8 8 8 \
+    --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1.0 \
-    --scale-recon-loss 1.0 \
+    --scale-contrastive-loss 0 \
+    --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
+    --separate-content-codebooks \
     --separate-encoders \
+    --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
-    --spatial-size 150 180 150 \
-    --model-id synthseg-baseline \
-    --tau 0.1 \
+    --style-injection-mode film \
+    --synthetic-causal \
+    --synthetic-causal-edge-prob 0.5 \
+    --synthetic-causal-graph random \
+    --synthetic-mode pseudo_mri \
+    --synthetic-normalize fixed_reference \
+    --synthetic-num-test 400 \
+    --synthetic-num-train 2000 \
+    --synthetic-num-val 200 \
+    --synthetic-res 128 \
+    --model-id synthetic-causal-groupnorm-control \
+    --tau 0.07 \
     --total-dim 512 \
-    --train-steps 20000 \
+    --train-steps 300000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 32 \
-    --vqvae-hidden-channels 32 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
-    --vqvae-nb-levels 3 \
-    --vqvae-scaling-rates 2 2 2 \
+    --vqvae-nb-levels 1 \
+    --vqvae-scaling-rates 4 \
     --workers 8

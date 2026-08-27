@@ -1,18 +1,19 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-27T13:47:38Z
-# Git SHA: f8d698f
+# Generated at: 2026-08-27T14:48:57Z
+# Git SHA: d848347
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-40-50
+#SBATCH --job-name=synthetic-clean-content-40-100-lambda-6
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-40-50-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --error=synthetic-clean-content-40-100-lambda-6-%j.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
+#SBATCH --constraint=a100|h200|l40s
+
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
 
@@ -58,9 +59,9 @@ fi
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
     --bt-corr-ema 0.99 \
-    --bt-gap-lambda 7 \
+    --bt-gap-lambda 6 \
     --bt-gap-weight 1 \
-    --bt-lambda 7 \
+    --bt-lambda 6 \
     --bt-normalize-terms \
     --bt-patch-weight 1 \
     --bt-sim-coeff 0.000114 \
@@ -100,7 +101,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 50 \
+    --scale-contrastive-loss 100 \
     --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -121,7 +122,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 200 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-40-50 \
+    --model-id synthetic-clean-content-40-100-lambda-6 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
