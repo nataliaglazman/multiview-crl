@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-causal-clean-content-redo-norm
+tag: synthetic-clean-content-40-100-style-no-clip
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -62,14 +62,14 @@ bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_patch_weight: 1
 single_count_commitment: true
 
-scale_contrastive_loss: 1       # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_contrastive_loss: 100       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 # scale_recon_loss: 10
-grad_clip_norm: 100
+# grad_clip_norm: 100
 batch_size: 128
 # synthetic_identifiable_ventricle: true
 # synthetic_identifiable_ventricle: true
 
-content_size: 44              # match the baseline; fixes the 44-vs-48 confound
+content_size: 40              # match the baseline; fixes the 44-vs-48 confound
 
 # unchanged from synthetic_causal.yaml so the comparison stays valid
 synthetic_normalize: fixed_reference
@@ -83,7 +83,7 @@ no_final_recon_norm: true
 inject_style_to_decoder: true
 style_injection_mode: input
 separate_style_codebooks: true
-separate_content_codebooks: false
+separate_content_codebooks: true
 vqvae_nb_levels: 1
 vqvae_nb_res_layers: 2
 vqvae_hidden_channels: 48
@@ -106,8 +106,8 @@ bt_sim_normalize: true
 bt_normalize_terms: true
 bt_lambda: 7
 bt_gap_lambda: 7
-bt_sim_coeff: 0.0114     # 0.5 / 44
-bt_std_coeff: 0.227      # 10 / 44
+bt_sim_coeff: 0.000114     # 0.5 / 44
+bt_std_coeff: 0.00227      # 10 / 44
 bt_corr_ema: 0.99
 scale_recon_loss: 16
 

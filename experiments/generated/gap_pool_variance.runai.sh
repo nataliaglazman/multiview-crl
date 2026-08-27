@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-26T14:24:49Z
-# Git SHA: 77548f5
+# Auto-generated from: experiments/gap_pool_variance.yaml
+# Generated at: 2026-08-25T11:54:02Z
+# Git SHA: d804979
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -13,19 +13,19 @@ export PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl ;
 python -m training.main_multimodal
     --batch-size 128
     --bt-corr-ema 0.99
-    --bt-gap-lambda 7
+    --bt-gap-lambda 0.013
+    --bt-gap-pool variance
+    --bt-gap-pool-ema 0.9
     --bt-gap-weight 1
-    --bt-lambda 7
-    --bt-normalize-terms
     --bt-patch-weight 1
-    --bt-sim-coeff 0.000114
+    --bt-sim-coeff 0.5
     --bt-sim-normalize
-    --bt-std-coeff 0.00227
+    --bt-std-coeff 10
     --channels-last
     --checkpoint-steps 1000
     --content-dim 128
     --content-ratios 0.95
-    --content-size 40
+    --content-size 44
     --content-style-levels 0
     --contrastive-loss-type barlow_twins
     --cross-view-negs-only
@@ -35,6 +35,7 @@ python -m training.main_multimodal
     --decoder-norm-type group
     --deterministic
     --eval-dci
+    --grad-clip-norm 100
     --image-spacing 1.0
     --inject-style-to-decoder
     --log-steps 50
@@ -54,12 +55,11 @@ python -m training.main_multimodal
     --resume-training
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
-    --scale-contrastive-loss 100
-    --scale-recon-loss 16
+    --scale-contrastive-loss 1
+    --scale-recon-loss 1
     --scale-style-contrastive-loss 0.0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
-    --separate-content-codebooks
     --separate-encoders
     --separate-style-codebooks
     --separation-floor-diagnosis-info 0.1
@@ -69,13 +69,14 @@ python -m training.main_multimodal
     --synthetic-causal-edge-prob 0.5
     --synthetic-causal-graph random
     --synthetic-clean-content
+    --synthetic-identifiable-ventricle
     --synthetic-mode pseudo_mri
     --synthetic-normalize fixed_reference
     --synthetic-num-test 400
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-clean-content-40-100-style-no-clip
+    --model-id gap-pool-variance
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -93,7 +94,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-clean-content-40-100-style-no-clip \
+runai training standard submit gap-pool-variance \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
