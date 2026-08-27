@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-27T21:57:49Z
-# Git SHA: a47fc16
+# Generated at: 2026-08-27T21:59:04Z
+# Git SHA: b710ce5
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-clean-content-40-100-codebook
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -100,7 +100,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 50 \
+    --scale-contrastive-loss 100 \
     --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
