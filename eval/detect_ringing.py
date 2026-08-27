@@ -32,11 +32,52 @@ monotonically (nothing in the BT objective bounds feature scale: the variance hi
 drags the ACF positive at all lags -- masking a real negative lobe. Default is a rolling
 median high-pass wide enough to leave the periods of interest untouched.
 
+``--msd`` answers the OTHER question, and it is the one that matters once ringing is ruled
+out: a metric that jumps around is either sitting in a bounded noise ball (the model is
+stable, the swings are its jitter and go nowhere) or DIFFUSING (the model is wandering, and
+each swing is a step of a random walk that does not come back). Those look identical on a
+plot and call for opposite responses. Mean-squared displacement separates them:
+
+    MSD(delta) = mean over pairs of (y(t+delta) - y(t))^2,  classified by its GROWTH exponent
+
+    slope ~ 0   BOUNDED JITTER — stationary. MSD plateaus at 2*sigma^2, so the swings have a
+                fixed amplitude and the representation is not going anywhere. The reported
+                implied per-sample std is directly comparable to the logged
+                selection/mcc_by_factor_std/* — if they match, the swings are probe noise;
+                if the implied std is much larger, the MODEL is jittering.
+    slope ~ 1   DIFFUSION — random walk. The encoder is wandering in parameter space, driven
+                by gradient noise. This is what a noise-dominated gradient produces once the
+                deterministic signal is exhausted, and the swings do NOT return.
+    slope > 1   DRIFT — faster than a random walk, i.e. a systematic direction.
+
+Two things this gets right that a naive version does not, both found by testing it against
+series whose answer was known:
+
+  * The verdict comes from the growth exponent, NOT from the a/b/c decomposition of
+    a*delta^2 + b*delta + c. Those shares depend entirely on where you evaluate them: at
+    delta = one sampling interval the constant term dominates for every series by
+    construction, which reads a random walk as bounded. The shares are reported as detail;
+    the exponent decides.
+
+  * Thresholds are calibrated by SIMULATION at the observed series length, not from a
+    regression standard error. MSD values at different lags come from heavily overlapping
+    windows on one realization, so they are strongly dependent and an analytic SE understates
+    the spread badly — at n=18 that made a genuine random walk report BOUNDED JITTER with
+    apparent confidence. With simulated bands the same case correctly reports INCONCLUSIVE.
+
+That last point is a practical limit worth knowing before running this: the 2000-step
+selection cadence gives ~18 points over a 35k-step window, and at that length the bounded
+and diffusion bands OVERLAP — the test cannot separate them however the run behaves. Point
+it at a fine-grained (log_steps) proxy for the representation instead, e.g.
+Contrastive/pos_sim_mean_L0 or Contrastive/feat_std_mean_L0, which have ~40x the points.
+
 Usage:
     python -m eval.detect_ringing <run_dir_or_tb_logdir> --tag Contrastive/off_diag_inst_L0
     python -m eval.detect_ringing <logdir> --tag Contrastive/feat_std_mean_L0 --from 25000 --to 40000
     python -m eval.detect_ringing <logdir> --all-contrastive --from 25000
     python -m eval.detect_ringing <logdir> --tag X --detrend linear --max-period 4000
+    python -m eval.detect_ringing <logdir> --msd --tag selection/mcc_by_pool/patch --from 31000
+    python -m eval.detect_ringing <logdir> --msd --all-selection --from 31000
 """
 
 import argparse
@@ -200,6 +241,220 @@ def analyse(steps, vals, detrend="rolling", max_period=None, n_surr=400, seed=0,
     }
 
 
+def _msd_slope(y, max_lag):
+    """Pair-count-weighted log-log slope of MSD(delta) for one series. NaN if undefined."""
+    n = len(y)
+    lags = np.arange(1, min(max_lag, n - 2) + 1)
+    if len(lags) < 4:
+        return float("nan")
+    msd = np.array([float(np.mean((y[k:] - y[:-k]) ** 2)) for k in lags])
+    pos = msd > 0
+    if pos.sum() < 4:
+        return float("nan")
+    x = np.log(lags[pos].astype(float))
+    yv = np.log(msd[pos])
+    w = (n - lags[pos]).astype(float)
+    w = w / w.mean()
+    xb = np.sum(w * x) / np.sum(w)
+    yb = np.sum(w * yv) / np.sum(w)
+    sxx = float(np.sum(w * (x - xb) ** 2))
+    if sxx <= 0:
+        return float("nan")
+    return float(np.sum(w * (x - xb) * (yv - yb)) / sxx)
+
+
+def _simulate_slopes(kind, n, max_lag, n_sim, rng, y=None):
+    """Distribution of the fitted MSD slope for a known regime at THIS series length.
+
+    ``bounded`` is matched to the observed series' own lag-1 autocorrelation, so a smooth
+    stationary process is not mistaken for diffusion purely because it is autocorrelated.
+    """
+    out = np.empty(n_sim)
+    if kind == "bounded":
+        phi = 0.0
+        if y is not None and len(y) > 2:
+            yc = y - y.mean()
+            den = float(np.dot(yc[:-1], yc[:-1]))
+            if den > 0:
+                phi = float(np.clip(np.dot(yc[:-1], yc[1:]) / den, -0.95, 0.95))
+        e = rng.standard_normal((n_sim, n))
+        s = np.empty((n_sim, n))
+        s[:, 0] = e[:, 0]
+        for t in range(1, n):
+            s[:, t] = phi * s[:, t - 1] + e[:, t] * np.sqrt(max(1 - phi**2, 1e-6))
+    elif kind == "diffusion":
+        s = np.cumsum(rng.standard_normal((n_sim, n)), axis=1)
+    else:
+        raise ValueError(kind)
+    for i in range(n_sim):
+        out[i] = _msd_slope(s[i], max_lag)
+    return out[np.isfinite(out)]
+
+
+def analyse_msd(steps, vals, max_lag_frac=0.34, at_lag=None, n_sim=300, seed=0):
+    """Mean-squared displacement: is the movement bounded, diffusive, or ballistic?
+
+    Fits MSD(delta) = a*delta^2 + b*delta + c under a >= 0, b >= 0, c >= 0 (the three terms
+    are variances and cannot be negative; an unconstrained fit happily returns a negative
+    diffusion coefficient and reads as nonsense). Those shares are reported at ``at_lag``
+    (default: the largest fitted lag) as supporting detail only — the VERDICT comes from the
+    log-log growth exponent, which does not depend on where you choose to evaluate it.
+    """
+    from scipy.optimize import nnls
+
+    steps = np.asarray(steps, float)
+    vals = np.asarray(vals, float)
+    if len(steps) < 8:
+        return {"ok": False, "why": f"only {len(steps)} points after cleaning (need >= 8)"}
+
+    y, dt = _resample(steps, vals)
+    n = len(y)
+    max_lag = max(2, int(n * max_lag_frac))
+    lags = np.arange(1, max_lag + 1)
+    msd = np.array([float(np.mean((y[k:] - y[:-k]) ** 2)) for k in lags])
+    pairs = n - lags
+    d = lags * dt
+
+    # Weight by pair count: MSD at large lag is estimated from few pairs and is far noisier.
+    w = np.sqrt(pairs.astype(float))
+    A = np.column_stack([d**2, d, np.ones_like(d)]) * w[:, None]
+    coef, _ = nnls(A, msd * w)
+    a, b, c = (float(x) for x in coef)
+
+    # Split the fitted MSD at the LARGEST lag, not the smallest: at delta = one sampling
+    # interval the constant term dominates by construction for every series (a*delta^2 and
+    # b*delta are smallest there), which reads every curve as bounded whatever it is.
+    at = float(at_lag) if at_lag else float(max_lag * dt)
+    parts = np.array([a * at**2, b * at, c])
+    tot = float(parts.sum())
+    shares = parts / tot if tot > 0 else np.zeros(3)
+
+    # The actual discriminator: how fast MSD GROWS. slope 0 = bounded, 1 = diffusion,
+    # 2 = ballistic drift.
+    slope = _msd_slope(y, max_lag)
+
+    # Thresholds are CALIBRATED BY SIMULATION at this n, not taken from an analytic standard
+    # error. MSD values at different lags come from heavily OVERLAPPING windows on a single
+    # realization, so they are strongly dependent and a regression SE understates the spread
+    # by a wide margin — at n=18 that made a genuine random walk report BOUNDED JITTER with
+    # apparent confidence, which is the worst failure this tool could have. Simulating each
+    # regime at the observed length gives the real overlap, so a length that cannot separate
+    # them says so instead.
+    rng = np.random.default_rng(int(seed))
+    nsim = int(n_sim)
+    null_bounded = _simulate_slopes("bounded", n, max_lag, nsim, rng, y=y)
+    null_diffusion = _simulate_slopes("diffusion", n, max_lag, nsim, rng)
+
+    return {
+        "ok": True,
+        "n": len(steps),
+        "dt": dt,
+        "span": steps[-1] - steps[0],
+        "max_lag_steps": float(max_lag * dt),
+        "min_pairs": int(pairs.min()),
+        "a": a,
+        "b": b,
+        "c": c,
+        "at_lag": at,
+        "share_drift": float(shares[0]),
+        "share_diffusion": float(shares[1]),
+        "share_bounded": float(shares[2]),
+        "msd_at": tot,
+        "implied_step_std": float(np.sqrt(tot)) if tot > 0 else 0.0,
+        "implied_bounded_std": float(np.sqrt(c / 2.0)) if c > 0 else 0.0,
+        "loglog_slope": slope,
+        "null_bounded": null_bounded,
+        "null_diffusion": null_diffusion,
+        "step_std": float(np.sqrt(np.mean((y[1:] - y[:-1]) ** 2))),
+        "series_std": float(np.std(y)),
+    }
+
+
+def _verdict_msd(r):
+    """Classify from the log-log MSD slope and its CI, not from the a/b/c shares.
+
+    The shares depend on where you evaluate them; the growth exponent does not. A CI that
+    spans two categories is reported as INCONCLUSIVE rather than resolved to the nearest
+    one — at the 2000-step selection cadence there are often too few points to tell a
+    random walk from bounded jitter, and saying so is the useful answer.
+    """
+    if not r["ok"]:
+        return "NO DATA", r["why"]
+    s = r["loglog_slope"]
+    if not np.isfinite(s):
+        return "INCONCLUSIVE", "not enough usable lags to fit a growth exponent"
+
+    # Only two regimes are simulated. The question that matters is BOUNDED vs UNBOUNDED —
+    # does the representation come back, or is it going somewhere — and a drift null would
+    # need an arbitrary choice of noise level that decides the answer by itself. Anything
+    # growing faster than a random walk is unambiguously going somewhere, so super-diffusive
+    # is read off the diffusion band's upper edge rather than simulated separately.
+    nb, nd = r["null_bounded"], r["null_diffusion"]
+    if len(nb) < 20 or len(nd) < 20:
+        return "INCONCLUSIVE", f"slope {s:+.2f}; too few usable simulations to calibrate at n={r['n']}"
+    b_lo, b_hi = (float(x) for x in np.percentile(nb, [5, 95]))
+    d_lo, d_hi = (float(x) for x in np.percentile(nd, [5, 95]))
+    head = f"slope {s:+.2f} vs simulated bands at n={r['n']}: bounded[{b_lo:+.2f},{b_hi:+.2f}] diffusion[{d_lo:+.2f},{d_hi:+.2f}]"
+
+    in_b, in_d = b_lo <= s <= b_hi, d_lo <= s <= d_hi
+    if s > d_hi:
+        return "DRIFT", f"{head}. Faster than a random walk — a systematic direction, not noise."
+    if in_b and not in_d:
+        return "BOUNDED JITTER", f"{head}. The swings have a fixed amplitude and go nowhere."
+    if in_d and not in_b:
+        return "DIFFUSION", f"{head}. A random walk: these swings do NOT return."
+    if in_b and in_d:
+        return (
+            "INCONCLUSIVE",
+            f"{head}. The bands OVERLAP at n={r['n']} — this many points cannot tell bounded "
+            f"jitter from a random walk. Widen --from/--to, or run this on a fine-grained "
+            f"(log_steps) proxy such as Contrastive/pos_sim_mean_L0.",
+        )
+    if s < b_lo:
+        # Growing SLOWER than a stationary process means the MSD turns over: the series
+        # comes back toward where it was. That is mean reversion, and an oscillation is the
+        # common cause — which is the other mode's question, not this one's.
+        return (
+            "MEAN-REVERTING",
+            f"{head}. MSD grows SLOWER than stationary noise, i.e. it turns over — the series "
+            f"returns toward earlier values. Run without --msd to test for a periodic component.",
+        )
+    return "INCONCLUSIVE", f"{head}. Slope falls outside both bands — inspect the curve directly."
+
+
+def _report_msd(tag, r):
+    verdict, why = _verdict_msd(r)
+    print(f"\n  {tag}")
+    print(f"    VERDICT: {verdict} — {why}")
+    if not r["ok"]:
+        return
+    print(
+        f"    n={r['n']} points, {r['dt']:.0f}-step grid, span {r['span']:.0f} steps | "
+        f"lags to {r['max_lag_steps']:.0f} steps (min {r['min_pairs']} pairs)"
+    )
+    print(f"    RMS move between consecutive samples: {r['step_std']:.4g}  " f"(series std {r['series_std']:.4g})")
+    print(
+        f"    at delta={r['at_lag']:.0f} steps the fitted MSD splits "
+        f"{r['share_bounded'] * 100:.0f}% bounded / {r['share_diffusion'] * 100:.0f}% diffusion / "
+        f"{r['share_drift'] * 100:.0f}% drift"
+    )
+    print(
+        f"    bounded component implies a per-sample std of {r['implied_bounded_std']:.4g} — "
+        f"compare against the logged selection/mcc_by_factor_std/* to tell model jitter from probe noise"
+    )
+    if verdict == "DIFFUSION":
+        print(
+            "    NOTE: linear MSD growth means these swings do NOT return — the representation "
+            "is wandering, not vibrating around a fixed point."
+        )
+    elif verdict == "BOUNDED JITTER":
+        print(
+            "    NOTE: the MSD plateaus, so the swings have a fixed amplitude and the model is "
+            "NOT drifting away. Shrink the noise ball (lower LR / lower loss weight / more "
+            "subjects per step) rather than hunting a trend."
+        )
+
+
 def _verdict(r, alpha=0.05):
     if not r["ok"]:
         return "NO DATA", r["why"]
@@ -265,6 +520,26 @@ def main():
         action="store_true",
         help="Test every Contrastive/* and Codebook/* tag — the fine-grained (log_steps) series",
     )
+    ap.add_argument(
+        "--all-selection",
+        action="store_true",
+        help="Test every selection/* and dci_synthetic/* tag — the coarse (2000-step) series. "
+        "Most useful with --msd, which needs no resolution beyond the sampling interval.",
+    )
+    ap.add_argument(
+        "--msd",
+        action="store_true",
+        help="Mean-squared-displacement mode: classify the movement as BOUNDED JITTER (stationary, "
+        "swings go nowhere), DIFFUSION (random walk, swings do not return) or DRIFT (systematic). "
+        "Use this once --detect-ringing has come back negative.",
+    )
+    ap.add_argument(
+        "--at-lag",
+        type=float,
+        default=None,
+        help="Step gap at which to split the MSD into its three components. Default: the series' "
+        "own sampling interval, i.e. the gap between the consecutive evals you are eyeballing.",
+    )
     ap.add_argument("--from", dest="lo", type=float, default=None, help="First step to include")
     ap.add_argument("--to", dest="hi", type=float, default=None, help="Last step to include")
     ap.add_argument(
@@ -296,11 +571,19 @@ def main():
     tags = list(args.tag)
     if args.all_contrastive:
         tags += sorted(t for t in series if t.startswith(("Contrastive/", "Codebook/")))
+    if args.all_selection:
+        tags += sorted(t for t in series if t.startswith(("selection/", "dci_synthetic/")))
     if not tags:
-        tags = [t for t in ("Contrastive/off_diag_inst_L0", "Contrastive/feat_std_mean_L0") if t in series]
+        _defaults = (
+            ("selection/mcc_by_pool/patch", "selection/mcc_cc_gap", "selection/encoder_l2")
+            if args.msd
+            else ("Contrastive/off_diag_inst_L0", "Contrastive/feat_std_mean_L0")
+        )
+        tags = [t for t in _defaults if t in series]
         if not tags:
-            cand = [t for t in series if t.startswith("Contrastive/")]
-            raise SystemExit(f"No --tag given and no defaults present. Contrastive tags: {cand[:12]}")
+            _pre = "selection/" if args.msd else "Contrastive/"
+            cand = [t for t in series if t.startswith(_pre)]
+            raise SystemExit(f"No --tag given and no defaults present. {_pre}* tags: {cand[:12]}")
 
     seen = set()
     tags = [t for t in tags if not (t in seen or seen.add(t))]
@@ -308,6 +591,30 @@ def main():
     for t in missing:
         print(f"  [skip] {t!r} not in this run")
     tags = [t for t in tags if t in series]
+
+    if args.msd:
+        print(
+            "\nMean-squared displacement, classified by how fast it GROWS: flat = bounded jitter\n"
+            "that goes nowhere, linear = diffusion (a random walk whose swings do NOT return),\n"
+            "faster = systematic drift. Ruling out ringing does not distinguish these, and they\n"
+            "call for opposite responses. Bands are simulated at each series' own length, so a\n"
+            "series with too few points reports INCONCLUSIVE instead of guessing."
+        )
+        rows = []
+        for tag in tags:
+            s, v = series[tag]
+            s, v = _clean(np.asarray(s, float), np.asarray(v, float), args.lo, args.hi)
+            r = analyse_msd(s, v, at_lag=args.at_lag)
+            _report_msd(tag, r)
+            rows.append((tag, r))
+        by_verdict = {}
+        for t, r in rows:
+            by_verdict.setdefault(_verdict_msd(r)[0], []).append(t)
+        print("\n  Summary:")
+        for k in ("DIFFUSION", "DRIFT", "MIXED", "BOUNDED JITTER", "NO DATA"):
+            if k in by_verdict:
+                print(f"    {k:>15}: {len(by_verdict[k])}  {', '.join(by_verdict[k][:6])}")
+        return
 
     print(
         "\nTesting for a periodic component. The statistic is the most NEGATIVE autocorrelation\n"
@@ -338,7 +645,8 @@ def main():
             print(f"    {r['period_steps']:>8.0f} steps  (p={r['p_value']:.3f})  {t}")
     else:
         print("\n  No tag showed a periodic component beyond red noise.")
-        print("  That rules out a limit cycle at these tags — the movement is drift, not ringing.")
+        print("  Not a limit cycle at these tags. Re-run with --msd to tell bounded jitter")
+        print("  (swings that go nowhere) from diffusion (swings that do not return).")
 
 
 if __name__ == "__main__":
