@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_groupnorm_control.yaml
-# Generated at: 2026-08-21T11:42:15Z
-# Git SHA: f20641b
+# Generated at: 2026-08-27T13:47:38Z
+# Git SHA: f8d698f
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-groupnorm-control
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -105,7 +105,7 @@ fi
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
-    --synthetic-num-val 1500 \
+    --synthetic-num-val 200 \
     --synthetic-res 128 \
     --model-id synthetic-causal-groupnorm-control \
     --tau 0.07 \

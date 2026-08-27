@@ -49,7 +49,7 @@
 
 
 _base_: synthetic_defaults
-tag: synthetic-clean-content-40-100-style-no-clip
+tag: synthetic-clean-content-40-50
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -62,9 +62,9 @@ bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_patch_weight: 1
 single_count_commitment: true
 
-scale_contrastive_loss: 100       # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_contrastive_loss: 50       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 # scale_recon_loss: 10
-# grad_clip_norm: 100
+grad_clip_norm: 100
 batch_size: 128
 # synthetic_identifiable_ventricle: true
 # synthetic_identifiable_ventricle: true
