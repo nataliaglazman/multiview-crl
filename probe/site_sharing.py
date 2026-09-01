@@ -430,7 +430,16 @@ def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: fl
     if mode == "strata":
         if tissue is None:
             raise SystemExit("--sites strata needs synthetic tissue labels; use --sites foreground.")
-        chosen = stratify_sites(tissue_fractions(tissue, latent_shape), latent_shape, max_sites // 4 + 1, gen)
+        # Over-request, because the fit filter runs after stratify_sites has already drawn:
+        # at a large dilation only the middle of the grid fits, and drawing the final count
+        # up front would leave a handful of sites per stratum after filtering.
+        per_stratum = max_sites // 4 + 1
+        chosen = stratify_sites(tissue_fractions(tissue, latent_shape), latent_shape, per_stratum * 8, gen)
+        dropped = 0
+        for name, lst in list(chosen.items()):
+            good, n_bad = keep_fitting(lst)
+            dropped += n_bad
+            chosen[name] = good[:per_stratum]
         # The strata are not disjoint — periventricular and cortical_ribbon can both claim a
         # site with csf > 0.02 and gm > 0.25 — and a duplicated site would be measured twice
         # and counted twice in every median below.  First stratum to claim it wins.
@@ -440,9 +449,8 @@ def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: fl
                 if s not in strata:
                     strata[s] = name
                     sites.append(s)
-        sites, dropped = keep_fitting(sites)
-        strata = {s: strata[s] for s in sites}
         _require_sites(sites, dilation)
+        _warn_thin(sites, max_sites, dilation)
         return sites, strata, dropped
 
     if mode == "all":
@@ -460,6 +468,7 @@ def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: fl
     if len(cands) > max_sites:
         sel = torch.randperm(len(cands), generator=gen)[:max_sites]
         cands = [cands[int(i)] for i in sel]
+    _warn_thin(cands, max_sites, dilation)
     return cands, {}, dropped
 
 
@@ -469,6 +478,20 @@ def _require_sites(sites, dilation):
             f"No latent site has a full window at --block-dilation {dilation}: it is wider than the "
             "volume, so every site is clipped by the edge. Use a smaller dilation. (That the widest "
             "window does not fit is itself the finding — the decoder's reach exceeds the volume.)"
+        )
+
+
+def _warn_thin(sites, max_sites, dilation):
+    """A dilation large enough to shrink the site set also shrinks what Lambda is covered."""
+    if len(sites) < max(max_sites // 2, 4):
+        logger.warning(
+            "Only %d site(s) have a full window at --block-dilation %d (asked for %d). The window "
+            "then fits over the middle of the grid alone, so the audit covers a small central part "
+            "of Lambda rather than the field. Prefer a smaller dilation — the rank and energy "
+            "profiles are reported at every dilation regardless of which one is measured at.",
+            len(sites),
+            dilation,
+            max_sites,
         )
 
 
