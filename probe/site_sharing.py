@@ -539,6 +539,17 @@ def main():
         print("  The frozen_norm arm below isolates the convolutional path.")
 
     # ---------------- data + operating point ---------------------------------------
+    # build_synthetic_test_set renders from `args` whatever the run was trained on, so an
+    # ADNI run would be measured on synthetic volumes and report a plausible-looking number
+    # for a decoder never operated at that point.  Refuse instead.  Nothing below needs
+    # ground-truth factors, so the ADNI path is a dataset swap and not a redesign.
+    if not str(getattr(args, "dataset_name", "")).lower().startswith("synthetic"):
+        raise SystemExit(
+            f"This run trained on dataset_name={getattr(args, 'dataset_name', None)!r}, but only the "
+            "synthetic loader is wired up here — measuring it on synthetic volumes would put the "
+            "decoder at an operating point it never saw. Real-data support needs a loader that "
+            "yields {'image': (view1, view2), 'mask': ...} for this run's dataset."
+        )
     ds = build_synthetic_test_set(args, max(cli.n_subjects, 8), cache=False, causal=True)
     inner = getattr(ds, "_inner", None)
     gen = torch.Generator().manual_seed(cli.seed)
