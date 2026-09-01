@@ -2053,6 +2053,32 @@ def main(args):
             train_sampler=train_sampler,
         )
 
+        # A relaunch reuses this save_dir, so the writer above appends a second
+        # event file to the same tensorboard/ dir and the run stays continuous.
+        # The steps between the last checkpoint and the interruption were already
+        # logged, though, and this process is about to log them again: TensorBoard
+        # keeps both copies (it purges orphaned data only on a SessionLog.START,
+        # which SummaryWriter never emits), so the curve doubles back on itself at
+        # every restart. Emitting that record makes TensorBoard drop the orphaned
+        # tail, the way W&B drops steps it already holds.
+        if step > 1:
+            try:
+                from tensorboard.compat.proto.event_pb2 import Event, SessionLog
+
+                tb_writer._get_file_writer().add_event(
+                    Event(
+                        wall_time=time.time(),
+                        step=step,
+                        session_log=SessionLog(status=SessionLog.START),
+                    )
+                )
+                logger.info(f"  TensorBoard: marked a restart at step {step}; replayed steps supersede the old ones.")
+            except Exception as exc:
+                logger.warning(
+                    f"  Could not mark the TensorBoard restart ({exc}); the curve will show "
+                    "both copies of the steps between the last checkpoint and the interruption."
+                )
+
         # Build the train iterator AFTER the sampler has been (potentially)
         # restored, so the first epoch starts from the correct mid-epoch offset.
         train_iterator = InfiniteIterator(train_loader)
