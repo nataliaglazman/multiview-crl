@@ -54,7 +54,7 @@ def make_arm(n_subj, sites, rng, *, noise=0.02, perm_after=None, cond_after=None
                 J = J[:, p]
             if cond_after is not None and ui >= cond_after:
                 J = J * np.linspace(1.0, cond_after_strength(cond_after), D)[None, :]
-            out[u] = {"J": J, "energy_profile": {0: 0.9, 1: 0.95}}
+            out[u] = {"J": J, "energy_profile": {0: 0.9, 1: 0.95}, "rank_profile": {0: float(D), 1: float(D)}}
         per_subject.append(out)
     return per_subject
 
@@ -161,6 +161,44 @@ def main():
     weak[:, 4] *= 0.01
     ok &= check("weak-but-live channel retained at default", bool(live_channels(weak)[4]))
 
+    print("\nrank-deficient J: the spectrum must be truncated or it measures the noise floor")
+    # One shared rank-2 mechanism at every site. The trailing 10 singular values are pure
+    # float32-scale noise, independent per site — no site-sharing failure anywhere.
+    # Build the spectrum explicitly: two dominant directions that are IDENTICAL everywhere,
+    # then a decaying tail that is numerically resolved but physically irrelevant and whose
+    # decay jitters per site. Equal weighting over all D log-values lets the 10 near-null
+    # directions dominate the RMS, so the tail's jitter is reported as site heterogeneity.
+    r_sites = sites_list(16)
+    U = np.linalg.qr(rng.normal(size=(M, D)))[0]
+    V = np.linalg.qr(rng.normal(size=(D, D)))[0]
+    head = np.array([1.0, 0.7])
+    # The tail shape is drawn per SITE and reused across subjects, which is what registered
+    # anatomy produces: the same location looks alike in every subject. Site-consistent tail
+    # structure lands in dev_across but not in the within-site floor, so it survives the
+    # self-calibration and is reported as heterogeneity of a mechanism that never varied.
+    site_tail = {u: np.exp(rng.normal(0, 0.6, D - 2)) for u in r_sites}
+    deficient = []
+    for _ in range(4):
+        out = {}
+        for u in r_sites:
+            tail = 1e-3 * np.exp(-np.arange(D - 2)) * site_tail[u] * np.exp(rng.normal(0, 0.02, D - 2))
+            J = (U * np.concatenate([head, tail])) @ V.T
+            J *= 10.0 ** rng.uniform(-1, 1)
+            out[u] = {"J": J, "energy_profile": {0: 0.9}, "rank_profile": {0: 2.0}}
+        deficient.append(out)
+    untrunc = reduce_arm(deficient, r_sites, 1e-3, 2, spectrum_energy=1.0)["homogeneity"]["ratio"]
+    trunc = reduce_arm(deficient, r_sites, 1e-3, 2, spectrum_energy=0.99)
+    ok &= check(
+        "untruncated spectrum invents heterogeneity",
+        untrunc > 5.0,
+        f"ratio={untrunc:.1f} on data with ONE shared mechanism",
+    )
+    ok &= check(
+        "truncation removes it",
+        trunc["homogeneity"]["ratio"] < 3.0,
+        f"ratio={trunc['homogeneity']['ratio']:.2f} keeping {trunc['spectrum_keep']}/{D} values",
+    )
+
     print("\nblock geometry")
     for latent, out in (((16, 16, 16), (64, 64, 64)), ((5, 7, 5), (91, 109, 91)), ((3, 3, 3), (8, 8, 8))):
         covered = np.zeros(out, dtype=int)
@@ -201,6 +239,7 @@ def main():
                 "chance": 0.02,
             },
             "energy_profile": {"0": energy, "1": 0.95},
+            "rank_profile": {"0": 48.0 * rank_ratio, "1": 48.0 * rank_ratio},
             "effective_rank": 40.0,
             "effective_rank_ratio": rank_ratio,
             "n_live_channels": 48,
@@ -221,6 +260,19 @@ def main():
 
     v = build_verdict({"arms": {"full": arm(), "linear": arm(bind=0.4)}}, 3.0, 0.9)
     ok &= check("broken linear control blocks", v["blocked"] and any("CONTROL FAILED" in ln for ln in v["lines"]))
+
+    # A rank that stays flat as the window grows is architectural; one that recovers is a
+    # windowing artefact. The verdict must distinguish them — they need different responses.
+    flat = arm(rank_ratio=0.05)
+    flat["rank_profile"] = {"0": 2.2, "1": 2.3, "2": 2.4, "4": 2.4}
+    v = build_verdict({"arms": {"full": flat, "linear": arm()}}, 3.0, 0.9)
+    ok &= check("flat rank profile reads as architectural", any("LOCAL DECODING MAP" in ln for ln in v["lines"]))
+
+    recovers = arm(rank_ratio=0.05)
+    recovers["rank_profile"] = {"0": 2.2, "1": 12.0, "2": 31.0, "4": 40.0}
+    v = build_verdict({"arms": {"full": recovers, "linear": arm()}}, 3.0, 0.9)
+    ok &= check("recovering rank profile reads as windowing", any("windowing artefact" in ln for ln in v["lines"]))
+    ok &= check("  ...and does not claim architecture", not any("LOCAL DECODING MAP" in ln for ln in v["lines"]))
 
     v = build_verdict({"arms": {"full": arm(bind=0.5), "linear": arm()}}, 3.0, 0.9)
     ok &= check("low binding fails once gates pass", not v["ok"] and not v["blocked"])

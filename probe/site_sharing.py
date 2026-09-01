@@ -175,14 +175,32 @@ def make_linear_decoder(decoder):
 # --------------------------------------------------------------------------------------
 
 
-def scale_shape(J: np.ndarray, eps: float = 1e-30) -> tuple[float, np.ndarray]:
+def energy_rank(J: np.ndarray, frac: float = 0.99) -> int:
+    """How many singular values it takes to hold ``frac`` of ``J``'s squared energy."""
+    s = np.linalg.svd(np.asarray(J, dtype=np.float64), compute_uv=False)
+    p = s**2
+    tot = p.sum()
+    if tot <= 0:
+        return 0
+    return int(np.searchsorted(np.cumsum(p) / tot, frac) + 1)
+
+
+def scale_shape(J: np.ndarray, keep: int | None = None, eps: float = 1e-30) -> tuple[float, np.ndarray]:
     """Split ``J``'s log singular spectrum into overall scale and zero-mean shape.
 
     ``shape`` is invariant to ``J -> cJ`` for any ``c > 0``, which is the point: local
     anatomy changes how *strongly* a block decodes, and only a change in the *conditioning*
     is evidence against a site-shared mechanism.
+
+    ``keep`` truncates to the leading ``keep`` singular values, and on a rank-deficient
+    ``J`` it is what makes the statistic mean anything.  The trailing values of a rank-r
+    map with r << d sit on the float32 noise floor, log pushes their *relative* wobble to
+    several nats, and an untruncated shape vector then measures numerical noise rather
+    than the mechanism — inflating the deviation without any site-sharing failure.
     """
     s = np.linalg.svd(np.asarray(J, dtype=np.float64), compute_uv=False)
+    if keep is not None:
+        s = s[: max(int(keep), 1)]
     logs = np.log(np.maximum(s, eps))
     scale = float(logs.mean())
     return scale, logs - scale
@@ -327,6 +345,7 @@ def block_jacobian(fn, z, site, block, n_channels: int, profile_dilations: dict,
 
     cols, total = [], 0.0
     energy = {d: 0.0 for d in profile_dilations}
+    rows = {d: [] for d in profile_dilations}
     for start in range(0, n_channels, chunk):
         stop = min(start + chunk, n_channels)
         n = stop - start
@@ -339,14 +358,34 @@ def block_jacobian(fn, z, site, block, n_channels: int, profile_dilations: dict,
         total += float((jv**2).sum())
         blk = jv[:, :, block[0], block[1], block[2]]
         cols.append(blk.reshape(n, -1).cpu().numpy().T)
-        # The whole response is already in hand before slicing, so the energy-vs-window
-        # curve costs nothing beyond a few reductions and is what tells you whether the
-        # window you asked for was wide enough.
+        # The whole response is already in hand before slicing, so both curves cost nothing
+        # beyond a few reductions. The energy curve says whether the window was wide enough;
+        # the RANK curve says whether widening it would even help — a local map that stays
+        # rank-deficient as the window grows is rank-deficient as a matter of architecture,
+        # and no window makes z(u) recoverable from the response.
         for d, sl in profile_dilations.items():
-            energy[d] += float((jv[:, :, sl[0], sl[1], sl[2]] ** 2).sum())
+            part = jv[:, :, sl[0], sl[1], sl[2]]
+            energy[d] += float((part**2).sum())
+            rows[d].append(part.reshape(n, -1).cpu().numpy())
     J = np.concatenate(cols, axis=1)
     prof = {d: (e / total if total > 0 else float("nan")) for d, e in energy.items()}
-    return J, prof
+    rank_prof = {}
+    for d, blocks in rows.items():
+        Jt = np.concatenate(blocks, axis=0).astype(np.float64)  # (channels, window)
+        rank_prof[d] = effective_rank_from_gram(Jt @ Jt.T)
+    return J, prof, rank_prof
+
+
+def effective_rank_from_gram(G: np.ndarray) -> float:
+    """Entropy effective rank from a ``d x d`` Gram, avoiding an SVD of the tall Jacobian."""
+    w = np.linalg.eigvalsh(np.asarray(G, dtype=np.float64))
+    w = np.clip(w, 0.0, None)
+    tot = w.sum()
+    if tot <= 0:
+        return 0.0
+    p = w / tot
+    nz = p[p > 0]
+    return float(np.exp(-(nz * np.log(nz)).sum()))
 
 
 def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: float, gen, tissue):
@@ -393,12 +432,19 @@ def measure_arm(fn, z, sites, latent_shape, out_shape, n_channels, chunk, dilati
     for site in sites:
         blk = block_slices(site, latent_shape, out_shape, dilation)
         prof_slices = {d: block_slices(site, latent_shape, out_shape, d) for d in profile_dilations}
-        J, prof = block_jacobian(fn, z, site, blk, n_channels, prof_slices, chunk=chunk)
-        out[site] = {"J": J, "energy_profile": prof}
+        J, prof, rank_prof = block_jacobian(fn, z, site, blk, n_channels, prof_slices, chunk=chunk)
+        out[site] = {"J": J, "energy_profile": prof, "rank_profile": rank_prof}
     return out
 
 
-def reduce_arm(per_subject: list[dict], sites, dead_thresh: float, n_refs: int, margin_tol: float = 0.05) -> dict:
+def reduce_arm(
+    per_subject: list[dict],
+    sites,
+    dead_thresh: float,
+    n_refs: int,
+    margin_tol: float = 0.05,
+    spectrum_energy: float = 0.99,
+) -> dict:
     """Turn raw Jacobians into the two headline statistics, with their own noise floors."""
     n_subj = len(per_subject)
     if n_subj < 2:
@@ -422,11 +468,18 @@ def reduce_arm(per_subject: list[dict], sites, dead_thresh: float, n_refs: int, 
         )
 
     # --- spectra ------------------------------------------------------------------
+    # Truncate to the leading directions that actually carry the response, and use ONE
+    # length everywhere so the shape vectors are comparable. Past that point the singular
+    # values sit on the float32 noise floor, where log turns a numerical wobble into whole
+    # nats — which is a deviation with no mechanism behind it.
+    keep = min(energy_rank(per_subject[si][u]["J"][:, live], spectrum_energy) for si in range(n_subj) for u in sites)
+    keep = max(int(keep), 1)
+
     scales = np.zeros((n_subj, len(sites)))
-    shapes = np.zeros((n_subj, len(sites), n_live))
+    shapes = np.zeros((n_subj, len(sites), keep))
     for si in range(n_subj):
         for ui, u in enumerate(sites):
-            scales[si, ui], shapes[si, ui] = scale_shape(per_subject[si][u]["J"][:, live])
+            scales[si, ui], shapes[si, ui] = scale_shape(per_subject[si][u]["J"][:, live], keep=keep)
 
     # Across-site spread of the subject-mean shape, against the within-site spread across
     # subjects.  The ratio is the finding: the raw deviation has no scale of its own.
@@ -507,6 +560,11 @@ def reduce_arm(per_subject: list[dict], sites, dead_thresh: float, n_refs: int, 
         # d columns in an effectively r-dimensional space cannot be told apart when r << d.
         "effective_rank": eff_rank,
         "effective_rank_ratio": eff_rank / n_live,
+        "spectrum_keep": keep,
+        "rank_profile": {
+            str(d): float(np.median([per_subject[s][u]["rank_profile"][d] for s in range(n_subj) for u in sites]))
+            for d in profile_keys
+        },
         "homogeneity": {
             "dev_across_median": across,
             "dev_within_sigma": sigma,
@@ -599,8 +657,30 @@ def build_verdict(report: dict, tol: float, bind_tol: float, energy_tol: float =
             f"DEGENERATE MATCHING: J_u columns span an effectively {full['effective_rank']:.1f}-dimensional "
             f"space against {full['n_live_channels']} channels ({rank_ratio:.0%}), median assignment margin "
             f"{prim['margin_median']:.3f}. Every permutation scores alike, so the identity fraction reads near "
-            "chance whether or not the labelling drifted. Read identity_frac_confident instead."
+            "chance whether or not the labelling drifted."
         )
+        # A rank that does not recover as the window grows is not a windowing problem: the
+        # local decoding map is rank-deficient, z(u) is not recoverable from the response
+        # around u at ANY window, and per-position identifiability fails outright.
+        rp = full.get("rank_profile", {})
+        if rp:
+            widest = max(rp, key=lambda k: int(k))
+            best = max(rp.values())
+            lines.append(
+                "  rank by dilation: "
+                + "  ".join(f"+{d}:{v:.1f}" for d, v in sorted(rp.items(), key=lambda kv: int(kv[0])))
+            )
+            if best < 0.5 * full["n_live_channels"]:
+                lines.append(
+                    f"  It does not recover by dilation +{widest} (best {best:.1f}/{full['n_live_channels']}), so "
+                    "this is the LOCAL DECODING MAP being rank-deficient, not a window too small. z(u) is not "
+                    "recoverable from the response around u at any window, and per-position identifiability "
+                    "fails for this decoder regardless of Lambda."
+                )
+            else:
+                lines.append(
+                    f"  It recovers to {best:.1f} by dilation +{widest} — a windowing artefact. Re-run at that dilation."
+                )
 
     # --- gate 3: does the measurement reproduce itself? --------------------------------
     null = full["binding"]["same_site_null"]
@@ -710,6 +790,13 @@ def main():
         type=float,
         default=0.05,
         help="Min |cos| lead over the runner-up for a match to count as decisive.",
+    )
+    ap.add_argument(
+        "--spectrum-energy",
+        type=float,
+        default=0.99,
+        help="Truncate the log spectrum to the leading directions holding this much squared "
+        "energy. Past them the singular values are float32 noise, and log turns that into nats.",
     )
     ap.add_argument("--skip-control", action="store_true", help="Skip the control arms (not recommended).")
     ap.add_argument("--seed", type=int, default=0)
@@ -871,22 +958,29 @@ def main():
                 )
             )
             print(f"  subject {si + 1}/{len(subjects)} done")
-        red = reduce_arm(per_subject, sites, cli.dead_thresh, cli.n_refs, cli.margin_tol)
+        red = reduce_arm(per_subject, sites, cli.dead_thresh, cli.n_refs, cli.margin_tol, cli.spectrum_energy)
 
         h, b = red["homogeneity"], red["binding"]
         p = b["primary"]
         print(f"\n  live channels           {red['n_live_channels']}/{n_channels}")
         print(
-            f"  effective rank          {red['effective_rank']:.1f}/{red['n_live_channels']}  "
+            f"  rank at the window      {red['effective_rank']:.1f}/{red['n_live_channels']}  "
             f"({red['effective_rank_ratio']:.0%} — below ~50% the matching is degenerate)"
         )
         print(
-            f"  captured energy         "
+            "  captured energy         "
             + "  ".join(f"+{d}:{v:.3f}" for d, v in sorted(red["energy_profile"].items(), key=lambda kv: int(kv[0])))
         )
         print(
-            f"                          (share of |dx/dz(u)|^2 inside the window, by dilation; measured at +{cli.block_dilation})"
+            "  effective rank          "
+            + "  ".join(f"+{d}:{v:.1f}" for d, v in sorted(red["rank_profile"].items(), key=lambda kv: int(kv[0])))
+            + f"   /{red['n_live_channels']} channels"
         )
+        print(
+            f"                          (by dilation; measured at +{cli.block_dilation}. A rank that stays "
+            "flat as the window grows is architectural, not a windowing artefact.)"
+        )
+        print(f"  spectrum truncated to   {red['spectrum_keep']} of {red['n_live_channels']} singular values")
         print("\n  SPECTRAL HOMOGENEITY (shape of the log spectrum; scale excluded by construction)")
         print(f"    across-site deviation {h['dev_across_median']:.4f} nats  (subject-mean shape vs the median site)")
         print(f"    per-subject sigma     {h['dev_within_sigma']:.4f} nats  (same site, across subjects)")
