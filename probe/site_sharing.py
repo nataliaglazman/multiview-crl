@@ -45,27 +45,51 @@ unconstrained readout absorb a position-dependent permutation before scoring.
 
 Why this is not trivially 1.0
 -----------------------------
-The decoder's *weights* are shared by construction, so a purely convolutional decoder would
-score 1.0 on both measurements with nothing learned.  What varies across ``u`` is the
-*state*: nonlinearities and — decisively here — normalization layers whose statistics are
-computed over the whole volume.  So the measurement reads the **effective, state-dependent**
-mechanism, and the ``frozen_norm`` arm is the positive control that isolates it:
+The decoder's *weights* are shared by construction.  What varies across ``u`` is the
+*state*: nonlinearities, and normalization layers whose statistics span the volume.  So the
+measurement reads the **effective, state-dependent** mechanism.  Three arms:
 
     ``full``        the decoder as trained; the headline.
-    ``frozen_norm`` normalization statistics pinned at the operating point.  Site-sharing
-                    is near-exact here by construction, so this arm **must** score ~1.0.
-                    If it does not, the measurement is broken and nothing else here counts.
+    ``linear``      every nonlinearity and normalization replaced by identity, leaving a
+                    pure convolution stack.  That is exactly translation-equivariant, so
+                    binding **must** come back ~1.0.  This is the positive control, and the
+                    only one that is exact by construction.
+    ``frozen_norm`` normalization statistics pinned at the operating point.  **Diagnostic,
+                    not a control** — freezing removes the spatial-statistic path but leaves
+                    every nonlinearity, and ReLU gating alone makes ``J_u`` position-
+                    dependent, so this arm is not expected to reach 1.0.  Its gap from
+                    ``full`` is the normalization's cost, as ``probe.jacobian_spread``
+                    reports it for rho.  It is a silent no-op on a decoder built with
+                    ``norm_type='layer'`` (ChannelLayerNorm3d is not an ``nn.GroupNorm``);
+                    that case is detected and reported rather than left to look like a
+                    control that passed.
 
-The gap between the arms is the cost of the normalization, on the same footing that
-``probe.jacobian_spread`` reports it for rho.
+What must hold before the numbers mean anything
+-----------------------------------------------
+Three conditions gate interpretation, and the verdict refuses to report a headline until
+all three pass — announcing "the labelling drifts with position" off an instrument that
+cannot reproduce itself would be the worst failure this script could have.
+
+  1. **The window caught the response.**  ``energy_profile`` gives the share of
+     ``|dx/dz(u)|^2`` inside the window at each dilation.  A low value at dilation 0 means
+     ``J_u`` is a peripheral tail rather than the mechanism — which is itself an A4
+     centre-dominance failure worth reporting — and ``--block-dilation`` widens it.
+  2. **The assignment was decisive.**  ``d`` columns spanning an effectively much smaller
+     space make every permutation score alike, so the identity fraction reads near chance
+     whether or not anything drifted.  ``effective_rank`` and the assignment ``margin``
+     detect this; ``identity_frac_confident`` restricts to decisive columns.
+  3. **The instrument reproduces itself.**  ``same_site_null`` matches one site to itself
+     across subjects.  It is the *ceiling* for the across-site score, which cannot be read
+     past it.
 
 Self-calibration
 ----------------
 Neither statistic is compared against an invented threshold.  The same site is measured
 across several subjects, which gives a *within-site* spread — the measurement's own noise
-floor — and the across-site spread is reported as a multiple of it.  A homogeneity ratio of
-~1 means site-sharing holds to measurement precision; the ratio is the finding, not the raw
-deviation.
+floor — and the across-site spread is reported as a multiple of it, matched for the sqrt(n)
+the subject-mean already bought.  A homogeneity ratio of ~1 means site-sharing holds to
+measurement precision; the ratio is the finding, not the raw deviation.  ``true_site_sd``
+reports the same thing with the noise subtracted, in nats.
 
 Scope
 -----
@@ -97,7 +121,53 @@ from scipy.optimize import linear_sum_assignment
 
 logger = logging.getLogger(__name__)
 
-ARMS = ("full", "frozen_norm")
+# "linear" is the positive control and the only one that is exact by construction; see
+# make_linear_decoder.  "frozen_norm" is diagnostic — the cost of the normalization — and
+# is NOT a control: pinning the statistics leaves every nonlinearity in place, so its
+# Jacobian still varies with position.
+ARMS = ("full", "frozen_norm", "linear")
+
+
+def make_linear_decoder(decoder):
+    """A copy of ``decoder`` with every nonlinearity and normalization replaced by identity.
+
+    What remains is a pure (transposed-)convolution stack, which is exactly
+    translation-equivariant, so ``J_u`` is the same matrix at every interior site and both
+    statistics have a known answer: binding 1.0, homogeneity ratio ~1.  Anything else is a
+    defect in the measurement rather than a property of the model, which is what a positive
+    control is for.
+
+    This replaces an earlier and wrong assumption that pinning normalization statistics was
+    sufficient: freezing removes the *spatial-statistic* path only, and ReLU gating alone
+    makes the effective linear map position-dependent.
+    """
+    import copy
+
+    import torch.nn as nn
+
+    import probe.receptive_field as rfmod
+
+    kill = (
+        nn.ReLU,
+        nn.LeakyReLU,
+        nn.GELU,
+        nn.SiLU,
+        nn.ELU,
+        nn.Tanh,
+        nn.Sigmoid,
+        nn.GroupNorm,
+        nn.LayerNorm,
+        nn.InstanceNorm3d,
+        nn.BatchNorm3d,
+    )
+    lin = copy.deepcopy(decoder)
+    # Deepest-first, so replacing a wrapper (ChannelLayerNorm3d) does not invalidate the
+    # path to a child that was also queued for replacement.
+    for name, m in sorted(lin.named_modules(), key=lambda kv: -kv[0].count(".")):
+        if name and isinstance(m, kill):
+            rfmod._set_submodule(lin, name, nn.Identity())
+    lin.eval()
+    return lin
 
 
 # --------------------------------------------------------------------------------------
@@ -146,12 +216,18 @@ def live_channels(col_norms: np.ndarray, dead_thresh: float = 1e-3) -> np.ndarra
     return np.median(rel, axis=0) >= dead_thresh
 
 
-def match_columns(Ja: np.ndarray, Jb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def match_columns(Ja: np.ndarray, Jb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Hungarian match ``Ja``'s columns to ``Jb``'s on ``|cos|``.
 
-    Returns ``(assignment, matched_cos)`` where ``assignment[j]`` is the column of ``Jb``
-    that column ``j`` of ``Ja`` was matched to.  Absolute cosine, because the theory's
+    Returns ``(assignment, matched_cos, margin)`` where ``assignment[j]`` is the column of
+    ``Jb`` that column ``j`` of ``Ja`` was matched to.  Absolute cosine, because the theory's
     residual gauge admits a coordinate-wise bijection, and a sign flip is one.
+
+    ``margin[j]`` is how much the chosen match beats the best alternative for that column.
+    Without it a low identity fraction is ambiguous: columns spanning a space much smaller
+    than ``d`` make every permutation score alike, so the assignment is arbitrary and reads
+    near chance whether or not the labelling actually drifted.  A near-zero margin means the
+    identity fraction is not measuring anything.
     """
     A = _unit_columns(Ja)
     B = _unit_columns(Jb)
@@ -159,7 +235,27 @@ def match_columns(Ja: np.ndarray, Jb: np.ndarray) -> tuple[np.ndarray, np.ndarra
     row, col = linear_sum_assignment(-sim)
     assignment = np.empty(A.shape[1], dtype=int)
     assignment[row] = col
-    return assignment, sim[row, col]
+
+    chosen = sim[np.arange(sim.shape[0]), assignment]
+    masked = sim.copy()
+    masked[np.arange(sim.shape[0]), assignment] = -np.inf
+    return assignment, chosen, chosen - masked.max(axis=1)
+
+
+def effective_rank(J: np.ndarray) -> float:
+    """Entropy effective rank of ``J``'s singular spectrum — the matching's real difficulty.
+
+    ``d`` columns living in an effectively ``r``-dimensional space cannot be told apart by
+    any assignment when ``r << d``; this is the number to read next to a low margin.
+    """
+    s = np.linalg.svd(np.asarray(J, dtype=np.float64), compute_uv=False)
+    p = s**2
+    tot = p.sum()
+    if tot <= 0:
+        return 0.0
+    p = p / tot
+    nz = p[p > 0]
+    return float(np.exp(-(nz * np.log(nz)).sum()))
 
 
 def _unit_columns(J: np.ndarray) -> np.ndarray:
@@ -168,14 +264,20 @@ def _unit_columns(J: np.ndarray) -> np.ndarray:
     return J / np.maximum(n, 1e-300)
 
 
-def binding_stats(assignment: np.ndarray, matched_cos: np.ndarray) -> dict:
+def binding_stats(assignment: np.ndarray, matched_cos: np.ndarray, margin: np.ndarray, margin_tol: float) -> dict:
     """Identity agreement for one (site, subject) match against the reference site."""
     d = len(assignment)
     identity = assignment == np.arange(d)
+    confident = margin >= margin_tol
     return {
         "identity_frac": float(identity.mean()),
         "matched_cos": float(np.mean(matched_cos)),
         "matched_cos_identity": float(np.mean(matched_cos[identity])) if identity.any() else float("nan"),
+        "margin": float(np.median(margin)),
+        "confident_frac": float(confident.mean()),
+        # Identity among only the columns whose match was decisive.  When `confident_frac`
+        # is low this is the only binding number worth reading.
+        "identity_frac_confident": float(identity[confident].mean()) if confident.any() else float("nan"),
         "chance": 1.0 / max(d, 1),
         "identity": identity,
     }
@@ -186,33 +288,45 @@ def binding_stats(assignment: np.ndarray, matched_cos: np.ndarray) -> dict:
 # --------------------------------------------------------------------------------------
 
 
-def block_slices(site, latent_shape, out_shape) -> tuple[slice, slice, slice]:
-    """The output block ``B(u)`` for latent site ``u``, from the decoder's stride."""
+def block_slices(site, latent_shape, out_shape, dilation: int = 0) -> tuple[slice, slice, slice]:
+    """The output block ``B(u)`` for latent site ``u``, from the decoder's stride.
+
+    ``dilation`` widens the window by that many *latent cells* on each side.  A window
+    tighter than the decoder's reach captures only the periphery of the response, and the
+    Jacobian columns it yields are then dominated by whatever weak, position-idiosyncratic
+    signal lands there — which reads as a binding failure that is really a windowing one.
+    Read ``energy_profile`` before choosing a value.
+    """
     sl = []
     for a in range(3):
         stride = out_shape[a] / latent_shape[a]
-        lo = int(np.floor(site[a] * stride))
-        hi = max(int(np.floor((site[a] + 1) * stride)), lo + 1)
-        sl.append(slice(lo, min(hi, out_shape[a])))
+        pad = dilation * stride
+        # floor on both edges, so that at dilation 0 the blocks tile Omega exactly even when
+        # the stride is fractional (ceil on the upper edge overlaps adjacent blocks by one).
+        lo = int(np.floor(site[a] * stride - pad))
+        hi = max(int(np.floor((site[a] + 1) * stride + pad)), lo + 1)
+        sl.append(slice(max(lo, 0), min(hi, out_shape[a])))
     return tuple(sl)
 
 
-def block_jacobian(fn, z: torch.Tensor, site, block, n_channels: int, chunk: int = 16):
-    """``d x|B(u) / d z(u)`` by exact JVPs, plus the fraction of response energy inside B(u).
+def block_jacobian(fn, z, site, block, n_channels: int, profile_dilations: dict, chunk: int = 16):
+    """``d x|B(u) / d z(u)`` by exact JVPs, plus the response energy captured at each window.
 
     One basis tangent per latent channel, batched ``chunk`` at a time along the batch axis
     (every normalization here is per sample, so batch elements stay independent).
 
-    ``block_energy_fraction`` is free from the same JVPs: the share of ``|d x / d z(u)|^2``
-    that lands inside ``B(u)``.  It is *not* the A4 ratio — A4 bounds what leaks *into*
-    ``B(u)`` from other sites — but it is the same phenomenon seen from the other side, and
-    a low value means the block is smaller than the decoder's reach.
+    ``profile_dilations`` maps a dilation to its slice tuple; the returned profile gives the
+    share of ``|d x / d z(u)|^2`` inside each.  It is *not* the A4 ratio — A4 bounds what
+    leaks *into* ``B(u)`` from other sites — but it is the same phenomenon from the other
+    side, and a low value at dilation 0 means the block is far smaller than the decoder's
+    reach, so every column below is a peripheral tail rather than the mechanism.
     """
     import torch
 
     from probe.jacobian_spread import _jvp
 
-    cols, inside, total = [], 0.0, 0.0
+    cols, total = [], 0.0
+    energy = {d: 0.0 for d in profile_dilations}
     for start in range(0, n_channels, chunk):
         stop = min(start + chunk, n_channels)
         n = stop - start
@@ -224,10 +338,15 @@ def block_jacobian(fn, z: torch.Tensor, site, block, n_channels: int, chunk: int
         jv = jv.detach()
         total += float((jv**2).sum())
         blk = jv[:, :, block[0], block[1], block[2]]
-        inside += float((blk**2).sum())
         cols.append(blk.reshape(n, -1).cpu().numpy().T)
+        # The whole response is already in hand before slicing, so the energy-vs-window
+        # curve costs nothing beyond a few reductions and is what tells you whether the
+        # window you asked for was wide enough.
+        for d, sl in profile_dilations.items():
+            energy[d] += float((jv[:, :, sl[0], sl[1], sl[2]] ** 2).sum())
     J = np.concatenate(cols, axis=1)
-    return J, (inside / total if total > 0 else float("nan"))
+    prof = {d: (e / total if total > 0 else float("nan")) for d, e in energy.items()}
+    return J, prof
 
 
 def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: float, gen, tissue):
@@ -268,17 +387,18 @@ def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: fl
 # --------------------------------------------------------------------------------------
 
 
-def measure_arm(fn, z, sites, latent_shape, out_shape, n_channels, chunk):
+def measure_arm(fn, z, sites, latent_shape, out_shape, n_channels, chunk, dilation, profile_dilations):
     """Every site's block Jacobian for one subject, one arm."""
     out = {}
     for site in sites:
-        blk = block_slices(site, latent_shape, out_shape)
-        J, frac = block_jacobian(fn, z, site, blk, n_channels, chunk=chunk)
-        out[site] = {"J": J, "block_energy_fraction": frac}
+        blk = block_slices(site, latent_shape, out_shape, dilation)
+        prof_slices = {d: block_slices(site, latent_shape, out_shape, d) for d in profile_dilations}
+        J, prof = block_jacobian(fn, z, site, blk, n_channels, prof_slices, chunk=chunk)
+        out[site] = {"J": J, "energy_profile": prof}
     return out
 
 
-def reduce_arm(per_subject: list[dict], sites, dead_thresh: float, n_refs: int) -> dict:
+def reduce_arm(per_subject: list[dict], sites, dead_thresh: float, n_refs: int, margin_tol: float = 0.05) -> dict:
     """Turn raw Jacobians into the two headline statistics, with their own noise floors."""
     n_subj = len(per_subject)
     if n_subj < 2:
@@ -291,6 +411,15 @@ def reduce_arm(per_subject: list[dict], sites, dead_thresh: float, n_refs: int) 
     n_live = int(live.sum())
     if n_live < 2:
         raise SystemExit(f"Only {n_live} live channel(s) at --dead-thresh {dead_thresh}; nothing to match.")
+
+    # A window holding fewer rows than there are live channels cannot carry d independent
+    # directions, so the spectrum is short and the matching is degenerate before it starts.
+    n_rows = per_subject[0][sites[0]]["J"].shape[0]
+    if n_rows < n_live:
+        raise SystemExit(
+            f"The window holds {n_rows} values but there are {n_live} live channels, so J_u has rank "
+            f"<= {n_rows} and neither statistic is defined. Widen it with --block-dilation."
+        )
 
     # --- spectra ------------------------------------------------------------------
     scales = np.zeros((n_subj, len(sites)))
@@ -328,14 +457,19 @@ def reduce_arm(per_subject: list[dict], sites, dead_thresh: float, n_refs: int) 
     for ref in refs:
         ident = np.zeros((n_subj, len(sites)))
         mcos = np.zeros((n_subj, len(sites)))
+        marg = np.zeros((n_subj, len(sites)))
+        conf = np.zeros((n_subj, len(sites)))
+        ident_conf = np.full((n_subj, len(sites)), np.nan)
         chan_hits = np.zeros(n_live)
         for si in range(n_subj):
             Jr = per_subject[si][ref]["J"][:, live]
             for ui, u in enumerate(sites):
-                a, c = match_columns(per_subject[si][u]["J"][:, live], Jr)
-                st = binding_stats(a, c)
+                st = binding_stats(*match_columns(per_subject[si][u]["J"][:, live], Jr), margin_tol)
                 ident[si, ui] = st["identity_frac"]
                 mcos[si, ui] = st["matched_cos"]
+                marg[si, ui] = st["margin"]
+                conf[si, ui] = st["confident_frac"]
+                ident_conf[si, ui] = st["identity_frac_confident"]
                 chan_hits += st["identity"]
         per_ref.append(
             {
@@ -343,29 +477,44 @@ def reduce_arm(per_subject: list[dict], sites, dead_thresh: float, n_refs: int) 
                 "identity_frac_median": float(np.median(ident.mean(axis=0))),
                 "identity_frac_mean": float(ident.mean()),
                 "matched_cos_median": float(np.median(mcos.mean(axis=0))),
+                "margin_median": float(np.median(marg)),
+                "confident_frac_median": float(np.median(conf)),
+                "identity_frac_confident": (
+                    float(np.nanmedian(ident_conf)) if np.isfinite(ident_conf).any() else float("nan")
+                ),
                 "per_site_identity": ident.mean(axis=0),
                 "channel_stability": chan_hits / (n_subj * len(sites)),
             }
         )
 
     # Same site, different subjects: the binding measurement's own noise floor.  Site
-    # identity is held fixed, so anything below 1.0 here is measurement noise, not drift.
+    # identity is held fixed, so anything below 1.0 here is measurement noise, not drift —
+    # and it is the CEILING for the across-site score, which cannot be read past it.
     same_site = []
-    if n_subj > 1:
-        for ui, u in enumerate(sites):
-            for si in range(1, n_subj):
-                a, c = match_columns(per_subject[si][u]["J"][:, live], per_subject[0][u]["J"][:, live])
-                same_site.append(binding_stats(a, c)["identity_frac"])
+    for u in sites:
+        for si in range(1, n_subj):
+            st = binding_stats(
+                *match_columns(per_subject[si][u]["J"][:, live], per_subject[0][u]["J"][:, live]), margin_tol
+            )
+            same_site.append(st["identity_frac"])
 
+    eff_rank = float(np.median([effective_rank(per_subject[s][u]["J"][:, live]) for s in range(n_subj) for u in sites]))
+    profile_keys = sorted(per_subject[0][sites[0]]["energy_profile"])
     return {
         "n_live_channels": n_live,
         "live_mask": live,
         "dead_channels": [int(i) for i in np.nonzero(~live)[0]],
+        # d columns in an effectively r-dimensional space cannot be told apart when r << d.
+        "effective_rank": eff_rank,
+        "effective_rank_ratio": eff_rank / n_live,
         "homogeneity": {
             "dev_across_median": across,
             "dev_within_sigma": sigma,
             "dev_within_median": float(floor),
             "ratio": float(ratio),
+            # The noise-free part of the across-site spread: what is left of dev_across once
+            # the sigma/sqrt(n) already in the subject-means is taken out.
+            "true_site_sd": float(np.sqrt(max(across**2 - floor**2, 0.0))),
             "per_site_dev": dev_across,
             "scale_log_range": [float(scales.mean(axis=0).min()), float(scales.mean(axis=0).max())],
         },
@@ -375,9 +524,10 @@ def reduce_arm(per_subject: list[dict], sites, dead_thresh: float, n_refs: int) 
             "chance": 1.0 / n_live,
             "same_site_null": float(np.median(same_site)) if same_site else float("nan"),
         },
-        "block_energy_fraction": float(
-            np.median([per_subject[s][u]["block_energy_fraction"] for s in range(n_subj) for u in sites])
-        ),
+        "energy_profile": {
+            str(d): float(np.median([per_subject[s][u]["energy_profile"][d] for s in range(n_subj) for u in sites]))
+            for d in profile_keys
+        },
     }
 
 
@@ -415,37 +565,98 @@ def _json_default(o):
     return str(o)
 
 
-def build_verdict(report: dict, tol: float, bind_tol: float) -> dict:
-    """What may be claimed, and where."""
-    full = report["arms"]["full"]
-    ctrl = report["arms"].get("frozen_norm")
-    lines, ok = [], True
+def build_verdict(report: dict, tol: float, bind_tol: float, energy_tol: float = 0.5) -> dict:
+    """What may be claimed, and where.
 
+    The gates are ordered by what invalidates what.  A window that captures little of the
+    response, a degenerate assignment, or a broken positive control each make the two
+    headline numbers unreadable, so they are checked before the numbers are interpreted at
+    all — reporting "the labelling drifts" off an instrument that cannot reproduce itself
+    would be the worst failure this script could have.
+    """
+    full = report["arms"]["full"]
+    lines, ok, blocked = [], True, False
+
+    # --- gate 1: did the window capture the response? ---------------------------------
+    captured = full.get("energy_profile", {}).get("0", float("nan"))
+    if np.isfinite(captured) and captured < energy_tol:
+        blocked = True
+        prof = ", ".join(f"+{d}:{v:.2f}" for d, v in sorted(full["energy_profile"].items(), key=lambda kv: int(kv[0])))
+        lines.append(
+            f"WINDOW TOO TIGHT: only {captured:.1%} of |dx/dz(u)|^2 lands in B(u), so J_u is a "
+            f"peripheral tail of the response and neither statistic is about the mechanism. "
+            f"This is itself an A4 centre-dominance failure worth reporting — confirm rho with "
+            f"probe.jacobian_spread. Energy by dilation: {prof}. Re-run at a dilation reaching "
+            f">= {energy_tol:.0%}."
+        )
+
+    # --- gate 2: is the assignment decisive? ------------------------------------------
+    prim = full["binding"]["primary"]
+    rank_ratio = full.get("effective_rank_ratio", float("nan"))
+    if np.isfinite(rank_ratio) and rank_ratio < 0.5:
+        blocked = True
+        lines.append(
+            f"DEGENERATE MATCHING: J_u columns span an effectively {full['effective_rank']:.1f}-dimensional "
+            f"space against {full['n_live_channels']} channels ({rank_ratio:.0%}), median assignment margin "
+            f"{prim['margin_median']:.3f}. Every permutation scores alike, so the identity fraction reads near "
+            "chance whether or not the labelling drifted. Read identity_frac_confident instead."
+        )
+
+    # --- gate 3: does the measurement reproduce itself? --------------------------------
+    null = full["binding"]["same_site_null"]
+    if np.isfinite(null) and null < 0.9:
+        blocked = True
+        lines.append(
+            f"NOISY INSTRUMENT: the same site across subjects matches itself only {null:.3f} of the time. "
+            "That is the ceiling for the across-site score, so binding cannot be read past it."
+        )
+
+    # --- gate 4: the positive control ---------------------------------------------------
+    ctrl = report["arms"].get("linear")
     if ctrl is not None:
         c_bind = ctrl["binding"]["primary"]["identity_frac_median"]
-        c_ratio = ctrl["homogeneity"]["ratio"]
         if c_bind < 0.95:
-            ok = False
+            blocked = True
             lines.append(
-                f"CONTROL FAILED: frozen_norm binding is {c_bind:.3f}, expected ~1.0. "
-                "Site-sharing is near-exact once normalization statistics are pinned, so a "
-                "low value here means the measurement is wrong, not the model. Nothing below counts."
+                f"CONTROL FAILED: the linearized decoder binds at {c_bind:.3f}, and it is exactly "
+                "translation-equivariant, so the answer must be ~1.0. The measurement is wrong, not the model."
             )
         else:
-            lines.append(f"control ok: frozen_norm binding {c_bind:.3f}, homogeneity ratio {c_ratio:.2f}")
+            lines.append(f"control ok: linearized decoder binds at {c_bind:.3f}, as it must.")
 
+    frozen = report["arms"].get("frozen_norm")
+    if frozen is not None:
+        if report.get("freeze_was_noop"):
+            lines.append(
+                "frozen_norm is a NO-OP for this run: the decoder has no nn.GroupNorm to pin (a "
+                "norm_type='layer' decoder uses ChannelLayerNorm3d). Its numbers repeat 'full' and say nothing."
+            )
+        else:
+            lines.append(
+                f"frozen_norm (diagnostic, not a control): binding {frozen['binding']['primary']['identity_frac_median']:.3f}, "
+                f"ratio {frozen['homogeneity']['ratio']:.2f}x — the gap from 'full' is the normalization's cost."
+            )
+
+    if blocked:
+        lines.append("=> No conclusion about A1 from this run. Fix the gates above and re-run.")
+        return {"ok": False, "blocked": True, "lines": lines}
+
+    # --- the numbers, only once the gates pass -----------------------------------------
     ratio = full["homogeneity"]["ratio"]
-    bind = full["binding"]["primary"]["identity_frac_median"]
+    bind = prim["identity_frac_median"]
     lines.append(f"full: homogeneity ratio {ratio:.2f}x the measurement floor; binding {bind:.3f}")
 
     if ratio <= tol:
         lines.append(
-            f"A1/A4 spectra are homogeneous to within {tol:.1f}x measurement noise — Section 5 may be claimed on the measured region."
+            f"A1/A4 spectra are homogeneous to within {tol:.1f}x measurement noise "
+            f"(true across-site sd {full['homogeneity']['true_site_sd']:.4f} nats) — "
+            "Section 5 may be claimed on the validity region."
         )
     else:
         lines.append(
-            f"Spectra are NOT homogeneous ({ratio:.2f}x > {tol:.1f}x). Site-sharing degrades across "
-            "Lambda; restrict every downstream identifiability number to the validity map."
+            f"Spectra are NOT homogeneous ({ratio:.2f}x > {tol:.1f}x; true across-site sd "
+            f"{full['homogeneity']['true_site_sd']:.4f} nats). Site-sharing degrades across Lambda; "
+            "restrict every downstream identifiability number to the validity map."
         )
         ok = False
 
@@ -461,7 +672,7 @@ def build_verdict(report: dict, tol: float, bind_tol: float) -> dict:
         )
         ok = False
 
-    return {"ok": ok, "lines": lines}
+    return {"ok": ok, "blocked": False, "lines": lines}
 
 
 def main():
@@ -482,7 +693,25 @@ def main():
         "--tol", type=float, default=3.0, help="Homogeneity ratio allowed, in multiples of the noise floor."
     )
     ap.add_argument("--bind-tol", type=float, default=0.9, help="Binding identity fraction required.")
-    ap.add_argument("--skip-control", action="store_true", help="Skip the frozen_norm arm (not recommended).")
+    ap.add_argument(
+        "--block-dilation",
+        type=int,
+        default=0,
+        help="Widen the measurement window by this many latent cells per side. Raise it until "
+        "the energy profile shows the window capturing most of the response.",
+    )
+    ap.add_argument(
+        "--profile-dilations",
+        default="0,1,2,4",
+        help="Dilations to report captured response energy for (free — same JVPs).",
+    )
+    ap.add_argument(
+        "--margin-tol",
+        type=float,
+        default=0.05,
+        help="Min |cos| lead over the runner-up for a match to count as decisive.",
+    )
+    ap.add_argument("--skip-control", action="store_true", help="Skip the control arms (not recommended).")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out-dir", default="results")
     ap.add_argument("--prefix", default="")
@@ -605,36 +834,77 @@ def main():
     print(f"  measuring {len(sites)} site(s) x {cli.n_subjects} subject(s) x {n_channels} JVP tangents per arm")
 
     # ---------------- measure -------------------------------------------------------
+    import torch.nn as nn
+
+    # freeze_norm_statistics only swaps nn.GroupNorm. A norm_type='layer' decoder is built
+    # from ChannelLayerNorm3d, which is not one, so the arm silently repeats 'full' — the
+    # same shape of no-op as the DataParallel --freeze-encoder bug. Detect and say so.
+    n_gn = sum(1 for m in decoder.modules() if isinstance(m, nn.GroupNorm))
+    report["decoder_groupnorm_count"] = n_gn
+    report["freeze_was_noop"] = n_gn == 0
+
+    profile_dilations = sorted({int(v) for v in cli.profile_dilations.split(",") if v.strip() != ""})
     arms = ARMS[:1] if cli.skip_control else ARMS
     report["arms"] = {}
     for arm in arms:
         print("\n" + "=" * 88)
-        print(f"ARM  {arm}")
+        print(f"ARM  {arm}" + ("   (NO-OP: decoder has no nn.GroupNorm)" if arm == "frozen_norm" and n_gn == 0 else ""))
         print("=" * 88)
         per_subject = []
         for si, sub in enumerate(subjects):
-            dec = build_arm(decoder, None, "frozen" if arm == "frozen_norm" else "live", sub["z"], sub["style"])
+            if arm == "linear":
+                dec = make_linear_decoder(decoder)
+            else:
+                dec = build_arm(decoder, None, "frozen" if arm == "frozen_norm" else "live", sub["z"], sub["style"])
             fn = make_fn(dec, sub["style"])
-            per_subject.append(measure_arm(fn, sub["z"], sites, latent_shape, out_shape, n_channels, cli.chunk))
+            per_subject.append(
+                measure_arm(
+                    fn,
+                    sub["z"],
+                    sites,
+                    latent_shape,
+                    out_shape,
+                    n_channels,
+                    cli.chunk,
+                    cli.block_dilation,
+                    profile_dilations,
+                )
+            )
             print(f"  subject {si + 1}/{len(subjects)} done")
-        red = reduce_arm(per_subject, sites, cli.dead_thresh, cli.n_refs)
+        red = reduce_arm(per_subject, sites, cli.dead_thresh, cli.n_refs, cli.margin_tol)
 
         h, b = red["homogeneity"], red["binding"]
+        p = b["primary"]
         print(f"\n  live channels           {red['n_live_channels']}/{n_channels}")
-        print(f"  block energy fraction   {red['block_energy_fraction']:.3f}  (share of |dx/dz(u)|^2 inside B(u))")
+        print(
+            f"  effective rank          {red['effective_rank']:.1f}/{red['n_live_channels']}  "
+            f"({red['effective_rank_ratio']:.0%} — below ~50% the matching is degenerate)"
+        )
+        print(
+            f"  captured energy         "
+            + "  ".join(f"+{d}:{v:.3f}" for d, v in sorted(red["energy_profile"].items(), key=lambda kv: int(kv[0])))
+        )
+        print(
+            f"                          (share of |dx/dz(u)|^2 inside the window, by dilation; measured at +{cli.block_dilation})"
+        )
         print("\n  SPECTRAL HOMOGENEITY (shape of the log spectrum; scale excluded by construction)")
         print(f"    across-site deviation {h['dev_across_median']:.4f} nats  (subject-mean shape vs the median site)")
         print(f"    per-subject sigma     {h['dev_within_sigma']:.4f} nats  (same site, across subjects)")
         print(f"    floor for the means   {h['dev_within_median']:.4f} nats  (sigma / sqrt(n_subjects))")
         print(f"    ratio                 {h['ratio']:.2f}x   (1.0 = homogeneous to measurement precision)")
+        print(f"    true across-site sd   {h['true_site_sd']:.4f} nats  (noise removed)")
         print("\n  BINDING (Hungarian match of J_u columns to the reference site; identity expected)")
-        print(f"    identity fraction     {b['primary']['identity_frac_median']:.3f}   (chance {b['chance']:.3f})")
-        print(f"    matched |cos|         {b['primary']['matched_cos_median']:.3f}")
-        print(f"    same-site null        {b['same_site_null']:.3f}   (measurement floor; 1.0 is perfect)")
+        print(f"    identity fraction     {p['identity_frac_median']:.3f}   (chance {b['chance']:.3f})")
+        print(f"    matched |cos|         {p['matched_cos_median']:.3f}")
+        print(
+            f"    assignment margin     {p['margin_median']:.3f}   ({p['confident_frac_median']:.0%} of columns decisive)"
+        )
+        print(f"    identity (confident)  {p['identity_frac_confident']:.3f}   (among decisive columns only)")
+        print(f"    same-site null        {b['same_site_null']:.3f}   (ceiling for the above; 1.0 is perfect)")
         print(f"    reference sensitivity {['%.3f' % v for v in b['reference_sensitivity']]}")
 
         red["per_site_dev_map"] = to_map(h["per_site_dev"], sites, latent_shape)
-        red["per_site_identity_map"] = to_map(b["primary"]["per_site_identity"], sites, latent_shape)
+        red["per_site_identity_map"] = to_map(p["per_site_identity"], sites, latent_shape)
         report["arms"][arm] = red
 
     # ---------------- validity map + verdict ----------------------------------------

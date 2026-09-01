@@ -19,6 +19,7 @@ import numpy as np
 from probe.site_sharing import (
     block_slices,
     build_verdict,
+    effective_rank,
     live_channels,
     match_columns,
     reduce_arm,
@@ -53,7 +54,7 @@ def make_arm(n_subj, sites, rng, *, noise=0.02, perm_after=None, cond_after=None
                 J = J[:, p]
             if cond_after is not None and ui >= cond_after:
                 J = J * np.linspace(1.0, cond_after_strength(cond_after), D)[None, :]
-            out[u] = {"J": J, "block_energy_fraction": 0.9}
+            out[u] = {"J": J, "energy_profile": {0: 0.9, 1: 0.95}}
         per_subject.append(out)
     return per_subject
 
@@ -93,11 +94,23 @@ def main():
     print("\ncolumn matching")
     A = rng.normal(size=(M, D))
     perm = rng.permutation(D)
-    a, c = match_columns(A, A[:, perm])
+    a, c, m = match_columns(A, A[:, perm])
     ok &= check("identity when unpermuted", (match_columns(A, A)[0] == np.arange(D)).all())
     ok &= check("recovers a known permutation", (a == np.argsort(perm)).all())
     ok &= check("sign flips are absorbed", (match_columns(A, A * -1.0)[0] == np.arange(D)).all())
     ok &= check("matched cos ~ 1", c.min() > 0.999, f"min={c.min():.6f}")
+    ok &= check("margin is large for a clean match", np.median(m) > 0.5, f"median margin={np.median(m):.3f}")
+
+    print("\ndegenerate matching is flagged, not silently reported as drift")
+    # d columns forced into a 3-dimensional space: every permutation scores alike, so the
+    # identity fraction is meaningless and only the margin reveals that.
+    low = rng.normal(size=(M, 3)) @ rng.normal(size=(3, D))
+    _, _, m_deg = match_columns(low, low + 1e-3 * rng.normal(size=(M, D)))
+    ok &= check("degenerate margin collapses", np.median(m_deg) < 0.05, f"median margin={np.median(m_deg):.4f}")
+    ok &= check(
+        "effective rank sees the true dimension", effective_rank(low) < 4.0, f"eff_rank={effective_rank(low):.2f}"
+    )
+    ok &= check("effective rank ~ d for full-rank J", effective_rank(A) > D * 0.6, f"eff_rank={effective_rank(A):.2f}")
 
     print("\nnull: one shared mechanism, scale varying 4 orders of magnitude across sites")
     sites = sites_list(24)
@@ -164,23 +177,58 @@ def main():
             f"min={covered.min()} max={covered.max()} empty={empty}",
         )
 
-    print("\nverdict logic")
-    good = {
-        "homogeneity": {"ratio": 1.4},
-        "binding": {"primary": {"identity_frac_median": 0.98}},
-    }
-    bad_ctrl = {
-        "homogeneity": {"ratio": 1.0},
-        "binding": {"primary": {"identity_frac_median": 0.4}},
-    }
-    v = build_verdict({"arms": {"full": good, "frozen_norm": good}}, 3.0, 0.9)
-    ok &= check("clean run passes", v["ok"])
-    v = build_verdict({"arms": {"full": good, "frozen_norm": bad_ctrl}}, 3.0, 0.9)
-    ok &= check("broken control fails the run", not v["ok"] and "CONTROL FAILED" in v["lines"][0])
-    v = build_verdict({"arms": {"full": {**good, "binding": {"primary": {"identity_frac_median": 0.5}}}}}, 3.0, 0.9)
-    ok &= check("low binding fails", not v["ok"])
-    v = build_verdict({"arms": {"full": {**good, "homogeneity": {"ratio": 12.0}}}}, 3.0, 0.9)
-    ok &= check("inhomogeneous spectra fail", not v["ok"])
+    print("\nblock dilation widens the window")
+    tight = block_slices((2, 2, 2), (8, 8, 8), (64, 64, 64), 0)
+    wide = block_slices((2, 2, 2), (8, 8, 8), (64, 64, 64), 2)
+    vol = lambda sl: np.prod([s.stop - s.start for s in sl])  # noqa: E731
+    ok &= check("dilation grows the window", vol(wide) > vol(tight), f"{vol(tight)} -> {vol(wide)} voxels")
+    edge = block_slices((0, 0, 0), (8, 8, 8), (64, 64, 64), 4)
+    ok &= check("dilation clips at the volume edge", all(s.start >= 0 for s in edge))
+
+    print("\nverdict gating")
+
+    def arm(ratio=1.4, bind=0.98, energy=0.9, rank_ratio=0.9, null=0.98, conf=0.9):
+        return {
+            "homogeneity": {"ratio": ratio, "true_site_sd": 0.01},
+            "binding": {
+                "primary": {
+                    "identity_frac_median": bind,
+                    "margin_median": 0.4,
+                    "confident_frac_median": conf,
+                    "identity_frac_confident": bind,
+                },
+                "same_site_null": null,
+                "chance": 0.02,
+            },
+            "energy_profile": {"0": energy, "1": 0.95},
+            "effective_rank": 40.0,
+            "effective_rank_ratio": rank_ratio,
+            "n_live_channels": 48,
+        }
+
+    v = build_verdict({"arms": {"full": arm(), "linear": arm()}}, 3.0, 0.9)
+    ok &= check("clean run passes", v["ok"] and not v["blocked"])
+
+    # Each gate must BLOCK interpretation rather than let a headline number through.
+    for name, bad in (
+        ("tight window", arm(energy=0.04)),
+        ("degenerate matching", arm(rank_ratio=0.1)),
+        ("noisy instrument", arm(null=0.35)),
+    ):
+        v = build_verdict({"arms": {"full": bad, "linear": arm()}}, 3.0, 0.9)
+        ok &= check(f"{name} blocks the verdict", v["blocked"] and not v["ok"])
+        ok &= check(f"  ...and reports no A1 conclusion", any("No conclusion about A1" in ln for ln in v["lines"]))
+
+    v = build_verdict({"arms": {"full": arm(), "linear": arm(bind=0.4)}}, 3.0, 0.9)
+    ok &= check("broken linear control blocks", v["blocked"] and any("CONTROL FAILED" in ln for ln in v["lines"]))
+
+    v = build_verdict({"arms": {"full": arm(bind=0.5), "linear": arm()}}, 3.0, 0.9)
+    ok &= check("low binding fails once gates pass", not v["ok"] and not v["blocked"])
+    v = build_verdict({"arms": {"full": arm(ratio=12.0), "linear": arm()}}, 3.0, 0.9)
+    ok &= check("inhomogeneous spectra fail once gates pass", not v["ok"] and not v["blocked"])
+
+    v = build_verdict({"arms": {"full": arm(), "frozen_norm": arm()}, "freeze_was_noop": True}, 3.0, 0.9)
+    ok &= check("freeze no-op is called out", any("NO-OP" in ln for ln in v["lines"]))
 
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
     return 0 if ok else 1
