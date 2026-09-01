@@ -25,6 +25,7 @@ from probe.site_sharing import (
     reduce_arm,
     scale_shape,
     shape_deviation,
+    window_fits,
 )
 
 M, D = 96, 12  # block voxels, latent channels
@@ -200,28 +201,59 @@ def main():
     )
 
     print("\nblock geometry")
-    for latent, out in (((16, 16, 16), (64, 64, 64)), ((5, 7, 5), (91, 109, 91)), ((3, 3, 3), (8, 8, 8))):
-        covered = np.zeros(out, dtype=int)
-        empty = False
-        for i in range(latent[0]):
-            for j in range(latent[1]):
-                for k in range(latent[2]):
-                    sl = block_slices((i, j, k), latent, out)
-                    covered[sl] += 1
-                    empty |= any(s.stop <= s.start for s in sl)
-        ok &= check(
-            f"blocks tile {latent} -> {out} exactly",
-            not empty and covered.min() == 1 and covered.max() == 1,
-            f"min={covered.min()} max={covered.max()} empty={empty}",
-        )
+    grids = (((16, 16, 16), (64, 64, 64)), ((5, 7, 5), (91, 109, 91)), ((3, 3, 3), (8, 8, 8)))
+    # Checked per axis, since block_slices treats the axes independently and a 3D count
+    # multiplies the per-axis overlaps together (2 per axis reads as 8).
+    for latent, out in grids:
+        for a in range(3):
+            cov = np.zeros(out[a], dtype=int)
+            spans = []
+            for u in range(latent[a]):
+                site = [0, 0, 0]
+                site[a] = u
+                sl = block_slices(tuple(site), latent, out)[a]
+                if sl.start < 0 or sl.stop > out[a]:
+                    continue  # dropped by window_fits; not measured, so not required to cover
+                cov[sl] += 1
+                spans.append(sl)
+            exact = out[a] % latent[a] == 0
+            lo, hi = spans[0].start, spans[-1].stop
+            inner = cov[lo:hi]
+            # A fixed window size is what binding needs; at fractional stride ceil(stride)
+            # exceeds the stride, so adjacent windows share a voxel at the seam. GAPS would
+            # be a real defect — part of the volume belonging to no site — so those are what
+            # is asserted against; an overlapping seam is the accepted cost of uniformity.
+            good = inner.min() >= 1 and inner.max() <= (1 if exact else 2)
+            ok &= check(
+                f"{latent}->{out} axis {a}: {'tiles exactly' if exact else 'no gaps, seams overlap <= 1'}",
+                good,
+                f"min={inner.min()} max={inner.max()} over [{lo},{hi})",
+            )
 
-    print("\nblock dilation widens the window")
+    # THE invariant the binding comparison depends on: every measured window is the same
+    # size, so J_u and J_u0 can be matched column-by-column. A run crashed here when an
+    # edge-clipped window came back 6400 rows against another site's 8000.
+    print("\nevery fitting window has identical size (binding compares them directly)")
+    for latent, out in grids:
+        for dil in (0, 1, 2):
+            sizes = set()
+            for i in range(latent[0]):
+                for j in range(latent[1]):
+                    for k in range(latent[2]):
+                        if window_fits((i, j, k), latent, out, dil):
+                            sl = block_slices((i, j, k), latent, out, dil)
+                            sizes.add(tuple(s.stop - s.start for s in sl))
+            ok &= check(f"{latent}->{out} at +{dil}: one window size", len(sizes) <= 1, f"sizes={sorted(sizes)}")
+
+    print("\nblock dilation and edge handling")
+    vol = lambda sl: int(np.prod([s.stop - s.start for s in sl]))  # noqa: E731
     tight = block_slices((2, 2, 2), (8, 8, 8), (64, 64, 64), 0)
     wide = block_slices((2, 2, 2), (8, 8, 8), (64, 64, 64), 2)
-    vol = lambda sl: np.prod([s.stop - s.start for s in sl])  # noqa: E731
     ok &= check("dilation grows the window", vol(wide) > vol(tight), f"{vol(tight)} -> {vol(wide)} voxels")
-    edge = block_slices((0, 0, 0), (8, 8, 8), (64, 64, 64), 4)
-    ok &= check("dilation clips at the volume edge", all(s.start >= 0 for s in edge))
+    ok &= check("a corner site does not fit when dilated", not window_fits((0, 0, 0), (8, 8, 8), (64, 64, 64), 2))
+    ok &= check("an interior site does", window_fits((4, 4, 4), (8, 8, 8), (64, 64, 64), 2))
+    clipped = block_slices((0, 0, 0), (8, 8, 8), (64, 64, 64), 4, clip=True)
+    ok &= check("clip=True stays inside the volume", all(s.start >= 0 and s.stop <= 64 for s in clipped))
 
     print("\nverdict gating")
 

@@ -306,25 +306,48 @@ def binding_stats(assignment: np.ndarray, matched_cos: np.ndarray, margin: np.nd
 # --------------------------------------------------------------------------------------
 
 
-def block_slices(site, latent_shape, out_shape, dilation: int = 0) -> tuple[slice, slice, slice]:
-    """The output block ``B(u)`` for latent site ``u``, from the decoder's stride.
+def block_slices(site, latent_shape, out_shape, dilation: int = 0, clip: bool = False):
+    """The output window around latent site ``u``, from the decoder's stride.
 
     ``dilation`` widens the window by that many *latent cells* on each side.  A window
     tighter than the decoder's reach captures only the periphery of the response, and the
     Jacobian columns it yields are then dominated by whatever weak, position-idiosyncratic
     signal lands there — which reads as a binding failure that is really a windowing one.
     Read ``energy_profile`` before choosing a value.
+
+    The window has a **fixed size for every site**, which the binding comparison requires:
+    ``J_u`` and ``J_u0`` are matched column-by-column, so a site whose window ran off the
+    volume edge and came back short cannot be compared with one that did not.  Anchoring the
+    size instead of the edges also keeps the blocks tiling exactly at integer stride, while
+    a fractional stride gets uniform windows with at most a voxel of slack between them.
+
+    The returned slices may therefore fall outside the volume; ``window_fits`` says whether
+    they do.  ``clip=True`` trims them to the volume for the energy and rank profiles, which
+    only reduce to scalars and so tolerate a short window at a boundary site.
     """
     sl = []
     for a in range(3):
         stride = out_shape[a] / latent_shape[a]
-        pad = dilation * stride
-        # floor on both edges, so that at dilation 0 the blocks tile Omega exactly even when
-        # the stride is fractional (ceil on the upper edge overlaps adjacent blocks by one).
-        lo = int(np.floor(site[a] * stride - pad))
-        hi = max(int(np.floor((site[a] + 1) * stride + pad)), lo + 1)
-        sl.append(slice(max(lo, 0), min(hi, out_shape[a])))
+        pad = int(round(dilation * stride))
+        # ceil, not round: a window narrower than the stride leaves gaps between adjacent
+        # sites, so part of the volume would belong to no site at all. Erring wide costs a
+        # voxel of overlap at the seams, which is harmless for a measurement neighbourhood.
+        size = max(int(np.ceil(stride)), 1) + 2 * pad
+        lo = int(round(site[a] * stride)) - pad
+        hi = lo + size
+        if clip:
+            lo, hi = max(lo, 0), min(hi, out_shape[a])
+            hi = max(hi, lo + 1)
+        sl.append(slice(lo, hi))
     return tuple(sl)
+
+
+def window_fits(site, latent_shape, out_shape, dilation: int = 0) -> bool:
+    """Does the fixed-size window at ``site`` lie wholly inside the volume?"""
+    return all(
+        s.start >= 0 and s.stop <= out_shape[a]
+        for a, s in enumerate(block_slices(site, latent_shape, out_shape, dilation))
+    )
 
 
 def block_jacobian(fn, z, site, block, n_channels: int, profile_dilations: dict, chunk: int = 16):
@@ -388,11 +411,21 @@ def effective_rank_from_gram(G: np.ndarray) -> float:
     return float(np.exp(-(nz * np.log(nz)).sum()))
 
 
-def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: float, gen, tissue):
-    """Latent sites to measure: anatomical strata, brain foreground, or the whole grid."""
+def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: float, gen, tissue, out_shape, dilation):
+    """Latent sites to measure: anatomical strata, brain foreground, or the whole grid.
+
+    Sites whose window would run off the volume are dropped, because a short window is not
+    comparable with a full one.  That also matches the theory: a latent cell whose response
+    is cut by the volume edge is in the boundary shell where per-position claims do not hold
+    anyway.  Returns ``(sites, strata, n_dropped)``.
+    """
     import torch
 
     from probe.jacobian_spread import stratify_sites, tissue_fractions
+
+    def keep_fitting(cands):
+        good = [s for s in cands if window_fits(s, latent_shape, out_shape, dilation)]
+        return good, len(cands) - len(good)
 
     if mode == "strata":
         if tissue is None:
@@ -407,7 +440,10 @@ def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: fl
                 if s not in strata:
                     strata[s] = name
                     sites.append(s)
-        return sites, strata
+        sites, dropped = keep_fitting(sites)
+        strata = {s: strata[s] for s in sites}
+        _require_sites(sites, dilation)
+        return sites, strata, dropped
 
     if mode == "all":
         keep = torch.ones(latent_shape, dtype=torch.bool)
@@ -416,9 +452,24 @@ def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: fl
         if not bool(keep.any()):
             raise SystemExit(f"No latent site has brain fraction >= {thresh}; lower --fg-thresh.")
     idx = torch.nonzero(keep, as_tuple=False)
-    if idx.shape[0] > max_sites:
-        idx = idx[torch.randperm(idx.shape[0], generator=gen)[:max_sites]]
-    return [tuple(int(v) for v in row) for row in idx], {}
+    cands = [tuple(int(v) for v in row) for row in idx]
+    # Filter BEFORE subsampling, or a boundary-heavy draw silently returns far fewer sites
+    # than --max-sites asked for.
+    cands, dropped = keep_fitting(cands)
+    _require_sites(cands, dilation)
+    if len(cands) > max_sites:
+        sel = torch.randperm(len(cands), generator=gen)[:max_sites]
+        cands = [cands[int(i)] for i in sel]
+    return cands, {}, dropped
+
+
+def _require_sites(sites, dilation):
+    if not sites:
+        raise SystemExit(
+            f"No latent site has a full window at --block-dilation {dilation}: it is wider than the "
+            "volume, so every site is clipped by the edge. Use a smaller dilation. (That the widest "
+            "window does not fit is itself the finding — the decoder's reach exceeds the volume.)"
+        )
 
 
 # --------------------------------------------------------------------------------------
@@ -431,7 +482,10 @@ def measure_arm(fn, z, sites, latent_shape, out_shape, n_channels, chunk, dilati
     out = {}
     for site in sites:
         blk = block_slices(site, latent_shape, out_shape, dilation)
-        prof_slices = {d: block_slices(site, latent_shape, out_shape, d) for d in profile_dilations}
+        # Profiles reduce to scalars (a sum, and a d x d Gram), so a clipped window at a
+        # boundary site is fine there — unlike the measured window, which is compared
+        # column-by-column against another site's and must be the same size.
+        prof_slices = {d: block_slices(site, latent_shape, out_shape, d, clip=True) for d in profile_dilations}
         J, prof, rank_prof = block_jacobian(fn, z, site, blk, n_channels, prof_slices, chunk=chunk)
         out[site] = {"J": J, "energy_profile": prof, "rank_profile": rank_prof}
     return out
@@ -903,9 +957,19 @@ def main():
         out_shape = tuple(make_fn(decoder, subjects[0]["style"])(subjects[0]["z"]).shape[2:])
 
     brain_frac = F.adaptive_avg_pool3d((subjects[0]["mask"] > 0).float()[None, None], latent_shape)[0, 0]
-    sites, strata = select_sites(
-        brain_frac, latent_shape, cli.sites, cli.max_sites, cli.fg_thresh, gen, subjects[0]["tissue"]
+    sites, strata, n_dropped = select_sites(
+        brain_frac,
+        latent_shape,
+        cli.sites,
+        cli.max_sites,
+        cli.fg_thresh,
+        gen,
+        subjects[0]["tissue"],
+        out_shape,
+        cli.block_dilation,
     )
+    win = block_slices(sites[0], latent_shape, out_shape, cli.block_dilation)
+    win_shape = tuple(s.stop - s.start for s in win)
 
     report.update(
         {
@@ -915,9 +979,14 @@ def main():
             "n_sites": len(sites),
             "sites": [list(s) for s in sites],
             "site_strata": {str(list(k)): v for k, v in strata.items()},
+            "window_shape": list(win_shape),
+            "n_sites_dropped_at_edge": n_dropped,
         }
     )
     print(f"\n  latent grid {latent_shape} x {n_channels}ch  ->  output {out_shape}")
+    print(f"  window {win_shape} = {int(np.prod(win_shape))} voxels at dilation +{cli.block_dilation}")
+    if n_dropped:
+        print(f"  dropped {n_dropped} site(s) whose window ran off the volume edge (not comparable)")
     print(f"  measuring {len(sites)} site(s) x {cli.n_subjects} subject(s) x {n_channels} JVP tangents per arm")
 
     # ---------------- measure -------------------------------------------------------
