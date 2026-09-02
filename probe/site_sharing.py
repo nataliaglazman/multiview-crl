@@ -713,17 +713,30 @@ def build_verdict(report: dict, tol: float, bind_tol: float, energy_tol: float =
     lines, ok, blocked = [], True, False
 
     # --- gate 1: did the window capture the response? ---------------------------------
-    captured = full.get("energy_profile", {}).get("0", float("nan"))
+    # Read the energy at the dilation actually MEASURED at, not at 0: once --block-dilation
+    # exists, the dilation-0 entry is a diagnostic about the decoder's reach, not a statement
+    # about the window these statistics were computed in.
+    measured_d = str(report.get("cli", {}).get("block_dilation", 0))
+    captured = full.get("energy_profile", {}).get(measured_d, float("nan"))
     if np.isfinite(captured) and captured < energy_tol:
         blocked = True
         prof = ", ".join(f"+{d}:{v:.2f}" for d, v in sorted(full["energy_profile"].items(), key=lambda kv: int(kv[0])))
         lines.append(
-            f"WINDOW TOO TIGHT: only {captured:.1%} of |dx/dz(u)|^2 lands in B(u), so J_u is a "
-            f"peripheral tail of the response and neither statistic is about the mechanism. "
-            f"This is itself an A4 centre-dominance failure worth reporting — confirm rho with "
-            f"probe.jacobian_spread. Energy by dilation: {prof}. Re-run at a dilation reaching "
-            f">= {energy_tol:.0%}."
+            f"WINDOW TOO TIGHT: at dilation +{measured_d} only {captured:.1%} of |dx/dz(u)|^2 lands in the "
+            f"window, so J_u is a peripheral tail of the response and neither statistic is about the "
+            f"mechanism. Energy by dilation: {prof}. Re-run at a dilation reaching >= {energy_tol:.0%}."
         )
+    elif np.isfinite(captured):
+        prof = ", ".join(f"+{d}:{v:.2f}" for d, v in sorted(full["energy_profile"].items(), key=lambda kv: int(kv[0])))
+        lines.append(f"window ok: +{measured_d} captures {captured:.1%} of the response. By dilation: {prof}")
+        # Localisation is reported whether or not the window is wide enough, because a
+        # dilation-0 share this low is an A4 centre-dominance finding in its own right.
+        at_zero = full["energy_profile"].get("0", float("nan"))
+        if np.isfinite(at_zero) and at_zero < energy_tol:
+            lines.append(
+                f"  but B(u) itself holds only {at_zero:.1%}: the decoder's reach far exceeds its own block, "
+                "which is an A4 centre-dominance failure worth reporting. Confirm rho with probe.jacobian_spread."
+            )
 
     # --- gate 2: is the assignment decisive? ------------------------------------------
     prim = full["binding"]["primary"]
@@ -748,11 +761,13 @@ def build_verdict(report: dict, tol: float, bind_tol: float, energy_tol: float =
                 + "  ".join(f"+{d}:{v:.1f}" for d, v in sorted(rp.items(), key=lambda kv: int(kv[0])))
             )
             if best < 0.5 * full["n_live_channels"]:
+                n_null = full["n_live_channels"] - best
                 lines.append(
-                    f"  It does not recover by dilation +{widest} (best {best:.1f}/{full['n_live_channels']}), so "
-                    "this is the LOCAL DECODING MAP being rank-deficient, not a window too small. z(u) is not "
-                    "recoverable from the response around u at any window, and per-position identifiability "
-                    "fails for this decoder regardless of Lambda."
+                    f"  It saturates at {best:.1f}/{full['n_live_channels']} by dilation +{widest} rather than "
+                    f"recovering, so this is the LOCAL DECODING MAP being rank-deficient, not a window too small. "
+                    f"About {n_null:.0f} of the {full['n_live_channels']} channel directions at a site leave the "
+                    "image essentially unchanged, so z(u) is not recoverable from the response around u at any "
+                    "window and per-position identifiability fails for this decoder regardless of Lambda."
                 )
             else:
                 lines.append(

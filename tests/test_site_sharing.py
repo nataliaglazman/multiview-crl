@@ -277,8 +277,19 @@ def main():
             "n_live_channels": 48,
         }
 
-    v = build_verdict({"arms": {"full": arm(), "linear": arm()}}, 3.0, 0.9)
+    v = build_verdict({"cli": {"block_dilation": 0}, "arms": {"full": arm(), "linear": arm()}}, 3.0, 0.9)
     ok &= check("clean run passes", v["ok"] and not v["blocked"])
+
+    # The energy gate must read the dilation actually measured at. A run measured at +2 with
+    # 68% captured is fine even though B(u) itself holds 3% — reading the "0" entry made the
+    # gate fire on a window that was in fact wide enough.
+    wide = arm()
+    wide["energy_profile"] = {"0": 0.034, "2": 0.675}
+    v = build_verdict({"cli": {"block_dilation": 2}, "arms": {"full": wide, "linear": arm()}}, 3.0, 0.9)
+    ok &= check("energy gate reads the measured dilation", not v["blocked"])
+    ok &= check("  ...and still reports poor localisation", any("B(u) itself holds" in ln for ln in v["lines"]))
+    v = build_verdict({"cli": {"block_dilation": 0}, "arms": {"full": wide, "linear": arm()}}, 3.0, 0.9)
+    ok &= check("same profile measured at +0 does block", v["blocked"])
 
     # Each gate must BLOCK interpretation rather than let a headline number through.
     for name, bad in (
@@ -286,32 +297,34 @@ def main():
         ("degenerate matching", arm(rank_ratio=0.1)),
         ("noisy instrument", arm(null=0.35)),
     ):
-        v = build_verdict({"arms": {"full": bad, "linear": arm()}}, 3.0, 0.9)
+        v = build_verdict({"cli": {"block_dilation": 0}, "arms": {"full": bad, "linear": arm()}}, 3.0, 0.9)
         ok &= check(f"{name} blocks the verdict", v["blocked"] and not v["ok"])
         ok &= check(f"  ...and reports no A1 conclusion", any("No conclusion about A1" in ln for ln in v["lines"]))
 
-    v = build_verdict({"arms": {"full": arm(), "linear": arm(bind=0.4)}}, 3.0, 0.9)
+    v = build_verdict({"cli": {"block_dilation": 0}, "arms": {"full": arm(), "linear": arm(bind=0.4)}}, 3.0, 0.9)
     ok &= check("broken linear control blocks", v["blocked"] and any("CONTROL FAILED" in ln for ln in v["lines"]))
 
     # A rank that stays flat as the window grows is architectural; one that recovers is a
     # windowing artefact. The verdict must distinguish them — they need different responses.
     flat = arm(rank_ratio=0.05)
     flat["rank_profile"] = {"0": 2.2, "1": 2.3, "2": 2.4, "4": 2.4}
-    v = build_verdict({"arms": {"full": flat, "linear": arm()}}, 3.0, 0.9)
+    v = build_verdict({"cli": {"block_dilation": 0}, "arms": {"full": flat, "linear": arm()}}, 3.0, 0.9)
     ok &= check("flat rank profile reads as architectural", any("LOCAL DECODING MAP" in ln for ln in v["lines"]))
 
     recovers = arm(rank_ratio=0.05)
     recovers["rank_profile"] = {"0": 2.2, "1": 12.0, "2": 31.0, "4": 40.0}
-    v = build_verdict({"arms": {"full": recovers, "linear": arm()}}, 3.0, 0.9)
+    v = build_verdict({"cli": {"block_dilation": 0}, "arms": {"full": recovers, "linear": arm()}}, 3.0, 0.9)
     ok &= check("recovering rank profile reads as windowing", any("windowing artefact" in ln for ln in v["lines"]))
     ok &= check("  ...and does not claim architecture", not any("LOCAL DECODING MAP" in ln for ln in v["lines"]))
 
-    v = build_verdict({"arms": {"full": arm(bind=0.5), "linear": arm()}}, 3.0, 0.9)
+    v = build_verdict({"cli": {"block_dilation": 0}, "arms": {"full": arm(bind=0.5), "linear": arm()}}, 3.0, 0.9)
     ok &= check("low binding fails once gates pass", not v["ok"] and not v["blocked"])
-    v = build_verdict({"arms": {"full": arm(ratio=12.0), "linear": arm()}}, 3.0, 0.9)
+    v = build_verdict({"cli": {"block_dilation": 0}, "arms": {"full": arm(ratio=12.0), "linear": arm()}}, 3.0, 0.9)
     ok &= check("inhomogeneous spectra fail once gates pass", not v["ok"] and not v["blocked"])
 
-    v = build_verdict({"arms": {"full": arm(), "frozen_norm": arm()}, "freeze_was_noop": True}, 3.0, 0.9)
+    v = build_verdict(
+        {"cli": {"block_dilation": 0}, "arms": {"full": arm(), "frozen_norm": arm()}, "freeze_was_noop": True}, 3.0, 0.9
+    )
     ok &= check("freeze no-op is called out", any("NO-OP" in ln for ln in v["lines"]))
 
     print("\n" + ("ALL PASS" if ok else "FAILURES ABOVE"))
