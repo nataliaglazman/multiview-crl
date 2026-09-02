@@ -639,7 +639,8 @@ def reduce_arm(
             )
             same_site.append(st["identity_frac"])
 
-    eff_rank = float(np.median([effective_rank(per_subject[s][u]["J"][:, live]) for s in range(n_subj) for u in sites]))
+    _ranks = np.array([effective_rank(per_subject[s][u]["J"][:, live]) for s in range(n_subj) for u in sites])
+    eff_rank, eff_rank_rv = float(np.median(_ranks[:, 0])), float(np.median(_ranks[:, 1]))
     profile_keys = sorted(per_subject[0][sites[0]]["energy_profile"])
     return {
         "n_live_channels": n_live,
