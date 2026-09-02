@@ -260,20 +260,33 @@ def match_columns(Ja: np.ndarray, Jb: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return assignment, chosen, chosen - masked.max(axis=1)
 
 
-def effective_rank(J: np.ndarray) -> float:
-    """Entropy effective rank of ``J``'s singular spectrum — the matching's real difficulty.
+def _entropy_rank(weights: np.ndarray) -> float:
+    tot = weights.sum()
+    if tot <= 0:
+        return 0.0
+    p = weights / tot
+    nz = p[p > 0]
+    return float(np.exp(-(nz * np.log(nz)).sum()))
+
+
+def effective_rank(J: np.ndarray) -> tuple[float, float]:
+    """Entropy effective rank of ``J``'s spectrum, in BOTH conventions.
+
+    Returns ``(energy, roy_vetterli)``.
 
     ``d`` columns living in an effectively ``r``-dimensional space cannot be told apart by
     any assignment when ``r << d``; this is the number to read next to a low margin.
+
+    The two conventions differ by whether the singular values are squared before the
+    entropy, and on a heavy-tailed spectrum they differ by 2-5x — enough to look like a
+    contradiction between scripts when it is only a definition. ``energy`` weights by
+    squared singular values, so it describes where the *response* lives and is the stricter
+    of the two. ``roy_vetterli`` matches ``eval/run_dci_compare._effective_rank``, which is
+    what the content-rank numbers elsewhere in this project report, so quote that one when
+    comparing against them.
     """
     s = np.linalg.svd(np.asarray(J, dtype=np.float64), compute_uv=False)
-    p = s**2
-    tot = p.sum()
-    if tot <= 0:
-        return 0.0
-    p = p / tot
-    nz = p[p > 0]
-    return float(np.exp(-(nz * np.log(nz)).sum()))
+    return _entropy_rank(s**2), _entropy_rank(s)
 
 
 def _unit_columns(J: np.ndarray) -> np.ndarray:
@@ -395,20 +408,18 @@ def block_jacobian(fn, z, site, block, n_channels: int, profile_dilations: dict,
     rank_prof = {}
     for d, blocks in rows.items():
         Jt = np.concatenate(blocks, axis=0).astype(np.float64)  # (channels, window)
-        rank_prof[d] = effective_rank_from_gram(Jt @ Jt.T)
+        rank_prof[d] = effective_rank_from_gram(Jt @ Jt.T)  # (energy, roy_vetterli)
     return J, prof, rank_prof
 
 
-def effective_rank_from_gram(G: np.ndarray) -> float:
-    """Entropy effective rank from a ``d x d`` Gram, avoiding an SVD of the tall Jacobian."""
-    w = np.linalg.eigvalsh(np.asarray(G, dtype=np.float64))
-    w = np.clip(w, 0.0, None)
-    tot = w.sum()
-    if tot <= 0:
-        return 0.0
-    p = w / tot
-    nz = p[p > 0]
-    return float(np.exp(-(nz * np.log(nz)).sum()))
+def effective_rank_from_gram(G: np.ndarray) -> tuple[float, float]:
+    """``effective_rank`` from a ``d x d`` Gram, avoiding an SVD of the tall Jacobian.
+
+    Gram eigenvalues are the squared singular values, so the energy convention reads them
+    directly and Roy-Vetterli takes their square root first.
+    """
+    w = np.clip(np.linalg.eigvalsh(np.asarray(G, dtype=np.float64)), 0.0, None)
+    return _entropy_rank(w), _entropy_rank(np.sqrt(w))
 
 
 def select_sites(brain_frac, latent_shape, mode: str, max_sites: int, thresh: float, gen, tissue, out_shape, dilation):
@@ -637,9 +648,16 @@ def reduce_arm(
         # d columns in an effectively r-dimensional space cannot be told apart when r << d.
         "effective_rank": eff_rank,
         "effective_rank_ratio": eff_rank / n_live,
+        # Roy-Vetterli, matching eval/run_dci_compare._effective_rank — quote this one when
+        # comparing against the content-rank numbers reported elsewhere in the project.
+        "effective_rank_rv": eff_rank_rv,
         "spectrum_keep": keep,
         "rank_profile": {
-            str(d): float(np.median([per_subject[s][u]["rank_profile"][d] for s in range(n_subj) for u in sites]))
+            str(d): float(np.median([per_subject[s][u]["rank_profile"][d][0] for s in range(n_subj) for u in sites]))
+            for d in profile_keys
+        },
+        "rank_profile_rv": {
+            str(d): float(np.median([per_subject[s][u]["rank_profile"][d][1] for s in range(n_subj) for u in sites]))
             for d in profile_keys
         },
         "homogeneity": {
@@ -1071,8 +1089,9 @@ def main():
         p = b["primary"]
         print(f"\n  live channels           {red['n_live_channels']}/{n_channels}")
         print(
-            f"  rank at the window      {red['effective_rank']:.1f}/{red['n_live_channels']}  "
-            f"({red['effective_rank_ratio']:.0%} — below ~50% the matching is degenerate)"
+            f"  rank at the window      {red['effective_rank']:.1f}/{red['n_live_channels']} energy-weighted  "
+            f"({red['effective_rank_ratio']:.0%} — below ~50% the matching is degenerate);  "
+            f"{red['effective_rank_rv']:.1f} Roy-Vetterli (comparable to content_rank_pca)"
         )
         print(
             "  captured energy         "
@@ -1081,7 +1100,11 @@ def main():
         print(
             "  effective rank          "
             + "  ".join(f"+{d}:{v:.1f}" for d, v in sorted(red["rank_profile"].items(), key=lambda kv: int(kv[0])))
-            + f"   /{red['n_live_channels']} channels"
+            + f"   /{red['n_live_channels']} energy-weighted"
+        )
+        print(
+            "    same, Roy-Vetterli    "
+            + "  ".join(f"+{d}:{v:.1f}" for d, v in sorted(red["rank_profile_rv"].items(), key=lambda kv: int(kv[0])))
         )
         print(
             f"                          (by dilation; measured at +{cli.block_dilation}. A rank that stays "

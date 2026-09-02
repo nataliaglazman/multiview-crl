@@ -55,7 +55,11 @@ def make_arm(n_subj, sites, rng, *, noise=0.02, perm_after=None, cond_after=None
                 J = J[:, p]
             if cond_after is not None and ui >= cond_after:
                 J = J * np.linspace(1.0, cond_after_strength(cond_after), D)[None, :]
-            out[u] = {"J": J, "energy_profile": {0: 0.9, 1: 0.95}, "rank_profile": {0: float(D), 1: float(D)}}
+            out[u] = {
+                "J": J,
+                "energy_profile": {0: 0.9, 1: 0.95},
+                "rank_profile": {0: (float(D), float(D)), 1: (float(D), float(D))},
+            }
         per_subject.append(out)
     return per_subject
 
@@ -108,10 +112,17 @@ def main():
     low = rng.normal(size=(M, 3)) @ rng.normal(size=(3, D))
     _, _, m_deg = match_columns(low, low + 1e-3 * rng.normal(size=(M, D)))
     ok &= check("degenerate margin collapses", np.median(m_deg) < 0.05, f"median margin={np.median(m_deg):.4f}")
-    ok &= check(
-        "effective rank sees the true dimension", effective_rank(low) < 4.0, f"eff_rank={effective_rank(low):.2f}"
-    )
-    ok &= check("effective rank ~ d for full-rank J", effective_rank(A) > D * 0.6, f"eff_rank={effective_rank(A):.2f}")
+    e_low, rv_low = effective_rank(low)
+    e_full, rv_full = effective_rank(A)
+    ok &= check("effective rank sees the true dimension", e_low < 4.0, f"energy={e_low:.2f} rv={rv_low:.2f}")
+    ok &= check("effective rank ~ d for full-rank J", e_full > D * 0.6, f"energy={e_full:.2f} rv={rv_full:.2f}")
+    # The two conventions differ by whether singular values are squared before the entropy.
+    # On a heavy tail that is a 2-5x gap, which reads as a contradiction between scripts if
+    # only one number is reported. Roy-Vetterli is always the larger of the two.
+    ok &= check("Roy-Vetterli >= energy-weighted", rv_low >= e_low and rv_full >= e_full)
+    decay = np.exp(-0.45 * np.arange(48))
+    e_d, rv_d = effective_rank(np.diag(decay))
+    ok &= check("and materially larger on a decaying spectrum", rv_d > 1.5 * e_d, f"energy={e_d:.2f} rv={rv_d:.2f}")
 
     print("\nnull: one shared mechanism, scale varying 4 orders of magnitude across sites")
     sites = sites_list(24)
@@ -185,7 +196,7 @@ def main():
             tail = 1e-3 * np.exp(-np.arange(D - 2)) * site_tail[u] * np.exp(rng.normal(0, 0.02, D - 2))
             J = (U * np.concatenate([head, tail])) @ V.T
             J *= 10.0 ** rng.uniform(-1, 1)
-            out[u] = {"J": J, "energy_profile": {0: 0.9}, "rank_profile": {0: 2.0}}
+            out[u] = {"J": J, "energy_profile": {0: 0.9}, "rank_profile": {0: (2.0, 4.0)}}
         deficient.append(out)
     untrunc = reduce_arm(deficient, r_sites, 1e-3, 2, spectrum_energy=1.0)["homogeneity"]["ratio"]
     trunc = reduce_arm(deficient, r_sites, 1e-3, 2, spectrum_energy=0.99)
