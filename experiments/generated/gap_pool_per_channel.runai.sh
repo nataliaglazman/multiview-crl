@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/synthetic_causal.yaml
+# Auto-generated from: experiments/gap_pool_per_channel.yaml
 # Generated at: 2026-09-03T15:44:25Z
 # Git SHA: d804979
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -13,12 +13,19 @@ export PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl ;
 python -m training.main_multimodal
     --batch-size 128
     --bt-corr-ema 0.99
-    --bt-gap-lambda 0.013
+    --bt-gap-lambda 0.005
+    --bt-gap-pool per_channel
+    --bt-gap-pool-coarsen 2
+    --bt-gap-pool-entropy 0.75
+    --bt-gap-pool-entropy-coeff 1.0
+    --bt-gap-std-coeff 0
     --bt-gap-weight 1
+    --bt-lambda 0.005
+    --bt-normalize-terms
     --bt-patch-weight 1
-    --bt-sim-coeff 0.5
+    --bt-sim-coeff 0.0114
     --bt-sim-normalize
-    --bt-std-coeff 10
+    --bt-std-coeff 0.227
     --channels-last
     --checkpoint-steps 1000
     --content-dim 128
@@ -53,8 +60,8 @@ python -m training.main_multimodal
     --resume-training
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
-    --scale-contrastive-loss 1
-    --scale-recon-loss 1
+    --scale-contrastive-loss 100
+    --scale-recon-loss 16
     --scale-style-contrastive-loss 0.0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
@@ -67,14 +74,13 @@ python -m training.main_multimodal
     --synthetic-causal-edge-prob 0.5
     --synthetic-causal-graph random
     --synthetic-clean-content
-    --synthetic-identifiable-ventricle
     --synthetic-mode pseudo_mri
     --synthetic-normalize fixed_reference
     --synthetic-num-test 400
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-causal-clean-content-commitment-ema-bt-0013
+    --model-id gap-pool-per-channel-075
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -92,7 +98,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-clean-content-commitment-ema-bt-0013 \
+runai training standard submit gap-pool-per-channel-075 \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \

@@ -53,13 +53,14 @@
 # synthetic_causal.yaml verbatim rather than inheriting through it. Keep them in sync.
 
 _base_: synthetic_defaults
-tag: gap-pool-per-channel
+tag: gap-pool-per-channel-075
 
 # ── the lines under test ─────────────────────────────────────────────────────────────
 bt_gap_pool: per_channel
 bt_gap_pool_coarsen: 2 # 8^3 -> 4^3 = 64 regions. Measured BETTER than the full grid.
-bt_gap_pool_entropy: 0.5
+bt_gap_pool_entropy: 0.75
 bt_gap_pool_entropy_coeff: 1.0
+bt_gap_std_coeff: 0
 
 # ── mirrored from synthetic_causal.yaml, unchanged ───────────────────────────────────
 contrastive_loss_type: barlow_twins
@@ -69,18 +70,20 @@ patch_center_mode: position
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1
-bt_gap_lambda: 0.013
 bt_patch_weight: 1
 bt_sim_normalize: true
-bt_sim_coeff: 0.5
-bt_std_coeff: 10
+bt_normalize_terms: true
+bt_lambda: 0.005
+bt_gap_lambda: 0.005
+bt_sim_coeff: 0.0114     # 0.5 / 44
+bt_std_coeff: 0.227      # 10 / 44
 bt_corr_ema: 0.99
+scale_recon_loss: 16
 single_count_commitment: true
-scale_contrastive_loss: 1
-scale_recon_loss: 1
+scale_contrastive_loss: 100
 grad_clip_norm: 100
 batch_size: 128
-synthetic_identifiable_ventricle: true
+# synthetic_identifiable_ventricle: true
 content_size: 44
 synthetic_normalize: fixed_reference
 synthetic_causal: true

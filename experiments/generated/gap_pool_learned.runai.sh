@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/synthetic_causal.yaml
+# Auto-generated from: experiments/gap_pool_learned.yaml
 # Generated at: 2026-09-03T15:44:25Z
 # Git SHA: d804979
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -14,6 +14,10 @@ python -m training.main_multimodal
     --batch-size 128
     --bt-corr-ema 0.99
     --bt-gap-lambda 0.013
+    --bt-gap-pool learned
+    --bt-gap-pool-entropy 0.5
+    --bt-gap-pool-entropy-coeff 1.0
+    --bt-gap-pool-temp 1.0
     --bt-gap-weight 1
     --bt-patch-weight 1
     --bt-sim-coeff 0.5
@@ -74,7 +78,7 @@ python -m training.main_multimodal
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-causal-clean-content-commitment-ema-bt-0013
+    --model-id gap-pool-learned
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -92,7 +96,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-clean-content-commitment-ema-bt-0013 \
+runai training standard submit gap-pool-learned \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
