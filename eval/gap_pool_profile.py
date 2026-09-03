@@ -50,10 +50,24 @@ positions carrying non-trivial variance and is the one to read for such a run. I
 rows disagree, the concentration is background structure, not focal anatomy, and the answer
 is NO.
 
+FOR A RUN THAT ALREADY HAS THE FLAG ON
+--------------------------------------
+Everything above decides whether to ENABLE ``--bt-gap-pool``. ``--from-checkpoint`` (on by
+default) answers the other question — where did this run's pooling actually end up? It
+reads the trained weights back out of the checkpoint, which nothing else can: the pooler is
+attached to the model at training-setup time rather than by ``VQVAE.__init__``, so a
+rebuilt model has no ``_bt_gap_pools`` and ``load_state_dict`` drops those entries. It
+reports concentration (in GROUP units too, since coarsening floors the position-space
+entropy at ``log(region size)`` whatever the pooling learned, which makes
+``--bt-gap-pool-entropy`` a weaker floor than its value suggests), the entropy hinge's state
+and what it would take to fire, what the learned weighting buys against its OWN permutation
+null, and which factor's spatial profile it aligns with.
+
 Usage
 -----
     python -m eval.gap_pool_profile --run-dir results/synthetic/RUN
     python -m eval.gap_pool_profile --run-dir results/synthetic/RUN --checkpoint-name vqvae_model.pt
+    python -m eval.gap_pool_profile --run-dir results/synthetic/RUN --no-from-checkpoint
 """
 
 from __future__ import annotations
@@ -95,14 +109,20 @@ def pooled_metrics(hz, weights, batch_size, draws, seed=0):
     """
     from training.losses import barlow_twins_loss
 
-    w = torch.as_tensor(weights, dtype=torch.float32)
+    w = torch.as_tensor(np.asarray(weights), dtype=torch.float32)
     rng = np.random.RandomState(seed)
     n, d = hz.shape[1], hz.shape[2]
     b = min(batch_size, n)
     stds, corrs, on_diags = [], [], []
     for _ in range(draws):
         idx = rng.choice(n, size=b, replace=False)
-        pooled = torch.matmul(hz[:, idx], w)  # (2, b, C)
+        # (C, P) weights are the per_channel pooler's: each channel contracts over its own
+        # positions, which matmul cannot express. Same contraction GapPositionPool.forward
+        # uses, so these numbers stay comparable with the shared-weight rows above.
+        if w.dim() == 2:
+            pooled = torch.einsum("vbcp,cp->vbc", hz[:, idx], w)
+        else:
+            pooled = torch.matmul(hz[:, idx], w)  # (2, b, C)
         stds.append(float(pooled.std(dim=1, unbiased=False).mean()))
         x, y = pooled[0], pooled[1]
         x = (x - x.mean(0)) / (x.std(0, unbiased=False) + 1e-8)
@@ -327,6 +347,128 @@ def pooled_factor_r2(hz, gt, weights, fit_idx, eval_idx, alpha=1.0):
     return float(np.mean(out))
 
 
+def load_trained_pool(run_dir, checkpoint_name, args_, level, n_positions, grid):
+    """Rebuild this run's GapPositionPool and load the weights it actually LEARNED.
+
+    Everything else in this script asks "should you turn --bt-gap-pool on". This asks the
+    other question: for a run that already has it on, where did the pooling END UP?
+
+    Necessary because ``load_model_from_run_dir`` cannot answer it. The pooler is attached
+    to the model in ``main_multimodal`` at training-setup time, not by ``VQVAE.__init__``,
+    so a rebuilt model has no ``_bt_gap_pools`` and the checkpoint's entries land in
+    ``load_state_dict``'s ``unexpected_keys`` and are dropped (with the ARCHITECTURE
+    MISMATCH warning that eval already prints). We therefore read the raw checkpoint.
+
+    Returns ``(pool, None)`` or ``(None, reason)``.
+    """
+    from models.vqvae import GapPositionPool
+
+    mode = getattr(args_, "bt_gap_pool", "mean")
+    if mode == "mean":
+        return None, "this run used --bt-gap-pool mean (the plain uniform average)"
+    if mode == "variance":
+        return None, "this run used --bt-gap-pool variance, which has NO learned state — the profile is recomputed from the batch, and the 'variance' rows above already report it"  # fmt: skip
+
+    ckpt_path = checkpoint_name if os.path.dirname(checkpoint_name) else os.path.join(run_dir, checkpoint_name)
+    if not os.path.exists(ckpt_path):
+        return None, f"checkpoint not found: {ckpt_path}"
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    sd = ckpt.get("encoders", ckpt)
+    prefix = f"_bt_gap_pools.L{level}."
+    sub = {k.removeprefix("module.").removeprefix(prefix): v for k, v in sd.items() if prefix in k}
+    if not sub:
+        return None, (
+            f"the checkpoint has no '{prefix}' entries. settings.json says --bt-gap-pool "
+            f"{mode}, so this checkpoint predates the pooler being added to the run"
+        )
+
+    pool = GapPositionPool(
+        n_positions=n_positions,
+        mode=mode,
+        temperature=getattr(args_, "bt_gap_pool_temp", 1.0),
+        entropy_floor=getattr(args_, "bt_gap_pool_entropy", 0.5),
+        ema=getattr(args_, "bt_gap_pool_ema", 0.9),
+        n_channels=int(getattr(args_, "vqvae_hidden_channels", 0) or 0),
+        grid=grid,
+        coarsen=int(getattr(args_, "bt_gap_pool_coarsen", 1) or 1),
+        init_std=float(getattr(args_, "bt_gap_pool_init_std", 0.0) or 0.0),
+    )
+    incompat = pool.load_state_dict(sub, strict=False)
+    if incompat.missing_keys:
+        return None, f"pooler rebuilt from settings.json does not match the checkpoint: missing {incompat.missing_keys}"  # fmt: skip
+    pool.eval()
+    return pool, None
+
+
+def group_stats(a, pool):
+    """Concentration in GROUP units, which is the only unit --bt-gap-pool-coarsen learns in.
+
+    Under ``--bt-gap-pool-coarsen k`` the positions inside a coarse region share one logit
+    and the module divides by the region's size, so the weights are UNIFORM WITHIN A REGION
+    by construction. That floor is baked into every position-space entropy readout: on an
+    8^3 grid at coarsen 2 a profile fully collapsed onto one region still reads
+    ``H = log(8) = 2.08`` nats, i.e. ``H/log(P) = 0.33``, without having learned anything at
+    that scale. So the position-space number overstates how spread the pooling is, and
+    ``--bt-gap-pool-entropy`` — which is applied in position space — is a weaker floor than
+    its value suggests. Both corrections are reported here.
+
+    Returns None when the run is not coarsened, where the two units coincide.
+    """
+    group_of = getattr(pool, "group_of", None)
+    if group_of is None or pool.coarsen <= 1:
+        return None
+    g = group_of.numpy()
+    n_groups = int(pool.n_groups)
+    a2 = np.atleast_2d(np.asarray(a, dtype=np.float64))
+    # Group mass = the summed weight of its positions.
+    m = np.stack([np.bincount(g, weights=row, minlength=n_groups) for row in a2])
+    m = m / (m.sum(axis=1, keepdims=True) + 1e-12)
+    h = -(m * np.log(m + 1e-12)).sum(axis=1)
+    return {
+        "n_groups": n_groups,
+        "eff_groups": float(np.exp(h).mean()),
+        "entropy": float((h / np.log(n_groups)).mean()),
+        "group_mass": m.mean(axis=0),
+        # H_position - H_group: the part of the position-space entropy that is forced by the
+        # coarsening rather than learned. Constant while every region keeps all its members.
+        "padding_nats": float((-(a2 * np.log(a2 + 1e-12)).sum(axis=1) - h).mean()),
+    }
+
+
+def centred_cosine(p, q):
+    """Cosine between two position profiles, centred at uniform.
+
+    Centred for the reason ``profile_overlap`` documents: non-negative profiles summing to 1
+    have a high raw cosine whatever they do, so only the deviation from uniform carries the
+    answer to "the same places?".
+    """
+    p = np.asarray(p, dtype=np.float64).ravel()
+    q = np.asarray(q, dtype=np.float64).ravel()
+    if p.size != q.size:
+        return float("nan")
+    p = p / (p.sum() + 1e-12) - 1.0 / p.size
+    q = q / (q.sum() + 1e-12) - 1.0 / q.size
+    d = np.linalg.norm(p) * np.linalg.norm(q)
+    return float(p @ q / d) if d > 1e-12 else float("nan")
+
+
+def shuffled_null(a, rng, draws):
+    """Permutations of the learned profile: same concentration, no position information.
+
+    The same null the variance mode is judged against, and for the same reason — ANY
+    concentrated weighting raises the pooled feature's across-subject std simply by
+    averaging fewer things, so "it beat the uniform mean" is not evidence on its own. Each
+    channel of a ``(C, P)`` profile is permuted independently, which preserves per-channel
+    concentration AND the channel-to-channel spread while destroying where each one points.
+    """
+    a = np.asarray(a, dtype=np.float64)
+    for _ in range(draws):
+        if a.ndim == 2:
+            yield np.stack([rng.permutation(row) for row in a])
+        else:
+            yield rng.permutation(a)
+
+
 def main():
     p = argparse.ArgumentParser(description="Is the GAP term's uniform pooling diluting focal subject signal?")
     p.add_argument("--run-dir", required=True)
@@ -346,6 +488,17 @@ def main():
         "profile. That compresses exactly the localisation this script exists to measure. Pass "
         "'match' only for the aggregate/variance sections, and do not read the per-factor table "
         "from a 'match' run.",
+    )
+    p.add_argument(
+        "--from-checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Read back the pooling weights this run actually LEARNED and report where they "
+        "ended up: concentration (in group units too, when coarsened), the entropy hinge's "
+        "state, what the weighting buys against its own permutation null, and which factor's "
+        "spatial profile it aligns with. Every other section here decides whether to turn "
+        "--bt-gap-pool ON; this one is the only one that describes a run that already has it "
+        "on. Silently skipped for 'mean' and 'variance', which have no learned state.",
     )
     p.add_argument("--batch-size", type=int, default=0, help="Training batch size (0 = read from the run's settings).")
     p.add_argument("--draws", type=int, default=16, help="Random batches to average the pooled metrics over.")
@@ -633,6 +786,129 @@ def main():
         print(f"  only one factor is localised ({loc[0][0]}); a shared weighting would serve it alone.")
     else:
         print("  no factor is meaningfully localised — every one is readable everywhere.")
+
+    # ── what the TRAINED pooler learned ──────────────────────────────────────────────
+    # Everything above decides whether to switch --bt-gap-pool on. For a run that already
+    # has it on, none of it says where the pooling ENDED UP — the training curves report
+    # concentration but never position, and the profile this script builds is the variance
+    # one, not the learned one.
+    if cli.from_checkpoint:
+        print("\n--- what the TRAINED pooler learned (read back from the checkpoint) ---------")
+        pool, why = load_trained_pool(cli.run_dir, cli.checkpoint_name, args_, cli.level, P, tuple(grid))
+        if pool is None:
+            print(f"  skipped: {why}")
+        else:
+            with torch.no_grad():
+                a_lrn = pool.weights(hz, None).detach().cpu().numpy()
+            per_ch = a_lrn.ndim == 2
+            a_mean = a_lrn.mean(axis=0) if per_ch else a_lrn
+            diag = pool.diagnostics(torch.as_tensor(a_lrn))
+            n_pos = a_lrn.shape[-1]
+            h_nats = -(a_lrn * np.log(a_lrn + 1e-12)).sum(axis=-1)
+            floor_nats = pool.entropy_floor * np.log(n_pos)
+            hinge = float(np.maximum(floor_nats - h_nats, 0.0).mean())
+
+            print(f"  mode {pool.mode}   coarsen {pool.coarsen}   temperature {pool.temperature:g}   ", end="")
+            print(f"logits {tuple(pool.logits.shape) if hasattr(pool, 'logits') else '-'}")
+            if fg_masked:
+                print("  NOTE: this run used --patch-foreground-mask, so training softmaxed over the")
+                print("  KEPT positions only while this reads the full grid. Positions training never")
+                print("  saw sit at their init logit and dilute the numbers below slightly — expect a")
+                print("  little MORE entropy here than the Contrastive/gap_pool_entropy_L* curve shows.")
+
+            print("\n  concentration (matches the training curves):")
+            print(f"    gap_pool_entropy     {diag['gap_pool_entropy']:.4f}   (1.0 = uniform, 0.0 = one position)")
+            print(f"    gap_pool_eff_pos     {diag['gap_pool_eff_pos']:.1f}  of {n_pos}")
+            print(f"    gap_pool_max_weight  {diag['gap_pool_max_weight']:.2f}   (1.0 = uniform, {n_pos} = collapsed)")
+            if per_ch:
+                _ag = diag.get("gap_pool_channel_agreement", float("nan"))
+                print(f"    channel_agreement    {_ag:.4f}   (0.0 = channels read different places, 1.0 = identical)")  # fmt: skip
+                print(f"    coverage             {diag.get('gap_pool_coverage', float('nan')):.4f}   (grid the channels collectively touch)")  # fmt: skip
+
+            gs = group_stats(a_lrn, pool)
+            if gs is not None:
+                # The correction this run's position-space numbers need. See group_stats.
+                print(f"\n  in GROUP units (coarsen {pool.coarsen} — the scale this pooler actually learns in):")
+                print(f"    eff_groups           {gs['eff_groups']:.1f}  of {gs['n_groups']}")
+                print(f"    group entropy        {gs['entropy']:.4f}   (1.0 = spread over every region)")
+                print(f"    forced by coarsening {gs['padding_nats']:.3f} nats of the {float(np.mean(h_nats)):.3f} above")  # fmt: skip
+                _fl_g = (floor_nats - gs["padding_nats"]) / np.log(gs["n_groups"])
+                print(f"    => --bt-gap-pool-entropy {pool.entropy_floor:g} is a {max(_fl_g, 0.0):.2f} floor in these units.")  # fmt: skip
+                if _fl_g <= 0:
+                    print("       That is BELOW ZERO: the coarsening alone keeps entropy above the floor,")
+                    print("       so this hinge can never fire at any concentration. It is not a")
+                    print("       constraint on this run — raise it or drop --bt-gap-pool-coarsen.")
+
+            print(f"\n  entropy hinge (Contrastive/gap_pool_entropy_loss_L{cli.level}):")
+            print(f"    value now            {hinge:.4f}")
+            print(f"    fires below          eff_pos {n_pos ** pool.entropy_floor:.1f}   (H < {floor_nats:.3f} nats)")
+            print(f"    you are at           eff_pos {diag['gap_pool_eff_pos']:.1f}   (H = {float(np.mean(h_nats)):.3f} nats)")  # fmt: skip
+            if hinge <= 0:
+                print("    => 0 is the RESTING state, not a fault: relu(floor - H) costs nothing until")
+                print("       concentration reaches the floor. A flat-zero curve is NOT evidence that")
+                print("       the pooling stayed uniform — read gap_pool_entropy for that.")
+            else:
+                print("    => ACTIVE. Watch that it is not losing: once the softmax saturates the")
+                print("       penalty's own gradient vanishes (see GapPositionPool.entropy_penalty)")
+                print("       and full collapse is an absorbing state a higher coefficient cannot undo.")
+
+            # Does the learned weighting buy anything, against the SAME null the variance
+            # mode is held to? Concentration alone raises feat_std, so uniform is the wrong
+            # baseline and only the permutation answers it.
+            w_lrn = a_lrn
+            if per_ch:
+                ci = list(getattr(args_, "content_indices", [[]])[0])
+                if len(ci) == C and max(ci, default=-1) < a_lrn.shape[0]:
+                    w_lrn = a_lrn[ci]
+                elif a_lrn.shape[0] != C:
+                    w_lrn = None
+                    print(f"\n  (pooled metrics skipped: the pooler covers {a_lrn.shape[0]} encoder channels")
+                    print(f"   and this level's content block is {C} wide, and settings.json's")
+                    print("   content_indices do not resolve the mapping.)")
+            if w_lrn is not None:
+                m_lrn = pooled_metrics(hz, w_lrn, B, cli.draws, seed=cli.seed)
+                rng_l = np.random.RandomState(cli.seed + 7717)
+                null_l = [
+                    pooled_metrics(hz, wp, B, cli.draws, seed=cli.seed + 1 + k)["xview_corr"]
+                    for k, wp in enumerate(shuffled_null(w_lrn, rng_l, cli.null_draws))
+                ]
+                nl_m, nl_s = float(np.mean(null_l)), float(np.std(null_l))
+                z_lrn = (m_lrn["xview_corr"] - nl_m) / max(nl_s, 1e-6)
+                print("\n  what the LEARNED weighting buys (same permutation null as above):")
+                print(f"    cross-view corr  uniform {res['uniform']['xview_corr']:.4f} -> learned {m_lrn['xview_corr']:.4f}")  # fmt: skip
+                print(f"      concentration alone (shuffled - uniform):  {nl_m - res['uniform']['xview_corr']:+.4f}")
+                print(f"      POSITION information (learned - shuffled): {m_lrn['xview_corr'] - nl_m:+.4f}   z = {z_lrn:.1f}")  # fmt: skip
+                print(f"    feat_std  uniform {res['uniform']['feat_std']:.5f} -> learned {m_lrn['feat_std']:.5f}")
+                print(f"    on_diag   uniform {res['uniform']['on_diag']:.4f} -> learned {m_lrn['on_diag']:.4f}")
+                if z_lrn < -3.0:
+                    print("    => SIGNIFICANTLY WORSE than its own permutation. The pooling has learned")
+                    print("       to concentrate on positions ANTI-aligned with shared content — the same")
+                    print("       failure the variance mode shows when it tracks per-view style.")
+                elif z_lrn > 3.0:
+                    print("    => the learned positions carry real information beyond their concentration.")
+                else:
+                    print("    => indistinguishable from a random reassignment of the same weights: the")
+                    print("       concentration is real, WHERE it went is not doing any work.")
+
+            # And WHERE did it go? Cosines against the profiles this script already built.
+            print("\n  what it locked onto (centred cosine of the learned profile against):")
+            print(f"    across-subject variance profile  {centred_cosine(a_mean, a_var):+.3f}")
+            print(f"    aggregate factor-recovery profile {centred_cosine(a_mean, a_fac):+.3f}")
+            for nm, prof, _s, _r, _e, _sg in scored:
+                line = f"    {nm:30s} {centred_cosine(a_mean, prof):+.3f}"
+                if per_ch:
+                    # A channel still at its uniform init has no deviation to compare, so its
+                    # cosine is nan rather than 0 — drop those instead of letting them decide
+                    # the max.
+                    cands = [(c, i) for i, row in enumerate(a_lrn) if np.isfinite(c := centred_cosine(row, prof))]
+                    if cands:
+                        best = max(cands)
+                        line += f"   best single channel: {best[0]:+.3f} (ch {best[1]})"
+                print(line)
+            print("    +1.0 = the pooling put its mass exactly where that factor lives, 0 = unrelated,")
+            print("    negative = it moved mass AWAY from it. With mutually orthogonal factor profiles")
+            print("    a shared weighting cannot score high on more than one — that is the finding this")
+            print("    flag was rejected on, and per_channel exists so different channels need not agree.")
 
     # ── combined verdict ─────────────────────────────────────────────────────────────
     var_wins = z > 3.0 and gain_vs_null >= cli.min_effect

@@ -863,5 +863,69 @@ try:
 except ValueError as e:
     check("channel-count mismatch raises", "projection head" in str(e))
 
+print("\n22. checkpoint readback: the entropy floor is weaker than its value under coarsening")
+# gap_pool_profile's --from-checkpoint section reports concentration in GROUP units as well
+# as position units, because under coarsening the two differ by a constant nobody learns:
+# positions inside a region share a logit and the module divides by the region size, so the
+# weights are uniform within a region BY CONSTRUCTION. On 8^3 at coarsen 2 that floors the
+# position-space entropy at log(8) = 0.33 of log(512) even when the pooling has collapsed
+# onto ONE region -- and --bt-gap-pool-entropy is applied in position space, so its stated
+# value overstates the constraint. These are the numbers that translation rests on.
+from types import SimpleNamespace  # noqa: E402
+
+from eval.gap_pool_profile import centred_cosine, group_stats, load_trained_pool, pooled_metrics  # noqa: E402
+
+_P, _G, _K, _C = 512, 64, 8, 4
+_pc = GapPositionPool(_P, mode="per_channel", n_channels=_C, grid=(8, 8, 8), coarsen=2)
+check("no coarsening => no group correction to make", group_stats(np.full(_P, 1.0 / _P), GapPositionPool(_P, mode="learned")) is None)  # fmt: skip
+
+_a_unif = _pc.weights(torch.randn(2, 3, _C, _P), None).detach().numpy()
+_gu = group_stats(_a_unif, _pc)
+check("zero-init: every region carries equal mass", _gu["n_groups"] == _G and abs(_gu["eff_groups"] - _G) < 1e-3, f"eff_groups={_gu['eff_groups']:.3f}")  # fmt: skip
+check("zero-init: group entropy is 1.0", abs(_gu["entropy"] - 1.0) < 1e-6, f"{_gu['entropy']:.6f}")
+check("padding is log(region size) regardless of profile", abs(_gu["padding_nats"] - math.log(_K)) < 1e-6, f"{_gu['padding_nats']:.6f}")  # fmt: skip
+
+# Collapse every channel onto region 0. This is the state the entropy floor exists to
+# prevent, and the point is that position-space entropy does NOT read 0 there.
+with torch.no_grad():
+    _pc.logits.zero_()
+    _pc.logits[:, 0] = 40.0
+_a_col = _pc.weights(torch.randn(2, 3, _C, _P), None).detach().numpy()
+_gc = group_stats(_a_col, _pc)
+_h_col = float(-(_a_col * np.log(_a_col + 1e-12)).sum(axis=-1).mean())
+check("fully collapsed: 1 effective region", abs(_gc["eff_groups"] - 1.0) < 1e-3, f"eff_groups={_gc['eff_groups']:.4f}")  # fmt: skip
+check("fully collapsed: position entropy still reads 0.33, NOT 0", abs(_h_col / math.log(_P) - math.log(_K) / math.log(_P)) < 1e-5, f"H/logP={_h_col / math.log(_P):.4f}")  # fmt: skip
+# The translation the readout prints: floor 0.5 in position space is 0.25 in group space.
+_fl_g = (0.5 * math.log(_P) - _gc["padding_nats"]) / math.log(_G)
+check("--bt-gap-pool-entropy 0.5 is a 0.25 floor in group units", abs(_fl_g - 0.25) < 1e-6, f"{_fl_g:.6f}")
+# ...and at coarsen 4 the same floor is unreachable at ANY concentration, which is what
+# --bt-gap-pool-coarsen's help means by the floor ceasing to be load-bearing.
+check("coarsen 4 on 8^3 puts the floor out of reach entirely", (0.5 * math.log(_P) - math.log(4**3)) < 0, f"{(0.5 * math.log(_P) - math.log(4**3)):.4f} nats of headroom")  # fmt: skip
+
+print("\n23. checkpoint readback: profile comparison and the (C,P) metric path")
+_p1 = np.zeros(_P)
+_p1[:8] = 1 / 8
+_p2 = np.zeros(_P)
+_p2[8:16] = 1 / 8
+check("a profile matches itself", abs(centred_cosine(_p1, _p1) - 1.0) < 1e-9)
+check("disjoint peaks are anti-aligned, not orthogonal", centred_cosine(_p1, _p2) < 0, f"{centred_cosine(_p1, _p2):+.4f}")  # fmt: skip
+check("uniform has no direction to compare", not np.isfinite(centred_cosine(np.full(_P, 1.0 / _P), _p1)))
+check("mismatched lengths do not silently broadcast", not np.isfinite(centred_cosine(_p1, np.ones(7))))
+
+# The einsum branch must agree with the matmul branch when every channel shares one profile.
+_hz = planted(n_subj=64, n_ch=6, grid=64, n_focal=4)
+_w1 = np.full(64, 1.0 / 64)
+_m1 = pooled_metrics(_hz, _w1, 32, 3, seed=0)
+_m2 = pooled_metrics(_hz, np.tile(_w1, (6, 1)), 32, 3, seed=0)
+check("(C,P) weights reproduce the shared-weight result when the rows agree", abs(_m1["xview_corr"] - _m2["xview_corr"]) < 1e-6 and abs(_m1["feat_std"] - _m2["feat_std"]) < 1e-6, f"{_m1['xview_corr']:.6f} vs {_m2['xview_corr']:.6f}")  # fmt: skip
+
+# Modes with no learned state are reported, not crashed on: 'variance' recomputes its
+# profile from the batch every step, so there is nothing in the checkpoint to read back.
+for _mode, _needle in (("mean", "uniform average"), ("variance", "NO learned state")):
+    _pool, _why = load_trained_pool(".", "nonexistent.pt", SimpleNamespace(bt_gap_pool=_mode), 0, _P, (8, 8, 8))
+    check(f"--bt-gap-pool {_mode} is explained, not read back", _pool is None and _needle in _why, _why[:60])
+_pool, _why = load_trained_pool(".", "nonexistent.pt", SimpleNamespace(bt_gap_pool="learned"), 0, _P, (8, 8, 8))
+check("a missing checkpoint is reported by path", _pool is None and "checkpoint not found" in _why, _why[:60])
+
 print("\n" + ("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}"))
 raise SystemExit(1 if FAILS else 0)
