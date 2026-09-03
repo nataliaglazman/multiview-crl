@@ -782,6 +782,35 @@ def train_step(
             if hasattr(level_loss, "_contrastive_diag"):
                 for _dk, _dv in level_loss._contrastive_diag.items():
                     _diag[f"Contrastive/{_dk}_L{level_idx}"] = _dv
+
+            # ── Encoder-output block amplitude ──────────────────────────────────
+            # Norm/*_gamma_* reads SplitGroupNorm, which z-scores content and style
+            # independently, so it cannot show how the blocks compare BEFORE that
+            # normalisation — and that is where they diverge. Measured by hand at the
+            # encoder output on two runs differing only in the contrastive term:
+            # content RMS 1.88 -> 29.5 while style went 1.23 -> 0.30, so style shrank
+            # 4x as content grew 16x. Whether style falls BECAUSE content rises (both
+            # blocks dividing by one per-voxel denominator under --norm-type layer) or
+            # is merely untrained decides whether --split-encoder-norm is the fix, and
+            # only these two series separate those.
+            #
+            # hz_level is that pre-SplitGroupNorm output (encoder_pools is built from
+            # enc_in_*_pool), patch-pooled: pooling shrinks the fluctuation component
+            # and keeps the DC, so these read smaller than the unpooled RMS. The trend
+            # and the content/style ratio are what the comparison needs. Computed here
+            # rather than stashed on the module because DataParallel replicates the
+            # module and discards attributes set on the replicas.
+            _rms_ci = level_content_indices[0] if level_content_indices else None
+            if _rms_ci is not None and 0 < len(_rms_ci) < hz_level.shape[2]:
+                with torch.no_grad():
+                    _is_c = torch.zeros(hz_level.shape[2], dtype=torch.bool, device=hz_level.device)
+                    _is_c[_rms_ci] = True
+                    _c_rms = float(hz_level[:, :, _is_c].float().pow(2).mean().sqrt())
+                    _s_rms = float(hz_level[:, :, ~_is_c].float().pow(2).mean().sqrt())
+                _diag[f"Encoder/content_rms_L{level_idx}"] = _c_rms
+                _diag[f"Encoder/style_rms_L{level_idx}"] = _s_rms
+                _diag[f"Encoder/content_style_rms_ratio_L{level_idx}"] = _c_rms / max(_s_rms, 1e-12)
+
             _lvl_weights = getattr(args, "contrastive_level_weights", None)
             _lvl_w = _lvl_weights[level_idx] if _lvl_weights and level_idx < len(_lvl_weights) else 1.0
             total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss * _lvl_w
