@@ -1129,6 +1129,7 @@ def build_vqvae(args) -> vqvae.VQVAE:
         final_recon_norm=not getattr(args, "no_final_recon_norm", False),
         norm_type=getattr(args, "norm_type", "group"),
         decoder_norm_type=getattr(args, "decoder_norm_type", None),
+        split_encoder_norm=getattr(args, "split_encoder_norm", False),
         latent_mask=getattr(args, "latent_mask", False),
         latent_mask_thresh=getattr(args, "latent_mask_thresh", 0.0),
     )
