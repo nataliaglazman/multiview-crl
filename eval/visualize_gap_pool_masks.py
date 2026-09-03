@@ -5,6 +5,10 @@ Example:
     python -m eval.visualize_gap_pool_masks \
         --checkpoint results/synthetic/RUN/vqvae_model.pt --grid 8 8 8
 
+Compare against a saved activation tensor (for example ``(views, samples, C, P)``):
+    python -m eval.visualize_gap_pool_masks --checkpoint ... --grid 8 8 8 \
+        --activations activations.pt --activation-key hz
+
 The script reads the saved pooler logits directly, so it does not need to build the
 model or dataset.  Each row shows the mask's probability mass marginalised along
 one anatomical axis; colours are comparable across all displayed channels.
@@ -34,6 +38,52 @@ def _pool_logits(state: dict[str, torch.Tensor], level: int) -> torch.Tensor:
     return matches[0][1].float()
 
 
+def _activation_distribution(
+    path: Path, key: str | None, channels: int, grid: tuple[int, int, int], coarsen: int
+) -> np.ndarray:
+    """Return a per-channel spatial distribution from saved encoder activations.
+
+    Accepted layouts are ``(C, P)``, ``(N, C, P)``, ``(V, N, C, P)``,
+    ``(C, D, H, W)``, or ``(N, C, D, H, W)``.  Leading sample/view axes are
+    averaged after taking absolute values.  Fine-grid tensors are block-averaged
+    to the pooler's coarse grid before being normalised per channel.
+    """
+    loaded = np.load(path) if path.suffix == ".npz" else torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(loaded, np.lib.npyio.NpzFile):
+        if key is None:
+            if len(loaded.files) != 1:
+                raise ValueError(f"{path} contains {loaded.files}; pass --activation-key.")
+            value = loaded[loaded.files[0]]
+        else:
+            value = loaded[key]
+    elif isinstance(loaded, dict):
+        if key is None:
+            raise ValueError("Activation .pt is a dictionary; pass --activation-key.")
+        value = loaded[key]
+    else:
+        value = loaded
+    x = np.asarray(value.detach().cpu() if torch.is_tensor(value) else value, dtype=np.float64)
+    fine_p = int(np.prod(grid))
+    coarse_grid = tuple(axis // coarsen for axis in grid)
+    coarse_p = int(np.prod(coarse_grid))
+    if x.ndim >= 2 and x.shape[-1] in (fine_p, coarse_p):
+        if x.shape[-2] != channels:
+            raise ValueError(f"Expected {channels} channels at axis -2, got activation shape {x.shape}.")
+        x = np.abs(x).mean(axis=tuple(range(x.ndim - 2)))  # (C, P)
+        x = x.reshape(channels, *(grid if x.shape[-1] == fine_p else coarse_grid))
+    elif x.ndim in (4, 5) and x.shape[-4] == channels:
+        x = np.abs(x).mean(axis=0) if x.ndim == 5 else np.abs(x)
+        if tuple(x.shape[1:]) != grid:
+            raise ValueError(f"Expected activation spatial grid {grid}, got {tuple(x.shape[1:])}.")
+    else:
+        raise ValueError("Unsupported activation shape. See --help for accepted layouts.")
+    if tuple(x.shape[1:]) == grid and coarsen > 1:
+        d, h, w = coarse_grid
+        x = x.reshape(channels, d, coarsen, h, coarsen, w, coarsen).mean(axis=(2, 4, 6))
+    x = x.reshape(channels, coarse_p)
+    return x / np.maximum(x.sum(axis=1, keepdims=True), 1e-12)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Visualise per-channel Barlow-Twins GAP-pool masks.")
     p.add_argument("--checkpoint", required=True, type=Path)
@@ -42,6 +92,8 @@ def main() -> None:
     p.add_argument("--channels", type=int, nargs="*", help="Channels to show (default: most concentrated).")
     p.add_argument("--n-channels", type=int, default=12, help="Number to show when --channels is omitted.")
     p.add_argument("--output", type=Path, help="Output PNG (default: beside checkpoint).")
+    p.add_argument("--activations", type=Path, help="Optional .pt or .npz tensor of encoder activations to compare.")
+    p.add_argument("--activation-key", help="Key for a dictionary/.npz activation file.")
     args = p.parse_args()
 
     logits = _pool_logits(_state_dict(args.checkpoint), args.level)
@@ -60,6 +112,10 @@ def main() -> None:
 
     coarse_grid = tuple(axis // coarsen for axis in grid)
     masks = torch.softmax(logits, dim=1).reshape(logits.shape[0], *coarse_grid).numpy()
+    activations = None
+    if args.activations:
+        activations = _activation_distribution(args.activations, args.activation_key, len(masks), grid, coarsen)
+        activations = activations.reshape(len(masks), *coarse_grid)
     entropy = -(masks.reshape(len(masks), -1) * np.log(masks.reshape(len(masks), -1) + 1e-12)).sum(1)
     if args.channels is None:
         channels = np.argsort(entropy)[: args.n_channels].tolist()  # most concentrated first
@@ -69,14 +125,21 @@ def main() -> None:
         raise ValueError(f"Choose channel indices in [0, {len(masks) - 1}].")
 
     # These are marginals, so their maximum can exceed any individual voxel mass.
-    vmax = max(float(masks[channel].sum(axis=axis).max()) for channel in channels for axis in range(3))
-    fig, axes = plt.subplots(len(channels), 3, figsize=(9, 2.7 * len(channels)), squeeze=False)
+    panels = 6 if activations is not None else 3
+    fig, axes = plt.subplots(len(channels), panels, figsize=(3 * panels, 2.7 * len(channels)), squeeze=False)
     labels = ("sum over D", "sum over H", "sum over W")
     for row, channel in enumerate(channels):
         mask = masks[channel]
         marginals = (mask.sum(0), mask.sum(1), mask.sum(2))
         peak = np.unravel_index(mask.argmax(), mask.shape)
-        for col, (image, label) in enumerate(zip(marginals, labels)):
+        if activations is not None:
+            act = activations[channel]
+            marginals = tuple(pair for axis in range(3) for pair in (mask.sum(axis), act.sum(axis)))
+            titles = tuple(item for label in labels for item in (f"mask: {label}", f"activation: {label}"))
+        else:
+            titles = labels
+        vmax = max(float(image.max()) for image in marginals)
+        for col, (image, label) in enumerate(zip(marginals, titles)):
             axes[row, col].imshow(image, origin="lower", cmap="magma", vmin=0, vmax=vmax)
             axes[row, col].set_title(label if row == 0 else "")
             axes[row, col].set_xticks([])
