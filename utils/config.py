@@ -243,6 +243,15 @@ def parse_args() -> argparse.ArgumentParser:
     parser.add_argument("--train-steps", type=int, default=300001)
     parser.add_argument("--log-steps", type=int, default=1)
     parser.add_argument("--checkpoint-steps", type=int, default=200)
+    parser.add_argument(
+        "--checkpoint-keep-every",
+        type=int,
+        default=0,
+        help="Also keep a dated copy 'vqvae_model_<step>.pt' every N steps, leaving a training "
+        "trajectory rather than only the final and best states. Needed to ask when during "
+        "training something changed (see probe/site_sharing.py --checkpoints). 0 disables. "
+        "Must be a multiple of --checkpoint-steps to fire, since saving happens on that cadence.",
+    )
     parser.add_argument("--evaluate", action="store_true")
     parser.add_argument("--val-size", default=25000, type=int)
     parser.add_argument("--test-size", default=25000, type=int)
@@ -281,6 +290,22 @@ def parse_args() -> argparse.ArgumentParser:
         "reconstruction: per-voxel channel norm forces every decoder feature voxel to unit scale, "
         "but emitting '0 here, bright there' is a magnitude task, so a layer-normed decoder "
         "reconstructs far worse (measured: brain MSE 0.35 vs 0.003).",
+    )
+    parser.add_argument(
+        "--split-encoder-norm",
+        action="store_true",
+        default=False,
+        help="Normalize content and style channels independently INSIDE the encoder (its final "
+        "norm and the residual stack) at masked levels, instead of jointly across all "
+        "hidden_channels. Under '--norm-type layer' the joint norm gives both blocks one "
+        "per-voxel denominator, making them compete: as content activations grow, dividing by "
+        "that shared statistic pushes style toward zero. Measured between a recon-only and a "
+        "contrastive run on the same config: content RMS 1.9 -> 29.5 while style went 1.2 -> "
+        "0.30, i.e. style was suppressed rather than merely outgrown. SplitGroupNorm already "
+        "isolates the two blocks after the encoder; this applies the same treatment inside it, "
+        "where the competition actually happens. Requires --mask-mode fixed (content must be "
+        "the first k channels). Changes the architecture, so checkpoints are not compatible "
+        "across values.",
     )
     parser.add_argument(
         "--latent-mask",
@@ -1498,6 +1523,16 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             "--mask-mode learned_split is incompatible with --inject-style-to-decoder "
             "because the number of style channels varies per forward pass. "
             "Use --mask-mode fixed or learned instead."
+        )
+
+    # --split-encoder-norm slices the first content_channels off each normalized tensor,
+    # so the content block has to actually BE those channels. Only "fixed" guarantees it;
+    # the top-k modes pick content channels by logit order, which changes per forward pass.
+    if getattr(args, "split_encoder_norm", False) and getattr(args, "mask_mode", "onthefly") != "fixed":
+        raise ValueError(
+            "--split-encoder-norm requires --mask-mode fixed. It normalizes the first "
+            "content_channels channels separately from the rest, which is only the content "
+            f"block under 'fixed' (got {getattr(args, 'mask_mode', 'onthefly')!r})."
         )
 
     # --separate-style-codebooks needs a style codebook to separate.

@@ -1,18 +1,17 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-08-27T14:48:57Z
-# Git SHA: d848347
+# Auto-generated from: experiments/ablation_moco_patches.yaml
+# Generated at: 2026-08-27T22:00:13Z
+# Git SHA: 9f15471
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthseg-baseline
+#SBATCH --job-name=ablation-moco-patches
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthseg-baseline-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=ablation-moco-patches-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --time=24:00:00
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -57,27 +56,35 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 4 \
+    --batch-size 2 \
     --cache-dataset \
     --cache-dir /scratch/users/k24058220/cache/multiview \
     --channels-last \
     --checkpoint-steps 500 \
     --content-dim 128 \
     --content-style-levels 0 \
+    --contrastive-level-weights 3.0 0.5 0.5 \
     --contrastive-loss-type infonce \
+    --crop-margin 12 \
     --cross-view-negs-only \
-    --dataroot /data/natalia/ADNI_synthseg \
+    --dataroot /scratch/users/k24058220 \
     --dataset-name ADNI_stripped_masks \
     --deterministic \
+    --gradient-accumulation-steps 4 \
     --gradient-checkpointing \
     --image-spacing 1.0 \
-    --labels-path /data/natalia/ADNI_synthseg/labels.csv \
+    --inject-style-to-decoder \
+    --labels-path /users/k24058220/multiview-crl/labels_cleaned_3class.csv \
     --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
-    --moco-queue-size 0 \
+    --masks-dir /scratch/users/k24058220/ADNI_stripped_masks \
+    --moco-momentum 0.99 \
+    --moco-queue-size 8192 \
     --pass-full-to-next-level \
-    --recon-loss-start-step 0 \
+    --patch-contrastive \
+    --patch-grid 4 5 4 \
+    --recon-loss-start-step 2000 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
@@ -88,16 +95,19 @@ fi
     --select-by-gated-score \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
+    --skip-recon-ratio 0.5 \
     --spatial-size 150 180 150 \
-    --model-id synthseg-baseline \
-    --tau 0.1 \
+    --style-injection-mode film \
+    --model-id ablation-moco-patches \
+    --tau 0.07 \
     --total-dim 512 \
-    --train-steps 20000 \
+    --train-steps 50000 \
     --use-amp \
+    --use-moco \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 32 \
-    --vqvae-hidden-channels 32 \
+    --vqvae-embed-dim 38 \
+    --vqvae-hidden-channels 64 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 3 \
     --vqvae-scaling-rates 2 2 2 \

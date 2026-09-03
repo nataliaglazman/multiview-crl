@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_identifiable.yaml
-# Generated at: 2026-08-21T11:42:15Z
-# Git SHA: f20641b
+# Generated at: 2026-08-27T14:48:57Z
+# Git SHA: d848347
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-identifiable-generator-4-scaling-2
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -120,7 +120,7 @@ fi
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
-    --synthetic-num-val 1500 \
+    --synthetic-num-val 200 \
     --synthetic-res 64 \
     --model-id synthetic-identifiable-generator-4-scaling-2 \
     --tau 0.1 \

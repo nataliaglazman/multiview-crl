@@ -250,6 +250,17 @@ def save_checkpoint(
         _atomic_torch_save(checkpoint, checkpoint_path)
         logger.info(f"[CHECKPOINT] Step {step}: Saved VQ-VAE-2 to {checkpoint_path}")
 
+        # Keep a dated copy every N steps, so a run leaves a TRAJECTORY rather than only its
+        # final and best states.  Without one, any question of the form "when during training
+        # did this change?" — identifiability decay, rank collapse, delocalisation — cannot
+        # be asked of a finished run at all, only by retraining.  Off by default: a 977k-param
+        # model is ~12 MB a copy, but a large one at a short interval fills a disk quietly.
+        _every = int(getattr(args, "checkpoint_keep_every", 0) or 0)
+        if _every > 0 and step % _every == 0:
+            versioned_path = os.path.join(args.save_dir, f"vqvae_model_{step:07d}.pt")
+            _atomic_torch_save(checkpoint, versioned_path)
+            logger.info(f"[CHECKPOINT] Step {step}: Saved versioned copy to {versioned_path}")
+
     else:
         checkpoint_path = os.path.join(args.save_dir, "checkpoint.pt")
         checkpoint = {

@@ -1,18 +1,17 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-08-27T14:48:57Z
-# Git SHA: d848347
+# Auto-generated from: experiments/ablation_multilevel_patches.yaml
+# Generated at: 2026-08-27T22:00:13Z
+# Git SHA: 9f15471
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthseg-baseline
+#SBATCH --job-name=ablation-multilevel-patches
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthseg-baseline-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=ablation-multilevel-patches-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --time=24:00:00
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -60,39 +59,47 @@ fi
     --batch-size 4 \
     --cache-dataset \
     --cache-dir /scratch/users/k24058220/cache/multiview \
+    --cb-reset-threshold 5 \
     --channels-last \
     --checkpoint-steps 500 \
     --content-dim 128 \
-    --content-style-levels 0 \
+    --content-ratios 0.5 0.5 0.5 \
+    --content-style-levels 0 1 2 \
     --contrastive-loss-type infonce \
     --cross-view-negs-only \
-    --dataroot /data/natalia/ADNI_synthseg \
+    --dataroot /scratch/users/k24058220 \
     --dataset-name ADNI_stripped_masks \
     --deterministic \
     --gradient-checkpointing \
     --image-spacing 1.0 \
-    --labels-path /data/natalia/ADNI_synthseg/labels.csv \
+    --inject-style-to-decoder \
+    --labels-path /users/k24058220/multiview-crl/labels_cleaned_3class.csv \
     --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
+    --masks-dir /scratch/users/k24058220/ADNI_stripped_masks \
     --moco-queue-size 0 \
     --pass-full-to-next-level \
+    --patch-contrastive \
+    --patch-grid 6 7 6 \
+    --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1.0 \
+    --scale-contrastive-loss 10.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
+    --shared-brain-mask \
     --spatial-size 150 180 150 \
-    --model-id synthseg-baseline \
+    --model-id ablation-multilevel-patches \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 20000 \
+    --train-steps 100000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
