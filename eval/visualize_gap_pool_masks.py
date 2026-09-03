@@ -5,7 +5,9 @@ Example:
     python -m eval.visualize_gap_pool_masks \
         --checkpoint results/synthetic/RUN/vqvae_model.pt --grid 8 8 8
 
-Compare against a saved activation tensor (for example ``(views, samples, C, P)``):
+For a synthetic run, activations are extracted automatically. Add
+``--save-activations activations.pt`` to cache them. A pre-extracted tensor (for
+example ``(views, samples, C, P)``) can instead be supplied explicitly:
     python -m eval.visualize_gap_pool_masks --checkpoint ... --grid 8 8 8 \
         --activations activations.pt --activation-key hz
 
@@ -38,9 +40,7 @@ def _pool_logits(state: dict[str, torch.Tensor], level: int) -> torch.Tensor:
     return matches[0][1].float()
 
 
-def _activation_distribution(
-    path: Path, key: str | None, channels: int, grid: tuple[int, int, int], coarsen: int
-) -> np.ndarray:
+def _activation_distribution(value, channels: int, grid: tuple[int, int, int], coarsen: int) -> np.ndarray:
     """Return a per-channel spatial distribution from saved encoder activations.
 
     Accepted layouts are ``(C, P)``, ``(N, C, P)``, ``(V, N, C, P)``,
@@ -48,20 +48,6 @@ def _activation_distribution(
     averaged after taking absolute values.  Fine-grid tensors are block-averaged
     to the pooler's coarse grid before being normalised per channel.
     """
-    loaded = np.load(path) if path.suffix == ".npz" else torch.load(path, map_location="cpu", weights_only=False)
-    if isinstance(loaded, np.lib.npyio.NpzFile):
-        if key is None:
-            if len(loaded.files) != 1:
-                raise ValueError(f"{path} contains {loaded.files}; pass --activation-key.")
-            value = loaded[loaded.files[0]]
-        else:
-            value = loaded[key]
-    elif isinstance(loaded, dict):
-        if key is None:
-            raise ValueError("Activation .pt is a dictionary; pass --activation-key.")
-        value = loaded[key]
-    else:
-        value = loaded
     x = np.asarray(value.detach().cpu() if torch.is_tensor(value) else value, dtype=np.float64)
     fine_p = int(np.prod(grid))
     coarse_grid = tuple(axis // coarsen for axis in grid)
@@ -69,7 +55,7 @@ def _activation_distribution(
     if x.ndim >= 2 and x.shape[-1] in (fine_p, coarse_p):
         if x.shape[-2] != channels:
             raise ValueError(f"Expected {channels} channels at axis -2, got activation shape {x.shape}.")
-        x = np.abs(x).mean(axis=tuple(range(x.ndim - 2)))  # (C, P)
+        x = np.abs(x).mean(axis=tuple(range(x.ndim - 2)))
         x = x.reshape(channels, *(grid if x.shape[-1] == fine_p else coarse_grid))
     elif x.ndim in (4, 5) and x.shape[-4] == channels:
         x = np.abs(x).mean(axis=0) if x.ndim == 5 else np.abs(x)
@@ -84,6 +70,45 @@ def _activation_distribution(
     return x / np.maximum(x.sum(axis=1, keepdims=True), 1e-12)
 
 
+def _load_activation_distribution(
+    path: Path, key: str | None, channels: int, grid: tuple[int, int, int], coarsen: int
+) -> np.ndarray:
+    loaded = np.load(path) if path.suffix == ".npz" else torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(loaded, np.lib.npyio.NpzFile):
+        if key is None:
+            if len(loaded.files) != 1:
+                raise ValueError(f"{path} contains {loaded.files}; pass --activation-key.")
+            value = loaded[loaded.files[0]]
+        else:
+            value = loaded[key]
+    elif isinstance(loaded, dict):
+        if key is None:
+            raise ValueError("Activation .pt is a dictionary; pass --activation-key.")
+        value = loaded[key]
+    else:
+        value = loaded
+    return _activation_distribution(value, channels, grid, coarsen)
+
+
+def _extract_synthetic_activations(
+    run_dir: Path, checkpoint: Path, level: int, grid: tuple[int, int, int], samples: int, batch: int
+):
+    """Extract patch activations from the run's own synthetic evaluation distribution."""
+    from eval.bt_term_balance import _as_views
+    from eval.dci import _extract_synthetic_representations
+    from eval.run_dci_compare import _CONTENT, _CONTENT_V2
+    from eval.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir, load_run_args
+
+    run_args = load_run_args(str(run_dir))
+    dataset = build_synthetic_test_set(run_args, samples, causal=bool(getattr(run_args, "synthetic_causal", False)))
+    model, _args, device = load_model_from_run_dir(str(run_dir), str(checkpoint))
+    level_data, _gt, _s1, _s2 = _extract_synthetic_representations(model, dataset, device, batch, 0, pooling=grid)
+    c1, c2 = level_data[level][_CONTENT], level_data[level][_CONTENT_V2]
+    if c1 is None or c2 is None:
+        raise ValueError("This run did not yield two content-view activation maps.")
+    return _as_views(c1, c2, int(np.prod(grid)))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Visualise per-channel Barlow-Twins GAP-pool masks.")
     p.add_argument("--checkpoint", required=True, type=Path)
@@ -94,6 +119,10 @@ def main() -> None:
     p.add_argument("--output", type=Path, help="Output PNG (default: beside checkpoint).")
     p.add_argument("--activations", type=Path, help="Optional .pt or .npz tensor of encoder activations to compare.")
     p.add_argument("--activation-key", help="Key for a dictionary/.npz activation file.")
+    p.add_argument("--run-dir", type=Path, help="Synthetic run directory; defaults to the checkpoint's parent.")
+    p.add_argument("--num-samples", type=int, default=200, help="Synthetic subjects used for automatic extraction.")
+    p.add_argument("--encode-batch", type=int, default=32, help="Encoder batch size for automatic extraction.")
+    p.add_argument("--save-activations", type=Path, help="Save extracted activations as {'hz': tensor} for reuse.")
     args = p.parse_args()
 
     logits = _pool_logits(_state_dict(args.checkpoint), args.level)
@@ -114,8 +143,17 @@ def main() -> None:
     masks = torch.softmax(logits, dim=1).reshape(logits.shape[0], *coarse_grid).numpy()
     activations = None
     if args.activations:
-        activations = _activation_distribution(args.activations, args.activation_key, len(masks), grid, coarsen)
+        activations = _load_activation_distribution(args.activations, args.activation_key, len(masks), grid, coarsen)
         activations = activations.reshape(len(masks), *coarse_grid)
+    else:
+        run_dir = args.run_dir or args.checkpoint.parent
+        hz = _extract_synthetic_activations(
+            run_dir, args.checkpoint, args.level, grid, args.num_samples, args.encode_batch
+        )
+        if args.save_activations:
+            torch.save({"hz": hz}, args.save_activations)
+            print(f"Saved extracted activations to {args.save_activations}")
+        activations = _activation_distribution(hz, len(masks), grid, coarsen).reshape(len(masks), *coarse_grid)
     entropy = -(masks.reshape(len(masks), -1) * np.log(masks.reshape(len(masks), -1) + 1e-12)).sum(1)
     if args.channels is None:
         channels = np.argsort(entropy)[: args.n_channels].tolist()  # most concentrated first
