@@ -93,20 +93,30 @@ def _load_activation_distribution(
 def _extract_synthetic_activations(
     run_dir: Path, checkpoint: Path, level: int, grid: tuple[int, int, int], samples: int, batch: int
 ):
-    """Extract patch activations from the run's own synthetic evaluation distribution."""
-    from eval.bt_term_balance import _as_views
-    from eval.dci import _extract_synthetic_representations
-    from eval.run_dci_compare import _CONTENT, _CONTENT_V2
+    """Extract the full pre-mask patch maps the pooler receives during training."""
+    from torch.utils.data import DataLoader
+
     from eval.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir, load_run_args
 
     run_args = load_run_args(str(run_dir))
     dataset = build_synthetic_test_set(run_args, samples, causal=bool(getattr(run_args, "synthetic_causal", False)))
     model, _args, device = load_model_from_run_dir(str(run_dir), str(checkpoint))
-    level_data, _gt, _s1, _s2 = _extract_synthetic_representations(model, dataset, device, batch, 0, pooling=grid)
-    c1, c2 = level_data[level][_CONTENT], level_data[level][_CONTENT_V2]
-    if c1 is None or c2 is None:
-        raise ValueError("This run did not yield two content-view activation maps.")
-    return _as_views(c1, c2, int(np.prod(grid)))
+    output = []
+    model.eval()
+    with torch.no_grad():
+        for data in DataLoader(dataset, batch_size=batch, shuffle=False, num_workers=0):
+            images = data["image"]
+            n_views = len(images)
+            encoded = model(torch.cat(images, dim=0).to(device), pool_only=True, n_views=n_views, patch_grid=grid)
+            features = encoded[2] if isinstance(encoded, tuple) else [encoded]
+            if level >= len(features):
+                raise ValueError(f"Run has {len(features)} encoder levels; requested --level {level}.")
+            feat = features[level]
+            per_view = feat.shape[0] // n_views
+            output.append(feat.reshape(n_views, per_view, feat.shape[1], feat.shape[2]).cpu())
+    if not output:
+        raise ValueError("Synthetic evaluation dataset yielded no activations.")
+    return torch.cat(output, dim=1)
 
 
 def main() -> None:
