@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-09-03T09:43:07Z
-# Git SHA: f8d698f
+# Generated at: 2026-09-03T18:02:16Z
+# Git SHA: c78cf47
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
