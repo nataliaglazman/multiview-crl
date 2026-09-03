@@ -43,16 +43,41 @@ def get_group_norm(channels, target_groups=32, norm_type: str = "group"):
     return nn.GroupNorm(1, channels)
 
 
+def _make_norm(channels, norm_type: str = "group", split_content_channels: int | None = None, target_groups: int = 32):
+    """Normalization over all channels, or over content and style independently.
+
+    With ``norm_type="layer"`` every channel at a voxel shares one mean and variance,
+    so the denominator is a resource the two blocks compete for: as the content
+    channels' activations grow, dividing by that shared statistic drives the style
+    channels toward zero. ``split_content_channels`` gives each block its own
+    normalizer and removes the coupling.
+
+    Assumes content occupies the first k channels — true for ``mask_mode="fixed"``,
+    which is why ``--split-encoder-norm`` requires it. Falls back to the joint norm
+    when k does not partition ``channels``, so callers can pass it unconditionally
+    at widths where the content/style split is not defined.
+    """
+    if split_content_channels is not None and 0 < split_content_channels < channels:
+        return SplitGroupNorm(split_content_channels, channels, target_groups=target_groups, norm_type=norm_type)
+    return get_group_norm(channels, target_groups, norm_type=norm_type)
+
+
 class ReZero(HelperModule):
     """3D ReZero residual block with learnable scaling parameter."""
 
-    def build(self, in_channels: int, res_channels: int, norm_type: str = "group"):
+    def build(
+        self,
+        in_channels: int,
+        res_channels: int,
+        norm_type: str = "group",
+        split_content_channels: int | None = None,
+    ):
         self.layers = nn.Sequential(
             nn.Conv3d(in_channels, res_channels, 3, stride=1, padding=1, bias=False),
             get_group_norm(res_channels, norm_type=norm_type),
             nn.ReLU(inplace=True),
             nn.Conv3d(res_channels, in_channels, 3, stride=1, padding=1, bias=False),
-            get_group_norm(in_channels, norm_type=norm_type),
+            _make_norm(in_channels, norm_type=norm_type, split_content_channels=split_content_channels),
             nn.ReLU(inplace=True),
         )
         self.alpha = nn.Parameter(torch.tensor(0.0))
@@ -71,8 +96,19 @@ class ResidualStack(HelperModule):
         nb_layers: int,
         use_checkpoint: bool = True,
         norm_type: str = "group",
+        split_content_channels: int | None = None,
     ):
-        self.stack = nn.Sequential(*[ReZero(in_channels, res_channels, norm_type=norm_type) for _ in range(nb_layers)])
+        self.stack = nn.Sequential(
+            *[
+                ReZero(
+                    in_channels,
+                    res_channels,
+                    norm_type=norm_type,
+                    split_content_channels=split_content_channels,
+                )
+                for _ in range(nb_layers)
+            ]
+        )
         self.use_checkpoint = use_checkpoint
 
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
@@ -95,6 +131,7 @@ class Encoder(HelperModule):
         downscale_factor: int,
         use_checkpoint: bool = True,
         norm_type: str = "group",
+        split_content_channels: int | None = None,
     ):
         assert log2(downscale_factor) % 1 == 0, "Downscale must be a power of 2"
         downscale_steps = int(log2(downscale_factor))
@@ -110,9 +147,20 @@ class Encoder(HelperModule):
             )
             c_channel, n_channel = n_channel, hidden_channels
         layers.append(nn.Conv3d(c_channel, n_channel, 3, stride=1, padding=1))
-        layers.append(get_group_norm(n_channel, norm_type=norm_type))
+        # The final norm and the residual stack set the per-channel statistics of the
+        # tensor the content/style mask splits, so those are the ones worth splitting.
+        # The downsampling norms above run at other widths and before the partition
+        # means anything, so they stay joint.
+        layers.append(_make_norm(n_channel, norm_type=norm_type, split_content_channels=split_content_channels))
         layers.append(
-            ResidualStack(n_channel, res_channels, nb_res_layers, use_checkpoint=use_checkpoint, norm_type=norm_type)
+            ResidualStack(
+                n_channel,
+                res_channels,
+                nb_res_layers,
+                use_checkpoint=use_checkpoint,
+                norm_type=norm_type,
+                split_content_channels=split_content_channels,
+            )
         )
 
         self.layers = nn.Sequential(*layers)
@@ -586,6 +634,7 @@ class VQVAE(HelperModule):
         norm_type: str = "group",  # Normalization used in the ENCODER conv blocks: "group" (default) or "layer".
         decoder_norm_type: str
         | None = None,  # Decoder normalization; None = follow norm_type. Set "group" with norm_type="layer" to keep the encoder artefact-free without breaking reconstruction: per-voxel channel normalization forces every decoder feature voxel to unit scale, but emitting "0 here, bright there" IS a magnitude task, so a layer-normed decoder reconstructs far worse (measured: brain MSE 0.35 vs 0.003).
+        split_encoder_norm: bool = False,  # Normalize content and style channels independently inside the ENCODER (final norm + residual stack) at masked levels, instead of jointly across all hidden_channels. With norm_type="layer" the joint norm shares one per-voxel denominator between the two blocks, so runaway content amplitude suppresses style (measured: content RMS 1.9 -> 29.5 and style 1.2 -> 0.30 between a recon-only and a contrastive run). SplitGroupNorm already does this after the encoder; this applies the same treatment inside it. Assumes content is the first content_channels channels, so it requires mask_mode="fixed". Changes the architecture, so checkpoints are not compatible across values.
         latent_mask: bool = False,  # Zero encoder-output positions whose input footprint has no foreground. Background latents are otherwise unconstrained (the recon loss is already brain-masked) and the encoder parks brain information in them — "codebook smuggling". Requires `mask` at forward(); a model trained with this MUST be evaluated with it too.
         latent_mask_thresh: float = 0.0,  # Keep a latent position if its pooled foreground fraction exceeds this. 0.0 keeps any position containing at least one foreground voxel — conservative, preserves the boundary ring the decoder legitimately needs.
     ):
@@ -677,6 +726,12 @@ class VQVAE(HelperModule):
             self.content_channels = None
             self.content_channels_per_level = {}
 
+        def _split_ch(lvl):
+            """Content width to split the encoder norms on at ``lvl``, or None."""
+            if not split_encoder_norm:
+                return None
+            return self.content_channels_per_level.get(lvl)
+
         def _make_encoder_stack():
             stack = nn.ModuleList(
                 [
@@ -688,6 +743,7 @@ class VQVAE(HelperModule):
                         scaling_rates[0],
                         use_checkpoint,
                         norm_type=norm_type,
+                        split_content_channels=_split_ch(0),
                     )
                 ]
             )
@@ -709,6 +765,7 @@ class VQVAE(HelperModule):
                         nb_res_layers,
                         sr,
                         use_checkpoint,
+                        split_content_channels=_split_ch(_i + 1),
                     )
                 )
             return stack
