@@ -11,8 +11,8 @@ example ``(views, samples, C, P)``) can instead be supplied explicitly:
     python -m eval.visualize_gap_pool_masks --checkpoint ... --grid 8 8 8 \
         --activations activations.pt --activation-key hz
 
-The default view shows native-image cross-sections of mean absolute activation over
-the mean synthetic anatomy; cyan contours show lower-resolution pool-mask support.
+The default view shows native-image cross-sections: activation over mean synthetic
+anatomy above, and the lower-resolution pool mask by itself below.
 """
 
 from __future__ import annotations
@@ -159,7 +159,7 @@ def main() -> None:
     p.add_argument(
         "--channels", type=int, nargs="*", help="Channels to show (default: strongest mask/activation alignment)."
     )
-    p.add_argument("--n-channels", type=int, default=8, help="Number to show when --channels is omitted.")
+    p.add_argument("--n-channels", type=int, default=4, help="Number to show when --channels is omitted.")
     p.add_argument("--rank-by", choices=("alignment", "concentration"), default="alignment")
     p.add_argument("--view", choices=("slices", "projections"), default="slices")
     p.add_argument("--slice-axis", choices=("D", "H", "W"), default="D", help="Axis crossed by slice views.")
@@ -252,33 +252,51 @@ def main() -> None:
             raise ValueError("--slice-fracs must lie in [0, 1].")
         indices = np.rint(fractions * (target_shape[axis] - 1)).astype(int)
         fig, axes = plt.subplots(
-            len(channels), len(indices), figsize=(3.3 * len(indices), 3.0 * len(channels)), squeeze=False
+            2 * len(channels), len(indices), figsize=(3.4 * len(indices), 4.7 * len(channels)), squeeze=False
         )
         for row, channel in enumerate(channels):
             peak = np.unravel_index(masks[channel].argmax(), coarse_grid)
+            flat_mask = masks[channel].reshape(-1)
+            top = np.argsort(-flat_mask)[:3]
+            top_text = ", ".join(
+                f"{tuple(int(v) for v in np.unravel_index(i, coarse_grid))}:{flat_mask[i]:.0%}" for i in top
+            )
+            activation_row, mask_row = 2 * row, 2 * row + 1
+            # Robust scaling avoids one unusually hot site making every other activation
+            # invisible. Colour answers "high for this channel", not absolute amplitude.
+            activation_scale = max(float(np.percentile(act_volume[channel], 99)), 1e-12)
             for col, index in enumerate(indices):
                 base_slice = np.take(backdrop, index, axis=axis)
                 act_slice = np.take(act_volume[channel], index, axis=axis)
                 mask_slice = np.take(mask_volume[channel], index, axis=axis)
-                act_slice = act_slice / max(float(act_volume[channel].max()), 1e-12)
-                ax = axes[row, col]
-                ax.imshow(base_slice, origin="lower", cmap="gray")
-                ax.imshow(act_slice, origin="lower", cmap="magma", alpha=np.clip(0.8 * act_slice, 0, 0.8))
-                levels = np.linspace(
-                    float(mask_volume[channel].max()) * 0.25, float(mask_volume[channel].max()) * 0.75, 3
+                heat = np.clip(act_slice / activation_scale, 0, 1)
+                activation_ax = axes[activation_row, col]
+                activation_ax.imshow(base_slice, origin="lower", cmap="gray")
+                activation_ax.imshow(heat, origin="lower", cmap="magma", alpha=np.where(heat > 0.08, 0.82 * heat, 0.0))
+                activation_ax.set_title(f"{args.slice_axis} = {index}" if row == 0 else "")
+                activation_ax.axis("off")
+
+                mask_ax = axes[mask_row, col]
+                mask_ax.imshow(
+                    mask_slice / max(float(mask_volume[channel].max()), 1e-12),
+                    origin="lower",
+                    cmap="viridis",
+                    interpolation="nearest",
+                    vmin=0,
+                    vmax=1,
                 )
-                valid_levels = levels[levels <= mask_slice.max()]
-                if valid_levels.size >= 2:
-                    ax.contour(mask_slice, levels=valid_levels, colors="#4deeea", linewidths=1.2)
-                ax.set_title(f"{args.slice_axis} = {index}" if row == 0 else "")
-                ax.axis("off")
-            axes[row, 0].set_ylabel(
+                mask_ax.set_title("mask probability" if row == 0 else "")
+                mask_ax.axis("off")
+            axes[activation_row, 0].set_ylabel(
                 f"ch {channel}\\nmask H/log G={entropy[channel] / np.log(groups):.2f}\\n"
-                f"mask×activation lift={alignment[channel]:.2f}\\npeak coarse={tuple(int(x) for x in peak)}"
+                f"mask×activation lift={alignment[channel]:.2f}\\nactivation (p99 scaled)"
+            )
+            axes[mask_row, 0].set_ylabel(
+                f"mask only\\npeak coarse={tuple(int(x) for x in peak)}\\ntop regions: {top_text}"
             )
         title = (
-            f"Cross-sections through mean synthetic image — level {args.level}; magma = mean |activation|; "
-            f"cyan = mask support; mask grid {coarse_grid}"
+            f"Cross-sections through mean synthetic image — level {args.level}; upper rows = activation, "
+            f"lower rows = learned mask only; mask grid {coarse_grid}"
         )
     else:
         fig, axes = plt.subplots(len(channels), 3, figsize=(10, 2.9 * len(channels)), squeeze=False)
