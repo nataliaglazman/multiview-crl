@@ -11,9 +11,8 @@ example ``(views, samples, C, P)``) can instead be supplied explicitly:
     python -m eval.visualize_gap_pool_masks --checkpoint ... --grid 8 8 8 \
         --activations activations.pt --activation-key hz
 
-The script reads the saved pooler logits directly, so it does not need to build the
-model or dataset.  Each row shows the mask's probability mass marginalised along
-one anatomical axis; colours are comparable across all displayed channels.
+The script reads the saved pooler logits directly. Each row projects native-grid
+mean absolute activations; cyan contours show the lower-resolution pool-mask support.
 """
 
 from __future__ import annotations
@@ -40,8 +39,10 @@ def _pool_logits(state: dict[str, torch.Tensor], level: int) -> torch.Tensor:
     return matches[0][1].float()
 
 
-def _activation_distribution(value, channels: int, grid: tuple[int, int, int], coarsen: int) -> np.ndarray:
-    """Return a per-channel spatial distribution from saved encoder activations.
+def _activation_distribution(
+    value, channels: int, grid: tuple[int, int, int], coarsen: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(coarse, fine)`` per-channel spatial activation distributions.
 
     Accepted layouts are ``(C, P)``, ``(N, C, P)``, ``(V, N, C, P)``,
     ``(C, D, H, W)``, or ``(N, C, D, H, W)``.  Leading sample/view axes are
@@ -63,11 +64,20 @@ def _activation_distribution(value, channels: int, grid: tuple[int, int, int], c
             raise ValueError(f"Expected activation spatial grid {grid}, got {tuple(x.shape[1:])}.")
     else:
         raise ValueError("Unsupported activation shape. See --help for accepted layouts.")
+    if tuple(x.shape[1:]) == grid:
+        x = x / np.maximum(x.sum(axis=(1, 2, 3), keepdims=True), 1e-12)
+        fine = x
+    else:
+        # A cached coarse-grid tensor has no finer information to recover. Repeat its
+        # mass only for an honest, blocky overlay on the fine activation grid.
+        x = x / np.maximum(x.sum(axis=(1, 2, 3), keepdims=True), 1e-12)
+        fine = np.repeat(np.repeat(np.repeat(x / coarsen**3, coarsen, axis=1), coarsen, axis=2), coarsen, axis=3)
     if tuple(x.shape[1:]) == grid and coarsen > 1:
         d, h, w = coarse_grid
-        x = x.reshape(channels, d, coarsen, h, coarsen, w, coarsen).mean(axis=(2, 4, 6))
-    x = x.reshape(channels, coarse_p)
-    return x / np.maximum(x.sum(axis=1, keepdims=True), 1e-12)
+        x = x.reshape(channels, d, coarsen, h, coarsen, w, coarsen).sum(axis=(2, 4, 6))
+    coarse = x.reshape(channels, coarse_p)
+    coarse = coarse / np.maximum(coarse.sum(axis=1, keepdims=True), 1e-12)
+    return coarse, fine
 
 
 def _load_activation_distribution(
@@ -124,8 +134,11 @@ def main() -> None:
     p.add_argument("--checkpoint", required=True, type=Path)
     p.add_argument("--grid", required=True, type=int, nargs=3, metavar=("D", "H", "W"))
     p.add_argument("--level", type=int, default=0)
-    p.add_argument("--channels", type=int, nargs="*", help="Channels to show (default: most concentrated).")
-    p.add_argument("--n-channels", type=int, default=12, help="Number to show when --channels is omitted.")
+    p.add_argument(
+        "--channels", type=int, nargs="*", help="Channels to show (default: strongest mask/activation alignment)."
+    )
+    p.add_argument("--n-channels", type=int, default=8, help="Number to show when --channels is omitted.")
+    p.add_argument("--rank-by", choices=("alignment", "concentration"), default="alignment")
     p.add_argument("--output", type=Path, help="Output PNG (default: beside checkpoint).")
     p.add_argument("--activations", type=Path, help="Optional .pt or .npz tensor of encoder activations to compare.")
     p.add_argument("--activation-key", help="Key for a dictionary/.npz activation file.")
@@ -151,9 +164,11 @@ def main() -> None:
 
     coarse_grid = tuple(axis // coarsen for axis in grid)
     masks = torch.softmax(logits, dim=1).reshape(logits.shape[0], *coarse_grid).numpy()
-    activations = None
+    activations = fine_activations = None
     if args.activations:
-        activations = _load_activation_distribution(args.activations, args.activation_key, len(masks), grid, coarsen)
+        activations, fine_activations = _load_activation_distribution(
+            args.activations, args.activation_key, len(masks), grid, coarsen
+        )
         activations = activations.reshape(len(masks), *coarse_grid)
     else:
         run_dir = args.run_dir or args.checkpoint.parent
@@ -163,39 +178,55 @@ def main() -> None:
         if args.save_activations:
             torch.save({"hz": hz}, args.save_activations)
             print(f"Saved extracted activations to {args.save_activations}")
-        activations = _activation_distribution(hz, len(masks), grid, coarsen).reshape(len(masks), *coarse_grid)
+        activations, fine_activations = _activation_distribution(hz, len(masks), grid, coarsen)
+        activations = activations.reshape(len(masks), *coarse_grid)
     entropy = -(masks.reshape(len(masks), -1) * np.log(masks.reshape(len(masks), -1) + 1e-12)).sum(1)
+    # 1.0 = no better than uniform. Larger values mean the learned mask puts mass
+    # where the channel has high mean absolute activation; it is descriptive, not
+    # evidence that the selected site encodes a desired ground-truth factor.
+    alignment = groups * (masks.reshape(len(masks), -1) * activations.reshape(len(masks), -1)).sum(1)
     if args.channels is None:
-        channels = np.argsort(entropy)[: args.n_channels].tolist()  # most concentrated first
+        rank = np.argsort(-alignment) if args.rank_by == "alignment" else np.argsort(entropy)
+        channels = rank[: args.n_channels].tolist()
     else:
         channels = args.channels
     if not channels or min(channels) < 0 or max(channels) >= len(masks):
         raise ValueError(f"Choose channel indices in [0, {len(masks) - 1}].")
 
-    # These are marginals, so their maximum can exceed any individual voxel mass.
-    panels = 6 if activations is not None else 3
-    fig, axes = plt.subplots(len(channels), panels, figsize=(3 * panels, 2.7 * len(channels)), squeeze=False)
-    labels = ("sum over D", "sum over H", "sum over W")
+    # Expand each coarse mask onto the native activation grid. This deliberately
+    # remains blocky: coarsen=2 learned only a 4x4x4 mask, so interpolation would
+    # invent detail and make the comparison look more precise than it is.
+    fine_masks = np.repeat(
+        np.repeat(np.repeat(masks / coarsen**3, coarsen, axis=1), coarsen, axis=2), coarsen, axis=3
+    )
+    fig, axes = plt.subplots(len(channels), 3, figsize=(10, 2.9 * len(channels)), squeeze=False)
+    labels = ("D projection", "H projection", "W projection")
     for row, channel in enumerate(channels):
-        mask = masks[channel]
-        marginals = (mask.sum(0), mask.sum(1), mask.sum(2))
-        peak = np.unravel_index(mask.argmax(), mask.shape)
-        if activations is not None:
-            act = activations[channel]
-            marginals = tuple(pair for axis in range(3) for pair in (mask.sum(axis), act.sum(axis)))
-            titles = tuple(item for label in labels for item in (f"mask: {label}", f"activation: {label}"))
-        else:
-            titles = labels
-        vmax = max(float(image.max()) for image in marginals)
-        for col, (image, label) in enumerate(zip(marginals, titles)):
-            axes[row, col].imshow(image, origin="lower", cmap="magma", vmin=0, vmax=vmax)
-            axes[row, col].set_title(label if row == 0 else "")
-            axes[row, col].set_xticks([])
-            axes[row, col].set_yticks([])
+        mask = fine_masks[channel]
+        activation = fine_activations[channel]
+        peak = np.unravel_index(masks[channel].argmax(), coarse_grid)
+        for col, axis in enumerate(range(3)):
+            activation_projection = activation.sum(axis)
+            mask_projection = mask.sum(axis)
+            ax = axes[row, col]
+            ax.imshow(activation_projection, origin="lower", cmap="magma", interpolation="nearest")
+            levels = np.linspace(float(mask_projection.max()) * 0.25, float(mask_projection.max()) * 0.75, 3)
+            if levels[-1] > 0:
+                ax.contour(mask_projection, levels=levels, colors="#4deeea", linewidths=1.3)
+            ax.set_title(labels[col] if row == 0 else "")
+            ax.set_xticks(np.arange(-0.5, activation_projection.shape[1], coarsen), minor=True)
+            ax.set_yticks(np.arange(-0.5, activation_projection.shape[0], coarsen), minor=True)
+            ax.grid(which="minor", color="white", alpha=0.25, linewidth=0.5)
+            ax.tick_params(which="both", bottom=False, left=False, labelbottom=False, labelleft=False)
         axes[row, 0].set_ylabel(
-            f"ch {channel}\\nH/log G={entropy[channel] / np.log(groups):.2f}\\npeak={tuple(int(x) for x in peak)}"
+            f"ch {channel}\\nmask H/log G={entropy[channel] / np.log(groups):.2f}\\n"
+            f"mask×activation lift={alignment[channel]:.2f}\\npeak coarse={tuple(int(x) for x in peak)}"
         )
-    fig.suptitle(f"GAP-pool masks: level {args.level}, coarse grid {coarse_grid} (coarsen={coarsen})", y=1.01)
+    fig.suptitle(
+        f"GAP-pool masks over mean |activation| — level {args.level}; cyan contours = mask support; "
+        f"mask grid {coarse_grid}, activation grid {grid}",
+        y=1.01,
+    )
     fig.tight_layout()
     output = args.output or args.checkpoint.with_name(f"gap_pool_masks_L{args.level}.png")
     fig.savefig(output, dpi=180, bbox_inches="tight")
