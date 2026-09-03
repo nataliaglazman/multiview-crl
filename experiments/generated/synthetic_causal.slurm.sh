@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-27T14:48:57Z
-# Git SHA: d848347
+# Generated at: 2026-09-03T10:30:26Z
+# Git SHA: ef46bdc
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-40-100-lambda-6
+#SBATCH --job-name=synthetic-clean-content-40-baseline-true
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-40-100-lambda-6-%j.err
+#SBATCH --error=synthetic-clean-content-40-baseline-true-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -59,9 +59,9 @@ fi
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
     --bt-corr-ema 0.99 \
-    --bt-gap-lambda 6 \
+    --bt-gap-lambda 7 \
     --bt-gap-weight 1 \
-    --bt-lambda 6 \
+    --bt-lambda 7 \
     --bt-normalize-terms \
     --bt-patch-weight 1 \
     --bt-sim-coeff 0.000114 \
@@ -101,7 +101,7 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 100 \
+    --scale-contrastive-loss 0 \
     --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
@@ -120,9 +120,9 @@ fi
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
-    --synthetic-num-val 200 \
+    --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-40-100-lambda-6 \
+    --model-id synthetic-clean-content-40-baseline-true \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

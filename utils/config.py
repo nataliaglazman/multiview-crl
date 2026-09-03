@@ -550,6 +550,123 @@ def parse_args() -> argparse.ArgumentParser:
         "term and leave redundancy reduction to the patch term, which has B*P rows to estimate from.",
     )
     parser.add_argument(
+        "--bt-gap-pool",
+        type=str,
+        default="mean",
+        choices=["mean", "variance", "learned", "per_channel"],
+        help="How the --bt-gap-weight companion term pools over patch positions. 'mean' (default) "
+        "is the plain uniform average and is bit-identical to every existing run. "
+        "MEASURED AND REJECTED ON THIS PROJECT'S DATA, 23 Aug 2026 — read before enabling. "
+        "The factors ARE spatially localised; the problem is that they are localised in "
+        "DIFFERENT PLACES, and this flag implements ONE weight vector shared across every "
+        "channel and every factor. Measured per-factor on a step-60k contrastive checkpoint "
+        "(--causal iid, per-position null subtracted): brain_size 0.120 and cortical_thickness "
+        "0.121 top-10% mass (0.10 = flat) at the global end, against ventricle_size 0.662, "
+        "temporal_atrophy 0.351 and lesion_y/z 0.74/0.80 — but mean pairwise profile cosine "
+        "+0.098, i.e. mutually orthogonal. Mass moved toward the ventricles is mass taken from "
+        "the lesions, so no shared weighting can serve them and the learned variant cannot fix "
+        "it either. Variance weighting fails separately and for its own reason: z = 0.7 on the "
+        "contrastive run, and z = -4.4 on the recon-only baseline, i.e. significantly WORSE "
+        "than its own permutation, because the highest-across-subject-variance positions carry "
+        "per-view style rather than shared content. The original motivation was also wrong on "
+        "its own terms: it read gap_feat_std ~0.004 as evidence of dilution, but that number is "
+        "set by the variance hinge (see --bt-gap-std-coeff), and on_diag/off_diag are "
+        "scale-invariant, so feat_std cannot diagnose pooling at all. Run "
+        "`python -m eval.gap_pool_profile --run-dir <run>` before enabling this on any new "
+        "dataset, and read its per-factor table rather than the aggregate — the aggregate is "
+        "dominated by whichever factors are globally visible and reads flat regardless. "
+        "The flag is kept because the probe and the negative result are the useful artifacts, "
+        "not because the pooling is expected to help. "
+        "'variance' weights positions by their across-SUBJECT variance (detached, no "
+        "parameters). 'learned' fits one logit per position, softmax over positions, "
+        "zero-initialised so it starts exactly at the mean. "
+        "'per_channel' is the one mode the measurements support: (C, P) logits, a softmax "
+        "over positions PER CHANNEL, so different channels can read different anatomy. It is "
+        "the direct answer to the orthogonality result above -- the factors are localised in "
+        "different places, and one shared vector cannot serve them, but C vectors can. "
+        "Measured with eval/per_channel_pool_ceiling on a step-60k contrastive checkpoint: "
+        "mean factor R^2 0.290 under uniform GAP against 0.532 for an allocation built only "
+        "from cross-view agreement and channel decorrelation -- both of which Barlow Twins "
+        "already optimises, which is why no separate allocation mechanism is needed. "
+        "ventricle_size 0.173 -> 0.596, sulcal_widening -0.014 -> 0.616. Pair it with "
+        "--bt-gap-pool-coarsen 2, which measured BETTER than the full grid, not merely "
+        "cheaper. Also zero-initialised, so step 0 is exactly the mean, per channel. "
+        "NEITHER weights by sample: the uniform mean recovers the subject term s EXACTLY because "
+        "the interaction r is defined as the deviation from it and sums to zero over positions, "
+        "and a sample-conditioned weight both revives that interaction and hands the BT loss a "
+        "shortcut (put mass where the views already agree, which on_diag rewards without any "
+        "representational gain). Neither mode changes the number of ROWS, so the d(d-1)/B "
+        "off-diagonal floor is untouched — compose with --bt-corr-ema for that.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-coarsen",
+        type=int,
+        default=1,
+        help="Average-pool the position grid by this factor per axis before weighting it "
+        "(--bt-gap-pool per_channel only). 1 = the full grid; 2 on an 8x8x8 grid gives 4x4x4 "
+        "= 64 regions and 8x fewer parameters. Not primarily a saving: C*P is 22.5k against a "
+        "~977k model, which is nothing. It shrinks the number of places each of the C "
+        "independent softmaxes can collapse to, which is the real cost of this mode -- at a "
+        "coarse enough grid the entropy floor stops being load-bearing, removing a "
+        "hyper-parameter rather than adding one. And because the measured localisation is "
+        "REGIONAL rather than point-like, averaging over a region denoises the estimate: "
+        "measured on planted regional factors, 4x4x4 recovered 129% of the full-grid gain and "
+        "2x2x2 recovered 101%. Must divide the patch grid on every axis.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-init-std",
+        type=float,
+        default=0.0,
+        help="Std of the random init for --bt-gap-pool per_channel logits. 0 (default) is "
+        "zero-init, which makes step 0 EXACTLY the uniform mean but does not reliably break "
+        "the symmetry between channels -- and this mode is worthless without that break, "
+        "since C identical profiles are the shared 'learned' mode with C times the "
+        "parameters. Observed on a short run: gap_pool_channel_agreement went to 1.00 "
+        "immediately under zero-init. Every channel sees the same anatomy, so the first-order "
+        "gradient pushes them the same way while off_diag's pressure to differentiate is "
+        "second-order. Try 0.01 if Contrastive/gap_pool_channel_agreement_L* pins near 1.0: "
+        "small enough that the softmax is still uniform to ~1%, large enough that the "
+        "channels start distinguishable.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-temp",
+        type=float,
+        default=1.0,
+        help="Softmax temperature for --bt-gap-pool learned. >1 flattens the weights, <1 sharpens. "
+        "Only a starting scale — the logits are free to reach any concentration the entropy floor "
+        "permits, so prefer tuning --bt-gap-pool-entropy over this.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-entropy",
+        type=float,
+        default=0.5,
+        help="Entropy floor for --bt-gap-pool learned, as a fraction of log(P). The weights are held "
+        "above it by a hinge, so it costs nothing until concentration reaches the floor. NOT "
+        "decoration: with the variance hinge active, putting all mass on the single "
+        "highest-variance position minimises it outright, and that reduces the effective sample "
+        "behind every GAP statistic to one patch — throwing away exactly the averaging that keeps "
+        "the term's noise below the patch term's. 0 disables the floor.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-entropy-coeff",
+        type=float,
+        default=1.0,
+        help="Weight on the --bt-gap-pool-entropy hinge. Logged unweighted as "
+        "Contrastive/gap_pool_entropy_loss_L* and weighted as Weighted/bt_gap_pool_entropy_L*, so "
+        "size it from the measured magnitude like every other Barlow Twins coefficient rather "
+        "than by transplanting a number.",
+    )
+    parser.add_argument(
+        "--bt-gap-pool-ema",
+        type=float,
+        default=0.9,
+        help="Momentum on the per-position variance profile for --bt-gap-pool variance. The profile "
+        "is estimated from B subjects per batch and is noisy for the same reason the "
+        "cross-correlation is, so it is smoothed across steps with Adam-style bias correction "
+        "(per position, because --patch-foreground-mask can drop a position for some batches and "
+        "not others). 0 disables and uses the current batch alone.",
+    )
+    parser.add_argument(
         "--bt-corr-ema",
         type=float,
         default=0.0,
@@ -1132,7 +1249,8 @@ def parse_args() -> argparse.ArgumentParser:
         "(1 - correlation) instead of an absolute distance. Recommended whenever --bt-std-coeff "
         "is active: the hinge drives sigma toward 1 while raw MSE scales as sigma^2, so the two "
         "fight and sim_loss RISES while alignment improves (observed at both coeff 1 and 0.1, "
-        "with GAP feat_std measured at 0.004 against a hinge target of 1). Also equalises "
+        "with GAP feat_std measured at 0.004 PRE-hinge against a hinge target of 1; once the hinge "
+        "has run it parks past the target — ~1.1 measured 23 Aug 2026 — see --bt-gap-std-coeff). Also equalises "
         "directions, which matters because the factor information sits in the low-variance tail.",
     )
     parser.add_argument(
@@ -1227,7 +1345,16 @@ def parse_args() -> argparse.ArgumentParser:
         "gap_var_loss hit exactly 0 and stayed, and the reconstruction loss stepped to a higher "
         "plateau because that inflation is PER-CHANNEL and so survives the content "
         "normalisation (a uniform gain would have been cancelled exactly). Set this low (0.1-0.5) "
-        "to keep the anti-collapse guarantee without the rescale.",
+        "to keep the anti-collapse guarantee without the rescale. "
+        "STATUS 23 Aug 2026: NO experiment YAML sets this, so every one of them inherits "
+        "--bt-std-coeff 10 and is running the failure mode above. A live synthetic_causal run "
+        "reads gap_feat_std_mean ~1.1, i.e. already parked past the hinge's target, so the term "
+        "is contributing no gradient while its per-channel inflation stands. 0.004 is the "
+        "PRE-hinge state and ~1.1-1.8 the post-hinge parked state; check gap_var_loss (exactly 0 "
+        "= fully inert) before assuming this flag is doing anything. Corollary worth stating "
+        "because it misled a whole investigation: feat_std reports what the HINGE did, not how "
+        "much subject signal survives pooling — on_diag and off_diag are scale-invariant, so no "
+        "pooling question can be diagnosed from it.",
     )
     parser.add_argument(
         "--selection-info-tolerance",

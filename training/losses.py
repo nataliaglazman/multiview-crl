@@ -1216,8 +1216,9 @@ def barlow_twins_loss(
                             # per-view offset. Two reasons to prefer it here:
                             #
                             # 1. Raw MSE scales as sigma^2, and the variance hinge is simultaneously
-                            #    driving sigma up (measured: GAP feat_std 0.004 against a hinge target
-                            #    of 1, a 250x rescale => up to 62500x on the raw term). The two terms
+                            #    driving sigma up (measured: GAP feat_std 0.004 PRE-hinge against a
+                            #    hinge target of 1, a 250x rescale => up to 62500x on the raw term;
+                            #    post-hinge it parks past the target, ~1.1 on 23 Aug 2026). The two terms
                             #    fight, and sim_loss rises while alignment IMPROVES — which is exactly
                             #    what was observed at both coeff 1 and 0.1.
                             # 2. Per-channel normalisation equalises directions, so the term stops

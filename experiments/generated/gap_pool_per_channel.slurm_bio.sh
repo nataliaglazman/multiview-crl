@@ -1,18 +1,17 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthetic_identifiable.yaml
-# Generated at: 2026-09-03T10:30:26Z
+# Auto-generated from: experiments/gap_pool_per_channel.yaml
+# Generated at: 2026-09-03T10:30:33Z
 # Git SHA: ef46bdc
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-identifiable-generator-4-scaling-2
+#SBATCH --job-name=gap-pool-per-channel-rescaled
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-identifiable-generator-4-scaling-2-%j.err
-#SBATCH --partition=gpu
+#SBATCH --error=gap-pool-per-channel-rescaled-%j.err
+#SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=48:00:00
-#SBATCH --constraint=a100|h200|l40s
+#SBATCH --time=24:00:00
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -58,17 +57,22 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 128 \
-    --bt-gap-lambda 0.01 \
+    --bt-corr-ema 0.99 \
+    --bt-gap-lambda 0.005 \
+    --bt-gap-pool per_channel \
+    --bt-gap-pool-coarsen 2 \
+    --bt-gap-pool-entropy 0.5 \
+    --bt-gap-pool-entropy-coeff 1.0 \
     --bt-gap-weight 1 \
     --bt-patch-weight 1 \
-    --bt-sim-coeff 0.025 \
+    --bt-sim-coeff 0.000114 \
     --bt-sim-normalize \
-    --bt-std-coeff 10 \
+    --bt-std-coeff 0.00227 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 44 \
+    --content-size 40 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
@@ -78,6 +82,7 @@ fi
     --decoder-norm-type group \
     --deterministic \
     --eval-dci \
+    --grad-clip-norm 100 \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --log-steps 50 \
@@ -97,32 +102,27 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 1 \
-    --scale-recon-loss 1 \
+    --scale-contrastive-loss 100 \
+    --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
+    --single-count-commitment \
     --style-injection-mode input \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
-    --synthetic-center-local-deformations \
     --synthetic-clean-content \
-    --synthetic-content-prior uniform \
-    --synthetic-content-squash none \
-    --synthetic-cortex-parameterization patterned \
-    --synthetic-identifiable-ventricle \
-    --synthetic-lesion-radius 0.14 \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-identifiable-generator-4-scaling-2 \
+    --model-id gap-pool-per-channel-rescaled \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
@@ -133,5 +133,6 @@ fi
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
+    --vqvae-nb-res-layers 2 \
     --vqvae-scaling-rates 4 \
     --workers 8

@@ -1,0 +1,92 @@
+# Weight patch positions by their across-subject variance instead of averaging uniformly.
+#
+# READ THIS BEFORE LAUNCHING: already tested on the checkpoints it was designed for, and
+# REJECTED -- twice over, for two independent reasons.
+#
+# 1. Variance is the wrong statistic. z = 0.7 against its own permutation on the contrastive
+#    run, and z = -4.4 on the recon-only baseline, i.e. significantly WORSE than permuting
+#    the same weights: the highest-across-subject-variance positions carry per-view style,
+#    not shared content, so upweighting them removes cross-view agreement.
+# 2. The deeper reason, which also kills the `learned` variant. The factors ARE localised --
+#    ventricle_size top-10% mass 0.662, temporal_atrophy 0.351, lesion_y/z 0.74/0.80 against
+#    a 0.10 flat floor -- but their profiles are mutually orthogonal (mean pairwise cosine
+#    +0.098). This file weights positions with ONE vector shared across every channel and
+#    factor, so mass moved toward the ventricles is mass taken from the lesions. No setting
+#    of a shared weighting can serve them.
+#
+# The motivating measurement was also misread: gap_feat_std parking low was taken as
+# evidence of dilution, but feat_std is set by the VARIANCE HINGE, not by the pooling
+# (0.004 pre-hinge, ~1.1 parked after), and BT's on_diag/off_diag are scale-invariant, so it
+# cannot diagnose a pooling question at all.
+#
+# This file is kept as the reproducible form of that negative result, and as the thing to
+# run FIRST if the hypothesis is ever revisited on different data. Before spending GPU time,
+# run the probe on a checkpoint instead -- it answers the same question in minutes:
+#
+#     python -m eval.gap_pool_profile --run-dir results/synthetic/<run>
+#
+# If you do launch it, what to read, in order:
+#   Contrastive/gap_pool_entropy_L0    1.0 = uniform. How far the profile actually moved.
+#   Contrastive/gap_pool_eff_pos_L0    effective positions contributing (P at uniform).
+#   Contrastive/gap_on_diag_loss_L0    should FALL if subject signal is less diluted.
+#   WeightedFrac/bt_gap_*_L0           whether the GAP term's share of the loss shifted.
+# NOT gap_feat_std: the hinge sets it, so it reports the hinge, not the pooling.
+# NOT off_diag: it keeps its d(d-1)/B sampling floor either way -- pooling changes the
+#               signal per row, not the number of rows.
+#
+# NOTE ON INHERITANCE: launch.py does not chain _base_ (it pops the key from the base config
+# with "Don't chain further"), so this cannot say `_base_: synthetic_causal` and inherit the
+# synthetic defaults through it -- that would silently resolve against defaults.yaml and run
+# this on ADNI. The block below therefore mirrors synthetic_causal.yaml verbatim; keep the
+# two in sync, and diff them before reading any comparison as an ablation of the pooling
+# alone.
+
+_base_: synthetic_defaults
+tag: gap-pool-variance
+
+# ── the one line under test ──────────────────────────────────────────────────────────
+bt_gap_pool: variance
+bt_gap_pool_ema: 0.9 # the per-position profile is estimated from B subjects; smooth it
+
+# ── mirrored from synthetic_causal.yaml, unchanged ───────────────────────────────────
+contrastive_loss_type: barlow_twins
+patch_contrastive: true
+patch_grid: [8, 8, 8]
+patch_center_mode: position
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+bt_gap_weight: 1
+bt_gap_lambda: 0.013
+bt_patch_weight: 1
+bt_sim_normalize: true
+bt_sim_coeff: 0.5
+bt_std_coeff: 10
+bt_corr_ema: 0.99
+single_count_commitment: true
+scale_contrastive_loss: 1
+scale_recon_loss: 1
+grad_clip_norm: 100
+batch_size: 128
+synthetic_identifiable_ventricle: true
+content_size: 44
+synthetic_normalize: fixed_reference
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_res: 64
+synthetic_clean_content: true
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
+inject_style_to_decoder: true
+style_injection_mode: input
+separate_style_codebooks: true
+separate_content_codebooks: false
+vqvae_nb_levels: 1
+vqvae_nb_res_layers: 2
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [4]
+deterministic: true
+checkpoint_steps: 1000
+eval_dci: true

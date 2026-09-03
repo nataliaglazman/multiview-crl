@@ -13,6 +13,7 @@
 import collections
 import csv
 import faulthandler
+import functools
 import json
 import math
 import os
@@ -314,6 +315,31 @@ def train_step(
                 return None
             return _proj_heads[f"L{_lvl}"] if f"L{_lvl}" in _proj_heads else None
 
+        # Optional weighted position pooling for the Barlow Twins GAP term
+        # (--bt-gap-pool). None on every other objective and on the default 'mean',
+        # where patch_loss_func keeps using the plain .mean(-1).
+        _gap_pools = getattr(_raw_vqvae, "_bt_gap_pools", None)
+
+        def _gap_pool_for(_lvl):
+            if _gap_pools is None:
+                return None
+            return _gap_pools[f"L{_lvl}"] if f"L{_lvl}" in _gap_pools else None
+
+        def _patch_lf(_lvl, _keep):
+            """``patch_loss_func`` with this level's GAP pooling context bound.
+
+            Bound once per level rather than passed at each call site: only the Barlow
+            Twins patch variant consumes these, and ``_lf`` has seven call sites across
+            the per-view / shared / fallback mask paths.
+            """
+            # The validation callers reach train_step without a patch_loss_func, so this
+            # is None there. Passed straight through rather than wrapped: partial()
+            # rejects a non-callable at CONSTRUCTION, which would turn the existing
+            # deferred failure into an earlier one and change where that path breaks.
+            if patch_loss_func is None:
+                return None
+            return functools.partial(patch_loss_func, gap_pool=_gap_pool_for(_lvl), keep_pos=_keep)
+
         for level_idx, enc_pooled in enumerate(encoder_outputs):
             # Global pool: enc_pooled is (2B, C) → hz_level (n_views, B, C)
             # Patch pool:  enc_pooled is (2B, C, P) → hz_level (n_views, B, C, P)
@@ -333,6 +359,10 @@ def train_step(
             # the brain mask: keep a position if any sample has >= thresh brain there.
             # Slicing hz_level here flows to every downstream patch path (content, style,
             # loss). Gated to the in-batch path; MoCo patch keys are not sliced in v1.
+            # Hoisted out of the branch below: the GAP position pooler indexes its
+            # weights by FULL-grid position, so it needs the same mask that produced
+            # this level's surviving positions. None means "every position kept".
+            _keep_pos = None
             if _is_patch and getattr(args, "patch_foreground_mask", False) and masks is not None and not use_moco:
                 _pg = _patch_grid[level_idx] if isinstance(_patch_grid, list) else _patch_grid
                 _fg_thr = getattr(args, "patch_foreground_thresh", 0.05)
@@ -476,7 +506,7 @@ def train_step(
                                     "MoCo/queue_raw_norm_v1": raw_norm_v1,
                                 }
                     else:
-                        _lf = patch_loss_func if _is_patch else loss_func
+                        _lf = _patch_lf(level_idx, _keep_pos) if _is_patch else loss_func
                         _ph = _proj_head_for(level_idx)
                         if _ph is not None:
                             # hz_content is already sliced to k content channels.
@@ -541,7 +571,7 @@ def train_step(
                             queue_v1=_qv1,
                         )
                     else:
-                        _lf = patch_loss_func if _is_patch else loss_func
+                        _lf = _patch_lf(level_idx, _keep_pos) if _is_patch else loss_func
                         _ph = _proj_head_for(level_idx)
                         if _ph is not None or _proj_mode == "bounded":
                             # Slice to content channels — keep the differentiable
@@ -682,7 +712,7 @@ def train_step(
                                 "MoCo/queue_raw_norm": queue_snapshot.norm(dim=0).mean().item(),
                             }
                 else:
-                    _lf = patch_loss_func if _is_patch else loss_func
+                    _lf = _patch_lf(level_idx, _keep_pos) if _is_patch else loss_func
                     _ph = _proj_head_for(level_idx)
                     if _ph is not None:
                         # Fallback path: select content via the gumbel mask (keeping
@@ -1263,19 +1293,24 @@ def main(args):
         _bt_std_c = getattr(args, "bt_std_coeff", 0.0)
         # The GAP hinge measures std over SUBJECT rows, the patch hinge over folded
         # (subject, position) rows. Position variance alone puts the patch std near 1,
-        # while the across-subject component leaves the GAP std around 0.004 — so one
-        # shared coefficient asks the GAP term for a ~250x rescale of the encoder output.
-        # Same split, same reason, as _bt_gap_lam above.
+        # while the across-subject component leaves the GAP std around 0.004 BEFORE the hinge
+        # runs — so one shared coefficient asks the GAP term for a ~250x rescale of the
+        # encoder output. Same split, same reason, as _bt_gap_lam above.
+        # NOTE 23 Aug 2026: no experiment YAML sets bt_gap_std_coeff, so they all inherit
+        # bt_std_coeff 10 and run exactly that rescale. Measured downstream: gap_feat_std_mean
+        # ~1.1, i.e. parked past the hinge target with gap_var_loss contributing nothing.
         _bt_gap_std_c = getattr(args, "bt_gap_std_coeff", None)
         _bt_gap_std_c = _bt_std_c if _bt_gap_std_c is None else _bt_gap_std_c
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
         _bt_norm = bool(getattr(args, "bt_normalize_terms", False))
+        _bt_pool_mode = getattr(args, "bt_gap_pool", "mean")
+        _bt_pool_ent_c = float(getattr(args, "bt_gap_pool_entropy_coeff", 1.0) or 0.0)
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
             f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
             f"sim={_bt_sim_c}, std={_bt_std_c}, gap std={_bt_gap_std_c}, "
-            f"patch weight={_bt_patch_w})"
+            f"patch weight={_bt_patch_w}, gap pool={_bt_pool_mode})"
         )
         if _bt_patch_w == 0 and _bt_gap_w <= 0:
             raise ValueError(
@@ -1304,6 +1339,55 @@ def main(args):
                 f"cross-correlation has only B rows for a d x d matrix, so its off-diagonal "
                 f"carries a sampling floor of ~d(d-1)/B. Prefer batch_size >= 128."
             )
+        if _bt_pool_mode != "mean":
+            if not getattr(args, "patch_contrastive", False):
+                raise ValueError(
+                    f"--bt-gap-pool {_bt_pool_mode} needs --patch-contrastive: without it the "
+                    "forward hands the loss an already-pooled (n_views, B, C) tensor, so there "
+                    "are no positions left to weight."
+                )
+            if _bt_gap_w <= 0:
+                raise ValueError(
+                    f"--bt-gap-pool {_bt_pool_mode} with --bt-gap-weight 0 does nothing — the "
+                    "pooling only feeds the GAP companion term, which is off."
+                )
+            if _bt_pool_mode in ("learned", "per_channel") and getattr(args, "bt_gap_pool_entropy", 0.5) <= 0:
+                logger.warning(
+                    f"--bt-gap-pool {_bt_pool_mode} with --bt-gap-pool-entropy 0 removes the entropy "
+                    "floor. With --bt-gap-std-coeff > 0 the weights can then collapse onto the "
+                    "single highest-variance position, which minimises the variance hinge while "
+                    "reducing every GAP statistic to a one-patch sample."
+                )
+            if _bt_pool_mode == "per_channel" and int(getattr(args, "contrastive_proj_dim", 0) or 0) > 0:
+                raise ValueError(
+                    "--bt-gap-pool per_channel is incompatible with --contrastive-proj-dim: the "
+                    "pooler is built for the encoder's hidden width but the projection head "
+                    "changes the channel count the loss sees, so the (C, P) weights would not "
+                    "line up. Drop the head, or use a shared pooling mode."
+                )
+            if _bt_pool_mode == "per_channel":
+                _cz = int(getattr(args, "bt_gap_pool_coarsen", 1) or 1)
+                _pg_chk = getattr(args, "patch_grid_per_level", None) or [tuple(args.patch_grid)] * args.vqvae_nb_levels
+                for _lv, _g in enumerate(_pg_chk):
+                    if any(int(v) % _cz for v in _g):
+                        raise ValueError(
+                            f"--bt-gap-pool-coarsen {_cz} does not divide the level-{_lv} patch grid "
+                            f"{tuple(_g)} on every axis. Coarsening groups whole regions, so the grid "
+                            "must be divisible; pick a factor that divides all three axes."
+                        )
+                logger.info(
+                    f"  --bt-gap-pool per_channel: {args.vqvae_hidden_channels} channels x "
+                    f"{int(np.prod(tuple(_pg_chk[0]))) // (_cz ** 3)} regions of weights per level. "
+                    "Watch Contrastive/gap_pool_channel_agreement — this mode only earns its "
+                    "parameters if the channels end up reading DIFFERENT places, and an agreement "
+                    "near 1.0 means it collapsed to the shared 'learned' mode, which is already "
+                    "measured not to work here."
+                )
+            if _bt_pool_mode in ("learned", "per_channel") and _bt_pool_ent_c <= 0:
+                logger.warning(
+                    f"--bt-gap-pool {_bt_pool_mode} with --bt-gap-pool-entropy-coeff 0 leaves the entropy "
+                    "hinge computed and logged but unweighted, so it cannot restrain collapse."
+                )
 
         def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
             return barlow_twins_loss(
@@ -1320,7 +1404,9 @@ def main(args):
                 normalize_terms=_bt_norm,
             )
 
-        def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+        def patch_loss_func(
+            z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None, gap_pool=None, keep_pos=None
+        ):
             _l = barlow_twins_loss(
                 z_rec_tuple,
                 estimated_content_indices=estimated_content_indices,
@@ -1342,8 +1428,23 @@ def main(args):
             # Averaging over positions recovers the subject term exactly (the interaction
             # integrates to zero there), so this is the term whose rows are SUBJECTS.
             if _bt_gap_w > 0 and z_rec_tuple.ndim == 4:
+                # --bt-gap-pool replaces the uniform mean with a weighted one, to stop focal
+                # subject signal being diluted by the ~P-1 positions that do not carry it.
+                # Weights are shared across views and independent of the sample — see
+                # models.vqvae.GapPositionPool for why both are load-bearing.
+                # MEASURED AND REJECTED on this project's data (see --bt-gap-pool's help and
+                # eval/gap_pool_profile.py): rejected on the contrastive run at z=0.5 and on
+                # the recon baseline at z=-3.7, where the variance profile tracks per-view
+                # style. Default stays 'mean'; probe a new dataset before enabling.
+                _pool_pen, _pool_diag = None, None
+                if gap_pool is None:
+                    _gap_in = z_rec_tuple.mean(-1)  # (n_views, B, C) — one row per subject
+                else:
+                    _gap_in, _pool_a = gap_pool(z_rec_tuple, keep_pos)
+                    _pool_pen = gap_pool.entropy_penalty(_pool_a)
+                    _pool_diag = gap_pool.diagnostics(_pool_a)
                 _lg = barlow_twins_loss(
-                    z_rec_tuple.mean(-1),  # (n_views, B, C) — one row per subject
+                    _gap_in,
                     estimated_content_indices=estimated_content_indices,
                     subsets=subsets,
                     soft_content_mask=soft_content_mask,
@@ -1357,7 +1458,7 @@ def main(args):
                 )
                 # bt_patch_weight scales the PATCH term only. Setting it to 0 (with
                 # patch_contrastive still on, so the forward hands us the patch-shaped
-                # tensor the .mean(-1) above needs) gives a GAP-ONLY objective.
+                # tensor the pooling above needs) gives a GAP-ONLY objective.
                 #
                 # Worth having as one config line because every patch term is compromised by
                 # the same 200:1 dominance of the within-subject interaction: on_diag and
@@ -1372,6 +1473,16 @@ def main(args):
                 _d = dict(getattr(_l, "_contrastive_diag", None) or {})
                 for _k, _v in (getattr(_lg, "_contrastive_diag", None) or {}).items():
                     _d[f"gap_{_k}"] = _v
+                if _pool_diag is not None:
+                    _d.update(_pool_diag)
+                # The entropy hinge is a constraint on the POOLING weights, not a Barlow
+                # Twins term, so it is not scaled by --bt-gap-weight — its own coefficient
+                # sizes it. Logged raw here (like every other term) and multiplied by that
+                # coefficient once, in the Weighted/* accounting.
+                if _pool_pen is not None:
+                    _d["gap_pool_entropy_loss"] = _pool_pen.item()
+                    if _bt_pool_ent_c > 0:
+                        _total = _total + _bt_pool_ent_c * _pool_pen
                 _total._contrastive_diag = _d
                 return _total
             if _bt_patch_w == 1.0:
@@ -1399,7 +1510,12 @@ def main(args):
                 cov_coeff=_cov_c,
             )
 
-        def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+        # gap_pool / keep_pos are bound onto every patch loss by _patch_lf in train_step
+        # but consumed only by the Barlow Twins variant, which is the one with a GAP
+        # companion term to pool for. Accepted and ignored here.
+        def patch_loss_func(
+            z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None, gap_pool=None, keep_pos=None
+        ):
             return vicreg_loss(
                 z_rec_tuple,
                 estimated_content_indices=estimated_content_indices,
@@ -1434,7 +1550,10 @@ def main(args):
                 cross_view_negs_only=_cross_view_negs,
             )
 
-        def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
+        # Same as the VICReg branch: bound by _patch_lf, consumed only by Barlow Twins.
+        def patch_loss_func(
+            z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None, gap_pool=None, keep_pos=None
+        ):
             return patch_infonce_loss(
                 z_rec_tuple,
                 sim_metric=sim_metric,
@@ -1688,6 +1807,39 @@ def main(args):
                 f"levels={list(_proj_heads.keys())} (loss-facing only; probes read pre-head features)"
             )
 
+    # Weighted position pooling for the Barlow Twins GAP term (--bt-gap-pool). Built
+    # here for the same reason as the projection heads: before the optimizer and the
+    # DataParallel wrap, so the learned logits land in the param groups and the
+    # checkpoint state_dict. One pooler per level (not per content_style_level) so a
+    # multi-level run cannot silently pool some levels uniformly and others not.
+    if getattr(args, "bt_gap_pool", "mean") != "mean":
+        _gap_pools = torch.nn.ModuleDict()
+        _pgpl_gap = getattr(args, "patch_grid_per_level", None)
+        for _lvl in range(args.vqvae_nb_levels):
+            _grid = tuple(_pgpl_gap[_lvl]) if _pgpl_gap is not None else tuple(args.patch_grid)
+            _gap_pools[f"L{_lvl}"] = vqvae.GapPositionPool(
+                n_positions=int(np.prod(_grid)),
+                mode=args.bt_gap_pool,
+                temperature=getattr(args, "bt_gap_pool_temp", 1.0),
+                entropy_floor=getattr(args, "bt_gap_pool_entropy", 0.5),
+                ema=getattr(args, "bt_gap_pool_ema", 0.9),
+                # per_channel needs the channel count and the grid layout. The pooler runs
+                # BEFORE content selection (that happens inside barlow_twins_loss), so the
+                # width it sees is the encoder's full hidden width, not the content block.
+                n_channels=int(getattr(args, "vqvae_hidden_channels", 0) or 0),
+                grid=_grid,
+                coarsen=int(getattr(args, "bt_gap_pool_coarsen", 1) or 1),
+                init_std=float(getattr(args, "bt_gap_pool_init_std", 0.0) or 0.0),
+            )
+        vqvae_model._bt_gap_pools = _gap_pools
+        _npar = sum(p_.numel() for p_ in _gap_pools.parameters())
+        logger.info(
+            f"  Barlow Twins GAP pooling: mode={args.bt_gap_pool} levels={list(_gap_pools.keys())} "
+            f"coarsen={getattr(args, 'bt_gap_pool_coarsen', 1)} params={_npar} "
+            f"(weights shared across views and independent of the sample, so the "
+            f"subject/interaction split the GAP term relies on stays intact)"
+        )
+
     if getattr(args, "compile_model", False):
         logger.warning(
             "  --compile-model ignored: torch.compile is incompatible with "
@@ -1873,11 +2025,16 @@ def main(args):
             # stationary point of the entropy term — an absorbing state, not a soft
             # penalty. Their BatchNorm weights would also miss the "norm" name test,
             # since nn.Sequential names them by position.
+            # The GAP pooling logits are excluded for a sharper version of the same
+            # argument: they feed a softmax, so decaying them toward 0 is decaying the
+            # weights toward UNIFORM — a force pulling against the one thing the module
+            # exists to learn, rather than a generic complexity penalty.
             if (
                 name.endswith(".bias")
                 or "norm" in name.lower()
                 or name.endswith(".alpha")
                 or "_contrastive_proj_heads" in name
+                or "_bt_gap_pools" in name
             ):
                 no_decay_params.append(param)
             else:
@@ -2422,6 +2579,7 @@ def main(args):
                         _wstd = float(getattr(args, "bt_std_coeff", 0.0) or 0.0)
                         _wgstd = getattr(args, "bt_gap_std_coeff", None)
                         _wgstd = _wstd if _wgstd is None else float(_wgstd)
+                        _wpent = float(getattr(args, "bt_gap_pool_entropy_coeff", 1.0) or 0.0)
                         _wvq = float(getattr(args, "vq_commitment_weight", 0.25))
                         _wsingle = bool(getattr(args, "single_count_commitment", False))
                         _wcommit = _wvq + (0.0 if _wsingle else _wsr)
@@ -2443,6 +2601,14 @@ def main(args):
                                             continue
                                         _name = f"{'gap' if _pfx else 'patch'}_{_term.replace('_loss', '')}"
                                         _weighted[f"Weighted/bt_{_name}_L{_li}"] = _v * _wsc * _lw * _w * _coef
+                                # The GAP pooling entropy hinge sits outside the (patch, gap)
+                                # x (term) grid above: it constrains the pooling weights, not a
+                                # cross-correlation, so it carries no bt_gap_weight. Accounted
+                                # for here anyway or it would show up as Weighted/residual and
+                                # make that audit read as a missing term.
+                                _vp = step_moco_diag.get(f"Contrastive/gap_pool_entropy_loss_L{_li}")
+                                if _vp is not None:
+                                    _weighted[f"Weighted/bt_gap_pool_entropy_L{_li}"] = _vp * _wsc * _lw * _wpent
                         _rs = recon_loss_fn.get_summaries().get(utils.TBSummaryTypes.SCALAR, {})
 
                         def _sv(k):
