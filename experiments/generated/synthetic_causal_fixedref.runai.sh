@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_fixedref.yaml
-# Generated at: 2026-08-26T14:24:49Z
-# Git SHA: 77548f5
+# Generated at: 2026-09-03T09:43:07Z
+# Git SHA: f8d698f
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -40,7 +40,7 @@ python -m training.main_multimodal
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
     --scale-contrastive-loss 100
-    --scale-recon-loss 0.0
+    --scale-recon-loss 1.0
     --scale-style-contrastive-loss 0.0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
