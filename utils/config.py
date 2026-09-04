@@ -1126,6 +1126,30 @@ def parse_args() -> argparse.ArgumentParser:
         "offline run_dci_compare --num-samples convention).",
     )
     parser.add_argument(
+        "--selection-n-jobs",
+        type=int,
+        default=-1,
+        help="Parallel probe jobs for the synthetic GT selection composite (-1 = all cores). "
+        "The scoring is sklearn on CPU, so the GPU is idle throughout and this is free "
+        "parallelism: joblib returns results in task order, so it is bit-identical to the "
+        "previous hardcoded 1. Pass 1 to restore single-threaded scoring.",
+    )
+    parser.add_argument(
+        "--selection-probe-dim",
+        default=0,
+        help="PCA width for the selection composite's probe blocks — the in-training twin of "
+        "run_dci_compare's --probe-dim. 'auto' reduces only p>>n blocks (d > N/4) to "
+        "min(64, N/4); an integer reduces every block; 0 (default) disables reduction. "
+        "0 is the historical behaviour and is kept as the default because this metric drives "
+        "CHECKPOINT SELECTION: changing it changes which checkpoint a run calls best, so past "
+        "runs stop being comparable. It is also the dominant cost. At --patch-grid 8 8 8 with "
+        "48 hidden channels the patch block is 24576 features against N=2000, where RidgeCV "
+        "builds an O(n^2 d) Gram per fold; 'auto' cuts that to 64 features. Measured on the "
+        "offline path at identical N, poolings and model: 48s of scoring at 'auto' against "
+        "hours at 0. It also removes the p>>n negative bias (mean R^2 -0.27 on a SHUFFLED "
+        "target unreduced, ~-0.04 reduced) that drags weak factors below zero.",
+    )
+    parser.add_argument(
         "--bt-sim-coeff",
         type=float,
         default=0.0,
@@ -1481,6 +1505,18 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             )
         else:
             args.patch_grid_per_level = [tuple(_pgpl[3 * i : 3 * i + 3]) for i in range(_nb_levels)]
+
+    # --selection-probe-dim takes "auto" or an int, so argparse hands back a string in both
+    # cases. Coerce here: an uncoerced "64" survives every equality check in _reduce_reprs
+    # and only TypeErrors on the width comparison, several minutes into a selection eval.
+    _spd = getattr(args, "selection_probe_dim", 0)
+    if isinstance(_spd, str) and _spd != "auto":
+        try:
+            args.selection_probe_dim = int(_spd)
+        except ValueError:
+            raise ValueError(f"--selection-probe-dim must be an integer or 'auto', got {_spd!r}")
+        if args.selection_probe_dim < 0:
+            raise ValueError(f"--selection-probe-dim must be >= 0 or 'auto', got {args.selection_probe_dim}")
 
     # --patch-foreground-mask only does anything with patch-contrastive active.
     if getattr(args, "patch_foreground_mask", False) and not getattr(args, "patch_contrastive", False):

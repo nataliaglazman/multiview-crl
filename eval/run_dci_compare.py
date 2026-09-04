@@ -56,6 +56,7 @@ import csv
 import json
 import logging
 import os
+import re
 import time
 
 import numpy as np
@@ -69,7 +70,11 @@ logger = logging.getLogger(__name__)
 # Each factor is scored under the pooling that can physically expose it.  Fixed
 # in advance so the headline number is not a max over noisy pooling estimates.
 FACTOR_POOLING = {
-    # global morphometry — present in the channel mean
+    # global morphometry — present in the channel mean.  Routed to gap, not patch: at
+    # patch pooling an untrained encoder already reads these at R2 0.78-0.92 (measured:
+    # brain_size floor 0.897, lr_asymmetry 0.923), leaving under 0.07 of headroom, so two
+    # models cannot be told apart there.  Use --factor-pooling patch for a one-off
+    # all-on-one-rung view instead of editing this table.
     "brain_size": "gap",
     "ventricle_size": "gap",
     "cortical_thickness": "gap",
@@ -90,6 +95,33 @@ FACTOR_POOLING = {
 # eval.dci._extract_synthetic_representations: (content, style, content_v2, style_v2, info)
 _CONTENT, _STYLE = 0, 1
 _CONTENT_V2, _STYLE_V2 = 2, 3
+
+# --probe-dim sentinel: reduce only the blocks that are actually in the p>>n regime.
+# Lives here rather than in content_rank_pca (which already imports from this module) so
+# the two scripts cannot drift on the rule.
+PROBE_DIM_AUTO = "auto"
+
+
+def _auto_probe_dim(n, d):
+    """``--probe-dim auto``: the width to reduce a (n, d) block to, or 0 for "leave alone".
+
+    Only blocks in the p>>n regime are touched. The patch block is the one that gets
+    there: at patch_grid 8^3 x 44 channels it is 22528 features against N~2000 samples,
+    where a ridge probe on a signal-free target returns a NEGATIVE R^2 — measured, and
+    it inverted the sign of the lesion dims in the scaling-2-vs-4 comparison until the
+    reduction was applied. ``gap`` (44) and ``stats`` (176) are well-conditioned at that
+    N and are left at full width, so this does not silently reshape the readouts that
+    were never overfitting.
+
+    Measured on this generator (untrained encoder, patch 8^3, N=200, iid factors): with
+    the labels SHUFFLED, the unreduced probe returns mean R^2 -0.270 while every reduced
+    width returns ~-0.04. The bias is roughly constant, so it is invisible on a strong
+    factor (brain_size reads 0.991 either way) and decisive on a weak one (lesion_y
+    -0.173 unreduced, +0.047 at 64). That asymmetry is why this cannot be left to the
+    caller: it silently penalises exactly the factors under investigation.
+    """
+    budget = max(1, n // 4)
+    return min(64, budget) if d > budget else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -141,6 +173,51 @@ def _null_block_mcc(X, Z, n_null, seeds, rng, kind="ridge"):
     return float(np.mean(vals)) if vals else float("nan")
 
 
+def mcc_by_pooling(reprs, level, gt_content, seeds=(0, 1, 2), kind="ridge", per_factor_pooling="patch", names=()):
+    """Block-MCC of the content block against ``gt_content`` at EVERY available pooling.
+
+    ``_score_one_encoder`` hardcodes stats pooling for its headline ``mcc_cc``, and stats
+    is ``[mean, std, amax, amin]`` over space — all permutation-invariant over voxels, so
+    ``lesion_x/y/z`` (positions) are structurally unreadable there.  That silently drops 3
+    of the 9 content factors, and they are the ones a reconstruction model recovers best:
+    measured, baseline vs contrastive flips from stats +0.011 to patch -0.043.  Reporting
+    the whole ladder makes the reversal visible instead of only showing the rung that
+    happens to flatter the contrastive arm.
+
+    The ladder is an unweighted MEAN over factors, which hides a sign split: measured on
+    one run, brain_size ROSE while cortical_thickness, lr_asymmetry, temporal_atrophy and
+    sulcal_widening all FELL, and the average reported a uniform decline.  ``block_mcc``
+    computes the per-factor breakdown on its way to that mean, so it is emitted for
+    ``per_factor_pooling`` at no extra cost.
+
+    Returns ``{"mcc_cc_pool_<key>": mean, ...}`` plus, for ``per_factor_pooling``, the
+    ``mcc_cc_factor_*`` / ``mcc_cc_assignment_identity`` keys.  Read every one of these as
+    a gap over an untrained twin (``--floor``): at patch pooling a random projection of
+    this architecture already scores ~0.86, so the absolute value is nearly all floor.
+    """
+    out = {}
+    if gt_content is None:
+        return out
+    for key in reprs:
+        blk = _block_array(reprs, key, level, _CONTENT)
+        if blk is None or not blk.shape[1]:
+            continue
+        res = block_mcc(blk, gt_content, seeds=seeds, kind=kind)
+        out[f"mcc_cc_pool_{key}"] = res["mean"]
+        if key != per_factor_pooling:
+            continue
+        pf, sd, dg = res.get("per_factor"), res.get("per_factor_std"), res.get("per_factor_diag")
+        if pf is None:
+            continue
+        for j in range(len(pf)):
+            fname = names[j] if j < len(names) else f"factor{j}"
+            out[f"mcc_cc_factor_{fname}"] = float(pf[j])
+            out[f"mcc_cc_factor_std_{fname}"] = float(sd[j])
+            out[f"mcc_cc_factor_diag_{fname}"] = float(dg[j])
+        out["mcc_cc_assignment_identity"] = res.get("assignment_identity", float("nan"))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Scoring (pure numpy — no torch, unit-testable)
 # --------------------------------------------------------------------------- #
@@ -159,7 +236,20 @@ def _block_array(reprs, key, level, block_idx):
     return ld[level][block_idx]
 
 
-def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, rng, n_jobs=1, kind="ridge"):
+def _score_block(
+    reprs,
+    level,
+    block_idx,
+    factors,
+    names,
+    avail,
+    n_null,
+    seeds,
+    rng,
+    n_jobs=1,
+    kind="ridge",
+    factor_pooling="assigned",
+):
     """Per-factor informativeness for one repr→factor block, under every pooling.
 
     ``block_idx`` selects the content (0) or style (1) array; ``factors``/``names``
@@ -212,7 +302,13 @@ def _score_block(reprs, level, block_idx, factors, names, avail, n_null, seeds, 
 
     for name in list(per):
         by_pooling = per[name]
-        assigned = _resolve_key(FACTOR_POOLING.get(name, "stats"), avail)
+        # ``factor_pooling`` overrides FACTOR_POOLING's per-factor routing and reads every
+        # factor at one rung.  The routing is the default because it keeps each factor off
+        # its ceiling as well as on a pooling that can express it: at patch an untrained
+        # encoder reads the morphometry factors at 0.78-0.92, leaving no headroom to
+        # compare models in.  The override is for asking "how does this factor read HERE".
+        want = FACTOR_POOLING.get(name, "stats") if factor_pooling == "assigned" else factor_pooling
+        assigned = _resolve_key(want, avail)
         head = by_pooling.get(
             assigned,
             {
@@ -262,7 +358,67 @@ def _blank_dci(prefix):
     return {
         **{f"{prefix}_{s}": float("nan") for s in _DCI_BASE},
         f"{prefix}_pooling": None,
+        f"{prefix}_n_codes": float("nan"),
     }
+
+
+def mean_std_structs(structs):
+    """Elementwise ``(mean, std)`` over a list of identically-shaped nested dicts.
+
+    Used to collapse several untrained-floor scorings — one per init seed — into a single
+    floor plus its across-seed spread.  That spread is the point: an unseeded floor is one
+    draw of a random projection, and every ``learned = trained - floor`` number inherits
+    its noise silently.  Measured on this project, three near-equivalent lesion axes drew
+    floors spanning 0.16 of block-MCC, which is the same order as the effects being
+    claimed over them.
+
+    Numeric leaves are averaged over the finite values; dicts recurse; anything else
+    (pooling names, factor-name lists, None) is taken from the first struct unchanged
+    since it is metadata, not a measurement.  With one struct the std is 0.0.
+    """
+    if not structs:
+        return {}, {}
+    first = structs[0]
+    if isinstance(first, dict):
+        mean, std = {}, {}
+        for k in first:
+            vals = [s[k] for s in structs if isinstance(s, dict) and k in s]
+            mean[k], std[k] = mean_std_structs(vals)
+        return mean, std
+    if isinstance(first, bool) or not isinstance(first, (int, float, np.floating, np.integer)):
+        return first, first
+    finite = [float(v) for v in structs if np.isfinite(_as_float(v))]
+    if not finite:
+        return float("nan"), float("nan")
+    return float(np.mean(finite)), float(np.std(finite))
+
+
+def _as_float(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _select_codes(X, max_codes):
+    """Cap a DCI block's width by SELECTING the highest-variance codes, never rotating.
+
+    DCI is basis-dependent by construction: ``disentanglement`` asks "is this CODE
+    dedicated to few factors", which is a statement about one specific feature, and
+    ``completeness`` normalises by the code count.  So the block handed to DCI must be
+    made of the model's own features.  Projecting onto principal components — what
+    ``_reduce_reprs`` does for the probes — replaces every code with a variance-ordered
+    MIXTURE of channels, and then D/C describe the PCA basis rather than the encoder.
+    Selection keeps each retained code a real ``(channel, patch)`` feature, so the score
+    still refers to the representation.
+
+    Returns ``(X, n_codes)``.  ``max_codes <= 0`` disables the cap.
+    """
+    if not max_codes or X.shape[1] <= max_codes:
+        return X, X.shape[1]
+    keep = np.argsort(-X.var(axis=0), kind="stable")[:max_codes]
+    keep.sort()  # original column order, so a code index still maps back to a channel
+    return X[:, keep], int(max_codes)
 
 
 def _score_dci(
@@ -277,6 +433,8 @@ def _score_dci(
     key_prefix="dci",
     pooling_key=None,
     train_ratio=0.8,
+    max_codes=0,
+    n_jobs=1,
 ):
     """GAP DCI disentanglement + completeness on one representation block.
 
@@ -289,6 +447,11 @@ def _score_dci(
     same path as ``compute_dci_synthetic``).  Returns real / null / gap for D and C
     under ``key_prefix``; ``gap = real - null`` cancels the shape advantage of a
     wider latent so different channel counts stay comparable.
+
+    Callers must pass the UNREDUCED ``reprs`` — see ``_select_codes`` for why a
+    PCA-projected block cannot carry a D/C score.  ``max_codes`` bounds the GBT cost by
+    selecting codes instead, and the width actually used is returned as ``_n_codes`` so
+    two rows can be checked for commensurability before they are compared.
     """
     nan = float("nan")
     blank = _blank_dci(key_prefix)
@@ -296,6 +459,7 @@ def _score_dci(
     X = _block_array(reprs, mkey, level, block_idx)
     if X is None or X.shape[1] == 0 or X.shape[0] < 20:
         return blank
+    X, n_codes = _select_codes(X, max_codes)
 
     F = np.hstack([gt_content, gt_style]) if gt_style is not None and gt_style.shape[1] else gt_content
     split = int(X.shape[0] * train_ratio)
@@ -304,13 +468,13 @@ def _score_dci(
     from eval.dci import _compute_dci, _null_permuted_dci  # pulls torch in lazily
 
     try:
-        real, _ = _compute_dci(X[:split].T, F[:split].T, X[split:].T, F[split:].T, factor_types)
+        real, _ = _compute_dci(X[:split].T, F[:split].T, X[split:].T, F[split:].T, factor_types, n_jobs=n_jobs)
         rd, rc = real["disentanglement"], real["completeness"]
     except Exception as e:
         logger.warning("DCI (real) failed: %s", e)
-        return {**blank, f"{key_prefix}_pooling": mkey}
+        return {**blank, f"{key_prefix}_pooling": mkey, f"{key_prefix}_n_codes": n_codes}
 
-    null = _null_permuted_dci(X, F, split, factor_types, n_null, rng)
+    null = _null_permuted_dci(X, F, split, factor_types, n_null, rng, n_jobs=n_jobs)
     nd, nc = null.get("disentanglement", nan), null.get("completeness", nan)
     return {
         f"{key_prefix}_d": rd,
@@ -320,6 +484,7 @@ def _score_dci(
         f"{key_prefix}_c_null": nc,
         f"{key_prefix}_c_gap": rc - nc,
         f"{key_prefix}_pooling": mkey,
+        f"{key_prefix}_n_codes": n_codes,
     }
 
 
@@ -339,20 +504,30 @@ def _score_one_encoder(
     all_only=False,
     with_dci=False,
     probe_kind="ridge",
+    dci_reprs=None,
+    dci_max_codes=0,
+    factor_pooling="assigned",
 ):
     """Score the four split blocks (cc, cs, ss, sc) + block-MCC for one encoder's
     features, plus the split-free ``all``-channels capacity (full representation →
     every factor).  ``all_only`` skips the split blocks and returns only that
     capacity — for a baseline with no meaningful content/style distinction.
-    ``with_dci`` adds GAP DCI disentanglement/completeness on the all-channels rep."""
+    ``with_dci`` adds GAP DCI disentanglement/completeness on the all-channels rep.
+
+    ``dci_reprs`` is the pre-``_reduce_reprs`` representation, used for the DCI scopes
+    only: the probes want a well-conditioned block, DCI wants the model's own basis, and
+    those are different requirements.  Defaults to ``reprs`` for callers that never
+    reduced."""
     cnames, snames = info["content_names"], info["style_names"]
     has_split = info["has_split"]
+    # DCI reads the unreduced block; every probe/MCC below keeps reading `reprs`.
+    dreprs = reprs if dci_reprs is None else dci_reprs
 
-    # Bind the probe kind once so every block, null and MCC in this row is scored by
-    # the same estimator — a row mixing linear and nonlinear probes is not internally
-    # comparable.
+    # Bind the probe kind and the factor routing once so every block, null and MCC in this
+    # row is scored by the same estimator on the same rung — a row mixing linear and
+    # nonlinear probes, or mixing routings, is not internally comparable.
     def _sblock(*a, **kw):
-        return _score_block(*a, kind=probe_kind, **kw)
+        return _score_block(*a, kind=probe_kind, factor_pooling=factor_pooling, **kw)
 
     # All-channels capacity: every factor predicted from content+style together.
     # Computed for every model so it is the one apples-to-apples axis (same total
@@ -380,9 +555,16 @@ def _score_one_encoder(
     #   dci_patch_*    — all-channels × all-factors at the PATCH pooling: spatial-grid
     #                    codes, so localized factors (lesions) contribute; NaN if no
     #                    patch pooling was requested.
+    #
+    # All three read `dreprs`, so the three scopes are always in the SAME basis (the
+    # encoder's own channels) and stay commensurable with each other.  Before this they
+    # read the probe-reduced blocks, which under `--probe-dim auto` reduces whichever
+    # scope happens to be in the p>>n regime and leaves the others alone: at N=2000 that
+    # put `dci_patch` on 64 principal components while `dci`/`dci_content` stayed on raw
+    # channels, and the three rows printed together were not comparable.
     if with_dci:
         dci = _score_dci(
-            reprs,
+            dreprs,
             level,
             (content_idx, style_idx),
             gt_content,
@@ -391,11 +573,13 @@ def _score_one_encoder(
             n_null,
             rng,
             key_prefix="dci",
+            max_codes=dci_max_codes,
+            n_jobs=n_jobs,
         )
         if not all_only and has_split:
             dci.update(
                 _score_dci(
-                    reprs,
+                    dreprs,
                     level,
                     content_idx,
                     gt_content,
@@ -404,6 +588,8 @@ def _score_one_encoder(
                     n_null,
                     rng,
                     key_prefix="dci_content",
+                    max_codes=dci_max_codes,
+                    n_jobs=n_jobs,
                 )
             )
         else:
@@ -411,7 +597,7 @@ def _score_one_encoder(
         if "patch" in avail:
             dci.update(
                 _score_dci(
-                    reprs,
+                    dreprs,
                     level,
                     (content_idx, style_idx),
                     gt_content,
@@ -421,6 +607,8 @@ def _score_one_encoder(
                     rng,
                     key_prefix="dci_patch",
                     pooling_key="patch",
+                    max_codes=dci_max_codes,
+                    n_jobs=n_jobs,
                 )
             )
         else:
@@ -564,18 +752,37 @@ def _reduce_reprs(reprs, level, probe_dim, seed=0):
     ``min(probe_dim, width)`` components, so every model's probes see the same
     feature capacity regardless of its channel count.
 
+    ``probe_dim=PROBE_DIM_AUTO`` resolves per block via ``_auto_probe_dim``: only the
+    p>>n blocks are touched, and a well-conditioned one is left at full width. An
+    explicit integer still reduces EVERY block, which is the setting to use when
+    equalising a channel-count confound across models of different width — that is a
+    different goal from fixing the conditioning, and only the integer serves it.
+
     View-1 and view-2 of a block share one PCA basis (fit on view 1) so the
     view-invariance probe is not confounded by mismatched bases.  PCA is
     unsupervised and fit on all samples — a transductive but label-free step.  The
     ``info`` dict is left untouched, so the tables still report the model's real
     channel count.  Blocks already at or below ``probe_dim`` are left unchanged.
+
+    PCA keeps top-VARIANCE directions, not top-signal ones, so an over-aggressive width
+    deletes weak factors outright (measured, same setup as ``_auto_probe_dim``:
+    sulcal_widening reads 0.866 at 64 and 0.073 at 16). Treat the width as a reported
+    parameter, and never compare two models scored at different values.
     """
     from sklearn.decomposition import PCA
 
+    def _width(A):
+        if probe_dim == PROBE_DIM_AUTO:
+            return _auto_probe_dim(A.shape[0], A.shape[1])
+        return probe_dim
+
     def _fit(A):
-        if A is None or A.shape[1] == 0 or A.shape[1] <= probe_dim:
+        if A is None or A.shape[1] == 0:
             return None
-        return PCA(n_components=min(probe_dim, A.shape[0]), random_state=seed).fit(A)
+        k = _width(A)
+        if k <= 0 or A.shape[1] <= k:
+            return None
+        return PCA(n_components=min(k, A.shape[0]), random_state=seed).fit(A)
 
     def _apply(pca, A):
         return pca.transform(A) if (pca is not None and A is not None) else A
@@ -673,6 +880,8 @@ def score_reprs(
     probe_dim=0,
     gt_style_v2=None,
     probe_kind="ridge",
+    dci_max_codes=0,
+    factor_pooling="assigned",
 ):
     """Turn extracted representations into one comparison row (torch-free).
 
@@ -682,8 +891,11 @@ def score_reprs(
     When ``per_encoder`` is True and view-2 features exist, the four score blocks
     and block-MCC are computed separately for each encoder and reported with a
     ``_v2`` suffix.  ``with_dci`` adds the split-free GAP DCI scores.  ``probe_dim``
-    (>0) PCA-reduces every block to that many components first, so informativeness /
-    MCC / DCI are compared at equal capacity across models of different width.
+    (>0) PCA-reduces every block to that many components first, so informativeness and
+    MCC are compared at equal capacity across models of different width.  DCI is scored
+    on the UNREDUCED blocks regardless (``_select_codes``) and bounded by
+    ``dci_max_codes`` instead, because D/C are basis-dependent and a PCA-projected block
+    describes the PCA basis rather than the encoder.
     """
     # Effective rank (collapse diagnostic) on the ORIGINAL representation, before any
     # probe_dim PCA — how many dims a block actually uses vs its nominal width.  Use
@@ -699,7 +911,10 @@ def score_reprs(
         ranks["style_rank_v2"] = _effective_rank(_block_array(reprs, _rk, level, _STYLE_V2))
         ranks["all_rank_v2"] = _effective_rank(_block_array(reprs, _rk, level, (_CONTENT_V2, _STYLE_V2)))
 
-    if probe_dim and probe_dim > 0:
+    # Keep a handle on the unreduced blocks: the probes want conditioning, DCI wants the
+    # encoder's own basis, and `_reduce_reprs` can only serve the first.
+    dci_reprs = reprs
+    if probe_dim == PROBE_DIM_AUTO or (isinstance(probe_dim, int) and probe_dim > 0):
         reprs = _reduce_reprs(reprs, level, probe_dim)
     avail = set(reprs.keys())
     rng = np.random.RandomState(0)
@@ -720,6 +935,9 @@ def score_reprs(
         all_only=all_only,
         with_dci=with_dci,
         probe_kind=probe_kind,
+        dci_reprs=dci_reprs,
+        dci_max_codes=dci_max_codes,
+        factor_pooling=factor_pooling,
     )
 
     # View-invariance (uses both encoders).  Skipped for an all-channels-only
@@ -771,6 +989,9 @@ def score_reprs(
             all_only=all_only,
             with_dci=with_dci,
             probe_kind=probe_kind,
+            dci_reprs=dci_reprs,
+            dci_max_codes=dci_max_codes,
+            factor_pooling=factor_pooling,
         )
         for k, v in enc2.items():
             if k == "detail":
@@ -797,13 +1018,18 @@ def score_reprs(
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_checkpoint(run_dir, name):
+def _resolve_checkpoint(run_dir, name=None):
     """Prefer ``<run_dir>/<name>``; fall back to vqvae_model.pt if it is missing.
 
     Lets a comparison mix runs that have a best-by-loss checkpoint with runs that
     only have a latest one, instead of dropping the latter.  Returns the preferred
     path unchanged when neither exists so the loader can raise a clear error.
+
+    ``name=None`` means "the default checkpoint" — callers whose own CLI defaults the
+    filename to None would otherwise land in ``os.path.join`` with a TypeError that says
+    nothing about checkpoints.
     """
+    name = name or "vqvae_model.pt"
     preferred = os.path.join(run_dir, name)
     if os.path.exists(preferred):
         return preferred
@@ -834,14 +1060,27 @@ def evaluate_model(
     probe_dim=0,
     probe_kind="ridge",
     squash_content=False,
+    random_init=False,
+    dci_max_codes=0,
+    factor_pooling="assigned",
+    init_seed=None,
 ):
-    """Load a model, extract representations under each pooling, return a row."""
+    """Load a model, extract representations under each pooling, return a row.
+
+    ``random_init=True`` skips the checkpoint and scores this run's exact architecture
+    UNTRAINED — the zero point every other row should be read as a gap over. It has to be
+    produced by this function rather than by ``run_dci_synthetic --random-init`` so the
+    floor and the trained rows share the pooling, probe width, null count, factor
+    distribution and FACTOR_POOLING routing; a floor measured on any other axis is not
+    subtractable, which is the failure mode that has repeatedly produced phantom results
+    on this project.
+    """
     from eval.dci import _extract_synthetic_representations
     from eval.run_dci_synthetic import load_model_from_run_dir
 
-    logger.info("=== evaluating %s (%s) ===", name, run_dir)
+    logger.info("=== evaluating %s (%s)%s ===", name, run_dir, " [UNTRAINED FLOOR]" if random_init else "")
     t0 = time.perf_counter()
-    model, _args, device = load_model_from_run_dir(run_dir, checkpoint, device)
+    model, _args, device = load_model_from_run_dir(run_dir, checkpoint, device, random_init=random_init, seed=init_seed)
     t_load = time.perf_counter() - t0
 
     reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
@@ -903,6 +1142,8 @@ def evaluate_model(
         with_dci=with_dci,
         probe_dim=probe_dim,
         probe_kind=probe_kind,
+        dci_max_codes=dci_max_codes,
+        factor_pooling=factor_pooling,
     )
     t_score = time.perf_counter() - t0
     logger.info(
@@ -934,6 +1175,7 @@ def score_encoder_live(
     probe_dim=0,
     max_samples=None,
     per_factor_pooling="patch",
+    n_jobs=1,
 ):
     """In-training counterpart of ``evaluate_model`` for a live (in-memory) encoder.
 
@@ -990,46 +1232,24 @@ def score_encoder_live(
         seeds=seeds,
         per_encoder=per_encoder,
         probe_dim=probe_dim,
+        n_jobs=n_jobs,
     )
     attach_scores([row])
 
-    # Block-MCC at EVERY pooling, not just the one `mcc_cc` uses.
-    #
-    # `_score_one_encoder` hardcodes stats pooling for block-MCC, and stats is
-    # `[mean, std, amax, amin]` over space — all permutation-invariant over voxels, so
-    # lesion_x/y/z (positions) are structurally unreadable there. That silently drops 3 of
-    # the 9 content factors, and they are the ones a reconstruction model recovers best:
-    # measured offline, baseline vs contrastive flips from stats +0.011 to patch -0.043.
-    # Reporting the whole ladder makes the reversal visible in-training instead of only
-    # showing the rung that happens to flatter the contrastive arm.
-    #
-    # The pooling ladder is still an unweighted MEAN over factors, which hides a sign split:
-    # measured offline on one run, brain_size ROSE while cortical_thickness, lr_asymmetry,
-    # temporal_atrophy and sulcal_widening all FELL, and the average reported a uniform
-    # decline. `block_mcc` computes the per-factor breakdown on its way to that mean, so
-    # emitting it for one pooling is free. Log-only by construction: nothing below feeds
-    # `attach_scores`, `overall_score` or the selection gate, so existing runs stay
-    # comparable. Defaults to `patch` — that is where the open question lives, and doing all
-    # three poolings would add 27 scalars to the dashboard for no extra information.
-    _names = (info or {}).get("content_names") or []
-    for _k in reprs:
-        _blk = _block_array(reprs, _k, level, _CONTENT)
-        if _blk is None or not _blk.shape[1] or gt_content is None:
-            continue
-        _res = block_mcc(_blk, gt_content, seeds=seeds)
-        row[f"mcc_cc_pool_{_k}"] = _res["mean"]
-        if _k != per_factor_pooling:
-            continue
-        _pf, _sd = _res.get("per_factor"), _res.get("per_factor_std")
-        _dg = _res.get("per_factor_diag")
-        if _pf is None:
-            continue
-        for _j in range(len(_pf)):
-            _fn = _names[_j] if _j < len(_names) else f"factor{_j}"
-            row[f"mcc_cc_factor_{_fn}"] = float(_pf[_j])
-            row[f"mcc_cc_factor_std_{_fn}"] = float(_sd[_j])
-            row[f"mcc_cc_factor_diag_{_fn}"] = float(_dg[_j])
-        row["mcc_cc_assignment_identity"] = _res.get("assignment_identity", float("nan"))
+    # Block-MCC at every pooling, not just the stats rung `mcc_cc` uses — see
+    # `mcc_by_pooling` for why the stats rung alone is misleading.  Log-only by
+    # construction: nothing here feeds `attach_scores`, `overall_score` or the selection
+    # gate, so existing runs stay comparable.
+    row.update(
+        mcc_by_pooling(
+            reprs,
+            level,
+            gt_content,
+            seeds=seeds,
+            per_factor_pooling=per_factor_pooling,
+            names=(info or {}).get("content_names") or [],
+        )
+    )
     return row
 
 
@@ -1231,6 +1451,63 @@ def _verdict_lines(row):
 def _disent_of(r):
     v = r.get("disentanglement", float("nan"))
     return v if (v is not None and np.isfinite(v)) else -1.0
+
+
+_N_SECTIONS = 6
+
+
+def _section(n, title, subtitle=""):
+    """Slim numbered rule before each section.
+
+    Deliberately NOT a banner box: every section below already prints its own header
+    with context the divider should not duplicate (which baseline, which mode).  This
+    only makes a long report navigable — "look at section 3" beats "scroll down a bit".
+    """
+    head = f"── {n}/{_N_SECTIONS} ─ {title} "
+    print("\n" + head + "─" * max(4, 96 - len(head)))
+    if subtitle:
+        print(f"   {subtitle}")
+
+
+def print_reading_guide(rows, baseline_name=None):
+    """The four rules that decide whether any number below means anything.
+
+    Printed first and kept short on purpose: every one of these corresponds to a mistake
+    that has actually been made on this project and cost an investigation.
+    """
+    w = 96
+    has_floor = bool(_floor_map(rows))
+    pdim = next((r.get("probe_dim") for r in rows if r.get("probe_dim")), 0)
+    print()
+    print("=" * w)
+    print("  HOW TO READ THIS REPORT")
+    print("=" * w)
+    print("  1. GAP, not absolute.  Every informativeness number is real - null, where null is the")
+    print("     same probe on permuted labels.  A raw R2 or MCC includes whatever the block's SHAPE")
+    print("     yields from noise, which is large for wide blocks.")
+    if has_floor:
+        print("  2. FLOOR delta.  The trailing signed number is this row minus its untrained twin.")
+        print("     THAT is the learned part.  At patch pooling an untrained encoder alone scores")
+        print("     >0.8 on most factors and ~0.86 block-MCC, so the absolute is nearly all floor.")
+    else:
+        print("  2. NO FLOOR MEASURED.  Without --floor you cannot tell a learned number from what")
+        print("     a random projection of this architecture scores. At patch pooling that floor is")
+        print("     ~0.86 block-MCC. Re-run with --floor before reporting anything below.")
+    print("  3. Compare LIKE with LIKE.  Never difference two numbers from different poolings,")
+    print("     probe widths, --causal modes or DCI code counts.  Cross-axis differencing is what")
+    print("     produced the phantom scaling-rate gap and the 0.695-vs-0.001 ventricle reading.")
+    print("  4. MCC is not invariant to re-gauging.  An exactly INVERTIBLE map costs up to 0.38 of")
+    print("     block-MCC, and block identifiability permits exactly such maps.  A fall in MCC is")
+    print("     therefore 'harder to read linearly', not necessarily 'lost'.")
+    if pdim == PROBE_DIM_AUTO:
+        print("  NOTE  --probe-dim auto: blocks with d > N/4 are PCA-reduced to min(64, N/4) for the")
+        print("        PROBES only.  DCI is scored on the unreduced block (its scores are")
+        print("        basis-dependent); effective rank likewise.")
+    elif pdim:
+        print(f"  NOTE  --probe-dim {pdim}: every probe block PCA-reduced to {pdim} components.")
+        print("        DCI and effective rank are scored on the unreduced block.")
+    if baseline_name:
+        print(f"  Baseline row: {baseline_name}")
 
 
 def print_scorecard(rows, baseline_name=None):
@@ -1460,6 +1737,66 @@ def _minibar(gap, width=10):
     return "[" + "#" * filled + "." * (width - filled) + "]"
 
 
+# Suffix --floor appends to a run's name for its untrained twin. One definition, shared
+# by the row builder and the readers below.
+_FLOOR_SUFFIX = "-floor"
+
+
+def _dnum(x, nd=3):
+    """Signed delta, so a floor-subtracted column reads at a glance."""
+    return f"{x:+.{nd}f}" if x is not None and np.isfinite(x) else "   -  "
+
+
+def _floor_map(rows):
+    """``{model name: its --floor twin row}``, empty when --floor was not passed."""
+    by_name = {r.get("name"): r for r in rows}
+    return {
+        n: by_name[n + _FLOOR_SUFFIX] for n in by_name if not n.endswith(_FLOOR_SUFFIX) and n + _FLOOR_SUFFIX in by_name
+    }
+
+
+def _floor_gap(floor_row, block_key, fname, detail_key="detail"):
+    """That factor's GAP in the floor twin's ``block_key``, or NaN if absent.
+
+    ``detail_key`` must track the row being printed: under --per-encoder, encoder 2's
+    numbers have to be differenced against encoder 2's floor, not encoder 1's.
+    """
+    if floor_row is None:
+        return float("nan")
+    block = (floor_row.get(detail_key) or {}).get(block_key)
+    if not block:
+        return float("nan")
+    return _fl((block.get("per_factor", {}).get(fname) or {}).get("gap"))
+
+
+# A factor beaten this far at another pooling is very likely mis-assigned rather than
+# unrecovered. Deliberately blunt: the point is to prompt a look at FACTOR_POOLING, NOT
+# to rescore on the max — scoring on the best-of-N pooling is what the fixed assignment
+# exists to prevent.
+_ROUTING_MARGIN = 0.15
+
+
+def _routing_note(fd):
+    """Flag a factor whose assigned pooling is far from the best one available.
+
+    Caught sulcal_widening, which FACTOR_POOLING files under "present in the channel
+    mean" while the generator renders it as sin(12x)sin(12y)sin(12z) — zero-mean by
+    construction, so it cannot be in a channel average. Measured on an untrained
+    encoder: gap -0.08, stats -0.09, patch +0.87. Read at gap it looks like a factor no
+    model recovers; it is a factor no model was ever asked about.
+    """
+    by_pool = (fd or {}).get("by_pooling") or {}
+    assigned, g = fd.get("pooling"), _fl(fd.get("gap"))
+    best_k, best_g = None, float("-inf")
+    for k, v in by_pool.items():
+        gk = _fl(v.get("gap"))
+        if np.isfinite(gk) and gk > best_g:
+            best_k, best_g = k, gk
+    if best_k is None or best_k == assigned or not np.isfinite(g):
+        return ""
+    return f"   <- {best_g:.2f} at {best_k}; check FACTOR_POOLING" if best_g - g > _ROUTING_MARGIN else ""
+
+
 def print_per_latent(rows):
     """Per-model, per-factor breakdown: for every ground-truth factor, the GAP
     test-R² of predicting it from its OWN block (signal, want high) next to the
@@ -1469,9 +1806,12 @@ def print_per_latent(rows):
     a content factor should light up the signal bar and leave the leak bar empty,
     and vice-versa for style.  The full per-pooling sweep lives in the CSV.
     """
+    floors = _floor_map(rows)
     print()
     print("  PER-LATENT BREAKDOWN   (GAP = real - null at each factor's assigned pooling)")
     print("  SIGNAL = predicted from its own block (want high)   LEAK = from the other block (want low)")
+    if floors:
+        print("  Signed number after each cell = minus the --floor twin. That is the learned part.")
 
     _NUMW, _CELLW = 5, 18  # "0.650" and "0.650 [##########]"
 
@@ -1479,6 +1819,7 @@ def print_per_latent(rows):
         return f"{_num(g):>{_NUMW}s} {_minibar(g)}"
 
     for r in rows:
+        fl = floors.get(r["name"])
         for detail_key, enc_label in [("detail", ""), ("detail_v2", "  [enc2]")]:
             detail = r.get(detail_key)
             if not detail:
@@ -1494,18 +1835,27 @@ def print_per_latent(rows):
             fw = max([len(n) for n in names] + [14])
             sep_w = fw + 2 + 6 + 2 + _CELLW + 4 + _CELLW
 
-            def _emit(kind, signal_pf, leak_pf, sig_src, leak_src):
+            def _emit(kind, signal_pf, leak_pf, sig_src, leak_src, sig_key, leak_key):
+                dh = "  Δflr " if fl else ""
                 print(
                     f"    {kind + ' factor':<{fw}s}  {'pool':<6s}  "
-                    f"{'SIGNAL: ' + sig_src:<{_CELLW}s}    {'LEAK: ' + leak_src:<{_CELLW}s}"
+                    f"{'SIGNAL: ' + sig_src:<{_CELLW}s}{dh}    {'LEAK: ' + leak_src:<{_CELLW}s}{dh}"
                 )
-                print("    " + "-" * sep_w)
+                print("    " + "-" * (sep_w + (14 if fl else 0)))
                 for fname, fd in signal_pf.items():
                     pool = fd.get("pooling") or "?"
                     sgap = fd.get("gap")
                     lgap = (leak_pf.get(fname, {}) or {}).get("gap") if leak_pf else None
                     leak_cell = _cell(lgap) if leak_pf is not None else f"{'n/a':>{_NUMW}s}"
-                    print(f"    {fname:<{fw}s}  {pool:<6s}  {_cell(sgap)}    {leak_cell}")
+                    ds = f"  {_dnum(_fl(sgap) - _floor_gap(fl, sig_key, fname, detail_key))}" if fl else ""
+                    dl = ""
+                    if fl:
+                        dl = (
+                            f"  {_dnum(_fl(lgap) - _floor_gap(fl, leak_key, fname, detail_key))}"
+                            if leak_pf is not None
+                            else ""
+                        )
+                    print(f"    {fname:<{fw}s}  {pool:<6s}  {_cell(sgap)}{ds}    {leak_cell}{dl}")
 
             print()
             print(f"  {r['name']}{enc_label}  ({r.get('checkpoint', '?')})")
@@ -1515,6 +1865,8 @@ def print_per_latent(rows):
                 sc["per_factor"] if sc else None,
                 "from content",
                 "from style",
+                "content2content",
+                "style2content",
             )
             if ss:
                 print()
@@ -1524,6 +1876,8 @@ def print_per_latent(rows):
                     cs["per_factor"] if cs else None,
                     "from style",
                     "from content",
+                    "style2style",
+                    "content2style",
                 )
     print()
 
@@ -1722,10 +2076,18 @@ def print_capacity_table(rows, baseline_name=None):
         return
     ranked = sorted(have, key=lambda r: r.get("info_all", float("-inf")), reverse=True)
     pdim = next((r.get("probe_dim") for r in have if r.get("probe_dim")), 0)
+    floors = _floor_map(rows)
     print()
     print("  ALL-CHANNELS CAPACITY   (GAP = real - null; full representation -> each factor)")
     print("  higher = more factor information present somewhere in the representation")
-    if pdim:
+    if floors:
+        print(
+            "  TRAILING SIGNED NUMBER = this row minus its --floor twin. Read THAT, not the "
+            "absolute:\n  at patch pooling an untrained encoder alone scores >0.8 on most factors."
+        )
+    if pdim == PROBE_DIM_AUTO:
+        print("  NOTE: --probe-dim auto — p>>n blocks (d > N/4) reduced to min(64, N/4) PCs; others full width")
+    elif pdim:
         print(f"  NOTE: scored on top-{pdim} PCs per block (--probe-dim) — capacity equalized across widths")
     for r in ranked:
         if r["name"] == baseline_name:
@@ -1743,11 +2105,14 @@ def print_capacity_table(rows, baseline_name=None):
         # baseline (all-channels) is scored on both encoders, not just the first.
         has_v2 = np.isfinite(r.get("info_all_v2", float("nan")))
 
+        fl = floors.get(r["name"])
+
         def _emit_enc(suffix, enc_label):
             allb = (r.get("detail_v2" if suffix else "detail") or {}).get("all")
             mean = r.get("info_all" + suffix, float("nan"))
             head = f"    {enc_label}  " if enc_label else "    "
-            print(f"{head}mean {_num(mean)} {_minibar(mean)}")
+            dmean = f"  {_dnum(_fl(mean) - _fl(fl.get('info_all' + suffix)))}" if fl else ""
+            print(f"{head}mean {_num(mean)} {_minibar(mean)}{dmean}")
             # D/C as "real - null = gap" per scope.  The gap alone is not readable: raw
             # D/C are shape artifacts (D is normalized by the factor count, C by the code
             # count), so a model can look disentangled purely from its dimensions, and a
@@ -1757,7 +2122,7 @@ def print_capacity_table(rows, baseline_name=None):
                 for prefix, label, note in (
                     ("dci", "DCI all", "all chan x all factors"),
                     ("dci_content", "DCI content", "content chan x content factors"),
-                    ("dci_patch", "DCI patch", "patch-grid chan x all factors"),
+                    ("dci_patch", "DCI patch", "patch-grid cells x all factors"),
                 ):
                     if not np.isfinite(r.get(f"{prefix}_d_gap{suffix}", float("nan"))):
                         continue
@@ -1766,22 +2131,45 @@ def print_capacity_table(rows, baseline_name=None):
                         real = r.get(f"{prefix}_{m}{suffix}", float("nan"))
                         null = r.get(f"{prefix}_{m}_null{suffix}", float("nan"))
                         gap = r.get(f"{prefix}_{m}_gap{suffix}", float("nan"))
-                        cells.append(f"{m.upper()} {_num(real)} - {_num(null)} = {_num(gap)} {_minibar(gap)}")
-                    print(f"      {label:14s} {cells[0]}   {cells[1]}   ({note})")
+                        d = f" {_dnum(_fl(gap) - _fl(fl.get(f'{prefix}_{m}_gap{suffix}')))}" if fl else ""
+                        cells.append(f"{m.upper()} {_num(real)} -{_num(null)} ={_num(gap)}{d}")
+                    ncodes = _fl(r.get(f"{prefix}_n_codes{suffix}"))
+                    cw = f"{int(ncodes):>6d}" if np.isfinite(ncodes) else "     ?"
+                    print(f"      {label:14s} {cells[0]}   {cells[1]}   {cw} codes  ({note})")
                     nulls = [_fl(r.get(f"{prefix}_{m}_null{suffix}")) for m in ("d", "c")]
                     if any(np.isfinite(v) and v > 0.9 for v in nulls):
                         print(
                             f"      {'':14s} ^ null saturated (>0.9) — the gap cannot go positive here; "
                             "raise --n-null or reconsider the pooling"
                         )
+                # C is normalised by log(n_codes) and D by log(n_factors), so two scopes
+                # with different code counts are on different scales even after the null
+                # subtraction: 512 near-duplicate patch cells dilute one channel's
+                # importance by construction.  Compare a scope against the SAME scope in
+                # another model, never one scope against another.
+                _ncs = {
+                    _fl(r.get(f"{p}_n_codes{suffix}"))
+                    for p in ("dci", "dci_content", "dci_patch")
+                    if np.isfinite(_fl(r.get(f"{p}_n_codes{suffix}")))
+                }
+                if len(_ncs) > 1:
+                    print(
+                        f"      {'':14s} rows above differ in code count — read each DOWN the model "
+                        "column, not ACROSS scopes"
+                    )
             if allb:
                 cset = set(allb.get("content_names", []))
                 fw = max([len(n) for n in allb["per_factor"]] + [16])
+                fl_all = ((fl or {}).get("detail_v2" if suffix else "detail") or {}).get("all") if fl else None
                 for fname, fd in allb["per_factor"].items():
                     kind = "content" if fname in cset else "style"
                     g = fd.get("gap")
                     pool = fd.get("pooling") or "?"
-                    print(f"      {kind:7s} {fname:<{fw}s} {pool:<6s} {_num(g)} {_minibar(g)}")
+                    d = ""
+                    if fl_all:
+                        fg = _fl((fl_all.get("per_factor", {}).get(fname) or {}).get("gap"))
+                        d = f"  {_dnum(_fl(g) - fg)}"
+                    print(f"      {kind:7s} {fname:<{fw}s} {pool:<6s} {_num(g)} {_minibar(g)}{d}{_routing_note(fd)}")
 
         print()
         print(f"  {r['name']}{tag}   {chans}ch")
@@ -1839,6 +2227,11 @@ _CSV_RENAME = {
     "dci_content_c_null": "dci_complete_null_content",
     "dci_patch_c": "dci_complete_patch",
     "dci_patch_c_null": "dci_complete_null_patch",
+    # Width the scope was actually scored at. Not cosmetic: C is normalised by
+    # log(n_codes), so two rows with different counts are on different scales.
+    "dci_n_codes": "dci_n_codes",
+    "dci_content_n_codes": "dci_n_codes_content",
+    "dci_patch_n_codes": "dci_n_codes_patch",
 }
 _CSV_TO_INTERNAL = {v: k for k, v in _CSV_RENAME.items()}
 for _old, _new in list(_CSV_RENAME.items()):
@@ -1882,9 +2275,17 @@ _CSV_LEGEND = """\
 #   dci_disent, dci_complete            real D / C
 #   dci_disent_null, dci_complete_null  label-permutation floor for the same shape
 #   *_content, *_patch                  content-block and patch-pooled scopes
+#   dci_n_codes*                        width each scope was scored at
 #   Raw D/C are shape artifacts: D is normalized by the factor count and C by the code
 #   count, so both sit high when factors are few or codes many. Compare gaps, and treat
 #   a scope whose null exceeds ~0.9 (or collapses to ~0) as unreportable.
+#   DCI ignores --probe-dim by design and is scored on the encoder's own basis, capped by
+#   --dci-max-codes (highest-variance SELECTION, never a rotation): D asks "is this CODE
+#   dedicated to few factors", so a PCA-projected block would describe the PCA basis.
+#   Compare a scope only against the SAME scope in another row, and only when
+#   dci_n_codes matches — C is normalized by log(n_codes), so different widths are
+#   different scales. At patch pooling one channel becomes many near-duplicate cells,
+#   which dilutes C and inflates D by construction; that is the pooling, not the model.
 #   With --per-encoder every DCI column also appears with a _v2 suffix (encoder 2).
 #
 # META: num_samples, poolings, probe_dim, run_dir
@@ -1936,7 +2337,7 @@ def write_outputs(rows, out_dir, baseline_name=None):
         "dci_complete_gap_content",
         "dci_complete_gap_patch",
     ]
-    meta_cols = ["num_samples", "poolings", "probe_dim", "generator", "run_dir"]
+    meta_cols = ["num_samples", "poolings", "probe_dim", "factor_pooling", "generator", "run_dir"]
     v2_cols = (
         [
             "grade_v2",
@@ -1964,6 +2365,9 @@ def write_outputs(rows, out_dir, baseline_name=None):
                 cols.append(f"dci_{metric}_null{scope}{suffix}")
                 if include_gap:
                     cols.append(f"dci_{metric}_gap{scope}{suffix}")
+        # One code count per scope, not per metric — it is a property of the block.
+        for scope in ("", "_content", "_patch"):
+            cols.append(f"dci_n_codes{scope}{suffix}")
         return cols
 
     # Encoder 1's gap columns already live in capacity_cols / detail_cols, so only its
@@ -2131,6 +2535,7 @@ def _settings_of(row):
         row.get("n_null"),
         row.get("seeds"),
         row.get("probe_dim"),
+        row.get("factor_pooling"),
     )
 
 
@@ -2202,6 +2607,29 @@ def main():
     p.add_argument("--level", type=int, default=0, help="Encoder level to compare on.")
     p.add_argument("--seeds", default="0,1,2", help="Probe CV seeds.")
     p.add_argument("--n-null", type=int, default=3, help="Permutations for the null floor.")
+    p.add_argument(
+        "--floor",
+        action="store_true",
+        help="Also score an UNTRAINED twin of every run (row '<name>-floor'), on the same "
+        "pooling, probe width, null count and factor distribution. The label-permutation null "
+        "already in every row asks 'is there any signal at all'; this asks the different and "
+        "usually harder question 'is there more signal than a random projection of this same "
+        "architecture'. At patch pooling an untrained encoder reads six of nine content factors "
+        "above R^2 0.8, so an absolute per-factor number there is close to meaningless without "
+        "it. Roughly doubles runtime.",
+    )
+    p.add_argument(
+        "--floor-seeds",
+        type=int,
+        default=3,
+        help="How many untrained draws to average the floor over (>=1). The untrained weights "
+        "ARE the measurement, and they were unseeded: one draw of a random projection, different "
+        "every invocation, whose noise went silently into every reported delta. Measured here, "
+        "three near-equivalent lesion axes drew floors spanning 0.16 of block-MCC — the same order "
+        "as the effects claimed over them. Seeds are 0..N-1, so a floor is now reproducible, and "
+        "the across-seed std is reported so a delta can be read against it. Costs one extra "
+        "extraction per seed; use 1 for a fast, still-reproducible floor.",
+    )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument(
@@ -2231,14 +2659,41 @@ def main():
         "baseline).  Uses GBT importance — noticeably slower; off by default.",
     )
     p.add_argument(
-        "--probe-dim",
+        "--factor-pooling",
+        default="assigned",
+        choices=("assigned", "gap", "stats", "patch"),
+        help="Which pooling each factor is scored at. 'assigned' (default) uses FACTOR_POOLING: "
+        "each factor read at the coarsest pooling that can physically expose it, fixed in advance "
+        "so the headline is never a max over poolings. That routing also keeps factors off their "
+        "ceiling — at patch an untrained encoder reads the morphometry factors at R2 0.78-0.92, "
+        "leaving under 0.07 of headroom to tell two models apart. Naming a pooling scores EVERY "
+        "factor there; use it for a deliberate one-rung view rather than editing FACTOR_POOLING, "
+        "which changes the routing for every script that imports it and leaves no record in the CSV.",
+    )
+    p.add_argument(
+        "--dci-max-codes",
         type=int,
-        default=0,
-        help="If >0, PCA-reduce every block to this many components before scoring, "
-        "so informativeness/MCC/DCI are compared at EQUAL probe capacity across "
-        "models of different channel counts (removes the capacity confound when "
-        "sweeping channel width).  Set it to <= the smallest content width in the "
-        "comparison.  0 (default) = no reduction.",
+        default=4096,
+        help="Cap the DCI blocks at this many codes, keeping the highest-variance ones "
+        "(0 = no cap).  DCI is NOT subject to --probe-dim: D asks 'is this CODE dedicated "
+        "to few factors' and C normalises by the code count, so both are statements about "
+        "one specific basis, and a PCA projection replaces every code with a mixture of "
+        "channels — the score then describes the PCA basis, not the encoder.  Selection "
+        "keeps each retained code a real (channel, patch) feature while bounding the GBT "
+        "cost, which at 8x8x8 would otherwise be ~22528 features per fit.",
+    )
+    p.add_argument(
+        "--probe-dim",
+        default=PROBE_DIM_AUTO,
+        help="PCA width for every probe block. 'auto' (default) reduces ONLY blocks in the "
+        "p>>n regime (d > N/4) to min(64, N/4): at --poolings 8x8x8 the patch block is ~22528 "
+        "features, where a ridge probe returns R^2 -0.27 on a SHUFFLED target and drags the weak "
+        "factors negative, while gap (44) and stats (176) are well-conditioned and stay at full "
+        "width. An explicit integer reduces EVERY block instead, which is what you want to "
+        "equalise a channel-count confound when sweeping width — set it <= the smallest content "
+        "width in the comparison. 0 disables reduction entirely and reproduces pre-2026 numbers; "
+        "it is not a safe default at patch pooling. The width is a reported parameter, not "
+        "preprocessing: two models must be scored at the same value.",
     )
     p.add_argument(
         "--probe-kind",
@@ -2278,6 +2733,14 @@ def main():
         help="Overwrite any existing results in --out instead of merging the new models into them.",
     )
     cli = p.parse_args()
+
+    if cli.probe_dim != PROBE_DIM_AUTO:
+        try:
+            cli.probe_dim = int(cli.probe_dim)
+        except (TypeError, ValueError):
+            p.error(f"--probe-dim must be an integer or '{PROBE_DIM_AUTO}' (got {cli.probe_dim!r})")
+        if cli.probe_dim < 0:
+            p.error(f"--probe-dim must be >= 0 or '{PROBE_DIM_AUTO}' (got {cli.probe_dim})")
 
     poolings = parse_poolings(cli.poolings)
     seeds = tuple(int(s) for s in cli.seeds.split(","))
@@ -2343,9 +2806,29 @@ def main():
             ", ".join(FIXED_FACTORS),
         )
 
+    # --floor appends an untrained twin of each run, scored by the identical path, so the
+    # zero point sits in the same table on the same axis instead of being carried over from
+    # a separate run_dci_synthetic invocation with its own defaults.
+    # `base` is the row this one is scored alongside: a floor row must inherit its twin's
+    # baseline status, or the baseline's floor would be scored on a different content/style
+    # split than the baseline and stop being subtractable from it.
+    #
+    # Each floor is scored `--floor-seeds` times with a fixed torch seed per draw and then
+    # averaged into one `<name>-floor` row (see `mean_std_structs`). Unseeded, the floor was
+    # a single random projection redrawn on every invocation, so the zero point everything
+    # is subtracted from carried noise nobody could reproduce or bound.
+    n_floor_seeds = max(1, cli.floor_seeds)
+    plan = [(n, n, d, c, False, None) for n, d, c in zip(names, specs, ckpts)]
+    if cli.floor:
+        plan += [
+            (f"{n}{_FLOOR_SUFFIX}-s{seed}", n, d, c, True, seed)
+            for seed in range(n_floor_seeds)
+            for n, d, c in zip(names, specs, ckpts)
+        ]
+
     rows = []
-    for name, run_dir, ckpt_name in zip(names, specs, ckpts):
-        is_baseline = baseline_name is not None and name == baseline_name
+    for name, base, run_dir, ckpt_name, random_init, init_seed in plan:
+        is_baseline = baseline_name is not None and base == baseline_name
         # Baseline default = all-content: style is merged into content (one content
         # block, no style), so its content-side metrics + capacity line up with the
         # models.  --baseline-per-block instead scores its own (arbitrary) split.
@@ -2369,8 +2852,12 @@ def main():
                     with_dci=cli.with_dci,
                     probe_dim=cli.probe_dim,
                     probe_kind=cli.probe_kind,
+                    dci_max_codes=cli.dci_max_codes,
+                    factor_pooling=cli.factor_pooling,
+                    init_seed=init_seed,
                     squash_content=cli.squash_content,
                     all_content=all_content,
+                    random_init=random_init,
                 )
             )
         except Exception as e:
@@ -2380,6 +2867,32 @@ def main():
         logger.error("No models evaluated successfully.")
         return
 
+    # Collapse the per-seed floor draws into one `<name>-floor` row. The across-seed std is
+    # kept on the row as `floor_std` (same nested shape) so a delta can be read against the
+    # floor's own spread rather than treated as exact.
+    if cli.floor:
+        keep, by_base = [], {}
+        for r in rows:
+            m = re.match(rf"^(?P<base>.+){re.escape(_FLOOR_SUFFIX)}-s\d+$", r["name"])
+            if m:
+                by_base.setdefault(m.group("base"), []).append(r)
+            else:
+                keep.append(r)
+        for base, draws in by_base.items():
+            avg, std = mean_std_structs(draws)
+            avg["name"] = base + _FLOOR_SUFFIX
+            avg["floor_seeds"] = len(draws)
+            avg["floor_std"] = std
+            keep.append(avg)
+            spread = _as_float(std.get("info_all"))
+            logger.info(
+                "floor for %s: averaged over %d untrained draws (info_all across-seed std %.4f)",
+                base,
+                len(draws),
+                spread,
+            )
+        rows = keep
+
     # Stamp eval settings on each row (provenance + the merge-comparability check).
     meta = {
         "num_samples": cli.num_samples,
@@ -2388,6 +2901,7 @@ def main():
         "n_null": cli.n_null,
         "seeds": cli.seeds,
         "probe_dim": cli.probe_dim,
+        "factor_pooling": cli.factor_pooling,
         # Generator vintage is provenance, not a setting: a legacy-renderer row and a
         # current-renderer row are different experiments on the fix-affected factors, and
         # nothing else in the output would reveal the difference.
@@ -2414,13 +2928,21 @@ def main():
         baseline_name = existing_baseline
 
     attach_scores(merged)
+    print_reading_guide(merged, baseline_name)
+    _section(1, "HEAD-TO-HEAD vs BASELINE", "the headline: does the objective organize better?")
     print_comparison(merged, baseline_name)
+    _section(2, "ENCODER SUMMARY", "per-encoder split, when --per-encoder gave each view its own")
     print_encoder_summary(merged)
+    _section(3, "CAPACITY + DCI", "how much factor information is present, and how it is spread")
     print_capacity_table(merged, baseline_name)
+    _section(4, "SCORECARD", "derived 0-100% health scores — a summary, never the evidence")
     print_scorecard(merged, baseline_name)
+    _section(5, "RAW METRICS", "the protocol numbers the scores above are derived from")
     print_table(merged, baseline_name)
+    _section(6, "PER-LATENT BREAKDOWN", "per factor: signal vs leak, at its assigned pooling")
     print_per_latent(merged)
     write_outputs(merged, cli.out, baseline_name)
+    print(f"\n  Wrote CSV + JSON to {cli.out}/\n")
 
 
 if __name__ == "__main__":
