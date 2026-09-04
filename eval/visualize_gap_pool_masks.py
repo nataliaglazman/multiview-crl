@@ -11,9 +11,8 @@ example ``(views, samples, C, P)``) can instead be supplied explicitly:
     python -m eval.visualize_gap_pool_masks --checkpoint ... --grid 8 8 8 \
         --activations activations.pt --activation-key hz
 
-The script reads the saved pooler logits directly, so it does not need to build the
-model or dataset.  Each row shows the mask's probability mass marginalised along
-one anatomical axis; colours are comparable across all displayed channels.
+The default view shows native-image cross-sections: activation over mean synthetic
+anatomy above, and the lower-resolution pool mask by itself below.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def _state_dict(checkpoint: Path) -> dict[str, torch.Tensor]:
@@ -40,8 +40,10 @@ def _pool_logits(state: dict[str, torch.Tensor], level: int) -> torch.Tensor:
     return matches[0][1].float()
 
 
-def _activation_distribution(value, channels: int, grid: tuple[int, int, int], coarsen: int) -> np.ndarray:
-    """Return a per-channel spatial distribution from saved encoder activations.
+def _activation_distribution(
+    value, channels: int, grid: tuple[int, int, int], coarsen: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(coarse, fine)`` per-channel spatial activation distributions.
 
     Accepted layouts are ``(C, P)``, ``(N, C, P)``, ``(V, N, C, P)``,
     ``(C, D, H, W)``, or ``(N, C, D, H, W)``.  Leading sample/view axes are
@@ -63,11 +65,20 @@ def _activation_distribution(value, channels: int, grid: tuple[int, int, int], c
             raise ValueError(f"Expected activation spatial grid {grid}, got {tuple(x.shape[1:])}.")
     else:
         raise ValueError("Unsupported activation shape. See --help for accepted layouts.")
+    if tuple(x.shape[1:]) == grid:
+        x = x / np.maximum(x.sum(axis=(1, 2, 3), keepdims=True), 1e-12)
+        fine = x
+    else:
+        # A cached coarse-grid tensor has no finer information to recover. Repeat its
+        # mass only for an honest, blocky overlay on the fine activation grid.
+        x = x / np.maximum(x.sum(axis=(1, 2, 3), keepdims=True), 1e-12)
+        fine = np.repeat(np.repeat(np.repeat(x / coarsen**3, coarsen, axis=1), coarsen, axis=2), coarsen, axis=3)
     if tuple(x.shape[1:]) == grid and coarsen > 1:
         d, h, w = coarse_grid
-        x = x.reshape(channels, d, coarsen, h, coarsen, w, coarsen).mean(axis=(2, 4, 6))
-    x = x.reshape(channels, coarse_p)
-    return x / np.maximum(x.sum(axis=1, keepdims=True), 1e-12)
+        x = x.reshape(channels, d, coarsen, h, coarsen, w, coarsen).sum(axis=(2, 4, 6))
+    coarse = x.reshape(channels, coarse_p)
+    coarse = coarse / np.maximum(coarse.sum(axis=1, keepdims=True), 1e-12)
+    return coarse, fine
 
 
 def _load_activation_distribution(
@@ -90,6 +101,20 @@ def _load_activation_distribution(
     return _activation_distribution(value, channels, grid, coarsen)
 
 
+def _load_cached_background(path: Path) -> np.ndarray | None:
+    """Read the optional mean-image backdrop written by --save-activations."""
+    if path.suffix == ".npz":
+        loaded = np.load(path)
+        value = loaded.get("image_mean")
+    else:
+        loaded = torch.load(path, map_location="cpu", weights_only=False)
+        value = loaded.get("image_mean") if isinstance(loaded, dict) else None
+    if value is None:
+        return None
+    value = value.detach().cpu() if torch.is_tensor(value) else value
+    return np.asarray(value, dtype=np.float32).squeeze()
+
+
 def _extract_synthetic_activations(
     run_dir: Path, checkpoint: Path, level: int, grid: tuple[int, int, int], samples: int, batch: int
 ):
@@ -102,10 +127,17 @@ def _extract_synthetic_activations(
     dataset = build_synthetic_test_set(run_args, samples, causal=bool(getattr(run_args, "synthetic_causal", False)))
     model, _args, device = load_model_from_run_dir(str(run_dir), str(checkpoint))
     output = []
+    image_sum = None
+    image_count = 0
     model.eval()
     with torch.no_grad():
         for data in DataLoader(dataset, batch_size=batch, shuffle=False, num_workers=0):
             images = data["image"]
+            # Registered synthetic volumes share a voxel coordinate system, so their
+            # mean is a useful anatomical backdrop for spatially averaged activations.
+            background_batch = images[0].float()
+            image_sum = background_batch.sum(0) if image_sum is None else image_sum + background_batch.sum(0)
+            image_count += len(background_batch)
             n_views = len(images)
             encoded = model(torch.cat(images, dim=0).to(device), pool_only=True, n_views=n_views, patch_grid=grid)
             features = encoded[2] if isinstance(encoded, tuple) else [encoded]
@@ -116,7 +148,7 @@ def _extract_synthetic_activations(
             output.append(feat.reshape(n_views, per_view, feat.shape[1], feat.shape[2]).cpu())
     if not output:
         raise ValueError("Synthetic evaluation dataset yielded no activations.")
-    return torch.cat(output, dim=1)
+    return torch.cat(output, dim=1), (image_sum / image_count).squeeze(0)
 
 
 def main() -> None:
@@ -124,8 +156,20 @@ def main() -> None:
     p.add_argument("--checkpoint", required=True, type=Path)
     p.add_argument("--grid", required=True, type=int, nargs=3, metavar=("D", "H", "W"))
     p.add_argument("--level", type=int, default=0)
-    p.add_argument("--channels", type=int, nargs="*", help="Channels to show (default: most concentrated).")
-    p.add_argument("--n-channels", type=int, default=12, help="Number to show when --channels is omitted.")
+    p.add_argument(
+        "--channels", type=int, nargs="*", help="Channels to show (default: strongest mask/activation alignment)."
+    )
+    p.add_argument("--n-channels", type=int, default=4, help="Number to show when --channels is omitted.")
+    p.add_argument("--rank-by", choices=("alignment", "concentration"), default="alignment")
+    p.add_argument("--view", choices=("slices", "projections"), default="slices")
+    p.add_argument("--slice-axis", choices=("D", "H", "W"), default="D", help="Axis crossed by slice views.")
+    p.add_argument(
+        "--slice-fracs",
+        type=float,
+        nargs="+",
+        default=(0.25, 0.5, 0.75),
+        help="Relative slice positions, each in [0, 1].",
+    )
     p.add_argument("--output", type=Path, help="Output PNG (default: beside checkpoint).")
     p.add_argument("--activations", type=Path, help="Optional .pt or .npz tensor of encoder activations to compare.")
     p.add_argument("--activation-key", help="Key for a dictionary/.npz activation file.")
@@ -151,51 +195,137 @@ def main() -> None:
 
     coarse_grid = tuple(axis // coarsen for axis in grid)
     masks = torch.softmax(logits, dim=1).reshape(logits.shape[0], *coarse_grid).numpy()
-    activations = None
+    activations = fine_activations = background = None
     if args.activations:
-        activations = _load_activation_distribution(args.activations, args.activation_key, len(masks), grid, coarsen)
+        activations, fine_activations = _load_activation_distribution(
+            args.activations, args.activation_key, len(masks), grid, coarsen
+        )
         activations = activations.reshape(len(masks), *coarse_grid)
+        background = _load_cached_background(args.activations)
     else:
         run_dir = args.run_dir or args.checkpoint.parent
-        hz = _extract_synthetic_activations(
+        hz, background = _extract_synthetic_activations(
             run_dir, args.checkpoint, args.level, grid, args.num_samples, args.encode_batch
         )
         if args.save_activations:
-            torch.save({"hz": hz}, args.save_activations)
+            torch.save({"hz": hz, "image_mean": background}, args.save_activations)
             print(f"Saved extracted activations to {args.save_activations}")
-        activations = _activation_distribution(hz, len(masks), grid, coarsen).reshape(len(masks), *coarse_grid)
+        activations, fine_activations = _activation_distribution(hz, len(masks), grid, coarsen)
+        activations = activations.reshape(len(masks), *coarse_grid)
     entropy = -(masks.reshape(len(masks), -1) * np.log(masks.reshape(len(masks), -1) + 1e-12)).sum(1)
+    # 1.0 = no better than uniform. Larger values mean the learned mask puts mass
+    # where the channel has high mean absolute activation; it is descriptive, not
+    # evidence that the selected site encodes a desired ground-truth factor.
+    alignment = groups * (masks.reshape(len(masks), -1) * activations.reshape(len(masks), -1)).sum(1)
     if args.channels is None:
-        channels = np.argsort(entropy)[: args.n_channels].tolist()  # most concentrated first
+        rank = np.argsort(-alignment) if args.rank_by == "alignment" else np.argsort(entropy)
+        channels = rank[: args.n_channels].tolist()
     else:
         channels = args.channels
     if not channels or min(channels) < 0 or max(channels) >= len(masks):
         raise ValueError(f"Choose channel indices in [0, {len(masks) - 1}].")
 
-    # These are marginals, so their maximum can exceed any individual voxel mass.
-    panels = 6 if activations is not None else 3
-    fig, axes = plt.subplots(len(channels), panels, figsize=(3 * panels, 2.7 * len(channels)), squeeze=False)
-    labels = ("sum over D", "sum over H", "sum over W")
-    for row, channel in enumerate(channels):
-        mask = masks[channel]
-        marginals = (mask.sum(0), mask.sum(1), mask.sum(2))
-        peak = np.unravel_index(mask.argmax(), mask.shape)
-        if activations is not None:
-            act = activations[channel]
-            marginals = tuple(pair for axis in range(3) for pair in (mask.sum(axis), act.sum(axis)))
-            titles = tuple(item for label in labels for item in (f"mask: {label}", f"activation: {label}"))
-        else:
-            titles = labels
-        vmax = max(float(image.max()) for image in marginals)
-        for col, (image, label) in enumerate(zip(marginals, titles)):
-            axes[row, col].imshow(image, origin="lower", cmap="magma", vmin=0, vmax=vmax)
-            axes[row, col].set_title(label if row == 0 else "")
-            axes[row, col].set_xticks([])
-            axes[row, col].set_yticks([])
-        axes[row, 0].set_ylabel(
-            f"ch {channel}\\nH/log G={entropy[channel] / np.log(groups):.2f}\\npeak={tuple(int(x) for x in peak)}"
+    # Expand each coarse mask onto the native activation grid. This deliberately
+    # remains blocky: coarsen=2 learned only a 4x4x4 mask, so interpolation would
+    # invent detail and make the comparison look more precise than it is.
+    fine_masks = np.repeat(
+        np.repeat(np.repeat(masks / coarsen**3, coarsen, axis=1), coarsen, axis=2), coarsen, axis=3
+    )
+    if args.view == "slices":
+        # Up-sample only for overlay on the image. The nearest-neighbour mask is still
+        # visibly blocky and therefore does not claim resolution it was not trained with.
+        target_shape = tuple(background.shape) if background is not None else grid
+        act_volume = F.interpolate(
+            torch.from_numpy(fine_activations[:, None]).float(),
+            size=target_shape,
+            mode="trilinear",
+            align_corners=False,
+        )[:, 0].numpy()
+        mask_volume = F.interpolate(torch.from_numpy(fine_masks[:, None]).float(), size=target_shape, mode="nearest")[
+            :, 0
+        ].numpy()
+        backdrop = np.zeros(target_shape, dtype=np.float32) if background is None else background
+        backdrop = (backdrop - backdrop.min()) / max(float(backdrop.max() - backdrop.min()), 1e-12)
+        axis = {"D": 0, "H": 1, "W": 2}[args.slice_axis]
+        fractions = np.asarray(args.slice_fracs)
+        if np.any((fractions < 0) | (fractions > 1)):
+            raise ValueError("--slice-fracs must lie in [0, 1].")
+        indices = np.rint(fractions * (target_shape[axis] - 1)).astype(int)
+        fig, axes = plt.subplots(
+            2 * len(channels), len(indices), figsize=(3.4 * len(indices), 4.7 * len(channels)), squeeze=False
         )
-    fig.suptitle(f"GAP-pool masks: level {args.level}, coarse grid {coarse_grid} (coarsen={coarsen})", y=1.01)
+        for row, channel in enumerate(channels):
+            peak = np.unravel_index(masks[channel].argmax(), coarse_grid)
+            flat_mask = masks[channel].reshape(-1)
+            top = np.argsort(-flat_mask)[:3]
+            top_text = ", ".join(
+                f"{tuple(int(v) for v in np.unravel_index(i, coarse_grid))}:{flat_mask[i]:.0%}" for i in top
+            )
+            activation_row, mask_row = 2 * row, 2 * row + 1
+            # Robust scaling avoids one unusually hot site making every other activation
+            # invisible. Colour answers "high for this channel", not absolute amplitude.
+            activation_scale = max(float(np.percentile(act_volume[channel], 99)), 1e-12)
+            for col, index in enumerate(indices):
+                base_slice = np.take(backdrop, index, axis=axis)
+                act_slice = np.take(act_volume[channel], index, axis=axis)
+                mask_slice = np.take(mask_volume[channel], index, axis=axis)
+                heat = np.clip(act_slice / activation_scale, 0, 1)
+                activation_ax = axes[activation_row, col]
+                activation_ax.imshow(base_slice, origin="lower", cmap="gray")
+                activation_ax.imshow(heat, origin="lower", cmap="magma", alpha=np.where(heat > 0.08, 0.82 * heat, 0.0))
+                activation_ax.set_title(f"{args.slice_axis} = {index}" if row == 0 else "")
+                activation_ax.axis("off")
+
+                mask_ax = axes[mask_row, col]
+                mask_ax.imshow(
+                    mask_slice / max(float(mask_volume[channel].max()), 1e-12),
+                    origin="lower",
+                    cmap="viridis",
+                    interpolation="nearest",
+                    vmin=0,
+                    vmax=1,
+                )
+                mask_ax.set_title("mask probability" if row == 0 else "")
+                mask_ax.axis("off")
+            axes[activation_row, 0].set_ylabel(
+                f"ch {channel}\\nmask H/log G={entropy[channel] / np.log(groups):.2f}\\n"
+                f"mask×activation lift={alignment[channel]:.2f}\\nactivation (p99 scaled)"
+            )
+            axes[mask_row, 0].set_ylabel(
+                f"mask only\\npeak coarse={tuple(int(x) for x in peak)}\\ntop regions: {top_text}"
+            )
+        title = (
+            f"Cross-sections through mean synthetic image — level {args.level}; upper rows = activation, "
+            f"lower rows = learned mask only; mask grid {coarse_grid}"
+        )
+    else:
+        fig, axes = plt.subplots(len(channels), 3, figsize=(10, 2.9 * len(channels)), squeeze=False)
+        labels = ("D projection", "H projection", "W projection")
+        for row, channel in enumerate(channels):
+            mask = fine_masks[channel]
+            activation = fine_activations[channel]
+            peak = np.unravel_index(masks[channel].argmax(), coarse_grid)
+            for col, axis in enumerate(range(3)):
+                activation_projection = activation.sum(axis)
+                mask_projection = mask.sum(axis)
+                ax = axes[row, col]
+                ax.imshow(activation_projection, origin="lower", cmap="magma", interpolation="nearest")
+                levels = np.linspace(float(mask_projection.max()) * 0.25, float(mask_projection.max()) * 0.75, 3)
+                if levels[-1] > 0:
+                    ax.contour(mask_projection, levels=levels, colors="#4deeea", linewidths=1.3)
+                ax.set_title(labels[col] if row == 0 else "")
+                ax.set_xticks(np.arange(-0.5, activation_projection.shape[1], coarsen), minor=True)
+                ax.set_yticks(np.arange(-0.5, activation_projection.shape[0], coarsen), minor=True)
+                ax.grid(which="minor", color="white", alpha=0.25, linewidth=0.5)
+                ax.tick_params(which="both", bottom=False, left=False, labelbottom=False, labelleft=False)
+            axes[row, 0].set_ylabel(
+                f"ch {channel}\\nmask H/log G={entropy[channel] / np.log(groups):.2f}\\n"
+                f"mask×activation lift={alignment[channel]:.2f}\\npeak coarse={tuple(int(x) for x in peak)}"
+            )
+        title = f"GAP-pool masks over mean |activation| — level {args.level}; cyan contours = mask support"
+    if args.view == "slices" and background is None:
+        print("WARNING: activation cache has no image_mean backdrop; rerun without --activations to generate one.")
+    fig.suptitle(title, y=1.01)
     fig.tight_layout()
     output = args.output or args.checkpoint.with_name(f"gap_pool_masks_L{args.level}.png")
     fig.savefig(output, dpi=180, bbox_inches="tight")
