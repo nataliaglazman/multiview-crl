@@ -228,21 +228,38 @@ def resolve_config(experiment_path: Path, cluster_name: str | None, cli_override
     that file is loaded on top of defaults.yaml before the experiment overrides.
     This lets synthetic experiments inherit from ``synthetic_defaults.yaml`` instead of
     repeating all the synthetic-specific settings.
+
+    ``_base_`` CHAINS: a config based on ``synthetic_identifiable`` also picks up the
+    ``synthetic_defaults`` that file is itself based on. Without chaining, a two-level
+    config silently loses the whole synthetic block — ``dataset_name`` falls back to the
+    ADNI default and the run trains on the wrong dataset while every synthetic flag it
+    did inherit looks correct in the resolved config. Single-level configs are unaffected.
     """
     config = load_yaml(DEFAULTS_PATH)
 
     # Check the experiment for a _base_ reference before merging cluster/experiment.
     experiment_cfg = load_yaml(experiment_path)
     base_name = experiment_cfg.pop("_base_", None)
-    base_cfg = {}
-    if base_name is not None:
+
+    # Walk the chain to its root, then apply root-first so nearer bases win.
+    chain, seen = [], set()
+    while base_name is not None:
+        if base_name in seen:
+            print(f"Error: circular _base_ chain at {base_name!r}", file=sys.stderr)
+            sys.exit(1)
+        seen.add(base_name)
         base_path = REPO_ROOT / "experiments" / f"{base_name}.yaml"
         if not base_path.exists():
             print(f"Error: _base_ config not found: {base_path}", file=sys.stderr)
             sys.exit(1)
-        base_cfg = load_yaml(base_path)
-        base_cfg.pop("_base_", None)  # Don't chain further.
-        config.update(base_cfg)
+        cfg = load_yaml(base_path)
+        base_name = cfg.pop("_base_", None)
+        chain.append(cfg)
+
+    base_cfg = {}
+    for cfg in reversed(chain):
+        base_cfg.update(cfg)
+    config.update(base_cfg)
 
     if cluster_name and cluster_name != "local":
         cluster_path = CLUSTER_DIR / f"{cluster_name}.yaml"

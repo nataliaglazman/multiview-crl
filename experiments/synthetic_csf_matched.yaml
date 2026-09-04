@@ -1,0 +1,60 @@
+# synthetic_identifiable.yaml with ONE generator change: the ventricle's cross-view
+# amplitude ratio is matched. Everything else — model, objective, every other generator
+# setting — is inherited unchanged, so this is a clean causal test of one variable.
+#
+# WHY. ventricle_size is the only factor the contrastive run loses to its recon-only
+# ablation (gap -0.089, patch -0.175, and the only NEGATIVE `learned` at patch, -0.126:
+# active removal, not failure to acquire). Two explanations have been refuted:
+#
+#   sign inversion (20 Aug)   eval/view_consistency measures cos(T1, FLAIR) = 0.992 for
+#                             the ventricle — the MOST view-consistent factor of the nine,
+#                             while cortical_thickness (a big winner) is far lower. Dead.
+#   occupancy dilution (H1)   eval/bt_channel_pressure: no channel is spatially sparse in
+#                             any arm (occupancy p10 0.50-0.62), so the folded patch term
+#                             has no sparse population to dilute, and the BT arm is LESS
+#                             dense than recon-only — the opposite of the prediction. Dead.
+#
+# What survives is amplitude: the ventricle's CSF/WM step is -0.70 in T1 against -0.30 in
+# FLAIR, ratio 0.428, the largest same-sign mismatch in the generator. And BT drives every
+# channel to cross-view consistency (mean c_ii 0.941, vs 0.060 recon-only / 0.119 at init,
+# with NO rank collapse: eff_rank 18.2 vs 20.9 / 19.1), while in the arms not optimised
+# against that objective the ventricle is read by the LEAST view-consistent channels
+# (w.c_ii 0.040 vs 0.060 baseline; 0.097 vs 0.119 untrained) — an ordering already present
+# at random init (rho 0.810) that predicts which factors the objective helps or hurts
+# (rho +0.857 against the contrastive-minus-ablation delta).
+#
+# That is predictive, not causal. This config makes it causal.
+#
+# THE KNOB. csf_t1 0.1 -> 0.5 puts the T1 step at 0.5 - 0.8 = -0.30, exactly matching
+# FLAIR: ratio 1.000, same sign. Geometry, size, boundary area and per-view SNR are
+# untouched, so amplitude ratio is the ONLY thing that moved. (The T1 step drops 2.33x,
+# but --synthetic-identifiable-ventricle already bought 2.8x, leaving SNR ~24 — far above
+# the floor. identifiable_ventricle is also required for a different reason: it gives the
+# fissure its own label, so CSF means the ventricle and nothing else.)
+#
+# READING IT. Compare ventricle_size's contrastive-minus-ablation delta against the
+# synthetic_identifiable pair, at a MATCHED step:
+#   deficit vanishes    cross-view amplitude mismatch is causal, and the objective is
+#                       correctly rejecting evidence the benchmark mislabels as content.
+#   deficit persists    amplitude is a passenger; the cause is whatever else distinguishes
+#                       a small interior structure, and alignability stays correlational.
+#
+# STRONGER, and worth the extra runs if you can afford them: sweep rather than switch.
+# The ratio is 0.30/|csf_t1 - 0.8|, so 0.1 -> 0.43, 0.3 -> 0.60, 0.5 -> 1.00, 0.65 -> 2.00.
+# A deficit minimised at 0.5 and rising on BOTH sides is very hard to explain any other
+# way; a single on/off point is not.
+#
+#   python scripts/launch.py experiments/synthetic_csf_matched.yaml --cluster runai
+#   python scripts/launch.py experiments/synthetic_csf_matched.yaml --cluster runai \
+#       --set synthetic_csf_t1_intensity=0.3     # and 0.65, for the sweep
+#
+# Verify the ratio actually moved BEFORE spending the GPU — checkpoint-free, ~minutes:
+#   python -m eval.view_consistency --preset flagship --res 64 --identifiable-ventricle \
+#     --content-prior uniform --content-squash none --lesion-radius 0.14 \
+#     --cortex-parameterization patterned --center-local-deformations --csf-t1-intensity 0.5
+#   # ventricle_size ||FLAIR||/||T1|| should read ~1.000, against 0.428 at the default.
+
+_base_: synthetic_identifiable
+tag: synthetic-csf-matched-ratio
+
+synthetic_csf_t1_intensity: 0.5

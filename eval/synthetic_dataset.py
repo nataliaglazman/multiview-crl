@@ -134,9 +134,25 @@ class PseudoMRIRenderer(nn.Module):
         lesion_radius=0.1,
         cortex_parameterization="additive",
         center_local_deformations=False,
+        csf_t1_intensity=0.1,
     ):
         super().__init__()
         self.res = res
+        # T1 intensity of the CSF label, i.e. of the ventricle. The ONE knob that moves
+        # the ventricle's cross-view amplitude ratio without touching its geometry, size
+        # or SNR — see render_modality for why it has to be this side of the LUT.
+        self.csf_t1_intensity = float(csf_t1_intensity)
+        if abs(self.csf_t1_intensity - 0.8) < 0.05:
+            import warnings
+
+            warnings.warn(
+                f"csf_t1_intensity={self.csf_t1_intensity} sits on the WM intensity (0.8), so the "
+                f"CSF/WM step in T1 is {self.csf_t1_intensity - 0.8:+.3f} and the ventricle is "
+                "invisible in that view. The cross-view ratio diverges rather than sweeping. This is "
+                "a legitimate extreme (one-view-only evidence) but it is not the matched-ratio "
+                "setting — that is 0.5.",
+                stacklevel=2,
+            )
         # See Synthetic3DDisentanglementDataset for why "field" exists. Render-side
         # knobs live here; the sampling-side length-scale lives on the dataset.
         if lesion_mode not in ("sphere", "field"):
@@ -444,8 +460,21 @@ class PseudoMRIRenderer(nn.Module):
         # entry is only reached when identifiable_ventricle relabels the fissure to 4;
         # with the default (fissure == CSF == label 1) it is inert, so runs are
         # byte-identical. The fissure intensity is deliberately distinct from CSF.
+        #
+        # csf_t1_intensity is the ventricle's cross-view amplitude knob. The evidence for
+        # ventricle_size is the step across the CSF/WM boundary, and that step is -0.70 in
+        # T1 against -0.30 in FLAIR at the default — same sign, but 2.3x stronger in T1
+        # (measured ratio 0.428, eval/view_consistency). A boundary's step is view-invariant
+        # only if BOTH tissues either side shift equally between views; CSF shifts by 0 and
+        # WM by -0.4, so the step MUST change by +0.4. FLAIR cannot be the knob (matching
+        # from that side needs CSF_FLAIR = -0.3), and equalising WM would delete the
+        # modality contrast itself. That leaves the T1 CSF value: at 0.5 the T1 step becomes
+        # 0.5 - 0.8 = -0.3, matching FLAIR exactly, ratio 1.000, same sign, and the
+        # ventricle's geometry, size and boundary area are untouched. Past 0.5 the ratio
+        # overshoots (0.65 -> 2.0), so the flag sweeps the ratio through 1.0 rather than
+        # only switching it on.
         if modality == "T1":
-            base = torch.tensor([0.0, 0.1, 0.8, 0.5, 0.3], device=device)
+            base = torch.tensor([0.0, self.csf_t1_intensity, 0.8, 0.5, 0.3], device=device)
             lesion_int = 0.4
         elif modality == "FLAIR":
             base = torch.tensor([0.0, 0.1, 0.4, 0.8, 0.3], device=device)
@@ -627,6 +656,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         lesion_radius=0.1,
         cortex_parameterization="additive",
         center_local_deformations=False,
+        csf_t1_intensity=0.1,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -770,7 +800,20 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 lesion_radius=lesion_radius,
                 cortex_parameterization=cortex_parameterization,
                 center_local_deformations=center_local_deformations,
+                csf_t1_intensity=csf_t1_intensity,
             )
+            if csf_t1_intensity != 0.1 and not identifiable_ventricle:
+                import warnings
+
+                warnings.warn(
+                    f"csf_t1_intensity={csf_t1_intensity} with identifiable_ventricle=False: the "
+                    "longitudinal fissure still carries the CSF label, so this changes the fissure's "
+                    "T1 appearance too and the knob is no longer ventricle-only. At 0.5 it also makes "
+                    "CSF equal to GM in T1, erasing the fissure against cortex entirely. Pass "
+                    "identifiable_ventricle=True (the fissure then gets its own label 4) so CSF means "
+                    "the ventricle and nothing else.",
+                    stacklevel=2,
+                )
             if lesion_mode == "field" and n_content > 2:
                 import warnings
 

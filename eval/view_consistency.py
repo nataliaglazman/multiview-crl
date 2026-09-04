@@ -70,6 +70,7 @@ Usage
     python -m eval.view_consistency --preset flagship --res 32 --n-samples 4   # faster
     python -m eval.view_consistency --preset flagship --independent-style
 """
+
 from __future__ import annotations
 
 import argparse
@@ -179,6 +180,7 @@ def main():
     p.add_argument("--clean-content", action="store_true")
     p.add_argument("--lesion-mode", default="sphere", choices=["sphere", "field"])
     p.add_argument("--identifiable-ventricle", action="store_true")
+    p.add_argument("--csf-t1-intensity", type=float, default=0.1)
     p.add_argument("--content-scale", type=float, default=1.0)
     p.add_argument("--style-scale", type=float, default=1.0)
     p.add_argument("--content-prior", default="normal", choices=["normal", "uniform"])

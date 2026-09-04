@@ -229,6 +229,22 @@ def parse_args() -> argparse.ArgumentParser:
         "ventricle CSF from fissure CSF. Lifts pooled ventricle R^2 from ~0.03 to ~0.92. "
         "Default off = byte-identical to prior runs.",
     )
+    parser.add_argument(
+        "--synthetic-csf-t1-intensity",
+        type=float,
+        default=0.1,
+        help="T1 intensity of the CSF label (the ventricle). Sweeps the ventricle's CROSS-VIEW "
+        "AMPLITUDE RATIO while leaving its geometry, size, boundary area and per-view SNR alone — "
+        "the only knob in the generator that separates those. ventricle_size is read from the "
+        "CSF/WM step, which is (csf_t1 - 0.8) in T1 against (0.1 - 0.4) = -0.30 in FLAIR, so the "
+        "ratio is 0.30/|csf_t1 - 0.8|: 0.1 gives 0.43 (the default, measured 0.428 by "
+        "eval/view_consistency), 0.5 gives 1.000 (matched), 0.65 gives 2.0 (overshoot the other "
+        "way). Use it to test whether the contrastive model's ventricle deficit tracks the ratio: "
+        "a deficit minimised at 0.5 and rising on BOTH sides is causal evidence, where a single "
+        "on/off point is not. Pair with --synthetic-identifiable-ventricle, or the fissure (which "
+        "shares the CSF label by default) moves too and the knob stops being ventricle-only. "
+        "Default 0.1 = byte-identical to prior runs.",
+    )
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default=None)
     parser.add_argument("--tau", type=float, default=1.0)

@@ -641,6 +641,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_lesion_radius=0.1,
         synthetic_cortex_parameterization="additive",
         synthetic_center_local_deformations=False,
+        synthetic_csf_t1_intensity=0.1,
         **kwargs,
     ):
         super().__init__()
@@ -706,6 +707,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             lesion_radius=synthetic_lesion_radius,
             cortex_parameterization=synthetic_cortex_parameterization,
             center_local_deformations=synthetic_center_local_deformations,
+            csf_t1_intensity=synthetic_csf_t1_intensity,
         )
         if synthetic_normalize in ("per_sample", "shared") and synthetic_n_style > 0:
             import warnings
