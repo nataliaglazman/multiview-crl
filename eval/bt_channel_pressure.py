@@ -41,7 +41,11 @@ What is measured, per channel
                   at each position is exactly what the loss sees.
 3. ``carries``    per-channel CV R^2 of each content factor from that channel's P patch
                   values alone. "Is this a ventricle channel?" — a spatial-profile question,
-                  so a scalar correlation with the channel mean will not answer it.
+                  so a scalar correlation with the channel mean will not answer it. NOTE
+                  this saturates on these models: one channel's 220-patch profile reads most
+                  global factors at ~0.9, so the per-channel R^2 barely varies and the
+                  weighted columns are reported as undefined below MIN_R2_SPREAD rather than
+                  printed as a restatement of the baseline.
 
 Run it on the ABLATION first. That model demonstrably carries the ventricle at patch
 (R2 0.924), so if its ventricle-carrying channels are the low-occupancy, low-``c_ii`` ones,
@@ -51,14 +55,20 @@ only reports the outcome.
 
 Reading it
 ----------
-    H1 SUPPORTED   ventricle_size's weighted c_ii and occupancy are well below the
-                   all-channel baseline, and below cortical_thickness / lr_asymmetry
-                   (the controls, whose channels should be dense and view-consistent).
-                   The per-factor Spearman(carries, c_ii) is negative for the ventricle.
-    H1 OUT         the ventricle's channels sit at or above the baseline on both. Then BT
-                   has no structural reason to prefer removing them and the deficit needs
-                   a different mechanism (style-rejection collateral, the off-diagonal term
-                   against the SCM, VQ resolution).
+    H1 SUPPORTED   occupancy is LOW for the ventricle's channels and high for the
+                   controls, and the ventricle's weighted c_ii sits below the all-channel
+                   baseline. Requires channels that are actually sparse.
+    H1 OUT         occupancy is high everywhere. Then no channel is spatially sparse, the
+                   fold has no sparse population to dilute, and the hypothesis has no
+                   purchase whatever the per-factor columns say.
+
+    MEASURED (36001 vs 19001 steps, 40 content channels, 220 foreground patches): occupancy
+    p10 0.50 / median 0.63 / p90 0.74 for the BT arm and 0.62 / 0.69 / 0.78 for recon-only,
+    against 0.51 / 0.63 / 0.69 untrained. Nothing is sparse in any arm, and the BT arm is
+    LESS dense than recon-only, not more. H1 is out. What the run did establish is the
+    diagonal itself: mean c_ii 0.941 (BT) vs 0.060 (recon-only) vs 0.119 (untrained) — the
+    objective aligned essentially every channel across views, and the model that reads the
+    ventricle best is the one that did not.
 
 The corollary (``--random-init``) adds an untrained arm built from the same settings. H1
 predicts BT training shifts the occupancy distribution UP relative to both the untrained
@@ -223,15 +233,30 @@ def collect(model, args, ds, num_samples, level, device, batch_size, channels="c
     return hz.float(), np.stack(z_rows), info
 
 
-def bt_diagonal(hz, center_mode):
-    """Per-channel diag(c) under the loss's own fold and standardisation."""
+def bt_matrix(hz, center_mode):
+    """The full cross-view correlation matrix under the loss's own fold and standardisation.
+
+    Returns ``(c_ii, off_diag_rms, eff_rank)``. The diagonal is what ``on_diag`` optimises;
+    the off-diagonal RMS is what ``lambd * off_diag`` penalises, and the effective rank of
+    the feature covariance says whether a high diagonal was bought by making every channel
+    the same thing. A model can reach c_ii ~ 1 either by learning genuinely view-invariant
+    features or by collapsing onto a few global modes every channel re-encodes, and only
+    the last two numbers separate those.
+    """
     hz = _center_patch_features(hz, center_mode)
     z = hz.permute(0, 1, 3, 2).reshape(hz.shape[0], -1, hz.shape[2])
     zi, zj = z[0], z[1]
     zi = (zi - zi.mean(dim=0)) / (zi.std(dim=0, unbiased=False) + 1e-6)
     zj = (zj - zj.mean(dim=0)) / (zj.std(dim=0, unbiased=False) + 1e-6)
     c = (zi.T @ zj) / zi.shape[0]
-    return c.diagonal().numpy()
+    d = c.shape[0]
+    off = float(((c.pow(2).sum() - c.diagonal().pow(2).sum()) / max(d * (d - 1), 1)).sqrt())
+
+    cov = (zi.T @ zi) / zi.shape[0]
+    ev = torch.linalg.eigvalsh(cov.double()).clamp_min(0)
+    p = ev / ev.sum().clamp_min(1e-20)
+    eff_rank = float(torch.exp(-(p * (p + 1e-20).log()).sum()))
+    return c.diagonal().numpy(), off, eff_rank
 
 
 def occupancy(hz, center_mode):
@@ -294,13 +319,32 @@ def _spearman(a, b):
     return float((ra * rb).sum() / denom) if denom > 0 else float("nan")
 
 
+# Below this spread (p90 - p10 of a factor's per-channel R^2), the channels do not differ
+# in how well they carry the factor, so "the channels that carry it" is not a well-defined
+# subset and any weighted statistic over them collapses to the all-channel mean. That is a
+# real property of these representations -- one channel's 220-patch profile is enough to
+# read most global factors -- and it must be reported as undefined rather than printed as
+# a number that merely re-states the baseline.
+MIN_R2_SPREAD = 0.05
+
+
 def _weighted(values, weights):
-    w = np.clip(weights, 0.0, None)
-    return float((values * w).sum() / w.sum()) if w.sum() > 1e-9 else float("nan")
+    """Sensitivity-weighted mean, weighting by EXCESS over the median channel.
+
+    Weighting by raw R^2 is what made the first version of this table degenerate: when
+    every channel reads a factor at ~0.9, raw weights are near-uniform and the weighted
+    mean silently equals the unweighted one. Excess-over-median keeps only the channels
+    that carry the factor better than a typical channel does.
+    """
+    w = np.clip(weights - np.nanmedian(weights), 0.0, None)
+    ok = np.isfinite(values) & np.isfinite(w)
+    if w[ok].sum() <= 1e-9:
+        return float("nan")
+    return float((values[ok] * w[ok]).sum() / w[ok].sum())
 
 
 def analyse(label, hz, Z, center_mode, seeds, n_splits, info, probe_dim):
-    c_ii = bt_diagonal(hz, center_mode)
+    c_ii, off_rms, eff_rank = bt_matrix(hz, center_mode)
     occ = occupancy(hz, center_mode)
     r2, k = channel_factor_r2(hz, Z, seeds, n_splits, probe_dim)
 
@@ -316,47 +360,66 @@ def analyse(label, hz, Z, center_mode, seeds, n_splits, info, probe_dim):
         f"  all-channel baseline:  mean c_ii {np.nanmean(c_ii):+.3f}   "
         f"mean occupancy {np.nanmean(occ):.3f}   dead channels {int(np.isnan(occ).sum())}"
     )
+    print(f"  cross-view matrix:     off-diag RMS {off_rms:.3f}   feature eff_rank {eff_rank:.1f} of {n_ch}")
 
-    print(f"\n  {'factor':<20}{'best r2':>9}{'w.c_ii':>9}{'w.occ':>8}{'rho(r2,c_ii)':>14}   top channels")
-    print(f"  {'-' * 84}")
+    print(f"\n  {'factor':<20}{'best r2':>9}{'spread':>8}{'w.c_ii':>9}{'w.occ':>8}{'rho(r2,c_ii)':>14}   top channels")
+    print(f"  {'-' * 92}")
+    n_degenerate = 0
     for fi, name in enumerate(CONTENT_NAMES[: Z.shape[1]]):
         col = r2[:, fi]
+        spread = float(np.nanpercentile(col, 90) - np.nanpercentile(col, 10))
         top = np.argsort(col)[::-1][:3]
         tops = " ".join(f"c{t:02d}({col[t]:.2f})" for t in top)
+        if spread < MIN_R2_SPREAD:
+            n_degenerate += 1
+            wc = wo = rho = "--"
+            cells = f"{wc:>9}{wo:>8}{rho:>14}"
+        else:
+            cells = f"{_weighted(c_ii, col):>9.3f}{_weighted(occ, col):>8.3f}{_spearman(col, c_ii):>14.3f}"
+        print(f"  {name:<20}{col.max():>9.3f}{spread:>8.3f}{cells}   {tops}")
+
+    if n_degenerate:
         print(
-            f"  {name:<20}{col.max():>9.3f}{_weighted(c_ii, col):>9.3f}"
-            f"{_weighted(occ, col):>8.3f}{_spearman(col, c_ii):>14.3f}   {tops}"
+            f"\n  {n_degenerate}/{Z.shape[1]} factors have per-channel R^2 spread < {MIN_R2_SPREAD}: every channel\n"
+            "  reads them about equally well, so there is no 'channels that carry this factor'\n"
+            "  subset to weight over and those rows are undefined, not zero. A single channel's\n"
+            "  patch profile is many features -- enough to read a global factor off an untrained\n"
+            "  conv stack (eval/init_baseline.py) -- so saturation here is expected, and it means\n"
+            "  the per-channel framing cannot localise those factors at all."
         )
 
     q = np.nanpercentile(occ, [10, 50, 90])
     print(f"\n  occupancy over channels:  p10 {q[0]:.3f}   median {q[1]:.3f}   p90 {q[2]:.3f}")
-    return {"label": label, "c_ii": c_ii, "occ": occ, "r2": r2}
+    return {
+        "label": label,
+        "c_ii": c_ii,
+        "occ": occ,
+        "r2": r2,
+        "off_rms": off_rms,
+        "eff_rank": eff_rank,
+        "n_ch": n_ch,
+    }
 
 
 def _verdict(results):
-    print(f"\n{'=' * 88}\n  H1 READOUT\n{'=' * 88}")
-    vi = CONTENT_NAMES.index("ventricle_size")
+    print(f"\n{'=' * 88}\n  READOUT\n{'=' * 88}")
+    print(f"  {'model':<14}{'mean c_ii':>11}{'off-diag':>10}{'eff_rank':>10}{'mean occ':>10}{'occ p10':>9}")
     for res in results:
-        col = res["r2"][:, vi]
-        wc, wo = _weighted(res["c_ii"], col), _weighted(res["occ"], col)
-        ctrl_c = [_weighted(res["c_ii"], res["r2"][:, CONTENT_NAMES.index(f)]) for f in CONTROL_FACTORS]
-        ctrl_o = [_weighted(res["occ"], res["r2"][:, CONTENT_NAMES.index(f)]) for f in CONTROL_FACTORS]
         print(
-            f"  {res['label']:<16} ventricle channels: c_ii {wc:+.3f} occ {wo:.3f}   |   "
-            f"controls: c_ii {np.nanmean(ctrl_c):+.3f} occ {np.nanmean(ctrl_o):.3f}   |   "
-            f"all-channel: c_ii {np.nanmean(res['c_ii']):+.3f} occ {np.nanmean(res['occ']):.3f}"
+            f"  {res['label']:<14}{np.nanmean(res['c_ii']):>11.3f}{res['off_rms']:>10.3f}"
+            f"{res['eff_rank']:>10.1f}{np.nanmean(res['occ']):>10.3f}"
+            f"{np.nanpercentile(res['occ'], 10):>9.3f}"
         )
     print(
-        "\n  H1 supported if the ventricle row sits well below BOTH the controls and the\n"
-        "  all-channel baseline on c_ii and occupancy — most importantly in the ABLATION,\n"
-        "  which demonstrably carries the ventricle at patch."
+        "\n  H1 (BT penalises spatially sparse channels) requires channels that ARE sparse.\n"
+        "  Occupancy near 1 across the board means every channel's variance is spread over\n"
+        "  most foreground patches, so there is no sparse population for the fold to dilute\n"
+        "  and the hypothesis has no purchase — independently of any per-factor column.\n"
+        "  A high mean c_ii says the objective aligned the views it was asked to align; read\n"
+        "  it against off-diag and eff_rank, since alignment bought by collapsing every\n"
+        "  channel onto a few shared modes is a different representation from alignment\n"
+        "  learned per channel."
     )
-    if len(results) > 1:
-        print(f"\n  OCCUPANCY SHIFT (corollary)   {'model':<16}{'mean':>8}{'median':>9}{'p90':>8}")
-        for res in results:
-            q = np.nanpercentile(res["occ"], [50, 90])
-            print(f"  {'':<30}{res['label']:<16}{np.nanmean(res['occ']):>8.3f}{q[0]:>9.3f}{q[1]:>8.3f}")
-        print("  H1 predicts the BT arm above the recon-only and untrained arms.")
 
 
 def main():
