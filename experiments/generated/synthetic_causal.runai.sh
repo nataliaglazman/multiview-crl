@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-03T18:02:16Z
-# Git SHA: c78cf47
+# Generated at: 2026-09-04T11:04:52Z
+# Git SHA: 76b3905
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -13,11 +13,11 @@ export PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl ;
 python -m training.main_multimodal
     --batch-size 128
     --bt-corr-ema 0.99
-    --bt-gap-lambda 7
+    --bt-gap-lambda 6
     --bt-gap-weight 1
-    --bt-lambda 7
+    --bt-lambda 6
     --bt-normalize-terms
-    --bt-patch-weight 1
+    --bt-patch-weight 0.5
     --bt-sim-coeff 0.0114
     --bt-sim-normalize
     --bt-std-coeff 0.227
@@ -55,7 +55,7 @@ python -m training.main_multimodal
     --resume-training
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
-    --scale-contrastive-loss 50
+    --scale-contrastive-loss 100
     --scale-recon-loss 16
     --scale-style-contrastive-loss 0.0
     --scale-style-modality-ce 0.0
@@ -75,7 +75,7 @@ python -m training.main_multimodal
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-clean-content-causal-sim-50-bt-7
+    --model-id synthetic-clean-content-causal-bt-patch-05
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -93,7 +93,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-clean-content-causal-sim-50-bt-7 \
+runai training standard submit synthetic-clean-content-causal-bt-patch-05 \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \

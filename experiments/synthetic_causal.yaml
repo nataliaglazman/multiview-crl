@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-clean-content-causal-sim-50-bt-7
+tag: synthetic-clean-content-causal-bt-patch-05
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -9,10 +9,10 @@ patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 # bt_gap_lambda: 0.16               # NOT 0.005 — see the calibration note above
-bt_patch_weight: 1
+bt_patch_weight: 0.5
 single_count_commitment: true
 
-scale_contrastive_loss: 50       # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_contrastive_loss: 100       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 # scale_recon_loss: 10
 grad_clip_norm: 100
 batch_size: 128
@@ -65,8 +65,8 @@ bt_sim_normalize: true
 # bt_gap_lambda: 0.2
 
 bt_normalize_terms: true
-bt_lambda: 7
-bt_gap_lambda: 7
+bt_lambda: 6
+bt_gap_lambda: 6
 bt_sim_coeff: 0.0114     # 0.5 / 44
 bt_std_coeff: 0.227      # 10 / 44
 bt_corr_ema: 0.99
