@@ -17,6 +17,11 @@ What it prints
    ``FACTOR_POOLING`` assigns it, the matched |corr| from block-MCC, and each one's
    distance from the untrained twin.  The FLOOR-SUBTRACTED column is the answer; the
    raw column is there so a saturated floor is visible rather than silent.
+1b. The same factors at EVERY rung — gap / stats / patch side by side, each with its own
+   floor.  Table 1 answers "was this factor learned"; this one answers "where does it
+   live", which is the axis the gap-vs-patch findings in the changelog turn on, and which
+   previously took one run per ``--factor-pooling`` to see.  It is a locality profile,
+   not a menu: the reportable number stays table 1's, at the assigned rung.
 2. The MCC pooling ladder, gap → stats → patch, with floors.  A single rung is not
    interpretable: stats cannot express position (it is permutation-invariant over
    voxels) and patch sits on a floor of ~0.86, so only the SHAPE across rungs carries
@@ -85,42 +90,61 @@ NOISE_FLOOR = 0.05
 
 
 def per_factor_scores(reprs, level, gt, names, seeds, n_null, rng, kind="ridge", n_jobs=1, factor_pooling="assigned"):
-    """R² gap per factor at its assigned pooling, plus that pooling's key.
+    """R² gap per factor at EVERY scored pooling, plus which one is the reportable rung.
 
-    One factor is scored under exactly one pooling — the one ``FACTOR_POOLING`` says can
-    physically expose it — so this is never a max over noisy pooling estimates.  Returns
-    ``{name: {"r2": gap, "pooling": key}}``.
+    Returns ``{name: {"r2", "r2_raw", "pooling", "by_pooling": {key: {...}}}}``.  The
+    top-level ``r2``/``r2_raw`` are the assigned rung's — one factor, one pooling, fixed in
+    advance by ``FACTOR_POOLING``, which is what keeps the headline from being a max over
+    noisy pooling estimates.  ``by_pooling`` carries the same factor at every other rung
+    too, so "where is this factor readable" is answerable without re-running the script
+    once per ``--factor-pooling``; it is a locality profile, not a menu to pick from.
 
-    The permutations are drawn up-front, in factor order, so the shared ``rng`` is
-    consumed deterministically no matter which worker finishes first — the null floor is
-    identical whatever ``n_jobs`` is set to.
+    The permutations are drawn up-front, in factor order, and SHARED across rungs: the
+    rungs are then differenced against one null draw rather than three, and the ``rng`` is
+    consumed exactly as it was when only the assigned rung was scored, so a floor stays
+    reproducible against runs made before the ladder existed.  Nothing here depends on
+    which worker finishes first, so ``n_jobs`` cannot move a number.
     """
     avail = set(reprs.keys())
-    tasks = []
+    # Coarse -> fine, and only the rungs that were actually extracted.
+    ladder = [k for k in ("gap", "stats", "patch") if k in avail]
+    blocks = {}
+    for key in ladder:
+        X = _block_array(reprs, key, level, _CONTENT)
+        if X is not None and X.shape[1]:
+            blocks[key] = X
+
+    tasks, meta = [], []
     for j, name in enumerate(names):
-        # ``factor_pooling`` overrides FACTOR_POOLING's per-factor routing and scores every
+        # ``factor_pooling`` overrides FACTOR_POOLING's per-factor routing and reports every
         # factor on one axis.  The routing is the honest default (each factor read where it
         # can physically appear, fixed in advance so the headline is not a max over
         # poolings); the override exists to ask the different question "how does this
         # factor read at THIS pooling", e.g. to compare all factors on one rung.
         want = FACTOR_POOLING.get(name, "stats") if factor_pooling == "assigned" else factor_pooling
         pkey = _resolve_key(want, avail)
-        X = _block_array(reprs, pkey, level, _CONTENT)
-        if X is None or not X.shape[1]:
+        if pkey not in blocks:
             continue
         perms = [rng.permutation(gt.shape[0]) for _ in range(n_null)]
-        tasks.append((name, pkey, X, gt[:, j], perms))
+        for key, X in blocks.items():
+            tasks.append((X, gt[:, j], perms))
+            meta.append((name, pkey, key))
 
     def _one(X, y, perms):
         real = cv_probe_r2(X, y, seeds=seeds, kind=kind)["mean"]
         nulls = [cv_probe_r2(X, y[p], seeds=seeds, kind=kind)["mean"] for p in perms]
         return real, (float(np.mean(nulls)) if nulls else float("nan"))
 
-    results = Parallel(n_jobs=n_jobs)(delayed(_one)(X, y, perms) for _n, _p, X, y, perms in tasks)
-    return {
-        name: {"r2": real - null, "r2_raw": real, "pooling": pkey}
-        for (name, pkey, _X, _y, _perms), (real, null) in zip(tasks, results)
-    }
+    results = Parallel(n_jobs=n_jobs)(delayed(_one)(X, y, perms) for X, y, perms in tasks)
+
+    out = {}
+    for (name, pkey, key), (real, null) in zip(meta, results):
+        d = out.setdefault(name, {"r2": float("nan"), "r2_raw": float("nan"), "pooling": pkey, "by_pooling": {}})
+        d["by_pooling"][key] = {"r2": real - null, "r2_raw": real, "r2_null": null}
+    for d in out.values():
+        head = d["by_pooling"][d["pooling"]]
+        d["r2"], d["r2_raw"] = head["r2"], head["r2_raw"]
+    return out
 
 
 def mcc_ladder(reprs, level, gt_content, seeds, kind="ridge", names=()):
@@ -249,6 +273,37 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
         print("   assigned pooling. Same axis for every factor; not comparable to an 'assigned' run.")
     print(f"   MCC raw = matched |corr| at {mpool} pooling; block-MCC has no permutation null here,")
     print(f"   which is exactly why its 'learned' column is the only one worth reading.")
+
+    # 1b. r2 ladder -----------------------------------------------------------
+    # Table 1 shows each factor once, at the rung it is reportable at.  That answers "did
+    # it learn this factor" but not "where does this factor live", which is the question
+    # the whole gap-vs-patch axis of this project turns on — and answering it used to mean
+    # running the script once per --factor-pooling and diffing two outputs by eye.
+    rungs = [k for k in ("gap", "stats", "patch") if any(k in (d.get("by_pooling") or {}) for d in pf.values())]
+    if len(rungs) > 1:
+        cw = 9
+        print()
+        print(_rule("1b. R2 POOLING LADDER (every factor at every rung)"))
+        print("   the SHAPE across rungs is the signal: a factor that only reads at patch lives in the")
+        print("   spatial layout, one that reads at gap lives in channel identity. R2 columns are")
+        print("   null-subtracted as in table 1 ('gap' the rung is not 'gap' the real-minus-null).")
+        print("   NOT a menu: the reportable number is table 1's, at the rung named in `assigned`.")
+        print("   Taking the best rung here is selection over noisy estimates, and these deltas are")
+        print("   not spread-gated — only table 1's +-spread and the verdict are.")
+        head, sub = "   " + " " * fw, f"   {'factor':<{fw}s}"
+        for k in rungs:
+            head += f"{k:^{2 * cw}s}"
+            sub += f"{'R2':>{cw}s}{'learned':>{cw}s}"
+        print(head + f"{'assigned':>10s}")
+        print(sub + f"{'':>10s}")
+        for name, d in pf.items():
+            row = f"   {name:<{fw}s}"
+            for k in rungs:
+                cur = (d.get("by_pooling") or {}).get(k) or {}
+                base = ((fpf.get(name) or {}).get("by_pooling") or {}).get(k) or {}
+                learned = _delta(cur.get("r2"), base.get("r2")) if has_floor else float("nan")
+                row += f"{_n(cur.get('r2')):>{cw}s}{_n(learned):>{cw}s}"
+            print(row + f"{d['pooling']:>10s}")
 
     # 2. mcc ladder -----------------------------------------------------------
     print()
@@ -612,6 +667,16 @@ def _assert_dci_basis():
     _s4 = per_factor_scores(_rp, 0, _gt, _nm, (0,), 2, _rng_b, n_jobs=4)
     for _k in _s1:
         assert abs(_s1[_k]["r2"] - _s4[_k]["r2"]) < 1e-9, f"n_jobs changed {_k}: {_s1[_k]} vs {_s4[_k]}"
+        for _p, _v in _s1[_k]["by_pooling"].items():
+            assert abs(_v["r2"] - _s4[_k]["by_pooling"][_p]["r2"]) < 1e-9, f"n_jobs changed {_k}@{_p}"
+    # Every factor is scored at every extracted rung, and the headline is the assigned
+    # rung's own entry — not a max, a mean, or a different probe. Asserted because the
+    # ladder is the only place two rungs of the same factor sit next to each other, which
+    # is exactly where a silent mix-up would look like a locality finding.
+    for _k, _d in _s1.items():
+        assert set(_d["by_pooling"]) == {"gap", "stats", "patch"}, f"{_k} missing rungs: {set(_d['by_pooling'])}"
+        _h = _d["by_pooling"][_d["pooling"]]
+        assert _d["r2"] == _h["r2"] and _d["r2_raw"] == _h["r2_raw"], f"{_k} headline != its assigned rung"
     # --factor-pooling forces every factor onto one rung instead of its assigned one.
     # Asserted against FACTOR_POOLING itself rather than against hardcoded pooling names:
     # the table is a research parameter that gets retuned, and a test that pins its values
@@ -620,6 +685,12 @@ def _assert_dci_basis():
     assert {d["pooling"] for d in _forced.values()} == {"patch"}, _forced
     for _k, _d in _s1.items():
         assert _d["pooling"] == FACTOR_POOLING[_k], f"{_k} routed to {_d['pooling']}, table says {FACTOR_POOLING[_k]}"
+    # Forcing a rung must only move which entry is quoted, never rescore it: the ladder
+    # would otherwise disagree with a --factor-pooling run of the same checkpoint.
+    _f2 = per_factor_scores(_rp, 0, _gt, _nm, (0,), 2, np.random.RandomState(7), factor_pooling="patch")
+    _f1 = per_factor_scores(_rp, 0, _gt, _nm, (0,), 2, np.random.RandomState(7))
+    for _k in _f1:
+        assert abs(_f2[_k]["r2"] - _f1[_k]["by_pooling"]["patch"]["r2"]) < 1e-9, f"forced rung rescored {_k}"
 
     # --checkpoint defaulting to None used to reach os.path.join and raise a TypeError that
     # said nothing about checkpoints. Both the guard and this script's default are asserted.
@@ -665,7 +736,13 @@ def main():
         "the same one for every run you intend to compare.",
     )
     p.add_argument("--num-samples", type=int, default=2000)
-    p.add_argument("--poolings", default="gap,stats,8x8x8", help="Comma list: gap, stats, DxHxW.")
+    p.add_argument(
+        "--poolings",
+        default="gap,stats,8x8x8",
+        help="Comma list: gap, stats, DxHxW. Every factor is probed at every rung listed here "
+        "(table 1b), so this also sets the per-factor scoring cost; the MCC ladder needs all "
+        "three rungs to be readable, so trim it only if the probes are the bottleneck.",
+    )
     p.add_argument("--level", type=int, default=0)
     p.add_argument("--seeds", default="0,1,2")
     p.add_argument("--n-null", type=int, default=3, help="Permutations for the label-permutation null.")
@@ -701,12 +778,14 @@ def main():
         "--factor-pooling",
         default="assigned",
         choices=("assigned", "gap", "stats", "patch"),
-        help="Which pooling each factor's R2 is read at. 'assigned' (default) uses "
-        "FACTOR_POOLING — each factor read where it can physically appear, fixed in advance so "
-        "the headline is never a max over poolings. Naming one pooling scores EVERY factor "
-        "there, which answers a different question ('how does this factor read at this rung') "
-        "and is the honest way to put all factors on one axis. The pooling must be in "
-        "--poolings or it falls back. Patch has a high floor, so read the learned column.",
+        help="Which pooling each factor's REPORTABLE R2 is read at — the number in table 1 that "
+        "the verdict is computed from. 'assigned' (default) uses FACTOR_POOLING: each factor read "
+        "where it can physically appear, fixed in advance so the headline is never a max over "
+        "poolings. Naming one pooling quotes EVERY factor from that rung instead, putting them all "
+        "on one axis. This no longer changes what is MEASURED — table 1b already shows every "
+        "factor at every rung in --poolings, so there is no need to re-run the script per pooling "
+        "just to see them. The pooling must be in --poolings or it falls back. Patch has a high "
+        "floor, so read the learned column.",
     )
     p.add_argument(
         "--n-jobs",
