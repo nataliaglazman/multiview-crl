@@ -16,11 +16,14 @@ Three panels:
               pattern.
   contrast    the tissue LUT after normalization, which is why the WM/GM edge dominates
               the GM/background edge under fixed_reference.
+  csf         what --synthetic-csf-t1-intensity does to the ventricle and to the evidence a
+              ventricle_size probe reads, with FLAIR alongside as the untouched control.
 
 Usage
 -----
     python -m eval.preview_generator --out /tmp/gen.png
     python -m eval.preview_generator --out /tmp/sweep.png --panel sweep --sweep-dim 5
+    python -m eval.preview_generator --out /tmp/csf.png --panel csf --csf-t1 0.5
 """
 
 import argparse
@@ -180,12 +183,64 @@ def panel_sweep(args, plt):
     return fig
 
 
+def panel_csf(args, plt):
+    """What --synthetic-csf-t1-intensity does to the ventricle, and to its evidence.
+
+    Rows are T1 at the default, T1 at the matched value, and FLAIR (which the knob cannot
+    touch). Columns are the smallest and largest ventricle and the DIFFERENCE between them
+    — that difference is literally the image evidence a ventricle_size probe reads, so its
+    brightness is the per-view amplitude. On one shared scale the point is immediate: at
+    the default the T1 evidence is 2.3x the FLAIR evidence, and at 0.5 they match.
+
+    Both datasets are normalized by the FIRST one's fixed_reference constants. Changing the
+    LUT changes the foreground mean, so letting each estimate its own would rescale the two
+    rows independently and quietly normalise away the very amplitude being compared.
+    """
+    ds_a = build(args.res, dict(NEW, synthetic_csf_t1_intensity=0.1))
+    ds_b = build(args.res, dict(NEW, synthetic_csf_t1_intensity=args.csf_t1))
+    ds_a._compute_fixed_reference()
+    ds_b._fixed_mean, ds_b._fixed_scale = ds_a._fixed_mean, ds_a._fixed_scale
+
+    z_small = ds_a._inner[0][2]["z_content"].clone()
+    z_small[:] = 0.0
+    z_large = z_small.clone()
+    z_small[1], z_large[1] = -1.0, 1.0
+
+    rows = [(ds_a, 0, f"T1  csf={0.1}"), (ds_b, 0, f"T1  csf={args.csf_t1}"), (ds_a, 1, "FLAIR (untouched)")]
+    planes = [[render(ds, 0, z)[view] for z in (z_small, z_large)] for ds, view, _ in rows]
+    diffs = [np.abs(_slices(hi)[args.plane] - _slices(lo)[args.plane]) for lo, hi in planes]
+    dmax = max(float(d.max()) for d in diffs)
+
+    fig, axes = plt.subplots(3, 3, figsize=(9.0, 9.4))
+    for r, ((_, _, label), (lo, hi), d) in enumerate(zip(rows, planes, diffs)):
+        for c, sl in enumerate([_slices(lo)[args.plane], _slices(hi)[args.plane]]):
+            axes[r, c].imshow(sl, cmap="gray", vmin=-1.2, vmax=1.2)
+        im = axes[r, 2].imshow(d, cmap="inferno", vmin=0, vmax=dmax)
+        axes[r, 2].set_title(f"peak {d.max():.3f}", fontsize=9)
+        axes[r, 0].set_ylabel(label, fontsize=9)
+        for c in range(3):
+            axes[r, c].set_xticks([])
+            axes[r, c].set_yticks([])
+    for c, t in enumerate(["ventricle_size = -1", "ventricle_size = +1", "|difference| = the evidence"]):
+        axes[0, c].set_title(t + ("" if c != 2 else f"\npeak {diffs[0].max():.3f}"), fontsize=9)
+    fig.colorbar(im, ax=axes[:, 2], fraction=0.046, label="shared difference scale")
+    step_a, step_b = abs(0.1 - 0.8), abs(args.csf_t1 - 0.8)
+    fig.suptitle(
+        f"csf_t1 sweeps the ventricle's CROSS-VIEW amplitude ratio, nothing else.\n"
+        f"raw CSF/WM step: T1 {step_a:.2f} -> {step_b:.2f}, FLAIR fixed at 0.30  "
+        f"=> ratio {0.30 / step_a:.3f} -> {0.30 / step_b:.3f}. "
+        "Geometry, size, boundary area and per-view SNR are unchanged.",
+        fontsize=10,
+    )
+    return fig
+
+
 def panel_contrast(args, plt):
-    ds = build(args.res, NEW)
+    ds = build(args.res, dict(NEW, synthetic_csf_t1_intensity=args.csf_t1))
     ds._compute_fixed_reference()
     mu, sc = ds._fixed_mean, ds._fixed_scale
     names = ["background", "CSF", "WM", "GM", "fissure"]
-    raw = [0.0, 0.1, 0.8, 0.5, 0.3]
+    raw = [0.0, args.csf_t1, 0.8, 0.5, 0.3]
     norm = [(v - mu) / sc for v in raw]
     fig, ax = plt.subplots(1, 2, figsize=(11, 3.6))
     ax[0].bar(names, raw, color="0.6")
@@ -210,7 +265,15 @@ def panel_contrast(args, plt):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", required=True)
-    p.add_argument("--panel", default="subjects", choices=["subjects", "sweep", "contrast"])
+    p.add_argument("--panel", default="subjects", choices=["subjects", "sweep", "contrast", "csf"])
+    p.add_argument(
+        "--csf-t1",
+        type=float,
+        default=0.5,
+        help="CSF T1 intensity for the csf panel's second row (and for the contrast panel's LUT). "
+        "0.5 matches the ventricle's cross-view amplitude ratio to 1.0; 0.1 is the default "
+        "generator value (ratio 0.43); 0.65 overshoots to 2.0.",
+    )
     p.add_argument("--res", type=int, default=64)
     p.add_argument("--n-subjects", type=int, default=4)
     p.add_argument("--sweep-dim", type=int, default=5)
@@ -231,7 +294,9 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig = {"subjects": panel_subjects, "sweep": panel_sweep, "contrast": panel_contrast}[args.panel](args, plt)
+    fig = {"subjects": panel_subjects, "sweep": panel_sweep, "contrast": panel_contrast, "csf": panel_csf}[args.panel](
+        args, plt
+    )
     fig.savefig(args.out, dpi=130, bbox_inches="tight")
     print(f"wrote {args.out}")
 
