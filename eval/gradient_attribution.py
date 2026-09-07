@@ -1,5 +1,12 @@
 #!/usr/bin/env python
-"""Which loss is degrading patch-MCC, measured directly rather than inferred.
+"""Checkpoint-only gradient attribution for patch-MCC or pixel reconstruction.
+
+``--target reconstruction`` isolates weighted patch/GAP similarity gradients and measures
+their conflict with held-out masked pixel MAE. It also scores temporary encoder steps,
+restoring all parameters and buffers between trials. No training or checkpoint writes.
+See ``eval.reconstruction_attribution`` for the metric and step conventions.
+
+The remaining description concerns the original ``--target mcc`` diagnostic:
 
 The decay of ``selection/mcc_by_pool/patch`` after its early peak was traced to the
 recon phase by ELIMINATION: every Barlow Twins term was >=93% converged before the peak,
@@ -44,6 +51,9 @@ Caveats, none of which the numbers announce on their own
 
 Usage
 -----
+    python -m eval.gradient_attribution --run-dir results/synthetic/RUN \\
+        --target reconstruction --checkpoints vqvae_model.pt --grad-batches 4
+
     python -m eval.gradient_attribution --run-dir results/synthetic/RUN \\
         --checkpoints vqvae_best.pt vqvae_model.pt
 
@@ -316,6 +326,7 @@ def _mcc_now(model, dataset, device, grid, level, batch_size, gt_cache, seeds, n
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--target", choices=("mcc", "reconstruction"), default="mcc")
     ap.add_argument("--checkpoints", nargs="+", default=["vqvae_best.pt", "vqvae_model.pt"])
     ap.add_argument("--level", type=int, default=0)
     ap.add_argument("--grid", type=int, nargs=3, default=None)
@@ -327,10 +338,32 @@ def main():
         "sd has been measured at ~69%% of its mean, so a handful of batches does not resolve "
         "its expectation from zero — which is exactly the quantity convergence claims is small.",
     )
-    ap.add_argument("--grad-batch-size", type=int, default=8)
+    ap.add_argument(
+        "--grad-batch-size",
+        type=int,
+        default=None,
+        help="Default: training batch size for reconstruction attribution; 8 for MCC.",
+    )
     ap.add_argument("--mcc-samples", type=int, default=600, help="Volumes for each block-MCC re-measurement")
     ap.add_argument("--mcc-batch", type=int, default=16)
-    ap.add_argument("--etas", type=float, nargs="+", default=[0.05, 0.2, 0.8])
+    ap.add_argument(
+        "--etas",
+        type=float,
+        nargs="+",
+        default=None,
+        help="MCC: unit-direction step lengths (default .05 .2 .8). Reconstruction: raw "
+        "weighted-gradient step multipliers (default 1e-5 3e-5 1e-4), NOT Adam learning rates.",
+    )
+    ap.add_argument("--recon-samples", type=int, default=64, help="Separate held-out subjects for pixel MAE.")
+    ap.add_argument(
+        "--recon-batch-size", type=int, default=4, help="Decoder batch size for reconstruction attribution."
+    )
+    ap.add_argument(
+        "--recon-clamp",
+        action="store_true",
+        help="Score clamped predictions for checkpoints trained with the older clamped pixel loss. Default: raw.",
+    )
+    ap.add_argument("--out", default=None, help="Optional reconstruction-attribution CSV output directory.")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--n-splits", type=int, default=5)
     ap.add_argument("--precondition", action="store_true", help="Divide by sqrt(v) from the optimizer state")
@@ -347,12 +380,30 @@ def main():
         "--random-controls",
         type=int,
         default=1,
-        help="Matched-random directions per loss (0 disables). Without at least one the dMCC "
+        help="MCC only: matched-random directions per loss (0 disables). Without at least one the dMCC "
         "table cannot separate the loss from generic perturbation sensitivity, so this "
         "defaults ON despite roughly doubling runtime.",
     )
     ap.add_argument("--causal", choices=("match", "iid"), default="match")
     cli = ap.parse_args()
+
+    if cli.target == "reconstruction":
+        if cli.precondition or cli.snr:
+            ap.error("--target reconstruction uses isolated raw gradients; --precondition/--snr apply to MCC only.")
+        if min(cli.grad_batches, cli.recon_samples, cli.recon_batch_size) < 1:
+            ap.error("Batch counts and reconstruction sample counts must be positive.")
+        if cli.grad_batch_size is not None and cli.grad_batch_size < 2:
+            ap.error("Reconstruction attribution needs --grad-batch-size >= 2 for GAP variance estimates.")
+        cli.etas = cli.etas if cli.etas is not None else [1e-5, 3e-5, 1e-4]
+        if any(not np.isfinite(e) or e <= 0 for e in cli.etas):
+            ap.error("--etas must be finite and positive.")
+        from eval.reconstruction_attribution import run
+
+        run(cli)
+        return
+
+    cli.grad_batch_size = cli.grad_batch_size if cli.grad_batch_size is not None else 8
+    cli.etas = cli.etas if cli.etas is not None else [0.05, 0.2, 0.8]
 
     import os
 
