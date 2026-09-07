@@ -397,8 +397,21 @@ def main():
                     f"    {'match recon, scale-aware':<28} {scale_r * recon / (scale_c * arm_w * s):.3e}"
                     f"   (scale_recon {scale_r:g} / scale_contrastive {scale_c:g}, arm weight {arm_w:g})"
                 )
-        print("  bt_std_coeff: 1.0 is safe at any scale — the hinge is bounded by 2.0 and goes")
-        print("  dormant once feat_std > 1 (currently {:.3f}).".format(sd if np.isfinite(sd) else float("nan")))
+        # Arm-aware, because "safe" and "advisable" differ here. The hinge is bounded by 2.0
+        # and dormant above feat_std 1, so it cannot blow up at any coefficient -- but on the
+        # GAP arm it measures std over SUBJECT rows, where the across-subject component is a
+        # fraction of what BT normalises by, so a large coefficient asks for a big per-channel
+        # rescale of the encoder output. That inflation survives the content normalisation and
+        # steps reconstruction to a higher plateau (see --bt-gap-std-coeff in utils/config.py).
+        sd = r["feat_std_mean"]
+        std_flag = "bt_gap_std_coeff" if k == "gap" else "bt_std_coeff"
+        print(f"  {std_flag}: the hinge is bounded by 2.0 and dormant once feat_std > 1")
+        print(f"  (currently {_fmt(sd, 3).strip()}, var_loss {_fmt(r['var_loss'], 3).strip()}).", end=" ")
+        if k == "gap":
+            print("Keep this LOW (0.1-0.5): on subject rows a")
+            print("  large value buys a per-channel rescale that costs reconstruction.")
+        else:
+            print("1.0 is safe at any scale here.")
 
 
 if __name__ == "__main__":
