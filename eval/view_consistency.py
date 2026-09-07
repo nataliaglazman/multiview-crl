@@ -181,6 +181,7 @@ def main():
     p.add_argument("--lesion-mode", default="sphere", choices=["sphere", "field"])
     p.add_argument("--identifiable-ventricle", action="store_true")
     p.add_argument("--csf-t1-intensity", type=float, default=0.1)
+    p.add_argument("--csf-flair-intensity", type=float, default=0.1)
     p.add_argument("--content-scale", type=float, default=1.0)
     p.add_argument("--style-scale", type=float, default=1.0)
     p.add_argument("--content-prior", default="normal", choices=["normal", "uniform"])

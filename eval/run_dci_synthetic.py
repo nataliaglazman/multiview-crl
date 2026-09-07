@@ -255,6 +255,7 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None):
         synthetic_cortex_parameterization=getattr(args, "synthetic_cortex_parameterization", "additive"),
         synthetic_center_local_deformations=getattr(args, "synthetic_center_local_deformations", False),
         synthetic_csf_t1_intensity=getattr(args, "synthetic_csf_t1_intensity", 0.1),
+        synthetic_csf_flair_intensity=getattr(args, "synthetic_csf_flair_intensity", 0.1),
     )
 
 

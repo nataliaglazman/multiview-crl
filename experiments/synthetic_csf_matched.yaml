@@ -25,36 +25,48 @@
 #
 # That is predictive, not causal. This config makes it causal.
 #
-# THE KNOB. csf_t1 0.1 -> 0.5 puts the T1 step at 0.5 - 0.8 = -0.30, exactly matching
-# FLAIR: ratio 1.000, same sign. Geometry, size, boundary area and per-view SNR are
-# untouched, so amplitude ratio is the ONLY thing that moved. (The T1 step drops 2.33x,
-# but --synthetic-identifiable-ventricle already bought 2.8x, leaving SNR ~24 — far above
-# the floor. identifiable_ventricle is also required for a different reason: it gives the
-# fissure its own label, so CSF means the ventricle and nothing else.)
+# THE KNOB, AND WHY IT NEEDS TWO. ventricle_size is read from the CSF/WM step:
+# |csf_t1 - 0.8| in T1 against |csf_flair - 0.4| in FLAIR. With FLAIR pinned at 0.1 the
+# ratio is exactly 0.30/step_T1, so ratio and T1 amplitude are the SAME VARIABLE and no
+# single-knob run can tell them apart. Worse, the only same-sign matched value, 0.5, is
+# also the GM intensity, so the ventricle renders at cortex level in T1 and ventricle_size
+# picks up a confound with brain_size / cortical_thickness. A first attempt at (0.5, 0.1)
+# degraded ventricle recovery, which is exactly what those two penalties predict and tells
+# you nothing about the ratio.
 #
-# READING IT. Compare ventricle_size's contrastive-minus-ablation delta against the
-# synthetic_identifiable pair, at a MATCHED step:
-#   deficit vanishes    cross-view amplitude mismatch is causal, and the objective is
-#                       correctly rejecting evidence the benchmark mislabels as content.
-#   deficit persists    amplitude is a passenger; the cause is whatever else distinguishes
-#                       a small interior structure, and alignability stays correlational.
+# With both knobs the 2x2 opens up. All four are same-sign; all but cell 2 are collision-free:
 #
-# STRONGER, and worth the extra runs if you can afford them: sweep rather than switch.
-# The ratio is 0.30/|csf_t1 - 0.8|, so 0.1 -> 0.43, 0.3 -> 0.60, 0.5 -> 1.00, 0.65 -> 2.00.
-# A deficit minimised at 0.5 and rising on BOTH sides is very hard to explain any other
-# way; a single on/off point is not.
+#   cell                     csf=(t1, flair)   steps        ratio   gmean amp
+#   1 baseline               (0.100, 0.100)    0.700/0.300  0.429   0.458
+#   2 matched, low amp       (0.500, 0.100)    0.300/0.300  1.000   0.300   <- csf == GM in T1
+#   3 matched, best amp      (0.450, 0.050)    0.350/0.350  1.000   0.350   <- this file
+#   4 UNMATCHED, cell-2 amp  (0.342, 0.203)    0.458/0.197  0.430   0.300   <- the control
+#
+# READING IT. Compare ventricle_size's contrastive-minus-ablation DELTA (not its absolute
+# R^2 -- absolute recovery falls in BOTH arms whenever amplitude drops, which is not the
+# prediction) across cells, at a matched step, with the ablation retrained under each
+# generator:
+#   3 shrinks the deficit, 4 does not   ratio is causal. The objective is rejecting evidence
+#                                       that transforms unequally across views, and the
+#                                       benchmark mislabels that evidence as content.
+#   3 and 4 degrade alike               amplitude is doing the work, the ratio is a passenger,
+#                                       and alignability stays correlational.
+#   neither changes                     the cause is something else about a small interior
+#                                       structure; go back to the hypothesis list.
 #
 #   python scripts/launch.py experiments/synthetic_csf_matched.yaml --cluster runai
 #   python scripts/launch.py experiments/synthetic_csf_matched.yaml --cluster runai \
-#       --set synthetic_csf_t1_intensity=0.3     # and 0.65, for the sweep
+#       --set synthetic_csf_t1_intensity=0.342 synthetic_csf_flair_intensity=0.203  # cell 4
 #
-# Verify the ratio actually moved BEFORE spending the GPU — checkpoint-free, ~minutes:
+# Verify the steps BEFORE spending the GPU -- checkpoint-free, ~minutes:
 #   python -m eval.view_consistency --preset flagship --res 64 --identifiable-ventricle \
 #     --content-prior uniform --content-squash none --lesion-radius 0.14 \
-#     --cortex-parameterization patterned --center-local-deformations --csf-t1-intensity 0.5
+#     --cortex-parameterization patterned --center-local-deformations \
+#     --csf-t1-intensity 0.45 --csf-flair-intensity 0.05
 #   # ventricle_size ||FLAIR||/||T1|| should read ~1.000, against 0.428 at the default.
 
 _base_: synthetic_identifiable
 tag: synthetic-csf-matched-ratio
 
-synthetic_csf_t1_intensity: 0.5
+synthetic_csf_t1_intensity: 0.45
+synthetic_csf_flair_intensity: 0.05

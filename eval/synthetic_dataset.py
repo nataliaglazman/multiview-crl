@@ -117,6 +117,33 @@ def sample_gp_field(grid, lengthscale, generator, *, prior="gp", dof=8.0, tau_se
 # full amplitude.
 CLEAN_NUISANCE_SCALE = 0.0
 
+# Every other tissue intensity in each view's LUT, so a CSF value that lands on one can be
+# flagged. A collision is not cosmetic: at csf_t1 = 0.5 the ventricle renders at exactly the
+# GM intensity, so any T1 feature tuned to that level fires on the cortical ribbon AND the
+# ventricle, and ventricle_size becomes confusable with brain_size / cortical_thickness in
+# that view. That is a recovery penalty which has nothing to do with the cross-view ratio the
+# knob exists to sweep, so it must not be silent.
+_T1_TISSUES = {"background": 0.0, "fissure": 0.3, "lesion": 0.4, "GM": 0.5, "WM": 0.8}
+_FLAIR_TISSUES = {"background": 0.0, "fissure": 0.3, "WM": 0.4, "GM": 0.8, "lesion": 1.0}
+
+
+def _warn_csf_lut(csf_t1, csf_flair, tol=0.03):
+    """Warn when a CSF intensity collides with another tissue in the same view."""
+    hits = [f"T1 {n} ({v})" for n, v in _T1_TISSUES.items() if abs(csf_t1 - v) < tol]
+    hits += [f"FLAIR {n} ({v})" for n, v in _FLAIR_TISSUES.items() if abs(csf_flair - v) < tol]
+    if not hits:
+        return
+    import warnings
+
+    warnings.warn(
+        f"CSF intensity collides with {', '.join(hits)}: the ventricle renders at the same level as "
+        "another tissue in that view, so a feature tuned to it cannot separate them and ventricle_size "
+        "picks up a confound with whatever drives that tissue's extent. Matched-ratio settings that "
+        "avoid every collision exist — csf=(0.45, 0.05) gives equal 0.35 steps, and csf=(0.342, 0.203) "
+        "reproduces the default 0.43 ratio at that same amplitude as its control.",
+        stacklevel=3,
+    )
+
 
 class PseudoMRIRenderer(nn.Module):
     def __init__(
@@ -135,6 +162,7 @@ class PseudoMRIRenderer(nn.Module):
         cortex_parameterization="additive",
         center_local_deformations=False,
         csf_t1_intensity=0.1,
+        csf_flair_intensity=0.1,
     ):
         super().__init__()
         self.res = res
@@ -142,6 +170,8 @@ class PseudoMRIRenderer(nn.Module):
         # the ventricle's cross-view amplitude ratio without touching its geometry, size
         # or SNR — see render_modality for why it has to be this side of the LUT.
         self.csf_t1_intensity = float(csf_t1_intensity)
+        self.csf_flair_intensity = float(csf_flair_intensity)
+        _warn_csf_lut(self.csf_t1_intensity, self.csf_flair_intensity)
         if abs(self.csf_t1_intensity - 0.8) < 0.05:
             import warnings
 
@@ -477,7 +507,7 @@ class PseudoMRIRenderer(nn.Module):
             base = torch.tensor([0.0, self.csf_t1_intensity, 0.8, 0.5, 0.3], device=device)
             lesion_int = 0.4
         elif modality == "FLAIR":
-            base = torch.tensor([0.0, 0.1, 0.4, 0.8, 0.3], device=device)
+            base = torch.tensor([0.0, self.csf_flair_intensity, 0.4, 0.8, 0.3], device=device)
             lesion_int = 1.0
         else:
             raise ValueError(f"Unknown modality {modality}")
@@ -657,6 +687,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         cortex_parameterization="additive",
         center_local_deformations=False,
         csf_t1_intensity=0.1,
+        csf_flair_intensity=0.1,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -801,8 +832,9 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 cortex_parameterization=cortex_parameterization,
                 center_local_deformations=center_local_deformations,
                 csf_t1_intensity=csf_t1_intensity,
+                csf_flair_intensity=csf_flair_intensity,
             )
-            if csf_t1_intensity != 0.1 and not identifiable_ventricle:
+            if (csf_t1_intensity != 0.1 or csf_flair_intensity != 0.1) and not identifiable_ventricle:
                 import warnings
 
                 warnings.warn(
