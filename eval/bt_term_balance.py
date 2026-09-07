@@ -48,13 +48,14 @@ suggests ``bt_gap_sim_coeff``, since that arm carries its own coefficient.
 applies ``--scale-recon-loss``, ``--scale-contrastive-loss`` and the arm weight, and is the
 one that answers how big ``sim`` is next to reconstruction in the loss actually optimised.
 
-Also reported: the VARIANCE-NORMALISED ``sim`` against ``1 - corr``. For zero-mean
-equal-variance views those are equal, so any excess is the per-view constant OFFSET — the
-component BT's standardised correlation is structurally blind to, and the reason the MSE
-term exists.  Under ``--bt-sim-normalize`` the loss has already divided by ``2*sigma^2``,
-so the reported ``sim`` IS that quantity and is compared directly; dividing again would
-understate the offset by ``2*feat_std^2`` (41x at a patch feat_std of 4.5 — enough to
-report a real offset as none).
+Also reported: ``sim`` split into its per-view constant OFFSET component and the genuine
+cross-view misalignment.  The offset is the component BT's standardised correlation is
+structurally blind to, and the whole reason the MSE term exists.  It comes from the loss's
+own ``sim_offset`` diagnostic — ``(mu_i - mu_j)^2`` measured on the same uncentered tensor
+``sim`` runs on, normalised the same way — rather than from the tempting
+``sim - (1 - pos_sim_mean)``: ``pos_sim_mean`` is the correlation of the CENTERED features,
+and under ``center_mode="position"`` the two differ by the entire shared-anatomy positional
+pattern, which over-subtracts badly enough to report a dominant offset as none.
 
 Usage
 -----
@@ -117,7 +118,16 @@ def measure(hz, batch_size, draws, center_mode, patch_stat, sim_normalize=False,
     rng = np.random.RandomState(seed)
     n = hz.shape[1]
     b = min(batch_size, n)
-    keys = ("on_diag_loss", "off_diag_loss", "off_diag_inst", "sim_loss", "var_loss", "feat_std_mean", "pos_sim_mean")
+    keys = (
+        "on_diag_loss",
+        "off_diag_loss",
+        "off_diag_inst",
+        "sim_loss",
+        "sim_offset",
+        "var_loss",
+        "feat_std_mean",
+        "pos_sim_mean",
+    )
     acc = {k: [] for k in keys}
     d = hz.shape[2]
     m = float(corr_ema_decay or 0.0)
@@ -297,15 +307,15 @@ def main():
     print("=" * 88)
     hdr = (
         f"  {'pooling':<8}{'d':>4}{'rows':>8}{'on_diag':>11}{'off_diag':>11}{'inst':>11}"
-        f"{'floor':>9}{'sim':>12}{'var':>8}{'std':>8}"
+        f"{'floor':>9}{'sim':>10}{'offset':>10}{'var':>8}{'std':>8}"
     )
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
     for k, r in results.items():
         print(
             f"  {k:<8}{r['d']:>4}{r['rows']:>8}{_fmt(r['on_diag_loss']):>11}{_fmt(r['off_diag_loss']):>11}"
-            f"{_fmt(r['off_diag_inst']):>11}{_fmt(r['floor'], 2):>9}{_fmt(r['sim_loss'], 3):>12}"
-            f"{_fmt(r['var_loss'], 3):>8}{_fmt(r['feat_std_mean'], 3):>8}"
+            f"{_fmt(r['off_diag_inst']):>11}{_fmt(r['floor'], 2):>9}{_fmt(r['sim_loss'], 3):>10}"
+            f"{_fmt(r.get('sim_offset'), 3):>10}{_fmt(r['var_loss'], 3):>8}{_fmt(r['feat_std_mean'], 3):>8}"
         )
     if ema_on:
         print(
@@ -337,25 +347,28 @@ def main():
             print("    [!] the redundancy term is mostly fitting sampling noise here.")
             print("        Levers: bigger batch (floor halves per doubling) or a narrower content block.")
 
-        s, sd, corr = r["sim_loss"], r["feat_std_mean"], r["pos_sim_mean"]
-        if np.isfinite(s) and np.isfinite(sd) and sd > 0:
-            # MSE_c = 2*sigma_c^2*(1 - rho_c) when the per-view means match, so the quantity
-            # to compare against (1 - rho) is the VARIANCE-NORMALISED sim -- and under
-            # --bt-sim-normalize the loss has already divided by that 2*sigma^2. Dividing
-            # again would double-normalise and understate the offset by 2*feat_std^2, which
-            # at the patch arm's feat_std of ~4.5 is a factor of 41: enough to report a real
-            # offset as none. `measure` already forwards the run's own sim_normalize, so the
-            # branch is on the same flag training used, not on a guess.
-            norm = s if sim_normalize else s / (2 * sd**2)
-            label = "sim (already /2sigma^2)" if sim_normalize else "sim / (2*std^2)"
-            print(f"\n  {label} = {norm:.3f}   vs   1 - corr = {1 - corr:.3f}")
-            if norm > 3 * max(1 - corr, 1e-6):
-                print(f"    => the OFFSET dominates the disagreement by ~{norm / max(1 - corr, 1e-6):.0f}x.")
-                print("       This is exactly what the MSE term exists to remove, and exactly what")
-                print("       BT's standardised correlation cannot see.")
+        s, off = r["sim_loss"], r.get("sim_offset", float("nan"))
+        if np.isfinite(s) and s > 0 and np.isfinite(off):
+            # sim_offset is the (mu_i - mu_j)^2 component of sim_loss, measured exactly by the
+            # loss on the same uncentered tensor sim runs on. It replaces the old
+            # `sim vs 1 - pos_sim_mean` comparison, which mixed tensors: pos_sim_mean is the
+            # correlation of the CENTERED features while sim runs on the uncentered ones, and
+            # under center_mode="position" the difference is the entire shared-anatomy
+            # positional pattern. That over-subtracted and reported the patch arm's offset as
+            # none when it was essentially all of sim.
+            frac = 100.0 * off / s
+            print(f"\n  sim {s:.4f} = offset {off:.4f} + misalignment {s - off:.4f}   ({frac:.0f}% offset)")
+            if frac > 50:
+                print("    => the per-view constant OFFSET dominates. This is exactly what the MSE")
+                print("       term exists to remove and exactly what BT's standardised correlation")
+                print("       cannot see, so the weight here is doing work no other term can.")
+            elif frac > 10:
+                print("    => a real offset, but most of sim is genuine cross-view misalignment,")
+                print("       which on_diag also penalises (as (1-rho)^2 rather than (1-rho)).")
             else:
                 print("    => little residual offset; the views already sit in the same region.")
-                print("       Weight here is redundant with on_diag, which already drives 1 - rho down.")
+                print("       Weight here is near-redundant with on_diag, differing mainly in that")
+                print("       sim keeps a gradient as rho -> 1 where on_diag's vanishes.")
 
         # Express the BT-term targets in the parameterisation the run trains in. sim and
         # recon are means under both, so only the two summed terms move.

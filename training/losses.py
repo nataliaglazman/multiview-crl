@@ -1235,6 +1235,30 @@ def barlow_twins_loss(
                     # Captured HERE: z_i is overwritten by its standardised self below, after
                     # which its std is 1.0 by construction and tells you nothing.
                     _raw_std_mean = _raw_std_i.mean()
+
+                    # How much of sim_loss is the per-view constant OFFSET — the component
+                    # on_diag is blind to and the only reason the MSE term exists.
+                    #
+                    # Computed EXACTLY, not inferred. The identity sim = (1-rho) + dmu^2/2sigma^2
+                    # invites reading the offset as `sim - (1 - pos_sim_mean)`, and that is wrong
+                    # here: pos_sim_mean is the correlation of the CENTERED tensor (`hz`), while
+                    # sim runs on the uncentered one (`hz_raw`), and under center_mode="position"
+                    # those differ by the whole shared-anatomy positional pattern — which both
+                    # views agree on, so it drives the uncentered rho toward 1 and the centered
+                    # one far below it. Subtracting the centered (1-rho) therefore over-subtracts
+                    # and can report a large offset as none. E[(a-b)^2] splits into a variance
+                    # part and (mu_a - mu_b)^2 with no approximation, so take the second directly.
+                    #
+                    # Normalised to match whichever sim_loss is being reported, so
+                    # `sim_offset <= sim_loss` holds and the remainder is the genuine
+                    # misalignment in the same units.
+                    with torch.no_grad():
+                        _dmu2 = (r_i.mean(dim=0) - r_j.mean(dim=0)).pow(2)
+                        if sim_normalize:
+                            _vsum = r_i.var(dim=0, unbiased=False) + r_j.var(dim=0, unbiased=False)
+                            _sim_offset = (_dmu2 / (_vsum + 1e-8)).mean()
+                        else:
+                            _sim_offset = _dmu2.mean()
                     if _per_pos:
                         B, d, P = z_i.shape
                         z_i = (z_i - z_i.mean(0, keepdim=True)) / (z_i.std(0, unbiased=False, keepdim=True) + 1e-6)
@@ -1336,6 +1360,9 @@ def barlow_twins_loss(
                             # they actually are, rather than by transplanting VICReg's 25/25/1
                             # (the mistake that made bt_lambda 200x too weak at d=44).
                             "sim_loss": sim_loss.item(),
+                            # The per-view constant offset component of sim_loss, same units.
+                            # sim_loss - sim_offset is the genuine cross-view misalignment.
+                            "sim_offset": _sim_offset.item(),
                             "var_loss": var_loss.item(),
                             "feat_std_mean": _raw_std_mean.item(),
                         }
