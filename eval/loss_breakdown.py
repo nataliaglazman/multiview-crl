@@ -85,6 +85,8 @@ def build_terms(cfg, level, series):
     glam = g("bt_gap_lambda", None)
     glam = lam if glam is None else float(glam)
     sim = float(g("bt_sim_coeff", 0.0) or 0.0)
+    gsim = g("bt_gap_sim_coeff", None)
+    gsim = sim if gsim is None else float(gsim)
     std = float(g("bt_std_coeff", 0.0) or 0.0)
     gstd = g("bt_gap_std_coeff", None)
     gstd = std if gstd is None else float(gstd)
@@ -101,7 +103,7 @@ def build_terms(cfg, level, series):
         ("BT patch  var hinge", f"Contrastive/var_loss{L}", sc * lw * pw * std),
         ("BT gap    on_diag", f"Contrastive/gap_on_diag_loss{L}", sc * lw * gw * 1.0),
         ("BT gap    off_diag", f"Contrastive/gap_off_diag_loss{L}", sc * lw * gw * glam),
-        ("BT gap    sim", f"Contrastive/gap_sim_loss{L}", sc * lw * gw * sim),
+        ("BT gap    sim", f"Contrastive/gap_sim_loss{L}", sc * lw * gw * gsim),
         ("BT gap    var hinge", f"Contrastive/gap_var_loss{L}", sc * lw * gw * gstd),
     ]
     commit_w = vqw + (0.0 if single else sr)

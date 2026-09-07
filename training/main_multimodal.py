@@ -1298,13 +1298,21 @@ def main(args):
         # Same split, same reason, as _bt_gap_lam above.
         _bt_gap_std_c = getattr(args, "bt_gap_std_coeff", None)
         _bt_gap_std_c = _bt_std_c if _bt_gap_std_c is None else _bt_gap_std_c
+        # Same split, same reason again, for the MSE term. What it uniquely buys is the
+        # per-view constant OFFSET on_diag cannot see, and the two arms do not carry the
+        # same offset: measured with --bt-sim-normalize (where sim reads 1-rho plus the
+        # offset), patch sim 0.046 vs 1-rho 0.044 is offset-free while gap sim 0.068 vs
+        # 1-rho 0.015 is a 4.5x excess. One shared coefficient buys the gap fix at the cost
+        # of surplus alignment pressure on patch, which nothing in BT counterweights.
+        _bt_gap_sim_c = getattr(args, "bt_gap_sim_coeff", None)
+        _bt_gap_sim_c = _bt_sim_c if _bt_gap_sim_c is None else _bt_gap_sim_c
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
         _bt_norm = bool(getattr(args, "bt_normalize_terms", False))
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
             f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
-            f"sim={_bt_sim_c}, std={_bt_std_c}, gap std={_bt_gap_std_c}, "
+            f"sim={_bt_sim_c}, std={_bt_std_c}, gap sim={_bt_gap_sim_c}, gap std={_bt_gap_std_c}, "
             f"patch weight={_bt_patch_w})"
         )
         if _bt_patch_w == 0 and _bt_gap_w <= 0:
@@ -1321,12 +1329,16 @@ def main(args):
                 "term is scale-invariant, so nothing in the loss can detect that. The "
                 "variance hinge is what makes the MSE term safe — they ship together."
             )
-        if _bt_sim_c > 0 and _bt_gap_w > 0 and _bt_gap_std_c <= 0:
+        # Gated on the GAP arm's own sim coefficient, not the patch one: with
+        # --bt-gap-sim-coeff those differ, and the collapse this rejects is caused by
+        # whichever coefficient the GAP call actually receives.
+        if _bt_gap_sim_c > 0 and _bt_gap_w > 0 and _bt_gap_std_c <= 0:
             raise ValueError(
-                "--bt-gap-std-coeff 0 with --bt-sim-coeff > 0 and --bt-gap-weight > 0 leaves the "
-                "GAP term's MSE with no variance hinge behind it — the same collapse-to-zero the "
-                "check above rejects, on the one term whose rows are subjects. Lower it (0.1-0.5) "
-                "rather than disabling it."
+                "--bt-gap-std-coeff 0 with a nonzero GAP sim coefficient (--bt-gap-sim-coeff, or "
+                "--bt-sim-coeff when it is unset) and --bt-gap-weight > 0 leaves the GAP term's "
+                "MSE with no variance hinge behind it — the same collapse-to-zero the check above "
+                "rejects, on the one term whose rows are subjects. Lower it (0.1-0.5) rather than "
+                "disabling it, or set --bt-gap-sim-coeff 0 to drop the GAP MSE instead."
             )
         if _bt_gap_w > 0 and args.batch_size < 128:
             logger.warning(
@@ -1378,7 +1390,7 @@ def main(args):
                     subsets=subsets,
                     soft_content_mask=soft_content_mask,
                     lambd=_bt_gap_lam,
-                    sim_coeff=_bt_sim_c,
+                    sim_coeff=_bt_gap_sim_c,
                     std_coeff=_bt_gap_std_c,
                     sim_normalize=_bt_sim_norm,
                     corr_ema=_bt_ema_gap,
@@ -2452,6 +2464,8 @@ def main(args):
                         _wstd = float(getattr(args, "bt_std_coeff", 0.0) or 0.0)
                         _wgstd = getattr(args, "bt_gap_std_coeff", None)
                         _wgstd = _wstd if _wgstd is None else float(_wgstd)
+                        _wgsim = getattr(args, "bt_gap_sim_coeff", None)
+                        _wgsim = _wsim if _wgsim is None else float(_wgsim)
                         _wvq = float(getattr(args, "vq_commitment_weight", 0.25))
                         _wsingle = bool(getattr(args, "single_count_commitment", False))
                         _wcommit = _wvq + (0.0 if _wsingle else _wsr)
@@ -2461,11 +2475,19 @@ def main(args):
                         if _contrastive_type == "barlow_twins":
                             for _li in range(args.vqvae_nb_levels):
                                 _lw = float(_wlvl[_li]) if _wlvl and _li < len(_wlvl) else 1.0
-                                for _pfx, _w, _lm, _sd in (("", _wpw, _wlam, _wstd), ("gap_", _wgw, _wglam, _wgstd)):
+                                # sim carries a per-arm coefficient like lambda and std do, so
+                                # it is unpacked here rather than closed over: Weighted/* is
+                                # documented above as mirroring the call chain exactly, and a
+                                # shared _wsim would silently misreport the gap arm the moment
+                                # --bt-gap-sim-coeff is set.
+                                for _pfx, _w, _lm, _sm, _sd in (
+                                    ("", _wpw, _wlam, _wsim, _wstd),
+                                    ("gap_", _wgw, _wglam, _wgsim, _wgstd),
+                                ):
                                     for _term, _coef in (
                                         ("on_diag_loss", 1.0),
                                         ("off_diag_loss", _lm),
-                                        ("sim_loss", _wsim),
+                                        ("sim_loss", _sm),
                                         ("var_loss", _sd),
                                     ):
                                         _v = step_moco_diag.get(f"Contrastive/{_pfx}{_term}_L{_li}")

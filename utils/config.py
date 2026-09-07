@@ -1261,6 +1261,24 @@ def parse_args() -> argparse.ArgumentParser:
         "bit-identical.",
     )
     parser.add_argument(
+        "--bt-gap-sim-coeff",
+        type=float,
+        default=None,
+        help="Separate MSE-alignment weight for the --bt-gap-weight companion term. Defaults to "
+        "--bt-sim-coeff, which is what --bt-gap-lambda and --bt-gap-std-coeff already exist to "
+        "avoid for the other two terms: the arms measure over different rows, so one coefficient "
+        "means two different things. The MSE term's distinctive job is the per-view constant "
+        "OFFSET that BT's standardised correlation is blind to (on_diag only sees co-variation), "
+        "and how much offset there is differs per arm. Measured on this project at step 133k with "
+        "--bt-sim-normalize, where the normalised sim reads (1 - rho) plus the offset: patch sim "
+        "0.046 against 1-rho 0.044 (no offset at all — every unit of weight there is redundant "
+        "with on_diag), gap sim 0.068 against 1-rho 0.015 (a 4.5x excess — a real offset only the "
+        "MSE term can remove). Sharing one coefficient therefore buys the gap fix at the price of "
+        "pure surplus alignment pressure on patch, and alignment pressure has no informativeness "
+        "counterweight anywhere in BT — only the reconstruction term asks the code to stay "
+        "informative. Size it with eval.bt_term_balance, which reports both arms separately.",
+    )
+    parser.add_argument(
         "--bt-gap-std-coeff",
         type=float,
         default=None,

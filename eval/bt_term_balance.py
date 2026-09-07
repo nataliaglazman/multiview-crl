@@ -27,11 +27,24 @@ What it suggests
 ----------------
 Coefficients that put each term at a chosen share of the total contrastive loss, plus the
 value that balances ``sim`` against reconstruction — because the two compete directly and
-``scale_contrastive_loss`` multiplies all of them together.
+``scale_contrastive_loss`` multiplies all of them together.  The terms are measured as RAW
+sums, so the BT-term suggestions are re-expressed in the run's own parameterisation when it
+sets ``--bt-normalize-terms`` (which divides ``on_diag`` by d and ``off_diag`` by d(d-1));
+quoting them raw is off by 40x and 1560x at this project's width.  ``sim`` and the
+reconstruction probe are means under both, so they carry over unchanged.  The GAP block
+suggests ``bt_gap_sim_coeff``, since that arm carries its own coefficient.
 
-Also reported: ``sim / (2 * feat_std^2)`` against ``1 - corr``. For zero-mean equal-variance
-views those are equal, so any excess is the per-view constant OFFSET — the component BT's
-standardised correlation is structurally blind to, and the reason the MSE term exists.
+"match reconstruction" equates the two UNWEIGHTED terms; the "scale-aware" line beside it
+applies ``--scale-recon-loss``, ``--scale-contrastive-loss`` and the arm weight, and is the
+one that answers how big ``sim`` is next to reconstruction in the loss actually optimised.
+
+Also reported: the VARIANCE-NORMALISED ``sim`` against ``1 - corr``. For zero-mean
+equal-variance views those are equal, so any excess is the per-view constant OFFSET — the
+component BT's standardised correlation is structurally blind to, and the reason the MSE
+term exists.  Under ``--bt-sim-normalize`` the loss has already divided by ``2*sigma^2``,
+so the reported ``sim`` IS that quantity and is compared directly; dividing again would
+understate the offset by ``2*feat_std^2`` (41x at a patch feat_std of 4.5 — enough to
+report a real offset as none).
 
 Usage
 -----
@@ -130,6 +143,15 @@ def main():
     center_mode = getattr(args_, "patch_center_mode", "none") or "none"
     patch_stat = getattr(args_, "bt_patch_stat", "fold") or "fold"
     sim_normalize = bool(getattr(args_, "bt_sim_normalize", False))
+    # The terms below are measured as RAW SUMS (the loss's own diagnostics, with
+    # normalize_terms off). A run with --bt-normalize-terms optimises on_diag/d and
+    # off_diag/(d(d-1)) instead, so a suggestion of the form `target / sim` has to be
+    # expressed in the same parameterisation or it lands off by d or d(d-1) -- 40x and
+    # 1560x at this project's width. sim and recon are means either way and carry over
+    # unchanged. Read here rather than assumed, so the printout matches the run.
+    normalize_terms = bool(getattr(args_, "bt_normalize_terms", False))
+    scale_c = float(getattr(args_, "scale_contrastive_loss", 1.0) or 1.0)
+    scale_r = float(getattr(args_, "scale_recon_loss", 1.0) or 1.0)
 
     dataset = build_synthetic_test_set(args_, cli.num_samples, causal=cli.causal == "match")
     ckpt = os.path.join(cli.run_dir, cli.checkpoint_name)
@@ -220,23 +242,51 @@ def main():
 
         s, sd, corr = r["sim_loss"], r["feat_std_mean"], r["pos_sim_mean"]
         if np.isfinite(s) and np.isfinite(sd) and sd > 0:
-            norm = s / (2 * sd**2)
-            print(f"\n  sim / (2*std^2) = {norm:.3f}   vs   1 - corr = {1 - corr:.3f}")
+            # MSE_c = 2*sigma_c^2*(1 - rho_c) when the per-view means match, so the quantity
+            # to compare against (1 - rho) is the VARIANCE-NORMALISED sim -- and under
+            # --bt-sim-normalize the loss has already divided by that 2*sigma^2. Dividing
+            # again would double-normalise and understate the offset by 2*feat_std^2, which
+            # at the patch arm's feat_std of ~4.5 is a factor of 41: enough to report a real
+            # offset as none. `measure` already forwards the run's own sim_normalize, so the
+            # branch is on the same flag training used, not on a guess.
+            norm = s if sim_normalize else s / (2 * sd**2)
+            label = "sim (already /2sigma^2)" if sim_normalize else "sim / (2*std^2)"
+            print(f"\n  {label} = {norm:.3f}   vs   1 - corr = {1 - corr:.3f}")
             if norm > 3 * max(1 - corr, 1e-6):
                 print(f"    => the OFFSET dominates the disagreement by ~{norm / max(1 - corr, 1e-6):.0f}x.")
                 print("       This is exactly what the MSE term exists to remove, and exactly what")
                 print("       BT's standardised correlation cannot see.")
             else:
                 print("    => little residual offset; the views already sit in the same region.")
+                print("       Weight here is redundant with on_diag, which already drives 1 - rho down.")
 
-        print("\n  suggested bt_sim_coeff:")
+        # Express the BT-term targets in the parameterisation the run trains in. sim and
+        # recon are means under both, so only the two summed terms move.
+        dd = r["d"]
+        on_t = r["on_diag_loss"] / (dd if normalize_terms else 1.0)
+        off_t = excess / (dd * (dd - 1) if normalize_terms else 1.0)
+        flag = "bt_gap_sim_coeff" if k == "gap" else "bt_sim_coeff"
+        print(f"\n  suggested {flag}   (--bt-normalize-terms={normalize_terms}):")
         for tag, target in (
-            ("match off_diag (real part)", max(excess, 1e-9)),
-            ("match on_diag", max(r["on_diag_loss"], 1e-9)),
+            ("match off_diag (real part)", max(off_t, 1e-9)),
+            ("match on_diag", max(on_t, 1e-9)),
             ("match reconstruction", recon),
         ):
             if np.isfinite(target) and np.isfinite(s) and s > 0:
                 print(f"    {tag:<28} {target / s:.3e}")
+        # "match reconstruction" above equates the two UNWEIGHTED terms, but they reach the
+        # optimiser through different scales, and sim is additionally multiplied by its arm
+        # weight. This is the line that answers "how big is sim next to recon in the loss
+        # that is actually optimised", which is the question the coefficient is really for.
+        if np.isfinite(recon) and np.isfinite(s) and s > 0 and scale_c > 0:
+            arm_w = float(
+                getattr(args_, "bt_gap_weight", 1.0) if k == "gap" else getattr(args_, "bt_patch_weight", 1.0)
+            )
+            if arm_w > 0:
+                print(
+                    f"    {'match recon, scale-aware':<28} {scale_r * recon / (scale_c * arm_w * s):.3e}"
+                    f"   (scale_recon {scale_r:g} / scale_contrastive {scale_c:g}, arm weight {arm_w:g})"
+                )
         print("  bt_std_coeff: 1.0 is safe at any scale — the hinge is bounded by 2.0 and goes")
         print("  dormant once feat_std > 1 (currently {:.3f}).".format(sd if np.isfinite(sd) else float("nan")))
 
