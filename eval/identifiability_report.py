@@ -26,9 +26,14 @@ What it prints
    interpretable: stats cannot express position (it is permutation-invariant over
    voxels) and patch sits on a floor of ~0.86, so only the SHAPE across rungs carries
    the "where does the information live" signal.
-3. DCI per scope, when ``--with-dci`` is passed, with the code count beside each row so
+3. The LEAKAGE matrix: the other three cells of block×factor (content→style, style→style,
+   style→content) plus a label-free view probe, each against its own floor.  Table 1 is
+   the content→content cell alone, and a content score that rises because the content
+   block absorbed style looks exactly like one that rises because content improved — this
+   is the section that tells them apart.  Skip with ``--no-leakage``.
+4. DCI per scope, when ``--with-dci`` is passed, with the code count beside each row so
    two scopes are never silently compared at different normalisations.
-4. A verdict block that refuses to report a metric whose learned part is inside its own
+5. A verdict block that refuses to report a metric whose learned part is inside its own
    noise, and says so instead of printing a number that looks like a result.
 
 Why the floor is not optional here
@@ -61,13 +66,17 @@ import os
 import numpy as np
 from joblib import Parallel, delayed
 
-from eval.identifiability_metrics import block_mcc, cv_probe_r2
+from eval.identifiability_metrics import block_mcc, cv_probe_r2, view_invariance
 from eval.run_dci_compare import (
     _CONTENT,
+    _CONTENT_V2,
+    _STYLE,
+    _STYLE_V2,
     FACTOR_POOLING,
     PROBE_DIM_AUTO,
     _auto_probe_dim,
     _block_array,
+    _has_v2,
     _resolve_key,
     mean_std_structs,
     parse_poolings,
@@ -89,8 +98,16 @@ NOISE_FLOOR = 0.05
 # --------------------------------------------------------------------------- #
 
 
-def per_factor_scores(reprs, level, gt, names, seeds, n_null, rng, kind="ridge", n_jobs=1, factor_pooling="assigned"):
+def per_factor_scores(
+    reprs, level, gt, names, seeds, n_null, rng, kind="ridge", n_jobs=1, factor_pooling="assigned", block=_CONTENT
+):
     """R² gap per factor at EVERY scored pooling, plus which one is the reportable rung.
+
+    ``block`` selects which array of the level tuple is probed — ``_CONTENT`` for table 1,
+    ``_STYLE`` for the leakage cells.  It is a parameter rather than a second function so
+    that every cell of the block×factor matrix is scored by one implementation: the nulls,
+    the rung ladder and the ``FACTOR_POOLING`` routing cannot drift between the diagonal
+    and the off-diagonal, and a leak number is therefore on table 1's scale.
 
     Returns ``{name: {"r2", "r2_raw", "pooling", "by_pooling": {key: {...}}}}``.  The
     top-level ``r2``/``r2_raw`` are the assigned rung's — one factor, one pooling, fixed in
@@ -110,7 +127,7 @@ def per_factor_scores(reprs, level, gt, names, seeds, n_null, rng, kind="ridge",
     ladder = [k for k in ("gap", "stats", "patch") if k in avail]
     blocks = {}
     for key in ladder:
-        X = _block_array(reprs, key, level, _CONTENT)
+        X = _block_array(reprs, key, level, block)
         if X is not None and X.shape[1]:
             blocks[key] = X
 
@@ -175,6 +192,119 @@ def mcc_ladder(reprs, level, gt_content, seeds, kind="ridge", names=()):
     return out
 
 
+def _view_blocks(reprs, key, level):
+    """(content_v1, content_v2, style_v1, style_v2) at one rung, with None widened to (N, 0).
+
+    ``view_invariance`` stacks the two views of a block, so a missing style block has to
+    arrive as a zero-width array rather than as None: ``cv_probe_acc`` already returns nan
+    for a zero-width X, and that is the reading we want for a run with no style channels.
+    """
+    c1 = _block_array(reprs, key, level, _CONTENT)
+    if c1 is None or not c1.shape[1]:
+        return None
+    c2 = _block_array(reprs, key, level, _CONTENT_V2)
+    if c2 is None or c2.shape != c1.shape:
+        return None
+    n = c1.shape[0]
+
+    def _widen(arr):
+        return np.zeros((n, 0)) if arr is None else arr
+
+    s1, s2 = _widen(_block_array(reprs, key, level, _STYLE)), _widen(_block_array(reprs, key, level, _STYLE_V2))
+    if s1.shape[1] != s2.shape[1]:  # a half-present style block would stack into nonsense
+        s1 = s2 = np.zeros((n, 0))
+    return c1, c2, s1, s2
+
+
+def leakage_scores(
+    reprs,
+    level,
+    gt_content,
+    gt_style,
+    content_names,
+    style_names,
+    seeds,
+    n_null,
+    rng,
+    kind="ridge",
+    n_jobs=1,
+    factor_pooling="assigned",
+):
+    """The off-diagonal cells of the block×factor matrix, plus the view probe.
+
+    Table 1 is the content→content cell, and on its own it cannot distinguish the two
+    things a rising content score can mean.  This architecture is specifically exposed to
+    the second: reconstruction needs the view-specific appearance from somewhere, and when
+    the style block cannot supply it the encoder routes it through content instead — which
+    reads as MORE content information, not less.  Three more cells settle which happened,
+    all scored by the same ``per_factor_scores`` as table 1 (same nulls, same rung ladder,
+    same routing), so the four numbers sit on one scale:
+
+      content→style   style factors read from the content block.  THE leak.  ~0 is clean.
+      style→style     style doing its own job.  ~0 means the style block is DEAD — a
+                      different diagnosis from a greedy content block, with a different
+                      fix, so read this row before reading the one above it.
+      style→content   anatomy in the style block.  Under an SCM the content factors are
+                      correlated and style sees the same image, so this sits above zero
+                      even when nothing is wrong.  Only its floor-subtracted column is
+                      worth anything.
+
+    ``view`` is the sharpest of them: a logistic probe for which view a feature came from,
+    per rung, on content / style / both.  Chance is 0.5.  It needs no factor labels and no
+    SCM assumption, and it is the probe that caught this leak on this project before — see
+    ``training/losses.py``, where every content channel sat at view-AUC 1.000 under Barlow
+    Twins while VICReg held 0/44 above 0.7.  Its floor matters as much as anywhere else
+    here: an untrained encoder already separates two views that differ in intensity
+    statistics, so a raw accuracy near 1.0 is not by itself evidence of anything.
+
+    Comparing two runs whose content/style split differs: the probe width IS the channel
+    count, so a 40/8 model hands the content probe 40·P features and a 30/18 model 30·P,
+    and ridge in the p≫n regime is not indifferent to that.  Pass an explicit
+    ``--probe-dim`` (not ``auto``, which leaves a well-conditioned block at full width) to
+    put every block of both models at one width; otherwise the width confound rides along
+    inside every number in this section and in table 1.
+    """
+    avail = set(reprs.keys())
+    style_ok = gt_style is not None and len(style_names) and np.asarray(gt_style).shape[1] > 0
+
+    # Order matters: the shared ``rng`` is consumed in call order, and table 1 draws its
+    # permutations before this function is reached.  Appending cells here therefore cannot
+    # move table 1's floor, while inserting one above it silently would.
+    cells = {}
+    if style_ok:
+        cells["content→style"] = per_factor_scores(
+            reprs, level, gt_style, style_names, seeds, n_null, rng, kind, n_jobs, factor_pooling, block=_CONTENT
+        )
+        cells["style→style"] = per_factor_scores(
+            reprs, level, gt_style, style_names, seeds, n_null, rng, kind, n_jobs, factor_pooling, block=_STYLE
+        )
+    cells["style→content"] = per_factor_scores(
+        reprs, level, gt_content, content_names, seeds, n_null, rng, kind, n_jobs, factor_pooling, block=_STYLE
+    )
+    cells = {k: v for k, v in cells.items() if v}
+
+    view = {}
+    if _has_v2(reprs, level):
+        for key in ("gap", "stats", "patch"):
+            if key not in avail:
+                continue
+            blocks = _view_blocks(reprs, key, level)
+            if blocks is None:
+                continue
+            c1, c2, s1, s2 = blocks
+            view[key] = view_invariance(
+                c1, c2, s1, s2, all_v1=np.hstack([c1, s1]), all_v2=np.hstack([c2, s2]), seeds=seeds
+            )
+    return {"cells": cells, "view": view}
+
+
+def _cell_mean(cell):
+    """Mean floor-subtractable R² gap over a cell's factors (nan when it has none)."""
+    vals = [_f(d.get("r2")) for d in (cell or {}).values()]
+    vals = [v for v in vals if np.isfinite(v)]
+    return float(np.mean(vals)) if vals else float("nan")
+
+
 def _delta(a, b):
     a, b = _f(a), _f(b)
     return a - b if np.isfinite(a) and np.isfinite(b) else float("nan")
@@ -196,6 +326,13 @@ def _f(x):
 def _n(x, nd=3):
     v = _f(x)
     return f"{v:+.{nd}f}" if np.isfinite(v) else "   -  "
+
+
+def _acc(x, nd=3):
+    """Unsigned formatter for accuracies. A probability printed as '+0.410' reads as a
+    delta, and the view table sits next to columns that really are deltas."""
+    v = _f(x)
+    return f"{v:.{nd}f}" if np.isfinite(v) else "   -  "
 
 
 def _bar(x, width=8):
@@ -323,14 +460,87 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
         sds = f" +-{sd:.3f}" if np.isfinite(sd) else ""
         print(f"   {key:<8s} {_n(m['mean'])} {_n(m.get('std'))} {_n(d)}{sds} {_bar(d)}  {istr}{warn}")
 
-    # 3. dci ------------------------------------------------------------------
+    # 3. leakage --------------------------------------------------------------
+    leak = res.get("leakage") or {}
+    fleak = (floor or {}).get("leakage") or {}
+    if not (leak.get("cells") or leak.get("view")):
+        print()
+        print(_rule("3. LEAKAGE (which block carries which factors)"))
+        if "leakage" in res:
+            print("   no style block and no second view — nothing to leak into or out of. This is the")
+            print("   expected reading for an all-content model (--content-size == hidden channels).")
+        else:
+            print("   skipped — --no-leakage. Table 1 alone cannot tell a better content block from")
+            print("   one that absorbed style; re-run without it before reporting a content result.")
+    else:
+        print()
+        print(_rule("3. LEAKAGE (which block carries which factors)"))
+        print("   table 1 is this matrix's content→content cell; these are the others, scored by the")
+        print("   same probe against the same nulls and the same floor, so they sit on table 1's")
+        print("   scale. A rising content→content is only good news if content→style stays flat")
+        print("   beside it: reconstruction has to get the view-specific appearance from somewhere,")
+        print("   and content absorbing it also reads as more content information.")
+        fcells = fleak.get("cells") or {}
+        scells = ((fstd.get("leakage") or {}).get("cells")) or {}
+        rows = [("content→content", pf, fpf, (fstd.get("per_factor") or {}))]
+        for cname in ("content→style", "style→style", "style→content"):
+            cell = (leak.get("cells") or {}).get(cname)
+            if cell:
+                rows.append((cname, cell, fcells.get(cname) or {}, scells.get(cname) or {}))
+        print(f"   {'cell':<16s} {'fac':>3s} {'R2 gap':>7s} {'learned':>8s}")
+        for cname, cell, fcell, _sd in rows:
+            learned = _delta(_cell_mean(cell), _cell_mean(fcell)) if has_floor else float("nan")
+            mark = ""
+            if cname == "content→style" and np.isfinite(learned) and learned > NOISE_FLOOR:
+                mark = "  <- LEAK"
+            elif cname == "style→style" and has_floor and np.isfinite(learned) and learned <= NOISE_FLOOR:
+                mark = "  <- style block is dead"
+            print(f"   {cname:<16s} {len(cell):>3d} {_n(_cell_mean(cell))} {_n(learned)} {_bar(learned)}{mark}")
+        print("   content→style is THE leak. style→style ~0 means the style block is DEAD instead —")
+        print("   a different diagnosis with a different fix, so read it first. style→content sits")
+        print("   above 0 even when nothing is wrong (correlated SCM factors, same image), so only")
+        print("   its learned column carries anything.")
+        cs = (leak.get("cells") or {}).get("content→style") or {}
+        if cs:
+            fcs = fcells.get("content→style") or {}
+            per = "  ".join(
+                f"{k} {_n(_delta(v.get('r2'), (fcs.get(k) or {}).get('r2')) if has_floor else v.get('r2'))}"
+                for k, v in cs.items()
+            )
+            print(f"   content→style per factor ({'learned' if has_floor else 'raw'}): {per}")
+
+        if leak.get("view"):
+            print()
+            print("   view probe — which view did this feature come from (logistic, chance 0.500).")
+            print("   No factor labels and no SCM assumption, so it is the one number here that does")
+            print("   not inherit the generator's correlations. content ≈ chance ⇒ view-invariant.")
+            fview = fleak.get("view") or {}
+            head = f"   {'pooling':<8s}"
+            for lbl in ("content", "style", "all"):
+                head += f"{lbl:>8s}{'learned':>9s}"
+            print(head)
+            for key in ("gap", "stats", "patch"):
+                v = (leak["view"] or {}).get(key)
+                if not v:
+                    continue
+                fv = fview.get(key) or {}
+                row = f"   {key:<8s}"
+                for blk in ("content_acc", "style_acc", "all_acc"):
+                    learned = _delta(v.get(blk), fv.get(blk)) if has_floor else float("nan")
+                    row += f"{_acc(v.get(blk)):>8s}{_n(learned):>9s}"
+                print(row)
+            print("   raw content accuracy near 1.0 is NOT by itself a finding — an untrained encoder")
+            print("   separates two views that differ in intensity statistics. Read learned. Style")
+            print("   ABOVE content is the healthy ordering: the view-specific signal sits in style.")
+
+    # 4. dci ------------------------------------------------------------------
     if not (with_dci and res.get("dci")):
         print()
-        print(_rule("3. DCI"))
+        print(_rule("4. DCI"))
         print("   skipped — pass --with-dci (GBT importance, noticeably slower).")
     else:
         print()
-        print(_rule("3. DCI"))
+        print(_rule("4. DCI"))
         print("   D = is each code dedicated to few factors.  C = is each factor carried by few codes.")
         print("   Both are basis-dependent, so these are scored on the encoder's OWN channels, never")
         print("   on principal components. Compare a row only with the same row in another model,")
@@ -360,9 +570,9 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
         if len(ncs) > 1:
             print("   ! rows differ in n_codes — they are on different scales. Do not compare them.")
 
-    # 4. verdict --------------------------------------------------------------
+    # 5. verdict --------------------------------------------------------------
     print()
-    print(_rule("4. VERDICT"))
+    print(_rule("5. VERDICT"))
     if not has_floor:
         print("   No floor measured — no verdict. Re-run without --no-floor.")
         print()
@@ -398,6 +608,34 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
         print("   from its own untrained architecture on aggregate factor recovery.")
     print(f"   RESOLVED: {', '.join(resolved) if resolved else 'NONE'}")
     print(f"   not resolved: {', '.join(borderline) if borderline else '-'}")
+
+    # Leak verdict. Deliberately separate from the RESOLVED list: a leak is not a factor
+    # failing to be learned, it is the content block having learned the wrong thing, and
+    # collapsing the two into one pass/fail is what would let a leaking run read as a win.
+    if leak.get("cells") or leak.get("view"):
+        fcells = fleak.get("cells") or {}
+        c2s = _delta(
+            _cell_mean((leak.get("cells") or {}).get("content→style")), _cell_mean(fcells.get("content→style"))
+        )
+        s2s = _delta(_cell_mean((leak.get("cells") or {}).get("style→style")), _cell_mean(fcells.get("style→style")))
+        if np.isfinite(s2s) and s2s <= NOISE_FLOOR:
+            print(f"   STYLE BLOCK DEAD: style→style learned {_n(s2s)} — style carries none of its own")
+            print("   factors, so reconstruction has nowhere but content to put the view-specific")
+            print("   appearance. Fix that before reading content→style as a property of the content block.")
+        if np.isfinite(c2s) and c2s > NOISE_FLOOR:
+            print(f"   LEAK: style factors read from content at learned {_n(c2s)} (> {NOISE_FLOOR}). The")
+            print("   content block is not view-invariant; a higher content→content is not a clean win.")
+        elif np.isfinite(c2s):
+            print(f"   no style leak into content (content→style learned {_n(c2s)}, inside {NOISE_FLOOR}).")
+        for key in ("gap", "stats", "patch"):
+            v = (leak.get("view") or {}).get(key)
+            fv = ((fleak.get("view") or {}).get(key)) or {}
+            if not v:
+                continue
+            d = _delta(v.get("content_acc"), fv.get("content_acc"))
+            if np.isfinite(d) and d > NOISE_FLOOR:
+                print(f"   content→view@{key}: learned {_n(d)} — view is decodable from content above its")
+                print("   untrained floor. This is the label-free confirmation of the row above.")
     for key in ("gap", "stats", "patch"):
         if key not in mladder:
             continue
@@ -425,6 +663,7 @@ def score_run(
     checkpoint=None,
     probe_dim=PROBE_DIM_AUTO,
     with_dci=False,
+    with_leakage=True,
     dci_max_codes=4096,
     random_init=False,
     probe_kind="ridge",
@@ -452,14 +691,18 @@ def score_run(
         random_init=random_init,
         seed=init_seed,
     )
-    reprs, gt_content, info = {}, None, None
+    reprs, gt_content, gt_style, info = {}, None, None, None
     for key, value in poolings:
-        level_data, gc, _gs1, _gs2 = _extract_synthetic_representations(
+        level_data, gc, gs1, _gs2 = _extract_synthetic_representations(
             model, dataset, device, batch_size, num_workers, pooling=value
         )
         reprs[key] = level_data
         if gt_content is None:
             gt_content = gc
+        # View-1 style factors, paired with the _STYLE / _CONTENT (view-1) blocks. The
+        # loader runs unshuffled, so every pooling returns the same rows in the same order.
+        if gt_style is None:
+            gt_style = gs1
         if info is None and level in level_data:
             info = level_data[level][4]
     del model
@@ -467,6 +710,7 @@ def score_run(
         raise RuntimeError(f"level {level} not found in encoder outputs for {run_dir}")
 
     names = info["content_names"]
+    style_names = info.get("style_names") or []
     rng = np.random.RandomState(0)
 
     # DCI reads the unreduced blocks; the probes read the reduced ones.  Same split as
@@ -490,6 +734,24 @@ def score_run(
         "mcc": mcc_ladder(probed, level, gt_content, seeds, probe_kind, names),
         "mcc_per_factor_pooling": "patch" if "patch" in probed else _resolve_key("stats", set(probed)),
     }
+    if with_leakage:
+        # After ``per_factor`` in this dict literal, and that ordering is load-bearing: the
+        # two share ``rng``, so scoring the leakage cells first would redraw table 1's
+        # permutations and move a floor that was reproducible before this section existed.
+        res["leakage"] = leakage_scores(
+            probed,
+            level,
+            gt_content,
+            gt_style,
+            names,
+            style_names,
+            seeds,
+            n_null,
+            rng,
+            probe_kind,
+            n_jobs,
+            factor_pooling,
+        )
     if with_dci:
         avail = set(dci_reprs.keys())
         dci = {}
@@ -545,41 +807,58 @@ def _self_test():
     Two arms: features that genuinely encode the factors, and pure noise of identical
     shape.  The report must separate them; if it does not, the plumbing is wrong in a way
     no checkpoint run would make obvious.
+
+    The signal arm also plants a deliberate LEAK — the style factors are written into the
+    content block as well as the style block — so section 3 is exercised on data whose
+    answer is known.  A leak detector that only ever runs on checkpoints is a detector
+    nobody can tell is working: this is the arm that would catch the block indices being
+    swapped, or ``gt_style`` arriving paired with the wrong view.
     """
     rng = np.random.RandomState(0)
-    n, n_fac, n_ch = 400, 4, 12
+    n, n_fac, n_ch, n_sty_ch = 400, 4, 12, 6
     names = ["brain_size", "ventricle_size", "lesion_x", "gain"][:n_fac]
+    style_names = ["bias", "noise_sigma"]
     gt = rng.randn(n, n_fac)
+    gt_s = rng.randn(n, len(style_names))
     A = rng.randn(n_fac, n_ch)
-    signal = gt @ A + 0.1 * rng.randn(n, n_ch)
+    LEAK = 0.8  # style→content coupling in the signal arm; big enough to clear NOISE_FLOOR
+    signal = gt @ A + LEAK * (gt_s @ rng.randn(len(style_names), n_ch)) + 0.1 * rng.randn(n, n_ch)
     noise = rng.randn(n, n_ch)
+    style_sig = gt_s @ rng.randn(len(style_names), n_sty_ch) + 0.1 * rng.randn(n, n_sty_ch)
+    style_noise = rng.randn(n, n_sty_ch)
 
-    def _mk(X):
+    def _mk(X, S):
         # (content, style, content_v2, style_v2, info) at level 0, one entry per pooling.
+        # View 2 differs from view 1 only in the style block, which is the arrangement the
+        # view probe is supposed to read as "content invariant, style view-specific".
         info = {
             "content_names": names,
-            "style_names": [],
+            "style_names": style_names,
             "n_content_channels": X.shape[1],
-            "n_style_channels": 0,
-            "has_split": False,
+            "n_style_channels": S.shape[1],
+            "has_split": True,
             "pooling": "gap",
             "level": 0,
         }
-        return {p: {0: (X, None, None, None, info)} for p in ("gap", "stats", "patch")}
+        v2c = X + 0.05 * rng.randn(*X.shape)
+        v2s = S + 2.0 * rng.randn(*S.shape)
+        return {p: {0: (X, S, v2c, v2s, info)} for p in ("gap", "stats", "patch")}
 
     out = {}
-    for label, X in (("signal", signal), ("noise", noise)):
+    for label, X, S in (("signal", signal, style_sig), ("noise", noise, style_noise)):
         r = np.random.RandomState(0)
+        reprs = _mk(X, S)
         res = {
             "name": label,
             "level": 0,
             "n_samples": n,
             "poolings": "gap,stats,patch",
             "probe_dim": 0,
-            "per_factor": per_factor_scores(_mk(X), 0, gt, names, (0, 1), 2, r),
-            "mcc": mcc_ladder(_mk(X), 0, gt, (0, 1), names=names),
+            "per_factor": per_factor_scores(reprs, 0, gt, names, (0, 1), 2, r),
+            "mcc": mcc_ladder(reprs, 0, gt, (0, 1), names=names),
             "mcc_per_factor_pooling": "patch",
         }
+        res["leakage"] = leakage_scores(reprs, 0, gt, gt_s, names, style_names, (0, 1), 2, r)
         out[label] = res
     print_report(out["signal"], floor=out["noise"])
     s = float(np.mean([d["r2"] for d in out["signal"]["per_factor"].values()]))
@@ -591,6 +870,26 @@ def _self_test():
     assert abs(z) < 0.15, f"pure noise should sit at its null, got {z}"
     assert m_s > m_z + 0.2, f"MCC should separate signal from noise, got {m_s} vs {m_z}"
     assert _auto_probe_dim(400, 10) == 0 and _auto_probe_dim(400, 5000) == 64
+
+    def _cell(arm, key):
+        return _cell_mean((out[arm]["leakage"]["cells"] or {}).get(key))
+
+    leak_s, leak_z = _cell("signal", "content→style"), _cell("noise", "content→style")
+    ss_s, ss_z = _cell("signal", "style→style"), _cell("noise", "style→style")
+    view_s = out["signal"]["leakage"]["view"]["gap"]
+    view_z = out["noise"]["leakage"]["view"]["gap"]
+    print(f"  self-test: content→style  signal {leak_s:+.3f}  noise {leak_z:+.3f}")
+    print(f"  self-test: style→style    signal {ss_s:+.3f}  noise {ss_z:+.3f}")
+    print(f"  self-test: style→view     signal {view_s['style_acc']:.3f}  content {view_s['content_acc']:.3f}")
+    assert leak_s - leak_z > NOISE_FLOOR, f"planted leak should clear the floor, got {leak_s} vs {leak_z}"
+    assert ss_s - ss_z > NOISE_FLOOR, f"style block should recover its own factors, got {ss_s} vs {ss_z}"
+    assert abs(leak_z) < 0.15, f"the floor arm should have no leak, got {leak_z}"
+    # The planted arrangement is content-invariant / style-view-specific across views, and
+    # the probe must read it in that direction — a swap of the two would still "work" on a
+    # checkpoint and silently invert every leak conclusion drawn from it.
+    assert (
+        view_s["style_acc"] > view_s["content_acc"]
+    ), f"style should be more view-separable than content, got {view_s} / {view_z}"
     _assert_dci_basis()
     print("  self-test PASSED")
 
@@ -750,6 +1049,15 @@ def main():
     p.add_argument("--probe-kind", default="ridge", choices=("ridge", "kernel", "mlp"))
     p.add_argument("--with-dci", action="store_true", help="Also score DCI (GBT — slow).")
     p.add_argument(
+        "--no-leakage",
+        action="store_true",
+        help="Skip section 3 (content→style / style→style / style→content and the view probe). "
+        "It roughly doubles the probe cost, since the off-diagonal cells are scored at every "
+        "rung in --poolings exactly as table 1 is, and it runs on the floor twin too. Skip it "
+        "only when the question is genuinely content-side; a content→content number read "
+        "without it cannot tell a better content block from one that absorbed style.",
+    )
+    p.add_argument(
         "--dci-max-codes",
         type=int,
         default=4096,
@@ -833,6 +1141,7 @@ def main():
         checkpoint=cli.checkpoint,
         probe_dim=cli.probe_dim,
         with_dci=cli.with_dci,
+        with_leakage=not cli.no_leakage,
         dci_max_codes=cli.dci_max_codes,
         probe_kind=cli.probe_kind,
         n_jobs=cli.n_jobs,
