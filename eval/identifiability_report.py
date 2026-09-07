@@ -16,7 +16,14 @@ What it prints
 1. A per-factor table.  For every ground-truth factor: the R² gap at the pooling
    ``FACTOR_POOLING`` assigns it, the matched |corr| from block-MCC, and each one's
    distance from the untrained twin.  The FLOOR-SUBTRACTED column is the answer; the
-   raw column is there so a saturated floor is visible rather than silent.
+   raw column is there so a saturated floor is visible rather than silent.  Under
+   ``--causal match`` it also carries a PARTIAL column: the same score on each factor
+   residualised on its SCM parents.  Without it, a factor with a well-recovered parent
+   scores well without being encoded at all (measured: ``ventricle_size`` reads 0.695
+   while ``brain_size`` is recovered at 0.92 and correlates ~0.8 with it), which is the
+   confound ``--causal iid`` was previously the only answer to — at the cost of scoring
+   the model off its training distribution, with a penalty that grows with how well the
+   model fits it, so iid cannot rank two models against each other.
 1b. The same factors at EVERY rung — gap / stats / patch side by side, each with its own
    floor.  Table 1 answers "was this factor learned"; this one answers "where does it
    live", which is the axis the gap-vs-patch findings in the changelog turn on, and which
@@ -66,7 +73,13 @@ import os
 import numpy as np
 from joblib import Parallel, delayed
 
-from eval.identifiability_metrics import block_mcc, cv_probe_r2, view_invariance
+from eval.identifiability_metrics import (
+    block_mcc,
+    cv_probe_r2,
+    n_parents_per_factor,
+    residualise_on_parents,
+    view_invariance,
+)
 from eval.run_dci_compare import (
     _CONTENT,
     _CONTENT_V2,
@@ -298,6 +311,23 @@ def leakage_scores(
     return {"cells": cells, "view": view}
 
 
+def _causal_adjacency(dataset):
+    """The eval set's SCM adjacency, or None when it has no SCM.
+
+    None is the correct answer in two cases and they are not failures: a run trained
+    without ``--synthetic-causal``, and any run scored with ``--causal iid`` (which builds
+    the test set with ``synthetic_causal=False``, so ``Synthetic3DDisentanglementDataset``
+    leaves ``scm`` unset).  The second is the useful one to keep in mind — the partial-R²
+    column exists precisely so that per-factor claims do not require leaving the training
+    distribution, so it is only defined on the mode where the confound it removes exists.
+    """
+    for obj in (getattr(dataset, "_inner", None), dataset):
+        scm = getattr(obj, "scm", None)
+        if isinstance(scm, dict) and scm.get("adj") is not None:
+            return np.asarray(scm["adj"])
+    return None
+
+
 def _cell_mean(cell):
     """Mean floor-subtractable R² gap over a cell's factors (nan when it has none)."""
     vals = [_f(d.get("r2")) for d in (cell or {}).values()]
@@ -386,21 +416,39 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
     mpf = (mladder.get(mpool) or {}).get("per_factor", {})
     fmpf = ((fladder.get(mpool) or {}).get("per_factor", {})) if has_floor else {}
 
+    part, fpart = res.get("partial") or {}, (floor or {}).get("partial") or {}
+    npa = res.get("n_parents") or {}
+    pcol = f"{'partial':>8s} {'pa':>3s}" if part else ""
+
     fw = max([len(k) for k in pf] + [14])
     print()
     print(_rule("1. PER FACTOR"))
     print(
-        f"   {'factor':<{fw}s} {'pool':<6s} {'R2 gap':>7s} {'learned':>8s}          " f"{'MCC raw':>8s} {'learned':>8s}"
+        f"   {'factor':<{fw}s} {'pool':<6s} {'R2 gap':>7s} {'learned':>8s}          "
+        f"{pcol}  {'MCC raw':>8s} {'learned':>8s}"
     )
+    parent_carried = []
     for name, d in pf.items():
         r2d = _delta(d["r2"], (fpf.get(name) or {}).get("r2")) if has_floor else float("nan")
         m_raw = mpf.get(name, float("nan"))
         mccd = _delta(m_raw, fmpf.get(name)) if has_floor else float("nan")
         sd = _f(((fstd.get("per_factor") or {}).get(name) or {}).get("r2")) if has_floor else float("nan")
         sds = f" +-{sd:.3f}" if np.isfinite(sd) else ""
+        pstr = ""
+        if part:
+            praw = (part.get(name) or {}).get("r2")
+            # Floor-subtracted where a floor exists, so the column is read against table 1's
+            # `learned` and not against its raw `R2 gap`. The residual has its own floor:
+            # an untrained projection recovers a residualised factor differently from the
+            # factor itself, so reusing the raw factor's floor here would be a cross-axis
+            # subtraction of exactly the kind this script exists to avoid.
+            pval = _delta(praw, (fpart.get(name) or {}).get("r2")) if has_floor else praw
+            pstr = f"{_n(pval)} {npa.get(name, 0):>3d}"
+            if npa.get(name, 0) and np.isfinite(_f(pval)) and np.isfinite(r2d) and (r2d - _f(pval)) > NOISE_FLOOR:
+                parent_carried.append(name)
         print(
             f"   {name:<{fw}s} {d['pooling']:<6s} {_n(d['r2'])} {_n(r2d)}{sds} {_bar(r2d)}  "
-            f"{_n(m_raw)} {_n(mccd)} {_bar(mccd)}"
+            f"{pstr}  {_n(m_raw)} {_n(mccd)} {_bar(mccd)}"
         )
     fp = res.get("factor_pooling", "assigned")
     if fp == "assigned":
@@ -410,6 +458,24 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
         print("   assigned pooling. Same axis for every factor; not comparable to an 'assigned' run.")
     print(f"   MCC raw = matched |corr| at {mpool} pooling; block-MCC has no permutation null here,")
     print(f"   which is exactly why its 'learned' column is the only one worth reading.")
+    if part:
+        print(
+            f"   partial = the same score on each factor RESIDUALISED on its SCM parents"
+            f"{', floor-subtracted' if has_floor else ' (raw gap — no floor)'}; pa = how many parents it has."
+        )
+        print("   partial ~ learned  => the encoder has the factor's OWN variation.")
+        print("   partial << learned => the score was being read off a parent, not the factor. This is")
+        print("   what makes per-factor claims safe under --causal match, WITHOUT switching to --causal")
+        print("   iid, whose penalty grows with how well a model fits training and so cannot rank models.")
+        if parent_carried:
+            print(f"   parent-carried (learned - partial > {NOISE_FLOOR}): {', '.join(parent_carried)}")
+    elif res.get("causal") == "match":
+        print("   partial: no SCM on the eval set (run trained without --synthetic-causal), so every")
+        print("   factor is already its own residual and the column would duplicate 'learned'.")
+    elif res.get("causal") == "iid":
+        print("   partial: not scored under --causal iid — the eval factors are already independent, so")
+        print("   there are no parents to residualise. Re-run with --causal match to get the column")
+        print("   (and per-factor numbers that stay on the training distribution).")
 
     # 1b. r2 ladder -----------------------------------------------------------
     # Table 1 shows each factor once, at the rung it is reportable at.  That answers "did
@@ -609,6 +675,16 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
     print(f"   RESOLVED: {', '.join(resolved) if resolved else 'NONE'}")
     print(f"   not resolved: {', '.join(borderline) if borderline else '-'}")
 
+    # Parent-carried factors are RESOLVED and yet not a per-factor result, so they get
+    # their own line rather than a demotion: the content block did learn something real
+    # here, it is just not this factor's own variation, and collapsing that into the
+    # resolved/unresolved split would lose which of the two a reader is looking at.
+    if part and parent_carried:
+        pm = float(np.mean([_f(v.get("r2")) for v in part.values() if np.isfinite(_f(v.get("r2")))]))
+        print(f"   PARENT-CARRIED: {', '.join(parent_carried)} — resolved, but the score drops by more")
+        print(f"   than {NOISE_FLOOR} once the SCM parents are residualised out, so it is not evidence that")
+        print(f"   these factors are encoded in their own right. (mean partial R2 gap {_n(pm)})")
+
     # Leak verdict. Deliberately separate from the RESOLVED list: a leak is not a factor
     # failing to be learned, it is the content block having learned the wrong thing, and
     # collapsing the two into one pass/fail is what would let a leaking run read as a win.
@@ -752,6 +828,31 @@ def score_run(
             n_jobs,
             factor_pooling,
         )
+
+    # Partial-R²: the same per-factor scorer, run on targets with each factor's linear
+    # parent contribution removed.  Under `--causal match` the eval set reproduces the
+    # training SCM, so a factor with a well-recovered parent scores well without being
+    # encoded in its own right (measured on this project: ventricle_size reads 0.695 while
+    # brain_size is recovered at 0.92 and correlates ~0.8 with it).  Comparing this column
+    # against table 1's separates the two WITHOUT switching to `--causal iid`, which fixes
+    # the attribution by moving the eval set off the training distribution — and whose
+    # penalty grows with how well a model fits it, so it is not safe to rank models on.
+    # Appended last for the same rng reason as the leakage cells above.
+    adjacency = _causal_adjacency(dataset)
+    if adjacency is not None:
+        res["partial"] = per_factor_scores(
+            probed,
+            level,
+            residualise_on_parents(gt_content, adjacency),
+            names,
+            seeds,
+            n_null,
+            rng,
+            probe_kind,
+            n_jobs,
+            factor_pooling,
+        )
+        res["n_parents"] = n_parents_per_factor(adjacency, names)
     if with_dci:
         avail = set(dci_reprs.keys())
         dci = {}
@@ -819,8 +920,16 @@ def _self_test():
     names = ["brain_size", "ventricle_size", "lesion_x", "gain"][:n_fac]
     style_names = ["bias", "noise_sigma"]
     gt = rng.randn(n, n_fac)
+    # ventricle_size is a CHILD of brain_size and is never encoded on its own (A's row for
+    # it is zeroed).  A probe should still read it well through the parent, and the partial
+    # column should be the thing that says so — this is the confound the column exists for,
+    # planted at a known strength so the detector is testable without a checkpoint.
+    gt[:, 1] = 0.9 * gt[:, 0] + 0.44 * rng.randn(n)
+    adj = np.zeros((n_fac, n_fac), dtype=bool)
+    adj[0, 1] = True  # adjacency[i, j] = i is a parent of j
     gt_s = rng.randn(n, len(style_names))
     A = rng.randn(n_fac, n_ch)
+    A[1, :] = 0.0
     LEAK = 0.8  # style→content coupling in the signal arm; big enough to clear NOISE_FLOOR
     signal = gt @ A + LEAK * (gt_s @ rng.randn(len(style_names), n_ch)) + 0.1 * rng.randn(n, n_ch)
     noise = rng.randn(n, n_ch)
@@ -859,6 +968,8 @@ def _self_test():
             "mcc_per_factor_pooling": "patch",
         }
         res["leakage"] = leakage_scores(reprs, 0, gt, gt_s, names, style_names, (0, 1), 2, r)
+        res["partial"] = per_factor_scores(reprs, 0, residualise_on_parents(gt, adj), names, (0, 1), 2, r)
+        res["n_parents"] = n_parents_per_factor(adj, names)
         out[label] = res
     print_report(out["signal"], floor=out["noise"])
     s = float(np.mean([d["r2"] for d in out["signal"]["per_factor"].values()]))
@@ -890,6 +1001,26 @@ def _self_test():
     assert (
         view_s["style_acc"] > view_s["content_acc"]
     ), f"style should be more view-separable than content, got {view_s} / {view_z}"
+
+    def _learned(key, factor):
+        return out["signal"][key][factor]["r2"] - out["noise"][key][factor]["r2"]
+
+    v_full, v_part = _learned("per_factor", "ventricle_size"), _learned("partial", "ventricle_size")
+    b_full, b_part = _learned("per_factor", "brain_size"), _learned("partial", "brain_size")
+    print(f"  self-test: ventricle (child, never encoded)  full {v_full:+.3f}  partial {v_part:+.3f}")
+    print(f"  self-test: brain_size (parent, encoded)      full {b_full:+.3f}  partial {b_part:+.3f}")
+    assert v_full > 0.5, f"the child should still read well THROUGH its parent, got {v_full}"
+    assert v_full - v_part > NOISE_FLOOR, f"partial must expose the parent-carried child, got {v_full} vs {v_part}"
+    # A parentless factor must come back untouched. Asserted on the residualiser itself and
+    # not on the two probe columns: those draw different permutation nulls from the shared
+    # rng, so they agree only to null noise (~0.01 here) even when the targets are identical.
+    _resid = residualise_on_parents(gt, adj)
+    for j in (0, 2, 3):
+        assert np.array_equal(_resid[:, j], gt[:, j]), f"parentless factor {names[j]} was residualised"
+    assert not np.allclose(_resid[:, 1], gt[:, 1]), "the child factor was NOT residualised"
+    # ...and must therefore never be flagged parent-carried by the table-1 rule.
+    assert b_full - b_part < NOISE_FLOOR, f"a parentless factor read as parent-carried, {b_full} vs {b_part}"
+    assert n_parents_per_factor(adj, names) == {"brain_size": 0, "ventricle_size": 1, "lesion_x": 0, "gain": 0}
     _assert_dci_basis()
     print("  self-test PASSED")
 

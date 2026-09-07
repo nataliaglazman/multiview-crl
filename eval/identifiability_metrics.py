@@ -186,6 +186,44 @@ def parents_from_adjacency(adjacency):
     return {j: np.where(adjacency[:, j])[0].tolist() for j in range(adjacency.shape[1])}
 
 
+def residualise_on_parents(z_content, adjacency):
+    """``z_content`` with each factor's linear parent contribution removed.
+
+    Returns an ``(N, K)`` array on the same axes as the input: column ``j`` is ``z_j``
+    residualised on ``Pa(j)``, or ``z_j`` unchanged when it has no parents.  Probing this
+    instead of ``z_content`` asks whether the representation carries each factor's OWN
+    variation, which under a dependent SCM is a different question from probing ``z_j``
+    directly — there the probe can score well by reading a parent that happens to be
+    strongly recovered (measured on this project: ``brain_size`` recovered at 0.92 and
+    correlated ~0.8 with ``ventricle_size``).
+
+    It is a separate function from :func:`partial_r2_vs_parents` because the residual is
+    also useful as a probe TARGET elsewhere (``eval.identifiability_report`` feeds it
+    through the same per-factor scorer as the raw factors, so the two land on one scale).
+    Keeping one implementation is what stops the two callers disagreeing about whether a
+    parentless factor is residualised at all.
+
+    Parents beyond ``z_content``'s width are dropped rather than raising: the adjacency
+    is over the SCM's full factor set, which can be wider than the columns a caller kept.
+    """
+    z = np.asarray(z_content, dtype=np.float64)
+    parents = parents_from_adjacency(adjacency)
+    out = z.copy()
+    for j in range(z.shape[1]):
+        pa = [p for p in parents.get(j, []) if p < z.shape[1]]
+        if pa:
+            X = z[:, pa]
+            out[:, j] = z[:, j] - LinearRegression().fit(X, z[:, j]).predict(X)
+    return out
+
+
+def n_parents_per_factor(adjacency, factor_names):
+    """``{name: n_parents}`` for the columns a caller kept, on the same guard as above."""
+    parents = parents_from_adjacency(adjacency)
+    k = len(factor_names)
+    return {name: len([p for p in parents.get(j, []) if p < k]) for j, name in enumerate(factor_names)}
+
+
 def partial_r2_vs_parents(content_repr, z_content, adjacency, factor_names, **kw):
     """How much of each factor's *own* variation the content captures, beyond parents.
 
@@ -193,21 +231,16 @@ def partial_r2_vs_parents(content_repr, z_content, adjacency, factor_names, **kw
     parents (linear), then probe that residual from the content block. A high
     partial-R^2 means the encoder isn't just reading off ``z_j``'s parents.
     """
-    parents = parents_from_adjacency(adjacency)
+    resid = residualise_on_parents(z_content, adjacency)
+    npa = n_parents_per_factor(adjacency, factor_names)
     rows = []
     for j, name in enumerate(factor_names):
-        pa = parents.get(j, [])
-        yj = z_content[:, j]
-        if pa:
-            resid = yj - LinearRegression().fit(z_content[:, pa], yj).predict(z_content[:, pa])
-        else:
-            resid = yj
-        full = cv_probe_r2(content_repr, yj, **kw)
-        part = cv_probe_r2(content_repr, resid, **kw)
+        full = cv_probe_r2(content_repr, z_content[:, j], **kw)
+        part = cv_probe_r2(content_repr, resid[:, j], **kw)
         rows.append(
             {
                 "factor": name,
-                "n_parents": len(pa),
+                "n_parents": npa[name],
                 "full_r2": full["mean"],
                 "partial_r2": part["mean"],
             }
