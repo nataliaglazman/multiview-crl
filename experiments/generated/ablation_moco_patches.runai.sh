@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/ablation_moco_patches.yaml
-# Generated at: 2026-09-04T11:04:52Z
-# Git SHA: 76b3905
+# Generated at: 2026-09-07T13:45:53Z
+# Git SHA: 4381bb0
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
