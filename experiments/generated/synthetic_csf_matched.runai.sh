@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/synthetic_causal_fixedref.yaml
+# Auto-generated from: experiments/synthetic_csf_matched.yaml
 # Generated at: 2026-09-07T13:25:47Z
 # Git SHA: 85ee9ae
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -11,18 +11,25 @@ TRAIN_CMD=$(tr '\n' ' ' <<'TRAIN_EOF'
 cd /nfs/home/nglazman/crl-2/multiview-crl || { echo ERROR: /nfs/home/nglazman/crl-2/multiview-crl is missing inside the container - check the --host-path mount of /nfs >&2 ; exit 1 ; } ;
 export PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl ;
 python -m training.main_multimodal
-    --batch-size 32
+    --batch-size 128
+    --bt-gap-lambda 0.01
+    --bt-gap-weight 1
+    --bt-patch-weight 1
+    --bt-sim-coeff 0.025
+    --bt-sim-normalize
+    --bt-std-coeff 10
     --channels-last
     --checkpoint-steps 1000
     --content-dim 128
     --content-ratios 0.95
     --content-size 44
     --content-style-levels 0
-    --contrastive-loss-type infonce
+    --contrastive-loss-type barlow_twins
     --cross-view-negs-only
     --dataroot /nfs/home/nglazman/data
     --dataset-name synthetic
     --dci-every 2000
+    --decoder-norm-type group
     --deterministic
     --eval-dci
     --image-spacing 1.0
@@ -31,35 +38,49 @@ python -m training.main_multimodal
     --lr 0.001
     --mask-mode fixed
     --moco-queue-size 0
+    --no-final-recon-norm
+    --norm-type layer
     --pass-full-to-next-level
+    --patch-center-mode position
     --patch-contrastive
-    --patch-grid 4 4 4
+    --patch-foreground-mask
+    --patch-foreground-thresh 0.05
+    --patch-grid 8 8 8
     --quantize-style
     --recon-loss-start-step 0
     --resume-training
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
-    --scale-contrastive-loss 100
-    --scale-recon-loss 1.0
+    --scale-contrastive-loss 1
+    --scale-recon-loss 1
     --scale-style-contrastive-loss 0.0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
     --separate-encoders
+    --separate-style-codebooks
     --separation-floor-diagnosis-info 0.1
-    --style-injection-mode concat
+    --style-injection-mode input
     --synthetic-causal
     --synthetic-causal-edge-prob 0.5
     --synthetic-causal-graph random
+    --synthetic-center-local-deformations
+    --synthetic-clean-content
+    --synthetic-content-prior uniform
+    --synthetic-content-squash none
+    --synthetic-cortex-parameterization patterned
+    --synthetic-csf-t1-intensity 0.5
+    --synthetic-identifiable-ventricle
+    --synthetic-lesion-radius 0.14
     --synthetic-mode pseudo_mri
     --synthetic-normalize fixed_reference
     --synthetic-num-test 400
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-causal-random-fixedref-new
+    --model-id synthetic-csf-matched-ratio
     --tau 0.1
     --total-dim 512
-    --train-steps 300000
+    --train-steps 200000
     --use-amp
     --use-wandb
     --vq-commitment-weight 0.25
@@ -73,7 +94,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-random-fixedref-new \
+runai training standard submit synthetic-csf-matched-ratio \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
