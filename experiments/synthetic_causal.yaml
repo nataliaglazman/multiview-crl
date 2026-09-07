@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-clean-content-causal-sim-gap-new
+tag: synthetic-clean-content-causal-sep-encoders-retry
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -27,7 +27,7 @@ batch_size: 128
 # # --- leak (b): make style non-degenerate so recon stops using content ---
 # scale_style_contrastive_loss: 1.0
 
-# separate_encoders: false
+separate_encoders: false
 
 
 content_size: 40              # match the baseline; fixes the 44-vs-48 confound
@@ -65,7 +65,7 @@ bt_sim_normalize: false
 # bt_lambda: 2.0
 # bt_gap_lambda: 0.2
 
-bt_normalize_terms: true
+bt_normalize_terms: false
 bt_lambda: 6
 bt_gap_lambda: 6
 bt_sim_coeff: 0.0114     # 0.5 / 44
