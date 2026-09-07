@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-clean-content-causal-sim-100
+tag: synthetic-clean-content-causal-sim-gap
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -12,7 +12,7 @@ bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_patch_weight: 1
 single_count_commitment: true
 
-scale_contrastive_loss: 0       # NOT 10 — BT's raw scale is ~10x InfoNCE's
+scale_contrastive_loss: 100       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 # scale_recon_loss: 10
 grad_clip_norm: 100
 batch_size: 128
@@ -55,7 +55,8 @@ checkpoint_steps: 1000
 eval_dci: true
 # detach_style_injection: true
 synthetic_clean_content: true
-bt_sim_normalize: true
+bt_sim_normalize: false
+# synthetic_csf_t1_intensity: 0.5
 # bt_sim_coeff: 0.5       # ≈ on_diag_gap 0.38 / current normalised sim 16624
 # bt_std_coeff: 10
 # # recon_view_balance: 1
@@ -69,6 +70,9 @@ bt_lambda: 6
 bt_gap_lambda: 6
 bt_sim_coeff: 0.0114     # 0.5 / 44
 bt_std_coeff: 0.227      # 10 / 44
+bt_gap_std_coeff: 0.05
+bt_gap_sim_coeff: 0.05
+
 bt_corr_ema: 0.99
 scale_recon_loss: 16
 
