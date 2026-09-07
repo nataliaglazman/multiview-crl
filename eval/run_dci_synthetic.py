@@ -46,16 +46,28 @@ def load_run_args(run_dir):
         return _namespace_from_dict(json.load(f))
 
 
-def load_model_from_run_dir(run_dir, checkpoint=None, device=None, random_init=False):
+def load_model_from_run_dir(run_dir, checkpoint=None, device=None, random_init=False, seed=None):
     """Rebuild the VQVAE from a run's settings.json and load its checkpoint.
 
     Returns ``(model, args, device)``.  Shared by the single-run eval and the
     model-comparison pipeline so model construction lives in exactly one place.
+
+    ``seed`` fixes ``torch.manual_seed`` before the model is constructed.  It matters
+    most for ``random_init=True``: those weights ARE the measurement (the untrained zero
+    point every trained number is reported as a gap over), and unseeded they were a
+    different draw on every invocation — so the floor carried sampling noise that went
+    straight into every reported delta, with no way to reproduce or bound it.  Nothing in
+    the eval path called ``manual_seed`` (training does, at main_multimodal.py:1215), so
+    leave it None only when you deliberately want a fresh draw.  It also makes a
+    checkpoint load fully deterministic, since ``strict=False`` leaves any unmatched
+    parameter at its random init.
     """
     import models.vqvae as vqvae
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if seed is not None:
+        torch.manual_seed(seed)
 
     args = load_run_args(run_dir)
     logger.info("Loaded settings from: %s", os.path.join(run_dir, "settings.json"))

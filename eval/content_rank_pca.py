@@ -46,6 +46,7 @@ than i.i.d.-with-a-warning, and ``--probe-dim`` now defaults to ``auto`` rather 
 Per-factor numbers printed before that date are not comparable to these unless the run
 passed both flags explicitly.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -58,34 +59,23 @@ from sklearn.decomposition import PCA
 
 from eval.dci import _extract_synthetic_representations
 from eval.identifiability_metrics import block_mcc, cv_probe_r2
-from eval.run_dci_compare import _CONTENT, FACTOR_POOLING, _effective_rank, parse_poolings
+from eval.run_dci_compare import (
+    _CONTENT,
+    FACTOR_POOLING,
+    PROBE_DIM_AUTO,
+    _auto_probe_dim,
+    _effective_rank,
+    parse_poolings,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
-
-# --probe-dim sentinel: reduce only the blocks that are actually in the p>>n regime.
-PROBE_DIM_AUTO = "auto"
 
 
 def _pc_grid(ncomp):
     """Coarse-but-dense grid of cumulative-PC counts up to ``ncomp`` (always incl. ncomp)."""
     base = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64]
     return sorted({k for k in base if k <= ncomp} | {ncomp}) if ncomp >= 1 else []
-
-
-def _auto_probe_dim(n, d):
-    """``--probe-dim auto``: the width to reduce a (n, d) block to, or 0 for "leave alone".
-
-    Only blocks in the p>>n regime are touched. The patch block is the one that gets
-    there: at patch_grid 8^3 x 44 channels it is 22528 features against N~2000 samples,
-    where a ridge probe on a signal-free target returns a NEGATIVE R^2 — measured, and
-    it inverted the sign of the lesion dims in the scaling-2-vs-4 comparison until the
-    reduction was applied. ``gap`` (44) and ``stats`` (176) are well-conditioned at that
-    N and are left at full width, so this does not silently reshape the readouts that
-    were never overfitting.
-    """
-    budget = max(1, n // 4)
-    return min(64, budget) if d > budget else 0
 
 
 def _pca_reduce(X, n_comp):
