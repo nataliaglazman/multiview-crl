@@ -38,6 +38,10 @@ What it prints
    the content→content cell alone, and a content score that rises because the content
    block absorbed style looks exactly like one that rises because content improved — this
    is the section that tells them apart.  Skip with ``--no-leakage``.
+3b. Per-factor decoding from CONTENT and STYLE side by side, at every extracted pooling.
+   Includes both content targets (e.g. ventricle_size) and style targets (e.g. bias).
+   Raw cross-validated R² answers how well each factor is decoded; null-adjusted and
+   untrained-floor-subtracted scores give its baselines. Reuses the already fitted probes.
 4. DCI per scope, when ``--with-dci`` is passed, with the code count beside each row so
    two scopes are never silently compared at different normalisations.
 5. A verdict block that refuses to report a metric whose learned part is inside its own
@@ -58,6 +62,7 @@ Usage
     python -m eval.identifiability_report --run-dir results/synthetic/RUN
     python -m eval.identifiability_report --run-dir RUN --with-dci --poolings gap,stats,4x4x4
     python -m eval.identifiability_report --run-dir RUN --no-floor       # not reportable
+    python -m eval.identifiability_report --from-json report.json       # no model/probe rerun
 
 The scoring layer is torch-free and unit-testable: ``--self-test`` runs it on planted
 numpy data with no checkpoint and no GPU.
@@ -348,6 +353,66 @@ def _f(x):
     return v
 
 
+def per_factor_decoding_rows(res, floor=None):
+    """Expose all four block×target cells without fitting probes again.
+
+    Feature blocks and style targets are from view 1, matching score_run. Each floor
+    subtraction stays within the same block, target factor and pooling. Missing scores
+    remain NaN, including missing style blocks and reports made with --no-leakage.
+    """
+
+    def cells(report):
+        leak = ((report or {}).get("leakage") or {}).get("cells") or {}
+        return {
+            "content": ((report or {}).get("per_factor") or {}, leak.get("style→content") or {}),
+            "style": (leak.get("content→style") or {}, leak.get("style→style") or {}),
+        }
+
+    def at_pool(score, pooling):
+        by_pool = score.get("by_pooling")
+        if by_pool is not None:
+            return by_pool.get(pooling) or {}
+        # Older JSON reports only stored the assigned rung. Never reuse it at another rung.
+        return score if score.get("pooling") == pooling else {}
+
+    current, baseline = cells(res), cells(floor)
+    rows = []
+    for target, (content, style) in current.items():
+        for factor in dict.fromkeys([*content, *style]):
+            scores = [content.get(factor) or {}, style.get(factor) or {}]
+            assigned = next((s["pooling"] for s in scores if s.get("pooling")), None)
+            for pooling in ("gap", "stats", "patch"):
+                entries = [at_pool(s, pooling) for s in scores]
+                if not any(entries):
+                    continue
+                row = {"target": target, "factor": factor, "pooling": pooling, "assigned_pooling": assigned}
+                for block, cur, floor_cell in zip(("content", "style"), entries, baseline[target]):
+                    base = at_pool(floor_cell.get(factor) or {}, pooling)
+                    row[f"{block}_r2"] = _f(cur.get("r2_raw"))
+                    row[f"{block}_r2_gap"] = _f(cur.get("r2"))
+                    row[f"{block}_learned"] = _delta(cur.get("r2"), base.get("r2"))
+                rows.append(row)
+    return rows
+
+
+def write_report_json(path, res, floor=None, floor_std=None):
+    """Keep existing nested scores and add convenient per-factor/block/pooling rows."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(
+            {
+                "run": res,
+                "floor": floor,
+                "floor_std": floor_std,
+                "per_factor_decoding": per_factor_decoding_rows(res, floor),
+            },
+            fh,
+            indent=2,
+            default=float,
+        )
+    logger.info("Wrote %s", path)
+
+
 # --------------------------------------------------------------------------- #
 # Printing
 # --------------------------------------------------------------------------- #
@@ -377,6 +442,35 @@ def _bar(x, width=8):
 def _rule(title, w=92):
     head = f"── {title} "
     return head + "─" * max(4, w - len(head))
+
+
+def print_per_factor_decoding(res, floor=None):
+    rows = per_factor_decoding_rows(res, floor)
+    if not rows:
+        return
+    print()
+    print(_rule("3b. PER-FACTOR DECODING FROM CONTENT AND STYLE"))
+    print("   Both representation blocks are from view 1; style targets use that same view.")
+    print("   R2 raw = held-out probe score; R2 gap = raw minus the label-permutation null.")
+    print("   learned = R2 gap minus the SAME block/factor/pooling in the untrained twin.")
+    print("   * marks the assigned pooling. Other rungs describe where the factor is readable.")
+    print("   '-' means not measured. Correlated factors can be predictable through other factors;")
+    print("   these rows measure decodability, not each factor's unique causal information.")
+    fw = max(14, max(len(row["factor"]) for row in rows))
+    for target in ("content", "style"):
+        group = [row for row in rows if row["target"] == target]
+        if not group:
+            continue
+        print(f"\n   {target.upper()} FACTORS (prediction targets)")
+        print(f"   {'':<{fw}s} {'':<7s}{'from content':^27s}{'from style':^27s}")
+        print(f"   {'factor':<{fw}s} {'pool':<7s}" + f"{'R2 raw':>9s}{'R2 gap':>9s}{'learned':>9s}" * 2)
+        for row in group:
+            pooling = row["pooling"] + ("*" if row["pooling"] == row["assigned_pooling"] else "")
+            line = f"   {row['factor']:<{fw}s} {pooling:<7s}"
+            for block in ("content", "style"):
+                for metric in ("r2", "r2_gap", "learned"):
+                    line += f"{_n(row[f'{block}_{metric}']):>9s}"
+            print(line)
 
 
 def print_report(res, floor=None, with_dci=False, floor_std=None):
@@ -566,15 +660,6 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
         print("   a different diagnosis with a different fix, so read it first. style→content sits")
         print("   above 0 even when nothing is wrong (correlated SCM factors, same image), so only")
         print("   its learned column carries anything.")
-        cs = (leak.get("cells") or {}).get("content→style") or {}
-        if cs:
-            fcs = fcells.get("content→style") or {}
-            per = "  ".join(
-                f"{k} {_n(_delta(v.get('r2'), (fcs.get(k) or {}).get('r2')) if has_floor else v.get('r2'))}"
-                for k, v in cs.items()
-            )
-            print(f"   content→style per factor ({'learned' if has_floor else 'raw'}): {per}")
-
         if leak.get("view"):
             print()
             print("   view probe — which view did this feature come from (logistic, chance 0.500).")
@@ -598,6 +683,9 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
             print("   raw content accuracy near 1.0 is NOT by itself a finding — an untrained encoder")
             print("   separates two views that differ in intensity statistics. Read learned. Style")
             print("   ABOVE content is the healthy ordering: the view-specific signal sits in style.")
+
+    if "leakage" in res:
+        print_per_factor_decoding(res, floor)
 
     # 4. dci ------------------------------------------------------------------
     if not (with_dci and res.get("dci")):
@@ -1156,7 +1244,9 @@ def _assert_dci_basis():
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--run-dir", help="Run directory to score.")
+    source = p.add_mutually_exclusive_group()
+    source.add_argument("--run-dir", help="Run directory to score.")
+    source.add_argument("--from-json", help="Redisplay a saved --out JSON with current tables; no model or probe fits.")
     p.add_argument("--name", default=None, help="Label for the report (default: basename of --run-dir).")
     p.add_argument(
         "--checkpoint",
@@ -1182,7 +1272,7 @@ def main():
     p.add_argument(
         "--no-leakage",
         action="store_true",
-        help="Skip section 3 (content→style / style→style / style→content and the view probe). "
+        help="Skip sections 3/3b (leakage, per-factor content/style decoding, and the view probe). "
         "It roughly doubles the probe cost, since the off-diagonal cells are scored at every "
         "rung in --poolings exactly as table 1 is, and it runs on the floor twin too. Skip it "
         "only when the question is genuinely content-side; a content→content number read "
@@ -1245,8 +1335,18 @@ def main():
     if cli.self_test:
         _self_test()
         return
+    if cli.from_json:
+        with open(cli.from_json) as fh:
+            saved = json.load(fh)
+        if not isinstance(saved, dict) or not isinstance(saved.get("run"), dict):
+            p.error("--from-json expects a report JSON written by --out, containing a 'run' object.")
+        res, floor, floor_std = saved["run"], saved.get("floor"), saved.get("floor_std")
+        print_report(res, floor=floor, floor_std=floor_std, with_dci=cli.with_dci or bool(res.get("dci")))
+        if cli.out:
+            write_report_json(cli.out, res, floor, floor_std)
+        return
     if not cli.run_dir:
-        p.error("--run-dir is required (or pass --self-test)")
+        p.error("--run-dir is required (or pass --from-json / --self-test)")
 
     if cli.probe_dim != PROBE_DIM_AUTO:
         try:
@@ -1305,10 +1405,7 @@ def main():
 
     print_report(res, floor=floor, floor_std=floor_std, with_dci=cli.with_dci)
     if cli.out:
-        os.makedirs(os.path.dirname(os.path.abspath(cli.out)), exist_ok=True)
-        with open(cli.out, "w") as fh:
-            json.dump({"run": res, "floor": floor, "floor_std": floor_std}, fh, indent=2, default=float)
-        logger.info("Wrote %s", cli.out)
+        write_report_json(cli.out, res, floor, floor_std)
 
 
 if __name__ == "__main__":
