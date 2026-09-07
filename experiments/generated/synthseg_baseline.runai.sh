@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-09-07T13:25:47Z
-# Git SHA: 85ee9ae
+# Generated at: 2026-09-07T14:50:09Z
+# Git SHA: aeeeeba
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
