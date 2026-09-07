@@ -233,16 +233,30 @@ def parse_args() -> argparse.ArgumentParser:
         "--synthetic-csf-t1-intensity",
         type=float,
         default=0.1,
-        help="T1 intensity of the CSF label (the ventricle). Sweeps the ventricle's CROSS-VIEW "
-        "AMPLITUDE RATIO while leaving its geometry, size, boundary area and per-view SNR alone — "
-        "the only knob in the generator that separates those. ventricle_size is read from the "
-        "CSF/WM step, which is (csf_t1 - 0.8) in T1 against (0.1 - 0.4) = -0.30 in FLAIR, so the "
-        "ratio is 0.30/|csf_t1 - 0.8|: 0.1 gives 0.43 (the default, measured 0.428 by "
-        "eval/view_consistency), 0.5 gives 1.000 (matched), 0.65 gives 2.0 (overshoot the other "
-        "way). Use it to test whether the contrastive model's ventricle deficit tracks the ratio: "
-        "a deficit minimised at 0.5 and rising on BOTH sides is causal evidence, where a single "
-        "on/off point is not. Pair with --synthetic-identifiable-ventricle, or the fissure (which "
-        "shares the CSF label by default) moves too and the knob stops being ventricle-only. "
+        help="T1 intensity of the CSF label (the ventricle). ventricle_size is read from the "
+        "CSF/WM step, |csf_t1 - 0.8| in T1 against |csf_flair - 0.4| in FLAIR. USE WITH "
+        "--synthetic-csf-flair-intensity: on its own this knob CANNOT separate the cross-view "
+        "amplitude ratio from the amplitude itself, because with FLAIR pinned the ratio is exactly "
+        "0.30/step_T1 — matching the ratio at 0.5 necessarily cuts the T1 evidence 2.33x, and 0.5 "
+        "is also the GM intensity, so the ventricle becomes confusable with cortex in T1. Both "
+        "penalties hit recovery and neither is the variable under test. Pair with "
+        "--synthetic-identifiable-ventricle, or the fissure (which shares the CSF label by default) "
+        "moves too. Default 0.1 = byte-identical to prior runs.",
+    )
+    parser.add_argument(
+        "--synthetic-csf-flair-intensity",
+        type=float,
+        default=0.1,
+        help="FLAIR intensity of the CSF label. The companion to --synthetic-csf-t1-intensity, and "
+        "what makes the ventricle's cross-view amplitude RATIO and its total AMPLITUDE independently "
+        "controllable — a 2x2 rather than one confounded axis. Four cells, all same-sign and (bar the "
+        "second) collision-free:\n"
+        "  (0.1,  0.1  ) ratio 0.43, amp 0.458  baseline\n"
+        "  (0.5,  0.1  ) ratio 1.00, amp 0.300  matched, but amp cut 1.5x AND csf==GM in T1\n"
+        "  (0.45, 0.05 ) ratio 1.00, amp 0.350  matched, best available amp, no collisions\n"
+        "  (0.342,0.203) ratio 0.43, amp 0.300  UNMATCHED at cell-2 amplitude -- the control\n"
+        "The last cell is the one that decides it: if it degrades as much as (0.5, 0.1) then the "
+        "damage is lost amplitude, not the ratio, and the alignability claim stays correlational. "
         "Default 0.1 = byte-identical to prior runs.",
     )
     parser.add_argument("--model-dir", type=str, default="results")
