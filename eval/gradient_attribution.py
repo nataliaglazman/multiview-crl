@@ -303,6 +303,13 @@ def collect_per_batch_gradients(model, dataset, args_, device, grid, level, n_ba
 
 
 def _mcc_now(model, dataset, device, grid, level, batch_size, gt_cache, seeds, n_splits):
+    """Full ``block_mcc`` result at this parameter point, plus the cached GT.
+
+    Returns the whole dict rather than ``["mean"]`` so the sweep can track ONE factor —
+    ``block_mcc`` already computes ``per_factor`` and ``per_factor_diag``, and the
+    aggregate mean hides exactly the case worth attributing: a loss that costs one
+    factor while the other eight absorb the difference.
+    """
     from eval.identifiability_metrics import block_mcc
     from eval.patch_mcc_decay import extract_patch_block
 
@@ -310,7 +317,29 @@ def _mcc_now(model, dataset, device, grid, level, batch_size, gt_cache, seeds, n
     if gt_cache is None:
         gt_cache = gt
     x = content.reshape(content.shape[0], -1)
-    return block_mcc(x, gt_cache, seeds=seeds, n_splits=n_splits)["mean"], gt_cache
+    return block_mcc(x, gt_cache, seeds=seeds, n_splits=n_splits), gt_cache
+
+
+def _mcc_scalar(res, factor_idx, stat):
+    """The scalar the finite-difference sweep tracks.
+
+    ``factor_idx=None`` gives the aggregate mean (the historical behaviour, bit-identical).
+
+    For a single factor, ``matched`` reproduces ``selection/mcc_by_factor/<name>`` exactly
+    — it is ``block_mcc``'s Hungarian-matched |corr| for that TRUE factor, which is what
+    the training-time scalar logs.  ``diag`` is the UNMATCHED |corr| between that factor's
+    own predictor and itself.  The distinction matters more here than anywhere else: the
+    sweep differences the metric at two DIFFERENT parameter points, and if the assignment
+    permutes between them the ``matched`` delta is partly a relabelling rather than a
+    change in the representation.  ``diag`` cannot permute, so it is the honest control
+    when ``assignment_identity`` is below 1.
+    """
+    if factor_idx is None:
+        return float(res["mean"])
+    arr = res.get("per_factor" if stat == "matched" else "per_factor_diag")
+    if arr is None or factor_idx >= len(arr):
+        return float("nan")
+    return float(arr[factor_idx])
 
 
 def main():
@@ -330,6 +359,27 @@ def main():
     ap.add_argument("--grad-batch-size", type=int, default=8)
     ap.add_argument("--mcc-samples", type=int, default=600, help="Volumes for each block-MCC re-measurement")
     ap.add_argument("--mcc-batch", type=int, default=16)
+    ap.add_argument(
+        "--factor",
+        default=None,
+        help="Attribute ONE ground-truth factor instead of the aggregate block-MCC, e.g. "
+        "'lesion_z'. The tracked scalar is then the same quantity training logs as "
+        "selection/mcc_by_factor/<name> (this script already scores at patch pooling, which "
+        "is where FACTOR_POOLING routes the lesion_* factors and the only rung where position "
+        "can register at all). Omit for the mean over all factors. NOTE: a single factor's "
+        "MCC is far noisier than the mean over nine — the per-factor across-seed spread is "
+        "printed at the base point, and an excess inside it is not an attribution.",
+    )
+    ap.add_argument(
+        "--factor-stat",
+        default="matched",
+        choices=("matched", "diag"),
+        help="Which per-factor number to track. 'matched' (default) is the Hungarian-matched "
+        "|corr| and reproduces selection/mcc_by_factor/<name>. 'diag' is the unmatched "
+        "|corr| of the factor's own predictor: immune to the assignment permuting between "
+        "the two parameter points the sweep differences, which 'matched' is not. Use 'diag' "
+        "whenever assignment_identity is below 1.",
+    )
     ap.add_argument("--etas", type=float, nargs="+", default=[0.05, 0.2, 0.8])
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--n-splits", type=int, default=5)
@@ -450,10 +500,39 @@ def main():
             for bkey in keys[i + 1 :]:
                 print(f"    {a} vs {bkey:<14}{cosine(np_g[a], np_g[bkey]):>+8.4f}")
 
-        base, gt_cache = _mcc_now(
+        base_res, gt_cache = _mcc_now(
             model, dataset, device, grid, cli.level, cli.mcc_batch, None, tuple(cli.seeds), cli.n_splits
         )
-        print(f"\n  block-MCC at this checkpoint: {base:.4f}")
+
+        # Resolve --factor against the GT columns actually present, so a typo or a factor
+        # this generator does not emit fails here rather than silently tracking NaN.
+        _fidx, _fnoise = None, float("nan")
+        if cli.factor:
+            from eval.dci import CONTENT_FACTOR_NAMES
+
+            _names = list(CONTENT_FACTOR_NAMES[: gt_cache.shape[1]])
+            if cli.factor not in _names:
+                ap.error(f"--factor {cli.factor!r} not among this run's factors: {_names}")
+            _fidx = _names.index(cli.factor)
+            _sd = base_res.get("per_factor_std")
+            _fnoise = float(_sd[_fidx]) if _sd is not None and _fidx < len(_sd) else float("nan")
+
+        base = _mcc_scalar(base_res, _fidx, cli.factor_stat)
+        if _fidx is None:
+            print(f"\n  block-MCC at this checkpoint: {base:.4f}")
+        else:
+            _ident = float(base_res.get("assignment_identity", float("nan")))
+            print(f"\n  block-MCC ({cli.factor}, {cli.factor_stat}) at this checkpoint: {base:.4f}")
+            print(
+                f"    matched {_mcc_scalar(base_res, _fidx, 'matched'):.4f}   "
+                f"diag {_mcc_scalar(base_res, _fidx, 'diag'):.4f}   "
+                f"across-seed sd {_fnoise:.4f}   assignment_identity {_ident:.2f}"
+            )
+            if np.isfinite(_ident) and _ident < 1.0 and cli.factor_stat == "matched":
+                print("    [!] the Hungarian assignment has PERMUTED at the base point. A 'matched'")
+                print("        delta then mixes a relabelling into the measurement. Re-run with")
+                print("        --factor-stat diag, which cannot permute.")
+            print(f"    mean over all factors, for reference: {base_res['mean']:.4f}")
         print(f"\n  dMCC after one step of size eta along -g/||g||  (negative = degrades identifiability)")
         backup = [p.detach().clone() for p in params]
 
@@ -466,10 +545,10 @@ def main():
                         n = p.numel()
                         p.copy_(b0 - eta * direction[off : off + n].view_as(p))
                         off += n
-                mcc, _ = _mcc_now(
+                res, _ = _mcc_now(
                     model, dataset, device, grid, cli.level, cli.mcc_batch, gt_cache, tuple(cli.seeds), cli.n_splits
                 )
-                out.append(mcc - base)
+                out.append(_mcc_scalar(res, _fidx, cli.factor_stat) - base)
             with torch.no_grad():
                 for p, b0 in zip(params, backup):
                     p.copy_(b0)
@@ -517,8 +596,13 @@ def main():
         print("\n  Reading it: the EXCESS row is the attribution — how much worse this loss's")
         print("  direction is than a random direction with the same per-layer energy. The raw")
         print("  dMCC row conflates that with generic perturbation sensitivity, which is large.")
-        print("  Compare the excess against block-MCC's per-seed sd (~0.001 at N=1500); inside")
-        print("  that band there is no attribution, whatever the raw row says.")
+        if _fidx is None:
+            print("  Compare the excess against block-MCC's per-seed sd (~0.001 at N=1500); inside")
+            print("  that band there is no attribution, whatever the raw row says.")
+        else:
+            print(f"  Compare the excess against THIS FACTOR's across-seed sd ({_fnoise:.4f}), not the")
+            print("  ~0.001 that applies to the mean over nine factors — a single factor's matched")
+            print("  |corr| is far noisier, and that spread is the whole bar to clear here.")
         del model
         if device.type == "cuda":
             torch.cuda.empty_cache()
