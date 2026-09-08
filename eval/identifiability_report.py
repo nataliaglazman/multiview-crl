@@ -21,14 +21,16 @@ What it prints
    residualised on its SCM parents.  Without it, a factor with a well-recovered parent
    scores well without being encoded at all (measured: ``ventricle_size`` reads 0.695
    while ``brain_size`` is recovered at 0.92 and correlates ~0.8 with it), which is the
-   confound ``--causal iid`` was previously the only answer to — at the cost of scoring
-   the model off its training distribution, with a penalty that grows with how well the
-   model fits it, so iid cannot rank two models against each other.
+   confound a linear residual only partially addresses. The legacy fit uses all samples;
+   use ``--parent-adjustment nonlinear`` for fold-local nonlinear adjustment instead.
 1b. The same factors at EVERY rung — gap / stats / patch side by side, each with its own
    floor.  Table 1 answers "was this factor learned"; this one answers "where does it
    live", which is the axis the gap-vs-patch findings in the changelog turn on, and which
    previously took one run per ``--factor-pooling`` to see.  It is a locality profile,
    not a menu: the reportable number stays table 1's, at the assigned rung.
+1c. Optional nonlinear parent-residual decoding from content and style, with full-target
+   references using the same fold-local PCA/scaling. Nonlinear nuisance fits are trained
+   only on outer training samples; training residuals use inner cross-fitting.
 2. The MCC pooling ladder, gap → stats → patch, with floors.  A single rung is not
    interpretable: stats cannot express position (it is permutation-invariant over
    voxels) and patch sits on a floor of ~0.86, so only the SHAPE across rungs carries
@@ -63,6 +65,13 @@ Usage
     python -m eval.identifiability_report --run-dir RUN --with-dci --poolings gap,stats,4x4x4
     python -m eval.identifiability_report --run-dir RUN --no-floor       # not reportable
     python -m eval.identifiability_report --from-json report.json       # no model/probe rerun
+    python -m eval.identifiability_report --run-dir RUN --parent-adjustment nonlinear
+    python -m eval.identifiability_report --run-dir RUN --causal shuffled --shuffle-seed 0
+
+``--causal shuffled`` re-renders independently permuted columns from matched content
+draws, preserving each factor's empirical marginal. It changes their joint distribution
+and is a complementary stress test, not an in-distribution replacement. See
+``eval/CAUSAL_EVALUATION.md`` for the protocol and interpretation.
 
 The scoring layer is torch-free and unit-testable: ``--self-test`` runs it on planted
 numpy data with no checkpoint and no GPU.
@@ -71,6 +80,7 @@ numpy data with no checkpoint and no GPU.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -82,6 +92,7 @@ from eval.identifiability_metrics import (
     block_mcc,
     cv_probe_r2,
     n_parents_per_factor,
+    parents_from_adjacency,
     residualise_on_parents,
     view_invariance,
 )
@@ -179,6 +190,71 @@ def per_factor_scores(
     for d in out.values():
         head = d["by_pooling"][d["pooling"]]
         d["r2"], d["r2_raw"] = head["r2"], head["r2_raw"]
+    return out
+
+
+def nonlinear_parent_scores(
+    reprs,
+    level,
+    gt,
+    names,
+    adjacency,
+    seeds,
+    n_null,
+    probe_dim=PROBE_DIM_AUTO,
+    kind="ridge",
+    n_jobs=1,
+    factor_pooling="assigned",
+    block=_CONTENT,
+    parent_cache=None,
+):
+    """Decode nonlinear parent residuals, including fold-local feature preprocessing.
+
+    Nuisance fits are shared across blocks, poolings and floor twins for the same
+    labels/graph/splits. These scores have their own full-target reference because
+    the legacy headline fits PCA before CV and is a different evaluation pipeline.
+    """
+    from eval.parent_adjusted import prepare_parent_folds, prepare_probe_folds, score_parent_folds
+
+    cache = parent_cache if parent_cache is not None else {}
+    key = (
+        hashlib.sha256(np.asarray(gt, dtype=np.float64).tobytes()).hexdigest(),
+        hashlib.sha256(np.asarray(adjacency, dtype=bool).tobytes()).hexdigest(),
+        tuple(gt.shape),
+        tuple(seeds),
+    )
+    if key not in cache:
+        parents = parents_from_adjacency(adjacency)
+        cache[key] = Parallel(n_jobs=n_jobs)(
+            delayed(prepare_parent_folds)(
+                gt[:, j], gt[:, [p for p in parents.get(j, []) if p < gt.shape[1]]], seeds=seeds
+            )
+            for j in range(len(names))
+        )
+    plans = cache[key]
+    blocks = {}
+    for pool in ("gap", "stats", "patch"):
+        X = _block_array(reprs, pool, level, block)
+        if X is not None and X.shape[1]:
+            blocks[pool] = prepare_probe_folds(X, plans[0], probe_dim)
+
+    tasks, meta = [], []
+    if not blocks:
+        return {}
+    for j, name in enumerate(names):
+        want = FACTOR_POOLING.get(name, "stats") if factor_pooling == "assigned" else factor_pooling
+        assigned = _resolve_key(want, set(blocks))
+        if assigned not in blocks:
+            continue
+        for pool, features in blocks.items():
+            tasks.append(delayed(score_parent_folds)(features, plans[j], kind, n_null, null_seed=j))
+            meta.append((name, assigned, pool))
+    out = {}
+    for (name, assigned, pool), score in zip(meta, Parallel(n_jobs=n_jobs)(tasks)):
+        entry = out.setdefault(name, {"pooling": assigned, "by_pooling": {}})
+        entry["by_pooling"][pool] = score
+    for entry in out.values():
+        entry.update(entry["by_pooling"][entry["pooling"]])
     return out
 
 
@@ -488,12 +564,19 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
     print(f"  N={res['n_samples']}  level={res['level']}  poolings={res['poolings']}  probe-dim={res['probe_dim']}")
     _cz = res.get("causal")
     if _cz:
-        _note = (
-            "factors correlated as in training — aggregate ranking only, per-factor numbers are\n           inflated by recoverable parents"
-            if _cz == "match"
-            else "factors forced independent — per-factor attribution; a LOW value here is\n           ambiguous between not-identified and out-of-distribution"
-        )
+        _note = {
+            "match": "training-matched factors; correlated parents can inflate individual decoding scores",
+            "iid": "legacy causal-off sampler; factor marginals may differ from training",
+            "shuffled": "independently shuffled content columns, matched empirical marginals, images re-rendered",
+        }.get(_cz, _cz)
         print(f"  causal={_cz}  ({_note})")
+    distribution = res.get("evaluation_distribution") or {}
+    if distribution.get("mode") == "shuffled":
+        print(
+            f"  shuffle-seed={distribution['shuffle_seed']}  mean |content correlation|: "
+            f"{distribution['mean_abs_correlation_before']:.3f} -> {distribution['mean_abs_correlation_after']:.3f}"
+        )
+        print("  Marginals are exact; finite-sample dependencies need not be zero. The joint distribution changes.")
     print("=" * 92)
     if has_floor:
         print("  LEARNED = this checkpoint minus the same architecture UNTRAINED. Read that column.")
@@ -557,19 +640,16 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
             f"   partial = the same score on each factor RESIDUALISED on its SCM parents"
             f"{', floor-subtracted' if has_floor else ' (raw gap — no floor)'}; pa = how many parents it has."
         )
-        print("   partial ~ learned  => the encoder has the factor's OWN variation.")
-        print("   partial << learned => the score was being read off a parent, not the factor. This is")
-        print("   what makes per-factor claims safe under --causal match, WITHOUT switching to --causal")
-        print("   iid, whose penalty grows with how well a model fits training and so cannot rank models.")
+        print("   Legacy adjustment is linear and fitted before CV; nonlinear parent dependence can remain.")
+        print("   Use --parent-adjustment nonlinear for cross-fitted nonlinear adjustment (table 1c).")
         if parent_carried:
-            print(f"   parent-carried (learned - partial > {NOISE_FLOOR}): {', '.join(parent_carried)}")
+            print(f"   possible parent contribution (learned - partial > {NOISE_FLOOR}): {', '.join(parent_carried)}")
+    elif res.get("parent_adjustment") == "nonlinear":
+        print("   Parent adjustment: " + res.get("parent_adjustment_status", "see nonlinear scores in table 1c."))
     elif res.get("causal") == "match":
-        print("   partial: no SCM on the eval set (run trained without --synthetic-causal), so every")
-        print("   factor is already its own residual and the column would duplicate 'learned'.")
-    elif res.get("causal") == "iid":
-        print("   partial: not scored under --causal iid — the eval factors are already independent, so")
-        print("   there are no parents to residualise. Re-run with --causal match to get the column")
-        print("   (and per-factor numbers that stay on the training distribution).")
+        print("   partial: no observed-parent SCM on the evaluation set; adjustment is unavailable.")
+    elif res.get("causal") in ("iid", "shuffled"):
+        print("   Parent adjustment is not scored under this distribution. Use --causal match for it.")
 
     # 1b. r2 ladder -----------------------------------------------------------
     # Table 1 shows each factor once, at the rung it is reportable at.  That answers "did
@@ -601,6 +681,49 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
                 learned = _delta(cur.get("r2"), base.get("r2")) if has_floor else float("nan")
                 row += f"{_n(cur.get('r2')):>{cw}s}{_n(learned):>{cw}s}"
             print(row + f"{d['pooling']:>10s}")
+
+    # 1c. nonlinear parent-adjusted decoding ----------------------------------
+    adjusted = res.get("parent_adjusted") or {}
+    if adjusted:
+        print()
+        print(_rule("1c. NONLINEAR PARENT-ADJUSTED DECODING"))
+        print("   Parent predictors: outer-train only; training residuals: inner cross-fitting.")
+        print("   PCA/scaling: outer-train only. Full and residual raw R2 use these same folds/features.")
+        print("   Residual gap = residual R2 minus within-split permutation null; learned = gap minus twin.")
+        print("   Parent R2 measures held-out nuisance fit quality. Residuals can retain unmodelled dependence;")
+        print("   this is a decoding diagnostic, not proof of causal identifiability or independence.")
+        print(
+            f"   {'block':<8} {'factor':<{fw}} {'pool':<6} {'pa':>3} {'parent':>7} "
+            f"{'full':>7} {'resid':>7} {'gap':>7} {'learned':>8} {'floor sd':>8}"
+        )
+        for block, factors in adjusted.items():
+            for factor, entry in factors.items():
+                for pool, score in entry["by_pooling"].items():
+                    base = (
+                        (floor or {})
+                        .get("parent_adjusted", {})
+                        .get(block, {})
+                        .get(factor, {})
+                        .get("by_pooling", {})
+                        .get(pool, {})
+                    )
+                    spread = (
+                        fstd.get("parent_adjusted", {})
+                        .get(block, {})
+                        .get(factor, {})
+                        .get("by_pooling", {})
+                        .get(pool, {})
+                        .get("r2")
+                    )
+                    learned = _delta(score["r2"], base.get("r2")) if has_floor else float("nan")
+                    marker = "*" if pool == entry["pooling"] else " "
+                    print(
+                        f"   {block:<8} {factor:<{fw}} {pool + marker:<6} {npa.get(factor, 0):>3d} "
+                        f"{_n(score['parent_r2'])} {_n(score['full_r2_raw'])} {_n(score['r2_raw'])} "
+                        f"{_n(score['r2'])} {_n(learned)} {_n(spread)}"
+                    )
+        print("   * = assigned pooling. Full and residual R2 have different target variances; their difference")
+        print("   is not a fraction of causally mediated information. The verdict below uses the legacy headline.")
 
     # 2. mcc ladder -----------------------------------------------------------
     print()
@@ -836,6 +959,8 @@ def score_run(
     init_seed=None,
     causal=None,
     name=None,
+    parent_adjustment="legacy",
+    parent_cache=None,
 ):
     """Extract this run's representations under every pooling and score them.
 
@@ -848,6 +973,10 @@ def score_run(
     from eval.run_dci_compare import _reduce_reprs, _resolve_checkpoint, _score_dci
     from eval.run_dci_synthetic import load_model_from_run_dir
 
+    if parent_adjustment not in ("legacy", "nonlinear"):
+        raise ValueError("parent_adjustment must be legacy or nonlinear")
+    if parent_adjustment == "nonlinear" and causal in ("iid", "shuffled"):
+        raise ValueError("Nonlinear parent adjustment requires the matched evaluation distribution.")
     model, _args, device = load_model_from_run_dir(
         run_dir,
         None if random_init else _resolve_checkpoint(run_dir, checkpoint),
@@ -917,17 +1046,57 @@ def score_run(
             factor_pooling,
         )
 
-    # Partial-R²: the same per-factor scorer, run on targets with each factor's linear
-    # parent contribution removed.  Under `--causal match` the eval set reproduces the
-    # training SCM, so a factor with a well-recovered parent scores well without being
-    # encoded in its own right (measured on this project: ventricle_size reads 0.695 while
-    # brain_size is recovered at 0.92 and correlates ~0.8 with it).  Comparing this column
-    # against table 1's separates the two WITHOUT switching to `--causal iid`, which fixes
-    # the attribution by moving the eval set off the training distribution — and whose
-    # penalty grows with how well a model fits it, so it is not safe to rank models on.
-    # Appended last for the same rng reason as the leakage cells above.
+    if hasattr(dataset, "evaluation_distribution"):
+        res["evaluation_distribution"] = dataset.evaluation_distribution
+
+    # Legacy adjustment remains the default. Nonlinear adjustment has a separate
+    # table with fold-local preprocessing and its own full-target reference scores.
     adjacency = _causal_adjacency(dataset)
-    if adjacency is not None:
+    if parent_adjustment == "nonlinear":
+        res["parent_adjustment"] = "nonlinear"
+        if adjacency is None:
+            res["parent_adjustment_status"] = "unavailable: no observed-parent SCM on the evaluation set"
+            logger.warning(res["parent_adjustment_status"])
+        else:
+            cache = parent_cache if parent_cache is not None else {}
+            res["parent_adjustment_config"] = dict(
+                regressor="HistGradientBoostingRegressor",
+                outer_splits=5,
+                inner_splits=3,
+                seeds=list(seeds),
+                n_null=n_null,
+                probe_kind=probe_kind,
+                preprocessing="outer_train_only",
+            )
+            res["parent_adjusted"] = {}
+            for block_name, block_idx in (("content", _CONTENT), ("style", _STYLE)):
+                if block_name == "style" and not with_leakage:
+                    continue
+                res["parent_adjusted"][block_name] = nonlinear_parent_scores(
+                    reprs,
+                    level,
+                    gt_content,
+                    names,
+                    adjacency,
+                    seeds,
+                    n_null,
+                    probe_dim,
+                    probe_kind,
+                    n_jobs,
+                    factor_pooling,
+                    block_idx,
+                    cache,
+                )
+            res["n_parents"] = n_parents_per_factor(adjacency, names)
+            # Keep downstream DCI permutation draws identical to legacy mode, even
+            # though the old partial probes themselves are skipped.
+            for factor in names:
+                want = FACTOR_POOLING.get(factor, "stats") if factor_pooling == "assigned" else factor_pooling
+                X = _block_array(probed, _resolve_key(want, set(probed)), level, _CONTENT)
+                if X is not None and X.shape[1]:
+                    for _ in range(n_null):
+                        rng.permutation(len(gt_content))
+    elif adjacency is not None:
         res["partial"] = per_factor_scores(
             probed,
             level,
@@ -1300,8 +1469,24 @@ def main():
     p.add_argument(
         "--causal",
         default="match",
-        choices=("match", "iid"),
-        help="'match' for aggregate ranking, 'iid' for per-factor attribution.",
+        choices=("match", "iid", "shuffled"),
+        help="'match': training-matched sampler (default). 'iid': legacy causal-off sampler. "
+        "'shuffled': independently permute matched content columns and re-render, preserving "
+        "empirical marginals (pseudo_mri only); this changes the joint distribution.",
+    )
+    p.add_argument(
+        "--parent-adjustment",
+        default="legacy",
+        choices=("legacy", "nonlinear"),
+        help="'nonlinear': replace legacy partial scores with cross-fitted nonlinear parent-residual "
+        "decoding and train-fold-only PCA/scaling (table 1c). Requires --causal match. "
+        "Also scores residuals from style unless --no-leakage is set.",
+    )
+    p.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=0,
+        help="Content-column permutation seed for --causal shuffled; use the same seed across models.",
     )
     p.add_argument(
         "--factor-pooling",
@@ -1347,6 +1532,18 @@ def main():
         return
     if not cli.run_dir:
         p.error("--run-dir is required (or pass --from-json / --self-test)")
+    if cli.parent_adjustment == "nonlinear":
+        if cli.causal != "match":
+            p.error(
+                "--parent-adjustment nonlinear requires --causal match; the original parent graph "
+                "does not describe the independent evaluation distribution."
+            )
+        if cli.num_samples < 20:
+            p.error("--parent-adjustment nonlinear requires at least 20 samples.")
+    if cli.causal == "shuffled" and (cli.num_samples < 2 or not 0 <= cli.shuffle_seed < 2**32):
+        p.error("--causal shuffled requires at least two samples and a shuffle seed in [0, 2**32).")
+    if cli.n_null < 0:
+        p.error("--n-null must be nonnegative.")
 
     if cli.probe_dim != PROBE_DIM_AUTO:
         try:
@@ -1359,7 +1556,18 @@ def main():
 
     from eval.run_dci_synthetic import build_synthetic_test_set, load_run_args
 
-    dataset = build_synthetic_test_set(load_run_args(cli.run_dir), cli.num_samples, causal=cli.causal == "match")
+    if cli.causal == "shuffled":
+        from eval.marginal_independence import MarginalShuffledDataset
+
+        source_dataset = build_synthetic_test_set(
+            load_run_args(cli.run_dir),
+            cli.num_samples,
+            causal=True,
+            cache=False,
+        )
+        dataset = MarginalShuffledDataset(source_dataset, seed=cli.shuffle_seed)
+    else:
+        dataset = build_synthetic_test_set(load_run_args(cli.run_dir), cli.num_samples, causal=cli.causal == "match")
     common = dict(
         dataset=dataset,
         poolings=poolings,
@@ -1378,6 +1586,8 @@ def main():
         n_jobs=cli.n_jobs,
         factor_pooling=cli.factor_pooling,
         causal=cli.causal,
+        parent_adjustment=cli.parent_adjustment,
+        parent_cache={} if cli.parent_adjustment == "nonlinear" else None,
     )
     logger.info("Scoring checkpoint ...")
     # init_seed=0 for the checkpoint too: strict=False leaves any unmatched parameter at
