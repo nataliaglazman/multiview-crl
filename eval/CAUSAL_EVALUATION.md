@@ -53,6 +53,80 @@ python -m eval.run_causal_recovery --from-json results/causal_recovery/causal_re
 This regenerates the reports alongside the input JSON; use `--output-dir` to
 write them elsewhere.
 
+### Locate factors that degrade during training
+
+Every evaluation and JSON replay now also writes `causal_recovery_factors.txt`
+and `causal_recovery_factors.csv`. The text report ranks each run's factors from
+largest to smallest decline in partial R² relative to a reference. The CSV keeps
+one row per run and factor, including raw values, deltas, and graph neighbors.
+
+For reports you have already generated, no checkpoint evaluation is needed:
+
+```bash
+python -m eval.run_causal_recovery \
+  --from-json results/causal_recovery/causal_recovery.json \
+  --reference-run early_checkpoint
+```
+
+`--reference-run` accepts a unique directory basename or the exact saved directory
+path. It defaults to the first run with factor scores. Supply directories in
+training order when comparing checkpoints; the script preserves input order and
+does not infer steps from names. Glob matches use lexicographic order, so use an
+explicit list or a runs file when names such as `step_2` and `step_10` would sort
+incorrectly. Comparisons to a reference are not tests for monotonic degradation.
+
+The diagnostics include:
+
+- **Raw R² and partial R²**, and their changes from the reference, per named factor.
+  Both falling supports loss of linearly decodable information about that factor.
+  Partial R² falling while raw R² remains high suggests the probe increasingly
+  relies on parent-related information. Nonlinear parent effects remain a caveat.
+- **Drop %**: the factor's share of the summed decreases in partial R². Improving
+  factors are excluded from this denominator, so improvements cannot hide losses.
+  CSV `mean_partial_delta_contribution` is the signed factor delta divided by the
+  number of factors; these contributions sum to the change in the mean partial R².
+  Neither quantity attributes the change in graph F1 to that factor.
+- **Incident graph F1/precision/recall/SHD**, missing and false neighbors, and the
+  change in incident SHD. Graph comparisons use `--diagnostic-alpha 0.05` by
+  default, fixed across runs. Each incorrect undirected edge is incident on TWO
+  factors, so summing incident SHD gives twice global SHD. Shared errors alone
+  cannot establish which endpoint's representation is responsible.
+- On **fresh evaluations**, **PC R²** is an additional held-out RidgeCV decoding
+  score after PCA/scaling at the graph readout's dimension. This diagnostic fits
+  preprocessing on training samples only. It can expose a loss after compression
+  even when the full-feature probe remains strong. It is distinct from the
+  original in-sample predictions fed to PC. JSON and CSV also record each decoded
+  factor's variance relative to its true variance and its correlation with truth.
+
+To add a more direct graph sensitivity check during a fresh evaluation:
+
+```bash
+python -m eval.run_causal_recovery \
+  --run-dirs results/early_checkpoint results/middle_checkpoint results/late_checkpoint \
+  --num-samples 500 --factor-rescue --diagnostic-alpha 0.05
+```
+
+**Factor rescue** replaces one column of the decoded factors with its true values,
+keeps all other decoded columns, and reruns PC at the fixed diagnostic alpha.
+Positive `rescue_shd_reduction` / `rescue_f1_gain` mean that this replacement
+improved the global graph. This is an oracle sensitivity check, not a causal
+intervention or proof of the training mechanism. Repairs may fail to help when
+multiple decoded factors degrade together; the individual gains are not additive.
+It adds one PC run per factor. Full repaired graphs and failures are stored in
+JSON. Old JSON lacks the decoded samples, so rescue and PC R² cannot be computed
+with `--from-json`; unavailable entries remain blank rather than being estimated.
+
+The fixed diagnostic alpha is evaluated even if it is outside `--alphas`, but is
+excluded from headline best-alpha selection unless explicitly in that sweep.
+Old JSON that lacks the fixed alpha shows unavailable graph diagnostics; choose
+an alpha present in the saved sweep or reevaluate. Known differences in ground
+truth DAG, sample count, level, pooling, or saved synthetic settings suppress
+reference deltas and are labelled `incompatible`. Missing metadata is labelled
+`unverified`. This check cannot establish that different directories belong to
+one training trajectory; compare matched data, preprocessing, architecture and
+checkpoint lineage. Scores have sampling/probe variability; small changes alone
+do not establish collapse or its cause.
+
 The calculations intentionally preserve section 7i: parent regressions use all
 samples; Ridge probes use a fixed 70/30 train/test split; scaled/PCA features feed
 supervised RidgeCV factor predictions on the same samples used to fit them; PC
@@ -64,8 +138,10 @@ so it is an optimistic diagnostic rather than held-out causal discovery evidence
 Linear residualization need not remove nonlinear parent effects. The residual
 score is the notebook's "partial R²", not a nested-model partial R² statistic.
 For an empty true and estimated graph, F1 remains 0 as in the notebook, while
-`exact_match` is true and SHD is 0. Constant decoded factors or PC failures become
-error rows instead of spurious graph scores.
+`exact_match` is true and SHD is 0. Constant decoded factors or numerical PC
+failures retain the raw/partial factor scores and record errors per alpha. If no
+requested alpha can be scored, the run has `partial` status, graph scores are
+unavailable, and the batch returns exit code 1 after writing all reports.
 
 ## Identifiability report diagnostics
 
