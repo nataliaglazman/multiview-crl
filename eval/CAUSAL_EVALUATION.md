@@ -1,5 +1,61 @@
 # Optional causal evaluation diagnostics
 
+## Batch notebook graph recovery
+
+`eval/run_causal_recovery.py` runs the notebook's section 7i over a list of
+VQVAE result directories. Each directory must contain `settings.json` and
+`vqvae_model.pt` (or the filename passed with `--checkpoint`). Run it in the
+training environment with the additional `causal-learn` package installed:
+
+```bash
+python -m pip install causal-learn
+python -m eval.run_causal_recovery \
+  --run-dirs results/run_a results/run_b \
+  --num-samples 500 --output-dir results/causal_recovery
+
+# Quoted globs are supported. Each matching path should be an individual run.
+python -m eval.run_causal_recovery --run-dirs 'results/experiment/*' \
+  --checkpoint vqvae_best.pt --device cuda
+
+# Alternatively, one run path or glob per line; blank lines and # comments ignored.
+python -m eval.run_causal_recovery --runs-file runs.txt
+```
+
+Paths inside `runs.txt` are relative to that file; command-line paths are relative
+to the working directory. Duplicate directories are evaluated once. Non-causal
+runs are skipped; errors are recorded and processing continues. An error in any
+run produces exit code 1 after saving the reports. Explicit checkpoint filenames
+are required to exist in each run; there is no fallback to a different checkpoint.
+
+The script regenerates each run's matched test distribution and uses its actual
+SCM adjacency. It captures raw view-1 encoder maps, fixes the content channel mask
+using sample 0 as in notebook section 4, and defaults to `--pooling 4,4,4`.
+`--pooling gap` is also available. The default encoder level is the first
+`content_style_levels` entry (otherwise 0); override it with `--level`.
+
+`causal_recovery.csv` contains one summary row per run: raw and residual R² means,
+best alpha, skeleton precision/recall/F1, false positives/negatives, skeleton SHD
+(missing plus extra edges), and `exact_match`. The JSON additionally stores
+per-factor scores/parents, the true DAG, every alpha's estimated skeleton and
+metrics, generator settings, and protocol metadata. Both files are updated after
+each run. By default they are saved under `results/causal_recovery`.
+
+The calculations intentionally preserve section 7i: parent regressions use all
+samples; Ridge probes use a fixed 70/30 train/test split; scaled/PCA features feed
+supervised RidgeCV factor predictions on the same samples used to fit them; PC
+uses Fisher-Z with alphas `0.01 0.05 0.1 0.2`, retaining the last alpha in a tie.
+Use `--alphas 0.05` to report a single prespecified alpha. These metrics describe
+**undirected skeleton recovery**, not recovery of causal directions. The default
+best F1 is selected against the known truth, and the graph readout is in-sample,
+so it is an optimistic diagnostic rather than held-out causal discovery evidence.
+Linear residualization need not remove nonlinear parent effects. The residual
+score is the notebook's "partial R²", not a nested-model partial R² statistic.
+For an empty true and estimated graph, F1 remains 0 as in the notebook, while
+`exact_match` is true and SHD is 0. Constant decoded factors or PC failures become
+error rows instead of spurious graph scores.
+
+## Identifiability report diagnostics
+
 The entry point is `eval/identifiability_report.py`. Existing defaults remain
 `--causal match --parent-adjustment legacy`; neither option changes training or the
 generative model.
