@@ -69,6 +69,7 @@ from training.losses import (
     style_modality_ce_loss,
     vicreg_loss,
 )
+from training.style_hsic import style_content_hsic_loss
 from utils.checkpointing import (
     load_checkpoint,
     resolve_wandb_run_id,
@@ -214,6 +215,33 @@ def train_step(
         else:
             _patch_grid = None
 
+        _hsic_scale = float(getattr(args, "scale_style_hsic_loss", 0.0))
+        _hsic_kwargs = {}
+        if _hsic_scale > 0:
+            _gt_content = data.get("gt_latents", {}).get("z_content")
+            if _gt_content is None:
+                raise ValueError("--scale-style-hsic-loss requires batch['gt_latents']['z_content'] (synthetic data).")
+            _gt_content = torch.as_tensor(_gt_content, device=device)
+            _hsic_kwargs["return_style_features"] = True
+
+        _forward = vqvae_model(
+            images,
+            return_recon=compute_recon,
+            pool_only=True,
+            n_views=n_views,
+            subsets=args.subsets,
+            patch_grid=_patch_grid,
+            mask=masks,
+            **_hsic_kwargs,
+        )
+        _hsic_loss = torch.zeros((), device=device)
+        if _hsic_scale > 0:
+            _forward, _style_features = _forward
+            _hsic_loss, _hsic_diag = style_content_hsic_loss(_style_features, _gt_content, n_views)
+            _diag.update(_hsic_diag)
+            _diag["Style/hsic_weighted"] = _hsic_loss.detach().item() * _hsic_scale
+            del _style_features
+
         (
             recon,
             diffs,
@@ -223,15 +251,8 @@ def train_step(
             _,
             fwd_soft_content_masks,
             _,  # style_id_outputs
-        ) = vqvae_model(
-            images,
-            return_recon=compute_recon,
-            pool_only=True,
-            n_views=n_views,
-            subsets=args.subsets,
-            patch_grid=_patch_grid,
-            mask=masks,
-        )
+        ) = _forward
+        del _forward
 
         # Compute momentum-encoder key embeddings BEFORE deleting images.
         # During mask warmup, disable MoCo so in-batch InfoNCE is used
@@ -845,6 +866,8 @@ def train_step(
 
         contrastive_loss = total_contrastive_loss
         total_loss = contrastive_loss + recon_loss + vq_loss
+        if _hsic_scale > 0:
+            total_loss = total_loss + _hsic_scale * _hsic_loss
 
         # Generator adversarial loss: fool the discriminator into predicting
         # the reconstruction as real (hinge: -mean(D(fake))).

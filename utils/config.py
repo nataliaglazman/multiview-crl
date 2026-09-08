@@ -429,6 +429,15 @@ def parse_args() -> argparse.ArgumentParser:
         "geometries, so one temperature need not suit both. Hold it fixed across A/B arms.",
     )
     parser.add_argument(
+        "--scale-style-hsic-loss",
+        type=float,
+        default=0.0,
+        help="Weight on per-view normalized RBF-HSIC between full spatial style features and ground-truth "
+        "z_content. Synthetic supervised ablation; requires --inject-style-to-decoder. "
+        "Independent of --scale-contrastive-loss; 0 disables it. Set --scale-style-contrastive-loss 0 "
+        "to replace style repulsion. Batches with fewer than four subjects are skipped.",
+    )
+    parser.add_argument(
         "--scale-style-contrastive-loss",
         type=float,
         default=0.0,
@@ -1578,6 +1587,17 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             "because the number of style channels varies per forward pass. "
             "Use --mask-mode fixed or learned instead."
         )
+
+    _style_hsic = getattr(args, "scale_style_hsic_loss", 0.0)
+    if not 0.0 <= _style_hsic < float("inf"):
+        raise ValueError("--scale-style-hsic-loss must be finite and nonnegative.")
+    if _style_hsic > 0:
+        if args.dataset_name != "synthetic":
+            raise ValueError("--scale-style-hsic-loss requires synthetic ground-truth content factors.")
+        if not getattr(args, "inject_style_to_decoder", False):
+            raise ValueError("--scale-style-hsic-loss requires --inject-style-to-decoder.")
+        if args.batch_size < 4:
+            raise ValueError("--scale-style-hsic-loss requires batch_size >= 4 subjects per forward pass.")
 
     # --split-encoder-norm slices the first content_channels off each normalized tensor,
     # so the content block has to actually BE those channels. Only "fixed" guarantees it;

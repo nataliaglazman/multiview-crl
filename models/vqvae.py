@@ -1051,7 +1051,16 @@ class VQVAE(HelperModule):
         return F.adaptive_avg_pool3d(style, target)
 
     def forward(
-        self, x, return_recon=True, pool_only=False, n_views=1, subsets=None, view_idx=None, patch_grid=None, mask=None
+        self,
+        x,
+        return_recon=True,
+        pool_only=False,
+        n_views=1,
+        subsets=None,
+        view_idx=None,
+        patch_grid=None,
+        mask=None,
+        return_style_features=False,
     ):
         """Forward pass through VQ-VAE-2.
 
@@ -1063,6 +1072,9 @@ class VQVAE(HelperModule):
                      batch is split in half (view 0 | view 1) and routed through
                      the respective encoder stacks.
             subsets: View subsets (unused, kept for API compat).
+            return_style_features: Opt in to (normal_eight_tuple, style_features).
+                Style features retain gradients after the spatial bottleneck and before
+                quantization/detachment/dropout, including when reconstruction is skipped.
             view_idx: When separate_encoders is active and n_views=1, selects which
                       encoder stack to use (0 → self.encoders, 1 → self.encoders_v1).
                       Defaults to 0 if not specified.  Ignored when n_views=2.
@@ -1170,7 +1182,7 @@ class VQVAE(HelperModule):
                 if estimated_content_indices is None:
                     estimated_content_indices = [idx_v0, idx_v1]
 
-                if self.inject_style_to_decoder and return_recon:
+                if self.inject_style_to_decoder and (return_recon or return_style_features):
                     style_idx_v0 = torch.where(~mask_v0.bool())[-1]
                     style_idx_v1 = torch.where(~mask_v1.bool())[-1]
                     style_spatials[lvl] = self._bottleneck_style(
@@ -1244,7 +1256,7 @@ class VQVAE(HelperModule):
                 if estimated_content_indices is None:
                     estimated_content_indices = [content_idx]
 
-                if self.inject_style_to_decoder and return_recon:
+                if self.inject_style_to_decoder and (return_recon or return_style_features):
                     style_idx = torch.where(~content_mask_bool)[-1]
                     style_spatials[lvl] = self._bottleneck_style(enc_out_lvl[:, style_idx, :, :, :])
 
@@ -1447,6 +1459,8 @@ class VQVAE(HelperModule):
         # and the zero-padded input produces meaningless gradients.
         skip_codebook = pool_only and not return_recon
 
+        hsic_style_features = dict(style_spatials) if return_style_features else None
+
         # --- Style quantization (independent codebooks, no cross-level conditioning) ---
         style_id_outputs = {}
         if self.quantize_style and return_recon and not skip_codebook:
@@ -1627,7 +1641,7 @@ class VQVAE(HelperModule):
         self._last_id_outputs = [None if t is None else t.detach() for t in id_outputs]
         self._last_style_id_outputs = {k: v.detach() for k, v in style_id_outputs.items()}
 
-        return (
+        outputs = (
             final_output,
             diffs,
             encoder_features,
@@ -1637,6 +1651,7 @@ class VQVAE(HelperModule):
             soft_content_masks,
             style_id_outputs,
         )
+        return (outputs, hsic_style_features) if return_style_features else outputs
 
     def decode_codes(
         self,
