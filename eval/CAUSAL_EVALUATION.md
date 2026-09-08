@@ -234,3 +234,70 @@ to residualize the shuffled labels, which no longer follow its joint law.
 
 `--causal iid` retains the older causal-off behavior; it does not preserve the
 matched factor marginals and may still use a configured hierarchical sampler.
+
+## Edge directions
+
+`run_causal_recovery --orientation` additionally scores each recovered graph's edge
+DIRECTIONS. The comparison target is the true DAG's **CPDAG** (via causal-learn's
+`dag2cpdag`), not the DAG: PC identifies a Markov equivalence class, and the default
+`chain` SCM's class is entirely undirected, so scoring arrows against the DAG would
+charge the estimate for edges no observational method can orient. The headline metrics
+are unchanged and remain skeleton-only; this adds one console line and, per alpha in the
+JSON, `correct_directed`, `reversed`, `undirected_in_estimate` (PC declined to orient an
+edge the truth's class does orient — a weaker failure than a reversal),
+`directed_in_estimate`, `bidirected_in_estimate`, `both_undirected`, `cpdag_shd` and
+`cpdag_exact_match`, plus the estimated and true CPDAG matrices. `cpdag_shd` counts node
+pairs whose edge type differs at all, so it is comparable to `skeleton_shd` but strictly
+harder. Without the flag the outputs are byte-identical to before.
+
+## DINOv3 embeddings as a reference representation
+
+Two scripts run the same two questions on a pretrained 2-D vision encoder instead of a
+trained VQ-VAE, so "what does a general-purpose foundation model already recover here"
+has an answer on this generator's own terms. They need `transformers` and `causal-learn`
+in the environment, and DINOv3 weights are gated on the Hub (accept the licence and
+`hf auth login`, or pass a local snapshot to `--model-id`).
+
+```bash
+python -m pip install transformers causal-learn
+
+# 1. embed. --run-dir takes the generator settings from a training run, so the
+#    embeddings are scored on exactly that run's distribution.
+python -m eval.dinov3_embed_synthetic --out results/dinov3/emb.npz --num-samples 500
+python -m eval.dinov3_embed_synthetic --out results/dinov3/emb_floor.npz --random-init \
+  --num-samples 500                      # untrained twin, same architecture and seed
+
+# 2. score
+python -m eval.dinov3_identifiability --embeddings results/dinov3/emb.npz \
+  --floor results/dinov3/emb_floor.npz --out results/dinov3/report.json
+```
+
+The volume is reduced to `--slices` evenly spaced planes per axis in `--axes`, embedded
+independently and concatenated (`--slice-agg mean` averages them instead and throws away
+which plane a feature came from, which is most of what locates `lesion_x/y/z`). Two
+choices are not cosmetic and are recorded in the output's `meta`:
+
+- `--window per_slice` (the recipe in `eval/dino.ipynb`) maps every plane onto the same
+  range, which is exactly the affine map style applies. Style recovery is then bounded by
+  the windowing rather than by the encoder — the same trap `--synthetic-normalize
+  per_sample` sets. The default `dataset` estimates one window from a pilot of volumes.
+- `--token-pool` defaults to `cls_mean`. Mean pooling over patch tokens is
+  permutation-invariant, so in-plane position is not in it; `--token-pool grid` keeps a
+  `--grid-size` average of the patch map. The patch-token prefix (CLS plus DINOv3's four
+  register tokens) is inferred from the sequence length rather than trusted from the
+  config, so `mean` never silently averages register tokens in with the patches.
+
+The report has four sections. Tables 1 and 2 are per-factor cross-validated probe R² with
+a permutation null and block-MCC, computed by `eval.identifiability_metrics` and batched
+as in `run_dci_compare._score_block`; `gap = real − null` is the reportable column,
+`Δfloor` subtracts the untrained twin and `Δvox` compares against downsampled voxels.
+Table 3 is `run_causal_recovery.evaluate_arrays` unchanged, with two extra rows: `truth`
+runs the identical panel on the ground-truth factors (the ceiling — PC at this sample
+size cannot beat that row) and `floor` runs it on the untrained twin. Every caveat above
+about alpha selection and the in-sample graph readout applies to it unchanged. Table 3's
+raw/partial R² use that panel's full-width single-split Ridge probe, which is biased low
+when the embeddings are wider than the sample count; table 1's null-corrected gap is the
+factor-recovery number to quote.
+
+`--self-test` on either script runs its logic on planted arrays with no model, no GPU and
+(for the scoring script) no torch.

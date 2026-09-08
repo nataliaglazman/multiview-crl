@@ -19,6 +19,8 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `eval/run_dci_compare.py` — full cross-model protocol (R²/MCC/DCI, nulls, `--floor`, CSV). The source of truth for the metric rules; other eval scripts import them from here rather than re-deriving.
 - `eval/identifiability_report.py` — one-page readable R²/MCC/DCI report for a single run vs its untrained floor. Per-factor R² at each factor's assigned pooling, plus an R² ladder showing every factor at every rung (gap/stats/patch). Thin layer over the above; `--self-test` runs torch-free.
 - `eval/plot_identifiability.py` — PNG figures from `identifiability_report --out` JSON (one or two models). Never re-scores; each figure ships a `.csv` twin.
+- `eval/dinov3_embed_synthetic.py` — run the synthetic views through a pretrained DINOv3 (HF `transformers`), slice 3D→2D, save embeddings + GT latents + SCM adjacency to `.npz`. `--random-init` gives the untrained floor.
+- `eval/dinov3_identifiability.py` — score those embeddings: per-factor R²/MCC vs permutation null, floor and voxel baselines, plus PC graph recovery via `run_causal_recovery.evaluate_arrays`. Torch-free; `--self-test`.
 - `eval/view_latents.ipynb`, `eval/dino.ipynb` — analysis notebooks.
 - `utils/config.py` — `parse_args`, `update_args`. CLI surface lives here. Datasets: ADNI, synthetic, custom only.
 - `utils/checkpointing.py` — save/load/emergency checkpoints, auto-resume, architecture compat check.

@@ -50,6 +50,89 @@ def skeleton_metrics(estimated, truth):
     )
 
 
+def edge_type(graph, i, j):
+    """The causal-learn edge between ``i`` and ``j``, as a name.
+
+    causal-learn stores the endpoint at ``a`` of the edge ``a—b`` in ``graph[a, b]``:
+    ``-1`` is a tail, ``1`` an arrowhead, ``0`` no edge.  So ``i -> j`` is
+    ``graph[i, j] == -1`` with ``graph[j, i] == 1``, ``i — j`` is ``-1`` both ways and
+    ``i <-> j`` is ``1`` both ways.
+    """
+    tail, head = int(graph[i][j]), int(graph[j][i])
+    return {
+        (0, 0): "none",
+        (-1, -1): "undirected",
+        (-1, 1): "forward",
+        (1, -1): "backward",
+        (1, 1): "bidirected",
+    }.get((tail, head), "other")
+
+
+def true_cpdag(adjacency):
+    """The true DAG's CPDAG, in causal-learn's matrix encoding.
+
+    PC identifies a Markov equivalence class, not a DAG, so this — not the DAG — is what
+    an oriented estimate can be scored against.  On the default ``chain`` SCM the CPDAG is
+    entirely undirected, and scoring orientations against the DAG instead would charge the
+    estimate for two edges that no observational method can orient.
+    """
+    import numpy as np
+    from causallearn.graph.Dag import Dag
+    from causallearn.graph.GraphNode import GraphNode
+    from causallearn.utils.DAG2CPDAG import dag2cpdag
+
+    adjacency = np.asarray(adjacency, dtype=bool)
+    nodes = [GraphNode(f"X{d + 1}") for d in range(len(adjacency))]
+    dag = Dag(nodes)
+    for i, j in zip(*np.where(adjacency)):
+        dag.add_directed_edge(nodes[i], nodes[j])
+    return np.asarray(dag2cpdag(dag).graph, dtype=int)
+
+
+def orientation_metrics(estimated, truth_cpdag):
+    """Score an estimated CPDAG against the true one, edge type by edge type.
+
+    ``cpdag_shd`` counts node pairs whose edge type differs at all — a missing edge, an
+    extra edge, and an edge oriented the wrong way each cost 1, so it is comparable to
+    ``skeleton_shd`` but strictly harder.  The breakdown covers only pairs adjacent in
+    BOTH graphs, which is where orientation is the question rather than detection:
+    ``undirected_in_estimate`` is PC declining to orient an edge the truth's equivalence
+    class does orient, which is a weaker failure than ``reversed``.
+    """
+    import numpy as np
+
+    estimated = np.asarray(estimated, dtype=int)
+    truth_cpdag = np.asarray(truth_cpdag, dtype=int)
+    if estimated.shape != truth_cpdag.shape:
+        raise ValueError("Estimated and true CPDAG must be equally sized square matrices")
+    counts = dict(
+        correct_directed=0,
+        reversed=0,
+        undirected_in_estimate=0,
+        directed_in_estimate=0,
+        bidirected_in_estimate=0,
+        both_undirected=0,
+    )
+    mismatched = 0
+    for i in range(len(truth_cpdag)):
+        for j in range(i + 1, len(truth_cpdag)):
+            est, true = edge_type(estimated, i, j), edge_type(truth_cpdag, i, j)
+            mismatched += est != true
+            if est == "none" or true == "none":
+                continue
+            if est == true:
+                counts["correct_directed" if true in ("forward", "backward") else "both_undirected"] += 1
+            elif {est, true} == {"forward", "backward"}:
+                counts["reversed"] += 1
+            elif est == "undirected":
+                counts["undirected_in_estimate"] += 1
+            elif est == "bidirected":
+                counts["bidirected_in_estimate"] += 1
+            else:
+                counts["directed_in_estimate"] += 1
+    return dict(counts, cpdag_shd=mismatched, cpdag_exact_match=(mismatched == 0))
+
+
 def fit_probe(X, y):
     """Notebook linear probe: 70/30 split, train-only scaling, Ridge(alpha=1)."""
     from sklearn.linear_model import Ridge
@@ -63,8 +146,21 @@ def fit_probe(X, y):
     return float(r2_score(yte, model.predict(scaler.transform(Xte)), multioutput="variance_weighted"))
 
 
-def evaluate_arrays(X_content, z_content, adjacency, alphas=DEFAULT_ALPHAS, factor_rescue=False, diagnostic_alpha=0.05):
-    """Evaluate already aligned features and factors with the supplied panel's protocol."""
+def evaluate_arrays(
+    X_content,
+    z_content,
+    adjacency,
+    alphas=DEFAULT_ALPHAS,
+    factor_rescue=False,
+    diagnostic_alpha=0.05,
+    orientation=False,
+):
+    """Evaluate already aligned features and factors with the supplied panel's protocol.
+
+    ``orientation=True`` additionally scores each recovered graph's edge DIRECTIONS
+    against the true DAG's CPDAG (see :func:`orientation_metrics`).  Off by default so
+    existing reports are unchanged; the headline metrics stay skeleton-only either way.
+    """
     import numpy as np
     from sklearn.decomposition import PCA
     from sklearn.linear_model import LinearRegression, RidgeCV
@@ -125,6 +221,7 @@ def evaluate_arrays(X_content, z_content, adjacency, alphas=DEFAULT_ALPHAS, fact
 
     truth = adj | adj.T
     np.fill_diagonal(truth, False)
+    truth_cpdag = true_cpdag(adj) if orientation else None
     sweep = []
     best = None
 
@@ -135,7 +232,11 @@ def evaluate_arrays(X_content, z_content, adjacency, alphas=DEFAULT_ALPHAS, fact
         graph = cg.G.graph
         estimated = (graph != 0) | (graph.T != 0)
         np.fill_diagonal(estimated, False)
-        return dict(alpha=alpha, **skeleton_metrics(estimated, truth), adjacency=estimated.astype(int).tolist())
+        row = dict(alpha=alpha, **skeleton_metrics(estimated, truth), adjacency=estimated.astype(int).tolist())
+        if truth_cpdag is not None:
+            row["orientation"] = orientation_metrics(graph, truth_cpdag)
+            row["cpdag"] = np.asarray(graph, dtype=int).tolist()
+        return row
 
     # Always include the fixed diagnostic alpha, but select the headline best
     # only from the user's original sweep to preserve the existing metric.
@@ -181,6 +282,8 @@ def evaluate_arrays(X_content, z_content, adjacency, alphas=DEFAULT_ALPHAS, fact
         alpha_sweep=sweep,
         graph_status="ok" if best else "unavailable",
     )
+    if truth_cpdag is not None:
+        result["true_cpdag"] = truth_cpdag.tolist()
     if factor_rescue:
         baseline = next((r for r in sweep if r["alpha"] == diagnostic_alpha and "f1" in r), None)
         repairs = []
@@ -292,7 +395,9 @@ def evaluate_run(run_dir, cli):
     if scm is None:
         raise ValueError("Matched synthetic dataset did not expose a causal SCM")
     X, z = extract_content(model, dataset, device, level, cli.pooling, cli.batch_size, cli.num_workers)
-    result = evaluate_arrays(X, z, scm["adj"], cli.alphas, cli.factor_rescue, cli.diagnostic_alpha)
+    result = evaluate_arrays(
+        X, z, scm["adj"], cli.alphas, cli.factor_rescue, cli.diagnostic_alpha, getattr(cli, "orientation", False)
+    )
     result.update(
         status="ok" if result["best"] else "partial",
         checkpoint=str(checkpoint),
@@ -432,6 +537,12 @@ def main(argv=None):
     parser.add_argument(
         "--factor-rescue", action="store_true", help="Rerun PC replacing each decoded factor with truth"
     )
+    parser.add_argument(
+        "--orientation",
+        action="store_true",
+        help="Also score edge DIRECTIONS against the true DAG's CPDAG. The headline metrics stay "
+        "skeleton-only; this adds a per-alpha breakdown to the JSON and one console line.",
+    )
     cli = parser.parse_args(argv)
     if not 0 < cli.diagnostic_alpha < 1:
         parser.error("--diagnostic-alpha must be strictly between 0 and 1")
@@ -489,6 +600,13 @@ def main(argv=None):
                     f"  Best skeleton F1={best['f1']:.3f} P={best['precision']:.3f} R={best['recall']:.3f} "
                     f"alpha={best['alpha']:g} SHD={best['skeleton_shd']} exact_match={best['exact_match']}"
                 )
+                if "orientation" in best:
+                    o = best["orientation"]
+                    print(
+                        f"  Orientation vs the true CPDAG: correct={o['correct_directed']} "
+                        f"reversed={o['reversed']} unoriented={o['undirected_in_estimate']} "
+                        f"CPDAG SHD={o['cpdag_shd']} exact_match={o['cpdag_exact_match']}"
+                    )
             else:
                 print("  PC unavailable; factor scores retained. See alpha_sweep errors in JSON.")
             for factor in result["factors"]:
