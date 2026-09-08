@@ -87,6 +87,8 @@ _STORE_TRUE_FLAGS = {
     "synthetic_hierarchical_content",
     "synthetic_causal",
     "contrastive_only",
+    "identifiability_no_leakage",
+    "identifiability_no_cache_testset",
 }
 
 # Keys added at runtime by update_args() or the training loop — not part of the

@@ -1149,6 +1149,117 @@ def parse_args() -> argparse.ArgumentParser:
         "hours at 0. It also removes the p>>n negative bias (mean R^2 -0.27 on a SHUFFLED "
         "target unreduced, ~-0.04 reduced) that drags weak factors below zero.",
     )
+    # ----------------------------------------------------------------------- #
+    # In-training identifiability report (log-only; never feeds selection)
+    # ----------------------------------------------------------------------- #
+    #
+    # These exist because the selection/* curves above and `eval.identifiability_report`
+    # are NOT the same measurement, and reading one as a preview of the other is a mistake
+    # this project has already made. They differ on every axis at once: split (val vs the
+    # frozen test set), probe width (--selection-probe-dim 0 vs --probe-dim auto), patch
+    # grid (--patch-grid vs 8x8x8), seeds, and above all the quantity — selection reports
+    # a 4-term health composite whose content term is block-MCC at STATS pooling, while
+    # the report's headline is per-factor R2 at each factor's assigned rung, minus an
+    # untrained twin. Nothing in TensorBoard was on the report's axis.
+    #
+    # This block puts the report itself on the curve. Defaults deliberately MIRROR
+    # eval/identifiability_report.py's argparse defaults, not the selection block's, so a
+    # curve and the end-of-run report agree by construction; changing one without the
+    # other reintroduces exactly the gap it exists to close.
+    parser.add_argument(
+        "--identifiability-every",
+        type=int,
+        default=0,
+        help="If > 0 and --dataset-name is 'synthetic', run eval.identifiability_report on the "
+        "live encoder every N steps and log its tables to TensorBoard/W&B under "
+        "identifiability/*. 0 disables (default). This is LOG-ONLY: it never reaches "
+        "overall_score, the selection gate or the best-checkpoint choice, so enabling it "
+        "leaves which checkpoint a run calls best bit-identical. Cost is real (a full "
+        "extraction per pooling plus CPU probes, ~1-2 min per firing at the defaults, plus "
+        "a one-off floor of --identifiability-floor-seeds draws at the first firing), so "
+        "set it to a multiple of --checkpoint-steps rather than to --log-steps.",
+    )
+    parser.add_argument(
+        "--identifiability-num-samples",
+        type=int,
+        default=2000,
+        help="Samples drawn from the FROZEN synthetic test split (mode='test', the same set "
+        "build_synthetic_test_set gives the offline report) for the in-training "
+        "identifiability report. Note this is deliberately NOT the training val split the "
+        "selection composite scores: val and test use different generator seeds "
+        "(_SPLIT_OFFSETS 1 vs 2), so scoring on val would be off the report's axis before "
+        "any other setting is considered.",
+    )
+    parser.add_argument(
+        "--identifiability-poolings",
+        default="gap,stats,8x8x8",
+        help="Poolings for the in-training identifiability report, as eval.identifiability_report "
+        "--poolings takes them (gap, stats, DxHxW). Default matches that script. It is NOT "
+        "tied to --patch-grid on purpose: the training grid is a property of the objective, "
+        "the report's rung is a property of the measurement, and quietly substituting one "
+        "for the other makes two runs with different --patch-grid incomparable.",
+    )
+    parser.add_argument(
+        "--identifiability-no-cache-testset",
+        dest="identifiability_cache_testset",
+        action="store_false",
+        help="Render the identifiability test set on every access instead of holding it in RAM. "
+        "The cache is on by default (as offline) because the set is iterated once per pooling "
+        "per firing and the generator is procedural, so uncached it re-renders 3x every firing "
+        "and 9x more for the floor. But it is held for the REST OF THE RUN, and training itself "
+        "does not cache (--cache-dataset defaults off): at the defaults (2000 samples, "
+        "--synthetic-res 64) that is ~8 GB of resident RAM, which on a tight node kills the job. "
+        "Lowering --identifiability-num-samples is the other lever, at the cost of leaving the "
+        "offline report's N and so its axis.",
+    )
+    parser.add_argument(
+        "--identifiability-level", type=int, default=0, help="Encoder level scored by the in-training report."
+    )
+    parser.add_argument(
+        "--identifiability-seeds",
+        default="0,1,2",
+        help="CV probe seeds for the in-training identifiability report (matches that script's default).",
+    )
+    parser.add_argument(
+        "--identifiability-n-null",
+        type=int,
+        default=3,
+        help="Label-permutation repeats for the in-training identifiability report.",
+    )
+    parser.add_argument(
+        "--identifiability-probe-dim",
+        default="auto",
+        help="PCA width for the in-training report's probe blocks. 'auto' (default, matching "
+        "eval.identifiability_report) reduces only p>>n blocks; an integer reduces every "
+        "block; 0 disables. Unlike --selection-probe-dim this is free to default to 'auto': "
+        "nothing here selects a checkpoint, so no past run's 'best' moves.",
+    )
+    parser.add_argument(
+        "--identifiability-floor-seeds",
+        type=int,
+        default=3,
+        help="Untrained-twin draws averaged into the floor, computed ONCE at the first firing "
+        "and reused for every later one. The floor is the measurement, not a formality: at "
+        "patch pooling an untrained encoder already scores R2 > 0.8 on most factors and "
+        "block-MCC ~0.86, so identifiability/r2_raw is nearly all architecture. Only the "
+        "learned (floor-subtracted) curves are readable. Set 0 to skip it — the raw curves "
+        "are still logged, and are still not reportable.",
+    )
+    parser.add_argument(
+        "--identifiability-no-leakage",
+        dest="identifiability_leakage",
+        action="store_false",
+        help="Skip the leakage cells and view probe in the in-training report (roughly halves "
+        "its probe cost). Leaves table 1 without the section that distinguishes a content "
+        "block that improved from one that absorbed style.",
+    )
+    parser.add_argument(
+        "--identifiability-n-jobs",
+        type=int,
+        default=-1,
+        help="Parallel probe workers for the in-training report (-1 = all cores). The scoring "
+        "is CPU sklearn with the GPU idle; results are identical at any setting.",
+    )
     parser.add_argument(
         "--bt-sim-coeff",
         type=float,

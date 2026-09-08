@@ -814,47 +814,20 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
 # --------------------------------------------------------------------------- #
 
 
-def score_run(
-    run_dir,
-    dataset,
-    poolings,
-    level,
-    seeds,
-    n_null,
-    batch_size,
-    num_workers,
-    device,
-    checkpoint=None,
-    probe_dim=PROBE_DIM_AUTO,
-    with_dci=False,
-    with_leakage=True,
-    dci_max_codes=4096,
-    random_init=False,
-    probe_kind="ridge",
-    n_jobs=1,
-    factor_pooling="assigned",
-    init_seed=None,
-    causal=None,
-    name=None,
-):
-    """Extract this run's representations under every pooling and score them.
+def extract_reprs(model, dataset, poolings, level, batch_size, num_workers, device, what="encoder outputs"):
+    """Representations of one model under every pooling, plus the paired GT factors.
 
-    ``random_init=True`` builds the same architecture UNTRAINED — the floor twin.  It must
-    go through this identical function, not a second script, so the floor and the
-    checkpoint share pooling, probe width, null count and factor routing; differencing two
-    scripts' numbers is the cross-axis mistake this project has already paid for twice.
+    Split out of ``score_run`` so that an in-memory encoder (in-training logging) and a
+    checkpoint on disk reach ``score_extracted`` through the same door.  The scoring half
+    is where every metric rule lives, and it must not be reachable by two paths that could
+    drift apart — that is the cross-axis mistake this whole module exists to avoid.
+
+    Note: ``_extract_synthetic_representations`` calls ``model.eval()`` and does NOT
+    restore train mode.  ``score_run`` discards the model afterwards; a live caller must
+    save and restore it.
     """
     from eval.dci import _extract_synthetic_representations
-    from eval.run_dci_compare import _reduce_reprs, _resolve_checkpoint, _score_dci
-    from eval.run_dci_synthetic import load_model_from_run_dir
 
-    model, _args, device = load_model_from_run_dir(
-        run_dir,
-        None if random_init else _resolve_checkpoint(run_dir, checkpoint),
-        device,
-        random_init=random_init,
-        seed=init_seed,
-    )
     reprs, gt_content, gt_style, info = {}, None, None, None
     for key, value in poolings:
         level_data, gc, gs1, _gs2 = _extract_synthetic_representations(
@@ -869,9 +842,41 @@ def score_run(
             gt_style = gs1
         if info is None and level in level_data:
             info = level_data[level][4]
-    del model
     if info is None:
-        raise RuntimeError(f"level {level} not found in encoder outputs for {run_dir}")
+        raise RuntimeError(f"level {level} not found in {what}")
+    return reprs, gt_content, gt_style, info
+
+
+def score_extracted(
+    reprs,
+    gt_content,
+    gt_style,
+    info,
+    dataset,
+    poolings,
+    level,
+    seeds,
+    n_null,
+    probe_dim=PROBE_DIM_AUTO,
+    with_dci=False,
+    with_leakage=True,
+    dci_max_codes=4096,
+    probe_kind="ridge",
+    n_jobs=1,
+    factor_pooling="assigned",
+    causal=None,
+    name="run",
+):
+    """Score already-extracted representations — every metric rule in the report lives here.
+
+    Takes the output of ``extract_reprs`` so the trained checkpoint, its untrained floor
+    twin and a live in-training encoder are all scored by one implementation, at one probe
+    width, with one null count and one ``FACTOR_POOLING`` routing.  Differencing numbers
+    that came from two scoring paths is the mistake in this project's changelog; keeping
+    the paths joined here is what makes an in-training curve comparable to the offline
+    report at all.
+    """
+    from eval.run_dci_compare import _reduce_reprs, _score_dci
 
     names = info["content_names"]
     style_names = info.get("style_names") or []
@@ -883,7 +888,7 @@ def score_run(
     probed = _reduce_reprs(reprs, level, probe_dim) if probe_dim else reprs
 
     res = {
-        "name": name or os.path.basename(os.path.normpath(run_dir)),
+        "name": name,
         "level": level,
         "n_samples": int(gt_content.shape[0]),
         # Render the VALUE, not the bucket key: "patch" alone hides whether the grid was
@@ -988,6 +993,257 @@ def score_run(
             }
         res["dci"] = dci
     return res
+
+
+def score_run(
+    run_dir,
+    dataset,
+    poolings,
+    level,
+    seeds,
+    n_null,
+    batch_size,
+    num_workers,
+    device,
+    checkpoint=None,
+    probe_dim=PROBE_DIM_AUTO,
+    with_dci=False,
+    with_leakage=True,
+    dci_max_codes=4096,
+    random_init=False,
+    probe_kind="ridge",
+    n_jobs=1,
+    factor_pooling="assigned",
+    init_seed=None,
+    causal=None,
+    name=None,
+):
+    """Extract this run's representations under every pooling and score them.
+
+    ``random_init=True`` builds the same architecture UNTRAINED — the floor twin.  It must
+    go through this identical function, not a second script, so the floor and the
+    checkpoint share pooling, probe width, null count and factor routing; differencing two
+    scripts' numbers is the cross-axis mistake this project has already paid for twice.
+    """
+    from eval.run_dci_compare import _resolve_checkpoint
+    from eval.run_dci_synthetic import load_model_from_run_dir
+
+    model, _args, device = load_model_from_run_dir(
+        run_dir,
+        None if random_init else _resolve_checkpoint(run_dir, checkpoint),
+        device,
+        random_init=random_init,
+        seed=init_seed,
+    )
+    try:
+        reprs, gt_content, gt_style, info = extract_reprs(
+            model, dataset, poolings, level, batch_size, num_workers, device, what=f"encoder outputs for {run_dir}"
+        )
+    finally:
+        # Freed before scoring, not after: the probes are CPU sklearn and the floor draws
+        # load a second model, so holding this one through scoring doubles peak GPU memory
+        # for no benefit.
+        del model
+    return score_extracted(
+        reprs,
+        gt_content,
+        gt_style,
+        info,
+        dataset,
+        poolings,
+        level,
+        seeds,
+        n_null,
+        probe_dim=probe_dim,
+        with_dci=with_dci,
+        with_leakage=with_leakage,
+        dci_max_codes=dci_max_codes,
+        probe_kind=probe_kind,
+        n_jobs=n_jobs,
+        factor_pooling=factor_pooling,
+        causal=causal,
+        name=name or os.path.basename(os.path.normpath(run_dir)),
+    )
+
+
+def score_model_live(
+    model,
+    dataset,
+    poolings,
+    level,
+    seeds,
+    n_null,
+    batch_size,
+    num_workers,
+    device,
+    probe_dim=PROBE_DIM_AUTO,
+    with_dci=False,
+    with_leakage=True,
+    dci_max_codes=4096,
+    probe_kind="ridge",
+    n_jobs=1,
+    factor_pooling="assigned",
+    causal=None,
+    name="live",
+):
+    """In-training counterpart of ``score_run`` for an in-memory encoder.
+
+    Same extraction, same probes, same nulls, same routing as the offline report — the
+    only difference is where the weights came from.  That is the point: the numbers this
+    returns are meant to be read on the SAME axis as
+    ``python -m eval.identifiability_report --run-dir <run>``, so a training curve and the
+    end-of-run report agree instead of disagreeing for reasons that are about the harness.
+
+    To land on that axis the caller must also pass the offline defaults — the frozen
+    ``build_synthetic_test_set`` (mode="test"), ``--num-samples 2000``,
+    ``--poolings gap,stats,8x8x8``, ``--seeds 0,1,2``, ``--probe-dim auto`` — and subtract
+    the same untrained floor.  ``training.main_multimodal`` does exactly that; nothing here
+    can enforce it.
+
+    Note: extraction calls ``model.eval()`` and does not restore train mode — save and
+    restore it around this call.
+    """
+    reprs, gt_content, gt_style, info = extract_reprs(
+        model, dataset, poolings, level, batch_size, num_workers, device, what="live encoder outputs"
+    )
+    return score_extracted(
+        reprs,
+        gt_content,
+        gt_style,
+        info,
+        dataset,
+        poolings,
+        level,
+        seeds,
+        n_null,
+        probe_dim=probe_dim,
+        with_dci=with_dci,
+        with_leakage=with_leakage,
+        dci_max_codes=dci_max_codes,
+        probe_kind=probe_kind,
+        n_jobs=n_jobs,
+        factor_pooling=factor_pooling,
+        causal=causal,
+        name=name,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Scalars — the printed report, flattened for TensorBoard / W&B
+# --------------------------------------------------------------------------- #
+
+
+def report_scalars(res, floor=None, prefix="identifiability/"):
+    """Flatten a scored report into ``{tag: value}`` for ``add_scalar``.
+
+    The tags mirror what ``print_report`` puts on the page, and the arithmetic is the
+    same: ``r2_learned/<factor>`` is table 1's LEARNED column (the null-subtracted R² gap
+    at the factor's assigned rung, minus the untrained twin's), ``mcc_learned/<rung>`` is
+    table 2's, and the leakage tags are section 3's cells averaged over their factors.
+
+    ``r2_raw`` and ``r2_floor`` are emitted alongside every learned value, deliberately.
+    Without the floor beside it a learned curve is not readable: at patch pooling an
+    untrained encoder already scores R² > 0.8 on most factors and block-MCC ~0.86, so a
+    raw curve that looks like a strong result can be entirely architecture, and a learned
+    curve that dips can be a floor that rose.  The floor lines are constants — one draw
+    per run — which is exactly what makes the comparison legible on the same axes.
+
+    Every value is a plain float; NaNs are dropped by the caller, not here, so that a
+    metric which stopped being computable is visibly absent rather than logged as 0.
+    """
+    out, has_floor = {}, floor is not None
+    fpf = (floor or {}).get("per_factor", {}) if has_floor else {}
+
+    learned = []
+    for name, d in (res.get("per_factor") or {}).items():
+        gap = _f(d.get("r2"))
+        out[f"{prefix}r2_gap/{name}"] = gap
+        out[f"{prefix}r2_raw/{name}"] = _f(d.get("r2_raw"))
+        if has_floor:
+            fl = _f((fpf.get(name) or {}).get("r2"))
+            out[f"{prefix}r2_floor/{name}"] = fl
+            val = _delta(gap, fl)
+            out[f"{prefix}r2_learned/{name}"] = val
+            learned.append(val)
+
+    # The MCC ladder, per rung. Its shape across rungs is the readable object — stats
+    # cannot express position and patch sits on a ~0.86 floor — so all rungs are emitted
+    # rather than a single headline that would invite reading one in isolation.
+    fladder = (floor or {}).get("mcc", {}) if has_floor else {}
+    for rung, d in (res.get("mcc") or {}).items():
+        raw = _f(d.get("mean"))
+        out[f"{prefix}mcc_raw/{rung}"] = raw
+        if has_floor:
+            fl = _f((fladder.get(rung) or {}).get("mean"))
+            out[f"{prefix}mcc_floor/{rung}"] = fl
+            out[f"{prefix}mcc_learned/{rung}"] = _delta(raw, fl)
+        # Below 1.0 the Hungarian match has permuted, likely between SCM-correlated
+        # factors, and a jump in any per-factor MCC is then an artefact of the assignment.
+        out[f"{prefix}mcc_assignment_identity/{rung}"] = _f(d.get("assignment_identity"))
+
+    mpool = res.get("mcc_per_factor_pooling")
+    mpf = ((res.get("mcc") or {}).get(mpool) or {}).get("per_factor", {})
+    fmpf = ((fladder.get(mpool) or {}).get("per_factor", {})) if has_floor else {}
+    for name, v in mpf.items():
+        out[f"{prefix}mcc_raw_by_factor/{name}"] = _f(v)
+        if has_floor:
+            out[f"{prefix}mcc_learned_by_factor/{name}"] = _delta(_f(v), _f(fmpf.get(name)))
+
+    # Section 3. A content score that rises because the content block absorbed style looks
+    # exactly like one that rises because content improved, so these travel with table 1
+    # or table 1 is not interpretable on its own.
+    fcells = ((floor or {}).get("leakage") or {}).get("cells", {}) if has_floor else {}
+    _cell_tag = {
+        "content→style": "content_to_style",
+        "style→style": "style_to_style",
+        "style→content": "style_to_content",
+    }
+    for cell, per_factor in ((res.get("leakage") or {}).get("cells") or {}).items():
+        tag = _cell_tag.get(cell, cell)
+        raw = _cell_mean(per_factor)
+        out[f"{prefix}leak_gap/{tag}"] = _f(raw)
+        if has_floor:
+            out[f"{prefix}leak_learned/{tag}"] = _delta(_f(raw), _f(_cell_mean(fcells.get(cell) or {})))
+
+    fview = ((floor or {}).get("leakage") or {}).get("view", {}) if has_floor else {}
+    for rung, d in ((res.get("leakage") or {}).get("view") or {}).items():
+        for block in ("content_acc", "style_acc", "all_acc"):
+            if block not in d:
+                continue
+            # Chance is 0.5, and an untrained encoder already separates two views that
+            # differ in intensity statistics, so the floor line matters here too.
+            out[f"{prefix}view_acc/{rung}_{block[:-4]}"] = _f(d[block])
+            if has_floor and block in (fview.get(rung) or {}):
+                out[f"{prefix}view_acc_floor/{rung}_{block[:-4]}"] = _f(fview[rung][block])
+
+    # Partial-R²: the same probe on each factor residualised on its SCM parents. Under
+    # --causal match a factor with a well-recovered parent scores well without being
+    # encoded in its own right, and this column is what separates the two.
+    fpart = (floor or {}).get("partial") or {} if has_floor else {}
+    partial = []
+    for name, d in (res.get("partial") or {}).items():
+        gap = _f(d.get("r2"))
+        out[f"{prefix}partial_gap/{name}"] = gap
+        if has_floor:
+            val = _delta(gap, _f((fpart.get(name) or {}).get("r2")))
+            out[f"{prefix}partial_learned/{name}"] = val
+            partial.append(val)
+
+    # One curve to watch, and the count behind it. n_resolved uses the report's own
+    # NOISE_FLOOR so "how many factors are actually identified" reads the same here as on
+    # the page; the mean alone hides a sign split across factors.
+    finite = [v for v in learned if np.isfinite(v)]
+    if finite:
+        out[f"{prefix}summary/r2_learned_mean"] = float(np.mean(finite))
+        out[f"{prefix}summary/r2_learned_min"] = float(np.min(finite))
+        out[f"{prefix}summary/n_resolved"] = float(sum(v > NOISE_FLOOR for v in finite))
+        out[f"{prefix}summary/n_factors"] = float(len(finite))
+    pfinite = [v for v in partial if np.isfinite(v)]
+    if pfinite:
+        out[f"{prefix}summary/partial_learned_mean"] = float(np.mean(pfinite))
+    if has_floor and mpool:
+        out[f"{prefix}summary/mcc_learned"] = _f(out.get(f"{prefix}mcc_learned/{mpool}"))
+    return out
 
 
 def _self_test():
@@ -1105,6 +1361,61 @@ def _self_test():
     _resid = residualise_on_parents(gt, adj)
     for j in (0, 2, 3):
         assert np.array_equal(_resid[:, j], gt[:, j]), f"parentless factor {names[j]} was residualised"
+
+    # report_scalars must be the printed page, flattened — nothing recomputed. The whole
+    # point of the in-training curves is that they land on the report's axis, so a tag
+    # whose arithmetic drifts from table 1 is worse than no tag: it looks comparable.
+    _sc = report_scalars(out["signal"], floor=out["noise"], prefix="id/")
+    for _fac, _d in out["signal"]["per_factor"].items():
+        _want = _d["r2"] - out["noise"]["per_factor"][_fac]["r2"]
+        assert abs(_sc[f"id/r2_learned/{_fac}"] - _want) < 1e-12, f"{_fac}: scalar != table 1 learned"
+        assert abs(_sc[f"id/r2_raw/{_fac}"] - _d["r2_raw"]) < 1e-12, f"{_fac}: raw column drifted"
+    assert abs(_sc["id/summary/r2_learned_mean"] - (s - z)) < 1e-12, "summary mean != table 1's mean"
+    assert _sc["id/summary/n_resolved"] == float(
+        sum(_sc[f"id/r2_learned/{f}"] > NOISE_FLOOR for f in out["signal"]["per_factor"])
+    ), "n_resolved must use the report's own NOISE_FLOOR"
+    assert abs(_sc["id/mcc_learned/gap"] - (m_s - m_z)) < 1e-12, "mcc ladder scalar != table 2"
+    assert abs(_sc["id/leak_learned/content_to_style"] - (leak_s - leak_z)) < 1e-12, "leak scalar != section 3"
+    # Without a floor there is no learned column anywhere — the raw ones must still be
+    # emitted, so a --no-floor caller gets curves that are honest about what they are.
+    _nf = report_scalars(out["signal"], floor=None, prefix="id/")
+    assert not any(k.startswith("id/r2_learned/") for k in _nf), "no floor => no learned column"
+    assert all(f"id/r2_raw/{f}" in _nf for f in out["signal"]["per_factor"]), "raw column dropped without a floor"
+    print("  self-test: report_scalars — learned/raw/summary tags match the printed tables")
+
+    # The live seam, with the exact kwargs training/main_multimodal.py passes. Extraction is
+    # stubbed (it is the only torch in the path), so this asserts the contract that would
+    # otherwise fail at the first firing of --identifiability-every, hours into a run, and
+    # be caught only by the `except Exception` that keeps such a failure from killing it.
+    import sys as _sys
+
+    _mod = _sys.modules[__name__]
+    _real_extract = _mod.extract_reprs
+    _mod.extract_reprs = lambda *a, **k: (reprs, gt, gt_s, reprs["gap"][0][4])
+    try:
+        _live = score_model_live(
+            object(),
+            dataset=None,
+            poolings=parse_poolings("gap,stats,8x8x8"),
+            level=0,
+            seeds=(0,),
+            n_null=1,
+            batch_size=32,
+            num_workers=0,
+            device=None,
+            probe_dim=PROBE_DIM_AUTO,
+            with_leakage=True,
+            n_jobs=1,
+            causal="match",
+            name="step1",
+        )
+    finally:
+        _mod.extract_reprs = _real_extract
+    assert _live["name"] == "step1" and _live["causal"] == "match", _live
+    assert set(_live["per_factor"]) == set(names), "live path lost factors"
+    assert "leakage" in _live, "live path dropped the leakage section"
+    assert report_scalars(_live)["identifiability/r2_raw/brain_size"] == _live["per_factor"]["brain_size"]["r2_raw"]
+    print("  self-test: score_model_live — in-training kwargs reach the same scorer as --run-dir")
     assert not np.allclose(_resid[:, 1], gt[:, 1]), "the child factor was NOT residualised"
     # ...and must therefore never be flagged parent-carried by the table-1 rule.
     assert b_full - b_part < NOISE_FLOOR, f"a parentless factor read as parent-carried, {b_full} vs {b_part}"

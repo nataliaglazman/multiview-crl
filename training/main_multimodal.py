@@ -2145,6 +2145,16 @@ def main(args):
         # re-arms the gate from its first eval. That is permissive, not wrong: right
         # after a resume the gate can miss a decline that started before it.
         _info_all_peak = float("-inf")
+        # In-training identifiability report state. Both are built lazily at the first
+        # firing and reused: the test set is a procedural render of --identifiability-num-samples
+        # volumes, and the floor is --identifiability-floor-seeds untrained twins scored
+        # end-to-end. Paying either per firing would dominate the training loop, and the
+        # floor MUST be reused anyway — a floor redrawn per firing would put its own
+        # sampling noise into every learned curve, which is the failure mode the offline
+        # script's seeded floor exists to avoid.
+        _ident_dataset = None
+        _ident_floor = None
+        _ident_floor_done = False
         best_ckpt_path = os.path.join(args.save_dir, "vqvae_best.pt")
         # Fallback: if the dedicated best file is missing, read the bookkeeping
         # from the rolling checkpoint (which now mirrors best_metric_*).
@@ -2843,6 +2853,167 @@ def main(args):
                             logger.warning(f"  [WARNING] Periodic synthetic DCI failed: {e}")
                         finally:
                             encoders[0].train(_dci_was_training)
+
+                    # Periodic identifiability REPORT — the offline
+                    # `python -m eval.identifiability_report --run-dir <run>` tables, on the
+                    # training curve. It exists because the selection/* block below answers a
+                    # different question on different data with a different probe, and reading
+                    # it as a preview of the report is a mistake: selection scores the val
+                    # split (generator seed 43) at --selection-probe-dim 0 on --patch-grid,
+                    # and its headline is a 4-term composite whose content term is block-MCC
+                    # at STATS pooling; the report scores the frozen test split (seed 44) at
+                    # probe-dim auto on 8x8x8, and its headline is per-factor R2 at each
+                    # factor's assigned rung MINUS an untrained twin. No scalar in one is an
+                    # estimator of any scalar in the other.
+                    #
+                    # Everything here routes through eval.identifiability_report's own
+                    # score_model_live / report_scalars, so the curve is the report's
+                    # arithmetic and cannot drift from it. LOG-ONLY by construction: nothing
+                    # below writes separation_score, _info_all_peak or any checkpoint, so
+                    # enabling it cannot change which checkpoint a run calls best.
+                    _ident_every = getattr(args, "identifiability_every", 0)
+                    if (
+                        _ident_every > 0
+                        and args.dataset_name == "synthetic"
+                        and (step % _ident_every == 1 or step == args.train_steps)
+                    ):
+                        # Extraction calls encoder.eval() and does not restore train mode;
+                        # leaving it eval would disable codebook EMA and Gumbel sampling for
+                        # the rest of the run.
+                        _ident_was_training = encoders[0].training
+                        # The floor twins go through load_model_from_run_dir, which calls
+                        # torch.manual_seed(init_seed) — on the GLOBAL RNG this loop draws its
+                        # augmentations, Gumbel noise and dropout from. Without this snapshot,
+                        # turning the flag on would silently change the training trajectory,
+                        # and a log-only diagnostic that moves the run it measures is worse
+                        # than no diagnostic. Restored unconditionally below.
+                        _ident_cpu_rng = torch.get_rng_state()
+                        _ident_cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+                        try:
+                            from eval.identifiability_report import (
+                                parse_poolings,
+                                report_scalars,
+                                score_model_live,
+                            )
+                            from eval.run_dci_synthetic import build_synthetic_test_set
+
+                            _ident_pool = parse_poolings(getattr(args, "identifiability_poolings", "gap,stats,8x8x8"))
+                            _ident_seeds = tuple(
+                                int(s) for s in str(getattr(args, "identifiability_seeds", "0,1,2")).split(",")
+                            )
+                            _ident_pd = getattr(args, "identifiability_probe_dim", "auto")
+                            if _ident_pd != "auto":
+                                _ident_pd = int(_ident_pd)
+                            _ident_n = getattr(args, "identifiability_num_samples", 2000)
+                            _ident_common = dict(
+                                poolings=_ident_pool,
+                                level=getattr(args, "identifiability_level", 0),
+                                seeds=_ident_seeds,
+                                n_null=getattr(args, "identifiability_n_null", 3),
+                                batch_size=dataloader_kwargs.get("batch_size", 32),
+                                num_workers=0,
+                                device=device,
+                                probe_dim=_ident_pd,
+                                with_leakage=getattr(args, "identifiability_leakage", True),
+                                n_jobs=getattr(args, "identifiability_n_jobs", -1),
+                                causal="match",
+                            )
+                            if _ident_dataset is None:
+                                # causal=True == the offline `--causal match` default: the eval
+                                # set reproduces the run's own SCM. Scoring an SCM-trained run
+                                # on i.i.d. factors reads dependence-through-parents as lost
+                                # information, with a penalty that GROWS with how well the model
+                                # fits training — measured on this project at 0.2 mean R2.
+                                _ident_dataset = build_synthetic_test_set(
+                                    args,
+                                    _ident_n,
+                                    cache=getattr(args, "identifiability_cache_testset", True),
+                                    causal=True,
+                                )
+                            _ident_common["dataset"] = _ident_dataset
+
+                            if _ident_floor is None and not _ident_floor_done:
+                                _ident_floor_done = True  # one attempt per run, success or not
+                                _n_floor = max(0, int(getattr(args, "identifiability_floor_seeds", 3)))
+                                if _n_floor:
+                                    from eval.identifiability_report import score_run
+                                    from eval.run_dci_compare import mean_std_structs
+
+                                    _f_t0 = time.perf_counter()
+                                    _draws = []
+                                    for _fs in range(_n_floor):
+                                        logger.info(
+                                            f"  [EVALUATION] identifiability floor draw {_fs + 1}/{_n_floor} "
+                                            f"(untrained twin, computed once and reused)..."
+                                        )
+                                        # Through score_run with random_init, i.e. the SAME
+                                        # function the offline report builds its floor with,
+                                        # rebuilt from this run's own settings.json. A twin
+                                        # constructed here instead would be a second path to
+                                        # the number every learned curve is differenced
+                                        # against, free to drift from the one on the page.
+                                        _draws.append(
+                                            score_run(
+                                                args.save_dir,
+                                                random_init=True,
+                                                init_seed=_fs,
+                                                name=f"floor-s{_fs}",
+                                                **_ident_common,
+                                            )
+                                        )
+                                    _ident_floor, _ = mean_std_structs(_draws)
+                                    logger.info(
+                                        f"  [EVALUATION] identifiability floor ready "
+                                        f"({_n_floor} draws, {time.perf_counter() - _f_t0:.1f}s)"
+                                    )
+
+                            _id_t0 = time.perf_counter()
+                            logger.info(
+                                f"  [EVALUATION] Identifiability report (step {step}) "
+                                f"| N={_ident_n} poolings={getattr(args, 'identifiability_poolings', '')} "
+                                f"probe_dim={_ident_pd} floor={'yes' if _ident_floor else 'NO'}..."
+                            )
+                            _ident_res = score_model_live(encoders[0], name=f"step{step}", **_ident_common)
+                            _ident_dt = time.perf_counter() - _id_t0
+                            _ident_scalars = report_scalars(_ident_res, floor=_ident_floor)
+                            _ident_scalars["Perf/identifiability_eval_seconds"] = _ident_dt
+                            for _ik, _iv in _ident_scalars.items():
+                                if _iv is not None and np.isfinite(_iv):
+                                    tb_writer.add_scalar(_ik, _iv, step)
+                            if _use_wandb:
+                                wandb.log(
+                                    {
+                                        _ik: _iv
+                                        for _ik, _iv in _ident_scalars.items()
+                                        if _iv is not None and np.isfinite(_iv)
+                                    },
+                                    step=step,
+                                )
+                            _id_mean = _ident_scalars.get("identifiability/summary/r2_learned_mean")
+                            _id_res = _ident_scalars.get("identifiability/summary/n_resolved")
+                            logger.info(
+                                f"  [IDENTIFIABILITY] step {step} took {_ident_dt:.1f}s | "
+                                + (
+                                    f"mean learned R2={_id_mean:+.4f} over "
+                                    f"{int(_ident_scalars.get('identifiability/summary/n_factors', 0))} factors, "
+                                    f"{int(_id_res)} resolved"
+                                    if _id_mean is not None and np.isfinite(_id_mean)
+                                    else "raw only (no floor) — NOT reportable, see --identifiability-floor-seeds"
+                                )
+                            )
+                        except Exception as e:
+                            logger.warning(f"  [WARNING] Periodic identifiability report failed: {e}")
+                        finally:
+                            encoders[0].train(_ident_was_training)
+                            torch.set_rng_state(_ident_cpu_rng)
+                            if _ident_cuda_rng is not None:
+                                torch.cuda.set_rng_state_all(_ident_cuda_rng)
+                            # The floor twins are a second full model on the same device.
+                            # They are freed inside score_run, but the caching allocator
+                            # holds their blocks, which the training loop then has to grow
+                            # around at the next activation peak.
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
 
                     if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
                         # Periodic separation score evaluation — run BEFORE saving the
