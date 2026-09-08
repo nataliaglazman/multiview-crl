@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-04T11:04:52Z
-# Git SHA: 76b3905
+# Generated at: 2026-09-07T15:56:43Z
+# Git SHA: bf4bd0c
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -14,12 +14,12 @@ python -m training.main_multimodal
     --batch-size 128
     --bt-corr-ema 0.99
     --bt-gap-lambda 6
+    --bt-gap-sim-coeff 0.05
+    --bt-gap-std-coeff 0.05
     --bt-gap-weight 1
     --bt-lambda 6
-    --bt-normalize-terms
-    --bt-patch-weight 0.5
+    --bt-patch-weight 1
     --bt-sim-coeff 0.0114
-    --bt-sim-normalize
     --bt-std-coeff 0.227
     --channels-last
     --checkpoint-steps 1000
@@ -60,7 +60,6 @@ python -m training.main_multimodal
     --scale-style-contrastive-loss 0.0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
-    --separate-encoders
     --separate-style-codebooks
     --separation-floor-diagnosis-info 0.1
     --single-count-commitment
@@ -75,7 +74,7 @@ python -m training.main_multimodal
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-clean-content-causal-bt-patch-05
+    --model-id synthetic-clean-content-causal-sep-encoders-retry
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -93,7 +92,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-clean-content-causal-bt-patch-05 \
+runai training standard submit synthetic-clean-content-causal-sep-encoders-retry \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \

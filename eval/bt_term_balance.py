@@ -175,6 +175,43 @@ def measure(hz, batch_size, draws, center_mode, patch_stat, sim_normalize=False,
     return out
 
 
+def foreground_keep(dataset, grid, thresh, batch_size=8, device=None):
+    """Patch positions training keeps, as a (P,) bool tensor — or None if none can be built.
+
+    Mirrors ``main_multimodal.py:335`` and ``eval.gradient_attribution``: pool the brain mask
+    to the patch grid and keep a position if ANY sample has at least ``thresh`` brain there.
+    Without it every BT term here is computed over background positions that training never
+    sees, and background is near-constant across subjects — which inflates off_diag (channels
+    correlate through the shared background) and deflates the across-subject feature std.
+    Measured against this project's own training scalars, that gap was 23x on gap off_diag
+    and 121x on the gap variance hinge, while the reconstruction probe — which runs the real
+    forward pass and its brain mask — matched to 1%.
+
+    One deviation, unavoidable and benign: training evaluates ``.any()`` over a 128-sample
+    batch, this evaluates it over the whole eval set, so it keeps a superset. On registered
+    volumes the foreground set barely moves between batches, so the two agree to a handful of
+    boundary positions.
+    """
+    import torch.nn.functional as F
+    from torch.utils.data import DataLoader
+
+    keep = None
+    for batch in DataLoader(dataset, batch_size=batch_size):
+        m = batch.get("mask")
+        if m is None:
+            return None
+        m = m[0] if isinstance(m, (list, tuple)) else m
+        m = torch.as_tensor(m).float()
+        if m.ndim == 4:  # (B, D, H, W) -> (B, 1, D, H, W)
+            m = m.unsqueeze(1)
+        if device is not None:
+            m = m.to(device)
+        frac = F.adaptive_avg_pool3d(m, tuple(grid)).flatten(1)  # (B, P)
+        hit = (frac >= thresh).any(dim=0)
+        keep = hit if keep is None else (keep | hit)
+    return keep
+
+
 def _fmt(v, nd=4):
     return "   -   " if v is None or not np.isfinite(v) else f"{v:.{nd}f}"
 
@@ -245,24 +282,54 @@ def main():
     ckpt = os.path.join(cli.run_dir, cli.checkpoint_name)
     model, _a, device = load_model_from_run_dir(cli.run_dir, ckpt if os.path.exists(ckpt) else None, None)
 
-    results = {}
-    poolings = [("gap", "gap")]
-    if grid:
-        poolings.insert(0, ("patch", tuple(grid)))
-    for key, value in poolings:
+    def _views(pooling, npatch):
         ld, _gt, _s1, _s2 = _extract_synthetic_representations(
-            model, dataset, device, cli.encode_batch, cli.num_workers, pooling=value
+            model, dataset, device, cli.encode_batch, cli.num_workers, pooling=pooling
         )
         if cli.level not in ld:
-            continue
+            return None
         c1, c2 = ld[cli.level][_CONTENT], ld[cli.level][_CONTENT_V2]
         if c1 is None or c2 is None or c1.shape[1] == 0:
-            continue
-        npatch = int(np.prod(value)) if key == "patch" else 1
-        hz = _as_views(c1, c2, npatch)
-        results[key] = measure(
+            return None
+        return _as_views(c1, c2, npatch)
+
+    def _measure(hz):
+        return measure(
             hz, B, cli.draws, center_mode, patch_stat, sim_normalize, corr_ema_decay=corr_ema_decay, warmup=warmup
         )
+
+    results = {}
+    if grid:
+        # ONE extraction, and both arms derive from it — which is also what training does.
+        # The GAP term is `z_rec_tuple.mean(-1)` over the ALREADY foreground-filtered patch
+        # tensor (main_multimodal.py), not an independent whole-volume average pool. Pooling
+        # the whole volume instead folds every background position into the subject vector,
+        # and background is the same in every subject, so it shrinks the across-subject
+        # variance the GAP hinge and correlation are computed from.
+        hz = _views(tuple(grid), int(np.prod(grid)))
+        if hz is not None:
+            keep = None
+            if bool(getattr(args_, "patch_foreground_mask", False)):
+                thr = float(getattr(args_, "patch_foreground_thresh", 0.05))
+                keep = foreground_keep(dataset, tuple(grid), thr, cli.encode_batch, hz.device)
+                if keep is None:
+                    logger.warning(
+                        "patch_foreground_mask is set but the dataset yielded no 'mask' key; "
+                        "measuring over ALL patch positions, which is NOT what training does."
+                    )
+                elif not bool(keep.any()):
+                    logger.warning("foreground mask kept no positions; falling back to all of them.")
+                    keep = None
+            if keep is not None:
+                n_kept, n_all = int(keep.sum()), int(keep.numel())
+                logger.info("Foreground patches: keeping %d/%d positions (thresh %.3g).", n_kept, n_all, thr)
+                hz = hz[..., keep.to(hz.device)]
+            results["patch"] = _measure(hz)
+            results["gap"] = _measure(hz.mean(-1))
+    else:
+        hz = _views("gap", 1)
+        if hz is not None:
+            results["gap"] = _measure(hz)
 
     # Reconstruction scale, for sizing the contrastive terms against what they compete with.
     #

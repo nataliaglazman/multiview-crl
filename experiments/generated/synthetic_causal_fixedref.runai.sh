@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_fixedref.yaml
-# Generated at: 2026-09-04T11:04:52Z
-# Git SHA: 76b3905
+# Generated at: 2026-09-07T15:56:43Z
+# Git SHA: bf4bd0c
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
