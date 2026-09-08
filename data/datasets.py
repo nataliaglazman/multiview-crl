@@ -2,6 +2,7 @@
 Collection of datasets.
 """
 
+import logging
 import os
 from abc import abstractmethod
 
@@ -9,7 +10,12 @@ import numpy as np
 import pandas as pd
 import torch
 
+from data.splits import split_summary, subject_level_split
 from utils.utils import load_data
+
+# _load_cached's corrupted-cache handler logs from outside _build_cache, which
+# owns the only other logger binding in this module.
+logger = logging.getLogger("multiview_crl")
 
 
 class MultiviewDataset(torch.utils.data.Dataset):
@@ -66,6 +72,9 @@ class MyCustomDataset(MultiviewDataset):
         masks_dir: str | None = None,
         asymmetric_aug: bool = False,
         shared_brain_mask: bool = False,
+        val_frac: float = 0.0,
+        test_frac: float = 0.0,
+        split_seed: int = 0,
         **kwargs,
     ):
         super().__init__()
@@ -87,13 +96,40 @@ class MyCustomDataset(MultiviewDataset):
         self.label_map = label_map  # group_name → int
 
         # Load data using utils.load_data
-        self.items, missing = load_data(df, data_dir, label_map, masks_dir=masks_dir)
+        all_items, missing = load_data(df, data_dir, label_map, masks_dir=masks_dir)
+
+        # Split by subject. ``load_data`` resolves the whole CSV regardless of
+        # mode, so without this train/val/test are the same subjects. The default
+        # (both fractions 0) keeps that historical behaviour — see data.splits.
+        split = subject_level_split(all_items, val_frac=val_frac, test_frac=test_frac, seed=split_seed)
+        if mode not in split:
+            raise ValueError(f"mode must be one of {sorted(split)}, got {mode!r}")
+
+        # The full list defines cache identity: every split shares one cache
+        # directory, and each .pt file is named by its position here, so a
+        # subject preprocessed for train is reused by val instead of redone.
+        self._all_items = all_items
+        self._indices = split[mode]
+        self.items = [all_items[i] for i in self._indices]
         self.num_samples = len(self.items)
 
         # All items must carry brain-mask paths to enable the mask pipeline —
         # if any item is missing masks, fall back to the thresholding path so
-        # every sample follows the same transform sequence.
-        self.masks_from_disk = all("mask_image" in it and "mask_z_image" in it for it in self.items)
+        # every sample follows the same transform sequence. Decided over the full
+        # list, not this split, so all three splits preprocess identically.
+        self.masks_from_disk = all("mask_image" in it and "mask_z_image" in it for it in all_items)
+
+        if mode == "train":
+            if val_frac == 0.0 and test_frac == 0.0:
+                logger.warning(
+                    "No subject split configured (--val-frac/--test-frac are 0): train, val and "
+                    "test are the SAME %d subjects. Validation metrics are training metrics.",
+                    len(all_items),
+                )
+            else:
+                logger.info(f"Subject-level split (seed={split_seed}, val={val_frac}, test={test_frac}):")
+                for _line in split_summary(all_items, split, label_names={v: k for k, v in label_map.items()}):
+                    logger.info(_line)
 
         # Get MONAI transforms with specified spacing and cropping
         from utils.utils import transforms as get_transforms
@@ -282,7 +318,10 @@ class MyCustomDataset(MultiviewDataset):
         h.update(f"spatial_size={self.spatial_size}".encode())
         h.update(f"masks_from_disk={self.masks_from_disk}".encode())
         h.update(f"shared_brain_mask={self.shared_brain_mask}".encode())
-        for item in self.items:
+        # Over the full list, never the split: the digest names a preprocessing
+        # of the dataset, so train/val/test resolve to the same directory and an
+        # unsplit run keeps hitting the cache it built before splitting existed.
+        for item in self._all_items:
             h.update(item["image"].encode())
             h.update(item["z_image"].encode())
             if "mask_image" in item:
@@ -342,14 +381,17 @@ class MyCustomDataset(MultiviewDataset):
                     f"spacing={self.spacing}\n"
                     f"crop_margin={self.crop_margin}\n"
                     f"spatial_size={self.spatial_size}\n"
-                    f"num_samples={self.num_samples}\n"
+                    f"num_samples={len(self._all_items)}\n"
                     f"fingerprint={fingerprint}\n"
                 )
 
             # Check which samples are already on disk and are not corrupted.
             # A previous interrupted run may leave truncated .pt files that pass
             # an existence check but fail on torch.load.
-            pt_paths = [str(cache_root / f"{i:06d}.pt") for i in range(self.num_samples)]
+            # Paths are indexed by position in the FULL item list so the file for
+            # a given subject is the same whichever split asks for it; only this
+            # split's entries are checked or processed.
+            pt_paths = [str(cache_root / f"{i:06d}.pt") for i in range(len(self._all_items))]
 
             # Clean up leftover .tmp files from interrupted writes
             for tmp in cache_root.glob("*.tmp"):
@@ -370,7 +412,8 @@ class MyCustomDataset(MultiviewDataset):
                 except OSError:
                     return False
 
-            missing_indices = [i for i, p in enumerate(pt_paths) if not _is_valid_pt(p)]
+            split_paths = [pt_paths[i] for i in self._indices]
+            missing_indices = [i for i in self._indices if not _is_valid_pt(pt_paths[i])]
 
             if len(missing_indices) == 0:
                 logger.info(
@@ -378,7 +421,7 @@ class MyCustomDataset(MultiviewDataset):
                     f"({self.num_samples} samples, fingerprint={fingerprint})"
                 )
                 self._cache = [None] * self.num_samples
-                self._cache_paths = pt_paths
+                self._cache_paths = split_paths
                 self._cache_persistent = True
                 # Don't eagerly load — __getitem__ will mmap on first access
                 return
@@ -390,7 +433,7 @@ class MyCustomDataset(MultiviewDataset):
                 f"({num_workers} workers)..."
             )
 
-            work_args = [(i, self.items[i], deterministic_transform, pt_paths[i]) for i in missing_indices]
+            work_args = [(i, self._all_items[i], deterministic_transform, pt_paths[i]) for i in missing_indices]
 
             done = 0
             if num_workers > 0:
@@ -421,7 +464,7 @@ class MyCustomDataset(MultiviewDataset):
 
             logger.info(f"Persistent cache complete: {cache_root}")
             self._cache = [None] * self.num_samples
-            self._cache_paths = pt_paths
+            self._cache_paths = split_paths
             self._cache_persistent = True
             return
 

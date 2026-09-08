@@ -1540,6 +1540,9 @@ def main(args):
         "masks_dir": getattr(args, "masks_dir", None),
         "asymmetric_aug": getattr(args, "asymmetric_aug", False),
         "shared_brain_mask": getattr(args, "shared_brain_mask", False),
+        "val_frac": getattr(args, "val_frac", 0.0),
+        "test_frac": getattr(args, "test_frac", 0.0),
+        "split_seed": getattr(args, "split_seed", 0),
     }
     if args.dataset_name == "synthetic":
         dataset_kwargs.update(

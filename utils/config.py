@@ -44,6 +44,31 @@ def parse_args() -> argparse.ArgumentParser:
         ],
     )
     parser.add_argument(
+        "--val-frac",
+        type=float,
+        default=0.0,
+        help="Fraction of SUBJECTS held out for validation on the real (ADNI/custom) datasets. "
+        "The labels CSV is resolved in full regardless of split, so at the default of 0 the "
+        "train, val and test datasets are the same subjects and every validation number is a "
+        "training number. Splits are subject-level (a subject's scans never straddle a split) "
+        "and stratified by diagnosis group. Ignored for --dataset-name synthetic, which draws "
+        "each split from its own seed. See data/splits.py.",
+    )
+    parser.add_argument(
+        "--test-frac",
+        type=float,
+        default=0.0,
+        help="Fraction of SUBJECTS held out for test on the real datasets (see --val-frac). "
+        "Only consumed when --evaluate is passed; held out from training either way.",
+    )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=0,
+        help="Seed for the subject-level split. Changing it reshuffles which subjects land in "
+        "val/test, so keep it fixed across runs you intend to compare.",
+    )
+    parser.add_argument(
         "--synthetic-mode",
         type=str,
         default="pseudo_mri",
