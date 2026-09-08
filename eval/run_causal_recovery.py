@@ -267,6 +267,35 @@ def collect_runs(patterns, runs_file=None):
     return runs
 
 
+def format_summary(results):
+    """One row per run, with failed/skipped metrics clearly marked unavailable."""
+    names = [Path(result["run_dir"]).name for result in results]
+    rows = [["Directory", "F1", "Precision", "Recall", "SHD", "Partial R²", "Status"]]
+    for result, name in zip(results, names):
+        # Keep runs with identical basenames distinguishable in the table.
+        label = result["run_dir"] if names.count(name) > 1 else name
+        if result["status"] == "ok":
+            best = result["best"]
+            metrics = [f"{best[key]:.3f}" for key in ("f1", "precision", "recall")]
+            metrics.extend([str(best["skeleton_shd"]), f"{result['partial_r2_mean']:.3f}"])
+        else:
+            metrics = ["—"] * 5
+        rows.append([label, *metrics, result["status"]])
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+
+    def line(row):
+        return "  ".join(
+            value.ljust(width) if i in (0, 6) else value.rjust(width)
+            for i, (value, width) in enumerate(zip(row, widths))
+        ).rstrip()
+
+    table = [line(rows[0]), "  ".join("-" * width for width in widths)]
+    table.extend(line(row) for row in rows[1:])
+    table.append("\nF1/precision/recall/SHD use the best-F1 alpha; SHD counts missing + extra skeleton edges.")
+    table.append("Partial R² is the mean across content factors. — = unavailable (see JSON/CSV for reasons).")
+    return "\n".join(table) + "\n"
+
+
 def write_reports(results, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
     payload = dict(
@@ -282,7 +311,9 @@ def write_reports(results, output_dir):
         runs=results,
     )
     (output_dir / "causal_recovery.json").write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+    (output_dir / "causal_recovery_summary.txt").write_text(format_summary(results))
     columns = [
+        "directory_name",
         "run_dir",
         "status",
         "reason",
@@ -306,14 +337,19 @@ def write_reports(results, output_dir):
         writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         for result in results:
-            writer.writerow({**result, **result.get("best", {})})
+            writer.writerow({**result, **result.get("best", {}), "directory_name": Path(result["run_dir"]).name})
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dirs", nargs="+", default=[], help="Run directories or quoted glob patterns")
     parser.add_argument("--runs-file", help="Text file with one directory/glob per line, relative to that file")
-    parser.add_argument("--output-dir", type=Path, default=Path("results/causal_recovery"))
+    parser.add_argument(
+        "--from-json", type=Path, help="Regenerate outputs from saved causal_recovery.json without evaluation"
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, help="Default: results/causal_recovery, or the input JSON directory with --from-json"
+    )
     parser.add_argument("--checkpoint", default="vqvae_model.pt", help="Checkpoint filename inside each run")
     parser.add_argument("--level", type=int, help="Default: first content_style_levels entry, otherwise 0")
     parser.add_argument("--pooling", default="4,4,4", help="gap or a 3D patch grid (default: 4,4,4, as in notebook)")
@@ -323,6 +359,17 @@ def main(argv=None):
     parser.add_argument("--device", help="cpu, cuda, cuda:0, etc.; default: CUDA when available, else CPU")
     parser.add_argument("--alphas", type=float, nargs="+", default=list(DEFAULT_ALPHAS))
     cli = parser.parse_args(argv)
+    if cli.from_json:
+        if cli.run_dirs or cli.runs_file:
+            parser.error("Use --from-json on its own, without --run-dirs or --runs-file")
+        with cli.from_json.open() as f:
+            results = json.load(f)["runs"]
+        output_dir = cli.output_dir or cli.from_json.parent
+        write_reports(results, output_dir)
+        print(format_summary(results))
+        print(f"Saved CSV, JSON and summary table to {output_dir.resolve()}")
+        return int(any(result["status"] == "error" for result in results))
+    cli.output_dir = cli.output_dir or Path("results/causal_recovery")
     if cli.pooling != "gap":
         try:
             cli.pooling = tuple(int(x) for x in cli.pooling.split(","))
@@ -368,7 +415,8 @@ def main(argv=None):
             print(f"  {result['status']}: {result['reason']}")
         # Persist after every run so a later failure doesn't discard completed work.
         write_reports(results, cli.output_dir)
-    print(f"\nSaved CSV and JSON to {cli.output_dir.resolve()}")
+    print("\n" + format_summary(results))
+    print(f"Saved CSV, JSON and summary table to {cli.output_dir.resolve()}")
     print("F1 measures the skeleton only; alpha is selected against truth and the graph readout is in-sample.")
     return int(any(result["status"] == "error" for result in results))
 

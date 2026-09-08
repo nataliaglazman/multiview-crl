@@ -40,6 +40,19 @@ per-factor scores/parents, the true DAG, every alpha's estimated skeleton and
 metrics, generator settings, and protocol metadata. Both files are updated after
 each run. By default they are saved under `results/causal_recovery`.
 
+A compact comparison table is also printed at the end and saved as
+`causal_recovery_summary.txt`, with columns for directory name, F1, precision,
+recall, SHD, mean partial R², and status. Skipped or failed runs show unavailable
+metrics. The CSV includes both `directory_name` and the full `run_dir`.
+To produce this table from an existing JSON report without rerunning evaluation:
+
+```bash
+python -m eval.run_causal_recovery --from-json results/causal_recovery/causal_recovery.json
+```
+
+This regenerates the reports alongside the input JSON; use `--output-dir` to
+write them elsewhere.
+
 The calculations intentionally preserve section 7i: parent regressions use all
 samples; Ridge probes use a fixed 70/30 train/test split; scaled/PCA features feed
 supervised RidgeCV factor predictions on the same samples used to fit them; PC
