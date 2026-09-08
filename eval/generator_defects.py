@@ -1,4 +1,4 @@
-"""Five *generator-side* identifiability defects, each converted into a measurement.
+"""Six *generator-side* identifiability defects, each converted into a measurement.
 
 None of these need a checkpoint. They are properties of the data-generating process, so
 they bound what ANY encoder can recover — which makes them the right thing to rule out
@@ -43,11 +43,26 @@ before reading another per-factor R^2 as a model result.
                    Measured as the cosine between per-dim render-Jacobian directions and
                    the unique (non-explainable-by-others) variance share of each dim.
 
+  6. GLOBAL READOUT
+                   `lut = base*gain + bias` writes the style parameters into the
+                   intensity HISTOGRAM and nowhere else, so any statistic sufficient for
+                   style is permutation-invariant over voxels. A content factor that is
+                   also decodable from such a statistic is observable through style's own
+                   sufficient statistic, and no encoder can keep it out of style by
+                   architecture alone — `--style-spatial-size` bounds style's spatial
+                   extent, not its histogram. Measured per factor, with and without
+                   `--synthetic-identifiable-ventricle`, which is predicted to move
+                   `ventricle_size` onto exactly this channel: it enlarges the ventricle
+                   (0.15+-0.05 -> 0.20+-0.08, ~2.9x the across-subject volume swing) and
+                   relabels the fissure away from CSF, leaving the CSF histogram bin a
+                   clean readout of ventricle volume.
+
 Usage
 -----
     python -m eval.generator_defects --tests all
     python -m eval.generator_defects --tests squash --causal --clean-content
     python -m eval.generator_defects --tests amplitude style --normalize per_sample
+    python -m eval.generator_defects --tests global --preset flagship
 
 Defaults mirror the *shipped defaults* (`utils/config.py`), NOT the flagship configs:
 `--synthetic-clean-content` is off and `--synthetic-normalize per_sample`. Pass
@@ -487,10 +502,165 @@ def test_degeneracy(args):
         print("    WM/GM boundary separates them.")
 
 
+# ───────────────────── 6. global readout: which factors are style-shaped ─────────────────────
+
+GLOBAL_QUANTILES = 11
+
+
+def _global_stats(x, mask):
+    """Two nested permutation-invariant summaries of one volume's FOREGROUND intensities.
+
+    Voxel order is discarded entirely, so anything decodable from these numbers is
+    decodable with no spatial information at all — which is the feature class the style
+    pathway occupies. `lut = base*gain + bias` writes gain and bias into the intensity
+    histogram and nowhere else, so a statistic sufficient for style is necessarily of
+    this form. A content factor that shows up here is therefore observable through
+    style's own sufficient statistic, and no bottleneck on style's spatial extent
+    (`--style-spatial-size`) can keep it out.
+
+    Returns ``(moments, histogram)``:
+      moments   — ``[mean, std]``. The tightest form of the claim: a style channel that
+                  computes only a first and second moment already carries the factor.
+      histogram — ``[GLOBAL_QUANTILES quantiles, mean, std]``. The full readout.
+
+    Foreground-masked deliberately. Under every real normalize mode the background is
+    exactly 0 (see `_sensitivity`), so an unmasked histogram carries a spike at 0 whose
+    mass is 1 - brain volume fraction — i.e. `brain_size`, which would then contaminate
+    every column. Masking is the conservative choice: it removes the one confound that
+    would inflate the whole table.
+    """
+    v = x.flatten().double()
+    m = mask.flatten()
+    if m.numel() != v.numel():
+        raise ValueError(f"mask/volume shape mismatch: {tuple(mask.shape)} vs {tuple(x.shape)}")
+    v = v[m.bool()]
+    if v.numel() < 2:
+        return None
+    q = torch.quantile(v, torch.linspace(0.0, 1.0, GLOBAL_QUANTILES, dtype=v.dtype))
+    moments = torch.stack([v.mean(), v.std()])
+    return moments, torch.cat([q, moments])
+
+
+def _global_arm(args, flag):
+    """One `identifiable_ventricle` arm: (moments, histogram, z_content, z_style_v1, adjacency)."""
+    a = argparse.Namespace(**vars(args))
+    a.identifiable_ventricle = flag
+    a.n_samples = args.n_global
+    ds = build_dataset(a, quiet=True)
+    inner = ds._inner
+
+    mom, hist, zc, zs = [], [], [], []
+    for i in range(args.n_global):
+        # Deliberately not `render()`: nothing is being overridden here, and at n_global
+        # draws the second render that helper costs is most of this test's runtime. The
+        # item already carries its own brain_mask, so this is the same normalized volume
+        # `render(..., normalize=True)` would return.
+        x1, x2, lat = inner[i]
+        bm = lat["brain_mask"]
+        x1, _ = ds.normalize_views(x1, x2, bm, bm.clone())
+        got = _global_stats(x1, bm)
+        if got is None:
+            continue
+        mom.append(got[0])
+        hist.append(got[1])
+        zc.append(lat["z_content"])
+        zs.append(lat["z_style_v1"])
+
+    adj = inner.scm["adj"] if getattr(inner, "causal", False) and getattr(inner, "scm", None) is not None else None
+    return (
+        torch.stack(mom).numpy(),
+        torch.stack(hist).numpy(),
+        torch.stack(zc).numpy(),
+        torch.stack(zs).numpy(),
+        adj,
+    )
+
+
+def test_global(args):
+    from eval.identifiability_metrics import cv_probe_r2_multi, residualise_on_parents
+
+    print(f"\n[6] GLOBAL READOUT   n={args.n_global} draws, view 1, {args.global_probe} probe, foreground-masked\n")
+    print("     Which factors are decodable from PERMUTATION-INVARIANT intensity statistics — the")
+    print("     feature class style occupies. Both --identifiable-ventricle arms are run here, so")
+    print("     the CLI flag is ignored for this test.\n")
+    if args.normalize == "per_sample":
+        print("    NOTE: per_sample z-scores each volume over its foreground, which is exactly an")
+        print("    affine intensity map, so the moments block is degenerate BY CONSTRUCTION and")
+        print("    both its columns should read ~0. Use --preset flagship (fixed_reference) for the")
+        print("    configuration the runs actually train on.\n")
+
+    # PAIRED: both arms are built at the same --seed, so the SCM and every latent draw are
+    # identical and only the rendering differs. The Δ columns below are therefore a
+    # within-subject contrast — no across-arm sampling noise to subtract.
+    arms = {flag: _global_arm(args, flag) for flag in (False, True)}
+    n_c = arms[False][2].shape[1]
+    n_s = arms[False][3].shape[1]
+    names = CONTENT_NAMES[:n_c] + STYLE_NAMES[:n_s]
+
+    scores = {}
+    for flag, (mom, hist, zc, zs, _adj) in arms.items():
+        Y = np.concatenate([zc, zs], axis=1)
+        for label, X in (("mom", mom), ("hist", hist)):
+            scores[(label, flag)] = cv_probe_r2_multi(X, Y, kind=args.global_probe)["mean"]
+
+    hdr = f"    {'factor':<20} {'mom_off':>8} {'mom_on':>8} {'Δmom':>8} {'hist_off':>9} {'hist_on':>8} {'Δhist':>8}"
+    print(hdr)
+    for j, name in enumerate(names):
+        if j == n_c:
+            print(f"    {'— style factors —':<20}")
+        mo, mn = scores[("mom", False)][j], scores[("mom", True)][j]
+        ho, hn = scores[("hist", False)][j], scores[("hist", True)][j]
+        print(f"    {name:<20} {mo:>8.3f} {mn:>8.3f} {mn - mo:>+8.3f} {ho:>9.3f} {hn:>8.3f} {hn - ho:>+8.3f}")
+
+    # Under the SCM the raw columns are confounded, so the verdict below must NOT read
+    # them: measured on the flagship preset, lesion_x jumps +0.219 raw and +0.015 once
+    # residualised — entirely its parents. `basis` is whichever block is attribution-safe.
+    d_hist = scores[("hist", True)] - scores[("hist", False)]
+    basis = "raw Δhist"
+    adj = arms[False][4]
+    if adj is not None:
+        print("\n    Parent-residualised — each factor's OWN variation. Under the SCM the columns")
+        print("    above are confounded (brain_size correlates ~0.8 with ventricle_size on the")
+        print("    random graph), so read attribution off THIS block, not that one:")
+        print(f"    {'factor':<20} {'hist_off':>9} {'hist_on':>8} {'Δhist':>8}")
+        resid = {}
+        for flag, (_mom, hist, zc, _zs, a) in arms.items():
+            resid[flag] = cv_probe_r2_multi(hist, residualise_on_parents(zc, a), kind=args.global_probe)["mean"]
+        for j in range(n_c):
+            ro, rn = resid[False][j], resid[True][j]
+            print(f"    {names[j]:<20} {ro:>9.3f} {rn:>8.3f} {rn - ro:>+8.3f}")
+        d_hist = resid[True] - resid[False]
+        basis = "partial Δhist"
+
+    if "ventricle_size" in names[:n_c]:
+        vi = names.index("ventricle_size")
+        others = [d_hist[j] for j in range(n_c) if j != vi]
+        best_other = max(others) if others else 0.0
+        print(
+            f"\n    ventricle_size {basis} = {d_hist[vi]:+.3f}   "
+            f"best of the other {len(others)} content factors = {best_other:+.3f}"
+        )
+        # Two conditions, both needed: the gain must clear the probe's own noise, and it
+        # must be SELECTIVE — a flag that lifted every factor would mean the renders had
+        # simply become easier to read, not that this one factor moved onto style's channel.
+        if d_hist[vi] > 0.05 and d_hist[vi] > 2 * max(best_other, 0.01):
+            print("    => --synthetic-identifiable-ventricle moves ventricle_size onto a statistic that")
+            print("       carries NO spatial information. A style pathway that recovers gain/bias reads")
+            print("       it for free, so a style->ventricle leak under this flag is a property of the")
+            print("       generator, not an encoder failure, and --style-spatial-size cannot close it.")
+        else:
+            print("    => no selective global-readout gain for ventricle_size. A style leak under this")
+            print("       flag is then NOT explained by the histogram; look at style's spatial extent")
+            print("       instead (--style-spatial-size defaults to 0, leaving style able to carry a blob).")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
-        "--tests", nargs="+", default=["all"], choices=["all", "squash", "amplitude", "style", "inert", "degeneracy"]
+        "--tests",
+        nargs="+",
+        default=["all"],
+        choices=["all", "squash", "amplitude", "style", "inert", "degeneracy", "global"],
     )
     p.add_argument(
         "--preset",
@@ -504,6 +674,13 @@ def main():
     p.add_argument("--n-resample", type=int, default=4, help="redraws per dim, for the signal term")
     p.add_argument("--n-noise", type=int, default=8, help="rendering seeds, for the noise term")
     p.add_argument("--n-squash", type=int, default=20000)
+    p.add_argument(
+        "--n-global",
+        type=int,
+        default=384,
+        help="draws for test 6. Needs >= 20 for the probe; 5-fold ridge on 13 features wants a few hundred.",
+    )
+    p.add_argument("--global-probe", default="ridge", choices=["ridge", "kernel"], help="test 6 probe class")
     p.add_argument("--fd-delta", type=float, default=0.5)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--normalize", default="per_sample", choices=["per_sample", "shared", "fixed_reference"])
@@ -528,7 +705,7 @@ def main():
         args.clean_content = True
         args.normalize = "fixed_reference"
 
-    tests = ["squash", "amplitude", "style", "inert", "degeneracy"] if "all" in args.tests else args.tests
+    tests = ["squash", "amplitude", "style", "inert", "degeneracy", "global"] if "all" in args.tests else args.tests
     print(
         f"preset={args.preset}  causal={args.causal}  clean_content={args.clean_content}  "
         f"normalize={args.normalize}  lesion_mode={args.lesion_mode}  content_scale={args.content_scale}"
@@ -540,6 +717,7 @@ def main():
             "style": test_style,
             "inert": test_inert,
             "degeneracy": test_degeneracy,
+            "global": test_global,
         }[t](args)
 
 
