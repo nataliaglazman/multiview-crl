@@ -52,6 +52,7 @@ from pathlib import Path
 import numpy as np
 
 from eval.identifiability_metrics import block_mcc, cv_probe_r2_multi
+from eval.run_causal_recovery import INDEP_TESTS
 from eval.run_dci_compare import PROBE_DIM_AUTO, _auto_probe_dim
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,8 @@ def graph_panel(X, z_content, adjacency, options):
             orientation=options.orientation,
             readout_dim=options.readout_dim,
             holdout_readout=options.holdout_readout,
+            indep_test=options.indep_test,
+            max_cond_set=options.max_cond_set,
         )
     except Exception as exc:  # noqa: BLE001 - one panel failing must not lose the tables
         logger.exception("Graph panel failed")
@@ -581,6 +584,8 @@ def _self_test():
         with_graph=True,
         readout_dim=None,
         holdout_readout=False,
+        indep_test="fisherz",
+        max_cond_set=None,
     )
     signal = bundle(z @ mixing + 0.1 * rng.randn(n, 24), raw=rng.randn(n, 8))
     noise = bundle(rng.randn(n, 24), path="floor")
@@ -657,6 +662,19 @@ def main(argv=None):
     graph.add_argument("--diagnostic-alpha", type=float, default=0.05, help="Fixed alpha for the orientation table")
     graph.add_argument("--no-orientation", dest="orientation", action="store_false", help="Skeleton scores only")
     graph.add_argument("--no-pc-ceiling", dest="pc_ceiling", action="store_false", help="Skip PC on the true factors")
+    graph.add_argument(
+        "--indep-test",
+        default="fisherz",
+        choices=list(INDEP_TESTS),
+        help="PC's conditional-independence test. 'fisherz' sees only linear dependence; 'kci' is "
+        "nonparametric and sees the generator's nonlinear mechanisms, at ~100x the cost.",
+    )
+    graph.add_argument(
+        "--max-cond-set",
+        type=int,
+        help="Cap PC's conditioning-set size (max_k). Unbounded by default; needed to make --indep-test "
+        "kci finish at this factor count. Can only add skeleton edges, never remove them.",
+    )
     graph.add_argument(
         "--readout-dim",
         type=int,
