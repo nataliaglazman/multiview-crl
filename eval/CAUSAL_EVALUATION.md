@@ -250,6 +250,33 @@ edge the truth's class does orient — a weaker failure than a reversal),
 pairs whose edge type differs at all, so it is comparable to `skeleton_shd` but strictly
 harder. Without the flag the outputs are byte-identical to before.
 
+## The decoded-factor readout
+
+PC does not see the representation. It sees `n_content` supervised reconstructions of the
+true factors: the features are standardised, PCA-reduced, and a `RidgeCV` per factor
+decodes it from that basis. Two flags control that step, on both
+`run_causal_recovery` and `eval/dinov3_identifiability`; both default to the original
+behaviour, so existing outputs are unchanged.
+
+`--readout-dim N` pins the PCA width. The default rule is
+`min(64, max(n_content, N_samples/5))`, capped at the block's own width — so a 48-channel
+encoder block gets a 48-dim readout while an 18432-dim embedding gets 64, and part of any
+difference in the recovered graph is that gap rather than the representation. Pin it to
+the narrower of two models to compare them at equal readout capacity; a block narrower
+than the request keeps its own width. The effective value is reported as
+`graph_readout_dim`, alongside `readout_mode` and `graph_samples`.
+
+`--holdout-readout` fits the readout on the 70/30 train split and runs PC on the held-out
+rows only, instead of decoding the same rows it was fit on with the true labels. This is
+what removes the panel's in-sample optimism — the `PC R²` column then reports exactly the
+decoding quality of the columns PC was handed, because both use the same split. It costs
+70% of the rows, so pair it with `--num-samples 2000` or more; PC on fewer than
+`20 * n_content` rows logs a warning and fewer than 20 is an error. A single split rather
+than cross-fitting is deliberate: a cross-fitted row's decoding depends on every other
+row's label, and Fisher-Z assumes the rows are independent draws.
+
+Neither flag touches the raw/partial R² columns, which keep their own full-width probe.
+
 ## DINOv3 embeddings as a reference representation
 
 Two scripts run the same two questions on a pretrained 2-D vision encoder instead of a
