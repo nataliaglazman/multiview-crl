@@ -136,6 +136,70 @@ class OrientationTests(unittest.TestCase):
         self.assertEqual((found["both_undirected"], found["correct_directed"]), (2, 0))
 
 
+class ReadoutTests(unittest.TestCase):
+    """--readout-dim and --holdout-readout, the two knobs on the graph readout."""
+
+    def setUp(self):
+        rng = np.random.RandomState(11)
+        self.n = 400
+        z = rng.randn(self.n, 3)
+        z[:, 1] += 1.3 * z[:, 0]
+        z[:, 2] += 1.3 * z[:, 1]
+        self.z = z
+        self.truth = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]], dtype=bool)
+        self.X = z @ rng.randn(3, 40) + 0.1 * rng.randn(self.n, 40)
+
+    def test_default_width_reproduces_the_original_rule(self):
+        # 64, floored at the factor count, capped at N/5 and at the block's own width.
+        self.assertEqual(recovery.readout_width(2000, 5000, 9), 64)
+        self.assertEqual(recovery.readout_width(2000, 40, 9), 40)
+        self.assertEqual(recovery.readout_width(30, 5000, 9), 9)  # N/5 < n_content, floor binds
+        self.assertEqual(recovery.readout_width(200, 5000, 9), 40)  # N/5 = 40 < 64
+
+    def test_explicit_width_pins_it_but_cannot_exceed_the_block(self):
+        self.assertEqual(recovery.readout_width(2000, 5000, 9, 16), 16)
+        self.assertEqual(recovery.readout_width(2000, 5000, 9, 200), 200)
+        self.assertEqual(recovery.readout_width(2000, 48, 9, 64), 48)  # a narrow block keeps its width
+        self.assertEqual(recovery.readout_width(30, 5000, 9, 64), 30)
+        with self.assertRaises(ValueError):
+            recovery.readout_width(2000, 5000, 9, 0)
+
+    def test_readout_dim_is_reported_and_changes_only_the_readout(self):
+        wide = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05])
+        thin = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05], readout_dim=3)
+        self.assertEqual((wide["graph_readout_dim"], thin["graph_readout_dim"]), (40, 3))
+        # raw/partial come from the full-width probe, so pinning the readout must not move them.
+        self.assertAlmostEqual(wide["raw_r2_mean"], thin["raw_r2_mean"], places=12)
+        self.assertAlmostEqual(wide["partial_r2_mean"], thin["partial_r2_mean"], places=12)
+
+    def test_holdout_runs_pc_on_unseen_rows_only(self):
+        insample = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05])
+        held = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05], holdout_readout=True)
+        self.assertEqual((insample["readout_mode"], held["readout_mode"]), ("in_sample", "holdout"))
+        self.assertEqual((insample["graph_samples"], held["graph_samples"]), (self.n, int(0.3 * self.n)))
+        # The planted chain survives the split; both should still recover it exactly.
+        self.assertTrue(insample["best"]["exact_match"])
+        self.assertTrue(held["best"]["exact_match"])
+
+    def test_holdout_correlations_use_the_test_rows_not_all_rows(self):
+        held = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05], holdout_readout=True)
+        for factor in held["factors"]:
+            self.assertIsNotNone(factor["decoded_gt_correlation"])
+            self.assertGreater(factor["decoded_gt_correlation"], 0.9)
+
+    def test_holdout_refuses_a_test_split_too_small_for_pc(self):
+        with self.assertRaises(ValueError):
+            recovery.evaluate_arrays(self.X[:60], self.z[:60], self.truth, alphas=[0.05], holdout_readout=True)
+
+    def test_defaults_leave_existing_results_untouched(self):
+        before = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05])
+        after = recovery.evaluate_arrays(
+            self.X, self.z, self.truth, alphas=[0.05], readout_dim=None, holdout_readout=False
+        )
+        self.assertEqual(before["best"], after["best"])
+        self.assertEqual(before["factors"], after["factors"])
+
+
 def _bundle(X, z, adjacency, names, raw=None, path="planted", style=None, style_names=()):
     return dict(
         path=path,
@@ -168,6 +232,8 @@ def _options(**overrides):
         orientation=True,
         pc_ceiling=True,
         with_graph=True,
+        readout_dim=None,
+        holdout_readout=False,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
