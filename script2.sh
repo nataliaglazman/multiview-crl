@@ -1,0 +1,65 @@
+python -m training.main_multimodal \
+    --batch-size 128 \
+    --channels-last \
+    --checkpoint-steps 1000 \
+    --content-dim 128 \
+    --content-ratios 0.95 \
+    --content-size 48 \
+    --content-style-levels 0 \
+    --contrastive-loss-type infonce \
+    --cross-view-negs-only \
+    --dataroot /scratch/users/k24058220 \
+    --dataset-name synthetic \
+    --dci-every 2000 \
+    --deterministic \
+    --eval-dci \
+    --image-spacing 1.0 \
+    --inject-style-to-decoder \
+    --lr 0.001 \
+    --mask-mode fixed \
+    --moco-queue-size 0 \
+    --no-final-recon-norm \
+    --norm-type layer \
+    --pass-full-to-next-level \
+    --patch-contrastive \
+    --patch-foreground-mask \
+    --patch-foreground-thresh 0.05 \
+    --patch-grid 8 8 8 \
+    --quantize-style \
+    --recon-loss-start-step 0 \
+    --resume-training \
+    --scale-adv-loss 0.0 \
+    --scale-content-modality-adv 0.0 \
+    --scale-contrastive-loss 0 \
+    --scale-recon-loss 1 \
+    --scale-style-contrastive-loss 0.0 \
+    --scale-style-modality-ce 0.0 \
+    --select-by-gated-score \
+    --separate-encoders \
+    --separate-style-codebooks \
+    --separate-content-codebooks \
+    --separation-floor-diagnosis-info 0.1 \
+    --style-injection-mode film \
+    --synthetic-causal \
+    --synthetic-causal-edge-prob 0.5 \
+    --synthetic-causal-graph random \
+    --synthetic-mode pseudo_mri \
+    --synthetic-normalize fixed_reference \
+    --synthetic-num-test 400 \
+    --synthetic-num-train 2000 \
+    --synthetic-num-val 1500 \
+    --synthetic-res 64 \
+    --model-id synthetic-causal-baseline-layernorm \
+    --tau 0.07 \
+    --total-dim 512 \
+    --train-steps 300000 \
+    --use-amp \
+    --use-wandb \
+    --vq-commitment-weight 0.25 \
+    --vqvae-embed-dim 48 \
+    --vqvae-hidden-channels 48 \
+    --vqvae-nb-entries 256 \
+    --vqvae-nb-levels 1 \
+    --vqvae-scaling-rates 4 \
+    --workers 8
+

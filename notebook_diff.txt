@@ -1,0 +1,1271 @@
+nbdiff eval/analyze_synthetic_recovery.ipynb (stash@{0}) eval/analyze_synthetic_recovery.ipynb
+--- eval/analyze_synthetic_recovery.ipynb (stash@{0})  (no timestamp)
++++ eval/analyze_synthetic_recovery.ipynb  2026-05-22 11:51:26.898555
+[34m[1m## replaced /cells/1/execution_count:[0m
+[31m-  38
+[32m+  80
+
+[0m[34m[1m## modified /cells/1/outputs/0/text:[0m
+[36m@@ -1,4 +1,4 @@[m
+[31m-Loaded settings from /home/ng24/projects/multiview-crl/results/synthetic/synthetic-baseline-psuedo-mri-patch-batch-dropout-quantized/settings.json[m
+[32m+[m[32mLoaded settings from /home/ng24/projects/multiview-crl/results/synthetic/synthetic-baseline-psuedo-mri-patch-batch-dropout-correction-style-cont/settings.json[m
+   dataset_name      : synthetic[m
+   synthetic_mode    : pseudo_mri[m
+   vqvae_nb_levels   : 3[m
+
+[0m[34m[1m## modified /cells/1/source:[0m
+[36m@@ -16,8 +16,8 @@[m [mfrom sklearn.model_selection import train_test_split[m
+ from sklearn.decomposition import PCA[m
+ [m
+ # ---- USER CONFIG ---------------------------------------------------------[m
+[31m-CHECKPOINT_PATH = "/home/ng24/projects/multiview-crl/results/synthetic/synthetic-baseline-psuedo-mri-patch-batch-dropout-quantized/vqvae_best.pt"  # <-- edit[m
+[31m-NUM_SAMPLES = 500  # samples to encode for probing[m
+[32m+[m[32mCHECKPOINT_PATH = "/home/ng24/projects/multiview-crl/results/synthetic/synthetic-baseline-psuedo-mri-patch-batch-dropout-correction-style-cont/vqvae_best.pt"  # <-- edit[m
+[32m+[m[32mNUM_SAMPLES = 1000  # samples to encode for probing[m
+ PROBE_TYPES = ("linear", "mlp")  # set to ("linear",) to skip MLP[m
+ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"[m
+ # --------------------------------------------------------------------------[m
+
+[0m[34m[1m## replaced /cells/3/execution_count:[0m
+[31m-  39
+[32m+  81
+
+[0m[34m[1m## replaced /cells/5/execution_count:[0m
+[31m-  40
+[32m+  82
+
+[0m[34m[1m## modified /cells/5/outputs/0/text:[0m
+[36m@@ -1,4 +1,4 @@[m
+[31m-Dataset: 500 samples at res=64[m
+[32m+[m[32mDataset: 1000 samples at res=64[m
+ Hierarchical content: False[m
+ image shapes : [torch.Size([1, 64, 64, 64]), torch.Size([1, 64, 64, 64])][m
+ mask shapes  : [torch.Size([1, 64, 64, 64]), torch.Size([1, 64, 64, 64])][m
+
+[0m[34m[1m## replaced /cells/7/execution_count:[0m
+[31m-  41
+[32m+  83
+
+[0m[34m[1m## modified /cells/7/outputs/0/text:[0m
+[36m@@ -1,18 +1,18 @@[m
+ Per-level pooled feature shapes (view 1) — patch-pooled, reshape order (C × 64):[m
+[31m-  level 0: (500, 2048)  (C=32, P=64, flat=2048)[m
+[31m-  level 1: (500, 2048)  (C=32, P=64, flat=2048)[m
+[31m-  level 2: (500, 2048)  (C=32, P=64, flat=2048)[m
+[31m-  raw   v1: (500, 64)  (no encoder, just patch-mean)[m
+[32m+[m[32m  level 0: (1000, 2048)  (C=32, P=64, flat=2048)[m
+[32m+[m[32m  level 1: (1000, 2048)  (C=32, P=64, flat=2048)[m
+[32m+[m[32m  level 2: (1000, 2048)  (C=32, P=64, flat=2048)[m
+[32m+[m[32m  raw   v1: (1000, 64)  (no encoder, just patch-mean)[m
+ [m
+ Ground-truth factor shapes:[m
+[31m-  z_content: (500, 9)[m
+[31m-  z_deformation: (500, 64)[m
+[31m-  z_fissure: (500, 512)[m
+[31m-  z_style_v1: (500, 3)[m
+[31m-  z_style_v2: (500, 3)[m
+[32m+[m[32m  z_content: (1000, 9)[m
+[32m+[m[32m  z_deformation: (1000, 64)[m
+[32m+[m[32m  z_fissure: (1000, 512)[m
+[32m+[m[32m  z_style_v1: (1000, 3)[m
+[32m+[m[32m  z_style_v2: (1000, 3)[m
+ [m
+ Sanity check (per-feature std across samples — should be > 0):[m
+[31m-  L0: mean across-sample std=0.1190[m
+[31m-  L1: mean across-sample std=0.1168[m
+[31m-  L2: mean across-sample std=0.2716[m
+[31m-  raw : mean across-sample std=0.0612[m
+[32m+[m[32m  L0: mean across-sample std=0.1204[m
+[32m+[m[32m  L1: mean across-sample std=0.0550[m
+[32m+[m[32m  L2: mean across-sample std=0.1869[m
+[32m+[m[32m  raw : mean across-sample std=0.1523[m
+
+[0m[34m[1m## replaced /cells/9/execution_count:[0m
+[31m-  42
+[32m+  84
+
+[0m[34m[1m## replaced /cells/11/execution_count:[0m
+[31m-  43
+[32m+  85
+
+[0m[34m[1m## replaced /cells/13/execution_count:[0m
+[31m-  44
+[32m+  86
+
+[0m[34m[1m## inserted before /cells/13/outputs/0:[0m
+[32m+  output:
+[32m+    output_type: stream
+[32m+    name: stdout
+[32m+    text:
+[32m+      === Probe: linear ===
+[32m+                     L0_content_v1  L0_style_v1  L0_content_v2  L0_style_v2  \
+[32m+      z_content              0.343        0.267          0.364        0.285   
+[32m+      z_deformation         -0.018        0.173         -0.009        0.170   
+[32m+      z_fissure             -0.056       -0.019         -0.051       -0.018   
+[32m+      z_style_v1             0.251        0.187         -0.079       -0.015   
+[32m+      z_style_v2            -0.061       -0.021          0.214        0.138   
+[32m+      
+[32m+                     L0_all_v1  L1_content_v1  L1_style_v1  L1_content_v2  \
+[32m+      z_content          0.350          0.271        0.226          0.281   
+[32m+      z_deformation      0.007         -0.006        0.043         -0.005   
+[32m+      z_fissure         -0.057         -0.046       -0.020         -0.038   
+[32m+      z_style_v1         0.253          0.191        0.099         -0.068   
+[32m+      z_style_v2        -0.061         -0.055       -0.022          0.160   
+[32m+      
+[32m+                     L1_style_v2  L1_all_v1  L2_content_v1  L2_style_v1  \
+[32m+      z_content            0.236      0.292          0.181        0.111   
+[32m+      z_deformation        0.040     -0.000         -0.033       -0.011   
+[32m+      z_fissure           -0.020     -0.047         -0.021       -0.016   
+[32m+      z_style_v1          -0.027      0.188          0.011        0.003   
+[32m+      z_style_v2           0.089     -0.055         -0.063       -0.039   
+[32m+      
+[32m+                     L2_content_v2  L2_style_v2  L2_all_v1  raw_v1  raw_v2  
+[32m+      z_content              0.187        0.096      0.191   0.085   0.102  
+[32m+      z_deformation         -0.035       -0.012     -0.033   0.002   0.018  
+[32m+      z_fissure             -0.020       -0.018     -0.022  -0.015  -0.012  
+[32m+      z_style_v1            -0.043       -0.045      0.017   0.268  -0.006  
+[32m+      z_style_v2            -0.034        0.001     -0.062  -0.016   0.231  
+[32m+      
+[32m+      === Probe: mlp ===
+[32m+                     L0_content_v1  L0_style_v1  L0_content_v2  L0_style_v2  \
+[32m+      z_content             -0.047        0.205         -0.035        0.259   
+[32m+      z_deformation         -0.065        0.035         -0.062        0.032   
+[32m+      z_fissure             -0.121       -0.035         -0.126       -0.037   
+[32m+      z_style_v1            -0.208        0.175         -0.676       -0.123   
+[32m+      z_style_v2            -0.506       -0.163         -0.349        0.034   
+[32m+      
+[32m+                     L0_all_v1  L1_content_v1  L1_style_v1  L1_content_v2  \
+[32m+      z_content         -0.055          0.023        0.121          0.030   
+[32m+      z_deformation     -0.065         -0.046       -0.021         -0.055   
+[32m+      z_fissure         -0.111         -0.088       -0.039         -0.092   
+[32m+      z_style_v1        -0.283         -0.210       -0.011         -0.501   
+[32m+      z_style_v2        -0.606         -0.485       -0.144         -0.236   
+[32m+      
+[32m+                     L1_style_v2  L1_all_v1  L2_content_v1  L2_style_v1  \
+[32m+      z_content            0.154      0.010         -0.148        0.037   
+[32m+      z_deformation       -0.036     -0.049         -0.060       -0.034   
+[32m+      z_fissure           -0.041     -0.080         -0.087       -0.038   
+[32m+      z_style_v1          -0.142     -0.230         -0.414       -0.167   
+[32m+      z_style_v2          -0.039     -0.515         -0.500       -0.180   
+[32m+      
+[32m+                     L2_content_v2  L2_style_v2  L2_all_v1  raw_v1  raw_v2  
+[32m+      z_content             -0.160       -0.001     -0.140   0.120   0.143  
+[32m+      z_deformation         -0.058       -0.041     -0.059  -0.026  -0.027  
+[32m+      z_fissure             -0.097       -0.034     -0.086  -0.027  -0.031  
+[32m+      z_style_v1            -0.402       -0.153     -0.395   0.191  -0.070  
+[32m+      z_style_v2            -0.402       -0.121     -0.449  -0.081   0.191  
+[32m+      
+
+[0m[34m[1m## deleted /cells/13/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      === Probe: linear ===
+[31m-                     L0_content_v1  L0_style_v1  L0_content_v2  L0_style_v2  \
+[31m-      z_content              0.363        0.259          0.372        0.299   
+[31m-      z_deformation          0.057        0.142          0.057        0.157   
+[31m-      z_fissure             -0.084       -0.024         -0.081       -0.024   
+[31m-      z_style_v1            -0.082       -0.038         -0.140       -0.028   
+[31m-      z_style_v2            -0.059       -0.035         -0.048       -0.072   
+[31m-      
+[31m-                     L0_all_v1  L1_content_v1  L1_style_v1  L1_content_v2  \
+[31m-      z_content          0.365          0.310        0.249          0.311   
+[31m-      z_deformation      0.070          0.010        0.044          0.013   
+[31m-      z_fissure         -0.086         -0.073       -0.017         -0.072   
+[31m-      z_style_v1        -0.085         -0.110       -0.021         -0.117   
+[31m-      z_style_v2        -0.067         -0.087       -0.042         -0.084   
+[31m-      
+[31m-                     L1_style_v2  L1_all_v1  L2_content_v1  L2_style_v1  \
+[31m-      z_content            0.241      0.314          0.166        0.095   
+[31m-      z_deformation        0.047      0.016         -0.075       -0.023   
+[31m-      z_fissure           -0.014     -0.074         -0.037       -0.004   
+[31m-      z_style_v1          -0.024     -0.107         -0.100       -0.037   
+[31m-      z_style_v2          -0.039     -0.095         -0.075       -0.031   
+[31m-      
+[31m-                     L2_content_v2  L2_style_v2  L2_all_v1  raw_v1  raw_v2  
+[31m-      z_content              0.165        0.092      0.165   0.172   0.138  
+[31m-      z_deformation         -0.071       -0.025     -0.076  -0.049  -0.172  
+[31m-      z_fissure             -0.041       -0.008     -0.041  -0.032  -0.067  
+[31m-      z_style_v1            -0.096       -0.054     -0.103  -0.025  -0.051  
+[31m-      z_style_v2            -0.078       -0.022     -0.082  -0.041  -0.059  
+[31m-      
+[31m-      === Probe: mlp ===
+[31m-                     L0_content_v1  L0_style_v1  L0_content_v2  L0_style_v2  \
+[31m-      z_content             -0.135        0.228         -0.107        0.248   
+[31m-      z_deformation         -0.115       -0.018         -0.108        0.006   
+[31m-      z_fissure             -0.145       -0.036         -0.154       -0.042   
+[31m-      z_style_v1            -0.662       -0.156         -0.621       -0.115   
+[31m-      z_style_v2            -0.662       -0.146         -0.409       -0.120   
+[31m-      
+[31m-                     L0_all_v1  L1_content_v1  L1_style_v1  L1_content_v2  \
+[31m-      z_content         -0.248         -0.146        0.116         -0.189   
+[31m-      z_deformation     -0.133         -0.111       -0.037         -0.105   
+[31m-      z_fissure         -0.136         -0.149       -0.034         -0.110   
+[31m-      z_style_v1        -0.879         -0.823       -0.178         -0.688   
+[31m-      z_style_v2        -0.710         -0.566       -0.111         -0.594   
+[31m-      
+[31m-                     L1_style_v2  L1_all_v1  L2_content_v1  L2_style_v1  \
+[31m-      z_content            0.149     -0.222         -0.302       -0.026   
+[31m-      z_deformation       -0.046     -0.112         -0.125       -0.047   
+[31m-      z_fissure           -0.035     -0.133         -0.124       -0.031   
+[31m-      z_style_v1          -0.109     -0.638         -0.791       -0.188   
+[31m-      z_style_v2          -0.140     -0.603         -0.717       -0.231   
+[31m-      
+[31m-                     L2_content_v2  L2_style_v2  L2_all_v1  raw_v1  raw_v2  
+[31m-      z_content             -0.334       -0.015     -0.336   0.032  -0.387  
+[31m-      z_deformation         -0.114       -0.064     -0.121  -0.132  -0.160  
+[31m-      z_fissure             -0.101       -0.039     -0.118  -0.064  -0.101  
+[31m-      z_style_v1            -0.570       -0.201     -0.836  -0.412  -0.997  
+[31m-      z_style_v2            -0.632       -0.181     -0.646  -0.425  -1.244  
+[31m-      
+
+[0m[34m[1m## replaced /cells/15/execution_count:[0m
+[31m-  34
+[32m+  87
+
+[0m[34m[1m## inserted before /cells/15/outputs/0:[0m
+[32m+  output:
+[32m+    output_type: display_data
+[32m+    data:
+[32m+      image/png: iVBORw0K...<snip base64, md5=578ddde3728b8982...>
+[32m+      text/plain: <Figure size 1020x400 with 2 Axes>
+[32m+  output:
+[32m+    output_type: display_data
+[32m+    data:
+[32m+      image/png: iVBORw0K...<snip base64, md5=104c8ca7069b2ea6...>
+[32m+      text/plain: <Figure size 1020x400 with 2 Axes>
+
+[0m[34m[1m## deleted /cells/15/outputs/0-1:[0m
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=c9099ff655d52344...>
+[31m-      text/plain: <Figure size 1020x400 with 2 Axes>
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=58737b2d1e4aa988...>
+[31m-      text/plain: <Figure size 1020x400 with 2 Axes>
+
+[0m[34m[1m## replaced /cells/17/execution_count:[0m
+[31m-  35
+[32m+  88
+
+[0m[34m[1m## inserted before /cells/17/outputs/0:[0m
+[32m+  output:
+[32m+    output_type: stream
+[32m+    name: stdout
+[32m+    text:
+[32m+      
+[32m+      === Level 0: per-channel R² (linear probe on 64 patches) ===
+[32m+                      z_content  z_deformation  z_fissure  z_style_v1  z_style_v2
+[32m+      ch0 (content)       0.105          0.001     -0.013       0.174      -0.011
+[32m+      ch1 (content)       0.107          0.011     -0.014       0.173      -0.016
+[32m+      ch2 (content)       0.061         -0.007     -0.010       0.173      -0.020
+[32m+      ch3 (content)       0.163          0.038     -0.009       0.129      -0.016
+[32m+      ch4 (content)       0.150          0.031      0.001       0.111      -0.023
+[32m+      ch5 (content)       0.179          0.041     -0.015       0.080      -0.016
+[32m+      ch6 (content)       0.070         -0.003     -0.004       0.178      -0.003
+[32m+      ch7 (content)       0.146          0.009     -0.009       0.172      -0.009
+[32m+      ch8 (content)       0.130          0.009     -0.013       0.157      -0.018
+[32m+      ch9 (content)       0.055         -0.011     -0.001       0.148      -0.006
+[32m+      ch10 (content)      0.200          0.078     -0.011       0.113      -0.013
+[32m+      ch11 (content)      0.132          0.032     -0.012       0.043      -0.007
+[32m+      ch12 (content)      0.128         -0.003     -0.011       0.051      -0.003
+[32m+      ch13 (content)      0.078         -0.003     -0.014       0.109      -0.021
+[32m+      ch14 (content)      0.168          0.053     -0.010       0.104      -0.017
+[32m+      ch15 (content)      0.159          0.015     -0.006       0.145      -0.005
+[32m+      ch16 (content)      0.072         -0.003     -0.011       0.157      -0.016
+[32m+      ch17 (content)      0.113          0.027     -0.009       0.070      -0.017
+[32m+      ch18 (content)      0.097          0.019     -0.011       0.155      -0.020
+[32m+      ch19 (content)      0.125          0.073     -0.014       0.184      -0.024
+[32m+      ch20 (content)      0.116          0.042     -0.019       0.153      -0.018
+[32m+      ch21 (content)      0.110          0.048     -0.010       0.142      -0.012
+[32m+      ch22 (content)      0.072         -0.001     -0.014       0.134      -0.018
+[32m+      ch23 (content)      0.153          0.063     -0.013       0.182      -0.013
+[32m+      ch24 (content)      0.066          0.001     -0.006       0.126      -0.011
+[32m+      ch25 (content)      0.056          0.004     -0.014       0.139      -0.012
+[32m+      ch26 (content)      0.169          0.011     -0.012       0.101      -0.021
+[32m+      ch27 (content)      0.086          0.008     -0.010       0.134      -0.015
+[32m+      ch28 (content)      0.052         -0.001     -0.013       0.079      -0.028
+[32m+      ch29 (content)      0.172          0.051     -0.012       0.136      -0.013
+[32m+      ch30 (style)        0.240          0.144     -0.013       0.172      -0.011
+[32m+      ch31 (style)        0.235          0.202     -0.015       0.065      -0.012
+[32m+      
+[32m+      === Level 1: per-channel R² (linear probe on 64 patches) ===
+[32m+                      z_content  z_deformation  z_fissure  z_style_v1  z_style_v2
+[32m+      ch0 (content)       0.152          0.019     -0.019       0.072      -0.002
+[32m+      ch1 (content)       0.101          0.007     -0.015       0.066      -0.025
+[32m+      ch2 (content)       0.080         -0.001     -0.014       0.094      -0.016
+[32m+      ch3 (content)       0.114          0.014     -0.018       0.071      -0.021
+[32m+      ch4 (content)       0.085          0.015     -0.015       0.024      -0.014
+[32m+      ch5 (content)       0.053         -0.001     -0.013       0.032      -0.009
+[32m+      ch6 (content)       0.074          0.009     -0.014       0.051      -0.021
+[32m+      ch7 (content)       0.084          0.009     -0.010       0.031      -0.029
+[32m+      ch8 (content)       0.071         -0.000     -0.016       0.043      -0.008
+[32m+      ch9 (content)       0.086          0.008     -0.012       0.049      -0.034
+[32m+      ch10 (content)      0.096          0.009     -0.010       0.054      -0.004
+[32m+      ch11 (content)      0.085          0.020     -0.015       0.030      -0.030
+[32m+      ch12 (content)      0.088          0.003     -0.014       0.019      -0.012
+[32m+      ch13 (content)      0.052          0.003     -0.014       0.034      -0.022
+[32m+      ch14 (content)      0.095          0.004     -0.013       0.054      -0.016
+[32m+      ch15 (content)      0.088          0.011     -0.013       0.037      -0.019
+[32m+      ch16 (content)      0.070          0.014     -0.014       0.052      -0.021
+[32m+      ch17 (content)      0.025         -0.004     -0.014      -0.001      -0.010
+[32m+      ch18 (content)      0.099          0.010     -0.015       0.065      -0.031
+[32m+      ch19 (content)      0.070          0.004     -0.011       0.068      -0.015
+[32m+      ch20 (content)      0.080          0.022     -0.013       0.020      -0.015
+[32m+      ch21 (content)      0.079          0.006     -0.013       0.026      -0.022
+[32m+      ch22 (content)      0.107          0.004     -0.014       0.070      -0.023
+[32m+      ch23 (content)      0.077         -0.001     -0.014       0.044      -0.021
+[32m+      ch24 (content)      0.105          0.009     -0.012       0.050      -0.017
+[32m+      ch25 (content)      0.082          0.009     -0.015       0.053      -0.013
+[32m+      ch26 (content)      0.088          0.020     -0.017       0.033      -0.025
+[32m+      ch27 (content)      0.090          0.004     -0.010      -0.017      -0.018
+[32m+      ch28 (content)      0.049         -0.001     -0.013       0.063      -0.029
+[32m+      ch29 (content)      0.089          0.017     -0.014       0.028      -0.018
+[32m+      ch30 (style)        0.199          0.034     -0.016       0.029      -0.009
+[32m+      ch31 (style)        0.154          0.036     -0.010       0.088      -0.021
+[32m+      
+[32m+      === Level 2: per-channel R² (linear probe on 64 patches) ===
+[32m+                      z_content  z_deformation  z_fissure  z_style_v1  z_style_v2
+[32m+      ch0 (content)       0.042         -0.000     -0.003      -0.005      -0.018
+[32m+      ch1 (content)       0.066         -0.005     -0.009       0.018      -0.027
+[32m+      ch2 (content)       0.044          0.001     -0.007       0.002      -0.018
+[32m+      ch3 (content)       0.052         -0.007     -0.006      -0.021      -0.037
+[32m+      ch4 (content)       0.029         -0.000     -0.006       0.001      -0.038
+[32m+      ch5 (content)       0.052         -0.008     -0.009      -0.007      -0.011
+[32m+      ch6 (content)       0.040         -0.011     -0.010       0.015      -0.019
+[32m+      ch7 (content)       0.041         -0.005     -0.007      -0.012      -0.033
+[32m+      ch8 (content)       0.028         -0.003     -0.007      -0.008      -0.019
+[32m+      ch9 (content)       0.040         -0.002     -0.011      -0.027      -0.011
+[32m+      ch10 (content)      0.072         -0.009     -0.010       0.003      -0.014
+[32m+      ch11 (content)      0.028         -0.007     -0.007      -0.014      -0.010
+[32m+      ch12 (content)      0.043         -0.011     -0.009      -0.006      -0.030
+[32m+      ch13 (content)      0.038         -0.010     -0.012      -0.001      -0.014
+[32m+      ch14 (content)      0.038         -0.006     -0.011      -0.026      -0.023
+[32m+      ch15 (content)      0.027         -0.008     -0.010      -0.000      -0.026
+[32m+      ch16 (content)      0.058         -0.008     -0.001       0.007      -0.010
+[32m+      ch17 (content)      0.046         -0.005     -0.007       0.008      -0.010
+[32m+      ch18 (content)      0.049         -0.008     -0.005       0.008      -0.025
+[32m+      ch19 (content)      0.042         -0.005     -0.001       0.010      -0.029
+[32m+      ch20 (content)      0.040         -0.010     -0.006      -0.001      -0.018
+[32m+      ch21 (content)      0.046         -0.008     -0.008      -0.001      -0.012
+[32m+      ch22 (content)      0.032         -0.011     -0.007       0.015      -0.008
+[32m+      ch23 (content)      0.037         -0.008     -0.009       0.002      -0.021
+[32m+      ch24 (content)      0.072          0.000     -0.007       0.001      -0.020
+[32m+      ch25 (content)      0.041         -0.003     -0.009      -0.000      -0.031
+[32m+      ch26 (content)      0.042         -0.005     -0.007       0.011      -0.009
+[32m+      ch27 (content)      0.036         -0.010     -0.006       0.007      -0.014
+[32m+      ch28 (content)      0.108          0.002     -0.012       0.021      -0.031
+[32m+      ch29 (content)      0.040         -0.008     -0.009       0.005      -0.008
+[32m+      ch30 (style)        0.085         -0.005     -0.010      -0.013      -0.029
+[32m+      ch31 (style)        0.084         -0.004     -0.013       0.017      -0.027
+
+[0m[34m[1m## deleted /cells/17/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      
+[31m-      === Level 0: per-channel R² (linear probe on 64 patches) ===
+[31m-                      z_content  z_deformation  z_fissure  z_style_v1  z_style_v2
+[31m-      ch0 (content)       0.128          0.003     -0.013       0.004       0.001
+[31m-      ch1 (content)       0.145          0.004     -0.015      -0.016      -0.016
+[31m-      ch2 (content)       0.162         -0.009     -0.017      -0.017      -0.020
+[31m-      ch3 (content)       0.111         -0.004     -0.011      -0.015      -0.026
+[31m-      ch4 (content)       0.211          0.078     -0.013       0.004      -0.011
+[31m-      ch5 (content)       0.141         -0.002     -0.015      -0.023      -0.018
+[31m-      ch6 (content)       0.258          0.071     -0.013      -0.018      -0.017
+[31m-      ch7 (content)       0.146         -0.002     -0.012      -0.018      -0.014
+[31m-      ch8 (content)       0.155          0.009     -0.006      -0.020      -0.004
+[31m-      ch9 (content)       0.189          0.000     -0.002      -0.002      -0.015
+[31m-      ch10 (content)      0.247          0.064     -0.022      -0.021      -0.025
+[31m-      ch11 (content)      0.257          0.088     -0.018      -0.023      -0.028
+[31m-      ch12 (content)      0.187         -0.002     -0.012      -0.012      -0.010
+[31m-      ch13 (content)      0.162          0.018     -0.010      -0.008      -0.009
+[31m-      ch14 (content)      0.097         -0.008     -0.013      -0.005      -0.002
+[31m-      ch15 (content)      0.270          0.094     -0.015      -0.035      -0.010
+[31m-      ch16 (content)      0.209          0.051     -0.022      -0.007      -0.022
+[31m-      ch17 (content)      0.210          0.040     -0.013      -0.017      -0.011
+[31m-      ch18 (content)      0.124          0.051     -0.014      -0.020      -0.010
+[31m-      ch19 (content)      0.255          0.091     -0.015      -0.024      -0.008
+[31m-      ch20 (content)      0.124         -0.003     -0.013      -0.027      -0.026
+[31m-      ch21 (content)      0.189         -0.004     -0.004      -0.006      -0.006
+[31m-      ch22 (content)      0.233          0.015     -0.016      -0.023      -0.012
+[31m-      ch23 (content)      0.200          0.019     -0.015      -0.023      -0.016
+[31m-      ch24 (content)      0.175          0.007     -0.012      -0.013      -0.029
+[31m-      ch25 (content)      0.299          0.095     -0.018      -0.023      -0.031
+[31m-      ch26 (content)      0.223         -0.000     -0.014      -0.048      -0.015
+[31m-      ch27 (content)      0.170          0.086     -0.013      -0.010      -0.020
+[31m-      ch28 (content)      0.190          0.037     -0.015      -0.011      -0.020
+[31m-      ch29 (content)      0.129          0.031     -0.020      -0.026      -0.031
+[31m-      ch30 (style)        0.258          0.114     -0.016      -0.024      -0.018
+[31m-      ch31 (style)        0.238          0.194     -0.022      -0.024      -0.029
+[31m-      
+[31m-      === Level 1: per-channel R² (linear probe on 64 patches) ===
+[31m-                      z_content  z_deformation  z_fissure  z_style_v1  z_style_v2
+[31m-      ch0 (content)       0.188          0.010     -0.018      -0.016      -0.008
+[31m-      ch1 (content)       0.143          0.002     -0.014      -0.016      -0.001
+[31m-      ch2 (content)       0.195          0.010     -0.010      -0.033      -0.022
+[31m-      ch3 (content)       0.157          0.004     -0.020      -0.021      -0.023
+[31m-      ch4 (content)       0.167          0.022     -0.011      -0.004      -0.000
+[31m-      ch5 (content)       0.118          0.010     -0.013      -0.016      -0.021
+[31m-      ch6 (content)       0.163          0.022     -0.012      -0.003      -0.026
+[31m-      ch7 (content)       0.126          0.014     -0.014      -0.026      -0.032
+[31m-      ch8 (content)       0.158          0.003     -0.022      -0.038      -0.019
+[31m-      ch9 (content)       0.218          0.016     -0.011      -0.021      -0.016
+[31m-      ch10 (content)      0.147          0.002     -0.012      -0.021      -0.015
+[31m-      ch11 (content)      0.080          0.009     -0.003      -0.020      -0.027
+[31m-      ch12 (content)      0.105         -0.005     -0.011      -0.000      -0.012
+[31m-      ch13 (content)      0.155          0.012     -0.013       0.003      -0.009
+[31m-      ch14 (content)      0.146          0.029     -0.017      -0.017      -0.016
+[31m-      ch15 (content)      0.147          0.005     -0.011      -0.017       0.000
+[31m-      ch16 (content)      0.160          0.026     -0.016      -0.041      -0.033
+[31m-      ch17 (content)      0.146          0.006     -0.011      -0.025      -0.013
+[31m-      ch18 (content)      0.173          0.028     -0.020      -0.015      -0.015
+[31m-      ch19 (content)      0.125          0.015     -0.000      -0.036      -0.014
+[31m-      ch20 (content)      0.164          0.008     -0.008      -0.024      -0.010
+[31m-      ch21 (content)      0.121          0.009     -0.014      -0.006      -0.012
+[31m-      ch22 (content)      0.139          0.014     -0.009      -0.044      -0.011
+[31m-      ch23 (content)      0.141          0.009     -0.012      -0.038      -0.000
+[31m-      ch24 (content)      0.172          0.022     -0.019      -0.023      -0.012
+[31m-      ch25 (content)      0.134          0.013     -0.018      -0.026      -0.002
+[31m-      ch26 (content)      0.150          0.016     -0.014      -0.009      -0.022
+[31m-      ch27 (content)      0.113          0.006     -0.008      -0.017      -0.001
+[31m-      ch28 (content)      0.144          0.013     -0.009      -0.013      -0.035
+[31m-      ch29 (content)      0.111          0.008     -0.015      -0.035      -0.027
+[31m-      ch30 (style)        0.232          0.073     -0.015      -0.010      -0.010
+[31m-      ch31 (style)        0.213          0.050     -0.015      -0.023      -0.022
+[31m-      
+[31m-      === Level 2: per-channel R² (linear probe on 64 patches) ===
+[31m-                      z_content  z_deformation  z_fissure  z_style_v1  z_style_v2
+[31m-      ch0 (content)       0.086         -0.012     -0.003      -0.016      -0.014
+[31m-      ch1 (content)       0.036         -0.012      0.002      -0.027      -0.012
+[31m-      ch2 (content)       0.062         -0.002     -0.001      -0.007      -0.007
+[31m-      ch3 (content)       0.050         -0.007     -0.004      -0.023      -0.007
+[31m-      ch4 (content)       0.028         -0.011     -0.006      -0.036      -0.020
+[31m-      ch5 (content)       0.047         -0.012     -0.002      -0.039      -0.018
+[31m-      ch6 (content)       0.019         -0.013     -0.001      -0.035      -0.018
+[31m-      ch7 (content)       0.034         -0.014     -0.004      -0.017      -0.022
+[31m-      ch8 (content)       0.042         -0.005     -0.001      -0.041      -0.021
+[31m-      ch9 (content)       0.064         -0.009     -0.010      -0.028      -0.013
+[31m-      ch10 (content)      0.046         -0.016      0.001      -0.021      -0.012
+[31m-      ch11 (content)      0.048         -0.015     -0.003      -0.013       0.009
+[31m-      ch12 (content)      0.057         -0.011      0.001      -0.019      -0.024
+[31m-      ch13 (content)      0.046         -0.011     -0.000      -0.028      -0.001
+[31m-      ch14 (content)      0.043         -0.013      0.003      -0.030      -0.019
+[31m-      ch15 (content)      0.036         -0.017     -0.009      -0.026      -0.001
+[31m-      ch16 (content)      0.037         -0.015      0.005      -0.019      -0.011
+[31m-      ch17 (content)      0.051         -0.013     -0.000      -0.019      -0.004
+[31m-      ch18 (content)      0.072         -0.009     -0.005      -0.018      -0.010
+[31m-      ch19 (content)      0.037         -0.015     -0.002      -0.019       0.008
+[31m-      ch20 (content)      0.043         -0.007      0.003      -0.017      -0.014
+[31m-      ch21 (content)      0.040         -0.009      0.001      -0.018      -0.006
+[31m-      ch22 (content)      0.023         -0.013     -0.003      -0.021       0.005
+[31m-      ch23 (content)      0.054         -0.011     -0.007      -0.019      -0.021
+[31m-      ch24 (content)      0.052         -0.011     -0.001      -0.018      -0.007
+[31m-      ch25 (content)      0.032         -0.010      0.005      -0.028      -0.008
+[31m-      ch26 (content)      0.046         -0.009      0.000      -0.020      -0.013
+[31m-      ch27 (content)      0.030         -0.013     -0.006      -0.012      -0.009
+[31m-      ch28 (content)      0.144          0.001     -0.004      -0.016      -0.008
+[31m-      ch29 (content)      0.058         -0.008      0.001       0.001      -0.006
+[31m-      ch30 (style)        0.071         -0.016     -0.007      -0.021      -0.001
+[31m-      ch31 (style)        0.089         -0.013     -0.006      -0.032      -0.019
+
+[0m[34m[1m## replaced /cells/18/execution_count:[0m
+[31m-  36
+[32m+  89
+
+[0m[34m[1m## inserted before /cells/18/outputs/0:[0m
+[32m+  output:
+[32m+    output_type: display_data
+[32m+    data:
+[32m+      image/png: iVBORw0K...<snip base64, md5=3e8af68ca6a5eb3d...>
+[32m+      text/plain: <Figure size 600x1120 with 2 Axes>
+[32m+  output:
+[32m+    output_type: display_data
+[32m+    data:
+[32m+      image/png: iVBORw0K...<snip base64, md5=8c131c5f6c35c170...>
+[32m+      text/plain: <Figure size 600x1120 with 2 Axes>
+[32m+  output:
+[32m+    output_type: display_data
+[32m+    data:
+[32m+      image/png: iVBORw0K...<snip base64, md5=0f9b4ddddf32b16f...>
+[32m+      text/plain: <Figure size 600x1120 with 2 Axes>
+
+[0m[34m[1m## deleted /cells/18/outputs/0-2:[0m
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=98ec278caf73601c...>
+[31m-      text/plain: <Figure size 600x1120 with 2 Axes>
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=8bc39407dff5ca6f...>
+[31m-      text/plain: <Figure size 600x1120 with 2 Axes>
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=9bf6254ccc70b1b4...>
+[31m-      text/plain: <Figure size 600x1120 with 2 Axes>
+
+[0m[34m[1m## inserted before /cells/19:[0m
+[32m+  markdown cell:
+[32m+    id: 72f6e4e5
+[32m+    source:
+[32m+      ## 7c-pre. Content vs style channel spatial maps
+[32m+      
+[32m+      Visualise what the content and style channels **actually look like** alongside the
+[32m+      ground-truth factors they should encode.  For a few samples we show:
+[32m+      
+[32m+      - **Row 1–2**: input views (T1, FLAIR) — axial mid-slice.
+[32m+      - **Row 3**: mean activation across content channels (should reflect anatomy).
+[32m+      - **Row 4**: mean activation across style channels (should differ between views, not reflect anatomy).
+[32m+      - **Row 5+**: ground-truth spatial factors (z_deformation, z_fissure, brain_mask) at mid-slice.
+[32m+      
+[32m+      If style channel maps are visually indistinguishable from content maps, content is
+[32m+      leaking into style.
+[32m+  code cell:
+[32m+    id: ace4b19e
+[32m+    source:
+[32m+      N_VIS = 5  # samples to show
+[32m+      
+[32m+      # Collect spatial encoder maps + GT for a handful of samples.
+[32m+      vis_content_v1, vis_style_v1 = [], []
+[32m+      vis_content_v2, vis_style_v2 = [], []
+[32m+      vis_input_v1, vis_input_v2 = [], []
+[32m+      vis_gt = {k: [] for k in ["z_deformation", "z_fissure", "brain_mask"] if k in ds[0]["gt_latents"]}
+[32m+      
+[32m+      primary_lvl = content_style_levels[0] if content_style_levels else 0
+[32m+      
+[32m+      with torch.no_grad():
+[32m+          for i in range(N_VIS):
+[32m+              item = ds[i]
+[32m+              v1, v2 = item["image"]
+[32m+              x = torch.cat([v1[None], v2[None]], dim=0).to(DEVICE)
+[32m+              spatial_maps, soft_masks = encode_batch(vqvae_model, x, n_views=2)
+[32m+      
+[32m+              smap = spatial_maps[primary_lvl]  # (2, C, D, H, W)
+[32m+              C = smap.shape[1]
+[32m+              c_idx, s_idx = get_mask_indices(soft_masks, primary_lvl, C)
+[32m+      
+[32m+              # Mean activation across content / style channels
+[32m+              enc_v1, enc_v2 = smap[0], smap[1]
+[32m+              vis_content_v1.append(enc_v1[c_idx].mean(0).cpu())
+[32m+              vis_content_v2.append(enc_v2[c_idx].mean(0).cpu())
+[32m+              if len(s_idx) > 0:
+[32m+                  vis_style_v1.append(enc_v1[s_idx].mean(0).cpu())
+[32m+                  vis_style_v2.append(enc_v2[s_idx].mean(0).cpu())
+[32m+              else:
+[32m+                  vis_style_v1.append(torch.zeros_like(enc_v1[0]).cpu())
+[32m+                  vis_style_v2.append(torch.zeros_like(enc_v1[0]).cpu())
+[32m+      
+[32m+              vis_input_v1.append(v1.squeeze().cpu())
+[32m+              vis_input_v2.append(v2.squeeze().cpu())
+[32m+      
+[32m+              gt_lat = item["gt_latents"]
+[32m+              for k in vis_gt:
+[32m+                  vis_gt[k].append(
+[32m+                      gt_lat[k].squeeze().cpu()
+[32m+                      if isinstance(gt_lat[k], torch.Tensor)
+[32m+                      else torch.tensor(gt_lat[k]).squeeze().cpu()
+[32m+                  )
+[32m+      
+[32m+      
+[32m+      # --- Plot ---
+[32m+      def _mid(vol):
+[32m+          v = vol.numpy() if isinstance(vol, torch.Tensor) else np.asarray(vol)
+[32m+          return v[v.shape[0] // 2]
+[32m+      
+[32m+      
+[32m+      gt_keys = [k for k in vis_gt if len(vis_gt[k]) > 0 and vis_gt[k][0].dim() == 3]
+[32m+      n_gt_rows = len(gt_keys)
+[32m+      # rows: input v1, input v2, input diff, content, style, gt factors...
+[32m+      n_rows = 5 + n_gt_rows
+[32m+      
+[32m+      fig, axes = plt.subplots(n_rows, N_VIS, figsize=(2.8 * N_VIS, 2.5 * n_rows))
+[32m+      if N_VIS == 1:
+[32m+          axes = axes[:, None]
+[32m+      
+[32m+      # Compute input difference volumes
+[32m+      vis_input_diff = [v1 - v2 for v1, v2 in zip(vis_input_v1, vis_input_v2)]
+[32m+      
+[32m+      row_labels = [
+[32m+          "Input V1",
+[32m+          "Input V2",
+[32m+          "Input V1 \u2212 V2",
+[32m+          f"Content mean (L{primary_lvl})",
+[32m+          f"Style mean (L{primary_lvl})",
+[32m+      ] + [f"GT: {k}" for k in gt_keys]
+[32m+      sources = [
+[32m+          vis_input_v1,
+[32m+          vis_input_v2,
+[32m+          vis_input_diff,
+[32m+          vis_content_v1,
+[32m+          vis_style_v1,
+[32m+      ] + [vis_gt[k] for k in gt_keys]
+[32m+      
+[32m+      for r, (label, src) in enumerate(zip(row_labels, sources)):
+[32m+          for c in range(N_VIS):
+[32m+              ax = axes[r, c]
+[32m+              slc = _mid(src[c])
+[32m+              if r == 2:  # input diff row — diverging colormap
+[32m+                  vmax = max(np.abs(slc).max(), 1e-6)
+[32m+                  ax.imshow(slc, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="equal")
+[32m+              elif r < 2 or "mask" in label:  # inputs and brain mask
+[32m+                  ax.imshow(slc, cmap="gray", aspect="equal")
+[32m+              else:
+[32m+                  ax.imshow(slc, cmap="viridis", aspect="equal")
+[32m+              ax.set_xticks([])
+[32m+              ax.set_yticks([])
+[32m+              if c == 0:
+[32m+                  ax.set_ylabel(label, fontsize=10)
+[32m+              if r == 0:
+[32m+                  ax.set_title(f"sample {c}", fontsize=10)
+[32m+      
+[32m+      fig.suptitle(
+[32m+          f"Content vs style channel activations (L{primary_lvl}, axial mid-slice)\n"
+[32m+          f"Content channels: {len(c_idx)}, Style channels: {len(s_idx)}",
+[32m+          y=1.02,
+[32m+          fontsize=12,
+[32m+      )
+[32m+      plt.tight_layout()
+[32m+      plt.show()
+[32m+      
+[32m+      # --- Cross-view difference for content and style ---
+[32m+      fig2, axes2 = plt.subplots(3, N_VIS, figsize=(2.8 * N_VIS, 7))
+[32m+      if N_VIS == 1:
+[32m+          axes2 = axes2[:, None]
+[32m+      
+[32m+      for c in range(N_VIS):
+[32m+          input_diff = _mid(vis_input_diff[c])
+[32m+          content_diff = _mid(vis_content_v1[c]) - _mid(vis_content_v2[c])
+[32m+          style_diff = _mid(vis_style_v1[c]) - _mid(vis_style_v2[c])
+[32m+          vmax = max(np.abs(input_diff).max(), np.abs(content_diff).max(), np.abs(style_diff).max(), 1e-6)
+[32m+      
+[32m+          axes2[0, c].imshow(input_diff, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="equal")
+[32m+          axes2[0, c].set_xticks([])
+[32m+          axes2[0, c].set_yticks([])
+[32m+          axes2[1, c].imshow(content_diff, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="equal")
+[32m+          axes2[1, c].set_xticks([])
+[32m+          axes2[1, c].set_yticks([])
+[32m+          axes2[2, c].imshow(style_diff, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="equal")
+[32m+          axes2[2, c].set_xticks([])
+[32m+          axes2[2, c].set_yticks([])
+[32m+          if c == 0:
+[32m+              axes2[0, c].set_ylabel("Input V1\u2212V2", fontsize=10)
+[32m+              axes2[1, c].set_ylabel("Content V1\u2212V2", fontsize=10)
+[32m+              axes2[2, c].set_ylabel("Style V1\u2212V2", fontsize=10)
+[32m+          axes2[0, c].set_title(f"sample {c}", fontsize=10)
+[32m+      
+[32m+      fig2.suptitle(
+[32m+          f"Cross-view difference maps (L{primary_lvl})\n"
+[32m+          "Input diff = ground-truth style signal; content diff should be ~0; style diff should match input diff",
+[32m+          y=1.04,
+[32m+          fontsize=11,
+[32m+      )
+[32m+      plt.tight_layout()
+[32m+      plt.show()
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/20/execution_count:[0m
+[31m-  11
+[32m+  None
+
+[0m[34m[1m## deleted /cells/20/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      Level 0: per-patch R² computed (64 patches × 5 factors)
+[31m-      Level 1: per-patch R² computed (64 patches × 5 factors)
+[31m-      Level 2: per-patch R² computed (64 patches × 5 factors)
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/21/execution_count:[0m
+[31m-  12
+[32m+  None
+
+[0m[34m[1m## deleted /cells/21/outputs/0-2:[0m
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=fcc2ee8793711262...>
+[31m-      text/plain: <Figure size 1000x1100 with 20 Axes>
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=21cc99e6756c2aa1...>
+[31m-      text/plain: <Figure size 1000x1100 with 20 Axes>
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=638e923870157563...>
+[31m-      text/plain: <Figure size 1000x1100 with 20 Axes>
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/23/execution_count:[0m
+[31m-  13
+[32m+  None
+
+[0m[34m[1m## deleted /cells/23/outputs/0-2:[0m
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=647c536b15c9cd0a...>
+[31m-      text/plain: <Figure size 1750x400 with 5 Axes>
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=a11e1aa0c7c5ad95...>
+[31m-      text/plain: <Figure size 1750x400 with 5 Axes>
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=e1a0b3274f01bb34...>
+[31m-      text/plain: <Figure size 1750x400 with 5 Axes>
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/25/execution_count:[0m
+[31m-  14
+[32m+  None
+
+[0m[34m[1m## deleted /cells/25/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      
+[31m-      === Level 0: content vs style channel R² summary ===
+[31m-        (30 content channels, 2 style channels)
+[31m-                         type  content_mean  content_max  style_mean  style_max  \
+[31m-      factor                                                                      
+[31m-      z_content        shared         0.153        0.212       0.256      0.294   
+[31m-      z_deformation    shared         0.027        0.101       0.132      0.171   
+[31m-      z_fissure        shared         0.000        0.004       0.000      0.000   
+[31m-      z_style_v1     per-view         0.000        0.004       0.000      0.000   
+[31m-      z_style_v2     per-view         0.000        0.003       0.000      0.000   
+[31m-      
+[31m-                     gap (c-s)  
+[31m-      factor                    
+[31m-      z_content         -0.103  
+[31m-      z_deformation     -0.105  
+[31m-      z_fissure          0.000  
+[31m-      z_style_v1         0.000  
+[31m-      z_style_v2         0.000  
+[31m-      
+[31m-        ⚠ z_content: shared factor better recovered by STYLE channels (gap=-0.103)
+[31m-        ⚠ z_deformation: shared factor better recovered by STYLE channels (gap=-0.105)
+[31m-      
+[31m-      === Level 1: content vs style channel R² summary ===
+[31m-        (30 content channels, 2 style channels)
+[31m-                         type  content_mean  content_max  style_mean  style_max  \
+[31m-      factor                                                                      
+[31m-      z_content        shared         0.094        0.162       0.179      0.198   
+[31m-      z_deformation    shared         0.009        0.020       0.020      0.035   
+[31m-      z_fissure        shared         0.000        0.000       0.000      0.000   
+[31m-      z_style_v1     per-view         0.000        0.000       0.000      0.000   
+[31m-      z_style_v2     per-view         0.000        0.007       0.000      0.000   
+[31m-      
+[31m-                     gap (c-s)  
+[31m-      factor                    
+[31m-      z_content         -0.085  
+[31m-      z_deformation     -0.011  
+[31m-      z_fissure          0.000  
+[31m-      z_style_v1         0.000  
+[31m-      z_style_v2         0.000  
+[31m-      
+[31m-        ⚠ z_content: shared factor better recovered by STYLE channels (gap=-0.085)
+[31m-      
+[31m-      === Level 2: content vs style channel R² summary ===
+[31m-        (30 content channels, 2 style channels)
+[31m-                         type  content_mean  content_max  style_mean  style_max  \
+[31m-      factor                                                                      
+[31m-      z_content        shared         0.033        0.147       0.068      0.081   
+[31m-      z_deformation    shared         0.000        0.002       0.000      0.000   
+[31m-      z_fissure        shared         0.000        0.003       0.000      0.000   
+[31m-      z_style_v1     per-view         0.000        0.004       0.000      0.000   
+[31m-      z_style_v2     per-view         0.000        0.005       0.000      0.000   
+[31m-      
+[31m-                     gap (c-s)  
+[31m-      factor                    
+[31m-      z_content         -0.035  
+[31m-      z_deformation      0.000  
+[31m-      z_fissure          0.000  
+[31m-      z_style_v1         0.000  
+[31m-      z_style_v2         0.000  
+[31m-      
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/27/execution_count:[0m
+[31m-  15
+[32m+  None
+
+[0m[34m[1m## deleted /cells/27/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      z_deformation: 64D → PCA to 16 components (37.9% variance explained)
+[31m-      z_fissure: 512D → PCA to 16 components (11.2% variance explained)
+[31m-      
+[31m-      Total latent dimensions to probe: 47
+[31m-        z_content: 9 dims
+[31m-        z_deformation: 16 dims
+[31m-        z_fissure: 16 dims
+[31m-        z_style_v1: 3 dims
+[31m-        z_style_v2: 3 dims
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/28/execution_count:[0m
+[31m-  16
+[32m+  None
+
+[0m[34m[1m## deleted /cells/28/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-        L0: 5/32 channels done
+[31m-        L0: 10/32 channels done
+[31m-        L0: 15/32 channels done
+[31m-        L0: 20/32 channels done
+[31m-        L0: 25/32 channels done
+[31m-        L0: 30/32 channels done
+[31m-      Level 0: per-channel × per-latent R² computed (32 × 47)
+[31m-        L1: 5/32 channels done
+[31m-        L1: 10/32 channels done
+[31m-        L1: 15/32 channels done
+[31m-        L1: 20/32 channels done
+[31m-        L1: 25/32 channels done
+[31m-        L1: 30/32 channels done
+[31m-      Level 1: per-channel × per-latent R² computed (32 × 47)
+[31m-        L2: 5/32 channels done
+[31m-        L2: 10/32 channels done
+[31m-        L2: 15/32 channels done
+[31m-        L2: 20/32 channels done
+[31m-        L2: 25/32 channels done
+[31m-        L2: 30/32 channels done
+[31m-      Level 2: per-channel × per-latent R² computed (32 × 47)
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/29/execution_count:[0m
+[31m-  17
+[32m+  None
+
+[0m[34m[1m## deleted /cells/29/outputs/0-5:[0m
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=33282e2db8445761...>
+[31m-      text/plain: <Figure size 1410x1120 with 2 Axes>
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      
+[31m-      Level 0 — top 15 (channel, latent) pairs:
+[31m-         1. ch30 (style  ) → z_content[5]          R²=0.741
+[31m-         2. ch30 (style  ) → z_content[0]          R²=0.734
+[31m-         3. ch23 (content) → z_content[5]          R²=0.732
+[31m-         4. ch31 (style  ) → z_content[7]          R²=0.722
+[31m-         5. ch22 (content) → z_content[0]          R²=0.699
+[31m-         6. ch31 (style  ) → z_content[0]          R²=0.693
+[31m-         7. ch 7 (content) → z_content[0]          R²=0.686
+[31m-         8. ch18 (content) → z_content[5]          R²=0.682
+[31m-         9. ch30 (style  ) → z_content[7]          R²=0.674
+[31m-        10. ch23 (content) → z_content[0]          R²=0.646
+[31m-        11. ch 2 (content) → z_content[0]          R²=0.627
+[31m-        12. ch11 (content) → z_content[7]          R²=0.614
+[31m-        13. ch 6 (content) → z_content[0]          R²=0.605
+[31m-        14. ch25 (content) → z_content[0]          R²=0.605
+[31m-        15. ch 1 (content) → z_content[0]          R²=0.603
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=e7f654be3af340a6...>
+[31m-      text/plain: <Figure size 1410x1120 with 2 Axes>
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      
+[31m-      Level 1 — top 15 (channel, latent) pairs:
+[31m-         1. ch31 (style  ) → z_content[7]          R²=0.711
+[31m-         2. ch30 (style  ) → z_content[0]          R²=0.572
+[31m-         3. ch 8 (content) → z_content[7]          R²=0.542
+[31m-         4. ch31 (style  ) → z_content[0]          R²=0.509
+[31m-         5. ch30 (style  ) → z_content[6]          R²=0.504
+[31m-         6. ch 0 (content) → z_content[5]          R²=0.502
+[31m-         7. ch 0 (content) → z_content[0]          R²=0.497
+[31m-         8. ch24 (content) → z_content[7]          R²=0.497
+[31m-         9. ch12 (content) → z_content[7]          R²=0.478
+[31m-        10. ch 8 (content) → z_content[0]          R²=0.464
+[31m-        11. ch 9 (content) → z_content[7]          R²=0.461
+[31m-        12. ch15 (content) → z_content[7]          R²=0.455
+[31m-        13. ch31 (style  ) → z_content[6]          R²=0.447
+[31m-        14. ch21 (content) → z_content[7]          R²=0.446
+[31m-        15. ch26 (content) → z_content[7]          R²=0.445
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=418f3f3cf75284d8...>
+[31m-      text/plain: <Figure size 1410x1120 with 2 Axes>
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      
+[31m-      Level 2 — top 15 (channel, latent) pairs:
+[31m-         1. ch28 (content) → z_content[7]          R²=0.608
+[31m-         2. ch 9 (content) → z_content[7]          R²=0.449
+[31m-         3. ch17 (content) → z_content[7]          R²=0.432
+[31m-         4. ch14 (content) → z_content[7]          R²=0.405
+[31m-         5. ch28 (content) → z_content[0]          R²=0.405
+[31m-         6. ch30 (style  ) → z_content[0]          R²=0.392
+[31m-         7. ch30 (style  ) → z_content[7]          R²=0.391
+[31m-         8. ch19 (content) → z_content[7]          R²=0.387
+[31m-         9. ch31 (style  ) → z_content[0]          R²=0.352
+[31m-        10. ch28 (content) → z_content[6]          R²=0.333
+[31m-        11. ch18 (content) → z_content[7]          R²=0.321
+[31m-        12. ch21 (content) → z_content[0]          R²=0.318
+[31m-        13. ch 5 (content) → z_content[7]          R²=0.302
+[31m-        14. ch24 (content) → z_content[0]          R²=0.300
+[31m-        15. ch 5 (content) → z_content[0]          R²=0.296
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/31/execution_count:[0m
+[31m-  18
+[32m+  None
+
+[0m[34m[1m## deleted /cells/31/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      === Level 0: raw vs encoder per latent dimension ===
+[31m-      
+[31m-                  latent        factor  gt_std  raw_r2  enc_best_r2  enc_mean_r2   lift        best_ch
+[31m-            z_content[0]     z_content   0.995   0.609        0.734        0.529  0.125   ch30 (style)
+[31m-            z_content[1]     z_content   0.954   0.000        0.314        0.018  0.314  ch6 (content)
+[31m-            z_content[2]     z_content   1.024   0.000        0.010        0.000  0.010 ch16 (content)
+[31m-            z_content[3]     z_content   0.983   0.000        0.006        0.000  0.006   ch30 (style)
+[31m-            z_content[4]     z_content   1.006   0.000        0.004        0.000  0.004  ch0 (content)
+[31m-            z_content[5]     z_content   0.956   0.142        0.741        0.341  0.599   ch30 (style)
+[31m-            z_content[6]     z_content   0.945   0.301        0.539        0.294  0.239 ch17 (content)
+[31m-            z_content[7]     z_content   1.037   0.522        0.722        0.428  0.199   ch31 (style)
+[31m-            z_content[8]     z_content   1.014   0.057        0.277        0.076  0.221  ch4 (content)
+[31m-       z_deformation_pc0 z_deformation   1.359   0.070        0.154        0.046  0.084 ch15 (content)
+[31m-       z_deformation_pc1 z_deformation   1.334   0.066        0.179        0.047  0.113   ch31 (style)
+[31m-       z_deformation_pc2 z_deformation   1.295   0.067        0.353        0.053  0.286   ch31 (style)
+[31m-       z_deformation_pc3 z_deformation   1.288   0.000        0.113        0.040  0.113 ch25 (content)
+[31m-       z_deformation_pc4 z_deformation   1.278   0.044        0.375        0.092  0.331   ch31 (style)
+[31m-       z_deformation_pc5 z_deformation   1.261   0.054        0.297        0.054  0.243   ch31 (style)
+[31m-       z_deformation_pc6 z_deformation   1.259   0.053        0.185        0.038  0.132   ch31 (style)
+[31m-       z_deformation_pc7 z_deformation   1.244   0.005        0.183        0.021  0.178 ch17 (content)
+[31m-       z_deformation_pc8 z_deformation   1.221   0.000        0.185        0.041  0.185 ch16 (content)
+[31m-       z_deformation_pc9 z_deformation   1.213   0.112        0.154        0.045  0.042 ch18 (content)
+[31m-      z_deformation_pc10 z_deformation   1.205   0.000        0.193        0.034  0.193 ch16 (content)
+[31m-      z_deformation_pc11 z_deformation   1.176   0.157        0.425        0.118  0.269   ch31 (style)
+[31m-      z_deformation_pc12 z_deformation   1.173   0.000        0.150        0.023  0.150   ch31 (style)
+[31m-      z_deformation_pc13 z_deformation   1.166   0.205        0.262        0.078  0.057   ch30 (style)
+[31m-      z_deformation_pc14 z_deformation   1.163   0.042        0.201        0.043  0.159   ch31 (style)
+[31m-      z_deformation_pc15 z_deformation   1.151   0.077        0.171        0.042  0.095 ch23 (content)
+[31m-           z_fissure_pc0     z_fissure   1.997   0.000        0.066        0.008  0.066  ch9 (content)
+[31m-           z_fissure_pc1     z_fissure   1.960   0.000        0.013        0.000  0.013 ch27 (content)
+[31m-           z_fissure_pc2     z_fissure   1.956   0.000        0.000        0.000  0.000  ch0 (content)
+[31m-           z_fissure_pc3     z_fissure   1.938   0.000        0.000        0.000  0.000  ch0 (content)
+[31m-           z_fissure_pc4     z_fissure   1.918   0.000        0.010        0.000  0.010  ch9 (content)
+[31m-           z_fissure_pc5     z_fissure   1.908   0.000        0.031        0.002  0.031  ch8 (content)
+[31m-           z_fissure_pc6     z_fissure   1.906   0.000        0.008        0.000  0.008 ch19 (content)
+[31m-           z_fissure_pc7     z_fissure   1.898   0.000        0.052        0.008  0.052  ch9 (content)
+[31m-           z_fissure_pc8     z_fissure   1.888   0.013        0.006        0.001 -0.007  ch5 (content)
+[31m-           z_fissure_pc9     z_fissure   1.872   0.000        0.057        0.003  0.057 ch19 (content)
+[31m-          z_fissure_pc10     z_fissure   1.868   0.000        0.038        0.004  0.038 ch27 (content)
+[31m-          z_fissure_pc11     z_fissure   1.858   0.000        0.027        0.003  0.027  ch6 (content)
+[31m-          z_fissure_pc12     z_fissure   1.831   0.000        0.016        0.001  0.016 ch19 (content)
+[31m-          z_fissure_pc13     z_fissure   1.822   0.000        0.036        0.006  0.036 ch27 (content)
+[31m-          z_fissure_pc14     z_fissure   1.818   0.000        0.022        0.002  0.022 ch19 (content)
+[31m-          z_fissure_pc15     z_fissure   1.807   0.000        0.017        0.001  0.017  ch6 (content)
+[31m-           z_style_v1[0]    z_style_v1   1.045   0.000        0.000        0.000  0.000  ch0 (content)
+[31m-           z_style_v1[1]    z_style_v1   0.999   0.000        0.027        0.003  0.027  ch0 (content)
+[31m-           z_style_v1[2]    z_style_v1   1.005   0.004        0.013        0.002  0.009  ch0 (content)
+[31m-           z_style_v2[0]    z_style_v2   1.019   0.000        0.014        0.003  0.014 ch19 (content)
+[31m-           z_style_v2[1]    z_style_v2   0.963   0.000        0.008        0.001  0.008 ch28 (content)
+[31m-           z_style_v2[2]    z_style_v2   1.044   0.000        0.002        0.000  0.002  ch0 (content)
+[31m-      
+[31m-      --- Diagnosis ---
+[31m-        z_content: raw R² varies widely (0.00–0.61) → data generation gives some dims more pixel influence than others
+[31m-        z_deformation: raw R² varies widely (0.00–0.20) → data generation gives some dims more pixel influence than others
+[31m-        z_fissure: both raw and encoder are uniformly low (raw=0.00, enc=0.02)
+[31m-        z_style_v1: both raw and encoder are uniformly low (raw=0.00, enc=0.01)
+[31m-        z_style_v2: both raw and encoder are uniformly low (raw=0.00, enc=0.01)
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/32/execution_count:[0m
+[31m-  19
+[32m+  None
+
+[0m[34m[1m## deleted /cells/32/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=11131b862703dffc...>
+[31m-      text/plain: <Figure size 1880x500 with 1 Axes>
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/34/execution_count:[0m
+[31m-  20
+[32m+  None
+
+[0m[34m[1m## deleted /cells/34/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      Skipping — hierarchical content not enabled for this run.
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/36/execution_count:[0m
+[31m-  22
+[32m+  None
+
+[0m[34m[1m## deleted /cells/36/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      Cross-view cosine similarity — centred is the clean signal:
+[31m-        CONTENT: centred high AND much greater than centred-shuffled = view-invariant.
+[31m-        STYLE  : centred ≈ centred-shuffled (≈ 0) is good. High centred with
+[31m-                 low centred-shuffled = content leaking into style channels.
+[31m-      
+[31m-        level 0 CONTENT: centred=+0.967  centred_shuf=+0.011  gap=+0.956   (raw paired=+0.967, raw shuffled=+0.014)
+[31m-        level 0 STYLE  : centred=+0.098  centred_shuf=-0.001  gap=+0.099   (raw paired=+0.550, raw shuffled=+0.543)
+[31m-        level 1 CONTENT: centred=+0.985  centred_shuf=-0.001  gap=+0.986   (raw paired=+0.985, raw shuffled=+0.002)
+[31m-        level 1 STYLE  : centred=+0.991  centred_shuf=+0.027  gap=+0.964   (raw paired=-0.325, raw shuffled=-0.360)
+[31m-        level 2 CONTENT: centred=+0.991  centred_shuf=-0.001  gap=+0.993   (raw paired=+0.991, raw shuffled=+0.001)
+[31m-        level 2 STYLE  : centred=-0.098  centred_shuf=-0.001  gap=-0.098   (raw paired=+0.604, raw shuffled=+0.632)
+
+[0m[34m[1m## replaced (type changed from NoneType to int) /cells/38/execution_count:[0m
+[31m-  None
+[32m+  94
+
+[0m[34m[1m## inserted before /cells/38/outputs/0:[0m
+[32m+  output:
+[32m+    output_type: stream
+[32m+    name: stdout
+[32m+    text:
+[32m+      Content purity = 0.068 - 0.046 = +0.023
+[32m+      Style   purity = 0.035 - 0.084 = -0.049
+[32m+  output:
+[32m+    output_type: error
+[32m+    ename: NameError
+[32m+    evalue: name 'cos_sim_paired' is not defined
+[32m+    traceback:
+[32m+      item[0]: [0;31m---------------------------------------------------------------------------[0m
+[32m+      item[1]: [0;31mNameError[0m                                 Traceback (most recent call last)
+[32m+      item[2]:
+[32m+        Cell [0;32mIn[94], line 35[0m
+[32m+        [1;32m     33[0m     [38;5;28;01mif[39;00m [38;5;28mlen[39m(c_idx):
+[32m+        [1;32m     34[0m         v1, v2 [38;5;241m=[39m features_per_level[lvl][[38;5;124m"[39m[38;5;124mv1[39m[38;5;124m"[39m], features_per_level[lvl][[38;5;124m"[39m[38;5;124mv2[39m[38;5;124m"[39m]
+[32m+        [0;32m---> 35[0m         sims[38;5;241m.[39mappend([43mcos_sim_paired[49m(v1[:, c_idx], v2[:, c_idx])[38;5;241m.[39mmean())
+[32m+        [1;32m     36[0m [38;5;28mprint[39m([38;5;124mf[39m[38;5;124m"[39m[38;5;124mView invariance (mean cos-sim) = [39m[38;5;132;01m{[39;00mnp[38;5;241m.[39mmean(sims)[38;5;132;01m:[39;00m[38;5;124m.3f[39m[38;5;132;01m}[39;00m[38;5;124m"[39m)
+[32m+        [1;32m     38[0m [38;5;66;03m# Encoder lift over the raw-pixel baseline.[39;00m
+[32m+      item[3]: [0;31mNameError[0m: name 'cos_sim_paired' is not defined
+
+[0m[34m[1m## replaced /cells/40/execution_count:[0m
+[31m-  23
+[32m+  91
+
+[0m[34m[1m## inserted before /cells/40/outputs/0:[0m
+[32m+  output:
+[32m+    output_type: stream
+[32m+    name: stdout
+[32m+    text:
+[32m+      ======================================================================
+[32m+      Effective dimensionality (participation ratio of singular values)
+[32m+      ======================================================================
+[32m+        L0 content (global,   30D): PR= 12.3  n90= 16  n95= 20  top-1 var=16.1%
+[32m+        L0 content (patch , 1920D): PR= 53.7  n90=184  n95=296  top-1 var=6.7%
+[32m+        L0 style   (global,    2D): PR=  1.3  n90=  2  n95=  2  top-1 var=85.8%
+[32m+        L0 style   (patch ,  128D): PR=  7.9  n90= 28  n95= 39  top-1 var=30.1%
+[32m+        L0 all     (global,   32D): PR= 12.3  n90= 16  n95= 20  top-1 var=16.2%
+[32m+        L0 all     (patch , 2048D): PR= 52.5  n90=183  n95=296  top-1 var=6.8%
+[32m+      
+[32m+        L1 content (global,   30D): PR=  5.6  n90= 17  n95= 22  top-1 var=38.9%
+[32m+        L1 content (patch , 1920D): PR=182.0  n90=356  n95=489  top-1 var=2.4%
+[32m+        L1 style   (global,    2D): PR=  1.1  n90=  1  n95=  1  top-1 var=97.3%
+[32m+        L1 style   (patch ,  128D): PR= 18.6  n90= 36  n95= 53  top-1 var=13.3%
+[32m+        L1 all     (global,   32D): PR=  5.6  n90= 17  n95= 22  top-1 var=38.8%
+[32m+        L1 all     (patch , 2048D): PR= 77.3  n90=292  n95=428  top-1 var=5.8%
+[32m+      
+[32m+        L2 content (global,   30D): PR= 27.1  n90= 26  n95= 28  top-1 var=7.1%
+[32m+        L2 content (patch , 1920D): PR=179.6  n90=390  n95=540  top-1 var=2.0%
+[32m+        L2 style   (global,    2D): PR=  1.6  n90=  2  n95=  2  top-1 var=76.6%
+[32m+        L2 style   (patch ,  128D): PR= 44.7  n90= 59  n95= 77  top-1 var=7.1%
+[32m+        L2 all     (global,   32D): PR= 19.9  n90= 27  n95= 30  top-1 var=15.6%
+[32m+        L2 all     (patch , 2048D): PR=178.5  n90=388  n95=539  top-1 var=2.0%
+[32m+      
+[32m+      Interpretation:
+[32m+        PR << n_content_channels → dimensional collapse (InfoNCE saturated)
+[32m+        PR ≈ n_content_channels  → channels carry independent info (healthy)
+[32m+        top-1 var >> 50%         → one dominant direction, rest is noise
+
+[0m[34m[1m## deleted /cells/40/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      ======================================================================
+[31m-      Effective dimensionality (participation ratio of singular values)
+[31m-      ======================================================================
+[31m-        L0 content (global,   30D): PR= 11.0  n90= 13  n95= 15  top-1 var=17.4%
+[31m-        L0 content (patch , 1920D): PR= 49.2  n90=114  n95=174  top-1 var=5.3%
+[31m-        L0 style   (global,    2D): PR=  1.0  n90=  1  n95=  1  top-1 var=99.5%
+[31m-        L0 style   (patch ,  128D): PR=  5.4  n90= 18  n95= 28  top-1 var=38.5%
+[31m-        L0 all     (global,   32D): PR= 11.0  n90= 13  n95= 15  top-1 var=15.9%
+[31m-        L0 all     (patch , 2048D): PR= 25.2  n90= 96  n95=152  top-1 var=15.2%
+[31m-      
+[31m-        L1 content (global,   30D): PR=  8.1  n90= 18  n95= 23  top-1 var=30.3%
+[31m-        L1 content (patch , 1920D): PR=118.6  n90=197  n95=267  top-1 var=2.6%
+[31m-        L1 style   (global,    2D): PR=  1.2  n90=  1  n95=  2  top-1 var=93.0%
+[31m-        L1 style   (patch ,  128D): PR=  9.0  n90= 26  n95= 39  top-1 var=28.3%
+[31m-        L1 all     (global,   32D): PR=  8.2  n90= 18  n95= 23  top-1 var=29.9%
+[31m-        L1 all     (patch , 2048D): PR= 47.8  n90=168  n95=239  top-1 var=10.5%
+[31m-      
+[31m-        L2 content (global,   30D): PR= 24.4  n90= 25  n95= 28  top-1 var=9.9%
+[31m-        L2 content (patch , 1920D): PR=131.6  n90=240  n95=322  top-1 var=2.3%
+[31m-        L2 style   (global,    2D): PR=  1.3  n90=  2  n95=  2  top-1 var=85.7%
+[31m-        L2 style   (patch ,  128D): PR= 57.3  n90= 75  n95= 93  top-1 var=5.4%
+[31m-        L2 all     (global,   32D): PR=  3.0  n90= 20  n95= 25  top-1 var=56.4%
+[31m-        L2 all     (patch , 2048D): PR=125.8  n90=225  n95=306  top-1 var=2.7%
+[31m-      
+[31m-      Interpretation:
+[31m-        PR << n_content_channels → dimensional collapse (InfoNCE saturated)
+[31m-        PR ≈ n_content_channels  → channels carry independent info (healthy)
+[31m-        top-1 var >> 50%         → one dominant direction, rest is noise
+
+[0m[34m[1m## replaced (type changed from int to NoneType) /cells/41/execution_count:[0m
+[31m-  24
+[32m+  None
+
+[0m[34m[1m## deleted /cells/41/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      ======================================================================
+[31m-      Global-pool vs patch-pool R² (content channels, view 1)
+[31m-      ======================================================================
+[31m-      
+[31m-      --- Level 0 ---
+[31m-             factor  R²_patch  R²_global  Δ (patch-global)
+[31m-          z_content    +0.370     +0.217            +0.153
+[31m-      z_deformation    +0.041     -0.004            +0.045
+[31m-          z_fissure    -0.083     -0.015            -0.068
+[31m-         z_style_v1    -0.145     -0.016            -0.129
+[31m-         z_style_v2    -0.058     -0.008            -0.049
+[31m-      
+[31m-      --- Level 1 ---
+[31m-             factor  R²_patch  R²_global  Δ (patch-global)
+[31m-          z_content    +0.321     +0.148            +0.173
+[31m-      z_deformation    +0.012     -0.004            +0.016
+[31m-          z_fissure    -0.060     -0.009            -0.052
+[31m-         z_style_v1    -0.133     -0.015            -0.118
+[31m-         z_style_v2    -0.076     -0.010            -0.066
+[31m-      
+[31m-      --- Level 2 ---
+[31m-             factor  R²_patch  R²_global  Δ (patch-global)
+[31m-          z_content    +0.161     +0.033            +0.128
+[31m-      z_deformation    -0.071     -0.015            -0.056
+[31m-          z_fissure    -0.025     -0.009            -0.015
+[31m-         z_style_v1    -0.123     -0.037            -0.086
+[31m-         z_style_v2    -0.070     -0.006            -0.064
+[31m-      
+[31m-      Interpretation:
+[31m-        Δ ≈ 0 for z_content scalars    → global pool preserves scalar anatomy info
+[31m-        Δ >> 0 for z_deformation/fissure → spatial layout carries the signal (expected)
+[31m-        Δ ≈ 0 AND both R² low           → encoder didn't learn this factor at all
+
+[0m[34m[1m## replaced /cells/42/execution_count:[0m
+[31m-  25
+[32m+  93
+
+[0m[34m[1m## inserted before /cells/42/outputs/0:[0m
+[32m+  output:
+[32m+    output_type: stream
+[32m+    name: stdout
+[32m+    text:
+[32m+      ======================================================================
+[32m+      Multi-level concatenated content probe (view 1)
+[32m+      ======================================================================
+[32m+        Concatenated patch features:  (1000, 5760)
+[32m+        Concatenated global features: (1000, 90)
+[32m+      
+[32m+             factor  best_single_level  all_levels_patch  all_levels_global  multi-level lift
+[32m+          z_content             +0.343            +0.311             +0.140            -0.032
+[32m+      z_deformation             -0.006            -0.030             -0.010            -0.024
+[32m+          z_fissure             -0.021            -0.038             -0.018            -0.018
+[32m+         z_style_v1             +0.251            +0.229             +0.112            -0.022
+[32m+         z_style_v2             -0.055            -0.066             -0.022            -0.011
+[32m+      
+[32m+      Interpretation:
+[32m+        multi-level lift > 0 → factor is distributed across scales (expected for spatial factors)
+[32m+        multi-level lift ≈ 0 → single level already captures it (expected for z_content scalars)
+[32m+        all values low       → encoder lost this information entirely
+
+[0m[34m[1m## deleted /cells/42/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: stream
+[31m-    name: stdout
+[31m-    text:
+[31m-      ======================================================================
+[31m-      Multi-level concatenated content probe (view 1)
+[31m-      ======================================================================
+[31m-        Concatenated patch features:  (500, 5760)
+[31m-        Concatenated global features: (500, 90)
+[31m-      
+[31m-             factor  best_single_level  all_levels_patch  all_levels_global  multi-level lift
+[31m-          z_content             +0.370            +0.351             +0.245            -0.019
+[31m-      z_deformation             +0.041            -0.029             -0.006            -0.070
+[31m-          z_fissure             -0.025            -0.059             -0.020            -0.034
+[31m-         z_style_v1             -0.123            -0.166             -0.050            -0.043
+[31m-         z_style_v2             -0.058            -0.076             -0.014            -0.019
+[31m-      
+[31m-      Interpretation:
+[31m-        multi-level lift > 0 → factor is distributed across scales (expected for spatial factors)
+[31m-        multi-level lift ≈ 0 → single level already captures it (expected for z_content scalars)
+[31m-        all values low       → encoder lost this information entirely
+
+[0m[34m[1m## replaced /cells/48/execution_count:[0m
+[31m-  37
+[32m+  90
+
+[0m[34m[1m## inserted before /cells/48/outputs/0:[0m
+[32m+  output:
+[32m+    output_type: display_data
+[32m+    data:
+[32m+      image/png: iVBORw0K...<snip base64, md5=680b65b3207235fa...>
+[32m+      text/plain: <Figure size 1320x900 with 24 Axes>
+
+[0m[34m[1m## deleted /cells/48/outputs/0:[0m
+[31m-  output:
+[31m-    output_type: display_data
+[31m-    data:
+[31m-      image/png: iVBORw0K...<snip base64, md5=27575412310effe5...>
+[31m-      text/plain: <Figure size 1320x900 with 24 Axes>
+
+[0m[34m[1m## modified /cells/48/outputs/1/text:[0m
+[36m@@ -1,7 +1,7 @@[m
+ Per-sample reconstruction MSE (v1 / v2):[m
+[31m-  sample 0: v1=0.4724  v2=0.4571[m
+[31m-  sample 1: v1=0.4935  v2=0.5096[m
+[31m-  sample 2: v1=0.5922  v2=0.6094[m
+[31m-  sample 3: v1=0.5056  v2=0.5065[m
+[31m-  sample 4: v1=0.4808  v2=0.4827[m
+[31m-  sample 5: v1=0.5328  v2=0.5524[m
+[32m+[m[32m  sample 0: v1=0.3316  v2=0.3280[m
+[32m+[m[32m  sample 1: v1=0.4874  v2=0.3903[m
+[32m+[m[32m  sample 2: v1=0.5028  v2=0.4654[m
+[32m+[m[32m  sample 3: v1=0.4056  v2=0.3801[m
+[32m+[m[32m  sample 4: v1=0.3850  v2=0.3814[m
+[32m+[m[32m  sample 5: v1=0.4401  v2=0.4356[m
+
+[0m[34m[1m## replaced /cells/49/id:[0m
+[31m-  19125341
+[32m+  7547d9d4
+
+[0m

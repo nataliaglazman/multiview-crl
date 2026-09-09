@@ -1,0 +1,67 @@
+====================================================================================================
+DINOv3 IDENTIFIABILITY — facebook/dinov3-vitl16-pretrain-lvd1689m
+====================================================================================================
+  embeddings   dino.npz  (view 1, 500 samples, 18432 features)
+  slices       3 per axis on axial,coronal,sagittal, concat · token pool cls_mean · window dataset
+  generator    {"synthetic_causal": true, "synthetic_causal_edge_prob": 0.5, "synthetic_causal_graph": "random", "synthetic_causal_noise_scale": 0.4, "synthetic_causal_nonlinearity": "leaky_relu", "synthetic_center_
+  floor        dino_floor.npz
+
+1. CONTENT FACTORS
+factor                  R²    null     gap      ±    MCC  voxels    Δvox   floor  Δfloor
+------------------  ------  ------  ------  -----  -----  ------  ------  ------  ------
+brain_size          +0.804  -0.027  +0.831  0.006  0.900  +0.896  -0.066  +0.857  -0.026
+ventricle_size      +0.850  -0.031  +0.881  0.003  0.925  +0.757  +0.124  +0.570  +0.311
+lesion_x            +0.529  -0.022  +0.551  0.006  0.741  +0.542  +0.009  +0.523  +0.028
+lesion_y            +0.568  -0.027  +0.595  0.014  0.763  +0.539  +0.055  +0.515  +0.080
+lesion_z            +0.128  -0.028  +0.156  0.013  0.386  +0.290  -0.134  +0.071  +0.085
+cortical_thickness  +0.647  -0.030  +0.677  0.008  0.809  +0.523  +0.153  +0.482  +0.195
+temporal_atrophy    +0.691  -0.016  +0.707  0.015  0.837  +0.778  -0.071  +0.699  +0.009
+lr_asymmetry        +0.746  -0.038  +0.784  0.003  0.868  +0.882  -0.098  +0.726  +0.058
+sulcal_widening     +0.524  -0.016  +0.540  0.010  0.734  +0.763  -0.223  +0.237  +0.303
+  mean gap +0.636   block-MCC 0.774 ±0.003   probe features 64   floor mean gap +0.520
+
+2. STYLE / NUISANCE FACTORS
+factor           R²    null     gap      ±    MCC  voxels    Δvox   floor  Δfloor
+-----------  ------  ------  ------  -----  -----  ------  ------  ------  ------
+gain         +0.719  -0.016  +0.734  0.006  0.852  +0.758  -0.024  +0.808  -0.073
+bias         +0.516  -0.035  +0.551  0.002  0.728  +0.334  +0.217  +0.708  -0.157
+noise_sigma  -0.030  -0.030  -0.000  0.005  0.068  +0.010  -0.010  +0.010  -0.011
+  mean gap +0.428   block-MCC 0.549 ±0.003   probe features 64   floor mean gap +0.509
+
+3. GRAPH RECOVERY — undirected skeleton, best-F1 alpha selected against truth
+source      alpha     F1   prec    rec  SHD  exact  raw R²  partial R²
+----------  -----  -----  -----  -----  ---  -----  ------  ----------
+embeddings    0.2  0.813  1.000  0.684    6     no  +0.623      +0.222
+truth         0.2  0.848  1.000  0.737    5     no  +1.000      +1.000
+floor         0.2  0.690  1.000  0.526    9     no  -0.094      -1.094
+
+  per factor (embeddings panel)
+factor                      parents     raw  partial     gap   PC R²
+------------------  ---------------  ------  -------  ------  ------
+brain_size                       []  +0.906   +0.906  +0.000  +0.871
+ventricle_size                  [0]  +0.875   +0.706  +0.170  +0.840
+lesion_x                         []  +0.582   +0.582  +0.000  +0.650
+lesion_y                        [2]  +0.581   +0.078  +0.502  +0.654
+lesion_z                  [1, 2, 3]  -0.153   -0.509  +0.357  +0.184
+cortical_thickness        [0, 3, 4]  +0.769   +0.133  +0.636  +0.706
+temporal_atrophy          [0, 2, 3]  +0.819   +0.250  +0.569  +0.724
+lr_asymmetry        [0, 1, 2, 3, 5]  +0.832   +0.031  +0.801  +0.758
+sulcal_widening           [1, 4, 5]  +0.398   -0.180  +0.578  +0.488
+
+  orientation vs the true CPDAG at alpha=0.05 (PC identifies an equivalence class, so undirected can be correct)
+source      correct  rev  undir_est  dir_est  bidir  both_undir  CPDAG SHD  exact
+----------  -------  ---  ---------  -------  -----  ----------  ---------  -----
+embeddings        2    6          0        2      0           0         19     no
+truth             3    8          0        2      0           0         16     no
+floor             4    1          3        0      0           2         13     no
+
+  Table 3's raw/partial R² use the panel's full-width Ridge probe on a single 70/30 split.
+  Where the features are wider than the sample count that probe is biased low; table 1's
+  null-corrected gap is the reading to quote for factor recovery.
+
+4. VERDICT
+  9/9 content factors decode above their permutation null.
+  Mean gap is 0.028 BELOW the downsampled-voxel baseline.
+  Pretraining is worth +0.116 mean R² over the same architecture at random init.
+  Skeleton F1 0.813 against a ground-truth ceiling of 0.848 (-0.036). PC on the true factors is the most any representation could score at this sample size.
+  Alpha is selected against the truth and the graph readout is in-sample, so table 3 is an optimistic diagnostic, not held-out causal discovery.

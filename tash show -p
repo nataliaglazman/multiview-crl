@@ -1,0 +1,20 @@
+stash@{0}: WIP on main: 2241357 correct normalization
+stash@{1}: WIP on main: 646486e add eval script
+stash@{2}: WIP on main: 30fb033 eval speedup
+stash@{3}: WIP on main: 95ee94c update saving checkpoints
+stash@{4}: WIP on main: 969f27f add style codebook analysis to notebook
+stash@{5}: WIP on main: 969f27f add style codebook analysis to notebook
+stash@{6}: WIP on main: 9348bb7 improve separation score
+stash@{7}: WIP on main: 963dec2 update notebook
+stash@{8}: WIP on main: 1dc04f4 fix notebook
+stash@{9}: WIP on main: 5061a00 update notebook to fit changes
+stash@{10}: WIP on main: 88581e1 update notebok analysis
+stash@{11}: WIP on main: b5d57be fix notebook implementation
+stash@{12}: WIP on main: 51cadcc change notebook
+stash@{13}: WIP on main: ea03f5c update batchnorm
+stash@{14}: WIP on main: 93f2d9a fix notebook
+stash@{15}: WIP on main: 878a9ec update
+stash@{16}: WIP on main: 102b11e update docker files
+stash@{17}: WIP on main: 3318ad4 update docker files
+stash@{18}: WIP on main: 61d139e fix bug
+stash@{19}: WIP on main: e3ca9ec fix casting of latents

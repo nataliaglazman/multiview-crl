@@ -228,7 +228,7 @@ def evaluate_arrays(
     def recover(values, alpha):
         if np.any(np.std(values, axis=0) <= np.finfo(float).eps):
             raise ValueError("A decoded factor is constant; Fisher-Z graph recovery is undefined")
-        cg = pc(values, alpha=alpha, indep_test="fisherz", show_progress=False)
+        cg = pc(values, alpha=alpha, indep_test="kci", show_progress=False)
         graph = cg.G.graph
         estimated = (graph != 0) | (graph.T != 0)
         np.fill_diagonal(estimated, False)
