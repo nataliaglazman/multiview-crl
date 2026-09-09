@@ -136,6 +136,71 @@ class OrientationTests(unittest.TestCase):
         self.assertEqual((found["both_undirected"], found["correct_directed"]), (2, 0))
 
 
+class IndepTestTests(unittest.TestCase):
+    """--indep-test: fisherz sees only linear dependence, kci sees the nonlinear part."""
+
+    @staticmethod
+    def _nonlinear_pair(seed=0, n=200):
+        """x -> y = x^2, an edge with (exactly) zero sample linear correlation.
+
+        ``x`` is antithetic, so sum(x^3) == 0 by construction and the sample corr(x, x^2)
+        is zero up to the noise term rather than up to sampling luck. That makes this a
+        deterministic separation between the two tests, not a seed-dependent one.
+        """
+        rng = np.random.RandomState(seed)
+        u = rng.randn(n)
+        x = np.concatenate([u, -u])
+        y = x**2 + 0.1 * rng.randn(len(x))
+        return np.column_stack([x, y]), np.array([[0, 1], [0, 0]], dtype=bool)
+
+    def test_kci_finds_a_purely_nonlinear_edge_that_fisherz_cannot(self):
+        for seed in (0, 1, 2):
+            with self.subTest(seed=seed):
+                z, adjacency = self._nonlinear_pair(seed)
+                self.assertLess(abs(float(np.corrcoef(z[:, 0], z[:, 1])[0, 1])), 0.05)
+                linear = recovery.evaluate_arrays(z, z, adjacency, alphas=[0.05], indep_test="fisherz")
+                kernel = recovery.evaluate_arrays(z, z, adjacency, alphas=[0.05], indep_test="kci")
+                self.assertEqual((linear["best"]["tp"], linear["best"]["fn"]), (0, 1))
+                self.assertEqual((kernel["best"]["tp"], kernel["best"]["fn"]), (1, 0))
+
+    def test_both_tests_agree_on_a_linear_chain(self):
+        rng = np.random.RandomState(7)
+        z = rng.randn(300, 3)
+        z[:, 1] += 1.3 * z[:, 0]
+        z[:, 2] += 1.3 * z[:, 1]
+        truth = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]], dtype=bool)
+        for test in recovery.INDEP_TESTS:
+            with self.subTest(indep_test=test):
+                result = recovery.evaluate_arrays(z, z, truth, alphas=[0.05], indep_test=test)
+                self.assertTrue(result["best"]["exact_match"])
+                self.assertEqual(result["indep_test"], test)
+
+    def test_capping_the_conditioning_set_only_adds_skeleton_edges(self):
+        # max_cond_set is what makes kci finish at realistic factor counts; the cost is
+        # that pairs needing a larger conditioning set keep their edge.
+        rng = np.random.RandomState(5)
+        z = rng.randn(400, 4)
+        z[:, 1] += 1.3 * z[:, 0]
+        z[:, 2] += 1.3 * z[:, 1]
+        z[:, 3] += 1.3 * z[:, 2]
+        truth = np.zeros((4, 4), dtype=bool)
+        truth[0, 1] = truth[1, 2] = truth[2, 3] = True
+        unbounded = recovery.evaluate_arrays(z, z, truth, alphas=[0.05])
+        capped = recovery.evaluate_arrays(z, z, truth, alphas=[0.05], max_cond_set=0)
+        self.assertEqual(unbounded["max_cond_set"], None)
+        self.assertEqual(capped["max_cond_set"], 0)
+        self.assertTrue(unbounded["best"]["exact_match"])
+        # With no conditioning allowed, PC cannot separate the chain's non-adjacent pairs.
+        self.assertGreater(capped["best"]["fp"], 0)
+        self.assertEqual(capped["best"]["fn"], 0)
+
+    def test_default_is_fisherz_and_an_unknown_test_is_rejected(self):
+        z, adjacency = self._nonlinear_pair()
+        self.assertEqual(recovery.evaluate_arrays(z, z, adjacency, alphas=[0.05])["indep_test"], "fisherz")
+        with self.assertRaises(ValueError):
+            recovery.evaluate_arrays(z, z, adjacency, alphas=[0.05], indep_test="spearman")
+
+
 class ReadoutTests(unittest.TestCase):
     """--readout-dim and --holdout-readout, the two knobs on the graph readout."""
 
@@ -234,6 +299,8 @@ def _options(**overrides):
         with_graph=True,
         readout_dim=None,
         holdout_readout=False,
+        indep_test="fisherz",
+        max_cond_set=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
