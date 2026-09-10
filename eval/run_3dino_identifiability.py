@@ -37,7 +37,7 @@ def validate_graph_support(max_cond_set):
             )
 
 
-def validate_bundle(path, views):
+def validate_bundle(path, views, representation="all"):
     """Fail early on a 2D, malformed, or nonfinite embedding artifact."""
     import numpy as np
 
@@ -49,17 +49,22 @@ def validate_bundle(path, views):
         if z.ndim != 2 or len(z) < 20 or not np.isfinite(z).all():
             raise ValueError(f"{path}: require at least 20 rows of finite content labels")
         for view in set(v for option in views for v in (["1", "2"] if option == "both" else [option])):
-            X = data[f"emb_view{view}"]
+            prefix = "emb_view" if representation == "all" else f"emb_{representation}_view"
+            if representation != "all" and not meta.get("embedding_partition"):
+                raise ValueError("Content/style evaluation needs a saved fine-tuning partition")
+            X = data[f"{prefix}{view}"]
             if X.ndim != 2 or len(X) != len(z) or X.shape[1] == 0 or not np.isfinite(X).all():
                 raise ValueError(f"{path}: invalid or misaligned view {view} embeddings")
         return meta
 
 
-def validate_floor(embeddings, floor, views):
+def validate_floor(embeddings, floor, views, representation="all"):
     """A floor must change weights only, not samples, modalities, or preprocessing."""
     import numpy as np
 
-    main_meta, floor_meta = (validate_bundle(path, views) for path in (embeddings, floor))
+    main_meta, floor_meta = (validate_bundle(path, views, representation) for path in (embeddings, floor))
+    if main_meta.get("embedding_partition") != floor_meta.get("embedding_partition"):
+        raise ValueError("Floor and trained embeddings use different content/style partitions")
     if not floor_meta.get("random_init"):
         raise ValueError("The supplied --floor is not marked as random initialization")
     keys = (
@@ -158,6 +163,8 @@ def scoring_args(cli, embeddings, floor, view):
         str(embeddings),
         "--view",
         view,
+        "--representation",
+        cli.representation,
         "--out",
         str(base.with_suffix(".json")),
         "--csv",
@@ -243,6 +250,7 @@ def write_summary(output_dir, views):
         rows.append(
             dict(
                 view=view,
+                representation=report.get("representation", "all"),
                 run_dir=report["embeddings_meta"].get("run_dir"),
                 embeddings=report["embeddings_path"],
                 num_samples=report["num_samples"],
@@ -300,6 +308,9 @@ def write_summary(output_dir, views):
     widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
     text = "\n".join("  ".join(value.ljust(width) for value, width in zip(row, widths)) for row in table)
     text += "\nContent gap = cross-validated R² minus permutation null; graph R² uses its own probe protocol.\n"
+    text += (
+        f"Representation: {rows[0]['representation']}; content/style table names denote targets, not input blocks.\n"
+    )
     text += "Graph F1/precision/recall/SHD use best-F1 alpha selected against truth; — = unavailable.\n"
     (output_dir / "summary.txt").write_text(text)
     print("\n" + text)
@@ -341,6 +352,7 @@ def main(argv=None):
     baseline.add_argument("--floor", type=Path, help="Use an existing matched random-initialization NPZ")
     parser.add_argument("--floor-seed", type=int, default=0)
     parser.add_argument("--eval-views", nargs="+", choices=["1", "2", "both"], default=["1", "2"])
+    parser.add_argument("--representation", choices=["all", "content", "style"], default="all")
     parser.add_argument("--num-samples", type=int, default=500)
     parser.add_argument("--volume-size", type=int, default=112)
     parser.add_argument("--volume-batch", type=int, default=2)
@@ -410,7 +422,7 @@ def main(argv=None):
     embeddings = cli.embeddings or cli.output_dir / "embeddings.npz"
     floor = cli.floor or (cli.output_dir / "random_init.npz" if cli.with_floor else None)
     if cli.embeddings:
-        validate_bundle(embeddings, cli.eval_views)
+        validate_bundle(embeddings, cli.eval_views, cli.representation)
     cli.output_dir.mkdir(parents=True, exist_ok=True)
     manifest = dict(
         options={k: str(v) if isinstance(v, Path) else v for k, v in vars(cli).items()},
@@ -426,7 +438,7 @@ def main(argv=None):
                 cli.output_dir,
                 manifest,
             )
-        meta = validate_bundle(embeddings, cli.eval_views)
+        meta = validate_bundle(embeddings, cli.eval_views, cli.representation)
         if meta.get("num_samples", 0) < 2 * cli.n_splits:
             raise ValueError("The embedding artifact has too few rows for the requested CV splits")
         if cli.with_floor:
@@ -438,7 +450,7 @@ def main(argv=None):
                 manifest,
             )
         if floor:
-            validate_floor(embeddings, floor, cli.eval_views)
+            validate_floor(embeddings, floor, cli.eval_views, cli.representation)
         for view in cli.eval_views:
             run_stage(
                 f"score_view{view}",

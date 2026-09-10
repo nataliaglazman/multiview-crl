@@ -68,7 +68,7 @@ DEFAULT_ALPHAS = (0.01, 0.05, 0.1, 0.2)
 # --------------------------------------------------------------------------- #
 
 
-def load_bundle(path, view="1"):
+def load_bundle(path, view="1", representation="all"):
     """One embeddings ``.npz`` -> the arrays the scoring functions take.
 
     ``view`` picks T1 (``1``), FLAIR (``2``) or ``both`` (their concatenation, which is
@@ -76,6 +76,11 @@ def load_bundle(path, view="1"):
     """
     data = np.load(path, allow_pickle=False)
     meta = json.loads(str(data["meta"])) if "meta" in data else {}
+    if representation not in ("all", "content", "style"):
+        raise ValueError("representation must be all, content or style")
+    prefix = "emb_view" if representation == "all" else f"emb_{representation}_view"
+    if representation != "all" and not meta.get("embedding_partition"):
+        raise ValueError("Content/style evaluation needs a saved fine-tuning partition")
 
     def _views(prefix):
         keys = [f"{prefix}{v}" for v in ("1", "2")] if view == "both" else [f"{prefix}{view}"]
@@ -107,6 +112,7 @@ def load_bundle(path, view="1"):
         style_names=meta.get("style_factor_names") or [f"s{d}" for d in range(n_style)],
         meta=meta,
         view=view,
+        representation=representation,
     )
 
 
@@ -487,6 +493,7 @@ def format_report(result):
         ),
         f"  generator    {json.dumps(meta.get('generator', {}), sort_keys=True)[:200]}",
         f"  floor        {result.get('floor_path') or 'none'}",
+        f"  representation {result.get('representation', 'all')} (both target types are probed from this block)",
         "",
     ]
     parts = [
@@ -563,6 +570,7 @@ def score(bundle, floor, options):
         embeddings_path=bundle["path"],
         floor_path=floor["path"] if floor else None,
         view=bundle["view"],
+        representation=bundle.get("representation", "all"),
         num_samples=int(len(bundle["X"])),
         num_features=int(bundle["X"].shape[1]),
         has_voxels=bundle["raw"] is not None,
@@ -668,6 +676,12 @@ def main(argv=None):
     parser.add_argument("--embeddings", type=Path, help="npz from eval.dinov3_embed_synthetic")
     parser.add_argument("--floor", type=Path, help="npz from the same script with --random-init")
     parser.add_argument("--view", default="1", choices=["1", "2", "both"], help="1=T1, 2=FLAIR, both=concatenated")
+    parser.add_argument(
+        "--representation",
+        choices=["all", "content", "style"],
+        default="all",
+        help="Embedding block to probe; split blocks require fine-tuning partition metadata",
+    )
     parser.add_argument("--out", type=Path, help="Write the full report as JSON")
     parser.add_argument("--csv", type=Path, help="Write the per-factor table as CSV")
     parser.add_argument("--quiet", action="store_true", help="Write the outputs without printing the report")
@@ -745,8 +759,12 @@ def main(argv=None):
         parser.error("Require --n-null >= 0, --n-splits >= 2 and at least one seed")
     cli.seeds = tuple(cli.seeds)
 
-    bundle = load_bundle(cli.embeddings, cli.view)
-    floor = load_bundle(cli.floor, cli.view) if cli.floor else None
+    bundle = load_bundle(cli.embeddings, cli.view, cli.representation)
+    floor = load_bundle(cli.floor, cli.view, cli.representation) if cli.floor else None
+    if bundle["X"].shape[1] == 0:
+        parser.error("The selected representation has no dimensions")
+    if floor is not None and floor["meta"].get("embedding_partition") != bundle["meta"].get("embedding_partition"):
+        parser.error("The floor must use the same content/style partition")
     if floor is not None and floor["X"].shape[0] != bundle["X"].shape[0]:
         parser.error("The floor embeddings must come from the same number of samples as the embeddings")
     if floor is not None and not np.allclose(floor["z_content"], bundle["z_content"]):
