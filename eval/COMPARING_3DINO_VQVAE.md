@@ -47,7 +47,7 @@ python -m eval.compare_bundles \
   --floors  vq_all=results/bundles/vq_all_floor.npz \
             dino=results/3dino_matched/random_init.npz \
   --equal-width --with-graph --alphas 0.05 --diagnostic-alpha 0.05 \
-  --probe-kind ridge --seeds 0 1 2 --n-null 3 \
+  --graph-repeats 20 --probe-kind ridge --seeds 0 1 2 --n-null 3 \
   --out results/matched/compare.json --csv results/matched/compare.csv
 ```
 
@@ -100,7 +100,11 @@ checkpoints, and the reports already published were produced without it.
 `--with-graph` runs the PC panel on every bundle and scores each recovered skeleton
 **against the true SCM adjacency** the generator used. The section carries:
 
-- one row per representation, plus one per untrained floor;
+- one row per representation, plus one per untrained floor. **Export a floor for every
+  model, not just one.** A model whose gap is uncorrected sitting beside one whose gap is
+  floor-corrected is not a comparison: on this generator an untrained encoder already reads
+  most of the global morphometry, so the uncorrected column is measuring the architecture
+  as much as the training;
 - a `truth (ceiling)` row — the identical panel on the ground-truth factors themselves,
   computed once because it depends only on the factors every bundle shares. It is a
   finite-sample reference, not a strict upper bound: a representation can beat it by
@@ -118,12 +122,37 @@ checkpoints, and the reports already published were produced without it.
   is entirely undirected, and scoring against the DAG would charge every estimate for two
   edges no observational method can orient.
 
-`--equal-width` matters more here than for the probes. `--probe-dim` does not touch the
-graph; the readout has its own rule (`run_causal_recovery.readout_width`) that caps at each
-block's feature count, so a 48-channel VQ block and an 18,432-dim embedding otherwise get
-readouts of 48 and 64. `--equal-width` pins both to what the narrowest block can reach and
-the report prints the widths so a mismatch is visible. The ceiling is exempt by
-construction.
+`--equal-width` matters more here than for the probes, and it now pins **two** widths the
+graph section depends on. `--probe-dim` reaches neither of them:
+
+- `--readout-dim`, the PCA the decoded factors PC consumes come out of. Its own rule caps
+  at each block's feature count, so a 48-channel VQ block and an 18,432-dim embedding
+  otherwise get readouts of 48 and 64.
+- `--graph-probe-dim`, the features the panel's raw and partial R² columns are fitted on.
+  Without it those columns compare a 16-channel block against a 1024-dim one and part of
+  the difference is 64× the features, not the representation.
+
+The report prints both widths and names which one differs when they do. The ceiling is
+exempt from both: its features ARE the factors.
+
+Note that adding a narrow bundle to the comparison drags every other bundle down to its
+width. That is the correct behaviour for a matched read, but it means a 12-channel content
+block will handicap a 16-channel all-block sitting next to it. Run the pair you actually
+want to compare, or run more than once.
+
+### Is the difference real?
+
+The panel is deterministic given its input, so the headline table has no error bar and a
+two-edge difference reads exactly like a twenty-edge one. `--graph-repeats N` re-runs PC on
+`N` row subsamples (`--graph-subsample`, default 0.8 of the rows, **without** replacement —
+a bootstrap's duplicate rows would inflate the dependence Fisher-Z tests for) and reports
+each source's mean ± spread.
+
+Every source sees the same rows at every repeat, so the per-repeat differences are paired;
+that is why the `ΔF1 vs ref` column's spread is much tighter than the two marginal columns
+it is built from. The `resolved` column marks a paired difference that clears twice its own
+spread. It is a rough screen, not a test: no multiplicity correction, and the repeats share
+rows. Treat `no` as "do not quote this ordering".
 
 `compare_graph.csv` (written next to `--csv`, taking its stem) holds one row per source
 and alpha, so the whole sweep can be replotted without re-running PC.

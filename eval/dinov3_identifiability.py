@@ -24,8 +24,11 @@ mean the same thing:
    readout of the decoded factors, scored against the true skeleton over an alpha sweep.
    ``--orientation`` additionally scores edge directions against the true DAG's CPDAG —
    the CPDAG, because PC identifies a Markov equivalence class and the default ``chain``
-   SCM's is entirely undirected.  That panel does its own scaling/PCA internally, so it is
-   handed the unreduced features while tables 1/2 use ``--probe-dim``.
+   SCM's is entirely undirected.  The panel does its own scaling/PCA for the readout PC
+   consumes, so ``--probe-dim`` (which reduces tables 1/2) does not reach it and by default
+   it is handed the unreduced features.  ``--graph-probe-dim`` reduces them too, which is
+   what makes the panel's raw/partial R² columns comparable between blocks of very
+   different widths.
 
    The ``truth`` row runs the identical panel on the ground-truth factors themselves.  It
    is a finite-sample reference for PC on observed factors, not a strict upper bound
@@ -234,6 +237,24 @@ def graph_panel(X, z_content, adjacency, options):
         return dict(status="error", reason=f"{type(exc).__name__}: {exc}")
 
 
+def graph_features(X, options, seed=0):
+    """The feature block the graph panel sees, after any ``--graph-probe-dim`` reduction.
+
+    Separate from ``--probe-dim`` because the two reach different things.  ``--probe-dim``
+    reduces the block tables 1/2 probe.  The graph panel does its own PCA for the readout
+    PC consumes, but its raw/partial R² columns are fitted on whatever it is handed — so
+    without this, those columns compare a 16-channel VQ block against a 1024-dim embedding
+    and part of the difference is 64x the features, not the representation.
+
+    Defaults to off (0) so existing reports are unchanged; ``compare_bundles --equal-width``
+    turns it on at the narrowest block's width.
+    """
+    dim = getattr(options, "graph_probe_dim", 0)
+    if not dim:
+        return X
+    return reduce_features(X, dim, seed)[0]
+
+
 def score_graphs(bundle, floor, options):
     """The panel for the embeddings, the ground-truth ceiling, and the untrained floor."""
     if bundle["adjacency"] is None:
@@ -241,11 +262,12 @@ def score_graphs(bundle, floor, options):
         return {}
     Z, names, keep = usable_factors(bundle["z_content"], bundle["content_names"])
     adjacency = bundle["adjacency"][np.ix_(keep, keep)]
-    panels = {"embeddings": graph_panel(bundle["X"], Z, adjacency, options)}
+    panels = {"embeddings": graph_panel(graph_features(bundle["X"], options), Z, adjacency, options)}
     if options.pc_ceiling:
+        # Never reduced: its "features" ARE the factors, so there is nothing to match to.
         panels["truth"] = graph_panel(Z, Z, adjacency, options)
     if floor is not None:
-        panels["floor"] = graph_panel(floor["X"], Z, adjacency, options)
+        panels["floor"] = graph_panel(graph_features(floor["X"], options), Z, adjacency, options)
     for panel in panels.values():
         panel["factor_names"] = names
     return panels
@@ -684,6 +706,13 @@ def main(argv=None):
         "kci finish at this factor count. Can only add skeleton edges, never remove them.",
     )
     graph.add_argument(
+        "--graph-probe-dim",
+        default=0,
+        help="PCA the features handed to the graph panel to this width (0 = off, the default; "
+        "'auto' uses run_dci_compare's rule). --probe-dim does not reach this panel, so without "
+        "it the panel's raw/partial R2 columns compare blocks of different widths.",
+    )
+    graph.add_argument(
         "--readout-dim",
         type=int,
         help="PCA width for the decoded-factor readout in table 3. Default: run_causal_recovery's own "
@@ -703,11 +732,13 @@ def main(argv=None):
         return 0
     if cli.embeddings is None:
         parser.error("--embeddings is required (or pass --self-test)")
-    if cli.probe_dim != PROBE_DIM_AUTO:
-        try:
-            cli.probe_dim = int(cli.probe_dim)
-        except ValueError:
-            parser.error(f"--probe-dim must be an integer or {PROBE_DIM_AUTO!r}")
+    for name in ("probe_dim", "graph_probe_dim"):
+        value = getattr(cli, name)
+        if value != PROBE_DIM_AUTO:
+            try:
+                setattr(cli, name, int(value))
+            except ValueError:
+                parser.error(f"--{name.replace('_', '-')} must be an integer or {PROBE_DIM_AUTO!r}")
     if any(not 0 < a < 1 for a in cli.alphas) or not 0 < cli.diagnostic_alpha < 1:
         parser.error("PC alphas must be strictly between 0 and 1")
     if cli.n_null < 0 or cli.n_splits < 2 or not cli.seeds:

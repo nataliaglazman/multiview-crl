@@ -215,7 +215,11 @@ def format_block(results, block, column):
     footer = ["mean", *means]
     if len(labels) == 2:
         footer.append("")
-    title = {"gap": "real − permutation null", "delta_floor": "gap − own untrained floor"}[column]
+    title = {
+        "gap": "real − permutation null",
+        "delta_floor": "gap − own untrained floor",
+        "delta_voxels": "gap − downsampled-voxel baseline",
+    }[column]
     return f"{block.upper()} · {title}\n{scorer._table(headers, [*body, footer])}\n"
 
 
@@ -226,7 +230,8 @@ def format_widths(results):
         lines.append(
             f"  {label:<14} {result['num_features']:>7} features"
             f" -> {block.get('probe_features', '?'):>5} probed"
-            f"   floor: {'yes' if result.get('floor_path') else 'no'}"
+            f"   floor: {'yes' if result.get('floor_path') else 'no':<3}"
+            f"   voxels: {'yes' if result.get('has_voxels') else 'no'}"
         )
     widths = {r.get("content", {}).get("_block", {}).get("probe_features") for r in results.values()}
     note = ""
@@ -348,7 +353,116 @@ def format_graph_orientation(rows, diagnostic_alpha):
     return scorer._table(headers, body)
 
 
-def format_graph(results, truth, options):
+def graph_sources(bundles, floors, options):
+    """``(sources, Z, adjacency)`` — every feature block the causal table scores.
+
+    Same labels and order as :func:`graph_panels`, and the same per-source reduction the
+    headline panel uses, so a stability band describes the rows above it rather than a
+    slightly different pipeline.
+    """
+    reference = next(iter(bundles.values()))
+    if reference["adjacency"] is None:
+        return [], None, None
+    Z, _names, keep = scorer.usable_factors(reference["z_content"], reference["content_names"])
+    adjacency = reference["adjacency"][np.ix_(keep, keep)]
+    sources = [(CEILING_LABEL, Z)]
+    for label, bundle in bundles.items():
+        sources.append((label, scorer.graph_features(bundle["X"], options)))
+        if floors.get(label) is not None:
+            sources.append((f"{label} · floor", scorer.graph_features(floors[label]["X"], options)))
+    return sources, Z, adjacency
+
+
+def graph_stability(sources, Z, adjacency, options, repeats, fraction):
+    """Re-run PC on repeated row subsamples, to say whether a graph difference is real.
+
+    The panel is deterministic given its input, so the headline table has no error bar and
+    a two-edge difference between two sources reads exactly like a twenty-edge one.  This
+    resamples the thing that actually varies — which subjects are in the evaluation set —
+    and reports the spread.
+
+    Subsampling WITHOUT replacement rather than a bootstrap: duplicated rows would inflate
+    the dependence Fisher-Z is testing for, so a bootstrap would bias the skeleton towards
+    extra edges.  Every source sees the SAME rows at every repeat, which makes the
+    per-repeat differences paired — that is what lets the paired column have a much tighter
+    spread than the two marginal columns it is built from.
+
+    The feature reduction is fitted once, outside the loop, so the band reflects the graph
+    step rather than PCA being refitted; it is the same reduction the headline row used.
+    """
+    if not sources or repeats < 2:
+        return {}
+    n = len(Z)
+    size = max(int(round(n * fraction)), 20)
+    if size >= n:
+        raise ValueError("--graph-subsample must be below 1.0 or every repeat is the same rows")
+    rng = np.random.RandomState(options.null_seed)
+    per_source = {label: [] for label, _X in sources}
+    for repeat in range(repeats):
+        rows = rng.choice(n, size=size, replace=False)
+        logger.info("Graph stability repeat %d/%d on %d rows", repeat + 1, repeats, size)
+        for label, X in sources:
+            panel = scorer.graph_panel(X[rows], Z[rows], adjacency, options)
+            per_source[label].append(_sweep_row(panel, options.diagnostic_alpha))
+    return summarise_stability(per_source, sources, size, repeats)
+
+
+def summarise_stability(per_source, sources, size, repeats):
+    """``{label: {...}}`` with each metric's mean/std and the paired delta vs the first model."""
+    metrics = ("f1", "precision", "recall", "skeleton_shd")
+    reference = next((label for label, _X in sources if label != CEILING_LABEL), None)
+    out = {}
+    for label, rows in per_source.items():
+        scored = [row for row in rows if row]
+        entry = {"repeats": len(scored), "subsample": size, "requested": repeats}
+        for metric in metrics:
+            values = [row[metric] for row in scored]
+            entry[f"{metric}_mean"] = float(np.mean(values)) if values else float("nan")
+            entry[f"{metric}_std"] = float(np.std(values)) if values else float("nan")
+        if reference and label != reference:
+            paired = [row["f1"] - other["f1"] for row, other in zip(rows, per_source[reference]) if row and other]
+            entry["f1_delta_mean"] = float(np.mean(paired)) if paired else float("nan")
+            entry["f1_delta_std"] = float(np.std(paired)) if paired else float("nan")
+            entry["f1_delta_vs"] = reference
+        out[label] = entry
+    return out
+
+
+def format_graph_stability(stability):
+    """The band table: is the difference in the rows above bigger than the resampling noise?"""
+    if not stability:
+        return ""
+    headers = ["source", "F1 mean", "±", "SHD mean", "±", "ΔF1 vs ref", "±", "resolved"]
+    body = []
+    for label, entry in stability.items():
+        delta, spread = entry.get("f1_delta_mean"), entry.get("f1_delta_std")
+        # "resolved" only when the paired difference clears twice its own spread. Two SDs of
+        # a paired difference over this many repeats is a rough screen, not a test -- it has
+        # no multiplicity correction and the repeats share rows.
+        resolved = "—"
+        if delta is not None and np.isfinite(delta) and np.isfinite(spread):
+            resolved = "yes" if abs(delta) > 2 * spread else "no"
+        body.append(
+            [
+                label,
+                f"{entry['f1_mean']:.3f}",
+                f"{entry['f1_std']:.3f}",
+                f"{entry['skeleton_shd_mean']:.1f}",
+                f"{entry['skeleton_shd_std']:.1f}",
+                scorer._fmt(delta) if delta is not None else "ref",
+                f"{spread:.3f}" if spread is not None and np.isfinite(spread) else "",
+                resolved,
+            ]
+        )
+    first = next(iter(stability.values()))
+    caption = (
+        f"  {first['repeats']}/{first['requested']} repeats on {first['subsample']} rows each, "
+        "the same rows for every source"
+    )
+    return f"{scorer._table(headers, body)}\n{caption}"
+
+
+def format_graph(results, truth, options, stability=None):
     """The whole causal-discovery section: PC on each representation, scored against truth."""
     rows = graph_panels(results, truth)
     if not rows:
@@ -361,6 +475,7 @@ def format_graph(results, truth, options):
         format_graph_scores(rows, lambda panel: _sweep_row(panel, alpha), alpha),
     ]
     scored = [(label, panel) for label, panel in rows if label != CEILING_LABEL]
+    features = {panel.get("num_features") for _l, panel in scored}
     widths = {panel.get("graph_readout_dim") for _l, panel in scored}
     samples = {panel.get("graph_samples") for _l, panel in rows}
     modes = {panel.get("readout_mode") for _l, panel in rows}
@@ -369,14 +484,18 @@ def format_graph(results, truth, options):
         return "/".join(str(v) for v in sorted(values, key=lambda v: (v is None, v)))
 
     out.append(
-        f"  readout: {'/'.join(sorted(str(m) for m in modes))} at {_join(widths)} dims, "
-        f"PC on {_join(samples)} rows, {next(iter(rows))[1].get('indep_test')} independence test"
-        + (f"; the ceiling reads out its {truth.get('graph_readout_dim')} factors directly" if truth else "")
+        f"  features: {_join(features)} in, read out {'/'.join(sorted(str(m) for m in modes))} at "
+        f"{_join(widths)} dims, PC on {_join(samples)} rows, "
+        f"{next(iter(rows))[1].get('indep_test')} independence test"
+        + (f"; the ceiling uses its {truth.get('num_features')} factors directly" if truth else "")
     )
-    if len(widths) > 1:
+    if len(widths) > 1 or len(features) > 1:
+        which = " and ".join(
+            part for part, differs in (("feature", len(features) > 1), ("readout", len(widths) > 1)) if differs
+        )
         out.append(
-            "  NOTE: the sources were read out at different widths, so part of the difference\n"
-            "        above is readout capacity rather than representation. Pass --equal-width."
+            f"  NOTE: the sources differ in {which} width, so part of the difference above is\n"
+            "        capacity rather than representation. Pass --equal-width."
         )
     out += [
         "",
@@ -386,6 +505,13 @@ def format_graph(results, truth, options):
     factors = format_graph_factors(rows)
     if factors:
         out += ["", "  partial R² per factor — the recovered signal each edge rests on", factors]
+    band = format_graph_stability(stability)
+    if band:
+        out += [
+            "",
+            "  stability under row resampling — is the difference above bigger than the noise?",
+            band,
+        ]
     orientation = format_graph_orientation(rows, alpha)
     if orientation:
         out += [
@@ -404,7 +530,7 @@ def format_graph(results, truth, options):
     return "\n".join(out)
 
 
-def format_report(results, problems, truth=None, options=None):
+def format_report(results, problems, truth=None, options=None, stability=None):
     parts = [
         "=" * 92,
         "MATCHED BUNDLE COMPARISON",
@@ -415,16 +541,20 @@ def format_report(results, problems, truth=None, options=None):
     if problems:
         parts += ["ROW ALIGNMENT", *(f"  !! {p}" for p in problems), ""]
     for block in ("content", "style"):
-        for column in ("gap", "delta_floor"):
+        # delta_voxels last: it is the weakest claim of the three (a feature that does not
+        # beat average-pooled voxels has not earned its forward pass) but it is the only one
+        # that needs no second model, so it is the column a single bundle still gets.
+        for column in ("gap", "delta_floor", "delta_voxels"):
             table = format_block(results, block, column)
             if table:
                 parts.append(table)
     parts.append(
         "Read across a row for the same factor under different representations. 'gap' is\n"
-        "comparable everywhere; 'Δfloor' only where each bundle has its own floor.\n"
+        "comparable everywhere; 'Δfloor' only where each bundle has its own floor, and\n"
+        "'Δvoxels' only where the bundle stored one (export with --raw-grid).\n"
     )
     if options is not None:
-        graph = format_graph(results, truth, options)
+        graph = format_graph(results, truth, options, stability)
         if graph:
             parts.append(graph)
     return "\n".join(parts)
@@ -562,6 +692,9 @@ def _self_test():
         max_cond_set=None,
         readout_dim=8,
         holdout_readout=False,
+        graph_probe_dim=16,
+        graph_repeats=4,
+        graph_subsample=0.8,
     )
     records, problems = check_alignment(bundles, strict=True)
     assert not problems, problems
@@ -573,7 +706,14 @@ def _self_test():
 
     scored = argparse.Namespace(**{**vars(options), "pc_ceiling": False})
     results = score_all(bundles, {}, scored)
-    print(format_report(results, problems, truth, scored))
+
+    sources, gt, adjacency = graph_sources(bundles, {}, scored)
+    assert [label for label, _X in sources] == [CEILING_LABEL, "strong", "weak"], sources
+    # --graph-probe-dim must reach the panel's own features, which --probe-dim does not.
+    assert dict(sources)["strong"].shape[1] == 16, dict(sources)["strong"].shape
+    assert dict(sources)[CEILING_LABEL].shape[1] == 3, "the ceiling is never reduced"
+    stability = graph_stability(sources, gt, adjacency, scored, scored.graph_repeats, scored.graph_subsample)
+    print(format_report(results, problems, truth, scored, stability))
 
     gaps = {label: result["content"]["_block"]["mean_gap"] for label, result in results.items()}
     assert gaps["strong"] > gaps["weak"], gaps
@@ -593,12 +733,21 @@ def _self_test():
         assert panel["graph_readout_dim"] == expected, (label, panel["graph_readout_dim"])
     assert rows["strong"]["best"]["f1"] >= rows["weak"]["best"]["f1"], "cleaner features, no worse graph"
 
+    assert set(stability) == {CEILING_LABEL, "strong", "weak"}, sorted(stability)
+    for label, entry in stability.items():
+        assert entry["repeats"] == scored.graph_repeats, entry
+        assert entry["subsample"] == int(round(len(gt) * scored.graph_subsample)), entry
+        assert 0.0 <= entry["f1_mean"] <= 1.0 and entry["f1_std"] >= 0.0, entry
+    assert "f1_delta_mean" not in stability["strong"], "the reference source has no paired delta"
+    assert stability["weak"]["f1_delta_vs"] == "strong", stability["weak"]
+    assert stability["weak"]["f1_delta_mean"] <= 0.0, stability["weak"]
+
     mismatched = {"strong": bundles["strong"], "shifted": make(weak)}
     mismatched["shifted"]["z_content"] = z + 1.0
     assert check_alignment(mismatched, strict=False)[1], "a different factor draw must be reported"
     print(
         "SELF-TEST OK: matched scoring separates the two, PC scores against the true "
-        "adjacency, and a factor mismatch is caught."
+        "adjacency with a resampling band, and a factor mismatch is caught."
     )
 
 
@@ -656,6 +805,29 @@ def main(argv=None):
     graph.add_argument("--indep-test", default="fisherz", choices=list(INDEP_TESTS))
     graph.add_argument("--max-cond-set", type=int)
     graph.add_argument("--readout-dim", type=int)
+    graph.add_argument(
+        "--graph-probe-dim",
+        default=0,
+        help="PCA the features handed to the graph panel to this width (0 = off, 'auto' for "
+        "run_dci_compare's rule). --probe-dim does not reach that panel. --equal-width sets this "
+        "to the narrowest block's width for you.",
+    )
+    graph.add_argument(
+        "--graph-repeats",
+        type=int,
+        default=0,
+        help="Re-run PC on this many row subsamples to put an error bar on the graph scores. "
+        "0 (default) skips it. The panel is deterministic, so without this a two-edge difference "
+        "between two sources is indistinguishable from a real one. Costs one PC search per "
+        "source per repeat.",
+    )
+    graph.add_argument(
+        "--graph-subsample",
+        type=float,
+        default=0.8,
+        help="Fraction of rows each --graph-repeats draw keeps, without replacement (default 0.8). "
+        "Not a bootstrap: duplicated rows would inflate the dependence Fisher-Z tests for.",
+    )
     graph.add_argument("--holdout-readout", action="store_true")
 
     cli = parser.parse_args(argv)
@@ -672,6 +844,15 @@ def main(argv=None):
             parser.error(f"--probe-dim must be an integer or {PROBE_DIM_AUTO!r}")
     if cli.n_null < 0 or cli.n_splits < 2 or not cli.seeds:
         parser.error("Require --n-null >= 0, --n-splits >= 2 and at least one seed")
+    if cli.graph_probe_dim != PROBE_DIM_AUTO:
+        try:
+            cli.graph_probe_dim = int(cli.graph_probe_dim)
+        except ValueError:
+            parser.error(f"--graph-probe-dim must be an integer or {PROBE_DIM_AUTO!r}")
+    if cli.graph_repeats and cli.graph_repeats < 2:
+        parser.error("--graph-repeats needs at least 2 draws to have a spread")
+    if not 0 < cli.graph_subsample < 1:
+        parser.error("--graph-subsample must be between 0 and 1, exclusive")
     cli.seeds = tuple(cli.seeds)
 
     bundle_paths = parse_named(cli.bundles, "--bundles")
@@ -691,7 +872,15 @@ def main(argv=None):
     if cli.with_graph:
         if cli.equal_width:
             cli.readout_dim = common_readout(bundles, floors, cli)
-            logger.info("--equal-width: reading every graph out at %d dims", cli.readout_dim)
+            # --probe-dim does not reach the graph panel, so pin its features separately:
+            # without this the panel's raw/partial R2 columns compare a narrow block against
+            # a wide one and part of the difference is the extra features.
+            cli.graph_probe_dim = common_width(bundles, floors)
+            logger.info(
+                "--equal-width: graph features at %d, readout at %d dims",
+                cli.graph_probe_dim,
+                cli.readout_dim,
+            )
         # The ceiling depends only on the factors, which every bundle shares, so it is
         # scored once here and the per-bundle panels are told not to repeat it.
         if cli.pc_ceiling:
@@ -700,13 +889,21 @@ def main(argv=None):
         cli = argparse.Namespace(**{**vars(cli), "pc_ceiling": False})
 
     results = score_all(bundles, floors, cli)
-    report = format_report(results, problems, truth, cli)
+
+    stability = {}
+    if cli.with_graph and cli.graph_repeats:
+        sources, Z, adjacency = graph_sources(bundles, floors, cli)
+        logger.info("Graph stability: %d repeats x %d sources", cli.graph_repeats, len(sources))
+        stability = graph_stability(sources, Z, adjacency, cli, cli.graph_repeats, cli.graph_subsample)
+
+    report = format_report(results, problems, truth, cli, stability)
     payload = {
         "bundles": {label: str(path) for label, path in bundle_paths.items()},
         "floors": {label: str(path) for label, path in floor_paths.items()},
         "row_alignment": problems or "verified",
         "options": scorer.options_record(cli),
         "truth_panel": truth,
+        "graph_stability": stability,
         "results": results,
     }
     saved = []

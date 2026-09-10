@@ -5,6 +5,7 @@ import csv
 import json
 import tempfile
 import unittest
+import unittest.mock
 import warnings
 from pathlib import Path
 
@@ -482,14 +483,20 @@ class GraphComparisonTests(unittest.TestCase):
         results, truth, options = self.scored(bundles)
         text = compare.format_graph(results, truth, options)
         self.assertIn("CAUSAL DISCOVERY", text)
-        self.assertNotIn("different widths", text)
-        self.assertIn("the ceiling reads out its 3 factors directly", text)
+        self.assertNotIn("capacity rather than representation", text)
+        self.assertIn("the ceiling uses its 3 factors directly", text)
 
     def test_a_genuine_readout_mismatch_is_still_flagged(self):
         bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
         results, truth, options = self.scored(bundles)
         results["weak"]["graph"]["embeddings"]["graph_readout_dim"] = 4
-        self.assertIn("different widths", compare.format_graph(results, truth, options))
+        self.assertIn("differ in readout width", compare.format_graph(results, truth, options))
+
+    def test_a_feature_width_mismatch_is_flagged_separately_from_a_readout_one(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        results["weak"]["graph"]["embeddings"]["num_features"] = 999
+        self.assertIn("differ in feature width", compare.format_graph(results, truth, options))
 
     def test_both_alpha_selections_are_reported(self):
         bundles = {"strong": self.make(self.strong)}
@@ -530,6 +537,213 @@ class GraphComparisonTests(unittest.TestCase):
         bundle = self.make(self.strong)
         bundle["adjacency"] = None
         self.assertIsNone(compare.truth_panel({"m": bundle}, self.options))
+
+
+class GraphWidthAndVoxelTests(unittest.TestCase):
+    """--equal-width must reach the graph panel, and the voxel baseline must be visible."""
+
+    def setUp(self):
+        warnings.simplefilter("ignore")
+        self.z, self.adjacency, self.wide = planted(n=240, noise=0.1, width=40)
+        _z, _a, self.narrow = planted(n=240, noise=0.6, seed=1, width=10)
+
+    def make(self, X, raw=None):
+        return dict(
+            path="<t>",
+            X=X,
+            raw=raw,
+            z_content=self.z,
+            z_style=None,
+            adjacency=self.adjacency,
+            content_names=["a", "b", "c"],
+            style_names=[],
+            meta={},
+            view="1",
+        )
+
+    def test_graph_features_reduce_only_when_asked(self):
+        off = argparse.Namespace()
+        self.assertIs(scorer.graph_features(self.wide, off), self.wide)
+        self.assertIs(scorer.graph_features(self.wide, argparse.Namespace(graph_probe_dim=0)), self.wide)
+        reduced = scorer.graph_features(self.wide, argparse.Namespace(graph_probe_dim=10))
+        self.assertEqual(reduced.shape, (240, 10))
+
+    def test_a_block_narrower_than_the_target_is_left_alone(self):
+        same = scorer.graph_features(self.narrow, argparse.Namespace(graph_probe_dim=16))
+        self.assertEqual(same.shape[1], 10)
+
+    def test_equal_width_puts_both_graph_blocks_on_one_width(self):
+        bundles = {"wide": self.make(self.wide), "narrow": self.make(self.narrow)}
+        options = argparse.Namespace(graph_probe_dim=compare.common_width(bundles, {}))
+        sources, _Z, _adj = compare.graph_sources(bundles, {}, options)
+        widths = {label: X.shape[1] for label, X in sources}
+        self.assertEqual(widths["wide"], 10)
+        self.assertEqual(widths["narrow"], 10)
+        # The ceiling's features ARE the factors; reducing them would be meaningless.
+        self.assertEqual(widths[compare.CEILING_LABEL], 3)
+
+    def test_the_voxel_column_renders_when_a_bundle_stored_one(self):
+        _z, _a, voxels = planted(n=240, noise=2.0, seed=5, width=8)
+        options = argparse.Namespace(
+            probe_kind="ridge", seeds=(0,), n_splits=3, n_null=1, null_seed=0, probe_dim=0, with_graph=False
+        )
+        bundles = {"withvox": self.make(self.wide, raw=voxels), "novox": self.make(self.narrow)}
+        results = compare.score_all(bundles, {}, options)
+        self.assertTrue(results["withvox"]["has_voxels"])
+        self.assertFalse(results["novox"]["has_voxels"])
+        table = compare.format_block(results, "content", "delta_voxels")
+        self.assertIn("downsampled-voxel baseline", table)
+        report = compare.format_report(results, [], None, options)
+        self.assertIn("Δvoxels", report)
+        self.assertIn("voxels: yes", report)
+        self.assertIn("voxels: no", report)
+
+    def test_no_voxel_table_when_nothing_stored_one(self):
+        options = argparse.Namespace(
+            probe_kind="ridge", seeds=(0,), n_splits=3, n_null=1, null_seed=0, probe_dim=0, with_graph=False
+        )
+        results = compare.score_all({"a": self.make(self.wide), "b": self.make(self.narrow)}, {}, options)
+        self.assertEqual(compare.format_block(results, "content", "delta_voxels"), "")
+
+
+class GraphStabilityTests(unittest.TestCase):
+    """The resampling band that says whether a two-edge difference is noise."""
+
+    def setUp(self):
+        warnings.simplefilter("ignore")
+        self.z, self.adjacency, self.strong = planted(n=300, noise=0.1, width=16)
+        _z, _a, self.weak = planted(n=300, noise=4.0, seed=1, width=16)
+        self.options = argparse.Namespace(
+            alphas=(0.05,),
+            diagnostic_alpha=0.05,
+            orientation=False,
+            indep_test="fisherz",
+            max_cond_set=None,
+            readout_dim=8,
+            holdout_readout=False,
+            null_seed=0,
+            graph_probe_dim=0,
+        )
+
+    def make(self, X):
+        return dict(
+            path="<t>",
+            X=X,
+            raw=None,
+            z_content=self.z,
+            z_style=None,
+            adjacency=self.adjacency,
+            content_names=["a", "b", "c"],
+            style_names=[],
+            meta={},
+            view="1",
+        )
+
+    def sources(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        return compare.graph_sources(bundles, {}, self.options)
+
+    def test_every_source_is_summarised_over_the_requested_repeats(self):
+        sources, Z, adj = self.sources()
+        out = compare.graph_stability(sources, Z, adj, self.options, repeats=4, fraction=0.8)
+        self.assertEqual(set(out), {compare.CEILING_LABEL, "strong", "weak"})
+        for entry in out.values():
+            self.assertEqual(entry["repeats"], 4)
+            self.assertEqual(entry["subsample"], 240)
+            self.assertTrue(np.isfinite(entry["f1_mean"]) and np.isfinite(entry["f1_std"]))
+            self.assertGreaterEqual(entry["skeleton_shd_std"], 0.0)
+
+    def test_the_first_model_is_the_reference_and_carries_no_delta(self):
+        sources, Z, adj = self.sources()
+        out = compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=0.8)
+        self.assertNotIn("f1_delta_mean", out["strong"])
+        self.assertEqual(out["weak"]["f1_delta_vs"], "strong")
+        # The ceiling is compared to the reference too, not used as one.
+        self.assertEqual(out[compare.CEILING_LABEL]["f1_delta_vs"], "strong")
+
+    def test_the_same_rows_are_used_for_every_source(self):
+        # Pairing is what makes the delta column tighter than its two marginals. If each
+        # source drew its own rows the delta would inherit both spreads instead.
+        sources, Z, adj = self.sources()
+        seen = []
+        real_panel = scorer.graph_panel
+
+        def spy(X, z, adjacency, options):
+            seen.append(tuple(np.asarray(z[:, 0]).tolist()))
+            return real_panel(X, z, adjacency, options)
+
+        with unittest.mock.patch.object(scorer, "graph_panel", spy):
+            compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=0.8)
+        # 3 repeats x 3 sources, and each repeat's three calls must share one row subset.
+        self.assertEqual(len(seen), 9)
+        for repeat in range(3):
+            self.assertEqual(len(set(seen[repeat * 3 : repeat * 3 + 3])), 1)
+        self.assertEqual(len({seen[i * 3] for i in range(3)}), 3, "repeats must draw different rows")
+
+    def test_it_is_reproducible_from_the_null_seed(self):
+        sources, Z, adj = self.sources()
+        first = compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=0.8)
+        second = compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=0.8)
+        self.assertEqual(first["weak"]["f1_mean"], second["weak"]["f1_mean"])
+
+    def test_too_few_repeats_or_a_full_subsample_produce_nothing_useful(self):
+        sources, Z, adj = self.sources()
+        self.assertEqual(compare.graph_stability(sources, Z, adj, self.options, repeats=1, fraction=0.8), {})
+        self.assertEqual(compare.graph_stability([], None, None, self.options, repeats=5, fraction=0.8), {})
+        with self.assertRaises(ValueError):
+            compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=1.0)
+
+    def test_failed_repeats_are_dropped_rather_than_scored_as_zero(self):
+        rows = {"m": [{"f1": 0.8, "precision": 1.0, "recall": 0.7, "skeleton_shd": 2}, None]}
+        out = compare.summarise_stability(rows, [("m", None)], size=100, repeats=2)
+        self.assertEqual(out["m"]["repeats"], 1)
+        self.assertAlmostEqual(out["m"]["f1_mean"], 0.8)
+
+    def test_the_band_table_marks_a_difference_as_unresolved_when_it_is_inside_the_noise(self):
+        stability = {
+            "a": {
+                "repeats": 5,
+                "subsample": 100,
+                "requested": 5,
+                "f1_mean": 0.70,
+                "f1_std": 0.05,
+                "skeleton_shd_mean": 10.0,
+                "skeleton_shd_std": 1.0,
+            },
+            "b": {
+                "repeats": 5,
+                "subsample": 100,
+                "requested": 5,
+                "f1_mean": 0.72,
+                "f1_std": 0.05,
+                "skeleton_shd_mean": 9.0,
+                "skeleton_shd_std": 1.0,
+                "f1_delta_mean": 0.02,
+                "f1_delta_std": 0.04,
+                "f1_delta_vs": "a",
+            },
+            "c": {
+                "repeats": 5,
+                "subsample": 100,
+                "requested": 5,
+                "f1_mean": 0.90,
+                "f1_std": 0.03,
+                "skeleton_shd_mean": 4.0,
+                "skeleton_shd_std": 1.0,
+                "f1_delta_mean": 0.20,
+                "f1_delta_std": 0.02,
+                "f1_delta_vs": "a",
+            },
+        }
+        table = compare.format_graph_stability(stability)
+        lines = {line.split()[0]: line for line in table.splitlines() if line[:1] in "abc"}
+        self.assertTrue(lines["a"].rstrip().endswith("—"))
+        self.assertTrue(lines["b"].rstrip().endswith("no"))
+        self.assertTrue(lines["c"].rstrip().endswith("yes"))
+        self.assertIn("5/5 repeats on 100 rows", table)
+
+    def test_no_band_section_without_repeats(self):
+        self.assertEqual(compare.format_graph_stability({}), "")
 
 
 if __name__ == "__main__":
