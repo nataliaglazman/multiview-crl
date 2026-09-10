@@ -130,7 +130,8 @@ do not establish collapse or its cause.
 The calculations intentionally preserve section 7i: parent regressions use all
 samples; Ridge probes use a fixed 70/30 train/test split; scaled/PCA features feed
 supervised RidgeCV factor predictions on the same samples used to fit them; PC
-uses Fisher-Z with alphas `0.01 0.05 0.1 0.2`, retaining the last alpha in a tie.
+uses Fisher-Z (see `--indep-test`) with alphas `0.01 0.05 0.1 0.2`, retaining the last
+alpha in a tie.
 Use `--alphas 0.05` to report a single prespecified alpha. These metrics describe
 **undirected skeleton recovery**, not recovery of causal directions. The default
 best F1 is selected against the known truth, and the graph readout is in-sample,
@@ -249,6 +250,92 @@ edge the truth's class does orient — a weaker failure than a reversal),
 `cpdag_exact_match`, plus the estimated and true CPDAG matrices. `cpdag_shd` counts node
 pairs whose edge type differs at all, so it is comparable to `skeleton_shd` but strictly
 harder. Without the flag the outputs are byte-identical to before.
+
+## Plotting the panel
+
+`eval/plot_causal_recovery.py` draws the JSON `run_causal_recovery` already wrote, so a
+figure can never disagree with its table:
+
+```bash
+python -m eval.plot_causal_recovery --json results/causal_recovery/causal_recovery.json --out figures/
+```
+
+`edges.png` is the one a scalar cannot give you — a cell per factor pair showing which
+edges were recovered, missed and invented, so a single factor carrying the errors is
+visible where `skeleton_shd` averages it away. `alpha_sweep.png` plots F1/precision/recall
+/SHD against alpha with the selected alpha ringed, which is how you catch the confound
+where two runs are compared at different best alphas. `factor_r2.png` splits each factor's
+raw R² into its partial part and the parent-mediated remainder. `orientation.png` appears
+only with `--orientation`. Each ships a `.csv` twin, and `--dark` re-steps the palette.
+At most two runs per figure: hues are assigned in fixed order and never generated.
+
+## Conditional-independence test
+
+`--indep-test {fisherz,kci}` on both `run_causal_recovery` and
+`eval/dinov3_identifiability`. Default `fisherz`, so existing outputs are unchanged; the
+choice is recorded per run as `indep_test` in the JSON, the CSV and the protocol block.
+
+Fisher-Z is a partial-correlation test, so it sees only the **linear** part of a
+dependence. This generator's mechanisms are `leaky_relu` of a weighted parent sum
+(`--synthetic-causal-nonlinearity tanh` is smoother still), so Fisher-Z is misspecified
+for it — and PC only ever returns a CPDAG, which together is why the orientation ceiling
+reads SHD 17 with 8 reversals *on the ground-truth factors*. A purely nonlinear edge is
+invisible to it: on `y = x²` with symmetric `x`, the linear correlation is zero and
+Fisher-Z reports independence, while KCI recovers the edge (`tests/`
+`test_dinov3_identifiability.py::IndepTestTests`).
+
+KCI is nonparametric, and the cost is not a constant factor. Measured here: a 3-factor
+chain takes 0.13 / 0.37 / 1.52 s at 200 / 400 / 800 rows, but **9 factors at 500 rows did
+not finish one alpha in 30 minutes**, where Fisher-Z is instant. The blow-up is in the
+number and size of conditioning sets, which grows with the factor count, and PC re-runs
+the whole search once per alpha — so pass a single `--alphas` value with it.
+
+`--max-cond-set N` caps PC's conditioning-set size (its `max_k`) and is what makes KCI
+usable at that width: 9 factors at 300 rows went from not finishing to **9.7 s at
+`--max-cond-set 2`**, recovering the same 14 edges as `1`. It is an approximation — pairs
+that only separate on a larger conditioning set keep their edge, so the skeleton can gain
+edges but never lose them, which shows up as lower precision rather than lower recall.
+`evaluate_arrays` warns before spending the time when KCI is uncapped at five or more
+factors. causal-learn's KCI defaults to the gamma approximation (`approx=True`), which is
+deterministic, so no seeding is needed.
+
+A workable starting point at 9 factors:
+
+```bash
+python -m eval.run_causal_recovery --run-dirs RUN --num-samples 500 --pooling gap \
+  --indep-test kci --max-cond-set 2 --alphas 0.05 --orientation
+```
+
+Note that KCI fixes the *test*, not the estimator: PC still returns a Markov equivalence
+class. For a generator that is a nonlinear additive-noise model the DAG itself is
+identifiable, which needs an ANM-family method rather than a constraint-based one.
+
+## The decoded-factor readout
+
+PC does not see the representation. It sees `n_content` supervised reconstructions of the
+true factors: the features are standardised, PCA-reduced, and a `RidgeCV` per factor
+decodes it from that basis. Two flags control that step, on both
+`run_causal_recovery` and `eval/dinov3_identifiability`; both default to the original
+behaviour, so existing outputs are unchanged.
+
+`--readout-dim N` pins the PCA width. The default rule is
+`min(64, max(n_content, N_samples/5))`, capped at the block's own width — so a 48-channel
+encoder block gets a 48-dim readout while an 18432-dim embedding gets 64, and part of any
+difference in the recovered graph is that gap rather than the representation. Pin it to
+the narrower of two models to compare them at equal readout capacity; a block narrower
+than the request keeps its own width. The effective value is reported as
+`graph_readout_dim`, alongside `readout_mode` and `graph_samples`.
+
+`--holdout-readout` fits the readout on the 70/30 train split and runs PC on the held-out
+rows only, instead of decoding the same rows it was fit on with the true labels. This is
+what removes the panel's in-sample optimism — the `PC R²` column then reports exactly the
+decoding quality of the columns PC was handed, because both use the same split. It costs
+70% of the rows, so pair it with `--num-samples 2000` or more; PC on fewer than
+`20 * n_content` rows logs a warning and fewer than 20 is an error. A single split rather
+than cross-fitting is deliberate: a cross-fitted row's decoding depends on every other
+row's label, and Fisher-Z assumes the rows are independent draws.
+
+Neither flag touches the raw/partial R² columns, which keep their own full-width probe.
 
 ## DINOv3 embeddings as a reference representation
 

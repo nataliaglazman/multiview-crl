@@ -136,6 +136,135 @@ class OrientationTests(unittest.TestCase):
         self.assertEqual((found["both_undirected"], found["correct_directed"]), (2, 0))
 
 
+class IndepTestTests(unittest.TestCase):
+    """--indep-test: fisherz sees only linear dependence, kci sees the nonlinear part."""
+
+    @staticmethod
+    def _nonlinear_pair(seed=0, n=200):
+        """x -> y = x^2, an edge with (exactly) zero sample linear correlation.
+
+        ``x`` is antithetic, so sum(x^3) == 0 by construction and the sample corr(x, x^2)
+        is zero up to the noise term rather than up to sampling luck. That makes this a
+        deterministic separation between the two tests, not a seed-dependent one.
+        """
+        rng = np.random.RandomState(seed)
+        u = rng.randn(n)
+        x = np.concatenate([u, -u])
+        y = x**2 + 0.1 * rng.randn(len(x))
+        return np.column_stack([x, y]), np.array([[0, 1], [0, 0]], dtype=bool)
+
+    def test_kci_finds_a_purely_nonlinear_edge_that_fisherz_cannot(self):
+        for seed in (0, 1, 2):
+            with self.subTest(seed=seed):
+                z, adjacency = self._nonlinear_pair(seed)
+                self.assertLess(abs(float(np.corrcoef(z[:, 0], z[:, 1])[0, 1])), 0.05)
+                linear = recovery.evaluate_arrays(z, z, adjacency, alphas=[0.05], indep_test="fisherz")
+                kernel = recovery.evaluate_arrays(z, z, adjacency, alphas=[0.05], indep_test="kci")
+                self.assertEqual((linear["best"]["tp"], linear["best"]["fn"]), (0, 1))
+                self.assertEqual((kernel["best"]["tp"], kernel["best"]["fn"]), (1, 0))
+
+    def test_both_tests_agree_on_a_linear_chain(self):
+        rng = np.random.RandomState(7)
+        z = rng.randn(300, 3)
+        z[:, 1] += 1.3 * z[:, 0]
+        z[:, 2] += 1.3 * z[:, 1]
+        truth = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]], dtype=bool)
+        for test in recovery.INDEP_TESTS:
+            with self.subTest(indep_test=test):
+                result = recovery.evaluate_arrays(z, z, truth, alphas=[0.05], indep_test=test)
+                self.assertTrue(result["best"]["exact_match"])
+                self.assertEqual(result["indep_test"], test)
+
+    def test_capping_the_conditioning_set_only_adds_skeleton_edges(self):
+        # max_cond_set is what makes kci finish at realistic factor counts; the cost is
+        # that pairs needing a larger conditioning set keep their edge.
+        rng = np.random.RandomState(5)
+        z = rng.randn(400, 4)
+        z[:, 1] += 1.3 * z[:, 0]
+        z[:, 2] += 1.3 * z[:, 1]
+        z[:, 3] += 1.3 * z[:, 2]
+        truth = np.zeros((4, 4), dtype=bool)
+        truth[0, 1] = truth[1, 2] = truth[2, 3] = True
+        unbounded = recovery.evaluate_arrays(z, z, truth, alphas=[0.05])
+        capped = recovery.evaluate_arrays(z, z, truth, alphas=[0.05], max_cond_set=0)
+        self.assertEqual(unbounded["max_cond_set"], None)
+        self.assertEqual(capped["max_cond_set"], 0)
+        self.assertTrue(unbounded["best"]["exact_match"])
+        # With no conditioning allowed, PC cannot separate the chain's non-adjacent pairs.
+        self.assertGreater(capped["best"]["fp"], 0)
+        self.assertEqual(capped["best"]["fn"], 0)
+
+    def test_default_is_fisherz_and_an_unknown_test_is_rejected(self):
+        z, adjacency = self._nonlinear_pair()
+        self.assertEqual(recovery.evaluate_arrays(z, z, adjacency, alphas=[0.05])["indep_test"], "fisherz")
+        with self.assertRaises(ValueError):
+            recovery.evaluate_arrays(z, z, adjacency, alphas=[0.05], indep_test="spearman")
+
+
+class ReadoutTests(unittest.TestCase):
+    """--readout-dim and --holdout-readout, the two knobs on the graph readout."""
+
+    def setUp(self):
+        rng = np.random.RandomState(11)
+        self.n = 400
+        z = rng.randn(self.n, 3)
+        z[:, 1] += 1.3 * z[:, 0]
+        z[:, 2] += 1.3 * z[:, 1]
+        self.z = z
+        self.truth = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]], dtype=bool)
+        self.X = z @ rng.randn(3, 40) + 0.1 * rng.randn(self.n, 40)
+
+    def test_default_width_reproduces_the_original_rule(self):
+        # 64, floored at the factor count, capped at N/5 and at the block's own width.
+        self.assertEqual(recovery.readout_width(2000, 5000, 9), 64)
+        self.assertEqual(recovery.readout_width(2000, 40, 9), 40)
+        self.assertEqual(recovery.readout_width(30, 5000, 9), 9)  # N/5 < n_content, floor binds
+        self.assertEqual(recovery.readout_width(200, 5000, 9), 40)  # N/5 = 40 < 64
+
+    def test_explicit_width_pins_it_but_cannot_exceed_the_block(self):
+        self.assertEqual(recovery.readout_width(2000, 5000, 9, 16), 16)
+        self.assertEqual(recovery.readout_width(2000, 5000, 9, 200), 200)
+        self.assertEqual(recovery.readout_width(2000, 48, 9, 64), 48)  # a narrow block keeps its width
+        self.assertEqual(recovery.readout_width(30, 5000, 9, 64), 30)
+        with self.assertRaises(ValueError):
+            recovery.readout_width(2000, 5000, 9, 0)
+
+    def test_readout_dim_is_reported_and_changes_only_the_readout(self):
+        wide = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05])
+        thin = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05], readout_dim=3)
+        self.assertEqual((wide["graph_readout_dim"], thin["graph_readout_dim"]), (40, 3))
+        # raw/partial come from the full-width probe, so pinning the readout must not move them.
+        self.assertAlmostEqual(wide["raw_r2_mean"], thin["raw_r2_mean"], places=12)
+        self.assertAlmostEqual(wide["partial_r2_mean"], thin["partial_r2_mean"], places=12)
+
+    def test_holdout_runs_pc_on_unseen_rows_only(self):
+        insample = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05])
+        held = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05], holdout_readout=True)
+        self.assertEqual((insample["readout_mode"], held["readout_mode"]), ("in_sample", "holdout"))
+        self.assertEqual((insample["graph_samples"], held["graph_samples"]), (self.n, int(0.3 * self.n)))
+        # The planted chain survives the split; both should still recover it exactly.
+        self.assertTrue(insample["best"]["exact_match"])
+        self.assertTrue(held["best"]["exact_match"])
+
+    def test_holdout_correlations_use_the_test_rows_not_all_rows(self):
+        held = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05], holdout_readout=True)
+        for factor in held["factors"]:
+            self.assertIsNotNone(factor["decoded_gt_correlation"])
+            self.assertGreater(factor["decoded_gt_correlation"], 0.9)
+
+    def test_holdout_refuses_a_test_split_too_small_for_pc(self):
+        with self.assertRaises(ValueError):
+            recovery.evaluate_arrays(self.X[:60], self.z[:60], self.truth, alphas=[0.05], holdout_readout=True)
+
+    def test_defaults_leave_existing_results_untouched(self):
+        before = recovery.evaluate_arrays(self.X, self.z, self.truth, alphas=[0.05])
+        after = recovery.evaluate_arrays(
+            self.X, self.z, self.truth, alphas=[0.05], readout_dim=None, holdout_readout=False
+        )
+        self.assertEqual(before["best"], after["best"])
+        self.assertEqual(before["factors"], after["factors"])
+
+
 def _bundle(X, z, adjacency, names, raw=None, path="planted", style=None, style_names=()):
     return dict(
         path=path,
@@ -168,6 +297,10 @@ def _options(**overrides):
         orientation=True,
         pc_ceiling=True,
         with_graph=True,
+        readout_dim=None,
+        holdout_readout=False,
+        indep_test="fisherz",
+        max_cond_set=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -242,6 +375,74 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual((wide.shape[1], width), (50, 50))
         fixed, width = score.reduce_features(np.random.RandomState(0).randn(200, 5000), 8)
         self.assertEqual((fixed.shape[1], width), (8, 8))
+
+
+class CausalPlotTests(unittest.TestCase):
+    """plot_causal_recovery renders every panel from a real evaluate_arrays result."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("matplotlib not installed")
+        rng = np.random.RandomState(13)
+        n = 300
+        z = rng.randn(n, 4)
+        z[:, 1] += 1.3 * z[:, 0]
+        z[:, 2] += 1.3 * z[:, 1]
+        z[:, 3] += 1.3 * z[:, 2]
+        adjacency = np.zeros((4, 4), dtype=bool)
+        adjacency[0, 1] = adjacency[1, 2] = adjacency[2, 3] = True
+        result = recovery.evaluate_arrays(z @ rng.randn(4, 20) + rng.randn(n, 20), z, adjacency, orientation=True)
+        result.update(run_dir="results/synthetic/planted", status="ok", level=0, pooling="gap")
+        cls.payload = {"protocol": {}, "runs": [result]}
+
+    def _render(self, payload, extra=()):
+        from eval import plot_causal_recovery as plot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "causal_recovery.json"
+            path.write_text(json.dumps(payload))
+            out = Path(tmp) / "figs"
+            self.assertEqual(plot.main(["--json", str(path), "--out", str(out), *extra]), 0)
+            return sorted(p.name for p in out.iterdir())
+
+    def test_every_figure_and_its_csv_twin_are_written(self):
+        for extra in ((), ("--dark",)):
+            with self.subTest(dark=bool(extra)):
+                names = self._render(self.payload, extra)
+                for stem in ("edges", "alpha_sweep", "factor_r2", "orientation"):
+                    self.assertIn(f"{stem}.png", names)
+                    self.assertIn(f"{stem}.csv", names, "a figure must never be the only way to read a value")
+
+    def test_orientation_is_skipped_rather_than_crashing_when_absent(self):
+        import copy
+
+        payload = copy.deepcopy(self.payload)
+        for row in [payload["runs"][0]["best"], *payload["runs"][0]["alpha_sweep"]]:
+            row.pop("orientation", None)
+        names = self._render(payload)
+        self.assertNotIn("orientation.png", names)
+        self.assertIn("edges.png", names)
+
+    def test_edge_classes_partition_the_pairs_the_skeleton_scores(self):
+        from eval import plot_causal_recovery as plot
+
+        run = self.payload["runs"][0]
+        _names, classes = plot.edge_classes(run)
+        best = run["best"]
+        counts = {kind: sum(1 for v in classes.values() if v == kind) for kind in ("tp", "fp", "fn")}
+        self.assertEqual((counts["tp"], counts["fp"], counts["fn"]), (best["tp"], best["fp"], best["fn"]))
+
+    def test_unscored_runs_are_dropped_not_plotted(self):
+        payload = {"protocol": {}, "runs": [{"run_dir": "a", "status": "error", "reason": "boom"}]}
+        from eval import plot_causal_recovery as plot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.json"
+            path.write_text(json.dumps(payload))
+            self.assertEqual(plot.load(path), [])
 
 
 class RoundTripTests(unittest.TestCase):

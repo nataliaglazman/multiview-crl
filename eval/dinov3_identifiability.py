@@ -52,6 +52,7 @@ from pathlib import Path
 import numpy as np
 
 from eval.identifiability_metrics import block_mcc, cv_probe_r2_multi
+from eval.run_causal_recovery import INDEP_TESTS
 from eval.run_dci_compare import PROBE_DIM_AUTO, _auto_probe_dim
 
 logger = logging.getLogger(__name__)
@@ -218,6 +219,10 @@ def graph_panel(X, z_content, adjacency, options):
             alphas=options.alphas,
             diagnostic_alpha=options.diagnostic_alpha,
             orientation=options.orientation,
+            readout_dim=options.readout_dim,
+            holdout_readout=options.holdout_readout,
+            indep_test=options.indep_test,
+            max_cond_set=options.max_cond_set,
         )
     except Exception as exc:  # noqa: BLE001 - one panel failing must not lose the tables
         logger.exception("Graph panel failed")
@@ -330,9 +335,16 @@ def format_graph_table(panels, diagnostic_alpha):
                 _fmt(panel["partial_r2_mean"]),
             ]
         )
-    out = ["3. GRAPH RECOVERY — undirected skeleton, best-F1 alpha selected against truth", _table(headers, body)]
+    panel = panels["embeddings"]
+    out = ["3. GRAPH RECOVERY — undirected skeleton, best-F1 alpha selected against truth"]
+    if panel.get("readout_mode"):
+        out.append(
+            f"  readout: {panel['readout_mode']} at {panel['graph_readout_dim']} dims,"
+            f" PC on {panel['graph_samples']} rows"
+        )
+    out.append(_table(headers, body))
 
-    per_factor = panels["embeddings"].get("factors")
+    per_factor = panel.get("factors")
     if per_factor:
         rows = [
             [
@@ -419,10 +431,16 @@ def format_verdict(content, panels, has_floor):
         )
     elif embeddings.get("best"):
         lines.append(f"  Skeleton F1 {embeddings['best']['f1']:.3f}; no ground-truth ceiling was computed.")
-    lines.append(
-        "  Alpha is selected against the truth and the graph readout is in-sample, so table 3 is an"
-        " optimistic diagnostic, not held-out causal discovery."
-    )
+    if embeddings.get("readout_mode") == "holdout":
+        lines.append(
+            "  The graph readout is held out, so table 3 is not inflated by decoding the rows it was fit"
+            " on. Alpha is still selected against the truth, which remains optimistic."
+        )
+    else:
+        lines.append(
+            "  Alpha is selected against the truth and the graph readout is in-sample, so table 3 is an"
+            " optimistic diagnostic, not held-out causal discovery. --holdout-readout removes the second half."
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -568,6 +586,10 @@ def _self_test():
         orientation=True,
         pc_ceiling=True,
         with_graph=True,
+        readout_dim=None,
+        holdout_readout=False,
+        indep_test="fisherz",
+        max_cond_set=None,
     )
     signal = bundle(z @ mixing + 0.1 * rng.randn(n, 24), raw=rng.randn(n, 8))
     noise = bundle(rng.randn(n, 24), path="floor")
@@ -602,6 +624,11 @@ def _self_test():
     child = score_graphs(parent_only, None, options)["embeddings"]["factors"][1]
     assert child["raw_r2"] > 0.4 and child["partial_r2"] < 0.15, child
     print(f"  self-test: parent-only features  child raw {child['raw_r2']:+.3f}  partial {child['partial_r2']:+.3f}")
+
+    held = score_graphs(signal, None, argparse.Namespace(**{**vars(options), "holdout_readout": True}))["embeddings"]
+    assert held["readout_mode"] == "holdout" and held["graph_samples"] == int(0.3 * n)
+    assert held["best"]["exact_match"], held["best"]
+    print(f"  self-test: held-out readout  PC on {held['graph_samples']}/{n} rows  F1 {held['best']['f1']:.3f}")
 
     result = score(signal, noise, options)
     assert "1. CONTENT FACTORS" in format_report(result) and "3. GRAPH RECOVERY" in format_report(result)
@@ -639,6 +666,31 @@ def main(argv=None):
     graph.add_argument("--diagnostic-alpha", type=float, default=0.05, help="Fixed alpha for the orientation table")
     graph.add_argument("--no-orientation", dest="orientation", action="store_false", help="Skeleton scores only")
     graph.add_argument("--no-pc-ceiling", dest="pc_ceiling", action="store_false", help="Skip PC on the true factors")
+    graph.add_argument(
+        "--indep-test",
+        default="fisherz",
+        choices=list(INDEP_TESTS),
+        help="PC's conditional-independence test. 'fisherz' sees only linear dependence; 'kci' is "
+        "nonparametric and sees the generator's nonlinear mechanisms, at ~100x the cost.",
+    )
+    graph.add_argument(
+        "--max-cond-set",
+        type=int,
+        help="Cap PC's conditioning-set size (max_k). Unbounded by default; needed to make --indep-test "
+        "kci finish at this factor count. Can only add skeleton edges, never remove them.",
+    )
+    graph.add_argument(
+        "--readout-dim",
+        type=int,
+        help="PCA width for the decoded-factor readout in table 3. Default: run_causal_recovery's own "
+        "rule (64 here). Pin it to the narrower of two models to compare them at equal readout capacity.",
+    )
+    graph.add_argument(
+        "--holdout-readout",
+        action="store_true",
+        help="Fit the readout on a 70/30 train split and run PC on the held-out rows only, instead of "
+        "decoding the rows it was fit on. Removes table 3's in-sample optimism; needs a large --num-samples.",
+    )
 
     cli = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")

@@ -20,6 +20,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 DEFAULT_ALPHAS = (0.01, 0.05, 0.1, 0.2)
+# PC's conditional-independence tests. fisherz is partial correlation, so it sees only the
+# LINEAR part of a dependence; this generator's mechanisms are leaky_relu of a weighted
+# parent sum, which fisherz is therefore misspecified for. kci is nonparametric and sees
+# the nonlinear part, at roughly two orders of magnitude more compute.
+INDEP_TESTS = ("fisherz", "kci")
 
 
 def skeleton_metrics(estimated, truth):
@@ -133,6 +138,25 @@ def orientation_metrics(estimated, truth_cpdag):
     return dict(counts, cpdag_shd=mismatched, cpdag_exact_match=(mismatched == 0))
 
 
+def readout_width(n_samples, n_features, n_content, readout_dim=None):
+    """PCA width for the supervised readout PC's decoded factors come out of.
+
+    ``readout_dim=None`` reproduces the original rule: 64, floored at the factor count so
+    the readout is never narrower than the graph it has to express, and capped at N/5 and
+    at the block's own width so a small sample is not handed a near-singular basis.
+
+    An explicit width pins it instead, which is what makes two models with different
+    feature counts comparable — a 48-channel encoder block and an 18432-dim embedding
+    otherwise get readouts of 48 and 64, and part of any difference in the recovered graph
+    is that gap rather than the representation.  A width can only be lowered to what a
+    block actually has, so match on the narrower of the two.
+    """
+    want = int(readout_dim) if readout_dim is not None else min(64, max(n_content, n_samples // 5))
+    if want < 1:
+        raise ValueError("Readout width must be at least 1")
+    return min(want, n_features, n_samples)
+
+
 def fit_probe(X, y):
     """Notebook linear probe: 70/30 split, train-only scaling, Ridge(alpha=1)."""
     from sklearn.linear_model import Ridge
@@ -154,12 +178,39 @@ def evaluate_arrays(
     factor_rescue=False,
     diagnostic_alpha=0.05,
     orientation=False,
+    readout_dim=None,
+    holdout_readout=False,
+    indep_test="fisherz",
+    max_cond_set=None,
 ):
     """Evaluate already aligned features and factors with the supplied panel's protocol.
 
     ``orientation=True`` additionally scores each recovered graph's edge DIRECTIONS
     against the true DAG's CPDAG (see :func:`orientation_metrics`).  Off by default so
     existing reports are unchanged; the headline metrics stay skeleton-only either way.
+
+    ``readout_dim`` pins the readout's PCA width (see :func:`readout_width`), so two models
+    with different feature counts can be compared at equal readout capacity.
+
+    ``holdout_readout=True`` fits the readout on a 70/30 train split and runs PC on the
+    held-out rows only.  The default in-sample readout decodes the same rows it was fit on
+    with the true labels, which is why the panel is documented as an optimistic diagnostic;
+    this makes the graph a held-out result at the cost of 70% of the rows.
+
+    ``indep_test`` selects PC's conditional-independence test: ``"fisherz"`` (partial
+    correlation, linear-Gaussian) or ``"kci"`` (kernel-based, nonparametric).  This
+    generator's mechanisms are ``leaky_relu`` of a weighted parent sum, so Fisher-Z is
+    misspecified — it can only see the linear part of a dependence — while KCI can see the
+    nonlinear part.  KCI's cost is the catch, and it is worse than a constant factor:
+    measured here, 9 factors at 500 rows did not finish one alpha in 30 minutes, where
+    Fisher-Z is instant.
+
+    ``max_cond_set`` caps the size of PC's conditioning sets (its ``max_k``), which is what
+    makes KCI tractable at that width — 9 factors at 300 rows went from not finishing to
+    9.7 s at ``max_cond_set=2``, recovering the same edge count as ``1``.  It is an
+    approximation: pairs that only separate on a larger conditioning set keep their edge,
+    so the skeleton can only gain edges, never lose them.  All five arguments default to
+    the original behaviour.
     """
     import numpy as np
     from sklearn.decomposition import PCA
@@ -189,6 +240,8 @@ def evaluate_arrays(
         raise ValueError("SCM adjacency dimension does not match z_content")
     if not alphas or any(not 0 < a < 1 for a in alphas):
         raise ValueError("PC alpha values must be between 0 and 1")
+    if indep_test not in INDEP_TESTS:
+        raise ValueError(f"indep_test must be one of {sorted(INDEP_TESTS)}, got {indep_test!r}")
 
     parents = [np.flatnonzero(adj[:, d]).tolist() for d in range(n_content)]
     residuals = z.copy()
@@ -200,24 +253,46 @@ def evaluate_arrays(
 
     Xsc = StandardScaler().fit_transform(X)
     # Extra sample-count cap avoids invalid PCA for small datasets / many factors.
-    n_pca = min(64, max(n_content, len(Xsc) // 5), Xsc.shape[1], len(Xsc))
+    n_pca = readout_width(len(Xsc), Xsc.shape[1], n_content, readout_dim)
     if Xsc.shape[1] > n_pca:
         Xsc = PCA(n_components=n_pca, random_state=0).fit_transform(Xsc)
-    z_hat = np.column_stack(
-        [RidgeCV(alphas=(0.1, 1.0, 10.0, 100.0)).fit(Xsc, z[:, d]).predict(Xsc) for d in range(n_content)]
-    )
-    # Test whether the PC preprocessing loses a factor that the full feature probe
-    # can decode. Fit this additional diagnostic's scaler/PCA on TRAIN rows only.
+
+    # One 70/30 split, shared by the held-out readout and by the PC R2 diagnostic that
+    # tests whether the readout's compression loses a factor the full probe can decode.
+    # Sharing it is what makes that diagnostic exactly the decoding quality of the columns
+    # PC is handed under holdout_readout. Fit its scaler/PCA on TRAIN rows only.
     train, test = train_test_split(np.arange(len(X)), test_size=0.3, random_state=0)
     scaler = StandardScaler().fit(X[train])
     Xtr, Xte = scaler.transform(X[train]), scaler.transform(X[test])
     if X.shape[1] > n_pca:
         pca = PCA(n_components=min(n_pca, len(train)), random_state=0).fit(Xtr)
         Xtr, Xte = pca.transform(Xtr), pca.transform(Xte)
-    readout_r2 = []
+    readout_r2, holdout_columns = [], []
     for d in range(n_content):
         model = RidgeCV(alphas=(0.1, 1.0, 10.0, 100.0)).fit(Xtr, z[train, d])
-        readout_r2.append(float(r2_score(z[test, d], model.predict(Xte))))
+        prediction = model.predict(Xte)
+        readout_r2.append(float(r2_score(z[test, d], prediction)))
+        holdout_columns.append(prediction)
+
+    if holdout_readout:
+        # PC now sees rows whose decoding never saw their own labels. A single split rather
+        # than cross-fitting on purpose: a cross-fitted row's decoding depends on every
+        # other row's label, and PC's Fisher-Z tests assume the rows are independent draws.
+        z_hat, z_graph, readout_features = np.column_stack(holdout_columns), z[test], Xte.shape[1]
+    else:
+        z_hat = np.column_stack(
+            [RidgeCV(alphas=(0.1, 1.0, 10.0, 100.0)).fit(Xsc, z[:, d]).predict(Xsc) for d in range(n_content)]
+        )
+        z_graph, readout_features = z, Xsc.shape[1]
+    if len(z_hat) < 20:
+        raise ValueError(f"Graph recovery needs at least 20 rows; the readout left {len(z_hat)}")
+    if len(z_hat) < 20 * n_content:
+        logger.warning(
+            "PC is running on %d rows for %d factors; Fisher-Z is thin at that ratio. Raise the sample "
+            "count -- with holdout_readout only 30%% of the rows reach PC.",
+            len(z_hat),
+            n_content,
+        )
 
     truth = adj | adj.T
     np.fill_diagonal(truth, False)
@@ -227,8 +302,8 @@ def evaluate_arrays(
 
     def recover(values, alpha):
         if np.any(np.std(values, axis=0) <= np.finfo(float).eps):
-            raise ValueError("A decoded factor is constant; Fisher-Z graph recovery is undefined")
-        cg = pc(values, alpha=alpha, indep_test="fisherz", show_progress=False)
+            raise ValueError("A decoded factor is constant; conditional-independence testing is undefined")
+        cg = pc(values, alpha=alpha, indep_test=indep_test, show_progress=False, max_k=max_cond_set)
         graph = cg.G.graph
         estimated = (graph != 0) | (graph.T != 0)
         np.fill_diagonal(estimated, False)
@@ -238,9 +313,23 @@ def evaluate_arrays(
             row["cpdag"] = np.asarray(graph, dtype=int).tolist()
         return row
 
+    passes = dict.fromkeys([*alphas, diagnostic_alpha])
+    # n_content >= 5 so the warning fires on real factor counts rather than on small tests:
+    # the blow-up is in the number of conditioning sets, which is what the width drives.
+    if indep_test == "kci" and max_cond_set is None and n_content >= 5:
+        # PC re-runs the whole search per alpha, and KCI's cost grows steeply in both the
+        # row count and the conditioning-set size, so they multiply. Say so before spending
+        # it rather than after: 9 factors at 500 rows did not finish one alpha in 30 min.
+        logger.warning(
+            "KCI on %d rows x %d factors, %d alpha(s), with no conditioning-set cap. Measured: 9 factors "
+            "at 500 rows did not finish one alpha in 30 minutes. Pass max_cond_set=2 and a single alpha.",
+            len(z_hat),
+            n_content,
+            len(passes),
+        )
     # Always include the fixed diagnostic alpha, but select the headline best
     # only from the user's original sweep to preserve the existing metric.
-    for alpha in dict.fromkeys([*alphas, diagnostic_alpha]):
+    for alpha in passes:
         try:
             row = recover(z_hat, alpha)
         except (ValueError, np.linalg.LinAlgError) as exc:
@@ -253,8 +342,9 @@ def evaluate_arrays(
 
     factors = []
     for d in range(n_content):
-        var = float(np.var(z[:, d]))
-        corr = float(np.corrcoef(z[:, d], z_hat[:, d])[0, 1]) if var > 0 and np.std(z_hat[:, d]) > 0 else None
+        # z_graph, not z: under holdout_readout the decoded columns cover the test rows only.
+        var = float(np.var(z_graph[:, d]))
+        corr = float(np.corrcoef(z_graph[:, d], z_hat[:, d])[0, 1]) if var > 0 and np.std(z_hat[:, d]) > 0 else None
         factors.append(
             dict(
                 dim=d,
@@ -272,7 +362,11 @@ def evaluate_arrays(
         num_samples=len(X),
         num_features=X.shape[1],
         n_content=n_content,
-        graph_readout_dim=Xsc.shape[1],
+        graph_readout_dim=readout_features,
+        graph_samples=len(z_hat),
+        readout_mode="holdout" if holdout_readout else "in_sample",
+        indep_test=indep_test,
+        max_cond_set=max_cond_set,
         raw_r2_mean=float(np.mean(raw)),
         partial_r2_mean=float(np.mean(partial)),
         factors=factors,
@@ -289,7 +383,7 @@ def evaluate_arrays(
         repairs = []
         for d in range(n_content):
             repaired = z_hat.copy()
-            repaired[:, d] = z[:, d]
+            repaired[:, d] = z_graph[:, d]
             try:
                 metrics = recover(repaired, diagnostic_alpha)
                 repairs.append(
@@ -396,7 +490,17 @@ def evaluate_run(run_dir, cli):
         raise ValueError("Matched synthetic dataset did not expose a causal SCM")
     X, z = extract_content(model, dataset, device, level, cli.pooling, cli.batch_size, cli.num_workers)
     result = evaluate_arrays(
-        X, z, scm["adj"], cli.alphas, cli.factor_rescue, cli.diagnostic_alpha, getattr(cli, "orientation", False)
+        X,
+        z,
+        scm["adj"],
+        cli.alphas,
+        cli.factor_rescue,
+        cli.diagnostic_alpha,
+        getattr(cli, "orientation", False),
+        getattr(cli, "readout_dim", None),
+        getattr(cli, "holdout_readout", False),
+        getattr(cli, "indep_test", "fisherz"),
+        getattr(cli, "max_cond_set", None),
     )
     result.update(
         status="ok" if result["best"] else "partial",
@@ -468,12 +572,18 @@ def write_reports(results, output_dir, reference_run=None, diagnostic_alpha=0.05
     from eval.causal_factor_diagnostics import write_factor_reports
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    # The readout mode is a property of how the runs were scored, so read it off them
+    # rather than restating a default that --holdout-readout would silently contradict.
+    mode = next((r.get("readout_mode") for r in results if r.get("readout_mode")), "in_sample")
+    test = next((r.get("indep_test") for r in results if r.get("indep_test")), "fisherz")
     payload = dict(
         protocol=protocol
         or dict(
             graph_target="undirected_skeleton",
             alpha_selection="best_f1_against_truth_last_tie",
-            graph_readout="supervised_in_sample_ridgecv",
+            indep_test=test,
+            max_cond_set=next((r.get("max_cond_set") for r in results if r.get("max_cond_set")), None),
+            graph_readout=f"supervised_{mode}_ridgecv",
             parent_adjustment="linear_all_samples",
             probe="ridge_alpha1_70_30_split_seed0",
             content_mask="sample0_fixed",
@@ -492,6 +602,11 @@ def write_reports(results, output_dir, reference_run=None, diagnostic_alpha=0.05
         "pooling",
         "num_samples",
         "num_features",
+        "indep_test",
+        "max_cond_set",
+        "readout_mode",
+        "graph_readout_dim",
+        "graph_samples",
         "raw_r2_mean",
         "partial_r2_mean",
         "alpha",
@@ -542,6 +657,38 @@ def main(argv=None):
         action="store_true",
         help="Also score edge DIRECTIONS against the true DAG's CPDAG. The headline metrics stay "
         "skeleton-only; this adds a per-alpha breakdown to the JSON and one console line.",
+    )
+    parser.add_argument(
+        "--indep-test",
+        default="fisherz",
+        choices=list(INDEP_TESTS),
+        help="PC's conditional-independence test. 'fisherz' (default) is partial correlation and sees "
+        "only the LINEAR part of a dependence, which is misspecified for this generator's leaky_relu "
+        "mechanisms. 'kci' is nonparametric and sees the nonlinear part, at ~100x the cost and growing "
+        "steeply with the sample count -- pair it with a single --alphas value.",
+    )
+    parser.add_argument(
+        "--max-cond-set",
+        type=int,
+        help="Cap PC's conditioning-set size (its max_k). Unbounded by default. This is what makes "
+        "--indep-test kci tractable: measured, 9 factors at 300 rows went from not finishing to 9.7s at "
+        "2, recovering the same edges as 1. An approximation -- pairs that only separate on a larger "
+        "conditioning set keep their edge, so the skeleton can gain edges but never lose them.",
+    )
+    parser.add_argument(
+        "--readout-dim",
+        type=int,
+        help="PCA width for the supervised readout PC's decoded factors come from. Default: the "
+        "min(64, max(n_content, N/5)) rule. Pin it to compare models whose blocks differ in width; "
+        "a block narrower than the request keeps its own width, and the effective value is reported "
+        "as graph_readout_dim.",
+    )
+    parser.add_argument(
+        "--holdout-readout",
+        action="store_true",
+        help="Fit the readout on a 70/30 train split and run PC on the held-out rows only, instead of "
+        "decoding the same rows the readout was fit on. Removes the panel's in-sample optimism at the "
+        "cost of 70%% of the rows, so pair it with --num-samples 2000 or more.",
     )
     cli = parser.parse_args(argv)
     if not 0 < cli.diagnostic_alpha < 1:
@@ -594,6 +741,10 @@ def main(argv=None):
             best = result["best"]
             print(
                 f"  L{result['level']} partial R²={result['partial_r2_mean']:.3f} " f"(raw={result['raw_r2_mean']:.3f})"
+            )
+            print(
+                f"  Readout: {result['readout_mode']} at {result['graph_readout_dim']} dims, "
+                f"PC on {result['graph_samples']} rows with {result['indep_test']}"
             )
             if best:
                 print(
