@@ -28,8 +28,8 @@ mean the same thing:
    handed the unreduced features while tables 1/2 use ``--probe-dim``.
 
    The ``truth`` row runs the identical panel on the ground-truth factors themselves.  It
-   is the ceiling: PC at this sample size cannot do better than that row, so a low F1
-   above it is the embedding's fault and a low F1 *at* it is not.
+   is a finite-sample reference for PC on observed factors, not a strict upper bound
+   on the score of a decoded representation.
 
 Caveats that are not optional
 -----------------------------
@@ -413,21 +413,20 @@ def format_verdict(content, panels, has_floor):
     if has_floor:
         delta = block["mean_gap"] - block.get("floor_mean_gap", float("nan"))
         lines.append(
-            f"  Pretraining is worth {delta:+.3f} mean R² over the same architecture at random init"
+            f"  The trained encoder's mean R² gap differs by {delta:+.3f} from the random-init architecture"
             + ("." if np.isfinite(delta) else " (floor unavailable).")
         )
     else:
         lines.append(
-            "  No --floor given. An absolute R² here is mostly a statement about the architecture:"
-            " on this generator an UNTRAINED encoder already reads six of nine content factors above 0.8."
+            "  No --floor given. These scores do not separate what the architecture recovers at random"
+            " initialization from what its trained weights contribute."
         )
     embeddings, truth = panels.get("embeddings", {}), panels.get("truth")
     if embeddings.get("best") and truth and truth.get("best"):
         gap = embeddings["best"]["f1"] - truth["best"]["f1"]
         lines.append(
-            f"  Skeleton F1 {embeddings['best']['f1']:.3f} against a ground-truth ceiling of "
-            f"{truth['best']['f1']:.3f} ({gap:+.3f}). PC on the true factors is the most any"
-            " representation could score at this sample size."
+            f"  Skeleton F1 {embeddings['best']['f1']:.3f} against PC on true factors: "
+            f"{truth['best']['f1']:.3f} ({gap:+.3f}). This finite-sample reference is not a strict upper bound."
         )
     elif embeddings.get("best"):
         lines.append(f"  Skeleton F1 {embeddings['best']['f1']:.3f}; no ground-truth ceiling was computed.")
