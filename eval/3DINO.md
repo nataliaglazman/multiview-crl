@@ -150,22 +150,71 @@ python -m training.finetune_dino \
   --backbone 3dino --three-dino-repo ../3DINO \
   --three-dino-weights /path/to/downloaded_checkpoint.pth \
   --run-dir results/synthetic/YOUR_RUN \
-  --output-dir results/3dino_finetuned \
-  --num-samples 1000 --epochs 20 --batch-size 2 \
+  --output-dir results/3dino_infonce \
+  --loss infonce --style-fraction 0.25 \
+  --num-samples 1000 --epochs 20 --batch-size 8 \
   --device cuda --dtype bfloat16 --gradient-checkpointing
 ```
 
-This optimizes the existing symmetric cross-modality InfoNCE objective using a
-shared, trainable 3DINO backbone and the existing optional projector. It is
-paired-view fine-tuning, not a reimplementation of upstream's DINO/iBOT
-self-distillation pretraining. Choose the largest subject batch your GPU supports;
-the other subjects supply contrastive negatives. `--batch-size` controls subjects,
+For the Barlow Twins experiment use the same starting checkpoint and generator,
+replace `--loss infonce` with `--loss barlow_twins`, and use a separate
+`--output-dir results/3dino_barlow_twins`. Both commands default to seed 42, so
+sample order and initial projection weights are matched when their other settings
+are identical. These are paired-view fine-tuning objectives on the pretrained
+backbone, rather than upstream self-distillation pretraining.
+
+The default partition is **75% content, 25% style**, applied to the backbone's
+channel coordinates before the optional projection head. For CLS embeddings:
+
+```text
+shared pretrained encoder → 1024-dimensional embedding
+                            ├─ first 768: content → shared projector → InfoNCE / Barlow Twins
+                            └─ last  256: style   → no alignment loss
+```
+
+Each channel keeps the same role across all spatial positions, CLS/mean blocks,
+and (for 2D DINO) slices. A spatial grid is not split into aligned versus unaligned
+regions. Non-integer fractions round the style channel count down and record the
+effective fraction. `--style-fraction 0` restores the previous all-embedding
+alignment. This new 25% default applies to both DINO backends.
+
+`--projection-dim 256` is the default content-only MLP output width;
+`--projection-dim 0` applies the loss directly to the content embedding. The
+projector never sees style coordinates. Exported embeddings are always from the
+backbone before this head, so the 768/256 split survives evaluation.
+
+- InfoNCE uses normalized similarities, positives from the same subject's other
+  modality, other subjects as negatives, and both directions equally.
+  `--temperature` defaults to 0.1.
+- Barlow Twins standardizes each output dimension across the subject batch and
+  minimizes `sum((diag(C)-1)^2) + lambda*sum(offdiag(C)^2)`. Defaults are
+  `--barlow-lambda 0.0051` and `--barlow-eps 1e-5`, following the
+  [authors' correlation objective](https://github.com/facebookresearch/barlowtwins/blob/main/main.py).
+  The shared projector/AdamW recipe here is configurable and does not reproduce
+  the authors' entire training recipe. Temperature does not affect this loss.
+
+Style is **excluded from alignment**, not forced to disagree across views. There
+is no style reconstruction, variance, or independence loss. Shared backbone
+updates (and weight decay) can change style outputs; they are not frozen. The
+split alone does not guarantee that the reserved coordinates encode style or
+exclude content. Probe both blocks against both target types after training.
+Per-volume windowing also removes affine gain/bias information before the model.
+
+Choose the largest subject batch your GPU supports; other subjects supply InfoNCE
+negatives and Barlow Twins estimates correlations across that batch. Very small
+batches give poor correlation estimates (rank at most batch size minus one).
+This trainer uses one device, without distributed negative/correlation gathering.
+`--batch-size` controls subjects,
 and `--plane-batch-size` applies only to the 2D backend. Use `--dtype float32` on
 CPU, or `float16` when a CUDA device does not support bfloat16.
 
 Checkpoints are saved under `encoder/model.pt` with architecture/provenance in
 `encoder/config.json`. The existing `training_state.pt`, `preprocessing.json`,
-`settings.json`, and training metrics are also written. As in the current 2D
+`settings.json`, and training metrics are also written. The partition is saved in
+`encoder/embedding_partition.json`, preprocessing, training config, and training
+state. `metrics.jsonl` includes content/style standard deviation and paired-view
+cosine similarity, plus BT diagonal/off-diagonal terms when selected. Retrieval
+accuracy is a diagnostic for BT, not part of its objective. As in the current 2D
 trainer, the latest checkpoint is replaced after each epoch; historical epochs
 are not automatically archived, and optimizer resume is not implemented.
 
@@ -174,12 +223,41 @@ Extract held-out embeddings with the saved preprocessing and generator settings:
 ```bash
 python -m eval.dinov3_embed_synthetic \
   --backbone 3dino --three-dino-repo ../3DINO \
-  --three-dino-weights results/3dino_finetuned/encoder \
-  --run-dir results/3dino_finetuned \
-  --preprocessing results/3dino_finetuned/preprocessing.json \
-  --out results/3dino_finetuned/test_embeddings.npz \
+  --three-dino-weights results/3dino_infonce/encoder \
+  --run-dir results/3dino_infonce \
+  --preprocessing results/3dino_infonce/preprocessing.json \
+  --out results/3dino_infonce/test_embeddings.npz \
   --num-samples 500 --volume-batch 2 --device cuda
 ```
+
+The NPZ retains `emb_view1/2` and adds `emb_content_view1/2` and
+`emb_style_view1/2`, with the partition in its metadata. To extract and evaluate
+the content block in one command, including a matched untrained floor:
+
+```bash
+python -m eval.run_3dino_identifiability \
+  --three-dino-repo ../3DINO \
+  --three-dino-weights results/3dino_infonce/encoder \
+  --representation content --with-floor \
+  --num-samples 2000 --volume-batch 2 --device cuda \
+  --output-dir results/3dino_infonce_eval_content
+
+# Reuse those same embeddings/floor to assess style without another encoder pass:
+python -m eval.run_3dino_identifiability \
+  --embeddings results/3dino_infonce_eval_content/embeddings.npz \
+  --floor results/3dino_infonce_eval_content/random_init.npz \
+  --representation style --no-graph \
+  --output-dir results/3dino_infonce_eval_style
+```
+
+`--representation all` remains the evaluation default, preserving old reports.
+The content and style *tables* name the target factors; both are predicted from
+the chosen representation. Thus the style-target table under
+`--representation content` measures style leakage into the aligned block. The
+content-target table under `--representation style` measures content present in
+the unaligned block. Graph recovery uses the selected representation too. The
+standalone `eval.dinov3_identifiability` accepts the same selector. The pipeline
+requires the random baseline to use the exact same partition.
 
 Training uses the generator's train split; extraction uses its test split. Saved
 dataset window bounds and fixed-reference generator normalization are restored

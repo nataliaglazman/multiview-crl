@@ -425,6 +425,12 @@ def save(path, embeddings, latents, raw, slots, meta):
     arrays = {"z_content": latents["z_content"].astype(np.float32), "meta": json.dumps(meta, indent=2)}
     for view, features in embeddings.items():
         arrays[f"emb_view{view}"] = features.astype(np.float32)
+        if meta.get("embedding_partition"):
+            from models.dino_partition import split_embeddings
+
+            content, style = split_embeddings(arrays[f"emb_view{view}"], meta["embedding_partition"])
+            arrays[f"emb_content_view{view}"] = content
+            arrays[f"emb_style_view{view}"] = style
     for view, features in raw.items():
         arrays[f"raw_view{view}"] = features.astype(np.float32)
     for key in ("z_style_v1", "z_style_v2", "causal_adj"):
@@ -524,6 +530,7 @@ def main(argv=None):
         return 0
     if cli.out is None:
         parser.error("--out is required (or pass --self-test)")
+    saved = {}
     if cli.preprocessing:
         saved = json.loads(cli.preprocessing.read_text())
         for key in (
@@ -546,6 +553,14 @@ def main(argv=None):
         if cli.backbone == "3dino":
             cli.image_mean = cli.image_std = None
     resolve_dino_backend_options(cli, parser)
+    partition = saved.get("embedding_partition")
+    checkpoint_path = cli.three_dino_weights if cli.backbone == "3dino" else cli.model_id
+    partition_path = Path(checkpoint_path).expanduser() / "embedding_partition.json" if checkpoint_path else None
+    if partition_path is not None and partition_path.is_file():
+        encoder_partition = json.loads(partition_path.read_text())
+        if partition is not None and partition != encoder_partition:
+            parser.error("Saved preprocessing and encoder content/style partitions disagree")
+        partition = encoder_partition
     cli.axes = [name.strip() for name in cli.axes.split(",") if name.strip()]
     if not cli.axes or any(name not in AXES for name in cli.axes):
         parser.error(f"--axes must be a comma-separated subset of {sorted(AXES)}")
@@ -598,6 +613,7 @@ def main(argv=None):
     n_content = latents["z_content"].shape[1]
     n_style = latents["z_style_v1"].shape[1] if "z_style_v1" in latents else 0
     meta = dict(
+        embedding_partition=partition,
         model_id="AICONSlab/3DINO-ViT" if cli.backbone == "3dino" else cli.model_id,
         backbone=cli.backbone,
         volume_size=cli.volume_size if cli.backbone == "3dino" else None,

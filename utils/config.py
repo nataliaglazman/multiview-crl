@@ -1843,11 +1843,11 @@ def resolve_dino_backend_options(cli, parser):
 
 
 def parse_dino_finetune_args(argv=None):
-    """CLI for the standalone paired-view DINO InfoNCE trainer."""
+    """CLI for paired-view DINO fine-tuning on a fixed content/style partition."""
     import math
     from pathlib import Path
 
-    parser = argparse.ArgumentParser(description="Fine-tune DINO on paired synthetic MRI views with symmetric InfoNCE")
+    parser = argparse.ArgumentParser(description="Fine-tune DINO content channels with InfoNCE or Barlow Twins")
     add_dino_arguments(parser)
     parser.set_defaults(num_samples=1000, axes="axial", slices=1)
     parser.add_argument("--output-dir", type=Path, required=True, help="New/empty directory for weights and logs")
@@ -1859,7 +1859,18 @@ def parse_dino_finetune_args(argv=None):
     parser.add_argument("--head-lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--temperature", type=float, default=0.1)
-    parser.add_argument("--projection-dim", type=int, default=256, help="MLP output size; 0 applies InfoNCE directly")
+    parser.add_argument("--loss", choices=["infonce", "barlow_twins"], default="infonce")
+    parser.add_argument(
+        "--style-fraction",
+        type=float,
+        default=0.25,
+        help="Fraction of backbone channels excluded from alignment; 0 restores all-content training",
+    )
+    parser.add_argument("--barlow-lambda", type=float, default=0.0051, help="Off-diagonal correlation penalty weight")
+    parser.add_argument("--barlow-eps", type=float, default=1e-5, help="Variance stabilizer for Barlow Twins")
+    parser.add_argument(
+        "--projection-dim", type=int, default=256, help="Content-only MLP output size; 0 aligns content directly"
+    )
     parser.add_argument("--projection-hidden-dim", type=int, default=1024)
     parser.add_argument("--grad-clip", type=float, default=1.0, help="Gradient norm cap; 0 disables clipping")
     parser.add_argument(
@@ -1885,12 +1896,14 @@ def parse_dino_finetune_args(argv=None):
     ):
         if getattr(cli, key) < 1:
             parser.error(f"--{key.replace('_', '-')} must be positive")
-    for key in ("lr", "head_lr", "temperature"):
+    for key in ("lr", "head_lr", "temperature", "barlow_eps"):
         if not math.isfinite(getattr(cli, key)) or getattr(cli, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be finite and positive")
-    for key in ("weight_decay", "grad_clip"):
+    for key in ("weight_decay", "grad_clip", "barlow_lambda"):
         if not math.isfinite(getattr(cli, key)) or getattr(cli, key) < 0:
             parser.error(f"--{key.replace('_', '-')} must be finite and nonnegative")
+    if not math.isfinite(cli.style_fraction) or not 0 <= cli.style_fraction < 1:
+        parser.error("--style-fraction must be finite and in [0, 1)")
     if cli.num_workers < 0 or cli.projection_dim < 0 or (cli.patch_size is not None and cli.patch_size < 1):
         parser.error("Require nonnegative workers/projection size and a positive patch size")
     if not 0 <= cli.window_pct[0] < cli.window_pct[1] <= 100:

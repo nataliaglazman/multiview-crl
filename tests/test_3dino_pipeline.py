@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -61,6 +62,65 @@ def bundle(path, random_init=False):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_partitioned_pipeline_scores_selected_block_and_checks_floor_partition(self):
+        from models.dino_partition import make_partition, split_embeddings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spec = make_partition(8, 8, SimpleNamespace(style_fraction=0.25, backbone="3dino", token_pool="cls"))
+            for name, random_init in (("trained", False), ("floor", True)):
+                path = root / f"{name}.npz"
+                bundle(path, random_init)
+                with np.load(path) as data:
+                    arrays = dict(data)
+                meta = json.loads(str(arrays["meta"]))
+                meta["embedding_partition"] = spec
+                arrays["meta"] = json.dumps(meta)
+                for view in (1, 2):
+                    content, style = split_embeddings(arrays[f"emb_view{view}"], spec)
+                    arrays[f"emb_content_view{view}"] = content
+                    arrays[f"emb_style_view{view}"] = style
+                np.savez(path, **arrays)
+            for representation, width in (("content", 6), ("style", 2)):
+                output = root / representation
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        pipeline.main(
+                            [
+                                "--embeddings",
+                                str(root / "trained.npz"),
+                                "--floor",
+                                str(root / "floor.npz"),
+                                "--output-dir",
+                                str(output),
+                                "--representation",
+                                representation,
+                                "--eval-views",
+                                "1",
+                                "--no-graph",
+                                "--seeds",
+                                "0",
+                                "--n-splits",
+                                "2",
+                                "--n-null",
+                                "1",
+                            ]
+                        ),
+                        0,
+                    )
+                report = json.loads((output / "report_view1.json").read_text())
+                self.assertEqual((report["representation"], report["num_features"]), (representation, width))
+                self.assertTrue(report["content"])
+                self.assertTrue(report["style"])
+            with np.load(root / "floor.npz") as data:
+                arrays = dict(data)
+            meta = json.loads(str(arrays["meta"]))
+            meta["embedding_partition"]["style_channels"] = 3
+            arrays["meta"] = json.dumps(meta)
+            np.savez(root / "floor.npz", **arrays)
+            with self.assertRaisesRegex(ValueError, "partitions"):
+                pipeline.validate_floor(root / "trained.npz", root / "floor.npz", ["1"], "style")
+
     def test_old_pc_cannot_silently_ignore_the_conditioning_limit(self):
         def old_pc(data, **kwargs):
             pass

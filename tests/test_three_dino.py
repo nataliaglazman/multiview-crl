@@ -148,6 +148,11 @@ class UpstreamIntegrationTests(unittest.TestCase):
             three.load_encoder(load_cli)
 
     def test_real_synthetic_training_and_saved_preprocessing_evaluation(self):
+        for objective in ("infonce", "barlow_twins"):
+            with self.subTest(loss=objective):
+                self._training_export_round_trip(objective)
+
+    def _training_export_round_trip(self, objective):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.wrapped().save_pretrained(root / "initial")
@@ -165,6 +170,8 @@ class UpstreamIntegrationTests(unittest.TestCase):
                 train.main(
                     [
                         *common,
+                        "--loss",
+                        objective,
                         "--three-dino-weights",
                         str(root / "initial"),
                         "--output-dir",
@@ -189,6 +196,14 @@ class UpstreamIntegrationTests(unittest.TestCase):
                 pre = root / "run/preprocessing.json"
                 saved = json.loads(pre.read_text())
                 self.assertEqual(saved["backbone"], "3dino")
+                partition = saved["embedding_partition"]
+                self.assertEqual((partition["content_dim"], partition["style_dim"]), (18, 6))
+                state = torch.load(root / "run/training_state.pt", weights_only=True)
+                self.assertEqual(state["embedding_partition"], partition)
+                self.assertEqual(state["projector"]["0.weight"].shape[1], 18)
+                metrics = json.loads((root / "run/metrics.jsonl").read_text())
+                self.assertIn("style_std", metrics)
+                self.assertEqual("barlow_on_diag" in metrics, objective == "barlow_twins")
                 with patch.object(embed, "estimate_window", side_effect=AssertionError("Must reuse training window")):
                     embed.main(
                         [
@@ -208,11 +223,18 @@ class UpstreamIntegrationTests(unittest.TestCase):
             with np.load(root / "emb.npz") as arrays:
                 self.assertEqual(arrays["emb_view1"].shape, (4, 24))
                 self.assertEqual(arrays["emb_view2"].shape, (4, 24))
+                np.testing.assert_array_equal(arrays["emb_content_view1"], arrays["emb_view1"][:, :18])
+                np.testing.assert_array_equal(arrays["emb_style_view2"], arrays["emb_view2"][:, 18:])
                 meta = json.loads(str(arrays["meta"]))
                 self.assertEqual(meta["backbone"], "3dino")
                 self.assertEqual(meta["slots"], ["volume"])
                 self.assertEqual(meta["window_values"], saved["window_bounds"])
                 self.assertEqual(meta["image_size"], 32)
+            from eval.dinov3_identifiability import load_bundle
+
+            for block, width in (("content", 18), ("style", 6)):
+                loaded = load_bundle(root / "emb.npz", "1", block)
+                self.assertEqual(loaded["X"].shape, (4, width))
 
 
 if __name__ == "__main__":
