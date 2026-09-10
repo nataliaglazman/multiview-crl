@@ -36,6 +36,97 @@ This repository's adapter does not redistribute their source or pretrained weigh
 
 ## Extract pretrained embeddings
 
+For extraction and identifiability evaluation in one command, use the pipeline:
+
+```bash
+python -m eval.run_3dino_identifiability \
+  --three-dino-repo ../3DINO \
+  --three-dino-weights /path/to/downloaded_checkpoint.pth \
+  --run-dir results/synthetic/YOUR_RUN \
+  --output-dir results/3dino_evaluation \
+  --num-samples 500 --volume-batch 2 --device cuda --with-floor
+```
+
+This extracts full-volume embeddings for both modalities, optionally extracts the
+same architecture at random initialization (`--with-floor`), then calls the
+existing 2D-DINO identifiability scorer for T1 and FLAIR separately. The random
+baseline uses the same weights/config path to reconstruct the architecture, but
+does not load its weights. `--floor-seed` controls its initialization. Omit
+`--with-floor` to skip this extra model pass, or supply `--floor /path/to/floor.npz`
+to reuse an existing baseline. A baseline is accepted only when its random-init
+metadata, model/pooling/window settings, labels, adjacency, and available voxel
+arrays match. Baseline mismatch stops scoring instead of producing a misleading
+trained-minus-random comparison.
+
+For a fine-tuned model, point `--three-dino-weights` to its `encoder` directory.
+The pipeline automatically finds adjacent `settings.json` and `preprocessing.json`
+unless you provide `--run-dir` / `--preprocessing` explicitly. The saved
+preprocessing takes precedence over volume/window/pooling flags, just as in the
+standalone extractor. For a pretrained checkpoint with no `--run-dir`, the
+extractor's default causal synthetic generator is used.
+
+To evaluate embeddings you have already saved (no model loading or GPU needed):
+
+```bash
+python -m eval.run_3dino_identifiability \
+  --embeddings results/3dino/pretrained.npz \
+  --floor results/3dino/random_init.npz \
+  --output-dir results/3dino_rescored
+```
+
+`--floor` is optional in this command. Use a new/empty output directory each time;
+input embeddings are preserved. If a stage fails, completed artifacts and logs
+remain available. For example, after extraction succeeds you can rescore its
+`embeddings.npz` into another directory without repeating inference.
+
+Pipeline outputs:
+
+- `embeddings.npz` and its metadata sidecar (when extracting).
+- `random_init.npz` and its metadata sidecar (with `--with-floor`).
+- `report_view1.json` / `.txt` and `report_view2.json` / `.txt`: content/style
+  recovery, permutation-null scores, block MCC, optional untrained and voxel
+  comparisons, partial R², PC skeleton recovery, and CPDAG orientation diagnostics.
+- `factors_view1.csv`, `factors_view2.csv`: per-factor numeric results.
+- `summary.csv` / `.txt`: a compact per-view comparison including mean content
+  R² gap, MCC, graph F1/precision/recall/SHD, and mean partial R².
+- `pipeline.json`: resolved options, stage commands, logs, exit codes, and status.
+  Each stage also has a `.log` file. Separate processes release encoder memory
+  before scoring. Missing graph scores are shown as unavailable, not zero.
+
+Use `--eval-views 1`, `--eval-views 2`, or `--eval-views 1 2 both`; `both` scores
+concatenated modality embeddings (its style table targets view 1's style, matching
+the existing scorer). Defaults match the 2D evaluator: ridge probes, five folds,
+CV seeds 0/1/2, three permutation nulls, auto probe PCA, and Fisher-Z PC with an
+alpha sweep. The voxel baseline is enabled (`--raw-grid 8`). For
+`--max-cond-set`, use `python -m pip install 'causal-learn>=0.1.4.8'` (tested
+with 0.1.4.8). The pipeline rejects older versions that silently ignore this
+argument. Useful controls:
+
+```bash
+# Factor recovery only, without the graph panel:
+python -m eval.run_3dino_identifiability --embeddings embeddings.npz \
+  --output-dir results/3dino_factors_only --no-graph
+
+# Use held-out decoded factors for PC; needs more samples than the default:
+python -m eval.run_3dino_identifiability --embeddings embeddings_large.npz \
+  --output-dir results/3dino_holdout --holdout-readout --readout-dim 64
+
+# Nonlinear conditional-independence tests, potentially substantially slower:
+python -m eval.run_3dino_identifiability --embeddings embeddings.npz \
+  --output-dir results/3dino_kci --indep-test kci --max-cond-set 2
+```
+
+Per-volume windowing limits gain/bias recovery; compare its style scores with
+that preprocessing in mind. To match the existing 2D protocol, automatic probe
+PCA is fit on the whole embedding matrix before cross-validation; it is not a
+strictly train-only transform. `--probe-dim 0` disables that reduction.
+Graph alpha selection still uses known truth, and
+the default graph readout is in-sample. PC on true factors supplies a
+finite-sample reference, not a guaranteed upper bound. These are empirical
+recovery diagnostics rather than a proof of mathematical identifiability.
+
+The two individual stages remain available:
+
 ```bash
 python -m eval.dinov3_embed_synthetic \
   --backbone 3dino --three-dino-repo ../3DINO \
