@@ -301,3 +301,55 @@ factor-recovery number to quote.
 
 `--self-test` on either script runs its logic on planted arrays with no model, no GPU and
 (for the scoring script) no torch.
+
+### Fine-tune DINO on the two views with InfoNCE
+
+`training.finetune_dino` updates the shared DINO backbone and a shared two-layer MLP
+projection head using the paired synthetic T1/FLAIR views. For B subjects, the loss is
+the average of cross-entropy on the B-by-B cosine similarity matrix divided by
+`--temperature`, and its transpose. The diagonal contains positives; the other B−1
+subjects in the opposite view are negatives. Multiple planes are pooled into one
+feature per subject before the loss, so planes from the same subject never become
+false negatives. No ground-truth factors enter the loss.
+
+Use the project training dependencies plus a DINOv3-capable Transformers installation
+(tested with `transformers==4.57.6`). The default backbone matches the pretrained
+reference above; its Hub licence/authentication requirements also apply here.
+
+```bash
+python -m pip install 'transformers>=4.56,<5'
+
+python -m training.finetune_dino \
+  --output-dir results/dino_infonce \
+  --num-samples 1000 --epochs 20 --batch-size 8 \
+  --lr 1e-5 --head-lr 1e-3 --temperature 0.1 \
+  --device cuda --gradient-checkpointing
+
+# Extract HELD-OUT features using the trained backbone and exact training preprocessing.
+python -m eval.dinov3_embed_synthetic \
+  --model-id results/dino_infonce/encoder --local-files-only \
+  --run-dir results/dino_infonce \
+  --preprocessing results/dino_infonce/preprocessing.json \
+  --num-samples 500 --out results/dino_infonce/test_emb.npz
+
+python -m eval.dinov3_identifiability \
+  --embeddings results/dino_infonce/test_emb.npz \
+  --out results/dino_infonce/report.json
+```
+
+Training defaults to one central axial plane to limit activation memory. Set
+`--axes axial,coronal,sagittal --slices 3` for the original nine-plane extraction recipe.
+`--batch-size` counts subjects; `--plane-batch-size` only chunks encoder calls and does
+not reduce the number of live autograd graphs or the contrastive negative pool. CUDA
+autocast is available via `--dtype bfloat16` or `float16`; weights stay in float32.
+`--projection-dim 0` applies the objective directly to pooled backbone features.
+
+Pass `--run-dir` to training to reuse another run's generator settings. Training uses
+the generator's train split, while extraction keeps its test split and the same SCM.
+The output directory must be new/empty. It stores `encoder/` in Hugging Face format,
+`training_state.pt` with head and optimizer state, `metrics.jsonl` with loss/retrieval
+accuracy/positive and negative similarities, and generator/preprocessing metadata.
+The latest completed epoch replaces the checkpoint; there is no automatic resume or
+validation-based checkpoint selection. Evaluation reads the backbone before the head.
+For pretrained/floor comparisons, use the same `--preprocessing` and `--run-dir` on
+each extraction so slice layout, intensity window, and held-out subjects match.

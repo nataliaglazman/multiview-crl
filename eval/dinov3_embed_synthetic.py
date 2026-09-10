@@ -168,12 +168,12 @@ def _generator_args(cli):
     )
 
 
-def build_dataset(cli):
-    """Build the frozen synthetic test split and report what it actually is."""
+def build_dataset(cli, split="test"):
+    """Build the requested synthetic split and report its generator settings."""
     from eval.run_dci_synthetic import build_synthetic_test_set
 
     args = _generator_args(cli)
-    dataset = build_synthetic_test_set(args, cli.num_samples, cache=not cli.no_cache, causal=True)
+    dataset = build_synthetic_test_set(args, cli.num_samples, cache=not cli.no_cache, causal=True, split=split)
     inner = getattr(dataset, "_inner", dataset)
     settings = {
         key: value
@@ -190,7 +190,9 @@ def build_dataset(cli):
 
 
 def resolve_normalization(cli):
-    """(mean, std, source) for the ViT input, preferring what the checkpoint declares."""
+    """(mean, std, source) for the encoder input."""
+    if getattr(cli, "backbone", "dinov3") == "3dino":
+        return (0.0,), (1.0,), "3dino_minus1_plus1"
     if cli.image_mean and cli.image_std:
         return tuple(cli.image_mean), tuple(cli.image_std), "cli"
     try:
@@ -209,12 +211,16 @@ def resolve_normalization(cli):
 
 
 def load_encoder(cli):
-    """Load the HF vision encoder, or a seeded random-init twin of the same architecture.
+    """Load the selected vision encoder, or its seeded random-init twin.
 
     The random-init weights ARE a measurement here -- they are the floor every trained
     number is read as a gap over -- so ``--model-seed`` fixes them, for the same reason
     ``eval.run_dci_synthetic.load_model_from_run_dir`` seeds its untrained twin.
     """
+    if getattr(cli, "backbone", "dinov3") == "3dino":
+        from models.three_dino import load_encoder as load_3dino
+
+        return load_3dino(cli)
     import torch
     from transformers import AutoConfig, AutoModel
 
@@ -347,6 +353,11 @@ def extract(dataset, model, device, dtype, config, cli, window, mean, std):
     before aggregation, ``raw[view]`` the downsampled-voxel baseline, and ``latents`` the
     ground-truth factors, all in dataset order.
     """
+    if getattr(cli, "backbone", "dinov3") == "3dino":
+        from models.three_dino import extract as extract_3dino
+
+        return extract_3dino(dataset, model, device, dtype, config, cli, window, mean, std)
+
     import numpy as np
     import torch
 
@@ -495,50 +506,11 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, help="Where to write the .npz (required unless --self-test)")
     parser.add_argument("--self-test", action="store_true", help="Run the numpy self-test and exit")
 
-    model = parser.add_argument_group("encoder")
-    model.add_argument("--model-id", default="facebook/dinov3-vitl16-pretrain-lvd1689m", help="HF id or local path")
-    model.add_argument("--random-init", action="store_true", help="Untrained twin of the same architecture (floor)")
-    model.add_argument("--model-seed", type=int, default=0, help="Seeds --random-init weights")
-    model.add_argument("--local-files-only", action="store_true", help="Never reach for the Hub")
-    model.add_argument("--device", help="cpu, cuda, cuda:0, ...; default: CUDA when available")
-    model.add_argument("--dtype", default="float32", choices=["float32", "float16", "bfloat16"])
-    model.add_argument("--image-size", type=int, default=224, help="Square ViT input; must divide by the patch size")
-    model.add_argument("--patch-size", type=int, help="Override the patch size read off the model config")
-    model.add_argument("--token-pool", default="cls_mean", choices=["cls", "mean", "cls_mean", "grid"])
-    model.add_argument("--grid-size", type=int, default=2, help="Patch-map pooling grid for --token-pool grid")
-    model.add_argument("--image-mean", type=float, nargs=3, help="Override the checkpoint's normalization mean")
-    model.add_argument("--image-std", type=float, nargs=3, help="Override the checkpoint's normalization std")
+    from utils.config import add_dino_arguments, resolve_dino_backend_options
 
-    view = parser.add_argument_group("slicing")
-    view.add_argument("--axes", default="axial,coronal,sagittal", help="Comma-separated: axial, coronal, sagittal")
-    view.add_argument("--slices", type=int, default=3, help="Evenly spaced planes per axis (1 = middle plane)")
-    view.add_argument("--slice-agg", default="concat", choices=["concat", "mean"])
-    view.add_argument("--views", type=int, nargs="+", default=[1, 2], choices=[1, 2], help="1=T1, 2=FLAIR")
-    view.add_argument("--window", default="dataset", choices=["dataset", "per_slice"])
-    view.add_argument("--window-pct", type=float, nargs=2, default=[1.0, 99.0], help="Window percentiles")
-    view.add_argument("--window-pilot", type=int, default=32, help="Volumes used to estimate the dataset window")
-    view.add_argument("--raw-grid", type=int, default=8, help="Voxel-baseline pooling grid; 0 disables it")
-
-    data = parser.add_argument_group("generator (ignored where --run-dir supplies them)")
-    data.add_argument("--run-dir", help="Take the generator settings from this run's settings.json")
-    data.add_argument("--num-samples", type=int, default=500)
-    data.add_argument("--res", type=int, help="Cubic volume resolution (default: 64, or the run's)")
-    data.add_argument("--seed", type=int, default=42)
-    data.add_argument("--n-content", type=int, default=9)
-    data.add_argument("--n-style", type=int, default=3)
-    data.add_argument("--no-causal", action="store_true", help="i.i.d. factors; there is then no graph to recover")
-    data.add_argument("--causal-graph", default="chain", choices=["chain", "full", "random"])
-    data.add_argument("--causal-edge-prob", type=float, default=0.5)
-    data.add_argument("--causal-noise-scale", type=float, default=0.4)
-    data.add_argument("--causal-nonlinearity", default="leaky_relu", choices=["leaky_relu", "tanh"])
-    data.add_argument("--content-prior", default="normal", choices=["normal", "uniform"])
-    data.add_argument("--content-squash", default="auto", choices=["auto", "clamp", "tanh", "none"])
-    data.add_argument("--normalize", default="fixed_reference", choices=["per_sample", "shared", "fixed_reference"])
-    data.add_argument("--clean-content", action="store_true")
-    data.add_argument("--identifiable-ventricle", action="store_true")
-    data.add_argument("--style-scale", type=float, default=1.0)
-    data.add_argument("--content-scale", type=float, default=1.0)
-    data.add_argument("--no-cache", action="store_true", help="Re-render volumes instead of keeping them in RAM")
+    add_dino_arguments(parser)
+    parser.add_argument("--raw-grid", type=int, default=8, help="Voxel-baseline pooling grid; 0 disables it")
+    parser.add_argument("--preprocessing", type=Path, help="preprocessing.json saved by DINO fine-tuning")
 
     run = parser.add_argument_group("execution")
     run.add_argument("--batch-size", type=int, default=64, help="Planes per encoder forward pass")
@@ -552,6 +524,28 @@ def main(argv=None):
         return 0
     if cli.out is None:
         parser.error("--out is required (or pass --self-test)")
+    if cli.preprocessing:
+        saved = json.loads(cli.preprocessing.read_text())
+        for key in (
+            "backbone",
+            "volume_size",
+            "axes",
+            "slices",
+            "slice_agg",
+            "token_pool",
+            "grid_size",
+            "image_size",
+            "patch_size",
+            "window",
+            "window_pct",
+            "image_mean",
+            "image_std",
+        ):
+            if key in saved:
+                setattr(cli, key, saved[key])
+        if cli.backbone == "3dino":
+            cli.image_mean = cli.image_std = None
+    resolve_dino_backend_options(cli, parser)
     cli.axes = [name.strip() for name in cli.axes.split(",") if name.strip()]
     if not cli.axes or any(name not in AXES for name in cli.axes):
         parser.error(f"--axes must be a comma-separated subset of {sorted(AXES)}")
@@ -571,6 +565,12 @@ def main(argv=None):
 
     started = time.time()
     dataset, inner, settings = build_dataset(cli)
+    if cli.preprocessing:
+        if saved.get("synthetic_normalize", dataset.synthetic_normalize) != dataset.synthetic_normalize:
+            parser.error("Generator normalization differs from saved preprocessing; use the fine-tuning --run-dir")
+        reference = saved.get("synthetic_fixed_reference")
+        if reference is not None:
+            dataset._fixed_mean, dataset._fixed_scale = reference["mean"], reference["scale"]
     if settings.get("synthetic_normalize") in ("per_sample", "shared") and settings.get("synthetic_n_style", 0):
         logger.warning(
             "The generator's own normalization is %r, which z-scores each volume and removes the "
@@ -580,7 +580,12 @@ def main(argv=None):
     encoder, device, dtype, config = load_encoder(cli)
     mean, std, norm_source = resolve_normalization(cli)
     logger.info("Input normalization from %s: mean=%s std=%s", norm_source, mean, std)
-    window = (0.0, 0.0) if cli.window == "per_slice" else estimate_window(dataset, cli)
+    if cli.window in ("per_slice", "per_volume"):
+        window = (0.0, 0.0)
+    elif cli.preprocessing:
+        window = tuple(saved["window_bounds"])
+    else:
+        window = estimate_window(dataset, cli)
     if cli.window == "dataset":
         logger.info("Dataset intensity window at percentiles %s: %s", cli.window_pct, window)
 
@@ -593,26 +598,34 @@ def main(argv=None):
     n_content = latents["z_content"].shape[1]
     n_style = latents["z_style_v1"].shape[1] if "z_style_v1" in latents else 0
     meta = dict(
-        model_id=cli.model_id,
+        model_id="AICONSlab/3DINO-ViT" if cli.backbone == "3dino" else cli.model_id,
+        backbone=cli.backbone,
+        volume_size=cli.volume_size if cli.backbone == "3dino" else None,
+        model_provenance=getattr(encoder, "provenance", None),
         random_init=cli.random_init,
         model_seed=cli.model_seed if cli.random_init else None,
         architecture=type(encoder).__name__,
         dtype=cli.dtype,
-        image_size=cli.image_size,
+        image_size=cli.volume_size if cli.backbone == "3dino" else cli.image_size,
         patch_size=cli.patch_size or patch_size_of(config),
         token_pool=cli.token_pool,
         grid_size=cli.grid_size if cli.token_pool == "grid" else None,
         image_mean=list(mean),
         image_std=list(std),
         normalization_source=norm_source,
-        axes=cli.axes,
-        slices=cli.slices,
-        slice_agg=cli.slice_agg,
+        axes=[] if cli.backbone == "3dino" else cli.axes,
+        slices=0 if cli.backbone == "3dino" else cli.slices,
+        slice_agg="none" if cli.backbone == "3dino" else cli.slice_agg,
         slots=slots,
         views=cli.views,
         window=cli.window,
         window_pct=cli.window_pct,
         window_values=list(window) if cli.window == "dataset" else None,
+        synthetic_fixed_reference=(
+            {"mean": dataset._fixed_mean, "scale": dataset._fixed_scale}
+            if dataset.synthetic_normalize == "fixed_reference"
+            else None
+        ),
         raw_grid=cli.raw_grid,
         embedding_dim={f"view{view}": int(features.shape[1]) for view, features in embeddings.items()},
         num_samples=int(len(dataset)),
@@ -630,7 +643,10 @@ def main(argv=None):
     for key, value in sorted(arrays.items()):
         if key != "meta":
             print(f"  {key:<14} {value.shape}")
-    print(f"  {len(slots)} slice(s) per view ({', '.join(slots)}), aggregated by {cli.slice_agg}")
+    if cli.backbone == "3dino":
+        print(f"  Full 3D volumes at {cli.volume_size}³; token pooling: {cli.token_pool}")
+    else:
+        print(f"  {len(slots)} slice(s) per view ({', '.join(slots)}), aggregated by {cli.slice_agg}")
     print(f"\nScore it:\n  python -m eval.dinov3_identifiability --embeddings {cli.out}")
     return 0
 
