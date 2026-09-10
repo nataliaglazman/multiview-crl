@@ -377,6 +377,74 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual((fixed.shape[1], width), (8, 8))
 
 
+class CausalPlotTests(unittest.TestCase):
+    """plot_causal_recovery renders every panel from a real evaluate_arrays result."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("matplotlib not installed")
+        rng = np.random.RandomState(13)
+        n = 300
+        z = rng.randn(n, 4)
+        z[:, 1] += 1.3 * z[:, 0]
+        z[:, 2] += 1.3 * z[:, 1]
+        z[:, 3] += 1.3 * z[:, 2]
+        adjacency = np.zeros((4, 4), dtype=bool)
+        adjacency[0, 1] = adjacency[1, 2] = adjacency[2, 3] = True
+        result = recovery.evaluate_arrays(z @ rng.randn(4, 20) + rng.randn(n, 20), z, adjacency, orientation=True)
+        result.update(run_dir="results/synthetic/planted", status="ok", level=0, pooling="gap")
+        cls.payload = {"protocol": {}, "runs": [result]}
+
+    def _render(self, payload, extra=()):
+        from eval import plot_causal_recovery as plot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "causal_recovery.json"
+            path.write_text(json.dumps(payload))
+            out = Path(tmp) / "figs"
+            self.assertEqual(plot.main(["--json", str(path), "--out", str(out), *extra]), 0)
+            return sorted(p.name for p in out.iterdir())
+
+    def test_every_figure_and_its_csv_twin_are_written(self):
+        for extra in ((), ("--dark",)):
+            with self.subTest(dark=bool(extra)):
+                names = self._render(self.payload, extra)
+                for stem in ("edges", "alpha_sweep", "factor_r2", "orientation"):
+                    self.assertIn(f"{stem}.png", names)
+                    self.assertIn(f"{stem}.csv", names, "a figure must never be the only way to read a value")
+
+    def test_orientation_is_skipped_rather_than_crashing_when_absent(self):
+        import copy
+
+        payload = copy.deepcopy(self.payload)
+        for row in [payload["runs"][0]["best"], *payload["runs"][0]["alpha_sweep"]]:
+            row.pop("orientation", None)
+        names = self._render(payload)
+        self.assertNotIn("orientation.png", names)
+        self.assertIn("edges.png", names)
+
+    def test_edge_classes_partition_the_pairs_the_skeleton_scores(self):
+        from eval import plot_causal_recovery as plot
+
+        run = self.payload["runs"][0]
+        _names, classes = plot.edge_classes(run)
+        best = run["best"]
+        counts = {kind: sum(1 for v in classes.values() if v == kind) for kind in ("tp", "fp", "fn")}
+        self.assertEqual((counts["tp"], counts["fp"], counts["fn"]), (best["tp"], best["fp"], best["fn"]))
+
+    def test_unscored_runs_are_dropped_not_plotted(self):
+        payload = {"protocol": {}, "runs": [{"run_dir": "a", "status": "error", "reason": "boom"}]}
+        from eval import plot_causal_recovery as plot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "r.json"
+            path.write_text(json.dumps(payload))
+            self.assertEqual(plot.load(path), [])
+
+
 class RoundTripTests(unittest.TestCase):
     def test_saved_arrays_load_back_into_a_scorable_bundle(self):
         rng = np.random.RandomState(5)

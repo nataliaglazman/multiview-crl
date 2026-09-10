@@ -251,6 +251,24 @@ edge the truth's class does orient — a weaker failure than a reversal),
 pairs whose edge type differs at all, so it is comparable to `skeleton_shd` but strictly
 harder. Without the flag the outputs are byte-identical to before.
 
+## Plotting the panel
+
+`eval/plot_causal_recovery.py` draws the JSON `run_causal_recovery` already wrote, so a
+figure can never disagree with its table:
+
+```bash
+python -m eval.plot_causal_recovery --json results/causal_recovery/causal_recovery.json --out figures/
+```
+
+`edges.png` is the one a scalar cannot give you — a cell per factor pair showing which
+edges were recovered, missed and invented, so a single factor carrying the errors is
+visible where `skeleton_shd` averages it away. `alpha_sweep.png` plots F1/precision/recall
+/SHD against alpha with the selected alpha ringed, which is how you catch the confound
+where two runs are compared at different best alphas. `factor_r2.png` splits each factor's
+raw R² into its partial part and the parent-mediated remainder. `orientation.png` appears
+only with `--orientation`. Each ships a `.csv` twin, and `--dark` re-steps the palette.
+At most two runs per figure: hues are assigned in fixed order and never generated.
+
 ## Conditional-independence test
 
 `--indep-test {fisherz,kci}` on both `run_causal_recovery` and
