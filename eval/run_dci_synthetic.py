@@ -189,8 +189,11 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None, random_init=F
     return model, args, device
 
 
-def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None):
-    """Build the synthetic test dataset from a run's settings (shared helper).
+def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None, split="test"):
+    """Build a synthetic dataset from a run's settings (test split by default).
+
+    ``split="train"`` supports the DINO trainer while preserving the SCM seed and
+    using the dataset's separate per-split sample seeds.
 
     ``cache=True`` (default) renders each volume once into RAM and reuses it on
     every later access.  This matters because the frozen test set is iterated
@@ -215,6 +218,8 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None):
     """
     from data.datasets import SyntheticBrainDataset
 
+    if split not in ("train", "val", "test"):
+        raise ValueError(f"Unknown synthetic split: {split}")
     n_samples = num_samples or getattr(args, "synthetic_num_test", 200)
     res = getattr(args, "synthetic_res", 64)
     spatial_size = getattr(args, "spatial_size", None) or (res, res, res)
@@ -232,10 +237,10 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None):
         )
     use_causal = trained_causal if causal else False
     logger.info(
-        "Generating %d synthetic test samples at resolution %s (causal=%s)...", n_samples, spatial_size, use_causal
+        "Generating %d synthetic %s samples at resolution %s (causal=%s)...", n_samples, split, spatial_size, use_causal
     )
     return SyntheticBrainDataset(
-        mode="test",
+        mode=split,
         spatial_size=spatial_size,
         cache=cache,
         synthetic_mode=getattr(args, "synthetic_mode", "pseudo_mri"),

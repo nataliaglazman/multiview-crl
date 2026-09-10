@@ -3,8 +3,6 @@
 
 import argparse
 
-import data.datasets as datasets
-
 
 def parse_args() -> argparse.ArgumentParser:
     """
@@ -1482,6 +1480,8 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
     """
     import logging
 
+    import data.datasets as datasets
+
     logger = logging.getLogger("multiview_crl")
     logger.info(f"Configuring dataset: {args.dataset_name}")
 
@@ -1744,7 +1744,7 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             f"  -> Style dimensions: {args.content_dim}-{args.total_dim - 1} ({args.total_dim - args.content_dim} dims)"
         )
     else:
-        raise ValueError(f"{args.dataset_name=} not supported.")
+        raise ValueError(f"args.dataset_name={args.dataset_name!r} not supported.")
 
     if not hasattr(args, "content_indices") or args.content_indices is None:
         args.content_indices = [list(range(args.content_dim))]
@@ -1752,3 +1752,153 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
     logger.info(f"  -> Content indices: {len(args.content_indices[0])} dimensions")
 
     return args
+
+
+def add_dino_arguments(parser):
+    """Shared encoder, slicing and generator flags for DINO training and extraction."""
+    model = parser.add_argument_group("encoder")
+    model.add_argument(
+        "--backbone",
+        choices=["dinov3", "3dino"],
+        default="dinov3",
+        help="2D slice encoder or the AICONSlab full-volume 3DINO encoder",
+    )
+    model.add_argument("--three-dino-repo", help="Path to the official AICONSlab/3DINO checkout")
+    model.add_argument("--three-dino-weights", help="Downloaded 3DINO teacher .pth or fine-tuned encoder directory")
+    model.add_argument(
+        "--volume-size", type=int, default=112, help="3DINO input side length; must divide by patch size"
+    )
+    model.add_argument("--model-id", default="facebook/dinov3-vitl16-pretrain-lvd1689m", help="HF id or local path")
+    model.add_argument("--random-init", action="store_true", help="Untrained twin of the same architecture (floor)")
+    model.add_argument("--model-seed", type=int, default=0, help="Seeds --random-init weights")
+    model.add_argument("--local-files-only", action="store_true", help="Never reach for the Hub")
+    model.add_argument("--device", help="cpu, cuda, cuda:0, ...; default: CUDA when available")
+    model.add_argument("--dtype", default="float32", choices=["float32", "float16", "bfloat16"])
+    model.add_argument("--image-size", type=int, default=224, help="Square ViT input; must divide by the patch size")
+    model.add_argument("--patch-size", type=int, help="Override the patch size read off the model config")
+    model.add_argument(
+        "--token-pool", choices=["cls", "mean", "cls_mean", "grid"], help="Default: cls_mean for DINOv3, cls for 3DINO"
+    )
+    model.add_argument("--grid-size", type=int, default=2, help="Patch-map pooling grid for --token-pool grid")
+    model.add_argument("--image-mean", type=float, nargs=3, help="Override the checkpoint's normalization mean")
+    model.add_argument("--image-std", type=float, nargs=3, help="Override the checkpoint's normalization std")
+
+    view = parser.add_argument_group("slicing")
+    view.add_argument("--axes", default="axial,coronal,sagittal", help="Comma-separated: axial, coronal, sagittal")
+    view.add_argument("--slices", type=int, default=3, help="Evenly spaced planes per axis (1 = middle plane)")
+    view.add_argument("--slice-agg", default="concat", choices=["concat", "mean"])
+    view.add_argument("--views", type=int, nargs="+", default=[1, 2], choices=[1, 2], help="1=T1, 2=FLAIR")
+    view.add_argument(
+        "--window",
+        choices=["dataset", "per_slice", "per_volume"],
+        help="Default: dataset for DINOv3, per_volume for 3DINO",
+    )
+    view.add_argument(
+        "--window-pct", type=float, nargs=2, help="Percentiles: default 1/99 for DINOv3, .05/99.95 for 3DINO"
+    )
+    view.add_argument("--window-pilot", type=int, default=32, help="Volumes used to estimate the dataset window")
+
+    data = parser.add_argument_group("generator (ignored where --run-dir supplies them)")
+    data.add_argument("--run-dir", help="Take the generator settings from this run's settings.json")
+    data.add_argument("--num-samples", type=int, default=500)
+    data.add_argument("--res", type=int, help="Cubic volume resolution (default: 64, or the run's)")
+    data.add_argument("--seed", type=int, default=42)
+    data.add_argument("--n-content", type=int, default=9)
+    data.add_argument("--n-style", type=int, default=3)
+    data.add_argument("--no-causal", action="store_true", help="i.i.d. factors; there is then no graph to recover")
+    data.add_argument("--causal-graph", default="chain", choices=["chain", "full", "random"])
+    data.add_argument("--causal-edge-prob", type=float, default=0.5)
+    data.add_argument("--causal-noise-scale", type=float, default=0.4)
+    data.add_argument("--causal-nonlinearity", default="leaky_relu", choices=["leaky_relu", "tanh"])
+    data.add_argument("--content-prior", default="normal", choices=["normal", "uniform"])
+    data.add_argument("--content-squash", default="auto", choices=["auto", "clamp", "tanh", "none"])
+    data.add_argument("--normalize", default="fixed_reference", choices=["per_sample", "shared", "fixed_reference"])
+    data.add_argument("--clean-content", action="store_true")
+    data.add_argument("--identifiable-ventricle", action="store_true")
+    data.add_argument("--style-scale", type=float, default=1.0)
+    data.add_argument("--content-scale", type=float, default=1.0)
+    data.add_argument("--no-cache", action="store_true", help="Re-render volumes instead of keeping them in RAM")
+
+
+def resolve_dino_backend_options(cli, parser):
+    """Resolve model-specific defaults after parsing or restoring preprocessing."""
+    volumetric = cli.backbone == "3dino"
+    cli.token_pool = cli.token_pool or ("cls" if volumetric else "cls_mean")
+    cli.window = cli.window or ("per_volume" if volumetric else "dataset")
+    cli.window_pct = cli.window_pct or ([0.05, 99.95] if volumetric else [1.0, 99.0])
+    if volumetric:
+        if cli.model_id not in ("facebook/dinov3-vitl16-pretrain-lvd1689m", "AICONSlab/3DINO-ViT"):
+            parser.error("3DINO loads local weights with --three-dino-weights, not --model-id")
+        cli.model_id = "AICONSlab/3DINO-ViT"
+        if not cli.three_dino_repo:
+            parser.error("--backbone 3dino requires --three-dino-repo pointing to the official checkout")
+        if cli.window == "per_slice":
+            parser.error("3DINO uses whole volumes; select --window per_volume or dataset")
+        if cli.image_mean is not None or cli.image_std is not None:
+            parser.error("3DINO uses single-channel [-1,1] input; RGB --image-mean/std do not apply")
+        if cli.volume_size < 16 or cli.volume_size % 16:
+            parser.error("--volume-size must be a positive multiple of 16 for the published 3DINO-ViT")
+    elif cli.window == "per_volume":
+        parser.error("--window per_volume is only supported with --backbone 3dino")
+
+
+def parse_dino_finetune_args(argv=None):
+    """CLI for the standalone paired-view DINO InfoNCE trainer."""
+    import math
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description="Fine-tune DINO on paired synthetic MRI views with symmetric InfoNCE")
+    add_dino_arguments(parser)
+    parser.set_defaults(num_samples=1000, axes="axial", slices=1)
+    parser.add_argument("--output-dir", type=Path, required=True, help="New/empty directory for weights and logs")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=8, help="Subjects per contrastive batch (at least 2)")
+    parser.add_argument("--plane-batch-size", type=int, default=8, help="Planes per encoder call; graphs remain live")
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--lr", type=float, default=1e-5, help="Backbone AdamW learning rate")
+    parser.add_argument("--head-lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--projection-dim", type=int, default=256, help="MLP output size; 0 applies InfoNCE directly")
+    parser.add_argument("--projection-hidden-dim", type=int, default=1024)
+    parser.add_argument("--grad-clip", type=float, default=1.0, help="Gradient norm cap; 0 disables clipping")
+    parser.add_argument(
+        "--gradient-checkpointing", action="store_true", help="Trade encoder compute for activation memory"
+    )
+    cli = parser.parse_args(argv)
+    resolve_dino_backend_options(cli, parser)
+    cli.axes = [name.strip() for name in cli.axes.split(",") if name.strip()]
+    if not cli.axes or any(name not in ("axial", "coronal", "sagittal") for name in cli.axes):
+        parser.error("--axes must be a comma-separated subset of axial,coronal,sagittal")
+    if cli.views != [1, 2]:
+        parser.error("Fine-tuning requires --views 1 2")
+    if cli.batch_size < 2 or not cli.batch_size <= cli.num_samples < 1_000_003:
+        parser.error("Require 2 <= --batch-size <= --num-samples < 1000003 (disjoint generator splits)")
+    for key in (
+        "epochs",
+        "slices",
+        "image_size",
+        "grid_size",
+        "window_pilot",
+        "plane_batch_size",
+        "projection_hidden_dim",
+    ):
+        if getattr(cli, key) < 1:
+            parser.error(f"--{key.replace('_', '-')} must be positive")
+    for key in ("lr", "head_lr", "temperature"):
+        if not math.isfinite(getattr(cli, key)) or getattr(cli, key) <= 0:
+            parser.error(f"--{key.replace('_', '-')} must be finite and positive")
+    for key in ("weight_decay", "grad_clip"):
+        if not math.isfinite(getattr(cli, key)) or getattr(cli, key) < 0:
+            parser.error(f"--{key.replace('_', '-')} must be finite and nonnegative")
+    if cli.num_workers < 0 or cli.projection_dim < 0 or (cli.patch_size is not None and cli.patch_size < 1):
+        parser.error("Require nonnegative workers/projection size and a positive patch size")
+    if not 0 <= cli.window_pct[0] < cli.window_pct[1] <= 100:
+        parser.error("--window-pct must be increasing percentiles in [0, 100]")
+    if (cli.image_mean is None) != (cli.image_std is None):
+        parser.error("--image-mean and --image-std must be given together")
+    if cli.image_std and any(not math.isfinite(v) or v <= 0 for v in cli.image_std):
+        parser.error("--image-std must be finite and positive")
+    if cli.image_mean and any(not math.isfinite(v) for v in cli.image_mean):
+        parser.error("--image-mean must be finite")
+    return cli

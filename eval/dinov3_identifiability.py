@@ -448,13 +448,17 @@ def format_report(result):
     meta = result["embeddings_meta"]
     header = [
         "=" * 100,
-        f"DINOv3 IDENTIFIABILITY — {meta.get('model_id', '?')}"
+        f"{'3DINO' if meta.get('backbone') == '3dino' else 'DINOv3'} IDENTIFIABILITY — {meta.get('model_id', '?')}"
         + ("  [RANDOM INIT]" if meta.get("random_init") else ""),
         "=" * 100,
         f"  embeddings   {result['embeddings_path']}  (view {result['view']}, {result['num_samples']} samples,"
         f" {result['num_features']} features)",
-        f"  slices       {meta.get('slices')} per axis on {','.join(meta.get('axes', []))},"
-        f" {meta.get('slice_agg')} · token pool {meta.get('token_pool')} · window {meta.get('window')}",
+        (
+            f"  volume       {meta.get('volume_size')}³ · token pool {meta.get('token_pool')} · window {meta.get('window')}"
+            if meta.get("backbone") == "3dino"
+            else f"  slices       {meta.get('slices')} per axis on {','.join(meta.get('axes', []))},"
+            f" {meta.get('slice_agg')} · token pool {meta.get('token_pool')} · window {meta.get('window')}"
+        ),
         f"  generator    {json.dumps(meta.get('generator', {}), sort_keys=True)[:200]}",
         f"  floor        {result.get('floor_path') or 'none'}",
         "",
