@@ -18,6 +18,10 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `eval/cross_reconstruction.py`, `eval/dci.py` — disentanglement metrics.
 - `eval/run_dci_compare.py` — full cross-model protocol (R²/MCC/DCI, nulls, `--floor`, CSV). The source of truth for the metric rules; other eval scripts import them from here rather than re-deriving.
 - `eval/identifiability_report.py` — one-page readable R²/MCC/DCI report for a single run vs its untrained floor. Per-factor R² at each factor's assigned pooling, plus an R² ladder showing every factor at every rung (gap/stats/patch). Thin layer over the above; `--self-test` runs torch-free.
+- `eval/export_vq_bundle.py` — VQ features → the shared bundle `.npz` (the format `dinov3_embed_synthetic` writes), so VQ and DINO can be scored by one function.
+- `eval/compare_bundles.py` — scores N bundles through one protocol into one table; verifies row identity, matches probe width, keeps each floor with its own bundle.
+- `eval/bundle_identity.py` — factor/generator digests that prove two bundles describe the same evaluation rows.
+- `eval/COMPARING_3DINO_VQVAE.md` — what the matched DINO/VQ comparison equalises and what it cannot. Read before quoting a cross-model number.
 - `eval/plot_identifiability.py` — PNG figures from `identifiability_report --out` JSON (one or two models). Never re-scores; each figure ships a `.csv` twin.
 - `eval/plot_causal_recovery.py` — PNG figures from `run_causal_recovery`'s JSON: recovered/missed/spurious edge map, alpha sweep, per-factor partial-vs-raw R², CPDAG orientation. Never re-runs PC; each figure ships a `.csv` twin.
 - `eval/dinov3_embed_synthetic.py` — run the synthetic views through a pretrained DINOv3 (HF `transformers`), slice 3D→2D, save embeddings + GT latents + SCM adjacency to `.npz`. `--random-init` gives the untrained floor.

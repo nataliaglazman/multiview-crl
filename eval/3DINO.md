@@ -125,6 +125,30 @@ the default graph readout is in-sample. PC on true factors supplies a
 finite-sample reference, not a guaranteed upper bound. These are empirical
 recovery diagnostics rather than a proof of mathematical identifiability.
 
+## Comparing against the VQ-VAE
+
+Do not read a DINO report and a VQ-VAE report side by side and difference the columns:
+they are separate protocols and several of the differences are large enough to invert a
+per-factor conclusion. Export the VQ-VAE run as a bundle in this same format and score
+both through one function instead:
+
+```bash
+python -m eval.export_vq_bundle --run-dir results/synthetic/YOUR_RUN \
+  --checkpoint vqvae_model.pt --level 0 --pooling gap --block all \
+  --num-samples 500 --out results/bundles/vq_all.npz
+
+python -m eval.compare_bundles \
+  --bundles vq=results/bundles/vq_all.npz dino=results/3dino_evaluation/embeddings.npz \
+  --floors  dino=results/3dino_evaluation/random_init.npz \
+  --equal-width --out results/matched/compare.json
+```
+
+Pass the same `--run-dir` and `--num-samples` to both exporters so they render the same
+brains; `compare_bundles` verifies that from the stored factor digests and refuses to
+build a table if they disagree. Pair VQ `--pooling gap` with `--token-pool mean`, or VQ
+`--pooling 4,4,4` with `--token-pool grid --grid-size 4`. See
+`eval/COMPARING_3DINO_VQVAE.md` for what this equalises and what it cannot.
+
 The two individual stages remain available:
 
 ```bash

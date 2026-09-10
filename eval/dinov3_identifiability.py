@@ -51,6 +51,7 @@ from pathlib import Path
 
 import numpy as np
 
+from eval.bundle_identity import FACTOR_KEYS, read_identity
 from eval.identifiability_metrics import block_mcc, cv_probe_r2_multi
 from eval.run_causal_recovery import INDEP_TESTS
 from eval.run_dci_compare import PROBE_DIM_AUTO, _auto_probe_dim
@@ -90,6 +91,10 @@ def load_bundle(path, view="1"):
         n_style = style.shape[1]
     return dict(
         path=str(path),
+        # Which rows this file holds, taken from the arrays under the WRITER's key names.
+        # It cannot be recomputed from the dict below: that one renames the style arrays
+        # and keeps only the scored view's, so the factor set it describes is incomplete.
+        identity=read_identity(meta, {k: data[k] for k in FACTOR_KEYS if k in data}, len(z_content)),
         X=_views("emb_view"),
         raw=_views("raw_view") if any(f"raw_view{v}" in data for v in ("1", "2")) else None,
         z_content=z_content,
