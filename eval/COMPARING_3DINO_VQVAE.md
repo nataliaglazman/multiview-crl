@@ -46,7 +46,8 @@ python -m eval.compare_bundles \
             dino=results/3dino_matched/embeddings.npz \
   --floors  vq_all=results/bundles/vq_all_floor.npz \
             dino=results/3dino_matched/random_init.npz \
-  --equal-width --probe-kind ridge --seeds 0 1 2 --n-null 3 \
+  --equal-width --with-graph --alphas 0.05 --diagnostic-alpha 0.05 \
+  --probe-kind ridge --seeds 0 1 2 --n-null 3 \
   --out results/matched/compare.json --csv results/matched/compare.csv
 ```
 
@@ -93,6 +94,45 @@ extractor now warns whenever the selection actually moves, on every code path.
 `identifiability_report --freeze-content-mask` opts the report into the same behaviour;
 it is off there by default because turning it on moves numbers for exactly those
 checkpoints, and the reports already published were produced without it.
+
+## Causal discovery across representations
+
+`--with-graph` runs the PC panel on every bundle and scores each recovered skeleton
+**against the true SCM adjacency** the generator used. The section carries:
+
+- one row per representation, plus one per untrained floor;
+- a `truth (ceiling)` row — the identical panel on the ground-truth factors themselves,
+  computed once because it depends only on the factors every bundle shares. It is a
+  finite-sample reference, not a strict upper bound: a representation can beat it by
+  decoding factors into columns PC happens to find easier to separate;
+- **two alpha selections**. The prespecified `--diagnostic-alpha` row is the one a
+  head-to-head reads off, because every source is tested at the same threshold. The
+  best-F1 row is each source at its own most flattering alpha, selected by looking at the
+  answer — the alpha column is part of that result. Quote the prespecified row and use
+  `--alphas 0.05 --diagnostic-alpha 0.05` so the sweep cannot drift between models;
+- **partial R² per factor**, which is where a graph difference usually comes from: a
+  representation that reads a factor only through its SCM parents scores high raw and near
+  zero partial, and PC then sees a column that is mostly the parent;
+- **orientation vs the true CPDAG** at the diagnostic alpha. The CPDAG, not the DAG,
+  because PC identifies a Markov equivalence class — on the default `chain` SCM that class
+  is entirely undirected, and scoring against the DAG would charge every estimate for two
+  edges no observational method can orient.
+
+`--equal-width` matters more here than for the probes. `--probe-dim` does not touch the
+graph; the readout has its own rule (`run_causal_recovery.readout_width`) that caps at each
+block's feature count, so a 48-channel VQ block and an 18,432-dim embedding otherwise get
+readouts of 48 and 64. `--equal-width` pins both to what the narrowest block can reach and
+the report prints the widths so a mismatch is visible. The ceiling is exempt by
+construction.
+
+`compare_graph.csv` (written next to `--csv`, taking its stem) holds one row per source
+and alpha, so the whole sweep can be replotted without re-running PC.
+
+Two limits that no flag removes. PC runs on a *supervised readout* of each representation's
+decoded factors, so this measures how well the SCM survives that representation, not causal
+discovery from raw features. And the default readout is in-sample — it decodes the rows it
+was fit on, with the true labels — so pass `--holdout-readout` for a held-out graph at the
+cost of 70% of the rows. See `eval/CAUSAL_EVALUATION.md`.
 
 ## What it still does not equalise
 

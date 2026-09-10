@@ -1,6 +1,7 @@
 """The shared bundle path: row identity, VQ block export, and one-protocol comparison."""
 
 import argparse
+import csv
 import json
 import tempfile
 import unittest
@@ -386,6 +387,149 @@ class MatchedComparisonTests(unittest.TestCase):
         results["wide"]["content"]["_block"]["probe_features"] = 40
         results["narrow"]["content"]["_block"]["probe_features"] = 12
         self.assertIn("different widths", compare.format_widths(results))
+
+
+class GraphComparisonTests(unittest.TestCase):
+    """PC on each representation's features, scored against the true SCM adjacency."""
+
+    def setUp(self):
+        warnings.simplefilter("ignore")
+        self.z, self.adjacency, self.strong = planted(n=240, noise=0.1, width=32)
+        _z, _a, self.weak = planted(n=240, noise=3.0, seed=1, width=32)
+        self.options = argparse.Namespace(
+            probe_kind="ridge",
+            seeds=(0,),
+            n_splits=3,
+            n_null=1,
+            null_seed=0,
+            probe_dim=0,
+            with_graph=True,
+            pc_ceiling=True,
+            alphas=(0.05,),
+            diagnostic_alpha=0.05,
+            orientation=True,
+            indep_test="fisherz",
+            max_cond_set=None,
+            readout_dim=8,
+            holdout_readout=False,
+        )
+
+    def make(self, X):
+        return dict(
+            path="<t>",
+            X=X,
+            raw=None,
+            z_content=self.z,
+            z_style=None,
+            adjacency=self.adjacency,
+            content_names=["a", "b", "c"],
+            style_names=[],
+            meta={},
+            view="1",
+        )
+
+    def scored(self, bundles, floors=None):
+        truth = compare.truth_panel(bundles, self.options)
+        options = argparse.Namespace(**{**vars(self.options), "pc_ceiling": False})
+        return compare.score_all(bundles, floors or {}, options), truth, options
+
+    def test_every_source_is_scored_against_the_same_true_skeleton(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, _o = self.scored(bundles)
+        skeletons = [tuple(map(tuple, panel["true_skeleton"])) for _l, panel in compare.graph_panels(results, truth)]
+        self.assertEqual(len(set(skeletons)), 1, "the truth must not vary between sources")
+        expected = self.adjacency | self.adjacency.T
+        np.testing.assert_array_equal(np.array(skeletons[0], dtype=bool), expected)
+
+    def test_a_degraded_representation_recovers_a_worse_graph(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        rows = dict(compare.graph_panels(results, truth))
+        f1 = {label: compare._sweep_row(panel, options.diagnostic_alpha)["f1"] for label, panel in rows.items()}
+        self.assertGreaterEqual(f1["strong"], f1["weak"])
+        self.assertEqual(f1[compare.CEILING_LABEL], 1.0)
+
+    def test_the_ceiling_is_scored_once_and_not_repeated_per_bundle(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, _o = self.scored(bundles)
+        self.assertIsNotNone(truth)
+        for result in results.values():
+            self.assertNotIn("truth", result["graph"])
+        self.assertEqual(
+            [label for label, _p in compare.graph_panels(results, truth)],
+            [compare.CEILING_LABEL, "strong", "weak"],
+        )
+
+    def test_a_floor_appears_as_its_own_row(self):
+        bundles = {"m": self.make(self.strong)}
+        _zf, _af, floor_features = planted(n=240, noise=9.0, seed=4, width=32)
+        results, truth, _o = self.scored(bundles, {"m": self.make(floor_features)})
+        labels = [label for label, _p in compare.graph_panels(results, truth)]
+        self.assertEqual(labels, [compare.CEILING_LABEL, "m", "m · floor"])
+
+    def test_readout_width_is_pinned_to_the_narrowest_block(self):
+        wide, narrow = self.make(self.strong), self.make(self.weak[:, :12])
+        bundles = {"wide": wide, "narrow": narrow}
+        options = argparse.Namespace(**{**vars(self.options), "readout_dim": None})
+        # The default rule would give the 32-wide block 64-capped-to-32 and the 12-wide one 12.
+        self.assertEqual(compare.common_readout(bundles, {}, options), 12)
+        self.assertEqual(compare.common_readout(bundles, {"wide": self.make(self.strong[:, :5])}, options), 5)
+
+    def test_the_ceiling_does_not_trigger_the_width_warning(self):
+        # Its features ARE the factors, so it is always narrower than any model's readout;
+        # letting that count as a mismatch would print the warning on every causal run.
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        text = compare.format_graph(results, truth, options)
+        self.assertIn("CAUSAL DISCOVERY", text)
+        self.assertNotIn("different widths", text)
+        self.assertIn("the ceiling reads out its 3 factors directly", text)
+
+    def test_a_genuine_readout_mismatch_is_still_flagged(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        results["weak"]["graph"]["embeddings"]["graph_readout_dim"] = 4
+        self.assertIn("different widths", compare.format_graph(results, truth, options))
+
+    def test_both_alpha_selections_are_reported(self):
+        bundles = {"strong": self.make(self.strong)}
+        results, truth, options = self.scored(bundles)
+        text = compare.format_graph(results, truth, options)
+        self.assertIn("at the prespecified alpha=0.05", text)
+        self.assertIn("best-F1 alpha, selected against the truth", text)
+        self.assertIn("orientation vs the true CPDAG", text)
+
+    def test_sweep_lookup_returns_none_when_pc_failed_at_that_alpha(self):
+        panel = {"alpha_sweep": [{"alpha": 0.05, "error": "singular"}, {"alpha": 0.1, "f1": 0.5}]}
+        self.assertIsNone(compare._sweep_row(panel, 0.05))
+        self.assertIsNone(compare._sweep_row(panel, 0.2))
+        self.assertEqual(compare._sweep_row(panel, 0.1)["f1"], 0.5)
+
+    def test_graph_csv_has_one_row_per_source_and_alpha_with_selection_marked(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "g.csv"
+            self.assertTrue(compare.write_graph_csv(path, results, truth, options))
+            rows = list(csv.DictReader(path.open()))
+        self.assertEqual({r["source"] for r in rows}, {compare.CEILING_LABEL, "strong", "weak"})
+        for row in rows:
+            self.assertIn("prespecified", row["selected"])
+            self.assertEqual(float(row["alpha"]), 0.05)
+            self.assertTrue(0.0 <= float(row["f1"]) <= 1.0)
+            self.assertEqual(int(row["readout_dim"]), 3 if row["source"] == compare.CEILING_LABEL else 8)
+
+    def test_no_graph_section_when_the_panel_was_not_run(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        options = argparse.Namespace(**{**vars(self.options), "with_graph": False})
+        results = compare.score_all(bundles, {}, options)
+        self.assertEqual(compare.format_graph(results, None, options), "")
+        self.assertNotIn("CAUSAL DISCOVERY", compare.format_report(results, [], None, options))
+
+    def test_a_non_causal_bundle_has_no_ceiling_to_score(self):
+        bundle = self.make(self.strong)
+        bundle["adjacency"] = None
+        self.assertIsNone(compare.truth_panel({"m": bundle}, self.options))
 
 
 if __name__ == "__main__":

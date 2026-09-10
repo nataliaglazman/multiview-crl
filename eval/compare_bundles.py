@@ -7,7 +7,7 @@
                   dino=results/3dino/pretrained.npz \\
         --floors  vq_all=results/bundles/vq_all_gap_floor.npz \\
                   dino=results/3dino/random_init.npz \\
-        --equal-width --out results/matched/compare.json
+        --equal-width --with-graph --out results/matched/compare.json
 
 Every bundle is scored by ``eval.dinov3_identifiability.score`` with ONE options object,
 so the CV splits, the permutation nulls, the PCA rule, the probe and the floor handling
@@ -29,10 +29,37 @@ Three things this checks that a pair of separate runs cannot:
    computed against the floor given for THAT bundle; one architecture's floor is never
    subtracted from another's, which would not be a baseline correction at all.
 
+Causal discovery (``--with-graph``)
+-----------------------------------
+Each representation additionally gets the PC panel from
+``eval.run_causal_recovery.evaluate_arrays``: a supervised readout decodes the factors from
+that representation, PC recovers a skeleton from the decoded columns, and the skeleton is
+scored **against the true SCM adjacency** the generator used.  One row per source, plus a
+``truth (ceiling)`` row running the identical panel on the ground-truth factors themselves
+and a row per untrained floor.
+
+Two alpha selections are reported and they answer different questions.  The **prespecified**
+``--diagnostic-alpha`` row is the one a head-to-head can be read off, because every source
+is tested at the same threshold.  The **best-F1** row is each source at its own most
+flattering alpha, chosen by looking at the answer; the alpha column is part of that result,
+not a footnote to it.  With ``--orientation`` (on by default) edge directions are also
+scored against the true DAG's CPDAG -- the CPDAG, because PC identifies an equivalence
+class and the default ``chain`` SCM's is entirely undirected.
+
+``--equal-width`` matters more here than for the probes.  The readout has its own width
+rule that caps at each block's feature count, so a 48-channel VQ block and an 18k-dim
+embedding otherwise get readouts of 48 and 64 and part of the graph difference is that gap.
+The ceiling is exempt: its features ARE the factors, so it is ``n_content`` columns wide by
+construction.
+
+This scores how well the SCM survives a representation, not causal discovery from raw
+features, and both the in-sample readout and the truth-selected alpha make it optimistic.
+See ``eval/CAUSAL_EVALUATION.md``.
+
 Read ``gap`` (real minus permutation null) across bundles, and ``Δfloor`` only where both
 bundles have their own floor.  The columns are defined in
-``eval/COMPARING_3DINO_VQVAE.md``; ``--self-test`` runs the whole path on planted numpy
-arrays with no bundle files.
+``eval/COMPARING_3DINO_VQVAE.md``; ``--self-test`` runs the whole path -- probes and PC --
+on planted numpy arrays with no bundle files.
 """
 
 from __future__ import annotations
@@ -102,6 +129,41 @@ def common_width(bundles, floors):
     widths = [b["X"].shape[1] for b in bundles.values()]
     widths += [f["X"].shape[1] for f in floors.values() if f is not None]
     return int(min(widths))
+
+
+def common_readout(bundles, floors, options):
+    """The graph readout width every bundle can actually reach.
+
+    ``--equal-width`` alone does not make the graph panel comparable: ``--probe-dim``
+    reduces the block tables 1/2 probe, while PC's supervised readout has its own width
+    rule (``run_causal_recovery.readout_width``) that caps at the block's own feature
+    count.  A 48-channel VQ block and an 18,432-dim embedding therefore get readouts of 48
+    and 64, and part of any difference in the recovered graph is that gap rather than the
+    representation.  Pinning both to what the narrowest block can reach removes it.
+    """
+    from eval.run_causal_recovery import readout_width
+
+    rows = min(len(b["X"]) for b in bundles.values())
+    n_content = min(b["z_content"].shape[1] for b in bundles.values())
+    return int(readout_width(rows, common_width(bundles, floors), n_content, options.readout_dim))
+
+
+def truth_panel(bundles, options):
+    """PC on the ground-truth factors themselves — the finite-sample reference row.
+
+    Computed once here rather than once per bundle. It depends only on the factors and the
+    adjacency, which the row-identity check has already established are shared, so scoring
+    it per bundle would repeat the same PC search and invite the reader to compare rows
+    that are the same computation. It is a reference, not an upper bound: a representation
+    can beat it by decoding factors into columns PC happens to find easier to separate.
+    """
+    reference = next(iter(bundles.values()))
+    if reference["adjacency"] is None:
+        return None
+    Z, names, keep = scorer.usable_factors(reference["z_content"], reference["content_names"])
+    panel = scorer.graph_panel(Z, Z, reference["adjacency"][np.ix_(keep, keep)], options)
+    panel["factor_names"] = names
+    return panel
 
 
 def score_all(bundles, floors, options):
@@ -176,7 +238,173 @@ def format_widths(results):
     return "FEATURE WIDTH\n" + "\n".join(lines) + "\n" + note
 
 
-def format_report(results, problems):
+#: Label of the reference row: PC on the ground-truth factors rather than on a
+#: representation. It is filtered out of the readout-width check, because its "features"
+#: ARE the factors, so it is n_content columns wide by construction and can never match a
+#: model's readout width.
+CEILING_LABEL = "truth (ceiling)"
+
+
+def graph_panels(results, truth):
+    """``[(label, panel)]`` in reading order: the ceiling, then each bundle and its floor."""
+    rows = []
+    if truth:
+        rows.append((CEILING_LABEL, truth))
+    for label, result in results.items():
+        panels = result.get("graph") or {}
+        if panels.get("embeddings"):
+            rows.append((label, panels["embeddings"]))
+        if panels.get("floor"):
+            rows.append((f"{label} · floor", panels["floor"]))
+    return rows
+
+
+def _sweep_row(panel, alpha):
+    """The panel's scored row at exactly ``alpha``, or None if PC failed there."""
+    for row in panel.get("alpha_sweep", []):
+        if abs(row.get("alpha", float("nan")) - alpha) < 1e-12 and "f1" in row:
+            return row
+    return None
+
+
+def format_graph_scores(rows, selector, diagnostic_alpha):
+    """Skeleton recovery against the TRUE adjacency, one line per source.
+
+    ``selector`` is either the prespecified ``--diagnostic-alpha`` row or each panel's own
+    best-F1 alpha.  Both are reported because they answer different questions: the fixed
+    alpha is the one a head-to-head can be read off, since every source is scored at the
+    same test threshold; the best-alpha row is each source at its own most flattering
+    setting, chosen by looking at the answer, and the alpha column is part of the result.
+    """
+    headers = ["source", "alpha", "F1", "prec", "rec", "SHD", "TP", "FP", "FN", "exact"]
+    body = []
+    for label, panel in rows:
+        row = selector(panel)
+        if not row:
+            body.append([label, *["—"] * 9])
+            continue
+        body.append(
+            [
+                label,
+                f"{row['alpha']:g}",
+                f"{row['f1']:.3f}",
+                f"{row['precision']:.3f}",
+                f"{row['recall']:.3f}",
+                str(row["skeleton_shd"]),
+                str(row["tp"]),
+                str(row["fp"]),
+                str(row["fn"]),
+                "yes" if row["exact_match"] else "no",
+            ]
+        )
+    return scorer._table(headers, body)
+
+
+def format_graph_factors(rows):
+    """Partial R² per factor, across sources — where a graph difference comes from.
+
+    Partial R² is the factor's own variation recovered after its SCM parents are regressed
+    out, so it is the quantity a recovered edge actually rests on: a source that reads a
+    factor only through its parents scores high raw and near zero here, and PC then sees a
+    column that is mostly the parent.
+    """
+    names = [factor["name"] for _label, panel in rows for factor in panel.get("factors", [])]
+    ordered = list(dict.fromkeys(names))
+    if not ordered:
+        return ""
+    labels = [label for label, _p in rows]
+    body = []
+    for name in ordered:
+        found = [next((f for f in panel.get("factors", []) if f["name"] == name), None) for _label, panel in rows]
+        parents = next((str(f["parents"]) for f in found if f), "")
+        body.append([name, parents, *(scorer._fmt(f["partial_r2"] if f else None) for f in found)])
+    return scorer._table(["factor", "parents", *labels], body)
+
+
+def format_graph_orientation(rows, diagnostic_alpha):
+    """Edge DIRECTIONS against the true DAG's CPDAG, at the prespecified alpha."""
+    body = []
+    for label, panel in rows:
+        row = _sweep_row(panel, diagnostic_alpha)
+        orientation = (row or {}).get("orientation")
+        if not orientation:
+            continue
+        body.append(
+            [
+                label,
+                str(orientation["correct_directed"]),
+                str(orientation["reversed"]),
+                str(orientation["undirected_in_estimate"]),
+                str(orientation["directed_in_estimate"]),
+                str(orientation["bidirected_in_estimate"]),
+                str(orientation["both_undirected"]),
+                str(orientation["cpdag_shd"]),
+                "yes" if orientation["cpdag_exact_match"] else "no",
+            ]
+        )
+    if not body:
+        return ""
+    headers = ["source", "correct", "rev", "undir_est", "dir_est", "bidir", "both_undir", "CPDAG SHD", "exact"]
+    return scorer._table(headers, body)
+
+
+def format_graph(results, truth, options):
+    """The whole causal-discovery section: PC on each representation, scored against truth."""
+    rows = graph_panels(results, truth)
+    if not rows:
+        return ""
+    alpha = options.diagnostic_alpha
+    out = [
+        "CAUSAL DISCOVERY · PC skeleton vs the TRUE SCM adjacency",
+        "",
+        f"  at the prespecified alpha={alpha:g} — the row to read a head-to-head off",
+        format_graph_scores(rows, lambda panel: _sweep_row(panel, alpha), alpha),
+    ]
+    scored = [(label, panel) for label, panel in rows if label != CEILING_LABEL]
+    widths = {panel.get("graph_readout_dim") for _l, panel in scored}
+    samples = {panel.get("graph_samples") for _l, panel in rows}
+    modes = {panel.get("readout_mode") for _l, panel in rows}
+
+    def _join(values):
+        return "/".join(str(v) for v in sorted(values, key=lambda v: (v is None, v)))
+
+    out.append(
+        f"  readout: {'/'.join(sorted(str(m) for m in modes))} at {_join(widths)} dims, "
+        f"PC on {_join(samples)} rows, {next(iter(rows))[1].get('indep_test')} independence test"
+        + (f"; the ceiling reads out its {truth.get('graph_readout_dim')} factors directly" if truth else "")
+    )
+    if len(widths) > 1:
+        out.append(
+            "  NOTE: the sources were read out at different widths, so part of the difference\n"
+            "        above is readout capacity rather than representation. Pass --equal-width."
+        )
+    out += [
+        "",
+        "  at each source's own best-F1 alpha, selected against the truth (optimistic)",
+        format_graph_scores(rows, lambda panel: panel.get("best"), alpha),
+    ]
+    factors = format_graph_factors(rows)
+    if factors:
+        out += ["", "  partial R² per factor — the recovered signal each edge rests on", factors]
+    orientation = format_graph_orientation(rows, alpha)
+    if orientation:
+        out += [
+            "",
+            f"  orientation vs the true CPDAG at alpha={alpha:g}"
+            " (PC identifies an equivalence class, so undirected can be correct)",
+            orientation,
+        ]
+    out.append(
+        "\n  PC runs on a supervised readout of each representation's decoded factors, so this\n"
+        "  scores how well the SCM survives that representation, not causal discovery from raw\n"
+        "  features. The default readout is in-sample (--holdout-readout makes it held-out at\n"
+        "  70% of the rows) and the best-alpha row selects against the answer, so both are\n"
+        "  optimistic diagnostics. See eval/CAUSAL_EVALUATION.md.\n"
+    )
+    return "\n".join(out)
+
+
+def format_report(results, problems, truth=None, options=None):
     parts = [
         "=" * 92,
         "MATCHED BUNDLE COMPARISON",
@@ -195,6 +423,10 @@ def format_report(results, problems):
         "Read across a row for the same factor under different representations. 'gap' is\n"
         "comparable everywhere; 'Δfloor' only where each bundle has its own floor.\n"
     )
+    if options is not None:
+        graph = format_graph(results, truth, options)
+        if graph:
+            parts.append(graph)
     return "\n".join(parts)
 
 
@@ -227,13 +459,74 @@ def write_csv(path, results):
                     writer.writerow({**row, "bundle": label, "block": block, "factor": name, "probe_features": width})
 
 
+def write_graph_csv(path, results, truth, options):
+    """One row per (source, alpha): the skeleton scored against the true adjacency.
+
+    Every alpha is written, not just the headline, so the alpha sweep can be replotted
+    without re-running PC — and so a reader can see whether a source's advantage at the
+    prespecified alpha survives the rest of the sweep.
+    """
+    columns = [
+        "source",
+        "alpha",
+        "selected",
+        "f1",
+        "precision",
+        "recall",
+        "skeleton_shd",
+        "tp",
+        "fp",
+        "fn",
+        "exact_match",
+        "cpdag_shd",
+        "raw_r2_mean",
+        "partial_r2_mean",
+        "readout_dim",
+        "graph_samples",
+        "readout_mode",
+        "indep_test",
+    ]
+    rows = graph_panels(results, truth)
+    if not rows:
+        return False
+    with Path(path).open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for label, panel in rows:
+            best = panel.get("best") or {}
+            for sweep in panel.get("alpha_sweep", []):
+                if "f1" not in sweep:
+                    continue
+                selected = []
+                if abs(sweep["alpha"] - options.diagnostic_alpha) < 1e-12:
+                    selected.append("prespecified")
+                if best and abs(sweep["alpha"] - best["alpha"]) < 1e-12:
+                    selected.append("best_f1")
+                writer.writerow(
+                    {
+                        **sweep,
+                        "source": label,
+                        "selected": "+".join(selected),
+                        "cpdag_shd": (sweep.get("orientation") or {}).get("cpdag_shd"),
+                        "raw_r2_mean": panel.get("raw_r2_mean"),
+                        "partial_r2_mean": panel.get("partial_r2_mean"),
+                        "readout_dim": panel.get("graph_readout_dim"),
+                        "graph_samples": panel.get("graph_samples"),
+                        "readout_mode": panel.get("readout_mode"),
+                        "indep_test": panel.get("indep_test"),
+                    }
+                )
+    return True
+
+
 def _self_test():
-    """Two representations of one planted factor set, scored through the real path."""
+    """Two representations of one planted SCM, scored through the real path — probes and PC."""
     rng = np.random.RandomState(0)
     n, k = 240, 3
     z = rng.randn(n, k)
     z[:, 1] += 1.3 * z[:, 0]
     z[:, 2] += 1.3 * z[:, 1]
+    adjacency = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]], dtype=bool)
     names = ["a", "b", "c"]
     strong = z @ rng.randn(k, 32) + 0.1 * rng.randn(n, 32)
     weak = z @ rng.randn(k, 32) + 3.0 * rng.randn(n, 32)
@@ -245,7 +538,7 @@ def _self_test():
             raw=None,
             z_content=z,
             z_style=None,
-            adjacency=None,
+            adjacency=adjacency,
             content_names=names,
             style_names=[],
             meta={},
@@ -254,21 +547,59 @@ def _self_test():
 
     bundles = {"strong": make(strong), "weak": make(weak)}
     options = argparse.Namespace(
-        probe_kind="ridge", seeds=(0, 1), n_splits=3, n_null=2, null_seed=0, probe_dim=0, with_graph=False
+        probe_kind="ridge",
+        seeds=(0, 1),
+        n_splits=3,
+        n_null=2,
+        null_seed=0,
+        probe_dim=0,
+        with_graph=True,
+        pc_ceiling=True,
+        alphas=(0.05,),
+        diagnostic_alpha=0.05,
+        orientation=True,
+        indep_test="fisherz",
+        max_cond_set=None,
+        readout_dim=8,
+        holdout_readout=False,
     )
     records, problems = check_alignment(bundles, strict=True)
     assert not problems, problems
     assert len({r["factor_digest"] for r in records.values()}) == 1, "identical factors must digest alike"
-    results = score_all(bundles, {}, options)
-    print(format_report(results, problems))
+
+    assert common_readout(bundles, {}, options) == 8, "an explicit readout width must be honoured"
+    truth = truth_panel(bundles, options)
+    assert truth and truth["best"], "the ceiling panel must run PC on the factors themselves"
+
+    scored = argparse.Namespace(**{**vars(options), "pc_ceiling": False})
+    results = score_all(bundles, {}, scored)
+    print(format_report(results, problems, truth, scored))
+
     gaps = {label: result["content"]["_block"]["mean_gap"] for label, result in results.items()}
     assert gaps["strong"] > gaps["weak"], gaps
     assert gaps["strong"] > 0.5, gaps
 
+    # The ceiling is scored once and reused; a per-bundle copy would repeat the same search.
+    assert all("truth" not in (r["graph"] or {}) for r in results.values()), "ceiling must not be repeated"
+    rows = dict(graph_panels(results, truth))
+    assert set(rows) == {"truth (ceiling)", "strong", "weak"}, sorted(rows)
+    for label, panel in rows.items():
+        row = _sweep_row(panel, options.diagnostic_alpha)
+        assert row, f"{label} has no row at the prespecified alpha"
+        assert 0.0 <= row["f1"] <= 1.0 and row["skeleton_shd"] >= 0, row
+        assert row["orientation"]["cpdag_shd"] >= 0, row["orientation"]
+        # The ceiling's features ARE the 3 factors, so it reads out at 3 whatever is asked.
+        expected = 3 if label == CEILING_LABEL else 8
+        assert panel["graph_readout_dim"] == expected, (label, panel["graph_readout_dim"])
+    assert rows["strong"]["best"]["f1"] >= rows["weak"]["best"]["f1"], "cleaner features, no worse graph"
+
     mismatched = {"strong": bundles["strong"], "shifted": make(weak)}
     mismatched["shifted"]["z_content"] = z + 1.0
     assert check_alignment(mismatched, strict=False)[1], "a different factor draw must be reported"
-    print("SELF-TEST OK: matched scoring separates the two, and a factor mismatch is caught.")
+    print(
+        "SELF-TEST OK: matched scoring separates the two, PC scores against the true "
+        "adjacency, and a factor mismatch is caught."
+    )
 
 
 def main(argv=None):
@@ -305,11 +636,19 @@ def main(argv=None):
     probe.add_argument(
         "--equal-width",
         action="store_true",
-        help="Override --probe-dim with the narrowest block's width, so every bundle " "is probed at the same capacity",
+        help="Override --probe-dim with the narrowest block's width, so every bundle is probed at "
+        "the same capacity. With --with-graph it pins --readout-dim to what the narrowest block can "
+        "reach as well, since the graph readout has its own width rule that caps at each block's "
+        "feature count.",
     )
 
     graph = parser.add_argument_group("graph")
-    graph.add_argument("--with-graph", action="store_true", help="Also run the PC panel per bundle (slow)")
+    graph.add_argument(
+        "--with-graph",
+        action="store_true",
+        help="Also run PC on each representation and score the recovered skeleton against the true "
+        "SCM adjacency. Slow: one PC search per source per alpha.",
+    )
     graph.add_argument("--alphas", type=float, nargs="+", default=list(scorer.DEFAULT_ALPHAS))
     graph.add_argument("--diagnostic-alpha", type=float, default=0.05)
     graph.add_argument("--no-orientation", dest="orientation", action="store_false")
@@ -348,13 +687,26 @@ def main(argv=None):
         cli.probe_dim = common_width(bundles, floors)
         logger.info("--equal-width: probing every bundle at %d features", cli.probe_dim)
 
+    truth = None
+    if cli.with_graph:
+        if cli.equal_width:
+            cli.readout_dim = common_readout(bundles, floors, cli)
+            logger.info("--equal-width: reading every graph out at %d dims", cli.readout_dim)
+        # The ceiling depends only on the factors, which every bundle shares, so it is
+        # scored once here and the per-bundle panels are told not to repeat it.
+        if cli.pc_ceiling:
+            logger.info("Scoring the ground-truth ceiling panel")
+            truth = truth_panel(bundles, cli)
+        cli = argparse.Namespace(**{**vars(cli), "pc_ceiling": False})
+
     results = score_all(bundles, floors, cli)
-    report = format_report(results, problems)
+    report = format_report(results, problems, truth, cli)
     payload = {
         "bundles": {label: str(path) for label, path in bundle_paths.items()},
         "floors": {label: str(path) for label, path in floor_paths.items()},
         "row_alignment": problems or "verified",
         "options": scorer.options_record(cli),
+        "truth_panel": truth,
         "results": results,
     }
     saved = []
@@ -367,6 +719,11 @@ def main(argv=None):
         cli.csv.parent.mkdir(parents=True, exist_ok=True)
         write_csv(cli.csv, results)
         saved.append(cli.csv.resolve())
+        # The graph rows are one per (source, alpha) rather than one per factor, so they get
+        # their own file instead of being padded into the factor table's columns.
+        graph_csv = cli.csv.with_name(f"{cli.csv.stem}_graph{cli.csv.suffix}")
+        if write_graph_csv(graph_csv, results, truth, cli):
+            saved.append(graph_csv.resolve())
     if not cli.quiet:
         print(report)
     for path in saved:

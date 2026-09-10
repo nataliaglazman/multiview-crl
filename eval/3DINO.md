@@ -140,8 +140,15 @@ python -m eval.export_vq_bundle --run-dir results/synthetic/YOUR_RUN \
 python -m eval.compare_bundles \
   --bundles vq=results/bundles/vq_all.npz dino=results/3dino_evaluation/embeddings.npz \
   --floors  dino=results/3dino_evaluation/random_init.npz \
-  --equal-width --out results/matched/compare.json
+  --equal-width --with-graph --alphas 0.05 --diagnostic-alpha 0.05 \
+  --out results/matched/compare.json
 ```
+
+`--with-graph` adds the PC panel for every representation, scored against the true SCM
+adjacency, with a ground-truth ceiling row and each untrained floor alongside. Pin the
+alphas as above so every source is tested at the same threshold rather than at its own
+truth-selected best. It also pins the graph readout width, which `--probe-dim` does not
+control.
 
 Pass the same `--run-dir` and `--num-samples` to both exporters so they render the same
 brains; `compare_bundles` verifies that from the stored factor digests and refuses to
