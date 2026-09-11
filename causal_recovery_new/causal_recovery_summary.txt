@@ -1,0 +1,7 @@
+Directory                                            F1  Precision  Recall  SHD  Partial R²  Status
+------------------------------------------------  -----  ---------  ------  ---  ----------  ------
+synthetic-clean-content-causal-ident-vent-12-4-2  0.750      0.923   0.632    8       0.278  ok
+synthetic-clean-content-causal-baseline-12-4      0.743      0.812   0.684    9       0.237  ok
+
+F1/precision/recall/SHD use the best-F1 alpha; SHD counts missing + extra skeleton edges.
+Partial R² is the mean across content factors. — = unavailable (see JSON/CSV for reasons).

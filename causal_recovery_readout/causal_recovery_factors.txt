@@ -1,0 +1,416 @@
+Factor diagnostics — reference: /home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-40-base-codebooks-causal
+Deltas are current minus reference; negative R² deltas mean degradation.
+Graph diagnostics use fixed alpha=0.05; unavailable metrics appear as —.
+Input order is preserved; directory names are not interpreted as training steps.
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-40-base-codebooks-causal
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.914  +0.000       0.914    +0.000     0.0  0.914    2     0            —
+ventricle_size       0.722  +0.000       0.437    +0.000     0.0  0.716    2     0            —
+lesion_x             0.603  +0.000       0.603    +0.000     0.0  0.594    1     0            —
+lesion_y             0.633  +0.000       0.223    +0.000     0.0  0.622    2     0            —
+lesion_z             0.172  +0.000      -0.044    +0.000     0.0  0.168    2     0            —
+cortical_thickness   0.786  +0.000       0.314    +0.000     0.0  0.803    4     0            —
+temporal_atrophy     0.645  +0.000       0.077    +0.000     0.0  0.636    2     0            —
+lr_asymmetry         0.738  +0.000       0.306    +0.000     0.0  0.743    4     0            —
+sulcal_widening      0.451  +0.000       0.091    +0.000     0.0  0.445    1     0            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-causal-clean-content-redo-norm-100-style-4
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.636  -0.086       0.157    -0.280    61.6  0.640    2     0            —
+sulcal_widening      0.387  -0.064      -0.029    -0.121    26.5  0.360    2     1            —
+lesion_y             0.646  +0.013       0.183    -0.039     8.6  0.646    1    -1            —
+cortical_thickness   0.793  +0.007       0.298    -0.015     3.4  0.803    4     0            —
+lesion_x             0.618  +0.015       0.618    +0.015     0.0  0.618    2     1            —
+lesion_z             0.146  -0.026      -0.029    +0.015     0.0  0.161    3     1            —
+brain_size           0.930  +0.016       0.930    +0.016     0.0  0.930    3     1            —
+lr_asymmetry         0.906  +0.168       0.388    +0.082     0.0  0.905    3    -1            —
+temporal_atrophy     0.745  +0.100       0.267    +0.190     0.0  0.745    2     0            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-causal-clean-content-128-lambda-003-4-patch
+  Comparison: incompatible: causal_settings
+Factor              Raw R²  ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.802     —       0.802         —       —  0.802    3     —            —
+ventricle_size       0.514     —       0.073         —       —  0.520    2     —            —
+lesion_x             0.462     —       0.462         —       —  0.469    1     —            —
+lesion_y             0.440     —       0.036         —       —  0.443    2     —            —
+lesion_z             0.134     —      -0.101         —       —  0.140    2     —            —
+cortical_thickness   0.445     —       0.102         —       —  0.456    2     —            —
+temporal_atrophy     0.503     —       0.020         —       —  0.507    2     —            —
+lr_asymmetry         0.799     —       0.177         —       —  0.804    2     —            —
+sulcal_widening      0.624     —       0.129         —       —  0.626    2     —            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-40-50-true
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.631  -0.091       0.201    -0.236    73.0  0.657    2     0            —
+sulcal_widening      0.414  -0.037       0.050    -0.041    12.7  0.434    2     1            —
+lesion_y             0.653  +0.020       0.189    -0.033    10.3  0.669    0    -2            —
+lesion_x             0.590  -0.013       0.590    -0.013     4.0  0.604    2     1            —
+lesion_z             0.180  +0.008      -0.019    +0.025     0.0  0.180    2     0            —
+brain_size           0.942  +0.028       0.942    +0.028     0.0  0.948    3     1            —
+lr_asymmetry         0.897  +0.158       0.391    +0.085     0.0  0.909    3    -1            —
+cortical_thickness   0.808  +0.022       0.415    +0.101     0.0  0.817    3    -1            —
+temporal_atrophy     0.688  +0.043       0.239    +0.162     0.0  0.743    1    -1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/gap-pool-per-channel-rescaled
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.562  -0.159       0.121    -0.316    47.9  0.562    0    -2            —
+cortical_thickness   0.542  -0.244       0.149    -0.164    24.9  0.574    5     1            —
+lesion_y             0.632  -0.001       0.106    -0.117    17.6  0.645    2     0            —
+brain_size           0.851  -0.063       0.851    -0.063     9.6  0.861    3     1            —
+lesion_z             0.134  -0.038      -0.027    +0.017     0.0  0.134    2     0            —
+lesion_x             0.658  +0.055       0.658    +0.055     0.0  0.658    3     2            —
+sulcal_widening      0.480  +0.029       0.176    +0.085     0.0  0.480    2     1            —
+lr_asymmetry         0.927  +0.189       0.399    +0.093     0.0  0.924    3    -1            —
+temporal_atrophy     0.869  +0.223       0.452    +0.375     0.0  0.878    2     0            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-redo-new
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.601  -0.121       0.137    -0.301    44.2  0.624    1    -1            —
+lr_asymmetry         0.600  -0.138       0.194    -0.112    16.5  0.731    3    -1            —
+lesion_x             0.509  -0.094       0.509    -0.094    13.8  0.548    2     1            —
+temporal_atrophy     0.563  -0.083       0.028    -0.049     7.2  0.602    0    -2            —
+sulcal_widening      0.338  -0.113       0.047    -0.045     6.6  0.319    1     0            —
+lesion_y             0.608  -0.025       0.179    -0.043     6.3  0.608    1    -1            —
+cortical_thickness   0.781  -0.005       0.277    -0.037     5.4  0.790    4     0            —
+brain_size           0.925  +0.011       0.925    +0.011     0.0  0.938    2     0            —
+lesion_z             0.194  +0.022       0.016    +0.059     0.0  0.194    2     0            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-actual-baseline-40
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+sulcal_widening      0.450  -0.001       0.017    -0.075    24.5  0.450    2     1            —
+lr_asymmetry         0.726  -0.012       0.235    -0.071    23.2  0.738    5     1            —
+lesion_x             0.538  -0.065       0.538    -0.065    21.3  0.547    3     2            —
+cortical_thickness   0.671  -0.115       0.272    -0.042    13.8  0.669    4     0            —
+lesion_y             0.578  -0.055       0.187    -0.035    11.6  0.574    1    -1            —
+brain_size           0.905  -0.009       0.905    -0.009     2.9  0.902    2     0            —
+ventricle_size       0.725  +0.003       0.429    -0.009     2.8  0.725    2     0            —
+lesion_z             0.156  -0.016      -0.036    +0.007     0.0  0.177    2     0            —
+temporal_atrophy     0.590  -0.055       0.104    +0.027     0.0  0.589    1    -1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-100
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.578  -0.143       0.125    -0.312    51.1  0.620    1    -1            —
+lesion_x             0.495  -0.108       0.495    -0.108    17.7  0.591    2     1            —
+lesion_y             0.545  -0.088       0.128    -0.094    15.5  0.625    1    -1            —
+temporal_atrophy     0.513  -0.132       0.022    -0.055     9.1  0.586    1    -1            —
+sulcal_widening      0.340  -0.111       0.052    -0.040     6.5  0.384    2     1            —
+brain_size           0.913  -0.001       0.913    -0.001     0.1  0.935    3     1            —
+cortical_thickness   0.698  -0.088       0.326    +0.012     0.0  0.756    3    -1            —
+lr_asymmetry         0.719  -0.019       0.331    +0.025     0.0  0.883    2    -2            —
+lesion_z             0.175  +0.003       0.004    +0.048     0.0  0.175    5     3            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-100-2
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.588  -0.133       0.152    -0.285    62.3  0.617    1    -1            —
+lesion_x             0.548  -0.055       0.548    -0.055    12.1  0.617    2     1            —
+lesion_y             0.620  -0.013       0.173    -0.050    10.9  0.669    2     0            —
+cortical_thickness   0.745  -0.041       0.281    -0.033     7.2  0.775    3    -1            —
+sulcal_widening      0.344  -0.107       0.071    -0.020     4.4  0.385    2     1            —
+temporal_atrophy     0.575  -0.071       0.063    -0.014     3.1  0.622    1    -1            —
+brain_size           0.916  +0.002       0.916    +0.002     0.0  0.925    3     1            —
+lesion_z             0.189  +0.017       0.001    +0.044     0.0  0.167    5     3            —
+lr_asymmetry         0.756  +0.018       0.352    +0.046     0.0  0.891    3    -1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-redo-new-2
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.618  -0.104       0.118    -0.320    78.5  0.618    2     0            —
+lesion_x             0.564  -0.039       0.564    -0.039     9.7  0.564    1     0            —
+lesion_y             0.695  +0.062       0.194    -0.028     6.9  0.695    1    -1            —
+sulcal_widening      0.386  -0.065       0.071    -0.020     4.9  0.386    2     1            —
+brain_size           0.954  +0.040       0.954    +0.040     0.0  0.954    3     1            —
+lesion_z             0.176  +0.004      -0.002    +0.041     0.0  0.149    3     1            —
+cortical_thickness   0.863  +0.077       0.363    +0.049     0.0  0.863    3    -1            —
+temporal_atrophy     0.669  +0.024       0.129    +0.052     0.0  0.669    0    -2            —
+lr_asymmetry         0.798  +0.060       0.363    +0.057     0.0  0.831    3    -1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-100-3
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.602  -0.120       0.125    -0.312    72.2  0.602    1    -1            —
+temporal_atrophy     0.614  -0.032       0.008    -0.069    15.9  0.625    2     0            —
+lesion_y             0.670  +0.037       0.190    -0.033     7.5  0.670    3     1            —
+sulcal_widening      0.368  -0.083       0.073    -0.019     4.3  0.368    1     0            —
+lesion_x             0.609  +0.006       0.609    +0.006     0.0  0.609    1     0            —
+lesion_z             0.157  -0.016      -0.031    +0.013     0.0  0.173    2     0            —
+brain_size           0.953  +0.040       0.953    +0.040     0.0  0.958    2     0            —
+cortical_thickness   0.861  +0.075       0.373    +0.059     0.0  0.874    3    -1            —
+lr_asymmetry         0.882  +0.144       0.414    +0.108     0.0  0.908    3    -1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-100-4
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.607  -0.115       0.114    -0.323    91.3  0.607    2     0            —
+sulcal_widening      0.354  -0.097       0.061    -0.031     8.7  0.358    1     0            —
+cortical_thickness   0.851  +0.065       0.318    +0.005     0.0  0.860    3    -1            —
+lesion_z             0.148  -0.024      -0.037    +0.007     0.0  0.155    2     0            —
+lesion_y             0.681  +0.048       0.236    +0.014     0.0  0.681    3     1            —
+lesion_x             0.617  +0.014       0.617    +0.014     0.0  0.617    1     0            —
+temporal_atrophy     0.621  -0.024       0.097    +0.020     0.0  0.642    2     0            —
+brain_size           0.951  +0.037       0.951    +0.037     0.0  0.954    2     0            —
+lr_asymmetry         0.904  +0.166       0.421    +0.115     0.0  0.917    4     0            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-30-18
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+lr_asymmetry         0.582  -0.156       0.171    -0.135    32.9  0.590    3    -1            —
+lesion_y             0.620  -0.013       0.161    -0.062    15.2  0.645    2     0            —
+lesion_x             0.545  -0.059       0.545    -0.059    14.3  0.551    3     2            —
+temporal_atrophy     0.621  -0.024       0.023    -0.054    13.3  0.621    1    -1            —
+cortical_thickness   0.776  -0.010       0.270    -0.043    10.6  0.794    4     0            —
+sulcal_widening      0.425  -0.026       0.051    -0.040     9.8  0.425    1     0            —
+ventricle_size       0.689  -0.032       0.421    -0.016     3.9  0.695    2     0            —
+brain_size           0.914  -0.000       0.914    -0.000     0.1  0.914    1    -1            —
+lesion_z             0.191  +0.019       0.024    +0.068     0.0  0.191    3     1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-100-5
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.621  -0.101       0.139    -0.298    95.2  0.612    2     0            —
+temporal_atrophy     0.621  -0.024       0.062    -0.015     4.7  0.618    3     1            —
+sulcal_widening      0.398  -0.053       0.091    -0.000     0.1  0.388    1     0            —
+lesion_y             0.693  +0.060       0.231    +0.008     0.0  0.683    2     0            —
+lesion_x             0.625  +0.022       0.625    +0.022     0.0  0.625    2     1            —
+lesion_z             0.181  +0.008      -0.000    +0.044     0.0  0.160    2     0            —
+brain_size           0.959  +0.045       0.959    +0.045     0.0  0.963    2     0            —
+cortical_thickness   0.886  +0.100       0.381    +0.067     0.0  0.895    3    -1            —
+lr_asymmetry         0.887  +0.149       0.436    +0.130     0.0  0.895    3    -1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-100-6
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.588  -0.134       0.087    -0.351    96.2  0.588    2     0            —
+sulcal_widening      0.354  -0.097       0.078    -0.014     3.8  0.354    1     0            —
+temporal_atrophy     0.640  -0.005       0.087    +0.010     0.0  0.672    2     0            —
+lesion_z             0.157  -0.015      -0.017    +0.027     0.0  0.145    2     0            —
+brain_size           0.953  +0.040       0.953    +0.040     0.0  0.958    2     0            —
+lesion_y             0.699  +0.066       0.268    +0.046     0.0  0.699    1    -1            —
+lesion_x             0.657  +0.054       0.657    +0.054     0.0  0.657    2     1            —
+cortical_thickness   0.880  +0.094       0.377    +0.063     0.0  0.887    4     0            —
+lr_asymmetry         0.906  +0.168       0.475    +0.169     0.0  0.909    4     0            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-100-7
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.585  -0.136       0.077    -0.360    86.4  0.585    1    -1            —
+lesion_z             0.143  -0.029      -0.072    -0.028     6.7  0.158    3     1            —
+temporal_atrophy     0.605  -0.041       0.056    -0.021     5.0  0.605    3     1            —
+sulcal_widening      0.338  -0.113       0.083    -0.008     1.9  0.338    1     0            —
+lesion_x             0.631  +0.028       0.631    +0.028     0.0  0.631    2     1            —
+cortical_thickness   0.873  +0.087       0.349    +0.035     0.0  0.873    4     0            —
+brain_size           0.954  +0.041       0.954    +0.041     0.0  0.956    2     0            —
+lesion_y             0.688  +0.055       0.267    +0.045     0.0  0.675    3     1            —
+lr_asymmetry         0.896  +0.158       0.424    +0.118     0.0  0.902    3    -1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-100-8
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.591  -0.131       0.086    -0.351    61.1  0.591    2     0            —
+sulcal_widening      0.281  -0.170      -0.020    -0.111    19.4  0.281    1     0            —
+cortical_thickness   0.838  +0.052       0.248    -0.066    11.5  0.842    4     0            —
+lesion_y             0.655  +0.022       0.185    -0.038     6.5  0.655    2     0            —
+lesion_z             0.098  -0.074      -0.052    -0.009     1.5  0.108    2     0            —
+brain_size           0.938  +0.024       0.938    +0.024     0.0  0.938    2     0            —
+lesion_x             0.629  +0.026       0.629    +0.026     0.0  0.629    3     2            —
+temporal_atrophy     0.630  -0.016       0.111    +0.034     0.0  0.633    2     0            —
+lr_asymmetry         0.921  +0.183       0.383    +0.077     0.0  0.916    4     0            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-ventricle
+  Comparison: incompatible: causal_settings
+Factor              Raw R²  ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.957     —       0.957         —       —  0.960    3     —            —
+ventricle_size       0.636     —       0.138         —       —  0.644    2     —            —
+lesion_x             0.631     —       0.631         —       —  0.631    1     —            —
+lesion_y             0.682     —       0.201         —       —  0.682    2     —            —
+lesion_z             0.103     —      -0.079         —       —  0.126    2     —            —
+cortical_thickness   0.859     —       0.355         —       —  0.858    5     —            —
+temporal_atrophy     0.660     —       0.097         —       —  0.680    3     —            —
+lr_asymmetry         0.910     —       0.437         —       —  0.913    4     —            —
+sulcal_widening      0.368     —       0.042         —       —  0.372    2     —            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-30-18-2
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+lesion_x             0.436  -0.167       0.436    -0.167    35.6  0.423    3     2            —
+temporal_atrophy     0.540  -0.105      -0.003    -0.080    17.1  0.542    2     0            —
+cortical_thickness   0.753  -0.033       0.235    -0.079    16.9  0.759    6     2            —
+ventricle_size       0.696  -0.026       0.380    -0.057    12.2  0.717    1    -1            —
+lesion_y             0.574  -0.059       0.176    -0.047    10.1  0.574    2     0            —
+sulcal_widening      0.425  -0.026       0.067    -0.025     5.3  0.424    1     0            —
+lr_asymmetry         0.585  -0.153       0.294    -0.012     2.5  0.585    3    -1            —
+brain_size           0.913  -0.001       0.913    -0.001     0.1  0.914    2     0            —
+lesion_z             0.140  -0.032      -0.044    -0.001     0.1  0.140    4     2            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-actual-baseline-40-2
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+lesion_x             0.481  -0.122       0.481    -0.122    26.6  0.470    3     2            —
+lr_asymmetry         0.669  -0.070       0.225    -0.081    17.7  0.651    3    -1            —
+temporal_atrophy     0.579  -0.066       0.021    -0.056    12.1  0.579    2     0            —
+cortical_thickness   0.722  -0.065       0.259    -0.055    11.8  0.722    4     0            —
+ventricle_size       0.736  +0.014       0.390    -0.047    10.3  0.736    2     0            —
+sulcal_widening      0.455  +0.004       0.056    -0.035     7.6  0.475    1     0            —
+lesion_y             0.602  -0.031       0.190    -0.033     7.1  0.602    2     0            —
+brain_size           0.895  -0.018       0.895    -0.018     4.0  0.899    2     0            —
+lesion_z             0.161  -0.011      -0.057    -0.013     2.8  0.161    3     1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-ident-vent
+  Comparison: incompatible: causal_settings
+Factor              Raw R²  ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.952     —       0.952         —       —  0.957    2     —            —
+ventricle_size       0.613     —       0.129         —       —  0.613    1     —            —
+lesion_x             0.599     —       0.599         —       —  0.650    2     —            —
+lesion_y             0.672     —       0.228         —       —  0.693    2     —            —
+lesion_z             0.161     —      -0.033         —       —  0.155    3     —            —
+cortical_thickness   0.866     —       0.317         —       —  0.872    4     —            —
+temporal_atrophy     0.606     —       0.070         —       —  0.677    3     —            —
+lr_asymmetry         0.829     —       0.411         —       —  0.903    2     —            —
+sulcal_widening      0.355     —       0.031         —       —  0.355    1     —            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-no-norm-2
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.620  -0.102       0.172    -0.265    73.9  0.615    2     0            —
+sulcal_widening      0.362  -0.089       0.045    -0.047    13.0  0.358    2     1            —
+lesion_y             0.656  +0.023       0.190    -0.032     9.0  0.664    3     1            —
+temporal_atrophy     0.592  -0.054       0.064    -0.013     3.7  0.636    2     0            —
+lesion_x             0.602  -0.001       0.602    -0.001     0.4  0.617    1     0            —
+cortical_thickness   0.843  +0.057       0.332    +0.018     0.0  0.849    3    -1            —
+lesion_z             0.172  -0.000      -0.013    +0.031     0.0  0.160    2     0            —
+brain_size           0.955  +0.041       0.955    +0.041     0.0  0.959    2     0            —
+lr_asymmetry         0.840  +0.102       0.372    +0.066     0.0  0.868    5     1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-ident-vent-2
+  Comparison: incompatible: causal_settings
+Factor              Raw R²  ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.960     —       0.960         —       —  0.963    2     —            —
+ventricle_size       0.630     —       0.150         —       —  0.626    2     —            —
+lesion_x             0.627     —       0.627         —       —  0.651    1     —            —
+lesion_y             0.690     —       0.231         —       —  0.701    2     —            —
+lesion_z             0.154     —      -0.048         —       —  0.148    2     —            —
+cortical_thickness   0.869     —       0.345         —       —  0.880    4     —            —
+temporal_atrophy     0.633     —       0.065         —       —  0.669    2     —            —
+lr_asymmetry         0.880     —       0.410         —       —  0.918    5     —            —
+sulcal_widening      0.375     —       0.035         —       —  0.375    2     —            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-30-18
+  Comparison: incompatible: causal_settings
+Factor              Raw R²  ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.904     —       0.904         —       —  0.910    3     —            —
+ventricle_size       0.572     —       0.125         —       —  0.571    1     —            —
+lesion_x             0.505     —       0.505         —       —  0.569    3     —            —
+lesion_y             0.550     —       0.142         —       —  0.588    2     —            —
+lesion_z             0.171     —      -0.008         —       —  0.175    3     —            —
+cortical_thickness   0.698     —       0.295         —       —  0.720    4     —            —
+temporal_atrophy     0.529     —       0.016         —       —  0.594    1     —            —
+lr_asymmetry         0.546     —       0.118         —       —  0.672    3     —            —
+sulcal_widening      0.313     —       0.056         —       —  0.313    2     —            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-12
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.627  -0.095       0.176    -0.261    64.5  0.637    2     0            —
+sulcal_widening      0.347  -0.105      -0.011    -0.103    25.3  0.347    2     1            —
+lesion_y             0.616  -0.017       0.181    -0.041    10.2  0.616    3     1            —
+lesion_z             0.128  -0.044      -0.036    +0.008     0.0  0.124    3     1            —
+brain_size           0.928  +0.015       0.928    +0.015     0.0  0.928    2     0            —
+lesion_x             0.622  +0.019       0.622    +0.019     0.0  0.627    3     2            —
+cortical_thickness   0.725  -0.061       0.355    +0.041     0.0  0.730    4     0            —
+lr_asymmetry         0.909  +0.171       0.398    +0.092     0.0  0.918    4     0            —
+temporal_atrophy     0.789  +0.144       0.341    +0.264     0.0  0.813    1    -1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-gap-rescale
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.550  -0.172       0.180    -0.257    32.2  0.573    2     0            —
+cortical_thickness   0.516  -0.270       0.116    -0.198    24.8  0.584    3    -1            —
+lesion_y             0.564  -0.069       0.083    -0.140    17.5  0.613    2     0            —
+sulcal_widening      0.171  -0.280      -0.034    -0.125    15.6  0.217    2     1            —
+brain_size           0.834  -0.080       0.834    -0.080     9.9  0.861    3     1            —
+lesion_z             0.059  -0.113      -0.043    +0.001     0.0  0.049    3     1            —
+lesion_x             0.626  +0.023       0.626    +0.023     0.0  0.655    2     1            —
+lr_asymmetry         0.929  +0.191       0.346    +0.040     0.0  0.946    5     1            —
+temporal_atrophy     0.652  +0.006       0.150    +0.073     0.0  0.768    2     0            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-ident-vent-3
+  Comparison: incompatible: causal_settings
+Factor              Raw R²  ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.954     —       0.954         —       —  0.957    2     —            —
+ventricle_size       0.620     —       0.149         —       —  0.620    1     —            —
+lesion_x             0.606     —       0.606         —       —  0.633    2     —            —
+lesion_y             0.679     —       0.225         —       —  0.684    3     —            —
+lesion_z             0.159     —      -0.042         —       —  0.155    3     —            —
+cortical_thickness   0.866     —       0.315         —       —  0.878    3     —            —
+temporal_atrophy     0.619     —       0.077         —       —  0.669    2     —            —
+lr_asymmetry         0.866     —       0.457         —       —  0.896    3     —            —
+sulcal_widening      0.354     —       0.042         —       —  0.354    1     —            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-sim-100-bt-7
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+ventricle_size       0.623  -0.099       0.122    -0.316    79.4  0.598    2     0            —
+sulcal_widening      0.302  -0.149       0.018    -0.073    18.3  0.301    1     0            —
+lesion_z             0.124  -0.048      -0.053    -0.009     2.3  0.124    2     0            —
+lesion_x             0.629  +0.026       0.629    +0.026     0.0  0.629    3     2            —
+cortical_thickness   0.843  +0.057       0.345    +0.031     0.0  0.846    4     0            —
+brain_size           0.951  +0.037       0.951    +0.037     0.0  0.952    2     0            —
+lesion_y             0.699  +0.066       0.263    +0.040     0.0  0.708    1    -1            —
+lr_asymmetry         0.913  +0.175       0.409    +0.103     0.0  0.919    4     0            —
+temporal_atrophy     0.695  +0.049       0.182    +0.105     0.0  0.719    1    -1            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-ident-vent-hsic
+  Comparison: incompatible: causal_settings
+Factor              Raw R²  ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.793     —       0.793         —       —  0.822    4     —            —
+ventricle_size       0.481     —       0.097         —       —  0.528    3     —            —
+lesion_x             0.319     —       0.319         —       —  0.490    3     —            —
+lesion_y             0.302     —       0.043         —       —  0.452    3     —            —
+lesion_z             0.065     —       0.004         —       —  0.112    3     —            —
+cortical_thickness   0.319     —       0.109         —       —  0.468    3     —            —
+temporal_atrophy     0.421     —      -0.000         —       —  0.516    3     —            —
+lr_asymmetry         0.405     —       0.088         —       —  0.635    4     —            —
+sulcal_widening      0.082     —      -0.000         —       —  0.169    2     —            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-ident-vent-12-4
+  Comparison: incompatible: causal_settings
+Factor              Raw R²  ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.926     —       0.926         —       —  0.931    3     —            —
+ventricle_size       0.615     —       0.184         —       —  0.640    1     —            —
+lesion_x             0.479     —       0.479         —       —  0.493    3     —            —
+lesion_y             0.616     —       0.186         —       —  0.634    2     —            —
+lesion_z             0.181     —       0.005         —       —  0.181    2     —            —
+cortical_thickness   0.799     —       0.246         —       —  0.824    4     —            —
+temporal_atrophy     0.567     —       0.066         —       —  0.586    3     —            —
+lr_asymmetry         0.464     —       0.065         —       —  0.533    3     —            —
+sulcal_widening      0.338     —      -0.000         —       —  0.362    1     —            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-baseline-12-4
+  Comparison: incompatible: causal_settings
+Factor              Raw R²  ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.836     —       0.836         —       —  0.860    2     —            —
+ventricle_size       0.578     —       0.362         —       —  0.645    3     —            —
+lesion_x             0.317     —       0.317         —       —  0.395    2     —            —
+lesion_y             0.383     —       0.103         —       —  0.498    2     —            —
+lesion_z             0.096     —       0.030         —       —  0.127    3     —            —
+cortical_thickness   0.427     —       0.130         —       —  0.523    3     —            —
+temporal_atrophy     0.501     —       0.023         —       —  0.573    1     —            —
+lr_asymmetry         0.312     —       0.055         —       —  0.458    2     —            —
+sulcal_widening      0.161     —       0.014         —       —  0.269    2     —            —
+
+Drop % = share of summed decreases in partial R² (improving factors are excluded).
+PC R² = held-out decoding after train-only PCA/scaling at the PC readout dimension.
+Incident SHD counts errors touching a factor; each graph error touches TWO factors.
+Positive rescue ΔSHD means replacing that decoded factor with truth reduced global SHD.
+Rescue is an oracle sensitivity check, not proof of the cause of training collapse.
+Raw and partial R² both falling supports loss of linearly decodable factor information.
+Stable raw R² with falling partial R² suggests loss beyond linearly fitted parent effects.
+Stable feature-probe R² with falling PC R² suggests sensitivity to PCA/readout compression.
