@@ -206,11 +206,65 @@ def print_report(result, center_mode=None):
     print("  factors live there), and a large e[s,p] share means it costs little. Neither is free.")
 
 
+# main()'s imports are deferred so --self-test needs no torch, which also means a rename in
+# one of those modules would not surface until a run had already loaded a checkpoint on the
+# cluster. This checks the names exist by parsing, no import required.
+REQUIRED_IMPORTS = {
+    "eval/bt_term_balance.py": ("_as_views", "foreground_keep"),
+    "eval/dci.py": ("_extract_synthetic_representations",),
+    "eval/run_dci_compare.py": ("_CONTENT", "_CONTENT_V2"),
+    "eval/run_dci_synthetic.py": ("build_synthetic_test_set", "load_model_from_run_dir", "load_run_args"),
+}
+
+
+def module_bindings(path):
+    """Every name a module binds at top level: defs, classes, assignments, imports."""
+    import ast
+
+    names = set()
+    for node in ast.parse(Path(path).read_text()).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            stack = list(targets)
+            while stack:
+                target = stack.pop()
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    # _CONTENT, _STYLE = 0, 1 binds both, and missing this is what let a
+                    # wrong import module reach the cluster.
+                    stack.extend(target.elts)
+    return names
+
+
+def _check_imports(root=None):
+    root = Path(root or Path(__file__).resolve().parent.parent)
+    results = []
+    for path, names in REQUIRED_IMPORTS.items():
+        full = root / path
+        if not full.exists():
+            results.extend((f"{path}::{n}", False) for n in names)
+            continue
+        bound = module_bindings(full)
+        results.extend((f"{path}::{n}", n in bound) for n in names)
+    return results
+
+
 def _self_test():
     try:
         import numpy as np
     except ImportError as exc:
         raise SystemExit(f"self-test needs numpy ({exc})")
+
+    import_checks = _check_imports()
+    print("self-test (deferred imports resolve)")
+    for label, ok in import_checks:
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}")
+    print()
 
     rng = np.random.default_rng(0)
     subjects, positions = 60, 24
@@ -270,7 +324,7 @@ def _self_test():
     for label, ok in checks:
         print(f"  {'PASS' if ok else 'FAIL'}  {label}")
     print_report(got, center_mode="position")
-    if not all(ok for _, ok in checks):
+    if not all(ok for _, ok in checks + import_checks):
         raise SystemExit("self-test failed")
     print("\nall checks passed")
 
@@ -298,15 +352,12 @@ def main():
 
     import numpy as np
 
+    # Same sources bt_term_balance imports these from, so the extraction is byte-for-byte
+    # the path that script measures the BT terms on.
     from eval.bt_term_balance import _as_views, foreground_keep
-    from eval.run_dci_synthetic import (
-        _CONTENT,
-        _CONTENT_V2,
-        _extract_synthetic_representations,
-        build_synthetic_test_set,
-        load_model_from_run_dir,
-        load_run_args,
-    )
+    from eval.dci import _extract_synthetic_representations
+    from eval.run_dci_compare import _CONTENT, _CONTENT_V2
+    from eval.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir, load_run_args
 
     args_ = load_run_args(cli.run_dir)
     grid = getattr(args_, "patch_grid", None)
