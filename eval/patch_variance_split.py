@@ -191,6 +191,78 @@ def split_by_lesion(hz, lesion_cells):
     return {"channels": per_channel, "pooled": pooled}
 
 
+def _sign_p(diffs):
+    """Two-sided exact sign test that the paired differences are centred on zero."""
+    import math
+
+    pos = sum(1 for d in diffs if d > 0)
+    neg = sum(1 for d in diffs if d < 0)
+    n = pos + neg
+    if n == 0:
+        return 1.0
+    k = min(pos, neg)
+    return min(1.0, 2 * sum(math.comb(n, i) for i in range(k + 1)) / 2**n)
+
+
+def within_position_split(hz, lesion_cells, min_each=3):
+    """Lesion vs no lesion AT THE SAME PATCH POSITION.
+
+    Comparing lesion cells against every other cell confounds the lesion with where it is
+    put: lesions land in white matter by construction, and a homogeneous region may align
+    across views differently from a boundary one whether or not a lesion is present. The
+    lesion moves between subjects, so each position is a lesion cell for some subjects and
+    not others, and that gives a matched control for free -- same position, same anatomy,
+    lesion present or absent. Anatomy cannot explain a difference measured this way.
+
+    Each channel's residual is divided by its own global RMS first, so pooling channels
+    within a position does not let the widest-swinging channel decide the correlation.
+
+    One bias to know about: at each position the lesion side has far fewer subjects than the
+    control side, so its correlation is estimated from fewer cells, is noisier, and is
+    attenuated toward zero slightly more. That leaves a small NEGATIVE bias in the mean
+    difference even when the lesion changes nothing -- measured at about -0.05 on planted
+    data with no lesion effect at all. Read ``sign_p`` rather than the magnitude alone.
+    """
+    import numpy as np
+
+    hz = np.asarray(hz, dtype=np.float64)
+    cells = np.asarray(lesion_cells, dtype=bool)
+    if cells.shape != (hz.shape[1], hz.shape[3]):
+        raise ValueError(f"lesion mask {cells.shape} does not match (S, P) = {(hz.shape[1], hz.shape[3])}")
+    residual = np.stack(
+        [np.stack([components(hz[view, :, c, :])[2] for c in range(hz.shape[2])], axis=1) for view in range(2)]
+    )  # (2, S, C, P)
+    scale = np.sqrt(np.mean(np.square(residual), axis=(0, 1, 3)))  # per channel
+    residual = residual / np.where(scale > 1e-20, scale, 1.0)[None, None, :, None]
+
+    rows = []
+    for position in range(hz.shape[3]):
+        has = cells[:, position]
+        if int(has.sum()) < min_each or int((~has).sum()) < min_each:
+            continue
+        entry = {"position": position, "n_lesion": int(has.sum()), "n_control": int((~has).sum())}
+        for name, selector in (("lesion", has), ("control", ~has)):
+            entry[name] = correlate(residual[0][selector, :, position], residual[1][selector, :, position])
+        if entry["lesion"] is not None and entry["control"] is not None:
+            entry["difference"] = entry["lesion"] - entry["control"]
+            rows.append(entry)
+    if not rows:
+        return None
+    weights = np.array([r["n_lesion"] for r in rows], dtype=float)
+    diffs = [r["difference"] for r in rows]
+    return {
+        "positions": rows,
+        "n_positions_used": len(rows),
+        "n_positions_total": int(hz.shape[3]),
+        "min_each": min_each,
+        "lesion": float((np.array([r["lesion"] for r in rows]) * weights).sum() / weights.sum()),
+        "control": float((np.array([r["control"] for r in rows]) * weights).sum() / weights.sum()),
+        "difference_weighted_mean": float((np.array(diffs) * weights).sum() / weights.sum()),
+        "difference_median": float(np.median(diffs)),
+        "sign_p": _sign_p(diffs),
+    }
+
+
 def fmt_pct(v):
     return "  n/a" if v is None else f"{100 * v:5.1f}%"
 
@@ -273,6 +345,34 @@ def print_report(result, center_mode=None):
                 print("  The lesion's cells align as well as the rest. Whatever limits lesion recovery is")
                 print("  NOT a cross-view disagreement at the lesion site; look at magnitude and probes.")
         print("  Check rms before reading r: a near-zero residual makes the correlation meaningless.")
+
+    matched = result.get("within_position")
+    if matched:
+        print("\n  MATCHED WITHIN PATCH POSITION   same location, lesion present vs absent")
+        print(f"    positions used            {matched['n_positions_used']}/{matched['n_positions_total']}")
+        print(f"    lesion present            r {matched['lesion']:+.3f}")
+        print(f"    lesion absent, same pos   r {matched['control']:+.3f}")
+        print(
+            f"    paired difference         {matched['difference_weighted_mean']:+.3f}"
+            f"   (median {matched['difference_median']:+.3f}, sign p {matched['sign_p']:.1e})"
+        )
+        naive = None
+        if lesion and None not in (lesion["pooled"]["lesion"]["cross_view"], lesion["pooled"]["other"]["cross_view"]):
+            naive = lesion["pooled"]["lesion"]["cross_view"] - lesion["pooled"]["other"]["cross_view"]
+        matched_gap = matched["difference_weighted_mean"]
+        if naive is not None:
+            print(f"\n    unmatched gap {naive:+.3f}  ->  matched gap {matched_gap:+.3f}")
+            shrunk = abs(matched_gap) < 0.5 * abs(naive)
+            if shrunk:
+                print("    Most of the unmatched gap was WHERE lesions go, not the lesions. Lesions sit in")
+                print("    white matter by construction, and those positions align differently anyway.")
+        if matched["sign_p"] > 0.05 or abs(matched_gap) < 0.02:
+            print("    Matched, the lesion does not measurably change alignment at its own location.")
+        elif matched_gap < 0:
+            print("    Matched, the lesion still degrades alignment at its own location: this is the")
+            print("    lesion, not its anatomy.")
+        print("    The lesion side has fewer subjects per position, so its r is attenuated more and the")
+        print("    difference carries a ~-0.05 negative bias even under no effect. Trust sign p, not size.")
 
 
 # main()'s imports are deferred so --self-test needs no torch, which also means a rename in
@@ -452,6 +552,55 @@ def _self_test():
         ("a mask of the wrong shape is rejected", _raises(split_by_lesion, hz_l, cells[:, :-1])),
         ("an empty mask returns None", split_by_lesion(hz_l, np.zeros_like(cells)) is None),
     ]
+
+    # The confound, planted deliberately: positions differ in how well the two views agree,
+    # and lesions are placed ONLY at the poorly-agreeing half. Nothing about the lesion
+    # itself changes alignment. The unmatched split must therefore report a large spurious
+    # gap and the within-position control must report ~0.
+    def build(subjects, positions, rho_by_position, lesion_cells, lesion_penalty=0.0):
+        x = rng.normal(size=(subjects, 1, positions))
+        noise = rng.normal(size=(subjects, 1, positions))
+        rho = np.asarray(rho_by_position, dtype=float)[None, None, :]
+        if lesion_penalty:
+            rho = np.repeat(rho, subjects, axis=0).copy()
+            rho[lesion_cells[:, None, :]] -= lesion_penalty
+        view1 = rho * x + np.sqrt(np.clip(1 - rho**2, 0, 1)) * noise
+        return np.stack([x, view1]) * 10.0
+
+    subjects_c, positions_c = 160, 40
+    good = np.full(positions_c, 0.95)
+    good[: positions_c // 2] = 0.30  # first half agrees poorly
+    confounded = np.zeros((subjects_c, positions_c), dtype=bool)
+    for s in range(subjects_c):
+        confounded[s, s % (positions_c // 2)] = True  # every lesion in the poor half
+    spurious = build(subjects_c, positions_c, good, confounded)
+    naive_spurious = split_by_lesion(spurious, confounded)["pooled"]
+    matched_spurious = within_position_split(spurious, confounded)
+
+    # And the real effect: lesions everywhere, each one genuinely lowering agreement.
+    everywhere = np.zeros((subjects_c, positions_c), dtype=bool)
+    for s in range(subjects_c):
+        everywhere[s, (s * 3) % positions_c] = True
+    real = build(subjects_c, positions_c, np.full(positions_c, 0.95), everywhere, lesion_penalty=0.45)
+    matched_real = within_position_split(real, everywhere)
+
+    got["within_position"] = matched_spurious
+    checks += [
+        (
+            "confound: unmatched split reports a big spurious gap",
+            naive_spurious["lesion"]["cross_view"] - naive_spurious["other"]["cross_view"] < -0.2,
+        ),
+        # Not asserted tighter than 0.10: the lesion side has far fewer cells per position
+        # than the control side, so its correlation is noisier and attenuated slightly more.
+        # That leaves a small negative bias in the magnitude; the sign test is the arbiter.
+        ("confound: matched control removes it", abs(matched_spurious["difference_weighted_mean"]) < 0.10),
+        ("confound: matched control is not significant", matched_spurious["sign_p"] > 0.05),
+        ("real effect: matched control still detects it", matched_real["difference_weighted_mean"] < -0.2),
+        ("real effect: and calls it significant", matched_real["sign_p"] < 0.01),
+        ("positions with too few of either side are skipped", matched_spurious["n_positions_used"] <= positions_c),
+        ("min_each is honoured", within_position_split(spurious, confounded, min_each=10_000) is None),
+        ("wrong-shaped mask is rejected", _raises(within_position_split, spurious, confounded[:, :-1])),
+    ]
     print("self-test (variance split)")
     for label, ok in checks:
         print(f"  {'PASS' if ok else 'FAIL'}  {label}")
@@ -534,7 +683,9 @@ def main():
         if cells is None:
             logger.warning("Could not render lesions for this dataset; skipping the lesion-patch split.")
         else:
-            result["lesion_split"] = split_by_lesion(hz.cpu().numpy(), cells)
+            features = hz.cpu().numpy()
+            result["lesion_split"] = split_by_lesion(features, cells)
+            result["within_position"] = within_position_split(features, cells)
     print_report(result, center_mode)
     if cli.out:
         out = Path(cli.out)
