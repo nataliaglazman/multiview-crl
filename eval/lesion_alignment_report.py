@@ -25,7 +25,9 @@ Nothing is re-scored here. Every number is an aggregate of what lesion_alignment
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import io
 import json
 import math
 import random
@@ -138,6 +140,26 @@ def in_order(names, stages):
 
 def clean(v):
     return None if v is None or not math.isfinite(v) else v
+
+
+# barlow_twins_loss builds its scalar as
+#   loss = on_diag + lambd*off_diag + sim_coeff*sim_loss + std_coeff*var_loss
+# and lesion_alignment reports loss*arm_scale. The logged on_diag_loss/off_diag_loss are
+# recorded AFTER any --bt-normalize-terms rescaling, and the effective lambda/sim/std
+# already carry the per-arm --bt-gap-* overrides, so multiplying them back out
+# reproduces the reported total exactly. The printed residual is the check that it did.
+BT_TERMS = ("on_diag", "off_diag", "sim", "std")
+
+
+def weighted_terms(entry):
+    """Each BT term's contribution, in the units of instantaneous_weighted_total."""
+    scale = entry.get("arm_scale", 1.0)
+    return {
+        "on_diag": entry.get("on_diag_loss", 0.0) * scale,
+        "off_diag": entry.get("lambda", 0.0) * entry.get("off_diag_loss", 0.0) * scale,
+        "sim": entry.get("sim_coefficient", 0.0) * entry.get("sim_loss", 0.0) * scale,
+        "std": entry.get("std_coefficient", 0.0) * entry.get("var_loss", 0.0) * scale,
+    }
 
 
 def report(directory, min_response_pct=1.0, seed=0):
@@ -265,8 +287,63 @@ def report(directory, min_response_pct=1.0, seed=0):
                     "pos_sim_on": clean(ps_on),
                     "pos_sim_off": clean(ps_off),
                 }
+
+            print("\n    WHICH TERM MOVED   weighted contributions; the four sum to the change above")
+            print("    stage                       on_diag   off_diag        sim        std" "        sum  unexplained")
+            for stage in in_order({t["stage"] for t in bt}, stages):
+                ts = [t for t in bt if t["stage"] == stage]
+                changes = {
+                    term: statistics.fmean(weighted_terms(t["on"])[term] - weighted_terms(t["off"])[term] for t in ts)
+                    for term in BT_TERMS
+                }
+                total = result[stage]["bt"]["change"] or 0.0
+                summed = sum(changes.values())
+                cells = "".join(f"{changes[term]:+11.4f}" for term in BT_TERMS)
+                print(f"    {stage:24s}{cells}{summed:+11.4f}{total - summed:+13.4f}")
+                result[stage]["bt"]["term_changes"] = {k: clean(v) for k, v in changes.items()}
+                result[stage]["bt"]["unexplained"] = clean(total - summed)
+
+            # Naming the inactive terms matters: a term at coefficient 0 contributes nothing
+            # and cannot be the explanation, which is the step that has to be checked rather
+            # than assumed when attributing a change by elimination.
+            print("\n    Effective coefficients (a term at 0 contributes nothing and explains nothing):")
+            for stage in in_order({t["stage"] for t in bt}, stages):
+                first = next(t for t in bt if t["stage"] == stage)["on"]
+                coefficients = {
+                    "lambda": first.get("lambda"),
+                    "sim_coeff": first.get("sim_coefficient"),
+                    "std_coeff": first.get("std_coefficient"),
+                    "arm_scale": first.get("arm_scale"),
+                }
+                inactive = [n for n, k in (("sim", "sim_coeff"), ("std", "std_coeff")) if not coefficients[k]]
+                text = "  ".join(f"{k}={v}" for k, v in coefficients.items() if v is not None)
+                suffix = f"   ({', '.join(inactive)} inactive)" if inactive else ""
+                print(f"      {stage:22s}{text}{suffix}")
+                result[stage]["bt"]["coefficients"] = coefficients
+
+            stds = []
+            for stage in in_order({t["stage"] for t in bt}, stages):
+                ts = [t for t in bt if t["stage"] == stage]
+                on_std = statistics.fmean(t["on"].get("feat_std_mean", float("nan")) for t in ts)
+                off_std = statistics.fmean(t["off"].get("feat_std_mean", float("nan")) for t in ts)
+                stds.append(f"{stage} {on_std:.4f}/{off_std:.4f}")
+                result[stage]["bt"]["feat_std_on_off"] = [clean(on_std), clean(off_std)]
+            print(f"    feature std on/off (the variance hinge targets 1.0):  {'   '.join(stds)}")
+
             print("    A change near 0% means the loss is blind to the lesion; it is a sensitivity, not")
             print("    an additive attribution (correlations are recomputed, EMA state is not replayed).")
+            centring = (summary.get("run_settings") or {}).get("patch_center_mode", "none") or "none"
+            batch = (summary.get("arguments") or {}).get("batch_size")
+            if centring != "none" and batch is not None and batch < 32:
+                print(
+                    f"    WARNING: patch centring is '{centring}' and these were recomputed at batch {batch}."
+                    " A centred"
+                )
+                print(
+                    "    loss is inflated-easy below B=32 (config.py measures ~10x low at B=8), so rerun"
+                    " lesion_alignment"
+                )
+                print("    with --batch-size 32 or more before trusting the patch attribution.")
 
         crows = [r for r in channels if r["distribution"] == dist]
         if crows:
@@ -359,17 +436,32 @@ def _self_test():
                     "mse": 0.1,
                 }
             )
-    bt = [
-        {
-            "distribution": "iid",
-            "batch": 0,
-            "n": n,
-            "stage": s,
-            "on": {"instantaneous_weighted_total": 10.0, "pos_sim_mean": 0.8},
-            "off": {"instantaneous_weighted_total": 10.0 - d, "pos_sim_mean": 0.8},
+
+    # Two stages whose loss change arrives through DIFFERENT terms, with every term field
+    # set so the attribution has to reproduce instantaneous_weighted_total exactly:
+    # shared_big moves entirely through the variance hinge, null_big through on_diag.
+    # arm_scale 2 and an inactive sim coefficient are what the decomposition must handle.
+    def arm(on_diag, var_loss, feat_std):
+        return {
+            "instantaneous_weighted_total": (on_diag + 0.005 * 100.0 + 10.0 * var_loss) * 2.0,
+            "arm_scale": 2.0,
+            "lambda": 0.005,
+            "sim_coefficient": 0.0,
+            "std_coefficient": 10.0,
+            "on_diag_loss": on_diag,
+            "off_diag_loss": 100.0,
+            "sim_loss": 7.0,
+            "var_loss": var_loss,
+            "feat_std_mean": feat_std,
+            "pos_sim_mean": 0.8,
         }
-        for s, d in (("shared_big", 2.0), ("null_big", 0.001))
+
+    bt = [
+        {"distribution": "iid", "batch": 0, "n": n, "stage": "shared_big", "on": arm(1.5, 0.30, 0.70)},
+        {"distribution": "iid", "batch": 0, "n": n, "stage": "null_big", "on": arm(4.5, 0.0, 1.0)},
     ]
+    bt[0]["off"] = arm(1.5, 0.20, 0.80)
+    bt[1]["off"] = arm(4.4995, 0.0, 1.0)
 
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
@@ -378,8 +470,20 @@ def _self_test():
                 w = csv.DictWriter(f, fieldnames=list(data[0]))
                 w.writeheader()
                 w.writerows(data)
-        (d / "summary.json").write_text(json.dumps({"arguments": {"level": 0, "num_samples": n}, "batch_bt_terms": bt}))
-        got = report(d)["distributions"]["iid"]
+        (d / "summary.json").write_text(
+            json.dumps(
+                {
+                    "arguments": {"level": 0, "num_samples": n, "batch_size": 8},
+                    "run_settings": {"patch_center_mode": "position"},
+                    "batch_bt_terms": bt,
+                }
+            )
+        )
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            got = report(d)["distributions"]["iid"]
+        printed = buffer.getvalue()
+    print(printed)
 
     print("\nself-test")
     checks = [
@@ -396,6 +500,21 @@ def _self_test():
         ("paired stage delta negative for anti", got["anti_big"]["dcos_change_vs_first_stage"] < -1.5),
         ("BT sees shared_big (20%)", abs(got["shared_big"]["bt"]["percent_of_loss"] - 20.0) < 0.1),
         ("BT blind to null_big (~0%)", abs(got["null_big"]["bt"]["percent_of_loss"]) < 0.1),
+        ("terms reproduce the total, no residual", abs(got["shared_big"]["bt"]["unexplained"]) < 1e-9),
+        ("variance hinge carries all of shared_big", abs(got["shared_big"]["bt"]["term_changes"]["std"] - 2.0) < 1e-9),
+        (
+            "the other three contribute nothing there",
+            all(abs(got["shared_big"]["bt"]["term_changes"][t]) < 1e-9 for t in ("on_diag", "off_diag", "sim")),
+        ),
+        (
+            "null_big moves through on_diag, not std",
+            abs(got["null_big"]["bt"]["term_changes"]["on_diag"] - 0.001) < 1e-9
+            and got["null_big"]["bt"]["term_changes"]["std"] == 0.0,
+        ),
+        ("inactive sim coefficient is reported", got["shared_big"]["bt"]["coefficients"]["sim_coeff"] == 0.0),
+        ("inactive terms are named as such", "sim inactive" in printed),
+        ("feature std is carried through", got["shared_big"]["bt"]["feat_std_on_off"] == [0.70, 0.80]),
+        ("centred loss at batch 8 is flagged", "patch centring is 'position'" in printed),
         ("one channel holds 80% of energy", got["shared_big"]["channels"]["channels_for_80pct_energy"] == 1),
         ("energy-weighted cos follows it", abs(got["shared_big"]["channels"]["energy_weighted_cosine"] - 0.95) < 0.05),
     ]
