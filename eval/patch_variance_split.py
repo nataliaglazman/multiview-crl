@@ -38,6 +38,7 @@ import argparse
 import csv
 import json
 import logging
+import statistics
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -204,7 +205,7 @@ def _sign_p(diffs):
     return min(1.0, 2 * sum(math.comb(n, i) for i in range(k + 1)) / 2**n)
 
 
-def within_position_split(hz, lesion_cells, min_each=3):
+def within_position_split(hz, lesion_cells, min_each=3, draws=20, seed=0):
     """Lesion vs no lesion AT THE SAME PATCH POSITION.
 
     Comparing lesion cells against every other cell confounds the lesion with where it is
@@ -217,11 +218,14 @@ def within_position_split(hz, lesion_cells, min_each=3):
     Each channel's residual is divided by its own global RMS first, so pooling channels
     within a position does not let the widest-swinging channel decide the correlation.
 
-    One bias to know about: at each position the lesion side has far fewer subjects than the
-    control side, so its correlation is estimated from fewer cells, is noisier, and is
-    attenuated toward zero slightly more. That leaves a small NEGATIVE bias in the mean
-    difference even when the lesion changes nothing -- measured at about -0.05 on planted
-    data with no lesion effect at all. Read ``sign_p`` rather than the magnitude alone.
+    The control is SIZE-MATCHED, and it has to be. Using every lesion-free subject at a
+    position gives the control side far more cells than the lesion side, so its correlation
+    is less attenuated toward zero, and the difference carries a systematic negative bias
+    (~-0.05 measured on planted data with no lesion effect at all). Systematic, not random:
+    it shifts every position the same way, so a sign test against zero rejects under the
+    null and cannot arbitrate. Instead the control is resampled to exactly the lesion
+    group's size, averaged over ``draws`` draws, which removes the bias by construction and
+    leaves the sign test valid.
     """
     import numpy as np
 
@@ -235,14 +239,29 @@ def within_position_split(hz, lesion_cells, min_each=3):
     scale = np.sqrt(np.mean(np.square(residual), axis=(0, 1, 3)))  # per channel
     residual = residual / np.where(scale > 1e-20, scale, 1.0)[None, None, :, None]
 
+    rng = np.random.default_rng(seed)
     rows = []
     for position in range(hz.shape[3]):
         has = cells[:, position]
-        if int(has.sum()) < min_each or int((~has).sum()) < min_each:
+        pool = np.flatnonzero(~has)
+        n_lesion = int(has.sum())
+        if n_lesion < min_each or len(pool) < min_each:
             continue
-        entry = {"position": position, "n_lesion": int(has.sum()), "n_control": int((~has).sum())}
-        for name, selector in (("lesion", has), ("control", ~has)):
-            entry[name] = correlate(residual[0][selector, :, position], residual[1][selector, :, position])
+        entry = {"position": position, "n_lesion": n_lesion, "n_control_available": int(len(pool))}
+        entry["lesion"] = correlate(residual[0][has, :, position], residual[1][has, :, position])
+        # Size-matched: draw exactly as many lesion-free subjects as there are lesion ones,
+        # so both correlations are attenuated by the same sample size.
+        size = min(n_lesion, len(pool))
+        drawn = []
+        for _ in range(draws):
+            pick = rng.choice(pool, size=size, replace=False)
+            value = correlate(residual[0][pick, :, position], residual[1][pick, :, position])
+            if value is not None:
+                drawn.append(value)
+        entry["control"] = float(np.mean(drawn)) if drawn else None
+        entry["n_control_matched"] = size
+        # Kept for reference only: the unmatched control is what carries the bias.
+        entry["control_all"] = correlate(residual[0][~has, :, position], residual[1][~has, :, position])
         if entry["lesion"] is not None and entry["control"] is not None:
             entry["difference"] = entry["lesion"] - entry["control"]
             rows.append(entry)
@@ -371,8 +390,8 @@ def print_report(result, center_mode=None):
         elif matched_gap < 0:
             print("    Matched, the lesion still degrades alignment at its own location: this is the")
             print("    lesion, not its anatomy.")
-        print("    The lesion side has fewer subjects per position, so its r is attenuated more and the")
-        print("    difference carries a ~-0.05 negative bias even under no effect. Trust sign p, not size.")
+        print("    The control is resampled to the lesion group's size, so both sides are attenuated")
+        print("    equally and the sign test is against a null that really is centred on zero.")
 
 
 # main()'s imports are deferred so --self-test needs no torch, which also means a rename in
@@ -557,13 +576,15 @@ def _self_test():
     # and lesions are placed ONLY at the poorly-agreeing half. Nothing about the lesion
     # itself changes alignment. The unmatched split must therefore report a large spurious
     # gap and the within-position control must report ~0.
-    def build(subjects, positions, rho_by_position, lesion_cells, lesion_penalty=0.0):
-        x = rng.normal(size=(subjects, 1, positions))
-        noise = rng.normal(size=(subjects, 1, positions))
+    def build(subjects, positions, rho_by_position, lesion_cells, lesion_penalty=0.0, channels=12):
+        # 12 channels, like the real content block: with one channel the per-position
+        # correlations are too noisy for a bias of this size to be visible at all.
+        x = rng.normal(size=(subjects, channels, positions))
+        noise = rng.normal(size=(subjects, channels, positions))
         rho = np.asarray(rho_by_position, dtype=float)[None, None, :]
         if lesion_penalty:
-            rho = np.repeat(rho, subjects, axis=0).copy()
-            rho[lesion_cells[:, None, :]] -= lesion_penalty
+            rho = np.repeat(np.repeat(rho, subjects, axis=0), channels, axis=1).copy()
+            rho[np.broadcast_to(lesion_cells[:, None, :], rho.shape)] -= lesion_penalty
         view1 = rho * x + np.sqrt(np.clip(1 - rho**2, 0, 1)) * noise
         return np.stack([x, view1]) * 10.0
 
@@ -590,11 +611,16 @@ def _self_test():
             "confound: unmatched split reports a big spurious gap",
             naive_spurious["lesion"]["cross_view"] - naive_spurious["other"]["cross_view"] < -0.2,
         ),
-        # Not asserted tighter than 0.10: the lesion side has far fewer cells per position
-        # than the control side, so its correlation is noisier and attenuated slightly more.
-        # That leaves a small negative bias in the magnitude; the sign test is the arbiter.
         ("confound: matched control removes it", abs(matched_spurious["difference_weighted_mean"]) < 0.10),
         ("confound: matched control is not significant", matched_spurious["sign_p"] > 0.05),
+        # Structural, not statistical: the size matching is what removes the attenuation
+        # bias, and its magnitude is data-dependent (measured between -0.02 and -0.05
+        # across planted scenarios), so asserting a threshold on it would be tuning to
+        # one scenario. Assert the property that makes the null centred instead.
+        (
+            "control is drawn at exactly the lesion group's size",
+            all(r["n_control_matched"] == r["n_lesion"] for r in matched_spurious["positions"]),
+        ),
         ("real effect: matched control still detects it", matched_real["difference_weighted_mean"] < -0.2),
         ("real effect: and calls it significant", matched_real["sign_p"] < 0.01),
         ("positions with too few of either side are skipped", matched_spurious["n_positions_used"] <= positions_c),
