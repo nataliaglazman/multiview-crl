@@ -147,6 +147,50 @@ def analyse(hz):
     }
 
 
+def split_by_lesion(hz, lesion_cells):
+    """Cross-view correlation of e[s,p] inside vs outside lesion-containing patches.
+
+    ``lesion_cells`` is a (S, P) boolean: does this subject's lesion touch this patch. The
+    interaction is the component ``double`` keeps, and it aligns across views at ~0.9 in
+    aggregate. This asks whether the lesion's own cells are the exception, which removes the
+    aggregate-vs-lesion caveat on that comparison: everything here is e[s,p], the same
+    component, differing only in where it is measured.
+    """
+    import numpy as np
+
+    hz = np.asarray(hz, dtype=np.float64)
+    cells = np.asarray(lesion_cells, dtype=bool)
+    if cells.shape != (hz.shape[1], hz.shape[3]):
+        raise ValueError(f"lesion mask {cells.shape} does not match (S, P) = {(hz.shape[1], hz.shape[3])}")
+    if not cells.any():
+        return None
+    per_channel, stacked = [], {"lesion": [[], []], "other": [[], []]}
+    for channel in range(hz.shape[2]):
+        parts = [components(hz[view, :, channel, :])[2] for view in range(2)]
+        row = {"channel": channel}
+        for name, selector in (("lesion", cells), ("other", ~cells)):
+            a, b = parts[0][selector], parts[1][selector]
+            row[name] = correlate(a, b)
+            row[f"n_{name}"] = int(selector.sum())
+            # Residual ENERGY per cell, so a near-zero response is visible as such rather
+            # than showing up as a confident correlation between two tiny vectors.
+            row[f"rms_{name}"] = float(np.sqrt(np.mean(np.square(np.concatenate([a, b])))))
+            stacked[name][0].append(a)
+            stacked[name][1].append(b)
+        per_channel.append(row)
+    pooled = {
+        name: {
+            "cross_view": correlate(np.concatenate(v[0]), np.concatenate(v[1])),
+            "rms": float(np.sqrt(np.mean(np.square(np.concatenate(v[0] + v[1]))))),
+        }
+        for name, v in stacked.items()
+    }
+    pooled["n_lesion_cells"] = int(cells.sum())
+    pooled["n_other_cells"] = int((~cells).sum())
+    pooled["lesion_cell_fraction"] = float(cells.mean())
+    return {"channels": per_channel, "pooled": pooled}
+
+
 def fmt_pct(v):
     return "  n/a" if v is None else f"{100 * v:5.1f}%"
 
@@ -205,6 +249,31 @@ def print_report(result, center_mode=None):
     print("\n  Read it as a trade: a large b[s] share means 'double' costs you real signal (global")
     print("  factors live there), and a large e[s,p] share means it costs little. Neither is free.")
 
+    lesion = result.get("lesion_split")
+    if lesion:
+        p = lesion["pooled"]
+        print("\n" + "-" * 92)
+        print("e[s,p] CROSS-VIEW CORRELATION, LESION PATCHES vs THE REST")
+        print("-" * 92)
+        print(
+            f"  lesion-containing cells   r {fmt_r(p['lesion']['cross_view'])}   rms {p['lesion']['rms']:.4g}"
+            f"   n {p['n_lesion_cells']}  ({100 * p['lesion_cell_fraction']:.2f}% of cells)"
+        )
+        print(
+            f"  every other cell          r {fmt_r(p['other']['cross_view'])}   rms {p['other']['rms']:.4g}"
+            f"   n {p['n_other_cells']}"
+        )
+        both = p["lesion"]["cross_view"], p["other"]["cross_view"]
+        if None not in both:
+            print(f"\n  gap: {both[0] - both[1]:+.3f}")
+            if both[0] < both[1] - 0.15:
+                print("  The lesion's own cells align WORSE than the rest of the same component. Localized")
+                print("  structure is not the problem; something specific to the lesion is.")
+            elif both[0] > both[1] - 0.05:
+                print("  The lesion's cells align as well as the rest. Whatever limits lesion recovery is")
+                print("  NOT a cross-view disagreement at the lesion site; look at magnitude and probes.")
+        print("  Check rms before reading r: a near-zero residual makes the correlation meaningless.")
+
 
 # main()'s imports are deferred so --self-test needs no torch, which also means a rename in
 # one of those modules would not surface until a run had already loaded a checkpoint on the
@@ -252,6 +321,45 @@ def _check_imports(root=None):
         bound = module_bindings(full)
         results.extend((f"{path}::{n}", n in bound) for n in names)
     return results
+
+
+def lesion_patch_mask(dataset, grid, n_subjects, keep=None):
+    """(S, P) boolean: does subject s's rendered lesion touch patch p?
+
+    Subject order is the dataset's own index order, which is what
+    ``_extract_synthetic_representations`` iterates with a sequential sampler, so row s here
+    is the same subject as row s of the features. Returns None if the dataset cannot render
+    a lesion (field-lesion modes have no sphere to pool).
+    """
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+
+    inner = getattr(dataset, "_inner", None)
+    renderer = getattr(inner, "renderer", None)
+    if renderer is None or not hasattr(renderer, "render_structure"):
+        return None
+    rows = []
+    with torch.inference_mode():
+        for idx in range(n_subjects):
+            _v1, _v2, lat = inner[idx]
+            _tissue, lesion = renderer.render_structure(
+                lat["z_content"], lat["z_deformation"], lat["z_fissure"], "cpu", clean=inner.clean_content
+            )
+            volume = lesion.reshape(1, 1, *lesion.shape[-3:]).float()
+            # Mean pooling gives each patch's lesion volume fraction; any nonzero fraction
+            # means the lesion reaches into that patch.
+            rows.append((F.adaptive_avg_pool3d(volume, tuple(grid)).flatten() > 0).cpu().numpy())
+    cells = np.stack(rows)
+    return cells[:, keep.cpu().numpy()] if keep is not None else cells
+
+
+def _raises(fn, *args):
+    try:
+        fn(*args)
+    except (ValueError, AssertionError):
+        return True
+    return False
 
 
 def _self_test():
@@ -320,6 +428,30 @@ def _self_test():
         ("decorrelated interaction reads ~0.7", 0.6 < ch[2]["cross_view"]["interaction"] < 0.8),
         ("pooled shares sum to 1", abs(sum(got["pooled_shares"].values()) - 1.0) < 1e-9),
     ]
+
+    # Lesion split: plant an interaction that agrees across views everywhere EXCEPT the
+    # cells a "lesion" occupies, where view 1 sees it with the opposite sign. That is the
+    # sign-reversal hypothesis in its purest form, so the split has to separate the two.
+    subjects_l, positions_l = 80, 40
+    cells = np.zeros((subjects_l, positions_l), dtype=bool)
+    for s in range(subjects_l):
+        cells[s, (s * 7) % positions_l] = True  # one lesion patch each, moving between subjects
+    base = rng.normal(size=(subjects_l, positions_l))
+    flipped = base.copy()
+    flipped[cells] *= -1.0
+    hz_l = np.stack([base[:, None, :], flipped[:, None, :]], axis=0)
+    split = split_by_lesion(hz_l, cells)
+    got["lesion_split"] = split
+    lp = split["pooled"]
+    checks += [
+        ("lesion cells read anti-aligned", lp["lesion"]["cross_view"] < -0.5),
+        ("other cells read aligned", lp["other"]["cross_view"] > 0.9),
+        ("lesion cell count is right", lp["n_lesion_cells"] == subjects_l),
+        ("cells partition exactly", lp["n_lesion_cells"] + lp["n_other_cells"] == subjects_l * positions_l),
+        ("residual rms is reported non-zero", lp["lesion"]["rms"] > 0 and lp["other"]["rms"] > 0),
+        ("a mask of the wrong shape is rejected", _raises(split_by_lesion, hz_l, cells[:, :-1])),
+        ("an empty mask returns None", split_by_lesion(hz_l, np.zeros_like(cells)) is None),
+    ]
     print("self-test (variance split)")
     for label, ok in checks:
         print(f"  {'PASS' if ok else 'FAIL'}  {label}")
@@ -339,6 +471,11 @@ def main():
     p.add_argument("--encode-batch", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--out", default=None, help="Also write the per-channel numbers as JSON + CSV")
+    p.add_argument(
+        "--no-lesion-split",
+        action="store_true",
+        help="Skip the lesion-patch vs rest comparison; it re-renders every subject's lesion mask",
+    )
     p.add_argument("--self-test", action="store_true")
     cli = p.parse_args()
     if cli.self_test:
@@ -376,17 +513,28 @@ def main():
     if c1 is None or c2 is None or c1.shape[1] == 0:
         raise SystemExit("No content channels at this level")
     hz = _as_views(c1, c2, int(np.prod(grid)))
+    # Stays None unless positions were actually dropped, so the lesion mask below is
+    # subset by exactly the same selection that was applied to hz -- and never by a
+    # selection that was computed but not used.
+    keep = None
     if bool(getattr(args_, "patch_foreground_mask", False)):
         thresh = float(getattr(args_, "patch_foreground_thresh", 0.05))
-        keep = foreground_keep(dataset, tuple(grid), thresh, cli.encode_batch, hz.device)
-        if keep is not None and bool(keep.any()):
-            logger.info("Foreground patches: keeping %d/%d positions.", int(keep.sum()), int(keep.numel()))
-            hz = hz[..., keep.to(hz.device)]
+        candidate = foreground_keep(dataset, tuple(grid), thresh, cli.encode_batch, hz.device)
+        if candidate is not None and bool(candidate.any()):
+            logger.info("Foreground patches: keeping %d/%d positions.", int(candidate.sum()), int(candidate.numel()))
+            hz = hz[..., candidate.to(hz.device)]
+            keep = candidate
         else:
             logger.warning("Foreground mask kept nothing; measuring over all positions, unlike training.")
     result = analyse(hz.cpu().numpy())
     result["center_mode"] = center_mode
     result["patch_grid"] = list(grid)
+    if not cli.no_lesion_split:
+        cells = lesion_patch_mask(dataset, tuple(grid), int(hz.shape[1]), keep)
+        if cells is None:
+            logger.warning("Could not render lesions for this dataset; skipping the lesion-patch split.")
+        else:
+            result["lesion_split"] = split_by_lesion(hz.cpu().numpy(), cells)
     print_report(result, center_mode)
     if cli.out:
         out = Path(cli.out)
