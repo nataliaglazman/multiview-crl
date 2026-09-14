@@ -1330,6 +1330,8 @@ def main(args):
         _bt_gap_sim_c = getattr(args, "bt_gap_sim_coeff", None)
         _bt_gap_sim_c = _bt_sim_c if _bt_gap_sim_c is None else _bt_gap_sim_c
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
+        _bt_whiten = getattr(args, "bt_sim_whiten", False)
+        _bt_whiten_eps = getattr(args, "bt_sim_whiten_eps", 1e-3)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
         _bt_norm = bool(getattr(args, "bt_normalize_terms", False))
         logger.info(
@@ -1380,6 +1382,8 @@ def main(args):
                 sim_coeff=_bt_sim_c,
                 std_coeff=_bt_std_c,
                 sim_normalize=_bt_sim_norm,
+                sim_whiten=_bt_whiten,
+                sim_whiten_eps=_bt_whiten_eps,
                 corr_ema=_bt_ema_plain,
                 corr_ema_decay=_bt_corr_ema,
                 normalize_terms=_bt_norm,
@@ -1416,6 +1420,12 @@ def main(args):
                     sim_coeff=_bt_gap_sim_c,
                     std_coeff=_bt_gap_std_c,
                     sim_normalize=_bt_sim_norm,
+                    # Whitening is applied ONLY here and on the gap-only path. The patch call
+                    # above folds (subject, position) into the rows and is 768 wide at this
+                    # batch size, where a d x d covariance is not estimable -- and its rows are
+                    # not the units being aligned anyway.
+                    sim_whiten=_bt_whiten,
+                    sim_whiten_eps=_bt_whiten_eps,
                     corr_ema=_bt_ema_gap,
                     corr_ema_decay=_bt_corr_ema,
                     normalize_terms=_bt_norm,

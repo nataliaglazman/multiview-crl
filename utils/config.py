@@ -1192,6 +1192,33 @@ def parse_args() -> argparse.ArgumentParser:
         "directions, which matters because the factor information sits in the low-variance tail.",
     )
     parser.add_argument(
+        "--bt-sim-whiten",
+        action="store_true",
+        default=False,
+        help="Whiten both views with Sigma^(-1/2) before the MSE alignment term, instead of "
+        "--bt-sim-normalize's per-channel divide. The difference is diagonal vs full covariance: "
+        "per-channel normalisation equalises CHANNELS, and when every channel is a mixture of the "
+        "same few dominant factors that leaves the mixture untouched, so the alignment gradient "
+        "stays proportional to variance share and a low-variance factor gets none of it. Whitening "
+        "rescales every DIRECTION to unit variance, so a factor holding 1% of the embedding's "
+        "variance commands the same gradient as one holding 50%. W-MSE (Ermolov et al., ICML 2021). "
+        "Both views are centred by the POOLED mean so a per-view constant offset still registers -- "
+        "centring each view separately would make the MSE blind to exactly what it exists to catch. "
+        "Needs batch_size > content channels + 1 to estimate the covariance; at content_size 12 and "
+        "batch_size 128 that is ~10 rows per parameter. Mutually exclusive with --bt-sim-normalize, "
+        "and requires --bt-sim-coeff > 0 (it only affects that term).",
+    )
+    parser.add_argument(
+        "--bt-sim-whiten-eps",
+        type=float,
+        default=1e-3,
+        help="Shrinkage added to the covariance diagonal before inversion under --bt-sim-whiten. "
+        "This is a real hyperparameter, not a numerical formality: it is the floor on how far any "
+        "direction can be amplified. Too small and noise in the near-null directions is amplified "
+        "into a full-weight term in the loss; too large and the term decays back toward plain MSE. "
+        "Sweep it (1e-4 to 1e-1) rather than trusting the default.",
+    )
+    parser.add_argument(
         "--bt-std-coeff",
         type=float,
         default=0.0,
@@ -1587,6 +1614,20 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             "because the number of style channels varies per forward pass. "
             "Use --mask-mode fixed or learned instead."
         )
+
+    if getattr(args, "bt_sim_whiten", False):
+        if getattr(args, "bt_sim_normalize", False):
+            raise ValueError(
+                "--bt-sim-whiten and --bt-sim-normalize are mutually exclusive: whitening already "
+                "gives every channel unit variance, so the per-channel divide would be applied twice."
+            )
+        if float(getattr(args, "bt_sim_coeff", 0.0)) <= 0 and float(getattr(args, "bt_gap_sim_coeff", 0.0) or 0.0) <= 0:
+            raise ValueError(
+                "--bt-sim-whiten only affects the MSE alignment term, which is off: set "
+                "--bt-sim-coeff (or --bt-gap-sim-coeff) above 0, and --bt-std-coeff with it."
+            )
+        if getattr(args, "contrastive_loss_type", "infonce") != "barlow_twins":
+            raise ValueError("--bt-sim-whiten requires --contrastive-loss-type barlow_twins.")
 
     _style_hsic = getattr(args, "scale_style_hsic_loss", 0.0)
     if not 0.0 <= _style_hsic < float("inf"):
