@@ -362,7 +362,7 @@ def verdict(ladder, factor, has_floor=False):
         print(f"\n  No single stage loses more than {NOISE_FLOOR}. The factor is either absent")
         print("  throughout or bleeds away gradually; read the ladder, not this line.")
     else:
-        tied = [lbl for cost, lbl, _, _ in ranked[1:] if np.isfinite(cost) and (top - cost) <= NOISE_FLOOR]
+        tied = [lbl for cost, lbl, _, _, _ in ranked[1:] if np.isfinite(cost) and (top - cost) <= NOISE_FLOOR]
         if tied:
             print(f"\n  {top_label} loses the most ({top:.3f}), but {' and '.join(tied)} is within")
             print(f"  {NOISE_FLOOR} of it -- treat them as one gradual loss across the encoder's tail,")
