@@ -215,45 +215,76 @@ def render_migration(c_scores, s_scores, names, factor, floor_c=None, floor_s=No
     return out
 
 
-def style_migration_note(migration):
-    """Say whether the factor moved to style, was destroyed, or neither."""
+def style_migration_note(migration, start="pre_norm", terminal="encoder_out"):
+    """Per view: did the factor move to style, or was it destroyed?
+
+    Scored PER VIEW, because one view can migrate while the other destroys, and a max
+    across views reports neither.  ``terminal`` is encoder_out rather than codebook_in:
+    codebook_in is a branch off the main path (content_norms feeds the codebook only),
+    while encoder_out is what the probes and the contrastive loss actually read.
+
+    Migration does NOT require style to RISE.  Style can already hold the factor from the
+    first stage and simply keep it while content sheds it -- what marks migration is style
+    ending up above the floor and above content, not a positive slope.
+    """
     if not migration:
         return
-    stages = [s for s in STAGES if any((s, v, "content") in migration for v in VIEWS)]
-    if len(stages) < 2:
-        return
-    first, last = stages[0], stages[-1]
-
-    def best(stage, block):
-        vals = [migration.get((stage, v, block)) for v in VIEWS]
-        vals = [x for x in vals if x is not None and np.isfinite(x)]
-        return max(vals) if vals else float("nan")
-
-    c0, c1 = best(first, "content"), best(last, "content")
-    s0, s1 = best(first, "style"), best(last, "style")
-    print("\n  content vs style across the encoder:")
-    print(f"    content {first} {c0:+.3f} -> {last} {c1:+.3f}   ({c1 - c0:+.3f})")
-    if np.isfinite(s0) and np.isfinite(s1):
-        print(f"    style   {first} {s0:+.3f} -> {last} {s1:+.3f}   ({s1 - s0:+.3f})")
-    else:
-        print("    style   not measured (no style channels at this width)")
+    if not any((terminal, v, "content") in migration for v in VIEWS):
         return
 
-    lost = c0 - c1
-    if lost <= NOISE_FLOOR:
-        print("  Content does not lose it, so there is nothing to migrate.")
-    elif s1 > NOISE_FLOOR and s1 >= c1:
-        print("  MIGRATION: content loses it while style ends up holding it. The factor is still")
-        print("  in the latent, on the pathway with no invariance constraint. Levers, in order:")
+    print(f"\n  content vs style per view ({start} -> {terminal}):")
+    verdicts = {}
+    for v in VIEWS:
+        c0, c1 = migration.get((start, v, "content")), migration.get((terminal, v, "content"))
+        s0, s1 = migration.get((start, v, "style")), migration.get((terminal, v, "style"))
+        if c0 is None or c1 is None or not (np.isfinite(c0) and np.isfinite(c1)):
+            continue
+        line = f"    {VIEW_LABEL[v]:<6} content {c0:+.3f} -> {c1:+.3f}"
+        has_style = s0 is not None and s1 is not None and np.isfinite(s0) and np.isfinite(s1)
+        if has_style:
+            line += f"    style {s0:+.3f} -> {s1:+.3f}"
+
+        lost = c0 - c1
+        if lost <= NOISE_FLOOR:
+            verdicts[v] = "keeps"
+            print(line + "   -> content keeps it")
+            continue
+        if has_style and s1 > NOISE_FLOOR and s1 > c1:
+            verdicts[v] = "migration"
+            print(line + "   -> MIGRATION (style ends up holding it, content does not)")
+        elif not has_style or s1 <= NOISE_FLOOR:
+            verdicts[v] = "destruction"
+            print(line + "   -> DESTRUCTION (neither block holds it)")
+        else:
+            verdicts[v] = "mixed"
+            print(line + "   -> mixed")
+
+        # Relocation accounting: style gaining less than content lost is destroyed, not moved.
+        if has_style:
+            gained = max(s1 - s0, 0.0)
+            unaccounted = lost - gained
+            if unaccounted > NOISE_FLOOR:
+                print(
+                    f"           content lost {lost:.3f}, style gained {s1 - s0:+.3f}"
+                    f"  -> {unaccounted:.3f} is destroyed, not relocated"
+                )
+
+    vals = set(verdicts.values())
+    if "migration" in vals:
+        which = ", ".join(VIEW_LABEL[v] for v, k in verdicts.items() if k == "migration")
+        print(f"\n  Style holds it in {which}. That part is relocation, and the levers are the")
+        print("  style-capacity flags -- check settings.json for style_spatial_size first:")
         print("    --style-spatial-size 1|2   cap style's spatial grid so it cannot carry a cavity")
         print("    --detach-style-injection   stop recon backprop teaching style to hold anatomy")
         print("    --style-dropout-prob 0.25  force recon from content alone on some samples")
         print("    --scale-style-hsic-loss    explicit style-content independence (supervised)")
-    elif s1 <= NOISE_FLOOR and c1 <= NOISE_FLOOR:
-        print("  DESTRUCTION, not migration: neither block holds it at the end. Capping the style")
-        print("  pathway will not bring it back -- look at content capacity and the objective.")
-    else:
-        print("  Mixed: content loses it but style does not clearly gain it. Read the table.")
+    if "destruction" in vals:
+        which = ", ".join(VIEW_LABEL[v] for v, k in verdicts.items() if k == "destruction")
+        print(f"\n  In {which} neither block holds it, so capping style recovers nothing there.")
+        print("  That part is content capacity and what the objective spends channels on.")
+    if vals == {"migration", "destruction"} or ("migration" in vals and "destruction" in vals):
+        print("\n  The two views differ, so ONE fix will not cover both. Treat the relocation and")
+        print("  the destruction as separate problems rather than looking for a single cause.")
 
 
 def render_rms(rms, block="content"):
