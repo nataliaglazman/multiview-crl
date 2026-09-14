@@ -20,7 +20,16 @@ import numpy as np
 import torch
 from scipy.ndimage import maximum_filter
 
-from eval.ventricle_routing import audit, decode_swaps, main, make_dataset, render_pair, score_swaps
+from eval.ventricle_routing import (
+    assess_endpoint_replay,
+    audit,
+    decode_swaps,
+    main,
+    make_dataset,
+    render_pair,
+    score_swaps,
+    stable_replay_math,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -124,6 +133,51 @@ class ScoringTests(unittest.TestCase):
             score_swaps(self.xa, self.xb, y, self.support, self.foreground)
 
 
+class ReplayValidationTests(unittest.TestCase):
+    def test_sparse_cuda_sized_error_passes_only_with_resolved_local_signal(self):
+        reference = np.full((2, 32, 32, 32), 0.424446)
+        reference[0, 16, 16, 16] = 0
+        replay = reference.copy()
+        replay[0, 16, 16, 16] += 0.00025034
+        roi = np.zeros((32,) * 3, bool)
+        roi[14:19, 14:19, 14:19] = True
+        delta = roi * 0.1
+        self.assertFalse(np.allclose(replay, reference, atol=2e-5, rtol=2e-4))
+        resolved = assess_endpoint_replay(replay, reference, delta, roi)
+        self.assertTrue(resolved["endpoint_signal_resolved"])
+        self.assertLess(resolved["endpoint_error_to_input_ratio"], 0.01)
+        tiny_signal = assess_endpoint_replay(replay, reference, delta * 1e-4, roi)
+        self.assertFalse(tiny_signal["endpoint_signal_resolved"])
+        self.assertGreater(tiny_signal["endpoint_error_to_input_ratio"], 1)
+        absent_signal = assess_endpoint_replay(replay, reference, delta * 0, roi)
+        self.assertFalse(absent_signal["endpoint_signal_resolved"])
+
+    def test_substantial_endpoint_mismatch_still_raises(self):
+        reference = np.ones((2, 8, 8, 8))
+        replay = reference.copy()
+        replay[1] += 0.1
+        with self.assertRaisesRegex(ValueError, "substantial mismatch"):
+            assess_endpoint_replay(replay, reference, np.ones((8,) * 3), np.ones((8,) * 3, bool))
+
+    def test_cuda_flags_are_restored_even_on_error(self):
+        def flags():
+            return (
+                torch.backends.cuda.matmul.allow_tf32,
+                torch.backends.cudnn.allow_tf32,
+                torch.backends.cudnn.benchmark,
+                torch.backends.cudnn.deterministic,
+                torch.backends.cudnn.enabled,
+            )
+
+        before = flags()
+        with self.assertRaisesRegex(RuntimeError, "injected failure"):
+            with stable_replay_math():
+                self.assertEqual(flags()[:4], (False, False, False, True))
+                self.assertEqual(flags()[4], before[4])
+                raise RuntimeError("injected failure")
+        self.assertEqual(flags(), before)
+
+
 class PipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -196,6 +250,28 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "model.eval"):
             decode_swaps(model, samples, "cpu")
 
+    def test_unresolved_rows_are_retained_but_excluded_from_routing_summary(self):
+        class SmallReplayOffset(RoutingOracle):
+            def decode_codes(self, *args, **kwargs):
+                return super().decode_codes(*args, **kwargs) + 2e-6
+
+        ds = self.dataset()
+
+        def tiny_pair(dataset, index, eps):
+            sample = render_pair(dataset, index, eps)
+            sample["b"] = [x + sample["mask"] * 1e-6 for x in sample["a"]]
+            return sample
+
+        with patch("eval.ventricle_routing.render_pair", side_effect=tiny_pair):
+            rows, summary, _ = audit(SmallReplayOffset(1), ds, "cpu", eps=0.5, examples=0)
+        self.assertTrue(any(r["valid_input"] for r in rows))
+        self.assertFalse(any(r["valid_routing"] for r in rows))
+        for view in summary.values():
+            self.assertEqual(view["n"], 3)
+            self.assertEqual(view["n_valid_routing"], 0)
+            self.assertEqual(view["metrics"]["style_mean_gain"]["n_valid"], 0)
+            self.assertIsNone(view["metrics"]["style_mean_gain"]["median"])
+
     def test_decoder_batch_geometry_matches_original_forward(self):
         class BatchDependentOracle(RoutingOracle):
             def forward(self, x, **kwargs):
@@ -244,6 +320,7 @@ class PipelineTests(unittest.TestCase):
                 "a": [torch.randn(1, 32, 32, 32) for _ in range(2)],
                 "b": [torch.randn(1, 32, 32, 32) for _ in range(2)],
                 "mask": torch.ones(1, 32, 32, 32),
+                "support": np.ones((32,) * 3, dtype=bool),
             }
             for _ in range(2)
         ]
@@ -339,6 +416,7 @@ class PipelineTests(unittest.TestCase):
                         "a": [torch.randn(1, 8, 8, 8) for _ in range(2)],
                         "b": [torch.randn(1, 8, 8, 8) for _ in range(2)],
                         "mask": torch.ones(1, 8, 8, 8),
+                        "support": np.ones((8,) * 3, dtype=bool),
                     }
                     for _ in range(2)
                 ]

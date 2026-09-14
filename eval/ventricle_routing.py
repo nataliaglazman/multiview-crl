@@ -18,6 +18,7 @@ already contain conditioning from coarser style-dependent reconstructions.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import inspect
 import json
@@ -30,6 +31,61 @@ from scipy.ndimage import maximum_filter
 from eval.lesion_reconstruction import json_safe
 
 logger = logging.getLogger(__name__)
+
+REPLAY_RMS_ATOL = 1e-6
+REPLAY_RMS_RTOL = 1e-4
+REPLAY_SIGNAL_FRACTION = 0.01
+
+
+@contextlib.contextmanager
+def stable_replay_math():
+    """Use consistent CUDA precision/algorithms and restore the caller's flags."""
+    import torch
+
+    matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        with torch.backends.cudnn.flags(
+            enabled=torch.backends.cudnn.enabled, benchmark=False, deterministic=True, allow_tf32=False
+        ):
+            yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = matmul_tf32
+
+
+def assess_endpoint_replay(replay, reference, input_delta, roi):
+    """Check both endpoints separately, then calibrate error to the local signal.
+
+    A pointwise allclose rejects isolated near-zero voxels even when the overall
+    replay agrees. RMS checks catch substantive mismatches without that failure.
+    The sum of endpoint error norms bounds their contribution to a difference's
+    projected gain. It does not bound unmeasured numerical errors in hybrids.
+    """
+    replay, reference, input_delta = [np.asarray(a, dtype=np.float64) for a in (replay, reference, input_delta)]
+    roi = np.asarray(roi, bool)
+    if replay.shape != reference.shape or replay.shape != (2, *input_delta.shape) or roi.shape != input_delta.shape:
+        raise ValueError("Invalid endpoint shapes")
+    if not all(np.isfinite(a).all() for a in (replay, reference, input_delta)):
+        raise ValueError("Non-finite endpoint values")
+    error = replay - reference
+    rms = np.sqrt(np.mean(error.reshape(2, -1) ** 2, axis=1))
+    reference_rms = np.sqrt(np.mean(reference.reshape(2, -1) ** 2, axis=1))
+    limits = REPLAY_RMS_ATOL + REPLAY_RMS_RTOL * reference_rms
+    if np.any(rms > limits):
+        raise ValueError(
+            "Decoder endpoint replay has a substantial mismatch; swaps would be invalid. "
+            f"max_abs={np.abs(error).max():.6g}, endpoint_rms={rms.tolist()}, "
+            f"allowed_rms={limits.tolist()}. Try --device cpu to separate CUDA numerics from a replay defect."
+        )
+    signal_norm = np.linalg.norm(input_delta[roi])
+    error_bound = sum(np.linalg.norm(e[roi]) for e in error)
+    ratio = float(error_bound / signal_norm) if signal_norm ** 2 > 1e-12 else np.nan
+    return {
+        "endpoint_replay_max_abs": float(np.abs(error).max()),
+        "endpoint_replay_rms": float(rms.max()),
+        "endpoint_error_to_input_ratio": ratio,
+        "endpoint_signal_resolved": bool(np.isfinite(ratio) and ratio <= REPLAY_SIGNAL_FRACTION),
+    }
 
 
 def make_dataset(args, n, causal="match", split="test"):
@@ -166,7 +222,7 @@ def decode_swaps(model, samples, device):
     # [v0: A subjects, B subjects; v1: A subjects, B subjects]
     x = torch.cat([torch.stack([s[state][v] for s in samples]) for v in range(2) for state in ("a", "b")]).to(device)
     masks = torch.cat([torch.stack([s["mask"] for s in samples])] * 4).to(device)
-    with torch.inference_mode():
+    with torch.inference_mode(), stable_replay_math():
         # Capture actual q outputs, not embed_code(ids): forward's straight-through
         # x + (q - x).detach() can incur cancellation when encoder magnitudes grow.
         # Do not alter the quantizer or training arithmetic to fix an eval replay.
@@ -217,14 +273,18 @@ def decode_swaps(model, samples, device):
         if replay.shape != x.shape or not bool(torch.isfinite(replay).all()):
             raise ValueError("Invalid endpoint reconstruction")
         reference = out[0]
-        if not torch.allclose(replay, reference, atol=2e-5, rtol=2e-4):
-            error = (replay - reference).abs()
-            raise ValueError(
-                "Exact-tensor endpoint does not reproduce forward; swaps would be invalid. "
-                f"max_abs={error.max().item():.6g}, rms={error.square().mean().sqrt().item():.6g}, "
-                f"reference_rms={reference.square().mean().sqrt().item():.6g}, "
-                f"device={x.device}, shape={tuple(x.shape)}"
-            )
+        replay_np, reference_np = replay[:, 0].cpu().numpy(), reference[:, 0].cpu().numpy()
+        endpoint_checks = []
+        for view in range(2):
+            checks = []
+            for b, sample in enumerate(samples):
+                a_idx, b_idx = view * 2 * n + b, view * 2 * n + n + b
+                roi = maximum_filter(sample["support"], size=3) & (sample["mask"].numpy()[0] > 0)
+                delta = (sample["b"][view] - sample["a"][view]).numpy()[0]
+                checks.append(
+                    assess_endpoint_replay(replay_np[[a_idx, b_idx]], reference_np[[a_idx, b_idx]], delta, roi)
+                )
+            endpoint_checks.append({k: np.asarray([r[k] for r in checks]) for k in checks[0]})
 
         # Exchange A/B content donors within each modality; style stays at its row.
         # Original A rows now decode BA, and original B rows decode AB. Preserve
@@ -249,14 +309,7 @@ def decode_swaps(model, samples, device):
                     "ab": hybrid[slices["b"], 0].cpu().numpy(),
                 }
             )
-            view_diag = {
-                "endpoint_replay_max_abs": (replay[start : start + 2 * n] - reference[start : start + 2 * n])
-                .abs()
-                .reshape(2, n, -1)
-                .amax(dim=(0, 2))
-                .cpu()
-                .numpy()
-            }
+            view_diag = endpoint_checks[view]
 
             def response(name, features):
                 diff = features[slices["b"]] - features[slices["a"]]
@@ -299,6 +352,7 @@ def audit(model, ds, device, eps=0.25, batch_size=2, examples=4):
                 row["modality"] = modality
                 row.update(score_swaps(xa, xb, ys, sample["support"], sample["mask"].numpy()[0]))
                 row.update({k: float(v[b]) for k, v in responses[view].items()})
+                row["valid_routing"] = row["valid_input"] and bool(row["endpoint_signal_resolved"])
                 rows.append(row)
                 if len(panels) < examples and view == 1 and sample["support"].any():
                     z = int(np.argmax(sample["support"].sum((0, 1))))
@@ -311,14 +365,24 @@ def audit(model, ds, device, eps=0.25, batch_size=2, examples=4):
         selected = [r for r in rows if r["modality"] == view]
         metrics = {}
         for key in selected[0]:
-            if key in ("index", "modality", "valid_input", "z_low", "z_high"):
+            if key in (
+                "index",
+                "modality",
+                "valid_input",
+                "valid_routing",
+                "endpoint_signal_resolved",
+                "z_low",
+                "z_high",
+            ):
                 continue
-            values = np.asarray([r[key] for r in selected], float)
+            routing_metric = key.endswith(("_gain", "_rms_ratio")) or key in ("joint_cosine", "joint_relative_error")
+            values = np.asarray([r[key] for r in selected if not routing_metric or r["valid_routing"]], float)
             values = values[np.isfinite(values)]
             metrics[key] = {"median": float(np.median(values)) if len(values) else None, "n_valid": len(values)}
         summary[view] = {
             "n": len(selected),
             "n_valid_input": sum(r["valid_input"] for r in selected),
+            "n_valid_routing": sum(r["valid_routing"] for r in selected),
             "metrics": metrics,
         }
     return rows, summary, panels
@@ -388,10 +452,18 @@ def main():
         "protocol": __doc__,
         "normalization": "Original sample foreground affine frozen for A and B",
         "generator": "legacy_pre_7ac56a3" if cli.old_generator else "current",
+        "replay_validation": {
+            "endpoint_rms_atol": REPLAY_RMS_ATOL,
+            "endpoint_rms_rtol": REPLAY_RMS_RTOL,
+            "max_endpoint_error_to_input_ratio": REPLAY_SIGNAL_FRACTION,
+            "cuda_math": "TF32 off; cuDNN benchmark off, deterministic on; caller flags restored",
+        },
         "interpretation": "Compare content_mean_gain and style_mean_gain only alongside joint_gain, joint_cosine and joint_relative_error. "
         "Means add to joint gain per sample; medians need not. Weak joint fidelity makes routing inconclusive. "
         "Latent RMS values depend on scale/width and are sensitivity diagnostics, not information scores. "
-        "Input-invisible interventions have null gains and remain in coverage counts. No checkpoints are written.",
+        "Input-invisible interventions have null gains and remain in coverage counts. "
+        "Rows with valid_routing=false retain raw scores but are excluded from routing metric summaries. "
+        "Endpoint replay error calibration does not bound all hybrid numerical errors. No checkpoints are written.",
     }
     (directory / "summary.json").write_text(json.dumps(json_safe(report), indent=2, allow_nan=False) + "\n")
     with (directory / "samples.csv").open("w", newline="") as f:
@@ -401,6 +473,7 @@ def main():
     save_panels(panels, directory / "examples.png")
     for view, result in summary.items():
         print(f"{view}: measurable input {result['n_valid_input']}/{result['n']}")
+        print(f"  resolved above endpoint replay error: {result['n_valid_routing']}/{result['n']}")
         for name in (
             "joint_gain",
             "joint_cosine",
@@ -408,6 +481,8 @@ def main():
             "content_mean_gain",
             "style_mean_gain",
             "interaction_rms_ratio",
+            "endpoint_replay_rms",
+            "endpoint_error_to_input_ratio",
         ):
             value = result["metrics"][name]
             print(f"  {name}: {value['median']} (n={value['n_valid']})")

@@ -32,9 +32,25 @@ Swaps are within modality and exchange all decoder-bound quantized content tenso
 while holding injected style fixed. The replay captures actual quantizer outputs:
 forward's straight-through arithmetic can round differently from an ID lookup.
 All decoder calls keep the original batch shape and tensor memory format, avoiding
-batch-size changes in GPU convolution kernels. `AA` and `BB` must reproduce the
-corresponding forward reconstructions; the diagnostic stops with numerical error
-details if this check fails. `endpoint_replay_max_abs` records the error per subject.
+batch-size changes in GPU convolution kernels. During the test, TF32 is disabled,
+cuDNN benchmarking is off and deterministic cuDNN algorithms are requested; the
+caller's backend flags are restored afterwards.
+
+Each `AA` and `BB` endpoint must reproduce its forward reconstruction to RMS error
+at most `1e-6 + 1e-4 * reference_RMS`, checked separately for each subject/state/view.
+Larger errors stop the test with diagnostics. Isolated pointwise errors near zero
+no longer abort an otherwise accurate replay. The maximum absolute error and RMS
+error are both saved.
+
+For each subject/view, the sum of the two endpoint error norms inside the ventricular
+ROI is divided by the input intervention norm. This bounds those endpoint errors'
+contribution to the projected difference gain. If this ratio exceeds **0.01**, the
+row has `valid_routing=false`: its raw scores remain in the CSV, but it is excluded
+from summaries of gains, response ratios, and joint fidelity. Invisible input
+changes are also unresolved. Summary coverage reports both `n_valid_input` and
+`n_valid_routing`. This is a numerical resolution criterion, not a significance
+test or a bound on all errors in the hybrid reconstructions.
+
 Separate modality codebooks and multiple
 levels are supported. At multiple levels, fine content codes may already include
 conditioning from coarser style-dependent reconstructions.
@@ -57,6 +73,8 @@ change in that ROI, divided by the input change's squared norm. Identity gain is
 | `content_mean_gain`, `style_mean_gain` | Averages over the two donor contexts; add to joint gain per subject |
 | `interaction_rms_ratio` | Strength of `BB − BA − AB + AA`, relative to the input change |
 | `aa_roi_mae`, `bb_roi_mae` | Absolute endpoint reconstruction quality near the ventricle |
+| `endpoint_replay_rms`, `endpoint_replay_max_abs` | Replay discrepancy from the original forward |
+| `endpoint_error_to_input_ratio` | Local endpoint error relative to the ventricle intervention; must be ≤0.01 for routing summaries |
 
 With good joint fidelity, high style gain and low content gain support decoder
 reliance on style for the ventricle change. If joint fidelity is poor, weak pathway
@@ -85,6 +103,8 @@ decoder, invisible input changes, real rendering with frozen normalization and
 noise, partial batches, CLI output, and real VQ-VAE endpoint round trips with
 multiple levels and separate modality codebooks. Regression controls reproduce
 straight-through cancellation and a batch-dependent decoder, while retaining the
-endpoint validity check. Model parameters and buffers are checked for changes,
+endpoint validity check. Further controls cover sparse CUDA-sized replay drift,
+unresolved local signals, substantial replay errors and backend-flag restoration.
+Model parameters and buffers are checked for changes,
 and temporary capture hooks are removed even on failure. Tests omit unrelated ADNI imports when loading model/dataset
 code, allowing these controls to run without MONAI or pandas.
