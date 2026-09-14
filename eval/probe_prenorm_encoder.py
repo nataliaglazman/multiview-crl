@@ -308,6 +308,64 @@ def style_migration_note(migration, start="pre_norm", terminal="encoder_out", pa
         print("  the destruction as separate problems rather than looking for a single cause.")
 
 
+def render_channel_map(feats, gt, names, factor, stage="encoder_out", pooling="gap", floor_feats=None, seeds=(0, 1)):
+    """Which factor does each individual channel's pooled value track?
+
+    The gap block's column j IS channel j's global mean, so this needs no new features --
+    it just scores each column on its own instead of letting ridge combine all twelve.
+    That distinguishes "the encoder has a ventricle channel" from "the ventricle is
+    reconstructable from a combination", which the block-level R^2 cannot separate.
+
+    Reported ABSOLUTE, not floor-subtracted: channel j of an untrained twin is a different
+    random projection from channel j of the trained model, so a per-channel difference
+    between them means nothing.  The untrained BEST-channel row is the reference instead --
+    it says what one random projection already achieves.
+    """
+    views = [v for v in VIEWS if (stage, v, pooling) in feats]
+    if not views:
+        return {}
+    short = [n[:6] for n in names]
+    best = {}
+    for v in views:
+        X = feats[(stage, v, pooling)]
+        per_ch = np.stack(
+            [np.asarray(cv_probe_r2_multi(X[:, [j]], gt, seeds=seeds)["mean"]) for j in range(X.shape[1])]
+        )
+        print(f"\n{VIEW_LABEL[v]} - per-channel {pooling} R^2 at {stage}  (absolute; one channel at a time)")
+        head = "  ch  " + "".join(f"{c:>8}" for c in short) + "   best"
+        print(head)
+        print("  " + "-" * (len(head) - 2))
+        for j in range(per_ch.shape[0]):
+            k = int(np.nanargmax(per_ch[j]))
+            print(f"  {j:<4}" + "".join(f"{x:>8.3f}" for x in per_ch[j]) + f"   {names[k]} {per_ch[j, k]:.3f}")
+        if floor_feats is not None and (stage, v, pooling) in floor_feats:
+            F = floor_feats[(stage, v, pooling)]
+            f_ch = np.stack(
+                [np.asarray(cv_probe_r2_multi(F[:, [j]], gt, seeds=seeds)["mean"]) for j in range(F.shape[1])]
+            )
+            print("  " + "-" * (len(head) - 2))
+            print("  untr" + "".join(f"{x:>8.3f}" for x in f_ch.max(0)) + "   best UNTRAINED channel")
+        jf = names.index(factor)
+        bj = int(np.nanargmax(per_ch[:, jf]))
+        best[v] = (bj, float(per_ch[bj, jf]))
+
+    print(f"\n  {factor}: best SINGLE channel per view")
+    for v in views:
+        bj, r = best[v]
+        print(f"    {VIEW_LABEL[v]:<6} channel {bj:<3} R^2 {r:+.3f}")
+    if len(views) == 2:
+        (b0, r0), (b1, r1) = best[views[0]], best[views[1]]
+        if max(r0, r1) <= NOISE_FLOOR:
+            print("  No single channel in either view tracks it -- if the block-level R^2 is high,")
+            print("  the factor is spread across channels rather than held by a detector.")
+        elif abs(r0 - r1) > NOISE_FLOOR:
+            hi = VIEW_LABEL[views[0] if r0 > r1 else views[1]]
+            lo = VIEW_LABEL[views[1] if r0 > r1 else views[0]]
+            print(f"  {hi} has a channel for it; {lo} does not. Compare each view's 'best' column")
+            print("  above to see what that view spends its channels on instead.")
+    return best
+
+
 def render_rms(rms, block="content"):
     """Feature scale per stage per view.  A per-view gap here is what the shared,
     squared-euclidean codebook cannot absorb."""
@@ -661,6 +719,8 @@ def _self_test():
     migration = render_migration(scores, style_scores, names, names[focus])
     migration_patch = render_migration(scores, style_scores, names, names[focus], pooling="patch")
     render_all_factors(scores, names, floor=None)
+    chan_pre = render_channel_map(feats, gt, names, names[focus], stage="pre_norm")
+    chan_out = render_channel_map(feats, gt, names, names[focus], stage="encoder_out")
     render_rms({("pre_norm", "v0", "content"): 1.0, ("pre_norm", "v1", "content"): 0.43})
     verdict(ladder, names[focus], has_floor=False)
     fmt = format_note(ladder, names[focus])
@@ -669,6 +729,12 @@ def _self_test():
     if migration_patch:
         print("\n  --- same split, PATCH pooling (where a spatially-held factor lives) ---")
         style_migration_note(migration_patch)
+
+    # The planted factor sits on channels 0-2 at pre_norm only, so a per-channel scan must
+    # find a detector there and none at encoder_out.
+    assert chan_pre["v0"][0] < 3, f"channel map missed the planted detector: {chan_pre['v0']}"
+    assert chan_pre["v0"][1] > 0.3, f"planted detector too weak: {chan_pre['v0']}"
+    assert chan_out["v0"][1] < NOISE_FLOOR, f"detector should be gone at encoder_out: {chan_out['v0']}"
 
     pre = ladder[("pre_norm", "v0", "gap")]
     post = ladder[("post_norm", "v0", "gap")]
@@ -695,6 +761,13 @@ def main():
     )
     ap.add_argument("--floor-seed", type=int, default=0, help="Seed for the untrained twin's weights.")
     ap.add_argument("--all-channels", action="store_true", help="Read the full hidden width, not just content.")
+    ap.add_argument(
+        "--channel-map",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Score each content channel's pooled value on its own, to see which factor each "
+        "channel tracks and whether a view has a detector for the focus factor at all.",
+    )
     ap.add_argument(
         "--probe-dim",
         default=PROBE_DIM_AUTO,
@@ -752,12 +825,14 @@ def main():
     style_scores = score_ladder(style_feats, gt, seeds=seeds) if style_feats else {}
 
     floor_scores = floor_style = None
+    f_feats_keep = None
     if args.floor:
         logger.info("scoring the untrained twin (seed %d) on the SAME rows ...", args.floor_seed)
         f_model, f_inner, _, f_device = _load(args.run_dir, args.checkpoint, random_init=True, seed=args.floor_seed)
         f_feats, f_style, _, f_gt = _ladder(f_model, f_inner, loader, f_device, args, n_content)
         floor_scores = score_ladder(f_feats, f_gt, seeds=seeds)
         floor_style = score_ladder(f_style, f_gt, seeds=seeds) if f_style else None
+        f_feats_keep = f_feats
 
     print(f"\nrun: {args.run_dir} | level {args.level} | content channels {n_content} | N={gt.shape[0]}")
     print(
@@ -778,6 +853,8 @@ def main():
         scores, style_scores, names, args.factor, floor_scores, floor_style, pooling="patch"
     )
     render_all_factors(scores, names, floor=floor_scores)
+    if args.channel_map:
+        render_channel_map(feats, gt, names, args.factor, floor_feats=f_feats_keep, seeds=seeds)
     render_rms(rms, block="content")
     render_rms(rms, block="style")
     verdict(ladder, args.factor, has_floor=floor_scores is not None)
