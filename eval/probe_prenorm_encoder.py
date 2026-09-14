@@ -91,7 +91,7 @@ import numpy as np
 
 from eval.identifiability_metrics import cv_probe_r2_multi
 from eval.identifiability_report import NOISE_FLOOR
-from eval.run_dci_compare import _auto_probe_dim
+from eval.run_dci_compare import PROBE_DIM_AUTO, _auto_probe_dim
 
 logger = logging.getLogger(__name__)
 
@@ -105,16 +105,24 @@ VIEW_LABEL = {"v0": "T1", "v1": "FLAIR"}
 # --------------------------------------------------------------------------- #
 # Scoring and rendering.  Pure numpy so --self-test needs no torch build.
 # --------------------------------------------------------------------------- #
-def reduce_block(X, seed=0):
-    """PCA-reduce a p>>n block, by `run_dci_compare._auto_probe_dim`'s rule.
+def reduce_block(X, probe_dim="auto", seed=0):
+    """PCA-reduce a block. ``probe_dim`` is "auto" (the imported rule), 0 (off), or a width.
 
-    Unreduced, a ridge probe on the patch block returns a NEGATIVE R^2 on weak targets,
-    which is exactly the regime a ventricle investigation lives in.  The rule is imported
-    rather than re-derived so the two scripts cannot drift.
+    "auto" is `run_dci_compare._auto_probe_dim`, imported rather than re-derived. Mind its
+    calibration: it was set for the 8^3 x 44-channel patch block, 22528 features against
+    N~2000, a genuine p>>n case. Its threshold is d > N/4, so at N=2000 it also fires on a
+    768-feature block (4^3 x 12 channels) that ridge handles perfectly well, and cuts it to
+    64 top-VARIANCE components. PCA keeps variance, not signal, so a small localised
+    structure -- a ventricle -- can be deleted outright by that step while a global factor
+    survives. If the patch column reads negative everywhere while gap does not, suspect
+    this before concluding anything about the model: re-run with ``--probe-dim 0``.
     """
     from sklearn.decomposition import PCA
 
-    width = _auto_probe_dim(X.shape[0], X.shape[1])
+    if probe_dim == PROBE_DIM_AUTO:
+        width = _auto_probe_dim(X.shape[0], X.shape[1])
+    else:
+        width = int(probe_dim)
     if not width or width >= X.shape[1]:
         return X
     return PCA(n_components=width, random_state=seed).fit_transform(X)
@@ -537,9 +545,23 @@ def _content_width(run_args, all_channels):
 
 def _ladder(model, inner, loader, device, args, n_content):
     feats, style, rms, gt = _collect(model, inner, loader, device, args.level, args.patch_grid, n_content)
+    pd = args.probe_dim
+    for key, X in feats.items():
+        if pd == PROBE_DIM_AUTO and _auto_probe_dim(X.shape[0], X.shape[1]) and X.shape[1] < X.shape[0] / 2:
+            logger.warning(
+                "--probe-dim auto is reducing %s from %d features to %d, but %d features against "
+                "N=%d is not p>>n. PCA keeps variance, not signal, so a localised factor can be "
+                "deleted by this step. Re-run with --probe-dim 0 before trusting that column.",
+                key,
+                X.shape[1],
+                _auto_probe_dim(X.shape[0], X.shape[1]),
+                X.shape[1],
+                X.shape[0],
+            )
+            break
     return (
-        {k: reduce_block(X) for k, X in feats.items()},
-        {k: reduce_block(X) for k, X in style.items()},
+        {k: reduce_block(X, pd) for k, X in feats.items()},
+        {k: reduce_block(X, pd) for k, X in style.items()},
         rms,
         gt,
     )
@@ -613,6 +635,14 @@ def main():
     )
     ap.add_argument("--floor-seed", type=int, default=0, help="Seed for the untrained twin's weights.")
     ap.add_argument("--all-channels", action="store_true", help="Read the full hidden width, not just content.")
+    ap.add_argument(
+        "--probe-dim",
+        default=PROBE_DIM_AUTO,
+        help="PCA width for each block: 'auto' (run_dci_compare's p>>n rule, the default), "
+        "0 to disable reduction entirely, or an integer width. Use 0 when the patch block is "
+        "already well-conditioned -- 'auto' fires at d > N/4 and will crush a 768-feature "
+        "block to 64 top-variance components, which can delete a small localised factor.",
+    )
     ap.add_argument(
         "--causal-eval",
         action=argparse.BooleanOptionalAction,
