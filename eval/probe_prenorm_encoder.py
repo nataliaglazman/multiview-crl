@@ -233,7 +233,7 @@ def render_migration(c_scores, s_scores, names, factor, floor_c=None, floor_s=No
     return out
 
 
-def style_migration_note(migration, start="pre_norm", terminal="encoder_out"):
+def style_migration_note(migration, start="pre_norm", terminal="encoder_out", patch_present=()):
     """Per view: did the factor move to style, or was it destroyed?
 
     Scored PER VIEW, because one view can migrate while the other destroys, and a max
@@ -270,9 +270,12 @@ def style_migration_note(migration, start="pre_norm", terminal="encoder_out"):
         if has_style and s1 > NOISE_FLOOR and s1 > c1:
             verdicts[v] = "migration"
             print(line + "   -> MIGRATION (style ends up holding it, content does not)")
+        elif v in patch_present:
+            verdicts[v] = "reformat"
+            print(line + "   -> NOT destroyed: the patch column still holds it (spatial format)")
         elif not has_style or s1 <= NOISE_FLOOR:
             verdicts[v] = "destruction"
-            print(line + "   -> DESTRUCTION (neither block holds it)")
+            print(line + "   -> DESTRUCTION (neither block holds it, at gap OR patch)")
         else:
             verdicts[v] = "mixed"
             print(line + "   -> mixed")
@@ -322,6 +325,51 @@ def render_rms(rms, block="content"):
         vals = [rms.get((stage, v), float("nan")) for v in views]
         ratio = vals[1] / vals[0] if len(vals) == 2 and np.isfinite(vals[0]) and abs(vals[0]) > 1e-9 else float("nan")
         print(f"  {stage:<14}" + "".join(f"{v:>12.3f}" for v in vals) + f"{ratio:>10.2f}")
+
+
+def format_note(ladder, factor, terminal="encoder_out"):
+    """Is the factor in the CHANNEL MEANS or in the SPATIAL LAYOUT? They are different codes.
+
+    gap averages every latent position, so it is structurally blind to a factor stored as
+    "this location is cavity" -- a 1-3 voxel ventricle in a 16^3 latent is invisible to it.
+    patch keeps position and can see that.
+
+    Neither is a ceiling.  gap's 12 features are linear combinations of patch's 768, so
+    patch ought to dominate; that it sometimes does not is a ridge-conditioning artefact of
+    standardising 768 features, which dilutes a signal concentrated in the global mean.
+    So each pooling is only a LOWER BOUND, and a factor counts as absent only when BOTH
+    are at the floor.
+    """
+    print(f"\n  encoding FORMAT at {terminal} (each pooling is a lower bound, never a ceiling):")
+    verdicts = {}
+    for v in VIEWS:
+        g = ladder.get((terminal, v, "gap"))
+        pt = ladder.get((terminal, v, "patch"))
+        if g is None and pt is None:
+            continue
+        gv = float("nan") if g is None else g
+        pv = float("nan") if pt is None else pt
+        hi_g, hi_p = gv > NOISE_FLOOR, pv > NOISE_FLOOR
+        if hi_g and hi_p:
+            kind = "both channel means AND spatial layout"
+        elif hi_g:
+            kind = "CHANNEL MEANS only (gap); not visible spatially"
+        elif hi_p:
+            kind = "SPATIAL LAYOUT only (patch); gap pooling is BLIND to it"
+        else:
+            kind = "neither pooling finds it"
+        verdicts[v] = kind
+        best = np.nanmax([gv, pv])
+        print(f"    {VIEW_LABEL[v]:<6} gap {gv:+.3f}   patch {pv:+.3f}   -> {kind} (at least {best:+.3f})")
+
+    kinds = set(verdicts.values())
+    if any("SPATIAL" in k for k in kinds) and any("CHANNEL" in k for k in kinds):
+        sp = ", ".join(VIEW_LABEL[v] for v, k in verdicts.items() if "SPATIAL" in k)
+        ch = ", ".join(VIEW_LABEL[v] for v, k in verdicts.items() if "CHANNEL" in k)
+        print(f"\n  The two views use DIFFERENT FORMATS: {ch} in channel means, {sp} spatially.")
+        print("  Both encode the factor; a single pooling would have called one of them empty.")
+        print("  A cross-view objective has to reconcile two codes, not recover a missing one.")
+    return verdicts
 
 
 def verdict(ladder, factor, has_floor=False):
@@ -397,8 +445,14 @@ def verdict(ladder, factor, has_floor=False):
                 print("  Both encoders treat it alike, so a view-consistency story does not apply;")
                 print("  look at capacity and at what the objective spends channels on instead.")
 
+    def gp(stage, view):
+        v = ladder.get((stage, view, "patch"))
+        return float("nan") if v is None else v
+
     out = [g("encoder_out", v) for v in VIEWS if np.isfinite(g("encoder_out", v))]
-    if has_floor and out and max(out) < 0:
+    patch_out = [gp("encoder_out", v) for v in VIEWS if np.isfinite(gp("encoder_out", v))]
+    patch_has_it = bool(patch_out) and max(patch_out) > NOISE_FLOOR
+    if has_floor and out and max(out) < 0 and not patch_has_it:
         print("\n  NOTE: at encoder_out the trained model is BELOW its untrained floor in every view.")
         print("  Training did not fail to learn this factor -- it removed information a random")
         print("  projection of the same architecture still had.")
@@ -608,7 +662,9 @@ def _self_test():
     render_all_factors(scores, names, floor=None)
     render_rms({("pre_norm", "v0", "content"): 1.0, ("pre_norm", "v1", "content"): 0.43})
     verdict(ladder, names[focus], has_floor=False)
-    style_migration_note(migration)
+    fmt = format_note(ladder, names[focus])
+    patch_present = {v for v, k in fmt.items() if "SPATIAL" in k or "both" in k}
+    style_migration_note(migration, patch_present=patch_present)
 
     pre = ladder[("pre_norm", "v0", "gap")]
     post = ladder[("post_norm", "v0", "gap")]
@@ -716,7 +772,9 @@ def main():
     render_rms(rms, block="content")
     render_rms(rms, block="style")
     verdict(ladder, args.factor, has_floor=floor_scores is not None)
-    style_migration_note(migration)
+    fmt = format_note(ladder, args.factor)
+    patch_present = {v for v, k in fmt.items() if "SPATIAL" in k or "both" in k}
+    style_migration_note(migration, patch_present=patch_present)
 
     if args.csv:
         with open(args.csv, "w", newline="") as fh:
