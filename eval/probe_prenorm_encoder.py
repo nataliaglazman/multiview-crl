@@ -332,7 +332,10 @@ def verdict(ladder, factor, has_floor=False):
     for a, b, label, lever in transitions:
         per_view = {v: g(a, v) - g(b, v) for v in VIEWS if np.isfinite(g(a, v)) and np.isfinite(g(b, v))}
         if per_view:
-            ranked.append((max(per_view.values()), label, lever, per_view))
+            # A transition where one view GAINS while the other loses is not "a stage that
+            # loses the factor" -- max() alone would report the loss and hide the gain.
+            disagree = max(per_view.values()) > NOISE_FLOOR and min(per_view.values()) < -NOISE_FLOOR
+            ranked.append((max(per_view.values()), label, lever, per_view, disagree))
     ranked.sort(reverse=True, key=lambda r: r[0])
 
     print(f"\nverdict for {factor}  (gap pooling; a move under {NOISE_FLOOR} is not reportable)")
@@ -340,12 +343,21 @@ def verdict(ladder, factor, has_floor=False):
         print("  Not enough stages captured to rank anything.")
         return
 
-    print("  where it is lost, largest first:")
-    for cost, label, _, per_view in ranked:
+    print("  where it is lost, largest first  (positive = the factor got WORSE across that stage):")
+    for cost, label, _, per_view, disagree in ranked:
         detail = "  ".join(f"{VIEW_LABEL[v]} {d:+.3f}" for v, d in per_view.items())
-        print(f"    {cost:+.3f}  {label:<36} ({detail})")
+        flag = "   <- views DISAGREE in sign" if disagree else ""
+        print(f"    {cost:+.3f}  {label:<36} ({detail}){flag}")
 
-    top, top_label, top_lever, _ = ranked[0]
+    top, top_label, top_lever, _, top_disagree = ranked[0]
+    if top_disagree:
+        gainers = ", ".join(VIEW_LABEL[v] for v, d in ranked[0][3].items() if d < -NOISE_FLOOR)
+        losers = ", ".join(VIEW_LABEL[v] for v, d in ranked[0][3].items() if d > NOISE_FLOOR)
+        print(f"\n  {top_label} is NOT a culprit stage: it BUILDS the factor in {gainers} and")
+        print(f"  loses it in {losers}. That is a per-view difference in what the encoder can")
+        print("  extract, not a stage deleting information. Read the per-view columns, and")
+        print("  compare against the recon-only baseline before blaming the architecture.")
+        top = float("-inf")
     if top <= NOISE_FLOOR:
         print(f"\n  No single stage loses more than {NOISE_FLOOR}. The factor is either absent")
         print("  throughout or bleeds away gradually; read the ladder, not this line.")
