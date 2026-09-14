@@ -1,0 +1,12 @@
+nohup: ignoring input
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ng24/projects/multiview-crl/eval/run_dci_compare.py", line 2426, in <module>
+    main()
+  File "/home/ng24/projects/multiview-crl/eval/run_dci_compare.py", line 2279, in main
+    poolings = parse_poolings(cli.poolings)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ng24/projects/multiview-crl/eval/run_dci_compare.py", line 115, in parse_poolings
+    raise ValueError(f"unrecognized pooling token: {tok!r} (use gap, stats, or e.g. 2x2x2)")
+ValueError: unrecognized pooling token: 'patch' (use gap, stats, or e.g. 2x2x2)
