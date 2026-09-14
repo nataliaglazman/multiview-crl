@@ -659,12 +659,16 @@ def _self_test():
     style_scores = score_ladder(style_feats, gt)
     ladder = render_focus(scores, names, names[focus])
     migration = render_migration(scores, style_scores, names, names[focus])
+    migration_patch = render_migration(scores, style_scores, names, names[focus], pooling="patch")
     render_all_factors(scores, names, floor=None)
     render_rms({("pre_norm", "v0", "content"): 1.0, ("pre_norm", "v1", "content"): 0.43})
     verdict(ladder, names[focus], has_floor=False)
     fmt = format_note(ladder, names[focus])
     patch_present = {v for v, k in fmt.items() if "SPATIAL" in k or "both" in k}
     style_migration_note(migration, patch_present=patch_present)
+    if migration_patch:
+        print("\n  --- same split, PATCH pooling (where a spatially-held factor lives) ---")
+        style_migration_note(migration_patch)
 
     pre = ladder[("pre_norm", "v0", "gap")]
     post = ladder[("post_norm", "v0", "gap")]
@@ -768,6 +772,11 @@ def main():
             print(f"  {pooling} probe width: {sorted(ws)}  (PCA-reduced when p >> n; see reduce_block)")
     ladder = render_focus(scores, names, args.factor, floor=floor_scores)
     migration = render_migration(scores, style_scores, names, args.factor, floor_scores, floor_style)
+    # FLAIR carries this factor spatially, so the content/style split has to be read at
+    # patch as well -- a gap-only split calls a spatially-held factor absent from both.
+    migration_patch = render_migration(
+        scores, style_scores, names, args.factor, floor_scores, floor_style, pooling="patch"
+    )
     render_all_factors(scores, names, floor=floor_scores)
     render_rms(rms, block="content")
     render_rms(rms, block="style")
@@ -775,6 +784,9 @@ def main():
     fmt = format_note(ladder, args.factor)
     patch_present = {v for v, k in fmt.items() if "SPATIAL" in k or "both" in k}
     style_migration_note(migration, patch_present=patch_present)
+    if migration_patch:
+        print("\n  --- same split, PATCH pooling (where a spatially-held factor lives) ---")
+        style_migration_note(migration_patch)
 
     if args.csv:
         with open(args.csv, "w", newline="") as fh:
