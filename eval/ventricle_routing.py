@@ -167,9 +167,42 @@ def decode_swaps(model, samples, device):
     x = torch.cat([torch.stack([s[state][v] for s in samples]) for v in range(2) for state in ("a", "b")]).to(device)
     masks = torch.cat([torch.stack([s["mask"] for s in samples])] * 4).to(device)
     with torch.inference_mode():
-        out, pre_style = model(
-            x, return_recon=True, pool_only=False, n_views=2, subsets=[(0, 1)], mask=masks, return_style_features=True
-        )
+        # Capture actual q outputs, not embed_code(ids): forward's straight-through
+        # x + (q - x).detach() can incur cancellation when encoder magnitudes grow.
+        # Do not alter the quantizer or training arithmetic to fix an eval replay.
+        captured, handles = {}, []
+
+        def capture(key):
+            def hook(module, inputs, output):
+                if key in captured:
+                    raise ValueError(f"Content codebook {key} ran more than once; replay mapping is ambiguous")
+                captured[key] = output[0].detach()
+
+            return hook
+
+        split = model.separate_content_codebooks and model.codebooks_v1 is not None
+        try:
+            for level, cb in enumerate(model.codebooks):
+                handles.append(cb.register_forward_hook(capture((level, 0))))
+            if split:
+                for level, cb in enumerate(model.codebooks_v1):
+                    handles.append(cb.register_forward_hook(capture((level, 1))))
+            out, pre_style = model(
+                x,
+                return_recon=True,
+                pool_only=False,
+                n_views=2,
+                subsets=[(0, 1)],
+                mask=masks,
+                return_style_features=True,
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+        quantized = {
+            level: torch.cat([captured[level, 0], captured[level, 1]]) if split else captured[level, 0]
+            for level in range(model.nb_levels)
+        }
         post_style = model._last_style_spatials
         if not post_style:
             raise ValueError("No decoder-bound style features; the run may have an all-content split")
@@ -177,29 +210,53 @@ def decode_swaps(model, samples, device):
         codes = list(reversed(out[5]))
         if len(codes) != model.nb_levels or any(c is None for c in codes):
             raise ValueError("Missing content codes")
+
+        # Replay all 4N rows, preserving the forward's batch geometry. GPU convolution
+        # kernels can change with batch size, producing another numerical discrepancy.
+        replay = model.decode_codes(quantized_codes=quantized, styles=dict(post_style), target_spatial_size=x.shape[2:])
+        if replay.shape != x.shape or not bool(torch.isfinite(replay).all()):
+            raise ValueError("Invalid endpoint reconstruction")
+        reference = out[0]
+        if not torch.allclose(replay, reference, atol=2e-5, rtol=2e-4):
+            error = (replay - reference).abs()
+            raise ValueError(
+                "Exact-tensor endpoint does not reproduce forward; swaps would be invalid. "
+                f"max_abs={error.max().item():.6g}, rms={error.square().mean().sqrt().item():.6g}, "
+                f"reference_rms={reference.square().mean().sqrt().item():.6g}, "
+                f"device={x.device}, shape={tuple(x.shape)}"
+            )
+
+        # Exchange A/B content donors within each modality; style stays at its row.
+        # Original A rows now decode BA, and original B rows decode AB. Preserve
+        # tensor memory format as well as batch shape for comparable decoder calls.
+        order = torch.arange(len(x), device=x.device).reshape(2, 2, n).flip(1).reshape(-1)
+        swapped = {}
+        for level, q in quantized.items():
+            swapped[level] = torch.empty_like(q)
+            swapped[level].copy_(q[order])
+        hybrid = model.decode_codes(quantized_codes=swapped, styles=dict(post_style), target_spatial_size=x.shape[2:])
+        if hybrid.shape != x.shape or not bool(torch.isfinite(hybrid).all()):
+            raise ValueError("Invalid hybrid reconstruction")
         recon, diagnostics = [], []
         for view in range(2):
             start = view * 2 * n
             slices = {"a": slice(start, start + n), "b": slice(start + n, start + 2 * n)}
-            hybrids = {}
-            for label in ("aa", "ba", "ab", "bb"):
-                c, s = slices[label[0]], slices[label[1]]
-                y = model.decode_codes(
-                    *[code[c] for code in codes],
-                    styles={level: feature[s] for level, feature in post_style.items()},
-                    content_view_idx=view,
-                    style_view_idx=view,
-                    target_spatial_size=x.shape[2:],
-                )
-                if y.shape != x[c].shape or not bool(torch.isfinite(y).all()):
-                    raise ValueError("Invalid decoded image")
-                if label in ("aa", "bb"):
-                    reference = out[0][c]
-                    if not torch.allclose(y, reference, atol=2e-5, rtol=2e-4):
-                        raise ValueError("Stored-code endpoint does not reproduce forward; swaps would be invalid")
-                hybrids[label] = y[:, 0].cpu().numpy()
-            recon.append(hybrids)
-            view_diag = {}
+            recon.append(
+                {
+                    "aa": replay[slices["a"], 0].cpu().numpy(),
+                    "bb": replay[slices["b"], 0].cpu().numpy(),
+                    "ba": hybrid[slices["a"], 0].cpu().numpy(),
+                    "ab": hybrid[slices["b"], 0].cpu().numpy(),
+                }
+            )
+            view_diag = {
+                "endpoint_replay_max_abs": (replay[start : start + 2 * n] - reference[start : start + 2 * n])
+                .abs()
+                .reshape(2, n, -1)
+                .amax(dim=(0, 2))
+                .cpu()
+                .numpy()
+            }
 
             def response(name, features):
                 diff = features[slices["b"]] - features[slices["a"]]
@@ -216,12 +273,7 @@ def decode_swaps(model, samples, device):
                 )
                 if idx.any():
                     response(f"content_pre_L{level}", feature[:, idx])
-                cb = model.codebooks
-                if model.separate_content_codebooks and view == 1:
-                    cb = model.codebooks_v1
-                embedded = cb[level].embed_code(codes[level][start : start + 2 * n])
-                diff = embedded[n:] - embedded[:n]
-                view_diag[f"content_post_L{level}_delta_rms"] = diff.flatten(1).square().mean(1).sqrt().cpu().numpy()
+                response(f"content_post_L{level}", quantized[level])
                 view_diag[f"content_L{level}_code_change_fraction"] = (
                     (codes[level][slices["a"]] != codes[level][slices["b"]]).flatten(1).float().mean(1).cpu().numpy()
                 )

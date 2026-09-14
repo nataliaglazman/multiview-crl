@@ -43,6 +43,15 @@ def load_without_monai(relative):
     return module
 
 
+class OracleCodebook(torch.nn.Module):
+    def __init__(self, offset):
+        super().__init__()
+        self.offset = offset
+
+    def forward(self, x):
+        return x, x.new_zeros(()), x[:, 0] - self.offset
+
+
 class RoutingOracle(torch.nn.Module):
     """Identity endpoints with a known fraction of the response carried by content."""
 
@@ -52,21 +61,21 @@ class RoutingOracle(torch.nn.Module):
         self.nb_levels = 1
         self.inject_style_to_decoder = True
         self.separate_content_codebooks = True
-        self.codebooks = [types.SimpleNamespace(embed_code=lambda x: x)]
-        self.codebooks_v1 = [types.SimpleNamespace(embed_code=lambda x: x + 10)]
+        self.codebooks = torch.nn.ModuleList([OracleCodebook(0)])
+        self.codebooks_v1 = torch.nn.ModuleList([OracleCodebook(10)])
         self.eval()
 
     def forward(self, x, **kwargs):
         assert kwargs["n_views"] == 2
-        code = x[:, 0].clone()
-        code[len(x) // 2 :] -= 10
+        first = self.codebooks[0](x[: len(x) // 2])
+        second = self.codebooks_v1[0](x[len(x) // 2 :])
+        code = torch.cat([first[2], second[2]])
         self._last_style_spatials = {0: x.clone()}
         result = (x, [], [torch.cat([x, x], 1)], None, [], [code], {0: torch.tensor([[1, 0]])}, {})
         return result, {0: x.clone()}
 
-    def decode_codes(self, code, styles, content_view_idx, **kwargs):
-        content = code[:, None] + 10 * content_view_idx
-        return self.weight * content + (1 - self.weight) * styles[0]
+    def decode_codes(self, quantized_codes, styles, **kwargs):
+        return self.weight * quantized_codes[0] + (1 - self.weight) * styles[0]
 
 
 class ScoringTests(unittest.TestCase):
@@ -186,6 +195,83 @@ class PipelineTests(unittest.TestCase):
         model.train()
         with self.assertRaisesRegex(ValueError, "model.eval"):
             decode_swaps(model, samples, "cpu")
+
+    def test_decoder_batch_geometry_matches_original_forward(self):
+        class BatchDependentOracle(RoutingOracle):
+            def forward(self, x, **kwargs):
+                out, pre = super().forward(x, **kwargs)
+                return (out[0] + len(x) * 0.01, *out[1:]), pre
+
+            def decode_codes(self, quantized_codes, **kwargs):
+                return super().decode_codes(quantized_codes, **kwargs) + len(quantized_codes[0]) * 0.01
+
+        ds = self.dataset()
+        for weight in (0, 1):
+            rows, _, _ = audit(BatchDependentOracle(weight), ds, "cpu", eps=0.5, batch_size=2, examples=0)
+            for row in rows:
+                if row["valid_input"]:
+                    self.assertAlmostEqual(row["joint_gain"], 1, places=5)
+                    self.assertAlmostEqual(row["content_mean_gain"], weight, places=5)
+                    self.assertAlmostEqual(row["endpoint_replay_max_abs"], 0, places=6)
+
+    def test_replay_uses_actual_ste_values_when_id_lookup_loses_precision(self):
+        torch.manual_seed(29)
+        model = self.Model(
+            hidden_channels=16,
+            res_channels=8,
+            nb_res_layers=2,
+            nb_levels=1,
+            embed_dim=16,
+            nb_entries=32,
+            scaling_rates=[4],
+            content_size=12,
+            style_size=4,
+            content_style_levels=[0],
+            mask_mode="fixed",
+            inject_style_to_decoder=True,
+            style_injection_mode="input",
+            quantize_style=True,
+            norm_type="layer",
+            decoder_norm_type="group",
+            final_recon_norm=False,
+            use_checkpoint=False,
+        ).eval()
+        with torch.no_grad():
+            model.codebooks[0].conv_in.weight.mul_(10000)
+        before = {k: v.clone() for k, v in model.state_dict().items()}
+        samples = [
+            {
+                "a": [torch.randn(1, 32, 32, 32) for _ in range(2)],
+                "b": [torch.randn(1, 32, 32, 32) for _ in range(2)],
+                "mask": torch.ones(1, 32, 32, 32),
+            }
+            for _ in range(2)
+        ]
+        decoded, diagnostics = decode_swaps(model, samples, "cpu")
+        exact = torch.from_numpy(np.concatenate([decoded[v][k] for v in range(2) for k in ("aa", "bb")]))[:, None]
+        with torch.inference_mode():
+            # Legacy API remains available, but lookup alone is not exact forward replay.
+            lookup = model.decode_codes(
+                model._last_id_outputs[0], styles=dict(model._last_style_spatials), target_spatial_size=(32,) * 3
+            )
+        self.assertFalse(torch.allclose(lookup, exact, atol=2e-5, rtol=2e-4))
+        self.assertGreater(float((lookup - exact).abs().max()), 2e-5)
+        for view in diagnostics:
+            self.assertLess(float(view["endpoint_replay_max_abs"].max()), 2e-6)
+        for key, value in model.state_dict().items():
+            self.assertTrue(torch.equal(value, before[key]), key)
+        self.assertEqual(len(model.codebooks[0]._forward_hooks), 0)
+        with self.assertRaisesRegex(ValueError, "every model level"):
+            model.decode_codes(quantized_codes={})
+
+    def test_capture_hooks_are_removed_if_forward_fails(self):
+        model = RoutingOracle(1)
+        samples = [render_pair(self.dataset(), 0)]
+        with patch.object(model, "forward", side_effect=RuntimeError("injected failure")):
+            with self.assertRaisesRegex(RuntimeError, "injected failure"):
+                decode_swaps(model, samples, "cpu")
+        self.assertEqual(len(model.codebooks[0]._forward_hooks), 0)
+        self.assertEqual(len(model.codebooks_v1[0]._forward_hooks), 0)
 
     def test_cli_writes_report_rows_and_panels(self):
         ds = self.dataset()

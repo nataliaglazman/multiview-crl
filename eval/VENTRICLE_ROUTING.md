@@ -28,9 +28,14 @@ Both states share one forward, so on-the-fly channel masks cannot differ between
 donors; those masks may still depend on the other subjects in the batch.
 
 The four reconstructions are `AA`, `BA`, `AB`, `BB`, with **content donor first**.
-Swaps are within modality and exchange all content codes or all injected style
-tensors. `AA` and `BB` must reproduce the corresponding forward reconstructions;
-the diagnostic stops if this check fails. Separate modality codebooks and multiple
+Swaps are within modality and exchange all decoder-bound quantized content tensors
+while holding injected style fixed. The replay captures actual quantizer outputs:
+forward's straight-through arithmetic can round differently from an ID lookup.
+All decoder calls keep the original batch shape and tensor memory format, avoiding
+batch-size changes in GPU convolution kernels. `AA` and `BB` must reproduce the
+corresponding forward reconstructions; the diagnostic stops with numerical error
+details if this check fails. `endpoint_replay_max_abs` records the error per subject.
+Separate modality codebooks and multiple
 levels are supported. At multiple levels, fine content codes may already include
 conditioning from coarser style-dependent reconstructions.
 
@@ -78,6 +83,8 @@ python -m unittest discover -s tests -p test_ventricle_routing.py -v
 Controls cover known content/style/mixed routes, nonlinear interactions, a constant
 decoder, invisible input changes, real rendering with frozen normalization and
 noise, partial batches, CLI output, and real VQ-VAE endpoint round trips with
-multiple levels and separate modality codebooks. Model parameters and buffers are
-checked for changes. Tests omit unrelated ADNI imports when loading model/dataset
+multiple levels and separate modality codebooks. Regression controls reproduce
+straight-through cancellation and a batch-dependent decoder, while retaining the
+endpoint validity check. Model parameters and buffers are checked for changes,
+and temporary capture hooks are removed even on failure. Tests omit unrelated ADNI imports when loading model/dataset
 code, allowing these controls to run without MONAI or pandas.

@@ -1662,6 +1662,7 @@ class VQVAE(HelperModule):
         target_spatial_size=None,
         style_view_idx=0,
         content_view_idx=0,
+        quantized_codes=None,
     ):
         """Decode from discrete codes back to the input space.
 
@@ -1686,7 +1687,14 @@ class VQVAE(HelperModule):
             content_view_idx: When ``separate_content_codebooks`` is active, selects
                               which view's content codebook decodes ``cs`` (0 or 1).
                               Ignored for shared content codebooks. Default 0.
+            quantized_codes: Optional complete dict of level -> (B, C, D, H, W)
+                             decoder-bound content tensors. Bypasses ID lookup when
+                             supplied, allowing exact replay of forward's quantized
+                             values, including straight-through floating-point rounding.
+                             The caller must preserve each view's codebook provenance.
         """
+        if quantized_codes is not None and set(quantized_codes) != set(range(self.nb_levels)):
+            raise ValueError("quantized_codes must supply every model level")
         if styles is None:
             styles = {}
         if style_codes is None:
@@ -1718,7 +1726,12 @@ class VQVAE(HelperModule):
 
         for l in range(self.nb_levels - 1, -1, -1):
             codebook, decoder = _content_cbs[l], self.decoders[l]
-            code_q = codebook.embed_code(cs[l]).permute(0, 4, 1, 2, 3)
+            if quantized_codes is None:
+                code_q = codebook.embed_code(cs[l]).permute(0, 4, 1, 2, 3)
+            else:
+                code_q = quantized_codes[l]
+                if code_q.ndim != 5 or code_q.shape[1] != codebook.dim:
+                    raise ValueError(f"quantized_codes[{l}] must have shape (B, {codebook.dim}, D, H, W)")
             target_size = code_q.shape[2:]
             upscaled_codes = []
             for i, c in enumerate(code_outputs):
