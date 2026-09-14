@@ -41,6 +41,15 @@ changing one stage alone will not recover the factor.
                                     WEAK view (`generator_defects` scores `render(...)[0]`,
                                     i.e. T1 only, so it has never measured FLAIR).
 
+The CONTENT vs STYLE table separates the two ways a factor can leave content.  Content
+falling while style rises is MIGRATION -- the factor is still in the latent, just on the
+pathway with no invariance constraint on it, and the levers are the style-capacity flags
+(--style-spatial-size, --detach-style-injection, --style-dropout-prob,
+--scale-style-hsic-loss).  Both blocks falling is DESTRUCTION, where capping style changes
+nothing and the question is content capacity.  The content ladder alone cannot tell these
+apart, which is why the style block is read off the same tensor (under --mask-mode fixed
+the first n_content channels are content and the rest are style).
+
 The RMS table is the separate test for the codebook: the content codebook quantizes by
 squared euclidean distance (`models/vqvae.py:491`) and is shared across views, so a
 per-view scale gap would send the two views to different entries.  Ratios at ~1.00 rule
@@ -79,6 +88,7 @@ logger = logging.getLogger(__name__)
 STAGES = ("pre_norm", "post_norm", "encoder_out", "codebook_in")
 VIEWS = ("v0", "v1")
 POOLINGS = ("gap", "patch")
+BLOCKS = ("content", "style")
 VIEW_LABEL = {"v0": "T1", "v1": "FLAIR"}
 
 
@@ -166,13 +176,94 @@ def render_all_factors(scores, names, stage="encoder_out", pooling="gap", floor=
         print(f"  {name:<18}" + "".join(f"{v:>10.3f}" for v in vals) + f"{ratio:>10.2f}")
 
 
-def render_rms(rms):
+def render_migration(c_scores, s_scores, names, factor, floor_c=None, floor_s=None, pooling="gap"):
+    """Content vs style for one factor at every stage -- did it MOVE or was it destroyed?
+
+    Content falling while style rises is migration: the factor is still in the latent, just
+    on the unconstrained pathway.  Both falling is destruction.  The two call for completely
+    different fixes, and the content ladder alone cannot tell them apart.
+    """
+    j = names.index(factor)
+    stages = [s for s in STAGES if any((s, v, pooling) in c_scores for v in VIEWS)]
+    views = _present_views(c_scores)
+    if not stages or not s_scores:
+        return None
+
+    def cell(scores, floor, stage, view):
+        key = (stage, view, pooling)
+        if key not in scores:
+            return None
+        val = float(scores[key][j])
+        if floor is not None and key in floor:
+            val -= float(floor[key][j])
+        return val
+
+    tag = "learned - untrained floor" if floor_c is not None else "absolute (NO floor subtracted)"
+    print(f"\n{factor}: CONTENT vs STYLE block, {pooling} pooling  [{tag}]")
+    head = f"  {'stage':<14}" + "".join(f"{VIEW_LABEL[v] + ' ' + b:>16}" for v in views for b in BLOCKS)
+    print(head)
+    print("  " + "-" * (len(head) - 2))
+    out = {}
+    for stage in stages:
+        cells = []
+        for v in views:
+            c = cell(c_scores, floor_c, stage, v)
+            st = cell(s_scores, floor_s, stage, v)
+            out[(stage, v, "content")], out[(stage, v, "style")] = c, st
+            cells += [c, st]
+        print(f"  {stage:<14}" + "".join(f"{_fmt(x):>16}" for x in cells))
+    return out
+
+
+def style_migration_note(migration):
+    """Say whether the factor moved to style, was destroyed, or neither."""
+    if not migration:
+        return
+    stages = [s for s in STAGES if any((s, v, "content") in migration for v in VIEWS)]
+    if len(stages) < 2:
+        return
+    first, last = stages[0], stages[-1]
+
+    def best(stage, block):
+        vals = [migration.get((stage, v, block)) for v in VIEWS]
+        vals = [x for x in vals if x is not None and np.isfinite(x)]
+        return max(vals) if vals else float("nan")
+
+    c0, c1 = best(first, "content"), best(last, "content")
+    s0, s1 = best(first, "style"), best(last, "style")
+    print("\n  content vs style across the encoder:")
+    print(f"    content {first} {c0:+.3f} -> {last} {c1:+.3f}   ({c1 - c0:+.3f})")
+    if np.isfinite(s0) and np.isfinite(s1):
+        print(f"    style   {first} {s0:+.3f} -> {last} {s1:+.3f}   ({s1 - s0:+.3f})")
+    else:
+        print("    style   not measured (no style channels at this width)")
+        return
+
+    lost = c0 - c1
+    if lost <= NOISE_FLOOR:
+        print("  Content does not lose it, so there is nothing to migrate.")
+    elif s1 > NOISE_FLOOR and s1 >= c1:
+        print("  MIGRATION: content loses it while style ends up holding it. The factor is still")
+        print("  in the latent, on the pathway with no invariance constraint. Levers, in order:")
+        print("    --style-spatial-size 1|2   cap style's spatial grid so it cannot carry a cavity")
+        print("    --detach-style-injection   stop recon backprop teaching style to hold anatomy")
+        print("    --style-dropout-prob 0.25  force recon from content alone on some samples")
+        print("    --scale-style-hsic-loss    explicit style-content independence (supervised)")
+    elif s1 <= NOISE_FLOOR and c1 <= NOISE_FLOOR:
+        print("  DESTRUCTION, not migration: neither block holds it at the end. Capping the style")
+        print("  pathway will not bring it back -- look at content capacity and the objective.")
+    else:
+        print("  Mixed: content loses it but style does not clearly gain it. Read the table.")
+
+
+def render_rms(rms, block="content"):
     """Feature scale per stage per view.  A per-view gap here is what the shared,
     squared-euclidean codebook cannot absorb."""
+    rms = {(s, v): x for (s, v, b), x in rms.items() if b == block}
     if not rms:
         return
     views = [v for v in VIEWS if any((s, v) in rms for s in STAGES)]
-    print("\nContent-block feature RMS  (a per-view gap is what the shared L2 codebook sees)")
+    print(f"\n{block.capitalize()}-block feature RMS  (a per-view gap is what the shared L2 codebook sees)")
     head = f"  {'stage':<14}" + "".join(f"{VIEW_LABEL[v]:>12}" for v in views) + f"{'v1/v0':>10}"
     print(head)
     print("  " + "-" * (len(head) - 2))
@@ -302,7 +393,8 @@ def _collect(model, inner, loader, device, level, patch_grid, n_content):
 
     use_latent_mask = bool(getattr(inner, "latent_mask", False))
     feats = {(s, v, p): [] for s in STAGES for v in VIEWS for p in POOLINGS}
-    sq_sum = {(s, v): [0.0, 0] for s in STAGES for v in VIEWS}
+    style_feats = {(s, v, p): [] for s in STAGES for v in VIEWS for p in POOLINGS}
+    sq_sum = {(s, v, b): [0.0, 0] for s in STAGES for v in VIEWS for b in BLOCKS}
     gts = []
 
     def _as_views(tensors, batch_half):
@@ -340,22 +432,31 @@ def _collect(model, inner, loader, device, level, patch_grid, n_content):
                 per_stage["codebook_in"] = _as_views(raw[("codebook_in", "cn")], half)
 
             for stage, (a, b) in per_stage.items():
-                for view, t in (("v0", a), ("v1", b)):
-                    if t is None:
+                for view, full in (("v0", a), ("v1", b)):
+                    if full is None:
                         continue
-                    t = t[:, :n_content].float()
-                    sq_sum[(stage, view)][0] += float(t.pow(2).sum().item())
-                    sq_sum[(stage, view)][1] += int(t.numel())
-                    feats[(stage, view, "gap")].append(t.mean(dim=[2, 3, 4]).cpu().numpy())
-                    feats[(stage, view, "patch")].append(F.adaptive_avg_pool3d(t, patch_grid).flatten(1).cpu().numpy())
+                    # Under --mask-mode fixed the first n_content channels ARE content and
+                    # the rest ARE style, so the two blocks can be read off the same tensor.
+                    blocks = {"content": full[:, :n_content].float()}
+                    if full.shape[1] > n_content:
+                        blocks["style"] = full[:, n_content:].float()
+                    for block, t in blocks.items():
+                        sq_sum[(stage, view, block)][0] += float(t.pow(2).sum().item())
+                        sq_sum[(stage, view, block)][1] += int(t.numel())
+                        sink = feats if block == "content" else style_feats
+                        sink[(stage, view, "gap")].append(t.mean(dim=[2, 3, 4]).cpu().numpy())
+                        sink[(stage, view, "patch")].append(
+                            F.adaptive_avg_pool3d(t, patch_grid).flatten(1).cpu().numpy()
+                        )
             gts.append(batch["gt_latents"]["z_content"].numpy())
 
     for h in handles:
         h.remove()
 
     feats = {k: np.concatenate(v, 0) for k, v in feats.items() if v}
+    style_feats = {k: np.concatenate(v, 0) for k, v in style_feats.items() if v}
     rms = {k: float(np.sqrt(s / n)) for k, (s, n) in sq_sum.items() if n}
-    return feats, rms, np.concatenate(gts, 0)
+    return feats, style_feats, rms, np.concatenate(gts, 0)
 
 
 def _load(run_dir, checkpoint, random_init, seed):
@@ -382,8 +483,13 @@ def _content_width(run_args, all_channels):
 
 
 def _ladder(model, inner, loader, device, args, n_content):
-    feats, rms, gt = _collect(model, inner, loader, device, args.level, args.patch_grid, n_content)
-    return {k: reduce_block(X) for k, X in feats.items()}, rms, gt
+    feats, style, rms, gt = _collect(model, inner, loader, device, args.level, args.patch_grid, n_content)
+    return (
+        {k: reduce_block(X) for k, X in feats.items()},
+        {k: reduce_block(X) for k, X in style.items()},
+        rms,
+        gt,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -411,11 +517,23 @@ def _self_test():
         feats[("encoder_out", "v0", pooling)] = block(False)
         feats[("encoder_out", "v1", pooling)] = block(False)
 
+    style_feats = {}
+    for pooling in POOLINGS:
+        style_feats[("pre_norm", "v0", pooling)] = block(False)
+        style_feats[("pre_norm", "v1", pooling)] = block(False)
+        style_feats[("post_norm", "v0", pooling)] = block(True)  # the planted migration
+        style_feats[("post_norm", "v1", pooling)] = block(True)
+        style_feats[("encoder_out", "v0", pooling)] = block(True)
+        style_feats[("encoder_out", "v1", pooling)] = block(True)
+
     scores = score_ladder(feats, gt)
+    style_scores = score_ladder(style_feats, gt)
     ladder = render_focus(scores, names, names[focus])
+    migration = render_migration(scores, style_scores, names, names[focus])
     render_all_factors(scores, names, floor=None)
-    render_rms({("pre_norm", "v0"): 1.0, ("pre_norm", "v1"): 0.43})
+    render_rms({("pre_norm", "v0", "content"): 1.0, ("pre_norm", "v1", "content"): 0.43})
     verdict(ladder, names[focus], has_floor=False)
+    style_migration_note(migration)
 
     pre = ladder[("pre_norm", "v0", "gap")]
     post = ladder[("post_norm", "v0", "gap")]
@@ -467,25 +585,30 @@ def main():
     ds = build_synthetic_test_set(run_args, args.num_samples, causal=False)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    feats, rms, gt = _ladder(model, inner, loader, device, args, n_content)
+    feats, style_feats, rms, gt = _ladder(model, inner, loader, device, args, n_content)
     names = CONTENT_FACTOR_NAMES[: gt.shape[1]]
     if args.factor not in names:
         ap.error(f"--factor {args.factor!r} not in {names}")
     scores = score_ladder(feats, gt, seeds=seeds)
+    style_scores = score_ladder(style_feats, gt, seeds=seeds) if style_feats else {}
 
-    floor_scores = None
+    floor_scores = floor_style = None
     if args.floor:
         logger.info("scoring the untrained twin (seed %d) on the SAME rows ...", args.floor_seed)
         f_model, f_inner, _, f_device = _load(args.run_dir, args.checkpoint, random_init=True, seed=args.floor_seed)
-        f_feats, _, f_gt = _ladder(f_model, f_inner, loader, f_device, args, n_content)
+        f_feats, f_style, _, f_gt = _ladder(f_model, f_inner, loader, f_device, args, n_content)
         floor_scores = score_ladder(f_feats, f_gt, seeds=seeds)
+        floor_style = score_ladder(f_style, f_gt, seeds=seeds) if f_style else None
 
     print(f"\nrun: {args.run_dir} | level {args.level} | content channels {n_content} | N={gt.shape[0]}")
     print("factors drawn i.i.d. (causal=False) so per-factor attribution is unambiguous")
     ladder = render_focus(scores, names, args.factor, floor=floor_scores)
+    migration = render_migration(scores, style_scores, names, args.factor, floor_scores, floor_style)
     render_all_factors(scores, names, floor=floor_scores)
-    render_rms(rms)
+    render_rms(rms, block="content")
+    render_rms(rms, block="style")
     verdict(ladder, args.factor, has_floor=floor_scores is not None)
+    style_migration_note(migration)
 
     if args.csv:
         with open(args.csv, "w", newline="") as fh:
