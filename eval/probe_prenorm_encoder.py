@@ -171,27 +171,51 @@ def render_focus(scores, names, factor, floor=None):
 
 
 def render_all_factors(scores, names, stage="encoder_out", pooling="gap", floor=None):
-    """Every factor at one stage -- the positive controls that say the probe works."""
+    """Every factor at one stage, ABSOLUTE and floor side by side.
+
+    The delta alone cannot support a cross-view claim.  The untrained floor is a random
+    projection of THAT VIEW's images, so it differs per view by construction: a random
+    channel mean of a T1 volume tracks brain_size well (T1's global mean is dominated by
+    it) while the same projection of a FLAIR volume does not.  A view can therefore look
+    "weaker" purely because its floor is higher.  Both columns are printed so that reading
+    is available rather than hidden.
+    """
     views = _present_views(scores)
     if not any((stage, v, pooling) in scores for v in views):
         return
-    print(f"\nAll factors at {stage}, {pooling} pooling  (context: the survivors should NOT split by view)")
-    head = f"  {'factor':<18}" + "".join(f"{VIEW_LABEL[v]:>10}" for v in views) + f"{'v1/v0':>10}"
+    has_floor = floor is not None
+    print(f"\nAll factors at {stage}, {pooling} pooling  (abs = learned, flr = untrained floor, d = gap over it)")
+    cols = ("abs", "flr", "d") if has_floor else ("abs",)
+    head = f"  {'factor':<18}" + "".join(f"{VIEW_LABEL[v] + ' ' + c:>10}" for v in views for c in cols)
     print(head)
     print("  " + "-" * (len(head) - 2))
     for j, name in enumerate(names):
-        vals = []
+        row = ""
         for v in views:
             key = (stage, v, pooling)
             if key not in scores:
-                vals.append(float("nan"))
+                row += "".join(f"{'--':>10}" for _ in cols)
                 continue
-            val = float(scores[key][j])
-            if floor is not None and key in floor:
-                val -= float(floor[key][j])
-            vals.append(val)
-        ratio = vals[1] / vals[0] if len(vals) == 2 and np.isfinite(vals[0]) and abs(vals[0]) > 1e-6 else float("nan")
-        print(f"  {name:<18}" + "".join(f"{v:>10.3f}" for v in vals) + f"{ratio:>10.2f}")
+            a = float(scores[key][j])
+            f = float(floor[key][j]) if has_floor and key in floor else float("nan")
+            vals = (a, f, a - f) if has_floor else (a,)
+            row += "".join(f"{x:>10.3f}" for x in vals)
+        print(f"  {name:<18}{row}")
+
+    if has_floor and len(views) == 2:
+        k0 = (stage, views[0], pooling)
+        k1 = (stage, views[1], pooling)
+        if k0 in floor and k1 in floor:
+            f0, f1 = np.nanmean(floor[k0]), np.nanmean(floor[k1])
+            a0, a1 = np.nanmean(scores[k0]), np.nanmean(scores[k1])
+            print(
+                f"\n  mean over factors: {VIEW_LABEL[views[0]]} abs {a0:+.3f} flr {f0:+.3f}   "
+                f"{VIEW_LABEL[views[1]]} abs {a1:+.3f} flr {f1:+.3f}"
+            )
+            if abs(f0 - f1) > NOISE_FLOOR:
+                hi = VIEW_LABEL[views[0] if f0 > f1 else views[1]]
+                print(f"  The FLOORS differ by {abs(f0 - f1):.3f} ({hi} higher). A per-view difference in the")
+                print("  DELTA column of that size says nothing about the learned code -- compare abs.")
 
 
 def render_migration(c_scores, s_scores, names, factor, floor_c=None, floor_s=None, pooling="gap"):
