@@ -185,7 +185,7 @@ class PipelineTests(unittest.TestCase):
         cls.dataset_module = load_without_monai("data/datasets.py")
         cls.Model = load_without_monai("models/vqvae.py").VQVAE
 
-    def dataset(self, normalization="per_sample", **kwargs):
+    def dataset(self, normalization="per_sample", spatial_size=None, **kwargs):
         settings = dict(
             synthetic_mode="pseudo_mri",
             synthetic_res=32,
@@ -198,8 +198,19 @@ class PipelineTests(unittest.TestCase):
             synthetic_causal=True,
         )
         settings.update(kwargs)
+        settings["spatial_size"] = spatial_size
         with patch.dict("sys.modules", {"data.datasets": self.dataset_module}):
             return make_dataset(argparse.Namespace(**settings), 3, "iid", "test")
+
+    def test_run_resolution_reaches_renderer_and_explicit_spatial_size_takes_precedence(self):
+        ds = self.dataset(synthetic_res=64)
+        self.assertEqual(ds.res, 64)
+        self.assertEqual(ds._inner.res, 64)
+        sample = render_pair(ds, 0, eps=0.5)
+        self.assertEqual(tuple(sample["a"][0].shape), (1, 64, 64, 64))
+        self.assertEqual(sample["support"].shape, (64, 64, 64))
+        explicit = self.dataset(synthetic_res=64, spatial_size=(40, 48, 44))
+        self.assertEqual(explicit.res, 40)
 
     def test_real_rendering_freezes_noise_factors_and_normalization(self):
         for normalization in ("per_sample", "shared", "fixed_reference"):
@@ -378,6 +389,7 @@ class PipelineTests(unittest.TestCase):
                 main()
             report = json.loads((Path(tmp) / "summary.json").read_text())
             self.assertEqual(report["summary"]["t1"]["n"], 3)
+            self.assertEqual(report["render_resolution"], ds.res)
             self.assertAlmostEqual(report["summary"]["t1"]["metrics"]["style_mean_gain"]["median"], 1, places=5)
             with (Path(tmp) / "samples.csv").open() as f:
                 self.assertEqual(len(list(csv.DictReader(f))), 6)

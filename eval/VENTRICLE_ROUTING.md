@@ -13,6 +13,12 @@ for a different checkpoint, `--device cpu` for CPU inference, and `--out-dir`
 to choose the destination. Each forward contains four volumes per subject
 (two ventricle states × two modalities). Checkpoints are never written.
 
+Resolution follows the run's `spatial_size`, falling back to `synthetic_res`
+(64 if absent), matching `build_synthetic_test_set`. The actual cubic resolution
+is logged and saved as `render_resolution`. Earlier versions omitted the
+`spatial_size` argument and silently rendered at 32³; rerun those results before
+comparing them with a 64³ probe or interpreting them at training resolution.
+
 The diagnostic uses the saved synthetic settings and requires an injected,
 nonempty style pathway. Base anatomies follow the run's distribution by default
 (`--causal match`); `--causal iid` is an optional distribution-shift control.

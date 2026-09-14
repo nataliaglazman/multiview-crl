@@ -100,7 +100,13 @@ def make_dataset(args, n, causal="match", split="test"):
     if causal == "iid":
         kw.update(synthetic_causal=False, synthetic_hierarchical_content=False)
     kw.update(synthetic_num_samples=n, synthetic_num_samples_per_mode=None)
-    return SyntheticBrainDataset(mode=split, cache=False, **kw)
+    # SyntheticBrainDataset takes resolution via spatial_size, not synthetic_res.
+    # Omitting it silently selects 32, even for checkpoints trained at 64.
+    res = getattr(args, "synthetic_res", 64)
+    spatial_size = getattr(args, "spatial_size", None) or (res, res, res)
+    ds = SyntheticBrainDataset(mode=split, spatial_size=spatial_size, cache=False, **kw)
+    logger.info("Ventricle routing renders at %d³ (requested spatial_size=%s)", ds.res, spatial_size)
+    return ds
 
 
 def normalization_affine(raw, normalized, mask):
@@ -452,6 +458,7 @@ def main():
         "protocol": __doc__,
         "normalization": "Original sample foreground affine frozen for A and B",
         "generator": "legacy_pre_7ac56a3" if cli.old_generator else "current",
+        "render_resolution": ds.res,
         "replay_validation": {
             "endpoint_rms_atol": REPLAY_RMS_ATOL,
             "endpoint_rms_rtol": REPLAY_RMS_RTOL,
