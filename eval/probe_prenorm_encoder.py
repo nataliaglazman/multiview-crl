@@ -13,26 +13,38 @@ recoverability drops:
     encoder_out   after the residual stack                (what every probe reads)
     codebook_in   after content_norms[level]              (what the codebook sees)
 
-Both views are scored apart, because the hypothesis under test is asymmetric.  On the
-pseudo-MRI LUT the ventricle/WM edge is the STRONGEST internal edge in T1 (0.70, against
-WM/GM 0.30) and the WEAKEST in FLAIR (0.30, against WM/GM 0.40) -- the salience rank
-inverts.  A shared content code is then limited by whichever view carries the factor
-least well, which a pooled both-views probe cannot see.
+Both views are scored apart because a pooled both-views probe cannot see an asymmetric
+loss, and a shared content code is capped by whichever view carries the factor least
+well.  The motivating asymmetry is in the LUT: the ventricle/WM edge is the STRONGEST
+internal edge in T1 (0.70, against WM/GM 0.30) and the WEAKEST in FLAIR (0.30, against
+0.40), so the salience rank inverts between views.  That predicts T1 ahead of FLAIR.
+MEASURED, it is not: on the first run scored here (12 content channels, step 40001)
+FLAIR led T1 by 0.142 at the stage the factor is best carried.  The script reports the
+direction rather than assuming it -- do not read the LUT argument as settled.
 
 Reading it
 ----------
-    drop pre_norm -> post_norm      the norm removes it.  Per-voxel channel norm deletes
-                                    magnitude and contrast DEPTH is a magnitude, so the
-                                    fix is architectural (--norm-type, --split-encoder-norm).
-    drop post_norm -> encoder_out   same family, inside the residual stack.
-    one view low at EVERY stage     that encoder never extracted it; the norms are
-                                    innocent and the fix is the objective (projection
-                                    head, weaker invariance).
-    both views fine at encoder_out  it survives the encoder; whatever loses it is
-                                    downstream -- the content codebook quantizes by
-                                    squared euclidean distance (`models/vqvae.py:491`)
-                                    and is shared across views, so a per-view scale gap
-                                    sends the two views to different entries.
+The verdict RANKS the per-stage drops rather than naming the first one over the floor,
+because "which stage" is only meaningful if one clearly dominates.  When the top two are
+within NOISE_FLOOR of each other the loss is gradual across the encoder's tail, and
+changing one stage alone will not recover the factor.
+
+    one stage dominates             that stage is the lever (norm -> --norm-type /
+                                    --split-encoder-norm; residual stack -> its norms
+                                    or its width).
+    top two comparable              a gradual loss, not a culprit; treat it as capacity
+                                    or as what the objective spends channels on.
+    views asymmetric                the trailing view's encoder is the constraint; the
+                                    objective is the lever (--contrastive-proj-dim).
+    views symmetric                 no view-consistency story applies at all.
+    all stages flat, low everywhere lost upstream -- check the generator's SNR in the
+                                    WEAK view (`generator_defects` scores `render(...)[0]`,
+                                    i.e. T1 only, so it has never measured FLAIR).
+
+The RMS table is the separate test for the codebook: the content codebook quantizes by
+squared euclidean distance (`models/vqvae.py:491`) and is shared across views, so a
+per-view scale gap would send the two views to different entries.  Ratios at ~1.00 rule
+that out.
 
 Nothing is retrained.  Only the tap point changes.
 
@@ -172,52 +184,72 @@ def render_rms(rms):
         print(f"  {stage:<14}" + "".join(f"{v:>12.3f}" for v in vals) + f"{ratio:>10.2f}")
 
 
-def verdict(ladder, factor):
+def verdict(ladder, factor, has_floor=False):
     """Name the stage that loses the factor.  `ladder` is render_focus's return."""
 
     def g(stage, view):
         v = ladder.get((stage, view, "gap"))
         return float("nan") if v is None else v
 
-    def worst_drop(a, b):
-        drops = [g(a, v) - g(b, v) for v in VIEWS if np.isfinite(g(a, v)) and np.isfinite(g(b, v))]
-        return max(drops) if drops else float("nan")
-
-    norm_cost = worst_drop("pre_norm", "post_norm")
-    res_cost = worst_drop("post_norm", "encoder_out")
-    cb_cost = worst_drop("encoder_out", "codebook_in")
-    out0, out1 = g("encoder_out", "v0"), g("encoder_out", "v1")
-    pre0, pre1 = g("pre_norm", "v0"), g("pre_norm", "v1")
+    transitions = (
+        ("pre_norm", "post_norm", "the encoder's FINAL NORM", "--norm-type / --split-encoder-norm"),
+        ("post_norm", "encoder_out", "the RESIDUAL STACK", "its norms, or its width"),
+        ("encoder_out", "codebook_in", "content_norms (codebook path only)", "--split-encoder-norm"),
+    )
+    ranked = []
+    for a, b, label, lever in transitions:
+        per_view = {v: g(a, v) - g(b, v) for v in VIEWS if np.isfinite(g(a, v)) and np.isfinite(g(b, v))}
+        if per_view:
+            ranked.append((max(per_view.values()), label, lever, per_view))
+    ranked.sort(reverse=True, key=lambda r: r[0])
 
     print(f"\nverdict for {factor}  (gap pooling; a move under {NOISE_FLOOR} is not reportable)")
-    if np.isfinite(norm_cost) and norm_cost > NOISE_FLOOR:
-        print(f"  The encoder's FINAL NORM removes it: pre -> post drops {norm_cost:.3f}.")
-        print("  Per-voxel channel norm deletes magnitude, and contrast depth IS a magnitude.")
-        print("  Next: --norm-type group (or none) at the encoder, or --split-encoder-norm.")
-    elif np.isfinite(res_cost) and res_cost > NOISE_FLOOR:
-        print(f"  The RESIDUAL STACK removes it: post_norm -> encoder_out drops {res_cost:.3f}.")
-        print("  Same family as above; the norms inside ResidualStack are the suspects.")
-    elif np.isfinite(out0) and np.isfinite(out1) and max(out0, out1) > NOISE_FLOOR and min(out0, out1) < NOISE_FLOOR:
-        lo = VIEW_LABEL["v1" if out1 < out0 else "v0"]
-        print(
-            f"  Only one view carries it out of the encoder ({VIEW_LABEL['v0']} {out0:.3f} vs {VIEW_LABEL['v1']} {out1:.3f})."
-        )
-        print(f"  The norms are innocent -- the {lo} encoder never extracted it, which is the")
-        print("  salience-inversion prediction. Next: --contrastive-proj-dim, so the invariance")
-        print("  constraint stops landing on the features the probes read.")
-    elif np.isfinite(out0) and np.isfinite(out1) and min(out0, out1) > NOISE_FLOOR:
-        extra = f" (encoder_out -> codebook_in drops {cb_cost:.3f})" if np.isfinite(cb_cost) else ""
-        print(f"  BOTH views carry it out of the encoder ({out0:.3f} / {out1:.3f}){extra}.")
-        print("  Nothing in the encoder loses it, so the loss is downstream: the shared content")
-        print("  codebook quantizes by squared euclidean distance, so a per-view scale gap sends")
-        print("  the views to different entries. Next: --separate-content-codebooks as the test.")
-    elif np.isfinite(pre0) and np.isfinite(pre1) and max(pre0, pre1) < NOISE_FLOOR:
-        print(f"  Neither view carries it even at pre_norm ({pre0:.3f} / {pre1:.3f}).")
-        print("  It is lost upstream of everything measured here -- check the generator's SNR")
-        print("  in the WEAK view (generator_defects scores render(...)[0], i.e. T1 only).")
+    if not ranked:
+        print("  Not enough stages captured to rank anything.")
+        return
+
+    print("  where it is lost, largest first:")
+    for cost, label, _, per_view in ranked:
+        detail = "  ".join(f"{VIEW_LABEL[v]} {d:+.3f}" for v, d in per_view.items())
+        print(f"    {cost:+.3f}  {label:<36} ({detail})")
+
+    top, top_label, top_lever, _ = ranked[0]
+    if top <= NOISE_FLOOR:
+        print(f"\n  No single stage loses more than {NOISE_FLOOR}. The factor is either absent")
+        print("  throughout or bleeds away gradually; read the ladder, not this line.")
     else:
-        print("  No stage loses more than the noise floor and no view is clearly starved.")
-        print("  Re-run with more --num-samples before reading anything into this.")
+        tied = [lbl for cost, lbl, _, _ in ranked[1:] if np.isfinite(cost) and (top - cost) <= NOISE_FLOOR]
+        if tied:
+            print(f"\n  {top_label} loses the most ({top:.3f}), but {' and '.join(tied)} is within")
+            print(f"  {NOISE_FLOOR} of it -- treat them as one gradual loss across the encoder's tail,")
+            print("  not as a single culprit stage. Changing one alone is unlikely to be enough.")
+        else:
+            print(f"\n  {top_label} loses the most ({top:.3f}). Lever: {top_lever}.")
+
+    # View asymmetry, reported wherever the factor is best carried rather than at the end.
+    best_stage = max(
+        (s for s in ("pre_norm", "post_norm", "encoder_out") if np.isfinite(g(s, "v0")) or np.isfinite(g(s, "v1"))),
+        key=lambda s: np.nanmax([g(s, "v0"), g(s, "v1")]),
+        default=None,
+    )
+    if best_stage is not None:
+        b0, b1 = g(best_stage, "v0"), g(best_stage, "v1")
+        if np.isfinite(b0) and np.isfinite(b1):
+            hi, lo = (VIEW_LABEL["v0"], VIEW_LABEL["v1"]) if b0 >= b1 else (VIEW_LABEL["v1"], VIEW_LABEL["v0"])
+            gap = abs(b0 - b1)
+            where = f"best carried at {best_stage} ({VIEW_LABEL['v0']} {b0:.3f} / {VIEW_LABEL['v1']} {b1:.3f})"
+            if gap > NOISE_FLOOR:
+                print(f"\n  Views are ASYMMETRIC: {where} -- {hi} ahead of {lo} by {gap:.3f}.")
+            else:
+                print(f"\n  Views are SYMMETRIC: {where}, gap {gap:.3f}.")
+                print("  Both encoders treat it alike, so a view-consistency story does not apply;")
+                print("  look at capacity and at what the objective spends channels on instead.")
+
+    out = [g("encoder_out", v) for v in VIEWS if np.isfinite(g("encoder_out", v))]
+    if has_floor and out and max(out) < 0:
+        print("\n  NOTE: at encoder_out the trained model is BELOW its untrained floor in every view.")
+        print("  Training did not fail to learn this factor -- it removed information a random")
+        print("  projection of the same architecture still had.")
 
 
 # --------------------------------------------------------------------------- #
@@ -383,7 +415,7 @@ def _self_test():
     ladder = render_focus(scores, names, names[focus])
     render_all_factors(scores, names, floor=None)
     render_rms({("pre_norm", "v0"): 1.0, ("pre_norm", "v1"): 0.43})
-    verdict(ladder, names[focus])
+    verdict(ladder, names[focus], has_floor=False)
 
     pre = ladder[("pre_norm", "v0", "gap")]
     post = ladder[("post_norm", "v0", "gap")]
@@ -453,7 +485,7 @@ def main():
     ladder = render_focus(scores, names, args.factor, floor=floor_scores)
     render_all_factors(scores, names, floor=floor_scores)
     render_rms(rms)
-    verdict(ladder, args.factor)
+    verdict(ladder, args.factor, has_floor=floor_scores is not None)
 
     if args.csv:
         with open(args.csv, "w", newline="") as fh:
