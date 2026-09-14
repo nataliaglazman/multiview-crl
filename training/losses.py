@@ -1029,6 +1029,45 @@ def moco_loss(
 # ---------------------------------------------------------------------------
 
 
+def stats_pool(hz, content_indices=None, soft_content_mask=None, n_stats=4):
+    """``(n_views, B, C, P)`` -> ``(n_views, B, n_stats*C)``: mean, std, max, min over space.
+
+    A subject-level summary that is NOT the spatial mean.  The GAP companion exists because
+    its rows are subjects rather than (subject, position) -- but the uniform average is the
+    worst possible summary for a LOCALISED factor, which contributes ~1/P of one channel's
+    mean and is gone.  These four statistics keep the subject rows and add sensitivity to
+    localised structure: a small dark cavity barely moves a channel's mean over hundreds of
+    positions, and clearly moves its min and its spread.
+
+    Measured on this project's own report, ventricle_size content R^2 by pooling:
+    gap 0.097, stats 0.406, patch 0.773.  The 4x from gap to stats costs nothing in row
+    semantics -- both are one row per subject.
+
+    Layout is STAT-MAJOR to match ``eval/dci.py``'s ``_pool_and_split_view`` exactly
+    (all C means, then all C stds, then maxes, then mins), so the loss trains on the same
+    statistic the report scores.  ``tests/test_stats_pool.py`` pins that equality rather
+    than trusting the comment.
+
+    Content selection happens on the last axis downstream, so the channel indices and the
+    soft mask are expanded here too: channel ``c`` becomes ``{c, C+c, 2C+c, 3C+c}``.
+    Returning them alongside keeps ``barlow_twins_loss`` unaware of the pooling.
+    """
+    if hz.dim() != 4:
+        raise ValueError(f"stats_pool expects (n_views, B, C, P); got {tuple(hz.shape)}")
+    n_views, B, C, P = hz.shape
+    if P < 2:
+        raise ValueError(f"stats_pool needs P >= 2 for an unbiased std; got P={P}.")
+    pooled = torch.cat([hz.mean(dim=3), hz.std(dim=3), hz.amax(dim=3), hz.amin(dim=3)], dim=2)
+
+    idx_out = content_indices
+    if content_indices is not None:
+        idx_out = [[s * C + int(c) for s in range(n_stats) for c in idx] for idx in content_indices]
+    mask_out = soft_content_mask
+    if soft_content_mask is not None:
+        mask_out = soft_content_mask.reshape(1, -1).repeat(1, n_stats)
+    return pooled, idx_out, mask_out
+
+
 def _whiten_batch(x, eps, mean=None):
     """Apply ``Sigma^(-1/2)`` to ``(N, d)`` rows so every direction carries unit variance.
 

@@ -1192,6 +1192,22 @@ def parse_args() -> argparse.ArgumentParser:
         "directions, which matters because the factor information sits in the low-variance tail.",
     )
     parser.add_argument(
+        "--bt-gap-pooling",
+        type=str,
+        default="gap",
+        choices=["gap", "stats"],
+        help="How the GAP companion term summarises each subject's spatial map. 'gap' (default) "
+        "is the uniform spatial mean. 'stats' concatenates mean, std, max and min per channel, "
+        "matching the 'stats' pooling eval/dci.py already scores. Both give ONE ROW PER SUBJECT, "
+        "which is the property the GAP term exists for -- but the uniform mean is the worst "
+        "summary for a LOCALISED factor, which contributes ~1/P of a channel's mean and vanishes, "
+        "while clearly moving that channel's min and spread. Measured on this project: "
+        "ventricle_size content R^2 reads 0.097 at gap and 0.406 at stats, a 4x recovery for no "
+        "change in row semantics. It also removes a train/eval mismatch, since the report already "
+        "scores stats. NOTE it quadruples the term's width (d -> 4d), and BT's off-diagonal "
+        "carries a d(d-1)/B sampling floor -- keep --bt-gap-lambda low, per its own help.",
+    )
+    parser.add_argument(
         "--bt-sim-whiten",
         action="store_true",
         default=False,
@@ -1614,6 +1630,31 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             "because the number of style channels varies per forward pass. "
             "Use --mask-mode fixed or learned instead."
         )
+
+    if getattr(args, "bt_gap_pooling", "gap") == "stats":
+        if float(getattr(args, "bt_gap_weight", 0.0) or 0.0) <= 0:
+            raise ValueError("--bt-gap-pooling stats only affects the GAP companion term: set --bt-gap-weight > 0.")
+        _d4 = 4 * int(getattr(args, "content_size", 0) or 0)
+        _b = int(getattr(args, "batch_size", 0) or 0)
+        if _d4 and _b and _d4 * (_d4 - 1) / _b > 5.0:
+            logger.warning(
+                "--bt-gap-pooling stats widens the GAP term to %d dims; at batch_size %d the "
+                "off-diagonal's d(d-1)/B sampling floor is ~%.1f with no real redundancy behind "
+                "it. Keep --bt-gap-lambda at 0.01-0.1 so the term stays an ALIGNMENT term.",
+                _d4,
+                _b,
+                _d4 * (_d4 - 1) / _b,
+            )
+        if getattr(args, "bt_sim_whiten", False) and _d4 and _b and _b < 4 * _d4:
+            logger.warning(
+                "--bt-sim-whiten with stats pooling estimates a %dx%d covariance from %d rows "
+                "(%.1f rows per parameter). Whitening needs a well-conditioned covariance; raise "
+                "batch_size or raise --bt-sim-whiten-eps.",
+                _d4,
+                _d4,
+                _b,
+                _b / _d4,
+            )
 
     if getattr(args, "bt_sim_whiten", False):
         if getattr(args, "bt_sim_normalize", False):
