@@ -57,9 +57,19 @@ that out.
 
 Nothing is retrained.  Only the tap point changes.
 
-Factors are drawn i.i.d. (`causal=False`), never from the run's SCM.  Under a random graph
-ventricle_size and brain_size correlate ~0.8, so an SCM-matched probe reads brain_size in
-disguise -- per-factor attribution requires i.i.d.  See `build_synthetic_test_set`.
+Factors are drawn i.i.d. (`causal=False`) by default, not from the run's SCM.  Under a
+random graph ventricle_size and brain_size correlate ~0.8, so an SCM-matched probe reads
+brain_size in disguise -- per-factor attribution requires i.i.d.
+
+`--causal-eval` switches the eval distribution to the run's training SCM, for ONE purpose:
+the i.i.d.-vs-matched A/B.  A factor that reads ~0 i.i.d. but high under the SCM was never
+encoded as a separable direction -- the encoder holds it only through its training-time
+correlates, and the gap between the two runs is the size of that shortcut.  This is the
+signature to expect when Barlow Twins runs at a high redundancy weight (`bt_lambda`) on
+SCM-coupled factors: the off-diagonal penalty rewards a DECORRELATED basis, which on
+coupled data is not the factor basis, so the weaker member of a correlated pair is
+actively suppressed rather than merely unlearned -- which is how a trained encoder ends
+up BELOW its untrained floor.  Matched numbers are inflated and never reportable alone.
 
 Absolute R^2 here is mostly a statement about the architecture: an untrained encoder reads
 ventricle_size at 0.513 from a random projection.  `--floor` (default on) scores an
@@ -591,6 +601,16 @@ def main():
     )
     ap.add_argument("--floor-seed", type=int, default=0, help="Seed for the untrained twin's weights.")
     ap.add_argument("--all-channels", action="store_true", help="Read the full hidden width, not just content.")
+    ap.add_argument(
+        "--causal-eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Draw eval factors from the run's TRAINING SCM instead of i.i.d. Default off. "
+        "Turn it on only to run the i.i.d.-vs-matched A/B: a factor that reads ~0 i.i.d. but "
+        "high under the SCM was never encoded separably -- the encoder holds it only through "
+        "its training-time correlates. Matched per-factor numbers are inflated and are NOT "
+        "reportable on their own.",
+    )
     ap.add_argument("--csv", default=None, help="Write the per-stage table here.")
     ap.add_argument("--self-test", action="store_true", help="Run the torch-free self-test and exit.")
     args = ap.parse_args()
@@ -611,9 +631,15 @@ def main():
     model, inner, run_args, device = _load(args.run_dir, args.checkpoint, random_init=False, seed=None)
     n_content = _content_width(run_args, args.all_channels)
 
-    # causal=False, deliberately and explicitly: per-factor attribution needs i.i.d.
-    # factors, and under the run's SCM ventricle_size correlates with brain_size at ~0.8.
-    ds = build_synthetic_test_set(run_args, args.num_samples, causal=False)
+    # Default causal=False, deliberately: per-factor attribution needs i.i.d. factors, and
+    # under the run's SCM ventricle_size correlates with brain_size at ~0.8. --causal-eval
+    # switches it on for the A/B that tells "never encoded" from "encoded only via correlates".
+    if args.causal_eval:
+        logger.warning(
+            "--causal-eval: factors follow the run's TRAINING SCM. Per-factor numbers are "
+            "INFLATED by correlated factors and are only meaningful next to the i.i.d. run."
+        )
+    ds = build_synthetic_test_set(run_args, args.num_samples, causal=bool(args.causal_eval))
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     feats, style_feats, rms, gt = _ladder(model, inner, loader, device, args, n_content)
@@ -632,7 +658,16 @@ def main():
         floor_style = score_ladder(f_style, f_gt, seeds=seeds) if f_style else None
 
     print(f"\nrun: {args.run_dir} | level {args.level} | content channels {n_content} | N={gt.shape[0]}")
-    print("factors drawn i.i.d. (causal=False) so per-factor attribution is unambiguous")
+    print(
+        "factors drawn from the run's TRAINING SCM (--causal-eval): per-factor numbers are inflated"
+        if args.causal_eval
+        else "factors drawn i.i.d. (causal=False) so per-factor attribution is unambiguous"
+    )
+    widths = {k: X.shape[1] for k, X in feats.items()}
+    for pooling in POOLINGS:
+        ws = {w for (st, v, p), w in widths.items() if p == pooling}
+        if ws:
+            print(f"  {pooling} probe width: {sorted(ws)}  (PCA-reduced when p >> n; see reduce_block)")
     ladder = render_focus(scores, names, args.factor, floor=floor_scores)
     migration = render_migration(scores, style_scores, names, args.factor, floor_scores, floor_style)
     render_all_factors(scores, names, floor=floor_scores)
