@@ -98,6 +98,15 @@ def parse_args():
     p.add_argument("--n-style", type=int, default=3, help="Per-view style factors")
     p.add_argument("--num-train-samples", type=int, default=2000)
     p.add_argument("--num-val-samples", type=int, default=400)
+    p.add_argument(
+        "--cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Hold rendered volumes in RAM (default). The cache is (samples x 2 views x res^3 x 4B) "
+        "per split once full -- 23.5 GB for 1000 train + 400 val at res 128, which the OOM killer "
+        "takes out on the first eval. Pass --no-cache at high res to re-render each sample instead: "
+        "slower per step, constant memory.",
+    )
     p.add_argument("--synthetic-mode", type=str, default="pseudo_mri")
     p.add_argument(
         "--synthetic-normalize", type=str, default="per_sample", choices=["per_sample", "shared", "fixed_reference"]
@@ -116,12 +125,28 @@ def parse_args():
     return p.parse_args()
 
 
+def cache_gb(res, num_samples):
+    """RAM the dataset's in-memory cache will hold once every sample has been rendered."""
+    return num_samples * 2 * (res**3) * 4 / 1e9
+
+
 def make_dataset(args, mode, num_samples):
     """Single factory for train/val/test so the generative distribution is identical."""
+    if args.cache:
+        gb = cache_gb(args.res, num_samples)
+        # The cache fills lazily, so an over-large one survives training and is killed
+        # later, on the first eval that starts filling the val split's share of it.
+        if gb > 4.0:
+            print(
+                f"  WARNING: {mode} cache will grow to {gb:.1f} GB in RAM "
+                f"({num_samples} samples x 2 views x {args.res}^3 x 4B). "
+                f"Pass --no-cache to re-render instead of caching.",
+                flush=True,
+            )
     return SyntheticBrainDataset(
         mode=mode,
         spatial_size=(args.res, args.res, args.res),
-        cache=True,
+        cache=args.cache,
         synthetic_mode=args.synthetic_mode,
         synthetic_seed=args.seed,
         synthetic_num_samples=num_samples,
