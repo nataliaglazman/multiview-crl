@@ -29,7 +29,7 @@ def planted(n=200, k=3, noise=0.1, seed=0, width=24):
     return z, adjacency, features
 
 
-def write_bundle(path, features, z, adjacency, settings=None, n_style=2, seed=0):
+def write_bundle(path, features, z, adjacency, settings=None, n_style=2, seed=0, distribution=None):
     """Write a bundle exactly as the production writers do, identity fields included."""
     rng = np.random.RandomState(seed)
     latents = {
@@ -43,7 +43,7 @@ def write_bundle(path, features, z, adjacency, settings=None, n_style=2, seed=0)
         "content_factor_names": [f"c{d}" for d in range(z.shape[1])],
         "style_factor_names": [f"s{d}" for d in range(n_style)],
         "generator": settings,
-        **identity.identity_record(latents, settings, len(z)),
+        **identity.identity_record(latents, settings, len(z), distribution),
     }
     embed.save(Path(path), {1: features.astype(np.float32)}, latents, {}, [], meta)
     return meta
@@ -159,6 +159,61 @@ class RowIdentityTests(unittest.TestCase):
             np.savez_compressed(path, **data)
             bundle = scorer.load_bundle(path)
             self.assertEqual(compare.check_alignment({"x": bundle, "y": bundle}, strict=True)[1], [])
+
+
+class EvaluationDistributionTests(unittest.TestCase):
+    """match vs iid is the mismatch the digests alone cannot name."""
+
+    def test_a_match_and_an_iid_bundle_are_refused_with_the_reason(self):
+        # Same run-dir, same --num-samples, same seed: the generator settings agree and
+        # only the drawn factors differ, so without the recorded distribution the report
+        # would blame "a different draw" and send someone hunting a seed that is fine.
+        z, adjacency, features = planted()
+        other, _adj, _f = planted(seed=7)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "match.npz", Path(tmp) / "iid.npz"
+            write_bundle(a, features, z, adjacency, distribution="match")
+            write_bundle(b, features, other, adjacency, distribution="iid")
+            bundles = {"vq": scorer.load_bundle(a), "dino": scorer.load_bundle(b)}
+            with self.assertRaises(SystemExit) as raised:
+                compare.check_alignment(bundles, strict=True)
+            message = str(raised.exception)
+            self.assertIn("different evaluation distributions", message)
+            self.assertIn("two experiments rather than two models", message)
+            self.assertNotIn("different draw", message)
+
+    def test_two_iid_bundles_still_compare(self):
+        z, adjacency, strong = planted(noise=0.1)
+        _z, _a, weak = planted(noise=3.0, seed=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            write_bundle(a, strong, z, adjacency, distribution="iid")
+            write_bundle(b, weak, z, adjacency, distribution="iid")
+            bundles = {"a": scorer.load_bundle(a), "b": scorer.load_bundle(b)}
+            self.assertEqual(compare.check_alignment(bundles, strict=True)[1], [])
+
+    def test_the_distribution_reaches_meta_and_survives_the_round_trip(self):
+        z, adjacency, features = planted()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "b.npz"
+            write_bundle(path, features, z, adjacency, distribution="iid")
+            bundle = scorer.load_bundle(path)
+            self.assertEqual(bundle["identity"]["evaluation_distribution"], "iid")
+            self.assertEqual(bundle["meta"]["evaluation_distribution"], "iid")
+
+    def test_bundles_predating_the_field_are_not_treated_as_a_mismatch(self):
+        z, adjacency, features = planted()
+        _z, _a, other = planted(noise=3.0, seed=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            write_bundle(a, features, z, adjacency, distribution="match")
+            write_bundle(b, other, z, adjacency)  # unrecorded
+            bundles = {"a": scorer.load_bundle(a), "b": scorer.load_bundle(b)}
+            self.assertEqual(compare.check_alignment(bundles, strict=True)[1], [])
+
+    def test_an_unknown_distribution_is_rejected_at_the_source(self):
+        with self.assertRaises(ValueError):
+            identity.identity_record({"z_content": np.zeros((4, 2), np.float32)}, {}, 4, "shuffled")
 
 
 class VQBlockSelectionTests(unittest.TestCase):

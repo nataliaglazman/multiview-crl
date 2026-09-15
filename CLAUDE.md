@@ -25,6 +25,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `eval/COMPARING_3DINO_VQVAE.md` — what the matched DINO/VQ comparison equalises and what it cannot. Read before quoting a cross-model number.
 - `eval/plot_identifiability.py` — PNG figures from `identifiability_report --out` JSON (one or two models). Never re-scores; each figure ships a `.csv` twin.
 - `eval/plot_causal_recovery.py` — PNG figures from `run_causal_recovery`'s JSON: recovered/missed/spurious edge map, alpha sweep, per-factor partial-vs-raw R², CPDAG orientation. Never re-runs PC; each figure ships a `.csv` twin.
+- `training/finetune_dino.py` — fine-tune a DINO backbone on the paired synthetic views. `--objective {infonce,barlow,vicreg}`: InfoNCE uses negatives, the other two are negative-free and reuse `training/losses.py`. Cross-view retrieval diagnostics are logged for every arm and are never part of a negative-free loss.
 - `eval/dinov3_embed_synthetic.py` — run the synthetic views through a pretrained DINOv3 (HF `transformers`), slice 3D→2D, save embeddings + GT latents + SCM adjacency to `.npz`. `--random-init` gives the untrained floor.
 - `eval/dinov3_identifiability.py` — score those embeddings: per-factor R²/MCC vs permutation null, floor and voxel baselines, plus PC graph recovery via `run_causal_recovery.evaluate_arrays`. Torch-free; `--self-test`.
 - `eval/view_latents.ipynb`, `eval/dino.ipynb` — analysis notebooks.

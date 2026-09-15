@@ -42,7 +42,14 @@ import numpy as np
 FACTOR_KEYS = ("z_content", "z_style_v1", "z_style_v2", "causal_adj")
 
 #: ``meta`` keys this module owns.
-IDENTITY_KEYS = ("factor_digest", "generator_digest", "n_rows")
+IDENTITY_KEYS = ("factor_digest", "generator_digest", "n_rows", "evaluation_distribution")
+
+#: Which factor distribution a bundle's rows were drawn from. ``match`` forwards the run's
+#: trained SCM; ``iid`` forces the factors independent. They are different experiments, not
+#: a measurement and its control, so they are recorded rather than inferred -- and the
+#: generator SETTINGS cannot tell them apart when both come from one ``--run-dir``, since
+#: ``synthetic_causal`` reads True in that run's settings.json either way.
+DISTRIBUTIONS = ("match", "iid")
 
 
 def _digest_array(hasher, name, array):
@@ -86,12 +93,15 @@ def generator_digest(settings):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def identity_record(latents, settings, n_rows):
-    """The three ``meta`` fields describing which rows a bundle holds."""
+def identity_record(latents, settings, n_rows, distribution=None):
+    """The ``meta`` fields describing which rows a bundle holds, and from which distribution."""
+    if distribution is not None and distribution not in DISTRIBUTIONS:
+        raise ValueError(f"distribution must be one of {DISTRIBUTIONS}, got {distribution!r}")
     return {
         "factor_digest": factor_digest(latents),
         "generator_digest": generator_digest(settings),
         "n_rows": int(n_rows),
+        "evaluation_distribution": distribution,
     }
 
 
@@ -121,6 +131,21 @@ def compare(records):
     if len(labels) < 2:
         return []
     problems = []
+
+    # Before the digests: a match/iid mix is the one mismatch whose cause the digests
+    # cannot name. Both bundles can come from one --run-dir with one --num-samples and one
+    # seed and still hold different rows, and the generator settings agree in both, so
+    # without this the report would blame "a different draw" and send someone hunting a
+    # seed that is not wrong.
+    modes = {label: records[label].get("evaluation_distribution") for label in labels}
+    known_modes = {m for m in modes.values() if m is not None}
+    if len(known_modes) > 1:
+        detail = ", ".join(f"{label}={modes[label] or 'unrecorded'}" for label in labels)
+        return [
+            f"different evaluation distributions ({detail}); 'match' forwards the run's SCM and "
+            "'iid' forces the factors independent, so these are two experiments rather than two "
+            "models -- rebuild every bundle with the same --causal"
+        ]
 
     counts = {label: records[label].get("n_rows") for label in labels}
     if len({c for c in counts.values() if c is not None}) > 1:

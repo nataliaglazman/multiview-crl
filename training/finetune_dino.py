@@ -3,12 +3,22 @@
     python -m training.finetune_dino --output-dir results/dino_infonce --epochs 20
 
 Each subject contributes one feature per modality after pooling its selected planes.
-The corresponding subject in the other modality is the positive; the other B-1
-subjects in that modality are negatives for InfoNCE. Barlow Twins instead aligns
-the cross-correlation diagonal and penalizes off-diagonal correlations. Only
-content channels (75% by default) enter either loss or the optional MLP projector.
-Style channels are excluded from alignment; shared backbone updates can still
-change them. This exclusion alone does not enforce style informativeness.
+The corresponding subject in the other modality is the positive. All backbone
+parameters and an optional shared MLP projector receive gradients.
+
+``--objective`` selects what that pairing is used for, which is the axis an ablation
+varies:
+
+* ``infonce`` (default) -- the other B-1 subjects in that modality are negatives, and
+  both directions contribute equally.
+* ``barlow`` / ``vicreg`` -- negative-free: the pairing is kept and the negatives are
+  dropped, so the arm answers "are the negatives what matters?" rather than "does any
+  training on this data help?". Both come from ``training.losses``, the same
+  implementations the VQ-VAE arm of this project trains with.
+
+Cross-view retrieval accuracy and positive/negative similarity are logged for every
+objective and are never part of a negative-free loss, so the arms can be read against one
+another on a quantity that means the same thing under each.
 
 Uses the generator's TRAIN split; the existing embedding script defaults to TEST.
 The output includes an HF-loadable encoder, projection/optimizer state, the generator
@@ -32,13 +42,62 @@ from utils.config import parse_dino_finetune_args
 logger = logging.getLogger(__name__)
 
 
+def _check_pair(view1, view2, objective):
+    if view1.ndim != 2 or view1.shape != view2.shape or view1.shape[0] < 2:
+        raise ValueError(f"{objective} requires matching (B, D) tensors with at least two subjects")
+
+
+def pair_diagnostics(view1, view2, temperature=0.1):
+    """Cross-view retrieval accuracy and mean positive/negative cosine similarity.
+
+    Reported for EVERY objective, not just InfoNCE, and never part of the loss for the
+    negative-free ones.  The point of running more than one objective is to compare the
+    arms, and that needs one set of numbers whose meaning does not change between them --
+    Barlow Twins' loss and InfoNCE's loss are not on a common scale, but "can you retrieve
+    a subject's other modality" is the same question under both.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    with torch.no_grad():
+        similarity = F.normalize(view1.float(), dim=-1) @ F.normalize(view2.float(), dim=-1).T
+        labels = torch.arange(len(view1), device=view1.device)
+        positive = similarity.diag()
+        n = len(view1)
+        return {
+            "accuracy": (
+                (similarity.argmax(1) == labels).float().mean() + (similarity.argmax(0) == labels).float().mean()
+            ).item()
+            / 2,
+            "positive_similarity": positive.mean().item(),
+            "negative_similarity": ((similarity.sum() - positive.sum()) / (n * (n - 1))).item(),
+        }
+
+
+def _extra_diagnostics(loss):
+    """The per-term breakdown ``training.losses`` hangs off its returned tensor.
+
+    Only finite scalars are kept: the epoch aggregator averages every key it is handed and
+    ``metrics.jsonl`` is written with ``allow_nan=False``, so one NaN diagnostic would end
+    the run after the optimizer had already stepped.
+    """
+    out = {}
+    for key, value in (getattr(loss, "_contrastive_diag", None) or {}).items():
+        # Barlow Twins reports a hardcoded top1_acc of 0.0 as "not applicable". Next to the
+        # real cross-view accuracy pair_diagnostics measures, that reads as a score of zero.
+        if key == "top1_acc":
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            out[key] = float(value)
+    return out
+
+
 def symmetric_infonce(view1, view2, temperature=0.1):
     """Mean of cross-view InfoNCE in both directions, with cosine similarities."""
     import torch
     import torch.nn.functional as F
 
-    if view1.ndim != 2 or view1.shape != view2.shape or view1.shape[0] < 2:
-        raise ValueError("InfoNCE requires matching (B, D) tensors with at least two subjects")
+    _check_pair(view1, view2, "InfoNCE")
     if not math.isfinite(temperature) or temperature <= 0:
         raise ValueError("temperature must be finite and positive")
     # Float32 keeps normalization and softmax stable under mixed precision.
@@ -46,79 +105,60 @@ def symmetric_infonce(view1, view2, temperature=0.1):
     logits = similarity / temperature
     labels = torch.arange(len(view1), device=view1.device)
     loss = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
-    with torch.no_grad():
-        positive = similarity.diag()
-        metrics = {
-            "loss": loss.item(),
-            "accuracy": (
-                (logits.argmax(1) == labels).float().mean() + (logits.argmax(0) == labels).float().mean()
-            ).item()
-            / 2,
-            "positive_similarity": positive.mean().item(),
-            "negative_similarity": ((similarity.sum() - positive.sum()) / (len(view1) * (len(view1) - 1))).item(),
-        }
+    metrics = {"loss": loss.item(), **pair_diagnostics(view1, view2)}
     return loss, metrics
 
 
-def barlow_twins(view1, view2, lambd=0.0051, eps=1e-5):
-    """Batch-normalized cross-correlation objective, using population variance.
+def negative_free(view1, view2, cli):
+    """Barlow Twins or VICReg over the paired views -- the same objective, minus negatives.
 
-    Objective follows https://github.com/facebookresearch/barlowtwins .
-    Correlation statistics use this process's actual batch, in float32.
+    Delegates to ``training.losses``, which already owns both, rather than restating them:
+    the VQ-VAE arm of this project is trained with those exact implementations, so a DINO
+    encoder fine-tuned here and a VQ-VAE trained there are optimising the same thing.
+
+    Those losses take ``(n_views, B, C)`` and split content from style via
+    ``estimated_content_indices``. A DINO embedding has no such split, and passing ``None``
+    is how they are told so -- they then treat every view and every channel as content,
+    which is the whole embedding, which is what we want.
     """
     import torch
 
-    if view1.ndim != 2 or view1.shape != view2.shape or min(view1.shape) < 1 or len(view1) < 2:
-        raise ValueError("Barlow Twins requires matching (B, D) tensors with B >= 2 and D >= 1")
-    if not math.isfinite(lambd) or lambd < 0 or not math.isfinite(eps) or eps <= 0:
-        raise ValueError("Barlow lambda must be nonnegative and eps positive, both finite")
-    normalized = []
-    for view in (view1, view2):
-        centered = view.float() - view.float().mean(0)
-        normalized.append(centered / (centered.square().mean(0) + eps).sqrt())
-    corr = normalized[0].T @ normalized[1] / len(view1)
-    diagonal = corr.diagonal()
-    on_diag = (diagonal - 1).square().sum()
-    off_diag = corr[~torch.eye(corr.shape[0], dtype=torch.bool, device=corr.device)].square().sum()
-    loss = on_diag + lambd * off_diag
-    # Retrieval is only a diagnostic for BT; it does not contribute to its objective.
-    with torch.no_grad():
-        _, metrics = symmetric_infonce(view1, view2)
-        metrics.update(
-            loss=loss.item(),
-            barlow_on_diag=on_diag.item(),
-            barlow_off_diag=off_diag.item(),
-            barlow_diag_mean=diagonal.mean().item(),
+    from training.losses import barlow_twins_loss, vicreg_loss
+
+    _check_pair(view1, view2, cli.objective)
+    # float32 deliberately: both losses standardise per channel and square the result, and
+    # the upstream implementations note fp16 is not safe for that.
+    hz = torch.stack([view1.float(), view2.float()])
+    if cli.objective == "barlow":
+        total = barlow_twins_loss(hz, lambd=cli.bt_lambda)
+    else:
+        total = vicreg_loss(
+            hz, sim_coeff=cli.vicreg_sim_coeff, std_coeff=cli.vicreg_std_coeff, cov_coeff=cli.vicreg_cov_coeff
         )
+    # Read the per-term breakdown BEFORE reshaping: it is a plain Python attribute hung off
+    # the returned tensor, and squeeze() returns a new tensor that does not carry it.
+    extra = _extra_diagnostics(total)
+    # They accumulate into a (1,) tensor; squeeze so isfinite/backward/item behave as they
+    # do for the InfoNCE scalar and the two arms stay interchangeable in the loop.
+    loss = total.squeeze()
+    metrics = {"loss": loss.item(), **pair_diagnostics(view1, view2), **extra}
     return loss, metrics
 
 
-def alignment_loss(content1, content2, projector, cli):
-    """The projector receives content only; style has no direct alignment gradient."""
-    first, second = projector(content1), projector(content2)
-    # Disable autocast for correlation / similarity matrix products.
-    import torch
-
-    with torch.autocast(device_type=first.device.type, enabled=False):
-        if cli.loss == "barlow_twins":
-            return barlow_twins(first, second, cli.barlow_lambda, cli.barlow_eps)
-        return symmetric_infonce(first, second, cli.temperature)
+#: name -> (loss fn, what goes in training_config.json). The recorded string is the claim a
+#: reader gets, so it names the paper objective rather than the flag.
+OBJECTIVES = {
+    "infonce": "symmetric_cross_view_infonce",
+    "barlow": "cross_view_barlow_twins",
+    "vicreg": "cross_view_vicreg",
+}
 
 
-def partition_diagnostics(parts):
-    import torch
-    import torch.nn.functional as F
-
-    metrics = {}
-    with torch.no_grad():
-        for index, name in enumerate(("content", "style")):
-            first, second = [p[index].float() for p in parts]
-            if first.shape[1]:
-                metrics[f"{name}_std"] = (
-                    (first.std(0, unbiased=False).mean() + second.std(0, unbiased=False).mean()) / 2
-                ).item()
-                metrics[f"{name}_paired_cosine"] = F.cosine_similarity(first, second, dim=-1).mean().item()
-    return metrics
+def compute_objective(view1, view2, cli):
+    """The selected objective's ``(loss, metrics)``."""
+    if cli.objective == "infonce":
+        return symmetric_infonce(view1, view2, temperature=cli.temperature)
+    return negative_free(view1, view2, cli)
 
 
 def encode_volumes(volumes, encoder, config, cli, device, window, mean, std):
@@ -178,10 +218,10 @@ def train_epoch(loader, encoder, projector, optimizer, scaler, config, cli, devi
                 split_embeddings(encode_volumes(view, encoder, config, cli, device, window, mean, std), partition)
                 for view in views
             ]
-            loss, metrics = alignment_loss(parts[0][0], parts[1][0], projector, cli)
-        metrics.update(partition_diagnostics(parts))
+        # Keep the similarity matrix multiplication out of autocast too.
+        loss, metrics = compute_objective(*projected, cli)
         if not torch.isfinite(loss):
-            raise FloatingPointError(f"Non-finite {cli.loss} loss; no optimizer update was applied")
+            raise FloatingPointError(f"Non-finite {cli.objective} loss; no optimizer update was applied")
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(parameters, cli.grad_clip or float("inf"), error_if_nonfinite=True)
@@ -302,9 +342,7 @@ def main(argv=None):
         git_sha=embed.git_sha(),
         split="train",
         feature_dim=width,
-        objective="content_barlow_twins" if cli.loss == "barlow_twins" else "content_symmetric_cross_view_infonce",
-        embedding_partition=partition,
-        style_objective="none",
+        objective=OBJECTIVES[cli.objective],
         model_provenance=getattr(encoder, "provenance", None),
     )
     (cli.output_dir / "training_config.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -333,9 +371,10 @@ def main(argv=None):
         with (cli.output_dir / "metrics.jsonl").open("a") as stream:
             stream.write(json.dumps(metrics, allow_nan=False) + "\n")
         logger.info(
-            "Epoch %d/%d: loss=%.4f accuracy=%.3f pos=%.3f neg=%.3f",
+            "Epoch %d/%d [%s]: loss=%.4f accuracy=%.3f pos=%.3f neg=%.3f",
             epoch,
             cli.epochs,
+            cli.objective,
             metrics["loss"],
             metrics["accuracy"],
             metrics["positive_similarity"],

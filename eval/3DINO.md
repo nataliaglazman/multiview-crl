@@ -125,6 +125,46 @@ the default graph readout is in-sample. PC on true factors supplies a
 finite-sample reference, not a guaranteed upper bound. These are empirical
 recovery diagnostics rather than a proof of mathematical identifiability.
 
+## Comparing fine-tuning objectives
+
+`training/finetune_dino.py --objective` selects what the T1/T2 pairing is used for. The
+pairing, the optimizer, the steps and the data are identical across arms, so the only thing
+that varies is the loss:
+
+| `--objective` | loss | the arm answers |
+| --- | --- | --- |
+| `infonce` (default) | symmetric cross-view InfoNCE | with negatives |
+| `barlow` | Barlow Twins | negative-free: is it the negatives that matter? |
+| `vicreg` | VICReg | same question, variance-hinge form, steadier at small batches |
+
+`barlow` and `vicreg` call `training.losses`' own implementations — the same ones the
+VQ-VAE arm of this project trains with — so a fine-tuned DINO and a VQ-VAE here optimise
+the same objective rather than two things that share a name. They take `(n_views, B, C)`
+and are told there is no content/style split by passing no indices, so every channel of
+the embedding is treated as content.
+
+Cross-view retrieval accuracy and mean positive/negative similarity are logged under
+**every** objective and are never part of a negative-free loss. That matters for reading
+the arms against one another: Barlow Twins' loss and InfoNCE's loss are not on a common
+scale, but "can you retrieve a subject's other modality" is the same question under both.
+`metrics.jsonl` also carries each loss's own term breakdown (`on_diag_loss`/`off_diag_loss`
+for Barlow Twins, `sim_loss`/`var_loss`/`cov_loss` for VICReg), so a collapsed run is
+visible in which term went to zero.
+
+```bash
+for OBJ in infonce barlow; do
+  python -m training.finetune_dino --three-dino-repo ../3DINO \
+    --three-dino-weights /path/to/pretrained.pth \
+    --run-dir results/synthetic/YOUR_RUN \
+    --objective $OBJ --output-dir results/dino_$OBJ --epochs 20
+done
+```
+
+Then extract a bundle from each and compare them as two models. Every arm writes its own
+`preprocessing.json`; they will agree when the extraction flags did, and the extractor
+reuses the saved one either way, so check that the two match before reading a difference as
+the objective.
+
 ## Comparing against the VQ-VAE
 
 Do not read a DINO report and a VQ-VAE report side by side and difference the columns:
