@@ -1029,6 +1029,87 @@ def moco_loss(
 # ---------------------------------------------------------------------------
 
 
+def stats_pool(hz, content_indices=None, soft_content_mask=None, n_stats=4):
+    """``(n_views, B, C, P)`` -> ``(n_views, B, n_stats*C)``: mean, std, max, min over space.
+
+    A subject-level summary that is NOT the spatial mean.  The GAP companion exists because
+    its rows are subjects rather than (subject, position) -- but the uniform average is the
+    worst possible summary for a LOCALISED factor, which contributes ~1/P of one channel's
+    mean and is gone.  These four statistics keep the subject rows and add sensitivity to
+    localised structure: a small dark cavity barely moves a channel's mean over hundreds of
+    positions, and clearly moves its min and its spread.
+
+    Measured on this project's own report, ventricle_size content R^2 by pooling:
+    gap 0.097, stats 0.406, patch 0.773.  The 4x from gap to stats costs nothing in row
+    semantics -- both are one row per subject.
+
+    Layout is STAT-MAJOR to match ``eval/dci.py``'s ``_pool_and_split_view`` exactly
+    (all C means, then all C stds, then maxes, then mins), so the loss trains on the same
+    statistic the report scores.  ``tests/test_stats_pool.py`` pins that equality rather
+    than trusting the comment.
+
+    Content selection happens on the last axis downstream, so the channel indices and the
+    soft mask are expanded here too: channel ``c`` becomes ``{c, C+c, 2C+c, 3C+c}``.
+    Returning them alongside keeps ``barlow_twins_loss`` unaware of the pooling.
+    """
+    if hz.dim() != 4:
+        raise ValueError(f"stats_pool expects (n_views, B, C, P); got {tuple(hz.shape)}")
+    n_views, B, C, P = hz.shape
+    if P < 2:
+        raise ValueError(f"stats_pool needs P >= 2 for an unbiased std; got P={P}.")
+    pooled = torch.cat([hz.mean(dim=3), hz.std(dim=3), hz.amax(dim=3), hz.amin(dim=3)], dim=2)
+
+    idx_out = content_indices
+    if content_indices is not None:
+        idx_out = [[s * C + int(c) for s in range(n_stats) for c in idx] for idx in content_indices]
+    mask_out = soft_content_mask
+    if soft_content_mask is not None:
+        mask_out = soft_content_mask.reshape(1, -1).repeat(1, n_stats)
+    return pooled, idx_out, mask_out
+
+
+def _whiten_batch(x, eps, mean=None):
+    """Apply ``Sigma^(-1/2)`` to ``(N, d)`` rows so every direction carries unit variance.
+
+    Per-channel standardisation (``sim_normalize``) divides by ``sqrt(diag(Sigma))`` and so
+    equalises CHANNELS, not DIRECTIONS.  That is not the same thing when the channels are
+    mixtures: a channel holding 95% of one factor and 5% of another is still 95/5 after
+    dividing by its own sigma, because the off-diagonal of Sigma -- the part that says the
+    channels are redundant copies of a few factors -- was never used.  Whitening uses the
+    full matrix, so a direction carrying 1% of the raw variance becomes a unit-variance
+    direction and commands the same alignment gradient as the dominant one.  This is the
+    W-MSE construction (Ermolov et al., ICML 2021).
+
+    Symmetric (ZCA) rather than Cholesky: Cholesky whitening is a triangular map and so
+    depends on the ARBITRARY ordering of the channels, which is not a property an
+    identifiability claim should rest on.  The cost is that ``eigh``'s backward carries
+    ``1/(lambda_i - lambda_j)`` terms and is ill-conditioned when eigenvalues are close --
+    ``eps`` is the floor that keeps that bounded, and it is a real hyperparameter, not a
+    formality.  Too small amplifies noise in the null directions; too large and this decays
+    back into plain MSE.
+
+    Only valid where the rows are the units being aligned and there are enough of them to
+    estimate a ``d x d`` covariance.  At ``content_size`` 12 and ``batch_size`` 128 that is
+    ~10 rows per parameter; the 768-wide patch block at the same batch size is not
+    estimable and the caller must not reach here with it.
+    """
+    if x.dim() != 2:
+        raise ValueError(f"_whiten_batch expects (N, d); got {tuple(x.shape)}")
+    n, d = x.shape
+    if n <= d + 1:
+        raise ValueError(f"Whitening needs more rows than channels: got N={n}, d={d}. Raise batch_size.")
+    # The covariance is always taken about x's OWN mean; `mean` only sets the origin the
+    # whitened output is expressed in. A covariance is invariant to that choice, so passing a
+    # pooled mean keeps the block identity-covariance while letting a per-view offset survive.
+    xc = x - x.mean(dim=0, keepdim=True)
+    cov = (xc.T @ xc) / (n - 1)
+    cov = cov + eps * torch.eye(d, device=cov.device, dtype=cov.dtype)
+    evals, evecs = torch.linalg.eigh(cov)
+    inv_sqrt = (evecs * evals.clamp_min(1e-12).rsqrt()) @ evecs.T
+    out = xc if mean is None else (x - mean)
+    return out @ inv_sqrt
+
+
 def barlow_twins_loss(
     hz,
     estimated_content_indices=None,
@@ -1040,6 +1121,8 @@ def barlow_twins_loss(
     sim_coeff=0.0,
     std_coeff=0.0,
     sim_normalize=False,
+    sim_whiten=False,
+    sim_whiten_eps=1e-3,
     corr_ema=None,
     corr_ema_decay=0.0,
     normalize_terms=False,
@@ -1078,6 +1161,16 @@ def barlow_twins_loss(
             loss bit-identical. Cuts off_diag's d(d-1)/B sampling floor by (1-m)/(1+m):
             at d=44, B=128 the floor is 14.78, and m=0.99 takes it to 0.075. Raise ``lambd``
             when enabling — the gradient on this term scales with (1-m).
+        sim_whiten: Whiten the two views with ``Sigma^(-1/2)`` before the MSE instead of
+            normalising per channel. ``sim_normalize`` equalises CHANNELS (the diagonal of
+            the covariance); this equalises DIRECTIONS (the whole matrix), which is the
+            version that matters when the channels are mixtures of a few dominant factors
+            and the factor of interest sits in the low-variance tail. Mutually exclusive
+            with ``sim_normalize`` and only defined where the rows are the aligned units --
+            the caller must not pass the patch fold. See :func:`_whiten_batch`.
+        sim_whiten_eps: Shrinkage on the covariance before inversion, ``(Sigma + eps*I)``.
+            A real hyperparameter: too small amplifies noise in the null directions into a
+            full-weight term, too large decays back into plain MSE. Sweep it.
         sim_normalize: Divide the MSE by a detached per-channel ``2*sigma^2`` so it reads
             ``1 - rho`` rather than an absolute distance. Makes the term scale-free (it
             stops fighting the variance hinge, which is simultaneously rescaling sigma) and
@@ -1209,7 +1302,28 @@ def barlow_twins_loss(
                     with _ctx:
                         r_i = r_i.float()
                         r_j = r_j.float()
-                        if sim_normalize:
+                        if sim_whiten:
+                            # Whitening subsumes the per-channel normalisation below: after
+                            # Sigma^(-1/2) every DIRECTION, not merely every channel, has unit
+                            # variance, so a plain MSE is already scale-free and
+                            # direction-equalised. Each view is whitened by its own covariance,
+                            # as in W-MSE; a shared covariance is the alternative worth trying
+                            # when the two views' statistics differ a lot, which here they do.
+                            #
+                            # Centred by the POOLED mean, not each view's own. Whitening
+                            # normally centres each input, and that would silently destroy the
+                            # one thing this MSE term exists for: on_diag is already blind to a
+                            # per-view constant offset, and centring each view separately would
+                            # make the MSE blind to it too, leaving nothing in the objective
+                            # that requires the two views to be in the same PLACE rather than
+                            # merely to co-vary. A covariance does not depend on which constant
+                            # was subtracted, so the pooled mean buys offset-sensitivity for
+                            # free and the whitened block still has identity covariance.
+                            _mu = 0.5 * (r_i.mean(dim=0, keepdim=True) + r_j.mean(dim=0, keepdim=True))
+                            _wi_dbg = _whiten_batch(r_i, sim_whiten_eps, mean=_mu)
+                            _wj_dbg = _whiten_batch(r_j, sim_whiten_eps, mean=_mu)
+                            sim_loss = F.mse_loss(_wi_dbg, _wj_dbg)
+                        elif sim_normalize:
                             # Per-channel, scale-free MSE. For zero-mean equal-variance views with
                             # per-channel correlation rho_c, MSE_c = 2*sigma_c^2*(1 - rho_c), so this
                             # reads (1 - mean rho) when the means match and EXCESS over that is the
@@ -1254,7 +1368,12 @@ def barlow_twins_loss(
                     # misalignment in the same units.
                     with torch.no_grad():
                         _dmu2 = (r_i.mean(dim=0) - r_j.mean(dim=0)).pow(2)
-                        if sim_normalize:
+                        if sim_whiten:
+                            # Offset in whitened units, to match the reported sim_loss. Both
+                            # views were centred by the SAME pooled mean, so the per-view
+                            # offset survives whitening and this is nonzero when it should be.
+                            _sim_offset = (_wi_dbg.mean(dim=0) - _wj_dbg.mean(dim=0)).pow(2).mean()
+                        elif sim_normalize:
                             _vsum = r_i.var(dim=0, unbiased=False) + r_j.var(dim=0, unbiased=False)
                             _sim_offset = (_dmu2 / (_vsum + 1e-8)).mean()
                         else:

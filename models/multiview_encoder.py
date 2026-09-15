@@ -46,6 +46,8 @@ class MultiviewConvEncoder(HelperModule):
         content_channels: int = 9,
         separate_encoders: bool = True,
         use_checkpoint: bool = False,
+        proj_dim: int = 0,
+        proj_hidden: int = 256,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -54,6 +56,7 @@ class MultiviewConvEncoder(HelperModule):
         self.latent_dim = latent_dim
         self.content_channels = content_channels
         self.separate_encoders = separate_encoders
+        self.proj_dim = proj_dim
 
         # --- View-specific encoders ---
         # Encoder 1 is a deep copy of encoder 0 so both views start in the same
@@ -74,6 +77,22 @@ class MultiviewConvEncoder(HelperModule):
         fixed_mask[0, :content_channels] = 1.0
         self.register_buffer("content_mask", fixed_mask)
 
+        # --- Contrastive projection head (SimCLR/MoCo recipe) ---
+        # The loss runs on the head's output while probes keep reading the pre-head
+        # encoding, so InfoNCE can over-compress its own space toward view-invariance
+        # without flattening the units being scored. Without it the aligned space and
+        # the probed space are the same vector, and alignment removes content along
+        # with view information. Shared across views so both encoders, which do not
+        # otherwise share weights, land in one comparison space.
+        if proj_dim > 0:
+            self.projector = nn.Sequential(
+                nn.Linear(content_channels, proj_hidden),
+                nn.ReLU(inplace=True),
+                nn.Linear(proj_hidden, proj_dim),
+            )
+        else:
+            self.projector = None
+
     def _encode(self, x: torch.FloatTensor, n_views: int, view_idx) -> torch.FloatTensor:
         """Route each view through its own encoder, returning a (B, hidden, d, h, w) map."""
         if n_views == 2 and self.encoder_v1 is not None:
@@ -81,6 +100,16 @@ class MultiviewConvEncoder(HelperModule):
             return torch.cat([self.encoder(x[:b]), self.encoder_v1(x[b:])], dim=0)
         enc = self.encoder_v1 if (view_idx == 1 and self.encoder_v1 is not None) else self.encoder
         return enc(x)
+
+    def project(self, content_block: torch.FloatTensor) -> torch.FloatTensor:
+        """Map a pooled content block into the loss-facing space.
+
+        Applies to the last dimension, so ``(B, C)`` and ``(n_views, B, C)`` both work.
+        Returns the input unchanged when no head is configured, so callers can call it
+        unconditionally. ``forward`` deliberately does not call it — eval and the DCI
+        probes must read the pre-head encoding.
+        """
+        return content_block if self.projector is None else self.projector(content_block)
 
     @staticmethod
     def _patch_pool(feat: torch.FloatTensor, patch_grid) -> torch.FloatTensor:

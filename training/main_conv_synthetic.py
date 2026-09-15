@@ -57,6 +57,24 @@ def parse_args():
         default=True,
         help="InfoNCE negatives only from the other view (paper aligns across views)",
     )
+    p.add_argument(
+        "--contrastive-proj-dim",
+        type=int,
+        default=0,
+        help="If > 0, insert an MLP head between the pooled content block and the "
+        "contrastive loss. The loss is computed on the head's output while the DCI "
+        "probes keep reading the pre-head encoding (the SimCLR/MoCo recipe — the "
+        "loss-facing space over-compresses toward view-invariance and loses "
+        "linear-probe info). 0 (default) disables the head: the loss acts directly "
+        "on the representation being scored.",
+    )
+    p.add_argument(
+        "--contrastive-proj-hidden",
+        type=int,
+        default=256,
+        help="Hidden width of the projection head MLP (Linear -> ReLU -> Linear). "
+        "Only used when --contrastive-proj-dim > 0.",
+    )
 
     # Optimisation.
     p.add_argument("--lr", type=float, default=1e-4)
@@ -80,6 +98,15 @@ def parse_args():
     p.add_argument("--n-style", type=int, default=3, help="Per-view style factors")
     p.add_argument("--num-train-samples", type=int, default=2000)
     p.add_argument("--num-val-samples", type=int, default=400)
+    p.add_argument(
+        "--cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Hold rendered volumes in RAM (default). The cache is (samples x 2 views x res^3 x 4B) "
+        "per split once full -- 23.5 GB for 1000 train + 400 val at res 128, which the OOM killer "
+        "takes out on the first eval. Pass --no-cache at high res to re-render each sample instead: "
+        "slower per step, constant memory.",
+    )
     p.add_argument("--synthetic-mode", type=str, default="pseudo_mri")
     p.add_argument(
         "--synthetic-normalize", type=str, default="per_sample", choices=["per_sample", "shared", "fixed_reference"]
@@ -98,12 +125,28 @@ def parse_args():
     return p.parse_args()
 
 
+def cache_gb(res, num_samples):
+    """RAM the dataset's in-memory cache will hold once every sample has been rendered."""
+    return num_samples * 2 * (res**3) * 4 / 1e9
+
+
 def make_dataset(args, mode, num_samples):
     """Single factory for train/val/test so the generative distribution is identical."""
+    if args.cache:
+        gb = cache_gb(args.res, num_samples)
+        # The cache fills lazily, so an over-large one survives training and is killed
+        # later, on the first eval that starts filling the val split's share of it.
+        if gb > 4.0:
+            print(
+                f"  WARNING: {mode} cache will grow to {gb:.1f} GB in RAM "
+                f"({num_samples} samples x 2 views x {args.res}^3 x 4B). "
+                f"Pass --no-cache to re-render instead of caching.",
+                flush=True,
+            )
     return SyntheticBrainDataset(
         mode=mode,
         spatial_size=(args.res, args.res, args.res),
-        cache=True,
+        cache=args.cache,
         synthetic_mode=args.synthetic_mode,
         synthetic_seed=args.seed,
         synthetic_num_samples=num_samples,
@@ -120,11 +163,19 @@ def make_dataset(args, mode, num_samples):
     )
 
 
-def contrastive_loss(pooled, args, sim_metric, criterion):
-    """Content-alignment − entropy on the pooled content block across the two views."""
+def contrastive_loss(pooled, model, args, sim_metric, criterion):
+    """Content-alignment − entropy on the pooled content block across the two views.
+
+    The content block is selected first and then projected, so with a head every output
+    dimension is part of the loss-facing space and counts as content downstream. The head
+    is applied here rather than handed to the losses' ``projector`` argument, which
+    ``infonce_base_loss`` accepts but never calls. Without a head ``project`` is the
+    identity and this is the same tensor the loss selected internally before.
+    """
     b = pooled.shape[0] // 2
     hz = torch.stack([pooled[:b], pooled[b:]], dim=0)  # (2, B, C)
-    content_indices = [list(range(args.content_channels))]
+    hz = model.project(hz[..., : args.content_channels])
+    content_indices = [list(range(hz.shape[-1]))]
     if args.contrastive_loss_type == "barlow_twins":
         loss = losses.barlow_twins_loss(
             hz, estimated_content_indices=content_indices, subsets=[(0, 1)], lambd=args.bt_lambda
@@ -135,12 +186,26 @@ def contrastive_loss(pooled, args, sim_metric, criterion):
             sim_metric=sim_metric,
             criterion=criterion,
             tau=args.tau,
-            projector=(lambda t: t),
             estimated_content_indices=content_indices,
             subsets=[(0, 1)],
             cross_view_negs_only=args.cross_view_negs_only,
         )
     return loss.squeeze()
+
+
+def effective_rank(feat):
+    """Participation ratio of the covariance spectrum: 1 = collapsed to a line, C = isotropic.
+
+    The quantity InfoNCE quietly destroys when alignment is the only pressure on the
+    representation. GAP already starts this near 1 on a random encoder, so a run whose
+    rank never climbs is discarding information rather than aligning content, and every
+    identifiability number it reports will sit at the untrained floor.
+    """
+    x = feat.detach().float()
+    x = x - x.mean(dim=0, keepdim=True)
+    ev = torch.linalg.eigvalsh(torch.cov(x.T)).clamp(min=0)
+    total = ev.sum()
+    return float(total**2 / ev.pow(2).sum()) if total > 0 else 0.0
 
 
 def evaluate(model, val_dataset, device, args, save_dir, step, writer=None):
@@ -209,7 +274,15 @@ def main():
         latent_dim=args.latent_dim,
         content_channels=args.content_channels,
         separate_encoders=not args.no_separate_encoders,
+        proj_dim=args.contrastive_proj_dim,
+        proj_hidden=args.contrastive_proj_hidden,
     ).to(device)
+    if model.projector is not None:
+        print(
+            f"projection head: {args.content_channels} -> {args.contrastive_proj_hidden} -> "
+            f"{args.contrastive_proj_dim} (loss runs here; probes read the {args.latent_dim}-d encoding)",
+            flush=True,
+        )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     sim_metric = torch.nn.CosineSimilarity(dim=-1)
@@ -223,7 +296,7 @@ def main():
         writer = None
 
     step = 0
-    running = {"loss": 0.0, "n": 0}
+    running = {"loss": 0.0, "rank": 0.0, "n": 0}
     model.train()
     while step < args.train_steps:
         for batch in train_loader:
@@ -233,7 +306,7 @@ def main():
 
             _, _, feats, _, _, _, _, _ = model(x, pool_only=True, n_views=2)
             pooled = feats[0]  # (2B, latent_dim)
-            loss = contrastive_loss(pooled, args, sim_metric, criterion)
+            loss = contrastive_loss(pooled, model, args, sim_metric, criterion)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -242,15 +315,21 @@ def main():
             optimizer.step()
 
             running["loss"] += loss.item()
+            running["rank"] += effective_rank(pooled[: pooled.shape[0] // 2, : args.content_channels])
             running["n"] += 1
             step += 1
 
             if step % args.log_every == 0:
                 n = max(running["n"], 1)
-                print(f"step {step:6d} | contrastive {running['loss']/n:.4f}", flush=True)
+                print(
+                    f"step {step:6d} | contrastive {running['loss']/n:.4f} "
+                    f"| content eff_rank {running['rank']/n:.2f}/{args.content_channels}",
+                    flush=True,
+                )
                 if writer is not None:
                     writer.add_scalar("train/contrastive", running["loss"] / n, step)
-                running = {"loss": 0.0, "n": 0}
+                    writer.add_scalar("train/content_eff_rank", running["rank"] / n, step)
+                running = {"loss": 0.0, "rank": 0.0, "n": 0}
 
             if step % args.eval_every == 0 or step == args.train_steps:
                 model.eval()
