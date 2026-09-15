@@ -89,6 +89,13 @@ def parse_args():
 
     # Evaluation pooling — GAP is the paper-faithful default; patch probes whether
     # content survives at spatial resolution (see groupnorm-caps-gap-pooled-mcc).
+    p.add_argument(
+        "--floor-eval",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run one eval before training and keep it as the untrained floor, so every "
+        "later per-factor score prints its delta against it. Costs one extra eval.",
+    )
     p.add_argument("--eval-pooling", type=str, default="gap", choices=["gap", "patch"])
     p.add_argument("--eval-patch-grid", type=int, nargs=3, default=[4, 5, 4])
 
@@ -208,7 +215,58 @@ def effective_rank(feat):
     return float(total**2 / ev.pow(2).sum()) if total > 0 else 0.0
 
 
-def evaluate(model, val_dataset, device, args, save_dir, step, writer=None):
+def per_factor_scores(results):
+    """Per-factor ridge R² and block-MCC, keyed by block then factor name.
+
+    Both are already computed inside ``compute_dci_synthetic``; this just reads them off
+    the block detail dicts. Returned in a plain-dict shape so a step-0 call can be kept
+    as the untrained floor and subtracted from every later eval.
+    """
+    out = {}
+    for block in ("content→content", "content→style"):
+        detail = results.get(f"{block}/detail")
+        if not isinstance(detail, dict):
+            continue
+        names = detail.get("factor_names") or []
+        ridge, mcc, mcc_std = (detail.get(k) for k in ("per_factor_ridge", "per_factor_mcc", "per_factor_mcc_std"))
+
+        def at(arr, j):
+            return float(arr[j]) if arr is not None and j < len(arr) else float("nan")
+
+        out[block] = {
+            nm: {"ridge": at(ridge, j), "mcc": at(mcc, j), "mcc_std": at(mcc_std, j)} for j, nm in enumerate(names)
+        }
+    return out
+
+
+def print_per_factor(scores, floor=None, writer=None, step=0):
+    """One row per ground-truth factor: which factors the representation actually carries.
+
+    The mean over factors hides exactly the case worth checking — a block that recovers
+    two coarse global factors well and every localised one at chance reads as a decent
+    average. Floor-subtracted where a step-0 eval is available, because raw per-factor R²
+    has the same untrained-floor problem as the block means.
+    """
+    for block, rows in scores.items():
+        if not rows:
+            continue
+        has_floor = bool(floor) and block in floor
+        print(f"    --- per-factor recovery: {block} ---", flush=True)
+        head = f"      {'factor':<20s}{'ridge R²':>9s}{'MCC':>8s}{'±':>7s}"
+        print(head + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""), flush=True)
+        for nm, v in rows.items():
+            line = f"      {nm:<20s}{v['ridge']:>9.3f}{v['mcc']:>8.3f}{v['mcc_std']:>7.3f}"
+            if has_floor and nm in floor[block]:
+                fl = floor[block][nm]["ridge"]
+                line += f"{fl:>9.3f}{v['ridge'] - fl:>+12.3f}"
+            print(line, flush=True)
+            if writer is not None:
+                tag = block.replace("→", "_to_")
+                writer.add_scalar(f"per_factor/{tag}/{nm}/ridge_r2", v["ridge"], step)
+                writer.add_scalar(f"per_factor/{tag}/{nm}/mcc", v["mcc"], step)
+
+
+def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
     print(f"  [eval] synthetic DCI @ step {step} ...", flush=True)
     pooling = "gap" if args.eval_pooling == "gap" else tuple(args.eval_patch_grid)
     results = dci.compute_dci_synthetic(
@@ -233,14 +291,19 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None):
     show("content->style/block_mcc")
     show("content->view/acc")
 
+    scores = per_factor_scores(results)
+    print_per_factor(scores, floor=floor, writer=writer, step=step)
+
     if writer is not None:
         for k, v in flat.items():
             if np.isfinite(v):
                 writer.add_scalar(f"dci_synthetic/{k}", v, step)
 
+    payload = {k: float(v) for k, v in flat.items()}
+    payload["per_factor"] = scores  # nested, so the existing flat keys stay at top level
     with open(os.path.join(save_dir, f"dci_step{step}.json"), "w") as fp:
-        json.dump({k: float(v) for k, v in flat.items()}, fp, indent=2)
-    return flat
+        json.dump(payload, fp, indent=2)
+    return flat, scores
 
 
 def main():
@@ -295,6 +358,15 @@ def main():
     except Exception:
         writer = None
 
+    # Step-0 eval doubles as the untrained floor: same architecture, same seed, no training.
+    # Per-factor R² needs it more than the block means do -- a localised factor can read
+    # 0.2 from a random encoder, so the raw number alone cannot say whether it was learned.
+    floor = None
+    if args.floor_eval:
+        model.eval()
+        _, floor = evaluate(model, val_dataset, device, args, save_dir, 0, writer)
+        model.train()
+
     step = 0
     running = {"loss": 0.0, "rank": 0.0, "n": 0}
     model.train()
@@ -333,7 +405,7 @@ def main():
 
             if step % args.eval_every == 0 or step == args.train_steps:
                 model.eval()
-                evaluate(model, val_dataset, device, args, save_dir, step, writer)
+                evaluate(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
                 torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
                 model.train()
 
