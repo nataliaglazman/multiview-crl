@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-08-27T22:00:13Z
-# Git SHA: 9f15471
+# Generated at: 2026-09-15T14:08:40Z
+# Git SHA: eb498aa
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-40-baseline-true
+#SBATCH --job-name=synthetic-clean-content-causal-stats
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-40-baseline-true-%j.err
+#SBATCH --error=synthetic-clean-content-causal-stats-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -56,21 +56,21 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 128 \
+    --batch-size 64 \
     --bt-corr-ema 0.99 \
-    --bt-gap-lambda 7 \
-    --bt-gap-weight 1 \
-    --bt-lambda 7 \
+    --bt-gap-lambda 6 \
+    --bt-gap-pooling stats \
+    --bt-gap-weight 0.5 \
+    --bt-lambda 6 \
     --bt-normalize-terms \
     --bt-patch-weight 1 \
-    --bt-sim-coeff 0.000114 \
-    --bt-sim-normalize \
-    --bt-std-coeff 0.00227 \
+    --bt-sim-coeff 0.0114 \
+    --bt-std-coeff 0.227 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 40 \
+    --content-size 12 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-view-negs-only \
@@ -100,12 +100,12 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 100 \
     --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
+    --scale-style-hsic-loss 0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
@@ -115,21 +115,22 @@ fi
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-clean-content \
+    --synthetic-identifiable-ventricle \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-40-baseline-true \
+    --model-id synthetic-clean-content-causal-stats \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 16 \
+    --vqvae-hidden-channels 16 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-nb-res-layers 2 \

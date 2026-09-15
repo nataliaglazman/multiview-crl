@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_identifiable.yaml
-# Generated at: 2026-08-27T22:00:13Z
-# Git SHA: 9f15471
+# Generated at: 2026-09-15T14:08:40Z
+# Git SHA: eb498aa
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-identifiable-generator-4-scaling-2
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -99,6 +99,7 @@ fi
     --scale-contrastive-loss 1 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
+    --scale-style-hsic-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
