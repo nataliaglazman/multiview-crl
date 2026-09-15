@@ -9,7 +9,17 @@ it fails on:
     gap        4 global scalars (mean/std/max/min per view). Position-blind by construction:
                a feature at the front and the same feature at the back give the same mean.
                This is what ``--eval-pooling gap`` hands the probes.
-    vox8/vox16 the volume average-pooled to 8^3 / 16^3 and flattened. Spatial, and the pair
+    patch      the volume average-pooled to ``--patch-grid`` (default 4x5x4, ~80 positions),
+               the pooling the patch objectives align on.
+    patch_dbl  the same grid under ``--patch-center-mode double``: each sample's mean over
+               positions removed, so a spatially constant per-subject code contributes
+               nothing and only the subject x location interaction survives.
+               ``--patch-center-mode position`` is deliberately absent: it subtracts the
+               across-sample mean at each patch, i.e. one constant vector, which the probe's
+               StandardScaler undoes exactly. It cannot change ANY linear-probe score, so it
+               would only ever reprint the ``patch`` column. It still matters for the
+               objectives themselves, whose cosine similarity is not affine-invariant.
+    vox8/vox16 average-pooled to 8^3 / 16^3. Finer than the patch grid, and the pair
                separates "needs more spatial detail" from "needs any spatial detail".
     centroid   intensity-weighted centroid of the most extreme voxels in each view (the
                lesion is painted at a fixed intensity distinct from the white matter around
@@ -18,16 +28,19 @@ it fails on:
 
 Reading the table:
 
-    high under centroid/vox*, ~0 under gap   -> the READOUT is the problem. Global pooling
+    high under patch/vox*, ~0 under gap      -> the READOUT is the problem. Global pooling
                                                 discards it; more input resolution will not
                                                 bring it back.
+    high under patch, low under patch_dbl    -> the factor lives in a spatially constant
+                                                per-subject code, which that centring mode
+                                                deletes on purpose.
     rises from one resolution to the next    -> RESOLUTION is the problem for that factor.
     low everywhere, centroid included        -> the LABEL is the problem: the factor does not
                                                 correspond to anything recoverable in the image
                                                 at any resolution, through any readout.
 
 Example:
-    python -m eval.factor_visibility --res 32 64 --num-samples 250
+    python -m eval.factor_visibility --res 32 64 128 --num-samples 350 --patch-grid 4 5 4
 """
 
 import argparse
@@ -51,6 +64,14 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--quantile", type=float, default=0.99, help="Extremal-voxel cut for the centroid oracle")
+    p.add_argument(
+        "--patch-grid",
+        type=int,
+        nargs=3,
+        default=[4, 5, 4],
+        help="Patch grid (D, H, W) for the patch oracles, matching main_multimodal's "
+        "--patch-grid. Default 4 5 4 (~80 patches).",
+    )
     p.add_argument(
         "--probe-dim",
         type=int,
@@ -90,7 +111,7 @@ def extremal_centroid(vol, quantile, high=True):
     return (w @ coords) / total
 
 
-def readouts(v1, v2, quantile):
+def readouts(v1, v2, quantile, patch_grid):
     """Every readout for one batch, as {name: (B, D)}. Volumes are (B, 1, D, H, W)."""
     a, b = v1[:, 0], v2[:, 0]
 
@@ -115,10 +136,33 @@ def readouts(v1, v2, quantile):
         ],
         dim=1,
     )
+    # Raw patch grid, kept in (B, views, P) so the centring can run over the whole split
+    # rather than per batch -- ``position`` centring subtracts an across-SAMPLE mean, so a
+    # per-batch estimate of it would be a different (and much noisier) operator.
+    p1, p2 = (F.adaptive_avg_pool3d(v, tuple(patch_grid)).flatten(2)[:, 0] for v in (v1, v2))
+    out["_patch_raw"] = torch.stack([p1, p2], dim=1)
     return out
 
 
-def collect(ds, batch_size, quantile):
+def derive_patch(raw, modes=(("none", "patch"), ("double", "patch_dbl"))):
+    """Patch readouts matching ``main_multimodal``'s --patch-grid / --patch-center-mode.
+
+    ``raw`` is ``(N, views, P)``. Centring is delegated to the training code's own
+    ``_center_patch_features`` rather than reimplemented, so what this measures is exactly
+    what the patch objectives see: ``position`` removes the shared anatomy at each patch,
+    ``double`` additionally removes each sample's spatially constant code.
+    """
+    from training.losses import _center_patch_features
+
+    hz = torch.as_tensor(raw).permute(1, 0, 2).unsqueeze(2)  # (views, N, 1, P)
+    out = {}
+    for mode, name in modes:
+        c = _center_patch_features(hz, mode)
+        out[name] = c.permute(1, 0, 2, 3).reshape(hz.shape[1], -1).numpy()
+    return out
+
+
+def collect(ds, batch_size, quantile, patch_grid):
     """Readouts and GT factors for the whole split, accumulating only the readouts.
 
     The volumes are dropped batch by batch; at res 128 holding them all would cost more
@@ -127,7 +171,7 @@ def collect(ds, batch_size, quantile):
     acc, gt = {}, []
     for batch in DataLoader(ds, batch_size=batch_size):
         v1, v2 = batch["image"]
-        for k, v in readouts(v1, v2, quantile).items():
+        for k, v in readouts(v1, v2, quantile, patch_grid).items():
             acc.setdefault(k, []).append(v)
         gt.append(batch["gt_latents"]["z_content"].numpy())
     return {k: torch.cat(v).numpy() for k, v in acc.items()}, np.concatenate(gt)
@@ -146,9 +190,10 @@ def run_resolution(args, res):
         synthetic_normalize=args.synthetic_normalize,
         synthetic_clean_content=args.synthetic_clean_content,
     )
-    reps, gt = collect(ds, args.batch_size, args.quantile)
+    reps, gt = collect(ds, args.batch_size, args.quantile, args.patch_grid)
+    reps.update(derive_patch(reps.pop("_patch_raw")))
     names = CONTENT_FACTOR_NAMES[: gt.shape[1]]
-    order = ["gap", "vox8", "vox16", "centroid"]
+    order = ["gap", "patch", "patch_dbl", "vox8", "vox16", "centroid"]
 
     raw_width = {k: v.shape[1] for k, v in reps.items()}
     if args.probe_dim > 0:
@@ -168,15 +213,18 @@ def run_resolution(args, res):
         f"  lesion sphere: radius {lesion_r_vox:.1f} vox -> ~{4/3*np.pi*lesion_r_vox**3:.0f} voxels",
         flush=True,
     )
-    print(f"  {'factor':<20s}" + "".join(f"{k:>11s}" for k in order), flush=True)
+    print(f"  {'factor':<19s}" + "".join(f"{k:>10s}" for k in order), flush=True)
     scores = {}
     for j, nm in enumerate(names):
         row = {k: cv_probe_r2(reps[k], gt[:, j])["mean"] for k in order}
         scores[nm] = row
-        print(f"  {nm:<20s}" + "".join(f"{row[k]:>11.3f}" for k in order), flush=True)
-    print(f"  {'(raw width)':<20s}" + "".join(f"{raw_width[k]:>11d}" for k in order), flush=True)
-    print(f"  {'(probe width)':<20s}" + "".join(f"{reps[k].shape[1]:>11d}" for k in order), flush=True)
+        print(f"  {nm:<19s}" + "".join(f"{row[k]:>10.3f}" for k in order), flush=True)
+    print(f"  {'(raw width)':<19s}" + "".join(f"{raw_width[k]:>10d}" for k in order), flush=True)
+    print(f"  {'(probe width)':<19s}" + "".join(f"{reps[k].shape[1]:>10d}" for k in order), flush=True)
     return scores
+
+
+SPATIAL = ("patch", "patch_dbl", "vox8", "vox16", "centroid")
 
 
 def verdict(per_res):
@@ -188,7 +236,7 @@ def verdict(per_res):
     # "Not recoverable" is only meaningful once the probes are shown to recover SOMETHING.
     # Underpowered probes drive every factor to chance, which would otherwise be reported
     # as nine separate label problems.
-    best = max(max(v[k] for k in ("vox8", "vox16", "centroid")) for v in per_res[hi].values())
+    best = max(max(v[k] for k in SPATIAL) for v in per_res[hi].values())
     if best < 0.30:
         print(
             f"  INCONCLUSIVE — best spatial recovery over all factors is only {best:.2f}. "
@@ -200,8 +248,8 @@ def verdict(per_res):
 
     for nm in per_res[hi]:
         top = per_res[hi][nm]
-        spatial = max(top["vox8"], top["vox16"], top["centroid"])
-        gained = spatial - max(per_res[lo][nm][k] for k in ("vox8", "vox16", "centroid"))
+        spatial = max(top[k] for k in SPATIAL)
+        gained = spatial - max(per_res[lo][nm][k] for k in SPATIAL)
         if spatial < 0.15:
             msg = "LABEL — not recoverable by any readout at any resolution tested"
         elif top["gap"] < 0.15:
