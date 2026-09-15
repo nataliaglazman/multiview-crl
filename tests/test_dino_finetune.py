@@ -47,6 +47,113 @@ class InfoNCETests(unittest.TestCase):
                 train.symmetric_infonce(torch.ones(size, 3), torch.ones(size, 3), temperature)
 
 
+def objective_cli(name):
+    return type(
+        "Cli",
+        (),
+        dict(
+            objective=name,
+            temperature=0.1,
+            bt_lambda=0.005,
+            vicreg_sim_coeff=25.0,
+            vicreg_std_coeff=25.0,
+            vicreg_cov_coeff=1.0,
+        ),
+    )()
+
+
+@unittest.skipIf(torch is None, "torch not installed")
+class ObjectiveTests(unittest.TestCase):
+    """infonce vs the negative-free arms: the ablation axis, and what stays comparable."""
+
+    def pair(self, seed=0, n=8, dim=16):
+        torch.manual_seed(seed)
+        base = torch.randn(n, dim)
+        first = (base + 0.1 * torch.randn(n, dim)).requires_grad_(True)
+        second = (base + 0.1 * torch.randn(n, dim)).requires_grad_(True)
+        return first, second
+
+    def test_every_objective_is_a_scalar_that_trains(self):
+        for name in train.OBJECTIVES:
+            with self.subTest(objective=name):
+                first, second = self.pair()
+                loss, _metrics = train.compute_objective(first, second, objective_cli(name))
+                self.assertEqual(loss.dim(), 0, "the loop's isfinite/backward/item assume a scalar")
+                self.assertTrue(torch.isfinite(loss))
+                loss.backward()
+                for view in (first, second):
+                    self.assertGreater(view.grad.norm().item(), 0)
+
+    def test_every_objective_reports_the_same_comparable_diagnostics(self):
+        # The point of more than one arm is to read them against each other, and their
+        # losses are not on a common scale. These three keys are.
+        for name in train.OBJECTIVES:
+            with self.subTest(objective=name):
+                loss, metrics = train.compute_objective(*self.pair(), objective_cli(name))
+                for key in ("loss", "accuracy", "positive_similarity", "negative_similarity"):
+                    self.assertIn(key, metrics)
+                    self.assertTrue(math.isfinite(metrics[key]), key)
+                json.dumps(metrics, allow_nan=False)  # what metrics.jsonl does
+
+    def test_retrieval_accuracy_is_a_diagnostic_not_part_of_a_negative_free_loss(self):
+        # Imported here, not at module scope: training.losses pulls in lpips, and this file
+        # is meant to skip cleanly rather than error when the training extras are absent.
+        from training.losses import barlow_twins_loss
+
+        first, second = self.pair()
+        direct = barlow_twins_loss(torch.stack([first.detach().float(), second.detach().float()]), lambd=0.005)
+        wrapped, _metrics = train.compute_objective(first, second, objective_cli("barlow"))
+        self.assertAlmostEqual(wrapped.item(), direct.squeeze().item(), places=6)
+
+    def test_the_per_term_breakdown_survives_into_the_metrics(self):
+        # Regression: the losses hang their breakdown off the returned tensor as a plain
+        # attribute, and squeeze() returns a NEW tensor that does not carry it.
+        _loss, barlow = train.compute_objective(*self.pair(), objective_cli("barlow"))
+        self.assertIn("on_diag_loss", barlow)
+        self.assertIn("off_diag_loss", barlow)
+        _loss, vicreg = train.compute_objective(*self.pair(), objective_cli("vicreg"))
+        for key in ("sim_loss", "var_loss", "cov_loss"):
+            self.assertIn(key, vicreg)
+
+    def test_barlows_not_applicable_accuracy_is_not_reported_as_a_score(self):
+        _loss, metrics = train.compute_objective(*self.pair(), objective_cli("barlow"))
+        self.assertNotIn("top1_acc", metrics)
+        self.assertGreater(metrics["accuracy"], 0.0)
+
+    def test_non_finite_and_non_numeric_diagnostics_are_dropped(self):
+        # metrics.jsonl is written with allow_nan=False, so one NaN would end the run after
+        # the optimizer had already stepped.
+        marker = torch.zeros(1)
+        marker._contrastive_diag = {"good": 1.5, "nan": float("nan"), "inf": float("inf"), "text": "x", "flag": True}
+        self.assertEqual(train._extra_diagnostics(marker), {"good": 1.5})
+        self.assertEqual(train._extra_diagnostics(torch.zeros(1)), {})
+
+    def test_each_objective_rejects_a_bad_pair_by_name(self):
+        for name in train.OBJECTIVES:
+            with self.subTest(objective=name):
+                with self.assertRaises(ValueError) as raised:
+                    train.compute_objective(torch.ones(1, 4), torch.ones(1, 4), objective_cli(name))
+                self.assertIn("at least two subjects", str(raised.exception))
+
+    def test_the_recorded_objective_names_the_paper_loss(self):
+        self.assertEqual(
+            train.OBJECTIVES,
+            {
+                "infonce": "symmetric_cross_view_infonce",
+                "barlow": "cross_view_barlow_twins",
+                "vicreg": "cross_view_vicreg",
+            },
+        )
+
+    def test_the_cli_offers_every_objective_and_defaults_to_infonce(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = parse_dino_finetune_args(["--output-dir", str(Path(tmp) / "run")])
+            self.assertEqual(cli.objective, "infonce")
+            for name in train.OBJECTIVES:
+                parsed = parse_dino_finetune_args(["--output-dir", str(Path(tmp) / "run"), "--objective", name])
+                self.assertEqual(parsed.objective, name)
+
+
 @unittest.skipIf(torch is None, "torch not installed")
 class DinoIntegrationTests(unittest.TestCase):
     @classmethod

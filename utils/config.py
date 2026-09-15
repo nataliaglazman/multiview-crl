@@ -1869,7 +1869,28 @@ def parse_dino_finetune_args(argv=None):
     parser.add_argument("--lr", type=float, default=1e-5, help="Backbone AdamW learning rate")
     parser.add_argument("--head-lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument(
+        "--objective",
+        default="infonce",
+        choices=["infonce", "barlow", "vicreg"],
+        help="Fine-tuning loss over the paired views. 'infonce' (default) uses the other subjects "
+        "in the batch as negatives. 'barlow' and 'vicreg' are negative-free: they keep the T1/T2 "
+        "pairing and drop the negatives, which is the arm to run against infonce when the question "
+        "is whether the negatives are what matters. Both are training.losses' own implementations, "
+        "so a fine-tuned DINO and a VQ-VAE trained in this repo optimise the same objective. "
+        "Cross-view retrieval accuracy is logged under every choice and is never part of a "
+        "negative-free loss, so the arms stay comparable.",
+    )
+    parser.add_argument("--temperature", type=float, default=0.1, help="InfoNCE temperature; unused by the others")
+    parser.add_argument(
+        "--bt-lambda",
+        type=float,
+        default=0.005,
+        help="Barlow Twins off-diagonal weight. The paper default, and the one training.losses uses.",
+    )
+    parser.add_argument("--vicreg-sim-coeff", type=float, default=25.0, help="VICReg invariance (MSE) weight")
+    parser.add_argument("--vicreg-std-coeff", type=float, default=25.0, help="VICReg variance (hinge) weight")
+    parser.add_argument("--vicreg-cov-coeff", type=float, default=1.0, help="VICReg covariance weight")
     parser.add_argument("--projection-dim", type=int, default=256, help="MLP output size; 0 applies InfoNCE directly")
     parser.add_argument("--projection-hidden-dim", type=int, default=1024)
     parser.add_argument("--grad-clip", type=float, default=1.0, help="Gradient norm cap; 0 disables clipping")
