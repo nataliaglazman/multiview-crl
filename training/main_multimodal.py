@@ -71,6 +71,7 @@ from training.losses import (
     vicreg_loss,
 )
 from training.style_hsic import style_content_hsic_loss
+from training.vicreg_local import attach_vicregl_heads, registered_level_loss
 from utils.checkpointing import (
     load_checkpoint,
     resolve_wandb_run_id,
@@ -342,6 +343,7 @@ def train_step(
             hz_level = enc_pooled.reshape(n_views, -1, *enc_pooled.shape[1:])
             _is_patch = hz_level.ndim == 4  # has patch dimension
             n_channels = hz_level.shape[2] if _is_patch else hz_level.shape[-1]
+            _vicregl_valid = None
             # Use per-level content_channels if available, otherwise fall back to ratio
             if level_idx in _content_ch_per_level:
                 content_size = _content_ch_per_level[level_idx]
@@ -364,6 +366,14 @@ def train_step(
                     if not bool(_keep_pos.any()):
                         _keep_pos = torch.ones_like(_keep_pos)  # never drop every patch
                 hz_level = hz_level[..., _keep_pos]
+                if getattr(args, "contrastive_loss_type", None) == "vicregl":
+                    _vicregl_valid = (_frac >= _fg_thr).reshape(n_views, -1, _frac.shape[-1])[..., _keep_pos]
+
+            _level_loss_func = (
+                registered_level_loss(_raw_vqvae, level_idx, _vicregl_valid)
+                if getattr(args, "contrastive_loss_type", None) == "vicregl"
+                else (patch_loss_func if _is_patch else loss_func)
+            )
 
             soft_content_mask = None
             _style_hz_v0 = _style_hz_v1 = None
@@ -498,7 +508,7 @@ def train_step(
                                     "MoCo/queue_raw_norm_v1": raw_norm_v1,
                                 }
                     else:
-                        _lf = patch_loss_func if _is_patch else loss_func
+                        _lf = _level_loss_func
                         _ph = _proj_head_for(level_idx)
                         if _ph is not None:
                             # hz_content is already sliced to k content channels.
@@ -563,7 +573,7 @@ def train_step(
                             queue_v1=_qv1,
                         )
                     else:
-                        _lf = patch_loss_func if _is_patch else loss_func
+                        _lf = _level_loss_func
                         _ph = _proj_head_for(level_idx)
                         if _ph is not None or _proj_mode == "bounded":
                             # Slice to content channels — keep the differentiable
@@ -704,7 +714,7 @@ def train_step(
                                 "MoCo/queue_raw_norm": queue_snapshot.norm(dim=0).mean().item(),
                             }
                 else:
-                    _lf = patch_loss_func if _is_patch else loss_func
+                    _lf = _level_loss_func
                     _ph = _proj_head_for(level_idx)
                     if _ph is not None:
                         # Fallback path: select content via the gumbel mask (keeping
@@ -1468,6 +1478,14 @@ def main(args):
             _scaled._contrastive_diag = dict(getattr(_l, "_contrastive_diag", None) or {})
             return _scaled
 
+    elif _contrastive_type == "vicregl":
+        logger.info("[LOSS] Registered local/global VICReg; local statistics across subjects per position; no BT EMA")
+
+        def loss_func(*_args, **_kwargs):
+            raise ValueError("vicregl must be dispatched through its model-owned local/global heads")
+
+        patch_loss_func = loss_func
+
     elif _contrastive_type == "vicreg":
         _sim_c = getattr(args, "vicreg_sim_coeff", 25.0)
         _std_c = getattr(args, "vicreg_std_coeff", 25.0)
@@ -1774,6 +1792,8 @@ def main(args):
                 f"levels={list(_proj_heads.keys())} (loss-facing only; probes read pre-head features)"
             )
 
+    attach_vicregl_heads(vqvae_model, args)
+
     if getattr(args, "compile_model", False):
         logger.warning(
             "  --compile-model ignored: torch.compile is incompatible with "
@@ -1964,6 +1984,7 @@ def main(args):
                 or "norm" in name.lower()
                 or name.endswith(".alpha")
                 or "_contrastive_proj_heads" in name
+                or "_vicregl_heads" in name
             ):
                 no_decay_params.append(param)
             else:

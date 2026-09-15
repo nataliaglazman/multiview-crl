@@ -523,12 +523,12 @@ def parse_args() -> argparse.ArgumentParser:
         "--contrastive-loss-type",
         type=str,
         default="infonce",
-        choices=["infonce", "barlow_twins", "vicreg"],
+        choices=["infonce", "barlow_twins", "vicreg", "vicregl"],
         help="Contrastive objective: 'infonce' (default, uses negatives — pair with "
         "--use-moco for small batches), 'barlow_twins' (negative-free, redundancy "
         "reduction — works well at any batch size), or 'vicreg' (negative-free, "
         "variance-invariance-covariance — more stable than Barlow Twins at very small "
-        "batch sizes).",
+        "batch sizes), or 'vicregl' (registered local/global VICReg; subject statistics at each patch position).",
     )
 
     parser.add_argument(
@@ -629,6 +629,26 @@ def parse_args() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="VICReg covariance (decorrelation) coefficient. Default: 1.0.",
+    )
+    parser.add_argument(
+        "--vicregl-local-weight",
+        type=float,
+        default=1.0,
+        help="Registered local VICReg arm weight (vicregl only).",
+    )
+    parser.add_argument(
+        "--vicregl-global-weight",
+        type=float,
+        default=0.25,
+        help="Independent foreground-GAP VICReg arm weight (vicregl only).",
+    )
+    parser.add_argument("--vicregl-local-dim", type=int, default=16)
+    parser.add_argument("--vicregl-global-dim", type=int, default=16)
+    parser.add_argument("--vicregl-hidden", type=int, default=64)
+    parser.add_argument(
+        "--vicregl-no-projectors",
+        action="store_true",
+        help="Apply local/global VICReg directly to content features; no learned heads.",
     )
     parser.add_argument(
         "--encoder-type",
@@ -1720,6 +1740,10 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
 
     # Warn if MoCo is enabled with a negative-free loss (it'll be ignored)
     _cl_type = getattr(args, "contrastive_loss_type", "infonce")
+    if _cl_type == "vicregl":
+        from training.vicreg_local import validate_vicregl_args
+
+        validate_vicregl_args(args)
     if _cl_type in ("barlow_twins", "vicreg") and getattr(args, "use_moco", False):
         logger.warning(
             f"--use-moco is set but --contrastive-loss-type is '{_cl_type}' which does not "
