@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-15T19:36:39Z
-# Git SHA: 57b90a0
+# Generated at: 2026-09-15T21:45:06Z
+# Git SHA: dcd3a34
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-causal-vicregl
+#SBATCH --job-name=synthetic-clean-content-causal-vicregl-rescaled
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-causal-vicregl-%j.err
+#SBATCH --error=synthetic-clean-content-causal-vicregl-rescaled-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -57,14 +57,6 @@ fi
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
     --batch-size 64 \
-    --bt-corr-ema 0.99 \
-    --bt-gap-lambda 6 \
-    --bt-gap-weight 1 \
-    --bt-lambda 6 \
-    --bt-normalize-terms \
-    --bt-patch-weight 1 \
-    --bt-sim-coeff 0.0114 \
-    --bt-std-coeff 0.227 \
     --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
@@ -73,6 +65,7 @@ fi
     --content-style-levels 0 \
     --contrastive-loss-type vicregl \
     --contrastive-proj-dim 0 \
+    --contrastive-proj-mode head \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -97,10 +90,9 @@ fi
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
-    --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 100 \
+    --scale-contrastive-loss 1.0 \
     --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-hsic-loss 0 \
@@ -122,12 +114,15 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-causal-vicregl \
+    --model-id synthetic-clean-content-causal-vicregl-rescaled \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
+    --vicreg-cov-coeff 1.0 \
+    --vicreg-sim-coeff 25.0 \
+    --vicreg-std-coeff 25.0 \
     --vicregl-global-weight 0.25 \
     --vicregl-local-weight 1.0 \
     --vq-commitment-weight 0.25 \
