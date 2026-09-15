@@ -168,16 +168,40 @@ def readout_width(n_samples, n_features, n_content, readout_dim=None):
     return min(want, n_features, n_samples)
 
 
-def fit_probe(X, y):
-    """Notebook linear probe: 70/30 split, train-only scaling, Ridge(alpha=1)."""
-    from sklearn.linear_model import Ridge
+# Ridge penalties --probe-ridge-cv selects among, by leave-one-out CV on the train split.
+# Spans 1e-2 to 1e6 because the useful penalty scales with the FEATURE COUNT, and this probe
+# is handed the unreduced block: at --pooling 8,8,8 that is 8x wider than at 4,4,4, and the
+# fixed alpha=1.0 below was never re-tuned for either.
+PROBE_ALPHAS = tuple(10.0**k for k in range(-2, 7))
+
+
+def fit_probe(X, y, ridge_cv=False):
+    """Notebook linear probe: 70/30 split, train-only scaling, Ridge(alpha=1).
+
+    ``ridge_cv=True`` selects the penalty over :data:`PROBE_ALPHAS` instead of pinning it at
+    1.0.  This probe reads the block at its FULL width, so its feature count moves with
+    ``--pooling`` while the readout PC uses does not (``--readout-dim`` pins that one), and a
+    penalty fixed for one width is not fixed for another.  Measured on a real two-arm run,
+    going from 4,4,4 to 8,8,8 moved mean raw R2 by -0.096 and mean partial R2 by -0.242 while
+    the pinned readout moved +0.016, with six of nine factors moving in OPPOSITE directions
+    under the two probes -- two readings of the same features that cannot both be right.
+
+    What tuning buys is that AGREEMENT, not width-invariance: the absolute values still move
+    with pooling, because the information genuinely differs, but they stop contradicting the
+    column held at fixed capacity.  Measured on planted features at 768 vs 6144 (test
+    ``TestProbeRidgeCV``), the fixed penalty matched the pinned readout's direction on 0 of 9
+    factors and the tuned one on 9 of 9.  Off by default: it changes every raw/partial number,
+    so a run with it is not comparable with one without.  Costs one SVD per factor.
+    """
+    from sklearn.linear_model import Ridge, RidgeCV
     from sklearn.metrics import r2_score
     from sklearn.model_selection import train_test_split
     from sklearn.preprocessing import StandardScaler
 
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=0)
     scaler = StandardScaler().fit(Xtr)
-    model = Ridge(alpha=1.0).fit(scaler.transform(Xtr), ytr)
+    model = RidgeCV(alphas=PROBE_ALPHAS) if ridge_cv else Ridge(alpha=1.0)
+    model = model.fit(scaler.transform(Xtr), ytr)
     return float(r2_score(yte, model.predict(scaler.transform(Xte)), multioutput="variance_weighted"))
 
 
@@ -193,6 +217,7 @@ def evaluate_arrays(
     holdout_readout=False,
     indep_test="fisherz",
     max_cond_set=None,
+    probe_ridge_cv=False,
 ):
     """Evaluate already aligned features and factors with the supplied panel's protocol.
 
@@ -220,8 +245,13 @@ def evaluate_arrays(
     makes KCI tractable at that width — 9 factors at 300 rows went from not finishing to
     9.7 s at ``max_cond_set=2``, recovering the same edge count as ``1``.  It is an
     approximation: pairs that only separate on a larger conditioning set keep their edge,
-    so the skeleton can only gain edges, never lose them.  All five arguments default to
-    the original behaviour.
+    so the skeleton can only gain edges, never lose them.
+
+    ``probe_ridge_cv`` tunes the raw/partial probe's penalty instead of pinning it at 1.0
+    (see :func:`fit_probe`), so those two columns stop contradicting the pinned readout when
+    the block's width changes.  It does not touch the readout PC reads, which ``readout_dim``
+    already pins, so no skeleton metric moves.  All six arguments default to the original
+    behaviour.
     """
     import numpy as np
     from sklearn.decomposition import PCA
@@ -259,8 +289,8 @@ def evaluate_arrays(
     for d, pa in enumerate(parents):
         if pa:
             residuals[:, d] -= LinearRegression().fit(z[:, pa], z[:, d]).predict(z[:, pa])
-    raw = [fit_probe(X, z[:, d : d + 1]) for d in range(n_content)]
-    partial = [fit_probe(X, residuals[:, d : d + 1]) for d in range(n_content)]
+    raw = [fit_probe(X, z[:, d : d + 1], probe_ridge_cv) for d in range(n_content)]
+    partial = [fit_probe(X, residuals[:, d : d + 1], probe_ridge_cv) for d in range(n_content)]
 
     Xsc = StandardScaler().fit_transform(X)
     # Extra sample-count cap avoids invalid PCA for small datasets / many factors.
@@ -376,6 +406,7 @@ def evaluate_arrays(
         graph_readout_dim=readout_features,
         graph_samples=len(z_hat),
         readout_mode="holdout" if holdout_readout else "in_sample",
+        probe_mode="ridge_cv" if probe_ridge_cv else "ridge_alpha1",
         indep_test=indep_test,
         max_cond_set=max_cond_set,
         raw_r2_mean=float(np.mean(raw)),
@@ -449,6 +480,7 @@ def truth_ceiling(z, adjacency, cli, cache):
         getattr(cli, "holdout_readout", False),
         getattr(cli, "indep_test", "fisherz"),
         getattr(cli, "max_cond_set", None),
+        getattr(cli, "probe_ridge_cv", False),
     )
     # Marked only on success, so a run whose ceiling failed does not poison the digest and
     # suppress the retry on the next run that shares the draw.
@@ -568,6 +600,7 @@ def evaluate_run(run_dir, cli, random_init=False, init_seed=0, ceiling_cache=Non
         getattr(cli, "holdout_readout", False),
         getattr(cli, "indep_test", "fisherz"),
         getattr(cli, "max_cond_set", None),
+        getattr(cli, "probe_ridge_cv", False),
     )
     result.update(
         status="ok" if result["best"] else "partial",
@@ -802,7 +835,13 @@ def write_reports(results, output_dir, reference_run=None, diagnostic_alpha=0.05
             max_cond_set=next((r.get("max_cond_set") for r in results if r.get("max_cond_set")), None),
             graph_readout=f"supervised_{mode}_ridgecv",
             parent_adjustment="linear_all_samples",
-            probe="ridge_alpha1_70_30_split_seed0",
+            # Read off the rows: --probe-ridge-cv changes every raw/partial number, so a
+            # reader comparing two JSONs has to be able to see which probe produced them.
+            probe=(
+                "ridgecv_70_30_split_seed0"
+                if next((r.get("probe_mode") for r in results if r.get("probe_mode")), "") == "ridge_cv"
+                else "ridge_alpha1_70_30_split_seed0"
+            ),
             content_mask="sample0_fixed",
             empty_graph_f1=0.0,
             # Which reference rows this payload carries, so a reader of the JSON alone can
@@ -828,6 +867,7 @@ def write_reports(results, output_dir, reference_run=None, diagnostic_alpha=0.05
         "indep_test",
         "max_cond_set",
         "readout_mode",
+        "probe_mode",
         "graph_readout_dim",
         "graph_samples",
         "raw_r2_mean",
@@ -1006,6 +1046,19 @@ def main(argv=None):
         help="Fit the readout on a 70/30 train split and run PC on the held-out rows only, instead of "
         "decoding the same rows the readout was fit on. Removes the panel's in-sample optimism at the "
         "cost of 70%% of the rows, so pair it with --num-samples 2000 or more.",
+    )
+    parser.add_argument(
+        "--probe-ridge-cv",
+        action="store_true",
+        help="Tune the raw/partial R² probe's ridge penalty by CV instead of pinning it at "
+        "alpha=1.0. That probe reads the block at FULL width, so its feature count moves with "
+        "--pooling while the readout PC uses does not; a penalty fixed for one width is not fixed "
+        "for another, and the two probes have been measured disagreeing in SIGN on six of nine "
+        "factors across 4,4,4 vs 8,8,8. This does not make raw/partial width-invariant -- the "
+        "information genuinely differs -- it makes them agree in DIRECTION with the pinned "
+        "readout (measured 0/9 factors before, 9/9 after). Changes every raw/partial number, so "
+        "runs with and without it are not comparable. One SVD per factor. No skeleton metric "
+        "moves: PC reads the pinned readout, not this probe.",
     )
     parser.add_argument(
         "--floor",
