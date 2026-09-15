@@ -48,12 +48,14 @@ fi
 # one its directory name claims. Two arms that both trained InfoNCE under different
 # names would produce a clean-looking table comparing a model with itself.
 say "Checking each fine-tune run"
+BACKBONES=$(mktemp)
+trap 'rm -f "$BACKBONES"' EXIT
 for ARM in $ARMS; do
   DIR="${ARM_DIR}_${ARM}"
   for NEED in encoder preprocessing.json settings.json training_config.json; do
     [ -e "$DIR/$NEED" ] || { echo "ERROR: $DIR/$NEED is missing -- did that arm finish?" >&2; exit 1; }
   done
-  python - "$DIR" "$ARM" <<'PY'
+  python - "$DIR" "$ARM" "$BACKBONES" <<'PY'
 import json, sys
 from training.finetune_dino import OBJECTIVES
 run, arm = sys.argv[1], sys.argv[2]
@@ -61,42 +63,68 @@ recorded = json.load(open(f"{run}/training_config.json")).get("objective")
 expected = OBJECTIVES[arm]
 if recorded != expected:
     raise SystemExit(f"ERROR: {run} recorded objective={recorded!r}, expected {expected!r} for arm {arm!r}")
-# The backbone too. Passing --three-dino-repo/--three-dino-weights without --backbone
-# 3dino used to run the 2D slice encoder and ignore the local checkpoint entirely; those
-# runs train and log normally, so the recorded preprocessing is the only way to tell.
+# The backbone decides how this arm is extracted, and it is only knowable from the
+# recorded preprocessing: --three-dino-repo/--three-dino-weights without --backbone 3dino
+# used to run the 2D slice encoder and never open the local checkpoint, and such a run
+# trains and logs indistinguishably.
 pre = json.load(open(f"{run}/preprocessing.json"))
-if pre.get("backbone") != "3dino":
-    raise SystemExit(
-        f"ERROR: {run} was trained with backbone={pre.get('backbone')!r}, not '3dino' -- the 2D "
-        f"slice encoder ran and the 3DINO weights were never loaded. Re-run that arm with "
-        f"--backbone 3dino."
-    )
 epochs = sum(1 for _ in open(f"{run}/metrics.jsonl"))
 print(f"  {arm:8s} objective={recorded}  backbone={pre['backbone']}  token_pool={pre.get('token_pool')}  epochs_logged={epochs}")
+open(sys.argv[3], "a").write(pre["backbone"] + "\n")
 PY
 done
+# Every arm must share a backbone. A 2D-slice arm beside a full-volume one is not an
+# objective ablation -- it is a different encoder reading different inputs.
+BACKEND=$(sort -u "$BACKBONES")
+if [ "$(printf '%s' "$BACKEND" | wc -l)" -gt 0 ]; then
+  echo "ERROR: the arms were trained with different backbones:" >&2
+  sort -u "$BACKBONES" | sed 's/^/       /' >&2
+  echo "       Compare arms that share one encoder, or re-run the odd one out." >&2
+  exit 1
+fi
+echo "  -> all arms use backbone=$BACKEND"
+
 # Only now: a preflight failure should leave nothing behind, or the retry would trip the
 # already-exists guard above and demand FRESH=1 for a run that never started.
 mkdir -p "$OUT"
 
 # --- extract ---------------------------------------------------------------------
-# The fine-tuned arms: preprocessing.json and embedding_partition.json are found next to
-# the encoder, so the saved preprocessing wins over any pooling flag -- which is what
-# makes the arms comparable to each other.
+# One helper per backbone, because they load an encoder differently: 3DINO takes a repo
+# plus a local checkpoint and the pipeline extracts trained+floor in one call, while the
+# 2D path is an ordinary HF load where a fine-tuned run's `encoder/` directory IS the
+# model id. Both write the same two files, so everything downstream is identical.
+extract_arm () {            # $1 = weights/model, $2 = preprocessing.json, $3 = dest dir
+  local MODEL="$1" PRE="$2" DEST="$3"
+  if [ "$BACKEND" = "3dino" ]; then
+    python -m eval.run_3dino_identifiability \
+      --three-dino-repo "$DINO_REPO" --three-dino-weights "$MODEL" \
+      --preprocessing "$PRE" --run-dir "$RUN_DIR" --output-dir "$DEST" \
+      --num-samples "$NUM_SAMPLES" --causal match \
+      --volume-batch "$VOLUME_BATCH" --device "$DEVICE" \
+      --with-floor --no-graph
+  else
+    mkdir -p "$DEST"
+    # --preprocessing restores the pooling/window the arm was fine-tuned under, and
+    # embedding_partition.json next to the weights gives the content/style arrays. The
+    # floor is the same architecture unloaded, so it inherits both.
+    python -m eval.dinov3_embed_synthetic \
+      --model-id "$MODEL" --preprocessing "$PRE" --run-dir "$RUN_DIR" \
+      --out "$DEST/embeddings.npz" \
+      --num-samples "$NUM_SAMPLES" --causal match --views 1 2 --device "$DEVICE"
+    python -m eval.dinov3_embed_synthetic \
+      --model-id "$MODEL" --preprocessing "$PRE" --run-dir "$RUN_DIR" \
+      --out "$DEST/random_init.npz" --random-init --model-seed 0 \
+      --num-samples "$NUM_SAMPLES" --causal match --views 1 2 --device "$DEVICE"
+  fi
+}
+
 BUNDLES_CONTENT=()
 BUNDLES_ALL=()
 FLOORS_CONTENT=()
 FLOORS_ALL=()
 for ARM in $ARMS; do
   say "Extracting $ARM (+ its untrained floor)"
-  python -m eval.run_3dino_identifiability \
-    --three-dino-repo "$DINO_REPO" \
-    --three-dino-weights "${ARM_DIR}_${ARM}/encoder" \
-    --run-dir "$RUN_DIR" \
-    --output-dir "$OUT/extract/$ARM" \
-    --num-samples "$NUM_SAMPLES" --causal match \
-    --volume-batch "$VOLUME_BATCH" --device "$DEVICE" \
-    --with-floor --no-graph
+  extract_arm "${ARM_DIR}_${ARM}/encoder" "${ARM_DIR}_${ARM}/preprocessing.json" "$OUT/extract/$ARM"
   BUNDLES_CONTENT+=("$ARM=$OUT/extract/$ARM/embeddings.npz")
   FLOORS_CONTENT+=("$ARM=$OUT/extract/$ARM/random_init.npz")
   BUNDLES_ALL+=("$ARM=$OUT/extract/$ARM/embeddings.npz")
@@ -105,19 +133,20 @@ done
 
 if [ "$WITH_PRETRAINED" = "1" ]; then
   FIRST_ARM=$(echo "$ARMS" | awk '{print $1}')
-  say "Extracting the pretrained baseline on the SAME preprocessing"
+  FIRST_PRE="${ARM_DIR}_${FIRST_ARM}/preprocessing.json"
+  if [ "$BACKEND" = "3dino" ]; then
+    BASE="$PRETRAINED"
+  else
+    # Whatever this arm was fine-tuned FROM, so the baseline is its starting point rather
+    # than some other checkpoint that happens to share an architecture.
+    BASE=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['model_id'])" \
+             "${ARM_DIR}_${FIRST_ARM}/training_config.json")
+  fi
+  say "Extracting the pretrained baseline ($BASE) on the SAME preprocessing"
   # Forced onto a fine-tuned arm's preprocessing.json: without this the baseline is
   # measured through a different window/pooling and the difference is preprocessing as
   # much as training. It has no partition, so it can only join the all-block table.
-  python -m eval.run_3dino_identifiability \
-    --three-dino-repo "$DINO_REPO" \
-    --three-dino-weights "$PRETRAINED" \
-    --run-dir "$RUN_DIR" \
-    --preprocessing "${ARM_DIR}_${FIRST_ARM}/preprocessing.json" \
-    --output-dir "$OUT/extract/pretrained" \
-    --num-samples "$NUM_SAMPLES" --causal match \
-    --volume-batch "$VOLUME_BATCH" --device "$DEVICE" \
-    --with-floor --no-graph
+  extract_arm "$BASE" "$FIRST_PRE" "$OUT/extract/pretrained"
   BUNDLES_ALL=("pretrained=$OUT/extract/pretrained/embeddings.npz" "${BUNDLES_ALL[@]}")
   FLOORS_ALL=("pretrained=$OUT/extract/pretrained/random_init.npz" "${FLOORS_ALL[@]}")
 fi

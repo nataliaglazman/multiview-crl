@@ -161,7 +161,11 @@ done
 ```
 
 `scripts/compare_dino_objectives.sh` then takes those runs through extraction, scoring and
-figures in one go. It checks each run's recorded objective against the arm its directory
+figures in one go. It reads each arm's recorded backbone and dispatches accordingly --
+`3dino` arms go through `run_3dino_identifiability`, `dinov3` arms through
+`dinov3_embed_synthetic` twice (trained, then `--random-init` for the floor) -- and refuses
+to put arms with different backbones in one table, since a 2D-slice arm beside a
+full-volume one is a different encoder reading different inputs, not an objective ablation. It checks each run's recorded objective against the arm its directory
 name claims before spending any GPU time -- two arms that both trained InfoNCE under
 different names would otherwise produce a clean-looking table comparing a model with
 itself. It emits two comparisons: the **content block**, which is the objective ablation
