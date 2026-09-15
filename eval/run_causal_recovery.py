@@ -443,7 +443,10 @@ def evaluate_arrays(
 
 
 def truth_ceiling(z, adjacency, cli, cache):
-    """PC run on the TRUE factors: the best skeleton this protocol can reach.
+    """PC run on the TRUE factors: what this protocol reaches when decoding is perfect.
+
+    A finite-sample reference, not a strict bound -- a decoded representation can beat it on
+    a given draw, the same way one untrained floor seed can beat another by four edges.
 
     An F1 of 0.77 means nothing on its own, because PC does not recover the whole skeleton
     even when the readout is perfect.  Fisher-Z sees only the linear part of a leaky_relu

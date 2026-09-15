@@ -269,6 +269,25 @@ raw R² into its partial part and the parent-mediated remainder. `orientation.pn
 only with `--orientation`. Each ships a `.csv` twin, and `--dark` re-steps the palette.
 At most two runs per figure: hues are assigned in fixed order and never generated.
 
+A report written with `--floor`/`--ceiling` holds their reference rows in the same file, so
+two arms with three floor seeds is nine scored rows against those two hues. `--roles`
+(default `trained`) and `--only SUBSTRING` narrow it; a row from before those flags carries
+no role and counts as `trained`, so older reports plot unchanged.
+
+```bash
+# the two arms against each other
+python -m eval.plot_causal_recovery --json results/causal_fisherz/causal_recovery.json \
+  --out figures/arms --roles trained
+
+# one arm against what the protocol reaches with perfect decoding
+python -m eval.plot_causal_recovery --json results/causal_fisherz/causal_recovery.json \
+  --out figures/ceiling --roles trained ceiling --only ident-vent
+
+# one arm against one untrained seed
+python -m eval.plot_causal_recovery --json results/causal_fisherz/causal_recovery.json \
+  --out figures/floor --roles trained floor --only ident-vent --labels trained floor-s0
+```
+
 ## Conditional-independence test
 
 `--indep-test {fisherz,kci}` on both `run_causal_recovery` and
