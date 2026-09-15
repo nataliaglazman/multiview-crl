@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-15T17:19:44Z
-# Git SHA: a45b7fa
+# Generated at: 2026-09-15T17:24:54Z
+# Git SHA: 9793ce8
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-causal-stats-bt-1
+#SBATCH --job-name=synthetic-clean-content-causal-bt-wght-05
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-causal-stats-bt-1-%j.err
+#SBATCH --error=synthetic-clean-content-causal-bt-wght-05-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -58,9 +58,8 @@ fi
 "$PYTHON" -m training.main_multimodal \
     --batch-size 64 \
     --bt-corr-ema 0.99 \
-    --bt-gap-lambda 1 \
-    --bt-gap-pooling stats \
-    --bt-gap-weight 1 \
+    --bt-gap-lambda 6 \
+    --bt-gap-weight 5 \
     --bt-lambda 6 \
     --bt-normalize-terms \
     --bt-patch-weight 1 \
@@ -122,7 +121,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-causal-stats-bt-1 \
+    --model-id synthetic-clean-content-causal-bt-wght-05 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
