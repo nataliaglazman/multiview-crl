@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-15T18:05:54Z
-# Git SHA: c199458
+# Generated at: 2026-09-15T19:36:39Z
+# Git SHA: 57b90a0
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-causal-bt-patch-wght-5
+#SBATCH --job-name=synthetic-clean-content-causal-vicregl
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-causal-bt-patch-wght-5-%j.err
+#SBATCH --error=synthetic-clean-content-causal-vicregl-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -62,7 +62,7 @@ fi
     --bt-gap-weight 1 \
     --bt-lambda 6 \
     --bt-normalize-terms \
-    --bt-patch-weight 5 \
+    --bt-patch-weight 1 \
     --bt-sim-coeff 0.0114 \
     --bt-std-coeff 0.227 \
     --channels-last \
@@ -71,7 +71,8 @@ fi
     --content-ratios 0.95 \
     --content-size 12 \
     --content-style-levels 0 \
-    --contrastive-loss-type barlow_twins \
+    --contrastive-loss-type vicregl \
+    --contrastive-proj-dim 0 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -89,7 +90,7 @@ fi
     --no-final-recon-norm \
     --norm-type layer \
     --pass-full-to-next-level \
-    --patch-center-mode position \
+    --patch-center-mode none \
     --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
@@ -121,12 +122,14 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-causal-bt-patch-wght-5 \
+    --model-id synthetic-clean-content-causal-vicregl \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
+    --vicregl-global-weight 0.25 \
+    --vicregl-local-weight 1.0 \
     --vq-commitment-weight 0.25 \
     --vqvae-embed-dim 16 \
     --vqvae-hidden-channels 16 \
