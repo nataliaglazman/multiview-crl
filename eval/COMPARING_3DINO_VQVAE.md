@@ -157,6 +157,33 @@ rows. Treat `no` as "do not quote this ordering".
 `compare_graph.csv` (written next to `--csv`, taking its stem) holds one row per source
 and alpha, so the whole sweep can be replotted without re-running PC.
 
+## Figures
+
+```bash
+python -m eval.plot_compare_bundles --json results/matched/compare.json --out figures/
+```
+
+Draws the comparison from the JSON it already wrote, so a figure can never disagree with
+the table it came from:
+
+- `factor_recovery_<block>.png` — per factor, one bar per model, with a tick at that
+  model's **own** untrained floor. A bar that stops short of its tick is below floor.
+- `delta_floor_<block>.png` — the same quantity anchored at zero, because "what did
+  training buy" is the first question a collaborator asks. Only drawn where floors exist.
+- `causal_discovery.png` — F1 and skeleton SHD as two panels (never one axis with two
+  scales), error bars from `--graph-repeats`, the ground-truth ceiling as a reference rule
+  rather than a bar so nothing is ranked against it by length.
+- `partial_r2.png` — partial R² solid, the rest of raw R² as a pale tail: the part the
+  probe only reaches through the factor's parents.
+
+Every figure ships a `.csv` twin. One hue per model, in the shared validated order from
+`plot_identifiability.THEME`, so a colour means the same model across all three plot
+scripts; floors keep their model's hue and take a hatch. `--dark` re-steps the palette for
+a dark surface rather than inverting the light one.
+
+Note that no figure draws a mean across factors, deliberately: at a single rung the mean
+blends factors that rung can expose with factors it cannot.
+
 Two limits that no flag removes. PC runs on a *supervised readout* of each representation's
 decoded factors, so this measures how well the SCM survives that representation, not causal
 discovery from raw features. And the default readout is in-sample — it decodes the rows it
