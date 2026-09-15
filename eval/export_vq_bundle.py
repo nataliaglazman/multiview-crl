@@ -203,6 +203,7 @@ def build(cli):
         views=list(embeddings),
         num_samples=int(len(dataset)),
         causal=adjacency is not None,
+        evaluation_distribution=cli.distribution,
         content_factor_names=list(info["content_names"]),
         style_factor_names=list(info["style_names"]),
         generator=settings,
@@ -210,7 +211,7 @@ def build(cli):
         git_sha=git_sha(),
         created=time.strftime("%Y-%m-%dT%H:%M:%S"),
         elapsed_seconds=round(time.time() - started, 1),
-        **identity_record(latents, settings, len(dataset)),
+        **identity_record(latents, settings, len(dataset), cli.distribution),
     )
     return embeddings, latents, raw, meta
 
@@ -260,6 +261,9 @@ def main(argv=None):
 
     cli = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+    # Keep the label as well as the boolean: it goes into meta, and a bundle's arrays do
+    # not reveal which distribution they were drawn from.
+    cli.distribution = cli.causal
     cli.causal = cli.causal == "match"
 
     from eval.dinov3_embed_synthetic import save

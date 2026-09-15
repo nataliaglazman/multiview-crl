@@ -1806,6 +1806,17 @@ def add_dino_arguments(parser):
     data.add_argument("--n-content", type=int, default=9)
     data.add_argument("--n-style", type=int, default=3)
     data.add_argument("--no-causal", action="store_true", help="i.i.d. factors; there is then no graph to recover")
+    data.add_argument(
+        "--causal",
+        default="match",
+        choices=["match", "iid"],
+        help="Which factor distribution to embed. 'match' (default) forwards the run's trained SCM, "
+        "so the numbers are comparable to that run's VQ-VAE panel. 'iid' forces the factors "
+        "independent, which makes per-factor attribution unambiguous but leaves the training "
+        "distribution and removes the SCM, so there is then no graph to recover. Unlike "
+        "--no-causal this also applies when --run-dir supplies the generator settings, since "
+        "that run's settings.json says synthetic_causal=True whatever you want to evaluate on.",
+    )
     data.add_argument("--causal-graph", default="chain", choices=["chain", "full", "random"])
     data.add_argument("--causal-edge-prob", type=float, default=0.5)
     data.add_argument("--causal-noise-scale", type=float, default=0.4)

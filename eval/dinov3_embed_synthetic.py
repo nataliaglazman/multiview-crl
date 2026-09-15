@@ -175,7 +175,13 @@ def build_dataset(cli, split="test"):
     from eval.run_dci_synthetic import build_synthetic_test_set
 
     args = _generator_args(cli)
-    dataset = build_synthetic_test_set(args, cli.num_samples, cache=not cli.no_cache, causal=True, split=split)
+    # causal=True forwards the run's trained SCM; causal=False forces the factors
+    # independent. With --run-dir the run's settings.json always says synthetic_causal=True,
+    # so this argument -- not the settings -- is what decides, and it is recorded in meta
+    # because nothing in the saved arrays reveals it.
+    dataset = build_synthetic_test_set(
+        args, cli.num_samples, cache=not cli.no_cache, causal=cli.causal == "match", split=split
+    )
     inner = getattr(dataset, "_inner", dataset)
     settings = {
         key: value
@@ -635,6 +641,7 @@ def main(argv=None):
         embedding_dim={f"view{view}": int(features.shape[1]) for view, features in embeddings.items()},
         num_samples=int(len(dataset)),
         causal=bool(getattr(inner, "scm", None)),
+        evaluation_distribution=cli.causal,
         content_factor_names=[FACTOR_NAMES[d] if d < len(FACTOR_NAMES) else f"d{d}" for d in range(n_content)],
         style_factor_names=[STYLE_FACTOR_NAMES[d] if d < len(STYLE_FACTOR_NAMES) else f"s{d}" for d in range(n_style)],
         generator=settings,
@@ -644,7 +651,7 @@ def main(argv=None):
         elapsed_seconds=round(time.time() - started, 1),
         # Which rows this bundle holds, so it can be checked against a VQ-VAE bundle
         # before the two are compared. See eval/bundle_identity.py.
-        **identity_record(latents, settings, len(dataset)),
+        **identity_record(latents, settings, len(dataset), cli.causal),
     )
     arrays = save(cli.out, embeddings, latents, raw, slots, meta)
     print(f"\nSaved {cli.out.resolve()}")

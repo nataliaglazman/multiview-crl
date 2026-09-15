@@ -190,6 +190,38 @@ discovery from raw features. And the default readout is in-sample — it decodes
 was fit on, with the true labels — so pass `--holdout-readout` for a held-out graph at the
 cost of 70% of the rows. See `eval/CAUSAL_EVALUATION.md`.
 
+## Matched (SCM) vs i.i.d. factors
+
+Both sides default to `--causal match`: the evaluation set forwards the run's **trained
+SCM**, so the factors carry the dependence the model was trained under. That is the default
+for a reason — scoring an SCM-trained run on i.i.d. factors reads dependence-through-parents
+as lost information, and the penalty is not a wash across models: it grows with how well a
+model fits the training distribution. Measured on this project, it manufactured a
+0.2-mean-R² gap between two runs differing only in scaling rate, and flipped the sign of the
+lesion dims.
+
+`--causal iid` is available on both exporters and answers a different question: *can this
+representation read factor j when j is correlated with nothing?* Per-factor attribution
+becomes unambiguous. Three things it costs:
+
+1. **No graph panel.** Without an SCM the dataset has no adjacency, so the bundle carries no
+   `causal_adj`, `--with-graph` finds nothing to recover, and the causal section disappears.
+   An i.i.d. run is a factor-recovery experiment only.
+2. **Both models are scored off-distribution** — but not equally. A VQ-VAE trained on this
+   generator's SCM is being moved off its training distribution; a DINO encoder pretrained
+   on real brains was never on it. The asymmetry favours DINO for a reason that is not about
+   representation quality, so an i.i.d. VQ-vs-DINO gap is not a like-for-like result.
+3. **Every bundle in one comparison must agree.** Mixing a `match` bundle with an `iid` one
+   is refused by name: both can come from one `--run-dir` with one `--num-samples` and one
+   seed, so the generator settings agree and only the drawn factors differ — the digests
+   alone would blame "a different draw".
+
+The in-distribution way to ask the same question is already in the report: **partial R²**
+residualises each factor on its SCM parents without leaving the training distribution, and
+`identifiability_report --parent-adjustment nonlinear` does it with a cross-fitted nonlinear
+nuisance model. Prefer those; run i.i.d. as a labelled secondary experiment alongside the
+matched one, never as a replacement for it.
+
 ## What it still does not equalise
 
 These are properties of the representations and the pipelines, not of the scorer, and no
