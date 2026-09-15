@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-15T17:10:48Z
-# Git SHA: 5bb1e42
+# Generated at: 2026-09-15T17:19:44Z
+# Git SHA: a45b7fa
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-causal-stats
+#SBATCH --job-name=synthetic-clean-content-causal-stats-bt-1
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-causal-stats-%j.err
+#SBATCH --error=synthetic-clean-content-causal-stats-bt-1-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -122,7 +122,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-causal-stats \
+    --model-id synthetic-clean-content-causal-stats-bt-1 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

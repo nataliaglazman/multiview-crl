@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-clean-content-causal-stats
+tag: synthetic-clean-content-causal-stats-bt-1
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true

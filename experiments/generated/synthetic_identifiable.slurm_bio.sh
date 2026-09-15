@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_identifiable.yaml
-# Generated at: 2026-09-15T17:10:48Z
-# Git SHA: 5bb1e42
+# Generated at: 2026-09-15T17:19:44Z
+# Git SHA: a45b7fa
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-identifiable-generator-4-scaling-2
 #SBATCH --output=/scratch/users/%u/%j.out
