@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import sklearn  # noqa: F401 - Load compiled SciPy dependencies before sys.modules patches.
 import torch
 
 from eval import ventricle_checkpoint_test as vt
