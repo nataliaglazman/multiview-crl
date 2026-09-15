@@ -1636,14 +1636,37 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             raise ValueError("--bt-gap-pooling stats only affects the GAP companion term: set --bt-gap-weight > 0.")
         _d4 = 4 * int(getattr(args, "content_size", 0) or 0)
         _b = int(getattr(args, "batch_size", 0) or 0)
+        # Widening the term moves BOTH ends of the usable lambda window, in opposite
+        # directions, and quadrupling d moves them a long way. Report the window rather than a
+        # fixed range: an earlier version of this warning recommended 0.01-0.1, whose lower half
+        # is BELOW the collapse threshold at any content_size above 25.
+        _collapse = 1.0 / (_d4 - 1) if _d4 > 1 else 0.0
+        _glam = getattr(args, "bt_gap_lambda", None)
+        _glam = float(getattr(args, "bt_lambda", 0.005)) if _glam is None else float(_glam)
         if _d4 and _b and _d4 * (_d4 - 1) / _b > 5.0:
             logger.warning(
                 "--bt-gap-pooling stats widens the GAP term to %d dims; at batch_size %d the "
                 "off-diagonal's d(d-1)/B sampling floor is ~%.1f with no real redundancy behind "
-                "it. Keep --bt-gap-lambda at 0.01-0.1 so the term stays an ALIGNMENT term.",
+                "it. Keep --bt-gap-lambda near the low end of (%.3f, ~%.2f] so the term stays an "
+                "ALIGNMENT term -- or pass --bt-normalize-terms, which makes the window "
+                "(1, ~%.1f] for EVERY d and so survives a change of content_size.",
                 _d4,
                 _b,
                 _d4 * (_d4 - 1) / _b,
+                _collapse,
+                20.0 * _collapse,
+                20.0,
+            )
+        if _d4 > 1 and not getattr(args, "bt_normalize_terms", False) and 0 < _glam <= _collapse:
+            logger.warning(
+                "--bt-gap-lambda %g is at or below the dimensional-collapse threshold 1/(d-1)=%.4f "
+                "for the %d-dim stats term: making every channel IDENTICAL is then the global "
+                "optimum of this term, measured once at RMS cross-channel correlation 0.943. Raise "
+                "it above %.4f, or pass --bt-normalize-terms (threshold 1, independent of d).",
+                _glam,
+                _collapse,
+                _d4,
+                _collapse,
             )
         if getattr(args, "bt_sim_whiten", False) and _d4 and _b and _b < 4 * _d4:
             logger.warning(
