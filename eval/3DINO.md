@@ -160,6 +160,14 @@ for OBJ in infonce barlow; do
 done
 ```
 
+`scripts/compare_dino_objectives.sh` then takes those runs through extraction, scoring and
+figures in one go. It checks each run's recorded objective against the arm its directory
+name claims before spending any GPU time -- two arms that both trained InfoNCE under
+different names would otherwise produce a clean-looking table comparing a model with
+itself. It emits two comparisons: the **content block**, which is the objective ablation
+and excludes the pretrained baseline (that has no partition), and the **full embedding**,
+where the baseline can sit beside the fine-tuned arms.
+
 Then extract a bundle from each and compare them as two models. Every arm writes its own
 `preprocessing.json`; they will agree when the extraction flags did, and the extractor
 reuses the saved one either way, so check that the two match before reading a difference as

@@ -40,6 +40,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `experiments/*.yaml` — per-experiment configs (e.g. `ablation_baseline.yaml`).
 - `scripts/launch.py` — reads experiment YAML, merges defaults+cluster+overrides, submits to RunAI/SLURM/local. Saves timestamped resolved config snapshot with git SHA to the run's output directory.
 - `scripts/sweep_config.yaml` + `sweep_train.py` — W&B Bayesian sweep wrapper (handles bool flags + constraints).
+- `scripts/compare_dino_objectives.sh` — end-to-end DINO objective ablation: verifies each fine-tune run's recorded objective, extracts bundles + floors, scores the content block and the full embedding separately, plots both.
 - `scripts/launch_sweep.sh`, `sweep_runai.sh`, `analyze_sweep.py` — RunAI sweep launchers and analysis.
 - `docker/` — CUDA 12.1 / Python 3.12 container, training scripts for RunAI cluster.
 - `data/` (dir of code) vs `/data/natalia/ADNI_registered/` (actual dataset on cluster).
