@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/ablation_baseline.yaml
-# Generated at: 2026-09-07T15:56:43Z
-# Git SHA: bf4bd0c
+# Generated at: 2026-09-15T09:40:00Z
+# Git SHA: 7eaca16
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -39,6 +39,7 @@ python -m training.main_multimodal
     --scale-contrastive-loss 1.0
     --scale-recon-loss 1.0
     --scale-style-contrastive-loss 0.0
+    --scale-style-hsic-loss 0.0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
     --separate-encoders
