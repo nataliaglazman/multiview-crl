@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_fixedref.yaml
-# Generated at: 2026-08-27T14:48:57Z
-# Git SHA: d848347
+# Generated at: 2026-09-15T14:07:34Z
+# Git SHA: 4c00cd5
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-random-fixedref-new
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -88,6 +88,7 @@ fi
     --scale-contrastive-loss 100 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
+    --scale-style-hsic-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
@@ -100,7 +101,7 @@ fi
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
-    --synthetic-num-val 200 \
+    --synthetic-num-val 1500 \
     --synthetic-res 64 \
     --model-id synthetic-causal-random-fixedref-new \
     --tau 0.1 \
