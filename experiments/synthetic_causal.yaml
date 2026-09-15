@@ -1,15 +1,15 @@
 _base_: synthetic_defaults
-tag: synthetic-clean-content-causal-bt-patch-wght-5
-contrastive_loss_type: barlow_twins
+tag: synthetic-clean-content-causal-vicregl
+contrastive_loss_type: vicregl
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
 patch_grid: [8,8,8]                 # 4x4x4 patches for 64^3 volumes
-patch_center_mode: position   # now wired for BT; do NOT use double
+patch_center_mode: none   # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
 bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 # bt_gap_lambda: 0.16               # NOT 0.005 — see the calibration note above
-bt_patch_weight: 5
+bt_patch_weight: 1
 single_count_commitment: true
 # bt_patch_stat: fold
 
@@ -17,12 +17,18 @@ scale_contrastive_loss: 100       # NOT 10 — BT's raw scale is ~10x InfoNCE's
 grad_clip_norm: 100
 batch_size: 64
 synthetic_identifiable_ventricle: true
+contrastive_proj_dim: 0
 
 
 # scale_content_modality_adv: 1.0
 # content_modality_adv_lambda: 1.0
 # scale_content_patch_modality_adv: 1.0
 # scale_style_modality_ce: 1.0
+
+
+vicregl_local_weight: 1.0
+vicregl_global_weight: 0.25
+vicregl_no_projectors: false
 
 # # --- leak (b): make style non-degenerate so recon stops using content ---
 scale_style_hsic_loss: 0
