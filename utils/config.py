@@ -1849,8 +1849,19 @@ def resolve_dino_backend_options(cli, parser):
             parser.error("3DINO uses single-channel [-1,1] input; RGB --image-mean/std do not apply")
         if cli.volume_size < 16 or cli.volume_size % 16:
             parser.error("--volume-size must be a positive multiple of 16 for the published 3DINO-ViT")
-    elif cli.window == "per_volume":
-        parser.error("--window per_volume is only supported with --backbone 3dino")
+    else:
+        # These are accepted and then completely ignored without --backbone 3dino: the 2D
+        # DINOv3 slice encoder runs instead, downloading its own weights, and the local
+        # 3DINO checkpoint is never opened. Nothing downstream says so -- the run trains,
+        # logs and checkpoints normally, and the only visible trace is the feature width
+        # (cls_mean over one slice gives 2*hidden, where 3DINO's cls gives hidden).
+        if cli.three_dino_repo or cli.three_dino_weights:
+            parser.error(
+                "--three-dino-repo/--three-dino-weights require --backbone 3dino; without it the "
+                "2D DINOv3 slice encoder runs and those weights are never loaded"
+            )
+        if cli.window == "per_volume":
+            parser.error("--window per_volume is only supported with --backbone 3dino")
 
 
 def parse_dino_finetune_args(argv=None):

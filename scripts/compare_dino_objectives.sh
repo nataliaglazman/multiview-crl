@@ -61,8 +61,18 @@ recorded = json.load(open(f"{run}/training_config.json")).get("objective")
 expected = OBJECTIVES[arm]
 if recorded != expected:
     raise SystemExit(f"ERROR: {run} recorded objective={recorded!r}, expected {expected!r} for arm {arm!r}")
+# The backbone too. Passing --three-dino-repo/--three-dino-weights without --backbone
+# 3dino used to run the 2D slice encoder and ignore the local checkpoint entirely; those
+# runs train and log normally, so the recorded preprocessing is the only way to tell.
+pre = json.load(open(f"{run}/preprocessing.json"))
+if pre.get("backbone") != "3dino":
+    raise SystemExit(
+        f"ERROR: {run} was trained with backbone={pre.get('backbone')!r}, not '3dino' -- the 2D "
+        f"slice encoder ran and the 3DINO weights were never loaded. Re-run that arm with "
+        f"--backbone 3dino."
+    )
 epochs = sum(1 for _ in open(f"{run}/metrics.jsonl"))
-print(f"  {arm:8s} objective={recorded}  epochs_logged={epochs}")
+print(f"  {arm:8s} objective={recorded}  backbone={pre['backbone']}  token_pool={pre.get('token_pool')}  epochs_logged={epochs}")
 PY
 done
 # Only now: a preflight failure should leave nothing behind, or the retry would trip the
