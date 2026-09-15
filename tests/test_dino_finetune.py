@@ -54,7 +54,8 @@ def objective_cli(name):
         dict(
             objective=name,
             temperature=0.1,
-            bt_lambda=0.005,
+            barlow_lambda=0.0051,
+            barlow_eps=1e-5,
             vicreg_sim_coeff=25.0,
             vicreg_std_coeff=25.0,
             vicreg_cov_coeff=1.0,
@@ -95,28 +96,28 @@ class ObjectiveTests(unittest.TestCase):
                     self.assertTrue(math.isfinite(metrics[key]), key)
                 json.dumps(metrics, allow_nan=False)  # what metrics.jsonl does
 
-    def test_retrieval_accuracy_is_a_diagnostic_not_part_of_a_negative_free_loss(self):
-        # Imported here, not at module scope: training.losses pulls in lpips, and this file
-        # is meant to skip cleanly rather than error when the training extras are absent.
-        from training.losses import barlow_twins_loss
-
+    def test_the_dispatcher_adds_nothing_to_the_underlying_loss(self):
+        # Retrieval accuracy rides along as a diagnostic under every arm; it must not leak
+        # into the value being optimised.
         first, second = self.pair()
-        direct = barlow_twins_loss(torch.stack([first.detach().float(), second.detach().float()]), lambd=0.005)
-        wrapped, _metrics = train.compute_objective(first, second, objective_cli("barlow"))
-        self.assertAlmostEqual(wrapped.item(), direct.squeeze().item(), places=6)
+        direct, _ = train.barlow_twins(first, second, 0.0051, 1e-5)
+        wrapped, _ = train.compute_objective(first, second, objective_cli("barlow"))
+        self.assertAlmostEqual(wrapped.item(), direct.item(), places=6)
 
     def test_the_per_term_breakdown_survives_into_the_metrics(self):
         # Regression: the losses hang their breakdown off the returned tensor as a plain
         # attribute, and squeeze() returns a NEW tensor that does not carry it.
         _loss, barlow = train.compute_objective(*self.pair(), objective_cli("barlow"))
-        self.assertIn("on_diag_loss", barlow)
-        self.assertIn("off_diag_loss", barlow)
+        self.assertIn("barlow_on_diag", barlow)
+        self.assertIn("barlow_off_diag", barlow)
         _loss, vicreg = train.compute_objective(*self.pair(), objective_cli("vicreg"))
         for key in ("sim_loss", "var_loss", "cov_loss"):
             self.assertIn(key, vicreg)
 
-    def test_barlows_not_applicable_accuracy_is_not_reported_as_a_score(self):
-        _loss, metrics = train.compute_objective(*self.pair(), objective_cli("barlow"))
+    def test_vicregs_not_applicable_accuracy_is_not_reported_as_a_score(self):
+        # training.losses reports a hardcoded top1_acc of 0.0 as "not applicable"; next to
+        # the real measured accuracy that reads as a score of zero.
+        _loss, metrics = train.compute_objective(*self.pair(), objective_cli("vicreg"))
         self.assertNotIn("top1_acc", metrics)
         self.assertGreater(metrics["accuracy"], 0.0)
 
@@ -133,15 +134,17 @@ class ObjectiveTests(unittest.TestCase):
             with self.subTest(objective=name):
                 with self.assertRaises(ValueError) as raised:
                     train.compute_objective(torch.ones(1, 4), torch.ones(1, 4), objective_cli(name))
-                self.assertIn("at least two subjects", str(raised.exception))
+                # Wording differs per objective; what must hold is that each names the
+                # shape contract rather than failing somewhere downstream in a matmul.
+                self.assertIn("requires matching (B, D) tensors", str(raised.exception))
 
     def test_the_recorded_objective_names_the_paper_loss(self):
         self.assertEqual(
             train.OBJECTIVES,
             {
-                "infonce": "symmetric_cross_view_infonce",
-                "barlow": "cross_view_barlow_twins",
-                "vicreg": "cross_view_vicreg",
+                "infonce": "content_symmetric_cross_view_infonce",
+                "barlow": "content_barlow_twins",
+                "vicreg": "content_vicreg",
             },
         )
 

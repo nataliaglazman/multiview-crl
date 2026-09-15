@@ -109,56 +109,116 @@ def symmetric_infonce(view1, view2, temperature=0.1):
     return loss, metrics
 
 
-def negative_free(view1, view2, cli):
-    """Barlow Twins or VICReg over the paired views -- the same objective, minus negatives.
+def barlow_twins(view1, view2, lambd=0.0051, eps=1e-5):
+    """Batch-normalized cross-correlation objective, using population variance.
 
-    Delegates to ``training.losses``, which already owns both, rather than restating them:
-    the VQ-VAE arm of this project is trained with those exact implementations, so a DINO
-    encoder fine-tuned here and a VQ-VAE trained there are optimising the same thing.
+    Objective follows https://github.com/facebookresearch/barlowtwins .
+    Correlation statistics use this process's actual batch, in float32.
 
-    Those losses take ``(n_views, B, C)`` and split content from style via
-    ``estimated_content_indices``. A DINO embedding has no such split, and passing ``None``
-    is how they are told so -- they then treat every view and every channel as content,
-    which is the whole embedding, which is what we want.
+    Kept as its own implementation rather than routed through
+    ``training.losses.barlow_twins_loss``: that one is the VQ-VAE pipeline's, carrying
+    centering modes, a correlation EMA and patch handling that mean nothing for a
+    ``(B, D)`` embedding, and it has no variance stabiliser -- ``eps`` here is what keeps a
+    constant channel finite, which ``tests/test_dino_partition.py`` pins.
     """
     import torch
 
-    from training.losses import barlow_twins_loss, vicreg_loss
+    if view1.ndim != 2 or view1.shape != view2.shape or min(view1.shape) < 1 or len(view1) < 2:
+        raise ValueError("Barlow Twins requires matching (B, D) tensors with B >= 2 and D >= 1")
+    if not math.isfinite(lambd) or lambd < 0 or not math.isfinite(eps) or eps <= 0:
+        raise ValueError("Barlow lambda must be nonnegative and eps positive, both finite")
+    normalized = []
+    for view in (view1, view2):
+        centered = view.float() - view.float().mean(0)
+        normalized.append(centered / (centered.square().mean(0) + eps).sqrt())
+    corr = normalized[0].T @ normalized[1] / len(view1)
+    diagonal = corr.diagonal()
+    on_diag = (diagonal - 1).square().sum()
+    off_diag = corr[~torch.eye(corr.shape[0], dtype=torch.bool, device=corr.device)].square().sum()
+    loss = on_diag + lambd * off_diag
+    # Retrieval is only a diagnostic for BT; it does not contribute to its objective.
+    metrics = {
+        "loss": loss.item(),
+        **pair_diagnostics(view1, view2),
+        "barlow_on_diag": on_diag.item(),
+        "barlow_off_diag": off_diag.item(),
+        "barlow_diag_mean": diagonal.mean().item(),
+    }
+    return loss, metrics
 
-    _check_pair(view1, view2, cli.objective)
-    # float32 deliberately: both losses standardise per channel and square the result, and
-    # the upstream implementations note fp16 is not safe for that.
+
+def cross_view_vicreg(view1, view2, cli):
+    """VICReg over the paired views, from ``training.losses``.
+
+    Unlike Barlow Twins there is no leaner local variant to prefer, and this is the same
+    implementation the VQ-VAE arm of this project trains with. It takes ``(n_views, B, C)``
+    and splits content from style via ``estimated_content_indices``; the split has already
+    happened by the time we get here, so passing none tells it to treat every column of the
+    content block as content.
+    """
+    import torch
+
+    from training.losses import vicreg_loss
+
+    _check_pair(view1, view2, "VICReg")
+    # float32 deliberately: it standardises per channel and squares the result, which the
+    # upstream implementation notes is not safe in fp16.
     hz = torch.stack([view1.float(), view2.float()])
-    if cli.objective == "barlow":
-        total = barlow_twins_loss(hz, lambd=cli.bt_lambda)
-    else:
-        total = vicreg_loss(
-            hz, sim_coeff=cli.vicreg_sim_coeff, std_coeff=cli.vicreg_std_coeff, cov_coeff=cli.vicreg_cov_coeff
-        )
+    total = vicreg_loss(
+        hz, sim_coeff=cli.vicreg_sim_coeff, std_coeff=cli.vicreg_std_coeff, cov_coeff=cli.vicreg_cov_coeff
+    )
     # Read the per-term breakdown BEFORE reshaping: it is a plain Python attribute hung off
     # the returned tensor, and squeeze() returns a new tensor that does not carry it.
     extra = _extra_diagnostics(total)
-    # They accumulate into a (1,) tensor; squeeze so isfinite/backward/item behave as they
-    # do for the InfoNCE scalar and the two arms stay interchangeable in the loop.
     loss = total.squeeze()
     metrics = {"loss": loss.item(), **pair_diagnostics(view1, view2), **extra}
     return loss, metrics
 
 
-#: name -> (loss fn, what goes in training_config.json). The recorded string is the claim a
-#: reader gets, so it names the paper objective rather than the flag.
+#: flag -> what goes in training_config.json. Every arm aligns the CONTENT block only, so
+#: the recorded name says so: a reader comparing two runs needs to know the loss AND what
+#: it was applied to, and "barlow_twins" alone would not distinguish this from a run that
+#: aligned the whole embedding.
 OBJECTIVES = {
-    "infonce": "symmetric_cross_view_infonce",
-    "barlow": "cross_view_barlow_twins",
-    "vicreg": "cross_view_vicreg",
+    "infonce": "content_symmetric_cross_view_infonce",
+    "barlow": "content_barlow_twins",
+    "vicreg": "content_vicreg",
 }
 
 
 def compute_objective(view1, view2, cli):
-    """The selected objective's ``(loss, metrics)``."""
+    """The selected objective's ``(loss, metrics)``, on whatever block it is handed."""
     if cli.objective == "infonce":
         return symmetric_infonce(view1, view2, temperature=cli.temperature)
-    return negative_free(view1, view2, cli)
+    if cli.objective == "barlow":
+        return barlow_twins(view1, view2, cli.barlow_lambda, cli.barlow_eps)
+    return cross_view_vicreg(view1, view2, cli)
+
+
+def alignment_loss(content1, content2, projector, cli):
+    """The projector receives content only; style has no direct alignment gradient."""
+    import torch
+
+    first, second = projector(content1), projector(content2)
+    # Disable autocast for correlation / similarity matrix products.
+    with torch.autocast(device_type=first.device.type, enabled=False):
+        return compute_objective(first, second, cli)
+
+
+def partition_diagnostics(parts):
+    import torch
+    import torch.nn.functional as F
+
+    metrics = {}
+    with torch.no_grad():
+        for index, name in enumerate(("content", "style")):
+            first, second = [p[index].float() for p in parts]
+            if first.shape[1]:
+                metrics[f"{name}_std"] = (
+                    (first.std(0, unbiased=False).mean() + second.std(0, unbiased=False).mean()) / 2
+                ).item()
+                metrics[f"{name}_paired_cosine"] = F.cosine_similarity(first, second, dim=-1).mean().item()
+    return metrics
 
 
 def encode_volumes(volumes, encoder, config, cli, device, window, mean, std):
@@ -218,8 +278,9 @@ def train_epoch(loader, encoder, projector, optimizer, scaler, config, cli, devi
                 split_embeddings(encode_volumes(view, encoder, config, cli, device, window, mean, std), partition)
                 for view in views
             ]
-        # Keep the similarity matrix multiplication out of autocast too.
-        loss, metrics = compute_objective(*projected, cli)
+            # Content only. alignment_loss disables autocast around the matrix products.
+            loss, metrics = alignment_loss(parts[0][0], parts[1][0], projector, cli)
+        metrics.update(partition_diagnostics(parts))
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite {cli.objective} loss; no optimizer update was applied")
         scaler.scale(loss).backward()
@@ -343,6 +404,8 @@ def main(argv=None):
         split="train",
         feature_dim=width,
         objective=OBJECTIVES[cli.objective],
+        embedding_partition=partition,
+        style_objective="none",
         model_provenance=getattr(encoder, "provenance", None),
     )
     (cli.output_dir / "training_config.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -350,9 +413,9 @@ def main(argv=None):
         "Aligning %d content dimensions; %d style dimensions excluded; loss=%s",
         partition["content_dim"],
         partition["style_dim"],
-        cli.loss,
+        cli.objective,
     )
-    if cli.loss == "barlow_twins" and cli.batch_size < (cli.projection_dim or partition["content_dim"]):
+    if cli.objective == "barlow" and cli.batch_size < (cli.projection_dim or partition["content_dim"]):
         logger.warning(
             "BT correlation rank is limited to batch_size-1; small batches cannot attain identity "
             "at this projection width. Consider a larger batch or smaller projection."
