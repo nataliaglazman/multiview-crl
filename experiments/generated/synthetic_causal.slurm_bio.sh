@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-15T17:24:54Z
-# Git SHA: 9793ce8
+# Generated at: 2026-09-15T18:05:54Z
+# Git SHA: c199458
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-causal-bt-wght-05
+#SBATCH --job-name=synthetic-clean-content-causal-bt-patch-wght-5
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-causal-bt-wght-05-%j.err
+#SBATCH --error=synthetic-clean-content-causal-bt-patch-wght-5-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -59,10 +59,10 @@ fi
     --batch-size 64 \
     --bt-corr-ema 0.99 \
     --bt-gap-lambda 6 \
-    --bt-gap-weight 5 \
+    --bt-gap-weight 1 \
     --bt-lambda 6 \
     --bt-normalize-terms \
-    --bt-patch-weight 1 \
+    --bt-patch-weight 5 \
     --bt-sim-coeff 0.0114 \
     --bt-std-coeff 0.227 \
     --channels-last \
@@ -121,7 +121,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-causal-bt-wght-05 \
+    --model-id synthetic-clean-content-causal-bt-patch-wght-5 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

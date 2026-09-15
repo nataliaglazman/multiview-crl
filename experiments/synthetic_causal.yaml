@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-clean-content-causal-bt-wght-05
+tag: synthetic-clean-content-causal-bt-patch-wght-5
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -7,9 +7,9 @@ patch_grid: [8,8,8]                 # 4x4x4 patches for 64^3 volumes
 patch_center_mode: position   # now wired for BT; do NOT use double
 patch_foreground_mask: true
 patch_foreground_thresh: 0.05
-bt_gap_weight: 05                  # NOT 0.01 — see the calibration note above
+bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 # bt_gap_lambda: 0.16               # NOT 0.005 — see the calibration note above
-bt_patch_weight: 1
+bt_patch_weight: 5
 single_count_commitment: true
 # bt_patch_stat: fold
 
