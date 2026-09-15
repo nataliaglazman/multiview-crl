@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-15T14:08:40Z
-# Git SHA: eb498aa
+# Generated at: 2026-09-15T17:10:48Z
+# Git SHA: 5bb1e42
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-clean-content-causal-stats
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -58,9 +58,9 @@ fi
 "$PYTHON" -m training.main_multimodal \
     --batch-size 64 \
     --bt-corr-ema 0.99 \
-    --bt-gap-lambda 6 \
+    --bt-gap-lambda 1 \
     --bt-gap-pooling stats \
-    --bt-gap-weight 0.5 \
+    --bt-gap-weight 1 \
     --bt-lambda 6 \
     --bt-normalize-terms \
     --bt-patch-weight 1 \
