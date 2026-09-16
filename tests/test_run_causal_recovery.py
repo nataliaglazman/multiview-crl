@@ -249,5 +249,91 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(len(model.encoders[0]._forward_hooks), 0)
 
 
+class TestProbeRidgeCV(unittest.TestCase):
+    """--probe-ridge-cv exists because the raw/partial probe reads the block at FULL width
+    while the readout PC uses is pinned by --readout-dim, so changing --pooling moves one and
+    not the other. On a real two-arm run the two disagreed in SIGN on six of nine factors.
+
+    The claim is NOT that tuning makes raw/partial width-invariant -- the information really
+    does differ between poolings. It is that tuning makes them agree in DIRECTION with the
+    pinned column, instead of contradicting it. That is measurable, so it is measured.
+    """
+
+    N, C = 1200, 8
+
+    def setUp(self):
+        rng = np.random.default_rng(0)
+        self.z = rng.standard_normal((self.N, 6))
+        mix = rng.standard_normal((6, self.C))
+        amp = np.exp(-((np.indices((8, 8, 8)) - 3.5) ** 2).sum(0) / 18.0)
+        fine = np.zeros((self.N, self.C, 8, 8, 8))
+        for c in range(self.C):
+            signal = (self.z @ mix[:, c])[:, None, None, None] * amp
+            fine[:, c] = 0.05 * signal + rng.standard_normal((self.N, 8, 8, 8))
+        self.wide = fine.reshape(self.N, -1)  # 8 x 512, as --pooling 8,8,8
+        self.narrow = fine.reshape(self.N, self.C, 4, 2, 4, 2, 4, 2).mean((3, 5, 7)).reshape(self.N, -1)
+
+    def _pinned(self, X, y, dims=64):
+        """The PC R² column: PCA to the pinned readout width, then RidgeCV."""
+        from sklearn.decomposition import PCA
+        from sklearn.linear_model import RidgeCV
+        from sklearn.metrics import r2_score
+        from sklearn.model_selection import train_test_split
+        from sklearn.preprocessing import StandardScaler
+
+        Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=0)
+        scaler = StandardScaler().fit(Xtr)
+        pca = PCA(n_components=dims, random_state=0).fit(scaler.transform(Xtr))
+        model = RidgeCV(alphas=(0.1, 1.0, 10.0, 100.0)).fit(pca.transform(scaler.transform(Xtr)), ytr)
+        return r2_score(yte, model.predict(pca.transform(scaler.transform(Xte))))
+
+    def _widening_deltas(self, ridge_cv):
+        return np.array(
+            [
+                recovery.fit_probe(self.wide, self.z[:, d : d + 1], ridge_cv)
+                - recovery.fit_probe(self.narrow, self.z[:, d : d + 1], ridge_cv)
+                for d in range(self.z.shape[1])
+            ]
+        )
+
+    def test_tuning_restores_agreement_with_the_pinned_readout(self):
+        reference = np.array(
+            [self._pinned(self.wide, self.z[:, d]) - self._pinned(self.narrow, self.z[:, d]) for d in range(6)]
+        )
+        fixed_agree = int((reference * self._widening_deltas(False) > 0).sum())
+        tuned_agree = int((reference * self._widening_deltas(True) > 0).sum())
+        self.assertGreater(tuned_agree, fixed_agree)
+        self.assertGreaterEqual(tuned_agree, 5)
+
+    def test_default_is_the_pinned_penalty_so_old_numbers_are_unchanged(self):
+        from sklearn.linear_model import Ridge
+        from sklearn.metrics import r2_score
+        from sklearn.model_selection import train_test_split
+        from sklearn.preprocessing import StandardScaler
+
+        y = self.z[:, :1]
+        Xtr, Xte, ytr, yte = train_test_split(self.narrow, y, test_size=0.3, random_state=0)
+        scaler = StandardScaler().fit(Xtr)
+        want = r2_score(
+            yte,
+            Ridge(alpha=1.0).fit(scaler.transform(Xtr), ytr).predict(scaler.transform(Xte)),
+            multioutput="variance_weighted",
+        )
+        self.assertAlmostEqual(recovery.fit_probe(self.narrow, y), want, places=10)
+
+    def test_the_flag_is_recorded_and_leaves_the_skeleton_alone(self):
+        """PC reads the pinned readout, so no graph metric may move with this flag."""
+        adjacency = np.zeros((6, 6), dtype=bool)
+        adjacency[0, 1] = adjacency[1, 2] = True
+        common = dict(alphas=[0.05], readout_dim=16)
+        plain = recovery.evaluate_arrays(self.narrow, self.z, adjacency, **common)
+        tuned = recovery.evaluate_arrays(self.narrow, self.z, adjacency, probe_ridge_cv=True, **common)
+        self.assertEqual(plain["probe_mode"], "ridge_alpha1")
+        self.assertEqual(tuned["probe_mode"], "ridge_cv")
+        self.assertEqual(plain["best"]["skeleton_shd"], tuned["best"]["skeleton_shd"])
+        self.assertEqual(plain["best"]["adjacency"], tuned["best"]["adjacency"])
+        self.assertNotEqual(plain["raw_r2_mean"], tuned["raw_r2_mean"])
+
+
 if __name__ == "__main__":
     unittest.main()

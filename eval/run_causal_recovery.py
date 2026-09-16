@@ -7,6 +7,11 @@
 Each run needs settings.json and a VQVAE checkpoint. See CAUSAL_EVALUATION.md
 for metric interpretation. The default reproduces the notebook's supervised,
 in-sample graph readout and truth-selected alpha sweep, not directed recovery.
+
+An F1 on its own says nothing, because both ends of the scale are already taken:
+PC on a RANDOM projection of the same architecture recovers edges (--floor), and
+PC on the TRUE factors does not recover all of them (--ceiling). Pass both and
+read where a run sits between them, not its absolute score.
 """
 
 from __future__ import annotations
@@ -25,6 +30,12 @@ DEFAULT_ALPHAS = (0.01, 0.05, 0.1, 0.2)
 # parent sum, which fisherz is therefore misspecified for. kci is nonparametric and sees
 # the nonlinear part, at roughly two orders of magnitude more compute.
 INDEP_TESTS = ("fisherz", "kci")
+# Suffixes appended to a run's directory name for its two reference rows. They are not real
+# paths -- they exist so every downstream consumer (the summary table, the factor CSV,
+# --reference-run matching) keeps the reference rows distinguishable from the run itself,
+# which keys off Path(run_dir).name. Matching the -floor suffix run_dci_compare.py uses.
+_FLOOR_SUFFIX = "-floor"
+_CEILING_SUFFIX = "-ceiling"
 
 
 def skeleton_metrics(estimated, truth):
@@ -157,16 +168,40 @@ def readout_width(n_samples, n_features, n_content, readout_dim=None):
     return min(want, n_features, n_samples)
 
 
-def fit_probe(X, y):
-    """Notebook linear probe: 70/30 split, train-only scaling, Ridge(alpha=1)."""
-    from sklearn.linear_model import Ridge
+# Ridge penalties --probe-ridge-cv selects among, by leave-one-out CV on the train split.
+# Spans 1e-2 to 1e6 because the useful penalty scales with the FEATURE COUNT, and this probe
+# is handed the unreduced block: at --pooling 8,8,8 that is 8x wider than at 4,4,4, and the
+# fixed alpha=1.0 below was never re-tuned for either.
+PROBE_ALPHAS = tuple(10.0**k for k in range(-2, 7))
+
+
+def fit_probe(X, y, ridge_cv=False):
+    """Notebook linear probe: 70/30 split, train-only scaling, Ridge(alpha=1).
+
+    ``ridge_cv=True`` selects the penalty over :data:`PROBE_ALPHAS` instead of pinning it at
+    1.0.  This probe reads the block at its FULL width, so its feature count moves with
+    ``--pooling`` while the readout PC uses does not (``--readout-dim`` pins that one), and a
+    penalty fixed for one width is not fixed for another.  Measured on a real two-arm run,
+    going from 4,4,4 to 8,8,8 moved mean raw R2 by -0.096 and mean partial R2 by -0.242 while
+    the pinned readout moved +0.016, with six of nine factors moving in OPPOSITE directions
+    under the two probes -- two readings of the same features that cannot both be right.
+
+    What tuning buys is that AGREEMENT, not width-invariance: the absolute values still move
+    with pooling, because the information genuinely differs, but they stop contradicting the
+    column held at fixed capacity.  Measured on planted features at 768 vs 6144 (test
+    ``TestProbeRidgeCV``), the fixed penalty matched the pinned readout's direction on 0 of 9
+    factors and the tuned one on 9 of 9.  Off by default: it changes every raw/partial number,
+    so a run with it is not comparable with one without.  Costs one SVD per factor.
+    """
+    from sklearn.linear_model import Ridge, RidgeCV
     from sklearn.metrics import r2_score
     from sklearn.model_selection import train_test_split
     from sklearn.preprocessing import StandardScaler
 
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=0)
     scaler = StandardScaler().fit(Xtr)
-    model = Ridge(alpha=1.0).fit(scaler.transform(Xtr), ytr)
+    model = RidgeCV(alphas=PROBE_ALPHAS) if ridge_cv else Ridge(alpha=1.0)
+    model = model.fit(scaler.transform(Xtr), ytr)
     return float(r2_score(yte, model.predict(scaler.transform(Xte)), multioutput="variance_weighted"))
 
 
@@ -182,6 +217,7 @@ def evaluate_arrays(
     holdout_readout=False,
     indep_test="fisherz",
     max_cond_set=None,
+    probe_ridge_cv=False,
 ):
     """Evaluate already aligned features and factors with the supplied panel's protocol.
 
@@ -209,8 +245,13 @@ def evaluate_arrays(
     makes KCI tractable at that width — 9 factors at 300 rows went from not finishing to
     9.7 s at ``max_cond_set=2``, recovering the same edge count as ``1``.  It is an
     approximation: pairs that only separate on a larger conditioning set keep their edge,
-    so the skeleton can only gain edges, never lose them.  All five arguments default to
-    the original behaviour.
+    so the skeleton can only gain edges, never lose them.
+
+    ``probe_ridge_cv`` tunes the raw/partial probe's penalty instead of pinning it at 1.0
+    (see :func:`fit_probe`), so those two columns stop contradicting the pinned readout when
+    the block's width changes.  It does not touch the readout PC reads, which ``readout_dim``
+    already pins, so no skeleton metric moves.  All six arguments default to the original
+    behaviour.
     """
     import numpy as np
     from sklearn.decomposition import PCA
@@ -248,8 +289,8 @@ def evaluate_arrays(
     for d, pa in enumerate(parents):
         if pa:
             residuals[:, d] -= LinearRegression().fit(z[:, pa], z[:, d]).predict(z[:, pa])
-    raw = [fit_probe(X, z[:, d : d + 1]) for d in range(n_content)]
-    partial = [fit_probe(X, residuals[:, d : d + 1]) for d in range(n_content)]
+    raw = [fit_probe(X, z[:, d : d + 1], probe_ridge_cv) for d in range(n_content)]
+    partial = [fit_probe(X, residuals[:, d : d + 1], probe_ridge_cv) for d in range(n_content)]
 
     Xsc = StandardScaler().fit_transform(X)
     # Extra sample-count cap avoids invalid PCA for small datasets / many factors.
@@ -365,6 +406,7 @@ def evaluate_arrays(
         graph_readout_dim=readout_features,
         graph_samples=len(z_hat),
         readout_mode="holdout" if holdout_readout else "in_sample",
+        probe_mode="ridge_cv" if probe_ridge_cv else "ridge_alpha1",
         indep_test=indep_test,
         max_cond_set=max_cond_set,
         raw_r2_mean=float(np.mean(raw)),
@@ -398,6 +440,55 @@ def evaluate_arrays(
                 repairs.append(dict(dim=d, error=str(exc)))
         result["factor_rescue"] = dict(alpha=diagnostic_alpha, baseline=baseline, factors=repairs)
     return result
+
+
+def truth_ceiling(z, adjacency, cli, cache):
+    """PC run on the TRUE factors: what this protocol reaches when decoding is perfect.
+
+    A finite-sample reference, not a strict bound -- a decoded representation can beat it on
+    a given draw, the same way one untrained floor seed can beat another by four edges.
+
+    An F1 of 0.77 means nothing on its own, because PC does not recover the whole skeleton
+    even when the readout is perfect.  Fisher-Z sees only the linear part of a leaky_relu
+    mechanism, a finite row count costs power, and ``--max-cond-set`` is an approximation.
+    All three cost edges before any representation is involved.  Feeding ``z`` in as its own
+    features prices them: whatever the ceiling misses is the protocol's, not the model's.
+
+    Everything else is held at the settings the runs were scored under -- same alphas, same
+    test, same conditioning cap, same ``holdout_readout`` split -- so the row count PC sees
+    matches.  ``readout_dim`` is deliberately NOT passed: with 9 features and 9 factors the
+    readout is already the identity, and pinning it wider would only re-add PCA.
+
+    Returns ``(row, key)``.  ``row`` is ``None`` when this exact draw was already scored --
+    two arms on one SCM share a ceiling, and one row for it is enough.
+    """
+    import hashlib
+
+    import numpy as np
+
+    z = np.ascontiguousarray(np.asarray(z, dtype=float))
+    adjacency = np.ascontiguousarray(np.asarray(adjacency))
+    digest = hashlib.sha256(z.tobytes() + adjacency.tobytes()).hexdigest()[:12]
+    if digest in cache:
+        return None, digest
+    row = evaluate_arrays(
+        z,
+        z,
+        adjacency,
+        cli.alphas,
+        False,  # factor_rescue is meaningless here: every factor is already truth
+        cli.diagnostic_alpha,
+        getattr(cli, "orientation", False),
+        None,
+        getattr(cli, "holdout_readout", False),
+        getattr(cli, "indep_test", "fisherz"),
+        getattr(cli, "max_cond_set", None),
+        getattr(cli, "probe_ridge_cv", False),
+    )
+    # Marked only on success, so a run whose ceiling failed does not poison the digest and
+    # suppress the retry on the next run that shares the draw.
+    cache[digest] = True
+    return row, digest
 
 
 def extract_content(model, dataset, device, level, pooling, batch_size, num_workers):
@@ -466,8 +557,16 @@ def extract_content(model, dataset, device, level, pooling, batch_size, num_work
     return np.concatenate(features), np.concatenate(targets)
 
 
-def evaluate_run(run_dir, cli):
-    """Load each run independently so SCM, renderer and normalization match it."""
+def evaluate_run(run_dir, cli, random_init=False, init_seed=0, ceiling_cache=None):
+    """Load each run independently so SCM, renderer and normalization match it.
+
+    ``random_init=True`` skips the checkpoint and scores this run's exact architecture
+    untrained -- the floor every trained number has to be read as a gap over.  ``init_seed``
+    fixes the draw: those weights ARE the measurement, and unseeded they would be a
+    different random projection on every invocation, with the noise landing straight in the
+    reported gap.  The checkpoint is still required to exist, so a floor can only be
+    produced for a run that actually has a trained twin to be compared against.
+    """
     with (run_dir / "settings.json").open() as f:
         settings = json.load(f)
     if not settings.get("synthetic_causal", False):
@@ -478,7 +577,10 @@ def evaluate_run(run_dir, cli):
     checkpoint = run_dir / cli.checkpoint
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-    model, args, device = load_model_from_run_dir(str(run_dir), str(checkpoint), device=cli.device, seed=0)
+    logger.info("Evaluating %s%s", run_dir, f" [UNTRAINED FLOOR, seed {init_seed}]" if random_init else "")
+    model, args, device = load_model_from_run_dir(
+        str(run_dir), str(checkpoint), device=cli.device, random_init=random_init, seed=init_seed
+    )
     levels = settings.get("content_style_levels") or [0]
     level = cli.level if cli.level is not None else levels[0]
     if not 0 <= level < model.nb_levels:
@@ -501,14 +603,41 @@ def evaluate_run(run_dir, cli):
         getattr(cli, "holdout_readout", False),
         getattr(cli, "indep_test", "fisherz"),
         getattr(cli, "max_cond_set", None),
+        getattr(cli, "probe_ridge_cv", False),
     )
     result.update(
         status="ok" if result["best"] else "partial",
-        checkpoint=str(checkpoint),
+        checkpoint=None if random_init else str(checkpoint),
         level=level,
         pooling=cli.pooling,
+        role="floor" if random_init else "trained",
+        random_init=random_init,
+        init_seed=init_seed,
         causal_settings={key: value for key, value in settings.items() if key.startswith("synthetic_")},
     )
+    # The ceiling depends only on the factor draw and the SCM, so it is the same for a run
+    # and its floor twin; scoring it once off the trained pass is enough.
+    if getattr(cli, "ceiling", False) and not random_init:
+        # Guarded: the ceiling is a reference row, so losing it must not also lose the run's
+        # own scores, which are the expensive half and are already complete by here.
+        try:
+            ceiling, key = truth_ceiling(z, scm["adj"], cli, ceiling_cache if ceiling_cache is not None else {})
+        except Exception as exc:
+            logger.exception("Truth ceiling failed for %s; keeping the run's own scores", run_dir)
+            result["ceiling_error"] = f"{type(exc).__name__}: {exc}"
+            return result
+        result["ceiling_key"] = key
+        if ceiling is not None:
+            ceiling.update(
+                status="ok" if ceiling["best"] else "partial",
+                checkpoint=None,
+                level=level,
+                pooling=cli.pooling,
+                role="ceiling",
+                ceiling_key=key,
+                causal_settings=result["causal_settings"],
+            )
+            result["ceiling"] = ceiling
     return result
 
 
@@ -535,6 +664,130 @@ def collect_runs(patterns, runs_file=None):
             if path not in runs:
                 runs.append(path)
     return runs
+
+
+def build_plan(runs, floor=False, floor_seeds=1):
+    """``(label, run_dir, random_init, init_seed)`` per evaluation, in execution order.
+
+    Each run is followed immediately by its own untrained twins rather than all runs first,
+    so an evaluation that dies partway still leaves every scored run next to the floor it
+    has to be read against -- a run with no floor is uninterpretable, and the rows are
+    written out after every evaluation.
+    """
+    plan = []
+    for run in runs:
+        plan.append((str(run), run, False, 0))
+        if floor:
+            plan.extend((f"{run}{_FLOOR_SUFFIX}-s{seed}", run, True, seed) for seed in range(floor_seeds))
+    return plan
+
+
+def print_result(result):
+    """Console block for one scored row. Shared so a floor or ceiling row prints alike."""
+    if not result.get("factors"):
+        print(f"  {result['status']}: {result['reason']}")
+        return
+    best = result["best"]
+    print(f"  L{result['level']} partial R²={result['partial_r2_mean']:.3f} (raw={result['raw_r2_mean']:.3f})")
+    print(
+        f"  Readout: {result['readout_mode']} at {result['graph_readout_dim']} dims, "
+        f"PC on {result['graph_samples']} rows with {result['indep_test']}"
+    )
+    if best:
+        print(
+            f"  Best skeleton F1={best['f1']:.3f} P={best['precision']:.3f} R={best['recall']:.3f} "
+            f"alpha={best['alpha']:g} SHD={best['skeleton_shd']} exact_match={best['exact_match']}"
+        )
+        if "orientation" in best:
+            o = best["orientation"]
+            print(
+                f"  Orientation vs the true CPDAG: correct={o['correct_directed']} "
+                f"reversed={o['reversed']} unoriented={o['undirected_in_estimate']} "
+                f"CPDAG SHD={o['cpdag_shd']} exact_match={o['cpdag_exact_match']}"
+            )
+    else:
+        print("  PC unavailable; factor scores retained. See alpha_sweep errors in JSON.")
+    for factor in result["factors"]:
+        print(
+            f"    d{factor['dim']} pa={factor['parents']}: raw={factor['raw_r2']:.3f} "
+            f"partial={factor['partial_r2']:.3f} gap={factor['gap']:+.3f}"
+        )
+
+
+def _reference_rows(results):
+    """``{trained run_dir: (its floor rows, its ceiling row)}`` for rows that have them.
+
+    Floors are matched by the suffix their run_dir carries, ceilings by the draw digest both
+    sides recorded -- not by position, so a partial evaluation still pairs correctly.
+    """
+    scored = [r for r in results if r.get("best")]
+    ceilings = {r["ceiling_key"]: r for r in scored if r.get("role") == "ceiling" and r.get("ceiling_key")}
+    pairs = {}
+    for run in scored:
+        if run.get("role", "trained") != "trained":
+            continue
+        prefix = run["run_dir"] + _FLOOR_SUFFIX
+        floors = [r for r in scored if r.get("role") == "floor" and r["run_dir"].startswith(prefix)]
+        ceiling = ceilings.get(run.get("ceiling_key"))
+        if floors or ceiling:
+            pairs[run["run_dir"]] = (floors, ceiling)
+    return pairs
+
+
+def format_floor_block(results):
+    """Trained minus its untrained twin, with the truth ceiling beside it.
+
+    The absolute F1 is not a statement about the model. PC on a RANDOM projection of the
+    same architecture already recovers edges, and PC on the true factors does not recover
+    all of them, so the interpretable quantity is where a run sits between those two. This
+    block is empty unless --floor or --ceiling was passed.
+    """
+    import numpy as np
+
+    pairs = _reference_rows(results)
+    if not pairs:
+        return ""
+    by_dir = {r["run_dir"]: r for r in results}
+    seeds = max((len(floors) for floors, _ in pairs.values()), default=0)
+    head = ["Run", "F1", "floor", "learned"]
+    if seeds > 1:
+        head.append("fl.rng")
+    head += ["ceiling", "Partial R²", "floor", "learned"]
+    rows = [head]
+    for run_dir, (floors, ceiling) in pairs.items():
+        run = by_dir[run_dir]
+        f1 = run["best"]["f1"]
+        pr = run["partial_r2_mean"]
+        f1_floors = [f["best"]["f1"] for f in floors]
+        pr_floors = [f["partial_r2_mean"] for f in floors]
+        cells = [Path(run_dir).name, f"{f1:.3f}"]
+        cells += [f"{np.mean(f1_floors):.3f}", f"{f1 - np.mean(f1_floors):+.3f}"] if f1_floors else ["—", "—"]
+        if seeds > 1:
+            cells.append(f"{max(f1_floors) - min(f1_floors):.3f}" if len(f1_floors) > 1 else "—")
+        cells.append(f"{ceiling['best']['f1']:.3f}" if ceiling else "—")
+        cells.append(f"{pr:.3f}")
+        cells += [f"{np.mean(pr_floors):.3f}", f"{pr - np.mean(pr_floors):+.3f}"] if pr_floors else ["—", "—"]
+        rows.append(cells)
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+
+    def line(row):
+        return "  ".join(
+            value.ljust(width) if i == 0 else value.rjust(width) for i, (value, width) in enumerate(zip(row, widths))
+        ).rstrip()
+
+    out = ["\nFloor-subtracted, at the best-F1 alpha:", line(rows[0]), "  ".join("-" * w for w in widths)]
+    out.extend(line(row) for row in rows[1:])
+    if seeds:
+        out.append(
+            f"\nfloor = an UNTRAINED twin of the same architecture ({seeds} init seed"
+            f"{'s' if seeds > 1 else ''}), everything else held fixed."
+        )
+        if seeds == 1:
+            out.append("One seed is one draw of a random projection; --floor-seeds 3 bounds how much it moves.")
+    if any(ceiling for _, ceiling in pairs.values()):
+        out.append("ceiling = PC on the TRUE factors, same row count, test and alphas. What IT misses is what")
+        out.append("the protocol costs (a linear test, finite rows, --max-cond-set), before any model.")
+    return "\n".join(out) + "\n"
 
 
 def format_summary(results):
@@ -565,7 +818,7 @@ def format_summary(results):
     table.extend(line(row) for row in rows[1:])
     table.append("\nF1/precision/recall/SHD use the best-F1 alpha; SHD counts missing + extra skeleton edges.")
     table.append("Partial R² is the mean across content factors. — = unavailable (see JSON/CSV for reasons).")
-    return "\n".join(table) + "\n"
+    return "\n".join(table) + "\n" + format_floor_block(results)
 
 
 def write_reports(results, output_dir, reference_run=None, diagnostic_alpha=0.05, protocol=None):
@@ -585,9 +838,19 @@ def write_reports(results, output_dir, reference_run=None, diagnostic_alpha=0.05
             max_cond_set=next((r.get("max_cond_set") for r in results if r.get("max_cond_set")), None),
             graph_readout=f"supervised_{mode}_ridgecv",
             parent_adjustment="linear_all_samples",
-            probe="ridge_alpha1_70_30_split_seed0",
+            # Read off the rows: --probe-ridge-cv changes every raw/partial number, so a
+            # reader comparing two JSONs has to be able to see which probe produced them.
+            probe=(
+                "ridgecv_70_30_split_seed0"
+                if next((r.get("probe_mode") for r in results if r.get("probe_mode")), "") == "ridge_cv"
+                else "ridge_alpha1_70_30_split_seed0"
+            ),
             content_mask="sample0_fixed",
             empty_graph_f1=0.0,
+            # Which reference rows this payload carries, so a reader of the JSON alone can
+            # tell a missing floor from a floor of zero.
+            floor_seeds=sorted({r["init_seed"] for r in results if r.get("role") == "floor"}),
+            has_truth_ceiling=any(r.get("role") == "ceiling" for r in results),
         ),
         runs=results,
     )
@@ -596,6 +859,8 @@ def write_reports(results, output_dir, reference_run=None, diagnostic_alpha=0.05
     columns = [
         "directory_name",
         "run_dir",
+        "role",
+        "init_seed",
         "status",
         "reason",
         "level",
@@ -605,6 +870,7 @@ def write_reports(results, output_dir, reference_run=None, diagnostic_alpha=0.05
         "indep_test",
         "max_cond_set",
         "readout_mode",
+        "probe_mode",
         "graph_readout_dim",
         "graph_samples",
         "raw_r2_mean",
@@ -625,6 +891,100 @@ def write_reports(results, output_dir, reference_run=None, diagnostic_alpha=0.05
         for result in results:
             writer.writerow({**result, **(result.get("best") or {}), "directory_name": Path(result["run_dir"]).name})
     return write_factor_reports(results, output_dir, reference_run, diagnostic_alpha)
+
+
+def _self_test():
+    """Checks for the reference-row plumbing, which needs neither torch nor causal-learn.
+
+    The scoring itself cannot run here (PC needs causal-learn, the encoder needs torch), so
+    what is checked is the part that silently produces a WRONG NUMBER rather than an error:
+    which floor row gets subtracted from which run.
+    """
+
+    def row(name, role="trained", f1=0.5, partial=0.3, key=None, seed=0):
+        return dict(
+            run_dir=name,
+            role=role,
+            init_seed=seed,
+            status="ok",
+            partial_r2_mean=partial,
+            best=dict(f1=f1, precision=f1, recall=f1, skeleton_shd=4, exact_match=False, alpha=0.05),
+            **({"ceiling_key": key} if key else {}),
+        )
+
+    failures = []
+
+    def check(label, condition):
+        if not condition:
+            failures.append(label)
+        print(f"  {'ok  ' if condition else 'FAIL'}  {label}")
+
+    runs = [Path("/r/arm_a"), Path("/r/arm_b")]
+    check("without --floor the plan is one pass per run", build_plan(runs) == [(str(r), r, False, 0) for r in runs])
+    planned = build_plan(runs, floor=True, floor_seeds=3)
+    check("--floor adds one untrained pass per seed", len(planned) == 2 * (1 + 3))
+    check("each run is followed by its own floors", [p[1] for p in planned[:4]] == [runs[0]] * 4)
+    check("floor passes carry distinct seeds", [p[3] for p in planned[1:4]] == [0, 1, 2])
+    check("only floor passes set random_init", [p[2] for p in planned[:4]] == [False, True, True, True])
+    check(
+        "labels stay unique so the rows do not collide",
+        len({p[0] for p in planned}) == len(planned) and planned[1][0] == f"/r/arm_a{_FLOOR_SUFFIX}-s0",
+    )
+
+    a = row("/r/arm_a", f1=0.688, partial=0.384, key="d0")
+    b = row("/r/arm_b", f1=0.765, partial=0.005, key="d0")
+    floors_a = [row(f"/r/arm_a{_FLOOR_SUFFIX}-s{s}", "floor", f1=0.40 + 0.05 * s, partial=0.01, seed=s) for s in (0, 1)]
+    ceiling = row(f"/r/arm_a{_CEILING_SUFFIX}", "ceiling", f1=0.812, partial=1.0, key="d0")
+
+    pairs = _reference_rows([a, *floors_a, b, ceiling])
+    check(
+        "floors attach to their own run only",
+        [r["run_dir"] for r in pairs["/r/arm_a"][0]] == [f["run_dir"] for f in floors_a],
+    )
+    check("a run without floors gets none", pairs["/r/arm_b"][0] == [])
+    check("both arms share one ceiling via the draw digest", pairs["/r/arm_a"][1] is pairs["/r/arm_b"][1] is ceiling)
+
+    # A ceiling whose digest no arm recorded must not be silently attached to an arm.
+    stray = _reference_rows([a, row("/r/other-ceiling", "ceiling", key="d9")])
+    check("a ceiling from another SCM draw is not borrowed", stray == {})
+
+    # A directory that genuinely ends in the floor suffix is a run, not arm_a's twin.
+    impostor = row(f"/r/arm_a{_FLOOR_SUFFIX}-s0", f1=0.9)
+    check("a real run named like a floor is not absorbed", _reference_rows([a, impostor]) == {})
+
+    block = format_floor_block([a, *floors_a, b, ceiling])
+    check("learned F1 is trained minus the floor MEAN", "+0.263" in block)  # 0.688 - 0.425
+    check("learned partial R² is reported too", "+0.374" in block)  # 0.384 - 0.010
+    check("the across-seed spread shows once there is more than one", "fl.rng" in block and "0.050" in block)
+    check("the ceiling appears for both arms", block.count("0.812") == 2)
+    # arm_b has a ceiling but no floor: the five floor-derived cells (floor/learned/fl.rng
+    # for F1, floor/learned for partial R²) must read as missing, never as a floor of zero,
+    # which would silently turn its absolute F1 into its "learned" F1.
+    no_floor = next(line for line in block.splitlines() if line.startswith("arm_b "))
+    check("an arm with no floor prints dashes, not zeros", no_floor.count("—") == 5)
+    check("its own and its ceiling's scores still print", all(v in no_floor for v in ("0.765", "0.812", "0.005")))
+
+    one = format_floor_block([a, floors_a[0], ceiling])
+    check("one seed hides the spread column", "fl.rng" not in one)
+    check("one seed says so", "--floor-seeds 3" in one)
+    check("ceiling alone still renders", "ceiling" in format_floor_block([a, ceiling]))
+    check("no reference rows means no block", format_floor_block([a, b]) == "")
+
+    scored = dict(
+        level=0,
+        raw_r2_mean=0.4,
+        readout_mode="holdout",
+        graph_readout_dim=128,
+        graph_samples=600,
+        indep_test="fisherz",
+        factors=[dict(dim=0, parents=[], raw_r2=0.1, partial_r2=0.1, gap=0.0)],
+    )
+    print_result(dict(status="skipped", reason="settings['synthetic_causal'] is False"))
+    print_result({**a, **scored, "best": None})
+    check("print_result survives rows with no graph", True)
+
+    print("\n" + ("FAILED: " + ", ".join(failures) if failures else "All checks passed."))
+    return 1 if failures else 0
 
 
 def main(argv=None):
@@ -690,7 +1050,51 @@ def main(argv=None):
         "decoding the same rows the readout was fit on. Removes the panel's in-sample optimism at the "
         "cost of 70%% of the rows, so pair it with --num-samples 2000 or more.",
     )
+    parser.add_argument(
+        "--probe-ridge-cv",
+        action="store_true",
+        help="Tune the raw/partial R² probe's ridge penalty by CV instead of pinning it at "
+        "alpha=1.0. That probe reads the block at FULL width, so its feature count moves with "
+        "--pooling while the readout PC uses does not; a penalty fixed for one width is not fixed "
+        "for another, and the two probes have been measured disagreeing in SIGN on six of nine "
+        "factors across 4,4,4 vs 8,8,8. This does not make raw/partial width-invariant -- the "
+        "information genuinely differs -- it makes them agree in DIRECTION with the pinned "
+        "readout (measured 0/9 factors before, 9/9 after). Changes every raw/partial number, so "
+        "runs with and without it are not comparable. One SVD per factor. No skeleton metric "
+        "moves: PC reads the pinned readout, not this probe.",
+    )
+    parser.add_argument(
+        "--floor",
+        action="store_true",
+        help="Also score an UNTRAINED twin of every run (row '<name>-floor-s<seed>'), same "
+        "architecture, pooling, readout width and alphas. PC on a random projection of this "
+        "architecture already recovers edges, so an absolute F1 without this is not a statement "
+        "about what the model learned. Roughly doubles runtime per floor seed.",
+    )
+    parser.add_argument(
+        "--floor-seeds",
+        type=int,
+        default=1,
+        help="Init seeds to draw the untrained twin with (default 1). One seed is ONE draw of a "
+        "random projection and carries sampling noise straight into every floor-subtracted number; "
+        "3 makes the spread visible as its own column. Ignored without --floor.",
+    )
+    parser.add_argument(
+        "--ceiling",
+        action="store_true",
+        help="Also score PC on the TRUE factors (row '<name>-ceiling'), at the same row count, test, "
+        "alphas and conditioning cap. This is the upper bound of the protocol, not of a model: what it "
+        "misses is what Fisher-Z's linear test, the finite row count and --max-cond-set cost before any "
+        "representation is involved. Cheap under fisherz; one extra PC sweep per distinct SCM draw.",
+    )
+    parser.add_argument(
+        "--self-test", action="store_true", help="Run the built-in checks of the torch-free paths and exit"
+    )
     cli = parser.parse_args(argv)
+    if cli.self_test:
+        return _self_test()
+    if cli.floor_seeds < 1:
+        parser.error("--floor-seeds must be at least 1")
     if not 0 < cli.diagnostic_alpha < 1:
         parser.error("--diagnostic-alpha must be strictly between 0 and 1")
     if cli.from_json:
@@ -727,46 +1131,27 @@ def main(argv=None):
     if not runs:
         parser.error("Supply --run-dirs and/or a non-empty --runs-file")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
-    results = []
-    for i, run in enumerate(runs, 1):
-        print(f"\n[{i}/{len(runs)}] {run}", flush=True)
+    plan = build_plan(runs, cli.floor, cli.floor_seeds)
+    results, ceiling_cache = [], {}
+    for i, (label, run, random_init, init_seed) in enumerate(plan, 1):
+        print(f"\n[{i}/{len(plan)}] {label}", flush=True)
         try:
-            result = evaluate_run(run, cli)
+            result = evaluate_run(run, cli, random_init=random_init, init_seed=init_seed, ceiling_cache=ceiling_cache)
         except Exception as exc:
-            logger.exception("Failed to evaluate %s", run)
+            logger.exception("Failed to evaluate %s", label)
             result = dict(status="error", reason=f"{type(exc).__name__}: {exc}")
-        result["run_dir"] = str(run)
+        result["run_dir"] = label
+        # A skipped or errored run never reached evaluate_run's update, so it carries no role.
+        result.setdefault("role", "floor" if random_init else "trained")
+        result.setdefault("init_seed", init_seed)
+        ceiling = result.pop("ceiling", None)
         results.append(result)
-        if result.get("factors"):
-            best = result["best"]
-            print(
-                f"  L{result['level']} partial R²={result['partial_r2_mean']:.3f} " f"(raw={result['raw_r2_mean']:.3f})"
-            )
-            print(
-                f"  Readout: {result['readout_mode']} at {result['graph_readout_dim']} dims, "
-                f"PC on {result['graph_samples']} rows with {result['indep_test']}"
-            )
-            if best:
-                print(
-                    f"  Best skeleton F1={best['f1']:.3f} P={best['precision']:.3f} R={best['recall']:.3f} "
-                    f"alpha={best['alpha']:g} SHD={best['skeleton_shd']} exact_match={best['exact_match']}"
-                )
-                if "orientation" in best:
-                    o = best["orientation"]
-                    print(
-                        f"  Orientation vs the true CPDAG: correct={o['correct_directed']} "
-                        f"reversed={o['reversed']} unoriented={o['undirected_in_estimate']} "
-                        f"CPDAG SHD={o['cpdag_shd']} exact_match={o['cpdag_exact_match']}"
-                    )
-            else:
-                print("  PC unavailable; factor scores retained. See alpha_sweep errors in JSON.")
-            for factor in result["factors"]:
-                print(
-                    f"    d{factor['dim']} pa={factor['parents']}: raw={factor['raw_r2']:.3f} "
-                    f"partial={factor['partial_r2']:.3f} gap={factor['gap']:+.3f}"
-                )
-        else:
-            print(f"  {result['status']}: {result['reason']}")
+        print_result(result)
+        if ceiling is not None:
+            ceiling["run_dir"] = f"{run}{_CEILING_SUFFIX}"
+            results.append(ceiling)
+            print(f"\n[{i}/{len(plan)}] {ceiling['run_dir']}  (PC on the true factors)", flush=True)
+            print_result(ceiling)
         # Persist after every run so a later failure doesn't discard completed work.
         # The requested reference may be a later run; use the default until it arrives.
         reference_ready = any(
@@ -776,7 +1161,15 @@ def main(argv=None):
     print("\n" + format_summary(results))
     print(write_reports(results, cli.output_dir, cli.reference_run, cli.diagnostic_alpha))
     print(f"Saved CSV, JSON, summary and factor tables to {cli.output_dir.resolve()}")
-    print("F1 measures the skeleton only; alpha is selected against truth and the graph readout is in-sample.")
+    print("F1 measures the skeleton only, and alpha is selected against truth.")
+    if not cli.holdout_readout:
+        print("The graph readout is in-sample; --holdout-readout removes that optimism.")
+    if not cli.floor:
+        print(
+            "NO FLOOR MEASURED. PC on an untrained twin of this architecture already recovers edges, "
+            "so the F1 above is not on its own a statement about what the model learned. Re-run with "
+            "--floor (and --ceiling for the other end) before reporting it."
+        )
     return int(any(result["status"] in ("error", "partial") for result in results))
 
 

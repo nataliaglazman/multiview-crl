@@ -80,8 +80,14 @@ ORIENTATION_CLASSES = (
 # --------------------------------------------------------------------------- #
 
 
-def load(path):
-    """``[(label, run), ...]`` for every scored run in one report file."""
+def load(path, roles=("trained",)):
+    """``[(label, run), ...]`` for the scored runs of the requested roles in one report file.
+
+    ``--floor``/``--ceiling`` put reference rows in the same file as the runs they reference,
+    so a report of two arms with three floor seeds holds nine scored rows against two
+    categorical hues.  Selecting on role is what keeps a figure to the runs it is about.  A
+    row from before those flags existed carries no role and counts as ``trained``.
+    """
     with open(path) as fh:
         payload = json.load(fh)
     if "runs" not in payload:
@@ -92,6 +98,8 @@ def load(path):
             logger.warning(
                 "skipping %s: %s", run.get("run_dir", "?"), run.get("reason", run.get("status", "no scores"))
             )
+            continue
+        if run.get("role", "trained") not in roles:
             continue
         out.append((os.path.basename(str(run.get("run_dir", "run")).rstrip("/")), run))
     return out
@@ -366,16 +374,43 @@ def main(argv=None):
     p.add_argument("--labels", nargs="*", default=None, help="Run labels (default: each run's directory name).")
     p.add_argument("--out", default="figures", help="Output directory.")
     p.add_argument("--dark", action="store_true", help="Re-step to the dark surface.")
+    p.add_argument(
+        "--roles",
+        nargs="+",
+        default=["trained"],
+        choices=["trained", "floor", "ceiling"],
+        help="Which rows to draw (default: trained). A report written with --floor/--ceiling holds "
+        "their reference rows too, and there are only two categorical hues, so pick a pair: "
+        "'--roles trained ceiling' for one arm against what the protocol can reach, or "
+        "'--roles trained floor' for one arm against one untrained seed.",
+    )
+    p.add_argument(
+        "--only",
+        nargs="+",
+        default=None,
+        metavar="SUBSTRING",
+        help="Keep only rows whose name contains one of these (case-insensitive). Needed to pair "
+        "ONE of several arms with its reference row: two arms plus a ceiling is three rows against "
+        "two hues, so '--roles trained ceiling --only ident-vent' picks the arm and its ceiling.",
+    )
     cli = p.parse_args(argv)
 
-    runs = [entry for path in cli.json for entry in load(path)]
+    runs = [entry for path in cli.json for entry in load(path, tuple(cli.roles))]
+    if cli.only:
+        wanted = [s.lower() for s in cli.only]
+        runs = [(name, run) for name, run in runs if any(s in name.lower() for s in wanted)]
     if not runs:
-        p.error("no scored runs in those files — every run was skipped or errored")
+        p.error(
+            f"no scored runs with role(s) {', '.join(cli.roles)}"
+            + (f" matching {', '.join(cli.only)}" if cli.only else "")
+            + " in those files"
+        )
     t = THEME["dark" if cli.dark else "light"]
     if len(runs) > len(t["series"]):
         p.error(
             f"{len(runs)} runs but only {len(t['series'])} categorical hues — they are assigned in fixed "
-            "order and never generated. Plot them in pairs, or split the report."
+            "order and never generated. Narrow with --roles/--only, or split the report.\n  got: "
+            + ", ".join(name for name, _ in runs)
         )
     labels = cli.labels or [label for label, _ in runs]
     if len(labels) != len(runs):
