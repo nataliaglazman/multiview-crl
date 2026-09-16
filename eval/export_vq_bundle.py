@@ -203,7 +203,6 @@ def build(cli):
         views=list(embeddings),
         num_samples=int(len(dataset)),
         causal=adjacency is not None,
-        evaluation_distribution=cli.distribution,
         content_factor_names=list(info["content_names"]),
         style_factor_names=list(info["style_names"]),
         generator=settings,
