@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-clean-content-causal-sp-s-1-cont
+tag: synthetic-clean-content-causal-cross-recon
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -28,14 +28,15 @@ contrastive_proj_dim: 0
 # # --- leak (b): make style non-degenerate so recon stops using content ---
 scale_style_hsic_loss: 0
 scale_style_contrastive_loss: 0.0
-style_spatial_size: 1
-quantize_style: false
+# style_spatial_size: 1
+# quantize_style: false
 # contrastive-proj-mode: head 
 # contrastive_proj_dim: 12 
 # contrastive_proj_hidden: 256
 
 # separate_encoders: false
-
+scale_cross_recon_loss: 1
+cross_recon_start_step: 0
 
 content_size: 12              # match the baseline; fixes the 44-vs-48 confound
 # bt_sim_whiten: true

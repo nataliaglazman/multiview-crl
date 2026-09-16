@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_moco_patches.yaml
-# Generated at: 2026-09-16T09:26:06Z
-# Git SHA: bccd495
+# Generated at: 2026-09-16T10:47:07Z
+# Git SHA: 01afc0f
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-moco-patches
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -66,6 +66,7 @@ fi
     --contrastive-level-weights 3.0 0.5 0.5 \
     --contrastive-loss-type infonce \
     --crop-margin 12 \
+    --cross-recon-start-step 0 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name ADNI_stripped_masks \
@@ -89,6 +90,7 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 1.0 \
+    --scale-cross-recon-loss 0.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-hsic-loss 0.0 \

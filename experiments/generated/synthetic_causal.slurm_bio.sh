@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-16T09:26:06Z
-# Git SHA: bccd495
+# Generated at: 2026-09-16T10:47:07Z
+# Git SHA: 01afc0f
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-causal-sp-s-1-cont
+#SBATCH --job-name=synthetic-clean-content-causal-cross-recon
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-causal-sp-s-1-cont-%j.err
+#SBATCH --error=synthetic-clean-content-causal-cross-recon-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -73,6 +73,7 @@ fi
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --contrastive-proj-dim 0 \
+    --cross-recon-start-step 0 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -95,11 +96,13 @@ fi
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
     --patch-grid 8 8 8 \
+    --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 100 \
+    --scale-cross-recon-loss 1 \
     --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-hsic-loss 0 \
@@ -109,7 +112,6 @@ fi
     --separation-floor-diagnosis-info 0.1 \
     --single-count-commitment \
     --style-injection-mode input \
-    --style-spatial-size 1 \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -121,7 +123,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-causal-sp-s-1-cont \
+    --model-id synthetic-clean-content-causal-cross-recon \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

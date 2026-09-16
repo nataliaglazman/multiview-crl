@@ -1,11 +1,11 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthetic_causal_patch_vicreg.yaml
+# Auto-generated from: experiments/ablation_cross_recon.yaml
 # Generated at: 2026-09-16T10:47:07Z
 # Git SHA: 01afc0f
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-patch-vicreg
+#SBATCH --job-name=ablation-cross-recon
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-patch-vicreg-%j.err
+#SBATCH --error=ablation-cross-recon-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -56,72 +56,55 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 64 \
+    --batch-size 4 \
+    --cache-dataset \
+    --cache-dir /scratch/users/k24058220/cache/multiview \
     --channels-last \
-    --checkpoint-steps 1000 \
+    --checkpoint-steps 500 \
     --content-dim 128 \
-    --content-ratios 0.95 \
-    --content-size 44 \
     --content-style-levels 0 \
-    --contrastive-loss-type vicreg \
-    --cross-recon-start-step 0 \
+    --contrastive-loss-type infonce \
+    --cross-recon-start-step 5000 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
-    --dataset-name synthetic \
-    --dci-every 2000 \
+    --dataset-name ADNI_stripped_masks \
     --deterministic \
-    --eval-dci \
+    --gradient-checkpointing \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
+    --labels-path /users/k24058220/multiview-crl/labels_cleaned_3class.csv \
     --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
+    --masks-dir /scratch/users/k24058220/ADNI_stripped_masks \
     --moco-queue-size 0 \
-    --no-final-recon-norm \
     --pass-full-to-next-level \
-    --patch-contrastive \
-    --patch-foreground-mask \
-    --patch-foreground-thresh 0.05 \
-    --patch-grid 4 4 4 \
-    --quantize-style \
     --recon-loss-start-step 0 \
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 10 \
-    --scale-cross-recon-loss 0.0 \
-    --scale-recon-loss 1 \
+    --scale-contrastive-loss 1.0 \
+    --scale-cross-recon-loss 1.0 \
+    --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-hsic-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-content-codebooks \
     --separate-encoders \
-    --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
+    --spatial-size 150 180 150 \
     --style-injection-mode input \
-    --synthetic-causal \
-    --synthetic-causal-edge-prob 0.5 \
-    --synthetic-causal-graph random \
-    --synthetic-mode pseudo_mri \
-    --synthetic-normalize fixed_reference \
-    --synthetic-num-test 400 \
-    --synthetic-num-train 2000 \
-    --synthetic-num-val 1500 \
-    --synthetic-res 64 \
-    --model-id synthetic-causal-patch-vicreg \
-    --tau 0.07 \
+    --style-spatial-size 4 \
+    --model-id ablation-cross-recon \
+    --tau 0.1 \
     --total-dim 512 \
-    --train-steps 300000 \
+    --train-steps 20000 \
     --use-amp \
     --use-wandb \
-    --vicreg-cov-coeff 1.0 \
-    --vicreg-sim-coeff 25.0 \
-    --vicreg-std-coeff 25.0 \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 32 \
+    --vqvae-hidden-channels 32 \
     --vqvae-nb-entries 256 \
-    --vqvae-nb-levels 1 \
-    --vqvae-scaling-rates 4 \
+    --vqvae-nb-levels 3 \
+    --vqvae-scaling-rates 2 2 2 \
     --workers 8
