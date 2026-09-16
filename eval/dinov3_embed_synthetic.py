@@ -657,7 +657,6 @@ def main(argv=None):
         embedding_dim={f"view{view}": int(features.shape[1]) for view, features in embeddings.items()},
         num_samples=int(len(dataset)),
         causal=bool(getattr(inner, "scm", None)),
-        evaluation_distribution=cli.causal,
         content_factor_names=[FACTOR_NAMES[d] if d < len(FACTOR_NAMES) else f"d{d}" for d in range(n_content)],
         style_factor_names=[STYLE_FACTOR_NAMES[d] if d < len(STYLE_FACTOR_NAMES) else f"s{d}" for d in range(n_style)],
         generator=settings,

@@ -103,7 +103,11 @@ def load_bundle(path, view="1", representation="all"):
         # It cannot be recomputed from the dict below: that one renames the style arrays
         # and keeps only the scored view's, so the factor set it describes is incomplete.
         identity=read_identity(meta, {k: data[k] for k in FACTOR_KEYS if k in data}, len(z_content)),
-        X=_views("emb_view"),
+        # prefix, not the literal: --representation content/style selects the partitioned
+        # arrays the fine-tuning run stored. Passing "emb_view" here validated the flag,
+        # recorded it in the report, and then scored the WHOLE embedding, so every
+        # "content block" number this path produced was a whole-embedding number.
+        X=_views(prefix),
         raw=_views("raw_view") if any(f"raw_view{v}" in data for v in ("1", "2")) else None,
         z_content=z_content,
         z_style=style,

@@ -1,6 +1,7 @@
 """The shared bundle path: row identity, VQ block export, and one-protocol comparison."""
 
 import argparse
+import ast
 import csv
 import json
 import tempfile
@@ -159,6 +160,55 @@ class RowIdentityTests(unittest.TestCase):
             np.savez_compressed(path, **data)
             bundle = scorer.load_bundle(path)
             self.assertEqual(compare.check_alignment({"x": bundle, "y": bundle}, strict=True)[1], [])
+
+
+class MetaContractTests(unittest.TestCase):
+    """The writers' ``meta`` literals must not restate what identity_record supplies.
+
+    Both exporters build meta as ``dict(..., **identity_record(...))``. Setting a key
+    explicitly that identity_record also returns is a TypeError at the dict() call -- and
+    it fires only after the encoder has run and every sample is embedded, so on a real
+    extraction it costs the whole forward pass before it reports. Checked statically
+    because reaching that line for real needs weights and a GPU.
+    """
+
+    WRITERS = ("eval/dinov3_embed_synthetic.py", "eval/export_vq_bundle.py")
+
+    def meta_call(self, path):
+        tree = ast.parse((Path(__file__).resolve().parents[1] / path).read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "meta"
+                and isinstance(node.value, ast.Call)
+            ):
+                return node.value
+        self.fail(f"{path} has no `meta = <call>(...)` to check")
+
+    def test_no_writer_restates_an_identity_key(self):
+        for path in self.WRITERS:
+            with self.subTest(writer=path):
+                call = self.meta_call(path)
+                explicit = {kw.arg for kw in call.keywords if kw.arg}
+                self.assertEqual(sorted(explicit & set(identity.IDENTITY_KEYS)), [])
+
+    def test_every_writer_actually_splats_the_identity_record(self):
+        # The other half of the contract: a writer that stopped calling identity_record
+        # would pass the test above trivially and ship bundles with no row identity.
+        for path in self.WRITERS:
+            with self.subTest(writer=path):
+                call = self.meta_call(path)
+                starred = [kw for kw in call.keywords if kw.arg is None]
+                self.assertTrue(starred, "meta must splat identity_record(...)")
+                self.assertTrue(
+                    any(
+                        isinstance(kw.value, ast.Call) and getattr(kw.value.func, "id", None) == "identity_record"
+                        for kw in starred
+                    ),
+                    "the splatted call must be identity_record",
+                )
 
 
 class EvaluationDistributionTests(unittest.TestCase):

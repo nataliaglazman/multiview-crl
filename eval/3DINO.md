@@ -160,10 +160,60 @@ for OBJ in infonce barlow; do
 done
 ```
 
+`scripts/compare_dino_objectives.sh` then takes those runs through extraction, scoring and
+figures in one go. It reads each arm's recorded backbone and dispatches accordingly --
+`3dino` arms go through `run_3dino_identifiability`, `dinov3` arms through
+`dinov3_embed_synthetic` twice (trained, then `--random-init` for the floor) -- and refuses
+to put arms with different backbones in one table, since a 2D-slice arm beside a
+full-volume one is a different encoder reading different inputs, not an objective ablation. It checks each run's recorded objective against the arm its directory
+name claims before spending any GPU time -- two arms that both trained InfoNCE under
+different names would otherwise produce a clean-looking table comparing a model with
+itself. It emits two comparisons: the **content block**, which is the objective ablation
+and excludes the pretrained baseline (that has no partition), and the **full embedding**,
+where the baseline can sit beside the fine-tuned arms.
+
 Then extract a bundle from each and compare them as two models. Every arm writes its own
 `preprocessing.json`; they will agree when the extraction flags did, and the extractor
 reuses the saved one either way, so check that the two match before reading a difference as
 the objective.
+
+### Is it the pairing, or just training on your data?
+
+`--objective` varies the loss; `--pairing` varies what the positive pair IS, which is the
+axis that answers "does the cross-modal pair earn its keep".
+
+| `--pairing` | positive pair | the arm answers |
+| --- | --- | --- |
+| `cross_modal` (default) | a subject's T1 and FLAIR | the real acquisition pair |
+| `within_modality` | one modality, augmented twice | training on your data with no cross-modal signal |
+
+`within_modality` never reads the second modality. The optimizer, steps, loss and data
+budget are unchanged, so the difference between the two arms is the pairing itself.
+
+```bash
+python -m training.finetune_dino --backbone 3dino --three-dino-repo ../3DINO \
+  --three-dino-weights /path/to/pretrained.pth --run-dir results/synthetic/YOUR_RUN \
+  --objective infonce --pairing within_modality \
+  --output-dir results/dino_within --epochs 20
+```
+
+**The augmentation is intensity-only, deliberately.** Rotation, scale or shear would move
+`brain_size`, `lr_asymmetry` and the lesion coordinates — the factors the evaluation then
+probes for — so a spatially augmented arm would be trained to discard its own measurement.
+The recipe is `finetune_dino.AUGMENTATION`, scaled by `--aug-strength`.
+
+**Read the result with this caveat.** The generator renders a modality as
+`lut = base * gain + bias` plus noise, so gain/bias/noise *are* its style model. They are
+kept mild in the recipe and the work is carried by gamma and blur, which sit outside that
+family — but the arm is still partly re-deriving the cross-modal relationship, which makes
+it conservative. If `cross_modal` still wins, the pairing genuinely carries more. If they
+tie, the honest reading is "on this generator an intensity augmentation is as good as the
+real pair", which is a statement about the generator as much as about the method.
+
+Each run records the loss AND the pairing (`content_symmetric_within_modality_infonce`),
+and `scripts/compare_dino_objectives.sh` refuses to build a table from two arms that
+recorded the same objective — two names for one experiment would otherwise compare a model
+with itself.
 
 ## Comparing against the VQ-VAE
 
