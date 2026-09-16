@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_moco_patches.yaml
-# Generated at: 2026-09-15T21:45:06Z
-# Git SHA: dcd3a34
+# Generated at: 2026-09-16T08:51:40Z
+# Git SHA: 7f68f2a
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-moco-patches
 #SBATCH --output=/scratch/users/%u/%j.out
