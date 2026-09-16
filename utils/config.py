@@ -369,6 +369,35 @@ def parse_args() -> argparse.ArgumentParser:
         help="Scale factor for the reconstruction loss",
     )
     parser.add_argument(
+        "--scale-cross-recon-loss",
+        type=float,
+        default=0.0,
+        help="Scale factor for the CROSS-MODAL reconstruction loss: decode each view's content "
+        "with the OTHER view's style and score the result (masked L1) against the other view's "
+        "image. 0 (default) disables it and is bit-identical to a run without the flag. "
+        "Plain reconstruction lets content keep its own modality for free — the decoder only "
+        "ever sees a matched content/style pair, so nothing penalises a T1 content code that "
+        "says 'T1'. Swapping style makes that mismatch cost the full between-modality contrast "
+        "difference, and at the same time forces style to CARRY modality, since it is then the "
+        "only input distinguishing the two targets. Costs one extra forward through decoder 0 "
+        "per step (the encoder and the content codes are shared with the normal recon pass). "
+        "Requires --inject-style-to-decoder, two views, and level 0 in --content-style-levels. "
+        "Caveat: on its own this does not stop content from encoding BOTH modalities' "
+        "appearance and using style as a selector — keep style low-capacity "
+        "(--style-spatial-size, or a small --style-nb-entries under --quantize-style) to close "
+        "that door. Note --detach-style-injection blocks the gradient into style for this term "
+        "too, leaving only the pressure on content.",
+    )
+    parser.add_argument(
+        "--cross-recon-start-step",
+        type=int,
+        default=0,
+        help="Training step at which to start applying the cross-modal reconstruction loss. "
+        "Worth setting above --recon-loss-start-step: before the decoder reconstructs a "
+        "MATCHED pair, the swapped pair carries no usable signal, and an early cross term "
+        "mostly teaches the decoder to ignore style. Skipped on resume, like the recon warmup.",
+    )
+    parser.add_argument(
         "--contrastive-only",
         action="store_true",
         help="Encoder-only ablation: skip the entire quantization + decoding path "
@@ -1561,6 +1590,52 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             "Consider adding --inject-style-to-decoder to give style a reconstruction "
             "gradient path through the decoder."
         )
+
+    # --scale-cross-recon-loss preconditions. Checked here rather than at the first
+    # forward: every one of these is a config error that would otherwise surface as a
+    # crash (or, worse, a silently dead term) minutes into a cluster job.
+    if float(getattr(args, "scale_cross_recon_loss", 0.0)) > 0:
+        if not getattr(args, "inject_style_to_decoder", False):
+            raise ValueError(
+                "--scale-cross-recon-loss requires --inject-style-to-decoder: with no style "
+                "tensor reaching the decoder there is nothing to swap between the views."
+            )
+        if 0 not in _cs_levels:
+            raise ValueError(
+                "--scale-cross-recon-loss requires level 0 in --content-style-levels "
+                f"(got {_cs_levels}). The final decoder is the one that emits the image, and "
+                "it is only style-injected at level 0; style at coarser levels reaches the "
+                "image through codebook conditioning, which this loss deliberately holds fixed."
+            )
+        if not _has_cs:
+            raise ValueError(
+                "--scale-cross-recon-loss requires a content/style split "
+                f"(--content-dim {getattr(args, 'content_dim', 0)} < --total-dim "
+                f"{getattr(args, 'total_dim', 0)}); with no style channels there is no swap."
+            )
+        if getattr(args, "contrastive_only", False):
+            raise ValueError(
+                "--scale-cross-recon-loss needs the decoder, so it cannot be combined with --contrastive-only."
+            )
+        if getattr(args, "detach_style_injection", False):
+            logger.warning(
+                "--scale-cross-recon-loss with --detach-style-injection: the cross term can "
+                "still push content toward modality-invariance, but its gradient into the "
+                "style channels is blocked, so style is not being pushed to carry modality."
+            )
+        if float(getattr(args, "skip_recon_ratio", 0.0)) > 0:
+            logger.info(
+                "--scale-cross-recon-loss rides on the decoder pass, so --skip-recon-ratio "
+                f"{args.skip_recon_ratio} skips it on the same steps."
+            )
+        _cross_start = getattr(args, "cross_recon_start_step", 0)
+        if _cross_start < getattr(args, "recon_loss_start_step", 0):
+            logger.warning(
+                f"--cross-recon-start-step {_cross_start} is earlier than "
+                f"--recon-loss-start-step {args.recon_loss_start_step}: the cross term will be "
+                "active while the decoder is still untrained, where the swapped pair carries "
+                "no usable signal."
+            )
 
     # --patch-grid-per-level: flat list → list of (D, H, W) tuples, one per level.
     _pgpl = getattr(args, "patch_grid_per_level", None)
