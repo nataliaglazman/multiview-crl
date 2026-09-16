@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-16T10:47:07Z
-# Git SHA: 01afc0f
+# Generated at: 2026-09-16T11:10:32Z
+# Git SHA: 658d734
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-causal-cross-recon
+#SBATCH --job-name=synthetic-clean-content-causal-film
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-causal-cross-recon-%j.err
+#SBATCH --error=synthetic-clean-content-causal-film-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -102,7 +102,7 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 100 \
-    --scale-cross-recon-loss 1 \
+    --scale-cross-recon-loss 0.0 \
     --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-hsic-loss 0 \
@@ -111,7 +111,7 @@ fi
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
     --single-count-commitment \
-    --style-injection-mode input \
+    --style-injection-mode film \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
@@ -123,7 +123,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-causal-cross-recon \
+    --model-id synthetic-clean-content-causal-film \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
