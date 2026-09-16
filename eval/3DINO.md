@@ -177,6 +177,44 @@ Then extract a bundle from each and compare them as two models. Every arm writes
 reuses the saved one either way, so check that the two match before reading a difference as
 the objective.
 
+### Is it the pairing, or just training on your data?
+
+`--objective` varies the loss; `--pairing` varies what the positive pair IS, which is the
+axis that answers "does the cross-modal pair earn its keep".
+
+| `--pairing` | positive pair | the arm answers |
+| --- | --- | --- |
+| `cross_modal` (default) | a subject's T1 and FLAIR | the real acquisition pair |
+| `within_modality` | one modality, augmented twice | training on your data with no cross-modal signal |
+
+`within_modality` never reads the second modality. The optimizer, steps, loss and data
+budget are unchanged, so the difference between the two arms is the pairing itself.
+
+```bash
+python -m training.finetune_dino --backbone 3dino --three-dino-repo ../3DINO \
+  --three-dino-weights /path/to/pretrained.pth --run-dir results/synthetic/YOUR_RUN \
+  --objective infonce --pairing within_modality \
+  --output-dir results/dino_within --epochs 20
+```
+
+**The augmentation is intensity-only, deliberately.** Rotation, scale or shear would move
+`brain_size`, `lr_asymmetry` and the lesion coordinates — the factors the evaluation then
+probes for — so a spatially augmented arm would be trained to discard its own measurement.
+The recipe is `finetune_dino.AUGMENTATION`, scaled by `--aug-strength`.
+
+**Read the result with this caveat.** The generator renders a modality as
+`lut = base * gain + bias` plus noise, so gain/bias/noise *are* its style model. They are
+kept mild in the recipe and the work is carried by gamma and blur, which sit outside that
+family — but the arm is still partly re-deriving the cross-modal relationship, which makes
+it conservative. If `cross_modal` still wins, the pairing genuinely carries more. If they
+tie, the honest reading is "on this generator an intensity augmentation is as good as the
+real pair", which is a statement about the generator as much as about the method.
+
+Each run records the loss AND the pairing (`content_symmetric_within_modality_infonce`),
+and `scripts/compare_dino_objectives.sh` refuses to build a table from two arms that
+recorded the same objective — two names for one experiment would otherwise compare a model
+with itself.
+
 ## Comparing against the VQ-VAE
 
 Do not read a DINO report and a VQ-VAE report side by side and difference the columns:

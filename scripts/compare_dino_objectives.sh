@@ -49,20 +49,25 @@ fi
 # names would produce a clean-looking table comparing a model with itself.
 say "Checking each fine-tune run"
 BACKBONES=$(mktemp)
-trap 'rm -f "$BACKBONES"' EXIT
+RECORDED=$(mktemp)
+trap 'rm -f "$BACKBONES" "$RECORDED"' EXIT
 for ARM in $ARMS; do
   DIR="${ARM_DIR}_${ARM}"
   for NEED in encoder preprocessing.json settings.json training_config.json; do
     [ -e "$DIR/$NEED" ] || { echo "ERROR: $DIR/$NEED is missing -- did that arm finish?" >&2; exit 1; }
   done
-  python - "$DIR" "$ARM" "$BACKBONES" <<'PY'
+  python - "$DIR" "$ARM" "$BACKBONES" "$RECORDED" <<'PY'
 import json, sys
 from training.finetune_dino import OBJECTIVES
 run, arm = sys.argv[1], sys.argv[2]
 recorded = json.load(open(f"{run}/training_config.json")).get("objective")
-expected = OBJECTIVES[arm]
-if recorded != expected:
-    raise SystemExit(f"ERROR: {run} recorded objective={recorded!r}, expected {expected!r} for arm {arm!r}")
+# Only check the name against the arm when the arm IS a bare loss name. An arm can also be
+# a pairing variant ("within" running infonce on augmented single-modality views), whose
+# recorded name is legitimately not OBJECTIVES[arm]; the invariant that actually protects
+# the comparison is checked below -- no two arms may record the SAME objective.
+if arm in OBJECTIVES and recorded != OBJECTIVES[arm]:
+    raise SystemExit(f"ERROR: {run} recorded objective={recorded!r}, expected {OBJECTIVES[arm]!r} for arm {arm!r}")
+open(sys.argv[4], "a").write(f"{arm}\t{recorded}\n")
 # The backbone decides how this arm is extracted, and it is only knowable from the
 # recorded preprocessing: --three-dino-repo/--three-dino-weights without --backbone 3dino
 # used to run the 2D slice encoder and never open the local checkpoint, and such a run
@@ -75,6 +80,14 @@ PY
 done
 # Every arm must share a backbone. A 2D-slice arm beside a full-volume one is not an
 # objective ablation -- it is a different encoder reading different inputs.
+# The invariant: two arms that recorded the same objective are the same experiment under
+# two names, and the table would compare a model with itself while looking perfectly clean.
+if [ "$(cut -f2 "$RECORDED" | sort -u | wc -l)" -ne "$(wc -l < "$RECORDED")" ]; then
+  echo "ERROR: two arms recorded the same objective -- they are the same experiment:" >&2
+  sed 's/^/       /' "$RECORDED" >&2
+  exit 1
+fi
+
 BACKEND=$(sort -u "$BACKBONES")
 if [ "$(printf '%s' "$BACKEND" | wc -l)" -gt 0 ]; then
   echo "ERROR: the arms were trained with different backbones:" >&2

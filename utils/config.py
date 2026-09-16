@@ -1893,6 +1893,25 @@ def parse_dino_finetune_args(argv=None):
     )
     parser.add_argument("--temperature", type=float, default=0.1, help="InfoNCE temperature; unused by the others")
     parser.add_argument(
+        "--pairing",
+        default="cross_modal",
+        choices=["cross_modal", "within_modality"],
+        help="What the positive pair IS. 'cross_modal' (default) pairs a subject's two "
+        "modalities -- the real acquisition pair. 'within_modality' augments ONE modality "
+        "twice and never looks at the second, so running it against cross_modal isolates the "
+        "pairing rather than the loss: same objective, optimizer, steps and data budget.",
+    )
+    parser.add_argument(
+        "--aug-view", type=int, default=1, choices=[1, 2], help="Modality --pairing within_modality augments"
+    )
+    parser.add_argument(
+        "--aug-strength",
+        type=float,
+        default=1.0,
+        help="Multiplier on the within-modality augmentation recipe (finetune_dino.AUGMENTATION); "
+        "0 makes both views identical, which trivially collapses the objective.",
+    )
+    parser.add_argument(
         "--style-fraction",
         type=float,
         default=0.25,
@@ -1943,6 +1962,10 @@ def parse_dino_finetune_args(argv=None):
         parser.error("Require nonnegative workers/projection size and a positive patch size")
     if not 0 <= cli.window_pct[0] < cli.window_pct[1] <= 100:
         parser.error("--window-pct must be increasing percentiles in [0, 100]")
+    if not math.isfinite(cli.aug_strength) or cli.aug_strength < 0:
+        parser.error("--aug-strength must be finite and nonnegative")
+    if cli.pairing == "within_modality" and cli.aug_strength == 0:
+        parser.error("--pairing within_modality with --aug-strength 0 pairs a volume with itself")
     if (cli.image_mean is None) != (cli.image_std is None):
         parser.error("--image-mean and --image-std must be given together")
     if cli.image_std and any(not math.isfinite(v) or v <= 0 for v in cli.image_std):

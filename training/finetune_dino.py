@@ -186,6 +186,30 @@ OBJECTIVES = {
 }
 
 
+#: The same three losses under --pairing within_modality. Spelled out rather than derived
+#: from OBJECTIVES by string surgery: "cross_view" is baked into the InfoNCE name, and
+#: patching a prefix onto it yields "within_modality_...cross_view...", which contradicts
+#: itself. The cross-modal names are left exactly as they were, so runs trained before this
+#: existed still report the string they recorded.
+WITHIN_MODALITY_OBJECTIVES = {
+    "infonce": "content_symmetric_within_modality_infonce",
+    "barlow": "content_within_modality_barlow_twins",
+    "vicreg": "content_within_modality_vicreg",
+}
+
+
+def recorded_objective(cli):
+    """The string written to training_config.json: the loss AND what it was paired on.
+
+    Both halves matter. Two runs can share a loss and differ in the pairing, or share the
+    pairing and differ in the loss, and a reader comparing them needs the name to separate
+    those -- "content_barlow_twins" alone would not say whether the two views were a
+    subject's two modalities or one modality augmented twice.
+    """
+    table = OBJECTIVES if cli.pairing == "cross_modal" else WITHIN_MODALITY_OBJECTIVES
+    return table[cli.objective]
+
+
 def compute_objective(view1, view2, cli):
     """The selected objective's ``(loss, metrics)``, on whatever block it is handed."""
     if cli.objective == "infonce":
@@ -219,6 +243,90 @@ def partition_diagnostics(parts):
                 ).item()
                 metrics[f"{name}_paired_cosine"] = F.cosine_similarity(first, second, dim=-1).mean().item()
     return metrics
+
+
+#: Per-sample intensity augmentation for the within-modality arm, scaled by --aug-strength.
+#:
+#: NO spatial transform. Rotation, scale or shear would move brain_size, lr_asymmetry and
+#: the lesion coordinates -- the factors the evaluation then probes for -- so a spatially
+#: augmented arm would be trained to discard its own measurement.
+#:
+#: ``gain``/``bias``/``noise`` deliberately stay mild: the generator renders a modality as
+#: ``lut = base * gain + bias`` plus noise, so those three ARE its style model, and an arm
+#: driven by them would re-derive the cross-modal relationship rather than stand as an
+#: alternative to it. ``gamma`` and ``blur`` sit outside that family and are what make this
+#: a different objective from the paired one.
+AUGMENTATION = dict(gain=0.15, bias=0.10, gamma=0.30, noise=0.05, blur=1.0)
+
+
+def _blur3d(volumes, sigma):
+    """Separable 3-D Gaussian blur, applied one axis at a time."""
+    import torch
+    import torch.nn.functional as F
+
+    if sigma <= 0.05:
+        return volumes
+    radius = max(1, int(round(3 * sigma)))
+    grid = torch.arange(-radius, radius + 1, device=volumes.device, dtype=volumes.dtype)
+    kernel = torch.exp(-grid.pow(2) / (2 * sigma * sigma))
+    kernel = kernel / kernel.sum()
+    channels = volumes.shape[1]
+    for axis in range(3):
+        shape = [1, 1, 1, 1, 1]
+        shape[2 + axis] = kernel.numel()
+        weight = kernel.view(shape).expand(channels, 1, *shape[2:]).contiguous()
+        pad = [0, 0, 0, 0, 0, 0]
+        pad[2 * (2 - axis)] = pad[2 * (2 - axis) + 1] = radius
+        volumes = F.conv3d(F.pad(volumes, pad, mode="replicate"), weight, groups=channels)
+    return volumes
+
+
+def augment_volumes(volumes, strength=1.0):
+    """One draw of the within-modality augmentation. Two draws make a positive pair.
+
+    Every parameter is sampled per SAMPLE, not per batch, so two subjects in one batch are
+    not perturbed identically -- otherwise the shared perturbation is itself a signal the
+    encoder can align on, and the batch's negatives become separable for the wrong reason.
+    """
+    import torch
+
+    if strength <= 0:
+        return volumes
+    amount = {key: value * strength for key, value in AUGMENTATION.items()}
+    x = volumes.float()
+    batch = x.shape[0]
+    per_sample = (batch,) + (1,) * (x.ndim - 1)
+
+    flat = x.reshape(batch, -1)
+    low = flat.min(dim=1).values.view(per_sample)
+    span = (flat.max(dim=1).values.view(per_sample) - low).clamp_min(1e-6)
+
+    def uniform(lo, hi):
+        return torch.empty(batch, device=x.device, dtype=x.dtype).uniform_(lo, hi).view(per_sample)
+
+    # Contrast first, on a per-sample [0, 1] rescale so the exponent is well defined.
+    unit = ((x - low) / span).clamp(0, 1)
+    x = unit.pow(uniform(1 - amount["gamma"], 1 + amount["gamma"])) * span + low
+    x = _blur3d(x, float(torch.empty(1).uniform_(0, amount["blur"]).item()))
+    x = x * uniform(1 - amount["gain"], 1 + amount["gain"]) + uniform(-amount["bias"], amount["bias"]) * span
+    if amount["noise"] > 0:
+        x = x + torch.randn_like(x) * amount["noise"] * span
+    return x
+
+
+def paired_views(batch, cli):
+    """The two volumes whose CONTENT the objective is asked to align.
+
+    ``cross_modal`` is the real acquisition pair: same subject, T1 and FLAIR, differing by
+    the generator's style draw. ``within_modality`` never looks at the second modality --
+    it augments ONE modality twice -- so the difference between the two arms is the
+    pairing itself rather than the loss, the optimizer or the data budget.
+    """
+    views = batch["image"]
+    if cli.pairing == "cross_modal":
+        return views
+    source = views[cli.aug_view - 1]
+    return [augment_volumes(source, cli.aug_strength), augment_volumes(source, cli.aug_strength)]
 
 
 def encode_volumes(volumes, encoder, config, cli, device, window, mean, std):
@@ -271,7 +379,7 @@ def train_epoch(loader, encoder, projector, optimizer, scaler, config, cli, devi
     amp_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(cli.dtype)
     for batch in loader:
         optimizer.zero_grad(set_to_none=True)
-        views = batch["image"]
+        views = paired_views(batch, cli)
         context = torch.autocast(device_type=device.type, dtype=amp_dtype) if amp_dtype else nullcontext()
         with context:
             parts = [
@@ -403,7 +511,7 @@ def main(argv=None):
         git_sha=embed.git_sha(),
         split="train",
         feature_dim=width,
-        objective=OBJECTIVES[cli.objective],
+        objective=recorded_objective(cli),
         embedding_partition=partition,
         style_objective="none",
         model_provenance=getattr(encoder, "provenance", None),
