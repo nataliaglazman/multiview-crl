@@ -51,7 +51,7 @@ decoder_norm_type: group
 no_final_recon_norm: true
 inject_style_to_decoder: true
 style_injection_mode: input
-separate_style_codebooks: true
+separate_style_codebooks: false
 separate_content_codebooks: false
 vqvae_nb_levels: 1
 vqvae_nb_res_layers: 2

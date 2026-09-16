@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-16T08:51:40Z
-# Git SHA: 7f68f2a
+# Generated at: 2026-09-16T09:26:06Z
+# Git SHA: bccd495
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-clean-content-causal-sp-s-1-cont
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -106,7 +106,6 @@ fi
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
-    --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --single-count-commitment \
     --style-injection-mode input \
