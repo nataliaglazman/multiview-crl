@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-clean-content-causal-film
+tag: synthetic-clean-content-causal-93
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -38,7 +38,7 @@ scale_style_contrastive_loss: 0.0
 # scale_cross_recon_loss: 1
 # cross_recon_start_step: 0
 
-content_size: 12              # match the baseline; fixes the 44-vs-48 confound
+content_size: 9              # match the baseline; fixes the 44-vs-48 confound
 # bt_sim_whiten: true
 # btsim_whiten_eps: 1e-2
 # unchanged from synthetic_causal.yaml so the comparison stays valid
@@ -51,13 +51,13 @@ norm_type: layer
 decoder_norm_type: group
 no_final_recon_norm: true
 inject_style_to_decoder: true
-style_injection_mode: film
-separate_style_codebooks: false
+style_injection_mode: input
+separate_style_codebooks: true
 separate_content_codebooks: false
 vqvae_nb_levels: 1
 vqvae_nb_res_layers: 2
-vqvae_hidden_channels: 16
-vqvae_embed_dim: 16
+vqvae_hidden_channels: 12
+vqvae_embed_dim: 12
 vqvae_scaling_rates: [4]
 deterministic: true
 checkpoint_steps: 1000
