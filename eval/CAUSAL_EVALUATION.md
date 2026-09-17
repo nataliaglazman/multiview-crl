@@ -260,7 +260,11 @@ figure can never disagree with its table:
 python -m eval.plot_causal_recovery --json results/causal_recovery/causal_recovery.json --out figures/
 ```
 
-`edges.png` is the one a scalar cannot give you — a cell per factor pair showing which
+`truth_graph.png` draws the SCM itself: every true edge as an arc over the factors in
+causal order, arrow on the child, shaded by how many of the plotted runs recovered it. The
+spans are the point — they say whether what PC misses is the long-range structure or the
+local structure, which a per-pair matrix cannot show. `edges.png` leads with a ground-truth
+panel and then gives the one a scalar cannot — a cell per factor pair showing which
 edges were recovered, missed and invented, so a single factor carrying the errors is
 visible where `skeleton_shd` averages it away. `alpha_sweep.png` plots F1/precision/recall
 /SHD against alpha with the selected alpha ringed, which is how you catch the confound
