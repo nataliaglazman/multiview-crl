@@ -21,6 +21,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `eval/plot_identifiability.py` — PNG figures from `identifiability_report --out` JSON (one or two models). Never re-scores; each figure ships a `.csv` twin.
 - `eval/latent_causal_discovery.py` — PC on the content CHANNELS directly (`--reduce gap|pc1|std|max`), no supervised readout, so no label builds the graph. Labels only name nodes afterwards via one Hungarian match on `|corr|`, scored against a random-assignment null plus `--floor`/`--ceiling`. Torch-free `--self-test`.
 - `eval/plot_causal_recovery.py` — PNG figures from `run_causal_recovery`'s JSON: recovered/missed/spurious edge map, alpha sweep, per-factor partial-vs-raw R², CPDAG orientation. Never re-runs PC; each figure ships a `.csv` twin.
+- `eval/plot_causal_graph.py` — PNG of the ground-truth content SCM (node-link + adjacency matrix) straight from `build_content_scm`, no run or scoring involved. Each figure ships a `.csv` twin; `--self-test` runs torch-free.
 - `eval/dinov3_embed_synthetic.py` — run the synthetic views through a pretrained DINOv3 (HF `transformers`), slice 3D→2D, save embeddings + GT latents + SCM adjacency to `.npz`. `--random-init` gives the untrained floor.
 - `eval/dinov3_identifiability.py` — score those embeddings: per-factor R²/MCC vs permutation null, floor and voxel baselines, plus PC graph recovery via `run_causal_recovery.evaluate_arrays`. Torch-free; `--self-test`.
 - `eval/view_latents.ipynb`, `eval/dino.ipynb` — analysis notebooks.
