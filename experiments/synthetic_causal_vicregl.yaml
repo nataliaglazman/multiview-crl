@@ -1,0 +1,61 @@
+# Registered VICRegL-inspired experiment, not the original nearest-neighbour method.
+# Starting configuration, not a calibrated replacement for BT's loss scale.
+_base_: synthetic_defaults
+tag: synthetic-causal-vicregl-12-4
+resume_training: false
+select_by_gated_score: false
+use_wandb: false
+train_steps: 5000
+checkpoint_steps: 1000
+batch_size: 64
+
+contrastive_loss_type: vicregl
+patch_contrastive: true
+patch_grid: [8, 8, 8]
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+patch_center_mode: none
+contrastive_proj_dim: 0
+contrastive_proj_mode: head
+use_moco: false
+
+vicregl_local_weight: 1.0
+vicregl_global_weight: 0.25
+vicregl_local_dim: 16
+vicregl_global_dim: 16
+vicregl_hidden: 64
+vicregl_no_projectors: false
+vicreg_sim_coeff: 25.0
+vicreg_std_coeff: 25.0
+vicreg_cov_coeff: 1.0
+# Do not inherit BT's 100x scale: these are different numerical objectives.
+# Inspect logged weighted terms and reconstruction before a long run.
+scale_contrastive_loss: 1.0
+scale_recon_loss: 16
+
+synthetic_normalize: fixed_reference
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_clean_content: true
+synthetic_identifiable_ventricle: true
+synthetic_res: 64
+vqvae_nb_levels: 1
+vqvae_nb_res_layers: 2
+vqvae_hidden_channels: 16
+vqvae_embed_dim: 16
+vqvae_scaling_rates: [4]
+content_size: 12
+content_ratios: [0.75]
+mask_mode: fixed
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
+inject_style_to_decoder: true
+style_injection_mode: input
+separate_style_codebooks: true
+separate_content_codebooks: false
+single_count_commitment: true
+scale_style_hsic_loss: 0
+scale_style_contrastive_loss: 0
+deterministic: true
