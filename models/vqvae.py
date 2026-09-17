@@ -1061,6 +1061,7 @@ class VQVAE(HelperModule):
         patch_grid=None,
         mask=None,
         return_style_features=False,
+        cross_recon=False,
     ):
         """Forward pass through VQ-VAE-2.
 
@@ -1075,6 +1076,13 @@ class VQVAE(HelperModule):
             return_style_features: Opt in to (normal_eight_tuple, style_features).
                 Style features retain gradients after the spatial bottleneck and before
                 quantization/detachment/dropout, including when reconstruction is skipped.
+            cross_recon: Opt in to a second decode of the final (level-0) decoder with the
+                two views' style tensors exchanged, appended to the return as an extra
+                element (see Returns).  Requires return_recon, n_views=2, style injection
+                at level 0, and an even batch.  Output row i of the first half is
+                ``decode(content_v0[i], style_v1[i])`` and should render VIEW 1; the second
+                half is ``decode(content_v1[i], style_v0[i])`` and should render VIEW 0 —
+                i.e. its target is the view-swapped input batch.
             view_idx: When separate_encoders is active and n_views=1, selects which
                       encoder stack to use (0 → self.encoders, 1 → self.encoders_v1).
                       Defaults to 0 if not specified.  Ignored when n_views=2.
@@ -1095,7 +1103,31 @@ class VQVAE(HelperModule):
                                        (None if channel_logits not configured)
             decoder_outputs: Decoder features per level (or empty list)
             id_outputs: Codebook indices per level
+
+        The eight-tuple above is the whole return value unless an opt-in flag is set, in
+        which case the extras follow it in a fixed order:
+        ``(outputs, style_features?, cross_recon?)`` — style features first when
+        ``return_style_features``, then the swapped-style decode when ``cross_recon``.
         """
+        if cross_recon:
+            if not return_recon:
+                raise ValueError("cross_recon=True requires return_recon=True (there is no decoder pass otherwise).")
+            if n_views != 2:
+                raise ValueError(f"cross_recon=True requires n_views=2 (two paired views to swap), got {n_views}.")
+            if not self.inject_style_to_decoder:
+                raise ValueError(
+                    "cross_recon=True requires inject_style_to_decoder=True — with no style tensor "
+                    "reaching the decoder there is nothing to swap."
+                )
+            if 0 not in self.content_style_levels:
+                raise ValueError(
+                    "cross_recon=True requires level 0 in content_style_levels: the final decoder is "
+                    f"the one that emits the image, and it is only style-injected at level 0 (got "
+                    f"content_style_levels={self.content_style_levels})."
+                )
+            if x.shape[0] % 2 != 0:
+                raise ValueError(f"cross_recon=True requires an even batch ([v0; v1] halves), got {x.shape[0]} rows.")
+
         encoder_outputs = []  # Spatial (5D) feature maps, consumed by codebook/decoder loop
         encoder_pools = []  # Pooled (B, C) vectors, returned for contrastive loss
 
@@ -1114,6 +1146,13 @@ class VQVAE(HelperModule):
         id_outputs = []
         diffs = []
         estimated_content_indices = None
+        # Cross-modal reconstruction: the final decoder is run a second time with the two
+        # views' style tensors exchanged.  Only decoder 0 is re-run, because the decoders
+        # at coarser levels reach the image ONLY through the codebook conditioning of the
+        # next-finer level, and the content codes are held at their unswapped values by
+        # design — swapping style must not be allowed to change the content code, or the
+        # loss stops measuring whether content alone is modality-invariant.
+        cross_output = None
         # Per-level differentiable Gumbel masks, returned for contrastive loss.
         # Keys are level indices (int); only populated for levels in content_style_levels.
         soft_content_masks = {}
@@ -1606,12 +1645,22 @@ class VQVAE(HelperModule):
                     _style = style_spatials[l]
                     if self.detach_style_injection:
                         _style = _style.detach()
+                    _cross_style = None
+                    if cross_recon and l == 0:
+                        # Exchange the [v0; v1] halves. Taken BEFORE style dropout: the
+                        # cross target is the OTHER view's image, which content alone
+                        # cannot render, so zeroing the style here would train content to
+                        # carry modality — the opposite of what this loss is for.
+                        _b = _style.shape[0] // 2
+                        _cross_style = torch.cat([_style[_b:], _style[:_b]], dim=0)
                     if self.training and self.style_dropout_prob > 0.0:
                         _keep = (
                             torch.rand(_style.shape[0], 1, 1, 1, 1, device=_style.device) >= self.style_dropout_prob
                         ).to(_style.dtype)
                         _style = _style * _keep
                     decoder_outputs.append(decoder(decoder_in, style=_style))
+                    if _cross_style is not None:
+                        cross_output = decoder(decoder_in, style=_cross_style)
                 else:
                     decoder_outputs.append(decoder(decoder_in))
 
@@ -1624,6 +1673,17 @@ class VQVAE(HelperModule):
             # Resize to match input spatial dims when they differ (see note above).
             if final_output.shape[2:] != _input_spatial:
                 final_output = F.interpolate(final_output, size=_input_spatial, mode="trilinear", align_corners=False)
+            if cross_recon:
+                if cross_output is None:
+                    raise ValueError(
+                        "cross_recon=True but no style tensor reached the final decoder. This model has no "
+                        "content/style split at level 0 (content_size/style_size are zero, or the level-0 "
+                        "mask is inactive), so there is no style to swap."
+                    )
+                if cross_output.shape[2:] != _input_spatial:
+                    cross_output = F.interpolate(
+                        cross_output, size=_input_spatial, mode="trilinear", align_corners=False
+                    )
         else:
             final_output = None
             decoder_outputs = []
@@ -1651,7 +1711,14 @@ class VQVAE(HelperModule):
             soft_content_masks,
             style_id_outputs,
         )
-        return (outputs, hsic_style_features) if return_style_features else outputs
+        if not (return_style_features or cross_recon):
+            return outputs
+        extras = []
+        if return_style_features:
+            extras.append(hsic_style_features)
+        if cross_recon:
+            extras.append(cross_output)
+        return (outputs, *extras)
 
     def decode_codes(
         self,
