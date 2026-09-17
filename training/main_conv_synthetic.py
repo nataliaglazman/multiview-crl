@@ -129,6 +129,35 @@ def parse_args():
     p.add_argument("--synthetic-n-fissure-grid", type=int, default=8)
     p.add_argument("--synthetic-hierarchical-content", action="store_true")
     p.add_argument("--synthetic-causal", action="store_true")
+    # Same names, defaults and choices as utils/config.py's copies, so the two entrypoints
+    # describe the same generator rather than drifting apart.
+    p.add_argument(
+        "--synthetic-causal-graph",
+        type=str,
+        default="chain",
+        choices=["chain", "full", "random"],
+        help="DAG topology for the content SCM. 'chain' is a single path (n-1 edges, one "
+        "parent each) and is the easy case for PC; 'random' gives multi-parent nodes.",
+    )
+    p.add_argument(
+        "--synthetic-causal-edge-prob",
+        type=float,
+        default=0.5,
+        help="Edge probability for random DAG (ignored for chain/full).",
+    )
+    p.add_argument(
+        "--synthetic-causal-noise-scale",
+        type=float,
+        default=0.4,
+        help="Additive noise scale in causal mechanisms.",
+    )
+    p.add_argument(
+        "--synthetic-causal-nonlinearity",
+        type=str,
+        default="leaky_relu",
+        choices=["leaky_relu", "none"],
+        help="Nonlinearity in causal mechanisms.",
+    )
     return p.parse_args()
 
 
@@ -166,6 +195,10 @@ def make_dataset(args, mode, num_samples):
         synthetic_hierarchical_content=args.synthetic_hierarchical_content,
         synthetic_normalize=args.synthetic_normalize,
         synthetic_causal=args.synthetic_causal,
+        synthetic_causal_graph=args.synthetic_causal_graph,
+        synthetic_causal_edge_prob=args.synthetic_causal_edge_prob,
+        synthetic_causal_noise_scale=args.synthetic_causal_noise_scale,
+        synthetic_causal_nonlinearity=args.synthetic_causal_nonlinearity,
         synthetic_clean_content=args.synthetic_clean_content,
     )
 

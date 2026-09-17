@@ -107,6 +107,13 @@ def make_val_dataset(cfg, num_samples):
         synthetic_hierarchical_content=cfg.get("synthetic_hierarchical_content", False),
         synthetic_normalize=cfg.get("synthetic_normalize", "per_sample"),
         synthetic_causal=cfg.get("synthetic_causal", False),
+        # Read back, not defaulted: rebuilding the split with the default chain graph for a
+        # run trained on a random one would score PC against an SCM the model never saw,
+        # and nothing downstream would flag it.
+        synthetic_causal_graph=cfg.get("synthetic_causal_graph", "chain"),
+        synthetic_causal_edge_prob=cfg.get("synthetic_causal_edge_prob", 0.5),
+        synthetic_causal_noise_scale=cfg.get("synthetic_causal_noise_scale", 0.4),
+        synthetic_causal_nonlinearity=cfg.get("synthetic_causal_nonlinearity", "leaky_relu"),
         synthetic_clean_content=cfg.get("synthetic_clean_content", False),
     )
 
