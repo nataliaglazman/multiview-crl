@@ -562,6 +562,11 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
     print("=" * 92)
     print(f"  IDENTIFIABILITY REPORT — {res['name']}")
     print(f"  N={res['n_samples']}  level={res['level']}  poolings={res['poolings']}  probe-dim={res['probe_dim']}")
+    if res.get("projected_content"):
+        print("  content block = CONTRASTIVE PROJECTION HEAD OUTPUT (--project-content), not encoder features.")
+        print("  Post-head scores are expected to sit BELOW the pre-head run; that gap is what the head buys.")
+        print("  Not an identifiability claim about the head: a narrowing head is not invertible, so MCC can")
+        print("  only lose. Compare against the same model scored without the flag at the same --poolings.")
     _cz = res.get("causal")
     if _cz:
         _note = {
@@ -961,6 +966,7 @@ def score_run(
     name=None,
     parent_adjustment="legacy",
     parent_cache=None,
+    project_content=False,
 ):
     """Extract this run's representations under every pooling and score them.
 
@@ -968,27 +974,54 @@ def score_run(
     go through this identical function, not a second script, so the floor and the
     checkpoint share pooling, probe width, null count and factor routing; differencing two
     scripts' numbers is the cross-axis mistake this project has already paid for twice.
+
+    ``project_content=True`` scores the contrastive projection head's output instead of the
+    encoder's content block.  The head, its constraints and the floor's fresh-head rule all
+    live in ``run_dci_compare`` alongside the rest of the metric rules; this is a thin caller.
     """
     from eval.dci import _extract_synthetic_representations
-    from eval.run_dci_compare import _reduce_reprs, _resolve_checkpoint, _score_dci
+    from eval.run_dci_compare import (
+        _reduce_reprs,
+        _resolve_checkpoint,
+        _score_dci,
+        check_projectable_poolings,
+        load_contrastive_proj_heads,
+        project_content_reprs,
+    )
     from eval.run_dci_synthetic import load_model_from_run_dir
 
     if parent_adjustment not in ("legacy", "nonlinear"):
         raise ValueError("parent_adjustment must be legacy or nonlinear")
     if parent_adjustment == "nonlinear" and causal in ("iid", "shuffled"):
         raise ValueError("Nonlinear parent adjustment requires the matched evaluation distribution.")
+    # Resolved only on the checkpoint path: the floor loads nothing, and resolving there would
+    # log a spurious "falling back to vqvae_model.pt" on every untrained draw.
+    resolved_checkpoint = None if random_init else _resolve_checkpoint(run_dir, checkpoint)
     model, _args, device = load_model_from_run_dir(
         run_dir,
-        None if random_init else _resolve_checkpoint(run_dir, checkpoint),
+        resolved_checkpoint,
         device,
         random_init=random_init,
         seed=init_seed,
     )
+    proj_heads = {}
+    if project_content:
+        check_projectable_poolings(poolings)
+        proj_heads = load_contrastive_proj_heads(
+            run_dir, resolved_checkpoint, _args, model, random_init=random_init, init_seed=init_seed
+        )
+        if not proj_heads:
+            raise ValueError(
+                f"--project-content: {run_dir} trained no contrastive projection head "
+                "(--contrastive-proj-dim is 0 or absent in its settings.json). Nothing to project."
+            )
     reprs, gt_content, gt_style, info = {}, None, None, None
     for key, value in poolings:
         level_data, gc, gs1, _gs2 = _extract_synthetic_representations(
             model, dataset, device, batch_size, num_workers, pooling=value
         )
+        if proj_heads:
+            level_data = project_content_reprs(level_data, proj_heads, value)
         reprs[key] = level_data
         if gt_content is None:
             gt_content = gc
@@ -1021,6 +1054,7 @@ def score_run(
         "probe_dim": probe_dim,
         "factor_pooling": factor_pooling,
         "causal": causal,
+        "projected_content": bool(proj_heads),
         "per_factor": per_factor_scores(
             probed, level, gt_content, names, seeds, n_null, rng, probe_kind, n_jobs, factor_pooling
         ),
@@ -1510,6 +1544,19 @@ def main():
         "--with-dci wall time. Results are identical at any setting: permutations are drawn "
         "up-front in factor order and each DCI fit owns its own importance column.",
     )
+    p.add_argument(
+        "--project-content",
+        action="store_true",
+        help="Score the CONTRASTIVE PROJECTION HEAD's output instead of the encoder's content block "
+        "— the post-head view of a '--contrastive-proj-mode head' run, whose InfoNCE shaped the "
+        "head's output while this report otherwise reads the pre-head features (the shared loader "
+        "discards the head weights outright). Run the same checkpoint with and without the flag at "
+        "the same --poolings and read the difference: the SimCLR premise is that post-head scores "
+        "LOWER, and no gap means the head is a no-op. It is not an identifiability claim about the "
+        "head — a head narrower than the content block is not invertible, so MCC can only lose. "
+        "Requires --poolings without 'stats'; refuses 'entropy' and 'bounded' modes. The floor twin "
+        "gets its own freshly initialised head, so `learned` stays a like-for-like subtraction.",
+    )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--device", default=None)
@@ -1588,6 +1635,7 @@ def main():
         causal=cli.causal,
         parent_adjustment=cli.parent_adjustment,
         parent_cache={} if cli.parent_adjustment == "nonlinear" else None,
+        project_content=cli.project_content,
     )
     logger.info("Scoring checkpoint ...")
     # init_seed=0 for the checkpoint too: strict=False leaves any unmatched parameter at
