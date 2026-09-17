@@ -22,18 +22,28 @@ set -euo pipefail
 RUN_DIR=${RUN_DIR:-results/synthetic/synthetic-clean-content-causal-ident-vent-12-4-2}
 DINO_REPO=${DINO_REPO:-../3DINO}
 PRETRAINED=${PRETRAINED:-../3DINO/3dino_vit_weights.pth}
+# An arm is either a bare name, whose run directory is <ARM_DIR>_<name>, or an explicit
+# name=dir pair. The pair form exists because the naming convention only fits arms that
+# were launched together: a run added later (a pairing control, a re-run on another
+# backbone) lives wherever --output-dir put it, and renaming a finished run to satisfy a
+# script is how a comparison ends up pointing at the wrong checkpoint.
+#   ARMS="infonce within=results/dino_within" bash scripts/compare_dino_objectives.sh
 ARMS=${ARMS:-"infonce barlow"}
-ARM_DIR=${ARM_DIR:-results/dino_new}          # <ARM_DIR>_<arm> is each fine-tune run
+ARM_DIR=${ARM_DIR:-results/dino_new}          # <ARM_DIR>_<arm> for arms given as a bare name
 OUT=${OUT:-results/dino_objective_comparison}
 NUM_SAMPLES=${NUM_SAMPLES:-2000}
 DEVICE=${DEVICE:-cuda}
 VOLUME_BATCH=${VOLUME_BATCH:-2}
 GRAPH_REPEATS=${GRAPH_REPEATS:-20}
 ALPHA=${ALPHA:-0.05}
+VIEW=${VIEW:-1}                               # which modality's embedding is scored
 WITH_PRETRAINED=${WITH_PRETRAINED:-1}
 FRESH=${FRESH:-0}
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+
+arm_name () { printf '%s' "${1%%=*}"; }
+arm_dir  () { case "$1" in *=*) printf '%s' "${1#*=}";; *) printf '%s' "${ARM_DIR}_${1}";; esac; }
 
 if [ -e "$OUT" ] && [ "$FRESH" != "1" ]; then
   echo "ERROR: $OUT already exists. Re-run with FRESH=1 to replace it, or set OUT=..." >&2
@@ -51,8 +61,8 @@ say "Checking each fine-tune run"
 BACKBONES=$(mktemp)
 RECORDED=$(mktemp)
 trap 'rm -f "$BACKBONES" "$RECORDED"' EXIT
-for ARM in $ARMS; do
-  DIR="${ARM_DIR}_${ARM}"
+for SPEC in $ARMS; do
+  ARM=$(arm_name "$SPEC"); DIR=$(arm_dir "$SPEC")
   for NEED in encoder preprocessing.json settings.json training_config.json; do
     [ -e "$DIR/$NEED" ] || { echo "ERROR: $DIR/$NEED is missing -- did that arm finish?" >&2; exit 1; }
   done
@@ -74,7 +84,8 @@ open(sys.argv[4], "a").write(f"{arm}\t{recorded}\n")
 # trains and logs indistinguishably.
 pre = json.load(open(f"{run}/preprocessing.json"))
 epochs = sum(1 for _ in open(f"{run}/metrics.jsonl"))
-print(f"  {arm:8s} objective={recorded}  backbone={pre['backbone']}  token_pool={pre.get('token_pool')}  epochs_logged={epochs}")
+print(f"  {arm:8s} {run}")
+print(f"           objective={recorded}  backbone={pre['backbone']}  token_pool={pre.get('token_pool')}  epochs_logged={epochs}")
 open(sys.argv[3], "a").write(pre["backbone"] + "\n")
 PY
 done
@@ -135,9 +146,10 @@ BUNDLES_CONTENT=()
 BUNDLES_ALL=()
 FLOORS_CONTENT=()
 FLOORS_ALL=()
-for ARM in $ARMS; do
-  say "Extracting $ARM (+ its untrained floor)"
-  extract_arm "${ARM_DIR}_${ARM}/encoder" "${ARM_DIR}_${ARM}/preprocessing.json" "$OUT/extract/$ARM"
+for SPEC in $ARMS; do
+  ARM=$(arm_name "$SPEC"); DIR=$(arm_dir "$SPEC")
+  say "Extracting $ARM from $DIR (+ its untrained floor)"
+  extract_arm "$DIR/encoder" "$DIR/preprocessing.json" "$OUT/extract/$ARM"
   BUNDLES_CONTENT+=("$ARM=$OUT/extract/$ARM/embeddings.npz")
   FLOORS_CONTENT+=("$ARM=$OUT/extract/$ARM/random_init.npz")
   BUNDLES_ALL+=("$ARM=$OUT/extract/$ARM/embeddings.npz")
@@ -145,15 +157,15 @@ for ARM in $ARMS; do
 done
 
 if [ "$WITH_PRETRAINED" = "1" ]; then
-  FIRST_ARM=$(echo "$ARMS" | awk '{print $1}')
-  FIRST_PRE="${ARM_DIR}_${FIRST_ARM}/preprocessing.json"
+  FIRST_DIR=$(arm_dir "$(echo "$ARMS" | awk '{print $1}')")
+  FIRST_PRE="$FIRST_DIR/preprocessing.json"
   if [ "$BACKEND" = "3dino" ]; then
     BASE="$PRETRAINED"
   else
     # Whatever this arm was fine-tuned FROM, so the baseline is its starting point rather
     # than some other checkpoint that happens to share an architecture.
     BASE=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['model_id'])" \
-             "${ARM_DIR}_${FIRST_ARM}/training_config.json")
+             "$FIRST_DIR/training_config.json")
   fi
   say "Extracting the pretrained baseline ($BASE) on the SAME preprocessing"
   # Forced onto a fine-tuned arm's preprocessing.json: without this the baseline is
@@ -165,11 +177,13 @@ if [ "$WITH_PRETRAINED" = "1" ]; then
 fi
 
 # --- score -----------------------------------------------------------------------
-compare () {              # $1 = view name, $2 = --view value, then bundles/floors
-  local NAME="$1" VIEW="$2"; shift 2
+compare () {              # $1 = output dir name, $2 = --representation value, then bundles/floors
+  local NAME="$1" BLOCK="$2"; shift 2
   mkdir -p "$OUT/$NAME"
+  # --representation is what makes these two tables different questions. Without it both
+  # scored the whole embedding and content/ was a copy of all/ minus the baseline row.
   python -m eval.compare_bundles "$@" \
-    --view "$VIEW" \
+    --view "$VIEW" --representation "$BLOCK" \
     --equal-width --with-graph --holdout-readout \
     --graph-repeats "$GRAPH_REPEATS" \
     --alphas "$ALPHA" --diagnostic-alpha "$ALPHA" \
@@ -178,10 +192,10 @@ compare () {              # $1 = view name, $2 = --view value, then bundles/floo
 }
 
 say "Scoring the content block (objective ablation)"
-compare content 1 --bundles "${BUNDLES_CONTENT[@]}" --floors "${FLOORS_CONTENT[@]}"
+compare content content --bundles "${BUNDLES_CONTENT[@]}" --floors "${FLOORS_CONTENT[@]}"
 
 say "Scoring the full embedding (with the pretrained baseline)"
-compare all 1 --bundles "${BUNDLES_ALL[@]}" --floors "${FLOORS_ALL[@]}"
+compare all all --bundles "${BUNDLES_ALL[@]}" --floors "${FLOORS_ALL[@]}"
 
 say "Done"
 echo "  tables   $OUT/{content,all}/compare.txt"

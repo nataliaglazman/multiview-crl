@@ -853,3 +853,100 @@ class GraphStabilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepresentationSelectionTests(unittest.TestCase):
+    """--representation must reach load_bundle, or the two tables score the same block."""
+
+    CONTENT, STYLE = 18, 6
+
+    def partitioned(self, path, noise=0.1):
+        """A bundle whose content block carries the signal and whose style block is noise."""
+        z, adjacency, content = planted(noise=noise, width=self.CONTENT)
+        rng = np.random.RandomState(7)
+        style = rng.randn(len(z), self.STYLE)
+        features = np.concatenate([content, style], axis=1)
+        meta = write_bundle(path, features, z, adjacency)
+        # Re-write with a partition: save() derives the content/style arrays from it, so
+        # the split has to exist in meta before the arrays are written, not after.
+        meta["embedding_partition"] = dict(
+            version=1,
+            scheme="fixed_backbone_channels",
+            feature_dim=self.CONTENT + self.STYLE,
+            hidden_size=self.CONTENT + self.STYLE,
+            content_channels=self.CONTENT,
+            style_channels=self.STYLE,
+            content_dim=self.CONTENT,
+            style_dim=self.STYLE,
+            spatial_positions=1,
+            repeats=1,
+        )
+        latents = {
+            "z_content": z.astype(np.float32),
+            "causal_adj": adjacency.astype(np.float32),
+        }
+        embed.save(Path(path), {1: features.astype(np.float32)}, latents, {}, [], meta)
+        return z
+
+    def test_each_block_loads_at_its_own_width(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "b.npz"
+            self.partitioned(path)
+            widths = {
+                block: scorer.load_bundle(path, "1", block)["X"].shape[1] for block in ("all", "content", "style")
+            }
+        self.assertEqual(widths, {"all": self.CONTENT + self.STYLE, "content": self.CONTENT, "style": self.STYLE})
+
+    def test_main_scores_the_block_the_flag_names(self):
+        # The regression: main() called load_bundle(path, cli.view) and left representation
+        # on its default, so --representation content reported the whole embedding's width
+        # and numbers. Feature width is the cheapest thing that separates the two.
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            self.partitioned(a, noise=0.1)
+            self.partitioned(b, noise=3.0)
+            seen = {}
+            for block in ("all", "content", "style"):
+                out = Path(tmp) / f"{block}.json"
+                compare.main(
+                    [
+                        "--bundles",
+                        f"a={a}",
+                        f"b={b}",
+                        "--representation",
+                        block,
+                        "--probe-dim",
+                        "0",
+                        "--seeds",
+                        "0",
+                        "--n-splits",
+                        "3",
+                        "--n-null",
+                        "1",
+                        "--out",
+                        str(out),
+                        "--quiet",
+                    ]
+                )
+                payload = json.loads(out.read_text())
+                seen[block] = payload["results"]["a"]
+            for block, expected in (
+                ("all", self.CONTENT + self.STYLE),
+                ("content", self.CONTENT),
+                ("style", self.STYLE),
+            ):
+                self.assertEqual(seen[block]["num_features"], expected, block)
+                self.assertEqual(seen[block]["representation"], block)
+            # Not just the width: the content block holds the signal, so its factor
+            # recovery must actually differ from the style block's.
+            gaps = {b: [r["gap"] for k, r in seen[b]["content"].items() if k != "_block"] for b in seen}
+            self.assertGreater(min(gaps["content"]), max(gaps["style"]))
+
+    def test_a_bundle_with_no_partition_is_refused_not_silently_widened(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            z, adjacency, features = planted(width=12)
+            write_bundle(a, features, z, adjacency)
+            write_bundle(b, features, z, adjacency)
+            with self.assertRaises(SystemExit):
+                compare.main(["--bundles", f"a={a}", f"b={b}", "--representation", "content", "--quiet"])
