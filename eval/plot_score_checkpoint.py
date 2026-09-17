@@ -30,10 +30,12 @@ Every figure carries a ``.csv`` twin with the same numbers, since a colour-encod
 should never be the only way to read a value.
 
 It also writes ``causal_panels.json``, the graph panels reshaped into the ``{"runs": [...]}``
-form ``plot_causal_recovery`` reads, so the edge map, alpha sweep and per-factor partial-R²
-figures come from that script rather than being drawn twice here:
+form ``plot_causal_recovery`` reads, each tagged with that script's ``role`` (embeddings =
+``trained``, floor = ``floor``, ground-truth = ``ceiling``), so the edge map, alpha sweep and
+per-factor partial-R² figures come from that script rather than being drawn twice here:
 
     python -m eval.plot_causal_recovery --json figures/causal_panels.json --out figures/
+    python -m eval.plot_causal_recovery --json figures/causal_panels.json --roles trained ceiling
 
 Colour
 ------
@@ -303,11 +305,11 @@ def fig_graph(report, t, path):
     return True
 
 
-# plot_causal_recovery assigns run identity from the two validated categorical slots and
-# refuses to generate a third, so the handoff carries at most two panels. Embeddings and
-# floor are the pair worth drawing there: the ground-truth panel's edge map is all-true-
-# positive by construction, and its value is the scalar bound already in graph_recovery.png.
-HANDOFF_PANELS = ("embeddings", "untrained floor")
+# plot_causal_recovery selects rows by ``role`` and holds two categorical hues, so the
+# panels are tagged with the roles it understands rather than filtered down here. Its
+# default (--roles trained) then draws the embeddings alone, and a pair is one flag away:
+# --roles trained floor, or --roles trained ceiling.
+PANEL_ROLES = {"embeddings": "trained", "untrained floor": "floor", "ground-truth factors": "ceiling"}
 
 
 def write_causal_panels(report, path):
@@ -317,7 +319,7 @@ def write_causal_panels(report, path):
     panels come out of ``evaluate_arrays`` with exactly the keys it reads, so they are
     handed over rather than redrawn here.
     """
-    runs = [dict(panel, run_dir=label) for label, panel in graph_panels(report) if label in HANDOFF_PANELS]
+    runs = [dict(panel, run_dir=label, role=PANEL_ROLES[label]) for label, panel in graph_panels(report)]
     if not runs:
         return None
     with open(path, "w") as fh:
@@ -341,7 +343,12 @@ def render(report, out_dir, dark=False):
         cp = write_causal_panels(report, os.path.join(out_dir, "causal_panels.json"))
         if cp:
             written.append(cp)
-            logger.info("edge map / alpha sweep: python -m eval.plot_causal_recovery --json %s --out %s", cp, out_dir)
+            logger.info(
+                "edge map / alpha sweep: python -m eval.plot_causal_recovery --json %s --out %s "
+                "[--roles trained ceiling]",
+                cp,
+                out_dir,
+            )
     else:
         logger.info("no graph panels in the report (run scored without an SCM) — skipping graph figures")
     return written
