@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """The content SCM itself, drawn — the true DAG a synthetic run samples z_content from.
 
-``plot_causal_recovery`` draws what PC *recovered*; this draws what the generator actually
-used, with no run and no scoring involved.  The graph is whatever
-``synthetic_dataset.build_content_scm`` returns for a config's
+``plot_causal_recovery``'s ``truth_graph.png`` also draws the true graph, but reads it out
+of a scored ``causal_recovery.json`` and shades it by what PC recovered — so it needs a run.
+This one needs only the config: no run, no scoring, nothing to disagree with.  The graph is
+whatever ``synthetic_dataset.build_content_scm`` returns for a config's
 ``(synthetic_n_content, synthetic_causal_graph, synthetic_causal_edge_prob, synthetic_seed)``,
 so the figure is reproducible from the YAML alone.
 
