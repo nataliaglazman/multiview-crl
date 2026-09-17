@@ -56,7 +56,9 @@ def parse_args():
     p.add_argument(
         "--holdout-readout", action="store_true", help="Fit the graph readout on 70%% and run PC on the rest"
     )
-    p.add_argument("--out", default=None, help="Write the full report as JSON here")
+    p.add_argument("--out", default=None, help="Report JSON path (default: <run-dir>/score_report.json)")
+    p.add_argument("--plot", action="store_true", help="Also render figures into <run-dir>/figures")
+    p.add_argument("--plot-dir", default=None, help="Render figures here instead (implies --plot)")
     p.add_argument("--self-test", action="store_true")
     return p.parse_args()
 
@@ -310,10 +312,18 @@ def main():
                 report["graph_floor"] = graph_panel(fX, z, adj, args)
                 print_graph(report["graph_floor"], "untrained floor")
 
-    if args.out:
-        with open(args.out, "w") as fp:
-            json.dump(report, fp, indent=2, default=float)
-        print(f"\nwrote {args.out}", flush=True)
+    # Always write the report: the plotting script reads it, and a figure that can
+    # disagree with the numbers it came from is worse than no figure.
+    out = args.out or os.path.join(args.run_dir, "score_report.json")
+    with open(out, "w") as fp:
+        json.dump(report, fp, indent=2, default=float)
+    print(f"\nwrote {out}", flush=True)
+
+    if args.plot or args.plot_dir:
+        from eval.plot_score_checkpoint import render
+
+        for path in render(report, args.plot_dir or os.path.join(args.run_dir, "figures")):
+            print(f"wrote {path}", flush=True)
 
 
 if __name__ == "__main__":
