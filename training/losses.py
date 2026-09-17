@@ -1787,6 +1787,96 @@ class BaurLoss(object):
         return dx, dy, dz
 
 
+def swap_views(t: torch.Tensor) -> torch.Tensor:
+    """Exchange the two halves of a ``[v0; v1]`` batch, so row i pairs with its own subject."""
+    b = t.shape[0] // 2
+    return torch.cat([t[b:], t[:b]], dim=0)
+
+
+@torch.amp.autocast("cuda", enabled=False)
+def cross_reconstruction_loss(
+    cross_recon: torch.Tensor,
+    images: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> Tuple[torch.Tensor, Dict[str, float]]:
+    """Masked L1 between a style-swapped decode and the OTHER view's image.
+
+    ``cross_recon`` comes from ``VQVAE.forward(..., cross_recon=True)``: its first half is
+    ``decode(content_v0, style_v1)`` and its second half ``decode(content_v1, style_v0)``,
+    both for the same subject.  Content is supposed to be the anatomy the two modalities
+    share and style the modality's contrast, so the correct target for row i is the OTHER
+    view of subject i — i.e. ``swap_views(images)``.
+
+    What the term buys, and what it does not:
+
+    * Content cannot keep its own modality.  If ``content_v0`` encoded "this is a T1", the
+      decoder would render a T1 whatever style it is handed, and the T2 target would be
+      missed by the whole between-modality contrast difference.  Plain reconstruction has
+      no such pressure — there, keeping modality in content is free.
+    * Style has to carry modality.  It is the only input that differs between the two
+      halves, so the only way to hit two different targets from one content code is to
+      read it.  This is the converse pressure to ``--style-dropout-prob``, which pushes
+      anatomy INTO content by decoding without style; the two are complementary, not
+      alternatives.
+    * It does not by itself stop content from carrying BOTH modalities' appearance and
+      using style as a selector — the standard degenerate solution for cross-decoding
+      objectives.  Keeping style low-capacity is what closes that door: the spatial
+      bottleneck (``--style-spatial-size``) and, if quantized, a small style codebook.
+
+    The perceptual term is deliberately not applied here.  What this loss has to measure
+    is the global tissue→intensity mapping, which is exactly the pixel term's business;
+    LPIPS is texture-sensitive and would double the per-step cost of the only term that
+    already runs the decoder twice.
+
+    Args:
+        cross_recon: Swapped-style decode, ``(2B, 1, D, H, W)``.
+        images: The input batch in its original ``[v0; v1]`` order, same shape.  Swapped
+            internally — pass what went INTO the model, not a pre-swapped target.
+        mask: Optional brain mask in the same ``[v0; v1]`` order, swapped alongside.
+
+    Returns:
+        ``(loss, diagnostics)`` — a differentiable scalar and a dict of detached floats.
+    """
+    if cross_recon.shape != images.shape:
+        raise ValueError(f"cross_recon {tuple(cross_recon.shape)} and images {tuple(images.shape)} must match.")
+    if images.shape[0] % 2 != 0:
+        raise ValueError(f"Cross reconstruction needs an even [v0; v1] batch, got {images.shape[0]} rows.")
+
+    y = cross_recon.float()
+    # Same guard as BaselineLoss: the decoder has no output activation, so under AMP its
+    # activations can reach inf and its GroupNorm then turns inf - inf into NaN. Left
+    # alone, one bad forward pass poisons every subsequent step via the gradient clip.
+    if not torch.isfinite(y).all():
+        y = torch.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)
+
+    x = swap_views(images).float()
+    m = None if mask is None else swap_views(mask).float()
+    if m is not None:
+        y = y * m
+
+    diff = (x - y).abs()
+    if m is None:
+        loss = diff.mean()
+    else:
+        # Mean over brain voxels only, matching BaselineLoss — a mean over the whole volume
+        # would be dominated by background zeros that both sides already agree on.
+        diff = diff * m
+        loss = diff.sum() / m.sum().clamp_min(1.0)
+
+    # Per-half breakdown. The halves are NOT interchangeable — the first is "T1 anatomy
+    # rendered as T2", the second the reverse — and a run can sit with one of them solved
+    # and the other collapsed while the mean looks merely mediocre.
+    b = images.shape[0] // 2
+    diagnostics = {"CrossRecon/mae": loss.detach().item()}
+    for v, sl in enumerate((slice(0, b), slice(b, None))):
+        mv = None if m is None else m[sl]
+        dv = diff[sl]
+        mae_v = dv.mean() if mv is None else dv.sum() / mv.sum().clamp_min(1.0)
+        # Row i of half 0 was decoded with style_v1, so it targets view 1, and vice versa.
+        diagnostics[f"CrossRecon/mae_to_view{1 - v}"] = mae_v.detach().item()
+    return loss, diagnostics
+
+
 class BaselineLoss(torch.nn.Module):
     def __init__(self):
         super(BaselineLoss, self).__init__()
