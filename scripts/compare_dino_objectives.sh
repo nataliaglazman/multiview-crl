@@ -99,6 +99,17 @@ if [ "$(cut -f2 "$RECORDED" | sort -u | wc -l)" -ne "$(wc -l < "$RECORDED")" ]; 
   exit 1
 fi
 
+# Which arm is which is decided by the RECORDED objective, not by what the arm was named:
+# an arm called "within" that recorded a cross-modal objective would otherwise label the
+# axes backwards. Only a clean one-of-each pair gets the pairing figures.
+CROSS_ARM=$(awk -F'\t' '$2 !~ /within_modality/ {print $1}' "$RECORDED")
+WITHIN_ARM=$(awk -F'\t' '$2 ~ /within_modality/ {print $1}' "$RECORDED")
+if [ "$(printf '%s' "$CROSS_ARM" | grep -c .)" -ne 1 ] || [ "$(printf '%s' "$WITHIN_ARM" | grep -c .)" -ne 1 ]; then
+  CROSS_ARM=""; WITHIN_ARM=""
+else
+  echo "  -> pairing comparison: $CROSS_ARM (cross-modal) vs $WITHIN_ARM (within-modality)"
+fi
+
 BACKEND=$(sort -u "$BACKBONES")
 if [ "$(printf '%s' "$BACKEND" | wc -l)" -gt 0 ]; then
   echo "ERROR: the arms were trained with different backbones:" >&2
@@ -107,6 +118,41 @@ if [ "$(printf '%s' "$BACKEND" | wc -l)" -gt 0 ]; then
   exit 1
 fi
 echo "  -> all arms use backbone=$BACKEND"
+
+# This script and the modules it drives are one program split across files, but they are
+# updated by `git pull` as separate files and a half-applied tree is not detectable from
+# inside either half. Both times it happened, the mismatch surfaced only when a stage was
+# spawned -- after the arms had been embedded, an hour of GPU in -- and argparse reported
+# the missing flag as an "ambiguous option" or an "unrecognized argument" rather than as an
+# out-of-date checkout. Checking up front costs a few --help calls.
+say "Checking the pipeline modules accept what this script passes"
+require_flags () {         # $1 = module, rest = flags it must accept
+  local MOD="$1"; shift
+  local HELP MISSING=""
+  if ! HELP=$(python -m "$MOD" --help 2>&1); then
+    echo "ERROR: python -m $MOD --help failed:" >&2
+    printf '%s\n' "$HELP" | sed 's/^/       /' >&2
+    exit 1
+  fi
+  for FLAG in "$@"; do
+    case "$HELP" in *"$FLAG"*) ;; *) MISSING="$MISSING $FLAG";; esac
+  done
+  if [ -n "$MISSING" ]; then
+    echo "ERROR: $MOD does not accept:$MISSING" >&2
+    echo "       This script is newer than that module -- the checkout is half-updated." >&2
+    echo "       Run 'git pull' and start again; nothing has been written yet." >&2
+    exit 1
+  fi
+  echo "  $MOD ok"
+}
+if [ "$BACKEND" = "3dino" ]; then
+  require_flags eval.run_3dino_identifiability --causal --with-floor --no-graph --preprocessing
+else
+  require_flags eval.dinov3_embed_synthetic --causal --random-init --preprocessing
+fi
+require_flags eval.compare_bundles --representation --equal-width --with-graph --holdout-readout
+require_flags eval.plot_compare_bundles --json
+[ -n "$CROSS_ARM" ] && require_flags eval.plot_pairing --cross --within --metric
 
 # Only now: a preflight failure should leave nothing behind, or the retry would trip the
 # already-exists guard above and demand FRESH=1 for a run that never started.
@@ -189,6 +235,12 @@ compare () {              # $1 = output dir name, $2 = --representation value, t
     --alphas "$ALPHA" --diagnostic-alpha "$ALPHA" \
     --out "$OUT/$NAME/compare.json" --csv "$OUT/$NAME/compare.csv"
   python -m eval.plot_compare_bundles --json "$OUT/$NAME/compare.json" --out "$OUT/$NAME/figures"
+  # The pairing pair of figures on top, when the run IS a pairing comparison: the generic
+  # table puts the two arms in separate bands and leaves the reader to subtract.
+  if [ -n "$CROSS_ARM" ] && [ -n "$WITHIN_ARM" ]; then
+    python -m eval.plot_pairing --json "$OUT/$NAME/compare.json" \
+      --cross "$CROSS_ARM" --within "$WITHIN_ARM" --out "$OUT/$NAME/figures"
+  fi
 }
 
 say "Scoring the content block (objective ablation)"
@@ -200,4 +252,5 @@ compare all all --bundles "${BUNDLES_ALL[@]}" --floors "${FLOORS_ALL[@]}"
 say "Done"
 echo "  tables   $OUT/{content,all}/compare.txt"
 echo "  figures  $OUT/{content,all}/figures/"
+[ -n "$CROSS_ARM" ] && echo "  pairing  $OUT/content/figures/pairing_{recovery,advantage}.png"
 echo "  csv      $OUT/{content,all}/compare.csv  (+ compare_graph.csv)"
