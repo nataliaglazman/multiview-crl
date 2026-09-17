@@ -269,6 +269,25 @@ raw R² into its partial part and the parent-mediated remainder. `orientation.pn
 only with `--orientation`. Each ships a `.csv` twin, and `--dark` re-steps the palette.
 At most two runs per figure: hues are assigned in fixed order and never generated.
 
+A report written with `--floor`/`--ceiling` holds their reference rows in the same file, so
+two arms with three floor seeds is nine scored rows against those two hues. `--roles`
+(default `trained`) and `--only SUBSTRING` narrow it; a row from before those flags carries
+no role and counts as `trained`, so older reports plot unchanged.
+
+```bash
+# the two arms against each other
+python -m eval.plot_causal_recovery --json results/causal_fisherz/causal_recovery.json \
+  --out figures/arms --roles trained
+
+# one arm against what the protocol reaches with perfect decoding
+python -m eval.plot_causal_recovery --json results/causal_fisherz/causal_recovery.json \
+  --out figures/ceiling --roles trained ceiling --only ident-vent
+
+# one arm against one untrained seed
+python -m eval.plot_causal_recovery --json results/causal_fisherz/causal_recovery.json \
+  --out figures/floor --roles trained floor --only ident-vent --labels trained floor-s0
+```
+
 ## Conditional-independence test
 
 `--indep-test {fisherz,kci}` on both `run_causal_recovery` and
@@ -336,6 +355,46 @@ than cross-fitting is deliberate: a cross-fitted row's decoding depends on every
 row's label, and Fisher-Z assumes the rows are independent draws.
 
 Neither flag touches the raw/partial R² columns, which keep their own full-width probe.
+
+## What an F1 is worth: the floor and the ceiling
+
+A skeleton F1 read on its own is not a statement about the model, because both ends of the
+scale are already occupied before any training happens.
+
+`--floor` scores an **untrained twin** of every run — the same architecture, pooling,
+readout width, alphas and test, with `random_init=True` so no checkpoint is loaded. A
+random projection of the factors is still an invertible map, so a `RidgeCV` readout decodes
+a good deal from one and PC recovers edges from that. The twin appears as its own row,
+`<name>-floor-s<seed>`, and the summary prints `learned = trained − floor` for both F1 and
+mean partial R². `--floor-seeds N` draws N of them: one seed is one draw of a random
+projection, and its sampling noise lands directly in every floor-subtracted number, so N>1
+adds an `fl.rng` column showing the across-seed spread. Runtime grows by roughly one run
+per seed.
+
+`--ceiling` scores **PC on the true factors** at the same row count, test, alphas and
+`--max-cond-set`, as the row `<name>-ceiling`. What the ceiling misses is not a model's
+failure: Fisher-Z sees only the linear part of a `leaky_relu` mechanism, a finite row count
+costs power, and `--max-cond-set` keeps edges that only separate on a larger conditioning
+set. The ceiling prices all three. It is deduplicated by a digest of the factor draw and
+adjacency, so two arms on one SCM share a single ceiling row and a single PC sweep, and a
+`readout_dim` is deliberately not passed — with `n_content` features and `n_content`
+factors the readout is already the identity.
+
+```bash
+python -m eval.run_causal_recovery \
+  --run-dirs results/contrastive results/baseline_recon \
+  --reference-run baseline_recon \
+  --num-samples 2000 --holdout-readout --readout-dim 128 \
+  --floor --floor-seeds 3 --ceiling --orientation --factor-rescue \
+  --batch-size 32 --num-workers 4 --output-dir results/causal_fisherz
+```
+
+The reference rows carry `role` (`trained`/`floor`/`ceiling`) and `init_seed` in the CSV,
+and the JSON's protocol block records `floor_seeds` and `has_truth_ceiling` so a reader can
+tell a missing floor from a floor of zero. They are ordinary rows everywhere else: they
+appear in the summary table and the factor tables, and `--reference-run` still resolves to
+exactly one of them because their names carry the suffix. Without `--floor` the script
+says so at the end rather than letting the absolute number stand unqualified.
 
 ## DINOv3 embeddings as a reference representation
 
