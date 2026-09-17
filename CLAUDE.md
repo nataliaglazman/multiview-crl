@@ -8,7 +8,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 
 - `training/main_multimodal.py` — primary training entrypoint (VQ-VAE-2, InfoNCE/MoCo/BT/VICReg, Gumbel content mask, optional style quantization). ~2300 lines.
 - `training/main_numerical.py` — small numerical theory-validation experiments (separate, simpler).
-- `training/losses.py` — contrastive + recon losses (InfoNCE, MoCo, Barlow Twins, VICReg, patch-InfoNCE, LPIPS-based `BaselineLoss`).
+- `training/losses.py` — contrastive + recon losses (InfoNCE, MoCo, Barlow Twins, VICReg, patch-InfoNCE, LPIPS-based `BaselineLoss`, `cross_reconstruction_loss` for the style-swapped decode).
 - `models/vqvae.py` — hierarchical 3D VQ-VAE-2 (content/style split, Gumbel mask, style codebooks). Primary model.
 - `models/encoders.py` — MLP helpers for numerical experiments.
 - `models/discriminator.py` — optional 3D PatchGAN discriminator (behind `--use-gan`).

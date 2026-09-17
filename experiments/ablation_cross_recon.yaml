@@ -1,0 +1,31 @@
+# Ablation: cross-modal reconstruction.
+#
+# Decode each view's content with the OTHER view's style and score the result against
+# the other view's image. Plain reconstruction only ever shows the decoder a MATCHED
+# content/style pair, so a content code that quietly encodes its own modality costs
+# nothing; under the swap it costs the full between-modality contrast difference.
+#
+# The control for this run is NOT ablation_baseline.yaml — that one has no style path at
+# all. It is this file with `scale_cross_recon_loss: 0.0`, which is baseline + style
+# injection, so the only thing that differs is the cross term.
+#
+# Read: CrossRecon/mae (and the two per-direction curves, which fail independently)
+# against Loss/Recon, plus the usual separation_score / cross_reconstruction eval.
+
+tag: ablation-cross-recon
+
+# Style has to reach the final decoder — this is what the swap swaps.
+inject_style_to_decoder: true
+style_injection_mode: input
+mask_mode: fixed
+content_style_levels: [0]
+
+# Keep style low-capacity. Without a bottleneck, the honest solution (style = the
+# modality's contrast) and the degenerate one (content carries BOTH appearances, style
+# just selects between them) score the same, and the degenerate one is easier to reach.
+style_spatial_size: 4
+
+# Let the decoder learn a matched pair first: before it reconstructs at all, the swapped
+# pair is noise, and an early cross term mostly teaches it to ignore style.
+scale_cross_recon_loss: 1.0
+cross_recon_start_step: 5000
