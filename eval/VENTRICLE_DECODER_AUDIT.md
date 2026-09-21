@@ -16,6 +16,37 @@ or simultaneous changes to style quantization confound attribution to spatial si
 `--eps 0.125 0.25 0.5` optionally checks sensitivity to intervention magnitude;
 `--examples 0` disables image artifacts. No retraining is required.
 
+### Reconstruction panels and NIfTI export
+
+Each saved subject now also gets a `*_reconstructions.png` panel showing natural
+T1 and FLAIR inputs next to their reconstructions in three array planes. Input and
+reconstruction share an intensity scale within each modality and use matched slices.
+
+Add `--save-nifti` to export the saved examples to a `nifti/` subdirectory.
+`--examples` controls how many subjects are saved (default 2; use 64 to save all
+subjects of a 64-subject audit). Export includes both modalities' natural inputs
+and reconstructions, intervention inputs, all four decoder combinations, affected
+masks and signed response volumes. Files are compressed `.nii.gz`.
+
+You can export an **already completed audit without running inference again**:
+
+```bash
+python -m eval.ventricle_decoder_audit \
+  --from-examples results/synthetic/synthetic-clean-content-causal-sp-s-1-cont/ventricle_decoder_audit_20260921_130818_473311/examples.npz \
+  --save-nifti
+```
+
+This writes new panels and NIfTIs under a timestamped `exports_*` directory beside
+the archive. Only subjects already saved in that archive can be exported; the
+export-only mode uses all of them. `--output-dir` can select a new destination.
+
+NIfTI export requires `nibabel` (`python -m pip install nibabel` if missing).
+Arrays are saved without transposing, clipping, or intensity rescaling. These
+synthetic volumes have no physical image geometry: the affine is identity, voxel
+spacing is one in unknown units, and no anatomical orientation is asserted. All
+volumes from a subject overlay in the same synthetic coordinate system. See
+`nifti/README.txt` for the filename and coordinate conventions.
+
 ## Intervention and swaps
 
 For each test subject, the renderer generates `z_content[1] - eps` and

@@ -227,7 +227,25 @@ class DecoderAuditTests(unittest.TestCase):
                     )
             maps = np.load(out / "examples.npz")
             self.assertEqual(maps["eps0.25_sample0_flair_hl"].shape, (1, 32, 32, 32))
-            self.assertEqual(len(list(out.glob("*.png"))), 4)
+            self.assertEqual(len(list(out.glob("*.png"))), 6)
+            exported = Path(tmp) / "exports"
+            with patch("eval.run_dci_synthetic.load_model_from_run_dir") as loader, contextlib.redirect_stdout(
+                io.StringIO()
+            ):
+                main(["--from-examples", str(out / "examples.npz"), "--save-nifti", "--output-dir", str(exported)])
+                loader.assert_not_called()
+            import nibabel as nib
+
+            for view in ("t1", "flair"):
+                prefix = f"eps0.25_sample0_{view}"
+                for key in ("natural_input", "natural_recon", "support"):
+                    image = nib.load(exported / "nifti" / f"{prefix}_{key}.nii.gz")
+                    np.testing.assert_array_equal(image.get_fdata(), maps[f"{prefix}_{key}"][0])
+                    np.testing.assert_array_equal(image.affine, np.eye(4))
+                    self.assertEqual(image.header.get_xyzt_units()[0], "unknown")
+                image = nib.load(exported / "nifti" / f"{prefix}_content_high_style_low.nii.gz")
+                np.testing.assert_array_equal(image.get_fdata(), maps[f"{prefix}_hl"][0])
+            self.assertEqual(len(list(exported.glob("*reconstructions.png"))), 2)
             self.assertEqual(state_digest(model), before)
             self.assertEqual(hashlib.sha256(checkpoint.read_bytes()).hexdigest(), file_hash)
 

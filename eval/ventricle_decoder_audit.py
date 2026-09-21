@@ -9,6 +9,7 @@ import argparse
 import csv
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -277,9 +278,120 @@ def save_panels(saved, output):
         plt.close(fig)
 
 
+def save_reconstruction_panels(saved, output):
+    """T1/FLAIR natural input and reconstruction in three array planes."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    for subject in sorted({prefix.rsplit("_", 1)[0] for prefix in saved}):
+        fig, axes = plt.subplots(2, 6, figsize=(16, 6), constrained_layout=True)
+        reference = saved[f"{subject}_t1"]["support"][0]
+        locations = [
+            (
+                int(reference.sum(tuple(i for i in range(3) if i != axis)).argmax())
+                if reference.any()
+                else reference.shape[axis] // 2
+            )
+            for axis in range(3)
+        ]
+        for row, view in enumerate(VIEWS):
+            maps = saved[f"{subject}_{view}"]
+            volumes = [maps[k][0] for k in ("natural_input", "natural_recon")]
+            lo, hi = min(x.min() for x in volumes), max(x.max() for x in volumes)
+            for axis, location in enumerate(locations):
+                for kind, volume in enumerate(volumes):
+                    ax = axes[row, 2 * axis + kind]
+                    ax.imshow(np.take(volume, location, axis=axis).T, origin="lower", cmap="gray", vmin=lo, vmax=hi)
+                    ax.set_title(
+                        f"{view.upper()} {'input' if kind == 0 else 'reconstruction'}\naxis {axis}, slice {location}"
+                    )
+                    ax.axis("off")
+        fig.suptitle(f"{subject}: natural T1 and FLAIR; matched input/reconstruction scales within each modality")
+        fig.savefig(output / f"{subject}_reconstructions.png", dpi=130)
+        plt.close(fig)
+
+
+def save_niftis(saved, output):
+    """Preserve array axes and normalized intensities; no physical geometry exists."""
+    import nibabel as nib
+
+    directory = output / "nifti"
+    directory.mkdir(exist_ok=True)
+    names = {
+        "ll": "content_low_style_low",
+        "lh": "content_low_style_high",
+        "hl": "content_high_style_low",
+        "hh": "content_high_style_high",
+    }
+    for prefix, maps in saved.items():
+        for key, array in maps.items():
+            data = array[0].astype(np.uint8 if key == "support" else np.float32)
+            image = nib.Nifti1Image(data, np.eye(4))
+            image.set_qform(np.eye(4), code=0)
+            image.set_sform(np.eye(4), code=2)
+            image.header.set_xyzt_units("unknown")
+            image.header["descrip"] = b"Synthetic voxel coordinates; normalized intensity; no physical orientation"
+            nib.save(image, directory / f"{prefix}_{names.get(key, key)}.nii.gz")
+    (directory / "README.txt").write_text(
+        "Synthetic voxel coordinates: identity affine, unit voxel spacing, unknown spatial units.\n"
+        "Array axes are preserved exactly; no anatomical orientation or physical millimetre spacing is implied.\n"
+        "Inputs and reconstructions use model-normalized intensities, without clipping or rescaling.\n"
+        "natural_input/natural_recon are the unperturbed subject. input_low/input_high are interventions.\n"
+        "content_low_style_high etc. are the four decoder combinations within the same subject and modality.\n"
+        "support is the binary affected region; other effect volumes are signed reconstruction differences.\n"
+    )
+
+
+def load_examples(path):
+    """Read an existing audit archive so exports do not require model inference."""
+    saved = {}
+    with np.load(path, allow_pickle=False) as archive:
+        for key in archive.files:
+            match = re.fullmatch(r"(eps[0-9.eE+\-]+_sample\d+_(?:t1|flair))_(\w+)", key)
+            if match is None:
+                raise ValueError(f"Unrecognized example key: {key}")
+            prefix, name = match.groups()
+            array = archive[key]
+            if array.ndim != 4 or array.shape[0] != 1 or not np.isfinite(array).all():
+                raise ValueError(f"Expected a finite [1, X, Y, Z] volume: {key}")
+            saved.setdefault(prefix, {})[name] = array
+    if not saved:
+        raise ValueError("The example archive is empty")
+    required = {
+        "support",
+        "natural_input",
+        "natural_recon",
+        "input_low",
+        "input_high",
+        "ll",
+        "lh",
+        "hl",
+        "hh",
+        "joint",
+        "content_mean",
+        "style_mean",
+    }
+    for prefix, maps in saved.items():
+        if not required <= maps.keys() or len({x.shape for x in maps.values()}) != 1:
+            raise ValueError(f"Incomplete or mismatched example volumes: {prefix}")
+        subject = prefix.rsplit("_", 1)[0]
+        if any(f"{subject}_{view}" not in saved for view in VIEWS):
+            raise ValueError(f"Missing paired T1/FLAIR example: {subject}")
+    return saved
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--run-dir")
+    source.add_argument(
+        "--from-examples", help="Export existing examples.npz without loading a checkpoint or rerunning the audit"
+    )
+    parser.add_argument(
+        "--save-nifti", action="store_true", help="Export saved example volumes as .nii.gz files (requires nibabel)"
+    )
     parser.add_argument("--checkpoint")
     parser.add_argument("--num-samples", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=4)
@@ -295,6 +407,23 @@ def main(argv=None):
     if any(not np.isfinite(e) or e <= 0 for e in cli.eps):
         parser.error("eps must be positive and finite")
     cli.eps = list(dict.fromkeys(cli.eps))
+    if cli.save_nifti:
+        try:
+            import nibabel  # noqa: F401
+        except ImportError:
+            parser.error("--save-nifti requires nibabel: python -m pip install nibabel")
+    if cli.from_examples:
+        saved = load_examples(cli.from_examples)
+        output = Path(cli.output_dir or Path(cli.from_examples).parent / f"exports_{datetime.now():%Y%m%d_%H%M%S_%f}")
+        output.mkdir(parents=True, exist_ok=False)
+        save_panels(saved, output)
+        save_reconstruction_panels(saved, output)
+        if cli.save_nifti:
+            save_niftis(saved, output)
+        print(
+            f"Exported {len(saved)} modality examples to {output}\nNo checkpoint was loaded; the audit was not rerun."
+        )
+        return
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     torch.set_num_threads(cli.threads)
     from eval.run_dci_synthetic import load_model_from_run_dir
@@ -348,6 +477,9 @@ def main(argv=None):
             output / "examples.npz", **{f"{p}_{k}": x for p, maps in saved.items() for k, x in maps.items()}
         )
         save_panels(saved, output)
+        save_reconstruction_panels(saved, output)
+        if cli.save_nifti:
+            save_niftis(saved, output)
     print("\nPaired mean responses (identity gain=1, no response=0)")
     print("eps  view   region    measurable/resolved   joint gain/cos/error    content/style gain   natural MAE")
     fmt = lambda x: "n/a" if x is None else f"{x:.4g}"
