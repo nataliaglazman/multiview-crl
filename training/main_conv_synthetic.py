@@ -96,6 +96,15 @@ def parse_args():
         help="Run one eval before training and keep it as the untrained floor, so every "
         "later per-factor score prints its delta against it. Costs one extra eval.",
     )
+    p.add_argument(
+        "--best-metric",
+        type=str,
+        default="block_mcc",
+        choices=["block_mcc", "ridge_r2", "none"],
+        help="Validation metric that decides which checkpoint is kept as model_best.pt. "
+        "Floor-subtracted when --floor-eval gave a floor, since the raw value is mostly "
+        "floor. 'none' keeps only the last-step model.pt.",
+    )
     p.add_argument("--eval-pooling", type=str, default="gap", choices=["gap", "patch"])
     p.add_argument("--eval-patch-grid", type=int, nargs=3, default=[4, 5, 4])
 
@@ -299,6 +308,26 @@ def print_per_factor(scores, floor=None, writer=None, step=0):
                 writer.add_scalar(f"per_factor/{tag}/{nm}/mcc", v["mcc"], step)
 
 
+BEST_METRIC_KEYS = {"block_mcc": "content->content/block_mcc", "ridge_r2": "content->content/informativeness_ridge"}
+
+
+def best_metric_value(flat, floor_flat, name):
+    """The scalar model_best.pt is selected on, floor-subtracted where a floor exists.
+
+    Raw block-MCC on this generator is mostly floor — an untrained encoder scores ~0.38 —
+    so selecting on it would rank checkpoints partly by how much untrained structure the
+    architecture happens to carry. The delta ranks them by what training added.
+    """
+    v = flat.get(BEST_METRIC_KEYS[name])
+    if v is None or not np.isfinite(v):
+        return None
+    if floor_flat is not None:
+        f = floor_flat.get(BEST_METRIC_KEYS[name])
+        if f is not None and np.isfinite(f):
+            return float(v - f)
+    return float(v)
+
+
 def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
     print(f"  [eval] synthetic DCI @ step {step} ...", flush=True)
     pooling = "gap" if args.eval_pooling == "gap" else tuple(args.eval_patch_grid)
@@ -394,11 +423,15 @@ def main():
     # Step-0 eval doubles as the untrained floor: same architecture, same seed, no training.
     # Per-factor R² needs it more than the block means do -- a localised factor can read
     # 0.2 from a random encoder, so the raw number alone cannot say whether it was learned.
-    floor = None
+    floor = floor_flat = None
     if args.floor_eval:
         model.eval()
-        _, floor = evaluate(model, val_dataset, device, args, save_dir, 0, writer)
+        floor_flat, floor = evaluate(model, val_dataset, device, args, save_dir, 0, writer)
         model.train()
+
+    # Step 0 is the untrained floor, not a candidate: with every delta at or below zero it
+    # would win on a tie and save an untrained encoder as "best".
+    best = {"value": None, "step": None}
 
     step = 0
     running = {"loss": 0.0, "rank": 0.0, "n": 0}
@@ -438,11 +471,44 @@ def main():
 
             if step % args.eval_every == 0 or step == args.train_steps:
                 model.eval()
-                evaluate(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
+                flat, _ = evaluate(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
                 torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
+
+                if args.best_metric != "none":
+                    value = best_metric_value(flat, floor_flat, args.best_metric)
+                    if value is not None and (best["value"] is None or value > best["value"]):
+                        best = {"value": value, "step": step}
+                        # A bare state_dict, so --checkpoint model_best.pt loads exactly like
+                        # model.pt does; the provenance goes in a sidecar rather than wrapping
+                        # the tensors in a dict every reader would then have to unwrap.
+                        torch.save(model.state_dict(), os.path.join(save_dir, "model_best.pt"))
+                        with open(os.path.join(save_dir, "best_checkpoint.json"), "w") as fp:
+                            json.dump(
+                                {
+                                    "step": step,
+                                    "metric": args.best_metric,
+                                    "value": value,
+                                    "floor_subtracted": floor_flat is not None,
+                                    "raw": flat.get(BEST_METRIC_KEYS[args.best_metric]),
+                                },
+                                fp,
+                                indent=2,
+                            )
+                        print(f"    new best {args.best_metric} {value:+.4f} -> model_best.pt", flush=True)
                 model.train()
 
     torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
+    if best["step"] is not None:
+        print(
+            f"best {args.best_metric} {best['value']:+.4f} at step {best['step']} -> model_best.pt "
+            f"(model.pt is the last step, {step}). Score the best one with "
+            f"--checkpoint model_best.pt.",
+            flush=True,
+        )
+        if best["step"] < step:
+            # Worth saying out loud: past the peak the run is spending compute making the
+            # representation worse, which at this dataset size is the expected shape.
+            print(f"  NOTE: peak was {step - best['step']} steps before the end.", flush=True)
     print(f"done. checkpoints + DCI logs in {save_dir}", flush=True)
 
 
