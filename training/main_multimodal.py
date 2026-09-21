@@ -61,16 +61,18 @@ from training.losses import (
     barlow_twins_loss,
     content_modality_adv_loss,
     content_patch_modality_adv_loss,
+    cross_reconstruction_loss,
     infonce_loss,
     moco_loss,
     patch_infonce_loss,
     split_infonce_loss,
+    stats_pool,
     style_infonce_loss,
     style_modality_ce_loss,
     vicreg_loss,
 )
 from training.style_hsic import style_content_hsic_loss
-from training.vicreg_local import registered_level_loss
+from training.vicreg_local import attach_vicregl_heads, registered_level_loss
 from utils.checkpointing import (
     load_checkpoint,
     resolve_wandb_run_id,
@@ -217,13 +219,28 @@ def train_step(
             _patch_grid = None
 
         _hsic_scale = float(getattr(args, "scale_style_hsic_loss", 0.0))
-        _hsic_kwargs = {}
+        _extra_kwargs = {}
         if _hsic_scale > 0:
             _gt_content = data.get("gt_latents", {}).get("z_content")
             if _gt_content is None:
                 raise ValueError("--scale-style-hsic-loss requires batch['gt_latents']['z_content'] (synthetic data).")
             _gt_content = torch.as_tensor(_gt_content, device=device)
-            _hsic_kwargs["return_style_features"] = True
+            _extra_kwargs["return_style_features"] = True
+
+        # Cross-modal reconstruction: ask the final decoder for each view's content rendered
+        # with the OTHER view's style. It reuses this forward's encoder and content codes —
+        # only decoder 0 runs a second time — so it rides on whatever compute_recon decided
+        # for this step rather than forcing a decode of its own.
+        _cross_scale = float(getattr(args, "scale_cross_recon_loss", 0.0))
+        _cross_start = getattr(args, "cross_recon_start_step", 0)
+        _cross_active = (
+            _cross_scale > 0
+            and n_views == 2
+            and compute_recon
+            and (step >= _cross_start or getattr(args, "_resumed_past_cross_recon_start", False))
+        )
+        if _cross_active:
+            _extra_kwargs["cross_recon"] = True
 
         _forward = vqvae_model(
             images,
@@ -233,15 +250,22 @@ def train_step(
             subsets=args.subsets,
             patch_grid=_patch_grid,
             mask=masks,
-            **_hsic_kwargs,
+            **_extra_kwargs,
         )
         _hsic_loss = torch.zeros((), device=device)
-        if _hsic_scale > 0:
-            _forward, _style_features = _forward
-            _hsic_loss, _hsic_diag = style_content_hsic_loss(_style_features, _gt_content, n_views)
-            _diag.update(_hsic_diag)
-            _diag["Style/hsic_weighted"] = _hsic_loss.detach().item() * _hsic_scale
-            del _style_features
+        _cross_out = None
+        if _extra_kwargs:
+            # Extras follow the eight-tuple in a fixed order: style features, then the
+            # swapped-style decode (see VQVAE.forward).
+            _forward, *_extras = _forward
+            if _hsic_scale > 0:
+                _style_features = _extras.pop(0)
+                _hsic_loss, _hsic_diag = style_content_hsic_loss(_style_features, _gt_content, n_views)
+                _diag.update(_hsic_diag)
+                _diag["Style/hsic_weighted"] = _hsic_loss.detach().item() * _hsic_scale
+                del _style_features
+            if _cross_active:
+                _cross_out = _extras.pop(0)
 
         (
             recon,
@@ -275,6 +299,21 @@ def train_step(
         _recon_active = step >= _recon_start or getattr(args, "_resumed_past_recon_start", False)
         _gan_recon = None
         _gan_real = None
+
+        # Cross-modal reconstruction loss. Computed before the plain recon block because
+        # that block frees `images`, and the cross target is the view-swapped input.
+        cross_recon_loss = torch.zeros((), device=device)
+        _cross_computed = False
+        if _cross_out is not None:
+            if _cross_out.shape[2:] != input_shape:
+                _cross_out = F.interpolate(_cross_out, size=input_shape, mode="trilinear", align_corners=False)
+            cross_recon_loss, _cross_diag = cross_reconstruction_loss(_cross_out, images, mask=masks)
+            cross_recon_loss = cross_recon_loss * _cross_scale
+            _diag.update(_cross_diag)
+            _diag["CrossRecon/weighted"] = cross_recon_loss.detach().item()
+            _cross_computed = True
+            del _cross_out
+
         if compute_recon and recon is not None and _recon_active:
             # Safety net: the model now interpolates internally, but guard
             # against size mismatch in case decode_codes or an older
@@ -878,6 +917,8 @@ def train_step(
         total_loss = contrastive_loss + recon_loss + vq_loss
         if _hsic_scale > 0:
             total_loss = total_loss + _hsic_scale * _hsic_loss
+        if _cross_computed:
+            total_loss = total_loss + cross_recon_loss
 
         # Generator adversarial loss: fool the discriminator into predicting
         # the reconstruction as real (hinge: -mean(D(fake))).
@@ -1057,7 +1098,17 @@ def _run_validation(
                 scaler=None,
                 recon_loss_fn=recon_loss_fn,
                 moco_loss_func=moco_loss_func,
-                step=getattr(args, "recon_loss_start_step", 0),  # ensure recon is always active in val
+                # Ensure every step-gated loss is active in val, not just the recon term.
+                # The cross term only counts when it is switched on, so a run without it
+                # passes exactly the step it always did.
+                step=max(
+                    getattr(args, "recon_loss_start_step", 0),
+                    (
+                        getattr(args, "cross_recon_start_step", 0)
+                        if float(getattr(args, "scale_cross_recon_loss", 0.0)) > 0
+                        else 0
+                    ),
+                ),
             )
             totals.append(total_loss)
             cons.append(contrastive_loss)
@@ -1340,6 +1391,9 @@ def main(args):
         _bt_gap_sim_c = getattr(args, "bt_gap_sim_coeff", None)
         _bt_gap_sim_c = _bt_sim_c if _bt_gap_sim_c is None else _bt_gap_sim_c
         _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
+        _bt_gap_pool = getattr(args, "bt_gap_pooling", "gap")
+        _bt_whiten = getattr(args, "bt_sim_whiten", False)
+        _bt_whiten_eps = getattr(args, "bt_sim_whiten_eps", 1e-3)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
         _bt_norm = bool(getattr(args, "bt_normalize_terms", False))
         logger.info(
@@ -1390,6 +1444,8 @@ def main(args):
                 sim_coeff=_bt_sim_c,
                 std_coeff=_bt_std_c,
                 sim_normalize=_bt_sim_norm,
+                sim_whiten=_bt_whiten,
+                sim_whiten_eps=_bt_whiten_eps,
                 corr_ema=_bt_ema_plain,
                 corr_ema_decay=_bt_corr_ema,
                 normalize_terms=_bt_norm,
@@ -1417,15 +1473,30 @@ def main(args):
             # Averaging over positions recovers the subject term exactly (the interaction
             # integrates to zero there), so this is the term whose rows are SUBJECTS.
             if _bt_gap_w > 0 and z_rec_tuple.ndim == 4:
+                # Both poolings give ONE ROW PER SUBJECT, which is the whole point of this
+                # companion. They differ in what they keep: the uniform mean is the worst
+                # summary for a localised factor (it contributes ~1/P of a channel's mean),
+                # while stats also carries that channel's spread and extremes. Measured here:
+                # ventricle_size content R^2 0.097 at gap, 0.406 at stats.
+                if _bt_gap_pool == "stats":
+                    _gz, _gidx, _gmask = stats_pool(z_rec_tuple, estimated_content_indices, soft_content_mask)
+                else:
+                    _gz, _gidx, _gmask = z_rec_tuple.mean(-1), estimated_content_indices, soft_content_mask
                 _lg = barlow_twins_loss(
-                    z_rec_tuple.mean(-1),  # (n_views, B, C) — one row per subject
-                    estimated_content_indices=estimated_content_indices,
+                    _gz,  # (n_views, B, C) or (n_views, B, 4C) — one row per subject either way
+                    estimated_content_indices=_gidx,
                     subsets=subsets,
-                    soft_content_mask=soft_content_mask,
+                    soft_content_mask=_gmask,
                     lambd=_bt_gap_lam,
                     sim_coeff=_bt_gap_sim_c,
                     std_coeff=_bt_gap_std_c,
                     sim_normalize=_bt_sim_norm,
+                    # Whitening is applied ONLY here and on the gap-only path. The patch call
+                    # above folds (subject, position) into the rows and is 768 wide at this
+                    # batch size, where a d x d covariance is not estimable -- and its rows are
+                    # not the units being aligned anyway.
+                    sim_whiten=_bt_whiten,
+                    sim_whiten_eps=_bt_whiten_eps,
                     corr_ema=_bt_ema_gap,
                     corr_ema_decay=_bt_corr_ema,
                     normalize_terms=_bt_norm,
@@ -1456,6 +1527,14 @@ def main(args):
             _scaled = _bt_patch_w * _l
             _scaled._contrastive_diag = dict(getattr(_l, "_contrastive_diag", None) or {})
             return _scaled
+
+    elif _contrastive_type == "vicregl":
+        logger.info("[LOSS] Registered local/global VICReg; local statistics across subjects per position; no BT EMA")
+
+        def loss_func(*_args, **_kwargs):
+            raise ValueError("vicregl must be dispatched through its model-owned local/global heads")
+
+        patch_loss_func = loss_func
 
     elif _contrastive_type == "vicreg":
         _sim_c = getattr(args, "vicreg_sim_coeff", 25.0)
@@ -1763,6 +1842,8 @@ def main(args):
                 f"levels={list(_proj_heads.keys())} (loss-facing only; probes read pre-head features)"
             )
 
+    attach_vicregl_heads(vqvae_model, args)
+
     if getattr(args, "compile_model", False):
         logger.warning(
             "  --compile-model ignored: torch.compile is incompatible with "
@@ -1953,6 +2034,7 @@ def main(args):
                 or "norm" in name.lower()
                 or name.endswith(".alpha")
                 or "_contrastive_proj_heads" in name
+                or "_vicregl_heads" in name
             ):
                 no_decay_params.append(param)
             else:
@@ -2166,6 +2248,14 @@ def main(args):
             logger.info(
                 f"  Resumed at step {step}: recon loss active immediately "
                 f"(skipping --recon-loss-start-step {_recon_start} warmup)."
+            )
+
+        _cross_recon_start = getattr(args, "cross_recon_start_step", 0)
+        args._resumed_past_cross_recon_start = step > 1
+        if args._resumed_past_cross_recon_start and _cross_recon_start > 0:
+            logger.info(
+                f"  Resumed at step {step}: cross-modal recon loss active immediately "
+                f"(skipping --cross-recon-start-step {_cross_recon_start} warmup)."
             )
 
         # Restore best-model tracking state from best checkpoint if resuming.
@@ -2417,6 +2507,15 @@ def main(args):
                         if f"Style/infonce_L{_li}" in step_moco_diag
                     ]
                     _style_str = f" | StyleNCE: {', '.join(_style_parts)}" if _style_parts else ""
+                    _cross_str = ""
+                    if step_moco_diag.get("CrossRecon/mae") is not None:
+                        # Both halves, not the mean: "T1 anatomy as T2" and its reverse fail
+                        # independently, and one of them collapsing is the thing to catch.
+                        _cross_str = (
+                            f" | Cross={step_moco_diag['CrossRecon/mae']:.4f}"
+                            f" (to_v0={step_moco_diag.get('CrossRecon/mae_to_view0', float('nan')):.4f},"
+                            f" to_v1={step_moco_diag.get('CrossRecon/mae_to_view1', float('nan')):.4f})"
+                        )
                     # logger, not print: print() only reaches stdout, which cluster schedulers
                     # do not always capture — and when a loss goes non-finite these are the
                     # numbers you need. TensorBoard renders NaN ambiguously (often as 0), so a
@@ -2424,7 +2523,8 @@ def main(args):
                     logger.info(
                         f"Step {step}: Total={accum_total:.4f} | "
                         f"Contrastive={accum_contrastive:.4f} | "
-                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}{_acc_str}{_cb_str}{_gan_str}{_style_str}"
+                        f"Recon={accum_recon:.4f} | VQ={accum_vq:.4f}"
+                        f"{_acc_str}{_cb_str}{_gan_str}{_style_str}{_cross_str}"
                     )
 
                     _perf_window_steps += 1

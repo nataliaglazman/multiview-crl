@@ -126,6 +126,12 @@ def load_model_from_run_dir(run_dir, checkpoint=None, device=None, random_init=F
         latent_mask_thresh=getattr(args, "latent_mask_thresh", 0.0),
     )
 
+    # Loss-facing heads are checkpoint state too; restore them so strict routing
+    # audits can load a vicregl checkpoint without architecture mismatches.
+    from training.vicreg_local import attach_vicregl_heads
+
+    attach_vicregl_heads(model, args)
+
     if random_init:
         # The zero point for every DCI/MCC curve: this run's EXACT architecture, pooling,
         # dataset and GBT estimator, with untrained weights. block_mcc fits a readout, so it

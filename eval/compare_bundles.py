@@ -225,6 +225,7 @@ def format_block(results, block, column):
 
 def format_widths(results):
     lines = []
+    blocks = sorted({r.get("representation", "all") for r in results.values()})
     for label, result in results.items():
         block = result.get("content", {}).get("_block", {})
         lines.append(
@@ -240,7 +241,10 @@ def format_widths(results):
             "\n  NOTE: the bundles were probed at different widths, so part of any difference\n"
             "        below is probe capacity rather than representation. Pass --equal-width.\n"
         )
-    return "FEATURE WIDTH\n" + "\n".join(lines) + "\n" + note
+    # Which block these features are: the content-block and whole-embedding tables are
+    # otherwise identical in shape, and only the feature counts hint at which is which.
+    head = f"FEATURE WIDTH  (scoring the {'/'.join(blocks)} block of each embedding)"
+    return head + "\n" + "\n".join(lines) + "\n" + note
 
 
 #: Label of the reference row: PC on the ground-truth factors rather than on a
@@ -762,6 +766,14 @@ def main(argv=None):
         help="Untrained twin per bundle label; each is only ever subtracted from its own bundle",
     )
     parser.add_argument("--view", default="1", choices=["1", "2", "both"])
+    parser.add_argument(
+        "--representation",
+        default="all",
+        choices=["all", "content", "style"],
+        help="Which block of each embedding to score. 'content'/'style' need every bundle to "
+        "carry a fine-tuning partition; a pretrained baseline has none and can only be "
+        "compared under 'all'.",
+    )
     parser.add_argument("--out", type=Path, help="Write the full report as JSON (and .txt alongside)")
     parser.add_argument("--csv", type=Path, help="Write the per-factor rows as CSV")
     parser.add_argument("--quiet", action="store_true")
@@ -861,8 +873,17 @@ def main(argv=None):
     if unknown:
         parser.error(f"--floors labels not in --bundles: {', '.join(sorted(unknown))}")
 
-    bundles = {label: scorer.load_bundle(path, cli.view) for label, path in bundle_paths.items()}
-    floors = {label: scorer.load_bundle(path, cli.view) for label, path in floor_paths.items()}
+    # cli.representation, not the default: passing only (path, view) left load_bundle on
+    # representation="all", so a run asking for the content block silently scored the whole
+    # embedding and two tables that differed only in this flag came out identical.
+    def _load(path):
+        try:
+            return scorer.load_bundle(path, cli.view, cli.representation)
+        except ValueError as exc:
+            parser.error(f"{path}: {exc}")
+
+    bundles = {label: _load(path) for label, path in bundle_paths.items()}
+    floors = {label: _load(path) for label, path in floor_paths.items()}
     _records, problems = check_alignment(bundles, strict=cli.strict_rows)
     if cli.equal_width:
         cli.probe_dim = common_width(bundles, floors)

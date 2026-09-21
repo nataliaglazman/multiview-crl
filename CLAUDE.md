@@ -8,7 +8,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 
 - `training/main_multimodal.py` — primary training entrypoint (VQ-VAE-2, InfoNCE/MoCo/BT/VICReg, Gumbel content mask, optional style quantization). ~2300 lines.
 - `training/main_numerical.py` — small numerical theory-validation experiments (separate, simpler).
-- `training/losses.py` — contrastive + recon losses (InfoNCE, MoCo, Barlow Twins, VICReg, patch-InfoNCE, LPIPS-based `BaselineLoss`).
+- `training/losses.py` — contrastive + recon losses (InfoNCE, MoCo, Barlow Twins, VICReg, patch-InfoNCE, LPIPS-based `BaselineLoss`, `cross_reconstruction_loss` for the style-swapped decode).
 - `models/vqvae.py` — hierarchical 3D VQ-VAE-2 (content/style split, Gumbel mask, style codebooks). Primary model.
 - `models/encoders.py` — MLP helpers for numerical experiments.
 - `models/discriminator.py` — optional 3D PatchGAN discriminator (behind `--use-gan`).
@@ -21,6 +21,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `eval/export_vq_bundle.py` — VQ features → the shared bundle `.npz` (the format `dinov3_embed_synthetic` writes), so VQ and DINO can be scored by one function.
 - `eval/compare_bundles.py` — scores N bundles through one protocol into one table; verifies row identity, matches probe width, keeps each floor with its own bundle. `--with-graph` adds PC causal discovery per representation scored against the true SCM adjacency, with a ground-truth ceiling row; `--graph-repeats` puts a paired resampling error bar on it.
 - `eval/plot_compare_bundles.py` — PNG figures from `compare_bundles --out` JSON: per-factor recovery with each model's own floor, what training bought, PC recovery vs the true adjacency with resampling error bars, partial-vs-raw R². Never re-scores; each figure ships a `.csv` twin.
+- `eval/plot_pairing.py` — the two-arm pairing figures from the same `compare.json`: a dumbbell per factor (both arms, each with its own floor tick) and the difference alone anchored at zero, hatched where the arms' seed spreads cross. Warns when `gap` and `delta_floor` disagree on the winner. Never re-scores; CSV twins; `--self-test`.
 - `eval/bundle_identity.py` — factor/generator digests that prove two bundles describe the same evaluation rows.
 - `eval/COMPARING_3DINO_VQVAE.md` — what the matched DINO/VQ comparison equalises and what it cannot. Read before quoting a cross-model number.
 - `eval/plot_identifiability.py` — PNG figures from `identifiability_report --out` JSON (one or two models). Never re-scores; each figure ships a `.csv` twin.

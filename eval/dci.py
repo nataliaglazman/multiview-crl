@@ -708,10 +708,25 @@ def compute_dci_synthetic(
             from eval.identifiability_metrics import block_mcc as _block_mcc
             from eval.identifiability_metrics import view_invariance as _view_invariance
 
-            results[f"{prefix}content->content/block_mcc"] = _block_mcc(content_repr, gt_content)["mean"]
+            # ``block_mcc`` already computes a matched |corr| per factor; keep it on the
+            # block's detail dict (next to per_factor_ridge) instead of discarding it with
+            # ``["mean"]``, so callers can see WHICH factors a block recovers. Attached to
+            # the detail dict rather than to ``results`` directly because bare arrays there
+            # break the scalar-only consumers (``flatten_dci_results``, the logging loop).
+            def _keep_mcc(label, repr_arr, factor_arr):
+                m = _block_mcc(repr_arr, factor_arr)
+                results[f"{prefix}{label}/block_mcc"] = m["mean"]
+                d = results.get(f"{prefix}{label.replace('->', '→')}/detail")
+                if isinstance(d, dict):
+                    d["per_factor_mcc"] = m["per_factor"]
+                    d["per_factor_mcc_std"] = m["per_factor_std"]
+                    d["assignment_identity"] = m["assignment_identity"]
+                return m
+
+            _keep_mcc("content->content", content_repr, gt_content)
             if style_repr is not None:
                 results[f"{prefix}style->style/block_mcc"] = _block_mcc(style_repr, gt_style)["mean"]
-                results[f"{prefix}content->style/block_mcc"] = _block_mcc(content_repr, gt_style)["mean"]
+                _keep_mcc("content->style", content_repr, gt_style)
             if per_encoder and content_v2 is not None:
                 results[f"{prefix}content_v2->content/block_mcc"] = _block_mcc(content_v2, gt_content)["mean"]
                 if style_v2 is not None:

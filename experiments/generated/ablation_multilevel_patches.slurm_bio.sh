@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_multilevel_patches.yaml
-# Generated at: 2026-08-27T22:00:13Z
-# Git SHA: 9f15471
+# Generated at: 2026-09-16T12:31:56Z
+# Git SHA: 6deafd3
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-multilevel-patches
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -66,6 +66,7 @@ fi
     --content-ratios 0.5 0.5 0.5 \
     --content-style-levels 0 1 2 \
     --contrastive-loss-type infonce \
+    --cross-recon-start-step 0 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name ADNI_stripped_masks \
@@ -88,8 +89,10 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 10.0 \
+    --scale-cross-recon-loss 0.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
+    --scale-style-hsic-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-encoders \
