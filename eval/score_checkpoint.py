@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader
 
 from data.datasets import SyntheticBrainDataset
 from eval.dci import CONTENT_FACTOR_NAMES
-from eval.identifiability_metrics import block_mcc, cv_probe_acc, cv_probe_r2
+from eval.identifiability_metrics import block_mcc, channel_mcc, cv_probe_acc, cv_probe_r2
 from models.multiview_encoder import MultiviewConvEncoder
 
 
@@ -50,6 +50,12 @@ def parse_args():
     p.add_argument("--no-cuda", action="store_true")
     p.add_argument("--no-floor", action="store_true", help="Skip the untrained twin (faster, and unreportable)")
     p.add_argument("--no-graph", action="store_true", help="Skip PC graph recovery")
+    p.add_argument(
+        "--no-dci",
+        action="store_true",
+        help="Skip the GBT DCI scores. ~1s at gap pooling; the cost grows with the feature "
+        "count, so it is worth skipping at wide patch poolings.",
+    )
     p.add_argument("--alphas", type=float, nargs="+", default=[0.01, 0.05, 0.1, 0.2], help="PC significance sweep")
     p.add_argument("--indep-test", choices=["fisherz", "kci"], default="fisherz")
     p.add_argument("--max-cond-set", type=int, default=None, help="Cap PC's conditioning-set size (needed for kci)")
@@ -142,51 +148,96 @@ def encode(model, ds, device, batch_size, content_channels, patch_grid=None):
     return (torch.cat(c1).numpy(), torch.cat(c2).numpy(), np.concatenate(gt), adj)
 
 
-def recovery(X, X_v2, z, names):
-    """Per-factor ridge R², block-MCC, and the content->view leakage probe."""
+def dci_scores(X, z, train_ratio=0.8):
+    """D/C/I from ``eval.dci._compute_dci`` — the repo's GBT implementation, not re-derived.
+
+    Split positionally at ``train_ratio`` and transposed to (features, samples), matching
+    how ``compute_dci_synthetic`` calls it, so these numbers line up with the ones the
+    training-time eval writes rather than being a second opinion computed differently.
+    """
+    from eval.dci import _compute_dci
+
+    split = int(len(X) * train_ratio)
+    scores, _ = _compute_dci(X[:split].T, z[:split].T, X[split:].T, z[split:].T, ["continuous"] * z.shape[1])
+    return {k: float(v) for k, v in scores.items()}
+
+
+def recovery(X, X_v2, z, names, with_dci=True):
+    """Per-factor ridge R², both MCC flavours, DCI, and the content->view leakage probe."""
     mcc = block_mcc(X, z)
+    chan = channel_mcc(X, z)
+    chan_s = channel_mcc(X, z, method="spearman")
     per_factor = {
         nm: {
             "ridge_r2": float(cv_probe_r2(X, z[:, j])["mean"]),
             "mcc": float(mcc["per_factor"][j]),
             "mcc_std": float(mcc["per_factor_std"][j]),
+            "channel_mcc": float(chan["per_factor"][j]),
+            "channel_mcc_spearman": float(chan_s["per_factor"][j]),
         }
         for j, nm in enumerate(names)
     }
     labels = np.array([0] * len(X) + [1] * len(X_v2))
-    return {
+    out = {
         "block_mcc": float(mcc["mean"]),
+        "channel_mcc": float(chan["mean"]),
+        "channel_mcc_spearman": float(chan_s["mean"]),
         "ridge_r2_mean": float(np.mean([v["ridge_r2"] for v in per_factor.values()])),
         "content_to_view_acc": float(cv_probe_acc(np.vstack([X, X_v2]), labels)["mean"]),
         "assignment_identity": float(mcc["assignment_identity"]),
+        "channel_assignment_identity": float(chan["assignment_identity"]),
+        "n_matched_channels": int(chan["n_matched"]),
         "per_factor": per_factor,
     }
+    if with_dci:
+        out["dci"] = dci_scores(X, z)
+    return out
 
 
 def print_recovery(res, floor, names):
     head = "" if floor is None else f"{'floor':>10s}{'Δ':>10s}"
     print("\n=== recovery (content block) ===", flush=True)
     print(f"  {'metric':<24s}{'value':>10s}" + head, flush=True)
-    for key, label in (
+    rows = [
         ("block_mcc", "block MCC"),
+        ("channel_mcc", "channel MCC"),
+        ("channel_mcc_spearman", "channel MCC (spearman)"),
         ("ridge_r2_mean", "ridge R² (mean)"),
         ("content_to_view_acc", "content->view acc"),
-    ):
+    ]
+    for key, label in rows:
         line = f"  {label:<24s}{res[key]:>10.3f}"
         if floor is not None:
             line += f"{floor[key]:>10.3f}{res[key] - floor[key]:>+10.3f}"
         print(line, flush=True)
     print(f"  {'(MCC assignment id.)':<24s}{res['assignment_identity']:>10.3f}", flush=True)
 
+    if res.get("dci"):
+        print("\n=== DCI (GBT importances) ===", flush=True)
+        print(f"  {'metric':<24s}{'value':>10s}" + head, flush=True)
+        for key, label in (
+            ("disentanglement", "disentanglement"),
+            ("completeness", "completeness"),
+            ("informativeness_test", "informativeness (test)"),
+            ("informativeness_train", "informativeness (train)"),
+        ):
+            line = f"  {label:<24s}{res['dci'][key]:>10.3f}"
+            if floor is not None and floor.get("dci"):
+                line += f"{floor['dci'][key]:>10.3f}{res['dci'][key] - floor['dci'][key]:>+10.3f}"
+            print(line, flush=True)
+
     print("\n=== per factor ===", flush=True)
     print(
-        f"  {'factor':<20s}{'ridge R²':>10s}{'MCC':>8s}{'±':>7s}"
+        f"  {'factor':<20s}{'ridge R²':>10s}{'blockMCC':>10s}{'±':>7s}{'chanMCC':>9s}"
         + ("" if floor is None else f"{'R² floor':>10s}{'Δ':>10s}"),
         flush=True,
     )
     for nm in names:
         v = res["per_factor"][nm]
-        line = f"  {nm:<20s}{v['ridge_r2']:>10.3f}{v['mcc']:>8.3f}{v['mcc_std']:>7.3f}"
+        line = (
+            f"  {nm:<20s}{v['ridge_r2']:>10.3f}{v['mcc']:>10.3f}{v['mcc_std']:>7.3f}"
+            f"{v.get('channel_mcc', float('nan')):>9.3f}"
+        )
         if floor is not None:
             f = floor["per_factor"][nm]["ridge_r2"]
             line += f"{f:>10.3f}{v['ridge_r2'] - f:>+10.3f}"
@@ -285,14 +336,14 @@ def main():
     names = CONTENT_FACTOR_NAMES[: z.shape[1]]
 
     report = {"run_dir": args.run_dir, "pooling": pooling, "num_samples": int(len(X)), "settings": cfg}
-    report["trained"] = recovery(X, X2, z, names)
+    report["trained"] = recovery(X, X2, z, names, with_dci=not args.no_dci)
 
     floor = None
     if not args.no_floor:
         fX, fX2, _, _ = encode(
             build_model(cfg, device), ds, device, args.batch_size, cfg["content_channels"], patch_grid
         )
-        floor = recovery(fX, fX2, z, names)
+        floor = recovery(fX, fX2, z, names, with_dci=not args.no_dci)
         report["floor"] = floor
     print_recovery(report["trained"], floor, names)
 

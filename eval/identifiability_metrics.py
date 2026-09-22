@@ -355,6 +355,52 @@ def block_mcc(X, Z, kind="ridge", seeds=(0, 1, 2), n_splits=5):
     }
 
 
+def channel_mcc(X, Z, method="pearson"):
+    """Per-channel MCC: Hungarian-matched |corr| between raw channels and factors.
+
+    The classical MCC, and the strict counterpart to :func:`block_mcc`. No readout is
+    fitted, so the score only rises when a SINGLE channel tracks a factor — it is not
+    invariant to the rotation or mixing that block identifiability permits, and a
+    representation that carries every factor in a mixed subspace scores near chance here
+    while scoring high there. Read the pair together: block high with channel low means
+    the information is present but spread across channels rather than axis-aligned.
+
+    No cross-validation, because nothing is fitted: a correlation on held-out rows
+    estimates the same quantity with fewer samples. ``method="spearman"`` scores monotone
+    but nonlinear channel-factor relationships, which Pearson misses.
+
+    Returns the same keys as :func:`block_mcc` minus the seed spread, plus ``n_matched``:
+    with fewer channels than factors the assignment can only cover ``n_matched`` of them
+    and the rest stay NaN rather than counting as zero.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    Z = np.asarray(Z, dtype=np.float64)
+    if Z.ndim == 1:
+        Z = Z[:, None]
+    n_factors = Z.shape[1]
+    if X.shape[1] == 0 or n_factors == 0 or X.shape[0] < 3:
+        nanvec = np.full(max(n_factors, 1), float("nan"))
+        return {"mean": float("nan"), "per_factor": nanvec, "assignment_identity": float("nan"), "n_matched": 0}
+
+    if method == "spearman":
+        from scipy.stats import rankdata
+
+        X, Z = rankdata(X, axis=0), rankdata(Z, axis=0)
+    elif method != "pearson":
+        raise ValueError(f"Unknown method: {method!r}. Expected 'pearson' or 'spearman'.")
+
+    corr = _abs_corr_matrix(X, Z)
+    row, col = linear_sum_assignment(-corr)
+    per_factor = np.full(n_factors, np.nan)
+    per_factor[col] = corr[row, col]
+    return {
+        "mean": float(corr[row, col].mean()),
+        "per_factor": per_factor,
+        "assignment_identity": float(np.mean(row == col)),
+        "n_matched": int(len(col)),
+    }
+
+
 def _abs_corr_matrix(A, B):
     """|Pearson| between every column of A (rows) and B (cols)."""
     dA, dB = A.shape[1], B.shape[1]
