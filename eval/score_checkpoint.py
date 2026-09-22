@@ -10,6 +10,10 @@ and reports three things about the resulting vectors:
    training. Every headline is printed as a delta against it. On this generator an
    untrained encoder already scores ~0.38 block-MCC and ~0.16 R² at GAP pooling, so a raw
    number on its own says nothing about what was learned.
+2b. **Per encoder** — the same metrics for each view's encoder separately, each against
+   its own floor. Under ``--separate-encoders`` (the default) the two are tied only by a
+   loss on their OUTPUTS, so nothing makes them equally good at carrying a factor;
+   reporting view 1 as "the model" hides a lopsided pair.
 3. **Causal graph** — the PC algorithm run on the decoded factors, scored against the
    generator's true SCM adjacency, via ``eval.run_causal_recovery.evaluate_arrays`` (the
    same protocol the rest of the repo uses; not re-derived here). Alongside it, PC run on
@@ -50,6 +54,12 @@ def parse_args():
     p.add_argument("--no-cuda", action="store_true")
     p.add_argument("--no-floor", action="store_true", help="Skip the untrained twin (faster, and unreportable)")
     p.add_argument("--no-graph", action="store_true", help="Skip PC graph recovery")
+    p.add_argument(
+        "--no-per-encoder",
+        action="store_true",
+        help="Score view 1 only. By default both views' encoders are scored separately, "
+        "since under --separate-encoders nothing forces them to be equally good.",
+    )
     p.add_argument(
         "--no-dci",
         action="store_true",
@@ -265,6 +275,44 @@ def print_graph(panel, title):
     )
 
 
+ENCODER_ROWS = (
+    ("block_mcc", "block MCC"),
+    ("channel_mcc", "channel MCC"),
+    ("ridge_r2_mean", "ridge R² (mean)"),
+)
+
+
+def print_encoder_comparison(v1, v2, floor_v1, floor_v2, shared_encoder):
+    """The two views' encoders side by side, each against its own floor.
+
+    Each view gets its own floor column because the two untrained encoders are separate
+    random draws (``encoder_v1`` is a deep copy at init but diverges immediately), so a
+    view-1 floor is not the right reference for view 2.
+    """
+    print("\n=== per encoder ===", flush=True)
+    if shared_encoder:
+        print("  (--no-separate-encoders: one encoder, two view inputs)", flush=True)
+    has_floor = floor_v1 is not None and floor_v2 is not None
+    head = f"  {'metric':<20s}{'view 1':>9s}{'view 2':>9s}{'gap':>9s}"
+    print(head + (f"{'Δ v1':>9s}{'Δ v2':>9s}" if has_floor else ""), flush=True)
+    for key, label in ENCODER_ROWS:
+        a, b = v1[key], v2[key]
+        line = f"  {label:<20s}{a:>9.3f}{b:>9.3f}{a - b:>+9.3f}"
+        if has_floor:
+            line += f"{a - floor_v1[key]:>+9.3f}{b - floor_v2[key]:>+9.3f}"
+        print(line, flush=True)
+    if v1.get("dci") and v2.get("dci"):
+        for key, label in (("disentanglement", "DCI disentangle."), ("completeness", "DCI completeness")):
+            a, b = v1["dci"][key], v2["dci"][key]
+            line = f"  {label:<20s}{a:>9.3f}{b:>9.3f}{a - b:>+9.3f}"
+            if has_floor and floor_v1.get("dci") and floor_v2.get("dci"):
+                line += f"{a - floor_v1['dci'][key]:>+9.3f}{b - floor_v2['dci'][key]:>+9.3f}"
+            print(line, flush=True)
+    # content->view accuracy is one probe over both views' rows, so it is a property of the
+    # pair and identical whichever view is passed first. Printed once, not per encoder.
+    print(f"  {'content->view acc':<20s}{v1['content_to_view_acc']:>9.3f}   (shared: one probe over both)", flush=True)
+
+
 def graph_panel(X, z, adjacency, args):
     """PC recovery for one feature matrix, or None when causal-learn is not installed.
 
@@ -339,6 +387,7 @@ def main():
     report["trained"] = recovery(X, X2, z, names, with_dci=not args.no_dci)
 
     floor = None
+    fX = fX2 = None
     if not args.no_floor:
         fX, fX2, _, _ = encode(
             build_model(cfg, device), ds, device, args.batch_size, cfg["content_channels"], patch_grid
@@ -346,6 +395,19 @@ def main():
         floor = recovery(fX, fX2, z, names, with_dci=not args.no_dci)
         report["floor"] = floor
     print_recovery(report["trained"], floor, names)
+
+    # View 2 goes through its own encoder under --separate-encoders (the default), and the
+    # two are trained only by a loss that ties their OUTPUTS together -- nothing makes them
+    # equally good at carrying a factor. Scoring one and reporting it as "the model" hides
+    # that, so score both.
+    if not args.no_per_encoder:
+        shared = cfg.get("no_separate_encoders", False)
+        report["trained_v2"] = recovery(X2, X, z, names, with_dci=not args.no_dci)
+        floor_v2 = None
+        if floor is not None:
+            floor_v2 = recovery(fX2, fX, z, names, with_dci=not args.no_dci)
+            report["floor_v2"] = floor_v2
+        print_encoder_comparison(report["trained"], report["trained_v2"], floor, floor_v2, shared)
 
     if not args.no_graph:
         if adj is None:
