@@ -312,6 +312,27 @@ def print_encoder_comparison(v1, v2, floor_v1, floor_v2, shared_encoder):
     # pair and identical whichever view is passed first. Printed once, not per encoder.
     print(f"  {'content->view acc':<20s}{v1['content_to_view_acc']:>9.3f}   (shared: one probe over both)", flush=True)
 
+    # Per factor, because a matching pair of MEANS can still hide the two encoders having
+    # split the factors between them — each carrying what the other dropped.
+    pf1, pf2 = v1.get("per_factor") or {}, v2.get("per_factor") or {}
+    if not pf1 or not pf2:
+        return
+    print("\n  --- per factor, both encoders ---", flush=True)
+    print(
+        f"  {'factor':<20s}{'v1 R²':>9s}{'v2 R²':>9s}{'gap':>9s}"
+        f"{'v1 bMCC':>10s}{'v2 bMCC':>10s}{'gap':>9s}"
+        f"{'v1 cMCC':>10s}{'v2 cMCC':>10s}{'gap':>9s}",
+        flush=True,
+    )
+    for nm in pf1:
+        a, b = pf1[nm], pf2.get(nm, {})
+        cells = ""
+        for key in ("ridge_r2", "mcc", "channel_mcc"):
+            x, y = a.get(key, float("nan")), b.get(key, float("nan"))
+            width = 9 if key == "ridge_r2" else 10
+            cells += f"{x:>{width}.3f}{y:>10.3f}{x - y:>+9.3f}"
+        print(f"  {nm:<20s}{cells}", flush=True)
+
 
 def graph_panel(X, z, adjacency, args):
     """PC recovery for one feature matrix, or None when causal-learn is not installed.
