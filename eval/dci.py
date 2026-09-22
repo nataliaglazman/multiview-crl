@@ -659,6 +659,7 @@ def compute_dci_synthetic(
         #                    view-invariant (clean of style), the Yao/von Kügelgen claim.
         try:
             from eval.identifiability_metrics import block_mcc as _block_mcc
+            from eval.identifiability_metrics import channel_mcc as _channel_mcc
             from eval.identifiability_metrics import view_invariance as _view_invariance
 
             # ``block_mcc`` already computes a matched |corr| per factor; keep it on the
@@ -666,14 +667,22 @@ def compute_dci_synthetic(
             # ``["mean"]``, so callers can see WHICH factors a block recovers. Attached to
             # the detail dict rather than to ``results`` directly because bare arrays there
             # break the scalar-only consumers (``flatten_dci_results``, the logging loop).
+            # Both MCC flavours, because they answer different questions: block_mcc fits a
+            # readout first and so is invariant to the mixing block identifiability allows,
+            # while channel_mcc fits nothing and only rises when ONE channel tracks a
+            # factor. Block high with channel low means the information is present but
+            # smeared across the block rather than axis-aligned.
             def _keep_mcc(label, repr_arr, factor_arr):
                 m = _block_mcc(repr_arr, factor_arr)
+                c = _channel_mcc(repr_arr, factor_arr)
                 results[f"{prefix}{label}/block_mcc"] = m["mean"]
+                results[f"{prefix}{label}/channel_mcc"] = c["mean"]
                 d = results.get(f"{prefix}{label.replace('->', '→')}/detail")
                 if isinstance(d, dict):
                     d["per_factor_mcc"] = m["per_factor"]
                     d["per_factor_mcc_std"] = m["per_factor_std"]
                     d["assignment_identity"] = m["assignment_identity"]
+                    d["per_factor_channel_mcc"] = c["per_factor"]
                 return m
 
             _keep_mcc("content->content", content_repr, gt_content)

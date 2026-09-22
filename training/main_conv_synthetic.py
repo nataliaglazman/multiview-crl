@@ -270,13 +270,17 @@ def per_factor_scores(results):
         if not isinstance(detail, dict):
             continue
         names = detail.get("factor_names") or []
-        ridge, mcc, mcc_std = (detail.get(k) for k in ("per_factor_ridge", "per_factor_mcc", "per_factor_mcc_std"))
+        ridge, mcc, mcc_std, chan = (
+            detail.get(k)
+            for k in ("per_factor_ridge", "per_factor_mcc", "per_factor_mcc_std", "per_factor_channel_mcc")
+        )
 
         def at(arr, j):
             return float(arr[j]) if arr is not None and j < len(arr) else float("nan")
 
         out[block] = {
-            nm: {"ridge": at(ridge, j), "mcc": at(mcc, j), "mcc_std": at(mcc_std, j)} for j, nm in enumerate(names)
+            nm: {"ridge": at(ridge, j), "mcc": at(mcc, j), "mcc_std": at(mcc_std, j), "chan": at(chan, j)}
+            for j, nm in enumerate(names)
         }
     return out
 
@@ -294,10 +298,13 @@ def print_per_factor(scores, floor=None, writer=None, step=0):
             continue
         has_floor = bool(floor) and block in floor
         print(f"    --- per-factor recovery: {block} ---", flush=True)
-        head = f"      {'factor':<20s}{'ridge R²':>9s}{'MCC':>8s}{'±':>7s}"
+        head = f"      {'factor':<20s}{'ridge R²':>9s}{'blockMCC':>10s}{'±':>7s}{'chanMCC':>9s}"
         print(head + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""), flush=True)
         for nm, v in rows.items():
-            line = f"      {nm:<20s}{v['ridge']:>9.3f}{v['mcc']:>8.3f}{v['mcc_std']:>7.3f}"
+            line = (
+                f"      {nm:<20s}{v['ridge']:>9.3f}{v['mcc']:>10.3f}{v['mcc_std']:>7.3f}"
+                f"{v.get('chan', float('nan')):>9.3f}"
+            )
             if has_floor and nm in floor[block]:
                 fl = floor[block][nm]["ridge"]
                 line += f"{fl:>9.3f}{v['ridge'] - fl:>+12.3f}"
@@ -306,6 +313,7 @@ def print_per_factor(scores, floor=None, writer=None, step=0):
                 tag = block.replace("→", "_to_")
                 writer.add_scalar(f"per_factor/{tag}/{nm}/ridge_r2", v["ridge"], step)
                 writer.add_scalar(f"per_factor/{tag}/{nm}/mcc", v["mcc"], step)
+                writer.add_scalar(f"per_factor/{tag}/{nm}/channel_mcc", v["chan"], step)
 
 
 BEST_METRIC_KEYS = {"block_mcc": "content->content/block_mcc", "ridge_r2": "content->content/informativeness_ridge"}
@@ -349,9 +357,15 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
 
     print("    --- identifiability summary ---", flush=True)
     show("content->content/block_mcc")
+    show("content->content/channel_mcc")
     show("content->content/informativeness_ridge")
     show("content->style/block_mcc")
     show("content->view/acc")
+
+    # DCI was already being computed here every eval and thrown away unprinted.
+    print("    --- DCI (GBT importances) ---", flush=True)
+    for _k in ("disentanglement", "completeness", "informativeness_test"):
+        show(f"content->content/{_k}")
 
     scores = per_factor_scores(results)
     print_per_factor(scores, floor=floor, writer=writer, step=step)
