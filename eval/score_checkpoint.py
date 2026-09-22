@@ -106,6 +106,7 @@ def make_val_dataset(cfg, num_samples):
         synthetic_normalize=cfg.get("synthetic_normalize", "per_sample"),
         synthetic_causal=cfg.get("synthetic_causal", False),
         synthetic_clean_content=cfg.get("synthetic_clean_content", False),
+        synthetic_lesion_placement=cfg.get("synthetic_lesion_placement", "legacy"),
     )
 
 

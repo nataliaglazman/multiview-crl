@@ -639,6 +639,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_content_squash="auto",
         synthetic_content_amp_scale=None,
         synthetic_lesion_radius=0.1,
+        synthetic_lesion_placement="legacy",
         synthetic_cortex_parameterization="additive",
         synthetic_center_local_deformations=False,
         **kwargs,
@@ -704,6 +705,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             content_squash=synthetic_content_squash,
             content_amp_scale=synthetic_content_amp_scale,
             lesion_radius=synthetic_lesion_radius,
+            lesion_placement=synthetic_lesion_placement,
             cortex_parameterization=synthetic_cortex_parameterization,
             center_local_deformations=synthetic_center_local_deformations,
         )

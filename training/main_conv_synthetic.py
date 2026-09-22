@@ -125,6 +125,12 @@ def parse_args():
     )
     p.add_argument("--synthetic-style-scale", type=float, default=1.0)
     p.add_argument("--synthetic-content-scale", type=float, default=1.0)
+    p.add_argument(
+        "--synthetic-lesion-placement",
+        choices=("legacy", "wm_interior"),
+        default="legacy",
+        help="wm_interior places a full fixed-radius sphere inside final WM labels; legacy reproduces old runs",
+    )
     p.add_argument("--synthetic-n-deformation-grid", type=int, default=4)
     p.add_argument("--synthetic-n-fissure-grid", type=int, default=8)
     p.add_argument("--synthetic-hierarchical-content", action="store_true")
@@ -167,6 +173,7 @@ def make_dataset(args, mode, num_samples):
         synthetic_normalize=args.synthetic_normalize,
         synthetic_causal=args.synthetic_causal,
         synthetic_clean_content=args.synthetic_clean_content,
+        synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
     )
 
 

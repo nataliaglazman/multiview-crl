@@ -122,8 +122,15 @@ def parse_args() -> argparse.ArgumentParser:
         "--synthetic-lesion-radius",
         type=float,
         default=0.1,
-        help="Sphere-mode lesion radius in [-1,1] coords (0.1 = 1.6 voxels at res=32). The WM "
-        "margin tracks it, so the lesion stays inside the white matter as it grows.",
+        help="Sphere-mode lesion radius in [-1,1] coords (0.1 = 1.6 voxels at res=32). "
+        "Use --synthetic-lesion-placement wm_interior for containment in final WM labels.",
+    )
+    parser.add_argument(
+        "--synthetic-lesion-placement",
+        choices=("legacy", "wm_interior"),
+        default="legacy",
+        help="wm_interior places an untruncated fixed-radius sphere inside actual WM. "
+        "Fails explicitly if no centre fits. legacy reproduces previous data/checkpoints.",
     )
     parser.add_argument(
         "--synthetic-cortex-parameterization",
