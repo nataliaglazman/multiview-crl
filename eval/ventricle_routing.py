@@ -214,7 +214,7 @@ def score_swaps(xa, xb, decoded, support, foreground):
     return result
 
 
-def decode_swaps(model, samples, device):
+def decode_swaps(model, samples, device, *, measure_gap=False):
     """One view-major forward pins each view's mask across both donor states."""
     import torch
 
@@ -320,6 +320,11 @@ def decode_swaps(model, samples, device):
             def response(name, features):
                 diff = features[slices["b"]] - features[slices["a"]]
                 view_diag[name + "_delta_rms"] = diff.flatten(1).square().mean(1).sqrt().cpu().numpy()
+                if measure_gap:
+                    # Compare the actual spatial response with the response left
+                    # after global pooling. This is sensitivity, not a probe score.
+                    pooled = diff.mean(tuple(range(2, diff.ndim)))
+                    view_diag[name + "_gap_delta_rms"] = pooled.square().mean(1).sqrt().cpu().numpy()
 
             for level, feature in enumerate(out[2]):
                 mask = out[6].get(level)
