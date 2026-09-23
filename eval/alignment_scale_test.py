@@ -150,7 +150,7 @@ def build_pairs(ds, n, regime, device):
         tissue, lesion = inner.renderer.render_structure(
             lat["z_content"], lat["z_deformation"], lat["z_fissure"], device=device, clean=inner.clean_content
         )
-        seed = inner.seed * 1000003 + i
+        seed = inner.sample_seed_for(i)
         s1, s2 = lat["z_style_v1"], lat["z_style_v2"]
         # Each regime turns ON exactly one source of view difference.
         mod1, mod2 = ("T1", "T1")

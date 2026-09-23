@@ -3,13 +3,15 @@
 import argparse
 import ast
 import unittest
+import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
 from data.datasets import SyntheticBrainDataset
-from eval.synthetic_dataset import PseudoMRIRenderer
+from eval.synthetic_dataset import LesionPlacementError, PseudoMRIRenderer
 
 
 class PlacementTests(unittest.TestCase):
@@ -83,6 +85,84 @@ class PlacementTests(unittest.TestCase):
             PseudoMRIRenderer(lesion_mode="field", lesion_placement="wm_interior")
         with self.assertRaisesRegex(ValueError, "positive finite"):
             PseudoMRIRenderer(lesion_radius=0, lesion_placement="wm_interior")
+
+    def test_no_room_is_a_subject_error_but_bad_positions_are_a_config_error(self):
+        r = PseudoMRIRenderer(res=32, lesion_radius=0.4, lesion_placement="wm_interior")
+        tissue = torch.zeros(32, 32, 32, dtype=torch.long)
+        tissue[10:15, 10:15, 10:15] = 2
+        with self.assertRaises(LesionPlacementError):
+            r._sphere_in_white_matter(tissue, torch.zeros(3))
+        with self.assertRaises(LesionPlacementError):
+            r._sphere_in_white_matter(tissue * 0, torch.zeros(3))
+        # Out-of-range positions are a configuration error: redrawing would only hide it.
+        with self.assertRaises(ValueError) as caught:
+            r._sphere_in_white_matter(tissue, torch.tensor([2.0, 0.0, 0.0]))
+        self.assertNotIsInstance(caught.exception, LesionPlacementError)
+
+    def redraw_datasets(self, radius, n=16):
+        kw = dict(
+            mode="train",
+            spatial_size=(32,) * 3,
+            cache=False,
+            synthetic_num_samples=n,
+            synthetic_n_content=9,
+            synthetic_n_style=3,
+            synthetic_normalize="fixed_reference",
+            synthetic_clean_content=True,
+            synthetic_identifiable_ventricle=True,
+            synthetic_lesion_radius=radius,
+        )
+        legacy = SyntheticBrainDataset(**kw)._inner
+        interior = SyntheticBrainDataset(synthetic_lesion_placement="wm_interior", **kw)._inner
+        return legacy, interior, lambda: SyntheticBrainDataset(synthetic_lesion_placement="wm_interior", **kw)._inner
+
+    def test_subjects_without_room_are_redrawn_reproducibly(self):
+        legacy, interior, fresh = self.redraw_datasets(0.2)
+        # The original draw does not depend on placement, so legacy exposes it.
+        failing, fitting = [], []
+        for i in range(16):
+            lat = legacy[i][2]
+            try:
+                interior.renderer.render_structure(
+                    lat["z_content"], lat["z_deformation"], lat["z_fissure"], "cpu", clean=True
+                )
+                fitting.append(i)
+            except LesionPlacementError:
+                failing.append(i)
+        self.assertTrue(failing and fitting, (failing, fitting))
+        uncached = fresh()
+        for i in failing:
+            with self.assertWarnsRegex(UserWarning, f"Subject {i}: no room"):
+                a, b, lat = interior[i]
+            seed = interior.sample_seed_for(i)
+            self.assertNotEqual(seed, interior.seed * 1000003 + i)
+            self.assertFalse(torch.equal(lat["z_content"], legacy[i][2]["z_content"]))
+            tissue, load = interior.renderer.render_structure(
+                lat["z_content"], lat["z_deformation"], lat["z_fissure"], "cpu", clean=True
+            )
+            self.assert_sphere(interior.renderer, tissue, load)
+            replay = interior.render_pseudo_mri(
+                lat["z_content"], lat["z_deformation"], lat["z_fissure"], lat["z_style_v1"], lat["z_style_v2"], seed
+            )
+            torch.testing.assert_close(a, replay[0], rtol=0, atol=0)
+            torch.testing.assert_close(b, replay[1], rtol=0, atol=0)
+            with warnings.catch_warnings():
+                # A redrawn subject is reported once, not on every access.
+                warnings.filterwarnings("error", message=r"Subject \d+: no room")
+                torch.testing.assert_close(a, interior[i][0], rtol=0, atol=0)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self.assertEqual(uncached.sample_seed_for(i), seed)  # structure-only path agrees
+        for i in fitting:
+            self.assertEqual(interior.sample_seed_for(i), interior.seed * 1000003 + i)
+            torch.testing.assert_close(interior[i][2]["z_content"], legacy[i][2]["z_content"], rtol=0, atol=0)
+        self.assertEqual([legacy.sample_seed_for(i) for i in range(16)], [legacy.seed * 1000003 + i for i in range(16)])
+
+    def test_impossible_radius_fails_after_bounded_redraws(self):
+        _, interior, _ = self.redraw_datasets(0.3, n=2)
+        with patch.object(type(interior), "MAX_LESION_RESAMPLES", 2):
+            with self.assertRaisesRegex(LesionPlacementError, "none of 3 candidate anatomies"):
+                interior[0]
 
     def test_legacy_formula_and_anatomy_unchanged(self):
         old = PseudoMRIRenderer(res=64)

@@ -8,6 +8,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 
+class LesionPlacementError(ValueError):
+    """This subject's anatomy has no room for a complete ``wm_interior`` lesion.
+
+    A property of one subject, not of the configuration, so the dataset redraws the
+    subject when it sees this. Configuration errors stay plain ``ValueError``.
+    """
+
+
 def build_content_scm(n_dims, graph_type="chain", edge_prob=0.5, seed=0):
     rng = np.random.RandomState(seed)
     adj = np.zeros((n_dims, n_dims), dtype=bool)
@@ -246,7 +254,7 @@ class PseudoMRIRenderer(nn.Module):
         white = tissue_map.detach().cpu().numpy() == 2
         positions = np.argwhere(white)
         if not len(positions):
-            raise ValueError("No white matter available for wm_interior lesion placement")
+            raise LesionPlacementError("No white matter available for wm_interior lesion placement")
         # Crop before the CPU distance transform: most of a volume is background.
         lower, upper = positions.min(0), positions.max(0) + 1
         slices = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper))
@@ -256,7 +264,7 @@ class PseudoMRIRenderer(nn.Module):
         # discretized sphere used by this renderer, not subvoxel tissue geometry.
         admissible = distance > self.lesion_radius + 1e-7
         if not admissible.any():
-            raise ValueError(
+            raise LesionPlacementError(
                 f"No voxel-centred sphere of radius {self.lesion_radius:g} fits entirely in final white matter "
                 f"at res={self.res} (maximum centre clearance {distance.max():.6g}). "
                 "wm_interior will not shrink or discard the lesion."
@@ -701,6 +709,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.causal_noise_scale = causal_noise_scale
         self.causal_nonlinearity = causal_nonlinearity
         self.clean_content = clean_content
+        # Accepted candidate draw per subject; see _first_fitting.
+        self._accepted_attempt = {}
 
         # Content prior. "normal" is z ~ N(0,1) (or the SCM), which the renderer's squash
         # then has to fold into [-1, 1] — non-injectively for the clamp, and with a linear
@@ -913,14 +923,66 @@ class Synthetic3DDisentanglementDataset(Dataset):
         mu, sd = self._pit_stats
         return torch.erf((z - mu) / (sd * (2.0**0.5)))
 
+    # Under wm_interior, a subject whose anatomy leaves no room for a complete lesion is
+    # replaced by its next candidate draw. Bounded so an impossible radius fails instead
+    # of looping.
+    MAX_LESION_RESAMPLES = 100
+
+    def _candidate_seed(self, idx, attempt):
+        """RNG seed of subject ``idx``'s ``attempt``-th candidate; attempt 0 is the original draw."""
+        base = self.seed * 1000003 + idx
+        return base if attempt == 0 else (base * 1000003 + attempt) % 2**63
+
+    def _first_fitting(self, idx, render):
+        """First candidate of subject ``idx`` that ``render(seed, draw)`` accepts.
+
+        Only ``wm_interior`` raises ``LesionPlacementError``, so every other setting
+        accepts attempt 0 and is unchanged. Subjects that fit on the original draw keep it.
+        """
+        start = self._accepted_attempt.get(idx, 0)
+        for attempt in range(start, self.MAX_LESION_RESAMPLES + 1):
+            seed = self._candidate_seed(idx, attempt)
+            draw = self._draw_pseudo_mri(seed)
+            try:
+                out = render(seed, draw)
+            except LesionPlacementError:
+                continue
+            if attempt and idx not in self._accepted_attempt:
+                import warnings
+
+                warnings.warn(
+                    f"Subject {idx}: no room for a complete lesion of radius {self.renderer.lesion_radius:g} in "
+                    f"its original anatomy; redrew it (candidate {attempt}). Lesion size and containment are "
+                    "unchanged; the subject's latents come from the redrawn candidate.",
+                    stacklevel=2,
+                )
+            self._accepted_attempt[idx] = attempt
+            return seed, draw, out
+        raise LesionPlacementError(
+            f"Subject {idx}: none of {self.MAX_LESION_RESAMPLES + 1} candidate anatomies has room for a complete "
+            f"lesion of radius {self.renderer.lesion_radius:g} at res={self.res}. The radius is too large for "
+            "this anatomy distribution; lower --synthetic-lesion-radius."
+        )
+
     def sample_seed_for(self, idx):
         """The per-sample RNG seed used by ``_pseudo_mri_item``.
 
         Exposed so an interventional evaluator can re-render a sample with one
         latent overwritten while keeping the *rendering* noise identical to the
-        observational draw.
+        observational draw. Under ``wm_interior`` this is the seed of the ACCEPTED
+        candidate, so a redrawn subject replays exactly as the dataset renders it.
         """
-        return self.seed * 1000003 + idx
+        if self.mode != "pseudo_mri" or self.renderer.lesion_placement != "wm_interior":
+            return self._candidate_seed(idx, 0)
+        if idx not in self._accepted_attempt:
+            # Structure-only check: the views are not needed to decide whether a lesion fits.
+            self._first_fitting(
+                idx,
+                lambda seed, d: self.renderer.render_structure(
+                    d["z_content"], d["z_deformation"], d["z_fissure"], "cpu", clean=self.clean_content
+                ),
+            )
+        return self._candidate_seed(idx, self._accepted_attempt[idx])
 
     def render_pseudo_mri(
         self, z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed, z_lesion=None
@@ -963,9 +1025,10 @@ class Synthetic3DDisentanglementDataset(Dataset):
             )
         return x_v1, x_v2, (tissue > 0).unsqueeze(0).float()
 
-    def _pseudo_mri_item(self, idx):
-        sample_seed = self.seed * 1000003 + idx
+    def _draw_pseudo_mri(self, sample_seed):
+        """Every latent of one candidate subject, drawn from ``sample_seed`` in the generator's fixed order."""
         sample_gen = torch.Generator().manual_seed(sample_seed)
+        z_global = z_residuals = None
 
         if self.causal:
             z_content = sample_content_from_scm(self.scm, sample_gen, self.causal_noise_scale, self.causal_nonlinearity)
@@ -1041,28 +1104,49 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 field_lengthscales = torch.tensor([ls_def, ls_fis], dtype=torch.float32)
         z_style_v1 = torch.randn(self.n_style, generator=sample_gen)
         z_style_v2 = torch.randn(self.n_style, generator=sample_gen)
-
-        x_v1, x_v2, brain_mask = self.render_pseudo_mri(
-            z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed, z_lesion=z_lesion
-        )
-
-        latents = {
+        return {
             "z_content": z_content,
             "z_deformation": z_deformation,
             "z_fissure": z_fissure,
+            "z_lesion": z_lesion,
+            "field_lengthscales": field_lengthscales,
+            "z_global": z_global,
+            "z_residuals": z_residuals,
             "z_style_v1": z_style_v1,
             "z_style_v2": z_style_v2,
+        }
+
+    def _pseudo_mri_item(self, idx):
+        _, d, (x_v1, x_v2, brain_mask) = self._first_fitting(
+            idx,
+            lambda seed, d: self.render_pseudo_mri(
+                d["z_content"],
+                d["z_deformation"],
+                d["z_fissure"],
+                d["z_style_v1"],
+                d["z_style_v2"],
+                seed,
+                z_lesion=d["z_lesion"],
+            ),
+        )
+
+        latents = {
+            "z_content": d["z_content"],
+            "z_deformation": d["z_deformation"],
+            "z_fissure": d["z_fissure"],
+            "z_style_v1": d["z_style_v1"],
+            "z_style_v2": d["z_style_v2"],
             "brain_mask": brain_mask,
         }
-        if z_lesion is not None:
-            latents["z_lesion"] = z_lesion
-        if field_lengthscales is not None:
-            latents["field_lengthscales"] = field_lengthscales
+        if d["z_lesion"] is not None:
+            latents["z_lesion"] = d["z_lesion"]
+        if d["field_lengthscales"] is not None:
+            latents["field_lengthscales"] = d["field_lengthscales"]
         if self.causal:
             latents["causal_adj"] = torch.from_numpy(self.scm["adj"].astype(np.float32))
         elif self.hierarchical_content:
-            latents["z_global_atrophy"] = z_global
-            latents["z_content_residuals"] = z_residuals
+            latents["z_global_atrophy"] = d["z_global"]
+            latents["z_content_residuals"] = d["z_residuals"]
 
         return x_v1, x_v2, latents
 

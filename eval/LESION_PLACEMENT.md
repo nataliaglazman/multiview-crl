@@ -61,10 +61,26 @@ their original images. Both old and new modes are explicit CLI choices. Use a
 new run directory when enabling `wm_interior`; changing the generator underneath
 an old checkpoint is not a matched evaluation.
 
-If no complete voxel-centred sphere fits, the generator raises an error reporting
-radius, resolution and maximum clearance. It does not resample the subject,
-silently remove a lesion, or change its size. Field-lesion mode is unchanged;
-combining it with `wm_interior` is rejected because this option places spheres.
+If no complete voxel-centred sphere fits a subject's anatomy, the renderer raises
+`LesionPlacementError` (a `ValueError`) reporting radius, resolution and maximum
+clearance. It never truncates, shrinks or removes a lesion. The dataset responds by
+**redrawing that subject**: it tries further deterministic candidate draws (all
+latents, not just the lesion) and keeps the first whose anatomy fits, warning once
+per redrawn subject. Subjects that fit on their original draw are byte-identical to
+before. `sample_seed_for(idx)` returns the accepted candidate's seed, so evaluators
+that re-render a subject reproduce it exactly. If none of
+`MAX_LESION_RESAMPLES + 1` candidates fits, the error says the radius is too large
+for the anatomy distribution.
+
+Redrawing conditions the anatomy distribution on "a complete lesion fits". For
+`experiments/synthetic_causal.yaml` at radius 0.1 (res 64) that replaces 2 of 3,900
+subjects (train 559, val 1429: small brains with enlarged ventricles, 3.00 voxels of
+clearance against a 3.15-voxel radius). At res 64 the voxelized lesion jumps from 123
+to 93 voxels at radius 0.0952, so no radius in between keeps the size. Out-of-range
+position values stay a plain `ValueError` and are never redrawn: that is a
+configuration error. Latents passed explicitly to `render_pseudo_mri` (for example
+interventions) are not redrawn either; they raise as before. Field-lesion mode is
+unchanged; combining it with `wm_interior` is rejected because this option places spheres.
 
 For the supplied dense-run distribution (seed 42, clean IID content, resolution
 64, radius 0.1, default ventricles), all **2,000 training + 400 validation + 400
@@ -72,13 +88,14 @@ test** geometries passed, with zero non-WM overlap and 123 lesion voxels each.
 This scan uses the same first nine latent draws per sample as the dataset; the
 clean setting removes deformation/fissure nuisance. It does not train a model.
 An additional 128-subject scan with `identifiable_ventricle=True` found two
-anatomies where no sphere of radius 0.1 fits. Different anatomy/radius/resolution
-settings therefore require their own feasibility check.
+anatomies where no sphere of radius 0.1 fits; such subjects are now redrawn (see
+above). How many a setting redraws depends on anatomy, radius and resolution, so
+check the warnings when changing any of them.
 
 Tests cover complete sphere geometry, both ventricular variants, deterministic
-rendering, each position coordinate, disconnected WM, boundary cases, explicit
-failure on impossible placement, unchanged legacy behavior and train/eval
-propagation:
+rendering, each position coordinate, disconnected WM, boundary cases, redrawing of
+subjects with no room (reproducible via `sample_seed_for`), bounded failure when no
+candidate fits, unchanged legacy behavior and train/eval propagation:
 
 ```bash
 python -m unittest discover -s tests -p 'test_lesion_placement.py' -v
