@@ -1,0 +1,39 @@
+Factor diagnostics — reference: /home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-ident-vent-12-4-2
+Deltas are current minus reference; negative R² deltas mean degradation.
+Graph diagnostics use fixed alpha=0.05; unavailable metrics appear as —.
+Input order is preserved; directory names are not interpreted as training steps.
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-ident-vent-12-4-2
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+brain_size           0.922  +0.000       0.922    +0.000     0.0  0.927    2     0            —
+ventricle_size       0.722  +0.000       0.277    +0.000     0.0  0.734    0     0            —
+lesion_x             0.515  +0.000       0.515    +0.000     0.0  0.523    4     0            —
+lesion_y             0.643  +0.000       0.129    +0.000     0.0  0.654    2     0            —
+lesion_z             0.256  +0.000       0.038    +0.000     0.0  0.256    2     0            —
+cortical_thickness   0.827  +0.000       0.300    +0.000     0.0  0.832    4     0            —
+temporal_atrophy     0.614  +0.000       0.131    +0.000     0.0  0.653    1     0            —
+lr_asymmetry         0.615  +0.000       0.129    +0.000     0.0  0.631    4     0            —
+sulcal_widening      0.514  +0.000       0.058    +0.000     0.0  0.529    1     0            —
+
+/home/ng24/projects/multiview-crl/results/synthetic/synthetic-clean-content-causal-baseline-12-4
+  Comparison: matched
+Factor              Raw R²    ΔRaw  Partial R²  ΔPartial  Drop %  PC R²  SHD  ΔSHD  Rescue ΔSHD
+lesion_x             0.348  -0.167       0.348    -0.167    33.4  0.379    3    -1            —
+cortical_thickness   0.497  -0.330       0.173    -0.127    25.4  0.524    4     0            —
+lr_asymmetry         0.466  -0.149       0.056    -0.073    14.5  0.484    1    -3            —
+lesion_y             0.415  -0.228       0.079    -0.050    10.1  0.443    2     0            —
+temporal_atrophy     0.553  -0.061       0.089    -0.042     8.4  0.572    2     1            —
+brain_size           0.884  -0.039       0.884    -0.039     7.7  0.888    2     0            —
+lesion_z             0.146  -0.110       0.036    -0.002     0.4  0.160    3     1            —
+sulcal_widening      0.356  -0.158       0.064    +0.006     0.0  0.375    1     0            —
+ventricle_size       0.692  -0.030       0.400    +0.122     0.0  0.701    2     2            —
+
+Drop % = share of summed decreases in partial R² (improving factors are excluded).
+PC R² = held-out decoding after train-only PCA/scaling at the PC readout dimension.
+Incident SHD counts errors touching a factor; each graph error touches TWO factors.
+Positive rescue ΔSHD means replacing that decoded factor with truth reduced global SHD.
+Rescue is an oracle sensitivity check, not proof of the cause of training collapse.
+Raw and partial R² both falling supports loss of linearly decodable factor information.
+Stable raw R² with falling partial R² suggests loss beyond linearly fitted parent effects.
+Stable feature-probe R² with falling PC R² suggests sensitivity to PCA/readout compression.

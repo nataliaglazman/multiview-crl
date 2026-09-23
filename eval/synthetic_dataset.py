@@ -134,6 +134,7 @@ class PseudoMRIRenderer(nn.Module):
         lesion_radius=0.1,
         cortex_parameterization="additive",
         center_local_deformations=False,
+        lesion_placement="legacy",
     ):
         super().__init__()
         self.res = res
@@ -166,6 +167,13 @@ class PseudoMRIRenderer(nn.Module):
         # not boundary displacements and ignore this — use lesion_radius for those.
         self.content_amp_scale = content_amp_scale
         self.lesion_radius = lesion_radius
+        if lesion_placement not in ("legacy", "wm_interior"):
+            raise ValueError(f"lesion_placement must be legacy|wm_interior, got {lesion_placement!r}")
+        if lesion_placement == "wm_interior" and lesion_mode != "sphere":
+            raise ValueError("wm_interior placement is defined only for sphere lesions")
+        if lesion_placement == "wm_interior" and (res < 2 or not np.isfinite(lesion_radius) or lesion_radius <= 0):
+            raise ValueError("wm_interior requires res >= 2 and a positive finite lesion_radius")
+        self.lesion_placement = lesion_placement
         if cortex_parameterization not in ("additive", "nested", "midsurface", "patterned"):
             raise ValueError(
                 f"cortex_parameterization must be additive|nested|midsurface, got {cortex_parameterization!r}"
@@ -219,13 +227,64 @@ class PseudoMRIRenderer(nn.Module):
     # [7] left–right asymmetry, [8] sulcal widening.
     N_CONTENT_COMPONENTS = 9
 
+    def _sphere_in_white_matter(self, tissue_map, lesion_dir):
+        """Map three bounded position latents to an untruncated, voxel-centred sphere.
+
+        Erode the FINAL WM labels by the sphere radius, including volume edges.
+        Conditional inverse CDFs use x/y/z latents to choose x/y/z coordinates
+        among admissible centres. No random rejection, nearest-point collapse,
+        clipping of the sphere, or radius change is used. Quantization is explicit
+        at the voxel grid; uniform quantiles sample admissible centres uniformly.
+        """
+        from scipy.ndimage import distance_transform_edt
+
+        direction = lesion_dir.detach().double().cpu().numpy()
+        if direction.shape != (3,) or not np.isfinite(direction).all() or np.any(np.abs(direction) > 1 + 1e-6):
+            raise ValueError(
+                "wm_interior needs three finite position values in [-1,1]; use tanh/clamp or a bounded prior"
+            )
+        white = tissue_map.detach().cpu().numpy() == 2
+        positions = np.argwhere(white)
+        if not len(positions):
+            raise ValueError("No white matter available for wm_interior lesion placement")
+        # Crop before the CPU distance transform: most of a volume is background.
+        lower, upper = positions.min(0), positions.max(0) + 1
+        slices = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper))
+        spacing = 2.0 / (self.res - 1)
+        distance = distance_transform_edt(np.pad(white[slices], 1), sampling=spacing)[1:-1, 1:-1, 1:-1]
+        # Distance is to non-WM voxel centres. This guarantees containment of the
+        # discretized sphere used by this renderer, not subvoxel tissue geometry.
+        admissible = distance > self.lesion_radius + 1e-7
+        if not admissible.any():
+            raise ValueError(
+                f"No voxel-centred sphere of radius {self.lesion_radius:g} fits entirely in final white matter "
+                f"at res={self.res} (maximum centre clearance {distance.max():.6g}). "
+                "wm_interior will not shrink or discard the lesion."
+            )
+        quantiles = np.clip((direction + 1) / 2, 0, np.nextafter(1.0, 0.0))
+
+        def choose(counts, quantile):
+            cumulative = np.cumsum(counts, dtype=np.int64)
+            return int(np.searchsorted(cumulative, quantile * cumulative[-1], side="right"))
+
+        ix = choose(admissible.sum((1, 2)), quantiles[0])
+        iy = choose(admissible[ix].sum(1), quantiles[1])
+        iz = choose(admissible[ix, iy], quantiles[2])
+        index = tuple(int(i) for i in lower + np.array([ix, iy, iz]))
+        centre = self.coords[index]
+        sphere = torch.norm(self.coords - centre, dim=-1) < self.lesion_radius
+        if not sphere.any() or bool((sphere & (tissue_map != 2)).any()):
+            raise RuntimeError("White-matter sphere containment failed; refusing to truncate the lesion")
+        return sphere.to(self.coords.dtype)
+
     def render_structure(self, z_content, z_deformation, z_fissure, device, clean=False, z_lesion=None):
         """Deterministic given (z_content, z_deformation, z_fissure). Shared across views.
 
         z_content layout (9 components, extras default to 0):
             [0]  brain size      — WM radius ±0.1 around 0.5
             [1]  ventricle size  — CSF cavity ±0.05 around 0.15
-            [2:5] lesion xyz     — WM lesion center (direction within the WM)
+            [2:5] lesion xyz     — WM lesion position; wm_interior maps these to
+                                  conditional x/y/z quantiles of valid centres
             [5]  cortical thickness — GM shell width ±0.06 around 0.15
             [6]  temporal atrophy — shrinks a compact bilateral inferior–lateral
                                    temporal region (hippocampal volume proxy)
@@ -394,16 +453,11 @@ class PseudoMRIRenderer(nn.Module):
         # fissure sheet, not the ventricle signal (see render_modality's 5th LUT entry).
         tissue_map[fissure_mask] = 4 if self.identifiable_ventricle else 1
 
-        # WM lesion (z_content[2:5]): place the 0.1-radius lesion so it lands
-        # INSIDE the white matter for (almost) every draw. z_content[2:5] is a
-        # direction in the unit cube; scaling by lesion_reach/√3 bounds the centre
-        # norm to lesion_reach = radii_wm − margin, so centre+radius stays within
-        # WM regardless of direction. (Old code scaled to ±0.6 per axis → centre
-        # norm up to ~1.04 ≫ radii_wm≈0.5, so the lesion was absent in ~95% of
-        # samples and its 3 position dims were near-dead / unidentifiable.)
-        # Returned as a FLOAT load in [0, 1], not a boolean. In sphere mode it takes
-        # only {0, 1}, and render_modality's blend then reduces exactly to the old
-        # torch.where — the legacy path stays bit-identical.
+        # Sphere lesions: wm_interior uses the final tissue labels, avoiding CSF,
+        # fissure and cortex. Legacy placement uses only the geometric WM envelope
+        # (which still contains CSF) to reproduce previous experiments exactly.
+        # Return a FLOAT load in [0,1]; sphere loads are binary. Field mode is
+        # unchanged and is not governed by the sphere-placement option.
         if self.lesion_mode == "field":
             # WM membership: soft when wm_softness > 0, so the lesion's support does
             # not jump discontinuously with brain_size (a hard mask makes one content
@@ -425,9 +479,14 @@ class PseudoMRIRenderer(nn.Module):
             # Margin tracks the lesion radius (+0.02) so a larger lesion still lands
             # inside the WM for every direction, instead of poking through the boundary
             # and turning its own support into a function of brain_size.
-            lesion_reach = (radii_wm - (self.lesion_radius + 0.02)).clamp_min(0.05)
-            lesion_xyz = lesion_dir * (lesion_reach / (3**0.5))
-            lesion_load = ((torch.norm(self.coords - lesion_xyz, dim=-1) < self.lesion_radius) & mask_wm).to(dist.dtype)
+            if self.lesion_placement == "wm_interior":
+                lesion_load = self._sphere_in_white_matter(tissue_map, lesion_dir)
+            else:
+                lesion_reach = (radii_wm - (self.lesion_radius + 0.02)).clamp_min(0.05)
+                lesion_xyz = lesion_dir * (lesion_reach / (3**0.5))
+                lesion_load = ((torch.norm(self.coords - lesion_xyz, dim=-1) < self.lesion_radius) & mask_wm).to(
+                    dist.dtype
+                )
 
         return tissue_map, lesion_load
 
@@ -627,6 +686,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         lesion_radius=0.1,
         cortex_parameterization="additive",
         center_local_deformations=False,
+        lesion_placement="legacy",
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -768,6 +828,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 content_squash=content_squash,
                 content_amp_scale=content_amp_scale,
                 lesion_radius=lesion_radius,
+                lesion_placement=lesion_placement,
                 cortex_parameterization=cortex_parameterization,
                 center_local_deformations=center_local_deformations,
             )

@@ -101,11 +101,15 @@ def extract_features(
     mask_batch,
     encode_batch,
     level=0,
+    target_key=None,
+    include_patch_flat=False,
+    partition_ends=None,
 ):
     """Encode microbatches once, then apply foreground ANY over each full logical batch.
 
     Fit and held-out subjects never share a mask batch. CPU patch maps are retained
     only until a logical batch is complete; full-resolution images are not cached.
+    Optional target_key/partition_ends/patch_flat also support lesion localization.
     """
     import torch
     import torch.nn.functional as F
@@ -113,7 +117,8 @@ def extract_features(
 
     from eval.reconstruction_attribution import _inputs
 
-    features = {f"{v}/{p}": [] for v in VIEWS for p in POOLS}
+    pools = (*POOLS, "patch_flat") if include_patch_flat else POOLS
+    features = {f"{v}/{p}": [] for v in VIEWS for p in pools}
     targets, ids, groups, group_info = [], [], [], []
     canonical_indices = None
     grid_arg = getattr(args, "patch_grid_per_level", None)
@@ -124,11 +129,12 @@ def extract_features(
         grid_arg = tuple(grid)
     use_foreground = bool(getattr(args, "patch_foreground_mask", False))
     threshold = float(getattr(args, "patch_foreground_thresh", 0.05))
+    ends = list(partition_ends) if partition_ends is not None else [fit_samples, len(dataset)]
+    if not ends or ends[-1] != len(dataset) or any(a >= b for a, b in zip([0] + ends, ends)):
+        raise ValueError("Partition ends must increase strictly and end at dataset length.")
     with torch.no_grad():
-        for partition, begin, end in (
-            ("fit", 0, fit_samples),
-            ("test", fit_samples, len(dataset)),
-        ):
+        for number, (begin, end) in enumerate(zip([0] + ends, ends)):
+            partition = ("fit" if end <= fit_samples else "test") if partition_ends is None else f"partition_{number}"
             for start in range(begin, end, mask_batch):
                 stop = min(start + mask_batch, end)
                 loader = DataLoader(
@@ -165,12 +171,18 @@ def extract_features(
                         keep |= (frac >= threshold).any(0).cpu()
                     else:
                         keep.fill_(True)
-                    ys.append(batch["gt_latents"]["z_content"][:, 1].detach().cpu().numpy())
+                    target = batch[target_key] if target_key else batch["gt_latents"]["z_content"][:, 1]
+                    ys.append(target.detach().cpu().numpy())
                     del out, raw, hz, x, masks
                 fallback = not bool(keep.any())
                 if fallback:
                     keep.fill_(True)  # exact training fallback when EVERY position was dropped
-                descriptors, counts = pool_descriptors(torch.cat(chunks, dim=1), keep, grid, regions)
+                patches = torch.cat(chunks, dim=1)
+                descriptors, counts = pool_descriptors(patches, keep, grid, regions)
+                if include_patch_flat:
+                    # Preserve ORIGINAL spatial coordinates despite changing keep sets.
+                    # A removed position is zero-filled, not deleted/reindexed.
+                    descriptors["patch_flat"] = (patches * keep).flatten(2)
                 for view, name in enumerate(VIEWS):
                     for pool, tensor in descriptors.items():
                         features[f"{name}/{pool}"].append(tensor[view].numpy())

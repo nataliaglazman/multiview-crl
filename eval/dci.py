@@ -264,6 +264,48 @@ def _parse_content_indices(content_idx_raw):
     return None
 
 
+def _stabilise_content_indices(level, indices, seen, freeze):
+    """One batch's content-channel indices, checked (and optionally pinned) across batches.
+
+    With ``mask_mode=onthefly`` the Gumbel mask is redrawn on every forward, so each batch
+    can name a DIFFERENT set of physical channels as content.  The extraction loop then
+    stacks those batches into one array whose column ``k`` is not one channel but whichever
+    channel happened to be selected k-th in that batch -- a probe reads a column that
+    changes meaning partway down.  Nothing in the output shape reveals this, which is why
+    it warns unconditionally.
+
+    ``freeze=True`` pins the first batch's indices for the rest of the pass, so every row
+    of the output describes the same physical channels.  It is opt-in because turning it
+    on moves numbers for exactly the checkpoints that have the problem, and the reports
+    already published were produced without it.
+    """
+    if indices is None:
+        return None
+    key, current = level, list(indices)
+    if key not in seen:
+        seen[key] = current
+        return current
+    if seen[key] != current:
+        seen.setdefault("_warned", set())
+        if key not in seen["_warned"]:
+            seen["_warned"].add(key)
+            logger.warning(
+                "Level %d's content mask changed between batches (%d channels -> %d, %d shared). "
+                "This checkpoint redraws its mask per forward, so a stacked feature column does "
+                "not describe one channel. %s",
+                key,
+                len(seen[key]),
+                len(current),
+                len(set(seen[key]) & set(current)),
+                (
+                    "Pinning the first batch's indices (freeze_content_mask=True)."
+                    if freeze
+                    else "Pass freeze_content_mask=True to pin the first batch's indices."
+                ),
+            )
+    return seen[key] if freeze else current
+
+
 def _split_content_style(features_np, content_indices):
     """Split a (B, D) array into content and style columns.
 
@@ -327,7 +369,9 @@ def _pool_and_split_view(feat_view, content_indices, pooling, use_patch_grid, us
     return content, style
 
 
-def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, num_workers=0, pooling="gap"):
+def _extract_synthetic_representations(
+    encoder, dataset, device, batch_size=32, num_workers=0, pooling="gap", freeze_content_mask=False
+):
     """Run the encoder over a synthetic dataset and collect per-level representations + GT factors.
 
     A single forward pass extracts features from every encoder level.  Each level's
@@ -358,6 +402,7 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
     use_stats = pooling == "stats"
 
     per_level = {}
+    seen_content_indices = {}
     all_gt_content = []
     all_gt_style_v1 = []
     all_gt_style_v2 = []
@@ -397,7 +442,9 @@ def _extract_synthetic_representations(encoder, dataset, device, batch_size=32, 
                         content_idx_raw = torch.where(mask.bool())[-1]
                 else:
                     content_idx_raw = None
-                content_indices = _parse_content_indices(content_idx_raw)
+                content_indices = _stabilise_content_indices(
+                    lvl_idx, _parse_content_indices(content_idx_raw), seen_content_indices, freeze_content_mask
+                )
 
                 if lvl_idx not in per_level:
                     per_level[lvl_idx] = {"content": [], "style": [], "content_v2": [], "style_v2": []}

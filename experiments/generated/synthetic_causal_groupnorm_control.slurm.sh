@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_groupnorm_control.yaml
-# Generated at: 2026-08-27T14:48:57Z
-# Git SHA: d848347
+# Generated at: 2026-09-15T14:07:34Z
+# Git SHA: 4c00cd5
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-groupnorm-control
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -91,6 +91,7 @@ fi
     --scale-contrastive-loss 0 \
     --scale-recon-loss 1 \
     --scale-style-contrastive-loss 0.0 \
+    --scale-style-hsic-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
     --separate-content-codebooks \
@@ -105,7 +106,7 @@ fi
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
-    --synthetic-num-val 200 \
+    --synthetic-num-val 1500 \
     --synthetic-res 128 \
     --model-id synthetic-causal-groupnorm-control \
     --tau 0.07 \

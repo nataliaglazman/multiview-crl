@@ -967,6 +967,7 @@ def score_run(
     parent_adjustment="legacy",
     parent_cache=None,
     project_content=False,
+    freeze_content_mask=False,
 ):
     """Extract this run's representations under every pooling and score them.
 
@@ -1018,7 +1019,7 @@ def score_run(
     reprs, gt_content, gt_style, info = {}, None, None, None
     for key, value in poolings:
         level_data, gc, gs1, _gs2 = _extract_synthetic_representations(
-            model, dataset, device, batch_size, num_workers, pooling=value
+            model, dataset, device, batch_size, num_workers, pooling=value, freeze_content_mask=freeze_content_mask
         )
         if proj_heads:
             level_data = project_content_reprs(level_data, proj_heads, value)
@@ -1055,6 +1056,7 @@ def score_run(
         "factor_pooling": factor_pooling,
         "causal": causal,
         "projected_content": bool(proj_heads),
+        "freeze_content_mask": freeze_content_mask,
         "per_factor": per_factor_scores(
             probed, level, gt_content, names, seeds, n_null, rng, probe_kind, n_jobs, factor_pooling
         ),
@@ -1523,6 +1525,16 @@ def main():
         help="Content-column permutation seed for --causal shuffled; use the same seed across models.",
     )
     p.add_argument(
+        "--freeze-content-mask",
+        action="store_true",
+        help="Pin the Gumbel mask's channel selection to the first batch, so every row of a "
+        "feature column describes the same physical channel. Only affects mask_mode=onthefly "
+        "checkpoints, which redraw the mask on every forward; the extractor warns when the "
+        "selection actually moves. Off by default because turning it on moves numbers for exactly "
+        "those checkpoints, and the reports already published were produced without it. Match it "
+        "to eval.export_vq_bundle (which freezes by default) when comparing the two.",
+    )
+    p.add_argument(
         "--factor-pooling",
         default="assigned",
         choices=("assigned", "gap", "stats", "patch"),
@@ -1636,6 +1648,7 @@ def main():
         parent_adjustment=cli.parent_adjustment,
         parent_cache={} if cli.parent_adjustment == "nonlinear" else None,
         project_content=cli.project_content,
+        freeze_content_mask=cli.freeze_content_mask,
     )
     logger.info("Scoring checkpoint ...")
     # init_seed=0 for the checkpoint too: strict=False leaves any unmatched parameter at
