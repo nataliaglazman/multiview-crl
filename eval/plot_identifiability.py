@@ -50,13 +50,24 @@ from matplotlib.lines import Line2D  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
-# Validated categorical slots 1-2 plus chart chrome, light and dark. Both columns pass the
-# lightness band, chroma floor, CVD separation, normal-vision floor and 3:1 contrast on
-# their own surface (validate_palette.js). The dark column is separately stepped for the
-# dark surface, not a flip of the light one.
+# Validated categorical slots plus chart chrome, light and dark. The dark column is
+# separately stepped for the dark surface, not a flip of the light one.
+#
+# Slots 1-2 (blue, orange) are what this script and plot_causal_recovery draw; slots 3-8
+# were appended for plot_compare_bundles, which puts one hue per model and can be handed
+# more than two. Appended in the reference palette's fixed order and never cycled, so a
+# colour keeps meaning the same series across all three scripts.
+#
+# validate_palette.js on the adjacent pairlist (the one bars and stacks use), all 8 slots:
+#   light  CVD dE 9.1 (protan, yellow<->aqua) · normal-vision dE 19.6 · ALL CHECKS PASS
+#   dark   CVD dE 8.4 (protan, yellow<->aqua) · normal-vision dE 19.3 · ALL CHECKS PASS
+# Light-mode aqua/yellow/magenta sit below 3:1 on the light surface, so the palette's
+# relief rule applies: every figure that uses them ships direct value labels AND a .csv
+# twin, which is the documented remedy.  Grouped bars only -- these 8 do NOT clear the
+# all-pairs pairlist a scatter would need; cap that at the first three slots.
 THEME = {
     "light": {
-        "series": ["#2a78d6", "#eb6834"],
+        "series": ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"],
         "surface": "#ffffff",
         "ink": "#0b0b0b",
         "ink2": "#52514e",
@@ -66,7 +77,7 @@ THEME = {
         "floor_fill": "#e1e0d9",
     },
     "dark": {
-        "series": ["#3987e5", "#d95926"],
+        "series": ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"],
         "surface": "#1a1a19",
         "ink": "#ffffff",
         "ink2": "#c3c2b7",

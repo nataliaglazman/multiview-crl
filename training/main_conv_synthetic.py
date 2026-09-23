@@ -1,12 +1,10 @@
 """Encoder-only multi-view contrastive learning on the 3D synthetic data.
 
-The faithful image-track method of Yao et al. (ICLR 2024): per-view 3D conv
-encoders (``models.multiview_encoder.MultiviewConvEncoder``) trained by the
-content-alignment − entropy contrastive loss (InfoNCE or Barlow Twins) with
-**no decoder and no reconstruction**. Sibling to ``training.main_numerical`` (the
-MLP/abstract-latent version) and ``training.main_vae_synthetic`` (the recon
-baseline) — this one keeps the same VQ-VAE conv backbone as the latter but drops
-the decoder, so the two scripts form a controlled recon vs. no-recon comparison.
+3D encoders trained with InfoNCE or Barlow Twins, without reconstruction.
+The default ``conv`` architecture uses the VQ-VAE convolutional backbone with
+an affine readout. ``--encoder-architecture resnet18`` uses a 3D adaptation of
+the upstream image encoder: ResNet-18 -> GAP -> Linear -> LeakyReLU -> Linear.
+This architecture option does not change the loss, data, or view-sharing policy.
 
 Identifiability is scored with ``eval.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
@@ -33,18 +31,30 @@ from data.datasets import SyntheticBrainDataset
 from models.multiview_encoder import MultiviewConvEncoder
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out-dir", type=str, default="results")
     p.add_argument("--model-id", type=str, default="conv_synthetic")
 
     # Model.
+    p.add_argument(
+        "--encoder-architecture",
+        choices=("conv", "resnet18"),
+        default="conv",
+        help="conv: original VQ-VAE backbone; resnet18: upstream ResNet-18 architecture adapted to 3D",
+    )
+    p.add_argument(
+        "--encoder-head-hidden",
+        type=int,
+        default=100,
+        help="ResNet readout width: GAP -> Linear(512, width) -> LeakyReLU -> Linear(width, latent_dim)",
+    )
     p.add_argument("--latent-dim", type=int, default=16, help="Total encoding size (content + style)")
     p.add_argument("--content-channels", type=int, default=9, help="Content units (set to the true n_content)")
-    p.add_argument("--hidden-channels", type=int, default=64)
-    p.add_argument("--res-channels", type=int, default=32)
-    p.add_argument("--nb-res-layers", type=int, default=2)
-    p.add_argument("--downscale-factor", type=int, default=4, help="Spatial downscale (power of 2)")
+    p.add_argument("--hidden-channels", type=int, default=64, help="conv architecture only")
+    p.add_argument("--res-channels", type=int, default=32, help="conv architecture only")
+    p.add_argument("--nb-res-layers", type=int, default=2, help="conv architecture only")
+    p.add_argument("--downscale-factor", type=int, default=4, help="conv downscale (power of 2); ResNet uses 32")
     p.add_argument("--no-separate-encoders", action="store_true", help="Share one encoder across both views")
 
     # Contrastive loss (content alignment − entropy).
@@ -96,6 +106,15 @@ def parse_args():
         help="Run one eval before training and keep it as the untrained floor, so every "
         "later per-factor score prints its delta against it. Costs one extra eval.",
     )
+    p.add_argument(
+        "--best-metric",
+        type=str,
+        default="block_mcc",
+        choices=["block_mcc", "ridge_r2", "none"],
+        help="Validation metric that decides which checkpoint is kept as model_best.pt. "
+        "Floor-subtracted when --floor-eval gave a floor, since the raw value is mostly "
+        "floor. 'none' keeps only the last-step model.pt.",
+    )
     p.add_argument("--eval-pooling", type=str, default="gap", choices=["gap", "patch"])
     p.add_argument("--eval-patch-grid", type=int, nargs=3, default=[4, 5, 4])
 
@@ -125,6 +144,12 @@ def parse_args():
     )
     p.add_argument("--synthetic-style-scale", type=float, default=1.0)
     p.add_argument("--synthetic-content-scale", type=float, default=1.0)
+    p.add_argument(
+        "--synthetic-lesion-placement",
+        choices=("legacy", "wm_interior"),
+        default="legacy",
+        help="wm_interior places a full fixed-radius sphere inside final WM labels; legacy reproduces old runs",
+    )
     p.add_argument("--synthetic-n-deformation-grid", type=int, default=4)
     p.add_argument("--synthetic-n-fissure-grid", type=int, default=8)
     p.add_argument("--synthetic-hierarchical-content", action="store_true")
@@ -143,7 +168,7 @@ def parse_args():
         "--synthetic-causal-edge-prob",
         type=float,
         default=0.5,
-        help="Edge probability for random DAG (ignored for chain/full).",
+        help="Edge probability for random DAG, in [0, 1] (ignored for chain/full)",
     )
     p.add_argument(
         "--synthetic-causal-noise-scale",
@@ -158,7 +183,16 @@ def parse_args():
         choices=["leaky_relu", "none"],
         help="Nonlinearity in causal mechanisms.",
     )
-    return p.parse_args()
+    args = p.parse_args(argv)
+    if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
+        p.error("--synthetic-causal-edge-prob must be between 0 and 1")
+    if args.encoder_architecture == "resnet18":
+        if args.encoder_head_hidden <= 0:
+            p.error("--encoder-head-hidden must be positive")
+        spatial_size = (args.res + 31) // 32
+        if args.eval_pooling == "patch" and any(g < 1 or g > spatial_size for g in args.eval_patch_grid):
+            p.error(f"ResNet at --res {args.res} has a {spatial_size}^3 map; --eval-patch-grid must fit it")
+    return args
 
 
 def cache_gb(res, num_samples):
@@ -200,6 +234,7 @@ def make_dataset(args, mode, num_samples):
         synthetic_causal_noise_scale=args.synthetic_causal_noise_scale,
         synthetic_causal_nonlinearity=args.synthetic_causal_nonlinearity,
         synthetic_clean_content=args.synthetic_clean_content,
+        synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
     )
 
 
@@ -261,13 +296,17 @@ def per_factor_scores(results):
         if not isinstance(detail, dict):
             continue
         names = detail.get("factor_names") or []
-        ridge, mcc, mcc_std = (detail.get(k) for k in ("per_factor_ridge", "per_factor_mcc", "per_factor_mcc_std"))
+        ridge, mcc, mcc_std, chan = (
+            detail.get(k)
+            for k in ("per_factor_ridge", "per_factor_mcc", "per_factor_mcc_std", "per_factor_channel_mcc")
+        )
 
         def at(arr, j):
             return float(arr[j]) if arr is not None and j < len(arr) else float("nan")
 
         out[block] = {
-            nm: {"ridge": at(ridge, j), "mcc": at(mcc, j), "mcc_std": at(mcc_std, j)} for j, nm in enumerate(names)
+            nm: {"ridge": at(ridge, j), "mcc": at(mcc, j), "mcc_std": at(mcc_std, j), "chan": at(chan, j)}
+            for j, nm in enumerate(names)
         }
     return out
 
@@ -285,10 +324,13 @@ def print_per_factor(scores, floor=None, writer=None, step=0):
             continue
         has_floor = bool(floor) and block in floor
         print(f"    --- per-factor recovery: {block} ---", flush=True)
-        head = f"      {'factor':<20s}{'ridge R²':>9s}{'MCC':>8s}{'±':>7s}"
+        head = f"      {'factor':<20s}{'ridge R²':>9s}{'blockMCC':>10s}{'±':>7s}{'chanMCC':>9s}"
         print(head + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""), flush=True)
         for nm, v in rows.items():
-            line = f"      {nm:<20s}{v['ridge']:>9.3f}{v['mcc']:>8.3f}{v['mcc_std']:>7.3f}"
+            line = (
+                f"      {nm:<20s}{v['ridge']:>9.3f}{v['mcc']:>10.3f}{v['mcc_std']:>7.3f}"
+                f"{v.get('chan', float('nan')):>9.3f}"
+            )
             if has_floor and nm in floor[block]:
                 fl = floor[block][nm]["ridge"]
                 line += f"{fl:>9.3f}{v['ridge'] - fl:>+12.3f}"
@@ -297,6 +339,27 @@ def print_per_factor(scores, floor=None, writer=None, step=0):
                 tag = block.replace("→", "_to_")
                 writer.add_scalar(f"per_factor/{tag}/{nm}/ridge_r2", v["ridge"], step)
                 writer.add_scalar(f"per_factor/{tag}/{nm}/mcc", v["mcc"], step)
+                writer.add_scalar(f"per_factor/{tag}/{nm}/channel_mcc", v["chan"], step)
+
+
+BEST_METRIC_KEYS = {"block_mcc": "content->content/block_mcc", "ridge_r2": "content->content/informativeness_ridge"}
+
+
+def best_metric_value(flat, floor_flat, name):
+    """The scalar model_best.pt is selected on, floor-subtracted where a floor exists.
+
+    Raw block-MCC on this generator is mostly floor — an untrained encoder scores ~0.38 —
+    so selecting on it would rank checkpoints partly by how much untrained structure the
+    architecture happens to carry. The delta ranks them by what training added.
+    """
+    v = flat.get(BEST_METRIC_KEYS[name])
+    if v is None or not np.isfinite(v):
+        return None
+    if floor_flat is not None:
+        f = floor_flat.get(BEST_METRIC_KEYS[name])
+        if f is not None and np.isfinite(f):
+            return float(v - f)
+    return float(v)
 
 
 def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
@@ -320,9 +383,15 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
 
     print("    --- identifiability summary ---", flush=True)
     show("content->content/block_mcc")
+    show("content->content/channel_mcc")
     show("content->content/informativeness_ridge")
     show("content->style/block_mcc")
     show("content->view/acc")
+
+    # DCI was already being computed here every eval and thrown away unprinted.
+    print("    --- DCI (GBT importances) ---", flush=True)
+    for _k in ("disentanglement", "completeness", "informativeness_test"):
+        show(f"content->content/{_k}")
 
     scores = per_factor_scores(results)
     print_per_factor(scores, floor=floor, writer=writer, step=step)
@@ -372,7 +441,16 @@ def main():
         separate_encoders=not args.no_separate_encoders,
         proj_dim=args.contrastive_proj_dim,
         proj_hidden=args.contrastive_proj_hidden,
+        encoder_architecture=args.encoder_architecture,
+        encoder_head_hidden=args.encoder_head_hidden,
     ).to(device)
+    if args.encoder_architecture == "resnet18":
+        print(
+            f"encoder: 3D ResNet-18, stride 32, GAP -> 512 -> {args.encoder_head_hidden} -> {args.latent_dim}; "
+            f"{'separate' if model.separate_encoders else 'shared'} view backbone(s). "
+            "The conv-only width, residual-layer and downscale flags are inactive.",
+            flush=True,
+        )
     if model.projector is not None:
         print(
             f"projection head: {args.content_channels} -> {args.contrastive_proj_hidden} -> "
@@ -394,11 +472,15 @@ def main():
     # Step-0 eval doubles as the untrained floor: same architecture, same seed, no training.
     # Per-factor R² needs it more than the block means do -- a localised factor can read
     # 0.2 from a random encoder, so the raw number alone cannot say whether it was learned.
-    floor = None
+    floor = floor_flat = None
     if args.floor_eval:
         model.eval()
-        _, floor = evaluate(model, val_dataset, device, args, save_dir, 0, writer)
+        floor_flat, floor = evaluate(model, val_dataset, device, args, save_dir, 0, writer)
         model.train()
+
+    # Step 0 is the untrained floor, not a candidate: with every delta at or below zero it
+    # would win on a tie and save an untrained encoder as "best".
+    best = {"value": None, "step": None}
 
     step = 0
     running = {"loss": 0.0, "rank": 0.0, "n": 0}
@@ -438,11 +520,44 @@ def main():
 
             if step % args.eval_every == 0 or step == args.train_steps:
                 model.eval()
-                evaluate(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
+                flat, _ = evaluate(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
                 torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
+
+                if args.best_metric != "none":
+                    value = best_metric_value(flat, floor_flat, args.best_metric)
+                    if value is not None and (best["value"] is None or value > best["value"]):
+                        best = {"value": value, "step": step}
+                        # A bare state_dict, so --checkpoint model_best.pt loads exactly like
+                        # model.pt does; the provenance goes in a sidecar rather than wrapping
+                        # the tensors in a dict every reader would then have to unwrap.
+                        torch.save(model.state_dict(), os.path.join(save_dir, "model_best.pt"))
+                        with open(os.path.join(save_dir, "best_checkpoint.json"), "w") as fp:
+                            json.dump(
+                                {
+                                    "step": step,
+                                    "metric": args.best_metric,
+                                    "value": value,
+                                    "floor_subtracted": floor_flat is not None,
+                                    "raw": flat.get(BEST_METRIC_KEYS[args.best_metric]),
+                                },
+                                fp,
+                                indent=2,
+                            )
+                        print(f"    new best {args.best_metric} {value:+.4f} -> model_best.pt", flush=True)
                 model.train()
 
     torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
+    if best["step"] is not None:
+        print(
+            f"best {args.best_metric} {best['value']:+.4f} at step {best['step']} -> model_best.pt "
+            f"(model.pt is the last step, {step}). Score the best one with "
+            f"--checkpoint model_best.pt.",
+            flush=True,
+        )
+        if best["step"] < step:
+            # Worth saying out loud: past the peak the run is spending compute making the
+            # representation worse, which at this dataset size is the expected shape.
+            print(f"  NOTE: peak was {step - best['step']} steps before the end.", flush=True)
     print(f"done. checkpoints + DCI logs in {save_dir}", flush=True)
 
 

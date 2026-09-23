@@ -101,12 +101,12 @@ def load(path):
 
 
 def factor_rows(report):
-    """``[(name, trained_r2, floor_r2_or_None, trained_mcc, mcc_std), ...]`` in factor order."""
+    """``[(name, trained_r2, floor_r2_or_None, block_mcc, block_mcc_std, channel_mcc), ...]``."""
     trained, floor = report["trained"]["per_factor"], (report.get("floor") or {}).get("per_factor")
     rows = []
     for name, v in trained.items():
         f = None if floor is None else _f(floor[name]["ridge_r2"])
-        rows.append((name, _f(v["ridge_r2"]), f, _f(v["mcc"]), _f(v["mcc_std"])))
+        rows.append((name, _f(v["ridge_r2"]), f, _f(v["mcc"]), _f(v["mcc_std"]), _f(v.get("channel_mcc"))))
     return rows
 
 
@@ -158,27 +158,48 @@ def fig_per_factor(report, t, path):
     _save(fig, path, t)
     _write_csv(
         os.path.splitext(path)[0] + ".csv",
-        ["factor", "trained_ridge_r2", "floor_ridge_r2", "delta", "trained_mcc", "mcc_std"],
-        [[r[0], r[1], r[2], (None if r[2] is None else r[1] - r[2]), r[3], r[4]] for r in rows],
+        [
+            "factor",
+            "trained_ridge_r2",
+            "floor_ridge_r2",
+            "delta",
+            "trained_block_mcc",
+            "block_mcc_std",
+            "trained_channel_mcc",
+        ],
+        [[r[0], r[1], r[2], (None if r[2] is None else r[1] - r[2]), r[3], r[4], r[5]] for r in rows],
     )
 
 
 def fig_summary(report, t, path):
     """Two panels: the higher-is-better pair, and view leakage whose target is 0.5."""
     trained, floor = report["trained"], report.get("floor")
-    left = [("block MCC", "block_mcc"), ("ridge R\u00b2 (mean)", "ridge_r2_mean")]
+    # Every row here is higher-is-better on [0,1], which is what lets them share one axis.
+    # DCI is flattened in from its sub-dict; rows absent from an older report are dropped
+    # rather than plotted as zero.
+    flat_t = dict(trained, **{f"dci_{k}": v for k, v in (trained.get("dci") or {}).items()})
+    flat_f = None if not floor else dict(floor, **{f"dci_{k}": v for k, v in (floor.get("dci") or {}).items()})
+    left = [
+        ("block MCC", "block_mcc"),
+        ("channel MCC", "channel_mcc"),
+        ("ridge R\u00b2 (mean)", "ridge_r2_mean"),
+        ("DCI disentangle.", "dci_disentanglement"),
+        ("DCI completeness", "dci_completeness"),
+        ("DCI informativeness", "dci_informativeness_test"),
+    ]
+    left = [(lbl, k) for lbl, k in left if flat_t.get(k) is not None]
     h, offs = _group(2 if floor else 1)
 
-    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.0), facecolor=t["surface"], gridspec_kw={"width_ratios": [2, 1]})
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.0), facecolor=t["surface"], gridspec_kw={"width_ratios": [2, 1]})
 
     ys = np.arange(len(left))[::-1]
     axes[0].barh(
-        ys + offs[0], [_f(trained[k]) for _, k in left], height=h, color=t["series"][0], zorder=3, label="trained"
+        ys + offs[0], [_f(flat_t[k]) for _, k in left], height=h, color=t["series"][0], zorder=3, label="trained"
     )
     if floor:
         axes[0].barh(
             ys + offs[1],
-            [_f(floor[k]) for _, k in left],
+            [_f(flat_f[k]) for _, k in left],
             height=h,
             color=t["floor_fill"],
             zorder=3,
@@ -217,7 +238,7 @@ def fig_summary(report, t, path):
     _style(axes[1], t, xlabel="accuracy (0.5 is the target)", title="View leakage")
 
     _save(fig, path, t)
-    rows = [[lbl, _f(trained[k]), (None if not floor else _f(floor[k]))] for lbl, k in left]
+    rows = [[lbl, _f(flat_t[k]), (None if not floor else _f(flat_f[k]))] for lbl, k in left]
     rows.append(
         [
             "content_to_view_acc",
@@ -364,8 +385,19 @@ def _self_test():
         "ridge_r2_mean": 0.3 * scale,
         "content_to_view_acc": 0.6,
         "assignment_identity": 1.0,
+        "channel_mcc": 0.4 * scale,
+        # DCI on BOTH trained and floor. Rows are dropped when absent, so a report without
+        # them exercises none of the flattening — which is how a floor-side KeyError on
+        # exactly these keys got past this test once already.
+        "dci": {
+            "disentanglement": 0.3 * scale,
+            "completeness": 0.25 * scale,
+            "informativeness_test": 0.5 * scale,
+            "informativeness_train": 0.9 * scale,
+        },
         "per_factor": {
-            n: {"ridge_r2": 0.4 * scale - 0.1 * i, "mcc": 0.6 * scale, "mcc_std": 0.02} for i, n in enumerate(names)
+            n: {"ridge_r2": 0.4 * scale - 0.1 * i, "mcc": 0.6 * scale, "mcc_std": 0.02, "channel_mcc": 0.5 * scale}
+            for i, n in enumerate(names)
         },
     }
     panel = {

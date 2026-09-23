@@ -1,10 +1,13 @@
 """InfoNCE math, backbone gradients, train/test separation, and HF checkpoint round trip."""
 
+import contextlib
+import io
 import json
 import math
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -45,6 +48,227 @@ class InfoNCETests(unittest.TestCase):
         for size, temperature in ((1, 0.1), (2, 0), (2, -1), (2, float("nan"))):
             with self.subTest(size=size, temperature=temperature), self.assertRaises(ValueError):
                 train.symmetric_infonce(torch.ones(size, 3), torch.ones(size, 3), temperature)
+
+
+def objective_cli(name):
+    return type(
+        "Cli",
+        (),
+        dict(
+            objective=name,
+            temperature=0.1,
+            barlow_lambda=0.0051,
+            barlow_eps=1e-5,
+            vicreg_sim_coeff=25.0,
+            vicreg_std_coeff=25.0,
+            vicreg_cov_coeff=1.0,
+        ),
+    )()
+
+
+@unittest.skipIf(torch is None, "torch not installed")
+class ObjectiveTests(unittest.TestCase):
+    """infonce vs the negative-free arms: the ablation axis, and what stays comparable."""
+
+    def pair(self, seed=0, n=8, dim=16):
+        torch.manual_seed(seed)
+        base = torch.randn(n, dim)
+        first = (base + 0.1 * torch.randn(n, dim)).requires_grad_(True)
+        second = (base + 0.1 * torch.randn(n, dim)).requires_grad_(True)
+        return first, second
+
+    def test_every_objective_is_a_scalar_that_trains(self):
+        for name in train.OBJECTIVES:
+            with self.subTest(objective=name):
+                first, second = self.pair()
+                loss, _metrics = train.compute_objective(first, second, objective_cli(name))
+                self.assertEqual(loss.dim(), 0, "the loop's isfinite/backward/item assume a scalar")
+                self.assertTrue(torch.isfinite(loss))
+                loss.backward()
+                for view in (first, second):
+                    self.assertGreater(view.grad.norm().item(), 0)
+
+    def test_every_objective_reports_the_same_comparable_diagnostics(self):
+        # The point of more than one arm is to read them against each other, and their
+        # losses are not on a common scale. These three keys are.
+        for name in train.OBJECTIVES:
+            with self.subTest(objective=name):
+                loss, metrics = train.compute_objective(*self.pair(), objective_cli(name))
+                for key in ("loss", "accuracy", "positive_similarity", "negative_similarity"):
+                    self.assertIn(key, metrics)
+                    self.assertTrue(math.isfinite(metrics[key]), key)
+                json.dumps(metrics, allow_nan=False)  # what metrics.jsonl does
+
+    def test_the_dispatcher_adds_nothing_to_the_underlying_loss(self):
+        # Retrieval accuracy rides along as a diagnostic under every arm; it must not leak
+        # into the value being optimised.
+        first, second = self.pair()
+        direct, _ = train.barlow_twins(first, second, 0.0051, 1e-5)
+        wrapped, _ = train.compute_objective(first, second, objective_cli("barlow"))
+        self.assertAlmostEqual(wrapped.item(), direct.item(), places=6)
+
+    def test_the_per_term_breakdown_survives_into_the_metrics(self):
+        # Regression: the losses hang their breakdown off the returned tensor as a plain
+        # attribute, and squeeze() returns a NEW tensor that does not carry it.
+        _loss, barlow = train.compute_objective(*self.pair(), objective_cli("barlow"))
+        self.assertIn("barlow_on_diag", barlow)
+        self.assertIn("barlow_off_diag", barlow)
+        _loss, vicreg = train.compute_objective(*self.pair(), objective_cli("vicreg"))
+        for key in ("sim_loss", "var_loss", "cov_loss"):
+            self.assertIn(key, vicreg)
+
+    def test_vicregs_not_applicable_accuracy_is_not_reported_as_a_score(self):
+        # training.losses reports a hardcoded top1_acc of 0.0 as "not applicable"; next to
+        # the real measured accuracy that reads as a score of zero.
+        _loss, metrics = train.compute_objective(*self.pair(), objective_cli("vicreg"))
+        self.assertNotIn("top1_acc", metrics)
+        self.assertGreater(metrics["accuracy"], 0.0)
+
+    def test_non_finite_and_non_numeric_diagnostics_are_dropped(self):
+        # metrics.jsonl is written with allow_nan=False, so one NaN would end the run after
+        # the optimizer had already stepped.
+        marker = torch.zeros(1)
+        marker._contrastive_diag = {"good": 1.5, "nan": float("nan"), "inf": float("inf"), "text": "x", "flag": True}
+        self.assertEqual(train._extra_diagnostics(marker), {"good": 1.5})
+        self.assertEqual(train._extra_diagnostics(torch.zeros(1)), {})
+
+    def test_each_objective_rejects_a_bad_pair_by_name(self):
+        for name in train.OBJECTIVES:
+            with self.subTest(objective=name):
+                with self.assertRaises(ValueError) as raised:
+                    train.compute_objective(torch.ones(1, 4), torch.ones(1, 4), objective_cli(name))
+                # Wording differs per objective; what must hold is that each names the
+                # shape contract rather than failing somewhere downstream in a matmul.
+                self.assertIn("requires matching (B, D) tensors", str(raised.exception))
+
+    def test_the_recorded_objective_names_the_paper_loss(self):
+        self.assertEqual(
+            train.OBJECTIVES,
+            {
+                "infonce": "content_symmetric_cross_view_infonce",
+                "barlow": "content_barlow_twins",
+                "vicreg": "content_vicreg",
+            },
+        )
+
+    def test_the_cli_offers_every_objective_and_defaults_to_infonce(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = parse_dino_finetune_args(["--output-dir", str(Path(tmp) / "run")])
+            self.assertEqual(cli.objective, "infonce")
+            for name in train.OBJECTIVES:
+                parsed = parse_dino_finetune_args(["--output-dir", str(Path(tmp) / "run"), "--objective", name])
+                self.assertEqual(parsed.objective, name)
+
+
+@unittest.skipIf(torch is None, "torch not installed")
+class WithinModalityTests(unittest.TestCase):
+    """The control arm: one modality augmented twice, never the real pair."""
+
+    def anatomy(self, batch=6, size=16):
+        """Subject identity as ANATOMY, not a DC offset.
+
+        A constant intensity offset is this generator's `bias` -- style -- which the
+        augmentation is supposed to discard, so a fixture that encodes identity that way
+        tests the opposite of what it looks like.
+        """
+        torch.manual_seed(0)
+        x = torch.randn(batch, 1, size, size, size) * 0.2
+        for i in range(batch):
+            z, y = 3 + (i % 3) * 4, 3 + (i // 3) * 6
+            x[i, :, z : z + 5, y : y + 5, 4:9] += 3.0
+        return x
+
+    def nearest(self, a, b):
+        flat = lambda t: torch.nn.functional.normalize(  # noqa: E731
+            t.reshape(len(t), -1) - t.reshape(len(t), -1).mean(1, keepdim=True), dim=1
+        )
+        return (flat(a) @ flat(b).T).argmax(1).tolist()
+
+    def test_a_subject_stays_recognisable_through_the_augmentation(self):
+        # If it did not, InfoNCE would have no learnable signal and the arm would be
+        # measuring nothing -- a failure that looks like "the objective did not help".
+        x = self.anatomy()
+        first, second = train.augment_volumes(x, 1.0), train.augment_volumes(x, 1.0)
+        want = list(range(len(x)))
+        self.assertEqual(self.nearest(first, x), want)
+        self.assertEqual(self.nearest(first, second), want)
+
+    def test_it_changes_the_image_substantially(self):
+        x = self.anatomy()
+        relative = ((train.augment_volumes(x, 1.0) - x).norm() / x.norm()).item()
+        self.assertGreater(relative, 0.1, "a near-identity augmentation makes the pair trivial")
+
+    def test_parameters_are_drawn_per_sample_not_per_batch(self):
+        # A perturbation shared across the batch is itself a signal the encoder can align
+        # on, and it makes the batch's negatives separable for the wrong reason.
+        identical = self.anatomy()[:1].repeat(6, 1, 1, 1, 1)
+        out = train.augment_volumes(identical, 1.0)
+        self.assertFalse(torch.allclose(out[0], out[1]))
+
+    def test_no_spatial_warp(self):
+        # Rotation/scale/shear would move brain_size, lr_asymmetry and the lesion
+        # coordinates, i.e. train the encoder to discard its own evaluation.
+        x = self.anatomy()
+        centre = lambda t: (  # noqa: E731
+            (t.squeeze(1) > t.squeeze(1).mean((1, 2, 3), keepdim=True)).float().nonzero().float().mean(0)
+        )
+        moved = (centre(train.augment_volumes(x, 1.0)) - centre(x)).abs().max().item()
+        self.assertLess(moved, 0.5)
+
+    def test_zero_strength_is_the_identity_and_the_cli_refuses_it(self):
+        x = self.anatomy()
+        torch.testing.assert_close(train.augment_volumes(x, 0.0), x)
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_dino_finetune_args(
+                    ["--output-dir", str(Path(tmp) / "r"), "--pairing", "within_modality", "--aug-strength", "0"]
+                )
+
+    def test_within_modality_never_reads_the_second_modality(self):
+        x = self.anatomy()
+        poisoned = torch.full_like(x, -99.0)
+        batch = {"image": [x, poisoned]}
+        views = train.paired_views(batch, SimpleNamespace(pairing="within_modality", aug_view=1, aug_strength=1.0))
+        self.assertEqual(len(views), 2)
+        for view in views:
+            self.assertFalse((view == -99.0).any().item())
+
+    def test_cross_modal_passes_the_real_pair_through_untouched(self):
+        x = self.anatomy()
+        other = torch.full_like(x, -99.0)
+        views = train.paired_views(
+            {"image": [x, other]}, SimpleNamespace(pairing="cross_modal", aug_view=1, aug_strength=1.0)
+        )
+        self.assertIs(views[0], x)
+        self.assertIs(views[1], other)
+
+    def test_every_loss_and_pairing_combination_records_a_distinct_name(self):
+        # The whole point of the name is telling two runs apart; a collision would let two
+        # different experiments pass the comparison script's duplicate check.
+        names = [
+            train.recorded_objective(SimpleNamespace(objective=obj, pairing=pair))
+            for obj in train.OBJECTIVES
+            for pair in ("cross_modal", "within_modality")
+        ]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_the_cross_modal_names_are_unchanged(self):
+        # Runs trained before --pairing existed recorded these; the comparison script reads
+        # them back, so renaming would strand every finished run.
+        self.assertEqual(
+            train.recorded_objective(SimpleNamespace(objective="infonce", pairing="cross_modal")),
+            "content_symmetric_cross_view_infonce",
+        )
+        self.assertEqual(
+            train.recorded_objective(SimpleNamespace(objective="barlow", pairing="cross_modal")),
+            "content_barlow_twins",
+        )
+
+    def test_the_cli_defaults_to_the_real_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = parse_dino_finetune_args(["--output-dir", str(Path(tmp) / "r")])
+            self.assertEqual(cli.pairing, "cross_modal")
+            self.assertEqual(cli.aug_view, 1)
 
 
 @unittest.skipIf(torch is None, "torch not installed")

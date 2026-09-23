@@ -109,6 +109,7 @@ def run_checkpoint(cli):
             synthetic_n_style=getattr(args, "synthetic_n_style", 3),
             synthetic_normalize=getattr(args, "synthetic_normalize", "per_sample"),
             synthetic_clean_content=getattr(args, "synthetic_clean_content", False),
+            synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
             synthetic_causal=True,
             synthetic_causal_graph=getattr(args, "synthetic_causal_graph", "random"),
             synthetic_causal_edge_prob=getattr(args, "synthetic_causal_edge_prob", 0.5),

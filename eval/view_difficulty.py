@@ -243,6 +243,7 @@ def main():
                     "synthetic_content_squash",
                     "synthetic_content_amp_scale",
                     "synthetic_lesion_radius",
+                    "synthetic_lesion_placement",
                     "synthetic_cortex_parameterization",
                     "synthetic_center_local_deformations",
                 )

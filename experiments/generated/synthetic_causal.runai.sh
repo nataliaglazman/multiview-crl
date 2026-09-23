@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-07T15:56:43Z
-# Git SHA: bf4bd0c
+# Generated at: 2026-09-15T09:40:00Z
+# Git SHA: 7eaca16
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -11,13 +11,13 @@ TRAIN_CMD=$(tr '\n' ' ' <<'TRAIN_EOF'
 cd /nfs/home/nglazman/crl-2/multiview-crl || { echo ERROR: /nfs/home/nglazman/crl-2/multiview-crl is missing inside the container - check the --host-path mount of /nfs >&2 ; exit 1 ; } ;
 export PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl ;
 python -m training.main_multimodal
-    --batch-size 128
+    --batch-size 64
     --bt-corr-ema 0.99
     --bt-gap-lambda 6
-    --bt-gap-sim-coeff 0.05
-    --bt-gap-std-coeff 0.05
-    --bt-gap-weight 1
+    --bt-gap-pooling stats
+    --bt-gap-weight 0.5
     --bt-lambda 6
+    --bt-normalize-terms
     --bt-patch-weight 1
     --bt-sim-coeff 0.0114
     --bt-std-coeff 0.227
@@ -25,7 +25,7 @@ python -m training.main_multimodal
     --checkpoint-steps 1000
     --content-dim 128
     --content-ratios 0.95
-    --content-size 40
+    --content-size 12
     --content-style-levels 0
     --contrastive-loss-type barlow_twins
     --cross-view-negs-only
@@ -58,8 +58,10 @@ python -m training.main_multimodal
     --scale-contrastive-loss 100
     --scale-recon-loss 16
     --scale-style-contrastive-loss 0.0
+    --scale-style-hsic-loss 0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
+    --separate-encoders
     --separate-style-codebooks
     --separation-floor-diagnosis-info 0.1
     --single-count-commitment
@@ -68,21 +70,22 @@ python -m training.main_multimodal
     --synthetic-causal-edge-prob 0.5
     --synthetic-causal-graph random
     --synthetic-clean-content
+    --synthetic-identifiable-ventricle
     --synthetic-mode pseudo_mri
     --synthetic-normalize fixed_reference
     --synthetic-num-test 400
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-clean-content-causal-sep-encoders-retry
+    --model-id synthetic-clean-content-causal-stats
     --tau 0.1
     --total-dim 512
     --train-steps 200000
     --use-amp
     --use-wandb
     --vq-commitment-weight 0.25
-    --vqvae-embed-dim 48
-    --vqvae-hidden-channels 48
+    --vqvae-embed-dim 16
+    --vqvae-hidden-channels 16
     --vqvae-nb-entries 256
     --vqvae-nb-levels 1
     --vqvae-nb-res-layers 2
@@ -92,7 +95,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-clean-content-causal-sep-encoders-retry \
+runai training standard submit synthetic-clean-content-causal-stats \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \

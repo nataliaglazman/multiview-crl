@@ -125,6 +125,127 @@ the default graph readout is in-sample. PC on true factors supplies a
 finite-sample reference, not a guaranteed upper bound. These are empirical
 recovery diagnostics rather than a proof of mathematical identifiability.
 
+## Comparing fine-tuning objectives
+
+`training/finetune_dino.py --objective` selects what the T1/T2 pairing is used for. The
+pairing, the optimizer, the steps and the data are identical across arms, so the only thing
+that varies is the loss:
+
+| `--objective` | loss | the arm answers |
+| --- | --- | --- |
+| `infonce` (default) | symmetric cross-view InfoNCE | with negatives |
+| `barlow` | Barlow Twins | negative-free: is it the negatives that matter? |
+| `vicreg` | VICReg | same question, variance-hinge form, steadier at small batches |
+
+`barlow` and `vicreg` call `training.losses`' own implementations — the same ones the
+VQ-VAE arm of this project trains with — so a fine-tuned DINO and a VQ-VAE here optimise
+the same objective rather than two things that share a name. They take `(n_views, B, C)`
+and are told there is no content/style split by passing no indices, so every channel of
+the embedding is treated as content.
+
+Cross-view retrieval accuracy and mean positive/negative similarity are logged under
+**every** objective and are never part of a negative-free loss. That matters for reading
+the arms against one another: Barlow Twins' loss and InfoNCE's loss are not on a common
+scale, but "can you retrieve a subject's other modality" is the same question under both.
+`metrics.jsonl` also carries each loss's own term breakdown (`on_diag_loss`/`off_diag_loss`
+for Barlow Twins, `sim_loss`/`var_loss`/`cov_loss` for VICReg), so a collapsed run is
+visible in which term went to zero.
+
+```bash
+for OBJ in infonce barlow; do
+  python -m training.finetune_dino --three-dino-repo ../3DINO \
+    --three-dino-weights /path/to/pretrained.pth \
+    --run-dir results/synthetic/YOUR_RUN \
+    --objective $OBJ --output-dir results/dino_$OBJ --epochs 20
+done
+```
+
+`scripts/compare_dino_objectives.sh` then takes those runs through extraction, scoring and
+figures in one go. It reads each arm's recorded backbone and dispatches accordingly --
+`3dino` arms go through `run_3dino_identifiability`, `dinov3` arms through
+`dinov3_embed_synthetic` twice (trained, then `--random-init` for the floor) -- and refuses
+to put arms with different backbones in one table, since a 2D-slice arm beside a
+full-volume one is a different encoder reading different inputs, not an objective ablation. It checks each run's recorded objective against the arm its directory
+name claims before spending any GPU time -- two arms that both trained InfoNCE under
+different names would otherwise produce a clean-looking table comparing a model with
+itself. It emits two comparisons: the **content block**, which is the objective ablation
+and excludes the pretrained baseline (that has no partition), and the **full embedding**,
+where the baseline can sit beside the fine-tuned arms.
+
+Then extract a bundle from each and compare them as two models. Every arm writes its own
+`preprocessing.json`; they will agree when the extraction flags did, and the extractor
+reuses the saved one either way, so check that the two match before reading a difference as
+the objective.
+
+### Is it the pairing, or just training on your data?
+
+`--objective` varies the loss; `--pairing` varies what the positive pair IS, which is the
+axis that answers "does the cross-modal pair earn its keep".
+
+| `--pairing` | positive pair | the arm answers |
+| --- | --- | --- |
+| `cross_modal` (default) | a subject's T1 and FLAIR | the real acquisition pair |
+| `within_modality` | one modality, augmented twice | training on your data with no cross-modal signal |
+
+`within_modality` never reads the second modality. The optimizer, steps, loss and data
+budget are unchanged, so the difference between the two arms is the pairing itself.
+
+```bash
+python -m training.finetune_dino --backbone 3dino --three-dino-repo ../3DINO \
+  --three-dino-weights /path/to/pretrained.pth --run-dir results/synthetic/YOUR_RUN \
+  --objective infonce --pairing within_modality \
+  --output-dir results/dino_within --epochs 20
+```
+
+**The augmentation is intensity-only, deliberately.** Rotation, scale or shear would move
+`brain_size`, `lr_asymmetry` and the lesion coordinates — the factors the evaluation then
+probes for — so a spatially augmented arm would be trained to discard its own measurement.
+The recipe is `finetune_dino.AUGMENTATION`, scaled by `--aug-strength`.
+
+**Read the result with this caveat.** The generator renders a modality as
+`lut = base * gain + bias` plus noise, so gain/bias/noise *are* its style model. They are
+kept mild in the recipe and the work is carried by gamma and blur, which sit outside that
+family — but the arm is still partly re-deriving the cross-modal relationship, which makes
+it conservative. If `cross_modal` still wins, the pairing genuinely carries more. If they
+tie, the honest reading is "on this generator an intensity augmentation is as good as the
+real pair", which is a statement about the generator as much as about the method.
+
+Each run records the loss AND the pairing (`content_symmetric_within_modality_infonce`),
+and `scripts/compare_dino_objectives.sh` refuses to build a table from two arms that
+recorded the same objective — two names for one experiment would otherwise compare a model
+with itself.
+
+## Comparing against the VQ-VAE
+
+Do not read a DINO report and a VQ-VAE report side by side and difference the columns:
+they are separate protocols and several of the differences are large enough to invert a
+per-factor conclusion. Export the VQ-VAE run as a bundle in this same format and score
+both through one function instead:
+
+```bash
+python -m eval.export_vq_bundle --run-dir results/synthetic/YOUR_RUN \
+  --checkpoint vqvae_model.pt --level 0 --pooling gap --block all \
+  --num-samples 500 --out results/bundles/vq_all.npz
+
+python -m eval.compare_bundles \
+  --bundles vq=results/bundles/vq_all.npz dino=results/3dino_evaluation/embeddings.npz \
+  --floors  dino=results/3dino_evaluation/random_init.npz \
+  --equal-width --with-graph --alphas 0.05 --diagnostic-alpha 0.05 \
+  --out results/matched/compare.json
+```
+
+`--with-graph` adds the PC panel for every representation, scored against the true SCM
+adjacency, with a ground-truth ceiling row and each untrained floor alongside. Pin the
+alphas as above so every source is tested at the same threshold rather than at its own
+truth-selected best. It also pins the graph readout width, which `--probe-dim` does not
+control.
+
+Pass the same `--run-dir` and `--num-samples` to both exporters so they render the same
+brains; `compare_bundles` verifies that from the stored factor digests and refuses to
+build a table if they disagree. Pair VQ `--pooling gap` with `--token-pool mean`, or VQ
+`--pooling 4,4,4` with `--token-pool grid --grid-size 4`. See
+`eval/COMPARING_3DINO_VQVAE.md` for what this equalises and what it cannot.
+
 The two individual stages remain available:
 
 ```bash

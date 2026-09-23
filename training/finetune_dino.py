@@ -3,12 +3,22 @@
     python -m training.finetune_dino --output-dir results/dino_infonce --epochs 20
 
 Each subject contributes one feature per modality after pooling its selected planes.
-The corresponding subject in the other modality is the positive; the other B-1
-subjects in that modality are negatives for InfoNCE. Barlow Twins instead aligns
-the cross-correlation diagonal and penalizes off-diagonal correlations. Only
-content channels (75% by default) enter either loss or the optional MLP projector.
-Style channels are excluded from alignment; shared backbone updates can still
-change them. This exclusion alone does not enforce style informativeness.
+The corresponding subject in the other modality is the positive. All backbone
+parameters and an optional shared MLP projector receive gradients.
+
+``--objective`` selects what that pairing is used for, which is the axis an ablation
+varies:
+
+* ``infonce`` (default) -- the other B-1 subjects in that modality are negatives, and
+  both directions contribute equally.
+* ``barlow`` / ``vicreg`` -- negative-free: the pairing is kept and the negatives are
+  dropped, so the arm answers "are the negatives what matters?" rather than "does any
+  training on this data help?". Both come from ``training.losses``, the same
+  implementations the VQ-VAE arm of this project trains with.
+
+Cross-view retrieval accuracy and positive/negative similarity are logged for every
+objective and are never part of a negative-free loss, so the arms can be read against one
+another on a quantity that means the same thing under each.
 
 Uses the generator's TRAIN split; the existing embedding script defaults to TEST.
 The output includes an HF-loadable encoder, projection/optimizer state, the generator
@@ -32,13 +42,62 @@ from utils.config import parse_dino_finetune_args
 logger = logging.getLogger(__name__)
 
 
+def _check_pair(view1, view2, objective):
+    if view1.ndim != 2 or view1.shape != view2.shape or view1.shape[0] < 2:
+        raise ValueError(f"{objective} requires matching (B, D) tensors with at least two subjects")
+
+
+def pair_diagnostics(view1, view2, temperature=0.1):
+    """Cross-view retrieval accuracy and mean positive/negative cosine similarity.
+
+    Reported for EVERY objective, not just InfoNCE, and never part of the loss for the
+    negative-free ones.  The point of running more than one objective is to compare the
+    arms, and that needs one set of numbers whose meaning does not change between them --
+    Barlow Twins' loss and InfoNCE's loss are not on a common scale, but "can you retrieve
+    a subject's other modality" is the same question under both.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    with torch.no_grad():
+        similarity = F.normalize(view1.float(), dim=-1) @ F.normalize(view2.float(), dim=-1).T
+        labels = torch.arange(len(view1), device=view1.device)
+        positive = similarity.diag()
+        n = len(view1)
+        return {
+            "accuracy": (
+                (similarity.argmax(1) == labels).float().mean() + (similarity.argmax(0) == labels).float().mean()
+            ).item()
+            / 2,
+            "positive_similarity": positive.mean().item(),
+            "negative_similarity": ((similarity.sum() - positive.sum()) / (n * (n - 1))).item(),
+        }
+
+
+def _extra_diagnostics(loss):
+    """The per-term breakdown ``training.losses`` hangs off its returned tensor.
+
+    Only finite scalars are kept: the epoch aggregator averages every key it is handed and
+    ``metrics.jsonl`` is written with ``allow_nan=False``, so one NaN diagnostic would end
+    the run after the optimizer had already stepped.
+    """
+    out = {}
+    for key, value in (getattr(loss, "_contrastive_diag", None) or {}).items():
+        # Barlow Twins reports a hardcoded top1_acc of 0.0 as "not applicable". Next to the
+        # real cross-view accuracy pair_diagnostics measures, that reads as a score of zero.
+        if key == "top1_acc":
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            out[key] = float(value)
+    return out
+
+
 def symmetric_infonce(view1, view2, temperature=0.1):
     """Mean of cross-view InfoNCE in both directions, with cosine similarities."""
     import torch
     import torch.nn.functional as F
 
-    if view1.ndim != 2 or view1.shape != view2.shape or view1.shape[0] < 2:
-        raise ValueError("InfoNCE requires matching (B, D) tensors with at least two subjects")
+    _check_pair(view1, view2, "InfoNCE")
     if not math.isfinite(temperature) or temperature <= 0:
         raise ValueError("temperature must be finite and positive")
     # Float32 keeps normalization and softmax stable under mixed precision.
@@ -46,17 +105,7 @@ def symmetric_infonce(view1, view2, temperature=0.1):
     logits = similarity / temperature
     labels = torch.arange(len(view1), device=view1.device)
     loss = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
-    with torch.no_grad():
-        positive = similarity.diag()
-        metrics = {
-            "loss": loss.item(),
-            "accuracy": (
-                (logits.argmax(1) == labels).float().mean() + (logits.argmax(0) == labels).float().mean()
-            ).item()
-            / 2,
-            "positive_similarity": positive.mean().item(),
-            "negative_similarity": ((similarity.sum() - positive.sum()) / (len(view1) * (len(view1) - 1))).item(),
-        }
+    metrics = {"loss": loss.item(), **pair_diagnostics(view1, view2)}
     return loss, metrics
 
 
@@ -65,6 +114,12 @@ def barlow_twins(view1, view2, lambd=0.0051, eps=1e-5):
 
     Objective follows https://github.com/facebookresearch/barlowtwins .
     Correlation statistics use this process's actual batch, in float32.
+
+    Kept as its own implementation rather than routed through
+    ``training.losses.barlow_twins_loss``: that one is the VQ-VAE pipeline's, carrying
+    centering modes, a correlation EMA and patch handling that mean nothing for a
+    ``(B, D)`` embedding, and it has no variance stabiliser -- ``eps`` here is what keeps a
+    constant channel finite, which ``tests/test_dino_partition.py`` pins.
     """
     import torch
 
@@ -82,27 +137,96 @@ def barlow_twins(view1, view2, lambd=0.0051, eps=1e-5):
     off_diag = corr[~torch.eye(corr.shape[0], dtype=torch.bool, device=corr.device)].square().sum()
     loss = on_diag + lambd * off_diag
     # Retrieval is only a diagnostic for BT; it does not contribute to its objective.
-    with torch.no_grad():
-        _, metrics = symmetric_infonce(view1, view2)
-        metrics.update(
-            loss=loss.item(),
-            barlow_on_diag=on_diag.item(),
-            barlow_off_diag=off_diag.item(),
-            barlow_diag_mean=diagonal.mean().item(),
-        )
+    metrics = {
+        "loss": loss.item(),
+        **pair_diagnostics(view1, view2),
+        "barlow_on_diag": on_diag.item(),
+        "barlow_off_diag": off_diag.item(),
+        "barlow_diag_mean": diagonal.mean().item(),
+    }
     return loss, metrics
+
+
+def cross_view_vicreg(view1, view2, cli):
+    """VICReg over the paired views, from ``training.losses``.
+
+    Unlike Barlow Twins there is no leaner local variant to prefer, and this is the same
+    implementation the VQ-VAE arm of this project trains with. It takes ``(n_views, B, C)``
+    and splits content from style via ``estimated_content_indices``; the split has already
+    happened by the time we get here, so passing none tells it to treat every column of the
+    content block as content.
+    """
+    import torch
+
+    from training.losses import vicreg_loss
+
+    _check_pair(view1, view2, "VICReg")
+    # float32 deliberately: it standardises per channel and squares the result, which the
+    # upstream implementation notes is not safe in fp16.
+    hz = torch.stack([view1.float(), view2.float()])
+    total = vicreg_loss(
+        hz, sim_coeff=cli.vicreg_sim_coeff, std_coeff=cli.vicreg_std_coeff, cov_coeff=cli.vicreg_cov_coeff
+    )
+    # Read the per-term breakdown BEFORE reshaping: it is a plain Python attribute hung off
+    # the returned tensor, and squeeze() returns a new tensor that does not carry it.
+    extra = _extra_diagnostics(total)
+    loss = total.squeeze()
+    metrics = {"loss": loss.item(), **pair_diagnostics(view1, view2), **extra}
+    return loss, metrics
+
+
+#: flag -> what goes in training_config.json. Every arm aligns the CONTENT block only, so
+#: the recorded name says so: a reader comparing two runs needs to know the loss AND what
+#: it was applied to, and "barlow_twins" alone would not distinguish this from a run that
+#: aligned the whole embedding.
+OBJECTIVES = {
+    "infonce": "content_symmetric_cross_view_infonce",
+    "barlow": "content_barlow_twins",
+    "vicreg": "content_vicreg",
+}
+
+
+#: The same three losses under --pairing within_modality. Spelled out rather than derived
+#: from OBJECTIVES by string surgery: "cross_view" is baked into the InfoNCE name, and
+#: patching a prefix onto it yields "within_modality_...cross_view...", which contradicts
+#: itself. The cross-modal names are left exactly as they were, so runs trained before this
+#: existed still report the string they recorded.
+WITHIN_MODALITY_OBJECTIVES = {
+    "infonce": "content_symmetric_within_modality_infonce",
+    "barlow": "content_within_modality_barlow_twins",
+    "vicreg": "content_within_modality_vicreg",
+}
+
+
+def recorded_objective(cli):
+    """The string written to training_config.json: the loss AND what it was paired on.
+
+    Both halves matter. Two runs can share a loss and differ in the pairing, or share the
+    pairing and differ in the loss, and a reader comparing them needs the name to separate
+    those -- "content_barlow_twins" alone would not say whether the two views were a
+    subject's two modalities or one modality augmented twice.
+    """
+    table = OBJECTIVES if cli.pairing == "cross_modal" else WITHIN_MODALITY_OBJECTIVES
+    return table[cli.objective]
+
+
+def compute_objective(view1, view2, cli):
+    """The selected objective's ``(loss, metrics)``, on whatever block it is handed."""
+    if cli.objective == "infonce":
+        return symmetric_infonce(view1, view2, temperature=cli.temperature)
+    if cli.objective == "barlow":
+        return barlow_twins(view1, view2, cli.barlow_lambda, cli.barlow_eps)
+    return cross_view_vicreg(view1, view2, cli)
 
 
 def alignment_loss(content1, content2, projector, cli):
     """The projector receives content only; style has no direct alignment gradient."""
-    first, second = projector(content1), projector(content2)
-    # Disable autocast for correlation / similarity matrix products.
     import torch
 
+    first, second = projector(content1), projector(content2)
+    # Disable autocast for correlation / similarity matrix products.
     with torch.autocast(device_type=first.device.type, enabled=False):
-        if cli.loss == "barlow_twins":
-            return barlow_twins(first, second, cli.barlow_lambda, cli.barlow_eps)
-        return symmetric_infonce(first, second, cli.temperature)
+        return compute_objective(first, second, cli)
 
 
 def partition_diagnostics(parts):
@@ -119,6 +243,90 @@ def partition_diagnostics(parts):
                 ).item()
                 metrics[f"{name}_paired_cosine"] = F.cosine_similarity(first, second, dim=-1).mean().item()
     return metrics
+
+
+#: Per-sample intensity augmentation for the within-modality arm, scaled by --aug-strength.
+#:
+#: NO spatial transform. Rotation, scale or shear would move brain_size, lr_asymmetry and
+#: the lesion coordinates -- the factors the evaluation then probes for -- so a spatially
+#: augmented arm would be trained to discard its own measurement.
+#:
+#: ``gain``/``bias``/``noise`` deliberately stay mild: the generator renders a modality as
+#: ``lut = base * gain + bias`` plus noise, so those three ARE its style model, and an arm
+#: driven by them would re-derive the cross-modal relationship rather than stand as an
+#: alternative to it. ``gamma`` and ``blur`` sit outside that family and are what make this
+#: a different objective from the paired one.
+AUGMENTATION = dict(gain=0.15, bias=0.10, gamma=0.30, noise=0.05, blur=1.0)
+
+
+def _blur3d(volumes, sigma):
+    """Separable 3-D Gaussian blur, applied one axis at a time."""
+    import torch
+    import torch.nn.functional as F
+
+    if sigma <= 0.05:
+        return volumes
+    radius = max(1, int(round(3 * sigma)))
+    grid = torch.arange(-radius, radius + 1, device=volumes.device, dtype=volumes.dtype)
+    kernel = torch.exp(-grid.pow(2) / (2 * sigma * sigma))
+    kernel = kernel / kernel.sum()
+    channels = volumes.shape[1]
+    for axis in range(3):
+        shape = [1, 1, 1, 1, 1]
+        shape[2 + axis] = kernel.numel()
+        weight = kernel.view(shape).expand(channels, 1, *shape[2:]).contiguous()
+        pad = [0, 0, 0, 0, 0, 0]
+        pad[2 * (2 - axis)] = pad[2 * (2 - axis) + 1] = radius
+        volumes = F.conv3d(F.pad(volumes, pad, mode="replicate"), weight, groups=channels)
+    return volumes
+
+
+def augment_volumes(volumes, strength=1.0):
+    """One draw of the within-modality augmentation. Two draws make a positive pair.
+
+    Every parameter is sampled per SAMPLE, not per batch, so two subjects in one batch are
+    not perturbed identically -- otherwise the shared perturbation is itself a signal the
+    encoder can align on, and the batch's negatives become separable for the wrong reason.
+    """
+    import torch
+
+    if strength <= 0:
+        return volumes
+    amount = {key: value * strength for key, value in AUGMENTATION.items()}
+    x = volumes.float()
+    batch = x.shape[0]
+    per_sample = (batch,) + (1,) * (x.ndim - 1)
+
+    flat = x.reshape(batch, -1)
+    low = flat.min(dim=1).values.view(per_sample)
+    span = (flat.max(dim=1).values.view(per_sample) - low).clamp_min(1e-6)
+
+    def uniform(lo, hi):
+        return torch.empty(batch, device=x.device, dtype=x.dtype).uniform_(lo, hi).view(per_sample)
+
+    # Contrast first, on a per-sample [0, 1] rescale so the exponent is well defined.
+    unit = ((x - low) / span).clamp(0, 1)
+    x = unit.pow(uniform(1 - amount["gamma"], 1 + amount["gamma"])) * span + low
+    x = _blur3d(x, float(torch.empty(1).uniform_(0, amount["blur"]).item()))
+    x = x * uniform(1 - amount["gain"], 1 + amount["gain"]) + uniform(-amount["bias"], amount["bias"]) * span
+    if amount["noise"] > 0:
+        x = x + torch.randn_like(x) * amount["noise"] * span
+    return x
+
+
+def paired_views(batch, cli):
+    """The two volumes whose CONTENT the objective is asked to align.
+
+    ``cross_modal`` is the real acquisition pair: same subject, T1 and FLAIR, differing by
+    the generator's style draw. ``within_modality`` never looks at the second modality --
+    it augments ONE modality twice -- so the difference between the two arms is the
+    pairing itself rather than the loss, the optimizer or the data budget.
+    """
+    views = batch["image"]
+    if cli.pairing == "cross_modal":
+        return views
+    source = views[cli.aug_view - 1]
+    return [augment_volumes(source, cli.aug_strength), augment_volumes(source, cli.aug_strength)]
 
 
 def encode_volumes(volumes, encoder, config, cli, device, window, mean, std):
@@ -171,17 +379,18 @@ def train_epoch(loader, encoder, projector, optimizer, scaler, config, cli, devi
     amp_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(cli.dtype)
     for batch in loader:
         optimizer.zero_grad(set_to_none=True)
-        views = batch["image"]
+        views = paired_views(batch, cli)
         context = torch.autocast(device_type=device.type, dtype=amp_dtype) if amp_dtype else nullcontext()
         with context:
             parts = [
                 split_embeddings(encode_volumes(view, encoder, config, cli, device, window, mean, std), partition)
                 for view in views
             ]
+            # Content only. alignment_loss disables autocast around the matrix products.
             loss, metrics = alignment_loss(parts[0][0], parts[1][0], projector, cli)
         metrics.update(partition_diagnostics(parts))
         if not torch.isfinite(loss):
-            raise FloatingPointError(f"Non-finite {cli.loss} loss; no optimizer update was applied")
+            raise FloatingPointError(f"Non-finite {cli.objective} loss; no optimizer update was applied")
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(parameters, cli.grad_clip or float("inf"), error_if_nonfinite=True)
@@ -302,7 +511,7 @@ def main(argv=None):
         git_sha=embed.git_sha(),
         split="train",
         feature_dim=width,
-        objective="content_barlow_twins" if cli.loss == "barlow_twins" else "content_symmetric_cross_view_infonce",
+        objective=recorded_objective(cli),
         embedding_partition=partition,
         style_objective="none",
         model_provenance=getattr(encoder, "provenance", None),
@@ -312,9 +521,9 @@ def main(argv=None):
         "Aligning %d content dimensions; %d style dimensions excluded; loss=%s",
         partition["content_dim"],
         partition["style_dim"],
-        cli.loss,
+        cli.objective,
     )
-    if cli.loss == "barlow_twins" and cli.batch_size < (cli.projection_dim or partition["content_dim"]):
+    if cli.objective == "barlow" and cli.batch_size < (cli.projection_dim or partition["content_dim"]):
         logger.warning(
             "BT correlation rank is limited to batch_size-1; small batches cannot attain identity "
             "at this projection width. Consider a larger batch or smaller projection."
@@ -333,9 +542,10 @@ def main(argv=None):
         with (cli.output_dir / "metrics.jsonl").open("a") as stream:
             stream.write(json.dumps(metrics, allow_nan=False) + "\n")
         logger.info(
-            "Epoch %d/%d: loss=%.4f accuracy=%.3f pos=%.3f neg=%.3f",
+            "Epoch %d/%d [%s]: loss=%.4f accuracy=%.3f pos=%.3f neg=%.3f",
             epoch,
             cli.epochs,
+            cli.objective,
             metrics["loss"],
             metrics["accuracy"],
             metrics["positive_similarity"],

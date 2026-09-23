@@ -1,20 +1,11 @@
-"""Encoder-only multi-view contrastive model (Yao et al. ICLR 2024, image track).
+"""Encoder-only multi-view contrastive models for 3D volumes.
 
-This is the paper's *image-experiment* setup adapted to 3D volumes: per-view conv
-encoders trained purely by the content-alignment − entropy contrastive loss, with
-**no decoder and no reconstruction** (App D.2/D.3; the paper's ResNet-18 →
-LeakyReLU → Linear(encoding_size) head, here in 3D). It is deliberately
-``models.vae.MultiviewVAE`` *minus* the decoder/KL, so encoder-only-contrastive vs
-VQ-VAE-with-reconstruction is a controlled test of the paper's claim that
-reconstruction hurts identifiability — same backbone, only the objective differs.
-
-Pipeline (per view):
-    volume (B,1,D,H,W)
-      → models.vqvae.Encoder  (3D strided conv + GroupNorm + ResidualStack)
-      → (B, hidden, d, h, w)
-      → 1x1 conv to the encoding space  → (B, latent_dim, d, h, w)
-      → pool: GAP (paper's ResNet→GAP→Linear; a 1x1 conv then GAP == GAP then
-        linear) or patch-grid → encoding vector.
+``conv`` (default) keeps the original VQ-VAE backbone and affine readout:
+    3D strided conv + GroupNorm + ResidualStack -> 1x1 conv -> GAP.
+``resnet18`` adapts the upstream image encoder architecture to volumes:
+    3D ResNet-18 -> GAP -> Linear(512, 100) -> LeakyReLU -> Linear(100, latent_dim).
+The hidden readout width is configurable. This is a 3D adaptation, not a change
+to the training objective or the view-sharing policy. Both have no decoder.
 
 The first ``content_channels`` units are the content block, the rest are style.
 ``forward`` returns the same 8-tuple as ``VQVAE``/``MultiviewVAE`` so
@@ -28,7 +19,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from models.vqvae import Encoder
+from models.resnet3d import ResNet18Features3d
 from utils.helper import HelperModule
 
 
@@ -48,6 +39,8 @@ class MultiviewConvEncoder(HelperModule):
         use_checkpoint: bool = False,
         proj_dim: int = 0,
         proj_hidden: int = 256,
+        encoder_architecture: str = "conv",
+        encoder_head_hidden: int = 100,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -57,20 +50,38 @@ class MultiviewConvEncoder(HelperModule):
         self.content_channels = content_channels
         self.separate_encoders = separate_encoders
         self.proj_dim = proj_dim
+        self.encoder_architecture = encoder_architecture
+        self.encoder_head_hidden = encoder_head_hidden
+        if encoder_architecture not in ("conv", "resnet18"):
+            raise ValueError(f"Unknown encoder_architecture: {encoder_architecture!r}")
+        if encoder_architecture == "resnet18" and encoder_head_hidden <= 0:
+            raise ValueError("encoder_head_hidden must be positive")
 
         # --- View-specific encoders ---
         # Encoder 1 is a deep copy of encoder 0 so both views start in the same
         # feature space (random init puts the two views in incompatible subspaces
         # and flattens the cross-view contrastive landscape — see models/vqvae.py).
-        self.encoder = Encoder(
-            in_channels, hidden_channels, res_channels, nb_res_layers, downscale_factor, use_checkpoint
-        )
+        if encoder_architecture == "conv":
+            from models.vqvae import Encoder
+
+            self.encoder = Encoder(
+                in_channels, hidden_channels, res_channels, nb_res_layers, downscale_factor, use_checkpoint
+            )
+        else:
+            self.encoder = ResNet18Features3d(in_channels)
         self.encoder_v1 = copy.deepcopy(self.encoder) if separate_encoders else None
 
         # --- Projection head to the encoding space ---
-        # 1x1 conv to latent_dim channels. Deterministic (no VAE head): the encoding
-        # is the pooled projection, matching the paper's GAP→Linear readout.
-        self.to_encoding = nn.Conv3d(hidden_channels, latent_dim, 1)
+        if encoder_architecture == "conv":
+            # Preserve the original module names, initialization order and weights.
+            self.to_encoding = nn.Conv3d(hidden_channels, latent_dim, 1)
+        else:
+            self.avgpool = nn.AdaptiveAvgPool3d(1)
+            self.to_encoding = nn.Sequential(
+                nn.Linear(512, encoder_head_hidden),
+                nn.LeakyReLU(),
+                nn.Linear(encoder_head_hidden, latent_dim),
+            )
 
         # --- Fixed content/style mask over the latent units ---
         fixed_mask = torch.zeros(1, latent_dim)
@@ -134,8 +145,43 @@ class MultiviewConvEncoder(HelperModule):
         but ignored — there is no decoder. Returns the 8-tuple
         ``(reconstruction=None, diffs=[0], encoder_features, content_indices,
         [], [], soft_content_masks, {})`` so the synthetic-DCI eval is unchanged.
+
+        For ResNet, GAP precedes the nonlinear readout. Patch probes apply that
+        readout separately AFTER averaging each bin; unpooled probes apply it at
+        each spatial position. Averaging these diagnostic outputs does not, in
+        general, reproduce the trained global encoding.
         """
         h = self._encode(x, n_views, view_idx)
+        if self.encoder_architecture == "resnet18":
+            if pool_only and patch_grid is None:
+                feat = self.to_encoding(self.avgpool(h).flatten(1))
+            else:
+                if pool_only:
+                    grid = (
+                        patch_grid[0]
+                        if len(patch_grid) > 0 and isinstance(patch_grid[0], (list, tuple))
+                        else patch_grid
+                    )
+                    if len(grid) != 3 or any(g < 1 or g > size for g, size in zip(grid, h.shape[2:])):
+                        raise ValueError(
+                            f"ResNet patch grid {grid} must fit its spatial map {tuple(h.shape[2:])}; "
+                            "the backbone downsamples by 32 (64^3 inputs give 2^3 maps)."
+                        )
+                    h = F.adaptive_avg_pool3d(h, tuple(grid))
+                feat = self.to_encoding(h.flatten(2).transpose(1, 2)).transpose(1, 2)
+                if not pool_only:
+                    feat = feat.reshape(h.shape[0], self.latent_dim, *h.shape[2:])
+            return (
+                None,
+                [x.new_zeros(())],
+                [feat],
+                [list(range(self.content_channels))],
+                [],
+                [],
+                {0: self.content_mask},
+                {},
+            )
+
         feat = self.to_encoding(h)  # (B, latent_dim, d, h, w)
 
         if pool_only:

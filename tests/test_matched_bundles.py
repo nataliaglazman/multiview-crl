@@ -1,0 +1,952 @@
+"""The shared bundle path: row identity, VQ block export, and one-protocol comparison."""
+
+import argparse
+import ast
+import csv
+import json
+import tempfile
+import unittest
+import unittest.mock
+import warnings
+from pathlib import Path
+
+import numpy as np
+
+from eval import bundle_identity as identity
+from eval import compare_bundles as compare
+from eval import dinov3_embed_synthetic as embed
+from eval import dinov3_identifiability as scorer
+from eval import export_vq_bundle as export
+
+
+def planted(n=200, k=3, noise=0.1, seed=0, width=24):
+    """A chain SCM, its factors, and features that mix them at the given noise level."""
+    rng = np.random.RandomState(seed)
+    z = rng.randn(n, k)
+    z[:, 1] += 1.3 * z[:, 0]
+    z[:, 2] += 1.3 * z[:, 1]
+    adjacency = np.array([[0, 1, 0], [0, 0, 1], [0, 0, 0]], dtype=bool)
+    features = z @ rng.randn(k, width) + noise * rng.randn(n, width)
+    return z, adjacency, features
+
+
+def write_bundle(path, features, z, adjacency, settings=None, n_style=2, seed=0, distribution=None):
+    """Write a bundle exactly as the production writers do, identity fields included."""
+    rng = np.random.RandomState(seed)
+    latents = {
+        "z_content": z.astype(np.float32),
+        "z_style_v1": rng.randn(len(z), n_style).astype(np.float32),
+        "z_style_v2": rng.randn(len(z), n_style).astype(np.float32),
+        "causal_adj": np.repeat(adjacency.astype(np.float32)[None], len(z), axis=0),
+    }
+    settings = settings or {"synthetic_seed": 42, "synthetic_res": 16}
+    meta = {
+        "content_factor_names": [f"c{d}" for d in range(z.shape[1])],
+        "style_factor_names": [f"s{d}" for d in range(n_style)],
+        "generator": settings,
+        **identity.identity_record(latents, settings, len(z), distribution),
+    }
+    embed.save(Path(path), {1: features.astype(np.float32)}, latents, {}, [], meta)
+    return meta
+
+
+class RowIdentityTests(unittest.TestCase):
+    def test_digest_survives_the_write_load_round_trip(self):
+        # The writer stores one adjacency where the collate produced N, and float32 where
+        # the caller may have had float64; a digest that did not survive both would make
+        # every alignment check fail open.
+        z, adjacency, features = planted()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "b.npz"
+            meta = write_bundle(path, features, z, adjacency)
+            bundle = scorer.load_bundle(path)
+            self.assertEqual(bundle["identity"]["factor_digest"], meta["factor_digest"])
+            self.assertEqual(bundle["meta"]["n_rows"], len(z))
+
+    def test_an_unstacked_adjacency_survives_the_writer(self):
+        # The DINO extractor hands save() one adjacency per sample; export_vq_bundle reads
+        # the single (K, K) matrix off the dataset's SCM. Reducing the second the way the
+        # first needs would store its first ROW and quietly break every graph panel.
+        z, adjacency, features = planted()
+        latents = {"z_content": z.astype(np.float32), "causal_adj": adjacency.astype(np.float32)}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "flat.npz"
+            embed.save(
+                path, {1: features.astype(np.float32)}, latents, {}, [], {"content_factor_names": ["a", "b", "c"]}
+            )
+            loaded = scorer.load_bundle(path)
+            self.assertEqual(loaded["adjacency"].shape, adjacency.shape)
+            np.testing.assert_array_equal(loaded["adjacency"], adjacency)
+
+    def test_stacked_and_flat_adjacencies_land_on_the_same_bundle(self):
+        z, adjacency, features = planted()
+        with tempfile.TemporaryDirectory() as tmp:
+            stacked, flat = Path(tmp) / "s.npz", Path(tmp) / "f.npz"
+            embed.save(
+                stacked,
+                {1: features.astype(np.float32)},
+                {
+                    "z_content": z.astype(np.float32),
+                    "causal_adj": np.repeat(adjacency.astype(np.float32)[None], len(z), axis=0),
+                },
+                {},
+                [],
+                {},
+            )
+            embed.save(
+                flat,
+                {1: features.astype(np.float32)},
+                {"z_content": z.astype(np.float32), "causal_adj": adjacency.astype(np.float32)},
+                {},
+                [],
+                {},
+            )
+            a, b = scorer.load_bundle(stacked), scorer.load_bundle(flat)
+            np.testing.assert_array_equal(a["adjacency"], b["adjacency"])
+            self.assertEqual(a["identity"]["factor_digest"], b["identity"]["factor_digest"])
+
+    def test_same_factors_with_different_features_stay_comparable(self):
+        z, adjacency, strong = planted(noise=0.1)
+        _z, _adj, weak = planted(noise=3.0, seed=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            write_bundle(a, strong, z, adjacency)
+            write_bundle(b, weak, z, adjacency)
+            bundles = {"a": scorer.load_bundle(a), "b": scorer.load_bundle(b)}
+            _records, problems = compare.check_alignment(bundles, strict=True)
+            self.assertEqual(problems, [])
+
+    def test_a_different_factor_draw_is_refused(self):
+        z, adjacency, features = planted()
+        other, _adj, _f = planted(seed=7)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            write_bundle(a, features, z, adjacency)
+            write_bundle(b, features, other, adjacency)
+            bundles = {"a": scorer.load_bundle(a), "b": scorer.load_bundle(b)}
+            with self.assertRaises(SystemExit) as raised:
+                compare.check_alignment(bundles, strict=True)
+            self.assertIn("not row-aligned", str(raised.exception))
+            # Same generator settings, different draw: the message must say which.
+            self.assertIn("different draw", str(raised.exception))
+
+    def test_different_row_counts_report_as_a_length_problem(self):
+        z, adjacency, features = planted(n=200)
+        short_z, short_adj, short_f = planted(n=120, seed=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            write_bundle(a, features, z, adjacency)
+            write_bundle(b, short_f, short_z, short_adj)
+            records = {
+                "a": identity.read_identity(scorer.load_bundle(a)["meta"]),
+                "b": identity.read_identity(scorer.load_bundle(b)["meta"]),
+            }
+            problems = identity.compare(records)
+            self.assertEqual(len(problems), 1)
+            self.assertIn("different row counts", problems[0])
+
+    def test_a_bundle_without_identity_fields_still_compares(self):
+        # Bundles written before the identity fields existed must not become unusable:
+        # the digest is a pure function of the arrays the file already carries.
+        z, adjacency, features = planted()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.npz"
+            write_bundle(path, features, z, adjacency)
+            data = dict(np.load(path, allow_pickle=False))
+            meta = json.loads(str(data["meta"]))
+            for key in identity.IDENTITY_KEYS:
+                meta.pop(key)
+            data["meta"] = json.dumps(meta)
+            np.savez_compressed(path, **data)
+            bundle = scorer.load_bundle(path)
+            self.assertEqual(compare.check_alignment({"x": bundle, "y": bundle}, strict=True)[1], [])
+
+
+class MetaContractTests(unittest.TestCase):
+    """The writers' ``meta`` literals must not restate what identity_record supplies.
+
+    Both exporters build meta as ``dict(..., **identity_record(...))``. Setting a key
+    explicitly that identity_record also returns is a TypeError at the dict() call -- and
+    it fires only after the encoder has run and every sample is embedded, so on a real
+    extraction it costs the whole forward pass before it reports. Checked statically
+    because reaching that line for real needs weights and a GPU.
+    """
+
+    WRITERS = ("eval/dinov3_embed_synthetic.py", "eval/export_vq_bundle.py")
+
+    def meta_call(self, path):
+        tree = ast.parse((Path(__file__).resolve().parents[1] / path).read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "meta"
+                and isinstance(node.value, ast.Call)
+            ):
+                return node.value
+        self.fail(f"{path} has no `meta = <call>(...)` to check")
+
+    def test_no_writer_restates_an_identity_key(self):
+        for path in self.WRITERS:
+            with self.subTest(writer=path):
+                call = self.meta_call(path)
+                explicit = {kw.arg for kw in call.keywords if kw.arg}
+                self.assertEqual(sorted(explicit & set(identity.IDENTITY_KEYS)), [])
+
+    def test_every_writer_actually_splats_the_identity_record(self):
+        # The other half of the contract: a writer that stopped calling identity_record
+        # would pass the test above trivially and ship bundles with no row identity.
+        for path in self.WRITERS:
+            with self.subTest(writer=path):
+                call = self.meta_call(path)
+                starred = [kw for kw in call.keywords if kw.arg is None]
+                self.assertTrue(starred, "meta must splat identity_record(...)")
+                self.assertTrue(
+                    any(
+                        isinstance(kw.value, ast.Call) and getattr(kw.value.func, "id", None) == "identity_record"
+                        for kw in starred
+                    ),
+                    "the splatted call must be identity_record",
+                )
+
+
+class EvaluationDistributionTests(unittest.TestCase):
+    """match vs iid is the mismatch the digests alone cannot name."""
+
+    def test_a_match_and_an_iid_bundle_are_refused_with_the_reason(self):
+        # Same run-dir, same --num-samples, same seed: the generator settings agree and
+        # only the drawn factors differ, so without the recorded distribution the report
+        # would blame "a different draw" and send someone hunting a seed that is fine.
+        z, adjacency, features = planted()
+        other, _adj, _f = planted(seed=7)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "match.npz", Path(tmp) / "iid.npz"
+            write_bundle(a, features, z, adjacency, distribution="match")
+            write_bundle(b, features, other, adjacency, distribution="iid")
+            bundles = {"vq": scorer.load_bundle(a), "dino": scorer.load_bundle(b)}
+            with self.assertRaises(SystemExit) as raised:
+                compare.check_alignment(bundles, strict=True)
+            message = str(raised.exception)
+            self.assertIn("different evaluation distributions", message)
+            self.assertIn("two experiments rather than two models", message)
+            self.assertNotIn("different draw", message)
+
+    def test_two_iid_bundles_still_compare(self):
+        z, adjacency, strong = planted(noise=0.1)
+        _z, _a, weak = planted(noise=3.0, seed=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            write_bundle(a, strong, z, adjacency, distribution="iid")
+            write_bundle(b, weak, z, adjacency, distribution="iid")
+            bundles = {"a": scorer.load_bundle(a), "b": scorer.load_bundle(b)}
+            self.assertEqual(compare.check_alignment(bundles, strict=True)[1], [])
+
+    def test_the_distribution_reaches_meta_and_survives_the_round_trip(self):
+        z, adjacency, features = planted()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "b.npz"
+            write_bundle(path, features, z, adjacency, distribution="iid")
+            bundle = scorer.load_bundle(path)
+            self.assertEqual(bundle["identity"]["evaluation_distribution"], "iid")
+            self.assertEqual(bundle["meta"]["evaluation_distribution"], "iid")
+
+    def test_bundles_predating_the_field_are_not_treated_as_a_mismatch(self):
+        z, adjacency, features = planted()
+        _z, _a, other = planted(noise=3.0, seed=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            write_bundle(a, features, z, adjacency, distribution="match")
+            write_bundle(b, other, z, adjacency)  # unrecorded
+            bundles = {"a": scorer.load_bundle(a), "b": scorer.load_bundle(b)}
+            self.assertEqual(compare.check_alignment(bundles, strict=True)[1], [])
+
+    def test_an_unknown_distribution_is_rejected_at_the_source(self):
+        with self.assertRaises(ValueError):
+            identity.identity_record({"z_content": np.zeros((4, 2), np.float32)}, {}, 4, "shuffled")
+
+
+class VQBlockSelectionTests(unittest.TestCase):
+    def level_tuple(self, n=40, content=6, style=4):
+        rng = np.random.RandomState(0)
+        arrays = [rng.randn(n, content), rng.randn(n, style), rng.randn(n, content), rng.randn(n, style)]
+        return (*arrays, {"has_split": True, "n_content_channels": content, "n_style_channels": style})
+
+    def test_each_block_selects_its_own_columns_for_each_view(self):
+        level = self.level_tuple()
+        for view, (c_idx, s_idx) in ((1, (0, 1)), (2, (2, 3))):
+            with self.subTest(view=view):
+                np.testing.assert_array_equal(export.select_block(level, "content", view), level[c_idx])
+                np.testing.assert_array_equal(export.select_block(level, "style", view), level[s_idx])
+                np.testing.assert_array_equal(
+                    export.select_block(level, "all", view), np.concatenate([level[c_idx], level[s_idx]], axis=1)
+                )
+
+    def test_all_is_the_full_width_and_content_alone_is_not(self):
+        level = self.level_tuple(content=6, style=4)
+        self.assertEqual(export.select_block(level, "all", 1).shape[1], 10)
+        self.assertEqual(export.select_block(level, "content", 1).shape[1], 6)
+
+    def test_all_survives_a_level_with_no_style_split(self):
+        rng = np.random.RandomState(0)
+        level = (rng.randn(30, 5), None, rng.randn(30, 5), None, {"has_split": False})
+        np.testing.assert_array_equal(export.select_block(level, "all", 1), level[0])
+        self.assertIsNone(export.select_block(level, "style", 1))
+
+    def test_pooling_strings_parse_to_what_the_extractor_takes(self):
+        self.assertEqual(export.parse_pooling("gap"), ("gap", "gap"))
+        self.assertEqual(export.parse_pooling("stats"), ("stats", "stats"))
+        self.assertEqual(export.parse_pooling("4,4,4"), ((4, 4, 4), "4x4x4"))
+        self.assertEqual(export.parse_pooling("2x2x2"), ((2, 2, 2), "2x2x2"))
+        for bad in ("4,4", "0,4,4", "gap,4,4", "-1,2,3"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    export.parse_pooling(bad)
+
+
+class ContentMaskStabilityTests(unittest.TestCase):
+    """The Gumbel mask must name the same channels for every row of one feature array."""
+
+    def helper(self):
+        from eval.dci import _stabilise_content_indices
+
+        return _stabilise_content_indices
+
+    def test_a_stable_mask_is_passed_through_unchanged(self):
+        stabilise = self.helper()
+        seen = {}
+        for _batch in range(3):
+            self.assertEqual(stabilise(0, [0, 2, 5], seen, freeze=True), [0, 2, 5])
+        self.assertNotIn("_warned", seen)
+
+    def test_freezing_pins_the_first_batch_for_the_rest_of_the_pass(self):
+        stabilise = self.helper()
+        seen = {}
+        self.assertEqual(stabilise(0, [0, 1, 2], seen, freeze=True), [0, 1, 2])
+        with self.assertLogs("eval.dci", level="WARNING") as logs:
+            self.assertEqual(stabilise(0, [3, 4, 5], seen, freeze=True), [0, 1, 2])
+        self.assertIn("changed between batches", logs.output[0])
+
+    def test_without_freezing_the_drift_is_reported_but_not_corrected(self):
+        # The old behaviour is still reachable, because the reports already published were
+        # produced with it; what it must not do any more is stay silent.
+        stabilise = self.helper()
+        seen = {}
+        stabilise(0, [0, 1, 2], seen, freeze=False)
+        with self.assertLogs("eval.dci", level="WARNING"):
+            self.assertEqual(stabilise(0, [3, 4, 5], seen, freeze=False), [3, 4, 5])
+
+    def test_each_level_warns_once_and_levels_are_tracked_separately(self):
+        stabilise = self.helper()
+        seen = {}
+        stabilise(0, [0, 1], seen, freeze=True)
+        stabilise(1, [7, 8], seen, freeze=True)
+        with self.assertLogs("eval.dci", level="WARNING") as logs:
+            stabilise(0, [2, 3], seen, freeze=True)
+            stabilise(0, [4, 5], seen, freeze=True)
+            stabilise(1, [9, 10], seen, freeze=True)
+        self.assertEqual(len(logs.output), 2)
+        self.assertEqual(stabilise(1, [9, 10], seen, freeze=True), [7, 8])
+
+    def test_a_level_with_no_mask_stays_unsplit(self):
+        stabilise = self.helper()
+        seen = {}
+        self.assertIsNone(stabilise(0, None, seen, freeze=True))
+        self.assertEqual(seen, {})
+
+
+class MatchedComparisonTests(unittest.TestCase):
+    def setUp(self):
+        warnings.simplefilter("ignore")
+        self.options = argparse.Namespace(
+            probe_kind="ridge", seeds=(0, 1), n_splits=3, n_null=2, null_seed=0, probe_dim=0, with_graph=False
+        )
+
+    def bundles(self):
+        z, adjacency, strong = planted(noise=0.1)
+        _z, _a, weak = planted(noise=3.0, seed=1)
+        return z, adjacency, strong, weak
+
+    def test_the_two_bundles_get_identical_folds_and_nulls(self):
+        # The equalisation claim in one assertion: scoring a bundle twice, once alone and
+        # once beside another, must not move a single number.
+        z, adjacency, strong, weak = self.bundles()
+
+        def make(X):
+            return dict(
+                path="<t>",
+                X=X,
+                raw=None,
+                z_content=z,
+                z_style=None,
+                adjacency=adjacency,
+                content_names=["a", "b", "c"],
+                style_names=[],
+                meta={},
+                view="1",
+            )
+
+        alone = compare.score_all({"s": make(strong)}, {}, self.options)
+        together = compare.score_all({"s": make(strong), "w": make(weak)}, {}, self.options)
+        for name, row in alone["s"]["content"].items():
+            if name == "_block":
+                continue
+            for key in ("real", "null", "gap"):
+                self.assertAlmostEqual(row[key], together["s"]["content"][name][key], places=12)
+
+    def test_a_cleaner_representation_scores_higher_on_every_factor(self):
+        z, adjacency, strong, weak = self.bundles()
+
+        def make(X):
+            return dict(
+                path="<t>",
+                X=X,
+                raw=None,
+                z_content=z,
+                z_style=None,
+                adjacency=adjacency,
+                content_names=["a", "b", "c"],
+                style_names=[],
+                meta={},
+                view="1",
+            )
+
+        results = compare.score_all({"strong": make(strong), "weak": make(weak)}, {}, self.options)
+        for name in ("a", "b", "c"):
+            with self.subTest(factor=name):
+                self.assertGreater(results["strong"]["content"][name]["gap"], results["weak"]["content"][name]["gap"])
+
+    def test_equal_width_pins_every_bundle_to_the_narrowest_block(self):
+        z, adjacency, wide = planted(width=40)
+        _z, _a, narrow = planted(width=12, seed=1)
+
+        def make(X):
+            return dict(
+                path="<t>",
+                X=X,
+                raw=None,
+                z_content=z,
+                z_style=None,
+                adjacency=adjacency,
+                content_names=["a", "b", "c"],
+                style_names=[],
+                meta={},
+                view="1",
+            )
+
+        bundles = {"wide": make(wide), "narrow": make(narrow)}
+        self.assertEqual(compare.common_width(bundles, {}), 12)
+        # A floor narrower than either model pulls the shared width down to itself.
+        self.assertEqual(compare.common_width(bundles, {"wide": make(planted(width=8, seed=2)[2])}), 8)
+
+    def test_a_floor_is_only_subtracted_from_its_own_bundle(self):
+        z, adjacency, strong, weak = self.bundles()
+
+        def make(X):
+            return dict(
+                path="<t>",
+                X=X,
+                raw=None,
+                z_content=z,
+                z_style=None,
+                adjacency=adjacency,
+                content_names=["a", "b", "c"],
+                style_names=[],
+                meta={},
+                view="1",
+            )
+
+        _zf, _af, floor_features = planted(noise=8.0, seed=3)
+        results = compare.score_all({"s": make(strong), "w": make(weak)}, {"s": make(floor_features)}, self.options)
+        self.assertIn("delta_floor", results["s"]["content"]["a"])
+        self.assertNotIn("delta_floor", results["w"]["content"]["a"])
+
+    def test_named_arguments_reject_malformed_and_duplicate_labels(self):
+        self.assertEqual(
+            compare.parse_named(["a=x.npz", "b=y.npz"], "--bundles"), {"a": Path("x.npz"), "b": Path("y.npz")}
+        )
+        for bad in (["nope.npz"], ["=x.npz"], ["a=x.npz", "a=y.npz"]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    compare.parse_named(bad, "--bundles")
+
+    def test_report_flags_a_width_mismatch_it_cannot_fix(self):
+        z, adjacency, wide = planted(width=40)
+        _z, _a, narrow = planted(width=12, seed=1)
+
+        def make(X):
+            return dict(
+                path="<t>",
+                X=X,
+                raw=None,
+                z_content=z,
+                z_style=None,
+                adjacency=adjacency,
+                content_names=["a", "b", "c"],
+                style_names=[],
+                meta={},
+                view="1",
+            )
+
+        options = argparse.Namespace(**{**vars(self.options), "probe_dim": "auto"})
+        results = compare.score_all({"wide": make(wide), "narrow": make(narrow)}, {}, options)
+        results["wide"]["content"]["_block"]["probe_features"] = 40
+        results["narrow"]["content"]["_block"]["probe_features"] = 12
+        self.assertIn("different widths", compare.format_widths(results))
+
+
+class GraphComparisonTests(unittest.TestCase):
+    """PC on each representation's features, scored against the true SCM adjacency."""
+
+    def setUp(self):
+        warnings.simplefilter("ignore")
+        self.z, self.adjacency, self.strong = planted(n=240, noise=0.1, width=32)
+        _z, _a, self.weak = planted(n=240, noise=3.0, seed=1, width=32)
+        self.options = argparse.Namespace(
+            probe_kind="ridge",
+            seeds=(0,),
+            n_splits=3,
+            n_null=1,
+            null_seed=0,
+            probe_dim=0,
+            with_graph=True,
+            pc_ceiling=True,
+            alphas=(0.05,),
+            diagnostic_alpha=0.05,
+            orientation=True,
+            indep_test="fisherz",
+            max_cond_set=None,
+            readout_dim=8,
+            holdout_readout=False,
+        )
+
+    def make(self, X):
+        return dict(
+            path="<t>",
+            X=X,
+            raw=None,
+            z_content=self.z,
+            z_style=None,
+            adjacency=self.adjacency,
+            content_names=["a", "b", "c"],
+            style_names=[],
+            meta={},
+            view="1",
+        )
+
+    def scored(self, bundles, floors=None):
+        truth = compare.truth_panel(bundles, self.options)
+        options = argparse.Namespace(**{**vars(self.options), "pc_ceiling": False})
+        return compare.score_all(bundles, floors or {}, options), truth, options
+
+    def test_every_source_is_scored_against_the_same_true_skeleton(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, _o = self.scored(bundles)
+        skeletons = [tuple(map(tuple, panel["true_skeleton"])) for _l, panel in compare.graph_panels(results, truth)]
+        self.assertEqual(len(set(skeletons)), 1, "the truth must not vary between sources")
+        expected = self.adjacency | self.adjacency.T
+        np.testing.assert_array_equal(np.array(skeletons[0], dtype=bool), expected)
+
+    def test_a_degraded_representation_recovers_a_worse_graph(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        rows = dict(compare.graph_panels(results, truth))
+        f1 = {label: compare._sweep_row(panel, options.diagnostic_alpha)["f1"] for label, panel in rows.items()}
+        self.assertGreaterEqual(f1["strong"], f1["weak"])
+        self.assertEqual(f1[compare.CEILING_LABEL], 1.0)
+
+    def test_the_ceiling_is_scored_once_and_not_repeated_per_bundle(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, _o = self.scored(bundles)
+        self.assertIsNotNone(truth)
+        for result in results.values():
+            self.assertNotIn("truth", result["graph"])
+        self.assertEqual(
+            [label for label, _p in compare.graph_panels(results, truth)],
+            [compare.CEILING_LABEL, "strong", "weak"],
+        )
+
+    def test_a_floor_appears_as_its_own_row(self):
+        bundles = {"m": self.make(self.strong)}
+        _zf, _af, floor_features = planted(n=240, noise=9.0, seed=4, width=32)
+        results, truth, _o = self.scored(bundles, {"m": self.make(floor_features)})
+        labels = [label for label, _p in compare.graph_panels(results, truth)]
+        self.assertEqual(labels, [compare.CEILING_LABEL, "m", "m · floor"])
+
+    def test_readout_width_is_pinned_to_the_narrowest_block(self):
+        wide, narrow = self.make(self.strong), self.make(self.weak[:, :12])
+        bundles = {"wide": wide, "narrow": narrow}
+        options = argparse.Namespace(**{**vars(self.options), "readout_dim": None})
+        # The default rule would give the 32-wide block 64-capped-to-32 and the 12-wide one 12.
+        self.assertEqual(compare.common_readout(bundles, {}, options), 12)
+        self.assertEqual(compare.common_readout(bundles, {"wide": self.make(self.strong[:, :5])}, options), 5)
+
+    def test_the_ceiling_does_not_trigger_the_width_warning(self):
+        # Its features ARE the factors, so it is always narrower than any model's readout;
+        # letting that count as a mismatch would print the warning on every causal run.
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        text = compare.format_graph(results, truth, options)
+        self.assertIn("CAUSAL DISCOVERY", text)
+        self.assertNotIn("capacity rather than representation", text)
+        self.assertIn("the ceiling uses its 3 factors directly", text)
+
+    def test_a_genuine_readout_mismatch_is_still_flagged(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        results["weak"]["graph"]["embeddings"]["graph_readout_dim"] = 4
+        self.assertIn("differ in readout width", compare.format_graph(results, truth, options))
+
+    def test_a_feature_width_mismatch_is_flagged_separately_from_a_readout_one(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        results["weak"]["graph"]["embeddings"]["num_features"] = 999
+        self.assertIn("differ in feature width", compare.format_graph(results, truth, options))
+
+    def test_both_alpha_selections_are_reported(self):
+        bundles = {"strong": self.make(self.strong)}
+        results, truth, options = self.scored(bundles)
+        text = compare.format_graph(results, truth, options)
+        self.assertIn("at the prespecified alpha=0.05", text)
+        self.assertIn("best-F1 alpha, selected against the truth", text)
+        self.assertIn("orientation vs the true CPDAG", text)
+
+    def test_sweep_lookup_returns_none_when_pc_failed_at_that_alpha(self):
+        panel = {"alpha_sweep": [{"alpha": 0.05, "error": "singular"}, {"alpha": 0.1, "f1": 0.5}]}
+        self.assertIsNone(compare._sweep_row(panel, 0.05))
+        self.assertIsNone(compare._sweep_row(panel, 0.2))
+        self.assertEqual(compare._sweep_row(panel, 0.1)["f1"], 0.5)
+
+    def test_graph_csv_has_one_row_per_source_and_alpha_with_selection_marked(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        results, truth, options = self.scored(bundles)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "g.csv"
+            self.assertTrue(compare.write_graph_csv(path, results, truth, options))
+            rows = list(csv.DictReader(path.open()))
+        self.assertEqual({r["source"] for r in rows}, {compare.CEILING_LABEL, "strong", "weak"})
+        for row in rows:
+            self.assertIn("prespecified", row["selected"])
+            self.assertEqual(float(row["alpha"]), 0.05)
+            self.assertTrue(0.0 <= float(row["f1"]) <= 1.0)
+            self.assertEqual(int(row["readout_dim"]), 3 if row["source"] == compare.CEILING_LABEL else 8)
+
+    def test_no_graph_section_when_the_panel_was_not_run(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        options = argparse.Namespace(**{**vars(self.options), "with_graph": False})
+        results = compare.score_all(bundles, {}, options)
+        self.assertEqual(compare.format_graph(results, None, options), "")
+        self.assertNotIn("CAUSAL DISCOVERY", compare.format_report(results, [], None, options))
+
+    def test_a_non_causal_bundle_has_no_ceiling_to_score(self):
+        bundle = self.make(self.strong)
+        bundle["adjacency"] = None
+        self.assertIsNone(compare.truth_panel({"m": bundle}, self.options))
+
+
+class GraphWidthAndVoxelTests(unittest.TestCase):
+    """--equal-width must reach the graph panel, and the voxel baseline must be visible."""
+
+    def setUp(self):
+        warnings.simplefilter("ignore")
+        self.z, self.adjacency, self.wide = planted(n=240, noise=0.1, width=40)
+        _z, _a, self.narrow = planted(n=240, noise=0.6, seed=1, width=10)
+
+    def make(self, X, raw=None):
+        return dict(
+            path="<t>",
+            X=X,
+            raw=raw,
+            z_content=self.z,
+            z_style=None,
+            adjacency=self.adjacency,
+            content_names=["a", "b", "c"],
+            style_names=[],
+            meta={},
+            view="1",
+        )
+
+    def test_graph_features_reduce_only_when_asked(self):
+        off = argparse.Namespace()
+        self.assertIs(scorer.graph_features(self.wide, off), self.wide)
+        self.assertIs(scorer.graph_features(self.wide, argparse.Namespace(graph_probe_dim=0)), self.wide)
+        reduced = scorer.graph_features(self.wide, argparse.Namespace(graph_probe_dim=10))
+        self.assertEqual(reduced.shape, (240, 10))
+
+    def test_a_block_narrower_than_the_target_is_left_alone(self):
+        same = scorer.graph_features(self.narrow, argparse.Namespace(graph_probe_dim=16))
+        self.assertEqual(same.shape[1], 10)
+
+    def test_equal_width_puts_both_graph_blocks_on_one_width(self):
+        bundles = {"wide": self.make(self.wide), "narrow": self.make(self.narrow)}
+        options = argparse.Namespace(graph_probe_dim=compare.common_width(bundles, {}))
+        sources, _Z, _adj = compare.graph_sources(bundles, {}, options)
+        widths = {label: X.shape[1] for label, X in sources}
+        self.assertEqual(widths["wide"], 10)
+        self.assertEqual(widths["narrow"], 10)
+        # The ceiling's features ARE the factors; reducing them would be meaningless.
+        self.assertEqual(widths[compare.CEILING_LABEL], 3)
+
+    def test_the_voxel_column_renders_when_a_bundle_stored_one(self):
+        _z, _a, voxels = planted(n=240, noise=2.0, seed=5, width=8)
+        options = argparse.Namespace(
+            probe_kind="ridge", seeds=(0,), n_splits=3, n_null=1, null_seed=0, probe_dim=0, with_graph=False
+        )
+        bundles = {"withvox": self.make(self.wide, raw=voxels), "novox": self.make(self.narrow)}
+        results = compare.score_all(bundles, {}, options)
+        self.assertTrue(results["withvox"]["has_voxels"])
+        self.assertFalse(results["novox"]["has_voxels"])
+        table = compare.format_block(results, "content", "delta_voxels")
+        self.assertIn("downsampled-voxel baseline", table)
+        report = compare.format_report(results, [], None, options)
+        self.assertIn("Δvoxels", report)
+        self.assertIn("voxels: yes", report)
+        self.assertIn("voxels: no", report)
+
+    def test_no_voxel_table_when_nothing_stored_one(self):
+        options = argparse.Namespace(
+            probe_kind="ridge", seeds=(0,), n_splits=3, n_null=1, null_seed=0, probe_dim=0, with_graph=False
+        )
+        results = compare.score_all({"a": self.make(self.wide), "b": self.make(self.narrow)}, {}, options)
+        self.assertEqual(compare.format_block(results, "content", "delta_voxels"), "")
+
+
+class GraphStabilityTests(unittest.TestCase):
+    """The resampling band that says whether a two-edge difference is noise."""
+
+    def setUp(self):
+        warnings.simplefilter("ignore")
+        self.z, self.adjacency, self.strong = planted(n=300, noise=0.1, width=16)
+        _z, _a, self.weak = planted(n=300, noise=4.0, seed=1, width=16)
+        self.options = argparse.Namespace(
+            alphas=(0.05,),
+            diagnostic_alpha=0.05,
+            orientation=False,
+            indep_test="fisherz",
+            max_cond_set=None,
+            readout_dim=8,
+            holdout_readout=False,
+            null_seed=0,
+            graph_probe_dim=0,
+        )
+
+    def make(self, X):
+        return dict(
+            path="<t>",
+            X=X,
+            raw=None,
+            z_content=self.z,
+            z_style=None,
+            adjacency=self.adjacency,
+            content_names=["a", "b", "c"],
+            style_names=[],
+            meta={},
+            view="1",
+        )
+
+    def sources(self):
+        bundles = {"strong": self.make(self.strong), "weak": self.make(self.weak)}
+        return compare.graph_sources(bundles, {}, self.options)
+
+    def test_every_source_is_summarised_over_the_requested_repeats(self):
+        sources, Z, adj = self.sources()
+        out = compare.graph_stability(sources, Z, adj, self.options, repeats=4, fraction=0.8)
+        self.assertEqual(set(out), {compare.CEILING_LABEL, "strong", "weak"})
+        for entry in out.values():
+            self.assertEqual(entry["repeats"], 4)
+            self.assertEqual(entry["subsample"], 240)
+            self.assertTrue(np.isfinite(entry["f1_mean"]) and np.isfinite(entry["f1_std"]))
+            self.assertGreaterEqual(entry["skeleton_shd_std"], 0.0)
+
+    def test_the_first_model_is_the_reference_and_carries_no_delta(self):
+        sources, Z, adj = self.sources()
+        out = compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=0.8)
+        self.assertNotIn("f1_delta_mean", out["strong"])
+        self.assertEqual(out["weak"]["f1_delta_vs"], "strong")
+        # The ceiling is compared to the reference too, not used as one.
+        self.assertEqual(out[compare.CEILING_LABEL]["f1_delta_vs"], "strong")
+
+    def test_the_same_rows_are_used_for_every_source(self):
+        # Pairing is what makes the delta column tighter than its two marginals. If each
+        # source drew its own rows the delta would inherit both spreads instead.
+        sources, Z, adj = self.sources()
+        seen = []
+        real_panel = scorer.graph_panel
+
+        def spy(X, z, adjacency, options):
+            seen.append(tuple(np.asarray(z[:, 0]).tolist()))
+            return real_panel(X, z, adjacency, options)
+
+        with unittest.mock.patch.object(scorer, "graph_panel", spy):
+            compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=0.8)
+        # 3 repeats x 3 sources, and each repeat's three calls must share one row subset.
+        self.assertEqual(len(seen), 9)
+        for repeat in range(3):
+            self.assertEqual(len(set(seen[repeat * 3 : repeat * 3 + 3])), 1)
+        self.assertEqual(len({seen[i * 3] for i in range(3)}), 3, "repeats must draw different rows")
+
+    def test_it_is_reproducible_from_the_null_seed(self):
+        sources, Z, adj = self.sources()
+        first = compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=0.8)
+        second = compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=0.8)
+        self.assertEqual(first["weak"]["f1_mean"], second["weak"]["f1_mean"])
+
+    def test_too_few_repeats_or_a_full_subsample_produce_nothing_useful(self):
+        sources, Z, adj = self.sources()
+        self.assertEqual(compare.graph_stability(sources, Z, adj, self.options, repeats=1, fraction=0.8), {})
+        self.assertEqual(compare.graph_stability([], None, None, self.options, repeats=5, fraction=0.8), {})
+        with self.assertRaises(ValueError):
+            compare.graph_stability(sources, Z, adj, self.options, repeats=3, fraction=1.0)
+
+    def test_failed_repeats_are_dropped_rather_than_scored_as_zero(self):
+        rows = {"m": [{"f1": 0.8, "precision": 1.0, "recall": 0.7, "skeleton_shd": 2}, None]}
+        out = compare.summarise_stability(rows, [("m", None)], size=100, repeats=2)
+        self.assertEqual(out["m"]["repeats"], 1)
+        self.assertAlmostEqual(out["m"]["f1_mean"], 0.8)
+
+    def test_the_band_table_marks_a_difference_as_unresolved_when_it_is_inside_the_noise(self):
+        stability = {
+            "a": {
+                "repeats": 5,
+                "subsample": 100,
+                "requested": 5,
+                "f1_mean": 0.70,
+                "f1_std": 0.05,
+                "skeleton_shd_mean": 10.0,
+                "skeleton_shd_std": 1.0,
+            },
+            "b": {
+                "repeats": 5,
+                "subsample": 100,
+                "requested": 5,
+                "f1_mean": 0.72,
+                "f1_std": 0.05,
+                "skeleton_shd_mean": 9.0,
+                "skeleton_shd_std": 1.0,
+                "f1_delta_mean": 0.02,
+                "f1_delta_std": 0.04,
+                "f1_delta_vs": "a",
+            },
+            "c": {
+                "repeats": 5,
+                "subsample": 100,
+                "requested": 5,
+                "f1_mean": 0.90,
+                "f1_std": 0.03,
+                "skeleton_shd_mean": 4.0,
+                "skeleton_shd_std": 1.0,
+                "f1_delta_mean": 0.20,
+                "f1_delta_std": 0.02,
+                "f1_delta_vs": "a",
+            },
+        }
+        table = compare.format_graph_stability(stability)
+        lines = {line.split()[0]: line for line in table.splitlines() if line[:1] in "abc"}
+        self.assertTrue(lines["a"].rstrip().endswith("—"))
+        self.assertTrue(lines["b"].rstrip().endswith("no"))
+        self.assertTrue(lines["c"].rstrip().endswith("yes"))
+        self.assertIn("5/5 repeats on 100 rows", table)
+
+    def test_no_band_section_without_repeats(self):
+        self.assertEqual(compare.format_graph_stability({}), "")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class RepresentationSelectionTests(unittest.TestCase):
+    """--representation must reach load_bundle, or the two tables score the same block."""
+
+    CONTENT, STYLE = 18, 6
+
+    def partitioned(self, path, noise=0.1):
+        """A bundle whose content block carries the signal and whose style block is noise."""
+        z, adjacency, content = planted(noise=noise, width=self.CONTENT)
+        rng = np.random.RandomState(7)
+        style = rng.randn(len(z), self.STYLE)
+        features = np.concatenate([content, style], axis=1)
+        meta = write_bundle(path, features, z, adjacency)
+        # Re-write with a partition: save() derives the content/style arrays from it, so
+        # the split has to exist in meta before the arrays are written, not after.
+        meta["embedding_partition"] = dict(
+            version=1,
+            scheme="fixed_backbone_channels",
+            feature_dim=self.CONTENT + self.STYLE,
+            hidden_size=self.CONTENT + self.STYLE,
+            content_channels=self.CONTENT,
+            style_channels=self.STYLE,
+            content_dim=self.CONTENT,
+            style_dim=self.STYLE,
+            spatial_positions=1,
+            repeats=1,
+        )
+        latents = {
+            "z_content": z.astype(np.float32),
+            "causal_adj": adjacency.astype(np.float32),
+        }
+        embed.save(Path(path), {1: features.astype(np.float32)}, latents, {}, [], meta)
+        return z
+
+    def test_each_block_loads_at_its_own_width(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "b.npz"
+            self.partitioned(path)
+            widths = {
+                block: scorer.load_bundle(path, "1", block)["X"].shape[1] for block in ("all", "content", "style")
+            }
+        self.assertEqual(widths, {"all": self.CONTENT + self.STYLE, "content": self.CONTENT, "style": self.STYLE})
+
+    def test_main_scores_the_block_the_flag_names(self):
+        # The regression: main() called load_bundle(path, cli.view) and left representation
+        # on its default, so --representation content reported the whole embedding's width
+        # and numbers. Feature width is the cheapest thing that separates the two.
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            self.partitioned(a, noise=0.1)
+            self.partitioned(b, noise=3.0)
+            seen = {}
+            for block in ("all", "content", "style"):
+                out = Path(tmp) / f"{block}.json"
+                compare.main(
+                    [
+                        "--bundles",
+                        f"a={a}",
+                        f"b={b}",
+                        "--representation",
+                        block,
+                        "--probe-dim",
+                        "0",
+                        "--seeds",
+                        "0",
+                        "--n-splits",
+                        "3",
+                        "--n-null",
+                        "1",
+                        "--out",
+                        str(out),
+                        "--quiet",
+                    ]
+                )
+                payload = json.loads(out.read_text())
+                seen[block] = payload["results"]["a"]
+            for block, expected in (
+                ("all", self.CONTENT + self.STYLE),
+                ("content", self.CONTENT),
+                ("style", self.STYLE),
+            ):
+                self.assertEqual(seen[block]["num_features"], expected, block)
+                self.assertEqual(seen[block]["representation"], block)
+            # Not just the width: the content block holds the signal, so its factor
+            # recovery must actually differ from the style block's.
+            gaps = {b: [r["gap"] for k, r in seen[b]["content"].items() if k != "_block"] for b in seen}
+            self.assertGreater(min(gaps["content"]), max(gaps["style"]))
+
+    def test_a_bundle_with_no_partition_is_refused_not_silently_widened(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.npz", Path(tmp) / "b.npz"
+            z, adjacency, features = planted(width=12)
+            write_bundle(a, features, z, adjacency)
+            write_bundle(b, features, z, adjacency)
+            with self.assertRaises(SystemExit):
+                compare.main(["--bundles", f"a={a}", f"b={b}", "--representation", "content", "--quiet"])
