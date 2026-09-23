@@ -121,11 +121,13 @@ def build_model(cfg, device, state_dict=None):
     return model.to(device).eval()
 
 
-def make_val_dataset(cfg, num_samples):
-    """The run's own validation distribution — every synthetic knob read back from settings."""
+def make_dataset(cfg, num_samples, mode="val"):
+    """Restore the encoder-only run's generator on a named subject split."""
+    if mode not in ("train", "val", "test"):
+        raise ValueError(f"Unknown dataset split: {mode!r}")
     res = cfg["res"]
     return SyntheticBrainDataset(
-        mode="val",
+        mode=mode,
         spatial_size=(res, res, res),
         cache=False,
         synthetic_mode=cfg.get("synthetic_mode", "pseudo_mri"),
@@ -145,6 +147,11 @@ def make_val_dataset(cfg, num_samples):
         synthetic_clean_content=cfg.get("synthetic_clean_content", False),
         synthetic_lesion_placement=cfg.get("synthetic_lesion_placement", "legacy"),
     )
+
+
+def make_val_dataset(cfg, num_samples):
+    """Backwards-compatible validation factory used by existing checkpoint probes."""
+    return make_dataset(cfg, num_samples, mode="val")
 
 
 @torch.no_grad()

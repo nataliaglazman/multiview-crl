@@ -77,3 +77,8 @@ features. These patch vectors are diagnostic encodings, not parts whose average
 must equal the global encoding. The same distinction applies to unpooled spatial
 outputs: applying a nonlinear head and then averaging is generally different
 from averaging first.
+
+To diagnose poor factor recovery without retraining, run the
+[encoder generalization audit](../eval/ENCODER_GENERALIZATION_AUDIT.md). It combines
+training/test cross-view retrieval, ridge/RBF probes through the readout, and
+training-only BatchNorm recalibration on a disposable model copy.

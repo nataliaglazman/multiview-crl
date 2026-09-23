@@ -172,12 +172,14 @@ def r2(truth, prediction):
     )
 
 
-def fit_readouts(gram, width, y, splits, seed):
+def fit_readouts(gram, width, y, splits, seed, target_names=TARGETS):
     """Per-target ridge/RBF selection on validation, with train-only scaling.
 
     Shuffled controls permute labels within train and within validation, separately;
     test labels never enter fitting or selection, even for the null control.
     """
+    if y.ndim != 2 or y.shape[1] != len(target_names):
+        raise ValueError("Need one target name for each target column")
     train, val, test = splits
     if width == 0:
         prediction = np.broadcast_to(y[train].mean(0), (len(test), y.shape[1])).copy()
@@ -193,7 +195,7 @@ def fit_readouts(gram, width, y, splits, seed):
             }
             for kind in ("ridge", "rbf")
             for cond in ("observed", "shuffled")
-            for j, name in enumerate(TARGETS)
+            for j, name in enumerate(target_names)
         ], {f"{kind}_{cond}": prediction.copy() for kind in ("ridge", "rbf") for cond in ("observed", "shuffled")}
     if not np.isfinite(gram).all() or not np.isfinite(y).all():
         raise ValueError("Non-finite kernel or target")
@@ -217,7 +219,7 @@ def fit_readouts(gram, width, y, splits, seed):
             for alpha in np.logspace(-6, 2, 9):
                 weights = projection / (values[:, None] + alpha)
                 loss = np.mean((cross_val @ weights - z[val]) ** 2, axis=0)
-                for j, name in enumerate(TARGETS):
+                for j, name in enumerate(target_names):
                     key = (kind, condition, j)
                     if key not in selected or loss[j] < selected[key]["validation_mse_standardized"]:
                         selected[key] = {
@@ -232,7 +234,7 @@ def fit_readouts(gram, width, y, splits, seed):
     rows, predictions = [], {}
     for (kind, condition, j), info in selected.items():
         prediction = info.pop("prediction")
-        predictions.setdefault(f"{kind}_{condition}", np.empty((len(test), len(TARGETS))))[:, j] = prediction
+        predictions.setdefault(f"{kind}_{condition}", np.empty((len(test), len(target_names))))[:, j] = prediction
         rows.append({**info, "test_r2": float(r2(y[test, j : j + 1], prediction[:, None])[0])})
     return rows, predictions
 
