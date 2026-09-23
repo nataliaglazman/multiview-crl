@@ -16,6 +16,11 @@ and reports three things about the resulting vectors:
    the ground-truth factors themselves, which bounds what any encoder could reach on this
    sample size.
 
+Optionally, --lesion-analysis compares backbone and projected content features
+at GAP and spatial grids, predicting both lesion controls and rendered centroids.
+It includes matched untrained and shuffled-label controls. --lesion-analysis-only
+skips the usual recovery/graph work and runs only this frozen diagnostic.
+
 The graph section needs a run whose dataset was built with ``--synthetic-causal``; without
 an SCM there is no true graph to score against and the section says so rather than
 inventing one.
@@ -28,6 +33,8 @@ Example:
 import argparse
 import json
 import os
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -39,7 +46,7 @@ from eval.identifiability_metrics import block_mcc, cv_probe_acc, cv_probe_r2
 from models.multiview_encoder import MultiviewConvEncoder
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run-dir", help="Run directory holding settings.json and model.pt")
     p.add_argument("--checkpoint", default="model.pt", help="Checkpoint filename inside --run-dir")
@@ -58,7 +65,33 @@ def parse_args():
     )
     p.add_argument("--out", default=None, help="Write the full report as JSON here")
     p.add_argument("--self-test", action="store_true")
-    return p.parse_args()
+    p.add_argument(
+        "--lesion-analysis", action="store_true", help="Append backbone/projected lesion and centroid probes"
+    )
+    p.add_argument(
+        "--lesion-analysis-only", action="store_true", help="Run only lesion analysis, skipping recovery and graph"
+    )
+    p.add_argument(
+        "--lesion-grids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Cubic grids for lesion analysis; GAP (1) always included. Default: 1 and 4, or native size if smaller",
+    )
+    p.add_argument(
+        "--lesion-shuffles", type=int, default=3, help="Number of matched shuffled-target controls (default: 3)"
+    )
+    p.add_argument("--lesion-seed", type=int, default=1729, help="Seed for lesion target permutations")
+    args = p.parse_args(argv)
+    args.lesion_analysis = args.lesion_analysis or args.lesion_analysis_only
+    if args.lesion_analysis:
+        if args.lesion_shuffles < 1:
+            p.error("--lesion-shuffles must be at least 1")
+        if args.lesion_grids is not None and any(grid < 1 for grid in args.lesion_grids):
+            p.error("--lesion-grids must be positive")
+        if args.batch_size < 1:
+            p.error("--batch-size must be positive")
+    return args
 
 
 def load_settings(run_dir):
@@ -252,6 +285,43 @@ def _self_test():
     print("self-test OK (model forward shape, recovery on a near-identity readout)")
 
 
+def append_lesion_analysis(report, model, ds, cfg, device, args):
+    from eval.checkpoint_lesion_analysis import print_analysis, run_analysis
+
+    grids = args.lesion_grids
+    if grids is None:
+        if cfg.get("encoder_architecture", "conv") == "resnet18":
+            native = (cfg["res"] + 31) // 32
+        else:
+            native = cfg["res"] // cfg["downscale_factor"]
+        grids = [1, min(4, max(1, native))]
+    floor_factory = None if args.no_floor else lambda: build_model(cfg, device)
+    report["lesion_analysis"] = run_analysis(
+        model, floor_factory, ds, device, args.batch_size, grids, args.lesion_shuffles, args.lesion_seed
+    )
+    print_analysis(report["lesion_analysis"])
+
+
+def write_report(report, args):
+    output = args.out
+    if output is None and args.lesion_analysis:
+        output = str(Path(args.run_dir) / f"score_lesion_{datetime.now():%Y%m%d_%H%M%S_%f}.json")
+    if output is None:
+        return
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    if args.lesion_analysis:
+        from eval.checkpoint_lesion_analysis import json_safe, save_tables
+
+        with open(output, "w") as fp:
+            json.dump(json_safe(report), fp, indent=2, default=float, allow_nan=False)
+        for table in save_tables(report["lesion_analysis"], output):
+            print(f"wrote {table}", flush=True)
+    else:
+        with open(output, "w") as fp:
+            json.dump(report, fp, indent=2, default=float)
+    print(f"\nwrote {output}", flush=True)
+
+
 def main():
     args = parse_args()
     if args.self_test:
@@ -273,12 +343,25 @@ def main():
     print(f"encoding: res {cfg['res']}, {n} val samples, content block = {cfg['content_channels']}", flush=True)
 
     ds = make_val_dataset(cfg, n)
-    state = torch.load(os.path.join(args.run_dir, args.checkpoint), map_location=device)
+    state = torch.load(os.path.join(args.run_dir, args.checkpoint), map_location="cpu")
     model = build_model(cfg, device, state)
+    del state
+    report = {
+        "run_dir": args.run_dir,
+        "checkpoint": args.checkpoint,
+        "pooling": pooling,
+        "patch_grid": patch_grid,
+        "num_samples": int(len(ds)),
+        "settings": cfg,
+    }
+    if args.lesion_analysis_only:
+        report["mode"] = "lesion_analysis_only"
+        append_lesion_analysis(report, model, ds, cfg, device, args)
+        write_report(report, args)
+        return
     X, X2, z, adj = encode(model, ds, device, args.batch_size, cfg["content_channels"], patch_grid)
     names = CONTENT_FACTOR_NAMES[: z.shape[1]]
 
-    report = {"run_dir": args.run_dir, "pooling": pooling, "num_samples": int(len(X)), "settings": cfg}
     report["trained"] = recovery(X, X2, z, names)
 
     floor = None
@@ -313,10 +396,9 @@ def main():
                 report["graph_floor"] = graph_panel(fX, z, adj, args)
                 print_graph(report["graph_floor"], "untrained floor")
 
-    if args.out:
-        with open(args.out, "w") as fp:
-            json.dump(report, fp, indent=2, default=float)
-        print(f"\nwrote {args.out}", flush=True)
+    if args.lesion_analysis:
+        append_lesion_analysis(report, model, ds, cfg, device, args)
+    write_report(report, args)
 
 
 if __name__ == "__main__":
