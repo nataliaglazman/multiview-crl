@@ -1,12 +1,10 @@
 """Encoder-only multi-view contrastive learning on the 3D synthetic data.
 
-The faithful image-track method of Yao et al. (ICLR 2024): per-view 3D conv
-encoders (``models.multiview_encoder.MultiviewConvEncoder``) trained by the
-content-alignment − entropy contrastive loss (InfoNCE or Barlow Twins) with
-**no decoder and no reconstruction**. Sibling to ``training.main_numerical`` (the
-MLP/abstract-latent version) and ``training.main_vae_synthetic`` (the recon
-baseline) — this one keeps the same VQ-VAE conv backbone as the latter but drops
-the decoder, so the two scripts form a controlled recon vs. no-recon comparison.
+3D encoders trained with InfoNCE or Barlow Twins, without reconstruction.
+The default ``conv`` architecture uses the VQ-VAE convolutional backbone with
+an affine readout. ``--encoder-architecture resnet18`` uses a 3D adaptation of
+the upstream image encoder: ResNet-18 -> GAP -> Linear -> LeakyReLU -> Linear.
+This architecture option does not change the loss, data, or view-sharing policy.
 
 Identifiability is scored with ``eval.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
@@ -33,18 +31,30 @@ from data.datasets import SyntheticBrainDataset
 from models.multiview_encoder import MultiviewConvEncoder
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out-dir", type=str, default="results")
     p.add_argument("--model-id", type=str, default="conv_synthetic")
 
     # Model.
+    p.add_argument(
+        "--encoder-architecture",
+        choices=("conv", "resnet18"),
+        default="conv",
+        help="conv: original VQ-VAE backbone; resnet18: upstream ResNet-18 architecture adapted to 3D",
+    )
+    p.add_argument(
+        "--encoder-head-hidden",
+        type=int,
+        default=100,
+        help="ResNet readout width: GAP -> Linear(512, width) -> LeakyReLU -> Linear(width, latent_dim)",
+    )
     p.add_argument("--latent-dim", type=int, default=16, help="Total encoding size (content + style)")
     p.add_argument("--content-channels", type=int, default=9, help="Content units (set to the true n_content)")
-    p.add_argument("--hidden-channels", type=int, default=64)
-    p.add_argument("--res-channels", type=int, default=32)
-    p.add_argument("--nb-res-layers", type=int, default=2)
-    p.add_argument("--downscale-factor", type=int, default=4, help="Spatial downscale (power of 2)")
+    p.add_argument("--hidden-channels", type=int, default=64, help="conv architecture only")
+    p.add_argument("--res-channels", type=int, default=32, help="conv architecture only")
+    p.add_argument("--nb-res-layers", type=int, default=2, help="conv architecture only")
+    p.add_argument("--downscale-factor", type=int, default=4, help="conv downscale (power of 2); ResNet uses 32")
     p.add_argument("--no-separate-encoders", action="store_true", help="Share one encoder across both views")
 
     # Contrastive loss (content alignment − entropy).
@@ -135,7 +145,14 @@ def parse_args():
     p.add_argument("--synthetic-n-fissure-grid", type=int, default=8)
     p.add_argument("--synthetic-hierarchical-content", action="store_true")
     p.add_argument("--synthetic-causal", action="store_true")
-    return p.parse_args()
+    args = p.parse_args(argv)
+    if args.encoder_architecture == "resnet18":
+        if args.encoder_head_hidden <= 0:
+            p.error("--encoder-head-hidden must be positive")
+        spatial_size = (args.res + 31) // 32
+        if args.eval_pooling == "patch" and any(g < 1 or g > spatial_size for g in args.eval_patch_grid):
+            p.error(f"ResNet at --res {args.res} has a {spatial_size}^3 map; --eval-patch-grid must fit it")
+    return args
 
 
 def cache_gb(res, num_samples):
@@ -346,7 +363,16 @@ def main():
         separate_encoders=not args.no_separate_encoders,
         proj_dim=args.contrastive_proj_dim,
         proj_hidden=args.contrastive_proj_hidden,
+        encoder_architecture=args.encoder_architecture,
+        encoder_head_hidden=args.encoder_head_hidden,
     ).to(device)
+    if args.encoder_architecture == "resnet18":
+        print(
+            f"encoder: 3D ResNet-18, stride 32, GAP -> 512 -> {args.encoder_head_hidden} -> {args.latent_dim}; "
+            f"{'separate' if model.separate_encoders else 'shared'} view backbone(s). "
+            "The conv-only width, residual-layer and downscale flags are inactive.",
+            flush=True,
+        )
     if model.projector is not None:
         print(
             f"projection head: {args.content_channels} -> {args.contrastive_proj_hidden} -> "

@@ -80,6 +80,8 @@ def build_model(cfg, device, state_dict=None):
         separate_encoders=not cfg.get("no_separate_encoders", False),
         proj_dim=cfg.get("contrastive_proj_dim", 0),
         proj_hidden=cfg.get("contrastive_proj_hidden", 256),
+        encoder_architecture=cfg.get("encoder_architecture", "conv"),
+        encoder_head_hidden=cfg.get("encoder_head_hidden", 100),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)
