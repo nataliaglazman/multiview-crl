@@ -140,6 +140,8 @@ def make_val_dataset(cfg, num_samples):
         synthetic_hierarchical_content=cfg.get("synthetic_hierarchical_content", False),
         synthetic_normalize=cfg.get("synthetic_normalize", "per_sample"),
         synthetic_causal=cfg.get("synthetic_causal", False),
+        synthetic_causal_graph=cfg.get("synthetic_causal_graph", "chain"),
+        synthetic_causal_edge_prob=cfg.get("synthetic_causal_edge_prob", 0.5),
         synthetic_clean_content=cfg.get("synthetic_clean_content", False),
         synthetic_lesion_placement=cfg.get("synthetic_lesion_placement", "legacy"),
     )

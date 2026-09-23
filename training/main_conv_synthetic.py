@@ -145,7 +145,22 @@ def parse_args(argv=None):
     p.add_argument("--synthetic-n-fissure-grid", type=int, default=8)
     p.add_argument("--synthetic-hierarchical-content", action="store_true")
     p.add_argument("--synthetic-causal", action="store_true")
+    p.add_argument(
+        "--synthetic-causal-graph",
+        type=str,
+        default="chain",
+        choices=["chain", "full", "random"],
+        help="DAG topology for the content SCM (requires --synthetic-causal)",
+    )
+    p.add_argument(
+        "--synthetic-causal-edge-prob",
+        type=float,
+        default=0.5,
+        help="Edge probability for random DAG, in [0, 1] (ignored for chain/full)",
+    )
     args = p.parse_args(argv)
+    if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
+        p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if args.encoder_architecture == "resnet18":
         if args.encoder_head_hidden <= 0:
             p.error("--encoder-head-hidden must be positive")
@@ -189,6 +204,8 @@ def make_dataset(args, mode, num_samples):
         synthetic_hierarchical_content=args.synthetic_hierarchical_content,
         synthetic_normalize=args.synthetic_normalize,
         synthetic_causal=args.synthetic_causal,
+        synthetic_causal_graph=getattr(args, "synthetic_causal_graph", "chain"),
+        synthetic_causal_edge_prob=getattr(args, "synthetic_causal_edge_prob", 0.5),
         synthetic_clean_content=args.synthetic_clean_content,
         synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
     )

@@ -43,6 +43,24 @@ negative sampling, optimizer, and data settings retain their existing behavior.
 Changing the architecture alone is not a reproduction of the entire upstream
 training recipe.
 
+To use the same random causal graph configuration as the earlier VQ-VAE YAML,
+add these dataset flags with either encoder architecture:
+
+```sh
+--synthetic-causal \
+--synthetic-causal-graph random \
+--synthetic-causal-edge-prob 0.5
+```
+
+Graph choices are `chain` (default), `full`, and `random`. The edge probability
+defaults to 0.5 and only affects `random`; each permitted edge from an earlier
+content index to a later index is sampled independently. The run's `--seed`
+determines the graph and mechanism weights, which are shared across train,
+validation and test splits. Use the same seed and content-factor count when
+matching a previous run's graph. These settings are recorded in `settings.json`
+and restored by `eval.score_checkpoint`, including its lesion analysis. Omitting
+`--synthetic-causal` keeps the SCM disabled regardless of the graph flags.
+
 Settings are saved automatically. `eval.score_checkpoint` reconstructs both the
 trained model and its untrained comparison from those settings. Old settings
 without the new fields still load the original architecture strictly.
