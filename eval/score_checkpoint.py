@@ -14,13 +14,16 @@ and reports three things about the resulting vectors:
    its own floor. Under ``--separate-encoders`` (the default) the two are tied only by a
    loss on their OUTPUTS, so nothing makes them equally good at carrying a factor;
    reporting view 1 as "the model" hides a lopsided pair.
+2c. **Style block** — the units after ``content_channels``, per view: style->style should
+   be high, content->style and style->content should stay near the floor. Style targets
+   are the gain / bias / noise sigma the renderer applied to that view, not the raw draws.
 3. **Causal graph** — the PC algorithm run on the decoded factors, scored against the
    generator's true SCM adjacency, via ``eval.run_causal_recovery.evaluate_arrays`` (the
    same protocol the rest of the repo uses; not re-derived here). Alongside it, PC run on
    the ground-truth factors themselves, which bounds what any encoder could reach on this
    sample size.
 
-Optionally, --lesion-analysis compares backbone and projected content features
+Optionally, --lesion-analysis compares backbone, projected content and style features
 at GAP and spatial grids, predicting both lesion controls and rendered centroids.
 It includes matched untrained and shuffled-label controls. --lesion-analysis-only
 skips the usual recovery/graph work and runs only this frozen diagnostic.
@@ -45,7 +48,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from data.datasets import SyntheticBrainDataset
-from eval.dci import CONTENT_FACTOR_NAMES
+from eval.dci import CONTENT_FACTOR_NAMES, STYLE_FACTOR_NAMES
 from eval.identifiability_metrics import block_mcc, channel_mcc, cv_probe_acc, cv_probe_r2
 from models.multiview_encoder import MultiviewConvEncoder
 
@@ -84,7 +87,7 @@ def parse_args(argv=None):
     p.add_argument("--plot-dir", default=None, help="Render figures here instead (implies --plot)")
     p.add_argument("--self-test", action="store_true")
     p.add_argument(
-        "--lesion-analysis", action="store_true", help="Append backbone/projected lesion and centroid probes"
+        "--lesion-analysis", action="store_true", help="Append backbone/content/style lesion and centroid probes"
     )
     p.add_argument(
         "--lesion-analysis-only", action="store_true", help="Run only lesion analysis, skipping recovery and graph"
@@ -178,6 +181,54 @@ def make_val_dataset(cfg, num_samples):
 
 
 @torch.no_grad()
+def encode_blocks(model, ds, device, batch_size, content_channels, patch_grid=None):
+    """Content and style blocks of both views from one forward pass, plus their GT factors.
+
+    Returns a dict with ``content`` and ``style`` as ``(view_1, view_2)`` arrays (style has
+    zero columns when ``latent_dim == content_channels``), ``z_content``, ``adjacency`` (or
+    None) and ``style_targets``: per view, the gain / bias / noise sigma the renderer applied
+    (``eval.style_path_audit.effective_style``). The raw draws are not the target: the
+    renderer clips gain and bias to [-1, 1] and uses only |z| for noise, so the noise draw's
+    sign never reaches the image and a raw target caps even a perfect block near R² 0.
+    ``style_targets`` is None when the samples carry no style draws or no renderer.
+    """
+    blocks = {"content": ([], []), "style": ([], [])}
+    gt, adj = [], None
+    renderer = getattr(getattr(ds, "_inner", None), "renderer", None)
+    style_scale = getattr(renderer, "style_scale", None)
+    if style_scale is not None:
+        from eval.style_path_audit import effective_style
+    style_gt = ([], [])
+    for batch in DataLoader(ds, batch_size=batch_size):
+        x = torch.cat(batch["image"], dim=0).to(device)
+        feats = model(x, pool_only=True, n_views=2, patch_grid=patch_grid)[2][0]
+        feats = feats.reshape(feats.shape[0], feats.shape[1], -1) if feats.dim() > 2 else feats.unsqueeze(-1)
+        n = feats.shape[0] // 2
+        for name, block in (("content", feats[:, :content_channels]), ("style", feats[:, content_channels:])):
+            block = block.flatten(1).cpu()
+            blocks[name][0].append(block[:n])
+            blocks[name][1].append(block[n:])
+        latents = batch["gt_latents"]
+        gt.append(latents["z_content"].numpy())
+        if style_scale is not None and "z_style_v1" in latents:
+            for view in range(2):
+                draws = latents[f"z_style_v{view + 1}"]
+                style_gt[view].append(np.stack([effective_style(z, style_scale)[: draws.shape[1]] for z in draws]))
+        if adj is None and "causal_adj" in latents:
+            # One copy per sample comes out of the collate; they are all the same SCM.
+            adj = latents["causal_adj"][0].numpy().astype(bool)
+    style_targets = None
+    if style_gt[0] and style_gt[0][0].shape[1] > 0:
+        style_targets = tuple(np.concatenate(parts) for parts in style_gt)
+    return {
+        "content": tuple(torch.cat(parts).numpy() for parts in blocks["content"]),
+        "style": tuple(torch.cat(parts).numpy() for parts in blocks["style"]),
+        "z_content": np.concatenate(gt),
+        "style_targets": style_targets,
+        "adjacency": adj,
+    }
+
+
 def encode(model, ds, device, batch_size, content_channels, patch_grid=None):
     """Content block of both views, plus GT factors and the SCM adjacency when present.
 
@@ -185,20 +236,8 @@ def encode(model, ds, device, batch_size, content_channels, patch_grid=None):
     the first ``content_channels`` units, matching the split the loss and the training-time
     eval both use.
     """
-    c1, c2, gt, adj = [], [], [], None
-    for batch in DataLoader(ds, batch_size=batch_size):
-        x = torch.cat(batch["image"], dim=0).to(device)
-        feats = model(x, pool_only=True, n_views=2, patch_grid=patch_grid)[2][0]
-        feats = feats.reshape(feats.shape[0], feats.shape[1], -1) if feats.dim() > 2 else feats.unsqueeze(-1)
-        feats = feats[:, :content_channels].flatten(1).cpu()
-        n = feats.shape[0] // 2
-        c1.append(feats[:n])
-        c2.append(feats[n:])
-        gt.append(batch["gt_latents"]["z_content"].numpy())
-        if adj is None and "causal_adj" in batch["gt_latents"]:
-            # One copy per sample comes out of the collate; they are all the same SCM.
-            adj = batch["gt_latents"]["causal_adj"][0].numpy().astype(bool)
-    return (torch.cat(c1).numpy(), torch.cat(c2).numpy(), np.concatenate(gt), adj)
+    blocks = encode_blocks(model, ds, device, batch_size, content_channels, patch_grid)
+    return (*blocks["content"], blocks["z_content"], blocks["adjacency"])
 
 
 def dci_scores(X, z, train_ratio=0.8):
@@ -245,6 +284,52 @@ def recovery(X, X_v2, z, names, with_dci=True):
     if with_dci:
         out["dci"] = dci_scores(X, z)
     return out
+
+
+def style_recovery(style, content, style_targets, z, content_names, style_names):
+    """One view's style block against its own style factors, plus both leakage directions.
+
+    The same cross-validated ridge probe as ``recovery``. A target that is constant across
+    subjects has no defined R² and is reported as NaN rather than scored.
+    """
+
+    def probe(X, Y, names):
+        per_factor = {
+            nm: float(cv_probe_r2(X, Y[:, j])["mean"]) if np.ptp(Y[:, j]) > 1e-12 else float("nan")
+            for j, nm in enumerate(names)
+        }
+        finite = [v for v in per_factor.values() if np.isfinite(v)]
+        return {"mean": float(np.mean(finite)) if finite else float("nan"), "per_factor": per_factor}
+
+    return {
+        "n_style_channels": int(style.shape[1]),
+        "style_to_style": probe(style, style_targets, style_names),
+        "content_to_style": probe(content, style_targets, style_names),
+        "style_to_content": probe(style, z, content_names),
+    }
+
+
+def print_style(views, floors, style_names):
+    """Both views' style blocks side by side, each against its own untrained floor."""
+    print(f"\n=== style block ({views[0]['n_style_channels']} features per view) ===", flush=True)
+    has_floor = floors is not None
+    head = f"  {'ridge R²':<26s}"
+    for view in ("view 1", "view 2"):
+        head += f"{view:>9s}" + (f"{'floor':>9s}{'Δ':>9s}" if has_floor else "")
+    print(head, flush=True)
+    rows = [(f"style -> {nm}", "style_to_style", nm) for nm in style_names]
+    rows += [(f"content -> {nm}", "content_to_style", nm) for nm in style_names]
+    rows += [("style -> content (mean)", "style_to_content", None)]
+    for label, block, nm in rows:
+        line = f"  {label:<26s}"
+        for v, res in enumerate(views):
+            value = res[block]["mean"] if nm is None else res[block]["per_factor"][nm]
+            line += f"{value:>9.3f}"
+            if has_floor:
+                f = floors[v][block]["mean"] if nm is None else floors[v][block]["per_factor"][nm]
+                line += f"{f:>9.3f}{value - f:>+9.3f}"
+        print(line, flush=True)
+    print("  style -> style should be high; content -> style and style -> content near the floor.", flush=True)
 
 
 def print_recovery(res, floor, names):
@@ -421,6 +506,38 @@ def _self_test():
     print("self-test OK (model forward shape, recovery on a near-identity readout)")
 
 
+def append_style(report, blocks, floor_blocks, names):
+    """Score and print both views' style blocks, or record why there is nothing to score."""
+    targets = blocks["style_targets"]
+    if blocks["style"][0].shape[1] == 0:
+        report["style_status"] = "no_style_units"
+        print(
+            "\n=== style block ===\n  SKIPPED: latent_dim == content_channels, so there are no style units.", flush=True
+        )
+        return
+    if targets is None:
+        report["style_status"] = "no_style_factors"
+        print("\n=== style block ===\n  SKIPPED: the samples carry no rendered style factors.", flush=True)
+        return
+    style_names = STYLE_FACTOR_NAMES[: targets[0].shape[1]]
+
+    def score(b):
+        return {
+            f"view{v + 1}": style_recovery(
+                b["style"][v], b["content"][v], targets[v], b["z_content"], names, style_names
+            )
+            for v in range(2)
+        }
+
+    report["style_status"] = "ok"
+    report["style"] = score(blocks)
+    floors = None
+    if floor_blocks is not None:
+        report["style_floor"] = score(floor_blocks)
+        floors = list(report["style_floor"].values())
+    print_style(list(report["style"].values()), floors, style_names)
+
+
 def append_lesion_analysis(report, model, ds, cfg, device, args):
     from eval.checkpoint_lesion_analysis import print_analysis, run_analysis
 
@@ -497,7 +614,9 @@ def main():
         append_lesion_analysis(report, model, ds, cfg, device, args)
         write_report(report, args)
         return
-    X, X2, z, adj = encode(model, ds, device, args.batch_size, cfg["content_channels"], patch_grid)
+    blocks = encode_blocks(model, ds, device, args.batch_size, cfg["content_channels"], patch_grid)
+    X, X2 = blocks["content"]
+    z, adj = blocks["z_content"], blocks["adjacency"]
     names = CONTENT_FACTOR_NAMES[: z.shape[1]]
 
     report = {"run_dir": args.run_dir, "pooling": pooling, "num_samples": int(len(X)), "settings": cfg}
@@ -505,10 +624,12 @@ def main():
 
     floor = None
     fX = fX2 = None
+    floor_blocks = None
     if not args.no_floor:
-        fX, fX2, _, _ = encode(
+        floor_blocks = encode_blocks(
             build_model(cfg, device), ds, device, args.batch_size, cfg["content_channels"], patch_grid
         )
+        fX, fX2 = floor_blocks["content"]
         floor = recovery(fX, fX2, z, names, with_dci=not args.no_dci)
         report["floor"] = floor
     print_recovery(report["trained"], floor, names)
@@ -525,6 +646,8 @@ def main():
             floor_v2 = recovery(fX2, fX, z, names, with_dci=not args.no_dci)
             report["floor_v2"] = floor_v2
         print_encoder_comparison(report["trained"], report["trained_v2"], floor, floor_v2, shared)
+
+    append_style(report, blocks, floor_blocks, names)
 
     if not args.no_graph:
         if adj is None:

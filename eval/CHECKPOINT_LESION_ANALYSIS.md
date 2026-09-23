@@ -18,9 +18,12 @@ The regular `--pooling` / `--patch-grid` flags configure the usual report;
 
 ## Comparisons
 
-For each view, compare full backbone features with projected content channels at
-identical mean-pooling grids. For the original run these are 64 and 9 channels,
-respectively. Grid 1 is the actual GAP representation and is always included.
+For each view, compare full backbone features with the encoding's projected content
+channels (`projected`) and its style channels (`style`, the units after
+`content_channels`) at identical mean-pooling grids. For the original run these are
+64, 9 and 3 channels, respectively. The `style` stage is omitted when
+`latent_dim == content_channels`. Grid 1 is the actual GAP representation and is
+always included.
 Every image is encoded once per trained/untrained model; all grids come from
 those captured tensors. No ground-truth masks are used to crop or weight encoder
 features.
@@ -89,13 +92,15 @@ Two CSV files with the same prefix are also saved:
 - `_lesion_targets.csv`: subject IDs, lesion sizes, validity, generating controls
   and physical centroids.
 
-`delta_backbone` is projected minus backbone R² at the same grid;
+`delta_backbone` is projected (or style) minus backbone R² at the same grid;
 `delta_gap` is spatial minus GAP R² at the same stage. These are matched score
 differences, without confidence intervals.
 
 Interpret the paired comparisons:
 
 - Backbone recovery exceeding projected recovery suggests a readout bottleneck.
+- Style recovery above its untrained reference suggests the style units carry
+  lesion location, i.e. the model treats it as view-specific rather than shared.
 - Spatial recovery exceeding GAP recovery suggests averaging loses accessible
   location information.
 - Centroid recovery exceeding latent recovery suggests the generator's inverse

@@ -17,6 +17,7 @@ from eval.checkpoint_lesion_analysis import (
     batch_features,
     json_safe,
     lesion_targets,
+    print_analysis,
     run_analysis,
     score_features,
     state_digest,
@@ -78,8 +79,9 @@ class CheckpointLesionTests(unittest.TestCase):
             with torch.inference_mode():
                 h = model._encode(x, 2, None)
                 for grid in (1, 4):
-                    actual = model(x, pool_only=True, n_views=2, patch_grid=[grid] * 3)[2][0][:, :9].flatten(1)
-                    np.testing.assert_allclose(features[(grid, "projected")], actual.numpy(), atol=1e-6)
+                    code = model(x, pool_only=True, n_views=2, patch_grid=[grid] * 3)[2][0]
+                    np.testing.assert_allclose(features[(grid, "projected")], code[:, :9].flatten(1).numpy(), atol=1e-6)
+                    np.testing.assert_allclose(features[(grid, "style")], code[:, 9:].flatten(1).numpy(), atol=1e-6)
                     expected = torch.nn.functional.adaptive_avg_pool3d(h, (grid,) * 3).flatten(1).numpy()
                     np.testing.assert_allclose(features[(grid, "backbone")], expected)
             self.assertEqual(before, state_digest(model))
@@ -100,9 +102,23 @@ class CheckpointLesionTests(unittest.TestCase):
         self.assertEqual((shape, channels), ((2, 2, 2), 512))
         with torch.inference_mode():
             for grid in (1, 2):
-                actual = model(x, pool_only=True, n_views=2, patch_grid=[grid] * 3)[2][0][:, :9].flatten(1)
-                np.testing.assert_allclose(features[(grid, "projected")], actual.numpy(), atol=1e-6)
+                code = model(x, pool_only=True, n_views=2, patch_grid=[grid] * 3)[2][0]
+                np.testing.assert_allclose(features[(grid, "projected")], code[:, :9].flatten(1).numpy(), atol=1e-6)
+                np.testing.assert_allclose(features[(grid, "style")], code[:, 9:].flatten(1).numpy(), atol=1e-6)
         self.assertEqual(before, state_digest(model))
+
+    def test_no_style_stage_without_style_units(self):
+        cfg = config(latent_dim=9)
+        model = score_checkpoint.build_model(cfg, "cpu")
+        features, _, _ = batch_features(model, torch.randn(4, 1, 32, 32, 32), [1, 4])
+        self.assertEqual({stage for _, stage in features}, {"backbone", "projected"})
+        ds = score_checkpoint.make_val_dataset(cfg, 24)
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            report = run_analysis(model, None, ds, "cpu", 8, grids=[1], n_shuffles=1)
+            print_analysis(report)
+        self.assertEqual({row["stage"] for row in report["rows"]}, {"backbone", "projected"})
+        self.assertNotRegex(stream.getvalue(), r"(?m)^(t1|flair)\s+\d+\s+style\s")
 
     def test_planted_information_loss_and_shuffled_controls(self):
         rng = np.random.default_rng(6)
@@ -195,15 +211,19 @@ class CheckpointLesionTests(unittest.TestCase):
             self.assertEqual(
                 analysis["state"]["trained"]["input_sha256"], analysis["state"]["untrained"]["input_sha256"]
             )
-            self.assertEqual(len(analysis["rows"]), 96)
+            # 2 arms x 2 views x 2 grids x 3 stages (backbone, content, style) x 6 targets.
+            self.assertEqual(len(analysis["rows"]), 144)
             self.assertTrue(all(value["unchanged"] for value in analysis["state"].values()))
             for row in analysis["rows"]:
                 if row["arm"] == "trained":
                     self.assertAlmostEqual(row["delta_untrained"], 0, places=8)
+                if row["stage"] == "style":
+                    self.assertEqual(row["n_features"], 3 * row["grid"] ** 3)
+                    self.assertIsNotNone(row["delta_backbone"])
             csv_path = output.with_name(output.stem + "_lesion_scores.csv")
             with csv_path.open() as stream:
                 rows = list(csv.DictReader(stream))
-            self.assertEqual(len(rows), 96)
+            self.assertEqual(len(rows), 144)
             self.assertIn("shuffled_r2_1", rows[0])
             self.assertIn("delta_backbone", rows[0])
             self.assertTrue(output.with_name(output.stem + "_lesion_targets.csv").exists())

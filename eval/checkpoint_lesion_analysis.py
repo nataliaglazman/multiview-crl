@@ -49,7 +49,11 @@ def lesion_targets(inner, latents):
 
 @torch.inference_mode()
 def batch_features(model, x, grids):
-    """One real forward; capture both backbone maps and the actual GAP encoding."""
+    """One real forward; capture backbone maps and the encoding's content and style units.
+
+    ``projected`` is the content block and ``style`` the units after it; ``style`` is
+    omitted when ``latent_dim == content_channels``.
+    """
     if any(module.training for module in model.modules()):
         raise ValueError("Frozen lesion analysis requires model.eval(), including all BatchNorm modules")
     captured = {}
@@ -78,15 +82,16 @@ def batch_features(model, x, grids):
             raise ValueError(f"Lesion grid {grid} must fit the backbone map {tuple(h.shape[2:])}")
         pooled = F.adaptive_avg_pool3d(h, (grid,) * 3)
         if grid == 1:
-            projected = global_code[:, : model.content_channels]
+            code = global_code
         elif model.encoder_architecture == "resnet18":
             # Nonlinear ResNet head is applied AFTER bin averaging, as in model.forward.
-            projected = model.to_encoding(pooled.flatten(2).transpose(1, 2)).transpose(1, 2)
-            projected = projected[:, : model.content_channels]
+            code = model.to_encoding(pooled.flatten(2).transpose(1, 2)).transpose(1, 2)
         else:
-            projected = F.adaptive_avg_pool3d(captured["to_encoding"][:, : model.content_channels], (grid,) * 3)
+            code = F.adaptive_avg_pool3d(captured["to_encoding"], (grid,) * 3)
         result[(grid, "backbone")] = pooled.flatten(1).cpu().numpy()
-        result[(grid, "projected")] = projected.flatten(1).cpu().numpy()
+        result[(grid, "projected")] = code[:, : model.content_channels].flatten(1).cpu().numpy()
+        if model.latent_dim > model.content_channels:
+            result[(grid, "style")] = code[:, model.content_channels :].flatten(1).cpu().numpy()
     return result, tuple(h.shape[2:]), int(h.shape[1])
 
 
@@ -166,7 +171,7 @@ def run_analysis(model, floor_factory, ds, device, batch_size, grids=(1, 4), n_s
         raise ValueError("At least one shuffled-label control is required")
     if ds._inner.mode != "pseudo_mri" or ds._inner.renderer.lesion_mode != "sphere":
         raise ValueError("Lesion position analysis requires pseudo_mri with lesion_mode='sphere'")
-    print("\nLesion analysis: extracting trained backbone and projected features...", flush=True)
+    print("\nLesion analysis: extracting trained backbone, content and style features...", flush=True)
     trained = extract(model, ds, device, batch_size, grids)
     Y = trained.pop("targets")
     masses = trained.pop("masses")
@@ -203,6 +208,7 @@ def run_analysis(model, floor_factory, ds, device, batch_size, grids=(1, 4), n_s
             "seed_std is spread across three CV-seed means, not a confidence interval.",
             "Shuffles permute whole six-target rows; axes and latent/centroid relationships are kept together.",
             "Backbone and projected feature counts differ; probe scores measure accessibility, not total information.",
+            "'projected' is the encoding's content block and 'style' the units after it (absent with no style units).",
             "wm_interior controls are anatomy-dependent quantiles, not Cartesian positions; voxelization can be many-to-one.",
             "ResNet patch readouts apply the nonlinear head after pooling each bin; their mean need not equal GAP.",
             "The untrained twin is a seeded initialization reference, not a saved pre-training checkpoint.",
@@ -247,7 +253,7 @@ def run_analysis(model, floor_factory, ds, device, batch_size, grids=(1, 4), n_s
         row["delta_untrained"] = row["r2"] - reference["r2"] if row["arm"] == "trained" and reference else None
         backbone = by_key[(row["arm"], row["view"], row["grid"], "backbone", row["target"])]
         gap = by_key[(row["arm"], row["view"], 1, row["stage"], row["target"])]
-        row["delta_backbone"] = row["r2"] - backbone["r2"] if row["stage"] == "projected" else None
+        row["delta_backbone"] = row["r2"] - backbone["r2"] if row["stage"] != "backbone" else None
         row["delta_gap"] = row["r2"] - gap["r2"] if row["grid"] != 1 else None
     report["centroid_to_latent_reference"] = {
         "description": "Ridge from true centroid to latent controls, on the same folds. Not an upper bound: it omits anatomy.",
@@ -261,9 +267,10 @@ def print_analysis(report):
     print("Mean xyz cross-validated ridge R²; per-axis scores and null repeats are saved.")
     print("view   grid stage       dims target      trained untrained shuffled    delta")
     rows = report["rows"]
+    stages = [stage for stage in ("backbone", "projected", "style") if any(r["stage"] == stage for r in rows)]
     for view in VIEWS:
         for grid in report["grids"]:
-            for stage in ("backbone", "projected"):
+            for stage in stages:
                 for family in ("latent", "centroid"):
                     selected = [
                         r
