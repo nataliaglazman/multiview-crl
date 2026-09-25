@@ -35,9 +35,16 @@ htmlcov/
 *.swp
 *.swo
 
+# OS / tool metadata
+.DS_Store
+.aider*
+
 # Logs
 *.log
+*.lo
 nohup.out
+# typo'd shell redirects, e.g. `>1 2>&1` writes a file named 1
+/[0-9]
 
 # Type checkers
 .mypy_cache/
@@ -62,3 +69,8 @@ eval/nifti_outputs/
 *.nii.gz
 *.pptx
 check.ipynb
+test.ipynb
+
+# One-off console dumps once committed at the root
+/dino.txt
+/notebook_diff.txt
