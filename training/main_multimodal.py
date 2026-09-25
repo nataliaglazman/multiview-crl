@@ -14,6 +14,7 @@ import collections
 import csv
 import faulthandler
 import json
+import logging
 import math
 import os
 import random
@@ -82,6 +83,10 @@ from utils.checkpointing import (
 from utils.config import parse_args, update_args
 from utils.logging_setup import setup_logging
 from utils.visualisation import save_vqvae_decoded_images
+
+# train_step's NaN guards log from outside main(), which owns the only other logger binding
+# in this module. Same name as setup_logging's logger, so the handlers main() installs apply.
+logger = logging.getLogger("multiview_crl")
 
 device_ids = [0]
 
@@ -903,7 +908,7 @@ def train_step(
         # poisoning the model permanently. Zeroing here turns a fatal event into a skipped
         # batch, and the message says which component went first so it is diagnosable in one run.
         if not torch.isfinite(total_contrastive_loss):
-            _bad = [f"L{_l}={_v.item():.4g}" for _l, _v in enumerate(level_losses) if not torch.isfinite(_v)]
+            _bad = [f"L{_l}={_v:.4g}" for _l, _v in enumerate(level_losses) if not math.isfinite(_v)]
             _feat_ok = all(bool(torch.isfinite(_e).all()) for _e in encoder_outputs)
             logger.warning(
                 "[NaN] contrastive loss is non-finite — batch SKIPPED. "
