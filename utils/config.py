@@ -283,8 +283,13 @@ def parse_args() -> argparse.ArgumentParser:
         "Must be a multiple of --checkpoint-steps to fire, since saving happens on that cadence.",
     )
     parser.add_argument("--evaluate", action="store_true")
-    parser.add_argument("--val-size", default=25000, type=int)
-    parser.add_argument("--test-size", default=25000, type=int)
+    # None → the full split. get_data() draws from an InfiniteIterator, so a
+    # fixed size larger than the split silently cycles it: the old default of
+    # 25000 meant 25000/batch_size forward passes per split regardless of how
+    # many samples actually exist (12500 iterations each at --batch-size 2).
+    # Set these only to deliberately subsample a large split.
+    parser.add_argument("--val-size", default=None, type=int)
+    parser.add_argument("--test-size", default=None, type=int)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--deterministic",
