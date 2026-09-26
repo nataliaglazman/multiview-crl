@@ -1040,6 +1040,171 @@ def _resolve_checkpoint(run_dir, name=None):
     return preferred
 
 
+# --------------------------------------------------------------------------- #
+# Contrastive projection head (--project-content)
+# --------------------------------------------------------------------------- #
+#
+# Every R2/MCC/DCI number this module produces is PRE-head by construction:
+# `load_model_from_run_dir` builds only the VQVAE, so a run's `_contrastive_proj_heads.*`
+# keys land in `load_state_dict`'s *unexpected* list and are discarded (with a warning).
+# That is the right default -- the SimCLR recipe probes the encoder, not the head -- but it
+# leaves the head's own space unmeasurable.  These helpers restore it on demand.
+#
+# Read a post-head number for what it is: the head is disposable by design and the
+# block-identifiability theory is about the encoder, so this is NOT an identifiability claim
+# about the projection.  It measures how much the loss-facing space compresses relative to
+# what the probes read.  A head narrower than the content block is not invertible, so MCC can
+# only lose -- a drop is the expected shape of the result, not a failure.
+
+
+def check_projectable_poolings(poolings):
+    """Refuse the stats rung before any extraction work happens.
+
+    The head's input is the k-wide content block.  The stats rung is 4k wide (mean, std, max,
+    min -- see ``eval.dci._pool_and_split_view``) and three of those four statistics are
+    inputs the head never saw in training, so there is no faithful way to push them through
+    it.  Silently leaving that rung un-projected would put raw and projected cells in one
+    table, which is precisely the cross-axis subtraction this protocol exists to prevent.
+    """
+    if any(value == "stats" for _key, value in poolings):
+        raise ValueError(
+            "--project-content cannot score the 'stats' pooling: the head takes the k-wide content "
+            "block, while the stats rung is 4k wide (mean/std/max/min) and the head never saw "
+            "std/max/min in training. Re-run with --poolings gap (or gap,DxHxW). Nothing is lost "
+            "for this diagnostic: every CONTENT factor in FACTOR_POOLING routes to gap or patch, "
+            "and stats carries only the style factors, which never pass through the head."
+        )
+
+
+def load_contrastive_proj_heads(run_dir, checkpoint, args, model, random_init=False, init_seed=None):
+    """Rebuild the contrastive projection head(s) that the shared eval loader discards.
+
+    Mirrors the construction in ``training/main_multimodal.py`` (``Linear -> ReLU -> Linear``,
+    one head per entry in ``--content-style-levels``, input width = that level's content
+    channels) and loads the weights STRICTLY from the raw checkpoint.  Strict on purpose:
+    measuring a freshly initialised head would look like a trained measurement and read as a
+    finding.
+
+    ``random_init=True`` is the floor twin -- the head is built but not loaded.  A trained
+    post-head number is only reportable as a gap over an untrained post-head number, so the
+    floor needs a head of its own.  ``init_seed`` reseeds torch immediately before the build
+    so that draw is reproducible and does not depend on how many draws the encoder's
+    construction happened to consume.
+
+    Returns ``{level: nn.Module}`` in eval mode on ``model``'s device, or ``{}`` when the run
+    trained no head.
+    """
+    import torch
+
+    proj_dim = int(getattr(args, "contrastive_proj_dim", 0) or 0)
+    if proj_dim <= 0:
+        return {}
+
+    mode = getattr(args, "contrastive_proj_mode", "head")
+    if mode != "head":
+        raise ValueError(
+            f"--project-content supports --contrastive-proj-mode head, not {mode!r}. "
+            "'entropy' builds a width-preserving t_k over the FULL (content+style) block and shapes "
+            "only the entropy term, so probing its output against content factors mixes two blocks; "
+            "the question there is whether t_k . r_k is invertible, which eval/entropy_uniformity.py "
+            "measures. 'bounded' builds no head at all -- its post-squash view is --squash-content."
+        )
+
+    hidden = int(getattr(args, "contrastive_proj_hidden", 256))
+    device = next(model.parameters()).device
+
+    state = {}
+    if not random_init:
+        ckpt_path = checkpoint or os.path.join(run_dir, "vqvae_model.pt")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        saved = ckpt.get("encoders", ckpt)
+        state = {k.removeprefix("module."): v for k, v in saved.items()}
+
+    heads = {}
+    for level in getattr(args, "content_style_levels", [0]):
+        width = model.content_channels_per_level.get(level)
+        if width is None:
+            continue
+        if random_init and init_seed is not None:
+            torch.manual_seed(init_seed)
+        head = torch.nn.Sequential(
+            torch.nn.Linear(width, hidden),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Linear(hidden, proj_dim),
+        )
+        if not random_init:
+            prefix = f"_contrastive_proj_heads.L{level}."
+            head_state = {k.removeprefix(prefix): v for k, v in state.items() if k.startswith(prefix)}
+            if not head_state:
+                raise ValueError(
+                    f"--project-content: settings.json for {run_dir} says --contrastive-proj-dim "
+                    f"{proj_dim}, but the checkpoint carries no '{prefix}*' weights. The head was "
+                    "never trained or never saved; scoring a fresh one would be meaningless."
+                )
+            head.load_state_dict(head_state, strict=True)
+        heads[level] = head.to(device).eval()
+
+    if heads:
+        logger.info(
+            "Restored %d contrastive projection head(s) the shared loader drops: %s -> %d%s",
+            len(heads),
+            "/".join(str(model.content_channels_per_level[lvl]) for lvl in heads),
+            proj_dim,
+            " [UNTRAINED, floor twin]" if random_init else "",
+        )
+    return heads
+
+
+def project_content_reprs(level_data, heads, pooling):
+    """Replace each level's content arrays with its projection head's output, in place.
+
+    Only content is touched: the head is trained on the content-selected block and style
+    never passes through it.
+
+    ``gap`` content is ``(N, k)`` and goes straight through.  Patch content is ``(N, P*k)``
+    patch-major (``eval.dci._pool_and_split_view``), so it is reshaped to ``(N, P, k)``,
+    projected per position exactly as training projects it, and flattened back to
+    ``(N, P*d)`` in the same patch-major order the rest of the pipeline assumes.
+
+    Column order needs no fixing up: training slices content with
+    ``torch.where(mask.bool())[-1]`` and extraction with ``expanded_content``, both ascending.
+    The mask multiply training applies before that slice is gradient plumbing only -- the
+    Gumbel mask is ``hard=True`` (``models/vqvae.py``), so the values are identical.
+    """
+    import torch
+
+    n_patches = int(np.prod(pooling)) if isinstance(pooling, (list, tuple)) else 1
+    for level, head in heads.items():
+        if level not in level_data:
+            continue
+        entry = list(level_data[level])
+        device = next(head.parameters()).device
+        for idx in (_CONTENT, _CONTENT_V2):
+            arr = entry[idx]
+            if arr is None:
+                continue
+            x = torch.from_numpy(np.ascontiguousarray(arr)).float()
+            n_rows = x.shape[0]
+            if n_patches > 1:
+                x = x.reshape(n_rows, n_patches, -1)
+            expected = head[0].in_features
+            if x.shape[-1] != expected:
+                raise ValueError(
+                    f"level {level}: content block is {x.shape[-1]} wide per position under pooling "
+                    f"{pooling!r}, but the head takes {expected}. The head only accepts the content "
+                    "block at the width it was trained on (see check_projectable_poolings)."
+                )
+            with torch.no_grad():
+                out = head(x.reshape(-1, x.shape[-1]).to(device)).cpu().numpy()
+            entry[idx] = out.reshape(n_rows, -1)
+        info = dict(entry[4])
+        info["n_content_channels"] = int(entry[_CONTENT].shape[1])
+        info["projected_content"] = True
+        entry[4] = info
+        level_data[level] = tuple(entry)
+    return level_data
+
+
 def evaluate_model(
     name,
     run_dir,
@@ -1060,6 +1225,7 @@ def evaluate_model(
     probe_dim=0,
     probe_kind="ridge",
     squash_content=False,
+    project_content=False,
     random_init=False,
     dci_max_codes=0,
     factor_pooling="assigned",
@@ -1083,6 +1249,24 @@ def evaluate_model(
     model, _args, device = load_model_from_run_dir(run_dir, checkpoint, device, random_init=random_init, seed=init_seed)
     t_load = time.perf_counter() - t0
 
+    proj_heads = {}
+    if project_content:
+        check_projectable_poolings(poolings)
+        proj_heads = load_contrastive_proj_heads(
+            run_dir, checkpoint, _args, model, random_init=random_init, init_seed=init_seed
+        )
+        if not proj_heads:
+            raise ValueError(
+                f"--project-content: {run_dir} trained no contrastive projection head "
+                "(--contrastive-proj-dim is 0 or absent in its settings.json). Nothing to project."
+            )
+        if all_content:
+            raise ValueError(
+                "--project-content cannot be combined with the all-content collapse: the head takes "
+                "only the content block, so collapsing would concatenate PROJECTED content with RAW "
+                "style into one block. Pass --baseline-per-block, or leave this run out of --baseline."
+            )
+
     reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
     t0 = time.perf_counter()
     for key, value in poolings:
@@ -1104,6 +1288,8 @@ def evaluate_model(
                     if _ld[_ci] is not None:
                         _ld[_ci] = np.tanh(_ld[_ci])
                 level_data[_lvl] = tuple(_ld)
+        if proj_heads:
+            level_data = project_content_reprs(level_data, proj_heads, value)
         reprs[key] = level_data
         if gt_content is None:
             gt_content, gt_style, gt_style_v2 = gc, gsv1, gsv2
@@ -1158,6 +1344,7 @@ def evaluate_model(
     row["run_dir"] = run_dir
     row["checkpoint"] = os.path.basename(checkpoint) if checkpoint else "vqvae_model.pt"
     row["baseline_all_content"] = all_content
+    row["projected_content"] = bool(proj_heads)
     return row
 
 
@@ -2536,6 +2723,11 @@ def _settings_of(row):
         row.get("seeds"),
         row.get("probe_dim"),
         row.get("factor_pooling"),
+        # Post-head and pre-head rows measure different spaces. Without this they merge into
+        # one leaderboard on name alone and the table silently mixes the two. Coerced to bool
+        # so rows written before this key existed (None) still match a pre-head row (False)
+        # and do not trip the settings-mismatch warning on every incremental run.
+        bool(row.get("projected_content")),
     )
 
 
@@ -2717,6 +2909,20 @@ def main():
         "the call, so use it on a single bounded run, not a mixed table.",
     )
     p.add_argument(
+        "--project-content",
+        action="store_true",
+        help="Probe the CONTRASTIVE PROJECTION HEAD's output instead of the encoder features — the "
+        "post-head view of a '--contrastive-proj-mode head' model, whose InfoNCE shaped the head's "
+        "output while probes otherwise read the pre-head block (the shared loader discards the head "
+        "weights outright). Diagnostic: run the same model with and without this flag at the same "
+        "--poolings and compare. The SimCLR premise is that post-head scores LOWER; that gap is the "
+        "whole justification for the head, and no gap means the head is a no-op. It is not an "
+        "identifiability claim about the projection: a head narrower than the content block is not "
+        "invertible, so MCC can only lose. Needs --poolings without 'stats', refuses 'entropy'/"
+        "'bounded' modes, and applies to every arm in the call — use it on a single run, not a "
+        "mixed table. Floor rows get a freshly initialised head so the gap stays subtractable.",
+    )
+    p.add_argument(
         "--old-generator",
         action="store_true",
         help="Render the frozen test set with the PRE-7ac56a3 render_structure (eval.legacy_renderer). "
@@ -2741,6 +2947,11 @@ def main():
             p.error(f"--probe-dim must be an integer or '{PROBE_DIM_AUTO}' (got {cli.probe_dim!r})")
         if cli.probe_dim < 0:
             p.error(f"--probe-dim must be >= 0 or '{PROBE_DIM_AUTO}' (got {cli.probe_dim})")
+
+    if cli.project_content and cli.squash_content:
+        # Each is the post-loss view of a DIFFERENT mode, and together they would tanh the raw
+        # content and then feed it to a head that was trained on un-squashed features.
+        p.error("--project-content and --squash-content are alternatives ('head' vs 'bounded' mode); pick one.")
 
     poolings = parse_poolings(cli.poolings)
     seeds = tuple(int(s) for s in cli.seeds.split(","))
@@ -2856,6 +3067,7 @@ def main():
                     factor_pooling=cli.factor_pooling,
                     init_seed=init_seed,
                     squash_content=cli.squash_content,
+                    project_content=cli.project_content,
                     all_content=all_content,
                     random_init=random_init,
                 )
@@ -2902,6 +3114,7 @@ def main():
         "seeds": cli.seeds,
         "probe_dim": cli.probe_dim,
         "factor_pooling": cli.factor_pooling,
+        "projected_content": cli.project_content,
         # Generator vintage is provenance, not a setting: a legacy-renderer row and a
         # current-renderer row are different experiments on the fix-affected factors, and
         # nothing else in the output would reveal the difference.

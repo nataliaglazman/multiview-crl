@@ -1,0 +1,151 @@
+# First real-data run: the current synthetic recipe, moved onto ADNI T1/T2.
+#
+# This mirrors experiments/synthetic_causal.yaml — same objective, same encoder,
+# same content/style split — changing only what the data forces to change, so the
+# two runs are as comparable as a synthetic/real pair can be. Inherits
+# defaults.yaml (which is already ADNI-shaped); cluster paths come from
+# experiments/cluster/<cluster>.yaml.
+#
+#   python scripts/preflight_adni.py experiments/adni_real.yaml --cluster slurm --sample 8
+#   python scripts/launch.py experiments/adni_real.yaml --cluster slurm --dry-run
+#   python scripts/launch.py experiments/adni_real.yaml --cluster slurm
+#
+# Run the preflight first — it resolves this config and checks the data is where
+# the paths say it is, which is most of what goes wrong on a first real-data run.
+#
+# WHAT CHANGED vs synthetic_causal.yaml, and why
+# ----------------------------------------------
+# batch_size 128 -> 16   A 96x112x96 volume is ~4x the voxels of a 64^3 synthetic
+#                        one. This is the setting most likely to need adjusting:
+#                        halve it first on OOM. It also matters for the loss —
+#                        see the Barlow Twins note below.
+# resolution             2mm / [96,112,96] rather than the 1mm / [150,180,150]
+#                        of the older ADNI ablations. 2mm is ~4x cheaper per step
+#                        and every axis divides by the level-0 scaling rate of 4
+#                        (latent 24x28x24), so no padding asymmetry in the
+#                        decoder. Switch to `--set image_spacing=1.0
+#                        spatial_size="[150,180,150]"` once the recipe holds up;
+#                        that rebuilds the preprocessing cache (different
+#                        fingerprint), it does not corrupt the existing one.
+# val_frac / test_frac   New. The labels CSV is resolved in full regardless of
+#                        mode, so before this the train, val and test datasets
+#                        were the same subjects. Splits are subject-level and
+#                        stratified by diagnosis group — see data/splits.py.
+# quantize_style         Set explicitly. synthetic_causal.yaml gets it from
+#                        synthetic_defaults.yaml, and separate_style_codebooks
+#                        raises without it.
+# eval_dci off           Real data has no ground-truth latents. The readouts here
+#                        are the content/style separation metrics — see below.
+#
+# BARLOW TWINS AT batch_size=16 — read before trusting a curve
+# ------------------------------------------------------------
+# BT decorrelates a cross-correlation matrix estimated over the batch. At N=128
+# that estimate is fine; at N=16 the GAP arm's raw estimate is not, and its
+# off-diagonal term is biased by 1/N. Two things carry the run:
+#   * bt_corr_ema (0.99, kept from the synthetic recipe) averages the correlation
+#     matrix across steps, which is exactly the mechanism that makes small-batch
+#     BT usable. Do not turn it off here.
+#   * patch_contrastive folds patch positions into the batch dimension, so the
+#     patch arm's effective N is 16 x n_kept_patches — large. The GAP arm
+#     (bt_gap_weight) is the one running at N=16.
+# If the GAP arm looks unstable, lower bt_gap_weight before touching anything
+# else. If it stays unstable, `--set contrastive_loss_type=infonce
+# scale_contrastive_loss=1.0` falls back to the InfoNCE recipe the earlier ADNI
+# ablations used, which is far less batch-size sensitive.
+#
+# The bt_* coefficients below are carried over verbatim. They were calibrated
+# against the synthetic content width and the synthetic data scale; treat them as
+# a starting point, not a tuned setting. Re-check them against the logged raw BT
+# terms in the first few hundred steps.
+#
+# WHAT TO LOOK AT (there is no DCI here)
+# --------------------------------------
+# Every 2000 steps eval/cross_reconstruction.evaluate_content_style_separation
+# runs on the val split and logs:
+#   content/modality_invariance     content should NOT be predictable from T1-vs-T2
+#   content/modality_probe_acc      near chance (0.5) is the target
+#   style/subject_invariance        style should carry modality, not subject
+#   style/subject_retrieval_top1
+#   content/cross_view_cosine_mean  T1 and T2 content of the same subject agree
+#   content/diagnosis_probe_acc     CN/MCI/AD from content — the anatomy floor
+#   separation_score(_gated)        composite; drives best-checkpoint selection
+# separation_floor_diagnosis_info (0.1, from defaults.yaml) gates selection on
+# the diagnosis probe beating chance, so a collapsed encoder with beautifully
+# "invariant" but content-free features cannot win.
+
+tag: adni-real-bt-patch
+
+# ---- Data ----
+dataset_name: ADNI_stripped_masks
+image_spacing: 2.0
+spatial_size: [96, 112, 96]
+cache_dataset: true
+
+# Subject-level, stratified, disjoint. Keep split_seed fixed across every run you
+# intend to compare — changing it reshuffles which subjects are held out.
+val_frac: 0.2
+test_frac: 0.1
+split_seed: 0
+
+# ---- Architecture (from synthetic_causal.yaml) ----
+vqvae_nb_levels: 1
+vqvae_nb_res_layers: 2
+vqvae_hidden_channels: 48
+vqvae_embed_dim: 48
+vqvae_scaling_rates: [4]
+content_size: 40
+separate_encoders: false
+norm_type: layer
+decoder_norm_type: group
+no_final_recon_norm: true
+inject_style_to_decoder: true
+style_injection_mode: input
+quantize_style: true
+separate_style_codebooks: true
+separate_content_codebooks: false
+deterministic: true
+
+# ---- Contrastive: Barlow Twins + patch ----
+contrastive_loss_type: barlow_twins
+patch_contrastive: true
+patch_grid: [8, 8, 8]
+patch_center_mode: position
+# Patch positions are kept when the pooled BRAIN MASK exceeds this fraction —
+# on ADNI that is a real skull-stripped mask, not the synthetic >0.05 intensity
+# proxy, so 0.05 keeps patches that are 95% background. Worth raising to ~0.25
+# once you have seen how many positions survive at level 0.
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+single_count_commitment: true
+scale_contrastive_loss: 100
+bt_gap_weight: 1
+bt_patch_weight: 1
+bt_normalize_terms: false
+bt_sim_normalize: false
+bt_lambda: 6
+bt_gap_lambda: 6
+bt_sim_coeff: 0.0114
+bt_std_coeff: 0.227
+bt_gap_std_coeff: 0.05
+bt_gap_sim_coeff: 0.05
+bt_corr_ema: 0.99
+
+# ---- Reconstruction ----
+scale_recon_loss: 16
+grad_clip_norm: 100
+
+# ---- Training ----
+lr: 1.0e-3
+batch_size: 16
+train_steps: 20000
+checkpoint_steps: 1000
+gradient_checkpointing: true
+use_amp: true
+channels_last: true
+resume_training: true
+
+# ---- Evaluation ----
+# eval_dci is synthetic-only (no ground-truth latents on ADNI); the real-data
+# readout is the separation suite listed in the header.
+eval_dci: false
+select_by_gated_score: true

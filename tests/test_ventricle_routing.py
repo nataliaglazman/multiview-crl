@@ -243,11 +243,46 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len(panels), 1)
             for view in ("t1", "flair"):
                 self.assertGreater(summary[view]["n_valid_input"], 0)
+                metric = summary[view]["metrics"]["content_mean_gain"]
+                self.assertAlmostEqual(metric["mean"], weight, places=4)
+                np.testing.assert_allclose(metric["mean_ci95"], [weight, weight], atol=1e-5)
             for row in rows:
                 if row["valid_input"]:
                     self.assertAlmostEqual(row["joint_gain"], 1, places=4)
                     self.assertAlmostEqual(row["content_mean_gain"], weight, places=4)
                     self.assertAlmostEqual(row["style_mean_gain"], 1 - weight, places=4)
+                    self.assertAlmostEqual(row["joint_energy_in_affected_fraction"], 1, places=6)
+                    self.assertLess(row["joint_outside_rms"], 2e-6)
+                    self.assertGreater(row["content_post_L0_delta_rms"], row["content_post_L0_gap_delta_rms"])
+                    self.assertLessEqual(row["content_post_L0_gap_to_native_rms"], 1)
+
+    def test_anatomy_dependent_lesion_motion_is_excluded_not_called_ventricle_routing(self):
+        ds = self.dataset("fixed_reference", synthetic_lesion_placement="wm_interior")
+        rows, summary, _ = audit(RoutingOracle(1), ds, "cpu", eps=0.5, examples=0)
+        confounded = [r for r in rows if r["lesion_changed_voxels"] > 0]
+        self.assertTrue(confounded)
+        self.assertTrue(any(r["valid_routing"] for r in rows))
+        for row in confounded:
+            self.assertFalse(row["isolated_intervention"])
+            self.assertFalse(row["valid_routing"])
+        for view, group in summary.items():
+            valid = sum(r["valid_routing"] for r in rows if r["modality"] == view)
+            self.assertEqual(group["metrics"]["joint_gain"]["n_valid"], valid)
+            self.assertEqual(group["metrics"]["content_post_L0_delta_rms"]["n_valid"], valid)
+            self.assertGreater(group["n_lesion_changed"], 0)
+
+    def test_registered_buffer_mutation_is_rejected(self):
+        class Mutating(RoutingOracle):
+            def __init__(self):
+                super().__init__(1)
+                self.register_buffer("counter", torch.zeros((), dtype=torch.long))
+
+            def forward(self, x, **kwargs):
+                self.counter.add_(1)
+                return super().forward(x, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, "changed a registered"):
+            audit(Mutating(), self.dataset(), "cpu", examples=0)
 
     def test_endpoint_guard_and_training_guard(self):
         ds = self.dataset()
@@ -362,39 +397,62 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(model.codebooks_v1[0]._forward_hooks), 0)
 
     def test_cli_writes_report_rows_and_panels(self):
+        import nibabel as nib
+
         ds = self.dataset()
         with tempfile.TemporaryDirectory() as tmp:
+            model = RoutingOracle(0)
+            checkpoint = Path(tmp) / "vqvae_model.pt"
+            torch.save({"encoders": model.state_dict(), "step": 123}, checkpoint)
+            original_checkpoint = checkpoint.read_bytes()
+            directory = Path(tmp) / "report"
             argv = [
                 "ventricle_routing",
                 "--run-dir",
-                "oracle",
-                "--out-dir",
                 tmp,
+                "--out-dir",
+                str(directory),
                 "--num-samples",
                 "3",
                 "--eps",
                 "0.5",
                 "--examples",
                 "1",
+                "--save-nifti",
             ]
             with (
                 patch("sys.argv", argv),
                 patch(
                     "eval.run_dci_synthetic.load_model_from_run_dir",
-                    return_value=(RoutingOracle(0), argparse.Namespace(), "cpu"),
+                    return_value=(model, argparse.Namespace(), "cpu"),
                 ),
                 patch("eval.ventricle_routing.make_dataset", return_value=ds),
                 contextlib.redirect_stdout(io.StringIO()) as output,
             ):
                 main()
-            report = json.loads((Path(tmp) / "summary.json").read_text())
+            report = json.loads((directory / "summary.json").read_text())
+            self.assertEqual(report["status"], "complete")
+            self.assertTrue(report["registered_state_unchanged"])
+            self.assertEqual(report["checkpoint"]["step"], 123)
+            self.assertEqual(checkpoint.read_bytes(), original_checkpoint)
             self.assertEqual(report["summary"]["t1"]["n"], 3)
             self.assertEqual(report["render_resolution"], ds.res)
             self.assertAlmostEqual(report["summary"]["t1"]["metrics"]["style_mean_gain"]["median"], 1, places=5)
-            with (Path(tmp) / "samples.csv").open() as f:
+            with (directory / "samples.csv").open() as f:
                 self.assertEqual(len(list(csv.DictReader(f))), 6)
-            self.assertTrue((Path(tmp) / "examples.png").read_bytes().startswith(b"\x89PNG"))
+            self.assertEqual((directory / "responses.csv").read_bytes(), (directory / "samples.csv").read_bytes())
+            self.assertTrue((directory / "examples.png").read_bytes().startswith(b"\x89PNG"))
+            sample = render_pair(ds, 0, 0.5)
+            for view, modality in enumerate(("t1", "flair")):
+                prefix = f"sample0000_ventricle_{modality}"
+                self.assertTrue((directory / f"{prefix}.png").read_bytes().startswith(b"\x89PNG"))
+                volume = nib.load(directory / f"{prefix}_input_delta.nii.gz")
+                np.testing.assert_allclose(volume.get_fdata(), (sample["b"][view] - sample["a"][view]).numpy()[0])
+                np.testing.assert_equal(volume.affine, np.eye(4))
+                mask = nib.load(directory / f"{prefix}_changed_tissue_mask.nii.gz")
+                np.testing.assert_equal(mask.get_fdata(), sample["support"])
             self.assertIn("joint_cosine", output.getvalue())
+            self.assertIn("native / GAP", output.getvalue())
 
     def test_real_model_multilevel_and_separate_codebooks_preserve_state(self):
         for separate, quantized, levels in ((False, False, 1), (True, True, 1), (True, True, 2)):

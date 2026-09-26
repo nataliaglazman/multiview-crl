@@ -12,6 +12,11 @@ so usually there is one ``--json``; pass several to overlay separate output dire
 
 What it draws
 -------------
+``truth_graph.png``  The SCM itself, drawn once: every true edge as an arc over the factors
+                     in causal order, arrow on the child. Each arc is shaded by how many of
+                     the plotted runs recovered it, so the SPANS answer what a per-pair
+                     matrix cannot — whether what PC misses is the long-range structure or
+                     the local structure.
 ``edges.png``        The one a scalar cannot give you: WHICH edges were recovered. A cell
                      per factor pair — blue filled + check for a true edge PC found, blue
                      outline + minus for one it missed, orange + plus for an edge it
@@ -109,6 +114,39 @@ def factor_names(run):
     return [factor.get("name", f"d{factor['dim']}") for factor in run["factors"]]
 
 
+def truth_edges(run):
+    """``(edges, directed)`` from the report's stored true graph.
+
+    Direction comes from ``true_dag``. ``true_skeleton`` is its symmetrisation and is the
+    fallback for a report written before the DAG was stored -- but then the pairs are
+    UNORDERED, so ``directed`` is False and callers must not draw an arrowhead on them.
+    Ordering a skeleton's pairs by index would silently assert a direction the report does
+    not contain, and on this generator it would even look right, since it only ever draws
+    parents with a lower index.
+    """
+    dag = run.get("true_dag")
+    if dag:
+        return [(i, j) for i in range(len(dag)) for j in range(len(dag)) if dag[i][j]], True
+    skeleton = run.get("true_skeleton") or []
+    pairs = [(i, j) for i in range(len(skeleton)) for j in range(i + 1, len(skeleton)) if skeleton[i][j]]
+    return pairs, False
+
+
+def truth_recovery(runs):
+    """``{(i, j): count}`` -- how many of these runs recovered each true pair, i < j.
+
+    Keyed on the unordered pair because the skeleton metrics are: PC is scored on
+    adjacency, and an edge it orients backwards still counts as recovered here.
+    """
+    found = {}
+    for _label, run in runs:
+        _names, classes = edge_classes(run)
+        for pair, kind in classes.items():
+            if kind == "tp":
+                found[pair] = found.get(pair, 0) + 1
+    return found
+
+
 def edge_classes(run):
     """``(names, {(i, j): 'tp'|'fp'|'fn'})`` for the selected alpha's skeleton."""
     best = run.get("best")
@@ -160,11 +198,22 @@ def fig_edges(runs, t, series, path):
     legend, which is the recolour-on-filter mistake in another costume.
     """
     truth_colour, spurious_colour = series[0], series[1]
-    fig, axes = _panel_grid(len(runs), 5.0, 4.6, t)
+    # The truth panel first, so every run panel is read against the graph it was scored on
+    # rather than against the reader's memory of it. It is a panel, not a colour: the
+    # outcome classes below already own both hues, and repainting them per panel is the
+    # recolour-on-filter mistake this docstring warns about.
+    fig, axes = _panel_grid(len(runs) + 1, 5.0, 4.6, t)
     fig.subplots_adjust(wspace=0.55)
     rows = []
-    for panel, (ax, (label, run)) in enumerate(zip(axes, runs)):
+    panels = [("ground truth", runs[0][1], True)] + [(label, run, False) for label, run in runs]
+    for panel, (ax, (label, run, is_truth)) in enumerate(zip(axes, panels)):
         names, classes = edge_classes(run)
+        if is_truth:
+            # Direction is kept here and nowhere else in this figure: the skeleton metrics
+            # score adjacency only, so a run panel has no direction to show.
+            edges, has_direction = truth_edges(run)
+            directed = {(min(p, c), max(p, c)): ("→" if p < c else "←") if has_direction else "·" for p, c in edges}
+            classes = dict.fromkeys(directed, "truth")
         n = len(names)
         ax.set_facecolor(t["surface"])
         for side in ("top", "right", "bottom", "left"):
@@ -177,12 +226,18 @@ def fig_edges(runs, t, series, path):
                 if kind is None:
                     ax.add_patch(Rectangle((x, y), w, w, facecolor=t["grid"], edgecolor="none", alpha=0.35))
                     continue
-                fill = {"tp": truth_colour, "fn": t["surface"], "fp": spurious_colour}[kind]
-                edge = truth_colour if kind in ("tp", "fn") else spurious_colour
+                fill = {"tp": truth_colour, "fn": t["surface"], "fp": spurious_colour, "truth": truth_colour}[kind]
+                edge = spurious_colour if kind == "fp" else truth_colour
                 ax.add_patch(Rectangle((x, y), w, w, facecolor=fill, edgecolor=edge, linewidth=1.6))
-                glyph, ink = {"tp": ("✓", t["surface"]), "fn": ("−", truth_colour), "fp": ("+", t["surface"])}[kind]
+                glyph, ink = {
+                    "tp": ("✓", t["surface"]),
+                    "fn": ("−", truth_colour),
+                    "fp": ("+", t["surface"]),
+                    "truth": (directed.get((i, j), "·"), t["surface"]),
+                }[kind]
                 ax.text(j, i, glyph, ha="center", va="center", fontsize=9, color=ink)
-                rows.append([label, names[i], names[j], {"tp": "recovered", "fn": "missed", "fp": "spurious"}[kind]])
+                outcome = {"tp": "recovered", "fn": "missed", "fp": "spurious", "truth": "true edge"}[kind]
+                rows.append([label, names[i], names[j], outcome])
         ax.set_xlim(0.5, n - 0.5)
         ax.set_ylim(n - 1.5, -0.5)
         ax.set_xticks(range(1, n))
@@ -194,17 +249,13 @@ def fig_edges(runs, t, series, path):
         ax.tick_params(colors=t["muted"], length=0)
         best = run.get("best") or {}
         ax.set_title(label, color=t["ink"], fontsize=10, loc="left", pad=20)
-        ax.text(
-            0.0,
-            1.0,
-            f"alpha {best.get('alpha', '—')} · SHD {best.get('skeleton_shd', '—')}"
-            f" · {sum(1 for v in classes.values() if v == 'tp')}/{sum(1 for v in classes.values() if v != 'fp')} found",
-            transform=ax.transAxes,
-            color=t["muted"],
-            fontsize=8.5,
-            va="bottom",
-            ha="left",
+        subtitle = (
+            f"{len(classes)} edges · " + ("arrow points parent → child" if has_direction else "skeleton only")
+            if is_truth
+            else f"alpha {best.get('alpha', '—')} · SHD {best.get('skeleton_shd', '—')}"
+            f" · {sum(1 for v in classes.values() if v == 'tp')}/{sum(1 for v in classes.values() if v != 'fp')} found"
         )
+        ax.text(0.0, 1.0, subtitle, transform=ax.transAxes, color=t["muted"], fontsize=8.5, va="bottom", ha="left")
     handles = [
         Patch(facecolor=truth_colour, edgecolor=truth_colour, label="✓ recovered — true edge, found"),
         Patch(facecolor=t["surface"], edgecolor=truth_colour, linewidth=1.6, label="−  missed — true edge, not found"),
@@ -221,6 +272,103 @@ def fig_edges(runs, t, series, path):
     )
     _save(fig, path, t)
     _write_csv(path.replace(".png", ".csv"), ["run", "factor_a", "factor_b", "outcome"], rows)
+
+
+def fig_truth_graph(runs, t, ramp, path):
+    """The SCM itself: every true edge as an arc over the factors in causal order.
+
+    ``edges.png`` shows the truth only per run and only as a cell's colour, which answers
+    "was this pair an edge" but never "what does the graph look like". This draws it once,
+    with direction, and shades each arc by how many of the plotted runs recovered it.
+
+    An arc diagram rather than a spring layout, because the factors have a real order --
+    the generator only ever draws parents with a lower index -- and reading the SPANS is
+    the question a matrix cannot answer: whether what PC misses is the long-range structure
+    or the local structure. Recovery is an ordered class, so it takes the ordinal ramp, with
+    a dotted line as the second cue for the edges nothing recovered.
+    """
+    import numpy as np
+
+    _label, first = runs[0]
+    names = factor_names(first)
+    edges, has_direction = truth_edges(first)
+    if not edges:
+        logger.info("no true graph stored in these runs; skipping %s", path)
+        return
+    disagreeing = [lbl for lbl, run in runs if truth_edges(run)[0] != edges]
+    if disagreeing:
+        logger.warning(
+            "these runs were scored against DIFFERENT true graphs (%s); drawing the first run's",
+            ", ".join(disagreeing),
+        )
+    found = truth_recovery(runs)
+    n_runs = len(runs)
+    n = len(names)
+    fig, ax = plt.subplots(figsize=(1.0 + 0.95 * n, 4.4), facecolor=t["surface"])
+    ax.set_facecolor(t["surface"])
+    rows = []
+    for parent, child in edges:
+        lo, hi = min(parent, child), max(parent, child)
+        count = found.get((lo, hi), 0)
+        tier = 0 if count == 0 else (1 if count < n_runs else 2)
+        colour, dashes = ramp[tier], (1.4, 1.8) if tier == 0 else ()
+        centre, radius = (parent + child) / 2.0, abs(child - parent) / 2.0
+        theta = np.linspace(np.pi, 0.0, 80) if parent < child else np.linspace(0.0, np.pi, 80)
+        x, y = centre + radius * np.cos(theta), radius * np.sin(theta)
+        line = ax.plot(x, y, color=colour, linewidth=1.9, solid_capstyle="round", zorder=3)[0]
+        if dashes:
+            line.set_dashes(dashes)
+        # The head sits ~90% along rather than at the endpoint: the node markers are drawn
+        # last and would paint over a head placed on the node itself, silently losing the
+        # one thing this figure adds over the skeleton matrix.
+        if has_direction:
+            ax.annotate(
+                "",
+                xy=(x[-8], y[-8]),
+                xytext=(x[-14], y[-14]),
+                arrowprops=dict(arrowstyle="-|>,head_width=0.22,head_length=0.45", color=colour, shrinkA=0, shrinkB=0),
+                zorder=6,
+            )
+        rows.append([names[parent], names[child], hi - lo, count, n_runs])
+    ax.scatter(range(n), [0] * n, s=64, color=t["surface"], edgecolors=t["axis"], linewidths=1.4, zorder=5)
+    for i, name in enumerate(names):
+        ax.text(i, -0.22, name, rotation=45, ha="right", va="top", fontsize=8, color=t["ink2"])
+    for side in ("top", "right", "bottom", "left"):
+        ax.spines[side].set_visible(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xlim(-0.7, n - 0.3)
+    ax.set_ylim(-0.35, max(abs(c - p) for p, c in edges) / 2.0 * 1.12 + 0.15)
+    ax.set_title("Ground-truth causal graph", color=t["ink"], fontsize=10, loc="left", pad=18)
+    missed = sum(1 for p, c in edges if found.get((min(p, c), max(p, c)), 0) == 0)
+    ax.text(
+        0.0,
+        1.0,
+        f"{len(edges)} edges over {n} factors · {missed} recovered by no run · "
+        + ("factors left to right in causal order" if has_direction else "skeleton only — no direction stored"),
+        transform=ax.transAxes,
+        color=t["muted"],
+        fontsize=8.5,
+        va="bottom",
+        ha="left",
+    )
+    labels = ["recovered by no run", f"recovered by some ({n_runs} plotted)", "recovered by every run"]
+    handles = [
+        plt.Line2D([], [], color=ramp[k], linewidth=1.9, linestyle=":" if k == 0 else "-", label=labels[k])
+        for k in (2, 1, 0)
+        if n_runs > 1 or k != 1
+    ]
+    ax.legend(
+        handles=handles,
+        loc="upper left",
+        bbox_to_anchor=(0.0, -0.26),
+        frameon=False,
+        fontsize=8.5,
+        labelcolor=t["ink2"],
+        handlelength=1.8,
+    )
+    _save(fig, path, t)
+    _write_csv(path.replace(".png", ".csv"), ["parent", "child", "span", "runs_recovering", "runs_plotted"], rows)
 
 
 def fig_alpha_sweep(runs, t, series, path):
@@ -419,6 +567,7 @@ def main(argv=None):
 
     os.makedirs(cli.out, exist_ok=True)
     series = t["series"]
+    fig_truth_graph(runs, t, ORDINAL["dark" if cli.dark else "light"], os.path.join(cli.out, "truth_graph.png"))
     fig_edges(runs, t, series, os.path.join(cli.out, "edges.png"))
     fig_alpha_sweep(runs, t, series, os.path.join(cli.out, "alpha_sweep.png"))
     fig_factor_r2(runs, t, series, os.path.join(cli.out, "factor_r2.png"))

@@ -52,6 +52,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from eval.bundle_identity import identity_record
+
 logger = logging.getLogger(__name__)
 
 # The generator's lattice is meshgrid(x, y, z, indexing="ij") with x left-right,
@@ -173,7 +175,13 @@ def build_dataset(cli, split="test"):
     from eval.run_dci_synthetic import build_synthetic_test_set
 
     args = _generator_args(cli)
-    dataset = build_synthetic_test_set(args, cli.num_samples, cache=not cli.no_cache, causal=True, split=split)
+    # causal=True forwards the run's trained SCM; causal=False forces the factors
+    # independent. With --run-dir the run's settings.json always says synthetic_causal=True,
+    # so this argument -- not the settings -- is what decides, and it is recorded in meta
+    # because nothing in the saved arrays reveals it.
+    dataset = build_synthetic_test_set(
+        args, cli.num_samples, cache=not cli.no_cache, causal=cli.causal == "match", split=split
+    )
     inner = getattr(dataset, "_inner", dataset)
     settings = {
         key: value
@@ -436,8 +444,11 @@ def save(path, embeddings, latents, raw, slots, meta):
     for key in ("z_style_v1", "z_style_v2", "causal_adj"):
         if key in latents:
             arrays[key] = latents[key].astype(np.float32)
-    if "causal_adj" in latents:
+    if "causal_adj" in latents and arrays["causal_adj"].ndim == 3:
         # One adjacency per sample comes out of the collate; they are all the same SCM.
+        # Guarded on ndim: a caller that already holds the single (K, K) matrix --
+        # eval.export_vq_bundle reads it straight off the dataset's SCM -- would otherwise
+        # have its adjacency silently reduced to that matrix's first ROW.
         arrays["causal_adj"] = arrays["causal_adj"][0]
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, **arrays)
@@ -653,6 +664,9 @@ def main(argv=None):
         git_sha=git_sha(),
         created=time.strftime("%Y-%m-%dT%H:%M:%S"),
         elapsed_seconds=round(time.time() - started, 1),
+        # Which rows this bundle holds, so it can be checked against a VQ-VAE bundle
+        # before the two are compared. See eval/bundle_identity.py.
+        **identity_record(latents, settings, len(dataset), cli.causal),
     )
     arrays = save(cli.out, embeddings, latents, raw, slots, meta)
     print(f"\nSaved {cli.out.resolve()}")

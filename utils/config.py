@@ -42,6 +42,31 @@ def parse_args() -> argparse.ArgumentParser:
         ],
     )
     parser.add_argument(
+        "--val-frac",
+        type=float,
+        default=0.0,
+        help="Fraction of SUBJECTS held out for validation on the real (ADNI/custom) datasets. "
+        "The labels CSV is resolved in full regardless of split, so at the default of 0 the "
+        "train, val and test datasets are the same subjects and every validation number is a "
+        "training number. Splits are subject-level (a subject's scans never straddle a split) "
+        "and stratified by diagnosis group. Ignored for --dataset-name synthetic, which draws "
+        "each split from its own seed. See data/splits.py.",
+    )
+    parser.add_argument(
+        "--test-frac",
+        type=float,
+        default=0.0,
+        help="Fraction of SUBJECTS held out for test on the real datasets (see --val-frac). "
+        "Only consumed when --evaluate is passed; held out from training either way.",
+    )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=0,
+        help="Seed for the subject-level split. Changing it reshuffles which subjects land in "
+        "val/test, so keep it fixed across runs you intend to compare.",
+    )
+    parser.add_argument(
         "--synthetic-mode",
         type=str,
         default="pseudo_mri",
@@ -122,8 +147,15 @@ def parse_args() -> argparse.ArgumentParser:
         "--synthetic-lesion-radius",
         type=float,
         default=0.1,
-        help="Sphere-mode lesion radius in [-1,1] coords (0.1 = 1.6 voxels at res=32). The WM "
-        "margin tracks it, so the lesion stays inside the white matter as it grows.",
+        help="Sphere-mode lesion radius in [-1,1] coords (0.1 = 1.6 voxels at res=32). "
+        "Use --synthetic-lesion-placement wm_interior for containment in final WM labels.",
+    )
+    parser.add_argument(
+        "--synthetic-lesion-placement",
+        choices=("legacy", "wm_interior"),
+        default="legacy",
+        help="wm_interior places an untruncated fixed-radius sphere inside actual WM. "
+        "Fails explicitly if no centre fits. legacy reproduces previous data/checkpoints.",
     )
     parser.add_argument(
         "--synthetic-cortex-parameterization",
@@ -251,8 +283,13 @@ def parse_args() -> argparse.ArgumentParser:
         "Must be a multiple of --checkpoint-steps to fire, since saving happens on that cadence.",
     )
     parser.add_argument("--evaluate", action="store_true")
-    parser.add_argument("--val-size", default=25000, type=int)
-    parser.add_argument("--test-size", default=25000, type=int)
+    # None → the full split. get_data() draws from an InfiniteIterator, so a
+    # fixed size larger than the split silently cycles it: the old default of
+    # 25000 meant 25000/batch_size forward passes per split regardless of how
+    # many samples actually exist (12500 iterations each at --batch-size 2).
+    # Set these only to deliberately subsample a large split.
+    parser.add_argument("--val-size", default=None, type=int)
+    parser.add_argument("--test-size", default=None, type=int)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--deterministic",
@@ -2010,6 +2047,17 @@ def add_dino_arguments(parser):
     data.add_argument("--n-content", type=int, default=9)
     data.add_argument("--n-style", type=int, default=3)
     data.add_argument("--no-causal", action="store_true", help="i.i.d. factors; there is then no graph to recover")
+    data.add_argument(
+        "--causal",
+        default="match",
+        choices=["match", "iid"],
+        help="Which factor distribution to embed. 'match' (default) forwards the run's trained SCM, "
+        "so the numbers are comparable to that run's VQ-VAE panel. 'iid' forces the factors "
+        "independent, which makes per-factor attribution unambiguous but leaves the training "
+        "distribution and removes the SCM, so there is then no graph to recover. Unlike "
+        "--no-causal this also applies when --run-dir supplies the generator settings, since "
+        "that run's settings.json says synthetic_causal=True whatever you want to evaluate on.",
+    )
     data.add_argument("--causal-graph", default="chain", choices=["chain", "full", "random"])
     data.add_argument("--causal-edge-prob", type=float, default=0.5)
     data.add_argument("--causal-noise-scale", type=float, default=0.4)
@@ -2042,8 +2090,19 @@ def resolve_dino_backend_options(cli, parser):
             parser.error("3DINO uses single-channel [-1,1] input; RGB --image-mean/std do not apply")
         if cli.volume_size < 16 or cli.volume_size % 16:
             parser.error("--volume-size must be a positive multiple of 16 for the published 3DINO-ViT")
-    elif cli.window == "per_volume":
-        parser.error("--window per_volume is only supported with --backbone 3dino")
+    else:
+        # These are accepted and then completely ignored without --backbone 3dino: the 2D
+        # DINOv3 slice encoder runs instead, downloading its own weights, and the local
+        # 3DINO checkpoint is never opened. Nothing downstream says so -- the run trains,
+        # logs and checkpoints normally, and the only visible trace is the feature width
+        # (cls_mean over one slice gives 2*hidden, where 3DINO's cls gives hidden).
+        if cli.three_dino_repo or cli.three_dino_weights:
+            parser.error(
+                "--three-dino-repo/--three-dino-weights require --backbone 3dino; without it the "
+                "2D DINOv3 slice encoder runs and those weights are never loaded"
+            )
+        if cli.window == "per_volume":
+            parser.error("--window per_volume is only supported with --backbone 3dino")
 
 
 def parse_dino_finetune_args(argv=None):
@@ -2062,8 +2121,37 @@ def parse_dino_finetune_args(argv=None):
     parser.add_argument("--lr", type=float, default=1e-5, help="Backbone AdamW learning rate")
     parser.add_argument("--head-lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--temperature", type=float, default=0.1)
-    parser.add_argument("--loss", choices=["infonce", "barlow_twins"], default="infonce")
+    parser.add_argument(
+        "--objective",
+        default="infonce",
+        choices=["infonce", "barlow", "vicreg"],
+        help="Loss applied to the CONTENT block of the paired views; style is never aligned. "
+        "'infonce' (default) uses the other subjects in the batch as negatives. 'barlow' and "
+        "'vicreg' are negative-free: they keep the T1/T2 pairing and drop the negatives, which is "
+        "the arm to run against infonce when the question is whether the negatives are what "
+        "matters. Cross-view retrieval accuracy is logged under every choice and is never part of "
+        "a negative-free loss, so the arms stay comparable.",
+    )
+    parser.add_argument("--temperature", type=float, default=0.1, help="InfoNCE temperature; unused by the others")
+    parser.add_argument(
+        "--pairing",
+        default="cross_modal",
+        choices=["cross_modal", "within_modality"],
+        help="What the positive pair IS. 'cross_modal' (default) pairs a subject's two "
+        "modalities -- the real acquisition pair. 'within_modality' augments ONE modality "
+        "twice and never looks at the second, so running it against cross_modal isolates the "
+        "pairing rather than the loss: same objective, optimizer, steps and data budget.",
+    )
+    parser.add_argument(
+        "--aug-view", type=int, default=1, choices=[1, 2], help="Modality --pairing within_modality augments"
+    )
+    parser.add_argument(
+        "--aug-strength",
+        type=float,
+        default=1.0,
+        help="Multiplier on the within-modality augmentation recipe (finetune_dino.AUGMENTATION); "
+        "0 makes both views identical, which trivially collapses the objective.",
+    )
     parser.add_argument(
         "--style-fraction",
         type=float,
@@ -2072,6 +2160,9 @@ def parse_dino_finetune_args(argv=None):
     )
     parser.add_argument("--barlow-lambda", type=float, default=0.0051, help="Off-diagonal correlation penalty weight")
     parser.add_argument("--barlow-eps", type=float, default=1e-5, help="Variance stabilizer for Barlow Twins")
+    parser.add_argument("--vicreg-sim-coeff", type=float, default=25.0, help="VICReg invariance (MSE) weight")
+    parser.add_argument("--vicreg-std-coeff", type=float, default=25.0, help="VICReg variance (hinge) weight")
+    parser.add_argument("--vicreg-cov-coeff", type=float, default=1.0, help="VICReg covariance weight")
     parser.add_argument(
         "--projection-dim", type=int, default=256, help="Content-only MLP output size; 0 aligns content directly"
     )
@@ -2112,6 +2203,10 @@ def parse_dino_finetune_args(argv=None):
         parser.error("Require nonnegative workers/projection size and a positive patch size")
     if not 0 <= cli.window_pct[0] < cli.window_pct[1] <= 100:
         parser.error("--window-pct must be increasing percentiles in [0, 100]")
+    if not math.isfinite(cli.aug_strength) or cli.aug_strength < 0:
+        parser.error("--aug-strength must be finite and nonnegative")
+    if cli.pairing == "within_modality" and cli.aug_strength == 0:
+        parser.error("--pairing within_modality with --aug-strength 0 pairs a volume with itself")
     if (cli.image_mean is None) != (cli.image_std is None):
         parser.error("--image-mean and --image-std must be given together")
     if cli.image_std and any(not math.isfinite(v) or v <= 0 for v in cli.image_std):

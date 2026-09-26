@@ -1,8 +1,8 @@
-"""Lesion donor semantics, known routing oracles, exact replay and frozen checkpoints."""
+"""Lesion routing: planted spatial codes, controlled rendering and real VQVAE replay."""
 
 import argparse
 import contextlib
-import importlib.util
+import csv
 import io
 import json
 import tempfile
@@ -12,248 +12,265 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-import sklearn  # noqa: F401 - initialize compiled dependencies before module patches
 import torch
 from scipy.ndimage import maximum_filter
+from test_ventricle_routing import RoutingOracle, load_without_monai
 
-from eval import lesion_routing as lr
+from eval.lesion_routing import (
+    audit,
+    main,
+    make_dataset,
+    render_pair,
+    score_pair,
+    state_digest,
+    summarize,
+    verify_checkpoint,
+)
+from eval.ventricle_routing import decode_swaps
 
-ROOT = Path(__file__).resolve().parents[1]
-# Reuse the existing exact-tensor oracle and dependency-light source loader. No
-# tests are executed by importing these fixtures.
-spec = importlib.util.spec_from_file_location("lesion_route_fixtures", ROOT / "tests/test_ventricle_routing.py")
-fixtures = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(fixtures)
+
+def translated_lesion():
+    a, b = torch.zeros(1, 12, 12, 12), torch.zeros(1, 12, 12, 12)
+    a[:, 2:4, 5:7, 5:7], b[:, 8:10, 5:7, 5:7] = 1, 1
+    lesions = [x[0].numpy() > 0 for x in (a, b)]
+    return {
+        "index": 0,
+        "axis": "x",
+        "eps": 0.5,
+        "a": [a, -a],
+        "b": [b, -b],
+        "mask": torch.ones_like(a),
+        "support": lesions[0] != lesions[1],
+        "lesions": lesions,
+        "centroids": [np.argwhere(m).mean(0) for m in lesions],
+        "controls": [np.zeros(3), np.ones(3)],
+    }
 
 
-class LesionRoutingTests(unittest.TestCase):
+class SpatialCodeTests(unittest.TestCase):
+    def test_perfect_reconstruction_and_routing_despite_zero_gap_signal(self):
+        sample = translated_lesion()
+        for weight in (0, 0.3, 1):
+            decoded, diagnostics = decode_swaps(RoutingOracle(weight), [sample], "cpu", measure_gap=True)
+            for view in range(2):
+                row = score_pair(
+                    sample,
+                    view,
+                    {k: v[0] for k, v in decoded[view].items()},
+                    diagnostics[view],
+                    0,
+                )
+                self.assertTrue(row["valid_routing"])
+                self.assertAlmostEqual(row["joint_gain"], 1, places=6)
+                self.assertAlmostEqual(row["content_mean_gain"], weight, places=6)
+                self.assertAlmostEqual(row["style_mean_gain"], 1 - weight, places=6)
+                self.assertAlmostEqual(row["joint_energy_in_affected_fraction"], 1)
+                self.assertEqual(row["joint_outside_rms"], 0)
+                for block in ("content", "style"):
+                    self.assertGreater(row[f"{block}_post_L0_delta_rms"], 0)
+                    self.assertEqual(row[f"{block}_post_L0_gap_delta_rms"], 0)
+
+    def test_joint_interaction_is_reported_even_with_perfect_endpoints(self):
+        class Interaction(RoutingOracle):
+            def decode_codes(self, quantized_codes, styles, **kwargs):
+                return quantized_codes[0] * styles[0].abs()
+
+        sample = translated_lesion()
+        decoded, diagnostics = decode_swaps(Interaction(0.5), [sample], "cpu", measure_gap=True)
+        row = score_pair(sample, 0, {k: v[0] for k, v in decoded[0].items()}, diagnostics[0], 0)
+        self.assertAlmostEqual(row["joint_gain"], 1)
+        self.assertAlmostEqual(row["content_mean_gain"], 0.5)
+        self.assertAlmostEqual(row["style_mean_gain"], 0.5)
+        self.assertAlmostEqual(row["interaction_rms_ratio"], 1)
+
+    def test_constant_decoder_and_unresolved_or_empty_pairs_do_not_claim_a_route(self):
+        class Constant(RoutingOracle):
+            def forward(self, x, **kwargs):
+                out, style = super().forward(x, **kwargs)
+                return (out[0] * 0, *out[1:]), style
+
+            def decode_codes(self, quantized_codes, **kwargs):
+                return quantized_codes[0] * 0
+
+        sample = translated_lesion()
+        decoded, diagnostics = decode_swaps(Constant(1), [sample], "cpu", measure_gap=True)
+        row = score_pair(sample, 0, {k: v[0] for k, v in decoded[0].items()}, diagnostics[0], 0)
+        self.assertEqual(row["joint_gain"], 0)
+        self.assertEqual(row["joint_relative_error"], 1)
+        self.assertTrue(np.isnan(row["joint_cosine"]))
+        diagnostics[0]["endpoint_signal_resolved"][0] = False
+        unresolved = score_pair(sample, 0, {k: v[0] for k, v in decoded[0].items()}, diagnostics[0], 0)
+        group = summarize([unresolved])["x/t1"]
+        self.assertEqual(group["resolved"], 0)
+        self.assertIsNone(group["metrics"]["joint_gain"]["mean"])
+        sample["lesions"][0][:] = False
+        diagnostics[0]["endpoint_signal_resolved"][0] = True
+        empty = score_pair(sample, 0, {k: v[0] for k, v in decoded[0].items()}, diagnostics[0], 0)
+        self.assertFalse(empty["valid_routing"])
+
+
+class PipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(2)
-        cls.datasets = fixtures.load_without_monai("data/datasets.py")
-        cls.Model = fixtures.load_without_monai("models/vqvae.py").VQVAE
+        cls.dataset_module = load_without_monai("data/datasets.py")
+        cls.Model = load_without_monai("models/vqvae.py").VQVAE
 
-    def settings(self, **overrides):
-        args = dict(
+    def settings(self, normalization="fixed_reference"):
+        return argparse.Namespace(
             synthetic_mode="pseudo_mri",
             synthetic_res=32,
             synthetic_n_content=9,
-            synthetic_content_prior="uniform",
-            synthetic_content_squash="none",
             synthetic_clean_content=True,
-            synthetic_identifiable_ventricle=True,
-            synthetic_normalize="per_sample",
-            synthetic_causal=True,
+            synthetic_normalize=normalization,
+            synthetic_causal=False,
             synthetic_lesion_radius=0.14,
-            vqvae_nb_levels=1,
-            inject_style_to_decoder=True,
-            mask_mode="fixed",
         )
-        args.update(overrides)
-        return argparse.Namespace(**args)
 
-    def dataset(self, n=3, **overrides):
-        with patch.dict("sys.modules", {"data.datasets": self.datasets}):
-            return lr.make_dataset(self.settings(**overrides), n, "iid", "test")
+    def dataset(self, normalization="fixed_reference"):
+        with patch.dict("sys.modules", {"data.datasets": self.dataset_module}):
+            return make_dataset(self.settings(normalization), 3)
 
-    def test_donors_mean_off_then_on_and_freeze_normalization(self):
-        for norm in ("per_sample", "shared", "fixed_reference"):
-            ds = self.dataset(synthetic_normalize=norm)
-            sample = lr.lesion_pair(ds, 0)
-            on = ds[0]["image"]
-            outside = ~maximum_filter(sample["support"], size=3)
-            self.assertGreater(sample["support"].sum(), 0)
-            for view in range(2):
-                torch.testing.assert_close(sample["b"][view], on[view])
-                delta = (sample["b"][view] - sample["a"][view]).numpy()[0]
-                self.assertLess(float(np.abs(delta[outside]).max()), 2e-6)
-                self.assertGreater(float(np.linalg.norm(delta)), 0)
-            repeated = lr.lesion_pair(ds, 0)
-            for state in ("a", "b"):
+    def test_renderer_changes_only_requested_coordinate_and_preserves_noise_and_normalization(
+        self,
+    ):
+        for normalization in ("fixed_reference", "shared", "per_sample"):
+            ds = self.dataset(normalization)
+            for axis in "xyz":
+                with patch.object(ds._inner, "render_pseudo_mri", wraps=ds._inner.render_pseudo_mri) as render:
+                    sample = render_pair(ds, 0, axis, 0.5)
+                    a, b = render.call_args_list[-2:]
+                    expected = torch.zeros(9)
+                    expected[2 + "xyz".index(axis)] = 1
+                    torch.testing.assert_close(b.args[0] - a.args[0], expected)
+                    for first, second in zip(a.args[1:], b.args[1:]):
+                        if isinstance(first, torch.Tensor):
+                            self.assertTrue(torch.equal(first, second))
+                        else:
+                            self.assertEqual(first, second)
+                repeated = render_pair(ds, 0, axis, 0.5)
                 for view in range(2):
-                    torch.testing.assert_close(sample[state][view], repeated[state][view], atol=0, rtol=0)
+                    self.assertTrue(torch.equal(sample["a"][view], repeated["a"][view]))
+                    delta = (sample["b"][view] - sample["a"][view]).numpy()[0]
+                    self.assertLess(
+                        np.abs(delta[~maximum_filter(sample["support"], size=3)]).max(),
+                        2e-6,
+                    )
+                self.assertEqual(sample["a"][0].shape, (1, 32, 32, 32))
 
-    def test_content_style_and_mixed_oracles_with_partial_batch(self):
+    def test_real_dataset_oracle_partial_batches_and_registered_state_guard(self):
         ds = self.dataset()
-        for weight in (0.0, 0.3, 1.0):
-            rows, summary, panels = lr.audit(fixtures.RoutingOracle(weight), ds, "cpu", 2, 1, 20)
-            self.assertEqual(len(rows), 6)
-            self.assertEqual({p["view"] for p in panels}, {"t1", "flair"})
-            for row in rows:
-                self.assertTrue(row["valid_routing"])
+        rows, summary = audit(RoutingOracle(0.3), ds, "cpu", batch_size=2)
+        self.assertEqual(len(rows), 18)
+        self.assertEqual(len(summary), 6)
+        self.assertTrue(any(r["valid_routing"] for r in rows))
+        for row in rows:
+            if row["valid_routing"]:
                 self.assertAlmostEqual(row["joint_gain"], 1, places=5)
-                for style in ("a", "b"):
-                    self.assertAlmostEqual(row[f"content_at_style_{style}_gain"], weight, places=5)
-                    self.assertAlmostEqual(row[f"style_at_content_{style}_gain"], 1 - weight, places=5)
-                self.assertAlmostEqual(row["interaction_rms_ratio"], 0, places=5)
-                self.assertAlmostEqual(row["endpoint_replay_rms"], 0, places=6)
-            for result in summary.values():
-                m = result["metrics"]
-                self.assertEqual(result["n_valid_routing"], 3)
-                self.assertAlmostEqual(
-                    m["content_mean_gain"]["mean"] + m["style_mean_gain"]["mean"], m["joint_gain"]["mean"]
-                )
+                self.assertAlmostEqual(row["content_mean_gain"], 0.3, places=5)
 
-    def test_interaction_is_reported_in_both_donor_contexts(self):
-        a = np.zeros((8, 8, 8))
-        b = a.copy()
-        b[3:5, 3:5, 3:5] = -1  # T1-like negative contrast
-        # Lesion response appears ONLY when both codes come from the on donor.
-        decoded = {"aa": a, "ba": a, "ab": a, "bb": b}
-        effects = lr.response_images(a, b, decoded)
-        scores = lr.score_swaps(a, b, decoded, b != 0, np.ones_like(a))
-        self.assertEqual(scores["content_at_style_a_gain"], 0)
-        self.assertEqual(scores["content_at_style_b_gain"], 1)
-        self.assertEqual(scores["style_at_content_a_gain"], 0)
-        self.assertEqual(scores["style_at_content_b_gain"], 1)
-        self.assertEqual(scores["content_mean_gain"], 0.5)
-        self.assertEqual(scores["style_mean_gain"], 0.5)
-        self.assertEqual(scores["interaction_rms_ratio"], 1)
-        np.testing.assert_array_equal(effects["content_mean"] + effects["style_mean"], effects["joint"])
+        class Mutating(RoutingOracle):
+            def __init__(self):
+                super().__init__(1)
+                self.register_buffer("counter", torch.zeros((), dtype=torch.long))
 
-    def test_empty_intervention_is_retained_but_not_given_a_route(self):
-        ds = self.dataset()
-        actual = lr.lesion_pair
+            def forward(self, x, **kwargs):
+                self.counter.add_(1)
+                return super().forward(x, **kwargs)
 
-        def invisible(dataset, index):
-            sample = actual(dataset, index)
-            sample["b"] = [x.clone() for x in sample["a"]]
-            sample["support"][:] = False
-            sample["centroid"][:] = np.nan
-            return sample
+        with self.assertRaisesRegex(RuntimeError, "changed a registered"):
+            audit(Mutating(), ds, "cpu", axes=("x",))
 
-        with patch.object(lr, "lesion_pair", side_effect=invisible):
-            rows, summary, _ = lr.audit(fixtures.RoutingOracle(1), ds, "cpu", draws=10)
-        self.assertEqual(len(rows), 6)
-        for result in summary.values():
-            self.assertEqual(result["n_valid_input"], 0)
-            self.assertEqual(result["n_valid_routing"], 0)
-            self.assertEqual(result["n_empty_lesions"], 3)
-            self.assertIsNone(result["metrics"]["content_mean_gain"]["mean"])
-
-    def test_bad_endpoint_is_rejected_and_capture_hooks_are_removed(self):
-        ds = self.dataset()
-        model = fixtures.RoutingOracle(0.5)
-        decode = model.decode_codes
-        with patch.object(model, "decode_codes", side_effect=lambda *a, **kw: decode(*a, **kw) + 1):
-            with self.assertRaisesRegex(ValueError, "endpoint"):
-                lr.audit(model, ds, "cpu", draws=10)
-        self.assertFalse(model.codebooks[0]._forward_hooks)
-        self.assertFalse(model.codebooks_v1[0]._forward_hooks)
-
-    def test_small_endpoint_error_above_signal_excludes_routing(self):
-        ds = self.dataset()
-        actual = lr.lesion_pair
-
-        def tiny(dataset, index):
-            sample = actual(dataset, index)
-            sample["b"] = [x + sample["mask"] * 1e-6 for x in sample["a"]]
-            return sample
-
-        class Offset(fixtures.RoutingOracle):
-            def decode_codes(self, *a, **kw):
-                return super().decode_codes(*a, **kw) + 2e-6
-
-        with patch.object(lr, "lesion_pair", side_effect=tiny):
-            _, summary, _ = lr.audit(Offset(1), ds, "cpu", examples=0, draws=10)
-        for view in summary.values():
-            self.assertEqual(view["n_valid_routing"], 0)
-            self.assertIsNone(view["metrics"]["joint_gain"]["median"])
-
-    def test_real_vqvae_and_separate_codebooks_preserve_state(self):
-        model = self.Model(
+    def model(self, global_style):
+        return self.Model(
             hidden_channels=8,
             res_channels=4,
             nb_res_layers=1,
             nb_levels=1,
-            embed_dim=4,
-            nb_entries=8,
+            embed_dim=8,
+            nb_entries=16,
             scaling_rates=[2],
-            content_size=3,
-            style_size=1,
+            content_size=4,
+            style_size=4,
             content_style_levels=[0],
             mask_mode="fixed",
             inject_style_to_decoder=True,
             style_injection_mode="input",
+            quantize_style=not global_style,
             separate_encoders=True,
             separate_content_codebooks=True,
-            separate_style_codebooks=True,
-            quantize_style=True,
-            norm_type="layer",
-            decoder_norm_type="group",
+            separate_style_codebooks=not global_style,
+            style_spatial_size=int(global_style),
             final_recon_norm=False,
             use_checkpoint=False,
+        ).eval()
+
+    def test_real_vqvae_spatial_and_global_style_exact_replay(self):
+        ds = self.dataset()
+        for global_style in (False, True):
+            model = self.model(global_style)
+            before = state_digest(model)
+            rows, _ = audit(model, ds, "cpu", axes=("x",), batch_size=2)
+            self.assertEqual(before, state_digest(model))
+            self.assertTrue(all(r["endpoint_replay_rms"] < 1e-6 for r in rows))
+            if global_style:
+                for r in rows:
+                    self.assertAlmostEqual(r["style_post_L0_delta_rms"], r["style_post_L0_gap_delta_rms"])
+
+    def test_cli_reports_images_nifti_checkpoint_integrity_and_mismatch_rejection(self):
+        import nibabel as nib
+
+        model = self.model(False)
+        loader = types.ModuleType("eval.run_dci_synthetic")
+        loader.load_model_from_run_dir = lambda *a, **kw: (
+            model,
+            self.settings(),
+            "cpu",
         )
-        model.train()
-        model.decoders.eval()
-        modes = [m.training for m in model.modules()]
-        flags = [p.requires_grad for p in model.parameters()]
-        saved = {k: v.clone() for k, v in model.state_dict().items()}
-        with lr.frozen_checkpoint(model):
-            rows, summary, _ = lr.audit(model, self.dataset(n=2), "cpu", examples=0, draws=10)
-        self.assertEqual(modes, [m.training for m in model.modules()])
-        self.assertEqual(flags, [p.requires_grad for p in model.parameters()])
-        for k, v in model.state_dict().items():
-            torch.testing.assert_close(v, saved[k], rtol=0, atol=0)
-        for row in rows:
-            self.assertTrue(row["valid_routing"])
-            self.assertAlmostEqual(row["content_mean_gain"] + row["style_mean_gain"], row["joint_gain"], places=6)
-        for book in list(model.codebooks) + list(model.codebooks_v1):
-            self.assertFalse(book._forward_hooks)
-
-    def test_cli_writes_both_views_and_never_changes_checkpoint(self):
-        ds, model, args = self.dataset(), fixtures.RoutingOracle(0.3), self.settings()
-        # The state-protection context expects an encoder parameter container.
-        # This inert module leaves the oracle's analytically known routing intact.
-        model.encoders = torch.nn.Linear(1, 1)
-        fake = types.ModuleType("eval.run_dci_synthetic")
-        fake.load_run_args = lambda *a: args
-        fake.load_model_from_run_dir = lambda *a, **kw: (model, args, "cpu")
-        with tempfile.TemporaryDirectory() as directory:
-            checkpoint = Path(directory) / "vqvae_model.pt"
-            torch.save({"encoders": model.state_dict(), "step": 23001}, checkpoint)
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "vqvae_model.pt"
+            torch.save({"encoders": model.state_dict(), "step": 123}, checkpoint)
             original = checkpoint.read_bytes()
-            out = Path(directory) / "result"
-            cli = lr.parser().parse_args(
-                [
-                    "--run-dir",
-                    directory,
-                    "--num-samples",
-                    "3",
-                    "--bootstrap",
-                    "10",
-                    "--examples",
-                    "1",
-                    "--out-dir",
-                    str(out),
-                ]
-            )
-            with patch.dict("sys.modules", {"eval.run_dci_synthetic": fake}), patch.object(
-                lr, "make_dataset", return_value=ds
-            ), contextlib.redirect_stdout(io.StringIO()):
-                report = lr.run(cli)
+            output = Path(tmp) / "audit"
+            argv = [
+                "lesion_routing",
+                "--run-dir",
+                tmp,
+                "--num-samples",
+                "3",
+                "--axes",
+                "x",
+                "--examples",
+                "1",
+                "--save-nifti",
+                "--out-dir",
+                str(output),
+            ]
+            with patch.dict(
+                "sys.modules",
+                {
+                    "eval.run_dci_synthetic": loader,
+                    "data.datasets": self.dataset_module,
+                },
+            ), patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()):
+                main()
+            report = json.loads((output / "summary.json").read_text())
+            self.assertEqual(report["status"], "complete")
+            self.assertEqual(report["checkpoint"]["step"], 123)
+            self.assertTrue(report["registered_state_unchanged"])
             self.assertEqual(checkpoint.read_bytes(), original)
-            self.assertEqual(report["checkpoint_step"], 23001)
-            saved = json.loads((out / "summary.json").read_text())
-            self.assertEqual(saved["donors"], {"a": "lesion absent", "b": "lesion present"})
-            self.assertEqual(set(saved["summary"]), {"t1", "flair"})
-            self.assertTrue((out / "samples.csv").is_file())
-            self.assertEqual((out / "responses.png").read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
-            with patch.dict("sys.modules", {"eval.run_dci_synthetic": fake}):
-                with self.assertRaises(FileExistsError):
-                    lr.run(cli)
-
-    def test_unsupported_runs_fail_before_decoding(self):
-        for override in (
-            {"vqvae_nb_levels": 2},
-            {"mask_mode": "onthefly"},
-            {"inject_style_to_decoder": False},
-            {"split_encoder_norm": True},
-            {"contrastive_only": True},
-            {"synthetic_lesion_mode": "field"},
-        ):
-            with self.assertRaises(ValueError):
-                lr.validate(self.settings(**override))
+            with (output / "responses.csv").open() as stream:
+                self.assertEqual(len(list(csv.DictReader(stream))), 6)
+            for view in ("t1", "flair"):
+                prefix = output / f"sample0000_x_{view}"
+                self.assertGreater(prefix.with_suffix(".png").stat().st_size, 1000)
+                volume = nib.load(str(prefix) + "_input_delta.nii.gz")
+                self.assertEqual(volume.shape, (32, 32, 32))
+                np.testing.assert_equal(volume.affine, np.eye(4))
+            with torch.no_grad():
+                next(model.parameters()).add_(1)
+            with self.assertRaisesRegex(ValueError, "does not exactly match"):
+                verify_checkpoint(model, checkpoint)
 
 
 if __name__ == "__main__":

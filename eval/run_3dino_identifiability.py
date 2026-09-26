@@ -142,6 +142,8 @@ def extraction_args(cli, output, random_init=False):
         str(cli.num_workers),
         "--dtype",
         cli.dtype,
+        "--causal",
+        cli.causal,
         "--views",
         "1",
         "2",
@@ -354,6 +356,16 @@ def main(argv=None):
     parser.add_argument("--eval-views", nargs="+", choices=["1", "2", "both"], default=["1", "2"])
     parser.add_argument("--representation", choices=["all", "content", "style"], default="all")
     parser.add_argument("--num-samples", type=int, default=500)
+    parser.add_argument(
+        "--causal",
+        default="match",
+        choices=["match", "iid"],
+        help="Factor distribution to embed. 'match' (default) forwards the run's trained SCM. "
+        "'iid' forces the factors independent: per-factor attribution becomes unambiguous, but "
+        "both the embeddings and the VQ-VAE they are compared against are then scored off the "
+        "distribution they were trained on, and there is no SCM left so table 3 is skipped. "
+        "Every bundle in one comparison must use the same value.",
+    )
     parser.add_argument("--volume-size", type=int, default=112)
     parser.add_argument("--volume-batch", type=int, default=2)
     parser.add_argument("--token-pool", choices=["cls", "mean", "cls_mean", "grid"], default="cls")

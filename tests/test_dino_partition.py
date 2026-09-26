@@ -23,10 +23,13 @@ class PartitionTests(unittest.TestCase):
             axes=["axial", "coronal"],
             slices=2,
             slice_agg="concat",
-            loss="infonce",
+            objective="infonce",
             temperature=0.1,
             barlow_lambda=0.0051,
             barlow_eps=1e-5,
+            vicreg_sim_coeff=25.0,
+            vicreg_std_coeff=25.0,
+            vicreg_cov_coeff=1.0,
         )
         vars(cli).update(changes)
         return cli
@@ -59,9 +62,9 @@ class PartitionTests(unittest.TestCase):
                     self.assertEqual(style.size, x.size // 4)
 
     def test_both_losses_are_independent_of_style_values_and_have_no_style_output_gradient(self):
-        for objective in ("infonce", "barlow_twins"):
+        for objective in ("infonce", "barlow", "vicreg"):
             torch.manual_seed(5)
-            cli = self.options(loss=objective)
+            cli = self.options(objective=objective)
             first, second = [torch.randn(8, 16, requires_grad=True) for _ in range(2)]
             spec = make_partition(16, 16, cli)
             projector = torch.nn.Linear(12, 5)

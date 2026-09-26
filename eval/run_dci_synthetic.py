@@ -275,6 +275,7 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None, sp
         synthetic_content_squash=getattr(args, "synthetic_content_squash", "auto"),
         synthetic_content_amp_scale=getattr(args, "synthetic_content_amp_scale", None),
         synthetic_lesion_radius=getattr(args, "synthetic_lesion_radius", 0.1),
+        synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
         synthetic_cortex_parameterization=getattr(args, "synthetic_cortex_parameterization", "additive"),
         synthetic_center_local_deformations=getattr(args, "synthetic_center_local_deformations", False),
     )
