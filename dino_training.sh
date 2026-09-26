@@ -1,0 +1,1 @@
+for OBJ in infonce barlow; do   python -m training.finetune_dino --three-dino-repo ../3DINO     --three-dino-weights ../3DINO/3dino_vit_weights.pth     --run-dir results/synthetic/synthetic-clean-content-causal-ident-vent-12-4-2     --objective $OBJ --output-dir results/dino_new_$OBJ --epochs 20; done
