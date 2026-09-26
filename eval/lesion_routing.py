@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import inspect
 import json
 import logging
@@ -35,42 +34,12 @@ from eval.ventricle_routing import (
     decode_swaps,
     normalization_affine,
     score_swaps,
+    state_digest,
+    verify_checkpoint,
 )
 
 logger = logging.getLogger(__name__)
 VIEWS = ("t1", "flair")
-
-
-def state_digest(model):
-    """Include every registered parameter and buffer, including integer counters."""
-    import torch
-
-    digest = hashlib.sha256()
-    for name, tensor in sorted(model.state_dict().items()):
-        digest.update(f"{name}:{tensor.dtype}:{tuple(tensor.shape)}".encode())
-        digest.update(tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
-    return digest.hexdigest()
-
-
-def verify_checkpoint(model, path):
-    """Fail if the shared permissive loader left any evaluated state at initialization."""
-    import torch
-
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    stored = checkpoint.get("encoders", checkpoint)
-    stored = {k.removeprefix("module."): v for k, v in stored.items()}
-    mismatched = [
-        key
-        for key, value in model.state_dict().items()
-        if key not in stored or not torch.equal(value.detach().cpu(), stored[key].cpu())
-    ]
-    if mismatched:
-        raise ValueError(f"Loaded model does not exactly match checkpoint state: {mismatched[:8]}")
-    return {
-        "path": str(path.resolve()),
-        "step": checkpoint.get("step"),
-        "model_state_sha256": state_digest(model),
-    }
 
 
 def make_dataset(args, n, causal="match", split="test"):

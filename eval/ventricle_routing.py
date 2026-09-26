@@ -20,9 +20,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import hashlib
 import inspect
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +37,38 @@ logger = logging.getLogger(__name__)
 REPLAY_RMS_ATOL = 1e-6
 REPLAY_RMS_RTOL = 1e-4
 REPLAY_SIGNAL_FRACTION = 0.01
+
+
+def state_digest(model):
+    """Include every registered parameter and buffer, including integer counters."""
+    import torch
+
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        digest.update(f"{name}:{tensor.dtype}:{tuple(tensor.shape)}".encode())
+        digest.update(tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def verify_checkpoint(model, path):
+    """Fail if the shared permissive loader left evaluated state at initialization."""
+    import torch
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    stored = checkpoint.get("encoders", checkpoint)
+    stored = {k.removeprefix("module."): v for k, v in stored.items()}
+    mismatched = [
+        key
+        for key, value in model.state_dict().items()
+        if key not in stored or not torch.equal(value.detach().cpu(), stored[key].cpu())
+    ]
+    if mismatched:
+        raise ValueError(f"Loaded model does not exactly match checkpoint state: {mismatched[:8]}")
+    return {
+        "path": str(path.resolve()),
+        "step": checkpoint.get("step"),
+        "model_state_sha256": state_digest(model),
+    }
 
 
 @contextlib.contextmanager
@@ -92,6 +126,9 @@ def make_dataset(args, n, causal="match", split="test"):
     from data.datasets import SyntheticBrainDataset
 
     accepted = inspect.signature(SyntheticBrainDataset.__init__).parameters
+    placement = getattr(args, "synthetic_lesion_placement", "legacy")
+    if placement != "legacy" and "synthetic_lesion_placement" not in accepted:
+        raise ValueError(f"This checkout cannot reproduce synthetic_lesion_placement={placement!r}")
     kw = {k: v for k, v in vars(args).items() if k.startswith("synthetic_") and k in accepted}
     if kw.get("synthetic_mode", "pseudo_mri") != "pseudo_mri":
         raise ValueError("Ventricle routing requires synthetic_mode=pseudo_mri")
@@ -138,7 +175,7 @@ def render_pair(ds, idx, eps=0.25):
     mask = lat["brain_mask"]
     normalized = ds.normalize_views(raw0, raw1, mask, mask.clone())
     affines = [normalization_affine(x, y, mask) for x, y in zip((raw0, raw1), normalized)]
-    states, tissues = [], []
+    states, tissues, lesions = [], [], []
     for sign in (-1, 1):
         content = lat["z_content"].clone()
         content[1] += sign * eps
@@ -152,17 +189,31 @@ def render_pair(ds, idx, eps=0.25):
         )
         if not torch.equal(new_mask, mask):
             raise ValueError("Ventricle intervention changed foreground support; fixed-mask test is invalid")
-        tissue, _ = inner.renderer.render_structure(
+        tissue, lesion = inner.renderer.render_structure(
             *args, device="cpu", clean=inner.clean_content, z_lesion=lat.get("z_lesion")
         )
         tissues.append(tissue.numpy())
+        lesions.append(lesion.numpy())
         states.append([(x * gain + bias) * mask for x, (gain, bias) in zip((a, b), affines)])
+    support = tissues[0] != tissues[1]
+    roi = maximum_filter(support, size=3)
+    outside_max = max(
+        float(np.abs((states[1][v] - states[0][v]).numpy()[0][~roi]).max()) if (~roi).any() else 0.0 for v in range(2)
+    )
+    # wm_interior places lesions using the final tissue map. Fixed lesion latents
+    # therefore do not guarantee a fixed rendered lesion when ventricles grow.
+    changed_lesion = int(np.count_nonzero(lesions[0] != lesions[1]))
     return {
         "a": states[0],
         "b": states[1],
         "mask": mask,
-        "support": tissues[0] != tissues[1],
+        "support": support,
+        "tissues": tissues,
+        "lesion_changed_voxels": changed_lesion,
+        "input_outside_roi_max_abs": outside_max,
+        "isolated_intervention": changed_lesion == 0 and outside_max <= 2e-6,
         "index": idx,
+        "eps": eps,
         "z_low": float(lat["z_content"][1]) - eps,
         "z_high": float(lat["z_content"][1]) + eps,
     }
@@ -348,23 +399,63 @@ def decode_swaps(model, samples, device, *, measure_gap=False):
     return recon, diagnostics
 
 
-def audit(model, ds, device, eps=0.25, batch_size=2, examples=4):
-    if batch_size < 1 or len(ds) < 1 or examples < 0:
-        raise ValueError("Need positive batch size/sample count and nonnegative examples")
+def audit(model, ds, device, eps=0.25, batch_size=2, examples=4, *, directory=None, nifti=False):
+    """Match lesion routing, retaining the legacy return value and median fields."""
+    if model.training:
+        raise ValueError("Call model.eval() before the diagnostic")
+    if batch_size < 1 or len(ds) < 1 or examples < 0 or not np.isfinite(eps) or eps <= 0:
+        raise ValueError("Need positive batch size/sample count/eps and nonnegative examples")
+    if nifti and directory is None:
+        raise ValueError("An output directory is needed to save NIfTI examples")
+    before = state_digest(model)
+    try:
+        return _audit(model, ds, device, eps, batch_size, examples, directory, nifti)
+    finally:
+        if before != state_digest(model):
+            raise RuntimeError("Diagnostic changed a registered parameter or buffer")
+
+
+def _audit(model, ds, device, eps, batch_size, examples, directory, nifti):
     rows, panels = [], []
     for start in range(0, len(ds), batch_size):
         samples = [render_pair(ds, i, eps) for i in range(start, min(start + batch_size, len(ds)))]
-        decoded, responses = decode_swaps(model, samples, device)
+        decoded, responses = decode_swaps(model, samples, device, measure_gap=True)
         for b, sample in enumerate(samples):
             for view, modality in enumerate(("t1", "flair")):
                 xa, xb = [sample[k][view].numpy()[0] for k in ("a", "b")]
                 ys = {k: v[b] for k, v in decoded[view].items()}
                 row = {k: sample[k] for k in ("index", "z_low", "z_high")}
+                row.update(
+                    {
+                        k: sample[k]
+                        for k in ("lesion_changed_voxels", "input_outside_roi_max_abs", "isolated_intervention")
+                    }
+                )
+                row["eps"] = eps
                 row["modality"] = modality
                 row.update(score_swaps(xa, xb, ys, sample["support"], sample["mask"].numpy()[0]))
                 row.update({k: float(v[b]) for k, v in responses[view].items()})
-                row["valid_routing"] = row["valid_input"] and bool(row["endpoint_signal_resolved"])
+                row["valid_routing"] = (
+                    row["valid_input"] and bool(row["endpoint_signal_resolved"]) and row["isolated_intervention"]
+                )
+                foreground = sample["mask"].numpy()[0] > 0
+                roi = maximum_filter(sample["support"], size=3) & foreground
+                outside = foreground & ~roi
+                delta = ys["bb"] - ys["aa"]
+                energy = float(np.square(delta[foreground]).sum())
+                row["joint_energy_in_affected_fraction"] = (
+                    float(np.square(delta[roi]).sum() / energy) if energy > 1e-20 else np.nan
+                )
+                row["joint_outside_rms"] = float(np.sqrt(np.square(delta[outside]).mean())) if outside.any() else np.nan
+                for key in list(row):
+                    if key.endswith("_gap_delta_rms"):
+                        native = row[key.replace("_gap_delta_rms", "_delta_rms")]
+                        row[key.replace("_gap_delta_rms", "_gap_to_native_rms")] = (
+                            row[key] / native if native > 1e-20 else np.nan
+                        )
                 rows.append(row)
+                if directory is not None and sample["index"] < examples:
+                    save_example(sample, modality, xa, xb, ys, Path(directory), nifti)
                 if len(panels) < examples and view == 1 and sample["support"].any():
                     z = int(np.argmax(sample["support"].sum((0, 1))))
                     panels.append(
@@ -384,19 +475,92 @@ def audit(model, ds, device, eps=0.25, batch_size=2, examples=4):
                 "endpoint_signal_resolved",
                 "z_low",
                 "z_high",
+                "eps",
+                "isolated_intervention",
             ):
                 continue
-            routing_metric = key.endswith(("_gain", "_rms_ratio")) or key in ("joint_cosine", "joint_relative_error")
-            values = np.asarray([r[key] for r in selected if not routing_metric or r["valid_routing"]], float)
+            routing_metric = key.endswith(("_gain", "_rms_ratio")) or key in (
+                "joint_cosine",
+                "joint_relative_error",
+                "joint_energy_in_affected_fraction",
+                "joint_outside_rms",
+            )
+            needs_valid = routing_metric or key.endswith(("_delta_rms", "_gap_to_native_rms"))
+            values = np.asarray([r[key] for r in selected if not needs_valid or r["valid_routing"]], float)
             values = values[np.isfinite(values)]
-            metrics[key] = {"median": float(np.median(values)) if len(values) else None, "n_valid": len(values)}
+            ci = None
+            if len(values) and routing_metric:
+                rng = np.random.default_rng(1729)
+                ci = np.quantile(
+                    values[rng.integers(len(values), size=(1000, len(values)))].mean(1), [0.025, 0.975]
+                ).tolist()
+            metrics[key] = {
+                "median": float(np.median(values)) if len(values) else None,
+                "mean": float(values.mean()) if len(values) else None,
+                "mean_ci95": ci,
+                "n_valid": len(values),
+            }
         summary[view] = {
             "n": len(selected),
             "n_valid_input": sum(r["valid_input"] for r in selected),
             "n_valid_routing": sum(r["valid_routing"] for r in selected),
+            "n_isolated_intervention": sum(r["isolated_intervention"] for r in selected),
+            "n_lesion_changed": sum(r["lesion_changed_voxels"] > 0 for r in selected),
             "metrics": metrics,
         }
     return rows, summary, panels
+
+
+def save_example(sample, modality, xa, xb, decoded, directory, nifti=False):
+    """Both modalities, all donor combinations and signed responses on one scale."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    arrays = {
+        "input_a": xa,
+        "input_b": xb,
+        "recon_aa": decoded["aa"],
+        "content_b_style_a": decoded["ba"],
+        "content_a_style_b": decoded["ab"],
+        "recon_bb": decoded["bb"],
+        "input_delta": xb - xa,
+        "joint_delta": decoded["bb"] - decoded["aa"],
+    }
+    support = sample["support"]
+    z = int(np.argmax(support.sum((0, 1)))) if support.any() else xa.shape[2] // 2
+    fg = sample["mask"].numpy()[0] > 0
+    lo, hi = np.quantile(np.concatenate([xa[fg], xb[fg]]), [0.01, 0.99])
+    limit = max(float(np.abs(xb - xa).max()), 1e-8)
+    fig, axes = plt.subplots(1, len(arrays), figsize=(20, 3))
+    for col, (ax, (name, array)) in enumerate(zip(axes, arrays.items())):
+        ax.imshow(
+            array[:, :, z].T,
+            origin="lower",
+            cmap="gray" if col < 6 else "coolwarm",
+            vmin=lo if col < 6 else -limit,
+            vmax=hi if col < 6 else limit,
+        )
+        ax.set_title(name.replace("_", " "), fontsize=9)
+        ax.axis("off")
+    prefix = f"sample{sample['index']:04d}_ventricle_{modality}"
+    note = "isolated" if sample["isolated_intervention"] else "CONFOUNDED: excluded from routing summary"
+    fig.suptitle(f"{prefix}: z={z}, ventricle size -/+{sample['eps']:g}; {note}")
+    fig.tight_layout()
+    fig.savefig(directory / f"{prefix}.png", dpi=110)
+    plt.close(fig)
+    if nifti:
+        import nibabel as nib
+
+        arrays.update(
+            affected_mask=maximum_filter(support, size=3) & fg,
+            changed_tissue_mask=support,
+            tissue_a=sample["tissues"][0],
+            tissue_b=sample["tissues"][1],
+        )
+        for name, array in arrays.items():
+            nib.save(nib.Nifti1Image(np.asarray(array, np.float32), np.eye(4)), directory / f"{prefix}_{name}.nii.gz")
 
 
 def save_panels(panels, path):
@@ -431,7 +595,8 @@ def main():
     p.add_argument("--old-generator", action="store_true", help="Use the pre-7ac56a3 renderer for older checkpoints")
     p.add_argument("--device", default=None)
     p.add_argument("--cpu-threads", type=int, default=2)
-    p.add_argument("--examples", type=int, default=4)
+    p.add_argument("--examples", type=int, default=2, help="First N subjects, both modalities")
+    p.add_argument("--save-nifti", action="store_true", help="Save example volumes in synthetic voxel coordinates")
     p.add_argument("--out-dir", default=None)
     cli = p.parse_args()
     if (
@@ -448,22 +613,28 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     torch.set_num_threads(cli.cpu_threads)
     model, args, device = load_model_from_run_dir(cli.run_dir, cli.checkpoint, device=cli.device, seed=0)
+    checkpoint = Path(cli.run_dir) / "vqvae_model.pt" if cli.checkpoint is None else Path(cli.checkpoint)
+    if cli.checkpoint is not None and checkpoint.name == cli.checkpoint:
+        checkpoint = Path(cli.run_dir) / checkpoint
+    provenance = verify_checkpoint(model, checkpoint)
     ds = make_dataset(args, cli.num_samples, cli.causal, cli.split)
     if cli.old_generator:
         from eval.legacy_renderer import use_legacy_renderer
 
         use_legacy_renderer(ds)
-    rows, summary, panels = audit(model, ds, device, cli.eps, cli.batch_size, cli.examples)
-    directory = Path(cli.out_dir or Path(cli.run_dir) / f"ventricle_routing_{cli.causal}_eps{cli.eps:g}")
-    directory.mkdir(parents=True, exist_ok=True)
+    directory = Path(cli.out_dir or Path(cli.run_dir) / f"ventricle_routing_{datetime.now():%Y%m%d_%H%M%S_%f}")
+    directory.mkdir(parents=True, exist_ok=False)
     report = {
+        "status": "running",
         "arguments": vars(cli),
         "run_settings": vars(args),
-        "summary": summary,
+        "checkpoint": provenance,
         "protocol": __doc__,
         "normalization": "Original sample foreground affine frozen for A and B",
         "generator": "legacy_pre_7ac56a3" if cli.old_generator else "current",
         "render_resolution": ds.res,
+        "summary_statistic": "Paired subject means, matching lesion_routing; medians retained for older comparisons",
+        "nifti_coordinates": "Identity affine: synthetic voxel indices, no patient orientation or physical spacing",
         "replay_validation": {
             "endpoint_rms_atol": REPLAY_RMS_ATOL,
             "endpoint_rms_rtol": REPLAY_RMS_RTOL,
@@ -474,18 +645,32 @@ def main():
         "Means add to joint gain per sample; medians need not. Weak joint fidelity makes routing inconclusive. "
         "Latent RMS values depend on scale/width and are sensitivity diagnostics, not information scores. "
         "Input-invisible interventions have null gains and remain in coverage counts. "
+        "Pairs with changed rendered lesions or input changes outside the ventricular/blur ROI are confounded and "
+        "excluded from routing summaries. All other factor values, including SCM descendants, are held fixed; "
+        "this is not a propagated SCM intervention. "
         "Rows with valid_routing=false retain raw scores but are excluded from routing metric summaries. "
         "Endpoint replay error calibration does not bound all hybrid numerical errors. No checkpoints are written.",
     }
     (directory / "summary.json").write_text(json.dumps(json_safe(report), indent=2, allow_nan=False) + "\n")
-    with (directory / "samples.csv").open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
+    rows, summary, panels = audit(
+        model, ds, device, cli.eps, cli.batch_size, cli.examples, directory=directory, nifti=cli.save_nifti
+    )
+    for filename in ("responses.csv", "samples.csv"):
+        with (directory / filename).open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
     save_panels(panels, directory / "examples.png")
+    report.update(status="complete", summary=summary, registered_state_unchanged=True)
+    (directory / "summary.json").write_text(json.dumps(json_safe(report), indent=2, allow_nan=False) + "\n")
+    print("\nPaired mean ventricle-size responses (identity gain=1; no response=0)")
     for view, result in summary.items():
         print(f"{view}: measurable input {result['n_valid_input']}/{result['n']}")
-        print(f"  resolved above endpoint replay error: {result['n_valid_routing']}/{result['n']}")
+        print(
+            f"  isolated interventions: {result['n_isolated_intervention']}/{result['n']} "
+            f"(lesion changed in {result['n_lesion_changed']})"
+        )
+        print(f"  isolated and resolved above endpoint replay error: {result['n_valid_routing']}/{result['n']}")
         for name in (
             "joint_gain",
             "joint_cosine",
@@ -493,13 +678,24 @@ def main():
             "content_mean_gain",
             "style_mean_gain",
             "interaction_rms_ratio",
+            "joint_energy_in_affected_fraction",
+            "joint_outside_rms",
+            "aa_roi_mae",
+            "bb_roi_mae",
             "endpoint_replay_rms",
             "endpoint_error_to_input_ratio",
         ):
             value = result["metrics"][name]
-            print(f"  {name}: {value['median']} (n={value['n_valid']})")
+            print(f"  {name}: {value['mean']} (n={value['n_valid']})")
+    print("\nDecoder-bound latent response RMS: native / GAP (sensitivity, not decodability)")
+    for view, result in summary.items():
+        for name, value in result["metrics"].items():
+            if name.endswith("_gap_delta_rms") and "_post_" in name:
+                native = result["metrics"][name.replace("_gap_delta_rms", "_delta_rms")]
+                print(f"{view:<6} {name.removesuffix('_gap_delta_rms'):<20} {native['mean']} / {value['mean']}")
     print("Gains: identity response=1, no response=0. Check joint fidelity before assigning a pathway.")
-    print(f"Saved {directory}")
+    print("Small GAP response with native sensitivity shows pooling attenuation, not absence of information.")
+    print(f"Saved {directory}\nNo registered model parameter or buffer changed; no checkpoint was written.")
 
 
 if __name__ == "__main__":

@@ -101,6 +101,8 @@ A new `lesion_routing_<timestamp>` directory contains:
   are identity: coordinates are synthetic voxel indices, not patient orientation
   or a claim about physical voxel spacing.
 
-The terminal prints **paired means**, not the older ventricle audit's medians. Compare
-like summaries when comparing runs. `resolved` means numerically resolved, not that
+The terminal prints **paired means**, as does the updated `eval.ventricle_routing`
+command (see `VENTRICLE_ROUTING.md` for the matching size intervention). Older
+ventricle reports printed medians. Compare like summaries when comparing runs.
+`resolved` means numerically resolved, not that
 reconstruction fidelity passed a biological or anatomical threshold.
