@@ -61,7 +61,9 @@ def response_rows(on, off, indices, stage, distribution):
             ("subject_centered_on", centered[0, i], centered[1, i]),
         ):
             row.update({f"{prefix}_{k}": v for k, v in pair_metrics(a, b).items()})
-        row["delta_wrong_subject_cosine"] = pair_metrics(delta[0, i], delta[1, (i + 1) % len(indices)])["cosine"]
+        row["delta_wrong_subject_cosine"] = (
+            pair_metrics(delta[0, i], delta[1, (i + 1) % len(indices)])["cosine"] if len(indices) > 1 else float("nan")
+        )
         for v, name in enumerate(("t1", "flair")):
             row[f"delta_to_subject_variation_{name}"] = safe_ratio(
                 float(delta[v, i].square().sum()), float(centered[v, i].square().sum())
@@ -95,7 +97,17 @@ def select_views(features, indices):
     return torch.stack([features[v * b : (v + 1) * b, indices[v]] for v in range(2)])
 
 
-def extract_stages(model, images, masks, args, device, level):
+def foreground_positions(masks, args, level):
+    """Training's batch-union mask, computed independently of encoding chunks."""
+    _, grid = grid_for(args, level)
+    if not grid or not getattr(args, "patch_foreground_mask", False):
+        return None
+    fraction = F.adaptive_avg_pool3d(torch.stack(masks).float(), grid).flatten(1)
+    keep = (fraction >= float(getattr(args, "patch_foreground_thresh", 0.05))).any(0)
+    return keep if bool(keep.any()) else torch.ones_like(keep)
+
+
+def extract_stages(model, images, masks, args, device, level, *, keep_override=None):
     """Use real forward pool outputs; capture their pre-normalization source separately."""
     x = torch.cat([torch.stack([s[v] for s in images]) for v in range(2)]).to(device)
     m = torch.cat([torch.stack(masks)] * 2).to(device)
@@ -135,12 +147,10 @@ def extract_stages(model, images, masks, args, device, level):
     # Verify that the captured source is the exact map pooled by this checkpoint.
     expected = F.adaptive_avg_pool3d(source, grid).flatten(2) if grid else source.mean((2, 3, 4))
     torch.testing.assert_close(features, expected, atol=2e-5, rtol=2e-5)
-    keep = None
-    if grid and getattr(args, "patch_foreground_mask", False):
-        fraction = F.adaptive_avg_pool3d(m.cpu(), grid).flatten(1)
-        keep = (fraction >= float(getattr(args, "patch_foreground_thresh", 0.05))).any(0)
-        if not bool(keep.any()):
-            keep = torch.ones_like(keep)
+    keep = foreground_positions(masks, args, level) if keep_override is None else keep_override.cpu()
+    if keep is not None:
+        if not grid or keep.dtype != torch.bool or keep.shape != (features.shape[-1],) or not bool(keep.any()):
+            raise ValueError("Invalid fixed foreground patch selection")
         features = features[..., keep]
     content = select_views(features, indices)
     stages["pooled_content"] = content
@@ -153,15 +163,20 @@ def extract_stages(model, images, masks, args, device, level):
         content = projected.permute(0, 1, 3, 2).contiguous() if grid else projected
     stages["loss_patch" if grid else "loss_global"] = content
     if grid and float(getattr(args, "bt_gap_weight", 0)) > 0:
-        # Training's companion averages retained patches AFTER projection/filtering.
-        stages["loss_gap"] = content.mean(-1)
+        # Training's companion pools retained patches AFTER projection/filtering.
+        if getattr(args, "bt_gap_pooling", "gap") == "stats":
+            from training.losses import stats_pool
+
+            stages["loss_gap"] = stats_pool(content)[0]
+        else:
+            stages["loss_gap"] = content.mean(-1)
     for stage, values in stages.items():
         if not bool(torch.isfinite(values).all()):
             raise ValueError(f"Non-finite features at {stage}")
     return stages, indices, keep
 
 
-def bt_terms(hz, args, stage, level):
+def bt_terms(hz, args, stage, level, *, corr_ema=None, corr_ema_decay=0.0):
     from training.losses import barlow_twins_loss
 
     gap = stage == "loss_gap"
@@ -184,6 +199,10 @@ def bt_terms(hz, args, stage, level):
             center_mode=(getattr(args, "patch_center_mode", "none") or "none") if patch else "none",
             patch_stat=getattr(args, "bt_patch_stat", "fold"),
             sim_normalize=getattr(args, "bt_sim_normalize", False),
+            sim_whiten=bool(getattr(args, "bt_sim_whiten", False)) and not patch,
+            sim_whiten_eps=getattr(args, "bt_sim_whiten_eps", 1e-3),
+            corr_ema=corr_ema,
+            corr_ema_decay=corr_ema_decay,
             normalize_terms=getattr(args, "bt_normalize_terms", False),
         )
     arm_weight = (
@@ -199,14 +218,18 @@ def bt_terms(hz, args, stage, level):
         * float(getattr(args, "scale_contrastive_loss", 1))
         * (levels[level] if levels and level < len(levels) else 1)
     )
-    return {
-        "instantaneous_weighted_total": float(value) * weight,
+    result = {
+        "weighted_total": float(value) * weight,
+        "unweighted_total": float(value),
         "arm_scale": weight,
         "sim_coefficient": sim,
         "std_coefficient": std,
         "lambda": lambd,
         **value._contrastive_diag,
     }
+    if not corr_ema_decay:
+        result["instantaneous_weighted_total"] = result["weighted_total"]
+    return result
 
 
 def audit(model, ds, args, device, level, batch_size, distribution):
@@ -363,7 +386,7 @@ def main():
             "native_probe": "Post-content_norms native encoder maps, as used by lesion_probe",
             "native_alignment_source": "Native maps before content_norms; verified against forward pooling",
             "pooled_content": "Forward-pooled content after foreground patch filtering, before optional head",
-            "loss_patch/global/gap": "Actual BT input after head; GAP averages retained projected patches",
+            "loss_patch/global/gap": "Actual BT input after head; companion uses configured gap/stats pooling over retained patches",
         },
         "limitations": "Eval mode; instantaneous BT correlations, not historical EMA; no lesion-free training guarantee. Raw feature magnitudes are coordinate-dependent; cosine alone ignores magnitude. Batch size affects centering and foreground filtering.",
     }
