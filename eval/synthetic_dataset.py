@@ -503,8 +503,12 @@ class PseudoMRIRenderer(nn.Module):
     # missing components simply default to "no modulation".
     N_STYLE_COMPONENTS = 3
 
-    def render_modality(self, tissue_map, lesion_load, z_style, modality, view_seed, device):
-        """View-specific rendering. z_style drives gain, bias, and noise sigma."""
+    def render_modality(self, tissue_map, lesion_load, z_style, modality, view_seed, device, noise_seed=None):
+        """Render acquisition effects; optionally redraw noise while preserving the bias field.
+
+        With noise_seed=None the original RNG sequence is unchanged. A separate
+        noise seed supports same-acquisition style pairs without identical noise.
+        """
         gen = torch.Generator(device=device).manual_seed(int(view_seed))
 
         # LUT indexed by tissue label [bg, CSF, WM, GM, fissure]. The 5th (fissure)
@@ -540,6 +544,8 @@ class PseudoMRIRenderer(nn.Module):
         volume = volume * bias_field
 
         sigma = 0.01 + z_style[2].abs() * 0.05 * self.style_scale
+        if noise_seed is not None:
+            gen = torch.Generator(device=device).manual_seed(int(noise_seed))
         real = torch.randn(volume.shape, generator=gen, device=device) * sigma
         imag = torch.randn(volume.shape, generator=gen, device=device) * sigma
         volume = torch.sqrt((volume + real) ** 2 + imag**2)
@@ -985,7 +991,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         return self._candidate_seed(idx, self._accepted_attempt[idx])
 
     def render_pseudo_mri(
-        self, z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed, z_lesion=None
+        self, z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed, z_lesion=None, noise_seed=None
     ):
         """Render a view pair from explicit latents. Deterministic given its inputs.
 
@@ -1014,6 +1020,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 "T1",
                 view_seed=sample_seed * 2,
                 device=device,
+                noise_seed=None if noise_seed is None else noise_seed * 2,
             )
             x_v2 = self.renderer.render_modality(
                 tissue,
@@ -1022,6 +1029,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 "FLAIR",
                 view_seed=sample_seed * 2 + 1,
                 device=device,
+                noise_seed=None if noise_seed is None else noise_seed * 2 + 1,
             )
         return x_v1, x_v2, (tissue > 0).unsqueeze(0).float()
 

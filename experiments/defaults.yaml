@@ -54,6 +54,9 @@ contrastive_only: false
 
 # ---- Losses (off by default) ----
 scale_style_contrastive_loss: 0.0
+style_contrastive_mode: cosine   # independence: cross-view HSIC; within_modality: same-acquisition synthetic pairs
+style_independence_var_weight: 1.0  # Hinge on the same post-bottleneck style tensor; independent of HSIC weight
+style_alignment_var_weight: 1.0  # Anti-collapse within within_modality; mean over views and paired branches
 scale_content_modality_adv: 0.0
 scale_style_modality_ce: 0.0
 scale_adv_loss: 0.0

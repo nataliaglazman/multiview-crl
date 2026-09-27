@@ -1,5 +1,8 @@
 # Optional style–anatomy independence penalty
 
+This page describes the supervised ablation. For the separate label-free
+cross-view mode, see [STYLE_INDEPENDENCE.md](STYLE_INDEPENDENCE.md).
+
 Enable on a synthetic run with ground-truth `gt_latents.z_content`:
 
 ```yaml

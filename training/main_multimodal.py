@@ -71,7 +71,8 @@ from training.losses import (
     style_modality_ce_loss,
     vicreg_loss,
 )
-from training.style_hsic import style_content_hsic_loss
+from training.style_hsic import style_content_hsic_loss, style_independence_loss
+from training.style_alignment import within_modality_style_loss
 from training.vicreg_local import attach_vicregl_heads, registered_level_loss
 from utils.checkpointing import (
     load_checkpoint,
@@ -226,6 +227,25 @@ def train_step(
                 raise ValueError("--scale-style-hsic-loss requires batch['gt_latents']['z_content'] (synthetic data).")
             _gt_content = torch.as_tensor(_gt_content, device=device)
             _extra_kwargs["return_style_features"] = True
+        # The label-free style penalty reads the same decoder-bound style tensors.
+        _style_indep = float(getattr(args, "scale_style_contrastive_loss", 0.0)) > 0 and (
+            getattr(args, "style_contrastive_mode", "cosine") == "independence"
+        )
+        _style_within = float(getattr(args, "scale_style_contrastive_loss", 0.0)) > 0 and (
+            getattr(args, "style_contrastive_mode", "cosine") == "within_modality"
+        )
+        if _style_within:
+            if getattr(args, "dataset_name", None) != "synthetic" or n_views != 2:
+                raise ValueError("Within-modality style alignment requires synthetic data with two views.")
+            if getattr(args, "mask_mode", None) != "fixed":
+                raise ValueError("Within-modality style alignment requires a fixed content/style mask across forwards.")
+            if "style_pair_image" not in data:
+                raise ValueError("Within-modality style alignment requires same-acquisition style_pair_image pairs.")
+            _extra_kwargs["return_style_features"] = True
+        if _style_indep:
+            if getattr(args, "dataset_name", None) != "synthetic" or n_views != 2:
+                raise ValueError("Style independence currently requires synthetic data with exactly two paired views.")
+            _extra_kwargs["return_style_features"] = True
 
         # Cross-modal reconstruction: ask the final decoder for each view's content rendered
         # with the OTHER view's style. It reuses this forward's encoder and content codes —
@@ -254,16 +274,21 @@ def train_step(
         )
         _hsic_loss = torch.zeros((), device=device)
         _cross_out = None
+        _style_features = None
         if _extra_kwargs:
             # Extras follow the eight-tuple in a fixed order: style features, then the
             # swapped-style decode (see VQVAE.forward).
             _forward, *_extras = _forward
-            if _hsic_scale > 0:
+            if _extra_kwargs.get("return_style_features"):
                 _style_features = _extras.pop(0)
+            if _hsic_scale > 0:
                 _hsic_loss, _hsic_diag = style_content_hsic_loss(_style_features, _gt_content, n_views)
                 _diag.update(_hsic_diag)
                 _diag["Style/hsic_weighted"] = _hsic_loss.detach().item() * _hsic_scale
-                del _style_features
+            if not (_style_indep or _style_within):
+                _style_features = None
+            elif not _style_features:
+                raise ValueError("Style regularization requires a nonempty decoder-bound style block.")
             if _cross_active:
                 _cross_out = _extras.pop(0)
 
@@ -278,6 +303,38 @@ def train_step(
             _,  # style_id_outputs
         ) = _forward
         del _forward
+
+        if _style_within:
+            _pair_samples = data["style_pair_image"]
+            if len(_pair_samples) != n_views or any(a.shape != b.shape for a, b in zip(samples, _pair_samples)):
+                raise ValueError("style_pair_image must match the anchor's view order and image shapes.")
+            _pair_images = torch.cat(_pair_samples, 0).to(device, non_blocking=True)
+            _pair_mask_samples = data.get("style_pair_mask")
+            _pair_masks = None
+            if _pair_mask_samples is not None:
+                if len(_pair_mask_samples) != n_views or any(
+                    a.shape != b.shape for a, b in zip(_pair_samples, _pair_mask_samples)
+                ):
+                    raise ValueError("style_pair_mask must match the paired image shapes.")
+                _pair_masks = torch.cat(_pair_mask_samples, 0).to(device, non_blocking=True).float()
+            elif masks is not None:
+                raise ValueError("Masked anchors require style_pair_mask for the paired anatomy.")
+            if getattr(args, "channels_last", False):
+                _pair_images = _pair_images.to(memory_format=torch.channels_last_3d)
+            # Only encode the auxiliary anatomy: no second decode, VQ commitment,
+            # or EMA codebook update. Both encoder branches receive gradients.
+            _pair_output, _pair_style_features = vqvae_model(
+                _pair_images,
+                return_recon=False,
+                pool_only=True,
+                n_views=n_views,
+                subsets=args.subsets,
+                mask=_pair_masks,
+                return_style_features=True,
+            )
+            del _pair_images, _pair_masks, _pair_output
+            if _pair_style_features.keys() != _style_features.keys():
+                raise ValueError("Anchor and paired forwards returned different style levels.")
 
         # Compute momentum-encoder key embeddings BEFORE deleting images.
         # During mask warmup, disable MoCo so in-batch InfoNCE is used
@@ -374,6 +431,41 @@ def train_step(
             if _proj_heads is None:
                 return None
             return _proj_heads[f"L{_lvl}"] if f"L{_lvl}" in _proj_heads else None
+
+        # Measure dependence and variation on the same post-bottleneck,
+        # pre-quantization tensors, independently of the earlier pooled features.
+        if _style_indep:
+            _indep_total = torch.zeros((), device=device)
+            for _style_level, _style_tensor in _style_features.items():
+                _style_loss, _indep_diag = style_independence_loss(
+                    _style_tensor, variance_weight=getattr(args, "style_independence_var_weight", 1.0)
+                )
+                _indep_total = _indep_total + _style_loss
+                for _k, _v in _indep_diag.items():
+                    _diag[f"Style/{_k}_L{_style_level}"] = _v
+                _diag[f"Style/independence_L{_style_level}"] = _style_loss.item()
+            _indep_weighted = _indep_total * args.scale_style_contrastive_loss
+            total_contrastive_loss = total_contrastive_loss + _indep_weighted
+            _diag["Style/independence_weighted"] = _indep_weighted.detach().item()
+            del _style_features
+
+        if _style_within:
+            _within_total = torch.zeros((), device=device)
+            for _style_level, _style_tensor in _style_features.items():
+                _style_loss, _within_diag = within_modality_style_loss(
+                    _style_tensor,
+                    _pair_style_features[_style_level],
+                    n_views=n_views,
+                    variance_weight=getattr(args, "style_alignment_var_weight", 1.0),
+                )
+                _within_total = _within_total + _style_loss
+                for _k, _v in _within_diag.items():
+                    _diag[f"Style/{_k}_L{_style_level}"] = _v
+                _diag[f"Style/within_modality_L{_style_level}"] = _style_loss.detach().item()
+            _within_weighted = _within_total * args.scale_style_contrastive_loss
+            total_contrastive_loss = total_contrastive_loss + _within_weighted
+            _diag["Style/within_modality_weighted"] = _within_weighted.detach().item()
+            del _style_features, _pair_style_features
 
         for level_idx, enc_pooled in enumerate(encoder_outputs):
             # Global pool: enc_pooled is (2B, C) → hz_level (n_views, B, C)
@@ -775,10 +867,10 @@ def train_step(
                         )
 
             _style_cl_scale = getattr(args, "scale_style_contrastive_loss", 0.0)
-            if _style_cl_scale > 0.0 and _style_hz_v0 is not None:
+            if _style_cl_scale > 0.0 and not (_style_indep or _style_within) and _style_hz_v0 is not None:
                 _style_loss = style_infonce_loss(_style_hz_v0, _style_hz_v1, tau=args.tau)
-                total_contrastive_loss = total_contrastive_loss + _style_loss * _style_cl_scale
                 _diag[f"Style/infonce_L{level_idx}"] = _style_loss.item()
+                total_contrastive_loss = total_contrastive_loss + _style_loss * _style_cl_scale
 
             # --- Auxiliary modality heads (decouple invariance from capacity) ---
             # Content path: gradient-reversal → content becomes linearly
@@ -1643,6 +1735,10 @@ def main(args):
                 "synthetic_style_scale": getattr(args, "synthetic_style_scale", 1.0),
                 "synthetic_content_scale": getattr(args, "synthetic_content_scale", 1.0),
                 "synthetic_normalize": getattr(args, "synthetic_normalize", "per_sample"),
+                "synthetic_style_alignment_pairs": (
+                    getattr(args, "style_contrastive_mode", "cosine") == "within_modality"
+                    and getattr(args, "scale_style_contrastive_loss", 0.0) > 0
+                ),
                 "synthetic_hierarchical_content": getattr(args, "synthetic_hierarchical_content", False),
                 "synthetic_causal": getattr(args, "synthetic_causal", False),
                 "synthetic_causal_graph": getattr(args, "synthetic_causal_graph", "chain"),
@@ -2281,6 +2377,8 @@ def main(args):
         # re-arms the gate from its first eval. That is permissive, not wrong: right
         # after a resume the gate can miss a decline that started before it.
         _info_all_peak = float("-inf")
+        # i.i.d. test set for --iid-probe-every, built on its first firing and reused.
+        _iid_dataset = None
         best_ckpt_path = os.path.join(args.save_dir, "vqvae_best.pt")
         # Fallback: if the dedicated best file is missing, read the bookkeeping
         # from the rolling checkpoint (which now mirrors best_metric_*).
@@ -2989,6 +3087,58 @@ def main(args):
                             logger.warning(f"  [WARNING] Periodic synthetic DCI failed: {e}")
                         finally:
                             encoders[0].train(_dci_was_training)
+
+                    # Periodic i.i.d. identifiability probe: identifiability_report's per-factor
+                    # decoding (every content + style factor, from content and from style, at gap
+                    # and patch) on the test split built with causal=False.
+                    _iid_every = getattr(args, "iid_probe_every", 0)
+                    if (
+                        _iid_every > 0
+                        and args.dataset_name == "synthetic"
+                        and (step % _iid_every == 1 or step == args.train_steps)
+                    ):
+                        _iid_was_training = encoders[0].training
+                        _iid_t0 = time.perf_counter()
+                        try:
+                            from eval.identifiability_report import live_metrics, score_live, write_report_json
+
+                            # fork_rng: building the dataset calls torch.manual_seed, and every eval
+                            # DataLoader draws its base seed from the global RNG. Without the fork the
+                            # probe would change the training trajectory.
+                            _iid_devs = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+                            with torch.random.fork_rng(devices=_iid_devs):
+                                if _iid_dataset is None:
+                                    from eval.run_dci_synthetic import build_synthetic_test_set
+
+                                    _iid_dataset = build_synthetic_test_set(
+                                        args,
+                                        getattr(args, "iid_probe_samples", 2000),
+                                        cache=getattr(args, "cache_dataset", False),
+                                        causal=False,
+                                    )
+                                _iid_res = score_live(
+                                    encoders[0],
+                                    _iid_dataset,
+                                    device,
+                                    poolings=[("gap", "gap"), ("patch", tuple(args.iid_probe_patch_grid))],
+                                    batch_size=dataloader_kwargs.get("batch_size", 32),
+                                    n_jobs=getattr(args, "iid_probe_n_jobs", -1),
+                                    causal="iid",
+                                    name=f"{args.model_id}-step{step}",
+                                )
+                            _iid_log = live_metrics(_iid_res)
+                            for _iid_k, _iid_v in _iid_log.items():
+                                tb_writer.add_scalar(_iid_k, _iid_v, step)
+                            if _use_wandb:
+                                wandb.log(_iid_log, step=step)
+                            write_report_json(os.path.join(args.save_dir, "iid_probe", f"step_{step}.json"), _iid_res)
+                            _iid_dt = time.perf_counter() - _iid_t0
+                            tb_writer.add_scalar("Perf/iid_probe_seconds", _iid_dt, step)
+                            logger.info(f"  [EVALUATION] iid probe (step {step}) took {_iid_dt:.1f}s")
+                        except Exception as e:
+                            logger.warning(f"  [WARNING] Periodic iid probe failed: {e}")
+                        finally:
+                            encoders[0].train(_iid_was_training)
 
                     if step % args.checkpoint_steps == 1 or step == args.train_steps or step == args.log_steps * 2:
                         # Periodic separation score evaluation — run BEFORE saving the
