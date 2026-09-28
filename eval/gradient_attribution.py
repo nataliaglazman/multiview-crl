@@ -1,66 +1,17 @@
 #!/usr/bin/env python
-"""Checkpoint-only gradient attribution for patch-MCC or pixel reconstruction.
+"""Gradient attribution using the current training objective, without optimizer updates.
 
-``--target reconstruction`` isolates weighted patch/GAP similarity gradients and measures
-their conflict with held-out masked pixel MAE. It also scores temporary encoder steps,
-restoring all parameters and buffers between trials. No training or checkpoint writes.
-See ``eval.reconstruction_attribution`` for the metric and step conventions.
-
-The remaining description concerns the original ``--target mcc`` diagnostic:
-
-The decay of ``selection/mcc_by_pool/patch`` after its early peak was traced to the
-recon phase by ELIMINATION: every Barlow Twins term was >=93% converged before the peak,
-so the contrastive objective was at a fixed point while the metric fell. That is an
-argument from timing. This measures the attribution instead.
-
-Two questions, two methods:
-
-  1. HOW BIG is each force, and do they conflict?  Compute the gradient of each loss term
-     with respect to the ENCODER parameters only (the ones ``--freeze-encoder`` pins, which
-     are exactly the ones ``enc_out[2]`` depends on), then report norms and pairwise
-     cosines. A negative cosine between recon and contrastive means they actively pull the
-     encoder in opposing directions; near-zero means they are simply unrelated.
-
-  2. WHAT DOES A STEP COST?  Norms and cosines say nothing about a metric that is not
-     differentiable (block-MCC ends in a Hungarian match over a cross-validated ridge).
-     So take an actual step along each normalised gradient and re-measure the real metric:
-
-         theta' = theta - eta * g / ||g||        ->  block-MCC(theta') - block-MCC(theta)
-
-     This is the honest bridge between "which gradient is larger" and "which gradient
-     costs identifiability", because it uses the metric itself, not a differentiable proxy.
-
-Read the sign convention carefully: a NEGATIVE dMCC means stepping along that loss's
-descent direction REDUCES block-MCC, i.e. that loss is degrading identifiability.
-
-Caveats, none of which the numbers announce on their own
---------------------------------------------------------
-* Training uses AdamW, which does NOT follow the raw gradient — it rescales per-parameter
-  by running second-moment estimates and applies decoupled weight decay. A raw-gradient
-  step is therefore an idealisation of what training actually did. Pass
-  ``--precondition`` to divide by sqrt(v)+eps from the checkpoint's optimizer state, which
-  is much closer to the real update direction.
-* Gradients are batch-dependent. ``--grad-batches`` averages over several draws; the
-  reported spread across draws is how much of any cosine is noise.
-* A finite-difference step is local. Too small and it is swamped by probe noise (block-MCC
-  has a per-seed sd around 0.001); too large and it leaves the regime where a single step
-  means anything. The eta sweep exists so the reading can be checked for linearity — if
-  dMCC is not roughly proportional to eta, the step is too big.
-* This attributes the drift at ONE point on the trajectory. The balance of forces changes
-  over training, so run it at more than one checkpoint before generalising.
+Default --target balance reports weighted per-component encoder gradients, conflicts,
+module norms and total-gradient parity. --target mcc additionally measures temporary
+unit-direction steps with matched random controls. --target reconstruction retains the
+separate similarity-only pixel-MAE experiment. See eval/GRADIENT_ATTRIBUTION.md.
 
 Usage
 -----
-    python -m eval.gradient_attribution --run-dir results/synthetic/RUN \\
-        --target reconstruction --checkpoints vqvae_model.pt --grad-batches 4
-
-    python -m eval.gradient_attribution --run-dir results/synthetic/RUN \\
-        --checkpoints vqvae_best.pt vqvae_model.pt
-
-    # closer to the real update direction
-    python -m eval.gradient_attribution --run-dir results/synthetic/RUN --precondition
+    python -m eval.gradient_attribution --run-dir results/synthetic/RUN
+    python -m eval.gradient_attribution --run-dir results/synthetic/RUN --target mcc
+    python -m eval.gradient_attribution --run-dir results/synthetic/RUN --target reconstruction
 """
-
 from __future__ import annotations
 
 import argparse
@@ -71,9 +22,8 @@ import numpy as np
 # torch is imported lazily inside the measurement path so the reporting helpers below
 # stay unit-testable on plain numpy (same convention as eval.run_dci_compare).
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
 ENCODER_MODULES = ("encoders", "encoders_v1", "content_norms", "content_projections")
 
 
@@ -129,139 +79,12 @@ def _flat(grads):
     return torch.cat([g.reshape(-1) for g in grads]).detach()
 
 
-def _losses_at(model, batch, args_, device, grid, level):
-    """Recon (+VQ) and contrastive losses for one batch, with the graph intact.
-
-    Computed in SEPARATE forward passes rather than decomposed from one joint pass: the
-    contrastive path wants ``pool_only=True`` with a patch grid, the reconstruction path
-    wants the full decode. Two passes keeps each loss exactly what training computed for
-    it, at the cost of one extra encoder forward.
-    """
-    import torch
-    import torch.nn.functional as F
-
-    from training.losses import BaselineLoss, barlow_twins_loss
-
-    imgs, msks = batch["image"], batch["mask"]
-    n_views = len(imgs)
-    x = torch.cat(imgs, 0).to(device).float()
-    m = torch.cat(msks, 0).to(device).float()
-    if m.dim() == 4:
-        m = m.unsqueeze(1)
-
-    out = {}
-    # Under --contrastive-only the decoder and codebook were NEVER TRAINED: that flag skips
-    # the whole quantization + decoding path. Computing a reconstruction loss through those
-    # random weights produces a large, meaningless gradient that looks like a real force in
-    # the table. Skip them rather than report a number that invites the wrong comparison.
-    _con_only = bool(getattr(args_, "contrastive_only", False))
-
-    # --- contrastive (Barlow Twins on the content channels, patch-pooled) ---
-    enc = model(x, pool_only=True, n_views=n_views, patch_grid=tuple(grid))
-    feat = enc[2][level]  # (n_views*B, C, P)
-    b = feat.shape[0] // n_views
-    hz = torch.stack([feat[:b], feat[b : 2 * b]], dim=0)  # (2, B, C, P)
-
-    # Same foreground rule as training (main_multimodal.py:335): keep a position if ANY
-    # sample has >= thresh brain there. Dropping it here would measure a different loss.
-    if getattr(args_, "patch_foreground_mask", False):
-        thr = float(getattr(args_, "patch_foreground_thresh", 0.05))
-        with torch.no_grad():
-            frac = F.adaptive_avg_pool3d(m, tuple(grid)).flatten(1)
-            keep = (frac >= thr).any(dim=0)
-            if not bool(keep.any()):
-                keep = torch.ones_like(keep)
-        hz = hz[..., keep]
-
-    c_idx = list(range(int(getattr(args_, "content_dim", hz.shape[2]))))
-    out["contrastive"] = barlow_twins_loss(
-        hz,
-        estimated_content_indices=[c_idx],
-        subsets=[[0, 1]],
-        lambd=float(getattr(args_, "bt_lambda", 1.0)),
-        center_mode=getattr(args_, "patch_center_mode", "none") or "none",
-        patch_stat=getattr(args_, "bt_patch_stat", "fold") or "fold",
-        sim_normalize=bool(getattr(args_, "bt_sim_normalize", False)),
-        sim_coeff=float(getattr(args_, "bt_sim_coeff", 0.0)),
-        std_coeff=float(getattr(args_, "bt_std_coeff", 0.0)),
-    ) * float(getattr(args_, "scale_contrastive_loss", 1.0))
-
-    # --- reconstruction (BaselineLoss, exactly as training scores it) ---
-    if _con_only:
-        return out
-    dec = model(x, return_recon=True, pool_only=False, n_views=n_views, subsets=[(0, 1)])
-    recon, diffs = dec[0], dec[1]
-    if recon.shape[2:] != x.shape[2:]:
-        recon = F.interpolate(recon, size=x.shape[2:], mode="trilinear", align_corners=False)
-    rl = BaselineLoss().to(device)
-    # NOTE: BaselineLoss ADDS the quantization losses into its own return value
-    # (losses.py:1611), and main_multimodal then adds sum(diffs)*vq_commitment_weight on
-    # top. So VQ is counted twice in training, at two different weights. Reproduced here
-    # rather than corrected, because the point is to attribute what actually ran.
-    out["recon"] = rl({"reconstruction": [recon], "quantization_losses": diffs, "mask": m}, x) * float(
-        getattr(args_, "scale_recon_loss", 1.0)
-    )
-    out["vq"] = sum(diffs) * float(getattr(args_, "vq_commitment_weight", 0.25))
-    return out
-
-
-def collect_gradients(model, dataset, args_, device, grid, level, n_batches, batch_size, precond=None):
-    """Per-loss gradients w.r.t. the encoder parameters, averaged over batches."""
-    import torch
-    from torch.utils.data import DataLoader, Subset
-
-    named = _encoder_params(model)
-    params = [p for _n, p in named]
-    for p in params:
-        p.requires_grad_(True)
-
-    loader = DataLoader(
-        Subset(dataset, range(min(n_batches * batch_size, len(dataset)))), batch_size=batch_size, shuffle=False
-    )
-    acc, per_batch, nb = {}, {}, 0
-    for batch in loader:
-        losses = _losses_at(model, batch, args_, device, grid, level)
-        for key, loss in losses.items():
-            if not torch.is_tensor(loss) or not loss.requires_grad:
-                continue
-            g = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
-            g = [torch.zeros_like(p) if gi is None else gi for gi, p in zip(g, params)]
-            flat = _flat(g)
-            acc[key] = flat if key not in acc else acc[key] + flat
-            per_batch.setdefault(key, []).append(flat.norm().item())
-        nb += 1
-        del losses
-    if nb == 0:
-        raise RuntimeError("No batches were processed — is the dataset empty?")
-    grads = {k: (v / nb) for k, v in acc.items()}
-
-    if precond is not None:
-        # AdamW's realised direction is g / (sqrt(v) + eps), not g. Applying the
-        # checkpoint's second-moment estimate makes the finite-difference step below a much
-        # better model of the update training actually took.
-        for k in grads:
-            grads[k] = grads[k] / (precond.sqrt() + 1e-8)
-    return named, params, grads, per_batch
-
-
 def snr_decomposition(G):
-    """Split a stack of per-batch gradients into expected-gradient and per-batch noise.
+    """Descriptive mean/noise estimates across batches.
 
-    ``G`` is ``(B, D)``: one flattened gradient per batch. For independent batches
-
-        E||mean(G)||^2 = ||E[g]||^2 + tr(Cov)/B
-
-    so the naive norm of the averaged gradient OVERSTATES the true expected gradient by
-    exactly the noise term, and does so more the fewer batches you average. Subtracting it
-    gives an unbiased estimate of ||E[g]||^2, which can come out NEGATIVE when the true
-    expected gradient is zero — that is the signature, not a bug, so it is reported rather
-    than clipped.
-
-    Why this decides the question: a loss whose target is attainable converges to a genuine
-    descent direction and keeps a non-zero ||E[g]||. A loss chasing an unattainable target
-    (an off-diagonal that cannot go below its d(d-1)/rows sampling floor) ends up with
-    E[g] ~ 0 and large per-batch variance — it never stops moving the weights, but the
-    motion is a random walk rather than optimisation.
+    The signed signal estimate can be negative at finite sample size. This does not
+    prove that a term is harmless, that its optimum is unattainable, or that training
+    follows a random walk. Interpretation assumes comparable independent batches.
     """
     G = np.asarray(G, dtype=np.float64)
     b = G.shape[0]
@@ -286,32 +109,6 @@ def snr_decomposition(G):
     }
 
 
-def collect_per_batch_gradients(model, dataset, args_, device, grid, level, n_batches, batch_size):
-    """One flattened encoder gradient per batch, for the SNR decomposition."""
-    import torch
-    from torch.utils.data import DataLoader, Subset
-
-    named = _encoder_params(model)
-    params = [p for _n, p in named]
-    for p in params:
-        p.requires_grad_(True)
-
-    loader = DataLoader(
-        Subset(dataset, range(min(n_batches * batch_size, len(dataset)))), batch_size=batch_size, shuffle=False
-    )
-    out = {}
-    for batch in loader:
-        losses = _losses_at(model, batch, args_, device, grid, level)
-        for key, loss in losses.items():
-            if not torch.is_tensor(loss) or not loss.requires_grad:
-                continue
-            g = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
-            g = [torch.zeros_like(p) if gi is None else gi for gi, p in zip(g, params)]
-            out.setdefault(key, []).append(_flat(g).float().cpu().numpy())
-        del losses
-    return {k: np.stack(v) for k, v in out.items()}
-
-
 def _mcc_now(model, dataset, device, grid, level, batch_size, gt_cache, seeds, n_splits):
     from eval.identifiability_metrics import block_mcc
     from eval.patch_mcc_decay import extract_patch_block
@@ -323,256 +120,88 @@ def _mcc_now(model, dataset, device, grid, level, batch_size, gt_cache, seeds, n
     return block_mcc(x, gt_cache, seeds=seeds, n_splits=n_splits)["mean"], gt_cache
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", required=True)
-    ap.add_argument("--target", choices=("mcc", "reconstruction"), default="mcc")
-    ap.add_argument("--checkpoints", nargs="+", default=["vqvae_best.pt", "vqvae_model.pt"])
+    ap.add_argument("--target", choices=("balance", "mcc", "reconstruction"), default="balance")
+    ap.add_argument("--checkpoints", nargs="+", default=["vqvae_model.pt"])
     ap.add_argument("--level", type=int, default=0)
-    ap.add_argument("--grid", type=int, nargs=3, default=None)
+    ap.add_argument("--grid", type=int, nargs=3)
     ap.add_argument(
         "--grad-batches",
         type=int,
         default=16,
-        help="Batches to average each gradient over. The contrastive gradient's batch-to-batch "
-        "sd has been measured at ~69%% of its mean, so a handful of batches does not resolve "
-        "its expectation from zero — which is exactly the quantity convergence claims is small.",
+        help="Batches per gradient estimate. The contrastive gradient's batch-to-batch sd has been "
+        "measured at ~69%% of its mean, so a handful of batches cannot resolve its expectation from zero.",
     )
     ap.add_argument(
-        "--grad-batch-size",
+        "--grad-batch-size", type=int, help="Default: saved training batch size. Smaller batches change BT statistics."
+    )
+    ap.add_argument(
+        "--ema-mode",
+        choices=("reference", "instantaneous"),
+        default="reference",
+        help="reference: a frozen checkpoint estimate of the correlation EMA, NOT its training history. "
+        "instantaneous: no EMA. (A cold EMA is instantaneous exactly, by its bias correction.)",
+    )
+    ap.add_argument(
+        "--ema-reference-batches",
         type=int,
-        default=None,
-        help="Default: training batch size for reconstruction attribution; 8 for MCC.",
+        help="Default: the EMA's effective window (1+m)/(1-m), 199 at m=0.99, so the reference is as "
+        "noisy as training's own EMA. Fewer batches inflate the off-diagonal gradient; the report "
+        "prints the resulting noise next to the training EMA's.",
     )
-    ap.add_argument("--mcc-samples", type=int, default=600, help="Volumes for each block-MCC re-measurement")
-    ap.add_argument("--mcc-batch", type=int, default=16)
-    ap.add_argument(
-        "--etas",
-        type=float,
-        nargs="+",
-        default=None,
-        help="MCC: unit-direction step lengths (default .05 .2 .8). Reconstruction: raw "
-        "weighted-gradient step multipliers (default 1e-5 3e-5 1e-4), NOT Adam learning rates.",
-    )
-    ap.add_argument("--recon-samples", type=int, default=64, help="Separate held-out subjects for pixel MAE.")
-    ap.add_argument(
-        "--recon-batch-size", type=int, default=4, help="Decoder batch size for reconstruction attribution."
-    )
-    ap.add_argument(
-        "--recon-clamp",
-        action="store_true",
-        help="Score clamped predictions for checkpoints trained with the older clamped pixel loss. Default: raw.",
-    )
-    ap.add_argument("--out", default=None, help="Optional reconstruction-attribution CSV output directory.")
+    ap.add_argument("--workers", type=int, default=4, help="DataLoader workers rendering synthetic subjects.")
+    ap.add_argument("--mcc-samples", type=int, default=600)
+    ap.add_argument("--mcc-batch", type=int, default=8)
+    ap.add_argument("--etas", type=float, nargs="+")
+    ap.add_argument("--recon-samples", type=int, default=64)
+    ap.add_argument("--recon-batch-size", type=int, default=4)
+    ap.add_argument("--recon-clamp", action="store_true")
+    ap.add_argument("--out")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     ap.add_argument("--n-splits", type=int, default=5)
-    ap.add_argument("--precondition", action="store_true", help="Divide by sqrt(v) from the optimizer state")
     ap.add_argument(
-        "--snr",
-        action="store_true",
-        help="Run the gradient signal-to-noise decomposition instead of the dMCC sweep. "
-        "Decides whether a loss has a genuine expected descent direction or is only chasing "
-        "sampling noise. The latter never stops moving the weights but is a random walk, "
-        "which the matched-random control in the dMCC table subtracts out by construction "
-        "-- so a loss can drive a decay and still show zero excess there.",
+        "--precondition", action="store_true", help="Deprecated: rejected without a verified optimizer-name mapping."
     )
     ap.add_argument(
-        "--random-controls",
-        type=int,
-        default=1,
-        help="MCC only: matched-random directions per loss (0 disables). Without at least one the dMCC "
-        "table cannot separate the loss from generic perturbation sensitivity, so this "
-        "defaults ON despite roughly doubling runtime.",
+        "--snr", action="store_true", help="Report batch SNR statistics without an MCC sweep (included in balance)."
     )
+    ap.add_argument("--random-controls", type=int, default=1)
     ap.add_argument("--causal", choices=("match", "iid"), default="match")
-    cli = ap.parse_args()
-
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device")
+    ap.add_argument("--threads", type=int, default=4)
+    cli = ap.parse_args(argv)
+    if cli.precondition:
+        ap.error(
+            "--precondition cannot safely map legacy optimizer state to named encoder parameters; raw gradients only."
+        )
+    counts = (cli.grad_batches, cli.threads, cli.recon_samples, cli.recon_batch_size, cli.mcc_samples, cli.mcc_batch)
+    if cli.ema_reference_batches is not None:
+        counts += (cli.ema_reference_batches,)
+    if min(counts) < 1 or min(cli.random_controls, cli.workers) < 0 or cli.n_splits < 2:
+        ap.error("Counts must be positive; random controls and workers nonnegative; n-splits >=2.")
+    if cli.grad_batch_size is not None and cli.grad_batch_size < 2:
+        ap.error("--grad-batch-size must be at least two subjects.")
+    if cli.grid is not None and min(cli.grid) < 1:
+        ap.error("Grid entries must be positive.")
+    cli.etas = (
+        cli.etas
+        if cli.etas is not None
+        else ([1e-5, 3e-5, 1e-4] if cli.target == "reconstruction" else [0.05, 0.2, 0.8])
+    )
+    if any(not np.isfinite(e) or e <= 0 for e in cli.etas):
+        ap.error("Etas must be finite and positive.")
     if cli.target == "reconstruction":
-        if cli.precondition or cli.snr:
-            ap.error("--target reconstruction uses isolated raw gradients; --precondition/--snr apply to MCC only.")
-        if min(cli.grad_batches, cli.recon_samples, cli.recon_batch_size) < 1:
-            ap.error("Batch counts and reconstruction sample counts must be positive.")
-        if cli.grad_batch_size is not None and cli.grad_batch_size < 2:
-            ap.error("Reconstruction attribution needs --grad-batch-size >= 2 for GAP variance estimates.")
-        cli.etas = cli.etas if cli.etas is not None else [1e-5, 3e-5, 1e-4]
-        if any(not np.isfinite(e) or e <= 0 for e in cli.etas):
-            ap.error("--etas must be finite and positive.")
-        from eval.reconstruction_attribution import run
-
-        run(cli)
-        return
-
-    cli.grad_batch_size = cli.grad_batch_size if cli.grad_batch_size is not None else 8
-    cli.etas = cli.etas if cli.etas is not None else [0.05, 0.2, 0.8]
-
-    import os
-
-    import torch
-
-    from eval.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    for name in cli.checkpoints:
-        path = os.path.join(cli.run_dir, name)
-        if not os.path.exists(path):
-            logger.warning("missing checkpoint %s — skipping", path)
-            continue
-        print(f"\n{'=' * 78}\nGRADIENT ATTRIBUTION — {name}\n{'=' * 78}")
-        model, args_, _ = load_model_from_run_dir(cli.run_dir, path, device)
-        model.to(device).train()
-        grid = cli.grid or list(getattr(args_, "patch_grid", [8, 8, 8]))
-        dataset = build_synthetic_test_set(args_, cli.mcc_samples, cache=False, causal=cli.causal == "match")
-
-        precond = None
-        if cli.precondition:
-            ck = torch.load(path, map_location="cpu", weights_only=False)
-            osd = ck.get("optimizer_state_dict")
-            if not osd:
-                logger.warning("--precondition: no optimizer_state_dict in the checkpoint; using raw gradients")
-            else:
-                logger.info("--precondition: using exp_avg_sq from the checkpoint's AdamW state")
-                # Rebuilt in the same order _encoder_params returns, which is the order the
-                # flat vectors below use; a mismatch here would silently scale the wrong
-                # coordinates, so it is length-checked against the flat gradient.
-                named_tmp = _encoder_params(model)
-                want = sum(p.numel() for _n, p in named_tmp)
-                vs = [s["exp_avg_sq"].reshape(-1) for s in osd["state"].values() if "exp_avg_sq" in s]
-                cat = torch.cat(vs) if vs else torch.empty(0)
-                if cat.numel() != want:
-                    logger.warning(
-                        "--precondition: optimizer state covers %d params but the encoder has %d; "
-                        "the parameter ordering does not line up, so falling back to raw gradients.",
-                        cat.numel(),
-                        want,
-                    )
-                else:
-                    precond = cat.to(device)
-
         if cli.snr:
-            per_b = collect_per_batch_gradients(
-                model, dataset, args_, device, grid, cli.level, cli.grad_batches, cli.grad_batch_size
-            )
-            print(f"\n  gradient signal/noise over {cli.grad_batches} batches of {cli.grad_batch_size}")
-            print(
-                f"  {'loss':<14}{'per-batch':>12}{'mean of B':>12}{'EXPECTED':>12}"
-                f"{'noise':>12}{'signal share':>14}{'batches->SNR1':>15}"
-            )
-            print("  " + "-" * 91)
-            for k in ("recon", "contrastive", "vq"):
-                if k not in per_b:
-                    continue
-                d = snr_decomposition(per_b[k])
-                if "naive_norm" not in d:
-                    continue
-                share = (d["signal_norm"] / d["per_batch_norm"]) if d["per_batch_norm"] > 0 else float("nan")
-                need = d["batches_for_snr1"]
-                need_s = "inf" if not np.isfinite(need) else f"{need:.0f}"
-                print(
-                    f"  {k:<14}{d['per_batch_norm']:>12.4e}{d['naive_norm']:>12.4e}"
-                    f"{d['signal_norm']:>12.4e}{d['noise_norm']:>12.4e}{share:>14.3f}{need_s:>15}"
-                )
-            print("\n    EXPECTED is bias-corrected: ||mean||^2 - tr(Cov)/B. At or below zero means the")
-            print("    loss has NO detectable descent direction left, so every step it takes is")
-            print("    sampling noise and it random-walks the encoder indefinitely instead of")
-            print("    converging. A loss with an attainable target keeps EXPECTED clearly positive.")
-            del model, per_b
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
-            continue
-
-        named, params, grads, per_batch = collect_gradients(
-            model, dataset, args_, device, grid, cli.level, cli.grad_batches, cli.grad_batch_size, precond
-        )
-        n_enc = sum(p.numel() for p in params)
-        print(f"\n  encoder parameters: {n_enc:,} across {len(named)} tensors")
-        print(f"  gradients averaged over {cli.grad_batches} batches of {cli.grad_batch_size}")
-
-        keys = [k for k in ("recon", "contrastive", "vq") if k in grads]
-        print(f"\n  {'loss':<14}{'||grad||':>14}{'batch-to-batch sd':>20}")
-        print("  " + "-" * 48)
-        for k in keys:
-            sd = float(np.std(per_batch[k])) if len(per_batch.get(k, [])) > 1 else float("nan")
-            print(f"  {k:<14}{grads[k].norm().item():>14.4e}{sd:>20.4e}")
-
-        np_g = {k: grads[k].detach().float().cpu().numpy() for k in keys}
-        print(f"\n  pairwise cosine (negative = the two losses pull the encoder apart):")
-        for i, a in enumerate(keys):
-            for bkey in keys[i + 1 :]:
-                print(f"    {a} vs {bkey:<14}{cosine(np_g[a], np_g[bkey]):>+8.4f}")
-
-        base, gt_cache = _mcc_now(
-            model, dataset, device, grid, cli.level, cli.mcc_batch, None, tuple(cli.seeds), cli.n_splits
-        )
-        print(f"\n  block-MCC at this checkpoint: {base:.4f}")
-        print(f"\n  dMCC after one step of size eta along -g/||g||  (negative = degrades identifiability)")
-        backup = [p.detach().clone() for p in params]
-
-        def _sweep(direction):
-            out = []
-            for eta in cli.etas:
-                off = 0
-                with torch.no_grad():
-                    for p, b0 in zip(params, backup):
-                        n = p.numel()
-                        p.copy_(b0 - eta * direction[off : off + n].view_as(p))
-                        off += n
-                mcc, _ = _mcc_now(
-                    model, dataset, device, grid, cli.level, cli.mcc_batch, gt_cache, tuple(cli.seeds), cli.n_splits
-                )
-                out.append(mcc - base)
-            with torch.no_grad():
-                for p, b0 in zip(params, backup):
-                    p.copy_(b0)
-            return out
-
-        def _matched_random(g, seed):
-            """A random direction with the SAME per-tensor energy profile as ``g``.
-
-            The control this table is meaningless without. Every direction is unit-norm, so
-            each row perturbs the weights by the same amount — and block-MCC degrades under
-            almost ANY perturbation of sufficient size. Without a baseline you cannot tell
-            "this loss degrades identifiability" from "0.8 of parameter noise degrades
-            identifiability". Matching per-tensor norms rather than drawing a flat Gaussian
-            keeps the comparison honest: the control spreads its energy across layers the
-            same way the real gradient does, so what is left is the DIRECTION within that
-            profile, which is the only part attributable to the loss.
-            """
-            gen = torch.Generator(device="cpu").manual_seed(seed)
-            parts, off = [], 0
-            for p in params:
-                n = p.numel()
-                blk = g[off : off + n]
-                r = torch.randn(n, generator=gen).to(g.device)
-                r = r / max(r.norm().item(), 1e-12) * blk.norm()
-                parts.append(r)
-                off += n
-            r = torch.cat(parts)
-            return r / max(r.norm().item(), 1e-12)
-
-        print(f"  {'direction':<20}" + "".join(f"{'eta=' + str(e):>12}" for e in cli.etas) + f"{'linearity R2':>15}")
-        print("  " + "-" * (20 + 12 * len(cli.etas) + 15))
-        for k in keys:
-            deltas = _sweep(grads[k] / max(grads[k].norm().item(), 1e-12))
-            r2 = linearity_check(cli.etas, deltas)
-            flag = "   <- non-linear" if np.isfinite(r2) and r2 < 0.9 else ""
-            print(f"  {k:<20}" + "".join(f"{d:>+12.4f}" for d in deltas) + f"{r2:>15.3f}{flag}")
-            if cli.random_controls > 0:
-                ctrl = np.mean(
-                    [_sweep(_matched_random(grads[k], 1000 + 7 * i)) for i in range(cli.random_controls)], axis=0
-                )
-                print(f"  {'  random (matched)':<20}" + "".join(f"{d:>+12.4f}" for d in ctrl) + "        [control]")
-                excess = [d - c for d, c in zip(deltas, ctrl)]
-                print(f"  {'  EXCESS over random':<20}" + "".join(f"{d:>+12.4f}" for d in excess) + "   <- attribution")
-
-        print("\n  Reading it: the EXCESS row is the attribution — how much worse this loss's")
-        print("  direction is than a random direction with the same per-layer energy. The raw")
-        print("  dMCC row conflates that with generic perturbation sensitivity, which is large.")
-        print("  Compare the excess against block-MCC's per-seed sd (~0.001 at N=1500); inside")
-        print("  that band there is no attribution, whatever the raw row says.")
-        del model
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+            ap.error("--snr is not supported by the isolated reconstruction experiment.")
+        from eval.reconstruction_attribution import run
+    else:
+        if cli.level != 0:
+            ap.error("Full loss attribution currently supports single-level models at level 0.")
+        from eval.loss_gradient_audit import run
+    run(cli)
 
 
 if __name__ == "__main__":

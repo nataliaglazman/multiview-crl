@@ -199,6 +199,10 @@ class PlacementTests(unittest.TestCase):
             synthetic_hierarchical_content=False,
             synthetic_normalize="fixed_reference",
             synthetic_causal=False,
+            synthetic_causal_graph="chain",
+            synthetic_causal_edge_prob=0.5,
+            synthetic_causal_noise_scale=0.4,
+            synthetic_causal_nonlinearity="leaky_relu",
             synthetic_clean_content=True,
             synthetic_lesion_placement="wm_interior",
         )
@@ -232,9 +236,14 @@ class PlacementTests(unittest.TestCase):
         self.assertEqual(ds._inner.renderer.lesion_placement, "wm_interior")
         file = Path(__file__).resolve().parents[1] / "eval/score_checkpoint.py"
         tree = ast.parse(file.read_text())
-        factory = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "make_val_dataset")
-        exec(compile(ast.Module(body=[factory], type_ignores=[]), str(file), "exec"), namespace)
-        scored = namespace["make_val_dataset"](vars(args), 2)
+        factories = [
+            n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("make_dataset", "make_val_dataset")
+        ]
+        # The validation wrapper now delegates to its module's make_dataset;
+        # keep that namespace separate from the differently shaped training factory.
+        eval_namespace = {"SyntheticBrainDataset": SyntheticBrainDataset}
+        exec(compile(ast.Module(body=factories, type_ignores=[]), str(file), "exec"), eval_namespace)
+        scored = eval_namespace["make_val_dataset"](vars(args), 2)
         trained_val = namespace["make_dataset"](args, "val", 2)
         self.assertEqual(scored._inner.renderer.lesion_placement, "wm_interior")
         for a, b in zip(scored._inner[0][:2], trained_val._inner[0][:2]):
