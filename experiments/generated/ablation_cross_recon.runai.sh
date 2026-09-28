@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/synthetic_defaults.yaml
+# Auto-generated from: experiments/ablation_cross_recon.yaml
 # Generated at: 2026-09-28T08:11:26Z
 # Git SHA: f3fba27
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -11,34 +11,35 @@ TRAIN_CMD=$(tr '\n' ' ' <<'TRAIN_EOF'
 cd /nfs/home/nglazman/crl-2/multiview-crl || { echo ERROR: /nfs/home/nglazman/crl-2/multiview-crl is missing inside the container - check the --host-path mount of /nfs >&2 ; exit 1 ; } ;
 export PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl ;
 python -m training.main_multimodal
-    --batch-size 32
+    --batch-size 4
+    --cache-dataset
+    --cache-dir /nfs/home/nglazman/cache/multiview
     --channels-last
     --checkpoint-steps 500
     --content-dim 128
-    --content-ratios 0.95
     --content-style-levels 0
     --contrastive-loss-type infonce
-    --cross-recon-start-step 0
+    --cross-recon-start-step 5000
     --cross-view-negs-only
     --dataroot /nfs/home/nglazman/data
-    --dataset-name synthetic
-    --dci-every 2000
+    --dataset-name ADNI_stripped_masks
     --deterministic
-    --eval-dci
+    --gradient-checkpointing
     --image-spacing 1.0
+    --inject-style-to-decoder
+    --labels-path /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv
     --log-steps 50
     --lr 0.001
     --mask-mode fixed
+    --masks-dir /nfs/home/nglazman/data/ADNI_stripped_masks
     --moco-queue-size 0
     --pass-full-to-next-level
-    --patch-contrastive
-    --quantize-style
     --recon-loss-start-step 0
     --resume-training
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
     --scale-contrastive-loss 1.0
-    --scale-cross-recon-loss 0.0
+    --scale-cross-recon-loss 1.0
     --scale-recon-loss 1.0
     --scale-style-contrastive-loss 0.0
     --scale-style-hsic-loss 0.0
@@ -46,31 +47,30 @@ python -m training.main_multimodal
     --select-by-gated-score
     --separate-encoders
     --separation-floor-diagnosis-info 0.1
+    --spatial-size 150 180 150
     --style-alignment-var-weight 1.0
     --style-contrastive-mode cosine
     --style-independence-var-weight 1.0
-    --synthetic-mode pseudo_mri
-    --synthetic-num-test 400
-    --synthetic-num-train 2000
-    --synthetic-num-val 1500
-    --synthetic-res 64
+    --style-injection-mode input
+    --style-spatial-size 4
+    --model-id ablation-cross-recon
     --tau 0.1
     --total-dim 512
-    --train-steps 200000
+    --train-steps 20000
     --use-amp
     --use-wandb
     --vq-commitment-weight 0.25
-    --vqvae-embed-dim 48
-    --vqvae-hidden-channels 48
+    --vqvae-embed-dim 32
+    --vqvae-hidden-channels 32
     --vqvae-nb-entries 256
-    --vqvae-nb-levels 1
-    --vqvae-scaling-rates 2
+    --vqvae-nb-levels 3
+    --vqvae-scaling-rates 2 2 2
     --workers 8
 TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic_defaults \
+runai training standard submit ablation-cross-recon \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \

@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-16T12:31:56Z
-# Git SHA: 6deafd3
+# Generated at: 2026-09-23T19:14:13Z
+# Git SHA: 67c973e
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-clean-content-causal-93
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -118,6 +118,7 @@ fi
     --synthetic-causal-graph random \
     --synthetic-clean-content \
     --synthetic-identifiable-ventricle \
+    --synthetic-lesion-placement wm_interior \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
