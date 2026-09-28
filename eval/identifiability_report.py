@@ -1195,6 +1195,94 @@ def score_run(
     return res
 
 
+def score_live(
+    model,
+    dataset,
+    device,
+    poolings,
+    level=0,
+    seeds=(0, 1, 2),
+    n_null=3,
+    batch_size=32,
+    num_workers=0,
+    probe_dim=PROBE_DIM_AUTO,
+    probe_kind="ridge",
+    n_jobs=1,
+    causal=None,
+    name="live",
+):
+    """In-training twin of ``score_run`` for an in-memory encoder (no floor, no DCI).
+
+    Same extractor, same PCA reduction, same probes, and the permutation nulls drawn from
+    one ``RandomState(0)`` in the same order (per_factor, then leakage), so a step's numbers
+    match an offline report of that checkpoint on the same rows at the same settings.
+    The extractor calls ``model.eval()`` and does not restore train mode; the caller must.
+    """
+    from eval.dci import _extract_synthetic_representations
+    from eval.run_dci_compare import _reduce_reprs
+
+    reprs, gt_content, gt_style, info = {}, None, None, None
+    for key, value in poolings:
+        level_data, gc, gs1, _gs2 = _extract_synthetic_representations(
+            model, dataset, device, batch_size, num_workers, pooling=value
+        )
+        reprs[key] = level_data
+        if gt_content is None:
+            gt_content, gt_style = gc, gs1
+        if info is None and level in level_data:
+            info = level_data[level][4]
+    if info is None:
+        raise RuntimeError(f"level {level} not found in encoder outputs")
+
+    names = info["content_names"]
+    style_names = info.get("style_names") or []
+    rng = np.random.RandomState(0)
+    probed = _reduce_reprs(reprs, level, probe_dim) if probe_dim else reprs
+    res = {
+        "name": name,
+        "level": level,
+        "n_samples": int(gt_content.shape[0]),
+        "poolings": ",".join("x".join(str(d) for d in v) if isinstance(v, tuple) else str(v) for _k, v in poolings),
+        "probe_dim": probe_dim,
+        "factor_pooling": "assigned",
+        "causal": causal,
+        "per_factor": per_factor_scores(probed, level, gt_content, names, seeds, n_null, rng, probe_kind, n_jobs),
+        "mcc": mcc_ladder(probed, level, gt_content, seeds, probe_kind, names),
+        "mcc_per_factor_pooling": "patch" if "patch" in probed else _resolve_key("stats", set(probed)),
+    }
+    res["leakage"] = leakage_scores(
+        probed, level, gt_content, gt_style, names, style_names, seeds, n_null, rng, probe_kind, n_jobs
+    )
+    return res
+
+
+def live_metrics(res, floor=None, prefix="iid"):
+    """Flatten a report into ``{tag: float}`` for TensorBoard / W&B.
+
+    Per-factor tags are ``{prefix}_{r2|r2_gap|learned}/{factor}/{pooling}/from_{content|style}``,
+    read straight off ``per_factor_decoding_rows`` (table 3b), so no probe is refit here.
+    ``r2_gap`` is real minus the permutation null; ``learned`` exists only with a floor.
+    Non-finite values are dropped rather than logged.
+    """
+    out = {}
+    for row in per_factor_decoding_rows(res, floor):
+        for block in ("content", "style"):
+            for metric in ("r2", "r2_gap", "learned"):
+                v = _f(row.get(f"{block}_{metric}"))
+                if np.isfinite(v):
+                    out[f"{prefix}_{metric}/{row['factor']}/{row['pooling']}/from_{block}"] = v
+    for key, m in (res.get("mcc") or {}).items():
+        v = _f(m.get("mean"))
+        if np.isfinite(v):
+            out[f"{prefix}_mcc/{key}"] = v
+    for key, v in ((res.get("leakage") or {}).get("view") or {}).items():
+        for blk in ("content_acc", "style_acc", "all_acc"):
+            a = _f(v.get(blk))
+            if np.isfinite(a):
+                out[f"{prefix}_view/{key}/{blk}"] = a
+    return out
+
+
 def _self_test():
     """Score planted numpy data — no torch, no checkpoint, no GPU.
 

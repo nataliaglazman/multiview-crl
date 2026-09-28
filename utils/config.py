@@ -505,7 +505,38 @@ def parse_args() -> argparse.ArgumentParser:
         "--scale-style-contrastive-loss",
         type=float,
         default=0.0,
-        help="Scale factor for the within-modality style InfoNCE loss. 0 disables it.",
+        help="Weight on the style penalty chosen by --style-contrastive-mode. 0 disables it.",
+    )
+    parser.add_argument(
+        "--style-contrastive-mode",
+        choices=["cosine", "independence", "within_modality"],
+        default="cosine",
+        help=(
+            "'cosine' (default, legacy): lower each subject's uncentered cosine between its two views' "
+            "GAP-pooled style, plus a variance hinge. A per-view offset satisfies it, so it cannot tell the "
+            "modality mean from anatomy routed through style.  'independence': normalized RBF-HSIC between "
+            "the two views' full post-bottleneck, pre-quantization style tensors (label-free), plus a "
+            "variance hinge on those same tensors. Targets dependence shared by both styles, not "
+            "anatomy stored only in one view. Requires synthetic data, --inject-style-to-decoder, "
+            "and batch size >=4; same-session real scans may share legitimate scanner/site style. "
+            "'within_modality': align same-acquisition, different-anatomy synthetic pairs separately "
+            "within T1 and FLAIR, plus a variance hinge. Uses generator-controlled pairings, not factor "
+            "targets. Requires pseudo_mri, fixed_reference, a fixed mask and batch size >=2."
+        ),
+    )
+    parser.add_argument(
+        "--style-independence-var-weight",
+        type=float,
+        default=1.0,
+        help="Relative variance-hinge weight within style independence (default 1). Applied to the same "
+        "post-bottleneck style as HSIC. The overall weight is --scale-style-contrastive-loss.",
+    )
+    parser.add_argument(
+        "--style-alignment-var-weight",
+        type=float,
+        default=1.0,
+        help="Relative variance-hinge weight within within_modality style alignment (default 1). "
+        "Overall scale is --scale-style-contrastive-loss. The paired branch adds an encoder-only forward.",
     )
     parser.add_argument(
         "--scale-content-modality-adv",
@@ -1181,6 +1212,41 @@ def parse_args() -> argparse.ArgumentParser:
         "end-of-run synthetic DCI is still controlled by --eval-dci.",
     )
     parser.add_argument(
+        "--iid-probe-every",
+        type=int,
+        default=0,
+        help="If > 0 and --dataset-name is 'synthetic', every N steps score the encoder with "
+        "eval.identifiability_report's per-factor decoding on an i.i.d. test set (the test split "
+        "built with causal=False, i.e. '--causal iid'): every content AND style factor, read from "
+        "the content block and from the style block, at gap and patch pooling. Logged as "
+        "iid_{r2,r2_gap}/<factor>/<pooling>/from_{content,style}, plus iid_mcc/* and iid_view/*, "
+        "and the full report saved to <save_dir>/iid_probe/step_<N>.json (readable with "
+        "`python -m eval.identifiability_report --from-json`). No untrained floor, so read "
+        "the curves as change over training, not as absolute scores. 0 disables (default).",
+    )
+    parser.add_argument(
+        "--iid-probe-samples",
+        type=int,
+        default=2000,
+        help="Size of the i.i.d. test set for --iid-probe-every. Default 2000 matches "
+        "identifiability_report --num-samples, so a step's numbers match an offline report.",
+    )
+    parser.add_argument(
+        "--iid-probe-patch-grid",
+        type=int,
+        nargs=3,
+        default=[8, 8, 8],
+        help="Patch grid (D H W) for the --iid-probe-every patch rung. Default 8 8 8 matches "
+        "identifiability_report's default --poolings.",
+    )
+    parser.add_argument(
+        "--iid-probe-n-jobs",
+        type=int,
+        default=-1,
+        help="Parallel sklearn probe jobs for --iid-probe-every (-1 = all cores). Results are "
+        "identical at any setting.",
+    )
+    parser.add_argument(
         "--no-select-by-synthetic-dci",
         dest="select_by_synthetic_dci",
         action="store_false",
@@ -1835,6 +1901,39 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
             raise ValueError("--scale-style-hsic-loss requires --inject-style-to-decoder.")
         if args.batch_size < 4:
             raise ValueError("--scale-style-hsic-loss requires batch_size >= 4 subjects per forward pass.")
+
+    if getattr(args, "style_contrastive_mode", "cosine") == "independence":
+        if not 0.0 <= float(getattr(args, "scale_style_contrastive_loss", 0.0)) < float("inf"):
+            raise ValueError("--scale-style-contrastive-loss must be finite and nonnegative.")
+        if getattr(args, "scale_style_contrastive_loss", 0.0) > 0:
+            if args.dataset_name != "synthetic":
+                raise ValueError("--style-contrastive-mode independence currently requires synthetic data.")
+            if not 0.0 <= float(getattr(args, "style_independence_var_weight", 1.0)) < float("inf"):
+                raise ValueError("--style-independence-var-weight must be finite and nonnegative.")
+            if not getattr(args, "inject_style_to_decoder", False):
+                raise ValueError("--style-contrastive-mode independence requires --inject-style-to-decoder.")
+            if args.batch_size < 4:
+                raise ValueError("--style-contrastive-mode independence requires batch_size >= 4 subjects.")
+
+    if getattr(args, "style_contrastive_mode", "cosine") == "within_modality":
+        _style_scale = float(getattr(args, "scale_style_contrastive_loss", 0.0))
+        if not 0.0 <= _style_scale < float("inf"):
+            raise ValueError("--scale-style-contrastive-loss must be finite and nonnegative.")
+        if _style_scale > 0:
+            if args.dataset_name != "synthetic" or getattr(args, "synthetic_mode", None) != "pseudo_mri":
+                raise ValueError("--style-contrastive-mode within_modality requires synthetic pseudo_mri data.")
+            if getattr(args, "synthetic_normalize", None) != "fixed_reference":
+                raise ValueError("Within-modality style pairs require --synthetic-normalize fixed_reference.")
+            if not getattr(args, "inject_style_to_decoder", False):
+                raise ValueError("Within-modality style alignment requires --inject-style-to-decoder.")
+            if getattr(args, "mask_mode", None) != "fixed":
+                raise ValueError("Within-modality style alignment requires --mask-mode fixed.")
+            if args.batch_size < 2:
+                raise ValueError("Within-modality style alignment requires batch_size >= 2 subjects.")
+            if not 0 <= float(getattr(args, "style_alignment_var_weight", 1.0)) < float("inf"):
+                raise ValueError("--style-alignment-var-weight must be finite and nonnegative.")
+            if getattr(args, "synthetic_n_style", 3) < 1 or getattr(args, "synthetic_style_scale", 1.0) <= 0:
+                raise ValueError("Within-modality style alignment requires varying synthetic acquisition settings.")
 
     # --split-encoder-norm slices the first content_channels off each normalized tensor,
     # so the content block has to actually BE those channels. Only "fixed" guarantees it;

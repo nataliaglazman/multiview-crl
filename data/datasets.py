@@ -685,6 +685,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_lesion_placement="legacy",
         synthetic_cortex_parameterization="additive",
         synthetic_center_local_deformations=False,
+        synthetic_style_alignment_pairs=False,
         **kwargs,
     ):
         super().__init__()
@@ -692,6 +693,11 @@ class SyntheticBrainDataset(MultiviewDataset):
 
         self.mode = mode
         self.synthetic_normalize = synthetic_normalize
+        self.synthetic_style_alignment_pairs = synthetic_style_alignment_pairs
+        if synthetic_style_alignment_pairs and (
+            synthetic_mode != "pseudo_mri" or synthetic_normalize != "fixed_reference"
+        ):
+            raise ValueError("Style alignment pairs require pseudo_mri with fixed_reference normalization.")
         # Lazily-estimated global foreground centering/scaling constants for
         # the ``fixed_reference`` normalization mode (see ``_render``).
         self._fixed_mean = None
@@ -768,6 +774,8 @@ class SyntheticBrainDataset(MultiviewDataset):
             )
         self.num_samples = synthetic_num_samples
         self.synthetic_mode = synthetic_mode
+        if synthetic_style_alignment_pairs and synthetic_num_samples < 2:
+            raise ValueError("Style alignment pairs require at least two subjects in each dataset split.")
 
         # Optional in-memory cache — synthetic rendering is non-trivial at
         # higher res, and DataLoader workers re-render every epoch otherwise.
@@ -888,13 +896,49 @@ class SyntheticBrainDataset(MultiviewDataset):
             if self._cache is not None:
                 self._cache[idx] = (x_v1, x_v2, mask_t1, mask_t2, latents)
 
-        return {
+        result = {
             "image": [x_v1, x_v2],
             "mask": [mask_t1, mask_t2],
             "z_image": [{}, {}],
             "index": idx,
             "label": 0,
-            # Ground-truth latents — not consumed by training, but available
-            # for downstream R²/DCI probes via `data["gt_latents"]`.
+            # Ground-truth latents for downstream R²/DCI probes. The new style
+            # loss never reads these; optional pair construction below reuses
+            # acquisition settings to generate its same-style correspondence.
             "gt_latents": latents,
         }
+        if self.synthetic_style_alignment_pairs:
+            pair_images, pair_masks = self._style_alignment_pair(idx, latents)
+            result["style_pair_image"] = pair_images
+            result["style_pair_mask"] = pair_masks
+        return result
+
+    def _style_alignment_pair(self, idx, latents):
+        """Fresh within-split anatomy, same per-view acquisition, independent noise.
+
+        Pairing uses generator controls, not factor targets in the training loss.
+        Cache only the anchor; training partners are resampled on every access.
+        Validation/test partners are deterministic and never drawn from train.
+        """
+        generator = None
+        if self.mode != "train":
+            generator = torch.Generator().manual_seed(self._inner.seed * 1000003 + int(idx) + 314159)
+        donor = int(torch.randint(self.num_samples - 1, (), generator=generator))
+        donor += donor >= idx
+        noise_seed = int(torch.randint(2**31, (), generator=generator))
+        acquisition_seed = self._inner.sample_seed_for(int(idx))
+        _, _, (t1, flair, mask) = self._inner._first_fitting(
+            donor,
+            lambda seed, draw: self._inner.render_pseudo_mri(
+                draw["z_content"],
+                draw["z_deformation"],
+                draw["z_fissure"],
+                latents["z_style_v1"],
+                latents["z_style_v2"],
+                acquisition_seed,
+                z_lesion=draw["z_lesion"],
+                noise_seed=noise_seed,
+            ),
+        )
+        t1, flair = self.normalize_views(t1, flair, mask, mask)
+        return [t1, flair], [mask, mask.clone()]

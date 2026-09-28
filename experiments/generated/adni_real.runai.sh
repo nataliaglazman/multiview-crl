@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auto-generated from: experiments/synthetic_defaults.yaml
+# Auto-generated from: experiments/adni_real.yaml
 # Generated at: 2026-09-28T08:11:26Z
 # Git SHA: f3fba27
 # Re-generate with: python scripts/launch.py --generate --cluster runai
@@ -11,66 +11,90 @@ TRAIN_CMD=$(tr '\n' ' ' <<'TRAIN_EOF'
 cd /nfs/home/nglazman/crl-2/multiview-crl || { echo ERROR: /nfs/home/nglazman/crl-2/multiview-crl is missing inside the container - check the --host-path mount of /nfs >&2 ; exit 1 ; } ;
 export PYTHONPATH=/nfs/home/nglazman/crl-2/multiview-crl ;
 python -m training.main_multimodal
-    --batch-size 32
+    --batch-size 16
+    --bt-corr-ema 0.99
+    --bt-gap-lambda 6
+    --bt-gap-sim-coeff 0.05
+    --bt-gap-std-coeff 0.05
+    --bt-gap-weight 1
+    --bt-lambda 6
+    --bt-patch-weight 1
+    --bt-sim-coeff 0.0114
+    --bt-std-coeff 0.227
+    --cache-dataset
+    --cache-dir /nfs/home/nglazman/cache/multiview
     --channels-last
-    --checkpoint-steps 500
+    --checkpoint-steps 1000
     --content-dim 128
-    --content-ratios 0.95
+    --content-size 40
     --content-style-levels 0
-    --contrastive-loss-type infonce
+    --contrastive-loss-type barlow_twins
     --cross-recon-start-step 0
     --cross-view-negs-only
     --dataroot /nfs/home/nglazman/data
-    --dataset-name synthetic
-    --dci-every 2000
+    --dataset-name ADNI_stripped_masks
+    --decoder-norm-type group
     --deterministic
-    --eval-dci
-    --image-spacing 1.0
+    --grad-clip-norm 100
+    --gradient-checkpointing
+    --image-spacing 2.0
+    --inject-style-to-decoder
+    --labels-path /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv
     --log-steps 50
     --lr 0.001
     --mask-mode fixed
+    --masks-dir /nfs/home/nglazman/data/ADNI_stripped_masks
     --moco-queue-size 0
+    --no-final-recon-norm
+    --norm-type layer
     --pass-full-to-next-level
+    --patch-center-mode position
     --patch-contrastive
+    --patch-foreground-mask
+    --patch-foreground-thresh 0.05
+    --patch-grid 8 8 8
     --quantize-style
     --recon-loss-start-step 0
     --resume-training
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
-    --scale-contrastive-loss 1.0
+    --scale-contrastive-loss 100
     --scale-cross-recon-loss 0.0
-    --scale-recon-loss 1.0
+    --scale-recon-loss 16
     --scale-style-contrastive-loss 0.0
     --scale-style-hsic-loss 0.0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
-    --separate-encoders
+    --separate-style-codebooks
     --separation-floor-diagnosis-info 0.1
+    --single-count-commitment
+    --spatial-size 96 112 96
+    --split-seed 0
     --style-alignment-var-weight 1.0
     --style-contrastive-mode cosine
     --style-independence-var-weight 1.0
-    --synthetic-mode pseudo_mri
-    --synthetic-num-test 400
-    --synthetic-num-train 2000
-    --synthetic-num-val 1500
-    --synthetic-res 64
+    --style-injection-mode input
+    --model-id adni-real-bt-patch
     --tau 0.1
+    --test-frac 0.1
     --total-dim 512
-    --train-steps 200000
+    --train-steps 20000
     --use-amp
     --use-wandb
+    --val-frac 0.2
     --vq-commitment-weight 0.25
     --vqvae-embed-dim 48
     --vqvae-hidden-channels 48
     --vqvae-nb-entries 256
     --vqvae-nb-levels 1
-    --vqvae-scaling-rates 2
+    --vqvae-nb-res-layers 2
+    --vqvae-scaling-rates 4
     --workers 8
 TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic_defaults \
+runai training standard submit adni-real-bt-patch \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \

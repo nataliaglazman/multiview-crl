@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_groupnorm_control.yaml
-# Generated at: 2026-09-16T12:31:56Z
-# Git SHA: 6deafd3
+# Generated at: 2026-09-28T08:13:56Z
+# Git SHA: 7e027c5
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-groupnorm-control
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -20,6 +20,10 @@ CONDA_ENV_NAME="multiview-env"
 PYTHON="${HOME}/.conda/envs/${CONDA_ENV_NAME}/bin/python"
 
 export PYTHONNOUSERSITE=1
+export OMP_NUM_THREADS=8
+export OPENBLAS_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+export NUMEXPR_NUM_THREADS=8
 
 # Automatically repair/build the environment if numpy or torch are missing
 if ! "$PYTHON" -c "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('torch') and importlib.util.find_spec('numpy') else 1)" 2>/dev/null; then
@@ -99,6 +103,9 @@ fi
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
+    --style-alignment-var-weight 1.0 \
+    --style-contrastive-mode cosine \
+    --style-independence-var-weight 1.0 \
     --style-injection-mode film \
     --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
