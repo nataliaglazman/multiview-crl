@@ -9,12 +9,13 @@ of `total_loss` from that one forward through `train_step(..., loss_observer=...
 
 ```bash
 python -m eval.gradient_attribution --run-dir results/synthetic/RUN                          # balance (default)
-python -m eval.gradient_attribution --run-dir results/synthetic/RUN --target mcc             # + block-MCC steps
+python -m eval.gradient_attribution --run-dir results/synthetic/RUN --target decode          # + i.i.d. decoding steps
+python -m eval.gradient_attribution --run-dir results/synthetic/RUN --target mcc             # + block-MCC steps too
 python -m eval.gradient_attribution --run-dir results/synthetic/RUN --target reconstruction  # pixel-MAE experiment
 ```
 
 `--target reconstruction` is the separate similarity-vs-pixel-MAE experiment in
-`eval/reconstruction_attribution.py`, unchanged. Everything below is about `balance` and `mcc`.
+`eval/reconstruction_attribution.py`, unchanged. Everything below is about the other targets.
 
 ## Why the numbers are the trained objective
 
@@ -86,16 +87,50 @@ the noise was 66× the EMA's. Reference batches are encoder-only forwards, but r
 would be identical to it, because the bias correction at t=1 cancels exactly, so it is
 not offered.
 
-## `--target mcc`
+## i.i.d. decoding of a factor (every target; `--decode-factors`)
+
+This asks whether each term's descent direction makes a factor more or less decodable.
+The default factor is `ventricle_size`; pass several names, or pass the flag with no
+names to skip. The probe is `run_dci_compare`'s reading of a GAP-assigned factor:
+pooled pre-norm content channels, StandardScaler, the repo's `RidgeCV` and k-fold CV.
+Each view is scored separately (T1 and FLAIR) because their encoders are separate. Only
+GAP-assigned factors (the morphometry ones) are accepted.
+
+The `--decode-samples` test subjects (default 512) are rendered once with factors drawn
+**i.i.d.**, whatever `--causal` says. Under the training SCM, ventricle_size correlates
+~0.8 with brain_size, so a matched probe would read brain_size in disguise.
+
+**First-order rates** (the per-term table in every report). Fit the probe once, then take
+the gradient of its objective J = ‖y − S(X)w − b‖² + α‖w‖². The envelope theorem makes
+this exact: the derivative of the optimally *refit* ridge equals the derivative with the
+fitted (w, b) held fixed. A change a refit probe would absorb, such as rescaling a
+channel, therefore counts as nothing. For each term,
+`dR2/deta = g_k·∇J / SS_tot` is the change in penalised in-sample R² per unit of a raw
+descent step on that term; positive helps decoding. The rates are additive across
+components and sum to the total's. `hurts` is the fraction of batches whose step lowers R².
+
+**Blind at R² ≈ 0.** A signal that is not yet there enters R² quadratically, so its first
+derivative vanishes. The report warns when a factor's CV R² is below 0.05. In that case
+read the finite steps instead: on `ident-vent-hsic`, ventricle_size read −0.04 (T1) and
+−0.02 (FLAIR) from GAP content at N=256.
+
+## Finite steps: `--target decode` and `--target mcc`
 
 This takes a temporary unit step along each **group's** mean gradient,
-θ' = θ − η·g/|g|, and re-measures patch block-MCC. The same step is repeated along
-matched-random directions that have the same per-tensor norms. A negative delta means
-descending that loss lowers block-MCC. The **excess over random** is the attribution;
-the raw delta also carries generic perturbation sensitivity. Compare the excess with
-block-MCC's per-seed sd (~0.001). The linearity R² checks that the η sweep is small
-enough for a finite difference to mean a derivative. Parameters and buffers are restored
-after every trial, and on error. `mcc_steps.csv` and `mcc_summary.csv` hold the curves.
+θ' = θ − η·g/|g|, and re-measures every metric: the CV R² of each decode factor per view,
+plus patch block-MCC under `mcc`. The same step is repeated along matched-random
+directions that have the same per-tensor norms. A negative delta means descending that
+loss lowers the metric. The **excess over random** is the attribution; the raw delta also
+carries generic perturbation sensitivity. Compare the excess with block-MCC's per-seed sd
+(~0.001). The linearity R² checks that the η sweep is small enough for a finite
+difference to mean a derivative.
+
+Each decode metric also gets a `fixed-alpha fit` row, which is the penalised in-sample R²
+re-measured at the checkpoint's α, next to its `first-order` prediction. Agreement between
+the two validates the rate table. CV R² can still move differently: `RidgeCV` re-selects α
+on every step, which makes it jump discontinuously, and at small N it is noisy.
+Parameters and buffers are restored after every trial, and on error. `steps.csv` and
+`steps_summary.csv` hold the curves.
 
 ## Not reproduced
 
@@ -122,7 +157,10 @@ per checkpoint when several are given:
 - `components.csv`, `groups.csv`, `cosines.csv`, `group_cosines.csv`, `modules.csv`
   (norms per encoder module)
 - `batches.csv`, `parity.csv`
-- `summary.json`: settings, arguments, EMA reference report, caveats, and the mean
+- `decoding.csv`: rate, cosine and `hurts` per (factor, view, component or group)
+- `steps.csv`, `steps_summary.csv` (finite-step targets only)
+- `summary.json`: settings, arguments, EMA reference report, the decoding baseline and
+  fitted probes (α, fit R²), caveats, and the mean
   `train_step` diagnostics. Those are the same `Contrastive/*` and `Style/*` keys
   TensorBoard logs, so the audited forward can be checked against the run's curves at
   the checkpoint step.

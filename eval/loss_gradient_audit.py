@@ -33,6 +33,9 @@ VALUE_PARITY_RTOL = 2e-5
 # an unobserved force above 0.1% of the components' summed magnitude still fails it.
 GRADIENT_PARITY_RTOL = 1e-3
 GROUPS = ("content", "style", "reconstruction", "commitment", "hsic", "cross_reconstruction")
+# Below this CV R^2 a factor has no linear direction for first-order rates to act on: R^2 is
+# locally quadratic in any emerging signal, so its derivative vanishes whatever a step does.
+UNDECODABLE_R2 = 0.05
 
 
 def validate_settings(args):
@@ -390,18 +393,274 @@ def matched_random(direction, params, seed):
     return torch.cat(pieces)
 
 
-def mcc_sweep(cli, model, dataset, device, grid, named, groups):
-    """Temporary unit steps along each group's mean gradient; state restored even on error.
+def decode_columns(factors, n_content=None):
+    """Validate decoding targets; return their ``z_content`` columns.
 
-    A NEGATIVE delta means stepping along that loss's descent direction lowers block-MCC.
-    The excess over matched-random directions is the attribution; the raw delta also
-    carries generic perturbation sensitivity.
+    Only GAP-assigned factors are accepted. Those are the morphometry factors, and
+    run_dci_compare scores them from pooled channel means, a d-wide block that ridge handles
+    at a few hundred subjects. Patch-assigned factors (lesion_x/y/z) need ~C*P features
+    against N, where an unreduced ridge overfits and the in-sample objective is degenerate.
     """
-    from eval.gradient_attribution import _mcc_now
+    from eval.dci import CONTENT_FACTOR_NAMES
+    from eval.run_dci_compare import FACTOR_POOLING
 
+    names = CONTENT_FACTOR_NAMES[: n_content or len(CONTENT_FACTOR_NAMES)]
+    columns = []
+    for factor in factors:
+        if factor not in names:
+            raise ValueError(f"Unknown content factor {factor!r}; choose from {names}.")
+        pooling = FACTOR_POOLING.get(factor, "stats")
+        if pooling != "gap":
+            raise ValueError(
+                f"{factor} is scored at {pooling} pooling by run_dci_compare; i.i.d. decoding supports "
+                "GAP-assigned factors only."
+            )
+        columns.append(names.index(factor))
+    return columns
+
+
+def iid_batches(args, n, batch_size, workers):
+    """Render ``n`` test subjects once, factors drawn i.i.d., keeping only what probes read."""
+    from torch.utils.data import DataLoader
+
+    from eval.ventricle_routing import make_dataset
+
+    iid_args = copy.deepcopy(args)
+    iid_args.synthetic_style_alignment_pairs = False
+    dataset = make_dataset(iid_args, n, "iid", "test")
+    batches = []
+    for batch in DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers):
+        images = torch.cat(batch["image"], 0)
+        masks = batch.get("mask")
+        if masks is not None:
+            masks = torch.cat(masks, 0) if isinstance(masks, (list, tuple)) else torch.cat([masks, masks], 0)
+            masks = (masks.unsqueeze(1) if masks.ndim == images.ndim - 1 else masks) > 0
+        batches.append((images, masks, batch["gt_latents"]["z_content"]))
+    return batches
+
+
+def ridge_feature_gradient(X, y):
+    """Fit the repo's ridge probe and return dJ/dX of its refit objective.
+
+    J(X) = min_{w,b} ||y - S(X) w - b||^2 + alpha ||w||^2, where S is the StandardScaler map
+    and alpha the RidgeCV choice, then held fixed. The minimiser is unique, so by the
+    envelope theorem dJ/dX is the partial derivative at the fitted (w, b): the probe stays
+    fixed while the features and their standardisation move. A change that a refit probe
+    absorbs, such as a per-channel rescaling, therefore has no effect. Also returns SS_tot
+    and the penalised in-sample R^2 = 1 - J/SS_tot whose first-order change this attributes.
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+
+    from eval.identifiability_metrics import _make_regressor
+
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64).ravel()
+    scaler = StandardScaler().fit(X)
+    alpha = float(_make_regressor("ridge", 0).fit(scaler.transform(X), y).alpha_)
+    # RidgeCV only chooses alpha; the refit at that fixed alpha is what penalised_fit_r2 re-measures.
+    probe = Ridge(alpha=alpha).fit(scaler.transform(X), y)
+    w = torch.as_tensor(np.asarray(probe.coef_, dtype=np.float64).ravel())
+    features = torch.as_tensor(X).requires_grad_()
+    scale = features.std(0, unbiased=False)
+    # StandardScaler leaves a constant column unscaled; mirror that rather than divide by ~0.
+    scale = torch.where(torch.as_tensor(scaler.scale_ == 1.0), torch.ones_like(scale), scale)
+    residual = torch.as_tensor(y) - ((features - features.mean(0)) / scale) @ w - float(probe.intercept_)
+    data_term = residual.square().sum()
+    (feature_gradient,) = torch.autograd.grad(data_term, features)
+    ss_tot = float(np.square(y - y.mean()).sum())
+    penalty = alpha * float(w.square().sum())
+    return dict(
+        feature_gradient=feature_gradient.numpy(),
+        ss_tot=ss_tot,
+        alpha=alpha,
+        fit_r2=1.0 - (float(data_term) + penalty) / ss_tot,
+        in_sample_r2=1.0 - float(data_term) / ss_tot,
+    )
+
+
+def penalised_fit_r2(X, y, alpha):
+    """1 - J/SS_tot of the standardised ridge refit at a FIXED alpha: the envelope objective."""
+    from sklearn.linear_model import Ridge
+    from sklearn.preprocessing import StandardScaler
+
+    X, y = np.asarray(X, dtype=np.float64), np.asarray(y, dtype=np.float64).ravel()
+    standardised = StandardScaler().fit_transform(X)
+    probe = Ridge(alpha=alpha).fit(standardised, y)
+    residual = y - probe.predict(standardised)
+    penalty = alpha * float(np.square(probe.coef_).sum())
+    return 1.0 - (float(np.square(residual).sum()) + penalty) / float(np.square(y - y.mean()).sum())
+
+
+VIEW_LABELS = ("T1", "FLAIR")
+
+
+def decode_metric(factor, view):
+    """CV R^2 of the repo's probe: the decoding number itself."""
+    return f"r2/{factor}/{VIEW_LABELS[view]}"
+
+
+def fit_metric(factor, view):
+    """Fixed-alpha penalised in-sample R^2: the quantity the first-order rates differentiate."""
+    return f"fit/{factor}/{VIEW_LABELS[view]}"
+
+
+class IidDecoding:
+    """Linear decodability of content factors from each view's GAP content channels.
+
+    Each factor is read the way run_dci_compare reads a GAP-assigned factor: pooled pre-norm
+    content channels of one view, StandardScaler + the repo's RidgeCV, k-fold CV. Views are
+    scored apart because their encoders are separate. Factors are drawn i.i.d., never from
+    the training SCM. Under the SCM ventricle_size correlates ~0.8 with brain_size, so a
+    matched probe reads brain_size in disguise (see eval/probe_prenorm_encoder.py).
+    """
+
+    def __init__(self, model, batches, factors, columns, device):
+        self.model, self.batches, self.factors, self.device = model, batches, list(factors), device
+        self.y = torch.cat([z for _, _, z in batches]).double().numpy()[:, columns]
+        self.targets = {}
+
+    def _views(self, images, masks):
+        # mask= matters only for latent_mask models, which must be evaluated with it.
+        out = self.model(
+            images.to(self.device),
+            return_recon=False,
+            pool_only=True,
+            n_views=2,
+            mask=None if masks is None else masks.to(self.device).float(),
+        )
+        features, content_masks = out[2][0], out[6]
+        mask = content_masks.get(0) if isinstance(content_masks, dict) else None
+        if mask is None:
+            index = torch.arange(features.shape[1], device=features.device)
+        else:
+            index = torch.where((mask[0] if isinstance(mask, tuple) else mask).bool())[-1]
+        b = features.shape[0] // 2
+        return features[:b, index], features[b:, index]
+
+    def features(self):
+        views = ([], [])
+        with torch.no_grad():
+            for images, masks, _ in self.batches:
+                for v, f in enumerate(self._views(images, masks)):
+                    views[v].append(f.double().cpu())
+        return [torch.cat(v).numpy() for v in views]
+
+    def scores(self, seeds, n_splits, features=None, spread=False):
+        """CV R^2 per (factor, view), plus each calibrated probe's fixed-alpha fit.
+
+        With ``spread`` the CV entries are (mean, sd over seeds) pairs.
+        """
+        from eval.identifiability_metrics import cv_probe_r2_multi
+
+        out = {}
+        for v, X in enumerate(self.features() if features is None else features):
+            result = cv_probe_r2_multi(X, self.y, n_splits=n_splits, seeds=seeds, kind="ridge")
+            for j, factor in enumerate(self.factors):
+                mean, sd = float(result["mean"][j]), float(result["std"][j])
+                out[decode_metric(factor, v)] = (mean, sd) if spread else mean
+                if (factor, v) in self.targets:
+                    out[fit_metric(factor, v)] = penalised_fit_r2(X, self.y[:, j], self.targets[(factor, v)]["alpha"])
+        return out
+
+    def calibrate(self, params, seeds, n_splits):
+        """Score the checkpoint, fit each probe, and backpropagate its envelope gradient.
+
+        The (N, d) feature gradient is pushed through the encoder one cached batch at a
+        time, so only one batch's graph is ever alive. Must run with encoder parameters
+        requiring grad and the model in eval mode (inside ``frozen_checkpoint``).
+        """
+        self.targets = {}
+        X = self.features()
+        baseline = self.scores(seeds, n_splits, X, spread=True)
+        fits = {(f, v): ridge_feature_gradient(X[v], self.y[:, j]) for v in (0, 1) for j, f in enumerate(self.factors)}
+        sums = {key: torch.zeros(sum(p.numel() for p in params), dtype=torch.float64) for key in fits}
+        offset = 0
+        for images, masks, _ in self.batches:
+            views = self._views(images, masks)
+            n = views[0].shape[0]
+            for (factor, v), fit in fits.items():
+                if not views[v].requires_grad:
+                    continue
+                weights = torch.as_tensor(fit["feature_gradient"][offset : offset + n]).to(views[v])
+                grads = torch.autograd.grad(
+                    views[v], params, grad_outputs=weights, retain_graph=True, allow_unused=True
+                )
+                sums[(factor, v)] += _flat(
+                    [torch.zeros_like(p) if g is None else g for p, g in zip(params, grads)]
+                ).cpu()
+            offset += n
+            del views
+        self.targets = {
+            key: dict({k: v for k, v in fit.items() if k != "feature_gradient"}, gradient=sums[key].numpy())
+            for key, fit in fits.items()
+        }
+        return baseline
+
+    def slopes(self, direction):
+        """First-order d(fit R^2)/d(eta) of a step theta - eta * direction, per fit metric."""
+        u = np.asarray(direction, dtype=np.float64)
+        return {fit_metric(f, v): float(t["gradient"] @ u) / t["ss_tot"] for (f, v), t in self.targets.items()}
+
+
+def decoding_attribution(stacks, groups, targets):
+    """Each term's first-order effect on each factor's i.i.d. decodability.
+
+    rate = g_k . dJ/dtheta / SS_tot is the change in penalised in-sample R^2 per unit of a raw
+    descent step along -g_k. Positive helps decoding. Rates are additive: over the components
+    they sum to the total's, batch by batch.
+    """
+    entries = [(k, "component", s) for k, s in stacks.items() if k != "total"]
+    entries += [(k, "group", s) for k, s in groups.items()] + [("total", "total", stacks["total"])]
+    rows = []
+    for (factor, view), target in targets.items():
+        d = target["gradient"]
+        total = float((stacks["total"].astype(np.float64) @ d).mean()) / target["ss_tot"]
+        for name, kind, stack in entries:
+            gs = stack.astype(np.float64)
+            rates = gs @ d / target["ss_tot"]
+            cosines = np.array([cosine(g, d) for g in gs])
+            rows.append(
+                dict(
+                    factor=factor,
+                    view=VIEW_LABELS[view],
+                    component=name,
+                    kind=kind,
+                    rate=float(rates.mean()),
+                    rate_sd=float(rates.std()),
+                    cosine=float(np.nanmean(cosines)) if np.isfinite(cosines).any() else None,
+                    hurting_batches=float((rates < 0).mean()),
+                    share_of_total=float(rates.mean()) / total if total else None,
+                )
+            )
+    return rows
+
+
+def block_mcc_measure(model, dataset, device, grid, cli):
+    """Patch block-MCC on ``dataset`` as a sweep metric; ground truth cached after one call."""
+    cache = {}
+
+    def measure():
+        from eval.gradient_attribution import _mcc_now
+
+        score, cache["targets"] = _mcc_now(
+            model, dataset, device, grid, 0, cli.mcc_batch, cache.get("targets"), tuple(cli.seeds), cli.n_splits
+        )
+        return {"block_mcc": score}
+
+    return measure
+
+
+def step_sweep(cli, named, groups, measure, predict=None):
+    """Temporary unit steps along each group's mean gradient, re-measuring every metric.
+
+    ``measure()`` returns ``{metric: value}``; ``predict(u)`` returns first-order slopes
+    ``{metric: d value / d eta}`` along -u where one exists. A NEGATIVE delta means stepping
+    along that loss's descent direction lowers the metric. The excess over matched-random
+    directions is the attribution; the raw delta also carries generic perturbation
+    sensitivity. Parameters are restored after every direction, and on error.
+    """
     params = [p for _, p in named]
-    seeds = tuple(cli.seeds)
-    base, targets = _mcc_now(model, dataset, device, grid, 0, cli.mcc_batch, None, seeds, cli.n_splits)
     backups = [p.detach().clone() for p in params]
 
     def restore():
@@ -409,6 +668,7 @@ def mcc_sweep(cli, model, dataset, device, grid, named, groups):
             for p, saved in zip(params, backups):
                 p.copy_(saved)
 
+    base = measure()
     steps, summary = [], []
     try:
         for key, stack in groups.items():
@@ -428,29 +688,35 @@ def mcc_sweep(cli, model, dataset, device, grid, named, groups):
                             n = p.numel()
                             p.copy_(saved - eta * current[offset : offset + n].view_as(p))
                             offset += n
-                    score, _ = _mcc_now(model, dataset, device, grid, 0, cli.mcc_batch, targets, seeds, cli.n_splits)
-                    curves[label].append(score - base)
-                    steps.append(
-                        dict(group=key, direction=label, eta=eta, base_mcc=base, mcc=score, delta_mcc=score - base)
+                    values = measure()
+                    curves[label].append(values)
+                    steps.extend(
+                        dict(group=key, direction=label, eta=eta, metric=m, base=base[m], value=v, delta=v - base[m])
+                        for m, v in values.items()
                     )
                 restore()
-            controls = [v for k, v in curves.items() if k != "gradient"]
-            control = np.mean(controls, axis=0) if controls else np.full(len(cli.etas), np.nan)
-            r2 = linearity_check(cli.etas, curves["gradient"])
-            for i, eta in enumerate(cli.etas):
-                summary.append(
-                    dict(
-                        group=key,
-                        eta=eta,
-                        delta_mcc=curves["gradient"][i],
-                        random_delta_mcc=float(control[i]),
-                        excess_over_random=curves["gradient"][i] - float(control[i]),
-                        linearity_r2=r2,
+            slopes = predict(direction.detach().double().cpu().numpy()) if predict is not None else {}
+            for metric in base:
+                deltas = [values[metric] - base[metric] for values in curves["gradient"]]
+                controls = [
+                    [c[metric] - base[metric] for c in curve] for label, curve in curves.items() if label != "gradient"
+                ]
+                control = np.mean(controls, axis=0) if controls else np.full(len(cli.etas), np.nan)
+                r2 = linearity_check(cli.etas, deltas)
+                for i, eta in enumerate(cli.etas):
+                    summary.append(
+                        dict(
+                            group=key,
+                            metric=metric,
+                            eta=eta,
+                            delta=deltas[i],
+                            random_delta=float(control[i]),
+                            excess_over_random=deltas[i] - float(control[i]),
+                            linearity_r2=r2,
+                            first_order=eta * slopes[metric] if metric in slopes else None,
+                        )
                     )
-                )
-            LOG.info(
-                "MCC %s: delta %s, matched random %s, linearity R2 %.3f", key, curves["gradient"], control.tolist(), r2
-            )
+                LOG.info("Steps %s on %s: delta %s, matched random %s", key, metric, deltas, control.tolist())
     finally:
         restore()
     return base, steps, summary
@@ -466,7 +732,85 @@ def _fmt(value, spec):
     return format(value, spec)
 
 
-def print_report(title, rows, group_rows, pairs, group_pairs, checks, reference, caveats, mcc=None):
+def print_decoding(decoding):
+    print(
+        f"\n  i.i.d. decoding: {decoding['subjects']} test subjects, factors drawn i.i.d.; GAP content channels "
+        "per view,\n  ridge CV R^2 as in run_dci_compare. Values at the checkpoint:"
+    )
+    for factor in decoding["factors"]:
+        cells = ""
+        for v, label in enumerate(VIEW_LABELS):
+            mean, sd = decoding["baseline"][decode_metric(factor, v)]
+            fit = decoding["probes"][decode_metric(factor, v)]["fit_r2"]
+            cells += f"   {label} {_fmt(mean, '.4f')} (sd {_fmt(sd, '.4f')}; in-sample fit {_fmt(fit, '.4f')})"
+        print(f"    {factor:<22s}{cells}")
+        blind = [
+            label
+            for v, label in enumerate(VIEW_LABELS)
+            if decoding["baseline"][decode_metric(factor, v)][0] < UNDECODABLE_R2
+        ]
+        if blind:
+            print(
+                f"    CAVEAT: {factor} is not linearly decodable in {'/'.join(blind)} (CV R^2 < {UNDECODABLE_R2}). "
+                "Near R^2 = 0 a new\n    signal enters quadratically, so first-order rates are blind there; "
+                "read the finite steps (--target decode)."
+            )
+    lookup = {(r["factor"], r["view"], r["component"]): r for r in decoding["rows"]}
+    for factor in decoding["factors"]:
+        print(
+            f"\n  {factor}: first-order change of in-sample R^2 per unit raw descent step on each term"
+            "\n  (dR2/deta > 0 helps decoding; hurts = fraction of batches whose step lowers it)"
+        )
+        print(f"  {'':38s}" + "".join(f"{label + ' dR2/deta':>17s}{'cos':>8s}{'hurts':>7s}" for label in VIEW_LABELS))
+        for kind in ("component", "group", "total"):
+            names = dict.fromkeys(
+                r["component"] for r in decoding["rows"] if r["factor"] == factor and r["kind"] == kind
+            )
+            if kind == "group":
+                print(f"  {'group':38s}")
+            for name in names:
+                cells = ""
+                for label in VIEW_LABELS:
+                    row = lookup[(factor, label, name)]
+                    cells += f"{_fmt(row['rate'], '+17.3e')}{_fmt(row['cosine'], '+8.3f')}"
+                    cells += f"{_fmt(row['hurting_batches'], '7.0%')}"
+                print(f"  {name:38s}{cells}")
+
+
+def print_sweep(sweep):
+    base, summary = sweep
+    etas = list(dict.fromkeys(r["eta"] for r in summary))
+    print(f"\n  Unit steps along -g/|g| per group, eta {etas}; delta per step (negative = lowers the metric):")
+    metrics = list(dict.fromkeys(r["metric"] for r in summary))
+
+    def rows_for(metric, group):
+        return [r for r in summary if r["metric"] == metric and r["group"] == group]
+
+    for metric in (m for m in metrics if not m.startswith("fit/")):
+        print(f"  {metric} (at the checkpoint {base[metric]:.4f})")
+        companion = "fit/" + metric[len("r2/") :] if metric.startswith("r2/") else None
+        for group in dict.fromkeys(r["group"] for r in summary if r["metric"] == metric):
+            rs = rows_for(metric, group)
+            print(
+                f"    {group:<24s}"
+                + "".join(_fmt(r["delta"], "+11.2e") for r in rs)
+                + f"   linearity R2 {_fmt(rs[0]['linearity_r2'], '.3f')}"
+            )
+            print(f"    {'  matched random':<24s}" + "".join(_fmt(r["random_delta"], "+11.2e") for r in rs))
+            print(f"    {'  EXCESS (attribution)':<24s}" + "".join(_fmt(r["excess_over_random"], "+11.2e") for r in rs))
+            if companion in metrics:
+                # The fixed-alpha fit is what the first-order rates differentiate; agreement here
+                # validates the rate table, while CV R^2 above is the decoding number itself.
+                fs = rows_for(companion, group)
+                print(
+                    f"    {'  fixed-alpha fit':<24s}"
+                    + "".join(_fmt(r["delta"], "+11.2e") for r in fs)
+                    + f"   linearity R2 {_fmt(fs[0]['linearity_r2'], '.3f')}"
+                )
+                print(f"    {'  first-order':<24s}" + "".join(_fmt(r["first_order"], "+11.2e") for r in fs))
+
+
+def print_report(title, rows, group_rows, pairs, group_pairs, checks, reference, caveats, decoding=None, sweep=None):
     print(f"\n{title}")
     head = f"  {'':38s}{'loss':>11s}{'rms |g|':>11s}{'|E g|':>11s}{'share':>9s}{'b->SNR1':>9s}"
     for label, table in (("component", rows), ("group", group_rows)):
@@ -517,21 +861,10 @@ def print_report(title, rows, group_rows, pairs, group_pairs, checks, reference,
                 f"{_fmt(row['offdiag_noise_training_ema'], '.3g')}"
             )
 
-    if mcc is not None:
-        base, summary = mcc
-        print(f"\n  block-MCC {base:.4f}; delta after a unit step along -g/|g| (negative = degrades):")
-        for group in dict.fromkeys(r["group"] for r in summary):
-            rs = [r for r in summary if r["group"] == group]
-            print(
-                f"    {group:<22s}"
-                + "".join(f"{r['delta_mcc']:+10.4f}" for r in rs)
-                + f"   linearity R2 {_fmt(rs[0]['linearity_r2'], '.3f')}"
-            )
-            print(f"    {'  matched random':<22s}" + "".join(f"{_fmt(r['random_delta_mcc'], '+10.4f')}" for r in rs))
-            print(
-                f"    {'  EXCESS (attribution)':<22s}"
-                + "".join(f"{_fmt(r['excess_over_random'], '+10.4f')}" for r in rs)
-            )
+    if decoding:
+        print_decoding(decoding)
+    if sweep is not None:
+        print_sweep(sweep)
 
     worst_value = max(c["value_relative_error"] for c in checks)
     worst_gradient = max(c["gradient_error_vs_component_norms"] for c in checks)
@@ -553,6 +886,9 @@ def run(cli):
     from eval.ventricle_routing import make_dataset, state_digest
 
     torch.set_num_threads(cli.threads)
+    decode_factors = list(getattr(cli, "decode_factors", None) or [])
+    if decode_factors:
+        decode_columns(decode_factors)  # fail on a bad name before anything is loaded or rendered
     checkpoints = []
     for name in cli.checkpoints:
         checkpoint = Path(name)
@@ -622,10 +958,20 @@ def run(cli):
         loader_options = dict(batch_size=batch_size, shuffle=False, num_workers=cli.workers)
         reference_loader = DataLoader(Subset(dataset, range(n_reference * batch_size)), **loader_options)
         loader = DataLoader(Subset(dataset, range(n_reference * batch_size, n)), **loader_options)
+        decoder = None
+        if decode_factors:
+            batches = iid_batches(ds_args, cli.decode_samples, cli.mcc_batch, cli.workers)
+            columns = decode_columns(decode_factors, batches[0][2].shape[1])
+            decoder = IidDecoding(model, batches, decode_factors, columns, device)
+            LOG.info(
+                "Cached %d i.i.d. subjects for decoding (%.0f MB)",
+                len(decoder.y),
+                sum(x.numel() * x.element_size() for x, _, _ in batches) / 2**20,
+            )
         before = state_digest(model)
         output = base_output / checkpoint.stem if len(checkpoints) > 1 else base_output
         output.mkdir(parents=True, exist_ok=False)
-        mcc = None
+        decoding = sweep = None
         with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))), frozen_checkpoint(model):
             torch.manual_seed(cli.seed)
             objective = TrainingObjective(model, args, step, ema_mode=cli.ema_mode)
@@ -636,13 +982,36 @@ def run(cli):
             group_rows, group_pairs, group_modules = summarize(
                 {**groups, "total": stacks["total"]}, {**group_values, "total": values["total"]}, named
             )
-            if cli.target == "mcc" and not cli.snr:
-                ds_args.synthetic_style_alignment_pairs = False
-                test = make_dataset(ds_args, cli.mcc_samples, cli.causal, "test")
-                base, steps, sweep = mcc_sweep(cli, model, test, device, grid, named, groups)
-                write_csv(output / "mcc_steps.csv", steps)
-                write_csv(output / "mcc_summary.csv", sweep)
-                mcc = (base, sweep)
+            if decoder is not None:
+                baseline = decoder.calibrate([p for _, p in named], tuple(cli.seeds), cli.n_splits)
+                decoding = dict(
+                    subjects=len(decoder.y),
+                    factors=decode_factors,
+                    baseline=baseline,
+                    probes={
+                        decode_metric(f, v): {k: t[k] for k in ("alpha", "fit_r2", "in_sample_r2", "ss_tot")}
+                        for (f, v), t in decoder.targets.items()
+                    },
+                    rows=decoding_attribution(stacks, groups, decoder.targets),
+                )
+            if cli.target in ("mcc", "decode") and not cli.snr:
+                measures = []
+                if cli.target == "mcc":
+                    ds_args.synthetic_style_alignment_pairs = False
+                    test = make_dataset(ds_args, cli.mcc_samples, cli.causal, "test")
+                    measures.append(block_mcc_measure(model, test, device, grid, cli))
+                if decoder is not None:
+                    measures.append(lambda: decoder.scores(tuple(cli.seeds), cli.n_splits))
+
+                def measure():
+                    return {k: v for m in measures for k, v in m().items()}
+
+                base, steps, summary = step_sweep(
+                    cli, named, groups, measure, decoder.slopes if decoder is not None else None
+                )
+                write_csv(output / "steps.csv", steps)
+                write_csv(output / "steps_summary.csv", summary)
+                sweep = (base, summary)
         if state_digest(model) != before:
             raise RuntimeError("Registered model state changed during attribution.")
         write_csv(output / "components.csv", rows)
@@ -657,6 +1026,8 @@ def run(cli):
             for i, g in enumerate(gradients)
         ]
         write_csv(output / "batches.csv", batch_rows)
+        if decoding is not None:
+            write_csv(output / "decoding.csv", decoding["rows"])
         metadata = dict(
             checkpoint=str(checkpoint.resolve()),
             checkpoint_step=step,
@@ -674,7 +1045,8 @@ def run(cli):
             group_cosines=group_pairs,
             parity=checks,
             train_step_diagnostics=diagnostics,
-            mcc=None if mcc is None else dict(base=mcc[0], sweep=mcc[1]),
+            decoding=decoding,
+            steps=None if sweep is None else dict(base=sweep[0], summary=sweep[1]),
             parameter_names=[name for name, _ in named],
             caveats=caveats,
             notes=[
@@ -686,6 +1058,8 @@ def run(cli):
                 "Signed projections can be negative or exceed one; they are not importance percentages.",
                 "SNR estimates describe these batches; a near-zero mean does not establish harmless noise.",
                 "No AdamW momentum/preconditioning, AMP, decoder updates or historical causation is reproduced.",
+                "Decoding uses i.i.d. factors whatever --causal says. Its rates are first-order changes of the "
+                "penalised in-sample ridge R^2 at the fitted alpha; finite steps re-measure the CV R^2 itself.",
             ],
         )
         (output / "summary.json").write_text(json.dumps(json_safe(metadata), indent=2, allow_nan=False) + "\n")
@@ -700,7 +1074,8 @@ def run(cli):
             checks,
             reference,
             caveats,
-            mcc,
+            decoding,
+            sweep,
         )
         print("  Frozen eval-mode diagnostic; no checkpoint changed.")
         print(f"Saved {output}")

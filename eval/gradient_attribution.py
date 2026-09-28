@@ -2,13 +2,17 @@
 """Gradient attribution using the current training objective, without optimizer updates.
 
 Default --target balance reports weighted per-component encoder gradients, conflicts,
-module norms and total-gradient parity. --target mcc additionally measures temporary
-unit-direction steps with matched random controls. --target reconstruction retains the
-separate similarity-only pixel-MAE experiment. See eval/GRADIENT_ATTRIBUTION.md.
+module norms and total-gradient parity, plus each term's first-order effect on the i.i.d.
+decodability of --decode-factors (default ventricle_size). --target decode adds temporary
+unit-direction steps that re-measure that decoding, with matched random controls; --target
+mcc also re-measures patch block-MCC. --target reconstruction retains the separate
+similarity-only pixel-MAE experiment. See eval/GRADIENT_ATTRIBUTION.md.
 
 Usage
 -----
     python -m eval.gradient_attribution --run-dir results/synthetic/RUN
+    python -m eval.gradient_attribution --run-dir results/synthetic/RUN --target decode
+    python -m eval.gradient_attribution --run-dir results/synthetic/RUN --decode-factors ventricle_size brain_size
     python -m eval.gradient_attribution --run-dir results/synthetic/RUN --target mcc
     python -m eval.gradient_attribution --run-dir results/synthetic/RUN --target reconstruction
 """
@@ -123,7 +127,20 @@ def _mcc_now(model, dataset, device, grid, level, batch_size, gt_cache, seeds, n
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", required=True)
-    ap.add_argument("--target", choices=("balance", "mcc", "reconstruction"), default="balance")
+    ap.add_argument("--target", choices=("balance", "decode", "mcc", "reconstruction"), default="balance")
+    ap.add_argument(
+        "--decode-factors",
+        nargs="*",
+        default=["ventricle_size"],
+        help="Content factors whose i.i.d. decodability each term is tested against (GAP-assigned factors "
+        "only). Pass the flag with no names to skip decoding.",
+    )
+    ap.add_argument(
+        "--decode-samples",
+        type=int,
+        default=512,
+        help="i.i.d. test subjects for decoding, rendered once and cached (~2 MB each at 64^3).",
+    )
     ap.add_argument("--checkpoints", nargs="+", default=["vqvae_model.pt"])
     ap.add_argument("--level", type=int, default=0)
     ap.add_argument("--grid", type=int, nargs=3)
@@ -153,7 +170,9 @@ def main(argv=None):
     )
     ap.add_argument("--workers", type=int, default=4, help="DataLoader workers rendering synthetic subjects.")
     ap.add_argument("--mcc-samples", type=int, default=600)
-    ap.add_argument("--mcc-batch", type=int, default=8)
+    ap.add_argument(
+        "--eval-batch", "--mcc-batch", dest="mcc_batch", type=int, default=8, help="Subjects per evaluation forward."
+    )
     ap.add_argument("--etas", type=float, nargs="+")
     ap.add_argument("--recon-samples", type=int, default=64)
     ap.add_argument("--recon-batch-size", type=int, default=4)
@@ -165,7 +184,7 @@ def main(argv=None):
         "--precondition", action="store_true", help="Deprecated: rejected without a verified optimizer-name mapping."
     )
     ap.add_argument(
-        "--snr", action="store_true", help="Report batch SNR statistics without an MCC sweep (included in balance)."
+        "--snr", action="store_true", help="Report batch SNR statistics without a step sweep (included in balance)."
     )
     ap.add_argument("--random-controls", type=int, default=1)
     ap.add_argument("--causal", choices=("match", "iid"), default="match")
@@ -186,6 +205,10 @@ def main(argv=None):
         ap.error("--grad-batch-size must be at least two subjects.")
     if cli.grid is not None and min(cli.grid) < 1:
         ap.error("Grid entries must be positive.")
+    if cli.target == "decode" and not cli.decode_factors:
+        ap.error("--target decode needs at least one --decode-factors name.")
+    if cli.decode_factors and cli.decode_samples < 4 * cli.n_splits:
+        ap.error(f"--decode-samples must be at least {4 * cli.n_splits} for {cli.n_splits}-fold CV.")
     cli.etas = (
         cli.etas
         if cli.etas is not None
