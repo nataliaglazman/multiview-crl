@@ -233,6 +233,21 @@ Those correlations are a sanity check, not a nonlinear independence test. Repeat
 with additional shuffle seeds to assess sensitivity. The source SCM is not used
 to residualize the shuffled labels, which no longer follow its joint law.
 
+Under `wm_interior` lesion placement a shuffled row can pair anatomy the source
+population almost never combines (a small brain with enlarged ventricles; the two
+correlate at +0.79 under the `synthetic_causal.yaml` SCM) and leave no room for the
+complete lesion, which the renderer refuses to truncate. Before rendering, every
+shuffled row's anatomy is checked. Each row without room exchanges one factor value
+with another row, taking the first exchange, in a seeded random order over
+(factor, partner) pairs, after which both rows fit. Every column stays a permutation
+of its source values, so the marginals remain exact; the distribution becomes the
+shuffle conditioned on a lesion fitting, as the source population is conditioned by
+its own redraws. JSON records the rows without room (`lesion_unfit_rows`) and the
+swaps (`lesion_repair_swaps`); the report header prints their count. With that
+generator at 2,000 samples, 31 rows (1.55%) needed a swap at shuffle seed 0 (22 and
+36 at seeds 1 and 2). If no single swap gives some row room, the run stops rather
+than dropping, shrinking or truncating anything. Other placements skip the check.
+
 `--causal iid` retains the older causal-off behavior; it does not preserve the
 matched factor marginals and may still use a configured hierarchical sampler.
 

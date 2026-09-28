@@ -17,7 +17,8 @@ from sklearn.preprocessing import StandardScaler
 
 from eval import identifiability_report as report
 from eval import parent_adjusted as adjusted
-from eval.marginal_independence import MarginalShuffledDataset, permute_content_marginals
+from eval.marginal_independence import MarginalShuffledDataset, permute_content_marginals, repair_by_swaps
+from eval.synthetic_dataset import LesionPlacementError
 
 
 def synthetic_brain_class():
@@ -154,6 +155,70 @@ class MarginalIndependenceTests(unittest.TestCase):
         corr = np.corrcoef(shuffled[:, :3], rowvar=False)
         self.assertLess(np.abs(corr[np.triu_indices(3, 1)]).max(), 0.1)
 
+    def test_swap_repair_fixes_every_row_and_keeps_exact_marginals(self):
+        rng = np.random.RandomState(0)
+        parent = rng.randn(200)
+        original = np.column_stack([parent, parent + 0.3 * rng.randn(200), rng.randn(200)])
+        shuffled, permutations = permute_content_marginals(original, seed=1)
+
+        def fits(i, row):
+            return row[1] - row[0] < 2.0  # The source dependence almost never violates this.
+
+        before = [i for i in range(200) if not fits(i, shuffled[i])]
+        self.assertTrue(before)
+        repaired, perms, failing, swaps = repair_by_swaps(shuffled, permutations, fits, seed=1)
+        self.assertEqual(failing, before)
+        self.assertTrue(all(fits(i, row) for i, row in enumerate(repaired)))
+        np.testing.assert_array_equal(np.sort(repaired, axis=0), np.sort(original, axis=0))
+        np.testing.assert_array_equal(repaired, original[perms, np.arange(3)])
+        untouched = np.setdiff1d(np.arange(200), [s[key] for s in swaps for key in ("row", "partner")])
+        np.testing.assert_array_equal(repaired[untouched], shuffled[untouched])
+        json.dumps(swaps)  # Recorded in the report JSON.
+        again = repair_by_swaps(shuffled, permutations, fits, seed=1)
+        np.testing.assert_array_equal(again[0], repaired)
+        self.assertEqual(again[3], swaps)
+        np.testing.assert_array_equal(shuffled, original[permutations, np.arange(3)])  # Inputs untouched.
+        with self.assertRaisesRegex(ValueError, "Row 0 does not fit"):
+            repair_by_swaps(shuffled, permutations, lambda i, row: i != 0)
+
+    def test_wm_interior_rows_without_lesion_room_are_repaired_before_rendering(self):
+        source = self.Brain(
+            mode="test",
+            spatial_size=(20, 20, 20),
+            synthetic_num_samples=12,
+            synthetic_causal=True,
+            synthetic_causal_graph="random",
+            synthetic_identifiable_ventricle=True,
+            synthetic_clean_content=True,
+            synthetic_lesion_placement="wm_interior",
+            synthetic_lesion_radius=0.15,
+            synthetic_normalize="fixed_reference",
+        )
+        inner = source._inner
+        original = [inner[i][2] for i in range(len(source))]
+        plain, _ = permute_content_marginals(torch.stack([z["z_content"] for z in original]).numpy(), seed=0)
+        shuffled = MarginalShuffledDataset(source, seed=0)
+        info = shuffled.evaluation_distribution
+        self.assertTrue(info["lesion_unfit_rows"])
+        for i in info["lesion_unfit_rows"]:
+            # Without the repair these rows raise mid-evaluation, as reported.
+            z = original[i]
+            with self.assertRaises(LesionPlacementError):
+                inner.render_pseudo_mri(
+                    torch.from_numpy(plain[i].copy()),
+                    z["z_deformation"],
+                    z["z_fissure"],
+                    z["z_style_v1"],
+                    z["z_style_v2"],
+                    inner.sample_seed_for(i),
+                )
+        touched = {s[key] for s in info["lesion_repair_swaps"] for key in ("row", "partner")}
+        for i in range(len(shuffled)):
+            content = shuffled[i]["gt_latents"]["z_content"].numpy()
+            if i not in touched:
+                np.testing.assert_array_equal(content, plain[i])
+        np.testing.assert_array_equal(np.sort(shuffled.content.numpy(), axis=0), np.sort(plain, axis=0))
+
     def test_rerenders_shuffled_labels_keeps_nuisances_seeds_and_normalization(self):
         for prior in ("normal", "uniform"):
             with self.subTest(prior=prior):
@@ -174,6 +239,7 @@ class MarginalIndependenceTests(unittest.TestCase):
                 self.assertIsNone(report._causal_adjacency(shuffled))
                 self.assertIsNotNone(report._causal_adjacency(source))
                 self.assertTrue(shuffled.evaluation_distribution["source_causal"])
+                self.assertEqual(shuffled.evaluation_distribution["lesion_unfit_rows"], [])
                 self.assertIsNone(source._cache)
                 rows = []
                 changed_image = False
@@ -351,6 +417,8 @@ class ReportFlagTests(unittest.TestCase):
                             mean_abs_correlation_before=0.8,
                             mean_abs_correlation_after=0.02,
                             permutation_sha256="example",
+                            lesion_unfit_rows=[3, 7],
+                            lesion_repair_swaps=[dict(row=3, partner=7, column=0)],
                         ),
                     )
                 source.write_text(json.dumps({"run": result, "floor": None}))
@@ -364,6 +432,8 @@ class ReportFlagTests(unittest.TestCase):
                     report.main()
                 self.assertEqual(json.loads(dest.read_text())["run"], result)
                 self.assertIn("Marginals are exact" if shuffled else "NONLINEAR PARENT-ADJUSTED", output.getvalue())
+                if shuffled:
+                    self.assertIn("2 shuffled row(s) left no room for the lesion; 1 within-column", output.getvalue())
 
 
 if __name__ == "__main__":
