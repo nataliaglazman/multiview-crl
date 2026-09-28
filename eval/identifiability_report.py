@@ -582,6 +582,12 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
             f"{distribution['mean_abs_correlation_before']:.3f} -> {distribution['mean_abs_correlation_after']:.3f}"
         )
         print("  Marginals are exact; finite-sample dependencies need not be zero. The joint distribution changes.")
+        unfit = distribution.get("lesion_unfit_rows") or []
+        if unfit:
+            print(
+                f"  {len(unfit)} shuffled row(s) left no room for the lesion; "
+                f"{len(distribution['lesion_repair_swaps'])} within-column swap(s) repaired them (marginals still exact)."
+            )
     print("=" * 92)
     if has_floor:
         print("  LEARNED = this checkpoint minus the same architecture UNTRAINED. Read that column.")
