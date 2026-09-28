@@ -532,8 +532,8 @@ class TrainingObjectiveTests(unittest.TestCase):
                 audit.collect(obj, [batch(7)])
 
 
-class MccSweepTests(unittest.TestCase):
-    def test_sweep_reports_excess_over_random_and_always_restores(self):
+class StepSweepTests(unittest.TestCase):
+    def test_sweep_reports_excess_and_first_order_and_always_restores(self):
         model = torch.nn.Module()
         model.encoders = torch.nn.Linear(3, 2)
         named = ga._encoder_params(model)
@@ -541,33 +541,160 @@ class MccSweepTests(unittest.TestCase):
         saved = [p.detach().clone() for p in params]
         origin = torch.cat([p.detach().flatten() for p in params])
 
-        def linear_mcc(*_args):
+        def measure():
             theta = torch.cat([p.detach().flatten() for p in params])
-            return float((origin - theta).sum()), "targets"
+            return {"linear": float((origin - theta).sum()), "flat": 1.0}
 
         groups = {"content": np.ones((2, origin.numel()), dtype=np.float32)}
-        cli = types.SimpleNamespace(seeds=[0], n_splits=2, mcc_batch=2, etas=[0.1, 0.2], random_controls=1, seed=0)
-        with patch.object(ga, "_mcc_now", linear_mcc):
-            base, steps, summary = audit.mcc_sweep(cli, model, None, "cpu", [2, 2, 2], named, groups)
-        # A unit step along -ones/|ones| raises this score by eta * sqrt(n).
-        self.assertAlmostEqual(summary[0]["delta_mcc"], 0.1 * math.sqrt(origin.numel()), places=5)
-        self.assertAlmostEqual(summary[0]["linearity_r2"], 1.0, places=6)
-        row = summary[1]
-        self.assertAlmostEqual(row["excess_over_random"], row["delta_mcc"] - row["random_delta_mcc"], places=9)
+        cli = types.SimpleNamespace(etas=[0.1, 0.2], random_controls=1, seed=0)
+        # A unit step along -ones/|ones| raises "linear" by eta * sqrt(n).
+        slope = math.sqrt(origin.numel())
+        base, steps, summary = audit.step_sweep(cli, named, groups, measure, lambda u: {"linear": float(u.sum())})
+        rows = {(r["metric"], r["eta"]): r for r in summary}
+        self.assertEqual(base, {"linear": 0.0, "flat": 1.0})
+        self.assertAlmostEqual(rows[("linear", 0.1)]["delta"], 0.1 * slope, places=5)
+        self.assertAlmostEqual(rows[("linear", 0.2)]["first_order"], 0.2 * slope, places=5)
+        self.assertAlmostEqual(rows[("linear", 0.1)]["linearity_r2"], 1.0, places=6)
+        self.assertIsNone(rows[("flat", 0.1)]["first_order"])
+        self.assertEqual(rows[("flat", 0.2)]["delta"], 0.0)
+        row = rows[("linear", 0.2)]
+        self.assertAlmostEqual(row["excess_over_random"], row["delta"] - row["random_delta"], places=9)
         self.assertEqual({s["direction"] for s in steps}, {"gradient", "random_1"})
         self.assertTrue(all(torch.equal(p, s) for p, s in zip(params, saved)))
 
         calls = []
 
-        def failing(*args):
+        def failing():
             calls.append(1)
             if len(calls) == 3:
                 raise RuntimeError("probe failed")
-            return linear_mcc(*args)
+            return measure()
 
-        with patch.object(ga, "_mcc_now", failing), self.assertRaisesRegex(RuntimeError, "probe failed"):
-            audit.mcc_sweep(cli, model, None, "cpu", [2, 2, 2], named, groups)
+        with self.assertRaisesRegex(RuntimeError, "probe failed"):
+            audit.step_sweep(cli, named, groups, failing)
         self.assertTrue(all(torch.equal(p, s) for p, s in zip(params, saved)))
+
+    def test_block_mcc_measure_caches_the_ground_truth(self):
+        seen = []
+
+        def fake_mcc(model, dataset, device, grid, level, batch_size, targets, seeds, n_splits):
+            seen.append(targets)
+            return 0.5, "targets"
+
+        cli = types.SimpleNamespace(mcc_batch=2, seeds=[0], n_splits=2)
+        with patch.object(ga, "_mcc_now", fake_mcc):
+            measure = audit.block_mcc_measure(None, None, "cpu", [2, 2, 2], cli)
+            self.assertEqual(measure(), {"block_mcc": 0.5})
+            measure()
+        self.assertEqual(seen, [None, "targets"])
+
+
+def decodable_batch(seed, b=6):
+    """Images whose global intensity carries z_content[:, 1], so a GAP probe has signal to read."""
+    g = torch.Generator().manual_seed(seed)
+    z = torch.randn(b, 3, generator=g)
+    shift = z[:, 1].view(b, 1, 1, 1, 1)
+    x0 = 0.3 * torch.randn(b, 1, 8, 8, 8, generator=g) + shift
+    x1 = 0.3 * torch.randn(b, 1, 8, 8, 8, generator=g) + 0.5 * shift
+    return torch.cat([x0, x1]), torch.ones(2 * b, 1, 8, 8, 8, dtype=torch.bool), z
+
+
+class DecodingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+
+    def test_envelope_gradient_is_the_derivative_of_the_refit_objective(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(80, 5)) * [1.0, 2.0, 0.5, 3.0, 1.0] + [0.0, 1.0, -2.0, 0.5, 3.0]
+        y = X @ [0.5, -0.2, 0.0, 0.1, 0.3] + 0.5 * rng.normal(size=80)
+        fit = audit.ridge_feature_gradient(X, y)
+        self.assertAlmostEqual(audit.penalised_fit_r2(X, y, fit["alpha"]), fit["fit_r2"], places=10)
+
+        def refit_objective(features):
+            return (1.0 - audit.penalised_fit_r2(features, y, fit["alpha"])) * fit["ss_tot"]
+
+        E, eps = rng.normal(size=X.shape), 1e-5
+        numeric = (refit_objective(X + eps * E) - refit_objective(X - eps * E)) / (2 * eps)
+        self.assertAlmostEqual(numeric, float((fit["feature_gradient"] * E).sum()), delta=1e-6 * abs(numeric))
+        # A per-channel rescaling or shift is absorbed by the standardised refit: zero derivative.
+        G = fit["feature_gradient"]
+        self.assertAlmostEqual(float((G[:, 0] * X[:, 0]).sum()), 0.0, places=8)
+        self.assertAlmostEqual(float(G[:, 3].sum()), 0.0, places=8)
+
+    def test_calibration_equals_one_full_backward_and_predicts_small_steps(self):
+        model = tiny_model()
+        batches = [decodable_batch(seed) for seed in range(4)]
+        with frozen_checkpoint(model):
+            params = [p for _, p in ga._encoder_params(model)]
+            decoder = audit.IidDecoding(model, batches, ["ventricle_size"], [1], "cpu")
+            baseline = decoder.calibrate(params, seeds=(0,), n_splits=2)
+            self.assertEqual(set(baseline), {"r2/ventricle_size/T1", "r2/ventricle_size/FLAIR"})
+            views = [decoder._views(x, m) for x, m, _ in batches]
+            for v in (0, 1):
+                features = torch.cat([pair[v] for pair in views])
+                fit = audit.ridge_feature_gradient(features.detach().double().numpy(), decoder.y[:, 0])
+                weights = torch.as_tensor(fit["feature_gradient"]).to(features)
+                grads = torch.autograd.grad(
+                    features, params, grad_outputs=weights, retain_graph=True, allow_unused=True
+                )
+                full = torch.cat([(torch.zeros_like(p) if g is None else g).flatten() for p, g in zip(params, grads)])
+                chunked = torch.as_tensor(decoder.targets[("ventricle_size", v)]["gradient"])
+                self.assertLess(float((chunked - full.double()).norm() / full.norm()), 1e-5)
+            del views
+
+            # Central finite difference of the fixed-alpha fit along the steepest direction. This
+            # tiny model is strongly curved: the ratio is 1.022 at eta 1e-3 and 0.99998 at 1e-4.
+            gradient = decoder.targets[("ventricle_size", 0)]["gradient"]
+            u = gradient / np.linalg.norm(gradient)
+            slope = decoder.slopes(u)["fit/ventricle_size/T1"]
+            saved = [p.detach().clone() for p in params]
+            fits, eta = [], 1e-4
+            for sign in (1.0, -1.0):
+                with torch.no_grad():
+                    offset = 0
+                    for p, s in zip(params, saved):
+                        step = torch.as_tensor(u[offset : offset + p.numel()]).view_as(p).to(p)
+                        p.copy_(s - sign * eta * step)
+                        offset += p.numel()
+                fits.append(decoder.scores((0,), 2)["fit/ventricle_size/T1"])
+            with torch.no_grad():
+                for p, s in zip(params, saved):
+                    p.copy_(s)
+        self.assertGreater(slope, 0)
+        self.assertAlmostEqual((fits[0] - fits[1]) / (2 * eta) / slope, 1.0, delta=0.005)
+
+    def test_attribution_is_additive_and_signed(self):
+        rng = np.random.default_rng(1)
+        d = rng.normal(size=6)
+        parts = {
+            "content/L0/gap/on_diag": np.stack([d, 2 * d]),
+            "reconstruction/pixel": np.stack([-d, -d]),
+            "hsic/total": rng.normal(size=(2, 6)),
+        }
+        stacks = dict(parts, total=sum(parts.values()))
+        groups, _ = audit.group_stacks(stacks, {k: [0.0, 0.0] for k in stacks})
+        targets = {("ventricle_size", 0): dict(gradient=d, ss_tot=2.0)}
+        rows = {r["component"]: r for r in audit.decoding_attribution(stacks, groups, targets)}
+        helps, hurts = rows["content/L0/gap/on_diag"], rows["reconstruction/pixel"]
+        self.assertAlmostEqual(helps["rate"], 1.5 * float(d @ d) / 2.0)
+        self.assertAlmostEqual(helps["cosine"], 1.0)
+        self.assertEqual((helps["hurting_batches"], hurts["hurting_batches"]), (0.0, 1.0))
+        self.assertAlmostEqual(sum(rows[k]["rate"] for k in parts), rows["total"]["rate"])
+        self.assertAlmostEqual(sum(rows[k]["share_of_total"] for k in parts), 1.0)
+        self.assertEqual((rows["content"]["kind"], rows["total"]["kind"], helps["view"]), ("group", "total", "T1"))
+
+    def test_only_gap_assigned_factors_are_accepted_and_checked_first(self):
+        self.assertEqual(audit.decode_columns(["ventricle_size", "brain_size"]), [1, 0])
+        with self.assertRaisesRegex(ValueError, "patch"):
+            audit.decode_columns(["lesion_x"])
+        with self.assertRaisesRegex(ValueError, "Unknown"):
+            audit.decode_columns(["ventricle"])
+        with self.assertRaisesRegex(ValueError, "Unknown"):
+            audit.decode_columns(["sulcal_widening"], n_content=5)
+        cli = types.SimpleNamespace(threads=1, decode_factors=["lesion_x"], checkpoints=["x.pt"], run_dir="/missing")
+        with self.assertRaisesRegex(ValueError, "patch"):  # before any checkpoint lookup
+            audit.run(cli)
 
 
 class SummaryTests(unittest.TestCase):
@@ -616,7 +743,18 @@ class SettingsAndCliTests(unittest.TestCase):
             (cli.target, cli.grad_batches, cli.ema_mode, cli.ema_reference_batches), ("balance", 16, "reference", None)
         )
         self.assertEqual(cli.etas, [0.05, 0.2, 0.8])
-        for bad in (["--ema-mode", "cold"], ["--precondition"], ["--level", "1"], ["--ema-reference-batches", "0"]):
+        self.assertEqual((cli.decode_factors, cli.decode_samples, cli.mcc_batch), (["ventricle_size"], 512, 8))
+        with patch.object(audit, "run") as run:
+            ga.main(["--run-dir", "RUN", "--decode-factors", "--eval-batch", "4"])
+        self.assertEqual((run.call_args.args[0].decode_factors, run.call_args.args[0].mcc_batch), ([], 4))
+        for bad in (
+            ["--ema-mode", "cold"],
+            ["--precondition"],
+            ["--level", "1"],
+            ["--ema-reference-batches", "0"],
+            ["--target", "decode", "--decode-factors"],
+            ["--decode-samples", "10"],
+        ):
             with self.subTest(bad=bad), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 ga.main(["--run-dir", "RUN", *bad])
 
