@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 
-def within_modality_style_loss(style, paired_style, *, n_views=2, variance_weight=1.0):
+def within_modality_style_loss(style, paired_style, *, n_views=2, variance_weight=1.0, capture_components=False):
     """Align corresponding styles separately within each view, never across views.
 
     Both inputs are post-bottleneck, pre-quantization tensors in view-major order:
@@ -59,4 +59,6 @@ def within_modality_style_loss(style, paired_style, *, n_views=2, variance_weigh
         alignment_var_hinge=hinge.detach().item(),
         alignment_var_weighted=(variance_weight * hinge).detach().item(),
     )
+    if capture_components:
+        loss._loss_components = {"alignment": alignment, "variance": variance_weight * hinge}
     return loss, diagnostics
