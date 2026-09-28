@@ -1479,10 +1479,6 @@ def main(args):
         _bt_gap_w = getattr(args, "bt_gap_weight", 0.0)
         # The GAP term is estimated from B rows, not B*P, so its off-diagonal has a large
         # sampling floor (~d(d-1)/B) that is pure noise. Let it carry its own lambda.
-        # One EMA state dict per TERM: the patch and GAP correlations are different matrices
-        # (folded (subject, position) rows vs subject rows) and must never share a buffer.
-        _bt_corr_ema = float(getattr(args, "bt_corr_ema", 0.0) or 0.0)
-        _bt_ema_patch, _bt_ema_gap, _bt_ema_plain = {}, {}, {}
         _bt_gap_lam = getattr(args, "bt_gap_lambda", None)
         _bt_gap_lam = _bt_lambda if _bt_gap_lam is None else _bt_gap_lam
         _bt_sim_c = getattr(args, "bt_sim_coeff", 0.0)
@@ -1502,12 +1498,7 @@ def main(args):
         # of surplus alignment pressure on patch, which nothing in BT counterweights.
         _bt_gap_sim_c = getattr(args, "bt_gap_sim_coeff", None)
         _bt_gap_sim_c = _bt_sim_c if _bt_gap_sim_c is None else _bt_gap_sim_c
-        _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
-        _bt_gap_pool = getattr(args, "bt_gap_pooling", "gap")
-        _bt_whiten = getattr(args, "bt_sim_whiten", False)
-        _bt_whiten_eps = getattr(args, "bt_sim_whiten_eps", 1e-3)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
-        _bt_norm = bool(getattr(args, "bt_normalize_terms", False))
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
             f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
