@@ -44,9 +44,11 @@ def make_barlow_loss_functions(
             patch_stat=setting("bt_patch_stat", "fold"),
             sim_normalize=setting("bt_sim_normalize", False),
             # Never whiten the patch fold: its rows are (subject, position) pairs, not the
-            # aligned units, and at d~768 a d x d covariance is not estimable per batch.
+            # units being aligned, so its covariance is the wrong one to whiten by.
             sim_whiten=setting("bt_sim_whiten", False) if name != "patch" else False,
             sim_whiten_eps=setting("bt_sim_whiten_eps", 1e-3),
+            # One EMA dict per arm: patch correlations fold (subject, position) rows, GAP
+            # ones have subject rows. Different matrices must never share a buffer.
             corr_ema=states.setdefault(name, {}),
             corr_ema_decay=setting("bt_corr_ema", 0.0),
             normalize_terms=setting("bt_normalize_terms", False),
