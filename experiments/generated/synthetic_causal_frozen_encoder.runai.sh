@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_frozen_encoder.yaml
-# Generated at: 2026-09-15T09:40:00Z
-# Git SHA: 7eaca16
+# Generated at: 2026-09-28T08:11:26Z
+# Git SHA: f3fba27
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -25,6 +25,7 @@ python -m training.main_multimodal
     --content-size 44
     --content-style-levels 0
     --contrastive-loss-type barlow_twins
+    --cross-recon-start-step 0
     --cross-view-negs-only
     --dataroot /nfs/home/nglazman/data
     --dataset-name synthetic
@@ -53,6 +54,7 @@ python -m training.main_multimodal
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
     --scale-contrastive-loss 0
+    --scale-cross-recon-loss 0.0
     --scale-recon-loss 1
     --scale-style-contrastive-loss 0.0
     --scale-style-hsic-loss 0.0
@@ -61,6 +63,9 @@ python -m training.main_multimodal
     --separate-encoders
     --separate-style-codebooks
     --separation-floor-diagnosis-info 0.1
+    --style-alignment-var-weight 1.0
+    --style-contrastive-mode cosine
+    --style-independence-var-weight 1.0
     --style-injection-mode input
     --synthetic-causal
     --synthetic-causal-edge-prob 0.5
@@ -101,6 +106,10 @@ runai training standard submit synthetic-causal-frozen-encoder-random \
     --cpu-memory-request 64G \
     --cpu-memory-limit 128G \
     --host-path path=/nfs,mount=/nfs,readwrite \
+    --environment "OMP_NUM_THREADS=16" \
+    --environment "OPENBLAS_NUM_THREADS=16" \
+    --environment "MKL_NUM_THREADS=16" \
+    --environment "NUMEXPR_NUM_THREADS=16" \
     --environment "WANDB_DIR=/tmp" \
     --environment "WANDB_API_KEY=${WANDB_API_KEY:?export WANDB_API_KEY before submitting - get it from https://wandb.ai/authorize}" \
     --command -- bash -c "${TRAIN_CMD}"
