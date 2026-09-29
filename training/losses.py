@@ -1814,6 +1814,36 @@ def swap_views(t: torch.Tensor) -> torch.Tensor:
     return torch.cat([t[b:], t[:b]], dim=0)
 
 
+def cross_subject_donors(subjects) -> torch.Tensor:
+    """Pick, for every row of a batch, a random row of a DIFFERENT subject to lend it its style.
+
+    ``subjects`` holds one ID per row. Rows sharing an ID are the same individual (an ADNI
+    subject can contribute several rows), so no row is ever given a donor with its own ID.
+    Returns ``donors``: row i borrows the style of row ``donors[i]``.
+
+    The result is a permutation whenever one exists, so every style is lent exactly once.
+    Rows are grouped by subject, groups and members in random order, and each row takes the
+    row ``m`` places further round that cycle, ``m`` being the largest group's size; a step
+    of ``m`` always leaves a contiguous block of at most ``m`` rows. With no repeated subject
+    this is a uniformly random single cycle. Once one subject holds more than half the batch
+    no such permutation exists, and each row instead draws independently among the other
+    subjects' rows.
+    """
+    subjects = subjects.tolist() if torch.is_tensor(subjects) else list(subjects)
+    ids = {s: k for k, s in enumerate(dict.fromkeys(subjects))}
+    if len(ids) < 2:
+        raise ValueError(f"A cross-subject style swap needs at least two subjects in the batch, got {len(ids)}.")
+    group = torch.tensor([ids[s] for s in subjects])
+    n = group.numel()
+    largest = int(torch.bincount(group).max())
+    if 2 * largest <= n:
+        order = torch.argsort(torch.randperm(len(ids))[group] * n + torch.randperm(n))
+        donors = torch.empty_like(order)
+        donors[order] = order.roll(-largest)
+        return donors
+    return torch.multinomial((group[:, None] != group[None, :]).float(), 1).squeeze(1)
+
+
 @torch.amp.autocast("cuda", enabled=False)
 def cross_reconstruction_loss(
     cross_recon: torch.Tensor,
@@ -1823,10 +1853,14 @@ def cross_reconstruction_loss(
     """Masked L1 between a style-swapped decode and the OTHER view's image.
 
     ``cross_recon`` comes from ``VQVAE.forward(..., cross_recon=True)``: its first half is
-    ``decode(content_v0, style_v1)`` and its second half ``decode(content_v1, style_v0)``,
-    both for the same subject.  Content is supposed to be the anatomy the two modalities
-    share and style the modality's contrast, so the correct target for row i is the OTHER
-    view of subject i — i.e. ``swap_views(images)``.
+    ``decode(content_v0, style_v1)`` and its second half ``decode(content_v1, style_v0)``.
+    The style is the same subject's, or with ``cross_style_index`` another subject's (see
+    ``cross_subject_donors``); the content is always row i's own.  Content is supposed to be
+    the anatomy the two modalities share and style the modality's contrast, so the correct
+    target for row i is the OTHER view of subject i — i.e. ``swap_views(images)`` — whoever
+    lent the style.  With a donor from another subject, the per-subject part of that view's
+    appearance is in neither input, so the term keeps a nonzero floor, and it also penalises
+    style for carrying anything subject-specific, anatomy included.
 
     What the term buys, and what it does not:
 

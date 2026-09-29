@@ -1062,6 +1062,7 @@ class VQVAE(HelperModule):
         mask=None,
         return_style_features=False,
         cross_recon=False,
+        cross_style_index=None,
     ):
         """Forward pass through VQ-VAE-2.
 
@@ -1083,6 +1084,11 @@ class VQVAE(HelperModule):
                 ``decode(content_v0[i], style_v1[i])`` and should render VIEW 1; the second
                 half is ``decode(content_v1[i], style_v0[i])`` and should render VIEW 0 —
                 i.e. its target is the view-swapped input batch.
+            cross_style_index: Optional ``(B/2,)`` LongTensor choosing whose style each
+                cross decode borrows: row i of either half takes the other view's style from
+                row ``cross_style_index[i]`` (e.g. another subject, see
+                ``training.losses.cross_subject_donors``) instead of row i.  The content,
+                and therefore the target, stay row i's.  ``None`` is the same-subject swap.
             view_idx: When separate_encoders is active and n_views=1, selects which
                       encoder stack to use (0 → self.encoders, 1 → self.encoders_v1).
                       Defaults to 0 if not specified.  Ignored when n_views=2.
@@ -1127,6 +1133,13 @@ class VQVAE(HelperModule):
                 )
             if x.shape[0] % 2 != 0:
                 raise ValueError(f"cross_recon=True requires an even batch ([v0; v1] halves), got {x.shape[0]} rows.")
+            if cross_style_index is not None and tuple(cross_style_index.shape) != (x.shape[0] // 2,):
+                raise ValueError(
+                    f"cross_style_index must hold one donor row per subject, shape ({x.shape[0] // 2},), "
+                    f"got {tuple(cross_style_index.shape)}."
+                )
+        elif cross_style_index is not None:
+            raise ValueError("cross_style_index only applies with cross_recon=True.")
 
         encoder_outputs = []  # Spatial (5D) feature maps, consumed by codebook/decoder loop
         encoder_pools = []  # Pooled (B, C) vectors, returned for contrastive loss
@@ -1652,7 +1665,10 @@ class VQVAE(HelperModule):
                         # cannot render, so zeroing the style here would train content to
                         # carry modality — the opposite of what this loss is for.
                         _b = _style.shape[0] // 2
-                        _cross_style = torch.cat([_style[_b:], _style[:_b]], dim=0)
+                        _style_v0, _style_v1 = _style[:_b], _style[_b:]
+                        if cross_style_index is not None:
+                            _style_v0, _style_v1 = _style_v0[cross_style_index], _style_v1[cross_style_index]
+                        _cross_style = torch.cat([_style_v1, _style_v0], dim=0)
                     if self.training and self.style_dropout_prob > 0.0:
                         _keep = (
                             torch.rand(_style.shape[0], 1, 1, 1, 1, device=_style.device) >= self.style_dropout_prob

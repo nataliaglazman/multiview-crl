@@ -618,6 +618,8 @@ class MyCustomDataset(MultiviewDataset):
             "z_image": [{}, {}],
             "index": idx,
             "label": lbl,
+            # Several rows can share a subject; the cross-subject style swap must tell them apart.
+            "subject": self.items[idx]["subject"],
         }
 
 

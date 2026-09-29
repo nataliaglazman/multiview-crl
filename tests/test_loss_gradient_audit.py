@@ -77,6 +77,7 @@ def load_train_step(losses):
         BaselineLoss=losses["BaselineLoss"],
         style_infonce_loss=losses["style_infonce_loss"],
         cross_reconstruction_loss=losses["cross_reconstruction_loss"],
+        cross_subject_donors=losses["cross_subject_donors"],
         style_content_hsic_loss=style_content_hsic_loss,
         within_modality_style_loss=within_modality_style_loss,
     )
