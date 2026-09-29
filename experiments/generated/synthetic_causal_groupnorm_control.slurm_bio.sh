@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_groupnorm_control.yaml
-# Generated at: 2026-09-29T12:17:42Z
-# Git SHA: 50a20ee
+# Generated at: 2026-09-29T12:28:32Z
+# Git SHA: 98b2853
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-groupnorm-control
 #SBATCH --output=/scratch/users/%u/%j.out

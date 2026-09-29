@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-causal-12-4-cross-recon
+tag: synthetic-causal-12-4-cross-recon-1
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -13,7 +13,7 @@ bt_patch_weight: 1
 single_count_commitment: true
 vicregl_no_projectors: true
 cross_recon_start_step: 0
-scale_cross_recon_loss: 10
+scale_cross_recon_loss: 1
 
 scale_contrastive_loss: 100      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 grad_clip_norm: 100

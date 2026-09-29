@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-29T12:17:42Z
-# Git SHA: 50a20ee
+# Generated at: 2026-09-29T12:28:32Z
+# Git SHA: 98b2853
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-12-4-cross-recon
+#SBATCH --job-name=synthetic-causal-12-4-cross-recon-1
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-12-4-cross-recon-%j.err
+#SBATCH --error=synthetic-causal-12-4-cross-recon-1-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -107,7 +107,7 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 100 \
-    --scale-cross-recon-loss 10 \
+    --scale-cross-recon-loss 1 \
     --scale-recon-loss 10 \
     --scale-style-contrastive-loss 10 \
     --scale-style-hsic-loss 0 \
@@ -134,7 +134,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-12-4-cross-recon \
+    --model-id synthetic-causal-12-4-cross-recon-1 \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
