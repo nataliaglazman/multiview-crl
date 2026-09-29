@@ -1,17 +1,18 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthetic_causal_frozen_encoder.yaml
-# Generated at: 2026-09-29T18:21:55Z
+# Auto-generated from: experiments/adni_real.yaml
+# Generated at: 2026-09-29T21:30:28Z
 # Git SHA: a29bdbc
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-frozen-encoder-random
+#SBATCH --job-name=adni-real-bt-patch
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-frozen-encoder-random-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --error=adni-real-bt-patch-%j.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -60,34 +61,39 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 128 \
-    --bt-gap-lambda 0.01 \
+    --batch-size 16 \
+    --bt-corr-ema 0.99 \
+    --bt-gap-lambda 6 \
+    --bt-gap-sim-coeff 0.05 \
+    --bt-gap-std-coeff 0.05 \
     --bt-gap-weight 1 \
-    --bt-lambda 1 \
+    --bt-lambda 6 \
     --bt-patch-weight 1 \
-    --bt-sim-coeff 2e-5 \
-    --bt-sim-normalize \
-    --bt-std-coeff 1 \
+    --bt-sim-coeff 0.0114 \
+    --bt-std-coeff 0.227 \
+    --cache-dataset \
+    --cache-dir /scratch/users/k24058220/cache/multiview \
+    --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
-    --content-ratios 0.95 \
-    --content-size 44 \
+    --content-size 40 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --cross-recon-start-step 0 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
-    --dataset-name synthetic \
-    --dci-every 2000 \
+    --dataset-name ADNI_stripped_masks \
     --decoder-norm-type group \
     --deterministic \
-    --eval-dci \
-    --freeze-encoder \
-    --image-spacing 1.0 \
+    --grad-clip-norm 100 \
+    --gradient-checkpointing \
+    --image-spacing 2.0 \
     --inject-style-to-decoder \
+    --labels-path /users/k24058220/multiview-crl/labels_cleaned_3class.csv \
     --log-steps 50 \
     --lr 0.001 \
     --mask-mode fixed \
+    --masks-dir /scratch/users/k24058220/ADNI_stripped_masks \
     --moco-queue-size 0 \
     --no-final-recon-norm \
     --norm-type layer \
@@ -102,40 +108,35 @@ fi
     --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 100 \
     --scale-cross-recon-loss 0.0 \
-    --scale-recon-loss 1 \
+    --scale-recon-loss 16 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-hsic-loss 0.0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
-    --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
+    --single-count-commitment \
+    --spatial-size 96 112 96 \
+    --split-seed 0 \
     --style-alignment-var-weight 1.0 \
     --style-contrastive-mode cosine \
     --style-independence-var-weight 1.0 \
     --style-injection-mode input \
-    --synthetic-causal \
-    --synthetic-causal-edge-prob 0.5 \
-    --synthetic-causal-graph random \
-    --synthetic-clean-content \
-    --synthetic-mode pseudo_mri \
-    --synthetic-normalize fixed_reference \
-    --synthetic-num-test 400 \
-    --synthetic-num-train 2000 \
-    --synthetic-num-val 1500 \
-    --synthetic-res 64 \
-    --model-id synthetic-causal-frozen-encoder-random \
+    --model-id adni-real-bt-patch \
     --tau 0.1 \
+    --test-frac 0.1 \
     --total-dim 512 \
-    --train-steps 88000 \
+    --train-steps 20000 \
     --use-amp \
     --use-wandb \
+    --val-frac 0.2 \
     --vq-commitment-weight 0.25 \
     --vqvae-embed-dim 48 \
     --vqvae-hidden-channels 48 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
+    --vqvae-nb-res-layers 2 \
     --vqvae-scaling-rates 4 \
     --workers 8

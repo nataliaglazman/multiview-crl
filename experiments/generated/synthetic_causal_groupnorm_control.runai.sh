@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_groupnorm_control.yaml
-# Generated at: 2026-09-29T10:33:30Z
-# Git SHA: 6898e2d
+# Generated at: 2026-09-29T18:22:01Z
+# Git SHA: a29bdbc
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail

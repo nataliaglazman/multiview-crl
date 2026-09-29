@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal_vicregl.yaml
-# Generated at: 2026-09-29T17:22:24Z
-# Git SHA: c77154c
+# Generated at: 2026-09-29T18:21:55Z
+# Git SHA: a29bdbc
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-vicregl-12-4
 #SBATCH --output=/scratch/users/%u/%j.out

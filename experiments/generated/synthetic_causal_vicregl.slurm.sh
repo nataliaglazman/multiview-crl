@@ -1,17 +1,18 @@
 #!/bin/bash -l
-# Auto-generated from: experiments/synthetic_causal_frozen_encoder.yaml
-# Generated at: 2026-09-29T18:21:55Z
+# Auto-generated from: experiments/synthetic_causal_vicregl.yaml
+# Generated at: 2026-09-29T21:30:28Z
 # Git SHA: a29bdbc
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-frozen-encoder-random
+#SBATCH --job-name=synthetic-causal-vicregl-12-4
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-frozen-encoder-random-%j.err
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --error=synthetic-causal-vicregl-12-4-%j.err
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
+#SBATCH --constraint=a100|h200|l40s
 
 # -- Software & Environment Setup --
 module load anaconda3/2022.10-gcc-13.2.0
@@ -60,20 +61,16 @@ fi
 
 # -- Training --
 "$PYTHON" -m training.main_multimodal \
-    --batch-size 128 \
-    --bt-gap-lambda 0.01 \
-    --bt-gap-weight 1 \
-    --bt-lambda 1 \
-    --bt-patch-weight 1 \
-    --bt-sim-coeff 2e-5 \
-    --bt-sim-normalize \
-    --bt-std-coeff 1 \
+    --batch-size 64 \
+    --channels-last \
     --checkpoint-steps 1000 \
     --content-dim 128 \
-    --content-ratios 0.95 \
-    --content-size 44 \
+    --content-ratios 0.75 \
+    --content-size 12 \
     --content-style-levels 0 \
-    --contrastive-loss-type barlow_twins \
+    --contrastive-loss-type vicregl \
+    --contrastive-proj-dim 0 \
+    --contrastive-proj-mode head \
     --cross-recon-start-step 0 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
@@ -82,7 +79,6 @@ fi
     --decoder-norm-type group \
     --deterministic \
     --eval-dci \
-    --freeze-encoder \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --log-steps 50 \
@@ -92,26 +88,25 @@ fi
     --no-final-recon-norm \
     --norm-type layer \
     --pass-full-to-next-level \
-    --patch-center-mode position \
+    --patch-center-mode none \
     --patch-contrastive \
     --patch-foreground-mask \
     --patch-foreground-thresh 0.05 \
     --patch-grid 8 8 8 \
     --quantize-style \
     --recon-loss-start-step 0 \
-    --resume-training \
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
-    --scale-contrastive-loss 0 \
+    --scale-contrastive-loss 1.0 \
     --scale-cross-recon-loss 0.0 \
-    --scale-recon-loss 1 \
-    --scale-style-contrastive-loss 0.0 \
-    --scale-style-hsic-loss 0.0 \
+    --scale-recon-loss 16 \
+    --scale-style-contrastive-loss 0 \
+    --scale-style-hsic-loss 0 \
     --scale-style-modality-ce 0.0 \
-    --select-by-gated-score \
     --separate-encoders \
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
+    --single-count-commitment \
     --style-alignment-var-weight 1.0 \
     --style-contrastive-mode cosine \
     --style-independence-var-weight 1.0 \
@@ -120,22 +115,31 @@ fi
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-clean-content \
+    --synthetic-identifiable-ventricle \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-frozen-encoder-random \
+    --model-id synthetic-causal-vicregl-12-4 \
     --tau 0.1 \
     --total-dim 512 \
-    --train-steps 88000 \
+    --train-steps 5000 \
     --use-amp \
-    --use-wandb \
+    --vicreg-cov-coeff 1.0 \
+    --vicreg-sim-coeff 25.0 \
+    --vicreg-std-coeff 25.0 \
+    --vicregl-global-dim 16 \
+    --vicregl-global-weight 0.25 \
+    --vicregl-hidden 64 \
+    --vicregl-local-dim 16 \
+    --vicregl-local-weight 1.0 \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 48 \
-    --vqvae-hidden-channels 48 \
+    --vqvae-embed-dim 16 \
+    --vqvae-hidden-channels 16 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
+    --vqvae-nb-res-layers 2 \
     --vqvae-scaling-rates 4 \
     --workers 8
