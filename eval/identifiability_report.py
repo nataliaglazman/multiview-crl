@@ -877,12 +877,19 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
         sd = _f(((fstd.get("per_factor") or {}).get(name) or {}).get("r2"))
         return max(NOISE_FLOOR, 2.0 * sd) if np.isfinite(sd) else NOISE_FLOOR
 
-    resolved, borderline = [], []
+    # Signed on purpose: a delta that clears the bar BELOW zero is a factor the checkpoint
+    # encodes worse than its untrained twin, which is not a resolved factor.
+    resolved, borderline, below_floor = [], [], []
     for name, d in pf.items():
-        delta = abs(_delta(d["r2"], (fpf.get(name) or {}).get("r2")))
+        delta = _delta(d["r2"], (fpf.get(name) or {}).get("r2"))
         if not np.isfinite(delta):
             continue
-        (resolved if delta > _bar_for(name) else borderline).append(name)
+        if delta > _bar_for(name):
+            resolved.append(name)
+        elif delta < -_bar_for(name):
+            below_floor.append(name)
+        else:
+            borderline.append(name)
     nseeds = _f((floor or {}).get("floor_seeds"))
     print(f"   mean learned R2 over {len(r2_learned)} factors: {_n(mean_r2)}")
     if np.isfinite(nseeds) and nseeds > 1:
@@ -896,6 +903,8 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
         print("   from its own untrained architecture on aggregate factor recovery.")
     print(f"   RESOLVED: {', '.join(resolved) if resolved else 'NONE'}")
     print(f"   not resolved: {', '.join(borderline) if borderline else '-'}")
+    if below_floor:
+        print(f"   BELOW UNTRAINED FLOOR: {', '.join(below_floor)} — clears the bar in the wrong direction")
 
     # Parent-carried factors are RESOLVED and yet not a per-factor result, so they get
     # their own line rather than a demotion: the content block did learn something real

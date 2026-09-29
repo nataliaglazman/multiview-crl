@@ -435,6 +435,20 @@ def parse_args() -> argparse.ArgumentParser:
         "mostly teaches the decoder to ignore style. Skipped on resume, like the recon warmup.",
     )
     parser.add_argument(
+        "--cross-recon-style-source",
+        choices=["other_subject", "same_subject"],
+        default="other_subject",
+        help="Whose style the cross-modal reconstruction borrows. 'other_subject' (default): "
+        "each content code is decoded with the other view's style from a DIFFERENT subject in "
+        "the batch (a random derangement, never a row of the same subject), still scored "
+        "against its own subject's other view. A same-subject style can carry that subject's "
+        "anatomy for free and still hit the target; a stranger's cannot, so style is pushed to "
+        "carry only what the view shares across subjects. The price: per-subject appearance "
+        "within a view (e.g. synthetic gain/bias) is in neither input, so the term keeps a "
+        "nonzero floor and discourages style from encoding it. 'same_subject': the subject's "
+        "own other view, the behaviour of every run before this flag. Needs --batch-size >= 2.",
+    )
+    parser.add_argument(
         "--contrastive-only",
         action="store_true",
         help="Encoder-only ablation: skip the entire quantization + decoding path "
@@ -1739,6 +1753,14 @@ def update_args(args: argparse.Namespace) -> argparse.Namespace:
         if getattr(args, "contrastive_only", False):
             raise ValueError(
                 "--scale-cross-recon-loss needs the decoder, so it cannot be combined with --contrastive-only."
+            )
+        if (
+            getattr(args, "cross_recon_style_source", "same_subject") == "other_subject"
+            and getattr(args, "batch_size", 2) < 2
+        ):
+            raise ValueError(
+                "--cross-recon-style-source other_subject borrows style from another subject in the "
+                f"batch, so it needs --batch-size >= 2 (got {args.batch_size})."
             )
         if getattr(args, "detach_style_injection", False):
             logger.warning(

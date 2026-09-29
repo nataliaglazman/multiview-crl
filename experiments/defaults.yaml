@@ -48,6 +48,9 @@ recon_loss_start_step: 0
 # and level 0 in content_style_levels. See experiments/ablation_cross_recon.yaml.
 scale_cross_recon_loss: 0.0
 cross_recon_start_step: 0
+# Whose style the swap borrows: other_subject (a different subject in the batch) or
+# same_subject (the subject's own other view, the behaviour before 29 Sep 2026).
+cross_recon_style_source: other_subject
 # Encoder-only ablation: skip the whole quantization + decoding path (no codebook,
 # no decoder → no VQ loss, no recon loss). Encoder trained by contrastive loss only.
 contrastive_only: false
