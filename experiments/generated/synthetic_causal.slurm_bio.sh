@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-29T11:19:31Z
-# Git SHA: 523cfc1
+# Generated at: 2026-09-29T12:17:42Z
+# Git SHA: 50a20ee
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthetic-causal-12-4-cross-recon
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -77,7 +77,6 @@ fi
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --contrastive-proj-dim 0 \
-    --cross-recon-loss 10 \
     --cross-recon-start-step 0 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
@@ -108,7 +107,7 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 100 \
-    --scale-cross-recon-loss 0.0 \
+    --scale-cross-recon-loss 10 \
     --scale-recon-loss 10 \
     --scale-style-contrastive-loss 10 \
     --scale-style-hsic-loss 0 \

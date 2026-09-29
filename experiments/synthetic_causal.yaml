@@ -13,7 +13,7 @@ bt_patch_weight: 1
 single_count_commitment: true
 vicregl_no_projectors: true
 cross_recon_start_step: 0
-cross_recon_loss: 10
+scale_cross_recon_loss: 10
 
 scale_contrastive_loss: 100      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 grad_clip_norm: 100
