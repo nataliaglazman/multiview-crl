@@ -35,7 +35,7 @@ def load_losses():
     tree = _strip_imports(ast.parse(source.read_text()), {"lpips", "utils"})
     namespace = {"__name__": "cross_recon_losses_test", "TBSummaryTypes": types.SimpleNamespace(SCALAR="scalar")}
     exec(compile(tree, str(source), "exec"), namespace)
-    return namespace["cross_reconstruction_loss"], namespace["swap_views"]
+    return namespace["cross_reconstruction_loss"], namespace["swap_views"], namespace["cross_subject_donors"]
 
 
 def load_model():
@@ -65,7 +65,59 @@ def load_config():
     return namespace["parse_args"], namespace["update_args"]
 
 
-cross_reconstruction_loss, swap_views = load_losses()
+cross_reconstruction_loss, swap_views, cross_subject_donors = load_losses()
+
+
+class CrossSubjectDonorTests(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(7)
+
+    def assert_other_subject(self, donors, subjects):
+        for i, j in enumerate(donors.tolist()):
+            self.assertNotEqual(subjects[i], subjects[j], f"row {i} borrowed from row {j}, the same subject")
+
+    def test_distinct_subjects_get_a_derangement(self):
+        for n in range(2, 9):
+            for _ in range(20):
+                donors = cross_subject_donors(range(n))
+                self.assertEqual(sorted(donors.tolist()), list(range(n)))  # every style lent once
+                self.assert_other_subject(donors, list(range(n)))
+
+    def test_every_other_subject_is_an_equally_likely_donor(self):
+        counts = torch.zeros(4, 4)
+        for _ in range(3000):
+            counts[torch.arange(4), cross_subject_donors(range(4))] += 1
+        self.assertTrue(torch.equal(counts.diag(), torch.zeros(4)))
+        off = counts[~torch.eye(4, dtype=torch.bool)] / 3000
+        self.assertLess((off - 1 / 3).abs().max().item(), 0.05)
+
+    def test_rows_of_a_repeated_subject_never_lend_to_each_other(self):
+        subjects = ["a", "b", "a", "c", "b", "d"]
+        for _ in range(50):
+            donors = cross_subject_donors(subjects)
+            self.assertEqual(sorted(donors.tolist()), list(range(6)))
+            self.assert_other_subject(donors, subjects)
+
+    def test_a_majority_subject_still_gets_other_subjects_style(self):
+        # Three rows of 'a' cannot take three distinct non-'a' donors from one 'b' row, so
+        # there is no permutation; each row must still borrow from another subject.
+        subjects = ["a", "a", "b", "a"]
+        for _ in range(20):
+            donors = cross_subject_donors(subjects)
+            self.assertEqual(donors.tolist()[:2] + donors.tolist()[3:], [2, 2, 2])
+            self.assert_other_subject(donors, subjects)
+
+    def test_tensor_ids_are_compared_by_value(self):
+        # 0-d tensors hash by identity; read naively, every row would count as its own subject.
+        subjects = torch.tensor([5, 5, 7, 7])
+        for _ in range(20):
+            self.assert_other_subject(cross_subject_donors(subjects), subjects.tolist())
+
+    def test_a_batch_of_one_subject_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "two subjects"):
+            cross_subject_donors(["a", "a"])
+        with self.assertRaisesRegex(ValueError, "two subjects"):
+            cross_subject_donors(range(1))
 
 
 class CrossReconstructionLossTests(unittest.TestCase):
@@ -220,6 +272,40 @@ class CrossReconstructionModelTests(unittest.TestCase):
         outputs, cross = model(torch.cat([half_a, half_b]), n_views=2, pool_only=True, cross_recon=True)
         self.assertFalse(torch.allclose(outputs[0], cross, atol=1e-4))
 
+    def test_style_index_decodes_each_row_with_its_donors_style(self):
+        # Row i keeps its content and takes the other view's style from row index[i]: the same
+        # decode as a same-subject swap on a batch whose other view was reordered to line the
+        # donors up. Rows are independent here (per-sample norms, eval mode), so reordering one
+        # view cannot move the other view's content.
+        model = self.model().eval()
+        v0, v1 = torch.randn(4, 1, 8, 8, 8), torch.randn(4, 1, 8, 8, 8) * 3 + 1
+        index = torch.tensor([2, 0, 3, 1])
+        _, cross = model(torch.cat([v0, v1]), n_views=2, pool_only=True, cross_recon=True, cross_style_index=index)
+        _, first = model(torch.cat([v0, v1[index]]), n_views=2, pool_only=True, cross_recon=True)
+        _, second = model(torch.cat([v0[index], v1]), n_views=2, pool_only=True, cross_recon=True)
+        self.assertTrue(torch.allclose(cross[:4], first[:4], atol=1e-6))
+        self.assertTrue(torch.allclose(cross[4:], second[4:], atol=1e-6))
+
+        _, own = model(torch.cat([v0, v1]), n_views=2, pool_only=True, cross_recon=True)
+        self.assertFalse(torch.allclose(cross, own, atol=1e-4))
+        _, identity = model(
+            torch.cat([v0, v1]), n_views=2, pool_only=True, cross_recon=True, cross_style_index=torch.arange(4)
+        )
+        self.assertTrue(torch.allclose(identity, own, atol=1e-6))
+
+    def test_a_rows_own_other_view_does_not_reach_its_cross_decode(self):
+        # What borrowing a stranger's style is for: the subject's own other view must have no
+        # path into its cross decode, so it cannot smuggle that subject's anatomy in as style.
+        model = self.model().eval()
+        x = torch.cat([torch.randn(4, 1, 8, 8, 8), torch.randn(4, 1, 8, 8, 8) * 3 + 1]).requires_grad_()
+        _, cross = model(x, n_views=2, pool_only=True, cross_recon=True, cross_style_index=torch.tensor([2, 0, 3, 1]))
+        cross[0].abs().sum().backward()
+        reach = x.grad.flatten(1).abs().sum(1)
+        self.assertGreater(reach[0].item(), 0)  # row 0's content (subject 0, view 0)
+        self.assertGreater(reach[4 + 2].item(), 0)  # the donor's style (subject 2, view 1)
+        self.assertEqual(reach[4 + 0].item(), 0.0)  # subject 0's own view 1
+        self.assertEqual(reach[[1, 2, 3, 5, 7]].sum().item(), 0.0)
+
     def test_preconditions_are_rejected_with_an_explanation(self):
         model = self.model().eval()
         x = torch.randn(4, 1, 8, 8, 8)
@@ -229,6 +315,10 @@ class CrossReconstructionModelTests(unittest.TestCase):
             model(x, n_views=1, pool_only=True, cross_recon=True)
         with self.assertRaisesRegex(ValueError, "even batch"):
             model(torch.randn(3, 1, 8, 8, 8), n_views=2, pool_only=True, cross_recon=True)
+        with self.assertRaisesRegex(ValueError, "one donor row per subject"):
+            model(x, n_views=2, pool_only=True, cross_recon=True, cross_style_index=torch.tensor([1, 0, 0]))
+        with self.assertRaisesRegex(ValueError, "only applies with cross_recon"):
+            model(x, n_views=2, pool_only=True, cross_style_index=torch.tensor([1, 0]))
 
         no_style = self.model(inject_style_to_decoder=False).eval()
         with self.assertRaisesRegex(ValueError, "inject_style_to_decoder"):
@@ -282,7 +372,11 @@ class CrossReconstructionConfigTests(unittest.TestCase):
         args = parse().parse_args([])
         self.assertEqual(args.scale_cross_recon_loss, 0.0)
         self.assertEqual(args.cross_recon_start_step, 0)
+        self.assertEqual(args.cross_recon_style_source, "other_subject")
         update(parse().parse_args(["--scale-cross-recon-loss", "0"]))  # disabled: no checks
+        update(parse().parse_args(["--scale-cross-recon-loss", "0", "--batch-size", "1"]))
+        on = ["--scale-cross-recon-loss", "1", "--inject-style-to-decoder", "--batch-size", "1"]
+        update(parse().parse_args(on + ["--cross-recon-style-source", "same_subject"]))
 
         for flags, message in [
             (["--scale-cross-recon-loss", "1"], "inject-style-to-decoder"),
@@ -294,6 +388,7 @@ class CrossReconstructionConfigTests(unittest.TestCase):
                 ["--scale-cross-recon-loss", "1", "--inject-style-to-decoder", "--contrastive-only"],
                 "contrastive-only",
             ),
+            (on, "batch-size >= 2"),
             (
                 [
                     "--scale-cross-recon-loss",
@@ -320,7 +415,7 @@ class CrossReconstructionTrainStepTests(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(5)
 
-    def train_step(self):
+    def train_step(self, **overrides):
         source = ROOT / "training/main_multimodal.py"
         tree = ast.parse(source.read_text())
         function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "train_step")
@@ -332,8 +427,10 @@ class CrossReconstructionTrainStepTests(unittest.TestCase):
             clip_grad_norm_=torch.nn.utils.clip_grad_norm_,
             logger=logging.getLogger(__name__),
             cross_reconstruction_loss=cross_reconstruction_loss,
+            cross_subject_donors=cross_subject_donors,
             NAN_SKIPPED_STEPS=0,
         )
+        namespace.update(overrides)
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
         return namespace["train_step"]
 
@@ -513,6 +610,87 @@ class CrossReconstructionTrainStepTests(unittest.TestCase):
             force_compute_recon=False,
         )
         self.assertNotIn("CrossRecon/mae", result[-1])
+
+    def test_other_subject_donors_are_drawn_from_batch_subjects_and_reach_the_decode(self):
+        calls, chosen = [], {}
+
+        def donors(subjects):
+            calls.append(list(subjects))
+            return chosen["index"]
+
+        train_step = self.train_step(cross_subject_donors=donors)
+        parse, update = load_config()
+        args = update(
+            parse().parse_args(
+                [
+                    "--dataset-name",
+                    "synthetic",
+                    "--inject-style-to-decoder",
+                    "--batch-size",
+                    "4",
+                    "--scale-contrastive-loss",
+                    "0",
+                    "--scale-cross-recon-loss",
+                    "1",
+                ]
+            )
+        )
+        model = self.Model(
+            hidden_channels=8,
+            res_channels=4,
+            nb_res_layers=1,
+            nb_levels=1,
+            embed_dim=8,
+            nb_entries=8,
+            scaling_rates=[2],
+            use_checkpoint=False,
+            content_size=6,
+            style_size=2,
+            content_style_levels=[0],
+            mask_mode="fixed",
+            inject_style_to_decoder=True,
+            style_injection_mode="input",
+            norm_type="layer",
+            decoder_norm_type="group",
+        ).eval()
+        subjects = ["s0", "s1", "s0", "s2"]
+        data = {"image": [torch.randn(4, 1, 8, 8, 8), torch.randn(4, 1, 8, 8, 8) * 3 + 1], "subject": subjects}
+
+        def cross_mae():
+            return train_step(
+                data,
+                [model],
+                [],
+                lambda h, *a, **kw: h.sum() * 0,
+                None,
+                list(model.parameters()),
+                args,
+                recon_loss_fn=lambda out, target: (out["reconstruction"][0] - target).square().mean(),
+                force_compute_recon=True,
+            )[-1]["CrossRecon/mae"]
+
+        chosen["index"] = torch.arange(4)
+        identity = cross_mae()
+        chosen["index"] = torch.tensor([1, 2, 3, 0])
+        shifted = cross_mae()
+        self.assertEqual(calls, [subjects, subjects])
+
+        args.cross_recon_style_source = "same_subject"
+        own = cross_mae()
+        self.assertEqual(len(calls), 2)
+        self.assertAlmostEqual(identity, own, places=6)
+        self.assertNotAlmostEqual(shifted, own, places=4)
+
+        # No IDs in the batch (synthetic): every row is its own subject.
+        args.cross_recon_style_source = "other_subject"
+        del data["subject"]
+        cross_mae()
+        self.assertEqual(calls[-1], [0, 1, 2, 3])
+
+        # settings.json from before the flag: those runs were trained on the same-subject swap.
+        del args.cross_recon_style_source
+        cross_mae()
+        self.assertEqual(len(calls), 3)
 
 
 if __name__ == "__main__":

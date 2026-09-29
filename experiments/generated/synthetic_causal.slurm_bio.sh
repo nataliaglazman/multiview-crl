@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-28T08:13:56Z
-# Git SHA: 7e027c5
+# Generated at: 2026-09-29T17:22:24Z
+# Git SHA: c77154c
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-causal-22-4-style-cont-100
+#SBATCH --job-name=synthetic-causal-12-4-dropout-no-style
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-causal-22-4-style-cont-100-%j.err
+#SBATCH --error=synthetic-causal-12-4-dropout-no-style-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -73,7 +73,7 @@ fi
     --checkpoint-steps 1000 \
     --content-dim 128 \
     --content-ratios 0.95 \
-    --content-size 22 \
+    --content-size 12 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
     --contrastive-proj-dim 0 \
@@ -86,6 +86,7 @@ fi
     --deterministic \
     --eval-dci \
     --grad-clip-norm 100 \
+    --iid-probe-every 2000 \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --log-steps 50 \
@@ -107,8 +108,8 @@ fi
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 100 \
     --scale-cross-recon-loss 0.0 \
-    --scale-recon-loss 16 \
-    --scale-style-contrastive-loss 100 \
+    --scale-recon-loss 10 \
+    --scale-style-contrastive-loss 0 \
     --scale-style-hsic-loss 0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
@@ -118,10 +119,10 @@ fi
     --single-count-commitment \
     --style-alignment-var-weight 1.0 \
     --style-contrastive-mode within_modality \
+    --style-dropout-prob 0.2 \
     --style-independence-var-weight 1.0 \
     --style-injection-mode input \
     --style-spatial-size 1 \
-    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-clean-content \
@@ -134,15 +135,16 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-causal-22-4-style-cont-100 \
+    --model-id synthetic-causal-12-4-dropout-no-style \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
+    --vicregl-no-projectors \
     --vq-commitment-weight 0.25 \
-    --vqvae-embed-dim 24 \
-    --vqvae-hidden-channels 24 \
+    --vqvae-embed-dim 16 \
+    --vqvae-hidden-channels 16 \
     --vqvae-nb-entries 256 \
     --vqvae-nb-levels 1 \
     --vqvae-nb-res-layers 2 \

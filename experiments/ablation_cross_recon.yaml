@@ -5,6 +5,10 @@
 # content/style pair, so a content code that quietly encodes its own modality costs
 # nothing; under the swap it costs the full between-modality contrast difference.
 #
+# The style comes from a DIFFERENT subject in the batch (cross_recon_style_source:
+# other_subject, the default since 29 Sep 2026), so it cannot smuggle the subject's own
+# anatomy to the decoder. Runs before that date used same_subject; set it to compare.
+#
 # The control for this run is NOT ablation_baseline.yaml — that one has no style path at
 # all. It is this file with `scale_cross_recon_loss: 0.0`, which is baseline + style
 # injection, so the only thing that differs is the cross term.

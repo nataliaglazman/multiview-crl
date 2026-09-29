@@ -61,6 +61,7 @@ from training.losses import (
     content_modality_adv_loss,
     content_patch_modality_adv_loss,
     cross_reconstruction_loss,
+    cross_subject_donors,
     infonce_loss,
     moco_loss,
     patch_infonce_loss,
@@ -268,6 +269,15 @@ def train_step(
         )
         if _cross_active:
             _extra_kwargs["cross_recon"] = True
+            # Runs from before the flag existed were trained on the same-subject swap, so a
+            # settings.json without it (the gradient audit reads those) keeps reproducing that.
+            if getattr(args, "cross_recon_style_source", "same_subject") == "other_subject":
+                # ADNI rows carry a subject ID (one subject can fill several rows); synthetic
+                # rows are distinct subjects by construction.
+                _subjects = data.get("subject")
+                if _subjects is None:
+                    _subjects = range(samples[0].shape[0])
+                _extra_kwargs["cross_style_index"] = cross_subject_donors(_subjects).to(device)
 
         _forward = vqvae_model(
             images,
