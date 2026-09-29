@@ -185,9 +185,20 @@ class StylePairDatasetTests(unittest.TestCase):
             torch.testing.assert_close(a, b, rtol=0, atol=0)
 
     def test_noise_changes_without_changing_bias_field(self):
-        inner = Synthetic3DDisentanglementDataset(num_samples=2, res=16, clean_content=True, mode="pseudo_mri")
+        inner = Synthetic3DDisentanglementDataset(
+            num_samples=2, res=16, n_content=9, clean_content=True, mode="pseudo_mri"
+        )
         draw = inner._draw_pseudo_mri(inner.sample_seed_for(0))
-        args = [draw[k] for k in ("z_content", "z_deformation", "z_fissure", "z_style_v1", "z_style_v2")]
+        args = [
+            draw[k]
+            for k in (
+                "z_content",
+                "z_deformation",
+                "z_fissure",
+                "z_style_v1",
+                "z_style_v2",
+            )
+        ]
         noise_fields = []
         original = inner.renderer._seeded_noise
 
@@ -234,7 +245,10 @@ class StyleAlignmentTrainingTests(unittest.TestCase):
             within_modality_style_loss=within_modality_style_loss,
             NAN_SKIPPED_STEPS=0,
         )
-        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), ns)
+        exec(
+            compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"),
+            ns,
+        )
         cls.train_step = staticmethod(ns["train_step"])
 
     def test_real_training_weight_gradients_and_encoder_only_pair(self):
@@ -262,7 +276,10 @@ class StyleAlignmentTrainingTests(unittest.TestCase):
             ).eval()
             data = {
                 "image": [torch.randn(4, 1, 8, 8, 8), torch.randn(4, 1, 8, 8, 8)],
-                "style_pair_image": [torch.randn(4, 1, 8, 8, 8), torch.randn(4, 1, 8, 8, 8)],
+                "style_pair_image": [
+                    torch.randn(4, 1, 8, 8, 8),
+                    torch.randn(4, 1, 8, 8, 8),
+                ],
             }  # Deliberately no gt_latents: the loss is label-free.
 
             def run(optimizer=None, reconstruct=True):
@@ -284,11 +301,20 @@ class StyleAlignmentTrainingTests(unittest.TestCase):
             args.scale_style_contrastive_loss = 1.7
             with patch.object(model, "forward", wraps=model.forward) as forward:
                 result = run()
-                self.assertEqual([c.kwargs["return_recon"] for c in forward.call_args_list], [True, False])
+                self.assertEqual(
+                    [c.kwargs["return_recon"] for c in forward.call_args_list],
+                    [True, False],
+                )
             diag = result[-1]
-            self.assertAlmostEqual(result[0] - baseline[0], diag["Style/within_modality_weighted"], places=5)
             self.assertAlmostEqual(
-                diag["Style/within_modality_weighted"], 1.7 * diag["Style/within_modality_L0"], places=5
+                result[0] - baseline[0],
+                diag["Style/within_modality_weighted"],
+                places=5,
+            )
+            self.assertAlmostEqual(
+                diag["Style/within_modality_weighted"],
+                1.7 * diag["Style/within_modality_L0"],
+                places=5,
             )
             self.assertNotIn("Style/infonce_L0", diag)
             self.assertNotIn("Style/xview_hsic_L0", diag)
@@ -324,6 +350,61 @@ class StyleAlignmentTrainingTests(unittest.TestCase):
             config("--scale-style-contrastive-loss", "-1")
         # Selecting an inactive mode imposes no new requirements.
         update(parse().parse_args(["--style-contrastive-mode", "within_modality"]))
+
+    def test_generated_pairs_with_latent_masks_train_without_factor_targets(self):
+        ds = load_dataset()(
+            spatial_size=(16, 16, 16),
+            synthetic_num_samples=4,
+            synthetic_normalize="fixed_reference",
+            synthetic_clean_content=True,
+            synthetic_style_alignment_pairs=True,
+            synthetic_causal=True,
+            synthetic_causal_graph="random",
+            synthetic_causal_edge_prob=0.4,
+        )
+        batch = next(iter(torch.utils.data.DataLoader(ds, batch_size=4)))
+        del batch["gt_latents"]
+        model = self.Model(
+            hidden_channels=8,
+            res_channels=4,
+            nb_res_layers=1,
+            nb_levels=1,
+            embed_dim=8,
+            nb_entries=8,
+            scaling_rates=[2],
+            use_checkpoint=False,
+            content_size=6,
+            style_size=2,
+            content_style_levels=[0],
+            mask_mode="fixed",
+            inject_style_to_decoder=True,
+            norm_type="layer",
+            style_spatial_size=1,
+            latent_mask=True,
+            quantize_style=True,
+        ).train()
+        args = config("--scale-style-contrastive-loss", "0.1", "--scale-contrastive-loss", "0")
+        quantizer_calls = []
+        handles = [
+            layer.register_forward_pre_hook(lambda m, a: quantizer_calls.append(m))
+            for layer in list(model.codebooks) + list(model.style_codebooks.values())
+        ]
+        result = self.train_step(
+            batch,
+            [model],
+            [],
+            lambda h, *a, **kw: h.sum() * 0,
+            torch.optim.SGD(model.parameters(), lr=0.001),
+            list(model.parameters()),
+            args,
+            recon_loss_fn=lambda out, target: (out["reconstruction"][0] - target).square().mean(),
+            force_compute_recon=True,
+        )
+        for handle in handles:
+            handle.remove()
+        self.assertEqual(len(quantizer_calls), 2)  # One content + one style; none for the paired forward.
+        self.assertGreater(result[-1]["Style/within_modality_weighted"], 0)
+        self.assertTrue(all(torch.isfinite(value).all() for value in model.state_dict().values()))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `training/main_multimodal.py` — primary training entrypoint (VQ-VAE-2, InfoNCE/MoCo/BT/VICReg, Gumbel content mask, optional style quantization). ~2300 lines.
 - `training/main_numerical.py` — small numerical theory-validation experiments (separate, simpler).
 - `training/losses.py` — contrastive + recon losses (InfoNCE, MoCo, Barlow Twins, VICReg, patch-InfoNCE, LPIPS-based `BaselineLoss`, `cross_reconstruction_loss` for the style-swapped decode).
+- `training/bt_objective.py` — builds the Barlow Twins plain/patch/GAP loss callables (arm weights, GAP overrides, per-arm correlation EMA) for training AND the gradient audit, so the two cannot drift. Change BT arm wiring here, not in `main_multimodal.py`.
 - `models/vqvae.py` — hierarchical 3D VQ-VAE-2 (content/style split, Gumbel mask, style codebooks). Primary model.
 - `models/encoders.py` — MLP helpers for numerical experiments.
 - `models/discriminator.py` — optional 3D PatchGAN discriminator (behind `--use-gan`).
@@ -17,6 +18,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `eval/evaluation.py` — `val_step`, `get_data`, `eval_step` (linear/kernel/MLP probes, R²/accuracy).
 - `eval/cross_reconstruction.py`, `eval/dci.py` — disentanglement metrics.
 - `eval/run_dci_compare.py` — full cross-model protocol (R²/MCC/DCI, nulls, `--floor`, CSV). The source of truth for the metric rules; other eval scripts import them from here rather than re-deriving.
+- `eval/gradient_attribution.py` (CLI) + `eval/loss_gradient_audit.py` — per-term encoder gradients of the REAL training objective at a checkpoint: runs `train_step` with no optimizer and a `loss_observer`, parity-checks every batch, frozen EMA reference, each term's first-order effect on i.i.d. decoding of a factor (`--decode-factors`, default ventricle_size), optional finite steps on decoding/block-MCC vs matched random. See `eval/GRADIENT_ATTRIBUTION.md`.
 - `eval/identifiability_report.py` — one-page readable R²/MCC/DCI report for a single run vs its untrained floor. Per-factor R² at each factor's assigned pooling, plus an R² ladder showing every factor at every rung (gap/stats/patch). Thin layer over the above; `--self-test` runs torch-free.
 - `eval/export_vq_bundle.py` — VQ features → the shared bundle `.npz` (the format `dinov3_embed_synthetic` writes), so VQ and DINO can be scored by one function.
 - `eval/compare_bundles.py` — scores N bundles through one protocol into one table; verifies row identity, matches probe width, keeps each floor with its own bundle. `--with-graph` adds PC causal discovery per representation scored against the true SCM adjacency, with a ground-truth ceiling row; `--graph-repeats` puts a paired resampling error bar on it.
@@ -62,6 +64,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - Imports are first-party package style (`import training.losses`, `import models.vqvae`), not relative.
 - Arg parsing is centralized in `utils/config.py`; add new flags there.
 - When touching `VQVAE.forward` tuple, update: training loop, `visualisation.py`, eval notebook.
+- Any new term added to `total_loss` in `train_step` must also go through `observe(prefix, loss, weight)` with the weight training applies; otherwise the gradient audit's parity check fails.
 - Don't add docstrings/comments to code you aren't changing.
 
 ## Commands

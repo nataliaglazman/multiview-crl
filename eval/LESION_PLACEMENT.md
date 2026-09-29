@@ -79,8 +79,11 @@ clearance against a 3.15-voxel radius). At res 64 the voxelized lesion jumps fro
 to 93 voxels at radius 0.0952, so no radius in between keeps the size. Out-of-range
 position values stay a plain `ValueError` and are never redrawn: that is a
 configuration error. Latents passed explicitly to `render_pseudo_mri` (for example
-interventions) are not redrawn either; they raise as before. Field-lesion mode is
-unchanged; combining it with `wm_interior` is rejected because this option places spheres.
+interventions) are not redrawn either; they raise as before. The marginal-shuffle
+evaluation (`identifiability_report --causal shuffled`) instead repairs rows without
+room by within-column swaps that keep its marginals exact; see `CAUSAL_EVALUATION.md`.
+Field-lesion mode is unchanged; combining it with `wm_interior` is rejected because
+this option places spheres.
 
 For the supplied dense-run distribution (seed 42, clean IID content, resolution
 64, radius 0.1, default ventricles), all **2,000 training + 400 validation + 400

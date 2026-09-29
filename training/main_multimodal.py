@@ -58,7 +58,6 @@ from eval.evaluation import eval_step, get_data
 from training.losses import (
     BaselineLoss,
     JukeboxPerceptualLoss,
-    barlow_twins_loss,
     content_modality_adv_loss,
     content_patch_modality_adv_loss,
     cross_reconstruction_loss,
@@ -66,7 +65,6 @@ from training.losses import (
     moco_loss,
     patch_infonce_loss,
     split_infonce_loss,
-    stats_pool,
     style_infonce_loss,
     style_modality_ce_loss,
     vicreg_loss,
@@ -137,6 +135,7 @@ def train_step(
     discriminator=None,
     disc_optimizer=None,
     disc_scaler=None,
+    loss_observer=None,
 ):
     """
     Perform a single forward + (optionally) backward pass.
@@ -161,6 +160,14 @@ def train_step(
         tuple: ``(total_loss, contrastive_loss, recon_loss, vq_loss, estimated_content_indices)``
     """
     _diag = {}  # MoCo stale-queue diagnostics (populated below when applicable)
+    _observed = {}
+
+    def observe(prefix, loss, weight=1.0):
+        if loss_observer is not None:
+            for name, term in getattr(loss, "_loss_components", {"total": loss}).items():
+                key = f"{prefix}/{name}"
+                _observed[key] = _observed.get(key, 0) + weight * term
+
     _gan_recon = None
     _gan_real = None
     adv_loss_value = 0.0
@@ -377,22 +384,22 @@ def train_step(
             # checkpoint path bypasses it.
             if recon.shape[2:] != input_shape:
                 recon = F.interpolate(recon, size=input_shape, mode="trilinear", align_corners=False)
-            recon_loss = (
-                recon_loss_fn(
-                    {
-                        "reconstruction": [recon],
-                        "quantization_losses": diffs,
-                        "mask": masks,
-                        # Per-view split, so the pixel loss can report and optionally
-                        # re-weight each view instead of averaging a dead one away.
-                        "n_views": n_views,
-                        "view_balance": getattr(args, "recon_view_balance", 0.0),
-                        "single_count_commitment": getattr(args, "single_count_commitment", False),
-                    },
-                    images,
-                )
-                * args.scale_recon_loss
+            recon_loss = recon_loss_fn(
+                {
+                    "reconstruction": [recon],
+                    "quantization_losses": diffs,
+                    "mask": masks,
+                    # Per-view split, so the pixel loss can report and optionally
+                    # re-weight each view instead of averaging a dead one away.
+                    "n_views": n_views,
+                    "view_balance": getattr(args, "recon_view_balance", 0.0),
+                    "single_count_commitment": getattr(args, "single_count_commitment", False),
+                    "capture_components": loss_observer is not None,
+                },
+                images,
             )
+            observe("reconstruction", recon_loss, args.scale_recon_loss)
+            recon_loss = recon_loss * args.scale_recon_loss
             # Stash for GAN update before freeing (references keep tensors alive)
             _use_gan = discriminator is not None and step >= getattr(args, "gan_start_step", 0)
             if _use_gan:
@@ -406,6 +413,7 @@ def train_step(
                 del recon
 
         vq_loss = sum(diffs) * args.vq_commitment_weight
+        observe("commitment", vq_loss)
         del diffs
 
         total_contrastive_loss = torch.zeros(1, device=device)
@@ -441,6 +449,7 @@ def train_step(
                     _style_tensor, variance_weight=getattr(args, "style_independence_var_weight", 1.0)
                 )
                 _indep_total = _indep_total + _style_loss
+                observe(f"style/L{_style_level}", _style_loss, args.scale_style_contrastive_loss)
                 for _k, _v in _indep_diag.items():
                     _diag[f"Style/{_k}_L{_style_level}"] = _v
                 _diag[f"Style/independence_L{_style_level}"] = _style_loss.item()
@@ -457,7 +466,9 @@ def train_step(
                     _pair_style_features[_style_level],
                     n_views=n_views,
                     variance_weight=getattr(args, "style_alignment_var_weight", 1.0),
+                    capture_components=loss_observer is not None,
                 )
+                observe(f"style/L{_style_level}", _style_loss, args.scale_style_contrastive_loss)
                 _within_total = _within_total + _style_loss
                 for _k, _v in _within_diag.items():
                     _diag[f"Style/{_k}_L{_style_level}"] = _v
@@ -871,6 +882,7 @@ def train_step(
                 _style_loss = style_infonce_loss(_style_hz_v0, _style_hz_v1, tau=args.tau)
                 _diag[f"Style/infonce_L{level_idx}"] = _style_loss.item()
                 total_contrastive_loss = total_contrastive_loss + _style_loss * _style_cl_scale
+                observe(f"style/L{level_idx}", _style_loss, _style_cl_scale)
 
             # --- Auxiliary modality heads (decouple invariance from capacity) ---
             # Content path: gradient-reversal → content becomes linearly
@@ -976,6 +988,7 @@ def train_step(
             _lvl_weights = getattr(args, "contrastive_level_weights", None)
             _lvl_w = _lvl_weights[level_idx] if _lvl_weights and level_idx < len(_lvl_weights) else 1.0
             total_contrastive_loss = total_contrastive_loss + level_loss * args.scale_contrastive_loss * _lvl_w
+            observe(f"content/L{level_idx}", level_loss, args.scale_contrastive_loss * _lvl_w)
 
         # Enqueue all levels in one call after the loss loop.
         if use_moco and optimizer is not None:
@@ -1009,8 +1022,10 @@ def train_step(
         total_loss = contrastive_loss + recon_loss + vq_loss
         if _hsic_scale > 0:
             total_loss = total_loss + _hsic_scale * _hsic_loss
+            observe("hsic", _hsic_loss, _hsic_scale)
         if _cross_computed:
             total_loss = total_loss + cross_recon_loss
+            observe("cross_reconstruction", cross_recon_loss)
 
         # Generator adversarial loss: fool the discriminator into predicting
         # the reconstruction as real (hinge: -mean(D(fake))).
@@ -1032,6 +1047,11 @@ def train_step(
         # in get_data() for any run that uses channel_logits.
 
     # ------------------------------------------------------------------
+    # Diagnostic callbacks receive live tensors from this exact forward, before backward.
+    # They must not mutate model state. Ordinary training pays no component-capture cost.
+    if loss_observer is not None:
+        loss_observer(total_loss, _observed, _diag)
+
     # Backward pass
     # ------------------------------------------------------------------
     if optimizer is not None:
@@ -1459,10 +1479,6 @@ def main(args):
         _bt_gap_w = getattr(args, "bt_gap_weight", 0.0)
         # The GAP term is estimated from B rows, not B*P, so its off-diagonal has a large
         # sampling floor (~d(d-1)/B) that is pure noise. Let it carry its own lambda.
-        # One EMA state dict per TERM: the patch and GAP correlations are different matrices
-        # (folded (subject, position) rows vs subject rows) and must never share a buffer.
-        _bt_corr_ema = float(getattr(args, "bt_corr_ema", 0.0) or 0.0)
-        _bt_ema_patch, _bt_ema_gap, _bt_ema_plain = {}, {}, {}
         _bt_gap_lam = getattr(args, "bt_gap_lambda", None)
         _bt_gap_lam = _bt_lambda if _bt_gap_lam is None else _bt_gap_lam
         _bt_sim_c = getattr(args, "bt_sim_coeff", 0.0)
@@ -1482,12 +1498,7 @@ def main(args):
         # of surplus alignment pressure on patch, which nothing in BT counterweights.
         _bt_gap_sim_c = getattr(args, "bt_gap_sim_coeff", None)
         _bt_gap_sim_c = _bt_sim_c if _bt_gap_sim_c is None else _bt_gap_sim_c
-        _bt_sim_norm = getattr(args, "bt_sim_normalize", False)
-        _bt_gap_pool = getattr(args, "bt_gap_pooling", "gap")
-        _bt_whiten = getattr(args, "bt_sim_whiten", False)
-        _bt_whiten_eps = getattr(args, "bt_sim_whiten_eps", 1e-3)
         _bt_patch_w = getattr(args, "bt_patch_weight", 1.0)
-        _bt_norm = bool(getattr(args, "bt_normalize_terms", False))
         logger.info(
             f"[LOSS] Barlow Twins (λ={_bt_lambda}, patch centering={_nce_center}, "
             f"patch stat={_bt_stat}, gap weight={_bt_gap_w}, gap λ={_bt_gap_lam}, "
@@ -1526,99 +1537,9 @@ def main(args):
                 f"carries a sampling floor of ~d(d-1)/B. Prefer batch_size >= 128."
             )
 
-        def loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
-            return barlow_twins_loss(
-                z_rec_tuple,
-                estimated_content_indices=estimated_content_indices,
-                subsets=subsets,
-                soft_content_mask=soft_content_mask,
-                lambd=_bt_lambda,
-                sim_coeff=_bt_sim_c,
-                std_coeff=_bt_std_c,
-                sim_normalize=_bt_sim_norm,
-                sim_whiten=_bt_whiten,
-                sim_whiten_eps=_bt_whiten_eps,
-                corr_ema=_bt_ema_plain,
-                corr_ema_decay=_bt_corr_ema,
-                normalize_terms=_bt_norm,
-            )
+        from training.bt_objective import make_barlow_loss_functions
 
-        def patch_loss_func(z_rec_tuple, estimated_content_indices, subsets, soft_content_mask=None):
-            _l = barlow_twins_loss(
-                z_rec_tuple,
-                estimated_content_indices=estimated_content_indices,
-                subsets=subsets,
-                soft_content_mask=soft_content_mask,
-                lambd=_bt_lambda,
-                center_mode=_nce_center,
-                patch_stat=_bt_stat,
-                sim_coeff=_bt_sim_c,
-                std_coeff=_bt_std_c,
-                sim_normalize=_bt_sim_norm,
-                corr_ema=_bt_ema_patch,
-                corr_ema_decay=_bt_corr_ema,
-                normalize_terms=_bt_norm,
-            )
-            # Optional GAP-pooled companion term. The patch fold's cross-covariance is
-            # Cov_subject + Cov_interaction and the interaction dominates on registered
-            # volumes, so the patch off-diagonal barely constrains subject identity.
-            # Averaging over positions recovers the subject term exactly (the interaction
-            # integrates to zero there), so this is the term whose rows are SUBJECTS.
-            if _bt_gap_w > 0 and z_rec_tuple.ndim == 4:
-                # Both poolings give ONE ROW PER SUBJECT, which is the whole point of this
-                # companion. They differ in what they keep: the uniform mean is the worst
-                # summary for a localised factor (it contributes ~1/P of a channel's mean),
-                # while stats also carries that channel's spread and extremes. Measured here:
-                # ventricle_size content R^2 0.097 at gap, 0.406 at stats.
-                if _bt_gap_pool == "stats":
-                    _gz, _gidx, _gmask = stats_pool(z_rec_tuple, estimated_content_indices, soft_content_mask)
-                else:
-                    _gz, _gidx, _gmask = z_rec_tuple.mean(-1), estimated_content_indices, soft_content_mask
-                _lg = barlow_twins_loss(
-                    _gz,  # (n_views, B, C) or (n_views, B, 4C) — one row per subject either way
-                    estimated_content_indices=_gidx,
-                    subsets=subsets,
-                    soft_content_mask=_gmask,
-                    lambd=_bt_gap_lam,
-                    sim_coeff=_bt_gap_sim_c,
-                    std_coeff=_bt_gap_std_c,
-                    sim_normalize=_bt_sim_norm,
-                    # Whitening is applied ONLY here and on the gap-only path. The patch call
-                    # above folds (subject, position) into the rows and is 768 wide at this
-                    # batch size, where a d x d covariance is not estimable -- and its rows are
-                    # not the units being aligned anyway.
-                    sim_whiten=_bt_whiten,
-                    sim_whiten_eps=_bt_whiten_eps,
-                    corr_ema=_bt_ema_gap,
-                    corr_ema_decay=_bt_corr_ema,
-                    normalize_terms=_bt_norm,
-                )
-                # bt_patch_weight scales the PATCH term only. Setting it to 0 (with
-                # patch_contrastive still on, so the forward hands us the patch-shaped
-                # tensor the .mean(-1) above needs) gives a GAP-ONLY objective.
-                #
-                # Worth having as one config line because every patch term is compromised by
-                # the same 200:1 dominance of the within-subject interaction: on_diag and
-                # sim are diluted by it, off_diag barely constrains subject identity (the
-                # reason this GAP companion exists at all), and the variance hinge is
-                # outright BLIND to subject collapse — its std(dim=0) runs over folded
-                # (subject, position) rows, so position variance alone satisfies it. Every
-                # GAP term instead acts on (1/P)sum_p z = s, the subject term exactly.
-                _total = _bt_patch_w * _l + _bt_gap_w * _lg
-                # Arithmetic drops the attribute; carry the patch diagnostics and add the
-                # GAP ones under gap_* so both show up as Contrastive/*_L{level}.
-                _d = dict(getattr(_l, "_contrastive_diag", None) or {})
-                for _k, _v in (getattr(_lg, "_contrastive_diag", None) or {}).items():
-                    _d[f"gap_{_k}"] = _v
-                _total._contrastive_diag = _d
-                return _total
-            if _bt_patch_w == 1.0:
-                return _l
-            # Re-attach: the multiply produces a new tensor and drops the attribute, which
-            # would silently blank every Contrastive/* curve for this level.
-            _scaled = _bt_patch_w * _l
-            _scaled._contrastive_diag = dict(getattr(_l, "_contrastive_diag", None) or {})
-            return _scaled
+        loss_func, patch_loss_func = make_barlow_loss_functions(args)
 
     elif _contrastive_type == "vicregl":
         logger.info("[LOSS] Registered local/global VICReg; local statistics across subjects per position; no BT EMA")

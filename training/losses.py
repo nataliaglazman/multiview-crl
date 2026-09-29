@@ -1126,6 +1126,7 @@ def barlow_twins_loss(
     corr_ema=None,
     corr_ema_decay=0.0,
     normalize_terms=False,
+    capture_components=False,
     **_kwargs,
 ):
     """Barlow Twins loss over content channels of paired views.
@@ -1217,6 +1218,7 @@ def barlow_twins_loss(
     # precisely the reason the correlation term is. The correlation terms still use the
     # centered tensor: removing the shared anatomy at each position is what makes their
     # diagonal a statement about subjects rather than about anatomy.
+    components, correlations = {}, {}
     hz_raw = hz
     if hz.ndim == 4:
         hz = _center_patch_features(hz, center_mode)
@@ -1417,6 +1419,11 @@ def barlow_twins_loss(
                 # raising when the EMA is enabled. `off_diag_inst` below is the un-EMA'd value,
                 # logged so runs stay comparable with every pre-EMA number.
                 c_inst = c
+                if capture_components:
+                    correlations[(si, i, j)] = {
+                        "c": c.detach().clone(),
+                        "sig": (tuple(c.shape), int(z_i.shape[-1])),
+                    }
                 if corr_ema is not None and corr_ema_decay > 0:
                     _key = (si, i, j)
                     # The Gumbel mask is learned, so the ACTIVE CHANNEL SET can change between
@@ -1460,6 +1467,17 @@ def barlow_twins_loss(
                     off_diag = off_diag / max(_dd * (_dd - 1), 1)
                 loss = on_diag + lambd * off_diag + sim_coeff * sim_loss + std_coeff * var_loss
                 total_loss = total_loss + loss
+                if capture_components:
+                    # A zero-coefficient term is not in the objective; recording it would only
+                    # add an all-zero row to every attribution table.
+                    for name, weight, term in (
+                        ("on_diag", 1.0, on_diag),
+                        ("off_diag", lambd, off_diag),
+                        ("sim", sim_coeff, sim_loss),
+                        ("variance", std_coeff, var_loss),
+                    ):
+                        if weight:
+                            components[name] = components.get(name, 0) + weight * term
 
                 with torch.no_grad():
                     sub_diags.append(
@@ -1489,6 +1507,9 @@ def barlow_twins_loss(
 
     if sub_diags:
         total_loss._contrastive_diag = _merge_diags(sub_diags)
+    if capture_components:
+        total_loss._loss_components = components
+        total_loss._bt_correlations = correlations
     return total_loss
 
 
@@ -1939,13 +1960,16 @@ class BaselineLoss(torch.nn.Module):
             y = y * mask
             y_percep = y_percep * mask
 
-        loss = self._calculate_pixel_loss(
+        pixel = self._calculate_pixel_loss(
             x,
             y,
             mask=mask,
             n_views=int(network_output.get("n_views", 1) or 1),
             view_balance=float(network_output.get("view_balance", 0.0) or 0.0),
-        ) + self._calculate_perceptual_loss(x, y_percep)
+        )
+        perceptual = self._calculate_perceptual_loss(x, y_percep)
+        loss = pixel + perceptual
+        components = {"pixel": pixel, "perceptual": perceptual}
 
         # The VQ commitment cost is added HERE and again in main_multimodal as Loss/VQ
         # (`vq_loss = sum(diffs) * args.vq_commitment_weight`), so the effective weight has
@@ -1967,7 +1991,10 @@ class BaselineLoss(torch.nn.Module):
 
             if not _single:
                 loss = loss + q_loss
+                components[f"commitment_L{idx}"] = q_loss
 
+        if network_output.get("capture_components", False):
+            loss._loss_components = components
         return loss
 
     def _masked_mae(self, x, y, mask):
