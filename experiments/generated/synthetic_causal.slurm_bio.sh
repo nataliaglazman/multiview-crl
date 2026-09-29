@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-29T12:28:32Z
-# Git SHA: 98b2853
+# Generated at: 2026-09-29T17:22:24Z
+# Git SHA: c77154c
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-causal-12-4-cross-recon-1
+#SBATCH --job-name=synthetic-causal-12-4-dropout-no-style
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-causal-12-4-cross-recon-1-%j.err
+#SBATCH --error=synthetic-causal-12-4-dropout-no-style-%j.err
 #SBATCH --partition=biomed_a100_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -107,9 +107,9 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 100 \
-    --scale-cross-recon-loss 1 \
+    --scale-cross-recon-loss 0.0 \
     --scale-recon-loss 10 \
-    --scale-style-contrastive-loss 10 \
+    --scale-style-contrastive-loss 0 \
     --scale-style-hsic-loss 0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
@@ -119,6 +119,7 @@ fi
     --single-count-commitment \
     --style-alignment-var-weight 1.0 \
     --style-contrastive-mode within_modality \
+    --style-dropout-prob 0.2 \
     --style-independence-var-weight 1.0 \
     --style-injection-mode input \
     --style-spatial-size 1 \
@@ -134,7 +135,7 @@ fi
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-causal-12-4-cross-recon-1 \
+    --model-id synthetic-causal-12-4-dropout-no-style \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \

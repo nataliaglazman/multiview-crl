@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-causal-12-4-cross-recon-1
+tag: synthetic-causal-12-4-dropout-no-style
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -12,8 +12,8 @@ bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_patch_weight: 1
 single_count_commitment: true
 vicregl_no_projectors: true
-cross_recon_start_step: 0
-scale_cross_recon_loss: 1
+# cross_recon_start_step: 0
+# scale_cross_recon_loss: 1
 
 scale_contrastive_loss: 100      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 grad_clip_norm: 100
@@ -25,10 +25,10 @@ synthetic_lesion_radius: 0.1
 
 # # --- leak (b): make style non-degenerate so recon stops using content ---
 scale_style_hsic_loss: 0
-scale_style_contrastive_loss: 10
+scale_style_contrastive_loss: 0
 style_spatial_size: 1
 style_contrastive_mode: within_modality
-# style_dropout_prob: 0.2
+style_dropout_prob: 0.2
 # style_nb_entries: 
 # quantize_style: false
 
