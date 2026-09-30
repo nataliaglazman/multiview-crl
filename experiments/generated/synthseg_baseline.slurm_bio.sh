@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-09-29T18:21:55Z
-# Git SHA: a29bdbc
+# Generated at: 2026-09-30T14:41:01Z
+# Git SHA: 1e4cccd
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthseg-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -69,6 +69,7 @@ fi
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
     --cross-recon-start-step 0 \
+    --cross-recon-style-source other_subject \
     --cross-view-negs-only \
     --dataroot /data/natalia/ADNI_synthseg \
     --dataset-name ADNI_stripped_masks \
