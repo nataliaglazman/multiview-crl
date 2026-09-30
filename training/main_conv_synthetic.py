@@ -17,9 +17,11 @@ Example:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import random
+import time
 
 import numpy as np
 import torch
@@ -29,6 +31,7 @@ import eval.dci as dci
 import training.losses as losses
 from data.datasets import SyntheticBrainDataset
 from models.multiview_encoder import MultiviewConvEncoder
+from utils.encoder_runtime import configure_encoder_runtime
 
 
 def parse_args(argv=None):
@@ -95,6 +98,17 @@ def parse_args(argv=None):
     p.add_argument("--grad-clip", type=float, default=2.0, help="Max grad 2-norm (paper uses 2); 0 disables")
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--data-seed", type=int, default=None, help="Generator seed; defaults to --seed")
+    p.add_argument("--model-seed", type=int, default=None, help="Initialization seed; defaults to --seed")
+    p.add_argument("--loader-seed", type=int, default=None, help="Independent shuffle seed; defaults to --seed + 10000")
+    p.add_argument("--require-new-run", action="store_true", help="Refuse to overwrite an existing run directory")
+    p.add_argument("--deterministic", action="store_true", help="Require deterministic PyTorch operations")
+    p.add_argument(
+        "--cpu-threads", type=int, default=None, help="Pin CPU rendering/encoding threads; restored by evaluation"
+    )
+    p.add_argument(
+        "--hash-training-inputs", action="store_true", help="Record a streaming hash of all actual training images"
+    )
     p.add_argument("--no-cuda", action="store_true")
 
     # Evaluation pooling — GAP is the paper-faithful default; patch probes whether
@@ -184,6 +198,15 @@ def parse_args(argv=None):
         help="Nonlinearity in causal mechanisms.",
     )
     args = p.parse_args(argv)
+    for name, default in (("data_seed", args.seed), ("model_seed", args.seed), ("loader_seed", args.seed + 10000)):
+        if getattr(args, name) is None:
+            setattr(args, name, default)
+    if args.train_steps < 1 or args.eval_every < 1 or args.batch_size < 2:
+        p.error("Need positive train/evaluation steps and at least two subjects per batch")
+    if args.num_train_samples < args.batch_size:
+        p.error("--num-train-samples must allow at least one full training batch")
+    if args.cpu_threads is not None and args.cpu_threads < 1:
+        p.error("--cpu-threads must be positive")
     if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if args.encoder_architecture == "resnet18":
@@ -218,7 +241,7 @@ def make_dataset(args, mode, num_samples):
         spatial_size=(args.res, args.res, args.res),
         cache=args.cache,
         synthetic_mode=args.synthetic_mode,
-        synthetic_seed=args.seed,
+        synthetic_seed=getattr(args, "data_seed", None) if getattr(args, "data_seed", None) is not None else args.seed,
         synthetic_num_samples=num_samples,
         synthetic_n_content=args.n_content,
         synthetic_n_style=args.n_style,
@@ -229,8 +252,8 @@ def make_dataset(args, mode, num_samples):
         synthetic_hierarchical_content=args.synthetic_hierarchical_content,
         synthetic_normalize=args.synthetic_normalize,
         synthetic_causal=args.synthetic_causal,
-        synthetic_causal_graph=args.synthetic_causal_graph,
-        synthetic_causal_edge_prob=args.synthetic_causal_edge_prob,
+        synthetic_causal_graph=getattr(args, "synthetic_causal_graph", "chain"),
+        synthetic_causal_edge_prob=getattr(args, "synthetic_causal_edge_prob", 0.5),
         synthetic_causal_noise_scale=args.synthetic_causal_noise_scale,
         synthetic_causal_nonlinearity=args.synthetic_causal_nonlinearity,
         synthetic_clean_content=args.synthetic_clean_content,
@@ -411,10 +434,11 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
 def main():
     args = parse_args()
     save_dir = os.path.join(args.out_dir, args.model_id)
-    os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=not args.require_new_run)
     with open(os.path.join(save_dir, "settings.json"), "w") as fp:
         json.dump(vars(args), fp, indent=2)
 
+    configure_encoder_runtime(vars(args))
     device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
     print(f"device: {device}", flush=True)
     for k, v in vars(args).items():
@@ -427,9 +451,17 @@ def main():
     train_dataset = make_dataset(args, "train", args.num_train_samples)
     val_dataset = make_dataset(args, "val", args.num_val_samples)
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        drop_last=True,
+        generator=torch.Generator().manual_seed(args.loader_seed),
     )
 
+    # Dataset construction resets the global RNG. Seed initialization explicitly,
+    # while the loader's private generator isolates batch order from architecture.
+    torch.manual_seed(args.model_seed)
     model = MultiviewConvEncoder(
         in_channels=1,
         hidden_channels=args.hidden_channels,
@@ -461,6 +493,39 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     sim_metric = torch.nn.CosineSimilarity(dim=-1)
     criterion = torch.nn.CrossEntropyLoss()
+    torch.save(model.state_dict(), os.path.join(save_dir, "model_init.pt"))
+    batch_order = hashlib.sha256()
+    input_images = hashlib.sha256() if args.hash_training_inputs else None
+    started = time.perf_counter()
+
+    def save_progress(step, status):
+        payload = {
+            "status": status,
+            "step": step,
+            "subjects_seen_per_view": step * args.batch_size,
+            "batch_order_sha256": batch_order.hexdigest(),
+            "training_input_sha256": input_images.hexdigest() if input_images is not None else None,
+            "data_seed": args.data_seed,
+            "model_seed": args.model_seed,
+            "loader_seed": args.loader_seed,
+            "parameter_count": sum(p.numel() for p in model.parameters()),
+            "backbone_stride": 32 if args.encoder_architecture == "resnet18" else args.downscale_factor,
+            "readout": "mlp" if args.encoder_architecture == "resnet18" else "linear",
+            "normalization": "batch" if args.encoder_architecture == "resnet18" else "group",
+            "optimizer": "AdamW",
+            "optimizer_defaults": optimizer.defaults,
+            "elapsed_seconds_including_evaluation": time.perf_counter() - started,
+            "torch_version": torch.__version__,
+            "numpy_version": np.__version__,
+            "cpu_threads": torch.get_num_threads(),
+            "device": str(device),
+        }
+        path = os.path.join(save_dir, "training_progress.json")
+        with open(path + ".tmp", "w") as fp:
+            json.dump(payload, fp, indent=2)
+        os.replace(path + ".tmp", path)
+
+    save_progress(0, "running")
 
     try:
         from torch.utils.tensorboard import SummaryWriter
@@ -489,7 +554,11 @@ def main():
         for batch in train_loader:
             if step >= args.train_steps:
                 break
-            x = torch.cat(batch["image"], dim=0).to(device)  # (2B, 1, res, res, res)
+            batch_order.update(batch["index"].cpu().numpy().astype("<i8").tobytes())
+            images = torch.cat(batch["image"], dim=0)
+            if input_images is not None:
+                input_images.update(images.contiguous().numpy().tobytes())
+            x = images.to(device)  # (2B, 1, res, res, res)
 
             _, _, feats, _, _, _, _, _ = model(x, pool_only=True, n_views=2)
             pooled = feats[0]  # (2B, latent_dim)
@@ -522,6 +591,7 @@ def main():
                 model.eval()
                 flat, _ = evaluate(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
                 torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
+                save_progress(step, "running")
 
                 if args.best_metric != "none":
                     value = best_metric_value(flat, floor_flat, args.best_metric)
@@ -547,6 +617,7 @@ def main():
                 model.train()
 
     torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
+    save_progress(step, "complete")
     if best["step"] is not None:
         print(
             f"best {args.best_metric} {best['value']:+.4f} at step {best['step']} -> model_best.pt "

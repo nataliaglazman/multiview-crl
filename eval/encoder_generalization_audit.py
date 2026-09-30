@@ -42,6 +42,7 @@ def parse_args(argv=None):
     p.add_argument("--retrieval-draws", type=int, default=8)
     p.add_argument("--bn-samples", type=int, default=512, help="Maximum original training subjects for calibration")
     p.add_argument("--bn-batch-size", type=int, help="Calibration subjects per view; default: training batch size")
+    p.add_argument("--skip-bn-recalibration", action="store_true", help="Evaluate the original checkpoint only")
     p.add_argument("--seed", type=int, default=1729, help="Audit sampling, probe split and shuffled controls")
     p.add_argument("--no-cuda", action="store_true")
     p.add_argument("--out-dir", help="New output directory; default: a timestamped folder inside the run")
@@ -479,9 +480,12 @@ def run_audit(model, cfg, cli, device, directory):
             }
 
     evaluate_arm("original", model)
-    candidate, report["batchnorm"] = recalibrate_batchnorm(
-        model, training, device, bn_batch, cli.bn_samples, cli.seed + 1
-    )
+    if getattr(cli, "skip_bn_recalibration", False):
+        candidate, report["batchnorm"] = None, {"status": "skipped_by_request"}
+    else:
+        candidate, report["batchnorm"] = recalibrate_batchnorm(
+            model, training, device, bn_batch, cli.bn_samples, cli.seed + 1
+        )
     if candidate is not None:
         evaluate_arm("bn_recalibrated", candidate)
         del candidate

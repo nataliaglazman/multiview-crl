@@ -51,6 +51,7 @@ from data.datasets import SyntheticBrainDataset
 from eval.dci import CONTENT_FACTOR_NAMES, STYLE_FACTOR_NAMES
 from eval.identifiability_metrics import block_mcc, channel_mcc, cv_probe_acc, cv_probe_r2
 from models.multiview_encoder import MultiviewConvEncoder
+from utils.encoder_runtime import configure_encoder_runtime
 
 
 def parse_args(argv=None):
@@ -122,7 +123,8 @@ def load_settings(run_dir):
 
 def build_model(cfg, device, state_dict=None):
     """Rebuild the trained architecture from the run's settings; random init when no state."""
-    torch.manual_seed(cfg.get("seed", 42))
+    configure_encoder_runtime(cfg)
+    torch.manual_seed(cfg.get("model_seed") if cfg.get("model_seed") is not None else cfg.get("seed", 42))
     model = MultiviewConvEncoder(
         in_channels=1,
         hidden_channels=cfg["hidden_channels"],
@@ -152,7 +154,7 @@ def make_dataset(cfg, num_samples, mode="val"):
         spatial_size=(res, res, res),
         cache=False,
         synthetic_mode=cfg.get("synthetic_mode", "pseudo_mri"),
-        synthetic_seed=cfg.get("seed", 42),
+        synthetic_seed=cfg.get("data_seed") if cfg.get("data_seed") is not None else cfg.get("seed", 42),
         synthetic_num_samples=num_samples,
         synthetic_n_content=cfg["n_content"],
         synthetic_n_style=cfg["n_style"],
@@ -586,6 +588,7 @@ def main():
         raise SystemExit("--run-dir is required (or pass --self-test)")
 
     cfg = load_settings(args.run_dir)
+    configure_encoder_runtime(cfg)
     device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
     pooling = args.pooling or cfg.get("eval_pooling", "gap")
     patch_grid = None
