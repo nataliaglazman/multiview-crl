@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-30T11:00:35Z
-# Git SHA: d0c215d
+# Generated at: 2026-09-30T11:01:11Z
+# Git SHA: d636e7b
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -71,7 +71,6 @@ python -m training.main_multimodal
     --single-count-commitment
     --style-alignment-var-weight 1.0
     --style-contrastive-mode within_modality
-    --style-dropout-prob 0.2
     --style-independence-var-weight 1.0
     --style-injection-mode input
     --style-spatial-size 1
@@ -88,7 +87,7 @@ python -m training.main_multimodal
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-causal-12-4-dropout-no-style-caus
+    --model-id synthetic-causal-12-4-no-style-caus
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -107,7 +106,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-12-4-dropout-no-style-caus \
+runai training standard submit synthetic-causal-12-4-no-style-caus \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \

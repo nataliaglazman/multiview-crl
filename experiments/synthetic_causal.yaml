@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-causal-12-4-dropout-no-style-caus
+tag: synthetic-causal-12-4-no-style-caus
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -28,7 +28,7 @@ scale_style_hsic_loss: 0
 scale_style_contrastive_loss: 0
 style_spatial_size: 1
 style_contrastive_mode: within_modality
-style_dropout_prob: 0.2
+# style_dropout_prob: 0.2
 # style_nb_entries: 
 # quantize_style: false
 

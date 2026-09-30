@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_identifiable.yaml
-# Generated at: 2026-09-30T11:00:35Z
-# Git SHA: d0c215d
+# Generated at: 2026-09-30T11:01:11Z
+# Git SHA: d636e7b
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
