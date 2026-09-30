@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal_groupnorm_control.yaml
-# Generated at: 2026-09-29T18:22:01Z
-# Git SHA: a29bdbc
+# Generated at: 2026-09-30T11:00:35Z
+# Git SHA: d0c215d
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -20,6 +20,7 @@ python -m training.main_multimodal
     --content-style-levels 0
     --contrastive-loss-type infonce
     --cross-recon-start-step 0
+    --cross-recon-style-source other_subject
     --cross-view-negs-only
     --dataroot /nfs/home/nglazman/data
     --dataset-name synthetic
