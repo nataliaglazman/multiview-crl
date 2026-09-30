@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthseg_baseline.yaml
-# Generated at: 2026-09-15T14:07:34Z
-# Git SHA: 4c00cd5
+# Generated at: 2026-09-29T21:30:28Z
+# Git SHA: a29bdbc
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=synthseg-baseline
 #SBATCH --output=/scratch/users/%u/%j.out
@@ -21,6 +21,10 @@ CONDA_ENV_NAME="multiview-env"
 PYTHON="${HOME}/.conda/envs/${CONDA_ENV_NAME}/bin/python"
 
 export PYTHONNOUSERSITE=1
+export OMP_NUM_THREADS=8
+export OPENBLAS_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+export NUMEXPR_NUM_THREADS=8
 
 # Automatically repair/build the environment if numpy or torch are missing
 if ! "$PYTHON" -c "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('torch') and importlib.util.find_spec('numpy') else 1)" 2>/dev/null; then
@@ -65,6 +69,7 @@ fi
     --content-dim 128 \
     --content-style-levels 0 \
     --contrastive-loss-type infonce \
+    --cross-recon-start-step 0 \
     --cross-view-negs-only \
     --dataroot /data/natalia/ADNI_synthseg \
     --dataset-name ADNI_stripped_masks \
@@ -82,6 +87,7 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 1.0 \
+    --scale-cross-recon-loss 0.0 \
     --scale-recon-loss 1.0 \
     --scale-style-contrastive-loss 0.0 \
     --scale-style-hsic-loss 0.0 \
@@ -90,6 +96,9 @@ fi
     --separate-encoders \
     --separation-floor-diagnosis-info 0.1 \
     --spatial-size 150 180 150 \
+    --style-alignment-var-weight 1.0 \
+    --style-contrastive-mode cosine \
+    --style-independence-var-weight 1.0 \
     --model-id synthseg-baseline \
     --tau 0.1 \
     --total-dim 512 \

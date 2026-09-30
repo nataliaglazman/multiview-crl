@@ -63,6 +63,7 @@ eval/nifti_outputs/
 *.npz
 *.csv
 *.json
+!experiments/encoder_comparison.json
 *.png
 *.pdf
 *.nii

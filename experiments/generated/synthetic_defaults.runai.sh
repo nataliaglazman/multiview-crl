@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_defaults.yaml
-# Generated at: 2026-09-29T10:33:30Z
-# Git SHA: 6898e2d
+# Generated at: 2026-09-30T11:01:11Z
+# Git SHA: d636e7b
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -19,6 +19,7 @@ python -m training.main_multimodal
     --content-style-levels 0
     --contrastive-loss-type infonce
     --cross-recon-start-step 0
+    --cross-recon-style-source other_subject
     --cross-view-negs-only
     --dataroot /nfs/home/nglazman/data
     --dataset-name synthetic

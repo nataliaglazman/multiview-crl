@@ -1,11 +1,11 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-15T14:07:34Z
-# Git SHA: 4c00cd5
+# Generated at: 2026-09-29T21:30:28Z
+# Git SHA: a29bdbc
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
-#SBATCH --job-name=synthetic-clean-content-causal-stats
+#SBATCH --job-name=synthetic-causal-12-4-dropout-no-style
 #SBATCH --output=/scratch/users/%u/%j.out
-#SBATCH --error=synthetic-clean-content-causal-stats-%j.err
+#SBATCH --error=synthetic-causal-12-4-dropout-no-style-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -21,6 +21,10 @@ CONDA_ENV_NAME="multiview-env"
 PYTHON="${HOME}/.conda/envs/${CONDA_ENV_NAME}/bin/python"
 
 export PYTHONNOUSERSITE=1
+export OMP_NUM_THREADS=8
+export OPENBLAS_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+export NUMEXPR_NUM_THREADS=8
 
 # Automatically repair/build the environment if numpy or torch are missing
 if ! "$PYTHON" -c "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('torch') and importlib.util.find_spec('numpy') else 1)" 2>/dev/null; then
@@ -60,8 +64,7 @@ fi
     --batch-size 64 \
     --bt-corr-ema 0.99 \
     --bt-gap-lambda 6 \
-    --bt-gap-pooling stats \
-    --bt-gap-weight 0.5 \
+    --bt-gap-weight 1 \
     --bt-lambda 6 \
     --bt-normalize-terms \
     --bt-patch-weight 1 \
@@ -74,6 +77,8 @@ fi
     --content-size 12 \
     --content-style-levels 0 \
     --contrastive-loss-type barlow_twins \
+    --contrastive-proj-dim 0 \
+    --cross-recon-start-step 0 \
     --cross-view-negs-only \
     --dataroot /scratch/users/k24058220 \
     --dataset-name synthetic \
@@ -82,6 +87,7 @@ fi
     --deterministic \
     --eval-dci \
     --grad-clip-norm 100 \
+    --iid-probe-every 2000 \
     --image-spacing 1.0 \
     --inject-style-to-decoder \
     --log-steps 50 \
@@ -102,8 +108,9 @@ fi
     --scale-adv-loss 0.0 \
     --scale-content-modality-adv 0.0 \
     --scale-contrastive-loss 100 \
-    --scale-recon-loss 16 \
-    --scale-style-contrastive-loss 0.0 \
+    --scale-cross-recon-loss 0.0 \
+    --scale-recon-loss 10 \
+    --scale-style-contrastive-loss 0 \
     --scale-style-hsic-loss 0 \
     --scale-style-modality-ce 0.0 \
     --select-by-gated-score \
@@ -111,24 +118,31 @@ fi
     --separate-style-codebooks \
     --separation-floor-diagnosis-info 0.1 \
     --single-count-commitment \
+    --style-alignment-var-weight 1.0 \
+    --style-contrastive-mode within_modality \
+    --style-dropout-prob 0.2 \
+    --style-independence-var-weight 1.0 \
     --style-injection-mode input \
-    --synthetic-causal \
+    --style-spatial-size 1 \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-clean-content \
     --synthetic-identifiable-ventricle \
+    --synthetic-lesion-placement wm_interior \
+    --synthetic-lesion-radius 0.1 \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-num-test 400 \
     --synthetic-num-train 2000 \
     --synthetic-num-val 1500 \
     --synthetic-res 64 \
-    --model-id synthetic-clean-content-causal-stats \
+    --model-id synthetic-causal-12-4-dropout-no-style \
     --tau 0.1 \
     --total-dim 512 \
     --train-steps 200000 \
     --use-amp \
     --use-wandb \
+    --vicregl-no-projectors \
     --vq-commitment-weight 0.25 \
     --vqvae-embed-dim 16 \
     --vqvae-hidden-channels 16 \
