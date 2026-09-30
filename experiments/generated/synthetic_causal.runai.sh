@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-29T10:33:30Z
-# Git SHA: 6898e2d
+# Generated at: 2026-09-30T11:01:11Z
+# Git SHA: d636e7b
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -28,8 +28,8 @@ python -m training.main_multimodal
     --content-style-levels 0
     --contrastive-loss-type barlow_twins
     --contrastive-proj-dim 0
-    --cross-recon-loss 10
     --cross-recon-start-step 0
+    --cross-recon-style-source other_subject
     --cross-view-negs-only
     --dataroot /nfs/home/nglazman/data
     --dataset-name synthetic
@@ -60,8 +60,8 @@ python -m training.main_multimodal
     --scale-content-modality-adv 0.0
     --scale-contrastive-loss 100
     --scale-cross-recon-loss 0.0
-    --scale-recon-loss 10
-    --scale-style-contrastive-loss 10
+    --scale-recon-loss 16
+    --scale-style-contrastive-loss 0
     --scale-style-hsic-loss 0
     --scale-style-modality-ce 0.0
     --select-by-gated-score
@@ -74,6 +74,7 @@ python -m training.main_multimodal
     --style-independence-var-weight 1.0
     --style-injection-mode input
     --style-spatial-size 1
+    --synthetic-causal
     --synthetic-causal-edge-prob 0.5
     --synthetic-causal-graph random
     --synthetic-clean-content
@@ -86,7 +87,7 @@ python -m training.main_multimodal
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-causal-12-4-cross-recon
+    --model-id synthetic-causal-12-4-no-style-caus
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -105,7 +106,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-12-4-cross-recon \
+runai training standard submit synthetic-causal-12-4-no-style-caus \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
