@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-causal-12-4-no-style-caus
+tag: synthetic-causal-12-4-2-levels
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -12,8 +12,8 @@ bt_gap_weight: 1                  # NOT 0.01 — see the calibration note above
 bt_patch_weight: 1
 single_count_commitment: true
 vicregl_no_projectors: true
-# cross_recon_start_step: 0
-# scale_cross_recon_loss: 1
+cross_recon_start_step: 0
+scale_cross_recon_loss: 10
 
 scale_contrastive_loss: 100      # NOT 10 — BT's raw scale is ~10x InfoNCE's
 grad_clip_norm: 100
@@ -35,7 +35,7 @@ style_contrastive_mode: within_modality
 
 content_size: 12              # match the baseline; fixes the 44-vs-48 confound
 synthetic_normalize: fixed_reference
-synthetic_causal: true
+synthetic_causal: false
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
 synthetic_res: 64
@@ -46,11 +46,11 @@ inject_style_to_decoder: true
 style_injection_mode: input
 separate_style_codebooks: true
 separate_content_codebooks: false
-vqvae_nb_levels: 1
+vqvae_nb_levels: 2
 vqvae_nb_res_layers: 2
 vqvae_hidden_channels: 16
 vqvae_embed_dim: 16
-vqvae_scaling_rates: [4]
+vqvae_scaling_rates: [2, 2]
 deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
