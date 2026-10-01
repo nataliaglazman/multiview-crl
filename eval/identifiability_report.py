@@ -48,6 +48,11 @@ What it prints
    two scopes are never silently compared at different normalisations.
 5. A verdict block that refuses to report a metric whose learned part is inside its own
    noise, and says so instead of printing a number that looks like a result.
+6. With ``--per-encoder`` (a ``separate_encoders`` run), sections 1-5 again for encoder 2:
+   its own view-2 blocks, scored against view 2's style factors (``z_style_v2``, drawn
+   independently of view 1's), with its own PCA and its own untrained twin, then the two
+   encoders side by side.  The view probe compares the two encoders, so it appears once,
+   in encoder 1's report.
 
 Why the floor is not optional here
 ----------------------------------
@@ -63,6 +68,7 @@ Usage
 -----
     python -m eval.identifiability_report --run-dir results/synthetic/RUN
     python -m eval.identifiability_report --run-dir RUN --with-dci --poolings gap,stats,4x4x4
+    python -m eval.identifiability_report --run-dir RUN --per-encoder    # enc1 + enc2 + side by side
     python -m eval.identifiability_report --run-dir RUN --no-floor       # not reportable
     python -m eval.identifiability_report --from-json report.json       # no model/probe rerun
     python -m eval.identifiability_report --run-dir RUN --parent-adjustment nonlinear
@@ -310,6 +316,29 @@ def _view_blocks(reprs, key, level):
     return c1, c2, s1, s2
 
 
+def _swap_encoders(reprs, level):
+    """``reprs`` with encoder 2's blocks moved into encoder 1's slots at *level*.
+
+    Under ``separate_encoders`` view 2 goes through its own encoder, so ``(content_v2,
+    style_v2)`` IS encoder 2's representation.  Swapping it into the primary slots, rather
+    than threading a block index through every scorer, scores encoder 2 by the identical
+    code path as encoder 1.  It also makes ``_reduce_reprs`` fit encoder 2's PCA on encoder
+    2's own features.  Its default (fit on view 1, reuse for view 2) is right for the view
+    probe and wrong here: two encoders do not share a basis, so encoder 1's top components
+    can miss encoder 2's signal entirely.
+    """
+    out = {}
+    for key, ld in reprs.items():
+        if level not in ld:
+            out[key] = ld
+            continue
+        content, style, content_v2, style_v2, info = ld[level]
+        new_ld = dict(ld)
+        new_ld[level] = (content_v2, style_v2, content, style, info)
+        out[key] = new_ld
+    return out
+
+
 def leakage_scores(
     reprs,
     level,
@@ -323,6 +352,7 @@ def leakage_scores(
     kind="ridge",
     n_jobs=1,
     factor_pooling="assigned",
+    with_view=True,
 ):
     """The off-diagonal cells of the block×factor matrix, plus the view probe.
 
@@ -350,6 +380,9 @@ def leakage_scores(
     Twins while VICReg held 0/44 above 0.7.  Its floor matters as much as anywhere else
     here: an untrained encoder already separates two views that differ in intensity
     statistics, so a raw accuracy near 1.0 is not by itself evidence of anything.
+    ``with_view=False`` skips it for encoder 2's report: the probe compares the two views,
+    i.e. the two encoders, so it is a property of the model and is scored once, with
+    encoder 1, rather than once per encoder.
 
     Comparing two runs whose content/style split differs: the probe width IS the channel
     count, so a 40/8 model hands the content probe 40·P features and a 30/18 model 30·P,
@@ -378,7 +411,7 @@ def leakage_scores(
     cells = {k: v for k, v in cells.items() if v}
 
     view = {}
-    if _has_v2(reprs, level):
+    if with_view and _has_v2(reprs, level):
         for key in ("gap", "stats", "patch"):
             if key not in avail:
                 continue
@@ -432,9 +465,10 @@ def _f(x):
 def per_factor_decoding_rows(res, floor=None):
     """Expose all four block×target cells without fitting probes again.
 
-    Feature blocks and style targets are from view 1, matching score_run. Each floor
-    subtraction stays within the same block, target factor and pooling. Missing scores
-    remain NaN, including missing style blocks and reports made with --no-leakage.
+    Feature blocks and style targets are from view 1, matching score_run (view 2 for
+    encoder 2's report, ``res["encoder2"]``). Each floor subtraction stays within the same
+    block, target factor and pooling. Missing scores remain NaN, including missing style
+    blocks and reports made with --no-leakage.
     """
 
     def cells(report):
@@ -472,20 +506,24 @@ def per_factor_decoding_rows(res, floor=None):
 
 
 def write_report_json(path, res, floor=None, floor_std=None):
-    """Keep existing nested scores and add convenient per-factor/block/pooling rows."""
+    """Keep existing nested scores and add convenient per-factor/block/pooling rows.
+
+    ``per_factor_decoding`` stays encoder 1's, so readers of older files see no change;
+    a per-encoder report adds encoder 2's rows as ``per_factor_decoding_encoder2``.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w") as fh:
-        json.dump(
-            {
-                "run": res,
-                "floor": floor,
-                "floor_std": floor_std,
-                "per_factor_decoding": per_factor_decoding_rows(res, floor),
-            },
-            fh,
-            indent=2,
-            default=float,
+    payload = {
+        "run": res,
+        "floor": floor,
+        "floor_std": floor_std,
+        "per_factor_decoding": per_factor_decoding_rows(res, floor),
+    }
+    if res.get("encoder2"):
+        payload["per_factor_decoding_encoder2"] = per_factor_decoding_rows(
+            res["encoder2"], (floor or {}).get("encoder2")
         )
+    with open(path, "w") as fh:
+        json.dump(payload, fh, indent=2, default=float)
     logger.info("Wrote %s", path)
 
 
@@ -526,7 +564,8 @@ def print_per_factor_decoding(res, floor=None):
         return
     print()
     print(_rule("3b. PER-FACTOR DECODING FROM CONTENT AND STYLE"))
-    print("   Both representation blocks are from view 1; style targets use that same view.")
+    view = res.get("encoder", 1)
+    print(f"   Both representation blocks are from view {view}; style targets use that same view.")
     print("   R2 raw = held-out probe score; R2 gap = raw minus the label-permutation null.")
     print("   learned = R2 gap minus the SAME block/factor/pooling in the untrained twin.")
     print("   * marks the assigned pooling. Other rungs describe where the factor is readable.")
@@ -549,8 +588,8 @@ def print_per_factor_decoding(res, floor=None):
             print(line)
 
 
-def print_report(res, floor=None, with_dci=False, floor_std=None):
-    """The whole report.
+def _print_encoder_report(res, floor=None, with_dci=False, floor_std=None):
+    """The whole report for one encoder (``print_report`` adds encoder 2 when present).
 
     ``floor`` is the same structure scored on an untrained twin; ``floor_std`` is its
     across-seed spread when several draws were averaged.  A 'learned' value inside that
@@ -562,6 +601,9 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
     print("=" * 92)
     print(f"  IDENTIFIABILITY REPORT — {res['name']}")
     print(f"  N={res['n_samples']}  level={res['level']}  poolings={res['poolings']}  probe-dim={res['probe_dim']}")
+    enc = res.get("encoder")
+    if enc:
+        print(f"  ENCODER {enc} of 2: view-{enc} features, style factors scored against z_style_v{enc}.")
     if res.get("projected_content"):
         print("  content block = CONTRASTIVE PROJECTION HEAD OUTPUT (--project-content), not encoder features.")
         print("  Post-head scores are expected to sit BELOW the pre-head run; that gap is what the head buys.")
@@ -817,6 +859,9 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
             print("   raw content accuracy near 1.0 is NOT by itself a finding — an untrained encoder")
             print("   separates two views that differ in intensity statistics. Read learned. Style")
             print("   ABOVE content is the healthy ordering: the view-specific signal sits in style.")
+        elif res.get("encoder") == 2:
+            print("   view probe: it compares the two encoders' features, so it is printed once, in")
+            print("   encoder 1's report.")
 
     if "leakage" in res:
         print_per_factor_decoding(res, floor)
@@ -952,6 +997,116 @@ def print_report(res, floor=None, with_dci=False, floor_std=None):
     print()
 
 
+def print_report(res, floor=None, with_dci=False, floor_std=None):
+    """The whole report: encoder 1's, then encoder 2's and the two side by side when the
+    report was scored per encoder (``res["encoder2"]``)."""
+    _print_encoder_report(res, floor=floor, with_dci=with_dci, floor_std=floor_std)
+    enc2 = res.get("encoder2")
+    if not enc2:
+        return
+    _print_encoder_report(
+        enc2,
+        floor=None if floor is None else floor.get("encoder2"),
+        with_dci=with_dci,
+        floor_std=(floor_std or {}).get("encoder2"),
+    )
+    print_encoder_comparison(res, floor)
+
+
+def print_encoder_comparison(res, floor=None):
+    """Encoder 1 vs encoder 2 on table 1, the MCC ladder and the leakage cells.
+
+    Both encoders are probed on the same rows with the same permutation draws, each on its
+    own view's style factors and against its own untrained twin, so a row's difference is
+    between the encoders and nothing else.  Reads the stored scores; no probe is refit.
+    """
+    enc2 = res.get("encoder2")
+    if not enc2:
+        return
+    f1, f2 = floor, None if floor is None else floor.get("encoder2")
+    has_floor = f1 is not None and f2 is not None
+
+    def score(cur, base):
+        return _delta(cur, base) if has_floor else _f(cur)
+
+    groups = []
+    pf1, pf2 = res.get("per_factor") or {}, enc2.get("per_factor") or {}
+    fpf1, fpf2 = (f1 or {}).get("per_factor") or {}, (f2 or {}).get("per_factor") or {}
+    groups.append(
+        (
+            "table 1 — content→content R2 gap, at each factor's assigned rung",
+            [
+                (
+                    name,
+                    (pf1.get(name) or pf2.get(name)).get("pooling", ""),
+                    score((pf1.get(name) or {}).get("r2"), (fpf1.get(name) or {}).get("r2")),
+                    score((pf2.get(name) or {}).get("r2"), (fpf2.get(name) or {}).get("r2")),
+                )
+                for name in dict.fromkeys([*pf1, *pf2])
+            ],
+        )
+    )
+    m1, m2 = res.get("mcc") or {}, enc2.get("mcc") or {}
+    fm1, fm2 = (f1 or {}).get("mcc") or {}, (f2 or {}).get("mcc") or {}
+    groups.append(
+        (
+            "block-MCC",
+            [
+                (
+                    f"MCC@{key}",
+                    "",
+                    score((m1.get(key) or {}).get("mean"), (fm1.get(key) or {}).get("mean")),
+                    score((m2.get(key) or {}).get("mean"), (fm2.get(key) or {}).get("mean")),
+                )
+                for key in ("gap", "stats", "patch")
+                if key in m1 or key in m2
+            ],
+        )
+    )
+
+    def cells(report):
+        return ((report or {}).get("leakage") or {}).get("cells") or {}
+
+    c1, c2, fc1, fc2 = cells(res), cells(enc2), cells(f1), cells(f2)
+    groups.append(
+        (
+            "leakage — mean R2 gap over the cell's factors",
+            [
+                (
+                    cname,
+                    "",
+                    score(_cell_mean(c1.get(cname)), _cell_mean(fc1.get(cname))),
+                    score(_cell_mean(c2.get(cname)), _cell_mean(fc2.get(cname))),
+                )
+                for cname in ("content→style", "style→style", "style→content")
+                if c1.get(cname) or c2.get(cname)
+            ],
+        )
+    )
+
+    fw = max([len(label) for _title, rows in groups for label, *_ in rows] + [16])
+    print()
+    print(_rule("6. ENCODER 1 vs ENCODER 2"))
+    print("   same rows, probes and permutation draws for both; each encoder is read on its own view")
+    print("   (style factors z_style_v1 / z_style_v2).")
+    if has_floor:
+        print("   values = learned: the score minus the same cell in THAT encoder's untrained twin.")
+    else:
+        print("   !! no floor for both encoders: values are raw R2 gap / raw MCC, not learned, and")
+        print("   !! a difference between them can be a difference between untrained architectures.")
+    print(f"   {'':<{fw}s} {'pool':<6s} {'enc1':>8s} {'enc2':>8s} {'enc2-enc1':>10s}")
+    for title, rows in groups:
+        if not rows:
+            continue
+        print(f"   {title}")
+        for label, pool, v1, v2 in rows:
+            diff = _delta(v2, v1)
+            mark = "  <-" if np.isfinite(diff) and abs(diff) > NOISE_FLOOR else ""
+            print(f"   {label:<{fw}s} {pool:<6s} {_n(v1):>8s} {_n(v2):>8s} {_n(diff):>10s}{mark}")
+    print(f"   <- marks |enc2-enc1| > {NOISE_FLOOR} (NOISE_FLOOR); a smaller difference is inside probe noise.")
+    print()
+
+
 # --------------------------------------------------------------------------- #
 # Model path (torch, lazily imported)
 # --------------------------------------------------------------------------- #
@@ -983,6 +1138,7 @@ def score_run(
     parent_cache=None,
     project_content=False,
     freeze_content_mask=False,
+    per_encoder=False,
 ):
     """Extract this run's representations under every pooling and score them.
 
@@ -994,12 +1150,13 @@ def score_run(
     ``project_content=True`` scores the contrastive projection head's output instead of the
     encoder's content block.  The head, its constraints and the floor's fresh-head rule all
     live in ``run_dci_compare`` alongside the rest of the metric rules; this is a thin caller.
+
+    ``per_encoder=True`` also scores encoder 2 (see ``_score_reprs``) from the same
+    extraction pass, under ``res["encoder2"]``.
     """
     from eval.dci import _extract_synthetic_representations
     from eval.run_dci_compare import (
-        _reduce_reprs,
         _resolve_checkpoint,
-        _score_dci,
         check_projectable_poolings,
         load_contrastive_proj_heads,
         project_content_reprs,
@@ -1020,6 +1177,20 @@ def score_run(
         random_init=random_init,
         seed=init_seed,
     )
+    if per_encoder and not random_init and _args is not None:
+        if not getattr(_args, "separate_encoders", False):
+            logger.warning(
+                "per-encoder: %s shares ONE encoder across views, so 'encoder 2' is that same "
+                "encoder applied to view 2, not a second network.",
+                run_dir,
+            )
+        elif getattr(_args, "mask_mode", None) == "learned":
+            # eval.dci._extract_synthetic_representations splits BOTH views with view 1's mask.
+            logger.warning(
+                "per-encoder: %s learns a content mask per view (mask_mode=learned), but the extractor "
+                "splits view 2 with view 1's mask, so encoder 2's content/style blocks are mis-split.",
+                run_dir,
+            )
     proj_heads = {}
     if project_content:
         check_projectable_poolings(poolings)
@@ -1031,9 +1202,9 @@ def score_run(
                 f"--project-content: {run_dir} trained no contrastive projection head "
                 "(--contrastive-proj-dim is 0 or absent in its settings.json). Nothing to project."
             )
-    reprs, gt_content, gt_style, info = {}, None, None, None
+    reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
     for key, value in poolings:
-        level_data, gc, gs1, _gs2 = _extract_synthetic_representations(
+        level_data, gc, gs1, gs2 = _extract_synthetic_representations(
             model, dataset, device, batch_size, num_workers, pooling=value, freeze_content_mask=freeze_content_mask
         )
         if proj_heads:
@@ -1043,13 +1214,85 @@ def score_run(
             gt_content = gc
         # View-1 style factors, paired with the _STYLE / _CONTENT (view-1) blocks. The
         # loader runs unshuffled, so every pooling returns the same rows in the same order.
+        # View 2's are kept for encoder 2, whose style is drawn independently of view 1's.
         if gt_style is None:
-            gt_style = gs1
+            gt_style, gt_style_v2 = gs1, gs2
         if info is None and level in level_data:
             info = level_data[level][4]
     del model
     if info is None:
         raise RuntimeError(f"level {level} not found in encoder outputs for {run_dir}")
+    return _score_reprs(
+        reprs,
+        gt_content,
+        gt_style,
+        info,
+        dataset=dataset,
+        poolings=poolings,
+        level=level,
+        seeds=seeds,
+        n_null=n_null,
+        name=name or os.path.basename(os.path.normpath(run_dir)),
+        probe_dim=probe_dim,
+        probe_kind=probe_kind,
+        n_jobs=n_jobs,
+        factor_pooling=factor_pooling,
+        causal=causal,
+        with_leakage=with_leakage,
+        with_dci=with_dci,
+        dci_max_codes=dci_max_codes,
+        parent_adjustment=parent_adjustment,
+        parent_cache=parent_cache,
+        projected_content=bool(proj_heads),
+        freeze_content_mask=freeze_content_mask,
+        per_encoder=per_encoder,
+        gt_style_v2=gt_style_v2,
+    )
+
+
+def _score_reprs(
+    reprs,
+    gt_content,
+    gt_style,
+    info,
+    *,
+    dataset,
+    poolings,
+    level,
+    seeds,
+    n_null,
+    name,
+    probe_dim=PROBE_DIM_AUTO,
+    probe_kind="ridge",
+    n_jobs=1,
+    factor_pooling="assigned",
+    causal=None,
+    with_leakage=True,
+    with_dci=False,
+    dci_max_codes=4096,
+    parent_adjustment="legacy",
+    parent_cache=None,
+    projected_content=False,
+    freeze_content_mask=False,
+    per_encoder=False,
+    gt_style_v2=None,
+    with_view=True,
+):
+    """Score already-extracted representations: every section of the report for one encoder.
+
+    The scoring half of ``score_run``, split out so that ``score_live`` and encoder 2 go
+    through it too rather than through copies of it.  ``rng`` is created here, so each call
+    draws the same permutations in the same order.
+
+    ``per_encoder=True`` scores encoder 2 as well, by calling this function again on
+    ``_swap_encoders(reprs)``: its own blocks, its own PCA, view 2's style factors
+    (``gt_style_v2``) and a fresh ``RandomState(0)``.  Encoder 1's numbers are therefore
+    identical with or without it, and both encoders are differenced against the same
+    permutation draws.  The result sits under ``res["encoder2"]``; the floor twin, scored
+    the same way, carries its own, and ``mean_std_structs`` averages it with the rest.
+    Without view-2 features there is no encoder 2 to score, which is logged, not raised.
+    """
+    from eval.run_dci_compare import _reduce_reprs, _score_dci
 
     names = info["content_names"]
     style_names = info.get("style_names") or []
@@ -1061,7 +1304,7 @@ def score_run(
     probed = _reduce_reprs(reprs, level, probe_dim) if probe_dim else reprs
 
     res = {
-        "name": name or os.path.basename(os.path.normpath(run_dir)),
+        "name": name,
         "level": level,
         "n_samples": int(gt_content.shape[0]),
         # Render the VALUE, not the bucket key: "patch" alone hides whether the grid was
@@ -1070,7 +1313,7 @@ def score_run(
         "probe_dim": probe_dim,
         "factor_pooling": factor_pooling,
         "causal": causal,
-        "projected_content": bool(proj_heads),
+        "projected_content": projected_content,
         "freeze_content_mask": freeze_content_mask,
         "per_factor": per_factor_scores(
             probed, level, gt_content, names, seeds, n_null, rng, probe_kind, n_jobs, factor_pooling
@@ -1095,6 +1338,7 @@ def score_run(
             probe_kind,
             n_jobs,
             factor_pooling,
+            with_view=with_view,
         )
 
     if hasattr(dataset, "evaluation_distribution"):
@@ -1207,6 +1451,37 @@ def score_run(
                 "n_codes": d.get("dci_n_codes"),
             }
         res["dci"] = dci
+    if per_encoder:
+        if not _has_v2(reprs, level):
+            logger.warning("per-encoder: no view-2 features at level %d, so encoder 2 was not scored.", level)
+        else:
+            res["encoder"] = 1
+            res["encoder2"] = _score_reprs(
+                _swap_encoders(reprs, level),
+                gt_content,
+                gt_style_v2,
+                info,
+                dataset=dataset,
+                poolings=poolings,
+                level=level,
+                seeds=seeds,
+                n_null=n_null,
+                name=f"{name} [enc2]",
+                probe_dim=probe_dim,
+                probe_kind=probe_kind,
+                n_jobs=n_jobs,
+                factor_pooling=factor_pooling,
+                causal=causal,
+                with_leakage=with_leakage,
+                with_dci=with_dci,
+                dci_max_codes=dci_max_codes,
+                parent_adjustment=parent_adjustment,
+                parent_cache=parent_cache,
+                projected_content=projected_content,
+                freeze_content_mask=freeze_content_mask,
+                with_view=False,
+            )
+            res["encoder2"]["encoder"] = 2
     return res
 
 
@@ -1225,50 +1500,48 @@ def score_live(
     n_jobs=1,
     causal=None,
     name="live",
+    per_encoder=False,
 ):
     """In-training twin of ``score_run`` for an in-memory encoder (no floor, no DCI).
 
-    Same extractor, same PCA reduction, same probes, and the permutation nulls drawn from
-    one ``RandomState(0)`` in the same order (per_factor, then leakage), so a step's numbers
-    match an offline report of that checkpoint on the same rows at the same settings.
+    Same extractor, and the same ``_score_reprs`` as ``score_run`` — PCA reduction, probes,
+    and permutation nulls drawn from one ``RandomState(0)`` in the same order — so a step's
+    numbers match an offline report of that checkpoint on the same rows at the same settings.
+    ``per_encoder=True`` adds encoder 2 under ``res["encoder2"]``, as ``--per-encoder`` does.
     The extractor calls ``model.eval()`` and does not restore train mode; the caller must.
     """
     from eval.dci import _extract_synthetic_representations
-    from eval.run_dci_compare import _reduce_reprs
 
-    reprs, gt_content, gt_style, info = {}, None, None, None
+    reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
     for key, value in poolings:
-        level_data, gc, gs1, _gs2 = _extract_synthetic_representations(
+        level_data, gc, gs1, gs2 = _extract_synthetic_representations(
             model, dataset, device, batch_size, num_workers, pooling=value
         )
         reprs[key] = level_data
         if gt_content is None:
-            gt_content, gt_style = gc, gs1
+            gt_content, gt_style, gt_style_v2 = gc, gs1, gs2
         if info is None and level in level_data:
             info = level_data[level][4]
     if info is None:
         raise RuntimeError(f"level {level} not found in encoder outputs")
-
-    names = info["content_names"]
-    style_names = info.get("style_names") or []
-    rng = np.random.RandomState(0)
-    probed = _reduce_reprs(reprs, level, probe_dim) if probe_dim else reprs
-    res = {
-        "name": name,
-        "level": level,
-        "n_samples": int(gt_content.shape[0]),
-        "poolings": ",".join("x".join(str(d) for d in v) if isinstance(v, tuple) else str(v) for _k, v in poolings),
-        "probe_dim": probe_dim,
-        "factor_pooling": "assigned",
-        "causal": causal,
-        "per_factor": per_factor_scores(probed, level, gt_content, names, seeds, n_null, rng, probe_kind, n_jobs),
-        "mcc": mcc_ladder(probed, level, gt_content, seeds, probe_kind, names),
-        "mcc_per_factor_pooling": "patch" if "patch" in probed else _resolve_key("stats", set(probed)),
-    }
-    res["leakage"] = leakage_scores(
-        probed, level, gt_content, gt_style, names, style_names, seeds, n_null, rng, probe_kind, n_jobs
+    return _score_reprs(
+        reprs,
+        gt_content,
+        gt_style,
+        info,
+        dataset=dataset,
+        poolings=poolings,
+        level=level,
+        seeds=seeds,
+        n_null=n_null,
+        name=name,
+        probe_dim=probe_dim,
+        probe_kind=probe_kind,
+        n_jobs=n_jobs,
+        causal=causal,
+        per_encoder=per_encoder,
+        gt_style_v2=gt_style_v2,
     )
-    return res
 
 
 def live_metrics(res, floor=None, prefix="iid"):
@@ -1277,9 +1550,13 @@ def live_metrics(res, floor=None, prefix="iid"):
     Per-factor tags are ``{prefix}_{r2|r2_gap|learned}/{factor}/{pooling}/from_{content|style}``,
     read straight off ``per_factor_decoding_rows`` (table 3b), so no probe is refit here.
     ``r2_gap`` is real minus the permutation null; ``learned`` exists only with a floor.
-    Non-finite values are dropped rather than logged.
+    Non-finite values are dropped rather than logged.  A per-encoder report adds encoder 2
+    under ``{prefix}_enc2_*`` and leaves encoder 1's tags as they were; there is no
+    ``{prefix}_enc2_view``, since the view probe is one model-level number.
     """
     out = {}
+    if res.get("encoder2"):
+        out.update(live_metrics(res["encoder2"], (floor or {}).get("encoder2"), prefix=f"{prefix}_enc2"))
     for row in per_factor_decoding_rows(res, floor):
         for block in ("content", "style"):
             for metric in ("r2", "r2_gap", "learned"):
@@ -1418,6 +1695,7 @@ def _self_test():
     assert b_full - b_part < NOISE_FLOOR, f"a parentless factor read as parent-carried, {b_full} vs {b_part}"
     assert n_parents_per_factor(adj, names) == {"brain_size": 0, "ventricle_size": 1, "lesion_x": 0, "gain": 0}
     _assert_dci_basis()
+    _assert_per_encoder()
     print("  self-test PASSED")
 
 
@@ -1550,6 +1828,80 @@ def _assert_dci_basis():
     print("  self-test: DCI reads the unreduced block (probes still reduced to 64) — basis OK")
 
 
+def _assert_per_encoder():
+    """Regression guard for ``per_encoder``, on planted data whose answer is known.
+
+    Encoder 2 encodes view 2's style factors — drawn independently of view 1's — and leaks
+    them into its content block; encoder 1 is clean.  Its patch blocks sit in the columns
+    encoder 1 leaves dead, so a PCA fitted on encoder 1 and reused for encoder 2 projects
+    its signal away.  Each of the three ways to get encoder 2 wrong (view-1 style targets,
+    view-1 PCA, leak credited to the wrong encoder) therefore fails an assertion, rather
+    than producing a plausible number.
+    """
+    from eval.run_dci_compare import _reduce_reprs
+
+    rng = np.random.RandomState(1)
+    n, half = 240, 64  # 2*half > n/4 = 60, so `auto` reduces the patch blocks to 60 components
+    names, style_names = ["brain_size", "lesion_x"], ["bias", "noise_sigma"]
+    gt, gs1, gs2 = rng.randn(n, 2), rng.randn(n, 2), rng.randn(n, 2)
+    info = {"content_names": names, "style_names": style_names, "n_content_channels": 8, "n_style_channels": 4}
+
+    def lin(z, width, leak=None):
+        out = z @ rng.randn(z.shape[1], width) + 0.05 * rng.randn(n, width)
+        return out if leak is None else out + 0.8 * (leak @ rng.randn(leak.shape[1], width))
+
+    def patch(block, encoder):
+        cols = [block, np.zeros_like(block)]
+        return np.hstack(cols if encoder == 1 else cols[::-1])
+
+    def arm(signal=True):
+        g = (lambda z: z) if signal else (lambda z: rng.randn(*z.shape))
+        c1, s1 = lin(g(gt), 8), lin(g(gs1), 4)
+        c2, s2 = lin(g(gt), 8, leak=g(gs2) if signal else None), lin(g(gs2), 4)
+        p_c1, p_s1 = patch(lin(g(gt), half), 1), patch(lin(g(gs1), half), 1)
+        p_c2 = patch(lin(g(gt), half, leak=g(gs2) if signal else None), 2)
+        p_s2 = patch(lin(g(gs2), half), 2)
+        return {"gap": {0: (c1, s1, c2, s2, info)}, "patch": {0: (p_c1, p_s1, p_c2, p_s2, info)}}
+
+    common = dict(
+        dataset=None,
+        poolings=[("gap", "gap"), ("patch", (4, 4, 8))],
+        level=0,
+        seeds=(0, 1),
+        n_null=2,
+        name="planted",
+    )
+    reprs, noise = arm(), arm(signal=False)
+    res = _score_reprs(reprs, gt, gs1, info, per_encoder=True, gt_style_v2=gs2, **common)
+    only1 = _score_reprs(reprs, gt, gs1, info, **common)
+    floor = _score_reprs(noise, gt, gs1, info, per_encoder=True, gt_style_v2=gs2, **common)
+    enc2 = res["encoder2"]
+
+    for key in ("per_factor", "mcc", "leakage"):
+        assert json.dumps(res[key], sort_keys=True) == json.dumps(
+            only1[key], sort_keys=True
+        ), f"scoring encoder 2 moved encoder 1's {key}"
+    assert res["encoder"] == 1 and enc2["encoder"] == 2 and "encoder2" not in enc2
+    s2s = _cell_mean(enc2["leakage"]["cells"]["style→style"])
+    assert s2s > 0.5, f"encoder 2's style must be scored against z_style_v2, got style→style {s2s}"
+    # The PCA trap is real on this data: view 1's basis leaves encoder 2's patch content constant...
+    trapped = _reduce_reprs(reprs, 0, PROBE_DIM_AUTO)["patch"][0][_CONTENT_V2]
+    assert np.ptp(trapped, axis=0).max() < 1e-6, "planted data no longer exercises the PCA basis"
+    # ...and encoder 2's own PCA recovers it.
+    p2 = enc2["per_factor"]["lesion_x"]["by_pooling"]["patch"]["r2"]
+    assert p2 > 0.5, f"encoder 2 must get its own PCA, got lesion_x@patch R2 gap {p2}"
+    leak1 = _cell_mean(res["leakage"]["cells"]["content→style"])
+    leak2 = _cell_mean(enc2["leakage"]["cells"]["content→style"])
+    assert leak2 > NOISE_FLOOR > abs(leak1), f"the leak is encoder 2's alone, got enc1 {leak1} / enc2 {leak2}"
+    assert res["leakage"]["view"] and not enc2["leakage"]["view"], "view probe must be scored once"
+    tags = live_metrics(res)
+    assert {k: v for k, v in tags.items() if not k.startswith("iid_enc2_")} == live_metrics(only1)
+    assert any(k.startswith("iid_enc2_r2/") for k in tags) and not any(k.startswith("iid_enc2_view") for k in tags)
+    print_encoder_comparison(res, floor)
+    print(f"  self-test: per-encoder — enc2 style→style {s2s:+.3f} (z_style_v2), lesion_x@patch {p2:+.3f}")
+    print(f"  self-test: per-encoder — content→style enc1 {leak1:+.3f}  enc2 {leak2:+.3f}; enc1 unchanged OK")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     source = p.add_mutually_exclusive_group()
@@ -1672,6 +2024,14 @@ def main():
         "Requires --poolings without 'stats'; refuses 'entropy' and 'bounded' modes. The floor twin "
         "gets its own freshly initialised head, so `learned` stays a like-for-like subtraction.",
     )
+    p.add_argument(
+        "--per-encoder",
+        action="store_true",
+        help="Also score encoder 2 (separate_encoders runs): the whole report again on its own view-2 "
+        "blocks, against view-2 style factors (z_style_v2), with its own PCA and its own untrained twin, "
+        "then an enc1-vs-enc2 table. Both encoders come from one extraction pass; the probe cost doubles. "
+        "Encoder 1's numbers are identical with or without it.",
+    )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--device", default=None)
@@ -1752,6 +2112,7 @@ def main():
         parent_cache={} if cli.parent_adjustment == "nonlinear" else None,
         project_content=cli.project_content,
         freeze_content_mask=cli.freeze_content_mask,
+        per_encoder=cli.per_encoder,
     )
     logger.info("Scoring checkpoint ...")
     # init_seed=0 for the checkpoint too: strict=False leaves any unmatched parameter at

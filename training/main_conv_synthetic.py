@@ -31,7 +31,7 @@ import eval.dci as dci
 import training.losses as losses
 from data.datasets import SyntheticBrainDataset
 from models.multiview_encoder import MultiviewConvEncoder
-from utils.encoder_runtime import configure_encoder_runtime
+from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
 
 def parse_args(argv=None):
@@ -50,14 +50,23 @@ def parse_args(argv=None):
         "--encoder-head-hidden",
         type=int,
         default=100,
-        help="ResNet readout width: GAP -> Linear(512, width) -> LeakyReLU -> Linear(width, latent_dim)",
+        help="MLP readout hidden width (ResNet, or conv with --conv-readout mlp)",
+    )
+    p.add_argument("--conv-readout", choices=("linear", "mlp"), default="linear")
+    p.add_argument("--resnet-norm", choices=("batch", "group"), default="batch")
+    p.add_argument(
+        "--resnet-output-stride",
+        type=int,
+        choices=(8, 16, 32),
+        default=32,
+        help="Remove late-stage downsampling for stride 8/16; preserve stem, kernels and channels; no dilation",
     )
     p.add_argument("--latent-dim", type=int, default=16, help="Total encoding size (content + style)")
     p.add_argument("--content-channels", type=int, default=9, help="Content units (set to the true n_content)")
     p.add_argument("--hidden-channels", type=int, default=64, help="conv architecture only")
     p.add_argument("--res-channels", type=int, default=32, help="conv architecture only")
     p.add_argument("--nb-res-layers", type=int, default=2, help="conv architecture only")
-    p.add_argument("--downscale-factor", type=int, default=4, help="conv downscale (power of 2); ResNet uses 32")
+    p.add_argument("--downscale-factor", type=int, default=4, help="conv downscale (power of 2)")
     p.add_argument("--no-separate-encoders", action="store_true", help="Share one encoder across both views")
 
     # Contrastive loss (content alignment − entropy).
@@ -115,6 +124,13 @@ def parse_args(argv=None):
         "--hash-training-inputs", action="store_true", help="Record a streaming hash of all actual training images"
     )
     p.add_argument("--no-cuda", action="store_true")
+    p.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+        help="auto keeps the legacy CUDA/CPU selection; mps needs PYTORCH_ENABLE_MPS_FALLBACK=1 exported "
+        "before Python starts (ResNet MaxPool3d runs on CPU)",
+    )
 
     # Evaluation pooling — GAP is the paper-faithful default; patch probes whether
     # content survives at spatial resolution (see groupnorm-caps-gap-pooled-mcc).
@@ -203,6 +219,8 @@ def parse_args(argv=None):
         help="Nonlinearity in causal mechanisms.",
     )
     args = p.parse_args(argv)
+    if args.no_cuda and args.device not in ("auto", "cpu"):
+        p.error("--no-cuda forces CPU; it cannot be combined with --device cuda/mps")
     for name, default in (("data_seed", args.seed), ("model_seed", args.seed), ("loader_seed", args.seed + 10000)):
         if getattr(args, name) is None:
             setattr(args, name, default)
@@ -217,11 +235,18 @@ def parse_args(argv=None):
     if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if args.encoder_architecture == "resnet18":
+        if args.conv_readout != "linear":
+            p.error("--conv-readout only applies to --encoder-architecture conv")
         if args.encoder_head_hidden <= 0:
             p.error("--encoder-head-hidden must be positive")
-        spatial_size = (args.res + 31) // 32
+        spatial_size = (args.res + args.resnet_output_stride - 1) // args.resnet_output_stride
         if args.eval_pooling == "patch" and any(g < 1 or g > spatial_size for g in args.eval_patch_grid):
             p.error(f"ResNet at --res {args.res} has a {spatial_size}^3 map; --eval-patch-grid must fit it")
+    else:
+        if args.resnet_norm != "batch" or args.resnet_output_stride != 32:
+            p.error("--resnet-norm and --resnet-output-stride only apply to --encoder-architecture resnet18")
+        if args.conv_readout == "mlp" and args.encoder_head_hidden <= 0:
+            p.error("--encoder-head-hidden must be positive")
     return args
 
 
@@ -307,6 +332,9 @@ def effective_rank(feat):
     identifiability number it reports will sit at the untrained floor.
     """
     x = feat.detach().float()
+    if x.device.type == "mps":
+        # This small diagnostic is outside autograd; keep eigvalsh off MPS.
+        x = x.cpu()
     x = x - x.mean(dim=0, keepdim=True)
     ev = torch.linalg.eigvalsh(torch.cov(x.T)).clamp(min=0)
     total = ev.sum()
@@ -440,13 +468,13 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
 
 def main():
     args = parse_args()
+    configure_encoder_runtime(vars(args))
+    device = select_encoder_device(args.device, args.no_cuda)
     save_dir = os.path.join(args.out_dir, args.model_id)
     os.makedirs(save_dir, exist_ok=not args.require_new_run)
     with open(os.path.join(save_dir, "settings.json"), "w") as fp:
         json.dump(vars(args), fp, indent=2)
 
-    configure_encoder_runtime(vars(args))
-    device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
     print(f"device: {device}", flush=True)
     for k, v in vars(args).items():
         print(f"\t{k}: {v}", flush=True)
@@ -482,14 +510,20 @@ def main():
         proj_hidden=args.contrastive_proj_hidden,
         encoder_architecture=args.encoder_architecture,
         encoder_head_hidden=args.encoder_head_hidden,
+        conv_readout=args.conv_readout,
+        resnet_norm=args.resnet_norm,
+        resnet_output_stride=args.resnet_output_stride,
     ).to(device)
     if args.encoder_architecture == "resnet18":
         print(
-            f"encoder: 3D ResNet-18, stride 32, GAP -> 512 -> {args.encoder_head_hidden} -> {args.latent_dim}; "
+            f"encoder: 3D ResNet-18, {args.resnet_norm} norm, stride {args.resnet_output_stride}, "
+            f"GAP -> 512 -> {args.encoder_head_hidden} -> {args.latent_dim}; "
             f"{'separate' if model.separate_encoders else 'shared'} view backbone(s). "
             "The conv-only width, residual-layer and downscale flags are inactive.",
             flush=True,
         )
+    elif args.conv_readout == "mlp":
+        print(f"encoder: conv, GAP -> {args.hidden_channels} -> {args.encoder_head_hidden} -> {args.latent_dim}")
     if model.projector is not None:
         print(
             f"projection head: {args.content_channels} -> {args.contrastive_proj_hidden} -> "
@@ -516,9 +550,9 @@ def main():
             "model_seed": args.model_seed,
             "loader_seed": args.loader_seed,
             "parameter_count": sum(p.numel() for p in model.parameters()),
-            "backbone_stride": 32 if args.encoder_architecture == "resnet18" else args.downscale_factor,
-            "readout": "mlp" if args.encoder_architecture == "resnet18" else "linear",
-            "normalization": "batch" if args.encoder_architecture == "resnet18" else "group",
+            "backbone_stride": model.backbone_stride,
+            "readout": model.readout_type,
+            "normalization": model.normalization,
             "optimizer": "AdamW",
             "optimizer_defaults": optimizer.defaults,
             "elapsed_seconds_including_evaluation": time.perf_counter() - started,
@@ -528,6 +562,7 @@ def main():
             "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
             "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
             "device": str(device),
+            "mps_fallback": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") if device == "mps" else None,
         }
         path = os.path.join(save_dir, "training_progress.json")
         with open(path + ".tmp", "w") as fp:

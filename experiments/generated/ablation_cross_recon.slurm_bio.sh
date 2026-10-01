@@ -1,7 +1,7 @@
 #!/bin/bash -l
 # Auto-generated from: experiments/ablation_cross_recon.yaml
-# Generated at: 2026-09-30T14:41:01Z
-# Git SHA: 1e4cccd
+# Generated at: 2026-10-01T13:37:40Z
+# Git SHA: d44a818
 # Re-generate with: python scripts/launch.py --generate --cluster slurm
 #SBATCH --job-name=ablation-cross-recon
 #SBATCH --output=/scratch/users/%u/%j.out

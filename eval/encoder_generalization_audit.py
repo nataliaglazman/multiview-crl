@@ -27,6 +27,7 @@ from eval.dci import CONTENT_FACTOR_NAMES
 from eval.lesion_probe import block_gram
 from eval.pooling_probe import fit_readouts
 from eval.score_checkpoint import build_model, load_settings, make_dataset
+from utils.encoder_runtime import select_encoder_device
 
 VIEWS = ("t1", "flair")
 
@@ -45,8 +46,16 @@ def parse_args(argv=None):
     p.add_argument("--skip-bn-recalibration", action="store_true", help="Evaluate the original checkpoint only")
     p.add_argument("--seed", type=int, default=1729, help="Audit sampling, probe split and shuffled controls")
     p.add_argument("--no-cuda", action="store_true")
+    p.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+        help="mps needs PYTORCH_ENABLE_MPS_FALLBACK=1 exported before Python starts (ResNet MaxPool3d runs on CPU)",
+    )
     p.add_argument("--out-dir", help="New output directory; default: a timestamped folder inside the run")
     args = p.parse_args(argv)
+    if args.no_cuda and args.device not in ("auto", "cpu"):
+        p.error("--no-cuda forces CPU; it cannot be combined with --device cuda/mps")
     if args.num_samples < 10 or args.probe_samples < 20:
         p.error("Need --num-samples >= 10 and --probe-samples >= 20 (400 each recommended)")
     for name in ("batch_size", "retrieval_draws", "bn_samples"):
@@ -81,7 +90,7 @@ def capture_batch(model, x):
 
     with ExitStack() as stack:
         modules = {"encoder": model.encoder, "encoder_v1": model.encoder_v1}
-        if model.encoder_architecture == "resnet18":
+        if model.readout_type == "mlp":
             modules["hidden"] = model.to_encoding[1]  # Actual post-LeakyReLU readout.
         for name, module in modules.items():
             if module is not None:
@@ -506,7 +515,7 @@ def run_audit(model, cfg, cli, device, directory):
 def main(argv=None):
     cli = parse_args(argv)
     cfg = load_settings(cli.run_dir)
-    device = "cuda" if torch.cuda.is_available() and not cli.no_cuda else "cpu"
+    device = select_encoder_device(cli.device, cli.no_cuda)
     checkpoint = Path(cli.run_dir) / cli.checkpoint
     # One immutable in-memory snapshot, even if training later overwrites model.pt.
     checkpoint_bytes = checkpoint.read_bytes()

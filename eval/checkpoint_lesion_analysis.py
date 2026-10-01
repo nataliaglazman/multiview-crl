@@ -83,8 +83,8 @@ def batch_features(model, x, grids):
         pooled = F.adaptive_avg_pool3d(h, (grid,) * 3)
         if grid == 1:
             code = global_code
-        elif model.encoder_architecture == "resnet18":
-            # Nonlinear ResNet head is applied AFTER bin averaging, as in model.forward.
+        elif model.readout_type == "mlp":
+            # Nonlinear head is applied AFTER bin averaging, as in model.forward.
             code = model.to_encoding(pooled.flatten(2).transpose(1, 2)).transpose(1, 2)
         else:
             code = F.adaptive_avg_pool3d(captured["to_encoding"], (grid,) * 3)
@@ -210,7 +210,7 @@ def run_analysis(model, floor_factory, ds, device, batch_size, grids=(1, 4), n_s
             "Backbone and projected feature counts differ; probe scores measure accessibility, not total information.",
             "'projected' is the encoding's content block and 'style' the units after it (absent with no style units).",
             "wm_interior controls are anatomy-dependent quantiles, not Cartesian positions; voxelization can be many-to-one.",
-            "ResNet patch readouts apply the nonlinear head after pooling each bin; their mean need not equal GAP.",
+            "MLP patch readouts apply the nonlinear head after pooling each bin; their mean need not equal GAP.",
             "The untrained twin is a seeded initialization reference, not a saved pre-training checkpoint.",
         ],
     }

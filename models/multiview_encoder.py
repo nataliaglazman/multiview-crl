@@ -6,6 +6,8 @@
     3D ResNet-18 -> GAP -> Linear(512, 100) -> LeakyReLU -> Linear(100, latent_dim).
 The hidden readout width is configurable. This is a 3D adaptation, not a change
 to the training objective or the view-sharing policy. Both have no decoder.
+Optional ablations add a pooled MLP to conv, replace ResNet BatchNorm with
+GroupNorm, or remove late ResNet strides. Defaults preserve existing checkpoints.
 
 The first ``content_channels`` units are the content block, the rest are style.
 ``forward`` returns the same 8-tuple as ``VQVAE``/``MultiviewVAE`` so
@@ -41,6 +43,9 @@ class MultiviewConvEncoder(HelperModule):
         proj_hidden: int = 256,
         encoder_architecture: str = "conv",
         encoder_head_hidden: int = 100,
+        conv_readout: str = "linear",
+        resnet_norm: str = "batch",
+        resnet_output_stride: int = 32,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -54,7 +59,17 @@ class MultiviewConvEncoder(HelperModule):
         self.encoder_head_hidden = encoder_head_hidden
         if encoder_architecture not in ("conv", "resnet18"):
             raise ValueError(f"Unknown encoder_architecture: {encoder_architecture!r}")
-        if encoder_architecture == "resnet18" and encoder_head_hidden <= 0:
+        if conv_readout not in ("linear", "mlp"):
+            raise ValueError("conv_readout must be linear or mlp")
+        if encoder_architecture == "resnet18" and conv_readout != "linear":
+            raise ValueError("conv_readout only applies to the conv architecture")
+        if encoder_architecture == "conv" and (resnet_norm != "batch" or resnet_output_stride != 32):
+            raise ValueError("resnet_norm and resnet_output_stride only apply to resnet18")
+        self.conv_readout = conv_readout
+        self.readout_type = "mlp" if encoder_architecture == "resnet18" else conv_readout
+        self.backbone_stride = resnet_output_stride if encoder_architecture == "resnet18" else downscale_factor
+        self.normalization = resnet_norm if encoder_architecture == "resnet18" else "group"
+        if self.readout_type == "mlp" and encoder_head_hidden <= 0:
             raise ValueError("encoder_head_hidden must be positive")
 
         # --- View-specific encoders ---
@@ -68,17 +83,17 @@ class MultiviewConvEncoder(HelperModule):
                 in_channels, hidden_channels, res_channels, nb_res_layers, downscale_factor, use_checkpoint
             )
         else:
-            self.encoder = ResNet18Features3d(in_channels)
+            self.encoder = ResNet18Features3d(in_channels, norm=resnet_norm, output_stride=resnet_output_stride)
         self.encoder_v1 = copy.deepcopy(self.encoder) if separate_encoders else None
 
         # --- Projection head to the encoding space ---
-        if encoder_architecture == "conv":
+        if self.readout_type == "linear":
             # Preserve the original module names, initialization order and weights.
             self.to_encoding = nn.Conv3d(hidden_channels, latent_dim, 1)
         else:
             self.avgpool = nn.AdaptiveAvgPool3d(1)
             self.to_encoding = nn.Sequential(
-                nn.Linear(512, encoder_head_hidden),
+                nn.Linear(512 if encoder_architecture == "resnet18" else hidden_channels, encoder_head_hidden),
                 nn.LeakyReLU(),
                 nn.Linear(encoder_head_hidden, latent_dim),
             )
@@ -146,13 +161,13 @@ class MultiviewConvEncoder(HelperModule):
         ``(reconstruction=None, diffs=[0], encoder_features, content_indices,
         [], [], soft_content_masks, {})`` so the synthetic-DCI eval is unchanged.
 
-        For ResNet, GAP precedes the nonlinear readout. Patch probes apply that
+        For MLP readouts, GAP precedes the nonlinear readout. Patch probes apply that
         readout separately AFTER averaging each bin; unpooled probes apply it at
         each spatial position. Averaging these diagnostic outputs does not, in
         general, reproduce the trained global encoding.
         """
         h = self._encode(x, n_views, view_idx)
-        if self.encoder_architecture == "resnet18":
+        if self.readout_type == "mlp":
             if pool_only and patch_grid is None:
                 feat = self.to_encoding(self.avgpool(h).flatten(1))
             else:
@@ -164,8 +179,8 @@ class MultiviewConvEncoder(HelperModule):
                     )
                     if len(grid) != 3 or any(g < 1 or g > size for g, size in zip(grid, h.shape[2:])):
                         raise ValueError(
-                            f"ResNet patch grid {grid} must fit its spatial map {tuple(h.shape[2:])}; "
-                            "the backbone downsamples by 32 (64^3 inputs give 2^3 maps)."
+                            f"{self.encoder_architecture} patch grid {grid} must fit its spatial map "
+                            f"{tuple(h.shape[2:])}; the backbone downsamples by {self.backbone_stride}."
                         )
                     h = F.adaptive_avg_pool3d(h, tuple(grid))
                 feat = self.to_encoding(h.flatten(2).transpose(1, 2)).transpose(1, 2)

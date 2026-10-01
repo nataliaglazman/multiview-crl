@@ -3021,7 +3021,8 @@ def main(args):
 
                     # Periodic i.i.d. identifiability probe: identifiability_report's per-factor
                     # decoding (every content + style factor, from content and from style, at gap
-                    # and patch) on the test split built with causal=False.
+                    # and patch) on the test split built with causal=False. With separate encoders,
+                    # encoder 2 is scored too (iid_enc2_* tags), as the periodic DCI above does.
                     _iid_every = getattr(args, "iid_probe_every", 0)
                     if (
                         _iid_every > 0
@@ -3056,6 +3057,7 @@ def main(args):
                                     n_jobs=getattr(args, "iid_probe_n_jobs", -1),
                                     causal="iid",
                                     name=f"{args.model_id}-step{step}",
+                                    per_encoder=getattr(args, "separate_encoders", False),
                                 )
                             _iid_log = live_metrics(_iid_res)
                             for _iid_k, _iid_v in _iid_log.items():

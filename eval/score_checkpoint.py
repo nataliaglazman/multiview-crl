@@ -51,7 +51,7 @@ from data.datasets import SyntheticBrainDataset
 from eval.dci import CONTENT_FACTOR_NAMES, STYLE_FACTOR_NAMES
 from eval.identifiability_metrics import block_mcc, channel_mcc, cv_probe_acc, cv_probe_r2
 from models.multiview_encoder import MultiviewConvEncoder
-from utils.encoder_runtime import configure_encoder_runtime
+from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
 
 def parse_args(argv=None):
@@ -63,6 +63,12 @@ def parse_args(argv=None):
     p.add_argument("--pooling", choices=["gap", "patch"], default=None, help="Default: the run's --eval-pooling")
     p.add_argument("--patch-grid", type=int, nargs=3, default=None, help="Default: the run's --eval-patch-grid")
     p.add_argument("--no-cuda", action="store_true")
+    p.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+        help="mps needs PYTORCH_ENABLE_MPS_FALLBACK=1 exported before Python starts (ResNet MaxPool3d runs on CPU)",
+    )
     p.add_argument("--no-floor", action="store_true", help="Skip the untrained twin (faster, and unreportable)")
     p.add_argument("--no-graph", action="store_true", help="Skip PC graph recovery")
     p.add_argument(
@@ -105,6 +111,8 @@ def parse_args(argv=None):
     )
     p.add_argument("--lesion-seed", type=int, default=1729, help="Seed for lesion target permutations")
     args = p.parse_args(argv)
+    if args.no_cuda and args.device not in ("auto", "cpu"):
+        p.error("--no-cuda forces CPU; it cannot be combined with --device cuda/mps")
     args.lesion_analysis = args.lesion_analysis or args.lesion_analysis_only
     if args.lesion_analysis:
         if args.lesion_shuffles < 1:
@@ -138,6 +146,9 @@ def build_model(cfg, device, state_dict=None):
         proj_hidden=cfg.get("contrastive_proj_hidden", 256),
         encoder_architecture=cfg.get("encoder_architecture", "conv"),
         encoder_head_hidden=cfg.get("encoder_head_hidden", 100),
+        conv_readout=cfg.get("conv_readout", "linear"),
+        resnet_norm=cfg.get("resnet_norm", "batch"),
+        resnet_output_stride=cfg.get("resnet_output_stride", 32),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)
@@ -546,7 +557,8 @@ def append_lesion_analysis(report, model, ds, cfg, device, args):
     grids = args.lesion_grids
     if grids is None:
         if cfg.get("encoder_architecture", "conv") == "resnet18":
-            native = (cfg["res"] + 31) // 32
+            stride = cfg.get("resnet_output_stride", 32)
+            native = (cfg["res"] + stride - 1) // stride
         else:
             native = cfg["res"] // cfg["downscale_factor"]
         grids = [1, min(4, max(1, native))]
@@ -589,7 +601,7 @@ def main():
 
     cfg = load_settings(args.run_dir)
     configure_encoder_runtime(cfg)
-    device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
+    device = select_encoder_device(args.device, args.no_cuda)
     pooling = args.pooling or cfg.get("eval_pooling", "gap")
     patch_grid = None
     if pooling == "patch":
