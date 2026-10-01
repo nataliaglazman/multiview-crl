@@ -1,5 +1,8 @@
 # Encoder architecture ablations on Run:ai
 
+For the same experiments on the biomedical SLURM cluster, see
+[slurm_bio launch instructions](ENCODER_ABLATIONS_SLURM_BIO.md).
+
 These scripts follow `experiments/generated/*.runai.sh`: one job per script,
 `runai training standard submit`, the existing image/project/A100 resources,
 the read-write `/nfs` mount, and a folded container command. They call
