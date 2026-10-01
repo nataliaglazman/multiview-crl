@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-09-30T11:01:11Z
-# Git SHA: d636e7b
+# Generated at: 2026-10-01T13:23:04Z
+# Git SHA: d44a818
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -59,7 +59,7 @@ python -m training.main_multimodal
     --scale-adv-loss 0.0
     --scale-content-modality-adv 0.0
     --scale-contrastive-loss 100
-    --scale-cross-recon-loss 0.0
+    --scale-cross-recon-loss 10
     --scale-recon-loss 16
     --scale-style-contrastive-loss 0
     --scale-style-hsic-loss 0
@@ -74,7 +74,6 @@ python -m training.main_multimodal
     --style-independence-var-weight 1.0
     --style-injection-mode input
     --style-spatial-size 1
-    --synthetic-causal
     --synthetic-causal-edge-prob 0.5
     --synthetic-causal-graph random
     --synthetic-clean-content
@@ -87,7 +86,7 @@ python -m training.main_multimodal
     --synthetic-num-train 2000
     --synthetic-num-val 1500
     --synthetic-res 64
-    --model-id synthetic-causal-12-4-no-style-caus
+    --model-id synthetic-causal-12-4-2-levels
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -98,15 +97,15 @@ python -m training.main_multimodal
     --vqvae-embed-dim 16
     --vqvae-hidden-channels 16
     --vqvae-nb-entries 256
-    --vqvae-nb-levels 1
+    --vqvae-nb-levels 2
     --vqvae-nb-res-layers 2
-    --vqvae-scaling-rates 4
+    --vqvae-scaling-rates 2 2
     --workers 8
 TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-12-4-no-style-caus \
+runai training standard submit synthetic-causal-12-4-2-levels \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
