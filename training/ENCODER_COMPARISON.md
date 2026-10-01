@@ -59,8 +59,38 @@ python scripts/compare_encoders.py train --only-seed 42 --only-architecture resn
 Use separate GPU allocations for concurrent jobs. The launcher itself neither
 submits cluster jobs nor assigns devices; it inherits `CUDA_VISIBLE_DEVICES`.
 The same selectors work for evaluation. Summarization requires both architectures
-for every selected seed. The same interpreter that runs the launcher runs its
+for every selected seed. Before launching any audits, evaluation checks that
+**all selected training runs** have completed with valid checkpoints and receipts.
+The same interpreter that runs the launcher runs its
 children; `plan` alone needs only Python's standard library.
+
+### Recover from the CUDA MaxPool3d determinism error
+
+Older comparison settings enabled strict deterministic algorithms, which reject
+ResNet's CUDA `MaxPool3d` backward operation. The default configuration now sets
+both `deterministic: true` and `deterministic_warn_only: true` for both encoders.
+This keeps deterministic implementations where available and emits warnings for
+operations that have no deterministic implementation. It does not guarantee
+bitwise-identical trained weights across reruns. The architecture stays intact.
+
+After transferring the updated code and configuration to the training machine,
+check the runtime and start a fresh experiment root. The old manifest records
+different code/settings, and a failed run cannot be resumed with `--skip-completed`.
+Keep those earlier outputs for reference. For one pair:
+
+```bash
+OUT=results/encoder_comparison_cuda
+python -m unittest tests.test_encoder_runtime -v &&
+python scripts/compare_encoders.py train --output-dir "$OUT" --only-seed 42 &&
+python scripts/compare_encoders.py evaluate --output-dir "$OUT" --only-seed 42 &&
+python scripts/compare_encoders.py summarize --output-dir "$OUT" --only-seed 42
+```
+
+The CUDA test executes an actual max-pooling backward pass when a GPU is
+available; otherwise it is explicitly skipped. The `&&` chain prevents later
+stages from starting after a failure. Remove `--only-seed 42` from all three
+launcher commands to run all configured pairs. A Conv audit started after the
+ResNet failure describes only the Conv checkpoint; it cannot complete the pair.
 
 ## Reproducibility and safeguards
 
@@ -78,9 +108,13 @@ children; `plan` alone needs only Python's standard library.
   streaming SHA-256 hashes of batch subject indices and actual input images, parameter count, architectural
   differences, optimizer defaults, PyTorch version and elapsed time including
   evaluations. Elapsed time is descriptive, not a compute-matched benchmark.
-- Deterministic PyTorch operations are enabled. Unsupported operations fail
-  explicitly. Set `deterministic: false` for **both** arms in a new configuration
-  if the environment cannot support them; do not silently change one arm.
+- Deterministic algorithms are enabled with `deterministic_warn_only: true` in
+  the shared recipe. Unsupported operations warn and proceed. The resolved
+  flags are recorded in training progress and compared between arms. Standalone
+  training exposes `--deterministic --deterministic-warn-only`; the latter
+  requires the former. Saved settings without `deterministic_warn_only` retain
+  strict behavior when determinism is enabled. Change the policy for **both**
+  arms in a fresh experiment, not one arm alone.
 - CPU rendering and numerical-library thread counts are pinned to one by default
   in both training and evaluation. Saved deterministic settings are restored by
   evaluation as well. Exact input hashes deliberately reject even floating-point
@@ -144,11 +178,12 @@ only the average across factors.
 
 ```bash
 python -m unittest tests.test_encoder_comparison
-python -m unittest tests.test_encoder_pairing tests.test_conv_causal_config \
+python -m unittest tests.test_encoder_runtime tests.test_encoder_pairing tests.test_conv_causal_config \
   tests.test_resnet_encoder tests.test_encoder_generalization_audit \
   tests.test_checkpoint_lesion_analysis
 ```
 
 The second command requires the normal training dependencies. It includes real
 CPU optimization steps through both backbones, seed/checkpoint round trips and
-existing diagnostic regression tests. It is not a full training experiment.
+existing diagnostic regression tests. The MaxPool3d CUDA regression runs only
+when CUDA is available. These checks are not a full training experiment.

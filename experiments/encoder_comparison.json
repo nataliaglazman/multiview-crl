@@ -38,6 +38,7 @@
     "floor_eval": true,
     "best_metric": "none",
     "deterministic": true,
+    "deterministic_warn_only": true,
     "cpu_threads": 1,
     "hash_training_inputs": true
   },
