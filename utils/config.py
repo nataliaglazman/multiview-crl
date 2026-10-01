@@ -1235,8 +1235,10 @@ def parse_args() -> argparse.ArgumentParser:
         "the content block and from the style block, at gap and patch pooling. Logged as "
         "iid_{r2,r2_gap}/<factor>/<pooling>/from_{content,style}, plus iid_mcc/* and iid_view/*, "
         "and the full report saved to <save_dir>/iid_probe/step_<N>.json (readable with "
-        "`python -m eval.identifiability_report --from-json`). No untrained floor, so read "
-        "the curves as change over training, not as absolute scores. 0 disables (default).",
+        "`python -m eval.identifiability_report --from-json`). With --separate-encoders, encoder 2 "
+        "is scored too, against view-2 style factors, under iid_enc2_* (about twice the probe time). "
+        "No untrained floor, so read the curves as change over training, not as absolute scores. "
+        "0 disables (default).",
     )
     parser.add_argument(
         "--iid-probe-samples",

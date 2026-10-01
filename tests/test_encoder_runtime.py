@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import torch
 
-from utils.encoder_runtime import configure_encoder_runtime
+from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
 
 class EncoderRuntimeTests(unittest.TestCase):
@@ -39,6 +39,25 @@ class EncoderRuntimeTests(unittest.TestCase):
     def test_warn_only_without_determinism_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "requires deterministic"):
             configure_encoder_runtime({"deterministic_warn_only": True})
+
+    def test_requested_accelerator_never_falls_back_to_cpu(self):
+        with patch("torch.cuda.is_available", return_value=False):
+            self.assertEqual(select_encoder_device("auto"), "cpu")
+            with self.assertRaisesRegex(RuntimeError, "CUDA was requested"):
+                select_encoder_device("cuda")
+        with patch("torch.cuda.is_available", return_value=True):
+            self.assertEqual(select_encoder_device("auto"), "cuda")
+            self.assertEqual(select_encoder_device("auto", no_cuda=True), "cpu")
+        with patch("torch.backends.mps.is_built", return_value=True):
+            with patch("torch.backends.mps.is_available", return_value=False):
+                with self.assertRaisesRegex(RuntimeError, "MPS was requested"):
+                    select_encoder_device("mps")
+            with patch("torch.backends.mps.is_available", return_value=True):
+                self.assertEqual(select_encoder_device("mps"), "mps")
+        with self.assertRaisesRegex(ValueError, "--no-cuda"):
+            select_encoder_device("mps", no_cuda=True)
+        with self.assertRaisesRegex(ValueError, "Unknown"):
+            select_encoder_device("tpu")
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for MaxPool3d backward regression")
     def test_cuda_maxpool_backward_can_run_in_warning_mode(self):
