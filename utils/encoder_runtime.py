@@ -6,6 +6,9 @@ import torch
 
 
 def configure_encoder_runtime(settings):
+    warn_only = settings.get("deterministic_warn_only", False)
+    if warn_only and not settings.get("deterministic", False):
+        raise ValueError("deterministic_warn_only requires deterministic=True")
     threads = settings.get("cpu_threads")
     if threads is not None:
         if threads < 1:
@@ -13,6 +16,8 @@ def configure_encoder_runtime(settings):
         torch.set_num_threads(threads)
     if settings.get("deterministic", False):
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-        torch.use_deterministic_algorithms(True)
+        # CUDA MaxPool3d backward has no deterministic implementation. Permit
+        # explicit opt-in fallback while keeping legacy strict settings strict.
+        torch.use_deterministic_algorithms(True, warn_only=warn_only)
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True

@@ -30,6 +30,7 @@ STORE_TRUE = {
     "no_cuda",
     "require_new_run",
     "deterministic",
+    "deterministic_warn_only",
     "hash_training_inputs",
 }
 RESERVED = {
@@ -105,6 +106,8 @@ def validate_config(config):
         raise ValueError("This protocol compares the actual content vectors; contrastive_proj_dim must be 0")
     if shared.get("cpu_threads", 0) < 1 or not shared.get("hash_training_inputs", False):
         raise ValueError("Pin positive cpu_threads and enable hash_training_inputs for verified pairing")
+    if shared.get("deterministic_warn_only", False) and not shared.get("deterministic", False):
+        raise ValueError("deterministic_warn_only requires deterministic=true")
     if not 2 <= shared["batch_size"] <= shared["num_train_samples"]:
         raise ValueError("Training needs a full batch of at least two subjects")
     if not shared["batch_size"] <= evaluation["num_samples"] <= shared["num_train_samples"]:
@@ -328,7 +331,15 @@ def summarize(output, config, seeds, tag):
         if not a[0]["training_input_sha256"] or a[0]["training_input_sha256"] != b[0]["training_input_sha256"]:
             raise ValueError(f"Seed {seed}: actual training images differed")
         if any(
-            a[0][key] != b[0][key] for key in ("torch_version", "numpy_version", "cpu_threads", "optimizer_defaults")
+            a[0][key] != b[0][key]
+            for key in (
+                "torch_version",
+                "numpy_version",
+                "cpu_threads",
+                "optimizer_defaults",
+                "deterministic_algorithms",
+                "deterministic_warn_only",
+            )
         ):
             raise ValueError(f"Seed {seed}: runtime or optimizer defaults differed")
         if a[1]["cohorts"] != b[1]["cohorts"] or a[1]["probe_split"] != b[1]["probe_split"]:
@@ -410,6 +421,22 @@ def main(argv=None):
             parser.error("Summarization requires both architectures")
         summarize(output, config, seeds, args.evaluation_tag)
         return
+    if args.action == "evaluate":
+        # Validate every selected checkpoint before launching any costly audits.
+        # A successful first arm must not hide an incomplete paired training run.
+        ready = []
+        for seed in seeds:
+            for architecture in architectures:
+                options = run_options(config, output, seed, architecture)
+                run = Path(options["out_dir"]) / options["model_id"]
+                try:
+                    _, hashes = validate_run(run, options)
+                except (ValueError, FileNotFoundError, KeyError) as error:
+                    raise ValueError(f"Evaluation not started: {error}") from error
+                ready.append((run, hashes))
+        for run, hashes in ready:
+            evaluate_run(run, config, hashes, args.evaluation_tag, args.skip_completed)
+        return
     for seed in seeds:
         for architecture in architectures:
             options = run_options(config, output, seed, architecture)
@@ -427,9 +454,6 @@ def main(argv=None):
                 execute(command, output / "logs" / f"{run.name}.log", config["shared"]["cpu_threads"])
                 _, hashes = validate_run(run, options, require_receipt=False)
                 write_json(run / "comparison_receipt.json", hashes)
-            else:
-                _, hashes = validate_run(run, options)
-                evaluate_run(run, config, hashes, args.evaluation_tag, args.skip_completed)
 
 
 if __name__ == "__main__":

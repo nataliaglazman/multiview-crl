@@ -29,6 +29,15 @@ class TinyImages(Dataset):
 
 class EncoderPairingTests(unittest.TestCase):
     def setUp(self):
+        threads = torch.get_num_threads()
+        deterministic = torch.are_deterministic_algorithms_enabled()
+        warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        benchmark = torch.backends.cudnn.benchmark
+        cudnn_deterministic = torch.backends.cudnn.deterministic
+        self.addCleanup(torch.set_num_threads, threads)
+        self.addCleanup(torch.use_deterministic_algorithms, deterministic, warn_only=warn_only)
+        self.addCleanup(setattr, torch.backends.cudnn, "benchmark", benchmark)
+        self.addCleanup(setattr, torch.backends.cudnn, "deterministic", cudnn_deterministic)
         torch.set_num_threads(2)
 
     def test_training_pairs_batches_despite_architecture_and_evaluation_rng_consumption(self):
@@ -80,6 +89,8 @@ class EncoderPairingTests(unittest.TestCase):
                     "--no-cache",
                     "--require-new-run",
                     "--hash-training-inputs",
+                    "--deterministic",
+                    "--deterministic-warn-only",
                     "--cpu-threads",
                     "1",
                     "--no-separate-encoders",
@@ -111,6 +122,8 @@ class EncoderPairingTests(unittest.TestCase):
                 self.assertEqual(progress[-1]["step"], 4)
                 self.assertEqual(progress[-1]["status"], "complete")
                 self.assertEqual(progress[-1]["subjects_seen_per_view"], 8)
+                self.assertTrue(progress[-1]["deterministic_algorithms"])
+                self.assertTrue(progress[-1]["deterministic_warn_only"])
                 with patch("sys.argv", argv), self.assertRaises(FileExistsError):
                     trainer.main()
                 del initial, restored, trained
@@ -118,6 +131,10 @@ class EncoderPairingTests(unittest.TestCase):
             self.assertEqual(progress[0]["batch_order_sha256"], progress[1]["batch_order_sha256"])
             self.assertEqual(progress[0]["training_input_sha256"], progress[1]["training_input_sha256"])
             self.assertNotEqual(progress[0]["parameter_count"], progress[1]["parameter_count"])
+
+    def test_warn_only_requires_determinism_flag(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            trainer.parse_args(["--deterministic-warn-only"])
 
     def test_generator_seed_round_trip_is_separate_from_model_seed(self):
         args = trainer.parse_args(

@@ -104,6 +104,11 @@ def parse_args(argv=None):
     p.add_argument("--require-new-run", action="store_true", help="Refuse to overwrite an existing run directory")
     p.add_argument("--deterministic", action="store_true", help="Require deterministic PyTorch operations")
     p.add_argument(
+        "--deterministic-warn-only",
+        action="store_true",
+        help="With --deterministic, warn instead of failing for unsupported operations (e.g. CUDA MaxPool3d backward)",
+    )
+    p.add_argument(
         "--cpu-threads", type=int, default=None, help="Pin CPU rendering/encoding threads; restored by evaluation"
     )
     p.add_argument(
@@ -207,6 +212,8 @@ def parse_args(argv=None):
         p.error("--num-train-samples must allow at least one full training batch")
     if args.cpu_threads is not None and args.cpu_threads < 1:
         p.error("--cpu-threads must be positive")
+    if args.deterministic_warn_only and not args.deterministic:
+        p.error("--deterministic-warn-only requires --deterministic")
     if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if args.encoder_architecture == "resnet18":
@@ -518,6 +525,8 @@ def main():
             "torch_version": torch.__version__,
             "numpy_version": np.__version__,
             "cpu_threads": torch.get_num_threads(),
+            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
             "device": str(device),
         }
         path = os.path.join(save_dir, "training_progress.json")

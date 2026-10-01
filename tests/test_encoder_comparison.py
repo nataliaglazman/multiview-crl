@@ -25,6 +25,8 @@ class ComparisonTests(unittest.TestCase):
         command = comparison.training_command(a)
         self.assertIn("--no-cache", command)
         self.assertIn("--cross-view-negs-only", command)
+        self.assertIn("--deterministic", command)
+        self.assertIn("--deterministic-warn-only", command)
         self.assertNotIn("--no-separate-encoders", command)
         self.assertNotIn("--synthetic-causal", command)
 
@@ -35,6 +37,7 @@ class ComparisonTests(unittest.TestCase):
             ("shared", "batch_size", 3000),
             ("shared", "data_seed", 9),
             ("evaluation", "probe_samples", 200),
+            ("shared", "deterministic", False),
         ):
             config = copy.deepcopy(self.config)
             config[section][key] = value
@@ -71,6 +74,8 @@ class ComparisonTests(unittest.TestCase):
             "numpy_version": "test",
             "torch_version": "test",
             "optimizer_defaults": {"lr": options["lr"]},
+            "deterministic_algorithms": options["deterministic"],
+            "deterministic_warn_only": options["deterministic_warn_only"],
         }
         comparison.write_json(run / "training_progress.json", progress)
         hashes = {}
@@ -102,6 +107,30 @@ class ComparisonTests(unittest.TestCase):
         comparison.write_json(run / "evaluation/global_path/report.json", report)
         return run
 
+    def test_evaluation_checks_all_selected_runs_before_launching(self):
+        for state in ("missing", "incomplete", "complete"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp).resolve()
+                conv = self.fixture(output, "conv", 0.1)
+                if state != "missing":
+                    resnet = self.fixture(output, "resnet18", 0.2)
+                    if state == "incomplete":
+                        progress = comparison.read_json(resnet / "training_progress.json")
+                        progress.update(status="running", step=0)
+                        comparison.write_json(resnet / "training_progress.json", progress)
+                with patch.object(comparison, "source_hashes", return_value={}), patch.object(
+                    comparison, "evaluate_run"
+                ) as evaluate:
+                    comparison.ensure_manifest(output, self.config, create=True)
+                    command = ["evaluate", "--output-dir", str(output), "--only-seed", "42"]
+                    if state == "complete":
+                        comparison.main(command)
+                        self.assertEqual([call.args[0] for call in evaluate.call_args_list], [conv, resnet])
+                    else:
+                        with self.assertRaisesRegex(ValueError, "Evaluation not started"):
+                            comparison.main(command)
+                        evaluate.assert_not_called()
+
     def test_summary_reports_paired_difference_and_rejects_broken_pairing(self):
         with tempfile.TemporaryDirectory() as tmp, patch("sys.stdout", new_callable=io.StringIO):
             output = Path(tmp)
@@ -119,6 +148,11 @@ class ComparisonTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "subject order differed"):
                 comparison.summarize(output, self.config, [42], "evaluation")
             progress["batch_order_sha256"] = "same-order"
+            progress["deterministic_warn_only"] = False
+            comparison.write_json(run / "training_progress.json", progress)
+            with self.assertRaisesRegex(ValueError, "runtime or optimizer defaults differed"):
+                comparison.summarize(output, self.config, [42], "evaluation")
+            progress["deterministic_warn_only"] = True
             comparison.write_json(run / "training_progress.json", progress)
             path = run / "evaluation/global_path/report.json"
             report = comparison.read_json(path)
