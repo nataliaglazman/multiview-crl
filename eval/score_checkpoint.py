@@ -138,6 +138,9 @@ def build_model(cfg, device, state_dict=None):
         proj_hidden=cfg.get("contrastive_proj_hidden", 256),
         encoder_architecture=cfg.get("encoder_architecture", "conv"),
         encoder_head_hidden=cfg.get("encoder_head_hidden", 100),
+        conv_readout=cfg.get("conv_readout", "linear"),
+        resnet_norm=cfg.get("resnet_norm", "batch"),
+        resnet_output_stride=cfg.get("resnet_output_stride", 32),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)
@@ -546,7 +549,8 @@ def append_lesion_analysis(report, model, ds, cfg, device, args):
     grids = args.lesion_grids
     if grids is None:
         if cfg.get("encoder_architecture", "conv") == "resnet18":
-            native = (cfg["res"] + 31) // 32
+            stride = cfg.get("resnet_output_stride", 32)
+            native = (cfg["res"] + stride - 1) // stride
         else:
             native = cfg["res"] // cfg["downscale_factor"]
         grids = [1, min(4, max(1, native))]

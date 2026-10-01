@@ -81,7 +81,7 @@ def capture_batch(model, x):
 
     with ExitStack() as stack:
         modules = {"encoder": model.encoder, "encoder_v1": model.encoder_v1}
-        if model.encoder_architecture == "resnet18":
+        if model.readout_type == "mlp":
             modules["hidden"] = model.to_encoding[1]  # Actual post-LeakyReLU readout.
         for name, module in modules.items():
             if module is not None:

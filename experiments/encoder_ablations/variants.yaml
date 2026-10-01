@@ -1,0 +1,14 @@
+# Each intervention differs from its reference by one architectural option.
+# All other settings come from ../encoder_comparison.json.
+conv_mlp:
+  reference: conv
+  overrides:
+    conv_readout: mlp
+resnet_groupnorm:
+  reference: resnet18
+  overrides:
+    resnet_norm: group
+resnet_stride8:
+  reference: resnet18
+  overrides:
+    resnet_output_stride: 8

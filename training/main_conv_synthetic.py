@@ -50,14 +50,23 @@ def parse_args(argv=None):
         "--encoder-head-hidden",
         type=int,
         default=100,
-        help="ResNet readout width: GAP -> Linear(512, width) -> LeakyReLU -> Linear(width, latent_dim)",
+        help="MLP readout hidden width (ResNet, or conv with --conv-readout mlp)",
+    )
+    p.add_argument("--conv-readout", choices=("linear", "mlp"), default="linear")
+    p.add_argument("--resnet-norm", choices=("batch", "group"), default="batch")
+    p.add_argument(
+        "--resnet-output-stride",
+        type=int,
+        choices=(8, 16, 32),
+        default=32,
+        help="Remove late-stage downsampling for stride 8/16; preserve stem, kernels and channels; no dilation",
     )
     p.add_argument("--latent-dim", type=int, default=16, help="Total encoding size (content + style)")
     p.add_argument("--content-channels", type=int, default=9, help="Content units (set to the true n_content)")
     p.add_argument("--hidden-channels", type=int, default=64, help="conv architecture only")
     p.add_argument("--res-channels", type=int, default=32, help="conv architecture only")
     p.add_argument("--nb-res-layers", type=int, default=2, help="conv architecture only")
-    p.add_argument("--downscale-factor", type=int, default=4, help="conv downscale (power of 2); ResNet uses 32")
+    p.add_argument("--downscale-factor", type=int, default=4, help="conv downscale (power of 2)")
     p.add_argument("--no-separate-encoders", action="store_true", help="Share one encoder across both views")
 
     # Contrastive loss (content alignment − entropy).
@@ -217,11 +226,18 @@ def parse_args(argv=None):
     if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if args.encoder_architecture == "resnet18":
+        if args.conv_readout != "linear":
+            p.error("--conv-readout only applies to --encoder-architecture conv")
         if args.encoder_head_hidden <= 0:
             p.error("--encoder-head-hidden must be positive")
-        spatial_size = (args.res + 31) // 32
+        spatial_size = (args.res + args.resnet_output_stride - 1) // args.resnet_output_stride
         if args.eval_pooling == "patch" and any(g < 1 or g > spatial_size for g in args.eval_patch_grid):
             p.error(f"ResNet at --res {args.res} has a {spatial_size}^3 map; --eval-patch-grid must fit it")
+    else:
+        if args.resnet_norm != "batch" or args.resnet_output_stride != 32:
+            p.error("--resnet-norm and --resnet-output-stride only apply to --encoder-architecture resnet18")
+        if args.conv_readout == "mlp" and args.encoder_head_hidden <= 0:
+            p.error("--encoder-head-hidden must be positive")
     return args
 
 
@@ -482,14 +498,20 @@ def main():
         proj_hidden=args.contrastive_proj_hidden,
         encoder_architecture=args.encoder_architecture,
         encoder_head_hidden=args.encoder_head_hidden,
+        conv_readout=args.conv_readout,
+        resnet_norm=args.resnet_norm,
+        resnet_output_stride=args.resnet_output_stride,
     ).to(device)
     if args.encoder_architecture == "resnet18":
         print(
-            f"encoder: 3D ResNet-18, stride 32, GAP -> 512 -> {args.encoder_head_hidden} -> {args.latent_dim}; "
+            f"encoder: 3D ResNet-18, {args.resnet_norm} norm, stride {args.resnet_output_stride}, "
+            f"GAP -> 512 -> {args.encoder_head_hidden} -> {args.latent_dim}; "
             f"{'separate' if model.separate_encoders else 'shared'} view backbone(s). "
             "The conv-only width, residual-layer and downscale flags are inactive.",
             flush=True,
         )
+    elif args.conv_readout == "mlp":
+        print(f"encoder: conv, GAP -> {args.hidden_channels} -> {args.encoder_head_hidden} -> {args.latent_dim}")
     if model.projector is not None:
         print(
             f"projection head: {args.content_channels} -> {args.contrastive_proj_hidden} -> "
@@ -516,9 +538,9 @@ def main():
             "model_seed": args.model_seed,
             "loader_seed": args.loader_seed,
             "parameter_count": sum(p.numel() for p in model.parameters()),
-            "backbone_stride": 32 if args.encoder_architecture == "resnet18" else args.downscale_factor,
-            "readout": "mlp" if args.encoder_architecture == "resnet18" else "linear",
-            "normalization": "batch" if args.encoder_architecture == "resnet18" else "group",
+            "backbone_stride": model.backbone_stride,
+            "readout": model.readout_type,
+            "normalization": model.normalization,
             "optimizer": "AdamW",
             "optimizer_defaults": optimizer.defaults,
             "elapsed_seconds_including_evaluation": time.perf_counter() - started,
