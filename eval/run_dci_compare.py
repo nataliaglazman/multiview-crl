@@ -759,7 +759,9 @@ def _reduce_reprs(reprs, level, probe_dim, seed=0):
     different goal from fixing the conditioning, and only the integer serves it.
 
     View-1 and view-2 of a block share one PCA basis (fit on view 1) so the
-    view-invariance probe is not confounded by mismatched bases.  PCA is
+    view-invariance probe is not confounded by mismatched bases.  That basis is for the
+    view probe only: to score encoder 2 of a ``separate_encoders`` model, reduce
+    ``_swap_encoders(reprs, level)`` instead, so its PCA is fit on its own features.  PCA is
     unsupervised and fit on all samples — a transductive but label-free step.  The
     ``info`` dict is left untouched, so the tables still report the model's real
     channel count.  Blocks already at or below ``probe_dim`` are left unchanged.
@@ -802,6 +804,28 @@ def _reduce_reprs(reprs, level, probe_dim, seed=0):
             _apply(pca_s, style_v2),
             info,
         )
+        out[key] = new_ld
+    return out
+
+
+def _swap_encoders(reprs, level):
+    """``reprs`` with encoder 2's blocks moved into encoder 1's slots at *level*.
+
+    Under ``separate_encoders`` view 2 goes through its own encoder, so ``(content_v2,
+    style_v2)`` IS encoder 2's representation.  Swapped into the primary slots, it is
+    scored by the same code path as encoder 1, and ``_reduce_reprs`` fits its PCA on
+    encoder 2's own features.  The unswapped default (fit on view 1, reuse for view 2) is
+    right for the view probe and wrong here: two encoders do not share a basis, so encoder
+    1's top components can miss encoder 2's signal entirely.
+    """
+    out = {}
+    for key, ld in reprs.items():
+        if level not in ld:
+            out[key] = ld
+            continue
+        content, style, content_v2, style_v2, info = ld[level]
+        new_ld = dict(ld)
+        new_ld[level] = (content_v2, style_v2, content, style, info)
         out[key] = new_ld
     return out
 
@@ -890,7 +914,9 @@ def score_reprs(
 
     When ``per_encoder`` is True and view-2 features exist, the four score blocks
     and block-MCC are computed separately for each encoder and reported with a
-    ``_v2`` suffix.  ``with_dci`` adds the split-free GAP DCI scores.  ``probe_dim``
+    ``_v2`` suffix.  Each encoder's probes read a reduction fitted on its own features
+    (``_swap_encoders``); only the view-invariance probe, which compares the two views,
+    puts both in view 1's basis.  ``with_dci`` adds the split-free GAP DCI scores.  ``probe_dim``
     (>0) PCA-reduces every block to that many components first, so informativeness and
     MCC are compared at equal capacity across models of different width.  DCI is scored
     on the UNREDUCED blocks regardless (``_select_codes``) and bounded by
@@ -914,7 +940,8 @@ def score_reprs(
     # Keep a handle on the unreduced blocks: the probes want conditioning, DCI wants the
     # encoder's own basis, and `_reduce_reprs` can only serve the first.
     dci_reprs = reprs
-    if probe_dim == PROBE_DIM_AUTO or (isinstance(probe_dim, int) and probe_dim > 0):
+    reduce_probes = probe_dim == PROBE_DIM_AUTO or (isinstance(probe_dim, int) and probe_dim > 0)
+    if reduce_probes:
         reprs = _reduce_reprs(reprs, level, probe_dim)
     avail = set(reprs.keys())
     rng = np.random.RandomState(0)
@@ -970,11 +997,20 @@ def score_reprs(
     }
 
     if per_encoder and _has_v2(reprs, level):
+        # Encoder 2 is scored from a copy with its blocks in the primary slots, so the probe
+        # reduction is fitted on its own features. `reprs` holds view 2 in view 1's basis,
+        # which the view probe above needs and encoder 2's scores must not use: two encoders
+        # do not share a basis, trained or not. Measured on ident-vent-hsic (N=300 causal,
+        # patch 8^3, init seed 0): encoder 2's untrained patch content read +0.610 in encoder
+        # 1's basis vs +0.743 in its own, which put its learned content at +0.167 instead of
+        # +0.022 and its learned style at +0.037 instead of +0.122. Same rng, consumed after
+        # encoder 1 exactly as before, so encoder 1's row is unchanged.
+        enc2_reprs = _swap_encoders(dci_reprs, level)
         enc2 = _score_one_encoder(
-            reprs,
+            _reduce_reprs(enc2_reprs, level, probe_dim) if reduce_probes else enc2_reprs,
             level,
-            _CONTENT_V2,
-            _STYLE_V2,
+            _CONTENT,
+            _STYLE,
             gt_content,
             # Encoder 2 sees view-2 style (z_style_v2), which is drawn independently of
             # view-1's — so it MUST be scored against gsv2, not gsv1. Falls back to
@@ -989,7 +1025,7 @@ def score_reprs(
             all_only=all_only,
             with_dci=with_dci,
             probe_kind=probe_kind,
-            dci_reprs=dci_reprs,
+            dci_reprs=enc2_reprs,
             dci_max_codes=dci_max_codes,
             factor_pooling=factor_pooling,
         )
