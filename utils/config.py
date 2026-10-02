@@ -1256,6 +1256,17 @@ def parse_args() -> argparse.ArgumentParser:
         "identifiability_report's default --poolings.",
     )
     parser.add_argument(
+        "--iid-probe-levels",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Encoder levels the --iid-probe-every probe scores (default: every level, from one "
+        "extraction pass; probe time scales with the count). Level 0 (finest, where the content "
+        "mask lives) logs the bare iid_* tags and step_<N>.json; level k logs iid_l<k>_* and "
+        "step_<N>_level<k>.json. A level without a content mask has no style block, so it is "
+        "scored as all-content and logs no from_style tags.",
+    )
+    parser.add_argument(
         "--iid-probe-n-jobs",
         type=int,
         default=-1,
