@@ -198,6 +198,12 @@ def parse_args(argv=None):
         default="legacy",
         help="wm_interior places a full fixed-radius sphere inside final WM labels; legacy reproduces old runs",
     )
+    p.add_argument(
+        "--synthetic-lesion-radius",
+        type=float,
+        default=0.1,
+        help="Sphere-mode lesion radius in [-1,1] coords (0.1 = 1.6 voxels at res=32)",
+    )
     p.add_argument("--synthetic-n-deformation-grid", type=int, default=4)
     p.add_argument("--synthetic-n-fissure-grid", type=int, default=8)
     p.add_argument("--synthetic-hierarchical-content", action="store_true")
@@ -245,6 +251,8 @@ def parse_args(argv=None):
         p.error("--cpu-threads must be positive")
     if args.deterministic_warn_only and not args.deterministic:
         p.error("--deterministic-warn-only requires --deterministic")
+    if not 0 < args.synthetic_lesion_radius < float("inf"):
+        p.error("--synthetic-lesion-radius must be finite and positive")
     if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if not 0 <= args.patch_loss_weight < float("inf"):
@@ -316,6 +324,7 @@ def make_dataset(args, mode, num_samples):
         synthetic_causal_nonlinearity=args.synthetic_causal_nonlinearity,
         synthetic_clean_content=args.synthetic_clean_content,
         synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
+        synthetic_lesion_radius=getattr(args, "synthetic_lesion_radius", 0.1),
     )
 
 

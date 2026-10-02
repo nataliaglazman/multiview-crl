@@ -1,0 +1,31 @@
+% Synthetic data generation — methodology section.
+% Describes experiments/synthetic_identifiable.yaml; generator in
+% eval/synthetic/synthetic_dataset.py (PseudoMRIRenderer).
+
+\subsection{Synthetic paired-contrast data}
+\label{sec:synthetic-data}
+
+Since real paired MRI has no ground-truth latents, we evaluate on a procedural
+generator that renders a T1-like and a FLAIR-like $64^3$ volume of the same
+subject. Each subject has a content vector $\mathbf{c}\in[-1,1]^{9}$ shared by
+both views and a style vector $\mathbf{s}^{(v)}\in\mathbb{R}^{3}$ drawn
+independently for each view.
+
+\paragraph{Content.}
+The nine factors are brain size, ventricle size, lesion position (3D),
+cortical thickness, temporal-lobe atrophy, left--right asymmetry and sulcal
+depth. They are sampled from a nonlinear structural causal model over a random
+DAG, so the factors are dependent, and are then mapped monotonically to
+$[-1,1]$. Each factor deforms a tissue-label map of white matter, grey matter,
+ventricles and a white-matter lesion. Local factors are constructed so that
+they do not change total brain volume, which keeps them distinguishable from
+brain size.
+
+\paragraph{Style.}
+Each view assigns intensities to the tissue labels with a modality-specific
+lookup table (e.g.\ white matter brighter than grey matter in T1, and the
+reverse in FLAIR; the lesion is hypointense in T1 and hyperintense in FLAIR).
+The style vector sets a global intensity gain, an offset and the noise level.
+A smooth bias field and Rician noise are then applied. Since style is redrawn
+for each view, it differs within every positive pair, whereas content is
+identical.
