@@ -144,6 +144,27 @@ class MultiviewConvEncoder(HelperModule):
             patch_grid = patch_grid[0]  # single level here
         return F.adaptive_avg_pool3d(feat, tuple(patch_grid)).flatten(2)
 
+    def global_and_patch_features(self, x, patch_grid, n_views=2):
+        """Two training readouts from ONE backbone pass, before any loss projector.
+
+        Returns (2B, latent_dim) and (2B, latent_dim, P). The global MLP still
+        receives GAP features; the same MLP receives each pooled patch separately.
+        Do not average patch MLP outputs to approximate the global readout.
+        No parameters/buffers are added, so existing checkpoints remain compatible.
+        """
+        h = self._encode(x, n_views, view_idx=None)
+        grid = tuple(patch_grid)
+        if len(grid) != 3 or any(g < 1 or g > size for g, size in zip(grid, h.shape[2:])):
+            raise ValueError(f"Training patch grid {grid} must fit spatial map {tuple(h.shape[2:])}")
+        if self.readout_type == "mlp":
+            pooled = self.to_encoding(self.avgpool(h).flatten(1))
+            patches = self.to_encoding(self._patch_pool(h, grid).transpose(1, 2)).transpose(1, 2)
+        else:
+            features = self.to_encoding(h)
+            pooled = features.mean(dim=[2, 3, 4])
+            patches = self._patch_pool(features, grid)
+        return pooled, patches
+
     def forward(
         self,
         x: torch.FloatTensor,
