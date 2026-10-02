@@ -14,10 +14,10 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from eval import encoder_spatial_target_audit as audit
-from eval import encoder_target_protocol as protocol
-from eval.checkpoint_lesion_analysis import state_digest
-from eval.score_checkpoint import build_model
+from eval.encoder import encoder_spatial_target_audit as audit
+from eval.encoder import encoder_target_protocol as protocol
+from eval.lesion.checkpoint_lesion_analysis import state_digest
+from eval.protocol.score_checkpoint import build_model
 from scripts import generate_encoder_followups_slurm as slurm
 from training import encoder_target_control as control
 
@@ -262,7 +262,7 @@ class EncoderTargetFollowupTests(unittest.TestCase):
             base_env = {k: v for k, v in os.environ.items() if not k.startswith("SLURM_")}
             base_env.update(ENCODER_REPO="/repo with spaces", ENCODER_PYTHON="/env/bin/python")
             for kind, count, module in (
-                ("spatial_probes", 3, "eval.encoder_spatial_target_audit"),
+                ("spatial_probes", 3, "eval.encoder.encoder_spatial_target_audit"),
                 ("target_controls", 2, "training.encoder_target_control"),
             ):
                 script = Path(tmp) / f"encoder_{kind}_s42.slurm_bio.sh"

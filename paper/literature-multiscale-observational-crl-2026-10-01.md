@@ -122,12 +122,12 @@ A stronger study would first reproduce the spatial-source model using the author
 
 Repository details that matter:
 
-- `eval/synthetic_dataset.py` already has GP/TP-inspired fields and distinct/repeated kernel options. Its Gaussian-filtered sampler centers and normalizes each realization. It is therefore not literally the unconditioned GP assumed by a standard GP likelihood. A theorem-aligned control needs a suitable sampler or an explicit analysis of the modified distribution.
+- `eval/synthetic/synthetic_dataset.py` already has GP/TP-inspired fields and distinct/repeated kernel options. Its Gaussian-filtered sampler centers and normalizes each realization. It is therefore not literally the unconditioned GP assumed by a standard GP likelihood. A theorem-aligned control needs a suitable sampler or an explicit analysis of the modified distribution.
 - Hard tissue overwrites and masks can remove source information. Two MRI contrasts do not automatically satisfy pointwise invertibility for all latent fields.
 - With `lesion_mode="field"`, the three lesion-position scalars are inactive and must be removed from that experiment's scalar scoring.
 - `synthetic_clean_content` can zero some shared fields. Field-recovery experiments need explicit nonzero-source checks.
 - Verify lesion support against the final tissue segmentation; the existing field-mode envelope is not equivalent to the sphere mode's interior-WM placement.
-- Reuse `eval/probe_fields.py` to score source recovery. Matching a target correlation length alone is not success.
+- Reuse `eval/diagnostics/probe_fields.py` to score source recovery. Matching a target correlation length alone is not success.
 
 If independent spatial disturbances feed a causal mechanism, recovering those disturbances still does not identify that mechanism or its endogenous variables. State exactly which object the experiment recovers.
 

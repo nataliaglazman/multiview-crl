@@ -1,4 +1,4 @@
-"""The local MPS runner trains the Run:ai recipe, changing only device and output location."""
+"""Local GPU launchers preserve the recipe, changing only device and output location."""
 
 import argparse
 import ast
@@ -80,6 +80,42 @@ class EncoderMpsRunnerTests(unittest.TestCase):
         self.assertEqual(tokens[:3], [sys.executable, "-m", "training.main_conv_synthetic"])
         parsed = trainer_parse_args()(tokens[3:])
         self.assertEqual((parsed.device, parsed.batch_size, parsed.resnet_output_stride), ("mps", 32, 8))
+
+    def test_cuda_patch_launcher_matches_mps_and_has_separate_outputs(self):
+        env = {**os.environ, "ENCODER_PYTHON": sys.executable}
+        commands = {}
+        for device in ("mps", "cuda"):
+            script = ROOT / f"experiments/generated/encoder_conv_mlp_patch_s42.{device}.sh"
+            subprocess.run(["bash", "-n", str(script)], check=True)
+            preview = subprocess.check_output(["bash", str(script), "--dry-run"], env=env, text=True)
+            commands[device] = vars(trainer_parse_args()(shlex.split(preview)[3:]))
+        cuda, mps = commands["cuda"], commands["mps"]
+        self.assertEqual({key for key in cuda if cuda[key] != mps[key]}, {"device", "out_dir", "model_id"})
+        self.assertEqual(cuda["device"], "cuda")
+        self.assertEqual(cuda["model_id"], "conv_mlp_s42_cuda_patch8x8x8_w1")
+        self.assertEqual(cuda["out_dir"], str(ROOT / "results/encoder_patch_cuda/runs"))
+        self.assertEqual((cuda["conv_readout"], cuda["batch_size"], cuda["train_steps"]), ("mlp", 32, 10000))
+        self.assertEqual((cuda["patch_loss_weight"], cuda["train_patch_grid"]), (1, [8, 8, 8]))
+        self.assertTrue(cuda["deterministic_warn_only"])
+        small, _ = runner.make_options(
+            runner_args(device="cuda", variant="conv_mlp", batch_size=8, patch_loss_weight=1)
+        )
+        self.assertEqual(small["model_id"], "conv_mlp_s42_cuda_b8_patch8x8x8_w1")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "NVIDIA GPU required")
+    def test_cuda_backend_check_runs_patch_update_without_writing_a_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {**os.environ, "ENCODER_PYTHON": sys.executable}
+            script = ROOT / "experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh"
+            result = subprocess.run(
+                ["bash", str(script), "--check", "--batch-size", "2", "--results-dir", temp],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Backend check passed: CUDA matches CPU", result.stdout)
+            self.assertEqual(list(Path(temp).iterdir()), [], "--check must not write a run")
 
     @unittest.skipUnless(torch.backends.mps.is_available(), "Apple-silicon GPU required")
     def test_backend_check_runs_a_real_step_and_matches_cpu(self):

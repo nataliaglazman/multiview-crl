@@ -60,7 +60,7 @@
 #
 # WHAT TO LOOK AT (there is no DCI here)
 # --------------------------------------
-# Every 2000 steps eval/cross_reconstruction.evaluate_content_style_separation
+# Every 2000 steps eval/metrics/cross_reconstruction.evaluate_content_style_separation
 # runs on the val split and logs:
 #   content/modality_invariance     content should NOT be predictable from T1-vs-T2
 #   content/modality_probe_acc      near chance (0.5) is the target

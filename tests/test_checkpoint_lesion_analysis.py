@@ -12,8 +12,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from eval import score_checkpoint
-from eval.checkpoint_lesion_analysis import (
+from eval.lesion.checkpoint_lesion_analysis import (
     batch_features,
     json_safe,
     lesion_targets,
@@ -22,6 +21,7 @@ from eval.checkpoint_lesion_analysis import (
     score_features,
     state_digest,
 )
+from eval.protocol import score_checkpoint
 
 
 def config(**kwargs):
@@ -160,7 +160,7 @@ class CheckpointLesionTests(unittest.TestCase):
             return target, mass
 
         with contextlib.redirect_stdout(io.StringIO()), patch(
-            "eval.checkpoint_lesion_analysis.lesion_targets", missing_first
+            "eval.lesion.checkpoint_lesion_analysis.lesion_targets", missing_first
         ):
             report = run_analysis(model, None, ds, "cpu", 4, grids=[1], n_shuffles=1)
         self.assertEqual(report["n_valid"], 23)

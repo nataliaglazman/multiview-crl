@@ -15,7 +15,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from eval.ventricle_decoder_audit import (
+from eval.ventricle.ventricle_decoder_audit import (
     effects_from_endpoints,
     main,
     make_dataset,
@@ -153,7 +153,7 @@ class DecoderAuditTests(unittest.TestCase):
 
     def test_bad_endpoint_is_rejected_and_hooks_removed(self):
         model = ToyModel("content")
-        with patch("eval.ventricle_decoder_audit.replay", side_effect=lambda m, c, s, spatial: c + 1):
+        with patch("eval.ventricle.ventricle_decoder_audit.replay", side_effect=lambda m, c, s, spatial: c + 1):
             with self.assertRaisesRegex(ValueError, "endpoint replay failed"):
                 swap_batch(model, [self.sample()], "cpu")
         self.assertNotIn("_bottleneck_style", model.__dict__)
@@ -188,7 +188,7 @@ class DecoderAuditTests(unittest.TestCase):
             file_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
             out = Path(tmp) / "audit"
             with patch(
-                "eval.run_dci_synthetic.load_model_from_run_dir", return_value=(model, dataset_args(), "cpu")
+                "eval.protocol.run_dci_synthetic.load_model_from_run_dir", return_value=(model, dataset_args(), "cpu")
             ), contextlib.redirect_stdout(io.StringIO()):
                 main(
                     [
@@ -229,7 +229,7 @@ class DecoderAuditTests(unittest.TestCase):
             self.assertEqual(maps["eps0.25_sample0_flair_hl"].shape, (1, 32, 32, 32))
             self.assertEqual(len(list(out.glob("*.png"))), 6)
             exported = Path(tmp) / "exports"
-            with patch("eval.run_dci_synthetic.load_model_from_run_dir") as loader, contextlib.redirect_stdout(
+            with patch("eval.protocol.run_dci_synthetic.load_model_from_run_dir") as loader, contextlib.redirect_stdout(
                 io.StringIO()
             ):
                 main(["--from-examples", str(out / "examples.npz"), "--save-nifti", "--output-dir", str(exported)])

@@ -1,0 +1,520 @@
+# Optional causal evaluation diagnostics
+
+## Batch notebook graph recovery
+
+`eval/causal/run_causal_recovery.py` runs the notebook's section 7i over a list of
+VQVAE result directories. Each directory must contain `settings.json` and
+`vqvae_model.pt` (or the filename passed with `--checkpoint`). Run it in the
+training environment with the additional `causal-learn` package installed:
+
+```bash
+python -m pip install causal-learn
+python -m eval.causal.run_causal_recovery \
+  --run-dirs results/run_a results/run_b \
+  --num-samples 500 --output-dir results/causal_recovery
+
+# Quoted globs are supported. Each matching path should be an individual run.
+python -m eval.causal.run_causal_recovery --run-dirs 'results/experiment/*' \
+  --checkpoint vqvae_best.pt --device cuda
+
+# Alternatively, one run path or glob per line; blank lines and # comments ignored.
+python -m eval.causal.run_causal_recovery --runs-file runs.txt
+```
+
+Paths inside `runs.txt` are relative to that file; command-line paths are relative
+to the working directory. Duplicate directories are evaluated once. Non-causal
+runs are skipped; errors are recorded and processing continues. An error in any
+run produces exit code 1 after saving the reports. Explicit checkpoint filenames
+are required to exist in each run; there is no fallback to a different checkpoint.
+
+The script regenerates each run's matched test distribution and uses its actual
+SCM adjacency. It captures raw view-1 encoder maps, fixes the content channel mask
+using sample 0 as in notebook section 4, and defaults to `--pooling 4,4,4`.
+`--pooling gap` is also available. The default encoder level is the first
+`content_style_levels` entry (otherwise 0); override it with `--level`.
+
+`causal_recovery.csv` contains one summary row per run: raw and residual R² means,
+best alpha, skeleton precision/recall/F1, false positives/negatives, skeleton SHD
+(missing plus extra edges), and `exact_match`. The JSON additionally stores
+per-factor scores/parents, the true DAG, every alpha's estimated skeleton and
+metrics, generator settings, and protocol metadata. Both files are updated after
+each run. By default they are saved under `results/causal_recovery`.
+
+A compact comparison table is also printed at the end and saved as
+`causal_recovery_summary.txt`, with columns for directory name, F1, precision,
+recall, SHD, mean partial R², and status. Skipped or failed runs show unavailable
+metrics. The CSV includes both `directory_name` and the full `run_dir`.
+To produce this table from an existing JSON report without rerunning evaluation:
+
+```bash
+python -m eval.causal.run_causal_recovery --from-json results/causal_recovery/causal_recovery.json
+```
+
+This regenerates the reports alongside the input JSON; use `--output-dir` to
+write them elsewhere.
+
+### Locate factors that degrade during training
+
+Every evaluation and JSON replay now also writes `causal_recovery_factors.txt`
+and `causal_recovery_factors.csv`. The text report ranks each run's factors from
+largest to smallest decline in partial R² relative to a reference. The CSV keeps
+one row per run and factor, including raw values, deltas, and graph neighbors.
+
+For reports you have already generated, no checkpoint evaluation is needed:
+
+```bash
+python -m eval.causal.run_causal_recovery \
+  --from-json results/causal_recovery/causal_recovery.json \
+  --reference-run early_checkpoint
+```
+
+`--reference-run` accepts a unique directory basename or the exact saved directory
+path. It defaults to the first run with factor scores. Supply directories in
+training order when comparing checkpoints; the script preserves input order and
+does not infer steps from names. Glob matches use lexicographic order, so use an
+explicit list or a runs file when names such as `step_2` and `step_10` would sort
+incorrectly. Comparisons to a reference are not tests for monotonic degradation.
+
+The diagnostics include:
+
+- **Raw R² and partial R²**, and their changes from the reference, per named factor.
+  Both falling supports loss of linearly decodable information about that factor.
+  Partial R² falling while raw R² remains high suggests the probe increasingly
+  relies on parent-related information. Nonlinear parent effects remain a caveat.
+- **Drop %**: the factor's share of the summed decreases in partial R². Improving
+  factors are excluded from this denominator, so improvements cannot hide losses.
+  CSV `mean_partial_delta_contribution` is the signed factor delta divided by the
+  number of factors; these contributions sum to the change in the mean partial R².
+  Neither quantity attributes the change in graph F1 to that factor.
+- **Incident graph F1/precision/recall/SHD**, missing and false neighbors, and the
+  change in incident SHD. Graph comparisons use `--diagnostic-alpha 0.05` by
+  default, fixed across runs. Each incorrect undirected edge is incident on TWO
+  factors, so summing incident SHD gives twice global SHD. Shared errors alone
+  cannot establish which endpoint's representation is responsible.
+- On **fresh evaluations**, **PC R²** is an additional held-out RidgeCV decoding
+  score after PCA/scaling at the graph readout's dimension. This diagnostic fits
+  preprocessing on training samples only. It can expose a loss after compression
+  even when the full-feature probe remains strong. It is distinct from the
+  original in-sample predictions fed to PC. JSON and CSV also record each decoded
+  factor's variance relative to its true variance and its correlation with truth.
+
+To add a more direct graph sensitivity check during a fresh evaluation:
+
+```bash
+python -m eval.causal.run_causal_recovery \
+  --run-dirs results/early_checkpoint results/middle_checkpoint results/late_checkpoint \
+  --num-samples 500 --factor-rescue --diagnostic-alpha 0.05
+```
+
+**Factor rescue** replaces one column of the decoded factors with its true values,
+keeps all other decoded columns, and reruns PC at the fixed diagnostic alpha.
+Positive `rescue_shd_reduction` / `rescue_f1_gain` mean that this replacement
+improved the global graph. This is an oracle sensitivity check, not a causal
+intervention or proof of the training mechanism. Repairs may fail to help when
+multiple decoded factors degrade together; the individual gains are not additive.
+It adds one PC run per factor. Full repaired graphs and failures are stored in
+JSON. Old JSON lacks the decoded samples, so rescue and PC R² cannot be computed
+with `--from-json`; unavailable entries remain blank rather than being estimated.
+
+The fixed diagnostic alpha is evaluated even if it is outside `--alphas`, but is
+excluded from headline best-alpha selection unless explicitly in that sweep.
+Old JSON that lacks the fixed alpha shows unavailable graph diagnostics; choose
+an alpha present in the saved sweep or reevaluate. Known differences in ground
+truth DAG, sample count, level, pooling, or saved synthetic settings suppress
+reference deltas and are labelled `incompatible`. Missing metadata is labelled
+`unverified`. This check cannot establish that different directories belong to
+one training trajectory; compare matched data, preprocessing, architecture and
+checkpoint lineage. Scores have sampling/probe variability; small changes alone
+do not establish collapse or its cause.
+
+The calculations intentionally preserve section 7i: parent regressions use all
+samples; Ridge probes use a fixed 70/30 train/test split; scaled/PCA features feed
+supervised RidgeCV factor predictions on the same samples used to fit them; PC
+uses Fisher-Z (see `--indep-test`) with alphas `0.01 0.05 0.1 0.2`, retaining the last
+alpha in a tie.
+Use `--alphas 0.05` to report a single prespecified alpha. These metrics describe
+**undirected skeleton recovery**, not recovery of causal directions. The default
+best F1 is selected against the known truth, and the graph readout is in-sample,
+so it is an optimistic diagnostic rather than held-out causal discovery evidence.
+Linear residualization need not remove nonlinear parent effects. The residual
+score is the notebook's "partial R²", not a nested-model partial R² statistic.
+For an empty true and estimated graph, F1 remains 0 as in the notebook, while
+`exact_match` is true and SHD is 0. Constant decoded factors or numerical PC
+failures retain the raw/partial factor scores and record errors per alpha. If no
+requested alpha can be scored, the run has `partial` status, graph scores are
+unavailable, and the batch returns exit code 1 after writing all reports.
+
+## Identifiability report diagnostics
+
+The entry point is `eval/protocol/identifiability_report.py`. Existing defaults remain
+`--causal match --parent-adjustment legacy`; neither option changes training or the
+generative model.
+
+Run the two diagnostics separately on each checkpoint:
+
+```bash
+python -m eval.protocol.identifiability_report --run-dir RUN \
+  --causal match --parent-adjustment nonlinear --out matched_nonlinear.json
+
+python -m eval.protocol.identifiability_report --run-dir RUN \
+  --causal shuffled --shuffle-seed 0 --out shuffled_marginals.json
+```
+
+Keep sample count, generator seed/settings, pooling, probe options and floor seeds
+the same across models. `--from-json PATH` replays all new tables without fitting.
+
+## Nonlinear parent adjustment
+
+`--parent-adjustment nonlinear` replaces the legacy partial column with table 1c.
+For each content factor with observed SCM parents, a histogram gradient boosting
+regressor estimates its conditional mean from those parents. Each outer CV test
+fold is held out from all nuisance fitting. Within the outer training set, three
+inner folds produce out-of-fold parent predictions, so training residuals do not
+come from in-sample fitted values. Parentless targets are left unchanged.
+
+The encoder stays frozen. PCA and scaling for table 1c are fitted on each outer
+training fold only. The probe predicts the parent residual from content and,
+unless `--no-leakage` is set, from style. Targets, splits and nuisance fits are
+reused across poolings and untrained twins. `--probe-kind`, `--probe-dim`, `--seeds`,
+`--n-null`, `--factor-pooling` and `--n-jobs` also apply to this section.
+
+The table and JSON contain:
+
+- `parent_r2`: held-out R² of the parent predictor, to assess nuisance fit quality.
+- `full_r2_raw`: original-target decoding with the same fold-local preprocessing.
+- `r2_raw`: parent-residual decoding R².
+- `r2_null` and `r2`: within-split permutation baseline and residual R² minus that
+  baseline. Test targets never move into probe training targets.
+- Learned gap and across-twin floor spread in the printed table. JSON retains all
+  scores under `parent_adjusted.content` and `parent_adjusted.style`, including
+  each pooling. `r2_std` is the residual score's spread across CV seeds, not a
+  confidence interval.
+
+This additional section uses its own full-target reference and untrained floor;
+the other tables and overall verdict keep their existing scoring pipeline. A
+large style residual score suggests that style carries content information beyond
+what the fitted parent predictor explains. The nuisance model is approximate:
+remaining nonlinear dependence, heteroscedasticity and finite-sample errors can
+still affect these scores. Residual R² is not an estimate of exogenous noise
+recovery or proof of independence. Full and residual targets have different
+variances, so subtracting their R² does not estimate a mediated fraction.
+
+This requires `--causal match`, at least 20 samples, and an observed-parent SCM.
+Without that graph, the report marks adjustment unavailable; hierarchical latent
+confounding alone does not supply such a graph. Use substantially more than the
+minimum samples for useful nonlinear fits. This mode adds probe and nuisance
+fitting cost. The nuisance model uses 150 boosting iterations, 15 leaves, minimum
+leaf size 10 and L2 penalty 1; it is fixed rather than selected using test labels.
+
+## Marginal-preserving independence stress test
+
+`--causal shuffled` first draws the same latent population as `--causal match`.
+It independently permutes each named `z_content` column across subjects, then
+re-renders both views with the existing renderer. The sorted values in every
+content column remain exactly identical to the source sample. Style factors,
+deformation/fissure/lesion fields, rendering seeds, renderer options and
+normalization stay attached to each subject. Fixed-reference normalization uses
+the original matched population's constants.
+
+This is a finite-sample approximation to the product of empirical content
+marginals. It breaks systematic content dependencies, including associations
+with fixed subject-level nuisance variables; empirical correlations need not be
+exactly zero. Preserving marginals still changes the joint image distribution,
+so a score drop can reflect sensitivity to unfamiliar factor combinations.
+Compare this diagnostic with the matched analysis when assessing disentanglement.
+It is not a statistical independence test with a p-value.
+
+The mode supports `pseudo_mri`. It collects source latent draws with one rendering
+pass, then renders the shuffled dataset and caches those images for the checkpoint
+and floor runs. It does not cache the original images. JSON records the shuffle
+seed, source causal/hierarchical settings, content/permutation hashes and mean
+absolute pairwise correlations before/after under `evaluation_distribution`.
+Those correlations are a sanity check, not a nonlinear independence test. Repeat
+with additional shuffle seeds to assess sensitivity. The source SCM is not used
+to residualize the shuffled labels, which no longer follow its joint law.
+
+Under `wm_interior` lesion placement a shuffled row can pair anatomy the source
+population almost never combines (a small brain with enlarged ventricles; the two
+correlate at +0.79 under the `synthetic_causal.yaml` SCM) and leave no room for the
+complete lesion, which the renderer refuses to truncate. Before rendering, every
+shuffled row's anatomy is checked. Each row without room exchanges one factor value
+with another row, taking the first exchange, in a seeded random order over
+(factor, partner) pairs, after which both rows fit. Every column stays a permutation
+of its source values, so the marginals remain exact; the distribution becomes the
+shuffle conditioned on a lesion fitting, as the source population is conditioned by
+its own redraws. JSON records the rows without room (`lesion_unfit_rows`) and the
+swaps (`lesion_repair_swaps`); the report header prints their count. With that
+generator at 2,000 samples, 31 rows (1.55%) needed a swap at shuffle seed 0 (22 and
+36 at seeds 1 and 2). If no single swap gives some row room, the run stops rather
+than dropping, shrinking or truncating anything. Other placements skip the check.
+
+`--causal iid` retains the older causal-off behavior; it does not preserve the
+matched factor marginals and may still use a configured hierarchical sampler.
+
+## Edge directions
+
+`run_causal_recovery --orientation` additionally scores each recovered graph's edge
+DIRECTIONS. The comparison target is the true DAG's **CPDAG** (via causal-learn's
+`dag2cpdag`), not the DAG: PC identifies a Markov equivalence class, and the default
+`chain` SCM's class is entirely undirected, so scoring arrows against the DAG would
+charge the estimate for edges no observational method can orient. The headline metrics
+are unchanged and remain skeleton-only; this adds one console line and, per alpha in the
+JSON, `correct_directed`, `reversed`, `undirected_in_estimate` (PC declined to orient an
+edge the truth's class does orient — a weaker failure than a reversal),
+`directed_in_estimate`, `bidirected_in_estimate`, `both_undirected`, `cpdag_shd` and
+`cpdag_exact_match`, plus the estimated and true CPDAG matrices. `cpdag_shd` counts node
+pairs whose edge type differs at all, so it is comparable to `skeleton_shd` but strictly
+harder. Without the flag the outputs are byte-identical to before.
+
+## Plotting the panel
+
+`eval/plots/plot_causal_recovery.py` draws the JSON `run_causal_recovery` already wrote, so a
+figure can never disagree with its table:
+
+```bash
+python -m eval.plots.plot_causal_recovery --json results/causal_recovery/causal_recovery.json --out figures/
+```
+
+`truth_graph.png` draws the SCM itself: every true edge as an arc over the factors in
+causal order, arrow on the child, shaded by how many of the plotted runs recovered it. The
+spans are the point — they say whether what PC misses is the long-range structure or the
+local structure, which a per-pair matrix cannot show. `edges.png` leads with a ground-truth
+panel and then gives the one a scalar cannot — a cell per factor pair showing which
+edges were recovered, missed and invented, so a single factor carrying the errors is
+visible where `skeleton_shd` averages it away. `alpha_sweep.png` plots F1/precision/recall
+/SHD against alpha with the selected alpha ringed, which is how you catch the confound
+where two runs are compared at different best alphas. `factor_r2.png` splits each factor's
+raw R² into its partial part and the parent-mediated remainder. `orientation.png` appears
+only with `--orientation`. Each ships a `.csv` twin, and `--dark` re-steps the palette.
+At most two runs per figure: hues are assigned in fixed order and never generated.
+
+A report written with `--floor`/`--ceiling` holds their reference rows in the same file, so
+two arms with three floor seeds is nine scored rows against those two hues. `--roles`
+(default `trained`) and `--only SUBSTRING` narrow it; a row from before those flags carries
+no role and counts as `trained`, so older reports plot unchanged.
+
+```bash
+# the two arms against each other
+python -m eval.plots.plot_causal_recovery --json results/causal_fisherz/causal_recovery.json \
+  --out figures/arms --roles trained
+
+# one arm against what the protocol reaches with perfect decoding
+python -m eval.plots.plot_causal_recovery --json results/causal_fisherz/causal_recovery.json \
+  --out figures/ceiling --roles trained ceiling --only ident-vent
+
+# one arm against one untrained seed
+python -m eval.plots.plot_causal_recovery --json results/causal_fisherz/causal_recovery.json \
+  --out figures/floor --roles trained floor --only ident-vent --labels trained floor-s0
+```
+
+## Conditional-independence test
+
+`--indep-test {fisherz,kci}` on both `run_causal_recovery` and
+`eval/dino/dinov3_identifiability`. Default `fisherz`, so existing outputs are unchanged; the
+choice is recorded per run as `indep_test` in the JSON, the CSV and the protocol block.
+
+Fisher-Z is a partial-correlation test, so it sees only the **linear** part of a
+dependence. This generator's mechanisms are `leaky_relu` of a weighted parent sum
+(`--synthetic-causal-nonlinearity tanh` is smoother still), so Fisher-Z is misspecified
+for it — and PC only ever returns a CPDAG, which together is why the orientation ceiling
+reads SHD 17 with 8 reversals *on the ground-truth factors*. A purely nonlinear edge is
+invisible to it: on `y = x²` with symmetric `x`, the linear correlation is zero and
+Fisher-Z reports independence, while KCI recovers the edge (`tests/`
+`test_dinov3_identifiability.py::IndepTestTests`).
+
+KCI is nonparametric, and the cost is not a constant factor. Measured here: a 3-factor
+chain takes 0.13 / 0.37 / 1.52 s at 200 / 400 / 800 rows, but **9 factors at 500 rows did
+not finish one alpha in 30 minutes**, where Fisher-Z is instant. The blow-up is in the
+number and size of conditioning sets, which grows with the factor count, and PC re-runs
+the whole search once per alpha — so pass a single `--alphas` value with it.
+
+`--max-cond-set N` caps PC's conditioning-set size (its `max_k`) and is what makes KCI
+usable at that width: 9 factors at 300 rows went from not finishing to **9.7 s at
+`--max-cond-set 2`**, recovering the same 14 edges as `1`. It is an approximation — pairs
+that only separate on a larger conditioning set keep their edge, so the skeleton can gain
+edges but never lose them, which shows up as lower precision rather than lower recall.
+`evaluate_arrays` warns before spending the time when KCI is uncapped at five or more
+factors. causal-learn's KCI defaults to the gamma approximation (`approx=True`), which is
+deterministic, so no seeding is needed.
+
+A workable starting point at 9 factors:
+
+```bash
+python -m eval.causal.run_causal_recovery --run-dirs RUN --num-samples 500 --pooling gap \
+  --indep-test kci --max-cond-set 2 --alphas 0.05 --orientation
+```
+
+Note that KCI fixes the *test*, not the estimator: PC still returns a Markov equivalence
+class. For a generator that is a nonlinear additive-noise model the DAG itself is
+identifiable, which needs an ANM-family method rather than a constraint-based one.
+
+## The decoded-factor readout
+
+PC does not see the representation. It sees `n_content` supervised reconstructions of the
+true factors: the features are standardised, PCA-reduced, and a `RidgeCV` per factor
+decodes it from that basis. Two flags control that step, on both
+`run_causal_recovery` and `eval/dino/dinov3_identifiability`; both default to the original
+behaviour, so existing outputs are unchanged.
+
+`--readout-dim N` pins the PCA width. The default rule is
+`min(64, max(n_content, N_samples/5))`, capped at the block's own width — so a 48-channel
+encoder block gets a 48-dim readout while an 18432-dim embedding gets 64, and part of any
+difference in the recovered graph is that gap rather than the representation. Pin it to
+the narrower of two models to compare them at equal readout capacity; a block narrower
+than the request keeps its own width. The effective value is reported as
+`graph_readout_dim`, alongside `readout_mode` and `graph_samples`.
+
+`--holdout-readout` fits the readout on the 70/30 train split and runs PC on the held-out
+rows only, instead of decoding the same rows it was fit on with the true labels. This is
+what removes the panel's in-sample optimism — the `PC R²` column then reports exactly the
+decoding quality of the columns PC was handed, because both use the same split. It costs
+70% of the rows, so pair it with `--num-samples 2000` or more; PC on fewer than
+`20 * n_content` rows logs a warning and fewer than 20 is an error. A single split rather
+than cross-fitting is deliberate: a cross-fitted row's decoding depends on every other
+row's label, and Fisher-Z assumes the rows are independent draws.
+
+Neither flag touches the raw/partial R² columns, which keep their own full-width probe.
+
+## What an F1 is worth: the floor and the ceiling
+
+A skeleton F1 read on its own is not a statement about the model, because both ends of the
+scale are already occupied before any training happens.
+
+`--floor` scores an **untrained twin** of every run — the same architecture, pooling,
+readout width, alphas and test, with `random_init=True` so no checkpoint is loaded. A
+random projection of the factors is still an invertible map, so a `RidgeCV` readout decodes
+a good deal from one and PC recovers edges from that. The twin appears as its own row,
+`<name>-floor-s<seed>`, and the summary prints `learned = trained − floor` for both F1 and
+mean partial R². `--floor-seeds N` draws N of them: one seed is one draw of a random
+projection, and its sampling noise lands directly in every floor-subtracted number, so N>1
+adds an `fl.rng` column showing the across-seed spread. Runtime grows by roughly one run
+per seed.
+
+`--ceiling` scores **PC on the true factors** at the same row count, test, alphas and
+`--max-cond-set`, as the row `<name>-ceiling`. What the ceiling misses is not a model's
+failure: Fisher-Z sees only the linear part of a `leaky_relu` mechanism, a finite row count
+costs power, and `--max-cond-set` keeps edges that only separate on a larger conditioning
+set. The ceiling prices all three. It is deduplicated by a digest of the factor draw and
+adjacency, so two arms on one SCM share a single ceiling row and a single PC sweep, and a
+`readout_dim` is deliberately not passed — with `n_content` features and `n_content`
+factors the readout is already the identity.
+
+```bash
+python -m eval.causal.run_causal_recovery \
+  --run-dirs results/contrastive results/baseline_recon \
+  --reference-run baseline_recon \
+  --num-samples 2000 --holdout-readout --readout-dim 128 \
+  --floor --floor-seeds 3 --ceiling --orientation --factor-rescue \
+  --batch-size 32 --num-workers 4 --output-dir results/causal_fisherz
+```
+
+The reference rows carry `role` (`trained`/`floor`/`ceiling`) and `init_seed` in the CSV,
+and the JSON's protocol block records `floor_seeds` and `has_truth_ceiling` so a reader can
+tell a missing floor from a floor of zero. They are ordinary rows everywhere else: they
+appear in the summary table and the factor tables, and `--reference-run` still resolves to
+exactly one of them because their names carry the suffix. Without `--floor` the script
+says so at the end rather than letting the absolute number stand unqualified.
+
+## DINOv3 embeddings as a reference representation
+
+Two scripts run the same two questions on a pretrained 2-D vision encoder instead of a
+trained VQ-VAE, so "what does a general-purpose foundation model already recover here"
+has an answer on this generator's own terms. They need `transformers` and `causal-learn`
+in the environment, and DINOv3 weights are gated on the Hub (accept the licence and
+`hf auth login`, or pass a local snapshot to `--model-id`).
+
+```bash
+python -m pip install transformers causal-learn
+
+# 1. embed. --run-dir takes the generator settings from a training run, so the
+#    embeddings are scored on exactly that run's distribution.
+python -m eval.dino.dinov3_embed_synthetic --out results/dinov3/emb.npz --num-samples 500
+python -m eval.dino.dinov3_embed_synthetic --out results/dinov3/emb_floor.npz --random-init \
+  --num-samples 500                      # untrained twin, same architecture and seed
+
+# 2. score
+python -m eval.dino.dinov3_identifiability --embeddings results/dinov3/emb.npz \
+  --floor results/dinov3/emb_floor.npz --out results/dinov3/report.json
+```
+
+The volume is reduced to `--slices` evenly spaced planes per axis in `--axes`, embedded
+independently and concatenated (`--slice-agg mean` averages them instead and throws away
+which plane a feature came from, which is most of what locates `lesion_x/y/z`). Two
+choices are not cosmetic and are recorded in the output's `meta`:
+
+- `--window per_slice` (the recipe in `eval/notebooks/dino.ipynb`) maps every plane onto the same
+  range, which is exactly the affine map style applies. Style recovery is then bounded by
+  the windowing rather than by the encoder — the same trap `--synthetic-normalize
+  per_sample` sets. The default `dataset` estimates one window from a pilot of volumes.
+- `--token-pool` defaults to `cls_mean`. Mean pooling over patch tokens is
+  permutation-invariant, so in-plane position is not in it; `--token-pool grid` keeps a
+  `--grid-size` average of the patch map. The patch-token prefix (CLS plus DINOv3's four
+  register tokens) is inferred from the sequence length rather than trusted from the
+  config, so `mean` never silently averages register tokens in with the patches.
+
+The report has four sections. Tables 1 and 2 are per-factor cross-validated probe R² with
+a permutation null and block-MCC, computed by `eval.metrics.identifiability_metrics` and batched
+as in `run_dci_compare._score_block`; `gap = real − null` is the reportable column,
+`Δfloor` subtracts the untrained twin and `Δvox` compares against downsampled voxels.
+Table 3 is `run_causal_recovery.evaluate_arrays` unchanged, with two extra rows: `truth`
+runs the identical panel on the ground-truth factors (the ceiling — PC at this sample
+size cannot beat that row) and `floor` runs it on the untrained twin. Every caveat above
+about alpha selection and the in-sample graph readout applies to it unchanged. Table 3's
+raw/partial R² use that panel's full-width single-split Ridge probe, which is biased low
+when the embeddings are wider than the sample count; table 1's null-corrected gap is the
+factor-recovery number to quote.
+
+`--self-test` on either script runs its logic on planted arrays with no model, no GPU and
+(for the scoring script) no torch.
+
+### Fine-tune DINO on the two views with InfoNCE
+
+`training.finetune_dino` updates the shared DINO backbone and a shared two-layer MLP
+projection head using the paired synthetic T1/FLAIR views. For B subjects, the loss is
+the average of cross-entropy on the B-by-B cosine similarity matrix divided by
+`--temperature`, and its transpose. The diagonal contains positives; the other B−1
+subjects in the opposite view are negatives. Multiple planes are pooled into one
+feature per subject before the loss, so planes from the same subject never become
+false negatives. No ground-truth factors enter the loss.
+
+Use the project training dependencies plus a DINOv3-capable Transformers installation
+(tested with `transformers==4.57.6`). The default backbone matches the pretrained
+reference above; its Hub licence/authentication requirements also apply here.
+
+```bash
+python -m pip install 'transformers>=4.56,<5'
+
+python -m training.finetune_dino \
+  --output-dir results/dino_infonce \
+  --num-samples 1000 --epochs 20 --batch-size 8 \
+  --lr 1e-5 --head-lr 1e-3 --temperature 0.1 \
+  --device cuda --gradient-checkpointing
+
+# Extract HELD-OUT features using the trained backbone and exact training preprocessing.
+python -m eval.dino.dinov3_embed_synthetic \
+  --model-id results/dino_infonce/encoder --local-files-only \
+  --run-dir results/dino_infonce \
+  --preprocessing results/dino_infonce/preprocessing.json \
+  --num-samples 500 --out results/dino_infonce/test_emb.npz
+
+python -m eval.dino.dinov3_identifiability \
+  --embeddings results/dino_infonce/test_emb.npz \
+  --out results/dino_infonce/report.json
+```
+
+Training defaults to one central axial plane to limit activation memory. Set
+`--axes axial,coronal,sagittal --slices 3` for the original nine-plane extraction recipe.
+`--batch-size` counts subjects; `--plane-batch-size` only chunks encoder calls and does
+not reduce the number of live autograd graphs or the contrastive negative pool. CUDA
+autocast is available via `--dtype bfloat16` or `float16`; weights stay in float32.
+`--projection-dim 0` applies the objective directly to pooled backbone features.
+
+Pass `--run-dir` to training to reuse another run's generator settings. Training uses
+the generator's train split, while extraction keeps its test split and the same SCM.
+The output directory must be new/empty. It stores `encoder/` in Hugging Face format,
+`training_state.pt` with head and optimizer state, `metrics.jsonl` with loss/retrieval
+accuracy/positive and negative similarities, and generator/preprocessing metadata.
+The latest completed epoch replaces the checkpoint; there is no automatic resume or
+validation-based checkpoint selection. Evaluation reads the backbone before the head.
+For pretrained/floor comparisons, use the same `--preprocessing` and `--run-dir` on
+each extraction so slice layout, intensity window, and held-out subjects match.

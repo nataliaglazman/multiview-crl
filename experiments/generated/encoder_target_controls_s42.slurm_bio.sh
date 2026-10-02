@@ -28,7 +28,7 @@ case "${1:-}" in
   *) echo "Usage: $0 [t1|flair] [--dry-run]" >&2; exit 2 ;;
 esac
 cd "$REPO"
-test -f eval/encoder_spatial_target_audit.py && test -f training/encoder_target_control.py
+test -f eval/encoder/encoder_spatial_target_audit.py && test -f training/encoder_target_control.py
 if ! PYTHON="$(command -v "$PYTHON")"; then echo "Python missing: ${ENCODER_PYTHON:-python3}" >&2; exit 1; fi
 export PYTHONPATH="$REPO" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 CUBLAS_WORKSPACE_CONFIG=:4096:8
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1

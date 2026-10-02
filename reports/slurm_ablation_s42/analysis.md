@@ -11,9 +11,9 @@ average validation ridge recovery ends below its untrained value.
 
 | Run | Job | Final evaluation | Completion line |
 |---|---|---|---|
-| Conv + MLP | 37697225 | [stdout line 301](../../encoder-ablation-bio-conv-mlp-s42-37697225.out#L301) | line 328 |
-| ResNet + GroupNorm | 37697226 | [stdout line 301](../../encoder-ablation-bio-resnet-groupnorm-s42-37697226.out#L301) | line 328 |
-| ResNet stride 8 | 37697227 | [stdout line 301](../../encoder-ablation-bio-resnet-stride8-s42-37697227.out#L301) | line 328 |
+| Conv + MLP | 37697225 | [stdout line 301](logs/encoder-ablation-bio-conv-mlp-s42-37697225.out#L301) | line 328 |
+| ResNet + GroupNorm | 37697226 | [stdout line 301](logs/encoder-ablation-bio-resnet-groupnorm-s42-37697226.out#L301) | line 328 |
+| ResNet stride 8 | 37697227 | [stdout line 301](logs/encoder-ablation-bio-resnet-stride8-s42-37697227.out#L301) | line 328 |
 
 Each log contains 100 training summaries and six evaluations (steps 0, 2000,
 4000, 6000, 8000, 10000). These show trainer completion, not an independently
@@ -154,7 +154,7 @@ existing checkpoints; each audit chooses its own timestamped output directory.
 set -euo pipefail
 BASE=results/encoder_ablations_slurm_bio/runs
 for MODEL in conv_mlp_s42 resnet_groupnorm_s42 resnet_stride8_s42; do
-  python -m eval.encoder_generalization_audit \
+  python -m eval.encoder.encoder_generalization_audit \
     --run-dir "$BASE/$MODEL" --checkpoint model.pt \
     --batch-size 4 --num-samples 400 --probe-samples 400 \
     --retrieval-draws 8 --seed 1729 --skip-bn-recalibration

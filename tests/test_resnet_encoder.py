@@ -13,7 +13,7 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
-from eval.score_checkpoint import build_model, encode
+from eval.protocol.score_checkpoint import build_model, encode
 from models.multiview_encoder import MultiviewConvEncoder
 from models.vqvae import Encoder
 

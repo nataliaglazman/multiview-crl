@@ -10,7 +10,7 @@ pipeline.  It uses:
     content / style block; no codebooks.
   * ``training.losses.infonce_loss`` — cross-view contrastive alignment of the pooled
     content block, plus an L1 reconstruction loss and a small KL term.
-  * ``eval.dci.compute_dci_synthetic`` — the trusted identifiability protocol, scoring
+  * ``eval.metrics.dci.compute_dci_synthetic`` — the trusted identifiability protocol, scoring
     content->content / content->style / content->view, etc.
 
 The point of the experiment: with ``--content-channels`` set to the true number of
@@ -32,7 +32,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-import eval.dci as dci
+import eval.metrics.dci as dci
 import training.losses as losses
 from data.datasets import SyntheticBrainDataset
 from models.vae import MultiviewVAE

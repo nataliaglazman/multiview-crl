@@ -1,7 +1,7 @@
 # Controlled patch-alignment screen, 27 September 2026
 
 This is a checkpoint-free diagnostic, not an evaluation of the trained encoder.
-It used `eval.patch_signal_audit` with the local
+It used `eval.diagnostics.patch_signal_audit` with the local
 `synthetic-clean-content-causal-sp-s-1/settings.json`, 64 subjects, batch size 64,
 grids 8 and 16, seed 0, and `--causal match`. The configuration has position
 centering, folded patch statistics, lambda 6, sim coefficient 0.0114, std

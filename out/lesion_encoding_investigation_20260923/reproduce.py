@@ -7,9 +7,9 @@ import numpy as np
 import torch
 
 from data.datasets import SyntheticBrainDataset
-from eval.identifiability_metrics import cv_probe_r2
-from eval.lesion_reconstruction import locate
-from eval.lesion_visibility import locate_within
+from eval.lesion.lesion_reconstruction import locate
+from eval.lesion.lesion_visibility import locate_within
+from eval.metrics.identifiability_metrics import cv_probe_r2
 
 torch.set_num_threads(4)
 n = 128

@@ -485,7 +485,7 @@ def main():
     torch.set_default_dtype(torch.float32)
     device = torch.device("cpu")  # gradient magnitudes are the measurement: float32, no AMP
 
-    from eval.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir
+    from eval.protocol.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir
 
     ckpt = cli.checkpoint or os.path.join(cli.run_dir, "vqvae_best.pt")
     model, args, device = load_model_from_run_dir(cli.run_dir, ckpt, device)

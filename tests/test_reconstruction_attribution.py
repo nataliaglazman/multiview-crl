@@ -18,7 +18,7 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from eval import reconstruction_attribution as ra
+from eval.gradients import reconstruction_attribution as ra
 
 
 class TinyModel(torch.nn.Module):
@@ -167,7 +167,7 @@ class ReconstructionAttributionTests(unittest.TestCase):
     def test_end_to_end_reports_known_conflict_and_restores_checkpoint(self):
         model = TinyModel()
         before = {k: v.clone() for k, v in model.state_dict().items()}
-        fake = types.ModuleType("eval.run_dci_synthetic")
+        fake = types.ModuleType("eval.protocol.run_dci_synthetic")
         fake.load_model_from_run_dir = lambda *a, **kw: (model, settings(), torch.device("cpu"))
         fake.build_synthetic_test_set = lambda args, n, **kw: [sample(i) for i in range(n)]
         with tempfile.TemporaryDirectory() as directory:
@@ -186,7 +186,9 @@ class ReconstructionAttributionTests(unittest.TestCase):
                 etas=[0.001, 0.002],
                 out=directory,
             )
-            with patch.dict("sys.modules", {"eval.run_dci_synthetic": fake}), contextlib.redirect_stdout(io.StringIO()):
+            with patch.dict("sys.modules", {"eval.protocol.run_dci_synthetic": fake}), contextlib.redirect_stdout(
+                io.StringIO()
+            ):
                 ra.run(cli)
             with Path(directory, "model_reconstruction_attribution.csv").open() as handle:
                 rows = list(csv.DictReader(handle))

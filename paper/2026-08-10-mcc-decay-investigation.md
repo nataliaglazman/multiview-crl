@@ -161,7 +161,7 @@ reconstruction at ~10k. The principled anchor **0.025** (matching GAP `on_diag`)
 
 ## 6. The data
 
-`eval/view_difficulty.py` (no model, 200 test subjects):
+`eval/diagnostics/view_difficulty.py` (no model, 200 test subjects):
 
 | map view 1 -> view 2 | held-out R^2 |
 |---|---|
@@ -186,10 +186,10 @@ Pre-norm content differs between views by a **pure constant offset and nothing e
 
 | file | purpose |
 |---|---|
-| `eval/patch_mcc_decay.py` | `--calibrate`, `--summarise`, and `curves` / `strata` / `geometry` / `viewgap` |
-| `eval/gradient_attribution.py` | per-loss gradients, matched-random controls, dMCC sweep, `--snr` decomposition |
-| `eval/view_difficulty.py` | alignment difficulty from the data alone |
-| `eval/reformat_vs_loss.py` | probe ladder + cross-checkpoint linear recoverability |
+| `eval/diagnostics/patch_mcc_decay.py` | `--calibrate`, `--summarise`, and `curves` / `strata` / `geometry` / `viewgap` |
+| `eval/gradients/gradient_attribution.py` | per-loss gradients, matched-random controls, dMCC sweep, `--snr` decomposition |
+| `eval/diagnostics/view_difficulty.py` | alignment difficulty from the data alone |
+| `eval/gradients/reformat_vs_loss.py` | probe ladder + cross-checkpoint linear recoverability |
 | notebook Section 23 | reconstruction quality with affine and pointwise correction columns |
 | `--freeze-encoder`, `--init-from-checkpoint`, `selection/encoder_l2` | two-phase training with a freeze that fails loudly |
 

@@ -131,7 +131,7 @@ To inspect a completed checkpoint meanwhile, the standalone audit can run under
 the current code and save a separate, timestamped diagnostic report:
 
 ```bash
-python -m eval.encoder_generalization_audit \
+python -m eval.encoder.encoder_generalization_audit \
   --run-dir "${OUT:?Set OUT}/runs/resnet18_s42" --checkpoint model.pt \
   --batch-size 4 --num-samples 400 --probe-samples 400 \
   --retrieval-draws 8 --seed 1729 --skip-bn-recalibration
@@ -194,7 +194,7 @@ For each run, `evaluation/global_path/` uses the existing generalization audit:
 ridge and RBF hyperparameters are fit/tuned on a 75/25 split of the 400 validation
 subjects, then evaluated on 400 separate test subjects. Both views are evaluated.
 The original checkpoint is primary; BatchNorm recalibration is disabled in this
-suite and remains available separately through `eval.encoder_generalization_audit`.
+suite and remains available separately through `eval.encoder.encoder_generalization_audit`.
 The renderer's existing split-specific fixed-reference normalization is retained
 identically in both arms; this suite does not change that preprocessing protocol.
 

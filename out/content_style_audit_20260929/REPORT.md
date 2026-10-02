@@ -61,11 +61,11 @@ Several comments overstate what these mechanisms enforce. Cross reconstruction n
 2. Run the existing frozen stage and acquisition audits on the training machine:
 
 ```bash
-python -m eval.content_path_probe \
+python -m eval.diagnostics.content_path_probe \
   --run-dir results/synthetic/synthetic-clean-content-causal-cross-recon \
   --num-samples 512 --batch-size 8 --grids 1 8 --causal iid
 
-python -m eval.style_path_audit \
+python -m eval.diagnostics.style_path_audit \
   --run-dir results/synthetic/synthetic-clean-content-causal-cross-recon \
   --num-samples 256 --swap-samples 64 --batch-size 4 --causal iid
 ```

@@ -6,7 +6,7 @@ an affine readout. ``--encoder-architecture resnet18`` uses a 3D adaptation of
 the upstream image encoder: ResNet-18 -> GAP -> Linear -> LeakyReLU -> Linear.
 This architecture option does not change the loss, data, or view-sharing policy.
 
-Identifiability is scored with ``eval.dci.compute_dci_synthetic`` (per-latent
+Identifiability is scored with ``eval.metrics.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
 independent style → ~chance is the block-identification signal.
 
@@ -27,7 +27,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-import eval.dci as dci
+import eval.metrics.dci as dci
 import training.losses as losses
 from data.datasets import SyntheticBrainDataset
 from models.multiview_encoder import MultiviewConvEncoder

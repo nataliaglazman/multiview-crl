@@ -85,7 +85,7 @@ def parse(path):
 
 
 def main():
-    runs = {label: parse(ROOT / filename) for label, filename in FILES.items()}
+    runs = {label: parse(DEST / "logs" / filename) for label, filename in FILES.items()}
     keys = set.union(*(set(run["config"]) for run in runs.values()))
     differences = {
         key: {label: run["config"].get(key) for label, run in runs.items()}

@@ -225,7 +225,7 @@ def evaluate_run(run, config, hashes, tag, skip_completed):
     audit = [
         sys.executable,
         "-m",
-        "eval.encoder_generalization_audit",
+        "eval.encoder.encoder_generalization_audit",
         *base,
         *device,
         "--num-samples",
@@ -245,7 +245,7 @@ def evaluate_run(run, config, hashes, tag, skip_completed):
     score = [
         sys.executable,
         "-m",
-        "eval.score_checkpoint",
+        "eval.protocol.score_checkpoint",
         *base,
         *device,
         "--num-samples",

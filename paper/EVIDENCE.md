@@ -18,7 +18,7 @@ Update this alongside the draft; do not promote a number to a headline until its
 |---|---|---|---|---|
 | 1 | Content completeness is tied at patch pooling | 0.409 vs 0.409 mean lin-R²; block-MCC 0.540/0.535; best-format 0.419/0.416 | `content_rank_out6`, `--per-factor-mlp`, seeds 0–4 | **SAFE** — multi-seed, the strongest result in the paper |
 | 2 | Contrastive advantage is GAP-only, shrinks with spatial pooling | +0.060 GAP → +0.015 stats → +0.010 patch | `content_rank_pca` | **SAFE** |
-| 3 | GroupNorm deletes the global channel signal | GAP mean R² 0.34→0.18; brain_size 0.78→0.34; **(μ,σ) alone → 0.68**; patch 0.307≈0.309 | `eval/probe_prenorm_groupnorm.py`, no-retrain forward-hook | **SAFE** — the smoking gun; no retraining confound |
+| 3 | GroupNorm deletes the global channel signal | GAP mean R² 0.34→0.18; brain_size 0.78→0.34; **(μ,σ) alone → 0.68**; patch 0.307≈0.309 | `eval/diagnostics/probe_prenorm_groupnorm.py`, no-retrain forward-hook | **SAFE** — the smoking gun; no retraining confound |
 | 4 | Temporal-atrophy reversal proves re-gauging | lin_gap 0.486 vs 0.173; lin_patch 0.623 vs **0.682** | `content_rank_out6`, seeds 0–4 | **SAFE** — the single most persuasive per-factor result |
 | 5 | No dimensional collapse | eff-rank GAP 29 vs 13; patch 115 vs 127 | `content_rank_out4`, seeds 0/1 | **SAFE** — rules out the obvious alternative |
 | 6 | Not data-limited (encoders beat pixels) | raw-pixel 16³: lin −0.44, mlp −2.5 vs model 0.36 | `content_rank_out4` | **SAFE** |
@@ -30,7 +30,7 @@ Update this alongside the draft; do not promote a number to a headline until its
 | 12 | Lesions ≈ 0 in both models | ~0 at every pooling | multiple | **ARTIFACT-RISK** — at 8³ the flat probe overfits (feat 22528 vs ~2000 samples); PCA-trunc shows patch R²@24 = 0.325 > full 0.228. Lesion encodability is OPEN |
 | 13 | Patch false-negative rates | 42% dead @ B=32; 23% @128; 16% @400; 8³: 53/43/40% | re-measured 2026-07-18 on current generator | **SAFE** |
 | 14 | Broad morphometric factors don't replicate the clean localisation gap | in_mass 0.02–0.18 vs uniform 0.145; contrastive 0.07 vs baseline 0.16–0.18 | notebook §7f, old-renderer swap (images matched) | **SAFE** — and correctly reported in the draft as a *qualification*, not buried |
-| 15 | Benchmark undercounts content | 9 probed vs ~585 true shared (z_deformation 4³=64 + z_fissure 8³=512) | `eval/synthetic_dataset.py` code read | **SAFE** — structural fact about the generator |
+| 15 | Benchmark undercounts content | 9 probed vs ~585 true shared (z_deformation 4³=64 + z_fissure 8³=512) | `eval/synthetic/synthetic_dataset.py` code read | **SAFE** — structural fact about the generator |
 
 ---
 

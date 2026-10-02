@@ -11,7 +11,7 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from eval.synthetic_dataset import Synthetic3DDisentanglementDataset
+from eval.synthetic.synthetic_dataset import Synthetic3DDisentanglementDataset
 from training.style_alignment import within_modality_style_loss
 
 ROOT = Path(__file__).resolve().parents[1]

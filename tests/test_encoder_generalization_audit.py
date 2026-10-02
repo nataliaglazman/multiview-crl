@@ -14,9 +14,9 @@ import numpy as np
 import torch
 from torch import nn
 
-from eval import encoder_generalization_audit as audit
-from eval.checkpoint_lesion_analysis import state_digest
-from eval.score_checkpoint import build_model, make_dataset, make_val_dataset
+from eval.encoder import encoder_generalization_audit as audit
+from eval.lesion.checkpoint_lesion_analysis import state_digest
+from eval.protocol.score_checkpoint import build_model, make_dataset, make_val_dataset
 
 
 def config(**kwargs):

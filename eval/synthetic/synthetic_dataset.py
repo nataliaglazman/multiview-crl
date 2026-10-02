@@ -1,0 +1,1297 @@
+import os
+
+import nibabel as nib
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+
+
+class LesionPlacementError(ValueError):
+    """This subject's anatomy has no room for a complete ``wm_interior`` lesion.
+
+    A property of one subject, not of the configuration, so the dataset redraws the
+    subject when it sees this. Configuration errors stay plain ``ValueError``.
+    """
+
+
+def build_content_scm(n_dims, graph_type="chain", edge_prob=0.5, seed=0):
+    rng = np.random.RandomState(seed)
+    adj = np.zeros((n_dims, n_dims), dtype=bool)
+
+    if graph_type == "chain":
+        for i in range(n_dims - 1):
+            adj[i, i + 1] = True
+    elif graph_type == "full":
+        for i in range(n_dims):
+            for j in range(i + 1, n_dims):
+                adj[i, j] = True
+    elif graph_type == "random":
+        for i in range(n_dims):
+            for j in range(i + 1, n_dims):
+                if rng.rand() < edge_prob:
+                    adj[i, j] = True
+    else:
+        raise ValueError(f"Unknown causal graph type: {graph_type}")
+
+    parents = {}
+    weights = {}
+    gen = torch.Generator().manual_seed(seed)
+    for idx in range(n_dims):
+        parent_indices = np.where(adj[:, idx])[0].tolist()
+        parents[idx] = parent_indices
+        if len(parent_indices) > 0:
+            w = torch.randn(len(parent_indices), generator=gen)
+            w = w / (w.norm() + 1e-8)
+            weights[idx] = w
+        else:
+            weights[idx] = torch.tensor([])
+
+    return {"adj": adj, "parents": parents, "weights": weights, "n_dims": n_dims}
+
+
+def sample_content_from_scm(scm, generator, noise_scale=0.4, nonlinearity="leaky_relu"):
+    n = scm["n_dims"]
+    z = torch.zeros(n)
+    noise = torch.randn(n, generator=generator)
+
+    for d in range(n):
+        pa = scm["parents"][d]
+        if len(pa) == 0:
+            z[d] = noise[d]
+        else:
+            parent_vals = z[pa]
+            w = scm["weights"][d]
+            signal = (parent_vals * w).sum()
+            if nonlinearity == "leaky_relu":
+                signal = F.leaky_relu(signal, 0.2)
+            elif nonlinearity == "tanh":
+                signal = torch.tanh(signal)
+            z[d] = signal + noise_scale * noise[d]
+    return z
+
+
+def _gaussian_blur_field(field, sigma):
+    """Separable 3D Gaussian blur with periodic ('wrap') padding -> stationary field.
+
+    Convolving white noise with a Gaussian of width ``sigma`` IS the spectral
+    construction of a GP sample whose covariance is a squared-exponential kernel of
+    that length-scale (exact for a stationary SE kernel up to lattice/boundary
+    effects). ``sigma`` is in lattice units.
+    """
+    if sigma <= 0:
+        return field
+    from scipy.ndimage import gaussian_filter
+
+    out = gaussian_filter(field.detach().cpu().numpy().astype(np.float64), sigma=float(sigma), mode="wrap")
+    return torch.from_numpy(out).to(field.dtype)
+
+
+def sample_gp_field(grid, lengthscale, generator, *, prior="gp", dof=8.0, tau_seed=0):
+    """One stationary GP/TP latent field on a ``grid**3`` lattice, at unit variance.
+
+    The field latents of Halva et al. (AISTATS 2024): each independent component is
+    a spatial field drawn from a process with its own covariance kernel. Here the
+    kernel is squared-exponential with length-scale ``lengthscale`` (set via the
+    Gaussian-blur construction above). ``prior='gp'`` is the Gaussian case;
+    ``prior='tp'`` rescales the field by ``1/sqrt(tau)``, ``tau ~ Gamma(dof/2,
+    dof/2)`` (Student-t process, their Prop. 1) -> heavier tails. Their Theorem 2:
+    GP components are identifiable iff their kernels are DISTINCT, whereas the
+    non-Gaussian t-process stays identifiable even with REPEATED kernels -- which
+    is exactly the ``field_kernels`` x ``field_prior`` control this enables.
+
+    Amplitude is left to the caller (the renderer's deformation/fissure gains);
+    the field is returned unit-variance so ``field_scale=1`` matches the legacy iid
+    amplitude.
+    """
+    white = torch.randn(grid, grid, grid, generator=generator)
+    field = _gaussian_blur_field(white, lengthscale)
+    # Zero-mean, unit-variance per realisation. Centering is essential: without it a
+    # long-length-scale (heavily blurred) field is nearly constant, so dividing by its
+    # tiny spatial std blows the surviving DC offset up to a huge value -- and that DC
+    # is a uniform radius shift, i.e. a brain_size confound. Centering makes the field
+    # a pure spatial pattern with a length-scale-independent range.
+    field = (field - field.mean()) / (field.std() + 1e-8)
+    if prior == "tp":
+        tau = np.random.RandomState(int(tau_seed) % (2**32 - 1)).gamma(dof / 2.0, 2.0 / dof)
+        field = field / (float(tau) ** 0.5 + 1e-8)
+    return field
+
+
+# clean-content mode (synthetic_clean_content): factor applied to the unlabeled
+# z_deformation / z_fissure fields. 0.0 removes them entirely so the named content
+# factors fully determine structural variance. 1.0 (default mode) leaves them at
+# full amplitude.
+CLEAN_NUISANCE_SCALE = 0.0
+
+
+class PseudoMRIRenderer(nn.Module):
+    def __init__(
+        self,
+        res=64,
+        style_scale=1.0,
+        content_scale=1.0,
+        identifiable_ventricle=False,
+        lesion_mode="sphere",
+        lesion_sharpness=10.0,
+        lesion_threshold=1.0,
+        wm_softness=0.0,
+        content_squash="auto",
+        content_amp_scale=None,
+        lesion_radius=0.1,
+        cortex_parameterization="additive",
+        center_local_deformations=False,
+        lesion_placement="legacy",
+    ):
+        super().__init__()
+        self.res = res
+        # See Synthetic3DDisentanglementDataset for why "field" exists. Render-side
+        # knobs live here; the sampling-side length-scale lives on the dataset.
+        if lesion_mode not in ("sphere", "field"):
+            raise ValueError(f"lesion_mode must be sphere|field, got {lesion_mode!r}")
+        self.lesion_mode = lesion_mode
+        self.lesion_sharpness = lesion_sharpness
+        self.lesion_threshold = lesion_threshold
+        self.wm_softness = wm_softness
+        self.style_scale = style_scale
+        self.content_scale = content_scale
+        # Squash applied to every content factor before it drives geometry. "auto" ties it
+        # to clean_content (tanh when clean, hard clamp otherwise) — the historical
+        # coupling, kept as the default so runs stay byte-identical. The clamp is
+        # non-injective on the ~32% of N(0,1) draws outside [-1,1] and caps recovery at
+        # R^2 0.906 (linear) / 0.940 (nonlinear); tanh is injective, so its NONLINEAR
+        # ceiling is 1.0 — but its linear ceiling is only 0.933, and cv_probe_r2 /
+        # block_mcc default to kind="ridge". "none" removes the squash entirely and is
+        # only safe with content_prior="uniform", where every draw already lies in
+        # [-1, 1] and the squash is the identity: that is the setting with no ceiling at
+        # all. Measured by eval/synthetic/generator_defects.py --tests squash.
+        if content_squash not in ("auto", "clamp", "tanh", "none"):
+            raise ValueError(f"content_squash must be auto|clamp|tanh|none, got {content_squash!r}")
+        self.content_squash = content_squash
+        # Per-dim multiplier on the geometric effect size, indexed like z_content. Lets a
+        # factor that renders below the noise floor be lifted WITHOUT touching the others
+        # (content_scale multiplies all of them together). Dims 2:5 (lesion position) are
+        # not boundary displacements and ignore this — use lesion_radius for those.
+        self.content_amp_scale = content_amp_scale
+        self.lesion_radius = lesion_radius
+        if lesion_placement not in ("legacy", "wm_interior"):
+            raise ValueError(f"lesion_placement must be legacy|wm_interior, got {lesion_placement!r}")
+        if lesion_placement == "wm_interior" and lesion_mode != "sphere":
+            raise ValueError("wm_interior placement is defined only for sphere lesions")
+        if lesion_placement == "wm_interior" and (res < 2 or not np.isfinite(lesion_radius) or lesion_radius <= 0):
+            raise ValueError("wm_interior requires res >= 2 and a positive finite lesion_radius")
+        self.lesion_placement = lesion_placement
+        if cortex_parameterization not in ("additive", "nested", "midsurface", "patterned"):
+            raise ValueError(
+                f"cortex_parameterization must be additive|nested|midsurface, got {cortex_parameterization!r}"
+            )
+        self.cortex_parameterization = cortex_parameterization
+        self.center_local_deformations = center_local_deformations
+        # When True, the ventricle is made recoverable: larger effect size, read off
+        # the UNdeformed radius (no gyral-field swamping), and the fissure gets its own
+        # tissue label so "total CSF" is no longer fissure-dominated. Default False =
+        # byte-identical to prior runs. See render_structure / render_modality.
+        self.identifiable_ventricle = identifiable_ventricle
+        grid = torch.linspace(-1, 1, res)
+        self.register_buffer(
+            "coords",
+            torch.stack(torch.meshgrid(grid, grid, grid, indexing="ij"), dim=-1),
+        )
+
+    def _seeded_noise(self, scale, gen, device):
+        n = torch.randn(
+            1,
+            1,
+            self.res // scale,
+            self.res // scale,
+            self.res // scale,
+            generator=gen,
+            device=device,
+        )
+        return F.interpolate(n, size=(self.res,) * 3, mode="trilinear", align_corners=False).squeeze(0).squeeze(0)
+
+    def _upsample_field(self, z_field, device):
+        """Trilinear-upsample a small (K, K, K) latent grid to volume resolution.
+
+        Deterministic — same latent grid → same field. Used in place of seeded
+        random noise so the gyral / fissure pattern becomes a discoverable
+        content latent rather than an unrecoverable per-sample seed.
+        """
+        return (
+            F.interpolate(
+                z_field.to(device).float()[None, None],
+                size=(self.res,) * 3,
+                mode="trilinear",
+                align_corners=False,
+            )
+            .squeeze(0)
+            .squeeze(0)
+        )
+
+    # Number of z_content components consumed by render_structure.
+    # [0] brain size (WM radius), [1] ventricle size, [2:5] lesion position,
+    # [5] cortical thickness, [6] temporal-lobe atrophy (hippocampal proxy),
+    # [7] left–right asymmetry, [8] sulcal widening.
+    N_CONTENT_COMPONENTS = 9
+
+    def _sphere_in_white_matter(self, tissue_map, lesion_dir):
+        """Map three bounded position latents to an untruncated, voxel-centred sphere.
+
+        Erode the FINAL WM labels by the sphere radius, including volume edges.
+        Conditional inverse CDFs use x/y/z latents to choose x/y/z coordinates
+        among admissible centres. No random rejection, nearest-point collapse,
+        clipping of the sphere, or radius change is used. Quantization is explicit
+        at the voxel grid; uniform quantiles sample admissible centres uniformly.
+        """
+        from scipy.ndimage import distance_transform_edt
+
+        direction = lesion_dir.detach().double().cpu().numpy()
+        if direction.shape != (3,) or not np.isfinite(direction).all() or np.any(np.abs(direction) > 1 + 1e-6):
+            raise ValueError(
+                "wm_interior needs three finite position values in [-1,1]; use tanh/clamp or a bounded prior"
+            )
+        white = tissue_map.detach().cpu().numpy() == 2
+        positions = np.argwhere(white)
+        if not len(positions):
+            raise LesionPlacementError("No white matter available for wm_interior lesion placement")
+        # Crop before the CPU distance transform: most of a volume is background.
+        lower, upper = positions.min(0), positions.max(0) + 1
+        slices = tuple(slice(int(a), int(b)) for a, b in zip(lower, upper))
+        spacing = 2.0 / (self.res - 1)
+        distance = distance_transform_edt(np.pad(white[slices], 1), sampling=spacing)[1:-1, 1:-1, 1:-1]
+        # Distance is to non-WM voxel centres. This guarantees containment of the
+        # discretized sphere used by this renderer, not subvoxel tissue geometry.
+        admissible = distance > self.lesion_radius + 1e-7
+        if not admissible.any():
+            raise LesionPlacementError(
+                f"No voxel-centred sphere of radius {self.lesion_radius:g} fits entirely in final white matter "
+                f"at res={self.res} (maximum centre clearance {distance.max():.6g}). "
+                "wm_interior will not shrink or discard the lesion."
+            )
+        quantiles = np.clip((direction + 1) / 2, 0, np.nextafter(1.0, 0.0))
+
+        def choose(counts, quantile):
+            cumulative = np.cumsum(counts, dtype=np.int64)
+            return int(np.searchsorted(cumulative, quantile * cumulative[-1], side="right"))
+
+        ix = choose(admissible.sum((1, 2)), quantiles[0])
+        iy = choose(admissible[ix].sum(1), quantiles[1])
+        iz = choose(admissible[ix, iy], quantiles[2])
+        index = tuple(int(i) for i in lower + np.array([ix, iy, iz]))
+        centre = self.coords[index]
+        sphere = torch.norm(self.coords - centre, dim=-1) < self.lesion_radius
+        if not sphere.any() or bool((sphere & (tissue_map != 2)).any()):
+            raise RuntimeError("White-matter sphere containment failed; refusing to truncate the lesion")
+        return sphere.to(self.coords.dtype)
+
+    def render_structure(self, z_content, z_deformation, z_fissure, device, clean=False, z_lesion=None):
+        """Deterministic given (z_content, z_deformation, z_fissure). Shared across views.
+
+        z_content layout (9 components, extras default to 0):
+            [0]  brain size      — WM radius ±0.1 around 0.5
+            [1]  ventricle size  — CSF cavity ±0.05 around 0.15
+            [2:5] lesion xyz     — WM lesion position; wm_interior maps these to
+                                  conditional x/y/z quantiles of valid centres
+            [5]  cortical thickness — GM shell width ±0.06 around 0.15
+            [6]  temporal atrophy — shrinks a compact bilateral inferior–lateral
+                                   temporal region (hippocampal volume proxy)
+            [7]  L–R asymmetry   — differential atrophy across hemispheres
+            [8]  sulcal widening  — depth of a deterministic gyral corrugation
+
+        z_deformation: small (K, K, K) grid → trilinear-upsampled into a random
+            per-sample gyral corrugation. Pure nuisance: zeroed in clean mode.
+        z_fissure: small (K, K, K) grid → drives the longitudinal fissure
+            wiggle. Pure nuisance: zeroed in clean mode.
+        """
+        # Right-pad z_content with zeros when the caller supplies fewer dims
+        # than the renderer consumes (back-compat with n_content=5 runs).
+        if z_content.numel() < self.N_CONTENT_COMPONENTS:
+            pad = torch.zeros(self.N_CONTENT_COMPONENTS - z_content.numel())
+            z_content = torch.cat([z_content.flatten(), pad])
+
+        # clean-content mode: tanh-squash (monotone → fully recoverable) instead of the
+        # hard clamp (which flattens the ~1/3 of N(0,1) values that overflow ±1), and
+        # zero out the unlabeled deformation/fissure nuisance so the named factors dominate.
+        nuisance = CLEAN_NUISANCE_SCALE if clean else 1.0
+
+        squash = self.content_squash
+        if squash == "auto":
+            squash = "tanh" if clean else "clamp"
+
+        def _sq(z, a=1.0):
+            if squash == "tanh":
+                return a * torch.tanh(z)
+            if squash == "none":
+                return z if a == 1.0 else a * z
+            return z.clamp(-a, a)
+
+        def _amp(dim, base):
+            if self.content_amp_scale is None:
+                return base
+            return base * float(self.content_amp_scale[dim])
+
+        dist = torch.norm(self.coords, dim=-1)
+        x_coords = self.coords[..., 0]
+        y_coords = self.coords[..., 1]
+        z_coords = self.coords[..., 2]
+
+        # How brain_size (z0) and cortical_thickness (z5) share the two spherical
+        # boundaries. This choice IS the dim0/dim5 degeneracy, so it is a flag.
+        #
+        # The three RADIAL options can only trade the degeneracy around, never remove it:
+        # both Jacobians live in the 2-D space spanned by the two concentric shells, so
+        # their cosine is fixed by the shells' relative energy. And that energy is NOT what
+        # geometry suggests — under fixed_reference the global mean (0.552) lands on the GM
+        # intensity (0.5), so after centring the outer GM/background edge nearly vanishes
+        # and the WM/GM edge dominates ~20:1. Measured cos(z0, z5): additive +0.43,
+        # midsurface -0.49, nested -0.67.
+        #   "additive"   (default, legacy) radii_gm = radii_wm + thickness. The DOMINANT
+        #                inner edge is z0-only, which is why it is the best of the three.
+        #   "nested"     outer surface is z0 alone, thickness cuts inward — puts BOTH
+        #                factors on the dominant inner edge, so it is the worst.
+        #   "midsurface" z0 shifts both boundaries together, z5 splits them apart.
+        #   "patterned"  the only option that actually removes the degeneracy. Thickness is
+        #                modulated by the l=2 zonal harmonic along the A-P axis, which is
+        #                zero-mean over the sphere and orthogonal to both the l=0 monopole
+        #                (brain_size) and the l=1 x-dipole (lr_asymmetry). The Jacobian
+        #                leaves the radial subspace entirely, so no uniform radius change
+        #                can mimic it. This is the same property that already makes
+        #                lr_asymmetry and sulcal_widening the two most uniquely-identified
+        #                dims. NOTE it redefines the factor: z5 becomes REGIONAL cortical
+        #                thinning (front/back contrast) at unchanged mean thickness, rather
+        #                than global thickness. Anatomically that is arguably the better
+        #                proxy for AD-pattern thinning, but it is a different factor.
+        # Ranges match across all options: radii_wm ~ 0.5, radii_gm ~ 0.65, thickness ~ 0.15.
+        size_shift = _sq(z_content[0]) * _amp(0, 0.1) * self.content_scale
+        thick_shift = _sq(z_content[5]) * _amp(5, 0.06) * self.content_scale
+        if self.cortex_parameterization == "nested":
+            radii_gm = 0.65 + size_shift
+            cortical_thickness = 0.15 + thick_shift
+            radii_wm = radii_gm - cortical_thickness
+        elif self.cortex_parameterization == "midsurface":
+            mid = 0.575 + size_shift
+            half = 0.075 + 0.5 * thick_shift
+            radii_wm = mid - half
+            radii_gm = mid + half
+        elif self.cortex_parameterization == "patterned":
+            radii_wm = 0.5 + size_shift
+            y_hat = y_coords / dist.clamp_min(1e-6)
+            harmonic = 1.5 * y_hat**2 - 0.5
+            cortical_thickness = 0.15 + thick_shift * 2.0 * harmonic
+            radii_gm = radii_wm + cortical_thickness
+        else:
+            radii_wm = 0.5 + size_shift
+            cortical_thickness = 0.15 + thick_shift
+            radii_gm = radii_wm + cortical_thickness
+        # identifiable_ventricle: re-centre to a larger, more salient ventricle whose
+        # SMALLEST radius (0.12) still clears the |x|>0.05 septum split. A naive
+        # amplitude bump around the 0.15 base instead drops the low end to ~0.05, where
+        # the split erases the ventricle entirely for z1<0 -- a floor effect that CAPS
+        # recoverability (R^2 0.92 -> 0.81). Range [0.12, 0.28], all inside the WM.
+        vent_base, vent_amp = (0.20, 0.08) if self.identifiable_ventricle else (0.15, 0.05)
+        ventricle_size = vent_base + _sq(z_content[1]) * _amp(1, vent_amp) * self.content_scale
+
+        # Nuisance gyral field (z_deformation): a per-sample random corrugation,
+        # zeroed in clean-content mode. Pure nuisance — no named factor rides on
+        # it (sulcal widening below has its own deterministic channel).
+        deformation = self._upsample_field(z_deformation, device) * 0.1 * nuisance
+        deformed_dist = dist + deformation
+
+        # Sulcal widening (z_content[8]): a DETERMINISTIC high-frequency gyral
+        # corrugation whose depth is set by z_content[8]. Unlike the nuisance
+        # field above it does not vanish in clean-content mode, so it stays a
+        # recoverable named factor. Sign flips the gyral phase (map stays
+        # injective); |z| sets sulcal depth → surface roughness.
+        gyral_pattern = torch.sin(12 * x_coords) * torch.sin(12 * y_coords) * torch.sin(12 * z_coords)
+        sulcal_amp = _sq(z_content[8]) * _amp(8, 0.06) * self.content_scale
+        deformed_dist = deformed_dist + gyral_pattern * sulcal_amp
+
+        # Temporal-lobe atrophy (z_content[6]): shrink the WM/GM boundary inside a
+        # compact, BILATERAL region over the (inferior, lateral, mid-A/P) temporal
+        # lobes — a hippocampal / medial-temporal volume-loss proxy. A localized
+        # Gaussian bump (not a product of half-space sigmoids) keeps the effect
+        # off the brain centre and the superior/anterior cortex, so it no longer
+        # drags the whole-brain volume down; |x| makes it symmetric across
+        # hemispheres so it does not confound the L–R asymmetry factor.
+        tw_x = torch.abs(x_coords) - 0.30  # lateral lobes at |x| ≈ 0.30
+        tw_y = y_coords - 0.05
+        tw_z = z_coords + 0.35  # inferior
+        temporal_weight = torch.exp(-(tw_x**2 + tw_y**2 + tw_z**2) / (2 * 0.18**2))
+        if self.center_local_deformations:
+            # A strictly-positive bump has a DC component, and a uniform radial offset IS
+            # brain_size — exactly the confound sample_gp_field centres its fields to avoid
+            # ("that DC is a uniform radius shift, i.e. a brain_size confound"). Centring
+            # turns temporal atrophy into a pure SHAPE factor: the temporal lobe shrinks and
+            # the rest expands slightly, so net volume is unchanged. The reference region is
+            # the NOMINAL brain (fixed radius), never the sample's own radii_gm — using the
+            # latter would make the correction latent-dependent and reintroduce coupling.
+            # Anatomically the compensating expansion is an artefact; it is the price of
+            # making this factor orthogonal to brain_size.
+            temporal_weight = temporal_weight - temporal_weight[dist < 0.65].mean()
+        temporal_shrink = _sq(z_content[6]) * _amp(6, 0.12) * self.content_scale
+        deformed_dist = deformed_dist + temporal_weight * temporal_shrink
+
+        # Left–right asymmetry: differential atrophy across hemispheres.
+        # Positive z_content[7] → left hemisphere (x < 0) more atrophied.
+        lr_weight = torch.tanh(-3 * x_coords)  # smooth L/R gradient, ∈ (−1, 1)
+        lr_shift = _sq(z_content[7]) * _amp(7, 0.08) * self.content_scale
+        deformed_dist = deformed_dist + lr_weight * lr_shift
+
+        mask_gm = deformed_dist < radii_gm
+        mask_wm = deformed_dist < radii_wm
+
+        ventricle_split = torch.abs(x_coords) > 0.05
+        # identifiable_ventricle: read the ventricle off the UNdeformed radius so the
+        # gyral/nuisance field (calibrated for the outer cortex, but ~50% of the tiny
+        # ventricle radius) no longer overwrites its boundary.
+        vent_dist = dist if self.identifiable_ventricle else deformed_dist
+        mask_csf = (vent_dist < ventricle_size) & ventricle_split
+
+        fissure_noise = self._upsample_field(z_fissure, device) * 0.05 * nuisance
+        fissure_mask = (torch.abs(x_coords + fissure_noise) < 0.03) & mask_gm
+
+        tissue_map = torch.zeros_like(dist, dtype=torch.long)
+        tissue_map[mask_gm] = 3
+        tissue_map[mask_wm] = 2
+        tissue_map[mask_csf] = 1
+        # identifiable_ventricle: give the longitudinal fissure its OWN label (4,
+        # rendered at a distinct intensity) so a pooled probe can separate ventricle
+        # CSF from fissure CSF. Otherwise "total CSF" tracks the brain-size-driven
+        # fissure sheet, not the ventricle signal (see render_modality's 5th LUT entry).
+        tissue_map[fissure_mask] = 4 if self.identifiable_ventricle else 1
+
+        # Sphere lesions: wm_interior uses the final tissue labels, avoiding CSF,
+        # fissure and cortex. Legacy placement uses only the geometric WM envelope
+        # (which still contains CSF) to reproduce previous experiments exactly.
+        # Return a FLOAT load in [0,1]; sphere loads are binary. Field mode is
+        # unchanged and is not governed by the sphere-placement option.
+        if self.lesion_mode == "field":
+            # WM membership: soft when wm_softness > 0, so the lesion's support does
+            # not jump discontinuously with brain_size (a hard mask makes one content
+            # component's support a function of another's).
+            if self.wm_softness > 0:
+                wm_weight = torch.sigmoid((radii_wm - deformed_dist) / self.wm_softness)
+            else:
+                wm_weight = mask_wm.to(dist.dtype)
+            if z_lesion is None:
+                lesion_load = torch.zeros_like(dist)
+            else:
+                z_les_up = self._upsample_field(z_lesion, device)
+                # SIGMOID, not a threshold: strictly monotone, so the image depends on
+                # the local field value everywhere and the local mixing stays injective.
+                lesion_load = torch.sigmoid(self.lesion_sharpness * (z_les_up - self.lesion_threshold))
+                lesion_load = lesion_load * wm_weight
+        else:
+            lesion_dir = _sq(z_content[2:5], 1.0).to(device)
+            # Margin tracks the lesion radius (+0.02) so a larger lesion still lands
+            # inside the WM for every direction, instead of poking through the boundary
+            # and turning its own support into a function of brain_size.
+            if self.lesion_placement == "wm_interior":
+                lesion_load = self._sphere_in_white_matter(tissue_map, lesion_dir)
+            else:
+                lesion_reach = (radii_wm - (self.lesion_radius + 0.02)).clamp_min(0.05)
+                lesion_xyz = lesion_dir * (lesion_reach / (3**0.5))
+                lesion_load = ((torch.norm(self.coords - lesion_xyz, dim=-1) < self.lesion_radius) & mask_wm).to(
+                    dist.dtype
+                )
+
+        return tissue_map, lesion_load
+
+    # render_modality consumes 3 style components (gain, bias, noise sigma).
+    # Shorter z_style is right-padded with zeros so it never IndexErrors —
+    # missing components simply default to "no modulation".
+    N_STYLE_COMPONENTS = 3
+
+    def render_modality(self, tissue_map, lesion_load, z_style, modality, view_seed, device, noise_seed=None):
+        """Render acquisition effects; optionally redraw noise while preserving the bias field.
+
+        With noise_seed=None the original RNG sequence is unchanged. A separate
+        noise seed supports same-acquisition style pairs without identical noise.
+        """
+        gen = torch.Generator(device=device).manual_seed(int(view_seed))
+
+        # LUT indexed by tissue label [bg, CSF, WM, GM, fissure]. The 5th (fissure)
+        # entry is only reached when identifiable_ventricle relabels the fissure to 4;
+        # with the default (fissure == CSF == label 1) it is inert, so runs are
+        # byte-identical. The fissure intensity is deliberately distinct from CSF.
+        if modality == "T1":
+            base = torch.tensor([0.0, 0.1, 0.8, 0.5, 0.3], device=device)
+            lesion_int = 0.4
+        elif modality == "FLAIR":
+            base = torch.tensor([0.0, 0.1, 0.4, 0.8, 0.3], device=device)
+            lesion_int = 1.0
+        else:
+            raise ValueError(f"Unknown modality {modality}")
+
+        # Right-pad z_style with zeros if the caller supplied fewer components
+        # than render_modality consumes. Defensive guard for misconfigured runs.
+        if z_style.numel() < self.N_STYLE_COMPONENTS:
+            pad = torch.zeros(self.N_STYLE_COMPONENTS - z_style.numel(), device=z_style.device)
+            z_style = torch.cat([z_style.flatten(), pad])
+
+        gain = (1.0 + z_style[0].clamp(-1, 1) * 0.3 * self.style_scale).clamp_min(0.05)
+        bias = z_style[1].clamp(-1, 1) * 0.1 * self.style_scale
+        lut = base * gain + bias
+        volume = lut[tissue_map]
+
+        # Convex blend, smooth and strictly monotone in the load. With a binary load
+        # this is exactly the old torch.where, so sphere mode is unchanged.
+        lesion_load = lesion_load.to(volume.dtype)
+        volume = (1.0 - lesion_load) * volume + lesion_load * lesion_int
+
+        bias_field = 1.0 + self._seeded_noise(scale=4, gen=gen, device=device) * 0.15 * self.style_scale
+        volume = volume * bias_field
+
+        sigma = 0.01 + z_style[2].abs() * 0.05 * self.style_scale
+        if noise_seed is not None:
+            gen = torch.Generator(device=device).manual_seed(int(noise_seed))
+        real = torch.randn(volume.shape, generator=gen, device=device) * sigma
+        imag = torch.randn(volume.shape, generator=gen, device=device) * sigma
+        volume = torch.sqrt((volume + real) ** 2 + imag**2)
+
+        volume = F.avg_pool3d(
+            volume.unsqueeze(0).unsqueeze(0),
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        ).squeeze(0)
+        return volume
+
+
+class Primitive3DRenderer(nn.Module):
+    def __init__(self, res=32, modality="T1"):
+        super().__init__()
+        self.res = res
+        self.modality = modality
+        grid = torch.linspace(-1, 1, res)
+        # indexing='ij' ensures correct spatial alignment
+        self.register_buffer("coords", torch.stack(torch.meshgrid(grid, grid, grid, indexing="ij"), dim=-1))
+
+    def _apply_lut(self, x):
+        if self.modality == "T1":
+            return torch.pow(x, 1.5)
+        elif self.modality == "FLAIR":
+            # Fluid suppression simulation
+            return 1.0 - torch.exp(-((x - 0.7) ** 2) / 0.1)
+        return x
+
+    def forward(self, z_t, z_b_shared, z_b_style):
+        # Ensure inputs are [B, D, H, W]
+        if z_t.dim() == 3:
+            z_t, z_b_shared, z_b_style = z_t.unsqueeze(0), z_b_shared.unsqueeze(0), z_b_style.unsqueeze(0)
+
+        B = z_t.shape[0]
+        device = z_t.device
+        # Output volume: [B, 1, res, res, res]
+        volume = torch.zeros((B, 1, self.res, self.res, self.res), device=device)
+
+        # Iterate through the 4x4x4 latent grid
+        for i in range(4):
+            for j in range(4):
+                for k in range(4):
+                    # Check existence for the whole batch at once
+                    # mask_exists shape: [B, 1, 1, 1, 1]
+                    mask_exists = (z_t[:, i, j, k] > 0).float().view(B, 1, 1, 1, 1)
+
+                    if mask_exists.sum() == 0:
+                        continue
+
+                    # Define center in range [-0.75, 0.75]
+                    center = torch.tensor([(i - 1.5) / 2, (j - 1.5) / 2, (k - 1.5) / 2], device=device)
+
+                    # Calculate sphere distance: dist shape [res, res, res]
+                    dist = torch.norm(self.coords - center, dim=-1)
+
+                    # Radius depends on z_t value
+                    radius = 0.12 + (z_t[:, i, j, k].float() / 25.0).view(B, 1, 1, 1, 1)
+
+                    # Primitive shape
+                    primitive = (dist.unsqueeze(0).unsqueeze(0) < radius).float()
+
+                    # Intensity from shared + style
+                    intensity = (z_b_shared[:, i, j, k].float() + z_b_style[:, i, j, k].float()) / 32.0
+                    intensity = intensity.view(B, 1, 1, 1, 1)
+
+                    # Add to volume using max pooling (simulates occlusion/additive density)
+                    volume = torch.max(volume, primitive * intensity * mask_exists)
+
+        return self._apply_lut(volume)
+
+
+class Random3DRenderer(nn.Module):
+    """
+    A fixed, randomly initialized 3D convolutional decoder.
+    Simulates a complex physical rendering process.
+    """
+
+    def __init__(self, K_t, K_b, output_res=32):
+        super().__init__()
+        self.emb_t = nn.Embedding(K_t, 16)
+        self.emb_b = nn.Embedding(K_b, 16)
+
+        # Starts at 8x8x8, upsamples to 32x32x32
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose3d(32, 64, kernel_size=4, stride=2, padding=1),  # 16x16x16
+            nn.LeakyReLU(0.2),
+            nn.ConvTranspose3d(64, 32, kernel_size=4, stride=2, padding=1),  # 32x32x32
+            nn.LeakyReLU(0.2),
+            nn.Conv3d(32, 1, kernel_size=3, padding=1),
+            nn.Sigmoid(),
+        )
+        # Freeze weights to maintain a consistent "ground truth" rendering function
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def forward(self, z_t, z_b):
+        # Embed inputs: [B, D, H, W] -> [B, D, H, W, C] -> [B, C, D, H, W]
+        e_t = self.emb_t(z_t).permute(0, 4, 1, 2, 3)
+        e_b = self.emb_b(z_b).permute(0, 4, 1, 2, 3)
+
+        # Align spatial dimensions (Upsample e_t to 8x8x8 to match e_b)
+        e_t_feat = F.interpolate(e_t, size=(8, 8, 8), mode="trilinear", align_corners=False)
+
+        # Combine embeddings and decode
+        combined = torch.cat([e_t_feat, e_b], dim=1)  # 16 + 16 = 32 channels
+        return self.decoder(combined)
+
+
+class Synthetic3DDisentanglementDataset(Dataset):
+    """
+    A drop-in 3D synthetic dataset generator.
+    Outputs: (View 1, View 2, Ground Truth Latents Dictionary)
+    """
+
+    def __init__(
+        self,
+        num_samples=1000,
+        res=32,
+        seed=42,
+        mode="primitives",
+        n_content=5,
+        n_style=3,
+        n_deformation_grid=4,
+        n_fissure_grid=8,
+        hierarchical_content=False,
+        causal=False,
+        causal_graph="chain",
+        causal_edge_prob=0.5,
+        causal_noise_scale=0.4,
+        causal_nonlinearity="leaky_relu",
+        scm_seed=None,
+        clean_content=False,
+        style_scale=1.0,
+        content_scale=1.0,
+        field_prior="iid",
+        field_grid=8,
+        field_kernels="distinct",
+        field_lengthscales=(1.0, 2.5),
+        field_tp_dof=8.0,
+        field_scale=1.0,
+        identifiable_ventricle=False,
+        lesion_mode="sphere",
+        lesion_lengthscale=0.4,
+        lesion_sharpness=10.0,
+        lesion_threshold=1.0,
+        wm_softness=0.0,
+        content_prior="normal",
+        content_squash="auto",
+        content_amp_scale=None,
+        lesion_radius=0.1,
+        cortex_parameterization="additive",
+        center_local_deformations=False,
+        lesion_placement="legacy",
+    ):
+        super().__init__()
+        self.num_samples = num_samples
+        self.identifiable_ventricle = identifiable_ventricle
+        self.res = res
+        self.mode = mode
+        self.seed = seed
+        self.n_content = n_content
+        self.n_style = n_style
+        self.hierarchical_content = hierarchical_content
+        self.causal = causal
+        self.causal_noise_scale = causal_noise_scale
+        self.causal_nonlinearity = causal_nonlinearity
+        self.clean_content = clean_content
+        # Accepted candidate draw per subject; see _first_fitting.
+        self._accepted_attempt = {}
+
+        # Content prior. "normal" is z ~ N(0,1) (or the SCM), which the renderer's squash
+        # then has to fold into [-1, 1] — non-injectively for the clamp, and with a linear
+        # ceiling of ~0.93 even for tanh. "uniform" maps each factor onto U(-1, 1), where
+        # the squash is the identity and the recovery ceiling is exactly 1.0 for every
+        # probe class. Under --synthetic-causal the map is the per-dim probability-integral
+        # transform 2*Phi((z-mu)/sigma) - 1 with (mu, sigma) estimated once from the SCM:
+        # strictly monotone per dim, so it preserves each factor's information and the DAG's
+        # dependence structure exactly, and only reshapes the marginals. Pair with
+        # content_squash="none" (or leave "auto" — on [-1,1] the clamp is already inert).
+        if content_prior not in ("normal", "uniform"):
+            raise ValueError(f"content_prior must be normal|uniform, got {content_prior!r}")
+        self.content_prior = content_prior
+        self._pit_stats = None
+
+        # Field latents (Halva et al. 2024): the shared z_deformation / z_fissure
+        # fields are, by default, iid grids (a fixed triangular kernel). When
+        # field_prior is "gp"/"tp" they become GP / t-process samples with a chosen
+        # squared-exponential kernel per field, so their recovery is testable and
+        # the distinct-vs-repeated-kernel identifiability control (their Thm 2) is
+        # exposed. iid keeps prior runs byte-identical.
+        if field_prior not in ("iid", "gp", "tp"):
+            raise ValueError(f"field_prior must be iid|gp|tp, got {field_prior!r}")
+        if field_kernels not in ("distinct", "repeated"):
+            raise ValueError(f"field_kernels must be distinct|repeated, got {field_kernels!r}")
+        self.field_prior = field_prior
+        self.field_grid = field_grid
+        # ── lesion as a latent FIELD (lesion_mode="field") ────────────────────
+        # "sphere" (default) is the legacy path: z_content[2:5] place a hard
+        # 0.1-radius ball. It is bit-identical to before, and it is why the lesion
+        # sits outside both identifiability frameworks: the image at a site far from
+        # the ball is CONSTANT in lesion position, so the local mixing is not
+        # injective in it, and equivalently the per-site index set S_{k,u} becomes a
+        # function of the latents.
+        #
+        # "field" replaces the position triple with a third GP/TP component on the
+        # shared lattice, at its own (shorter) length-scale. Two consequences:
+        #   * every site carries a lesion value, so S_{k,u} is fixed and the local
+        #     mixing is injective in it -> Assumption (L1) holds;
+        #   * three components with three DISTINCT kernels satisfies the condition of
+        #     Halva et al. (2024) Thm 2 by construction, rather than by the accident
+        #     of the iid branch's differing lattice resolutions.
+        # In "field" mode z_content[2:5] are INERT — the eval side must drop them.
+        if lesion_mode not in ("sphere", "field"):
+            raise ValueError(f"lesion_mode must be sphere|field, got {lesion_mode!r}")
+        self.lesion_mode = lesion_mode
+        self.lesion_lengthscale = lesion_lengthscale
+        self.field_kernels = field_kernels
+        self.field_lengthscales = tuple(field_lengthscales)
+        self.field_tp_dof = field_tp_dof
+        self.field_scale = field_scale
+
+        if causal and hierarchical_content:
+            raise ValueError("--synthetic-causal and --synthetic-hierarchical-content are mutually exclusive")
+
+        if causal and mode != "pseudo_mri":
+            raise ValueError(f"--synthetic-causal requires --synthetic-mode pseudo_mri, got '{mode}'")
+
+        if causal:
+            # The SCM is a property of the data-generating PROCESS, so it must not vary
+            # with the split. `seed` here is already split-adjusted by SyntheticBrainDataset
+            # (train/val/test = base+0/+1/+2), which is right for sample noise but wrong for
+            # the graph: with causal_graph="random" each split drew a DIFFERENT DAG, and
+            # corr(brain_size, ventricle_size) came out +0.78 / -0.79 / -0.07 on
+            # train / val / test. Any causal or per-factor claim compared across splits was
+            # therefore comparing different generative processes. `scm_seed` pins the graph.
+            self.scm = build_content_scm(
+                n_content, causal_graph, causal_edge_prob, seed if scm_seed is None else scm_seed
+            )
+        else:
+            self.scm = None
+
+        # Spatial-content grid sizes for pseudo_mri mode. Trilinear-upsampled
+        # to (res, res, res) → drives the deformation / fissure fields.
+        # Default 4³ for the gyral pattern (low-frequency, ~16 dof per axis at res=32)
+        # and 8³ for the fissure (slightly higher frequency).
+        self.n_deformation_grid = n_deformation_grid
+        self.n_fissure_grid = n_fissure_grid
+
+        if mode == "pseudo_mri":
+            # render_structure indexes z_content[0..8] and render_modality indexes
+            # z_style[0..2]. Smaller values silently disable the corresponding
+            # anatomical / nuisance factor — warn loudly so it's not a surprise.
+            if n_content < PseudoMRIRenderer.N_CONTENT_COMPONENTS:
+                import warnings
+
+                warnings.warn(
+                    f"pseudo_mri renderer consumes z_content[0..{PseudoMRIRenderer.N_CONTENT_COMPONENTS - 1}] "
+                    f"but n_content={n_content}. Missing components will default to 0 "
+                    f"(no anatomical variation on those axes). Pass --synthetic-n-content "
+                    f"{PseudoMRIRenderer.N_CONTENT_COMPONENTS} (or greater) to fully exercise the renderer.",
+                    stacklevel=2,
+                )
+            if n_style < PseudoMRIRenderer.N_STYLE_COMPONENTS:
+                import warnings
+
+                warnings.warn(
+                    f"pseudo_mri renderer consumes z_style[0..{PseudoMRIRenderer.N_STYLE_COMPONENTS - 1}] "
+                    f"but n_style={n_style}. Missing components will default to 0 (no contrast/noise modulation). "
+                    f"Pass --synthetic-n-style {PseudoMRIRenderer.N_STYLE_COMPONENTS} to fully exercise it.",
+                    stacklevel=2,
+                )
+
+        # Hyperparameters from the recipe (used by primitives / random modes)
+        self.grid_t = 4  # Top-level spatial grid
+        self.grid_m = 8  # Middle-level spatial grid
+        self.grid_b = 16  # Bottom-level spatial grid
+        self.K_t = 10  # Top-level categories
+        self.K_m = 16  # Middle-level categories
+        self.K_b = 20  # Bottom-level categories
+
+        if mode == "primitives":
+            self.renderer_v1 = Primitive3DRenderer(res=res, modality="T1")
+            self.renderer_v2 = Primitive3DRenderer(res=res, modality="FLAIR")
+        elif mode == "pseudo_mri":
+            self.renderer = PseudoMRIRenderer(
+                res=res,
+                style_scale=style_scale,
+                content_scale=content_scale,
+                identifiable_ventricle=identifiable_ventricle,
+                lesion_mode=lesion_mode,
+                lesion_sharpness=lesion_sharpness,
+                lesion_threshold=lesion_threshold,
+                wm_softness=wm_softness,
+                content_squash=content_squash,
+                content_amp_scale=content_amp_scale,
+                lesion_radius=lesion_radius,
+                lesion_placement=lesion_placement,
+                cortex_parameterization=cortex_parameterization,
+                center_local_deformations=center_local_deformations,
+            )
+            if lesion_mode == "field" and n_content > 2:
+                import warnings
+
+                warnings.warn(
+                    "lesion_mode='field': render_structure never reads z_content[2:5], so those 3 "
+                    "dims are INERT — they vary in the ground-truth latents but cannot change the "
+                    "image (verified: max|dx| == 0 across sign sweeps, eval/synthetic/generator_defects.py "
+                    "--tests inert). Any per-factor R^2 or block_mcc over the full z_content will "
+                    "average in 3 unrecoverable columns and understate recovery by ~1/3. Drop them "
+                    "on the eval side, or use lesion_mode='sphere'.",
+                    stacklevel=2,
+                )
+        else:
+            # Fallback to the Conv-based random decoders
+            self.renderer_v1 = Random3DRenderer(8, 16, res)
+            self.renderer_v2 = Random3DRenderer(8, 16, res)
+
+        torch.manual_seed(seed)
+
+    def _build_renderer(self, seed):
+        torch.manual_seed(seed)
+        return Random3DRenderer(self.K_t, self.K_b, self.res)
+
+    def __len__(self):
+        return self.num_samples
+
+    # Hierarchical content structure: a global atrophy scalar drives the
+    # regional content dims via fixed coupling weights + independent residuals.
+    # Indices into z_content that each regional factor occupies:
+    #   [0] brain size, [1] ventricle, [5] cortical thickness,
+    #   [6] temporal atrophy, [8] sulcal widening.
+    # [2:5] (lesion xyz) and [7] (L-R asymmetry) are independent of global.
+    _HIER_COUPLINGS = {
+        0: -1.0,  # global atrophy → smaller brain
+        1: -0.8,  # global atrophy → bigger ventricles (anticorrelated)
+        5: -0.9,  # global atrophy → thinner cortex
+        6: 1.5,  # global atrophy → more temporal atrophy (AD-like)
+        8: 0.7,  # global atrophy → wider sulci
+    }
+    _HIER_RESIDUAL_SCALE = 0.6
+
+    def _sample_hierarchical_content(self, gen):
+        """Sample z_content with a shared global-atrophy factor.
+
+        Returns (z_content, z_global, z_residuals) where:
+          z_content  = the actual vector fed to the renderer
+          z_global   = scalar global atrophy severity
+          z_residuals = independent per-dim residuals (same shape as z_content)
+
+        The relationship is:
+          z_content[i] = coupling[i] * z_global + residual_scale * residual[i]
+        for coupled dims, and z_content[i] = residual[i] for independent dims.
+        """
+        z_global = torch.randn(1, generator=gen)
+        z_residuals = torch.randn(self.n_content, generator=gen)
+        z_content = z_residuals.clone() * self._HIER_RESIDUAL_SCALE
+        for idx, weight in self._HIER_COUPLINGS.items():
+            if idx < self.n_content:
+                z_content[idx] = weight * z_global.item() + self._HIER_RESIDUAL_SCALE * z_residuals[idx]
+        return z_content, z_global, z_residuals
+
+    def _pit_to_uniform(self, z, sampler):
+        """Map a structured content draw onto U(-1, 1) per dim, monotonically.
+
+        Neither the SCM (leaky_relu of a weighted parent sum plus noise) nor the
+        hierarchical prior has closed-form marginals, so (mu, sigma) are estimated once
+        from a fixed 8192-draw pilot of ``sampler`` and cached. The transform is
+        2*Phi((z-mu)/sigma) - 1 == erf((z-mu)/(sigma*sqrt(2))): strictly increasing in
+        z_d, so it is information-preserving per factor, and it leaves the DAG's / the
+        global factor's dependence structure untouched — only the marginal shape changes.
+        Not exactly uniform (those marginals are not exactly Gaussian), which is fine:
+        what matters is that the result lands inside [-1, 1], where the renderer's squash
+        is the identity and the recovery ceiling is 1.0.
+        """
+        if self._pit_stats is None:
+            gen = torch.Generator().manual_seed(20240717)
+            pilot = torch.stack([sampler(gen) for _ in range(8192)])
+            self._pit_stats = (pilot.mean(0), pilot.std(0).clamp_min(1e-6))
+        mu, sd = self._pit_stats
+        return torch.erf((z - mu) / (sd * (2.0**0.5)))
+
+    # Under wm_interior, a subject whose anatomy leaves no room for a complete lesion is
+    # replaced by its next candidate draw. Bounded so an impossible radius fails instead
+    # of looping.
+    MAX_LESION_RESAMPLES = 100
+
+    def _candidate_seed(self, idx, attempt):
+        """RNG seed of subject ``idx``'s ``attempt``-th candidate; attempt 0 is the original draw."""
+        base = self.seed * 1000003 + idx
+        return base if attempt == 0 else (base * 1000003 + attempt) % 2**63
+
+    def _first_fitting(self, idx, render):
+        """First candidate of subject ``idx`` that ``render(seed, draw)`` accepts.
+
+        Only ``wm_interior`` raises ``LesionPlacementError``, so every other setting
+        accepts attempt 0 and is unchanged. Subjects that fit on the original draw keep it.
+        """
+        start = self._accepted_attempt.get(idx, 0)
+        for attempt in range(start, self.MAX_LESION_RESAMPLES + 1):
+            seed = self._candidate_seed(idx, attempt)
+            draw = self._draw_pseudo_mri(seed)
+            try:
+                out = render(seed, draw)
+            except LesionPlacementError:
+                continue
+            if attempt and idx not in self._accepted_attempt:
+                import warnings
+
+                warnings.warn(
+                    f"Subject {idx}: no room for a complete lesion of radius {self.renderer.lesion_radius:g} in "
+                    f"its original anatomy; redrew it (candidate {attempt}). Lesion size and containment are "
+                    "unchanged; the subject's latents come from the redrawn candidate.",
+                    stacklevel=2,
+                )
+            self._accepted_attempt[idx] = attempt
+            return seed, draw, out
+        raise LesionPlacementError(
+            f"Subject {idx}: none of {self.MAX_LESION_RESAMPLES + 1} candidate anatomies has room for a complete "
+            f"lesion of radius {self.renderer.lesion_radius:g} at res={self.res}. The radius is too large for "
+            "this anatomy distribution; lower --synthetic-lesion-radius."
+        )
+
+    def sample_seed_for(self, idx):
+        """The per-sample RNG seed used by ``_pseudo_mri_item``.
+
+        Exposed so an interventional evaluator can re-render a sample with one
+        latent overwritten while keeping the *rendering* noise identical to the
+        observational draw. Under ``wm_interior`` this is the seed of the ACCEPTED
+        candidate, so a redrawn subject replays exactly as the dataset renders it.
+        """
+        if self.mode != "pseudo_mri" or self.renderer.lesion_placement != "wm_interior":
+            return self._candidate_seed(idx, 0)
+        if idx not in self._accepted_attempt:
+            # Structure-only check: the views are not needed to decide whether a lesion fits.
+            self._first_fitting(
+                idx,
+                lambda seed, d: self.renderer.render_structure(
+                    d["z_content"], d["z_deformation"], d["z_fissure"], "cpu", clean=self.clean_content
+                ),
+            )
+        return self._candidate_seed(idx, self._accepted_attempt[idx])
+
+    def render_pseudo_mri(
+        self, z_content, z_deformation, z_fissure, z_style_v1, z_style_v2, sample_seed, z_lesion=None, noise_seed=None
+    ):
+        """Render a view pair from explicit latents. Deterministic given its inputs.
+
+        The single place that fixes the structure/modality call order, the
+        ``clean_content`` flag, the per-view modality names and the view-seed
+        convention, so ``_pseudo_mri_item`` and ``eval.protocol.interventional_identifiability``
+        cannot drift apart on any of them.
+
+        Returns ``(x_v1, x_v2, brain_mask)`` — unnormalized; the
+        ``SyntheticBrainDataset`` wrapper owns normalization.
+        """
+        device = torch.device("cpu")
+        with torch.no_grad():
+            tissue, lesion = self.renderer.render_structure(
+                z_content,
+                z_deformation,
+                z_fissure,
+                device=device,
+                clean=self.clean_content,
+                z_lesion=z_lesion,
+            )
+            x_v1 = self.renderer.render_modality(
+                tissue,
+                lesion,
+                z_style_v1,
+                "T1",
+                view_seed=sample_seed * 2,
+                device=device,
+                noise_seed=None if noise_seed is None else noise_seed * 2,
+            )
+            x_v2 = self.renderer.render_modality(
+                tissue,
+                lesion,
+                z_style_v2,
+                "FLAIR",
+                view_seed=sample_seed * 2 + 1,
+                device=device,
+                noise_seed=None if noise_seed is None else noise_seed * 2 + 1,
+            )
+        return x_v1, x_v2, (tissue > 0).unsqueeze(0).float()
+
+    def _draw_pseudo_mri(self, sample_seed):
+        """Every latent of one candidate subject, drawn from ``sample_seed`` in the generator's fixed order."""
+        sample_gen = torch.Generator().manual_seed(sample_seed)
+        z_global = z_residuals = None
+
+        if self.causal:
+            z_content = sample_content_from_scm(self.scm, sample_gen, self.causal_noise_scale, self.causal_nonlinearity)
+            if self.content_prior == "uniform":
+                z_content = self._pit_to_uniform(
+                    z_content,
+                    lambda g: sample_content_from_scm(self.scm, g, self.causal_noise_scale, self.causal_nonlinearity),
+                )
+        elif self.hierarchical_content:
+            z_content, z_global, z_residuals = self._sample_hierarchical_content(sample_gen)
+            if self.content_prior == "uniform":
+                z_content = self._pit_to_uniform(z_content, lambda g: self._sample_hierarchical_content(g)[0])
+        elif self.content_prior == "uniform":
+            z_content = torch.rand(self.n_content, generator=sample_gen) * 2.0 - 1.0
+        else:
+            z_content = torch.randn(self.n_content, generator=sample_gen)
+
+        z_lesion = None
+        if self.field_prior == "iid":
+            z_deformation = torch.randn(
+                self.n_deformation_grid,
+                self.n_deformation_grid,
+                self.n_deformation_grid,
+                generator=sample_gen,
+            )
+            z_fissure = torch.randn(
+                self.n_fissure_grid,
+                self.n_fissure_grid,
+                self.n_fissure_grid,
+                generator=sample_gen,
+            )
+            if self.lesion_mode == "field":
+                z_lesion = torch.randn(self.field_grid, self.field_grid, self.field_grid, generator=sample_gen)
+            field_lengthscales = None
+        else:
+            # GP / t-process fields on a COMMON lattice so the only difference
+            # between the two is the kernel length-scale (the clean Thm-2 control).
+            ls_def, ls_fis = self.field_lengthscales
+            if self.field_kernels == "repeated":
+                ls_fis = ls_def
+            z_deformation = self.field_scale * sample_gp_field(
+                self.field_grid,
+                ls_def,
+                sample_gen,
+                prior=self.field_prior,
+                dof=self.field_tp_dof,
+                tau_seed=sample_seed * 7 + 1,
+            )
+            z_fissure = self.field_scale * sample_gp_field(
+                self.field_grid,
+                ls_fis,
+                sample_gen,
+                prior=self.field_prior,
+                dof=self.field_tp_dof,
+                tau_seed=sample_seed * 7 + 2,
+            )
+            if self.lesion_mode == "field":
+                # Third component, own (shorter) length-scale. Three distinct kernels
+                # is exactly the condition of Halva et al. (2024) Thm 2.
+                ls_les = self.lesion_lengthscale
+                if self.field_kernels == "repeated":
+                    ls_les = ls_def
+                z_lesion = self.field_scale * sample_gp_field(
+                    self.field_grid,
+                    ls_les,
+                    sample_gen,
+                    prior=self.field_prior,
+                    dof=self.field_tp_dof,
+                    tau_seed=sample_seed * 7 + 3,
+                )
+                field_lengthscales = torch.tensor([ls_def, ls_fis, ls_les], dtype=torch.float32)
+            else:
+                field_lengthscales = torch.tensor([ls_def, ls_fis], dtype=torch.float32)
+        z_style_v1 = torch.randn(self.n_style, generator=sample_gen)
+        z_style_v2 = torch.randn(self.n_style, generator=sample_gen)
+        return {
+            "z_content": z_content,
+            "z_deformation": z_deformation,
+            "z_fissure": z_fissure,
+            "z_lesion": z_lesion,
+            "field_lengthscales": field_lengthscales,
+            "z_global": z_global,
+            "z_residuals": z_residuals,
+            "z_style_v1": z_style_v1,
+            "z_style_v2": z_style_v2,
+        }
+
+    def _pseudo_mri_item(self, idx):
+        _, d, (x_v1, x_v2, brain_mask) = self._first_fitting(
+            idx,
+            lambda seed, d: self.render_pseudo_mri(
+                d["z_content"],
+                d["z_deformation"],
+                d["z_fissure"],
+                d["z_style_v1"],
+                d["z_style_v2"],
+                seed,
+                z_lesion=d["z_lesion"],
+            ),
+        )
+
+        latents = {
+            "z_content": d["z_content"],
+            "z_deformation": d["z_deformation"],
+            "z_fissure": d["z_fissure"],
+            "z_style_v1": d["z_style_v1"],
+            "z_style_v2": d["z_style_v2"],
+            "brain_mask": brain_mask,
+        }
+        if d["z_lesion"] is not None:
+            latents["z_lesion"] = d["z_lesion"]
+        if d["field_lengthscales"] is not None:
+            latents["field_lengthscales"] = d["field_lengthscales"]
+        if self.causal:
+            latents["causal_adj"] = torch.from_numpy(self.scm["adj"].astype(np.float32))
+        elif self.hierarchical_content:
+            latents["z_global_atrophy"] = d["z_global"]
+            latents["z_content_residuals"] = d["z_residuals"]
+
+        return x_v1, x_v2, latents
+
+    def _categorical_item(self, idx):
+        # Top-level z_t
+        z_t = torch.randint(0, self.K_t, (self.grid_t, self.grid_t, self.grid_t))
+
+        # Middle-level z_m conditioned on z_t
+        z_t_upsampled = (
+            F.interpolate(
+                z_t.float().view(1, 1, self.grid_t, self.grid_t, self.grid_t),
+                size=(self.grid_m, self.grid_m, self.grid_m),
+                mode="nearest",
+            )
+            .squeeze()
+            .long()
+        )
+
+        z_m_base = torch.randint(0, self.K_m // 2, (self.grid_m, self.grid_m, self.grid_m))
+        z_m_offset = (z_t_upsampled % 2) * (self.K_m // 2)
+        z_m = z_m_base + z_m_offset
+
+        # Bottom-level z_b conditioned on z_m
+        z_m_upsampled = (
+            F.interpolate(
+                z_m.float().view(1, 1, self.grid_m, self.grid_m, self.grid_m),
+                size=(self.grid_b, self.grid_b, self.grid_b),
+                mode="nearest",
+            )
+            .squeeze()
+            .long()
+        )
+
+        z_b_base = torch.randint(0, self.K_b // 2, (self.grid_b, self.grid_b, self.grid_b))
+        z_b_offset = (z_m_upsampled % 2) * (self.K_b // 2)
+        z_b = z_b_base + z_b_offset
+
+        mid_z = self.grid_b // 2
+        z_b_shared = z_b[:, :, :mid_z]
+
+        z_b_style_v1 = torch.randint(0, self.K_b, (self.grid_b, self.grid_b, self.grid_b - mid_z))
+        z_b_style_v2 = torch.randint(0, self.K_b, (self.grid_b, self.grid_b, self.grid_b - mid_z))
+
+        z_b_v1 = torch.cat([z_b_shared, z_b_style_v1], dim=2)
+        z_b_v2 = torch.cat([z_b_shared, z_b_style_v2], dim=2)
+
+        with torch.no_grad():
+            if self.mode == "primitives":
+                x_v1 = self.renderer_v1(z_t, z_b_shared, z_b_style_v1).squeeze(0)
+                x_v2 = self.renderer_v2(z_t, z_b_shared, z_b_style_v2).squeeze(0)
+            else:
+                x_v1 = self.renderer_v1(z_t.unsqueeze(0), z_b_v1.unsqueeze(0)).squeeze(0)
+                x_v2 = self.renderer_v2(z_t.unsqueeze(0), z_b_v2.unsqueeze(0)).squeeze(0)
+
+        x_v1 = x_v1 + torch.randn_like(x_v1) * 0.01
+        x_v2 = x_v2 + torch.randn_like(x_v2) * 0.01
+
+        latents = {
+            "z_t": z_t,
+            "z_m": z_m,
+            "z_b_shared": z_b_shared,
+            "z_b_style_v1": z_b_style_v1,
+            "z_b_style_v2": z_b_style_v2,
+        }
+        return x_v1, x_v2, latents
+
+    def __getitem__(self, idx):
+        if self.mode == "pseudo_mri":
+            return self._pseudo_mri_item(idx)
+        return self._categorical_item(idx)
+
+
+def view_3d_volume(tensor_3d):
+    import plotly.graph_objects as go
+
+    vol = tensor_3d.squeeze().cpu().numpy()
+    res = vol.shape[0]
+
+    # Create a 3D coordinate grid
+    X, Y, Z = np.mgrid[0:res, 0:res, 0:res]
+
+    fig = go.Figure(
+        data=go.Volume(
+            x=X.flatten(),
+            y=Y.flatten(),
+            z=Z.flatten(),
+            value=vol.flatten(),
+            isomin=vol.min() + 0.1,  # Ignore empty space
+            isomax=vol.max(),
+            opacity=0.2,  # Transparency
+            surface_count=15,  # Number of isosurfaces
+            colorscale="Viridis",
+        )
+    )
+
+    fig.update_layout(
+        scene_xaxis_showticklabels=False, scene_yaxis_showticklabels=False, scene_zaxis_showticklabels=False
+    )
+    fig.show()
+
+
+# ==========================================
+# Example Usage:
+# ==========================================
+if __name__ == "__main__":
+    # Create an output directory for saving NIfTI files
+    out_dir = "pseudo_mri_outputs"
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 1. Initialize dataset (Now using the new mode)
+    dataset = Synthetic3DDisentanglementDataset(num_samples=1000, res=100, seed=42, mode="pseudo_mri")
+
+    # 2. Create DataLoader
+    dataloader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=0)
+
+    # 3. Fetch and save all batches
+    sample_idx = 0
+    print(f"Starting generation of {dataset.num_samples} synthetic MRI pairs...")
+    for i, (view1, view2, gt_latents) in enumerate(dataloader):
+        # Iterate over the items in the current batch
+        batch_size = view1.shape[0]
+        for b in range(batch_size):
+            v1_np = view1[b].squeeze().cpu().numpy()
+            v2_np = view2[b].squeeze().cpu().numpy()
+
+            # Create NIfTI images with an identity affine matrix
+            nifti_v1 = nib.Nifti1Image(v1_np, affine=np.eye(4))
+            nifti_v2 = nib.Nifti1Image(v2_np, affine=np.eye(4))
+
+            p1 = os.path.join(out_dir, f"sample_{sample_idx:04d}_T1.nii.gz")
+            p2 = os.path.join(out_dir, f"sample_{sample_idx:04d}_FLAIR.nii.gz")
+            nib.save(nifti_v1, p1)
+            nib.save(nifti_v2, p2)
+
+            sample_idx += 1
+
+        if (i + 1) % 10 == 0:
+            print(f"Saved {sample_idx} samples...")
+
+    print(f"Successfully generated and saved all {sample_idx} synthetic MRI pairs to '{out_dir}'.")

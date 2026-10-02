@@ -14,7 +14,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from eval.codebook_recalibration import (
+from eval.diagnostics.codebook_recalibration import (
     collect_points,
     main,
     make_dataset,
@@ -182,10 +182,10 @@ class RecalibrationTests(unittest.TestCase):
             torch.save({"encoders": model.state_dict(), "step": 40}, checkpoint)
             before_file = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
             output = Path(tmp) / "audit"
-            with patch("eval.run_dci_synthetic.load_model_from_run_dir", return_value=(model, args, "cpu")), patch(
-                "eval.codebook_recalibration.make_dataset", side_effect=tracked_dataset
-            ), patch(
-                "eval.codebook_recalibration.recalibrated_copy", side_effect=tracked_refit
+            with patch(
+                "eval.protocol.run_dci_synthetic.load_model_from_run_dir", return_value=(model, args, "cpu")
+            ), patch("eval.diagnostics.codebook_recalibration.make_dataset", side_effect=tracked_dataset), patch(
+                "eval.diagnostics.codebook_recalibration.recalibrated_copy", side_effect=tracked_refit
             ), contextlib.redirect_stdout(
                 io.StringIO()
             ):

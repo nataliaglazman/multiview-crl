@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from eval import run_3dino_identifiability as pipeline
+from eval.dino import run_3dino_identifiability as pipeline
 
 
 def bundle(path, random_init=False):

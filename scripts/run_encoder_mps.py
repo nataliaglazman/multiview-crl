@@ -106,7 +106,7 @@ def check_training_step(options):
 def _disposable_step(options, device):
     import torch
 
-    from eval.score_checkpoint import build_model
+    from eval.protocol.score_checkpoint import build_model
     from training.main_conv_synthetic import contrastive_loss, effective_rank
 
     def forward(model, x):

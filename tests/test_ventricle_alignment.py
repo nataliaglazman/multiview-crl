@@ -13,8 +13,8 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from eval import ventricle_alignment as va
-from eval.lesion_alignment import bt_terms, extract_stages, foreground_positions, response_rows
+from eval.lesion.lesion_alignment import bt_terms, extract_stages, foreground_positions, response_rows
+from eval.ventricle import ventricle_alignment as va
 
 ROOT = Path(__file__).resolve().parents[1]
 

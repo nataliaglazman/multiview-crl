@@ -12,7 +12,7 @@ A smaller, lossy macro model is a separate research objective. The random SCM do
 
 ### Generative process
 
-`eval/synthetic_dataset.py:11` constructs an upper-triangular DAG. `sample_content_from_scm`, at line 46, uses independent standard Gaussian disturbances, unit noise scale at roots, and otherwise
+`eval/synthetic/synthetic_dataset.py:11` constructs an upper-triangular DAG. `sample_content_from_scm`, at line 46, uses independent standard Gaussian disturbances, unit noise scale at roots, and otherwise
 
 \[
 z_j=\operatorname{LeakyReLU}_{0.2}\left(\sum_{i\in\mathrm{pa}(j)}w_{ij}z_i\right)+0.4u_j
@@ -20,7 +20,7 @@ z_j=\operatorname{LeakyReLU}_{0.2}\left(\sum_{i\in\mathrm{pa}(j)}w_{ij}z_i\right
 
 under the inspected saved settings. The nine coordinates are brain size, ventricle size, lesion x/y/z, cortical thickness, temporal atrophy, left-right asymmetry, and sulcal widening. Their randomly assigned directions are synthetic causal ground truth, not assertions about biological causation.
 
-`render_pseudo_mri` (`eval/synthetic_dataset.py:864`) generates one tissue/lesion structure and renders it as T1 and FLAIR with separate style draws and noise seeds. Thus the two modalities measure the same shared state; they are not two causally ordered latent blocks. The simulator does not specify a causal graph between image voxels.
+`render_pseudo_mri` (`eval/synthetic/synthetic_dataset.py:864`) generates one tissue/lesion structure and renders it as T1 and FLAIR with separate style draws and noise seeds. Thus the two modalities measure the same shared state; they are not two causally ordered latent blocks. The simulator does not specify a causal graph between image voxels.
 
 All six inspected top-level saved settings use nine content factors, three style parameters per view, a random SCM with edge probability 0.5 and seed 42, clean content, the identifiable-ventricle variant, and fixed-reference normalization. In clean sphere mode, `CLEAN_NUISANCE_SCALE=0` removes the deformation and fissure fields from the image. Older notes counting hundreds of active shared field coordinates do not describe these runs. Field-lesion mode is a separate case.
 
@@ -56,7 +56,7 @@ Executed with `/opt/miniconda3/envs/adni-analysis/bin/python`, PyTorch 2.6.0, tw
 
 ### 1. Current perturbations are renderer sensitivity interventions
 
-`eval/interventional_identifiability.py:332` changes one coordinate in `z_content` and leaves every other coordinate fixed, then re-renders. It does not solve the intervened SCM. This is useful for asking whether the image/encoder responds to a factor while controlling the other rendering inputs. It is not the ordinary total effect of `do(z_j=a)` through the factor DAG.
+`eval/protocol/interventional_identifiability.py:332` changes one coordinate in `z_content` and leaves every other coordinate fixed, then re-renders. It does not solve the intervened SCM. This is useful for asking whether the image/encoder responds to a factor while controlling the other rendering inputs. It is not the ordinary total effect of `do(z_j=a)` through the factor DAG.
 
 For the actual seed-42 SCM (19 edges), I reconstructed the sampler from its explicitly drawn disturbances and obtained bit-identical factual factors. On one fixed context, increasing brain size by one unit and solving the SCM changed six other factors: ventricle size, lesion z, cortical thickness, temporal atrophy, asymmetry, and sulcal widening. The existing `_perturb` operation changed only brain size.
 
@@ -82,13 +82,13 @@ It respects the generator's topological order. The current seed gives all three 
 
 ### 3. The hard renderer is not injective in the continuous factors
 
-`render_structure` uses hard tissue inequalities (`eval/synthetic_dataset.py:374`) and a hard sphere lesion (`:430`). Tanh squashing does not remove this discretization. In one clean 64-cubed sample, changing ventricle size by 0.001 produced bit-identical T1 and FLAIR volumes under the same styles and rendering seed. Brain size and cortical thickness changes of 0.0001 also produced identical pairs. The latent differences were verified to be nonzero.
+`render_structure` uses hard tissue inequalities (`eval/synthetic/synthetic_dataset.py:374`) and a hard sphere lesion (`:430`). Tanh squashing does not remove this discretization. In one clean 64-cubed sample, changing ventricle size by 0.001 produced bit-identical T1 and FLAIR volumes under the same styles and rendering seed. Brain size and cortical thickness changes of 0.0001 also produced identical pairs. The latent differences were verified to be nonzero.
 
 This is a structural obstacle to exact continuous-factor recovery, not evidence that useful approximate recovery is impossible. The finite grid makes the tissue/lesion maps locally constant away from threshold crossings; adding the same noise or more draws of noise downstream does not distinguish the underlying configurations when the rendered structure is identical.
 
 ## Why graph scores are not yet abstraction evidence
 
-`eval/run_causal_recovery.py:295` standardizes/PCA-reduces the representation, fits a RidgeCV prediction of each true scalar factor, and passes those predictions to PC (`:313`, `:325`, `:347`). Its default is in-sample prediction. `--holdout-readout` makes the evaluation out of sample, but it remains a supervised factor readout. The best-F1 alpha is selected using the true graph (`:381`).
+`eval/causal/run_causal_recovery.py:295` standardizes/PCA-reduces the representation, fits a RidgeCV prediction of each true scalar factor, and passes those predictions to PC (`:313`, `:325`, `:347`). Its default is in-sample prediction. `--holdout-readout` makes the evaluation out of sample, but it remains a supervised factor readout. The best-F1 alpha is selected using the true graph (`:381`).
 
 These results assess whether labels can turn a representation into useful factor measurements. They do not identify macro variables without labels, validate a micro-to-macro intervention map, or establish exact causal equivalence. For a new abstraction result, retain this as a supervised baseline, use a held-out readout, fix hyperparameters without the final test DAG, and evaluate intervention predictions separately. Fisher-Z is only a linear conditional-independence diagnostic for this nonlinear generator; nonparametric tests still require appropriate assumptions and enough independent subjects. Spatial patches are not additional independent subjects.
 
