@@ -1,0 +1,328 @@
+Node: erc-hpc-vm063  Job: 37697226  CUDA_VISIBLE_DEVICES=0
+torch=2.3.1+cu121 cuda=12.1
+device: cuda
+	out_dir: /cephfs/volumes/hpc_home/k24058220/7b7da813-ef51-47c9-808b-4979d72c165c/multiview-crl/results/encoder_ablations_slurm_bio/runs
+	model_id: resnet_groupnorm_s42
+	encoder_architecture: resnet18
+	encoder_head_hidden: 100
+	conv_readout: linear
+	resnet_norm: group
+	resnet_output_stride: 32
+	latent_dim: 12
+	content_channels: 9
+	hidden_channels: 64
+	res_channels: 32
+	nb_res_layers: 2
+	downscale_factor: 4
+	no_separate_encoders: False
+	contrastive_loss_type: infonce
+	tau: 0.1
+	bt_lambda: 0.005
+	cross_view_negs_only: True
+	contrastive_proj_dim: 0
+	contrastive_proj_hidden: 256
+	lr: 0.0001
+	batch_size: 32
+	train_steps: 10000
+	eval_every: 2000
+	log_every: 100
+	grad_clip: 2.0
+	num_workers: 0
+	seed: 42
+	data_seed: 42
+	model_seed: 42
+	loader_seed: 10042
+	require_new_run: True
+	deterministic: True
+	deterministic_warn_only: True
+	cpu_threads: 1
+	hash_training_inputs: True
+	no_cuda: False
+	floor_eval: True
+	best_metric: none
+	eval_pooling: gap
+	eval_patch_grid: [4, 5, 4]
+	res: 64
+	n_content: 9
+	n_style: 3
+	num_train_samples: 2000
+	num_val_samples: 400
+	cache: False
+	synthetic_mode: pseudo_mri
+	synthetic_normalize: fixed_reference
+	synthetic_clean_content: True
+	synthetic_style_scale: 1.0
+	synthetic_content_scale: 1.0
+	synthetic_lesion_placement: wm_interior
+	synthetic_n_deformation_grid: 4
+	synthetic_n_fissure_grid: 8
+	synthetic_hierarchical_content: False
+	synthetic_causal: False
+	synthetic_causal_graph: chain
+	synthetic_causal_edge_prob: 0.5
+	synthetic_causal_noise_scale: 0.4
+	synthetic_causal_nonlinearity: leaky_relu
+encoder: 3D ResNet-18, group norm, stride 32, GAP -> 512 -> 100 -> 12; separate view backbone(s). The conv-only width, residual-layer and downscale flags are inactive.
+  [eval] synthetic DCI @ step 0 ...
+    --- identifiability summary ---
+      content->content/block_mcc                                   0.334
+      content->content/channel_mcc                                 0.209
+      content->content/informativeness_ridge                       0.116
+      content->style/block_mcc                                     0.328
+      content->view/acc                                            0.820
+    --- DCI (GBT importances) ---
+      content->content/disentanglement                             0.038
+      content->content/completeness                                0.042
+      content->content/informativeness_test                        -0.049
+    --- per-factor recovery: content→content ---
+      factor               ridge R²  blockMCC      ±  chanMCC
+      brain_size              0.407     0.642  0.007    0.430
+      ventricle_size          0.172     0.441  0.009    0.267
+      lesion_x               -0.021     0.177  0.014    0.041
+      lesion_y               -0.016     0.132  0.002    0.039
+      lesion_z               -0.012     0.160  0.029    0.065
+      cortical_thickness      0.059     0.309  0.018    0.293
+      temporal_atrophy        0.059     0.283  0.010    0.178
+      lr_asymmetry            0.368     0.618  0.008    0.460
+      sulcal_widening         0.029     0.244  0.039    0.109
+    --- per-factor recovery: content→style ---
+      factor               ridge R²  blockMCC      ±  chanMCC
+      gain                    0.324     0.581  0.007    0.438
+      bias                    0.062     0.292  0.004    0.273
+      noise_sigma            -0.031     0.110  0.024    0.031
+step    100 | contrastive 5.1560 | content eff_rank 1.28/9
+step    200 | contrastive 3.2566 | content eff_rank 2.33/9
+step    300 | contrastive 2.3278 | content eff_rank 2.81/9
+step    400 | contrastive 2.0980 | content eff_rank 3.18/9
+step    500 | contrastive 1.8720 | content eff_rank 3.61/9
+step    600 | contrastive 1.7399 | content eff_rank 3.97/9
+step    700 | contrastive 1.6154 | content eff_rank 4.57/9
+step    800 | contrastive 1.5029 | content eff_rank 4.66/9
+step    900 | contrastive 1.4009 | content eff_rank 4.81/9
+step   1000 | contrastive 1.1958 | content eff_rank 5.34/9
+step   1100 | contrastive 1.2111 | content eff_rank 5.64/9
+step   1200 | contrastive 1.1173 | content eff_rank 5.83/9
+step   1300 | contrastive 1.0683 | content eff_rank 5.98/9
+step   1400 | contrastive 0.9487 | content eff_rank 6.01/9
+step   1500 | contrastive 0.9249 | content eff_rank 6.02/9
+step   1600 | contrastive 0.8403 | content eff_rank 6.26/9
+step   1700 | contrastive 0.8255 | content eff_rank 6.27/9
+step   1800 | contrastive 0.7281 | content eff_rank 6.50/9
+step   1900 | contrastive 0.6832 | content eff_rank 6.60/9
+step   2000 | contrastive 0.7147 | content eff_rank 6.67/9
+  [eval] synthetic DCI @ step 2000 ...
+    --- identifiability summary ---
+      content->content/block_mcc                                   0.282
+      content->content/channel_mcc                                 0.169
+      content->content/informativeness_ridge                       0.075
+      content->style/block_mcc                                     0.129
+      content->view/acc                                            0.573
+    --- DCI (GBT importances) ---
+      content->content/disentanglement                             0.047
+      content->content/completeness                                0.054
+      content->content/informativeness_test                        0.092
+    --- per-factor recovery: content→content ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      brain_size              0.000     0.227  0.012    0.188    0.407      -0.407
+      ventricle_size         -0.025     0.154  0.026    0.070    0.172      -0.197
+      lesion_x               -0.018     0.187  0.025    0.066   -0.021      +0.003
+      lesion_y               -0.017     0.156  0.013    0.113   -0.016      -0.001
+      lesion_z               -0.015     0.182  0.040    0.065   -0.012      -0.003
+      cortical_thickness      0.038     0.258  0.006    0.112    0.059      -0.022
+      temporal_atrophy        0.453     0.679  0.006    0.475    0.059      +0.393
+      lr_asymmetry            0.283     0.549  0.003    0.380    0.368      -0.084
+      sulcal_widening        -0.026     0.143  0.028    0.057    0.029      -0.055
+    --- per-factor recovery: content→style ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      gain                   -0.020     0.123  0.007    0.080    0.324      -0.344
+      bias                   -0.014     0.143  0.020    0.101    0.062      -0.077
+      noise_sigma            -0.023     0.121  0.017    0.102   -0.031      +0.008
+step   2100 | contrastive 0.6255 | content eff_rank 6.65/9
+step   2200 | contrastive 0.6035 | content eff_rank 6.73/9
+step   2300 | contrastive 0.6086 | content eff_rank 6.71/9
+step   2400 | contrastive 0.5553 | content eff_rank 6.76/9
+step   2500 | contrastive 0.5295 | content eff_rank 6.82/9
+step   2600 | contrastive 0.5294 | content eff_rank 6.81/9
+step   2700 | contrastive 0.4889 | content eff_rank 6.81/9
+step   2800 | contrastive 0.5184 | content eff_rank 6.74/9
+step   2900 | contrastive 0.4919 | content eff_rank 6.80/9
+step   3000 | contrastive 0.4949 | content eff_rank 6.80/9
+step   3100 | contrastive 0.4846 | content eff_rank 6.79/9
+step   3200 | contrastive 0.4827 | content eff_rank 6.79/9
+step   3300 | contrastive 0.4598 | content eff_rank 6.85/9
+step   3400 | contrastive 0.4646 | content eff_rank 6.85/9
+step   3500 | contrastive 0.4265 | content eff_rank 6.91/9
+step   3600 | contrastive 0.4186 | content eff_rank 6.96/9
+step   3700 | contrastive 0.4223 | content eff_rank 6.91/9
+step   3800 | contrastive 0.4282 | content eff_rank 6.87/9
+step   3900 | contrastive 0.4087 | content eff_rank 6.98/9
+step   4000 | contrastive 0.4000 | content eff_rank 6.89/9
+  [eval] synthetic DCI @ step 4000 ...
+    --- identifiability summary ---
+      content->content/block_mcc                                   0.281
+      content->content/channel_mcc                                 0.179
+      content->content/informativeness_ridge                       0.084
+      content->style/block_mcc                                     0.142
+      content->view/acc                                            0.553
+    --- DCI (GBT importances) ---
+      content->content/disentanglement                             0.042
+      content->content/completeness                                0.048
+      content->content/informativeness_test                        0.057
+    --- per-factor recovery: content→content ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      brain_size             -0.009     0.237  0.020    0.079    0.407      -0.416
+      ventricle_size         -0.022     0.159  0.015    0.114    0.172      -0.194
+      lesion_x               -0.016     0.158  0.026    0.050   -0.021      +0.005
+      lesion_y               -0.012     0.167  0.014    0.064   -0.016      +0.004
+      lesion_z               -0.013     0.134  0.025    0.075   -0.012      -0.001
+      cortical_thickness      0.106     0.335  0.010    0.267    0.059      +0.046
+      temporal_atrophy        0.633     0.799  0.005    0.636    0.059      +0.574
+      lr_asymmetry            0.117     0.374  0.022    0.256    0.368      -0.250
+      sulcal_widening        -0.024     0.172  0.025    0.072    0.029      -0.053
+    --- per-factor recovery: content→style ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      gain                   -0.020     0.112  0.049    0.086    0.324      -0.344
+      bias                   -0.016     0.126  0.032    0.088    0.062      -0.078
+      noise_sigma            -0.029     0.187  0.025    0.098   -0.031      +0.003
+step   4100 | contrastive 0.4175 | content eff_rank 6.89/9
+step   4200 | contrastive 0.4154 | content eff_rank 6.95/9
+step   4300 | contrastive 0.3682 | content eff_rank 7.00/9
+step   4400 | contrastive 0.4078 | content eff_rank 6.97/9
+step   4500 | contrastive 0.3810 | content eff_rank 6.93/9
+step   4600 | contrastive 0.3789 | content eff_rank 6.85/9
+step   4700 | contrastive 0.3723 | content eff_rank 6.94/9
+step   4800 | contrastive 0.3819 | content eff_rank 6.99/9
+step   4900 | contrastive 0.3771 | content eff_rank 7.00/9
+step   5000 | contrastive 0.3824 | content eff_rank 6.95/9
+step   5100 | contrastive 0.3484 | content eff_rank 6.99/9
+step   5200 | contrastive 0.3337 | content eff_rank 6.98/9
+step   5300 | contrastive 0.3651 | content eff_rank 6.95/9
+step   5400 | contrastive 0.3810 | content eff_rank 6.98/9
+step   5500 | contrastive 0.3490 | content eff_rank 6.96/9
+step   5600 | contrastive 0.3485 | content eff_rank 7.02/9
+step   5700 | contrastive 0.3376 | content eff_rank 6.96/9
+step   5800 | contrastive 0.3324 | content eff_rank 7.00/9
+step   5900 | contrastive 0.3257 | content eff_rank 7.00/9
+step   6000 | contrastive 0.3423 | content eff_rank 7.02/9
+  [eval] synthetic DCI @ step 6000 ...
+    --- identifiability summary ---
+      content->content/block_mcc                                   0.265
+      content->content/channel_mcc                                 0.155
+      content->content/informativeness_ridge                       0.067
+      content->style/block_mcc                                     0.132
+      content->view/acc                                            0.502
+    --- DCI (GBT importances) ---
+      content->content/disentanglement                             0.023
+      content->content/completeness                                0.025
+      content->content/informativeness_test                        0.044
+    --- per-factor recovery: content→content ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      brain_size             -0.008     0.238  0.016    0.116    0.407      -0.415
+      ventricle_size         -0.026     0.162  0.002    0.083    0.172      -0.198
+      lesion_x               -0.016     0.169  0.029    0.052   -0.021      +0.005
+      lesion_y               -0.014     0.162  0.010    0.085   -0.016      +0.002
+      lesion_z               -0.014     0.143  0.019    0.079   -0.012      -0.001
+      cortical_thickness      0.053     0.261  0.005    0.151    0.059      -0.006
+      temporal_atrophy        0.587     0.757  0.007    0.532    0.059      +0.527
+      lr_asymmetry            0.066     0.298  0.003    0.203    0.368      -0.301
+      sulcal_widening        -0.022     0.190  0.018    0.095    0.029      -0.051
+    --- per-factor recovery: content→style ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      gain                   -0.019     0.111  0.032    0.082    0.324      -0.343
+      bias                   -0.011     0.116  0.024    0.133    0.062      -0.073
+      noise_sigma            -0.027     0.169  0.023    0.078   -0.031      +0.004
+step   6100 | contrastive 0.3327 | content eff_rank 6.98/9
+step   6200 | contrastive 0.3428 | content eff_rank 6.97/9
+step   6300 | contrastive 0.3451 | content eff_rank 6.97/9
+step   6400 | contrastive 0.3061 | content eff_rank 7.01/9
+step   6500 | contrastive 0.3274 | content eff_rank 6.92/9
+step   6600 | contrastive 0.3315 | content eff_rank 6.99/9
+step   6700 | contrastive 0.3087 | content eff_rank 7.05/9
+step   6800 | contrastive 0.3118 | content eff_rank 6.99/9
+step   6900 | contrastive 0.3385 | content eff_rank 6.99/9
+step   7000 | contrastive 0.3227 | content eff_rank 6.93/9
+step   7100 | contrastive 0.2994 | content eff_rank 7.06/9
+step   7200 | contrastive 0.3314 | content eff_rank 6.97/9
+step   7300 | contrastive 0.3294 | content eff_rank 6.88/9
+step   7400 | contrastive 0.2978 | content eff_rank 7.01/9
+step   7500 | contrastive 0.2992 | content eff_rank 6.94/9
+step   7600 | contrastive 0.3104 | content eff_rank 7.01/9
+step   7700 | contrastive 0.2981 | content eff_rank 6.98/9
+step   7800 | contrastive 0.3007 | content eff_rank 7.00/9
+step   7900 | contrastive 0.2772 | content eff_rank 6.98/9
+step   8000 | contrastive 0.3035 | content eff_rank 6.96/9
+  [eval] synthetic DCI @ step 8000 ...
+    --- identifiability summary ---
+      content->content/block_mcc                                   0.256
+      content->content/channel_mcc                                 0.151
+      content->content/informativeness_ridge                       0.060
+      content->style/block_mcc                                     0.140
+      content->view/acc                                            0.499
+    --- DCI (GBT importances) ---
+      content->content/disentanglement                             0.028
+      content->content/completeness                                0.034
+      content->content/informativeness_test                        0.030
+    --- per-factor recovery: content→content ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      brain_size             -0.021     0.180  0.028    0.116    0.407      -0.428
+      ventricle_size         -0.029     0.139  0.024    0.086    0.172      -0.200
+      lesion_x               -0.017     0.144  0.039    0.054   -0.021      +0.004
+      lesion_y               -0.017     0.163  0.017    0.058   -0.016      -0.001
+      lesion_z               -0.013     0.164  0.011    0.020   -0.012      -0.001
+      cortical_thickness      0.056     0.275  0.023    0.115    0.059      -0.003
+      temporal_atrophy        0.526     0.721  0.012    0.512    0.059      +0.466
+      lr_asymmetry            0.081     0.322  0.005    0.250    0.368      -0.287
+      sulcal_widening        -0.023     0.192  0.026    0.145    0.029      -0.052
+    --- per-factor recovery: content→style ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      gain                   -0.023     0.148  0.054    0.059    0.324      -0.347
+      bias                   -0.012     0.122  0.040    0.105    0.062      -0.074
+      noise_sigma            -0.026     0.151  0.009    0.075   -0.031      +0.005
+step   8100 | contrastive 0.3000 | content eff_rank 7.05/9
+step   8200 | contrastive 0.2776 | content eff_rank 7.06/9
+step   8300 | contrastive 0.2848 | content eff_rank 6.97/9
+step   8400 | contrastive 0.2959 | content eff_rank 6.99/9
+step   8500 | contrastive 0.2935 | content eff_rank 6.97/9
+step   8600 | contrastive 0.2754 | content eff_rank 7.02/9
+step   8700 | contrastive 0.3068 | content eff_rank 6.91/9
+step   8800 | contrastive 0.2782 | content eff_rank 7.04/9
+step   8900 | contrastive 0.2922 | content eff_rank 7.00/9
+step   9000 | contrastive 0.2947 | content eff_rank 6.96/9
+step   9100 | contrastive 0.2751 | content eff_rank 7.01/9
+step   9200 | contrastive 0.2738 | content eff_rank 6.98/9
+step   9300 | contrastive 0.2921 | content eff_rank 6.95/9
+step   9400 | contrastive 0.2687 | content eff_rank 7.04/9
+step   9500 | contrastive 0.2630 | content eff_rank 7.01/9
+step   9600 | contrastive 0.2739 | content eff_rank 6.98/9
+step   9700 | contrastive 0.2714 | content eff_rank 7.04/9
+step   9800 | contrastive 0.2898 | content eff_rank 6.98/9
+step   9900 | contrastive 0.2596 | content eff_rank 7.04/9
+step  10000 | contrastive 0.2490 | content eff_rank 7.00/9
+  [eval] synthetic DCI @ step 10000 ...
+    --- identifiability summary ---
+      content->content/block_mcc                                   0.267
+      content->content/channel_mcc                                 0.153
+      content->content/informativeness_ridge                       0.070
+      content->style/block_mcc                                     0.138
+      content->view/acc                                            0.475
+    --- DCI (GBT importances) ---
+      content->content/disentanglement                             0.028
+      content->content/completeness                                0.032
+      content->content/informativeness_test                        -0.025
+    --- per-factor recovery: content→content ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      brain_size             -0.012     0.171  0.026    0.066    0.407      -0.419
+      ventricle_size         -0.022     0.143  0.015    0.069    0.172      -0.193
+      lesion_x               -0.015     0.158  0.038    0.049   -0.021      +0.007
+      lesion_y               -0.017     0.154  0.009    0.070   -0.016      -0.002
+      lesion_z               -0.010     0.134  0.018    0.091   -0.012      +0.002
+      cortical_thickness      0.086     0.317  0.002    0.212    0.059      +0.026
+      temporal_atrophy        0.479     0.696  0.003    0.462    0.059      +0.420
+      lr_asymmetry            0.111     0.383  0.023    0.218    0.368      -0.257
+      sulcal_widening         0.032     0.245  0.027    0.136    0.029      +0.004
+    --- per-factor recovery: content→style ---
+      factor               ridge R²  blockMCC      ±  chanMCC    floor  Δ vs floor
+      gain                   -0.018     0.118  0.033    0.083    0.324      -0.342
+      bias                   -0.011     0.130  0.022    0.101    0.062      -0.073
+      noise_sigma            -0.032     0.167  0.025    0.107   -0.031      -0.001
+done. checkpoints + DCI logs in /cephfs/volumes/hpc_home/k24058220/7b7da813-ef51-47c9-808b-4979d72c165c/multiview-crl/results/encoder_ablations_slurm_bio/runs/resnet_groupnorm_s42

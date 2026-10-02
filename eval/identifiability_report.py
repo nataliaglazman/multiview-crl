@@ -1510,9 +1510,51 @@ def score_live(
     ``per_encoder=True`` adds encoder 2 under ``res["encoder2"]``, as ``--per-encoder`` does.
     The extractor calls ``model.eval()`` and does not restore train mode; the caller must.
     """
+    return score_live_levels(
+        model,
+        dataset,
+        device,
+        poolings,
+        levels=[level],
+        seeds=seeds,
+        n_null=n_null,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        probe_dim=probe_dim,
+        probe_kind=probe_kind,
+        n_jobs=n_jobs,
+        causal=causal,
+        name=name,
+        per_encoder=per_encoder,
+    )[level]
+
+
+def score_live_levels(
+    model,
+    dataset,
+    device,
+    poolings,
+    levels=None,
+    seeds=(0, 1, 2),
+    n_null=3,
+    batch_size=32,
+    num_workers=0,
+    probe_dim=PROBE_DIM_AUTO,
+    probe_kind="ridge",
+    n_jobs=1,
+    causal=None,
+    name="live",
+    per_encoder=False,
+):
+    """``score_live`` for several encoder levels off ONE extraction pass: ``{level: res}``.
+
+    ``levels=None`` scores every level the extractor returns. Each level goes through
+    ``_score_reprs`` on its own, so level 0's result is identical to ``score_live``'s, and
+    a level without a content mask (no style block) is scored as all-content.
+    """
     from eval.dci import _extract_synthetic_representations
 
-    reprs, gt_content, gt_style, gt_style_v2, info = {}, None, None, None, None
+    reprs, gt_content, gt_style, gt_style_v2, infos = {}, None, None, None, {}
     for key, value in poolings:
         level_data, gc, gs1, gs2 = _extract_synthetic_representations(
             model, dataset, device, batch_size, num_workers, pooling=value
@@ -1520,28 +1562,39 @@ def score_live(
         reprs[key] = level_data
         if gt_content is None:
             gt_content, gt_style, gt_style_v2 = gc, gs1, gs2
-        if info is None and level in level_data:
-            info = level_data[level][4]
-    if info is None:
-        raise RuntimeError(f"level {level} not found in encoder outputs")
-    return _score_reprs(
-        reprs,
-        gt_content,
-        gt_style,
-        info,
-        dataset=dataset,
-        poolings=poolings,
-        level=level,
-        seeds=seeds,
-        n_null=n_null,
-        name=name,
-        probe_dim=probe_dim,
-        probe_kind=probe_kind,
-        n_jobs=n_jobs,
-        causal=causal,
-        per_encoder=per_encoder,
-        gt_style_v2=gt_style_v2,
-    )
+        for lvl, data in level_data.items():
+            infos.setdefault(lvl, data[4])
+    if levels is None:
+        levels = sorted(lvl for lvl in infos if all(lvl in r for r in reprs.values()))
+    missing = [lvl for lvl in levels if lvl not in infos]
+    if missing:
+        raise RuntimeError(f"level(s) {missing} not found in encoder outputs (have {sorted(infos)})")
+    return {
+        lvl: _score_reprs(
+            reprs,
+            gt_content,
+            gt_style,
+            infos[lvl],
+            dataset=dataset,
+            poolings=poolings,
+            level=lvl,
+            seeds=seeds,
+            n_null=n_null,
+            name=name,
+            probe_dim=probe_dim,
+            probe_kind=probe_kind,
+            n_jobs=n_jobs,
+            causal=causal,
+            per_encoder=per_encoder,
+            gt_style_v2=gt_style_v2,
+        )
+        for lvl in levels
+    }
+
+
+def live_level_prefix(level, prefix="iid"):
+    """Tag prefix for one level: level 0 keeps the bare ``prefix`` so existing curves continue."""
+    return prefix if level == 0 else f"{prefix}_l{level}"
 
 
 def live_metrics(res, floor=None, prefix="iid"):

@@ -24,7 +24,7 @@ N = 120
 NAMES, STYLE_NAMES = ["brain_size", "ventricle_size"], ["bias"]
 
 
-def _planted(with_v2=True):
+def _planted(with_v2=True, with_level1=False):
     rng = np.random.RandomState(5)
     gt, gs1, gs2 = rng.randn(N, 2), rng.randn(N, 1), rng.randn(N, 1)
 
@@ -36,6 +36,9 @@ def _planted(with_v2=True):
     # against view 1's labels would read ~0 instead of ~1.
     blocks = (enc(gt), enc(gs1), enc(gt), enc(gs2)) if with_v2 else (enc(gt), enc(gs1), None, None)
     levels = {0: (*blocks, info)}
+    if with_level1:
+        # A coarser level with no content mask: all channels are content, no style block.
+        levels[1] = (enc(gt), None, enc(gt) if with_v2 else None, None, info)
     extractor = types.SimpleNamespace(_extract_synthetic_representations=lambda *a, **kw: (levels, gt, gs1, gs2))
     return extractor
 
@@ -122,6 +125,30 @@ class ScoreLiveTests(unittest.TestCase):
         self.assertIn("iid_enc2_mcc/gap", tags)
         self.assertFalse(any(k.startswith("iid_enc2_view") for k in tags))
         self.assertEqual({k: v for k, v in tags.items() if not k.startswith("iid_enc2_")}, report.live_metrics(only1))
+
+
+class ScoreLiveLevelsTests(unittest.TestCase):
+    def test_every_level_scored_from_one_pass_and_level0_unchanged(self):
+        planted = _planted(with_level1=True)
+        calls = []
+        extract = planted._extract_synthetic_representations
+        planted._extract_synthetic_representations = lambda *a, **kw: calls.append(1) or extract(*a, **kw)
+        kw = dict(dataset=None, device="cpu", poolings=[("gap", "gap")], seeds=(0,), n_null=1, probe_dim=0)
+        with patch.dict("sys.modules", {"eval.dci": planted}):
+            res = report.score_live_levels(object(), **kw)
+            self.assertEqual(len(calls), 1)
+            only0 = report.score_live(object(), **kw)
+        self.assertEqual(sorted(res), [0, 1])
+        self.assertEqual(report.live_metrics(res[0]), report.live_metrics(only0))
+        tags1 = report.live_metrics(res[1], prefix=report.live_level_prefix(1))
+        self.assertIn("iid_l1_r2/brain_size/gap/from_content", tags1)
+        self.assertFalse(any(k.endswith("from_style") for k in tags1))
+        self.assertEqual(report.live_level_prefix(0), "iid")
+
+    def test_missing_level_raises(self):
+        kw = dict(dataset=None, device="cpu", poolings=[("gap", "gap")], seeds=(0,), n_null=1, probe_dim=0)
+        with patch.dict("sys.modules", {"eval.dci": _planted()}), self.assertRaises(RuntimeError):
+            report.score_live_levels(object(), levels=[2], **kw)
 
 
 class CliTests(unittest.TestCase):

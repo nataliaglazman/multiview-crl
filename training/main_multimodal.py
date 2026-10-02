@@ -3021,8 +3021,9 @@ def main(args):
 
                     # Periodic i.i.d. identifiability probe: identifiability_report's per-factor
                     # decoding (every content + style factor, from content and from style, at gap
-                    # and patch) on the test split built with causal=False. With separate encoders,
-                    # encoder 2 is scored too (iid_enc2_* tags), as the periodic DCI above does.
+                    # and patch) on the test split built with causal=False, at every encoder level
+                    # (or --iid-probe-levels). With separate encoders, encoder 2 is scored too
+                    # (iid_enc2_* tags), as the periodic DCI above does.
                     _iid_every = getattr(args, "iid_probe_every", 0)
                     if (
                         _iid_every > 0
@@ -3032,7 +3033,12 @@ def main(args):
                         _iid_was_training = encoders[0].training
                         _iid_t0 = time.perf_counter()
                         try:
-                            from eval.identifiability_report import live_metrics, score_live, write_report_json
+                            from eval.identifiability_report import (
+                                live_level_prefix,
+                                live_metrics,
+                                score_live_levels,
+                                write_report_json,
+                            )
 
                             # fork_rng: building the dataset calls torch.manual_seed, and every eval
                             # DataLoader draws its base seed from the global RNG. Without the fork the
@@ -3048,23 +3054,32 @@ def main(args):
                                         cache=getattr(args, "cache_dataset", False),
                                         causal=False,
                                     )
-                                _iid_res = score_live(
+                                _iid_res = score_live_levels(
                                     encoders[0],
                                     _iid_dataset,
                                     device,
                                     poolings=[("gap", "gap"), ("patch", tuple(args.iid_probe_patch_grid))],
+                                    levels=getattr(args, "iid_probe_levels", None),
                                     batch_size=dataloader_kwargs.get("batch_size", 32),
                                     n_jobs=getattr(args, "iid_probe_n_jobs", -1),
                                     causal="iid",
                                     name=f"{args.model_id}-step{step}",
                                     per_encoder=getattr(args, "separate_encoders", False),
                                 )
-                            _iid_log = live_metrics(_iid_res)
+                            # Level 0 keeps the bare iid_* tags and step_<N>.json; level k logs
+                            # iid_l<k>_* and step_<N>_level<k>.json.
+                            _iid_log = {}
+                            for _iid_lvl, _iid_lvl_res in _iid_res.items():
+                                _iid_log.update(live_metrics(_iid_lvl_res, prefix=live_level_prefix(_iid_lvl)))
+                                _iid_suffix = "" if _iid_lvl == 0 else f"_level{_iid_lvl}"
+                                write_report_json(
+                                    os.path.join(args.save_dir, "iid_probe", f"step_{step}{_iid_suffix}.json"),
+                                    _iid_lvl_res,
+                                )
                             for _iid_k, _iid_v in _iid_log.items():
                                 tb_writer.add_scalar(_iid_k, _iid_v, step)
                             if _use_wandb:
                                 wandb.log(_iid_log, step=step)
-                            write_report_json(os.path.join(args.save_dir, "iid_probe", f"step_{step}.json"), _iid_res)
                             _iid_dt = time.perf_counter() - _iid_t0
                             tb_writer.add_scalar("Perf/iid_probe_seconds", _iid_dt, step)
                             logger.info(f"  [EVALUATION] iid probe (step {step}) took {_iid_dt:.1f}s")
