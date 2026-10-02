@@ -25,6 +25,7 @@ venv/
 .coverage.*
 .pytest_cache/
 htmlcov/
+reports/
 
 # Jupyter
 .ipynb_checkpoints
@@ -76,3 +77,12 @@ test.ipynb
 /dino.txt
 /notebook_diff.txt
 final_compare*
+
+# Run output dirs at the root (checkpoints, tensorboard, wandb ids)
+/synthetic-*/
+/causal_recovery_*/
+*.npy
+*.out
+events.out.tfevents.*
+/literature/
+/data_local/

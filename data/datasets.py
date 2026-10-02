@@ -626,7 +626,7 @@ class MyCustomDataset(MultiviewDataset):
 class SyntheticBrainDataset(MultiviewDataset):
     """Drop-in synthetic baseline mirroring the MyCustomDataset contract.
 
-    Wraps eval.synthetic_dataset.Synthetic3DDisentanglementDataset and emits
+    Wraps eval.synthetic.synthetic_dataset.Synthetic3DDisentanglementDataset and emits
     {"image": [v1, v2], "mask": [m1, m2], "z_image": [{}, {}], "index", "label"}
     so the existing training / val loops accept it without changes.
 
@@ -691,7 +691,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         **kwargs,
     ):
         super().__init__()
-        from eval.synthetic_dataset import Synthetic3DDisentanglementDataset
+        from eval.synthetic.synthetic_dataset import Synthetic3DDisentanglementDataset
 
         self.mode = mode
         self.synthetic_normalize = synthetic_normalize
@@ -768,7 +768,7 @@ class SyntheticBrainDataset(MultiviewDataset):
                 "foreground, which removes exactly the affine intensity map that style applies "
                 "(lut = base*gain + bias). Measured: a style swap at fixed anatomy leaves a "
                 "residual of 0.08 of the volume's own contrast, vs 0.76 under fixed_reference "
-                "(eval/generator_defects.py --tests style). z_style[0] (gain) and z_style[1] "
+                "(eval/synthetic/generator_defects.py --tests style). z_style[0] (gain) and z_style[1] "
                 "(bias) are effectively erased from the encoder input, so any style-recovery "
                 "number from this run is bounded by the normalizer, not by the model. Use "
                 "--synthetic-normalize fixed_reference for runs that report style recovery.",

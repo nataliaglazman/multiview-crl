@@ -58,15 +58,15 @@ content index to a later index is sampled independently. The run's `--seed`
 determines the graph and mechanism weights, which are shared across train,
 validation and test splits. Use the same seed and content-factor count when
 matching a previous run's graph. These settings are recorded in `settings.json`
-and restored by `eval.score_checkpoint`, including its lesion analysis. Omitting
+and restored by `eval.protocol.score_checkpoint`, including its lesion analysis. Omitting
 `--synthetic-causal` keeps the SCM disabled regardless of the graph flags.
 
-Settings are saved automatically. `eval.score_checkpoint` reconstructs both the
+Settings are saved automatically. `eval.protocol.score_checkpoint` reconstructs both the
 trained model and its untrained comparison from those settings. Old settings
 without the new fields still load the original architecture strictly.
 
 ```sh
-python -m eval.score_checkpoint --run-dir results/infonce_resnet18_3d --no-graph
+python -m eval.protocol.score_checkpoint --run-dir results/infonce_resnet18_3d --no-graph
 ```
 
 Training always averages the backbone features **before** the nonlinear readout.
@@ -79,6 +79,6 @@ outputs: applying a nonlinear head and then averaging is generally different
 from averaging first.
 
 To diagnose poor factor recovery without retraining, run the
-[encoder generalization audit](../eval/ENCODER_GENERALIZATION_AUDIT.md). It combines
+[encoder generalization audit](../eval/encoder/ENCODER_GENERALIZATION_AUDIT.md). It combines
 training/test cross-view retrieval, ridge/RBF probes through the readout, and
 training-only BatchNorm recalibration on a disposable model copy.

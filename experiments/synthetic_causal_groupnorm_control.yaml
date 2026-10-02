@@ -9,7 +9,7 @@
 # positions, so a feature position whose receptive field contains only zero-valued
 # background still emits gamma*(b - mu)/sigma + beta -- a pure readout of whole-volume
 # statistics. That is why empty background positions predict content factors. Established
-# architecturally, without a checkpoint, by eval/background_leak_mechanism.py: an UNTRAINED
+# architecturally, without a checkpoint, by eval/diagnostics/background_leak_mechanism.py: an UNTRAINED
 # encoder already reproduces it (far-background brain_size R^2 0.885, ventricle 0.662 at
 # these settings), the injection algebra is exact (R^2(far-bg <- [1/sigma, mu/sigma]) =
 # 1.0000), and swapping to ChannelLayerNorm3d with identical conv weights collapses it

@@ -8,7 +8,7 @@ runai submit --name classifier-binary-8 \
  --memory 64G --memory-limit 128G --project nglazman \
  -v /nfs:/nfs \
  --large-shm \
- --command -- python /nfs/home/nglazman/crl-2/multiview-crl/eval/run_dci_synthetic.py \
+ --command -- python /nfs/home/nglazman/crl-2/multiview-crl/eval/protocol/run_dci_synthetic.py \
  --run-dir /nfs/home/nglazman/results/synthetic/synthetic-create-causal-random \
  --checkpoint /nfs/home/nglazman/results/synthetic/synthetic-create-causal-random/vqvae_best.pt --pooling
 4,4,4 --levels 0 --num-samples 400

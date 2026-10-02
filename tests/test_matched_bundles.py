@@ -12,11 +12,11 @@ from pathlib import Path
 
 import numpy as np
 
-from eval import bundle_identity as identity
-from eval import compare_bundles as compare
-from eval import dinov3_embed_synthetic as embed
-from eval import dinov3_identifiability as scorer
-from eval import export_vq_bundle as export
+from eval.dino import dinov3_embed_synthetic as embed
+from eval.dino import dinov3_identifiability as scorer
+from eval.metrics import bundle_identity as identity
+from eval.protocol import compare_bundles as compare
+from eval.protocol import export_vq_bundle as export
 
 
 def planted(n=200, k=3, noise=0.1, seed=0, width=24):
@@ -172,7 +172,7 @@ class MetaContractTests(unittest.TestCase):
     because reaching that line for real needs weights and a GPU.
     """
 
-    WRITERS = ("eval/dinov3_embed_synthetic.py", "eval/export_vq_bundle.py")
+    WRITERS = ("eval/dino/dinov3_embed_synthetic.py", "eval/protocol/export_vq_bundle.py")
 
     def meta_call(self, path):
         tree = ast.parse((Path(__file__).resolve().parents[1] / path).read_text())
@@ -308,7 +308,7 @@ class ContentMaskStabilityTests(unittest.TestCase):
     """The Gumbel mask must name the same channels for every row of one feature array."""
 
     def helper(self):
-        from eval.dci import _stabilise_content_indices
+        from eval.metrics.dci import _stabilise_content_indices
 
         return _stabilise_content_indices
 
@@ -323,7 +323,7 @@ class ContentMaskStabilityTests(unittest.TestCase):
         stabilise = self.helper()
         seen = {}
         self.assertEqual(stabilise(0, [0, 1, 2], seen, freeze=True), [0, 1, 2])
-        with self.assertLogs("eval.dci", level="WARNING") as logs:
+        with self.assertLogs("eval.metrics.dci", level="WARNING") as logs:
             self.assertEqual(stabilise(0, [3, 4, 5], seen, freeze=True), [0, 1, 2])
         self.assertIn("changed between batches", logs.output[0])
 
@@ -333,7 +333,7 @@ class ContentMaskStabilityTests(unittest.TestCase):
         stabilise = self.helper()
         seen = {}
         stabilise(0, [0, 1, 2], seen, freeze=False)
-        with self.assertLogs("eval.dci", level="WARNING"):
+        with self.assertLogs("eval.metrics.dci", level="WARNING"):
             self.assertEqual(stabilise(0, [3, 4, 5], seen, freeze=False), [3, 4, 5])
 
     def test_each_level_warns_once_and_levels_are_tracked_separately(self):
@@ -341,7 +341,7 @@ class ContentMaskStabilityTests(unittest.TestCase):
         seen = {}
         stabilise(0, [0, 1], seen, freeze=True)
         stabilise(1, [7, 8], seen, freeze=True)
-        with self.assertLogs("eval.dci", level="WARNING") as logs:
+        with self.assertLogs("eval.metrics.dci", level="WARNING") as logs:
             stabilise(0, [2, 3], seen, freeze=True)
             stabilise(0, [4, 5], seen, freeze=True)
             stabilise(1, [9, 10], seen, freeze=True)

@@ -15,7 +15,7 @@ import unittest
 import numpy as np
 import torch
 
-from eval.run_dci_compare import (
+from eval.protocol.run_dci_compare import (
     _CONTENT,
     _CONTENT_V2,
     check_projectable_poolings,
@@ -100,7 +100,7 @@ class ProjectionHeadTests(unittest.TestCase):
     def test_patch_projection_matches_training_in_patch_major_order(self):
         heads = load_contrastive_proj_heads(self.tmp, self.ckpt, Args(), self.model)
         hz = torch.randn(2, N, K, PATCHES)  # (V, B, k, P), as the training loop holds it
-        # eval.dci._pool_and_split_view flattens to (B, P*k) patch-major.
+        # eval.metrics.dci._pool_and_split_view flattens to (B, P*k) patch-major.
         flat = [hz[v].permute(0, 2, 1).flatten(1).numpy() for v in range(2)]
         level_data = {0: (flat[0].copy(), None, flat[1].copy(), None, {"level": 0})}
 

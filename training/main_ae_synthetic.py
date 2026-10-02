@@ -1,7 +1,7 @@
 """Train the classic multiview AE (dense-vector bottleneck) on synthetic brain data.
 
 Sibling of ``training.main_vae_synthetic`` — same experiment, same trusted metric
-(``eval.dci.compute_dci_synthetic``), only the model differs:
+(``eval.metrics.dci.compute_dci_synthetic``), only the model differs:
 
   * ``models.ae.MultiviewAE`` — two encoders + a *dense* ``Linear`` bottleneck to a
     global latent vector (no spatial grid → no pooling degree of freedom), split by a
@@ -46,7 +46,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-import eval.dci as dci
+import eval.metrics.dci as dci
 import training.losses as losses
 from data.datasets import SyntheticBrainDataset
 from models.ae import MultiviewAE
@@ -218,7 +218,7 @@ def main():
     args = parse_args()
 
     # Resolve the coupled flags before anything reads them — settings.json must record
-    # what actually ran, since eval.analyze_vae_identifiability rebuilds the model from it.
+    # what actually ran, since eval.protocol.analyze_vae_identifiability rebuilds the model from it.
     if args.encoder_only:
         assert args.contrastive_weight > 0, "--encoder-only with --contrastive-weight 0 leaves no loss at all"
         args.recon_weight = 0.0
@@ -227,7 +227,7 @@ def main():
 
     save_dir = os.path.join(args.out_dir, args.model_id)
     os.makedirs(save_dir, exist_ok=True)
-    # ``model_type`` lets eval.analyze_vae_identifiability.load_model rebuild the right class.
+    # ``model_type`` lets eval.protocol.analyze_vae_identifiability.load_model rebuild the right class.
     with open(os.path.join(save_dir, "settings.json"), "w") as fp:
         json.dump({**vars(args), "model_type": "ae"}, fp, indent=2)
 

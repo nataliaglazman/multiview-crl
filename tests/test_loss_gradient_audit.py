@@ -20,10 +20,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from eval import gradient_attribution as ga
-from eval import loss_gradient_audit as audit
-from eval.reconstruction_attribution import frozen_checkpoint
-from eval.ventricle_routing import state_digest
+from eval.gradients import gradient_attribution as ga
+from eval.gradients import loss_gradient_audit as audit
+from eval.gradients.reconstruction_attribution import frozen_checkpoint
+from eval.ventricle.ventricle_routing import state_digest
 from training.bt_objective import make_barlow_loss_functions
 from training.style_alignment import within_modality_style_loss
 from training.style_hsic import style_content_hsic_loss

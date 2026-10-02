@@ -5,7 +5,7 @@ import warnings
 
 import numpy as np
 
-from eval.identifiability_metrics import BATCHABLE_PROBES, cv_probe_r2, cv_probe_r2_multi
+from eval.metrics.identifiability_metrics import BATCHABLE_PROBES, cv_probe_r2, cv_probe_r2_multi
 
 PROBE_KINDS = ("ridge", "kernel", "mlp")
 
@@ -27,8 +27,8 @@ def planted_targets(seed=19, n=120, d=12):
 class BatchedProbeEquivalenceTests(unittest.TestCase):
     """``cv_probe_r2_multi`` column j must equal ``cv_probe_r2`` on column j.
 
-    ``eval.identifiability_report`` fits one target at a time and
-    ``eval.dinov3_identifiability`` / ``eval.run_dci_compare`` batch them, so a VQ-VAE
+    ``eval.protocol.identifiability_report`` fits one target at a time and
+    ``eval.dino.dinov3_identifiability`` / ``eval.protocol.run_dci_compare`` batch them, so a VQ-VAE
     number and a DINO number are only on one scale while this holds.  It used to hold for
     ridge alone: kernel differed by 0.14 and MLP by 0.41 on the arrays below.
     """

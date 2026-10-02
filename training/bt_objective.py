@@ -1,6 +1,6 @@
 """Shared Barlow Twins arm construction for training and frozen gradient audits.
 
-Training and ``eval.loss_gradient_audit`` both build their loss callables here, so the
+Training and ``eval.gradients.loss_gradient_audit`` both build their loss callables here, so the
 audited objective cannot drift from the trained one.
 """
 

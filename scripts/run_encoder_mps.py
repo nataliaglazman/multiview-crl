@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train one encoder ablation locally on an Apple-silicon GPU (MPS).
+"""Train one encoder ablation locally on MPS (default) or CUDA.
 
 Options come from the same recipe and variant files as the Run:ai generator, so the
 command differs from the cluster one only in --device, --out-dir and --model-id, plus any
@@ -48,14 +48,39 @@ def make_options(args):
     for key in ("batch_size", "train_steps", "eval_every"):
         if getattr(args, key) is not None:
             options[key] = getattr(args, key)
-    options["device"] = "mps"
+    options["device"] = getattr(args, "device", "mps")
+    if options["device"] not in ("mps", "cuda"):
+        raise ValueError("The local GPU runner requires --device mps or cuda")
+    patch_weight = getattr(args, "patch_loss_weight", None)
+    patch_grid = getattr(args, "train_patch_grid", None)
+    if patch_weight is not None:
+        options["patch_loss_weight"] = patch_weight
+    if patch_grid is not None:
+        options["train_patch_grid"] = patch_grid
+    weight = options.get("patch_loss_weight", 0.0)
+    if not math.isfinite(weight) or weight < 0:
+        raise ValueError("Patch loss weight must be finite and nonnegative")
+    if weight > 0:
+        options.setdefault("train_patch_grid", [8, 8, 8])
+        if options["contrastive_loss_type"] != "infonce":
+            raise ValueError("Patch training requires InfoNCE")
+        stride = (
+            options["downscale_factor"]
+            if options["encoder_architecture"] == "conv"
+            else options["resnet_output_stride"]
+        )
+        spatial = options["res"] // stride
+        if len(options["train_patch_grid"]) != 3 or any(g < 1 or g > spatial for g in options["train_patch_grid"]):
+            raise ValueError(f"Training patch grid must fit the {spatial}^3 backbone map")
     if min(options["train_steps"], options["eval_every"]) < 1:
         raise ValueError("Training/evaluation steps must be positive")
     if not 2 <= options["batch_size"] <= options["num_train_samples"]:
         raise ValueError("Batch size must be at least 2 and fit the training dataset")
     # A shorter or smaller run must never occupy the directory of the recipe run.
     suffix = "".join(f"_{tag}{options[key]}" for key, tag in OVERRIDES.items() if options[key] != recipe[key])
-    options["model_id"] = args.model_id or f"{args.variant}_s{args.seed}_mps{suffix}"
+    if weight > 0:
+        suffix += "_patch" + "x".join(map(str, options["train_patch_grid"])) + f"_w{weight:g}"
+    options["model_id"] = args.model_id or f"{args.variant}_s{args.seed}_{options['device']}{suffix}"
     if Path(options["model_id"]).name != options["model_id"] or options["model_id"] in (".", ".."):
         raise ValueError("--model-id must be a directory name, not a path")
     return options, recipe
@@ -82,7 +107,7 @@ def lpips_stand_in():
 def check_training_step(options):
     """One disposable step of the real model, loss and AdamW update on random input.
 
-    Fails before any run directory exists if MPS is unavailable, its forward pass disagrees
+    Fails before any run directory exists if the GPU is unavailable, its forward pass disagrees
     with CPU on the same weights, an operator has neither a kernel nor a CPU fallback, the
     batch does not fit, or the step gives non-finite values or no weight update. Writes nothing.
     """
@@ -90,15 +115,19 @@ def check_training_step(options):
         import torch
     except ImportError as error:
         raise RuntimeError(f"{sys.executable} has no torch; set ENCODER_PYTHON to an environment with it") from error
-    from utils.encoder_runtime import select_encoder_device
+    from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
-    device = select_encoder_device("mps")
+    configure_encoder_runtime(options)
+    device = select_encoder_device(options.get("device", "mps"))
     print(f"Backend check: torch {torch.__version__}, batch {options['batch_size']}/view on {device}", flush=True)
     loss = _disposable_step(options, device)
     gc.collect()
-    torch.mps.empty_cache()
+    if device == "mps":
+        torch.mps.empty_cache()
+    else:
+        torch.cuda.empty_cache()
     print(
-        f"Backend check passed: MPS matches CPU; finite loss {loss:.4f}, gradients, rank and eval features.",
+        f"Backend check passed: {device.upper()} matches CPU; finite loss {loss:.4f}, gradients, rank and eval features.",
         flush=True,
     )
 
@@ -106,13 +135,13 @@ def check_training_step(options):
 def _disposable_step(options, device):
     import torch
 
-    from eval.score_checkpoint import build_model
-    from training.main_conv_synthetic import contrastive_loss, effective_rank
+    from eval.protocol.score_checkpoint import build_model
+    from training.main_conv_synthetic import effective_rank, training_objective
 
     def forward(model, x):
-        pooled = model(x, pool_only=True, n_views=2)[2][0]
         criteria = (torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss())
-        return pooled, contrastive_loss(pooled, model, SimpleNamespace(**options), *criteria)
+        pooled, loss, terms = training_objective(model, x, SimpleNamespace(**options), *criteria)
+        return pooled, loss, terms["global"], terms["patch"]
 
     reference = build_model(options, "cpu").train()
     model = copy.deepcopy(reference).to(device)
@@ -126,13 +155,13 @@ def _disposable_step(options, device):
     try:
         torch.testing.assert_close([t.cpu() for t in got], list(expected), rtol=1e-3, atol=1e-4)
     except AssertionError as error:
-        raise RuntimeError(f"Backend check: MPS forward pass differs from CPU\n{error}") from error
+        raise RuntimeError(f"Backend check: {str(device).upper()} forward pass differs from CPU\n{error}") from error
     del reference
     x = x.to(device)
     weight = next(model.encoder.parameters())
     before = weight.detach().cpu().clone()
     optimizer = torch.optim.AdamW(model.parameters(), lr=options["lr"])
-    pooled, loss = forward(model, x)
+    pooled, loss, _, _ = forward(model, x)
     if not torch.isfinite(loss).item():
         raise RuntimeError("Backend check: non-finite loss")
     loss.backward()
@@ -159,17 +188,22 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, default=ROOT / "experiments/encoder_comparison.json")
     parser.add_argument("--variant", default="resnet_stride8")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", choices=("mps", "cuda"), default="mps")
     parser.add_argument("--batch-size", type=int, help="Per-view batch; default: the recipe's")
     parser.add_argument("--train-steps", type=int, help="Default: the recipe's")
     parser.add_argument("--eval-every", type=int, help="Default: the recipe's")
+    parser.add_argument("--patch-loss-weight", type=float, help="Add spatial InfoNCE; 0 keeps global-only training")
+    parser.add_argument("--train-patch-grid", type=int, nargs=3, help="Default for patch training: 8 8 8")
     parser.add_argument(
-        "--model-id", help="Default: <variant>_s<seed>_mps, plus _b<batch>/_t<steps> where they differ from the recipe"
+        "--model-id", help="Default: <variant>_s<seed>_<device>, with suffixes for batch/steps/patch overrides"
     )
-    parser.add_argument("--results-dir", type=Path, default=ROOT / "results/encoder_ablations_mps")
+    parser.add_argument("--results-dir", type=Path, help="Default: results/encoder_ablations_<device>")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Print the training command and exit")
-    mode.add_argument("--check", action="store_true", help="Run one disposable MPS training step and exit")
+    mode.add_argument("--check", action="store_true", help="Run one disposable GPU training step and exit")
     args = parser.parse_args(argv)
+    if args.results_dir is None:
+        args.results_dir = ROOT / f"results/encoder_ablations_{args.device}"
     options, recipe = make_options(args)
     command = comparison.training_command(options)
     if args.dry_run:
@@ -178,8 +212,11 @@ def main(argv=None):
     run = Path(options["out_dir"]) / options["model_id"]
     if not args.check and run.exists():
         raise ValueError(f"Run already exists: {run}. Choose a new --model-id or --results-dir")
-    # torch reads this once, at import; the shell wrapper sets it too.
-    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    # Set backend environment before importing torch; shell wrappers set it too.
+    if options["device"] == "mps":
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    if options.get("deterministic", False):
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     for name in ablations.launch.THREAD_ENV_VARS:
         os.environ[name] = str(options["cpu_threads"])
     if options["batch_size"] != recipe["batch_size"]:

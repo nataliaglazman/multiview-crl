@@ -16,7 +16,7 @@ import torch
 from scipy.ndimage import maximum_filter
 from test_ventricle_routing import RoutingOracle, load_without_monai
 
-from eval.lesion_routing import (
+from eval.lesion.lesion_routing import (
     audit,
     main,
     make_dataset,
@@ -26,7 +26,7 @@ from eval.lesion_routing import (
     summarize,
     verify_checkpoint,
 )
-from eval.ventricle_routing import decode_swaps
+from eval.ventricle.ventricle_routing import decode_swaps
 
 
 def translated_lesion():
@@ -221,7 +221,7 @@ class PipelineTests(unittest.TestCase):
         import nibabel as nib
 
         model = self.model(False)
-        loader = types.ModuleType("eval.run_dci_synthetic")
+        loader = types.ModuleType("eval.protocol.run_dci_synthetic")
         loader.load_model_from_run_dir = lambda *a, **kw: (
             model,
             self.settings(),
@@ -249,7 +249,7 @@ class PipelineTests(unittest.TestCase):
             with patch.dict(
                 "sys.modules",
                 {
-                    "eval.run_dci_synthetic": loader,
+                    "eval.protocol.run_dci_synthetic": loader,
                     "data.datasets": self.dataset_module,
                 },
             ), patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()):

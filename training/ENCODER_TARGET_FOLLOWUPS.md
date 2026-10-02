@@ -83,7 +83,7 @@ follow-ups deliberately have their own provenance records and do not use the old
 
 ## Experiment 1: frozen features
 
-Entrypoint: `python -m eval.encoder_spatial_target_audit`.
+Entrypoint: `python -m eval.encoder.encoder_spatial_target_audit`.
 
 - Evaluate **both T1 and FLAIR**, with models strictly in evaluation mode and
   gradients disabled. Check both registered model state and checkpoint-file hashes.

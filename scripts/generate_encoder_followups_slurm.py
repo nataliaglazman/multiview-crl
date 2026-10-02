@@ -39,7 +39,7 @@ def render(kind, resources, steps, include_native):
     if any("\n" in str(value) or "\r" in str(value) for value in [*directives.values(), module]):
         raise ValueError("Newlines are not supported in resources")
     command = (
-        'COMMAND=("$PYTHON" -m eval.encoder_spatial_target_audit --run-dir "$RUNS/$NAME" '
+        'COMMAND=("$PYTHON" -m eval.encoder.encoder_spatial_target_audit --run-dir "$RUNS/$NAME" '
         '--out-dir "$OUTPUT/spatial/${NAME}_${STAMP}" --device cuda --batch-size 4 --test-samples 400 '
         "--grids 1 2 --seed 1729" + (" --include-native" if include_native else "") + ")"
         if frozen
@@ -74,7 +74,7 @@ def render(kind, resources, steps, include_native):
             "esac",
             'if [[ -z "${SLURM_JOB_ID:-}" ]]; then echo "Submit with sbatch; use --dry-run for preview." >&2; exit 2; fi',
             'cd "$REPO"',
-            "test -f eval/encoder_spatial_target_audit.py && test -f training/encoder_target_control.py",
+            "test -f eval/encoder/encoder_spatial_target_audit.py && test -f training/encoder_target_control.py",
             f"module load {shlex.quote(module)}",
             'if [[ ! -x "$PYTHON" ]]; then echo "Python missing: $PYTHON" >&2; exit 1; fi',
             'export PYTHONPATH="$REPO" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 CUBLAS_WORKSPACE_CONFIG=:4096:8',

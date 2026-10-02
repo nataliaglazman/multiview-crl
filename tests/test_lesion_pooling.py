@@ -12,8 +12,8 @@ import numpy as np
 import torch
 from threadpoolctl import threadpool_limits
 
-from eval import lesion_pooling as lp
-from eval import ventricle_pooling as vp
+from eval.lesion import lesion_pooling as lp
+from eval.ventricle import ventricle_pooling as vp
 
 
 def moving_lesions():
@@ -195,7 +195,7 @@ class LesionPoolingTests(unittest.TestCase):
             patch_foreground_mask=True,
         )
         model = ToyEncoder().eval()
-        fake = types.ModuleType("eval.run_dci_synthetic")
+        fake = types.ModuleType("eval.protocol.run_dci_synthetic")
         fake.load_run_args = lambda *a: args
         fake.load_model_from_run_dir = lambda *a, **kw: (model, args, "cpu")
         with tempfile.TemporaryDirectory() as directory:
@@ -219,7 +219,7 @@ class LesionPoolingTests(unittest.TestCase):
                     str(out),
                 ]
             )
-            with patch.dict("sys.modules", {"eval.run_dci_synthetic": fake}), patch.object(
+            with patch.dict("sys.modules", {"eval.protocol.run_dci_synthetic": fake}), patch.object(
                 lp, "make_dataset", side_effect=lambda args, n, *a: ToySubjects(n)
             ), contextlib.redirect_stdout(io.StringIO()):
                 first = lp.run(cli)
@@ -236,7 +236,9 @@ class LesionPoolingTests(unittest.TestCase):
                 ]
             )
             fake.load_model_from_run_dir = lambda *a, **kw: self.fail("Cache replay loaded a checkpoint")
-            with patch.dict("sys.modules", {"eval.run_dci_synthetic": fake}), contextlib.redirect_stdout(io.StringIO()):
+            with patch.dict("sys.modules", {"eval.protocol.run_dci_synthetic": fake}), contextlib.redirect_stdout(
+                io.StringIO()
+            ):
                 second = lp.run(replay)
             self.assertEqual(first["comparisons"], second["comparisons"])
             self.assertTrue((out / "pooling_scores.csv").exists())

@@ -9,8 +9,8 @@ import warnings
 
 import numpy as np
 
-from eval import plot_pairing as pp
-from eval.plot_identifiability import THEME
+from eval.plots import plot_pairing as pp
+from eval.plots.plot_identifiability import THEME
 
 T = THEME["light"]
 

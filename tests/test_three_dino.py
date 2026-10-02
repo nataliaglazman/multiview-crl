@@ -13,7 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from eval import dinov3_embed_synthetic as embed
+from eval.dino import dinov3_embed_synthetic as embed
 from models import three_dino as three
 from training import finetune_dino as train
 from utils.config import parse_dino_finetune_args
@@ -230,7 +230,7 @@ class UpstreamIntegrationTests(unittest.TestCase):
                 self.assertEqual(meta["slots"], ["volume"])
                 self.assertEqual(meta["window_values"], saved["window_bounds"])
                 self.assertEqual(meta["image_size"], 32)
-            from eval.dinov3_identifiability import load_bundle
+            from eval.dino.dinov3_identifiability import load_bundle
 
             for block, width in (("content", 18), ("style", 6)):
                 loaded = load_bundle(root / "emb.npz", "1", block)

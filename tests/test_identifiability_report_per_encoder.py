@@ -1,7 +1,7 @@
 """--per-encoder plumbing: encoder 2's blocks and view-2 style labels reach the scorers.
 
 The scoring semantics (own PCA, z_style_v2 targets, encoder 1 unchanged) are asserted on
-planted data by ``eval.identifiability_report --self-test``; these tests cover the paths
+planted data by ``eval.protocol.identifiability_report --self-test``; these tests cover the paths
 around it: extraction -> score_run / score_live, the CLI flag, warnings, and JSON replay.
 """
 
@@ -16,9 +16,9 @@ from unittest.mock import patch
 
 import numpy as np
 
-from eval import identifiability_report as report
-from eval import run_dci_compare as compare
-from eval import run_dci_synthetic as synthetic
+from eval.protocol import identifiability_report as report
+from eval.protocol import run_dci_compare as compare
+from eval.protocol import run_dci_synthetic as synthetic
 
 N = 120
 NAMES, STYLE_NAMES = ["brain_size", "ventricle_size"], ["bias"]
@@ -59,7 +59,7 @@ def _score_run(run_args, with_v2=True, **kw):
     )
     common.update(kw)
     with (
-        patch.dict("sys.modules", {"eval.dci": _planted(with_v2)}),
+        patch.dict("sys.modules", {"eval.metrics.dci": _planted(with_v2)}),
         patch.object(compare, "_resolve_checkpoint", return_value="unused"),
         patch.object(synthetic, "load_model_from_run_dir", return_value=(object(), run_args, "cpu")),
     ):
@@ -115,7 +115,7 @@ class ScoreRunTests(unittest.TestCase):
 
 class ScoreLiveTests(unittest.TestCase):
     def test_live_probe_scores_both_encoders_and_tags_encoder2(self):
-        with patch.dict("sys.modules", {"eval.dci": _planted()}):
+        with patch.dict("sys.modules", {"eval.metrics.dci": _planted()}):
             kw = dict(dataset=None, device="cpu", poolings=[("gap", "gap")], seeds=(0,), n_null=1, probe_dim=0)
             res = report.score_live(object(), per_encoder=True, **kw)
             only1 = report.score_live(object(), **kw)
@@ -134,7 +134,7 @@ class ScoreLiveLevelsTests(unittest.TestCase):
         extract = planted._extract_synthetic_representations
         planted._extract_synthetic_representations = lambda *a, **kw: calls.append(1) or extract(*a, **kw)
         kw = dict(dataset=None, device="cpu", poolings=[("gap", "gap")], seeds=(0,), n_null=1, probe_dim=0)
-        with patch.dict("sys.modules", {"eval.dci": planted}):
+        with patch.dict("sys.modules", {"eval.metrics.dci": planted}):
             res = report.score_live_levels(object(), **kw)
             self.assertEqual(len(calls), 1)
             only0 = report.score_live(object(), **kw)
@@ -147,7 +147,7 @@ class ScoreLiveLevelsTests(unittest.TestCase):
 
     def test_missing_level_raises(self):
         kw = dict(dataset=None, device="cpu", poolings=[("gap", "gap")], seeds=(0,), n_null=1, probe_dim=0)
-        with patch.dict("sys.modules", {"eval.dci": _planted()}), self.assertRaises(RuntimeError):
+        with patch.dict("sys.modules", {"eval.metrics.dci": _planted()}), self.assertRaises(RuntimeError):
             report.score_live_levels(object(), levels=[2], **kw)
 
 

@@ -1,0 +1,437 @@
+# Full-volume 3DINO for synthetic MRI
+
+Use `--backbone 3dino` in the existing DINO embedding and paired-view InfoNCE
+fine-tuning commands. The adapter imports the unmodified
+[AICONSlab/3DINO implementation](https://github.com/AICONSlab/3DINO). The default
+`--backbone dinov3` retains the existing 2D slice pipeline.
+
+## Setup
+
+In the existing training environment (PyTorch, MONAI, NumPy, nibabel, etc.):
+
+```bash
+git clone https://github.com/AICONSlab/3DINO.git ../3DINO
+git -C ../3DINO checkout 85bd4435c1b2ada41cd34cd15cad17c4d3c88d89
+python -m pip install omegaconf
+```
+
+This is the upstream revision inspected and tested for this integration. The
+adapter records the actual checkout revision and checkpoint path in its outputs.
+It imports only the model and configuration modules, so the upstream repository's
+entire pretraining environment is not required. xFormers is optional for our
+single-tensor forward path. Set `XFORMERS_DISABLED=1` before launching Python to
+use upstream's ordinary attention fallback if xFormers is incompatible with your
+device or PyTorch installation.
+
+Obtain the pretrained checkpoint from
+[AICONSlab/3DINO-ViT](https://huggingface.co/AICONSlab/3DINO-ViT), which requires
+requesting access/accepting the authors' conditions on Hugging Face. Pass its
+local path with `--three-dino-weights`. There is no automatic weight download or
+silent random initialization. `--random-init --model-seed 0` explicitly requests
+an untrained architecture baseline instead.
+
+The upstream code and weights have their own CC BY-NC-ND 4.0 terms; consult the
+[authors' license and usage conditions](https://github.com/AICONSlab/3DINO#license).
+This repository's adapter does not redistribute their source or pretrained weights.
+
+## Extract pretrained embeddings
+
+For extraction and identifiability evaluation in one command, use the pipeline:
+
+```bash
+python -m eval.dino.run_3dino_identifiability \
+  --three-dino-repo ../3DINO \
+  --three-dino-weights /path/to/downloaded_checkpoint.pth \
+  --run-dir results/synthetic/YOUR_RUN \
+  --output-dir results/3dino_evaluation \
+  --num-samples 500 --volume-batch 2 --device cuda --with-floor
+```
+
+This extracts full-volume embeddings for both modalities, optionally extracts the
+same architecture at random initialization (`--with-floor`), then calls the
+existing 2D-DINO identifiability scorer for T1 and FLAIR separately. The random
+baseline uses the same weights/config path to reconstruct the architecture, but
+does not load its weights. `--floor-seed` controls its initialization. Omit
+`--with-floor` to skip this extra model pass, or supply `--floor /path/to/floor.npz`
+to reuse an existing baseline. A baseline is accepted only when its random-init
+metadata, model/pooling/window settings, labels, adjacency, and available voxel
+arrays match. Baseline mismatch stops scoring instead of producing a misleading
+trained-minus-random comparison.
+
+For a fine-tuned model, point `--three-dino-weights` to its `encoder` directory.
+The pipeline automatically finds adjacent `settings.json` and `preprocessing.json`
+unless you provide `--run-dir` / `--preprocessing` explicitly. The saved
+preprocessing takes precedence over volume/window/pooling flags, just as in the
+standalone extractor. For a pretrained checkpoint with no `--run-dir`, the
+extractor's default causal synthetic generator is used.
+
+To evaluate embeddings you have already saved (no model loading or GPU needed):
+
+```bash
+python -m eval.dino.run_3dino_identifiability \
+  --embeddings results/3dino/pretrained.npz \
+  --floor results/3dino/random_init.npz \
+  --output-dir results/3dino_rescored
+```
+
+`--floor` is optional in this command. Use a new/empty output directory each time;
+input embeddings are preserved. If a stage fails, completed artifacts and logs
+remain available. For example, after extraction succeeds you can rescore its
+`embeddings.npz` into another directory without repeating inference.
+
+Pipeline outputs:
+
+- `embeddings.npz` and its metadata sidecar (when extracting).
+- `random_init.npz` and its metadata sidecar (with `--with-floor`).
+- `report_view1.json` / `.txt` and `report_view2.json` / `.txt`: content/style
+  recovery, permutation-null scores, block MCC, optional untrained and voxel
+  comparisons, partial R², PC skeleton recovery, and CPDAG orientation diagnostics.
+- `factors_view1.csv`, `factors_view2.csv`: per-factor numeric results.
+- `summary.csv` / `.txt`: a compact per-view comparison including mean content
+  R² gap, MCC, graph F1/precision/recall/SHD, and mean partial R².
+- `pipeline.json`: resolved options, stage commands, logs, exit codes, and status.
+  Each stage also has a `.log` file. Separate processes release encoder memory
+  before scoring. Missing graph scores are shown as unavailable, not zero.
+
+Use `--eval-views 1`, `--eval-views 2`, or `--eval-views 1 2 both`; `both` scores
+concatenated modality embeddings (its style table targets view 1's style, matching
+the existing scorer). Defaults match the 2D evaluator: ridge probes, five folds,
+CV seeds 0/1/2, three permutation nulls, auto probe PCA, and Fisher-Z PC with an
+alpha sweep. The voxel baseline is enabled (`--raw-grid 8`). For
+`--max-cond-set`, use `python -m pip install 'causal-learn>=0.1.4.8'` (tested
+with 0.1.4.8). The pipeline rejects older versions that silently ignore this
+argument. Useful controls:
+
+```bash
+# Factor recovery only, without the graph panel:
+python -m eval.dino.run_3dino_identifiability --embeddings embeddings.npz \
+  --output-dir results/3dino_factors_only --no-graph
+
+# Use held-out decoded factors for PC; needs more samples than the default:
+python -m eval.dino.run_3dino_identifiability --embeddings embeddings_large.npz \
+  --output-dir results/3dino_holdout --holdout-readout --readout-dim 64
+
+# Nonlinear conditional-independence tests, potentially substantially slower:
+python -m eval.dino.run_3dino_identifiability --embeddings embeddings.npz \
+  --output-dir results/3dino_kci --indep-test kci --max-cond-set 2
+```
+
+Per-volume windowing limits gain/bias recovery; compare its style scores with
+that preprocessing in mind. To match the existing 2D protocol, automatic probe
+PCA is fit on the whole embedding matrix before cross-validation; it is not a
+strictly train-only transform. `--probe-dim 0` disables that reduction.
+Graph alpha selection still uses known truth, and
+the default graph readout is in-sample. PC on true factors supplies a
+finite-sample reference, not a guaranteed upper bound. These are empirical
+recovery diagnostics rather than a proof of mathematical identifiability.
+
+## Comparing fine-tuning objectives
+
+`training/finetune_dino.py --objective` selects what the T1/T2 pairing is used for. The
+pairing, the optimizer, the steps and the data are identical across arms, so the only thing
+that varies is the loss:
+
+| `--objective` | loss | the arm answers |
+| --- | --- | --- |
+| `infonce` (default) | symmetric cross-view InfoNCE | with negatives |
+| `barlow` | Barlow Twins | negative-free: is it the negatives that matter? |
+| `vicreg` | VICReg | same question, variance-hinge form, steadier at small batches |
+
+`barlow` and `vicreg` call `training.losses`' own implementations — the same ones the
+VQ-VAE arm of this project trains with — so a fine-tuned DINO and a VQ-VAE here optimise
+the same objective rather than two things that share a name. They take `(n_views, B, C)`
+and are told there is no content/style split by passing no indices, so every channel of
+the embedding is treated as content.
+
+Cross-view retrieval accuracy and mean positive/negative similarity are logged under
+**every** objective and are never part of a negative-free loss. That matters for reading
+the arms against one another: Barlow Twins' loss and InfoNCE's loss are not on a common
+scale, but "can you retrieve a subject's other modality" is the same question under both.
+`metrics.jsonl` also carries each loss's own term breakdown (`on_diag_loss`/`off_diag_loss`
+for Barlow Twins, `sim_loss`/`var_loss`/`cov_loss` for VICReg), so a collapsed run is
+visible in which term went to zero.
+
+```bash
+for OBJ in infonce barlow; do
+  python -m training.finetune_dino --three-dino-repo ../3DINO \
+    --three-dino-weights /path/to/pretrained.pth \
+    --run-dir results/synthetic/YOUR_RUN \
+    --objective $OBJ --output-dir results/dino_$OBJ --epochs 20
+done
+```
+
+`scripts/compare_dino_objectives.sh` then takes those runs through extraction, scoring and
+figures in one go. It reads each arm's recorded backbone and dispatches accordingly --
+`3dino` arms go through `run_3dino_identifiability`, `dinov3` arms through
+`dinov3_embed_synthetic` twice (trained, then `--random-init` for the floor) -- and refuses
+to put arms with different backbones in one table, since a 2D-slice arm beside a
+full-volume one is a different encoder reading different inputs, not an objective ablation. It checks each run's recorded objective against the arm its directory
+name claims before spending any GPU time -- two arms that both trained InfoNCE under
+different names would otherwise produce a clean-looking table comparing a model with
+itself. It emits two comparisons: the **content block**, which is the objective ablation
+and excludes the pretrained baseline (that has no partition), and the **full embedding**,
+where the baseline can sit beside the fine-tuned arms.
+
+Then extract a bundle from each and compare them as two models. Every arm writes its own
+`preprocessing.json`; they will agree when the extraction flags did, and the extractor
+reuses the saved one either way, so check that the two match before reading a difference as
+the objective.
+
+### Is it the pairing, or just training on your data?
+
+`--objective` varies the loss; `--pairing` varies what the positive pair IS, which is the
+axis that answers "does the cross-modal pair earn its keep".
+
+| `--pairing` | positive pair | the arm answers |
+| --- | --- | --- |
+| `cross_modal` (default) | a subject's T1 and FLAIR | the real acquisition pair |
+| `within_modality` | one modality, augmented twice | training on your data with no cross-modal signal |
+
+`within_modality` never reads the second modality. The optimizer, steps, loss and data
+budget are unchanged, so the difference between the two arms is the pairing itself.
+
+```bash
+python -m training.finetune_dino --backbone 3dino --three-dino-repo ../3DINO \
+  --three-dino-weights /path/to/pretrained.pth --run-dir results/synthetic/YOUR_RUN \
+  --objective infonce --pairing within_modality \
+  --output-dir results/dino_within --epochs 20
+```
+
+**The augmentation is intensity-only, deliberately.** Rotation, scale or shear would move
+`brain_size`, `lr_asymmetry` and the lesion coordinates — the factors the evaluation then
+probes for — so a spatially augmented arm would be trained to discard its own measurement.
+The recipe is `finetune_dino.AUGMENTATION`, scaled by `--aug-strength`.
+
+**Read the result with this caveat.** The generator renders a modality as
+`lut = base * gain + bias` plus noise, so gain/bias/noise *are* its style model. They are
+kept mild in the recipe and the work is carried by gamma and blur, which sit outside that
+family — but the arm is still partly re-deriving the cross-modal relationship, which makes
+it conservative. If `cross_modal` still wins, the pairing genuinely carries more. If they
+tie, the honest reading is "on this generator an intensity augmentation is as good as the
+real pair", which is a statement about the generator as much as about the method.
+
+Each run records the loss AND the pairing (`content_symmetric_within_modality_infonce`),
+and `scripts/compare_dino_objectives.sh` refuses to build a table from two arms that
+recorded the same objective — two names for one experiment would otherwise compare a model
+with itself.
+
+## Comparing against the VQ-VAE
+
+Do not read a DINO report and a VQ-VAE report side by side and difference the columns:
+they are separate protocols and several of the differences are large enough to invert a
+per-factor conclusion. Export the VQ-VAE run as a bundle in this same format and score
+both through one function instead:
+
+```bash
+python -m eval.protocol.export_vq_bundle --run-dir results/synthetic/YOUR_RUN \
+  --checkpoint vqvae_model.pt --level 0 --pooling gap --block all \
+  --num-samples 500 --out results/bundles/vq_all.npz
+
+python -m eval.protocol.compare_bundles \
+  --bundles vq=results/bundles/vq_all.npz dino=results/3dino_evaluation/embeddings.npz \
+  --floors  dino=results/3dino_evaluation/random_init.npz \
+  --equal-width --with-graph --alphas 0.05 --diagnostic-alpha 0.05 \
+  --out results/matched/compare.json
+```
+
+`--with-graph` adds the PC panel for every representation, scored against the true SCM
+adjacency, with a ground-truth ceiling row and each untrained floor alongside. Pin the
+alphas as above so every source is tested at the same threshold rather than at its own
+truth-selected best. It also pins the graph readout width, which `--probe-dim` does not
+control.
+
+Pass the same `--run-dir` and `--num-samples` to both exporters so they render the same
+brains; `compare_bundles` verifies that from the stored factor digests and refuses to
+build a table if they disagree. Pair VQ `--pooling gap` with `--token-pool mean`, or VQ
+`--pooling 4,4,4` with `--token-pool grid --grid-size 4`. See
+`eval/dino/COMPARING_3DINO_VQVAE.md` for what this equalises and what it cannot.
+
+The two individual stages remain available:
+
+```bash
+python -m eval.dino.dinov3_embed_synthetic \
+  --backbone 3dino --three-dino-repo ../3DINO \
+  --three-dino-weights /path/to/downloaded_checkpoint.pth \
+  --run-dir results/synthetic/YOUR_RUN \
+  --out results/3dino/pretrained.npz \
+  --num-samples 500 --volume-batch 2 --device cuda
+
+python -m eval.dino.dinov3_identifiability \
+  --embeddings results/3dino/pretrained.npz
+```
+
+The existing identifiability and causal recovery scorer accepts the NPZ directly.
+Both modalities, latent labels, causal adjacency, and optional voxel baseline
+retain the existing schema and dataset order.
+
+## Fine-tune on paired synthetic modalities
+
+```bash
+python -m training.finetune_dino \
+  --backbone 3dino --three-dino-repo ../3DINO \
+  --three-dino-weights /path/to/downloaded_checkpoint.pth \
+  --run-dir results/synthetic/YOUR_RUN \
+  --output-dir results/3dino_infonce \
+  --loss infonce --style-fraction 0.25 \
+  --num-samples 1000 --epochs 20 --batch-size 8 \
+  --device cuda --dtype bfloat16 --gradient-checkpointing
+```
+
+For the Barlow Twins experiment use the same starting checkpoint and generator,
+replace `--loss infonce` with `--loss barlow_twins`, and use a separate
+`--output-dir results/3dino_barlow_twins`. Both commands default to seed 42, so
+sample order and initial projection weights are matched when their other settings
+are identical. These are paired-view fine-tuning objectives on the pretrained
+backbone, rather than upstream self-distillation pretraining.
+
+The default partition is **75% content, 25% style**, applied to the backbone's
+channel coordinates before the optional projection head. For CLS embeddings:
+
+```text
+shared pretrained encoder → 1024-dimensional embedding
+                            ├─ first 768: content → shared projector → InfoNCE / Barlow Twins
+                            └─ last  256: style   → no alignment loss
+```
+
+Each channel keeps the same role across all spatial positions, CLS/mean blocks,
+and (for 2D DINO) slices. A spatial grid is not split into aligned versus unaligned
+regions. Non-integer fractions round the style channel count down and record the
+effective fraction. `--style-fraction 0` restores the previous all-embedding
+alignment. This new 25% default applies to both DINO backends.
+
+`--projection-dim 256` is the default content-only MLP output width;
+`--projection-dim 0` applies the loss directly to the content embedding. The
+projector never sees style coordinates. Exported embeddings are always from the
+backbone before this head, so the 768/256 split survives evaluation.
+
+- InfoNCE uses normalized similarities, positives from the same subject's other
+  modality, other subjects as negatives, and both directions equally.
+  `--temperature` defaults to 0.1.
+- Barlow Twins standardizes each output dimension across the subject batch and
+  minimizes `sum((diag(C)-1)^2) + lambda*sum(offdiag(C)^2)`. Defaults are
+  `--barlow-lambda 0.0051` and `--barlow-eps 1e-5`, following the
+  [authors' correlation objective](https://github.com/facebookresearch/barlowtwins/blob/main/main.py).
+  The shared projector/AdamW recipe here is configurable and does not reproduce
+  the authors' entire training recipe. Temperature does not affect this loss.
+
+Style is **excluded from alignment**, not forced to disagree across views. There
+is no style reconstruction, variance, or independence loss. Shared backbone
+updates (and weight decay) can change style outputs; they are not frozen. The
+split alone does not guarantee that the reserved coordinates encode style or
+exclude content. Probe both blocks against both target types after training.
+Per-volume windowing also removes affine gain/bias information before the model.
+
+Choose the largest subject batch your GPU supports; other subjects supply InfoNCE
+negatives and Barlow Twins estimates correlations across that batch. Very small
+batches give poor correlation estimates (rank at most batch size minus one).
+This trainer uses one device, without distributed negative/correlation gathering.
+`--batch-size` controls subjects,
+and `--plane-batch-size` applies only to the 2D backend. Use `--dtype float32` on
+CPU, or `float16` when a CUDA device does not support bfloat16.
+
+Checkpoints are saved under `encoder/model.pt` with architecture/provenance in
+`encoder/config.json`. The existing `training_state.pt`, `preprocessing.json`,
+`settings.json`, and training metrics are also written. The partition is saved in
+`encoder/embedding_partition.json`, preprocessing, training config, and training
+state. `metrics.jsonl` includes content/style standard deviation and paired-view
+cosine similarity, plus BT diagonal/off-diagonal terms when selected. Retrieval
+accuracy is a diagnostic for BT, not part of its objective. As in the current 2D
+trainer, the latest checkpoint is replaced after each epoch; historical epochs
+are not automatically archived, and optimizer resume is not implemented.
+
+Extract held-out embeddings with the saved preprocessing and generator settings:
+
+```bash
+python -m eval.dino.dinov3_embed_synthetic \
+  --backbone 3dino --three-dino-repo ../3DINO \
+  --three-dino-weights results/3dino_infonce/encoder \
+  --run-dir results/3dino_infonce \
+  --preprocessing results/3dino_infonce/preprocessing.json \
+  --out results/3dino_infonce/test_embeddings.npz \
+  --num-samples 500 --volume-batch 2 --device cuda
+```
+
+The NPZ retains `emb_view1/2` and adds `emb_content_view1/2` and
+`emb_style_view1/2`, with the partition in its metadata. To extract and evaluate
+the content block in one command, including a matched untrained floor:
+
+```bash
+python -m eval.dino.run_3dino_identifiability \
+  --three-dino-repo ../3DINO \
+  --three-dino-weights results/3dino_infonce/encoder \
+  --representation content --with-floor \
+  --num-samples 2000 --volume-batch 2 --device cuda \
+  --output-dir results/3dino_infonce_eval_content
+
+# Reuse those same embeddings/floor to assess style without another encoder pass:
+python -m eval.dino.run_3dino_identifiability \
+  --embeddings results/3dino_infonce_eval_content/embeddings.npz \
+  --floor results/3dino_infonce_eval_content/random_init.npz \
+  --representation style --no-graph \
+  --output-dir results/3dino_infonce_eval_style
+```
+
+`--representation all` remains the evaluation default, preserving old reports.
+The content and style *tables* name the target factors; both are predicted from
+the chosen representation. Thus the style-target table under
+`--representation content` measures style leakage into the aligned block. The
+content-target table under `--representation style` measures content present in
+the unaligned block. Graph recovery uses the selected representation too. The
+standalone `eval.dino.dinov3_identifiability` accepts the same selector. The pipeline
+requires the random baseline to use the exact same partition.
+
+Training uses the generator's train split; extraction uses its test split. Saved
+dataset window bounds and fixed-reference generator normalization are restored
+for evaluation. Encoder weights load strictly: missing or incompatible backbone
+parameters fail rather than producing measurements on partially initialized weights.
+Official `teacher` checkpoints with `module.backbone.` prefixes and extra
+pretraining heads are supported, as are bare backbone state dictionaries.
+
+## What enters the model
+
+The authors' [basic-use notebook](https://github.com/AICONSlab/3DINO/blob/main/notebooks/basic_model_use.ipynb)
+uses single-channel volumes, 112³ input, and intensities in [-1, 1]. Our defaults:
+
+1. Accept genuine `(B, 1, X, Y, Z)` volumes; 2D inputs are rejected.
+2. Compute each volume's 0.05th and 99.95th intensity percentiles and map/clamp
+   them to [-1, 1]. Constant volumes map to zero.
+3. Resize the complete volume to 112³ by trilinear interpolation, retaining the
+   generator's axis order. There is no slice selection, RGB replication, center
+   cropping, 8-bit quantization, or ImageNet normalization.
+4. Feed the volume through the official ViT-Large 3D backbone, with 16³ voxel
+   patches (343 patch tokens at 112³).
+
+`--volume-size` can change input size to another positive multiple of 16; the
+upstream model interpolates its learned positional embeddings. The pretrained
+position-embedding parameter shape is built from the original 112³ configuration,
+independently of inference size. Cubic resizing is appropriate for the cubic
+synthetic data here; this adapter does not perform physical-spacing/orientation
+standardization for clinical scans.
+
+Token pooling supports `cls` (default, 1024 features, matching the authors' basic
+example), `mean` (1024), `cls_mean` (2048), and `grid` (3D adaptive patch-grid
+pooling; `--grid-size 2` produces 8192 features). All modes operate on the full
+volume. Slice flags `--axes`, `--slices`, `--slice-agg`, and `--image-size` are
+specific to the 2D backend and do not affect 3DINO. Metadata explicitly records
+`backbone: 3dino`, `slots: [volume]`, volume size, pooling and normalization.
+
+Per-volume percentile normalization removes affine gain/bias differences before
+encoding, so it limits recovery of those style factors. For that experiment use
+`--window dataset`, which estimates one fixed window from training subjects and
+applies it to every volume. This is an explicit departure from the per-volume
+normalization in the authors' example. Always reuse `--preprocessing` for
+fine-tuned evaluation and compare models with matched data/window/pooling choices.
+
+## Validation
+
+```bash
+THREE_DINO_REPO=../3DINO XFORMERS_DISABLED=1 \
+  python -m unittest discover -s tests -p test_three_dino.py -v
+```
+
+The integration tests instantiate the actual upstream 3D transformer at reduced
+width/depth for CPU execution. They check 3D token layout, pooling, preprocessing,
+backbone gradients with activation checkpointing, strict teacher/export loading,
+train/eval feature agreement, and a complete synthetic training → export →
+held-out extraction pass. They do not download the gated pretrained weights or
+establish pretrained ViT-Large performance or GPU memory requirements.

@@ -196,7 +196,7 @@ def audit(name, config_path):
 if __name__ == "__main__":
     provenance = {
         str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in [ROOT / "eval/synthetic_dataset.py", ROOT / "data/datasets.py"]
+        for p in [ROOT / "eval/synthetic/synthetic_dataset.py", ROOT / "data/datasets.py"]
     }
     (OUT / "source_hashes.json").write_text(json.dumps(provenance, indent=2) + "\n")
     audit("wm_interior_noncausal", ROOT / "settings.json")

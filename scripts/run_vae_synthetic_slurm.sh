@@ -1,6 +1,6 @@
 #!/bin/bash -l
 # Train the simple multiview VAE (models/vae.py) on synthetic data and measure
-# identifiability via eval.dci.compute_dci_synthetic.
+# identifiability via eval.metrics.dci.compute_dci_synthetic.
 #
 # Submit from the repo root:
 #     sbatch scripts/run_vae_synthetic_slurm.sh

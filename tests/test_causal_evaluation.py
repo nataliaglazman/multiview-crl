@@ -15,10 +15,10 @@ import torch
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from eval import identifiability_report as report
-from eval import parent_adjusted as adjusted
-from eval.marginal_independence import MarginalShuffledDataset, permute_content_marginals, repair_by_swaps
-from eval.synthetic_dataset import LesionPlacementError
+from eval.metrics import parent_adjusted as adjusted
+from eval.metrics.marginal_independence import MarginalShuffledDataset, permute_content_marginals, repair_by_swaps
+from eval.protocol import identifiability_report as report
+from eval.synthetic.synthetic_dataset import LesionPlacementError
 
 
 def synthetic_brain_class():
@@ -287,8 +287,8 @@ class MarginalIndependenceTests(unittest.TestCase):
 
 class ReportFlagTests(unittest.TestCase):
     def test_score_run_keeps_headlines_and_dci_nulls_when_adjustment_changes(self):
-        from eval import run_dci_compare as compare
-        from eval import run_dci_synthetic as synthetic
+        from eval.protocol import run_dci_compare as compare
+        from eval.protocol import run_dci_synthetic as synthetic
 
         rng = np.random.RandomState(13)
         gt, style_gt = rng.randn(80, 2), rng.randn(80, 1)
@@ -321,7 +321,7 @@ class ReportFlagTests(unittest.TestCase):
             return {"dci_d": float(args[7].rand())}
 
         with (
-            patch.dict("sys.modules", {"eval.dci": extractor}),
+            patch.dict("sys.modules", {"eval.metrics.dci": extractor}),
             patch.object(compare, "_resolve_checkpoint", return_value="unused"),
             patch.object(compare, "_score_dci", side_effect=fake_dci),
             patch.object(synthetic, "load_model_from_run_dir", return_value=(object(), None, "cpu")),
@@ -348,7 +348,7 @@ class ReportFlagTests(unittest.TestCase):
             self.assertNotIn("partial", shuffled)
 
     def invoke(self, flags, dataset=None):
-        from eval import run_dci_synthetic as synthetic
+        from eval.protocol import run_dci_synthetic as synthetic
 
         with (
             patch("sys.argv", ["report", "--run-dir", "unused", *flags]),
@@ -375,7 +375,7 @@ class ReportFlagTests(unittest.TestCase):
         self.assertEqual(score.call_args.kwargs["parent_adjustment"], "nonlinear")
 
     def test_shuffled_uses_matched_source_without_source_image_cache(self):
-        with patch("eval.marginal_independence.MarginalShuffledDataset", return_value="shuffled") as wrapper:
+        with patch("eval.metrics.marginal_independence.MarginalShuffledDataset", return_value="shuffled") as wrapper:
             build, score = self.invoke(["--causal", "shuffled", "--shuffle-seed", "12", "--no-floor"], "source")
         self.assertEqual(build.call_args.kwargs, {"causal": True, "cache": False})
         wrapper.assert_called_once_with("source", seed=12)

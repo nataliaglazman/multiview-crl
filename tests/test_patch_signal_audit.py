@@ -19,7 +19,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from eval import patch_signal_audit as audit
+from eval.diagnostics import patch_signal_audit as audit
 
 ROOT = Path(__file__).resolve().parents[1]
 

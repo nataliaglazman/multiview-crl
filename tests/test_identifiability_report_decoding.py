@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from eval import identifiability_report as report
+from eval.protocol import identifiability_report as report
 
 
 class PerFactorDecodingTests(unittest.TestCase):

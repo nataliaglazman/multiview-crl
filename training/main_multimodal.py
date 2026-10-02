@@ -54,7 +54,7 @@ from torch.utils.tensorboard import SummaryWriter
 import models.vqvae as vqvae
 import utils.utils as utils
 from data.infinite_iterator import InfiniteIterator, ResumableSampler
-from eval.evaluation import eval_step, get_data
+from eval.metrics.evaluation import eval_step, get_data
 from training.losses import (
     BaselineLoss,
     JukeboxPerceptualLoss,
@@ -1322,7 +1322,7 @@ def build_vqvae(args) -> vqvae.VQVAE:
     """Construct the bare ``VQVAE`` from a parsed args namespace.
 
     Single source of truth for the args→model mapping so training (``main``)
-    and offline tools (e.g. ``eval/phase0_extract.py``) build an identical
+    and offline tools (e.g. ``eval/maps/phase0_extract.py``) build an identical
     architecture from the same config. Returns the unwrapped module — callers
     add DataParallel / MoCo / aux heads as needed.
     """
@@ -2980,7 +2980,7 @@ def main(args):
                         # EMA and Gumbel sampling stay disabled for the rest of training.
                         _dci_was_training = encoders[0].training
                         try:
-                            import eval.dci as dci
+                            import eval.metrics.dci as dci
 
                             logger.info(f"  [EVALUATION] Periodic synthetic DCI (step {step})...")
                             # Gap only, deliberately: this path scores via GBT
@@ -3033,7 +3033,7 @@ def main(args):
                         _iid_was_training = encoders[0].training
                         _iid_t0 = time.perf_counter()
                         try:
-                            from eval.identifiability_report import (
+                            from eval.protocol.identifiability_report import (
                                 live_level_prefix,
                                 live_metrics,
                                 score_live_levels,
@@ -3046,7 +3046,7 @@ def main(args):
                             _iid_devs = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
                             with torch.random.fork_rng(devices=_iid_devs):
                                 if _iid_dataset is None:
-                                    from eval.run_dci_synthetic import build_synthetic_test_set
+                                    from eval.protocol.run_dci_synthetic import build_synthetic_test_set
 
                                     _iid_dataset = build_synthetic_test_set(
                                         args,
@@ -3098,7 +3098,7 @@ def main(args):
                         selection_name = "separation_score"
                         if step % 2000 == 1 or step == args.train_steps:
                             # (A) Synthetic GT selection: select on the SAME health
-                            # composite (overall_score) as eval.run_dci_compare so the
+                            # composite (overall_score) as eval.protocol.run_dci_compare so the
                             # chosen checkpoint is the one that protocol would rank best
                             # (single source of truth). ADNI runs have no GT factors and
                             # fall through to the cross-reconstruction proxy in (B).
@@ -3111,7 +3111,7 @@ def main(args):
                                 # calls encoder.eval() without restoring train mode.
                                 _sel_was_training = encoders[0].training
                                 try:
-                                    from eval.run_dci_compare import score_encoder_live
+                                    from eval.protocol.run_dci_compare import score_encoder_live
 
                                     # Patch pooling is included whenever a grid exists,
                                     # independent of the training objective: without it
@@ -3165,7 +3165,7 @@ def main(args):
                                     # content block; the other three reward what is ABSENT, and
                                     # measurably peak on a DEGRADED representation (verified by
                                     # deliberately truncating the rank of a real checkpoint in
-                                    # eval/metric_degeneracy_sweep.py: separation 0.414 -> 0.546 and
+                                    # eval/diagnostics/metric_degeneracy_sweep.py: separation 0.414 -> 0.546 and
                                     # content_purity 0.370 -> 0.499 while rank went 37.9 -> 6.5). So
                                     # overall_score can climb while the model quietly discards
                                     # content: measured on this project, 0.49 -> 0.53 between two
@@ -3309,7 +3309,7 @@ def main(args):
                                 and not getattr(args, "contrastive_only", False)
                             ):
                                 try:
-                                    from eval.cross_reconstruction import (
+                                    from eval.metrics.cross_reconstruction import (
                                         evaluate_content_style_separation,
                                     )
 
@@ -3580,7 +3580,7 @@ def main(args):
                     logger.warning(f"  Failed to load best checkpoint, using final weights instead: {e}")
 
             try:
-                from eval.cross_reconstruction import evaluate_content_style_separation
+                from eval.metrics.cross_reconstruction import evaluate_content_style_separation
 
                 logger.info("[EVALUATION] Running final content/style separation metrics...")
                 cs_metrics = evaluate_content_style_separation(
@@ -3679,7 +3679,7 @@ def main(args):
                 test_dict[f"hz_{m}_subsets"][s] = sc.transform(test_dict[f"hz_{m}_subsets"][s])
 
         if args.dataset_name == "synthetic" and args.eval_dci:
-            import eval.dci as dci
+            import eval.metrics.dci as dci
 
             logger.info("[EVALUATION] Computing DCI metrics on synthetic GT factors...")
             # Same split as the periodic DCI above: gap keeps the historical
@@ -3720,7 +3720,7 @@ def main(args):
             discrete_factors_m = args.DATASETCLASS.DISCRETE_FACTORS[m]
 
             if args.eval_dci:
-                import eval.dci as dci
+                import eval.metrics.dci as dci
 
                 def repr_fn(samples):
                     with torch.no_grad():
@@ -3779,7 +3779,7 @@ def main(args):
         # (skipped under contrastive_only — the decoder is never trained).
         if hasattr(args, "content_indices") and not getattr(args, "contrastive_only", False):
             try:
-                from eval.cross_reconstruction import evaluate_content_style_separation
+                from eval.metrics.cross_reconstruction import evaluate_content_style_separation
 
                 logger.info("[EVALUATION] Running content/style separation metrics...")
                 cs_metrics = evaluate_content_style_separation(

@@ -224,7 +224,7 @@ class RegisteredVICRegTests(unittest.TestCase):
         args.style_injection_mode = "input"
         model = self.model()
         attach_vicregl_heads(model, args)
-        path = ROOT / "eval/run_dci_synthetic.py"
+        path = ROOT / "eval/protocol/run_dci_synthetic.py"
         function = next(
             n
             for n in ast.parse(path.read_text()).body

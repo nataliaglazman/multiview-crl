@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from eval import dinov3_embed_synthetic as embed
+from eval.dino import dinov3_embed_synthetic as embed
 from training import finetune_dino as train
 from utils.config import parse_dino_finetune_args
 

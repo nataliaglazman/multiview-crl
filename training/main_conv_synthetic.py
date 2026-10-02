@@ -6,7 +6,7 @@ an affine readout. ``--encoder-architecture resnet18`` uses a 3D adaptation of
 the upstream image encoder: ResNet-18 -> GAP -> Linear -> LeakyReLU -> Linear.
 This architecture option does not change the loss, data, or view-sharing policy.
 
-Identifiability is scored with ``eval.dci.compute_dci_synthetic`` (per-latent
+Identifiability is scored with ``eval.metrics.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
 independent style → ~chance is the block-identification signal.
 
@@ -27,7 +27,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-import eval.dci as dci
+import eval.metrics.dci as dci
 import training.losses as losses
 from data.datasets import SyntheticBrainDataset
 from models.multiview_encoder import MultiviewConvEncoder
@@ -73,6 +73,19 @@ def parse_args(argv=None):
     p.add_argument("--contrastive-loss-type", type=str, default="infonce", choices=["infonce", "barlow_twins"])
     p.add_argument("--tau", type=float, default=1.0, help="InfoNCE temperature")
     p.add_argument("--bt-lambda", type=float, default=0.005, help="Barlow Twins off-diagonal weight")
+    p.add_argument(
+        "--patch-loss-weight",
+        type=float,
+        default=0.0,
+        help="Add this weight times spatial InfoNCE to global InfoNCE; 0 preserves global-only training",
+    )
+    p.add_argument(
+        "--train-patch-grid",
+        type=int,
+        nargs=3,
+        default=[8, 8, 8],
+        help="Training-only patch grid; must fit the backbone map when --patch-loss-weight > 0",
+    )
     p.add_argument(
         "--cross-view-negs-only",
         action=argparse.BooleanOptionalAction,
@@ -234,6 +247,19 @@ def parse_args(argv=None):
         p.error("--deterministic-warn-only requires --deterministic")
     if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
+    if not 0 <= args.patch_loss_weight < float("inf"):
+        p.error("--patch-loss-weight must be finite and nonnegative")
+    if args.patch_loss_weight > 0:
+        if args.contrastive_loss_type != "infonce":
+            p.error("Patch training currently supports global + patch InfoNCE only")
+        if not 0 < args.tau < float("inf"):
+            p.error("Patch InfoNCE requires a finite positive --tau")
+        stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
+        if stride < 1:
+            p.error("Encoder stride must be positive")
+        spatial = (args.res + stride - 1) // stride if args.encoder_architecture == "resnet18" else args.res // stride
+        if any(g < 1 or g > spatial for g in args.train_patch_grid):
+            p.error(f"--train-patch-grid must fit the {spatial}^3 backbone map")
     if args.encoder_architecture == "resnet18":
         if args.conv_readout != "linear":
             p.error("--conv-readout only applies to --encoder-architecture conv")
@@ -321,6 +347,43 @@ def contrastive_loss(pooled, model, args, sim_metric, criterion):
             cross_view_negs_only=args.cross_view_negs_only,
         )
     return loss.squeeze()
+
+
+def patch_contrastive_loss(patches, model, args, sim_metric, criterion):
+    """Registered positions are paired; negatives are subjects at the SAME position.
+
+    Only image-derived features enter this loss. All grid positions participate;
+    there is no lesion/brain-mask sampling or access to generator factor labels.
+    """
+    a, b = patches[:, : args.content_channels, :].chunk(2, dim=0)
+    hz = torch.stack((a, b), dim=0)  # views, subjects, content channels, positions
+    # A configured projector acts on channels, never on the position axis.
+    hz = model.project(hz.permute(0, 1, 3, 2)).permute(0, 1, 3, 2)
+    return losses.patch_infonce_loss(
+        hz,
+        sim_metric=sim_metric,
+        criterion=criterion,
+        tau=args.tau,
+        estimated_content_indices=[list(range(hz.shape[2]))],
+        subsets=[(0, 1)],
+        cross_view_negs_only=args.cross_view_negs_only,
+    ).squeeze()
+
+
+def training_objective(model, images, args, sim_metric, criterion):
+    """Keep the old global path exact when local training is disabled."""
+    weight = getattr(args, "patch_loss_weight", 0.0)
+    if weight > 0:
+        pooled, patches = model.global_and_patch_features(images, args.train_patch_grid, n_views=2)
+    else:
+        pooled = model(images, pool_only=True, n_views=2)[2][0]
+    global_loss = contrastive_loss(pooled, model, args, sim_metric, criterion)
+    patch_loss = (
+        patch_contrastive_loss(patches, model, args, sim_metric, criterion) if weight > 0 else global_loss.new_zeros(())
+    )
+    weighted = weight * patch_loss
+    total = global_loss + weighted if weight > 0 else global_loss
+    return (pooled, total, {"global": global_loss, "patch": patch_loss, "patch_weighted": weighted})
 
 
 def effective_rank(feat):
@@ -530,6 +593,12 @@ def main():
             f"{args.contrastive_proj_dim} (loss runs here; probes read the {args.latent_dim}-d encoding)",
             flush=True,
         )
+    if args.patch_loss_weight > 0:
+        print(
+            f"objective: global InfoNCE + {args.patch_loss_weight:g} * patch InfoNCE; "
+            f"grid={args.train_patch_grid}; shared backbone/readout; all positions; no target labels",
+            flush=True,
+        )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     sim_metric = torch.nn.CosineSimilarity(dim=-1)
@@ -538,6 +607,7 @@ def main():
     batch_order = hashlib.sha256()
     input_images = hashlib.sha256() if args.hash_training_inputs else None
     started = time.perf_counter()
+    last_loss_terms = None
 
     def save_progress(step, status):
         payload = {
@@ -563,6 +633,9 @@ def main():
             "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
             "device": str(device),
             "mps_fallback": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") if device == "mps" else None,
+            "patch_loss_weight": args.patch_loss_weight,
+            "train_patch_grid": (args.train_patch_grid if args.patch_loss_weight > 0 else None),
+            "last_loss_terms": last_loss_terms,
         }
         path = os.path.join(save_dir, "training_progress.json")
         with open(path + ".tmp", "w") as fp:
@@ -592,7 +665,7 @@ def main():
     best = {"value": None, "step": None}
 
     step = 0
-    running = {"loss": 0.0, "rank": 0.0, "n": 0}
+    running = dict(loss=0.0, rank=0.0, n=0, global_loss=0.0, patch=0.0, patch_weighted=0.0)
     model.train()
     while step < args.train_steps:
         for batch in train_loader:
@@ -604,9 +677,7 @@ def main():
                 input_images.update(images.contiguous().numpy().tobytes())
             x = images.to(device)  # (2B, 1, res, res, res)
 
-            _, _, feats, _, _, _, _, _ = model(x, pool_only=True, n_views=2)
-            pooled = feats[0]  # (2B, latent_dim)
-            loss = contrastive_loss(pooled, model, args, sim_metric, criterion)
+            pooled, loss, terms = training_objective(model, x, args, sim_metric, criterion)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -615,6 +686,11 @@ def main():
             optimizer.step()
 
             running["loss"] += loss.item()
+            last_loss_terms = {key: value.detach().item() for key, value in terms.items()}
+            last_loss_terms["total"] = loss.detach().item()
+            running["global_loss"] += last_loss_terms["global"]
+            running["patch"] += last_loss_terms["patch"]
+            running["patch_weighted"] += last_loss_terms["patch_weighted"]
             running["rank"] += effective_rank(pooled[: pooled.shape[0] // 2, : args.content_channels])
             running["n"] += 1
             step += 1
@@ -623,13 +699,26 @@ def main():
                 n = max(running["n"], 1)
                 print(
                     f"step {step:6d} | contrastive {running['loss']/n:.4f} "
-                    f"| content eff_rank {running['rank']/n:.2f}/{args.content_channels}",
+                    f"| content eff_rank {running['rank']/n:.2f}/{args.content_channels}"
+                    + (
+                        f" | global {running['global_loss']/n:.4f} | patch {running['patch']/n:.4f} "
+                        f"| weighted patch {running['patch_weighted']/n:.4f}"
+                        if args.patch_loss_weight > 0
+                        else ""
+                    ),
                     flush=True,
                 )
                 if writer is not None:
                     writer.add_scalar("train/contrastive", running["loss"] / n, step)
                     writer.add_scalar("train/content_eff_rank", running["rank"] / n, step)
-                running = {"loss": 0.0, "rank": 0.0, "n": 0}
+                    if args.patch_loss_weight > 0:
+                        for tag, key in (
+                            ("global_infonce", "global_loss"),
+                            ("patch_infonce", "patch"),
+                            ("patch_infonce_weighted", "patch_weighted"),
+                        ):
+                            writer.add_scalar(f"train/{tag}", running[key] / n, step)
+                running = dict(loss=0.0, rank=0.0, n=0, global_loss=0.0, patch=0.0, patch_weighted=0.0)
 
             if step % args.eval_every == 0 or step == args.train_steps:
                 model.eval()

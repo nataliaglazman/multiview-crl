@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from threadpoolctl import threadpool_limits
 
-from eval.pooling_probe import (
+from eval.diagnostics.pooling_probe import (
     TARGETS,
     block_gram,
     fit_readouts,
@@ -203,7 +203,7 @@ class ProbeTests(unittest.TestCase):
             before = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
             output = Path(tmp) / "audit"
             with patch(
-                "eval.run_dci_synthetic.load_model_from_run_dir", return_value=(model, args, "cpu")
+                "eval.protocol.run_dci_synthetic.load_model_from_run_dir", return_value=(model, args, "cpu")
             ), contextlib.redirect_stdout(io.StringIO()):
                 main(
                     [

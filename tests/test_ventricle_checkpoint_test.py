@@ -15,7 +15,7 @@ import numpy as np
 import sklearn  # noqa: F401 - Load compiled SciPy dependencies before sys.modules patches.
 import torch
 
-from eval import ventricle_checkpoint_test as vt
+from eval.ventricle import ventricle_checkpoint_test as vt
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -293,7 +293,7 @@ class ModelTests(unittest.TestCase):
                     "gt_latents": {"z_content": torch.tensor([0.0, target])},
                 }
 
-        fake = types.ModuleType("eval.run_dci_synthetic")
+        fake = types.ModuleType("eval.protocol.run_dci_synthetic")
         fake.load_run_args = lambda *a: args
         fake.load_model_from_run_dir = lambda *a, **kw: (model, args, torch.device("cpu"))
         with tempfile.TemporaryDirectory() as temp:
@@ -319,7 +319,7 @@ class ModelTests(unittest.TestCase):
                 out=str(Path(temp) / "result"),
                 relative_steps=[1e-5],
             )
-            with patch.dict("sys.modules", {"eval.run_dci_synthetic": fake}), patch.object(
+            with patch.dict("sys.modules", {"eval.protocol.run_dci_synthetic": fake}), patch.object(
                 vt, "make_dataset", side_effect=lambda args, n, causal, split: Samples(n, split)
             ), threadpool_limits(limits=2), contextlib.redirect_stdout(io.StringIO()):
                 report = vt.run(cli)

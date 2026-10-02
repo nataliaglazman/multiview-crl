@@ -12,8 +12,8 @@ import numpy as np
 import torch
 
 from data.datasets import SyntheticBrainDataset
-from eval.score_checkpoint import make_val_dataset
-from eval.synthetic_dataset import build_content_scm
+from eval.protocol.score_checkpoint import make_val_dataset
+from eval.synthetic.synthetic_dataset import build_content_scm
 
 
 def training_functions():

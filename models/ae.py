@@ -9,7 +9,7 @@ to pool, which removes the pooling degree of freedom entirely.
 Everything else mirrors ``MultiviewVAE`` so the swap is controlled — same conv
 backbone (``models.vqvae.Encoder``/``Decoder``), same two view-specific encoders,
 same fixed content/style channel split, same 8-tuple ``forward`` — so
-``eval.dci.compute_dci_synthetic`` scores it unchanged.  The differences from the VAE
+``eval.metrics.dci.compute_dci_synthetic`` scores it unchanged.  The differences from the VAE
 are exactly the two things under test:
 
   * deterministic bottleneck (no ``mu``/``logvar``, no KL) — a *classic* AE;
@@ -120,7 +120,7 @@ class MultiviewAE(HelperModule):
 
         # --- Fixed content/style mask ---
         # First ``content_channels`` latent units are content, the rest style. Buffer so
-        # it moves with .to(device) and is read by eval.dci.compute_dci_synthetic
+        # it moves with .to(device) and is read by eval.metrics.dci.compute_dci_synthetic
         # (which reads soft_content_masks[0]).
         fixed_mask = torch.zeros(1, latent_dim)
         fixed_mask[0, :content_channels] = 1.0
@@ -158,7 +158,7 @@ class MultiviewAE(HelperModule):
 
         recon = None
         # ``self.decoder is None`` under encoder_only: the guard is load-bearing because
-        # eval.dci.compute_dci_synthetic calls the GAP path without return_recon=False.
+        # eval.metrics.dci.compute_dci_synthetic calls the GAP path without return_recon=False.
         if return_recon and self.decoder is not None:
             recon = self.decoder(self.from_latent(z))
             if recon.shape[2:] != in_size:

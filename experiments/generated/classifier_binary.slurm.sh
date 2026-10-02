@@ -46,7 +46,7 @@ RUN_DIR="/scratch/users/k24058220/multiview-crl/results/synthetic/synthetic-crea
 CHECKPOINT="${RUN_DIR}/vqvae_best.pt"
 
 # -- Evaluation --
-"$PYTHON" -m eval.run_dci_synthetic \
+"$PYTHON" -m eval.protocol.run_dci_synthetic \
     --run-dir "${RUN_DIR}" \
     --checkpoint "${CHECKPOINT}" \
     --pooling 4,4,4 \

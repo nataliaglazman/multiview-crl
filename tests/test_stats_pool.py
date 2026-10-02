@@ -11,15 +11,15 @@ import unittest
 import numpy as np
 import torch
 
-from eval.dci import _pool_and_split_view
-from eval.identifiability_metrics import cv_probe_r2
+from eval.metrics.dci import _pool_and_split_view
+from eval.metrics.identifiability_metrics import cv_probe_r2
 from training.losses import stats_pool
 
 B, C, P = 256, 6, 64
 
 
 class TestMatchesTheReportsPooling(unittest.TestCase):
-    """The loss must train on the statistic eval/dci.py scores, or the report measures
+    """The loss must train on the statistic eval/metrics/dci.py scores, or the report measures
     something the objective never optimised. Pinned by calling the eval code, not by
     copying its expression -- a copy would not notice if the eval side changed."""
 

@@ -23,7 +23,7 @@ if [[ ! "$TASK_ID" =~ ^[0-2]$ ]]; then echo "Invalid task index: $TASK_ID" >&2; 
 NAMES=(conv_mlp_s42 resnet_groupnorm_s42 resnet_stride8_s42)
 NAME="${NAMES[$TASK_ID]}"
 STAMP="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-preview}}_${TASK_ID}"
-COMMAND=("$PYTHON" -m eval.encoder_spatial_target_audit --run-dir "$RUNS/$NAME" --out-dir "$OUTPUT/spatial/${NAME}_${STAMP}" --device cuda --batch-size 4 --test-samples 400 --grids 1 2 --seed 1729 --include-native)
+COMMAND=("$PYTHON" -m eval.encoder.encoder_spatial_target_audit --run-dir "$RUNS/$NAME" --out-dir "$OUTPUT/spatial/${NAME}_${STAMP}" --device cuda --batch-size 4 --test-samples 400 --grids 1 2 --seed 1729 --include-native)
 if [[ "$#" -gt 1 ]]; then echo "Usage: $0 [--dry-run]" >&2; exit 2; fi
 case "${1:-}" in
   --dry-run) printf '%q ' "${COMMAND[@]}"; printf '\n'; exit 0 ;;
@@ -32,7 +32,7 @@ case "${1:-}" in
 esac
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then echo "Submit with sbatch; use --dry-run for preview." >&2; exit 2; fi
 cd "$REPO"
-test -f eval/encoder_spatial_target_audit.py && test -f training/encoder_target_control.py
+test -f eval/encoder/encoder_spatial_target_audit.py && test -f training/encoder_target_control.py
 module load anaconda3/2022.10-gcc-13.2.0
 if [[ ! -x "$PYTHON" ]]; then echo "Python missing: $PYTHON" >&2; exit 1; fi
 export PYTHONPATH="$REPO" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 CUBLAS_WORKSPACE_CONFIG=:4096:8

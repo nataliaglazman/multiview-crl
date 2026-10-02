@@ -13,7 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from eval.style_path_audit import (
+from eval.diagnostics.style_path_audit import (
     capture_path,
     check_endpoint,
     effective_style,
@@ -245,7 +245,7 @@ class RenderTests(unittest.TestCase):
                 directory,
             ]
             with patch("sys.argv", argv), patch(
-                "eval.run_dci_synthetic.load_model_from_run_dir", return_value=(model, args, "cpu")
+                "eval.protocol.run_dci_synthetic.load_model_from_run_dir", return_value=(model, args, "cpu")
             ), contextlib.redirect_stdout(io.StringIO()):
                 main()
             report = json.loads((Path(directory) / "summary.json").read_text())

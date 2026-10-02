@@ -15,7 +15,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from eval.encoder_target_protocol import (
+from eval.diagnostics.pooling_probe import r2
+from eval.encoder.encoder_target_protocol import (
     TARGETS,
     VIEWS,
     dataset,
@@ -25,8 +26,7 @@ from eval.encoder_target_protocol import (
     save_csv,
     save_report,
 )
-from eval.pooling_probe import r2
-from eval.score_checkpoint import load_settings
+from eval.protocol.score_checkpoint import load_settings
 from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
 REGRESSION_NAMES = ("lesion_x", "lesion_y", "lesion_z", "sulcal_widening", "sulcal_amplitude")

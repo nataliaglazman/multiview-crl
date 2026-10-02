@@ -56,7 +56,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV_NAME}"
 
 # ---- Analyse ----
-"$PYTHON" -m eval.sweep_vae_identifiability \
+"$PYTHON" -m eval.protocol.sweep_vae_identifiability \
     --results-glob "${RESULTS_GLOB}" \
     --num-test-samples "${NUM_TEST_SAMPLES}" \
     --batch-size "${BATCH_SIZE}" \

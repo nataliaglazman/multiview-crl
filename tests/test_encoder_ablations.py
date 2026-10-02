@@ -7,9 +7,9 @@ import numpy as np
 import torch
 from torch import nn
 
-from eval.checkpoint_lesion_analysis import batch_features
-from eval.encoder_generalization_audit import capture_batch
-from eval.score_checkpoint import build_model
+from eval.encoder.encoder_generalization_audit import capture_batch
+from eval.lesion.checkpoint_lesion_analysis import batch_features
+from eval.protocol.score_checkpoint import build_model
 from models.resnet3d import ResNet18Features3d
 
 VARIANTS = (
