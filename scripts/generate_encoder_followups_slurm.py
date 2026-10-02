@@ -59,7 +59,7 @@ def render(kind, resources, steps, include_native):
             f"CONDA_ENV_NAME={shlex.quote(env)}",
             'PYTHON="${ENCODER_PYTHON:-${HOME}/.conda/envs/${CONDA_ENV_NAME}/bin/python}"',
             'RUNS="${ENCODER_RUNS:-$REPO/results/encoder_ablations_slurm_bio/runs}"',
-            'OUTPUT="${ENCODER_FOLLOWUPS:-$REPO/results/encoder_followups_slurm_bio}"',
+            'OUTPUT="${ENCODER_FOLLOWUPS:-/scratch/users/k24058220/encoder_followups_slurm_bio}"',
             'TASK_ID="${SLURM_ARRAY_TASK_ID:-${ENCODER_TASK_ID:-0}}"',
             f'if [[ ! "$TASK_ID" =~ ^[0-{len(names)-1}]$ ]]; then echo "Invalid task index: $TASK_ID" >&2; exit 2; fi',
             "NAMES=(" + shlex.join(names) + ")",
