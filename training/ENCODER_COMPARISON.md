@@ -92,6 +92,56 @@ stages from starting after a failure. Remove `--only-seed 42` from all three
 launcher commands to run all configured pairs. A Conv audit started after the
 ResNet failure describes only the Conv checkpoint; it cannot complete the pair.
 
+### Training finished but evaluation reports a manifest mismatch
+
+The `warn_only=True` MaxPool3d message is a warning, not a failed training step.
+If the log reaches `done. checkpoints + DCI logs ...`, preserve those checkpoints.
+`Configuration or source code differs from the saved experiment` is the launcher's
+separate provenance check. It compares the entire recipe and every frozen Python
+source, including evaluation utilities; even an unrelated edit changes its hashes.
+The manifest is checked at the start of each launcher invocation, so changes while
+training runs can first be detected when the next command starts. The message
+alone does not identify what changed or when. With `&&`, a failed evaluation
+prevents summarization from starting.
+
+Inspect the exact differences before deciding whether retraining is necessary:
+
+```bash
+# Set this to the directory containing the ORIGINAL comparison_manifest.json.
+# For logs ending in /home/ng24/projects/multiview-crl/runs/resnet18_s42,
+# that directory is normally /home/ng24/projects/multiview-crl.
+OUT=/home/ng24/projects/multiview-crl
+python scripts/diagnose_encoder_comparison.py --output-dir "${OUT:?Set OUT}" --only-seed 42
+```
+
+The diagnostic needs only the standard library and does not write files or start
+jobs. It reports changed configuration keys/source hashes and validates completed
+runs against the **saved** recipe and checkpoint receipts. Installing this separate
+script does not change the source files frozen by the manifest. An empty `"$OUT"`
+in the original launcher resolves to the current directory; use `${OUT:?...}` in
+shell commands to catch unset or empty variables.
+
+For the verified comparison, recover the source version and configuration that
+match the original manifest, then rerun only `evaluate` and `summarize`. Review
+whether source changes could also have affected training of either arm. Do not
+delete or rewrite the original manifest to make the check pass. A changed output
+directory alone does not transfer the existing trained runs.
+
+To inspect a completed checkpoint meanwhile, the standalone audit can run under
+the current code and save a separate, timestamped diagnostic report:
+
+```bash
+python -m eval.encoder.encoder_generalization_audit \
+  --run-dir "${OUT:?Set OUT}/runs/resnet18_s42" --checkpoint model.pt \
+  --batch-size 4 --num-samples 400 --probe-samples 400 \
+  --retrieval-draws 8 --seed 1729 --skip-bn-recalibration
+```
+
+This performs no retraining and records the checkpoint hash and settings. It does
+not repair the original comparison manifest or certify the pair. If the code that
+renders data, constructs the model, or scores features changed, account for that
+when interpreting this diagnostic. Preserve the source version used for the audit.
+
 ## Reproducibility and safeguards
 
 - The training entry point accepts `--data-seed`, `--model-seed` and
@@ -144,7 +194,7 @@ For each run, `evaluation/global_path/` uses the existing generalization audit:
 ridge and RBF hyperparameters are fit/tuned on a 75/25 split of the 400 validation
 subjects, then evaluated on 400 separate test subjects. Both views are evaluated.
 The original checkpoint is primary; BatchNorm recalibration is disabled in this
-suite and remains available separately through `eval.encoder_generalization_audit`.
+suite and remains available separately through `eval.encoder.encoder_generalization_audit`.
 The renderer's existing split-specific fixed-reference normalization is retained
 identically in both arms; this suite does not change that preprocessing protocol.
 

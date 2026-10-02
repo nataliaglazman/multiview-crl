@@ -8,7 +8,7 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from threadpoolctl import threadpool_limits
 
-from eval.lesion_probe import block_gram, extract_features, fit_probes, make_dataset, split_subjects
+from eval.lesion.lesion_probe import block_gram, extract_features, fit_probes, make_dataset, split_subjects
 
 
 class ProbeTests(unittest.TestCase):

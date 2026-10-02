@@ -1,6 +1,6 @@
 """Full-volume adapter for the external, unmodified AICONSlab/3DINO model.
 
-Upstream: https://github.com/AICONSlab/3DINO (see eval/3DINO.md).
+Upstream: https://github.com/AICONSlab/3DINO (see eval/dino/3DINO.md).
 This module does not vendor the upstream implementation or pretrained weights.
 """
 
@@ -190,7 +190,7 @@ def encode_volumes(volumes, encoder, config, cli, device, window, mean=None, std
 def extract(dataset, encoder, device, dtype, config, cli, window, mean, std):
     import numpy as np
 
-    from eval.dinov3_embed_synthetic import raw_voxel_features
+    from eval.dino.dinov3_embed_synthetic import raw_voxel_features
 
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=cli.volume_batch, num_workers=cli.num_workers, shuffle=False

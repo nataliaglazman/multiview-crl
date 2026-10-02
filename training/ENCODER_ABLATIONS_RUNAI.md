@@ -150,19 +150,19 @@ training job completes (example: Conv MLP):
 
 ```bash
 RUN=results/encoder_ablations/runs/conv_mlp_s42
-python -m eval.encoder_generalization_audit \
+python -m eval.encoder.encoder_generalization_audit \
   --run-dir "$RUN" --checkpoint model.pt \
   --num-samples 400 --probe-samples 400 --batch-size 4 \
   --retrieval-draws 8 --seed 1729 --skip-bn-recalibration \
   --out-dir "$RUN/evaluation/global_path"
 
-python -m eval.score_checkpoint \
+python -m eval.protocol.score_checkpoint \
   --run-dir "$RUN" --checkpoint model.pt --num-samples 400 --batch-size 4 \
   --pooling gap --no-graph --no-dci \
   --lesion-analysis --lesion-grids 1 2 --lesion-shuffles 3 --lesion-seed 1729 \
   --out "$RUN/evaluation/validation_gap_lesions.json"
 
-python -m eval.score_checkpoint \
+python -m eval.protocol.score_checkpoint \
   --run-dir "$RUN" --checkpoint model.pt --num-samples 400 --batch-size 4 \
   --pooling patch --patch-grid 2 2 2 --no-graph --no-dci \
   --out "$RUN/evaluation/validation_patch.json"

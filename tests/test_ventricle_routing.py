@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from scipy.ndimage import maximum_filter
 
-from eval.ventricle_routing import (
+from eval.ventricle.ventricle_routing import (
     assess_endpoint_replay,
     audit,
     decode_swaps,
@@ -308,7 +308,7 @@ class PipelineTests(unittest.TestCase):
             sample["b"] = [x + sample["mask"] * 1e-6 for x in sample["a"]]
             return sample
 
-        with patch("eval.ventricle_routing.render_pair", side_effect=tiny_pair):
+        with patch("eval.ventricle.ventricle_routing.render_pair", side_effect=tiny_pair):
             rows, summary, _ = audit(SmallReplayOffset(1), ds, "cpu", eps=0.5, examples=0)
         self.assertTrue(any(r["valid_input"] for r in rows))
         self.assertFalse(any(r["valid_routing"] for r in rows))
@@ -423,10 +423,10 @@ class PipelineTests(unittest.TestCase):
             with (
                 patch("sys.argv", argv),
                 patch(
-                    "eval.run_dci_synthetic.load_model_from_run_dir",
+                    "eval.protocol.run_dci_synthetic.load_model_from_run_dir",
                     return_value=(model, argparse.Namespace(), "cpu"),
                 ),
-                patch("eval.ventricle_routing.make_dataset", return_value=ds),
+                patch("eval.ventricle.ventricle_routing.make_dataset", return_value=ds),
                 contextlib.redirect_stdout(io.StringIO()) as output,
             ):
                 main()

@@ -16,7 +16,7 @@ import sklearn  # noqa: F401 - import compiled dependencies before sys.modules p
 import torch
 from threadpoolctl import threadpool_limits
 
-from eval import ventricle_pooling as vp
+from eval.ventricle import ventricle_pooling as vp
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -100,10 +100,10 @@ class PoolTests(unittest.TestCase):
         torch.set_num_threads(2)
 
     def test_stats_match_existing_eval_formula_and_channel_selection(self):
-        tree = ast.parse((ROOT / "eval/dci.py").read_text())
+        tree = ast.parse((ROOT / "eval/metrics/dci.py").read_text())
         tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_pool_and_split_view"]
         scope = {"torch": torch, "np": np}
-        exec(compile(tree, "eval/dci.py", "exec"), scope)
+        exec(compile(tree, "eval/metrics/dci.py", "exec"), scope)
         maps = torch.randn(2, 7, 5, 4, 4, 4)
         selected = [1, 3]
         ours, _ = vp.pool_descriptors(
@@ -228,7 +228,7 @@ class ExtractionTests(unittest.TestCase):
     ):
         from torch.utils.data import DataLoader, Subset
 
-        from eval.reconstruction_attribution import _content_features, frozen_checkpoint
+        from eval.gradients.reconstruction_attribution import _content_features, frozen_checkpoint
 
         model, ds, args = real_model(), Samples(10), settings()
         saved = {k: v.clone() for k, v in model.state_dict().items()}
@@ -260,7 +260,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_end_to_end_checkpoint_unchanged_and_cache_replay_needs_no_model(self):
         model, args = real_model(), settings()
-        fake = types.ModuleType("eval.run_dci_synthetic")
+        fake = types.ModuleType("eval.protocol.run_dci_synthetic")
         fake.load_run_args = lambda *a: args
         fake.load_model_from_run_dir = lambda *a, **kw: (model, args, "cpu")
         with tempfile.TemporaryDirectory() as temp:
@@ -289,8 +289,8 @@ class ExtractionTests(unittest.TestCase):
                     str(Path(temp) / "result"),
                 ]
             )
-            with patch.dict("sys.modules", {"eval.run_dci_synthetic": fake}), patch(
-                "eval.ventricle_routing.make_dataset",
+            with patch.dict("sys.modules", {"eval.protocol.run_dci_synthetic": fake}), patch(
+                "eval.ventricle.ventricle_routing.make_dataset",
                 side_effect=lambda args, n, *a: Samples(n),
             ), contextlib.redirect_stdout(io.StringIO()):
                 report = vp.run(cli)
@@ -318,7 +318,9 @@ class ExtractionTests(unittest.TestCase):
                 ]
             )
             fake.load_model_from_run_dir = lambda *a, **kw: self.fail("Cache mode loaded a model")
-            with patch.dict("sys.modules", {"eval.run_dci_synthetic": fake}), contextlib.redirect_stdout(io.StringIO()):
+            with patch.dict("sys.modules", {"eval.protocol.run_dci_synthetic": fake}), contextlib.redirect_stdout(
+                io.StringIO()
+            ):
                 cached_report = vp.run(replay)
             self.assertEqual(report["results"], cached_report["results"])
             with self.assertRaises(FileExistsError):

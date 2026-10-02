@@ -6,7 +6,7 @@ an affine readout. ``--encoder-architecture resnet18`` uses a 3D adaptation of
 the upstream image encoder: ResNet-18 -> GAP -> Linear -> LeakyReLU -> Linear.
 This architecture option does not change the loss, data, or view-sharing policy.
 
-Identifiability is scored with ``eval.dci.compute_dci_synthetic`` (per-latent
+Identifiability is scored with ``eval.metrics.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
 independent style → ~chance is the block-identification signal.
 
@@ -27,11 +27,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-import eval.dci as dci
+import eval.metrics.dci as dci
 import training.losses as losses
 from data.datasets import SyntheticBrainDataset
 from models.multiview_encoder import MultiviewConvEncoder
-from utils.encoder_runtime import configure_encoder_runtime
+from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
 
 def parse_args(argv=None):
@@ -124,6 +124,13 @@ def parse_args(argv=None):
         "--hash-training-inputs", action="store_true", help="Record a streaming hash of all actual training images"
     )
     p.add_argument("--no-cuda", action="store_true")
+    p.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+        help="auto keeps the legacy CUDA/CPU selection; mps needs PYTORCH_ENABLE_MPS_FALLBACK=1 exported "
+        "before Python starts (ResNet MaxPool3d runs on CPU)",
+    )
 
     # Evaluation pooling — GAP is the paper-faithful default; patch probes whether
     # content survives at spatial resolution (see groupnorm-caps-gap-pooled-mcc).
@@ -212,6 +219,8 @@ def parse_args(argv=None):
         help="Nonlinearity in causal mechanisms.",
     )
     args = p.parse_args(argv)
+    if args.no_cuda and args.device not in ("auto", "cpu"):
+        p.error("--no-cuda forces CPU; it cannot be combined with --device cuda/mps")
     for name, default in (("data_seed", args.seed), ("model_seed", args.seed), ("loader_seed", args.seed + 10000)):
         if getattr(args, name) is None:
             setattr(args, name, default)
@@ -323,6 +332,9 @@ def effective_rank(feat):
     identifiability number it reports will sit at the untrained floor.
     """
     x = feat.detach().float()
+    if x.device.type == "mps":
+        # This small diagnostic is outside autograd; keep eigvalsh off MPS.
+        x = x.cpu()
     x = x - x.mean(dim=0, keepdim=True)
     ev = torch.linalg.eigvalsh(torch.cov(x.T)).clamp(min=0)
     total = ev.sum()
@@ -456,13 +468,13 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
 
 def main():
     args = parse_args()
+    configure_encoder_runtime(vars(args))
+    device = select_encoder_device(args.device, args.no_cuda)
     save_dir = os.path.join(args.out_dir, args.model_id)
     os.makedirs(save_dir, exist_ok=not args.require_new_run)
     with open(os.path.join(save_dir, "settings.json"), "w") as fp:
         json.dump(vars(args), fp, indent=2)
 
-    configure_encoder_runtime(vars(args))
-    device = "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
     print(f"device: {device}", flush=True)
     for k, v in vars(args).items():
         print(f"\t{k}: {v}", flush=True)
@@ -550,6 +562,7 @@ def main():
             "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
             "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
             "device": str(device),
+            "mps_fallback": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") if device == "mps" else None,
         }
         path = os.path.join(save_dir, "training_progress.json")
         with open(path + ".tmp", "w") as fp:

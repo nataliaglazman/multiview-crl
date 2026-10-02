@@ -146,13 +146,13 @@ require_flags () {         # $1 = module, rest = flags it must accept
   echo "  $MOD ok"
 }
 if [ "$BACKEND" = "3dino" ]; then
-  require_flags eval.run_3dino_identifiability --causal --with-floor --no-graph --preprocessing
+  require_flags eval.dino.run_3dino_identifiability --causal --with-floor --no-graph --preprocessing
 else
-  require_flags eval.dinov3_embed_synthetic --causal --random-init --preprocessing
+  require_flags eval.dino.dinov3_embed_synthetic --causal --random-init --preprocessing
 fi
-require_flags eval.compare_bundles --representation --equal-width --with-graph --holdout-readout
-require_flags eval.plot_compare_bundles --json
-[ -n "$CROSS_ARM" ] && require_flags eval.plot_pairing --cross --within --metric
+require_flags eval.protocol.compare_bundles --representation --equal-width --with-graph --holdout-readout
+require_flags eval.plots.plot_compare_bundles --json
+[ -n "$CROSS_ARM" ] && require_flags eval.plots.plot_pairing --cross --within --metric
 
 # Only now: a preflight failure should leave nothing behind, or the retry would trip the
 # already-exists guard above and demand FRESH=1 for a run that never started.
@@ -166,7 +166,7 @@ mkdir -p "$OUT"
 extract_arm () {            # $1 = weights/model, $2 = preprocessing.json, $3 = dest dir
   local MODEL="$1" PRE="$2" DEST="$3"
   if [ "$BACKEND" = "3dino" ]; then
-    python -m eval.run_3dino_identifiability \
+    python -m eval.dino.run_3dino_identifiability \
       --three-dino-repo "$DINO_REPO" --three-dino-weights "$MODEL" \
       --preprocessing "$PRE" --run-dir "$RUN_DIR" --output-dir "$DEST" \
       --num-samples "$NUM_SAMPLES" --causal match \
@@ -177,11 +177,11 @@ extract_arm () {            # $1 = weights/model, $2 = preprocessing.json, $3 = 
     # --preprocessing restores the pooling/window the arm was fine-tuned under, and
     # embedding_partition.json next to the weights gives the content/style arrays. The
     # floor is the same architecture unloaded, so it inherits both.
-    python -m eval.dinov3_embed_synthetic \
+    python -m eval.dino.dinov3_embed_synthetic \
       --model-id "$MODEL" --preprocessing "$PRE" --run-dir "$RUN_DIR" \
       --out "$DEST/embeddings.npz" \
       --num-samples "$NUM_SAMPLES" --causal match --views 1 2 --device "$DEVICE"
-    python -m eval.dinov3_embed_synthetic \
+    python -m eval.dino.dinov3_embed_synthetic \
       --model-id "$MODEL" --preprocessing "$PRE" --run-dir "$RUN_DIR" \
       --out "$DEST/random_init.npz" --random-init --model-seed 0 \
       --num-samples "$NUM_SAMPLES" --causal match --views 1 2 --device "$DEVICE"
@@ -228,17 +228,17 @@ compare () {              # $1 = output dir name, $2 = --representation value, t
   mkdir -p "$OUT/$NAME"
   # --representation is what makes these two tables different questions. Without it both
   # scored the whole embedding and content/ was a copy of all/ minus the baseline row.
-  python -m eval.compare_bundles "$@" \
+  python -m eval.protocol.compare_bundles "$@" \
     --view "$VIEW" --representation "$BLOCK" \
     --equal-width --with-graph --holdout-readout \
     --graph-repeats "$GRAPH_REPEATS" \
     --alphas "$ALPHA" --diagnostic-alpha "$ALPHA" \
     --out "$OUT/$NAME/compare.json" --csv "$OUT/$NAME/compare.csv"
-  python -m eval.plot_compare_bundles --json "$OUT/$NAME/compare.json" --out "$OUT/$NAME/figures"
+  python -m eval.plots.plot_compare_bundles --json "$OUT/$NAME/compare.json" --out "$OUT/$NAME/figures"
   # The pairing pair of figures on top, when the run IS a pairing comparison: the generic
   # table puts the two arms in separate bands and leaves the reader to subtract.
   if [ -n "$CROSS_ARM" ] && [ -n "$WITHIN_ARM" ]; then
-    python -m eval.plot_pairing --json "$OUT/$NAME/compare.json" \
+    python -m eval.plots.plot_pairing --json "$OUT/$NAME/compare.json" \
       --cross "$CROSS_ARM" --within "$WITHIN_ARM" --out "$OUT/$NAME/figures"
   fi
 }

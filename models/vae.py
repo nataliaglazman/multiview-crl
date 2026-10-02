@@ -9,7 +9,7 @@ driven by an L1 loss; a small KL term keeps it variational.
 The intended experiment: set ``content_channels`` to the true number of recoverable
 shared factors (the synthetic dataset's ``n_content``) and verify that the content block
 becomes identifiable — high content->content informativeness, low content->view leakage —
-via ``eval.dci.compute_dci_synthetic``.  Sweeping ``content_channels`` should show the
+via ``eval.metrics.dci.compute_dci_synthetic``.  Sweeping ``content_channels`` should show the
 identifiability peak at the correct dimensionality.
 
 The conv building blocks (``Encoder``, ``Decoder``, ``get_group_norm``) are reused from
@@ -96,7 +96,7 @@ class MultiviewVAE(HelperModule):
         # --- Fixed content/style mask ---
         # First ``content_channels`` latent channels are content, the rest style.
         # Registered as a buffer so it moves with .to(device) and is picked up by
-        # eval.dci.compute_dci_synthetic (which reads soft_content_masks[0]).
+        # eval.metrics.dci.compute_dci_synthetic (which reads soft_content_masks[0]).
         fixed_mask = torch.zeros(1, latent_channels)
         fixed_mask[0, :content_channels] = 1.0
         self.register_buffer("content_mask", fixed_mask)

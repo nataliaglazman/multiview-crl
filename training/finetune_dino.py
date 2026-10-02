@@ -35,7 +35,7 @@ import math
 import random
 from contextlib import nullcontext
 
-from eval import dinov3_embed_synthetic as embed
+from eval.dino import dinov3_embed_synthetic as embed
 from models.dino_partition import make_partition, split_embeddings
 from utils.config import parse_dino_finetune_args
 

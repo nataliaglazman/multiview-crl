@@ -14,7 +14,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from eval.ventricle_quantizer_audit import (
+from eval.ventricle.ventricle_quantizer_audit import (
     audit,
     fixed_affine,
     main,
@@ -171,7 +171,7 @@ class QuantizerTests(unittest.TestCase):
             before_file = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
             out = Path(tmp) / "audit"
             with patch(
-                "eval.run_dci_synthetic.load_model_from_run_dir", return_value=(model, dataset_args(), "cpu")
+                "eval.protocol.run_dci_synthetic.load_model_from_run_dir", return_value=(model, dataset_args(), "cpu")
             ), contextlib.redirect_stdout(io.StringIO()):
                 main(
                     [

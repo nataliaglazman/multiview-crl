@@ -22,7 +22,7 @@
 #
 # HOW TO RUN. Point init_from_checkpoint at phase 1's BEST checkpoint (the selection
 # composite picks a step near the MCC peak; confirm with
-# `python -m eval.patch_mcc_decay --run-dir <phase1> --tests curves`), then score this run
+# `python -m eval.diagnostics.patch_mcc_decay --run-dir <phase1> --tests curves`), then score this run
 # with notebook Section 23 against the phase-1 final checkpoint.
 #
 # Everything below the frozen-phase block is copied verbatim from synthetic_causal.yaml.

@@ -120,7 +120,7 @@ def parse_args() -> argparse.ArgumentParser:
         "puts every factor in [-1,1] where the squash is the identity and the ceiling is 1.0 "
         "for every probe class. Under --synthetic-causal / --synthetic-hierarchical-content it "
         "is applied as a per-dim monotone probability-integral transform, so the dependence "
-        "structure is unchanged. Verify with: python -m eval.generator_defects --tests squash.",
+        "structure is unchanged. Verify with: python -m eval.synthetic.generator_defects --tests squash.",
     )
     parser.add_argument(
         "--synthetic-content-squash",
@@ -141,7 +141,7 @@ def parse_args() -> argparse.ArgumentParser:
         "--synthetic-content-scale, which multiplies all of them together). Lifts a factor that "
         "renders below the noise floor without touching the rest. Dims 2:5 are lesion POSITION, "
         "not a boundary displacement, and ignore this -- use --synthetic-lesion-radius. "
-        "Calibrate with: python -m eval.generator_defects --tests amplitude.",
+        "Calibrate with: python -m eval.synthetic.generator_defects --tests amplitude.",
     )
     parser.add_argument(
         "--synthetic-lesion-radius",
@@ -167,7 +167,7 @@ def parse_args() -> argparse.ArgumentParser:
         "on the OUTER surface, the highest-energy surface in the volume, so both Jacobians align "
         "(cosine +0.43). 'nested' gives the outer surface to z0 alone. 'midsurface' has z0 shift "
         "both boundaries together and z5 split them apart, i.e. orthogonal combinations. "
-        "Measure with: python -m eval.generator_defects --tests degeneracy.",
+        "Measure with: python -m eval.synthetic.generator_defects --tests degeneracy.",
     )
     parser.add_argument(
         "--synthetic-center-local-deformations",
@@ -1230,13 +1230,15 @@ def parse_args() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="If > 0 and --dataset-name is 'synthetic', every N steps score the encoder with "
-        "eval.identifiability_report's per-factor decoding on an i.i.d. test set (the test split "
+        "eval.protocol.identifiability_report's per-factor decoding on an i.i.d. test set (the test split "
         "built with causal=False, i.e. '--causal iid'): every content AND style factor, read from "
         "the content block and from the style block, at gap and patch pooling. Logged as "
         "iid_{r2,r2_gap}/<factor>/<pooling>/from_{content,style}, plus iid_mcc/* and iid_view/*, "
         "and the full report saved to <save_dir>/iid_probe/step_<N>.json (readable with "
-        "`python -m eval.identifiability_report --from-json`). No untrained floor, so read "
-        "the curves as change over training, not as absolute scores. 0 disables (default).",
+        "`python -m eval.protocol.identifiability_report --from-json`). With --separate-encoders, encoder 2 "
+        "is scored too, against view-2 style factors, under iid_enc2_* (about twice the probe time). "
+        "No untrained floor, so read the curves as change over training, not as absolute scores. "
+        "0 disables (default).",
     )
     parser.add_argument(
         "--iid-probe-samples",
@@ -1252,6 +1254,17 @@ def parse_args() -> argparse.ArgumentParser:
         default=[8, 8, 8],
         help="Patch grid (D H W) for the --iid-probe-every patch rung. Default 8 8 8 matches "
         "identifiability_report's default --poolings.",
+    )
+    parser.add_argument(
+        "--iid-probe-levels",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Encoder levels the --iid-probe-every probe scores (default: every level, from one "
+        "extraction pass; probe time scales with the count). Level 0 (finest, where the content "
+        "mask lives) logs the bare iid_* tags and step_<N>.json; level k logs iid_l<k>_* and "
+        "step_<N>_level<k>.json. A level without a content mask has no style block, so it is "
+        "scored as all-content and logs no from_style tags.",
     )
     parser.add_argument(
         "--iid-probe-n-jobs",
@@ -1364,7 +1377,7 @@ def parse_args() -> argparse.ArgumentParser:
         choices=["gap", "stats"],
         help="How the GAP companion term summarises each subject's spatial map. 'gap' (default) "
         "is the uniform spatial mean. 'stats' concatenates mean, std, max and min per channel, "
-        "matching the 'stats' pooling eval/dci.py already scores. Both give ONE ROW PER SUBJECT, "
+        "matching the 'stats' pooling eval/metrics/dci.py already scores. Both give ONE ROW PER SUBJECT, "
         "which is the property the GAP term exists for -- but the uniform mean is the worst "
         "summary for a LOCALISED factor, which contributes ~1/P of a channel's mean and vanishes, "
         "while clearly moving that channel's min and spread. Measured on this project: "
@@ -1492,7 +1505,7 @@ def parse_args() -> argparse.ArgumentParser:
         "MSE term can remove). Sharing one coefficient therefore buys the gap fix at the price of "
         "pure surplus alignment pressure on patch, and alignment pressure has no informativeness "
         "counterweight anywhere in BT — only the reconstruction term asks the code to stay "
-        "informative. Size it with eval.bt_term_balance, which reports both arms separately.",
+        "informative. Size it with eval.gradients.bt_term_balance, which reports both arms separately.",
     )
     parser.add_argument(
         "--bt-gap-std-coeff",

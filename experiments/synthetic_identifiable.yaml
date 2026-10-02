@@ -2,7 +2,7 @@
 #
 # The model/objective half is copied verbatim from synthetic_causal.yaml so this is a
 # clean A/B against it: the only differences are in the data-generating process. Every
-# number quoted below is from `eval/generator_defects.py` at --res 64 (this run's
+# number quoted below is from `eval/synthetic/generator_defects.py` at --res 64 (this run's
 # resolution), comparing this config against synthetic_causal.yaml.
 #
 #   what it buys                              before -> after
@@ -20,7 +20,7 @@
 # low per-factor R^2 is attributable to the model rather than to the benchmark.
 #
 # Reproduce the audit for this exact config with:
-#   python -m eval.generator_defects --tests all --preset flagship --res 64 \
+#   python -m eval.synthetic.generator_defects --tests all --preset flagship --res 64 \
 #     --identifiable-ventricle --content-prior uniform --content-squash none \
 #     --lesion-radius 0.14 --cortex-parameterization patterned --center-local-deformations
 

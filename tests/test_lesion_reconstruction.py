@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from eval.lesion_reconstruction import audit, json_safe, locate, location_metrics, make_dataset, render_pair
+from eval.lesion.lesion_reconstruction import audit, json_safe, locate, location_metrics, make_dataset, render_pair
 
 
 class LocationTests(unittest.TestCase):

@@ -12,8 +12,8 @@ from unittest.mock import patch
 import torch
 from torch.utils.data import Dataset
 
-from eval.score_checkpoint import build_model
-from eval.score_checkpoint import make_dataset as evaluation_dataset
+from eval.protocol.score_checkpoint import build_model
+from eval.protocol.score_checkpoint import make_dataset as evaluation_dataset
 from training import main_conv_synthetic as trainer
 
 

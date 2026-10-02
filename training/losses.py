@@ -1043,7 +1043,7 @@ def stats_pool(hz, content_indices=None, soft_content_mask=None, n_stats=4):
     gap 0.097, stats 0.406, patch 0.773.  The 4x from gap to stats costs nothing in row
     semantics -- both are one row per subject.
 
-    Layout is STAT-MAJOR to match ``eval/dci.py``'s ``_pool_and_split_view`` exactly
+    Layout is STAT-MAJOR to match ``eval/metrics/dci.py``'s ``_pool_and_split_view`` exactly
     (all C means, then all C stds, then maxes, then mins), so the loss trains on the same
     statistic the report scores.  ``tests/test_stats_pool.py`` pins that equality rather
     than trusting the comment.

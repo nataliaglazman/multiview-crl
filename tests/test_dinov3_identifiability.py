@@ -7,9 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from eval import dinov3_embed_synthetic as embed
-from eval import dinov3_identifiability as score
-from eval import run_causal_recovery as recovery
+from eval.causal import run_causal_recovery as recovery
+from eval.dino import dinov3_embed_synthetic as embed
+from eval.dino import dinov3_identifiability as score
 
 
 class SlicingTests(unittest.TestCase):
@@ -399,7 +399,7 @@ class CausalPlotTests(unittest.TestCase):
         cls.payload = {"protocol": {}, "runs": [result]}
 
     def _render(self, payload, extra=()):
-        from eval import plot_causal_recovery as plot
+        from eval.plots import plot_causal_recovery as plot
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "causal_recovery.json"
@@ -427,7 +427,7 @@ class CausalPlotTests(unittest.TestCase):
         self.assertIn("edges.png", names)
 
     def test_edge_classes_partition_the_pairs_the_skeleton_scores(self):
-        from eval import plot_causal_recovery as plot
+        from eval.plots import plot_causal_recovery as plot
 
         run = self.payload["runs"][0]
         _names, classes = plot.edge_classes(run)
@@ -437,7 +437,7 @@ class CausalPlotTests(unittest.TestCase):
 
     def test_unscored_runs_are_dropped_not_plotted(self):
         payload = {"protocol": {}, "runs": [{"run_dir": "a", "status": "error", "reason": "boom"}]}
-        from eval import plot_causal_recovery as plot
+        from eval.plots import plot_causal_recovery as plot
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "r.json"

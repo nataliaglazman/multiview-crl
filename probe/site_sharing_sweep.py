@@ -94,7 +94,7 @@ def build_fixture(cli, args, device, n_subjects):
     """Images, masks and tissue for the subjects — everything that does NOT depend on weights."""
     import torch
 
-    from eval.run_dci_synthetic import build_synthetic_test_set
+    from eval.protocol.run_dci_synthetic import build_synthetic_test_set
 
     ds = build_synthetic_test_set(args, max(n_subjects, 8), cache=True, causal=True)
     inner = getattr(ds, "_inner", None)
@@ -174,7 +174,7 @@ def main():
 
     import torch
 
-    from eval.run_dci_synthetic import load_model_from_run_dir
+    from eval.protocol.run_dci_synthetic import load_model_from_run_dir
     from probe.jacobian_spread import build_arm, make_fn
 
     torch.set_num_threads(cli.threads)

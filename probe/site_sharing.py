@@ -281,7 +281,7 @@ def effective_rank(J: np.ndarray) -> tuple[float, float]:
     entropy, and on a heavy-tailed spectrum they differ by 2-5x — enough to look like a
     contradiction between scripts when it is only a definition. ``energy`` weights by
     squared singular values, so it describes where the *response* lives and is the stricter
-    of the two. ``roy_vetterli`` matches ``eval/run_dci_compare._effective_rank``, which is
+    of the two. ``roy_vetterli`` matches ``eval/protocol/run_dci_compare._effective_rank``, which is
     what the content-rank numbers elsewhere in this project report, so quote that one when
     comparing against them.
     """
@@ -649,7 +649,7 @@ def reduce_arm(
         # d columns in an effectively r-dimensional space cannot be told apart when r << d.
         "effective_rank": eff_rank,
         "effective_rank_ratio": eff_rank / n_live,
-        # Roy-Vetterli, matching eval/run_dci_compare._effective_rank — quote this one when
+        # Roy-Vetterli, matching eval/protocol/run_dci_compare._effective_rank — quote this one when
         # comparing against the content-rank numbers reported elsewhere in the project.
         "effective_rank_rv": eff_rank_rv,
         "spectrum_keep": keep,
@@ -928,7 +928,7 @@ def main():
     torch.set_default_dtype(torch.float32)
     device = torch.device("cpu")  # gradient magnitudes are the measurement: float32, no AMP
 
-    from eval.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir
+    from eval.protocol.run_dci_synthetic import build_synthetic_test_set, load_model_from_run_dir
 
     ckpt = cli.checkpoint or os.path.join(cli.run_dir, "vqvae_best.pt")
     model, args, device = load_model_from_run_dir(cli.run_dir, ckpt, device)

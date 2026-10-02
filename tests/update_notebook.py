@@ -1,30 +1,28 @@
 import json
-import re
 
-with open('/home/ng24/projects/multiview-crl/eval/view_latents.ipynb', 'r') as f:
+with open("/home/ng24/projects/multiview-crl/eval/notebooks/view_latents.ipynb", "r") as f:
     nb = json.load(f)
 
-for cell in nb['cells']:
-    if cell['cell_type'] == 'code':
-        source = "".join(cell['source'])
-        
+for cell in nb["cells"]:
+    if cell["cell_type"] == "code":
+        source = "".join(cell["source"])
+
         # 1. Update initialization
         source = source.replace(
             "all_content_indices = None  # view-0 (T1) content indices (deterministic in eval mode)\nall_content_indices_v1 = None",
-            "all_content_indices = {}  # dict mapping level -> view-0 (T1) content indices\nall_content_indices_v1 = {}"
+            "all_content_indices = {}  # dict mapping level -> view-0 (T1) content indices\nall_content_indices_v1 = {}",
         )
-        
+
         # 2. Update model call
         source = source.replace(
             "_, _, enc_features, est_content_idx, _, _, _ = vqvae_model(",
-            "_, _, enc_features, est_content_idx, _, _, soft_masks, *_ = vqvae_model("
+            "_, _, enc_features, est_content_idx, _, _, soft_masks, *_ = vqvae_model(",
         )
         source = source.replace(
             "_, _, enc_features, est_content_idx, _, _, soft_masks, *extra = vqvae_model(",
-            "_, _, enc_features, est_content_idx, _, _, soft_masks, *_ = vqvae_model("
+            "_, _, enc_features, est_content_idx, _, _, soft_masks, *_ = vqvae_model(",
         )
 
-        
         # 3. Update indices extraction
         ext_old = """        if est_content_idx is not None:
             if modality == "T1" and all_content_indices is None:
@@ -44,7 +42,7 @@ for cell in nb['cells']:
                 if modality == "T1" and lvl not in all_content_indices:
                     all_content_indices[lvl] = torch.where(mask.bool())[-1].tolist()"""
         source = source.replace(ext_old, ext_new)
-        
+
         # 4. Update printing indices
         p_old = """all_style_indices = [i for i in range(hidden_channels) if i not in set(all_content_indices or [])]
 if _has_per_view and all_content_indices_v1 is not None:
@@ -116,7 +114,7 @@ if len(all_content_indices) > 0:
             )
         print("  (Content dist should be smaller than style dist if disentanglement is working)")"""
         source = source.replace(feat_stat_old, feat_stat_new)
-        
+
         # 6. PCA
         pca_old = """    # For level 0, show only the content dims — these are what the contrastive
     # loss acts on.  Plotting all embed_dim at level 0 mixes in style dims,
@@ -175,11 +173,13 @@ if len(all_content_indices) > 0:
     else:
         features = all_features[f"level_{level_idx}"]
         level_label = f"Level {level_idx}\""""
-        source = source.replace(tsne_old, pca_new.replace("Level 0 ", f"Level {level_idx} ").replace("Level 0", f"Level {level_idx}"))
+        source = source.replace(
+            tsne_old, pca_new.replace("Level 0 ", f"Level {level_idx} ").replace("Level 0", f"Level {level_idx}")
+        )
 
-        cell['source'] = [line + '\n' for line in source.split('\n')]
-        if cell['source'] and cell['source'][-1].endswith('\n') and not source.endswith('\n'):
-            cell['source'][-1] = cell['source'][-1][:-1]
+        cell["source"] = [line + "\n" for line in source.split("\n")]
+        if cell["source"] and cell["source"][-1].endswith("\n") and not source.endswith("\n"):
+            cell["source"][-1] = cell["source"][-1][:-1]
 
-with open('/home/ng24/projects/multiview-crl/eval/view_latents.ipynb', 'w') as f:
+with open("/home/ng24/projects/multiview-crl/eval/notebooks/view_latents.ipynb", "w") as f:
     json.dump(nb, f, indent=1)

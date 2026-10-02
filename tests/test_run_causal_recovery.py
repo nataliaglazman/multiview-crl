@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from eval import causal_factor_diagnostics as diagnostics
-from eval import run_causal_recovery as recovery
+from eval.causal import causal_factor_diagnostics as diagnostics
+from eval.causal import run_causal_recovery as recovery
 
 
 class ScoringTests(unittest.TestCase):

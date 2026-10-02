@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from eval import plot_compare_bundles as plot
-from eval.plot_identifiability import THEME
+from eval.plots import plot_compare_bundles as plot
+from eval.plots.plot_identifiability import THEME
 
 
 def factor_row(gap, floor=None, real=None):

@@ -2,7 +2,7 @@
 # Encoder-only multi-view contrastive learning on the 3D synthetic data
 # (training/main_conv_synthetic.py — Yao et al. ICLR 2024 image track, in 3D):
 # per-view conv encoders, content-alignment − entropy loss, NO decoder.
-# Identifiability is scored with eval.dci.compute_dci_synthetic (R^2 + block-MCC).
+# Identifiability is scored with eval.metrics.dci.compute_dci_synthetic (R^2 + block-MCC).
 #
 # Submit from the repo root:
 #     sbatch scripts/run_conv_synthetic_slurm.sh

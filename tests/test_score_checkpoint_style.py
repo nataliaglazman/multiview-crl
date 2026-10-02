@@ -1,4 +1,4 @@
-"""Style-block scoring in eval.score_checkpoint: one forward, rendered targets, leakage probes, CLI report."""
+"""Style-block scoring in eval.protocol.score_checkpoint: one forward, rendered targets, leakage probes, CLI report."""
 
 import contextlib
 import io
@@ -12,9 +12,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from eval import score_checkpoint
-from eval.dci import CONTENT_FACTOR_NAMES, STYLE_FACTOR_NAMES
-from eval.style_path_audit import effective_style
+from eval.diagnostics.style_path_audit import effective_style
+from eval.metrics.dci import CONTENT_FACTOR_NAMES, STYLE_FACTOR_NAMES
+from eval.protocol import score_checkpoint
 
 
 def config(**kwargs):

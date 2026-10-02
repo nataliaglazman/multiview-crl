@@ -11,7 +11,7 @@ GroupNorm, or remove late ResNet strides. Defaults preserve existing checkpoints
 
 The first ``content_channels`` units are the content block, the rest are style.
 ``forward`` returns the same 8-tuple as ``VQVAE``/``MultiviewVAE`` so
-``eval.dci.compute_dci_synthetic`` scores this model unchanged.
+``eval.metrics.dci.compute_dci_synthetic`` scores this model unchanged.
 """
 
 import copy

@@ -54,7 +54,7 @@ from torch.utils.tensorboard import SummaryWriter
 import models.vqvae as vqvae
 import utils.utils as utils
 from data.infinite_iterator import InfiniteIterator, ResumableSampler
-from eval.evaluation import eval_step, get_data
+from eval.metrics.evaluation import eval_step, get_data
 from training.losses import (
     BaselineLoss,
     JukeboxPerceptualLoss,
@@ -1322,7 +1322,7 @@ def build_vqvae(args) -> vqvae.VQVAE:
     """Construct the bare ``VQVAE`` from a parsed args namespace.
 
     Single source of truth for the args→model mapping so training (``main``)
-    and offline tools (e.g. ``eval/phase0_extract.py``) build an identical
+    and offline tools (e.g. ``eval/maps/phase0_extract.py``) build an identical
     architecture from the same config. Returns the unwrapped module — callers
     add DataParallel / MoCo / aux heads as needed.
     """
@@ -2980,7 +2980,7 @@ def main(args):
                         # EMA and Gumbel sampling stay disabled for the rest of training.
                         _dci_was_training = encoders[0].training
                         try:
-                            import eval.dci as dci
+                            import eval.metrics.dci as dci
 
                             logger.info(f"  [EVALUATION] Periodic synthetic DCI (step {step})...")
                             # Gap only, deliberately: this path scores via GBT
@@ -3021,7 +3021,9 @@ def main(args):
 
                     # Periodic i.i.d. identifiability probe: identifiability_report's per-factor
                     # decoding (every content + style factor, from content and from style, at gap
-                    # and patch) on the test split built with causal=False.
+                    # and patch) on the test split built with causal=False, at every encoder level
+                    # (or --iid-probe-levels). With separate encoders, encoder 2 is scored too
+                    # (iid_enc2_* tags), as the periodic DCI above does.
                     _iid_every = getattr(args, "iid_probe_every", 0)
                     if (
                         _iid_every > 0
@@ -3031,7 +3033,12 @@ def main(args):
                         _iid_was_training = encoders[0].training
                         _iid_t0 = time.perf_counter()
                         try:
-                            from eval.identifiability_report import live_metrics, score_live, write_report_json
+                            from eval.protocol.identifiability_report import (
+                                live_level_prefix,
+                                live_metrics,
+                                score_live_levels,
+                                write_report_json,
+                            )
 
                             # fork_rng: building the dataset calls torch.manual_seed, and every eval
                             # DataLoader draws its base seed from the global RNG. Without the fork the
@@ -3039,7 +3046,7 @@ def main(args):
                             _iid_devs = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
                             with torch.random.fork_rng(devices=_iid_devs):
                                 if _iid_dataset is None:
-                                    from eval.run_dci_synthetic import build_synthetic_test_set
+                                    from eval.protocol.run_dci_synthetic import build_synthetic_test_set
 
                                     _iid_dataset = build_synthetic_test_set(
                                         args,
@@ -3047,22 +3054,32 @@ def main(args):
                                         cache=getattr(args, "cache_dataset", False),
                                         causal=False,
                                     )
-                                _iid_res = score_live(
+                                _iid_res = score_live_levels(
                                     encoders[0],
                                     _iid_dataset,
                                     device,
                                     poolings=[("gap", "gap"), ("patch", tuple(args.iid_probe_patch_grid))],
+                                    levels=getattr(args, "iid_probe_levels", None),
                                     batch_size=dataloader_kwargs.get("batch_size", 32),
                                     n_jobs=getattr(args, "iid_probe_n_jobs", -1),
                                     causal="iid",
                                     name=f"{args.model_id}-step{step}",
+                                    per_encoder=getattr(args, "separate_encoders", False),
                                 )
-                            _iid_log = live_metrics(_iid_res)
+                            # Level 0 keeps the bare iid_* tags and step_<N>.json; level k logs
+                            # iid_l<k>_* and step_<N>_level<k>.json.
+                            _iid_log = {}
+                            for _iid_lvl, _iid_lvl_res in _iid_res.items():
+                                _iid_log.update(live_metrics(_iid_lvl_res, prefix=live_level_prefix(_iid_lvl)))
+                                _iid_suffix = "" if _iid_lvl == 0 else f"_level{_iid_lvl}"
+                                write_report_json(
+                                    os.path.join(args.save_dir, "iid_probe", f"step_{step}{_iid_suffix}.json"),
+                                    _iid_lvl_res,
+                                )
                             for _iid_k, _iid_v in _iid_log.items():
                                 tb_writer.add_scalar(_iid_k, _iid_v, step)
                             if _use_wandb:
                                 wandb.log(_iid_log, step=step)
-                            write_report_json(os.path.join(args.save_dir, "iid_probe", f"step_{step}.json"), _iid_res)
                             _iid_dt = time.perf_counter() - _iid_t0
                             tb_writer.add_scalar("Perf/iid_probe_seconds", _iid_dt, step)
                             logger.info(f"  [EVALUATION] iid probe (step {step}) took {_iid_dt:.1f}s")
@@ -3081,7 +3098,7 @@ def main(args):
                         selection_name = "separation_score"
                         if step % 2000 == 1 or step == args.train_steps:
                             # (A) Synthetic GT selection: select on the SAME health
-                            # composite (overall_score) as eval.run_dci_compare so the
+                            # composite (overall_score) as eval.protocol.run_dci_compare so the
                             # chosen checkpoint is the one that protocol would rank best
                             # (single source of truth). ADNI runs have no GT factors and
                             # fall through to the cross-reconstruction proxy in (B).
@@ -3094,7 +3111,7 @@ def main(args):
                                 # calls encoder.eval() without restoring train mode.
                                 _sel_was_training = encoders[0].training
                                 try:
-                                    from eval.run_dci_compare import score_encoder_live
+                                    from eval.protocol.run_dci_compare import score_encoder_live
 
                                     # Patch pooling is included whenever a grid exists,
                                     # independent of the training objective: without it
@@ -3148,7 +3165,7 @@ def main(args):
                                     # content block; the other three reward what is ABSENT, and
                                     # measurably peak on a DEGRADED representation (verified by
                                     # deliberately truncating the rank of a real checkpoint in
-                                    # eval/metric_degeneracy_sweep.py: separation 0.414 -> 0.546 and
+                                    # eval/diagnostics/metric_degeneracy_sweep.py: separation 0.414 -> 0.546 and
                                     # content_purity 0.370 -> 0.499 while rank went 37.9 -> 6.5). So
                                     # overall_score can climb while the model quietly discards
                                     # content: measured on this project, 0.49 -> 0.53 between two
@@ -3292,7 +3309,7 @@ def main(args):
                                 and not getattr(args, "contrastive_only", False)
                             ):
                                 try:
-                                    from eval.cross_reconstruction import (
+                                    from eval.metrics.cross_reconstruction import (
                                         evaluate_content_style_separation,
                                     )
 
@@ -3563,7 +3580,7 @@ def main(args):
                     logger.warning(f"  Failed to load best checkpoint, using final weights instead: {e}")
 
             try:
-                from eval.cross_reconstruction import evaluate_content_style_separation
+                from eval.metrics.cross_reconstruction import evaluate_content_style_separation
 
                 logger.info("[EVALUATION] Running final content/style separation metrics...")
                 cs_metrics = evaluate_content_style_separation(
@@ -3662,7 +3679,7 @@ def main(args):
                 test_dict[f"hz_{m}_subsets"][s] = sc.transform(test_dict[f"hz_{m}_subsets"][s])
 
         if args.dataset_name == "synthetic" and args.eval_dci:
-            import eval.dci as dci
+            import eval.metrics.dci as dci
 
             logger.info("[EVALUATION] Computing DCI metrics on synthetic GT factors...")
             # Same split as the periodic DCI above: gap keeps the historical
@@ -3703,7 +3720,7 @@ def main(args):
             discrete_factors_m = args.DATASETCLASS.DISCRETE_FACTORS[m]
 
             if args.eval_dci:
-                import eval.dci as dci
+                import eval.metrics.dci as dci
 
                 def repr_fn(samples):
                     with torch.no_grad():
@@ -3762,7 +3779,7 @@ def main(args):
         # (skipped under contrastive_only — the decoder is never trained).
         if hasattr(args, "content_indices") and not getattr(args, "contrastive_only", False):
             try:
-                from eval.cross_reconstruction import evaluate_content_style_separation
+                from eval.metrics.cross_reconstruction import evaluate_content_style_separation
 
                 logger.info("[EVALUATION] Running content/style separation metrics...")
                 cs_metrics = evaluate_content_style_separation(

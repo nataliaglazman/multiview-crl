@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from data.datasets import SyntheticBrainDataset
-from eval.synthetic_dataset import LesionPlacementError, PseudoMRIRenderer
+from eval.synthetic.synthetic_dataset import LesionPlacementError, PseudoMRIRenderer
 
 
 class PlacementTests(unittest.TestCase):
@@ -224,7 +224,7 @@ class PlacementTests(unittest.TestCase):
             )
             torch.testing.assert_close(a, replay[0], rtol=0, atol=0)
             torch.testing.assert_close(b, replay[1], rtol=0, atol=0)
-        from eval.run_dci_synthetic import build_synthetic_test_set
+        from eval.protocol.run_dci_synthetic import build_synthetic_test_set
 
         eval_args = argparse.Namespace(
             synthetic_res=64,
@@ -234,7 +234,7 @@ class PlacementTests(unittest.TestCase):
         )
         ds = build_synthetic_test_set(eval_args, num_samples=2, causal=False, cache=False)
         self.assertEqual(ds._inner.renderer.lesion_placement, "wm_interior")
-        file = Path(__file__).resolve().parents[1] / "eval/score_checkpoint.py"
+        file = Path(__file__).resolve().parents[1] / "eval/protocol/score_checkpoint.py"
         tree = ast.parse(file.read_text())
         factories = [
             n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("make_dataset", "make_val_dataset")

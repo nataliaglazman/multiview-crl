@@ -7,4 +7,4 @@ runai submit --name classifier-binary \
  --cpu 16 \
  --cpu-limit 32 \
  --memory 64G --memory-limit 128G --project nglazman \
- -v /nfs:/nfs --large-shm --command -- python /nfs/home/nglazman/crl-2/multiview-crl/eval/disease_classifier.py --task ad_cn --run-dir /nfs/home/nglazman/results/ADNI_stripped_masks/ablation-baseline-levels-shared-mask-style-dropout-moco-06-06-06 --features content style all --feature-levels 0 --classifier-epochs 30 --classifier-batch-size 8 --feature-cache-dir /tmp/disease_cache_$$
+ -v /nfs:/nfs --large-shm --command -- python /nfs/home/nglazman/crl-2/multiview-crl/eval/adni/disease_classifier.py --task ad_cn --run-dir /nfs/home/nglazman/results/ADNI_stripped_masks/ablation-baseline-levels-shared-mask-style-dropout-moco-06-06-06 --features content style all --feature-levels 0 --classifier-epochs 30 --classifier-batch-size 8 --feature-cache-dir /tmp/disease_cache_$$
