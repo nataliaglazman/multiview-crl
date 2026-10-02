@@ -82,3 +82,5 @@ test.ipynb
 *.npy
 *.out
 events.out.tfevents.*
+/literature/
+/data_local/

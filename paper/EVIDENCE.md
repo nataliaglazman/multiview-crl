@@ -52,7 +52,7 @@ Ordered by how much they threaten the paper.
    As written this is a synthetic-benchmark paper. That is publishable, but the title and abstract
    should not imply otherwise until real-data numbers exist. Minimum viable: the completeness tie
    and the localisation gap on ADNI, even without ground-truth factors (use FreeSurfer-derived
-   morphometrics as surrogate factors — `freesurfer.csv` is already in the repo).
+   morphometrics as surrogate factors — `freesurfer.csv` is in `data_local/` (untracked)).
 
 4. **Seed replication on voxel probes** — claim #8.
    Single 70/30 split. Needs seeds for error bars before any localisation claim goes in an abstract.
