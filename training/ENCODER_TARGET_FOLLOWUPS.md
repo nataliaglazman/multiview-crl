@@ -47,7 +47,7 @@ Defaults:
 | Frozen array 0 / 1 / 2 | `conv_mlp_s42` / `resnet_groupnorm_s42` / `resnet_stride8_s42` |
 | Supervised array 0 / 1 | `t1` / `flair` |
 | Original runs | `results/encoder_ablations_slurm_bio/runs/` |
-| New results | `results/encoder_followups_slurm_bio/` |
+| New results | `/scratch/users/k24058220/encoder_followups_slurm_bio/` |
 | Supervised data recipe | `conv_mlp_s42/settings.json` (same data settings in all three supplied logs) |
 | Python | `$HOME/.conda/envs/multiview-env/bin/python` |
 | Resources per task | One A100, 8 CPUs, 64G host RAM, 48h allocation |
@@ -58,8 +58,17 @@ Override `ENCODER_REPO`, `ENCODER_PYTHON`, `ENCODER_RUNS`, `ENCODER_FOLLOWUPS`, 
 ```bash
 export ENCODER_RUNS="$PWD/results/encoder_ablations_slurm_bio/runs"
 export ENCODER_PYTHON="$HOME/.conda/envs/multiview-env/bin/python"
+export ENCODER_FOLLOWUPS="/scratch/users/k24058220/encoder_followups_slurm_bio"
 ENCODER_TASK_ID=2 bash experiments/generated/encoder_spatial_probes_s42.slurm_bio.sh --dry-run
 ```
+
+The scratch output root contains `spatial/` for frozen probes and `supervised/`
+for fresh controls, including all feature/image caches, reports, predictions,
+and new control checkpoints. Output directories are created automatically.
+Existing checkpoints are still read from `ENCODER_RUNS`; existing results are
+not moved. An exported `ENCODER_FOLLOWUPS` overrides the scratch default, so
+update it if your shell still has the old location. Changing the scripts affects
+new launches only, not jobs already submitted or running.
 
 Every output directory includes job and array-task identifiers. Existing output
 directories are refused; these scripts do not resume interrupted jobs. Logs go
