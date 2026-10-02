@@ -4,14 +4,13 @@
 #SBATCH --output=/scratch/users/%u/%x-%A_%a.out
 #SBATCH --error=/scratch/users/%u/%x-%A_%a.err
 #SBATCH --array=0-1
-#SBATCH --partition=biomed_a100_gpu
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=48:00:00
-#SBATCH --constraint=a100_80g
 
 set -euo pipefail
 REPO="${ENCODER_REPO:-${SLURM_SUBMIT_DIR:-$PWD}}"
