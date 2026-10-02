@@ -185,6 +185,7 @@ def make_dataset(cfg, num_samples, mode="val"):
         synthetic_causal_nonlinearity=cfg.get("synthetic_causal_nonlinearity", "leaky_relu"),
         synthetic_clean_content=cfg.get("synthetic_clean_content", False),
         synthetic_lesion_placement=cfg.get("synthetic_lesion_placement", "legacy"),
+        synthetic_lesion_radius=cfg.get("synthetic_lesion_radius", 0.1),
     )
 
 

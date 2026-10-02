@@ -57,6 +57,11 @@ def make_options(args):
         options["patch_loss_weight"] = patch_weight
     if patch_grid is not None:
         options["train_patch_grid"] = patch_grid
+    lesion_radius = getattr(args, "synthetic_lesion_radius", None)
+    if lesion_radius is not None:
+        if not 0 < lesion_radius < float("inf"):
+            raise ValueError("Lesion radius must be finite and positive")
+        options["synthetic_lesion_radius"] = lesion_radius
     weight = options.get("patch_loss_weight", 0.0)
     if not math.isfinite(weight) or weight < 0:
         raise ValueError("Patch loss weight must be finite and nonnegative")
@@ -80,6 +85,8 @@ def make_options(args):
     suffix = "".join(f"_{tag}{options[key]}" for key, tag in OVERRIDES.items() if options[key] != recipe[key])
     if weight > 0:
         suffix += "_patch" + "x".join(map(str, options["train_patch_grid"])) + f"_w{weight:g}"
+    if options.get("synthetic_lesion_radius", 0.1) != recipe.get("synthetic_lesion_radius", 0.1):
+        suffix += f"_lr{options['synthetic_lesion_radius']:g}"
     options["model_id"] = args.model_id or f"{args.variant}_s{args.seed}_{options['device']}{suffix}"
     if Path(options["model_id"]).name != options["model_id"] or options["model_id"] in (".", ".."):
         raise ValueError("--model-id must be a directory name, not a path")
@@ -195,7 +202,13 @@ def main(argv=None):
     parser.add_argument("--patch-loss-weight", type=float, help="Add spatial InfoNCE; 0 keeps global-only training")
     parser.add_argument("--train-patch-grid", type=int, nargs=3, help="Default for patch training: 8 8 8")
     parser.add_argument(
-        "--model-id", help="Default: <variant>_s<seed>_<device>, with suffixes for batch/steps/patch overrides"
+        "--synthetic-lesion-radius",
+        type=float,
+        help="Sphere lesion radius in [-1,1] coords; default: the recipe's (trainer default 0.1)",
+    )
+    parser.add_argument(
+        "--model-id",
+        help="Default: <variant>_s<seed>_<device>, with suffixes for batch/steps/patch/lesion-radius overrides",
     )
     parser.add_argument("--results-dir", type=Path, help="Default: results/encoder_ablations_<device>")
     mode = parser.add_mutually_exclusive_group()
