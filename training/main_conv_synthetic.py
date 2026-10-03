@@ -165,6 +165,27 @@ def parse_args(argv=None):
     )
     p.add_argument("--eval-pooling", type=str, default="gap", choices=["gap", "patch"])
     p.add_argument("--eval-patch-grid", type=int, nargs=3, default=[4, 5, 4])
+    p.add_argument(
+        "--spatial-recovery-eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add frozen backbone/content spatial probes for both views at each evaluation",
+    )
+    p.add_argument(
+        "--spatial-recovery-grids",
+        type=int,
+        nargs="+",
+        help="Cubic probe grids; defaults to GAP plus the training patch grid (or up to 8 for global-only runs)",
+    )
+    p.add_argument(
+        "--spatial-recovery-native",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Also probe native maps; more CPU work and temporary disk space",
+    )
+    p.add_argument("--spatial-recovery-batch-size", type=int, default=4)
+    p.add_argument("--spatial-recovery-test-samples", type=int, default=400)
+    p.add_argument("--spatial-recovery-seed", type=int, default=1729)
 
     # Synthetic dataset (forwarded in full to train AND val so the distributions match).
     p.add_argument("--res", type=int, default=32, help="Cubic resolution (power of 2)")
@@ -281,6 +302,27 @@ def parse_args(argv=None):
             p.error("--resnet-norm and --resnet-output-stride only apply to --encoder-architecture resnet18")
         if args.conv_readout == "mlp" and args.encoder_head_hidden <= 0:
             p.error("--encoder-head-hidden must be positive")
+    if args.spatial_recovery_eval:
+        if args.n_content != 9 or args.synthetic_mode != "pseudo_mri":
+            p.error("Spatial recovery requires the nine-factor pseudo_mri recipe")
+        if args.num_val_samples < 20 or args.spatial_recovery_test_samples < 10 or args.spatial_recovery_batch_size < 1:
+            p.error(
+                "Spatial recovery needs >=20 validation subjects, >=10 diagnostic subjects and a positive batch size"
+            )
+        stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
+        if stride < 1:
+            p.error("Encoder stride must be positive")
+        spatial = (args.res + stride - 1) // stride if args.encoder_architecture == "resnet18" else args.res // stride
+        if args.spatial_recovery_grids is None:
+            if args.patch_loss_weight > 0:
+                if len(set(args.train_patch_grid)) != 1:
+                    p.error("For a non-cubic training grid, specify cubic --spatial-recovery-grids explicitly")
+                args.spatial_recovery_grids = [args.train_patch_grid[0]]
+            else:
+                args.spatial_recovery_grids = [min(8, spatial)]
+        args.spatial_recovery_grids = sorted(set([1, *args.spatial_recovery_grids]))
+        if any(g < 1 or g > spatial for g in args.spatial_recovery_grids):
+            p.error(f"Spatial recovery grids must fit the {spatial}^3 backbone map")
     return args
 
 
@@ -664,9 +706,14 @@ def main():
     # Per-factor R² needs it more than the block means do -- a localised factor can read
     # 0.2 from a random encoder, so the raw number alone cannot say whether it was learned.
     floor = floor_flat = None
+    spatial_initial = None
+    if args.spatial_recovery_eval:
+        from eval.encoder.spatial_recovery_monitor import evaluate_spatial_recovery
     if args.floor_eval:
         model.eval()
         floor_flat, floor = evaluate(model, val_dataset, device, args, save_dir, 0, writer)
+        if args.spatial_recovery_eval:
+            spatial_initial = evaluate_spatial_recovery(model, vars(args), device, save_dir, 0, writer=writer)
         model.train()
 
     # Step 0 is the untrained floor, not a candidate: with every delta at or below zero it
@@ -734,6 +781,10 @@ def main():
                 flat, _ = evaluate(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
                 torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
                 save_progress(step, "running")
+                if args.spatial_recovery_eval:
+                    evaluate_spatial_recovery(
+                        model, vars(args), device, save_dir, step, initial=spatial_initial, writer=writer
+                    )
 
                 if args.best_metric != "none":
                     value = best_metric_value(flat, floor_flat, args.best_metric)

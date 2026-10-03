@@ -70,6 +70,7 @@ TRAIN_ARGS=(
     --resnet-output-stride 32
     --patch-loss-weight 1.0
     --train-patch-grid 8 8 8
+    --spatial-recovery-eval
     --out-dir "$OUT_DIR"
 )
 

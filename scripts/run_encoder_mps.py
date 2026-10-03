@@ -57,6 +57,18 @@ def make_options(args):
         options["patch_loss_weight"] = patch_weight
     if patch_grid is not None:
         options["train_patch_grid"] = patch_grid
+    for key in (
+        "spatial_recovery_eval",
+        "spatial_recovery_grids",
+        "spatial_recovery_native",
+        "spatial_recovery_batch_size",
+        "spatial_recovery_test_samples",
+        "spatial_recovery_seed",
+    ):
+        if getattr(args, key, None) is not None:
+            options[key] = getattr(args, key)
+    if options.get("spatial_recovery_eval") and options.get("spatial_recovery_grids") is not None:
+        options["spatial_recovery_grids"] = sorted(set([1, *options["spatial_recovery_grids"]]))
     lesion_radius = getattr(args, "synthetic_lesion_radius", None)
     if lesion_radius is not None:
         if not 0 < lesion_radius < float("inf"):
@@ -201,6 +213,12 @@ def main(argv=None):
     parser.add_argument("--eval-every", type=int, help="Default: the recipe's")
     parser.add_argument("--patch-loss-weight", type=float, help="Add spatial InfoNCE; 0 keeps global-only training")
     parser.add_argument("--train-patch-grid", type=int, nargs=3, help="Default for patch training: 8 8 8")
+    parser.add_argument("--spatial-recovery-eval", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--spatial-recovery-grids", type=int, nargs="+")
+    parser.add_argument("--spatial-recovery-native", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--spatial-recovery-batch-size", type=int)
+    parser.add_argument("--spatial-recovery-test-samples", type=int)
+    parser.add_argument("--spatial-recovery-seed", type=int)
     parser.add_argument(
         "--synthetic-lesion-radius",
         type=float,

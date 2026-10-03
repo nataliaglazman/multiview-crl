@@ -8,6 +8,7 @@ import argparse
 import gc
 import hashlib
 import io
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -74,6 +75,8 @@ def extract(model, ds, args, device, directory):
             h.update(torch.stack((images[i], images[b + i])).numpy().tobytes())
         features, shape, channels = capture(model, images.to(device), args.grids, args.include_native)
         for (grid, stage), values in features.items():
+            if getattr(args, "stages", None) is not None and stage not in args.stages:
+                continue
             for view, block in zip(VIEWS, (values[:b], values[b:])):
                 key = (view, grid, stage)
                 if key not in arrays:
@@ -175,6 +178,11 @@ def main(argv=None):
         "--skip-initial", action="store_true", help="Omit model_init.pt; original checkpoint remains mandatory"
     )
     p.add_argument("--seed", type=int, default=1729)
+    p.add_argument(
+        "--discard-features",
+        action="store_true",
+        help="Remove large feature banks after scoring; retain reports/predictions",
+    )
     p.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     args = p.parse_args(argv)
     cfg = load_settings(args.run_dir)
@@ -242,6 +250,9 @@ def main(argv=None):
         report.update(status="failed", error=str(error))
         save_report(args.out_dir, report)
         raise
+    finally:
+        if args.discard_features:
+            shutil.rmtree(args.out_dir / "features", ignore_errors=True)
 
 
 if __name__ == "__main__":

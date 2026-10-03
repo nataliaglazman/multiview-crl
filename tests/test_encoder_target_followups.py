@@ -81,8 +81,11 @@ class EncoderTargetFollowupTests(unittest.TestCase):
         np.testing.assert_allclose(
             control.heatmap_centroid(logits, 8).numpy()[0], 2 * np.array([2.5, 4.5, 6.5]) / 7 - 1, atol=1e-6
         )
+        larger = protocol.dataset(config(synthetic_lesion_radius=0.2), 20, "val")
+        _, larger_support = protocol.sample_targets(larger._inner, larger[0]["gt_latents"])
+        self.assertGreater(larger_support.sum().item(), support.sum().item())
         with self.assertRaisesRegex(ValueError, "data drift"):
-            protocol.dataset(config(synthetic_lesion_radius=0.2), 20, "val")
+            protocol.dataset(config(synthetic_lesion_mode="unknown"), 20, "val")
 
     def test_spatial_capture_matches_actual_global_code_and_preserves_state(self):
         for cfg in (

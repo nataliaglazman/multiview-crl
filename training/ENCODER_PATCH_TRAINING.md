@@ -70,16 +70,17 @@ shorter run with a distinct ID. No long training job is launched by the tests.
 
 ## Local NVIDIA GPU / Linux PC
 
-Copy the updated source and CUDA launcher to the PC first. To transfer just the
-files required for this change (assuming the PC already has this project's other
-modules and comparison configuration), run from the repository root on the laptop:
+Copy the updated source and CUDA launcher to the PC first. From the repository
+root on the laptop, this transfers code/configuration only, including the current
+`eval/encoder`, `eval/protocol`, and `eval/metrics` package layout. It excludes
+checkpoints, datasets, result directories, and Python caches:
 
 ```bash
 rsync -avR \
-  models/multiview_encoder.py \
-  training/main_conv_synthetic.py \
-  scripts/run_encoder_mps.py \
-  experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --exclude '__pycache__/' --exclude 'results/' --exclude 'runs/' \
+  --include '*/' --include '*.py' --include '*.sh' \
+  --include '*.json' --include '*.yaml' --include '*.yml' --exclude '*' \
+  models/ training/ scripts/ eval/ data/ utils/ experiments/ \
   ng24@sie114-u-pc:~/projects/multiview-crl/
 ```
 
@@ -111,6 +112,72 @@ or `ENCODER_PATCH_RESULTS` to change the output root. If batch 32 does not fit,
 pass `--batch-size 8` to both `--check` and training, and use the same batch size
 for the global-only control. As on MPS, this creates a distinct run ID.
 For the spatial audit below, set `RUN` to the CUDA run and use `--device cuda`.
+
+## Spatial recovery during training
+
+The patch CUDA, MPS, and generated SLURM launchers now enable
+`--spatial-recovery-eval`. At initialization (when `--floor-eval` is enabled)
+and every `--eval-every` steps, this adds a frozen probe evaluation alongside
+the unchanged global DCI evaluation. Direct trainer invocations keep it off
+unless explicitly requested. A global-only control can enable the same flag.
+
+The default reads backbone and content features at GAP and the training grid
+(1³ and 8³ for these launchers), for **both T1 and FLAIR**. `projected` in reports
+means the content readout before the optional contrastive projector. Feature
+maps are flattened with spatial order retained; patches are not averaged back
+into one vector before probing. The optional `--spatial-recovery-native` also
+reads the full native map. This adds CPU work and temporary disk usage.
+
+For each representation, ridge and nonlinear RBF probes are fitted on 75% of the
+original validation subjects and tuned on the other 25%. They are scored on a
+separate diagnostic cohort (400 subjects by default). This cohort is monitored
+repeatedly, so it is not an untouched final test set. Shuffled controls permute
+fit/tuning targets, never the scoring targets. All nine latent factors, physical
+lesion centroids, and signed/absolute rendered sulcal amplitudes are scored.
+
+Console output focuses on lesion coordinates, physical centroids, sulcal latent
+and amplitude R², with amplitude's initialization delta and shuffled score.
+Full per-factor scores, shuffled controls, and deltas from initialization are
+saved here, and logged to TensorBoard:
+
+```text
+<run>/spatial_recovery/step_00000000/
+<run>/spatial_recovery/step_00002000/
+  report.json
+  probes.csv
+  summary.csv
+  trained_predictions.npz
+```
+
+The initial folder has `initial_predictions.npz`. With `--no-floor-eval`,
+initialization deltas are unavailable. Large feature arrays are temporary and
+removed after each evaluation, including on probe failures. They live under the
+run directory, so cluster scratch settings apply to them too.
+
+The monitor restores Python/NumPy/PyTorch random states and module modes, checks
+encoder weights/buffers are unchanged, and never updates gradients or selects an
+encoder checkpoint. Labels supervise only the diagnostic probes.
+
+Useful overrides on the CUDA/MPS launcher:
+
+```bash
+# A new run directory is needed if this experiment was already started.
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --results-dir results/encoder_patch_cuda_spatial \
+  --spatial-recovery-native --spatial-recovery-batch-size 2
+
+# Disable the additional evaluation; training objective is unchanged.
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh --no-spatial-recovery-eval
+```
+
+`--spatial-recovery-grids 1 8` fixes the grids explicitly, useful when matching a
+global-only control. `--spatial-recovery-test-samples` changes diagnostic cohort
+size; keep it and `--spatial-recovery-seed` matched across compared runs.
+
+An already-running Python process will not acquire this evaluation from a file
+update. There is no need to retrain an existing model: use the offline audit
+below on a completed run, or on a separate stable checkpoint copy. The audit
+rejects checkpoint files that change while it is running.
 
 ## SLURM run
 
@@ -158,18 +225,32 @@ python -m eval.encoder.encoder_spatial_target_audit \
   --run-dir "$RUN" \
   --out-dir "$RUN/evaluation/spatial_$(date +%Y%m%d_%H%M%S)" \
   --device mps --batch-size 1 --test-samples 400 \
-  --grids 1 2 --include-native --seed 1729
+  --grids 1 8 --include-native --discard-features --seed 1729
 ```
 
 Update `RUN` for a smaller-batch/shorter run or the cluster checkpoint. The
 standalone audit accepts the unchanged checkpoint format; original comparison
 manifests should not be rewritten after source changes. Compare trained versus
 initial weights, both views, shuffled controls, and spatial versus global stages.
+`--discard-features` keeps CSV/JSON/predictions and removes large feature banks;
+omit it if those arrays are needed for further analysis. The audit restores the
+saved lesion radius, including non-default radii.
+
+For the existing default PC run, after training finishes:
+
+```bash
+RUN="$PWD/results/encoder_patch_cuda/runs/conv_mlp_s42_cuda_patch8x8x8_w1"
+python -m eval.encoder.encoder_spatial_target_audit \
+  --run-dir "$RUN" \
+  --out-dir "$RUN/evaluation/spatial_$(date +%Y%m%d_%H%M%S)" \
+  --device cuda --batch-size 2 --test-samples 400 \
+  --grids 1 8 --include-native --discard-features --seed 1729
+```
 
 ## Verification
 
 ```bash
-python -m unittest tests.test_encoder_patch_training tests.test_encoder_mps_runner -v
+python -m unittest tests.test_spatial_recovery_monitor tests.test_encoder_patch_training tests.test_encoder_mps_runner -v
 ```
 
 Tests check actual local gradients into both encoders/readouts, content-only
@@ -177,3 +258,6 @@ selection, same-position subject comparisons, exact global-only regression,
 one backbone pass per view, real short CPU training/checkpoint replay, and both
 launchers. GPU-specific tests require their accelerator; use `--check` on the
 laptop to validate its installed MPS backend before a long run.
+Monitor tests additionally compare real training with evaluation enabled/disabled:
+weights, input hashes, and batch order remain identical. They check RNG/mode/gradient
+preservation, held-out controls, initialization pairing, and temporary-file cleanup.

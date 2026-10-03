@@ -21,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHITECTURES = ("conv", "resnet18")
-BOOLEAN_OPTIONAL = {"cache", "floor_eval", "cross_view_negs_only"}
+BOOLEAN_OPTIONAL = {"cache", "floor_eval", "cross_view_negs_only", "spatial_recovery_eval", "spatial_recovery_native"}
 STORE_TRUE = {
     "no_separate_encoders",
     "synthetic_clean_content",
