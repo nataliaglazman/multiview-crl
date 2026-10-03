@@ -19,7 +19,7 @@ overwritten or used as starting weights.
   other subjects at that position. Average InfoNCE over positions.
 - Compute the original global vector separately: average backbone features
   first, then apply the MLP. Averaging patch MLP outputs would change this vector.
-- Both branches reuse one backbone pass and the same readout parameters. No
+- By default, both branches reuse one backbone pass and the same readout parameters. No
   additional trainable parameters are introduced. An optional existing contrastive
   projector is shared across branches and acts along the channel axis.
 - Use every grid position. No lesion masks, brain masks, factor values, or
@@ -29,6 +29,83 @@ The new launchers retain `--best-metric none`: factor labels are used only for
 evaluation, not optimization or checkpoint selection. The saved final checkpoint
 is the prespecified endpoint. This is a recoverability experiment, not a guarantee
 of unsupervised identifiability.
+
+## Separate spatial readout experiment
+
+Add `--separate-spatial-readout` to test whether tying the two readouts contributes
+to the loss of lesion recoverability between the backbone and content map:
+
+```text
+                         GAP -> global MLP (64 -> 100 -> 12)
+                        /                   first 9 -> global InfoNCE
+view-specific backbone
+                        \                   all 9 -> patch InfoNCE
+                         pool 8³ -> spatial MLP (64 -> 100 -> 9)
+```
+
+Both readouts are shared across T1/FLAIR. Each objective directly updates its own
+readout; both objectives update the same view-specific backbones. The spatial
+head copies the global head's hidden layer and first nine output rows at
+initialization, using independent parameters and no extra random draws. The
+global head and backbone initial weights therefore match the shared-head control
+at the same model seed. This is a new training run from scratch, not a continuation
+of an existing checkpoint.
+
+Nine is retained to match the current patch code's width, not to assign one channel
+to each factor. A flattened 8³ code still contains 4,608 content values. The new
+head adds **7,409 parameters** for the default Conv MLP; this tests untying the
+readouts at fixed representation width, not a parameter-matched architecture.
+The initial implementation requires an MLP readout, positive patch weight and
+`--contrastive-proj-dim 0`, so no shared loss projector reconnects the heads.
+The default shared-head model and its checkpoint keys are preserved.
+
+On the NVIDIA PC, after syncing the updated source using the command below:
+
+```bash
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --separate-spatial-readout --check
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --separate-spatial-readout
+```
+
+For MPS, use the same flags with `encoder_conv_mlp_patch_s42.mps.sh`. The default
+CUDA output is a distinct run:
+
+```text
+results/encoder_patch_cuda/runs/conv_mlp_s42_cuda_patch8x8x8_w1_separate_spatial/
+```
+
+Keep all overrides matched to the shared-head patch control: batch size, training
+steps, lesion radius, data/model/loader seeds, patch weight/grid and evaluation
+settings. For example, if the control used `--synthetic-lesion-radius 0.14`, pass
+that to the new CUDA/MPS run too; its run ID gains `_lr0.14`. Changing batch size
+only for one arm changes the contrastive negatives as well as memory usage.
+
+The separate-head SLURM launcher is generated without replacing the shared-head
+script and retains scratch output paths:
+
+```bash
+python scripts/generate_conv_patch_slurm.py --separate-spatial-readout
+bash experiments/generated/encoder_conv_mlp_patch_separate_spatial_s42.slurm_bio.sh --dry-run
+sbatch experiments/generated/encoder_conv_mlp_patch_separate_spatial_s42.slurm_bio.sh
+```
+
+Its default run is
+`/scratch/users/k24058220/encoder_patch_slurm_bio/runs/conv_mlp_patch_g8x8x8_w1_separate_spatial_s42/`.
+
+Spatial recovery is enabled by these launchers. In reports, **`projected` at grid
+1 reads the global head; at larger grids it reads the separate spatial head**.
+The CSV's `readout_head` field identifies the mapping. Spatial style probes are
+absent because this head has only content outputs. Global DCI still reads the
+unchanged global pathway. Model calls with an explicit patch grid, or unpooled
+outputs, also use the active spatial head; their output/mask width is nine.
+
+Compare physical lesion centroid and lesion-control R² in the spatial readout
+against the shared-head patch run, at matched steps and on the same cohorts.
+Check the backbone scores too: improved readout recovery with similar backbone
+recovery would support the shared-readout bottleneck hypothesis. A change in both
+means the backbone also adapted. Track sulcal recovery and initialization/shuffled
+controls, and repeat across seeds before treating differences as reliable.
 
 ## Local MPS run
 
@@ -250,7 +327,7 @@ python -m eval.encoder.encoder_spatial_target_audit \
 ## Verification
 
 ```bash
-python -m unittest tests.test_spatial_recovery_monitor tests.test_encoder_patch_training tests.test_encoder_mps_runner -v
+python -m unittest tests.test_separate_spatial_readout tests.test_spatial_recovery_monitor tests.test_encoder_patch_training tests.test_encoder_mps_runner -v
 ```
 
 Tests check actual local gradients into both encoders/readouts, content-only
@@ -261,3 +338,6 @@ laptop to validate its installed MPS backend before a long run.
 Monitor tests additionally compare real training with evaluation enabled/disabled:
 weights, input hashes, and batch order remain identical. They check RNG/mode/gradient
 preservation, held-out controls, initialization pairing, and temporary-file cleanup.
+Separate-head tests check copied initialization and RNG state, isolated head
+gradients, active-head probe routing, strict checkpoint replay, matched inputs
+through real short training, and independent run paths on all launchers.

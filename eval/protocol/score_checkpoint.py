@@ -149,6 +149,7 @@ def build_model(cfg, device, state_dict=None):
         conv_readout=cfg.get("conv_readout", "linear"),
         resnet_norm=cfg.get("resnet_norm", "batch"),
         resnet_output_stride=cfg.get("resnet_output_stride", 32),
+        separate_spatial_readout=cfg.get("separate_spatial_readout", False),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)
