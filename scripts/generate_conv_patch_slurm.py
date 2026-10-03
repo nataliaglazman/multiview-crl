@@ -38,7 +38,9 @@ def main(argv=None):
     options = slurm.ablations.training_options(
         config, {"reference": "conv", "overrides": {"conv_readout": "mlp"}}, name, args.seed, args.results_dir
     )
-    options.update(patch_loss_weight=args.patch_loss_weight, train_patch_grid=args.train_patch_grid)
+    options.update(
+        patch_loss_weight=args.patch_loss_weight, train_patch_grid=args.train_patch_grid, spatial_recovery_eval=True
+    )
     command = shlex.join(["python", "scripts/generate_conv_patch_slurm.py", *arguments])
     script = slurm.render_script(
         config, options, slurm.load_resources(args.cluster_config), f"encoder-conv-patch-s{args.seed}", command

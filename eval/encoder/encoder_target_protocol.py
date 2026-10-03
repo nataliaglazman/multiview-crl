@@ -65,7 +65,6 @@ def dataset(cfg, count, split):
     # Reject newer non-default renderer options it cannot restore faithfully.
     unsupported_defaults = {
         "synthetic_lesion_mode": "sphere",
-        "synthetic_lesion_radius": 0.1,
         "synthetic_content_prior": "normal",
         "synthetic_content_squash": "auto",
         "synthetic_content_amp_scale": None,
