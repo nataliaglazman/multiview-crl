@@ -53,6 +53,12 @@ def parse_args(argv=None):
         help="MLP readout hidden width (ResNet, or conv with --conv-readout mlp)",
     )
     p.add_argument("--conv-readout", choices=("linear", "mlp"), default="linear")
+    p.add_argument(
+        "--separate-spatial-readout",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use an independent content-only patch MLP, copied from the global head at initialization",
+    )
     p.add_argument("--resnet-norm", choices=("batch", "group"), default="batch")
     p.add_argument(
         "--resnet-output-stride",
@@ -278,6 +284,13 @@ def parse_args(argv=None):
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if not 0 <= args.patch_loss_weight < float("inf"):
         p.error("--patch-loss-weight must be finite and nonnegative")
+    if args.separate_spatial_readout:
+        if args.encoder_architecture == "conv" and args.conv_readout != "mlp":
+            p.error("--separate-spatial-readout requires an MLP readout (--conv-readout mlp for Conv)")
+        if args.patch_loss_weight <= 0:
+            p.error("--separate-spatial-readout requires a positive --patch-loss-weight")
+        if args.contrastive_proj_dim != 0:
+            p.error("--separate-spatial-readout requires --contrastive-proj-dim 0 to avoid a shared loss projector")
     if args.patch_loss_weight > 0:
         if args.contrastive_loss_type != "infonce":
             p.error("Patch training currently supports global + patch InfoNCE only")
@@ -627,6 +640,7 @@ def main():
         conv_readout=args.conv_readout,
         resnet_norm=args.resnet_norm,
         resnet_output_stride=args.resnet_output_stride,
+        separate_spatial_readout=args.separate_spatial_readout,
     ).to(device)
     if args.encoder_architecture == "resnet18":
         print(
@@ -645,9 +659,14 @@ def main():
             flush=True,
         )
     if args.patch_loss_weight > 0:
+        readout = (
+            f"separate spatial MLP ({args.content_channels} channels, copied global initialization)"
+            if args.separate_spatial_readout
+            else "shared global/spatial readout"
+        )
         print(
             f"objective: global InfoNCE + {args.patch_loss_weight:g} * patch InfoNCE; "
-            f"grid={args.train_patch_grid}; shared backbone/readout; all positions; no target labels",
+            f"grid={args.train_patch_grid}; {readout}; both losses update the backbones; all positions; no target labels",
             flush=True,
         )
 
@@ -673,6 +692,11 @@ def main():
             "parameter_count": sum(p.numel() for p in model.parameters()),
             "backbone_stride": model.backbone_stride,
             "readout": model.readout_type,
+            "separate_spatial_readout": args.separate_spatial_readout,
+            "spatial_content_channels": args.content_channels,
+            "spatial_readout_parameter_count": (
+                sum(p.numel() for p in model.spatial_readout.parameters()) if model.spatial_readout is not None else 0
+            ),
             "normalization": model.normalization,
             "optimizer": "AdamW",
             "optimizer_defaults": optimizer.defaults,

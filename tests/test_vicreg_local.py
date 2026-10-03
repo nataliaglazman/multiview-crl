@@ -206,7 +206,36 @@ class RegisteredVICRegTests(unittest.TestCase):
     def test_experiment_yaml_resolves_to_valid_training_flags(self):
         from scripts.launch import config_to_cli_args, resolve_config
 
-        config = resolve_config(ROOT / "experiments/synthetic_causal_vicregl.yaml", "local", {})
+        vicregl_overrides = dict(
+            resume_training=False,
+            train_steps=5000,
+            batch_size=64,
+            contrastive_loss_type="vicregl",
+            patch_contrastive=True,
+            patch_grid=[8, 8, 8],
+            patch_foreground_mask=True,
+            patch_center_mode="none",
+            contrastive_proj_dim=0,
+            use_moco=False,
+            vicregl_local_weight=1.0,
+            vicregl_global_weight=0.25,
+            vicregl_local_dim=16,
+            vicregl_global_dim=16,
+            vicregl_hidden=64,
+            vicregl_no_projectors=False,
+            vicreg_sim_coeff=25.0,
+            vicreg_std_coeff=25.0,
+            vicreg_cov_coeff=1.0,
+            vqvae_nb_levels=1,
+            vqvae_scaling_rates=[4],
+            content_size=12,
+            content_ratios=[0.75],
+            mask_mode="fixed",
+            norm_type="layer",
+            inject_style_to_decoder=True,
+            style_injection_mode="input",
+        )
+        config = resolve_config(ROOT / "experiments/synthetic_causal.yaml", "local", vicregl_overrides)
         args = parse_args().parse_args(config_to_cli_args(config))
         validate_vicregl_args(args)
         self.assertFalse(args.resume_training)

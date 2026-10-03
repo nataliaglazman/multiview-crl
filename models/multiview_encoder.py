@@ -46,6 +46,7 @@ class MultiviewConvEncoder(HelperModule):
         conv_readout: str = "linear",
         resnet_norm: str = "batch",
         resnet_output_stride: int = 32,
+        separate_spatial_readout: bool = False,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -67,6 +68,11 @@ class MultiviewConvEncoder(HelperModule):
             raise ValueError("resnet_norm and resnet_output_stride only apply to resnet18")
         self.conv_readout = conv_readout
         self.readout_type = "mlp" if encoder_architecture == "resnet18" else conv_readout
+        self.separate_spatial_readout = separate_spatial_readout
+        if separate_spatial_readout and self.readout_type != "mlp":
+            raise ValueError("separate_spatial_readout requires an MLP readout")
+        if separate_spatial_readout and proj_dim != 0:
+            raise ValueError("separate_spatial_readout currently requires proj_dim=0 (no shared loss projector)")
         self.backbone_stride = resnet_output_stride if encoder_architecture == "resnet18" else downscale_factor
         self.normalization = resnet_norm if encoder_architecture == "resnet18" else "group"
         if self.readout_type == "mlp" and encoder_head_hidden <= 0:
@@ -97,6 +103,16 @@ class MultiviewConvEncoder(HelperModule):
                 nn.LeakyReLU(),
                 nn.Linear(encoder_head_hidden, latent_dim),
             )
+
+        # Untie the spatial content mapping without changing the global head or
+        # consuming additional random draws. Both heads remain shared across views.
+        self.spatial_readout = None
+        if separate_spatial_readout:
+            self.spatial_readout = copy.deepcopy(self.to_encoding)
+            output = self.spatial_readout[-1]
+            output.weight = nn.Parameter(output.weight[:content_channels].detach().clone())
+            output.bias = nn.Parameter(output.bias[:content_channels].detach().clone())
+            output.out_features = content_channels
 
         # --- Fixed content/style mask over the latent units ---
         fixed_mask = torch.zeros(1, latent_dim)
@@ -144,13 +160,19 @@ class MultiviewConvEncoder(HelperModule):
             patch_grid = patch_grid[0]  # single level here
         return F.adaptive_avg_pool3d(feat, tuple(patch_grid)).flatten(2)
 
+    @property
+    def patch_readout(self):
+        """The active spatial head; the legacy shared head when separation is off."""
+        return self.to_encoding if self.spatial_readout is None else self.spatial_readout
+
     def global_and_patch_features(self, x, patch_grid, n_views=2):
         """Two training readouts from ONE backbone pass, before any loss projector.
 
-        Returns (2B, latent_dim) and (2B, latent_dim, P). The global MLP still
-        receives GAP features; the same MLP receives each pooled patch separately.
+        Returns (2B, latent_dim) and (2B, spatial_channels, P). The global MLP
+        receives GAP features; the active patch MLP receives each pooled bin.
+        The separate spatial head has content_channels outputs and no style units;
+        the legacy shared head has latent_dim outputs.
         Do not average patch MLP outputs to approximate the global readout.
-        No parameters/buffers are added, so existing checkpoints remain compatible.
         """
         h = self._encode(x, n_views, view_idx=None)
         grid = tuple(patch_grid)
@@ -158,7 +180,7 @@ class MultiviewConvEncoder(HelperModule):
             raise ValueError(f"Training patch grid {grid} must fit spatial map {tuple(h.shape[2:])}")
         if self.readout_type == "mlp":
             pooled = self.to_encoding(self.avgpool(h).flatten(1))
-            patches = self.to_encoding(self._patch_pool(h, grid).transpose(1, 2)).transpose(1, 2)
+            patches = self.patch_readout(self._patch_pool(h, grid).transpose(1, 2)).transpose(1, 2)
         else:
             features = self.to_encoding(h)
             pooled = features.mean(dim=[2, 3, 4])
@@ -182,10 +204,11 @@ class MultiviewConvEncoder(HelperModule):
         ``(reconstruction=None, diffs=[0], encoder_features, content_indices,
         [], [], soft_content_masks, {})`` so the synthetic-DCI eval is unchanged.
 
-        For MLP readouts, GAP precedes the nonlinear readout. Patch probes apply that
-        readout separately AFTER averaging each bin; unpooled probes apply it at
-        each spatial position. Averaging these diagnostic outputs does not, in
-        general, reproduce the trained global encoding.
+        GAP precedes the global MLP. Patch and unpooled outputs use patch_readout,
+        after bin averaging or at each native position, respectively. With a
+        separate spatial head these outputs contain only content_channels units.
+        Explicit patch_grid=[1,1,1] also uses the spatial head; patch_grid=None
+        with pool_only=True always returns the global encoding.
         """
         h = self._encode(x, n_views, view_idx)
         if self.readout_type == "mlp":
@@ -204,9 +227,9 @@ class MultiviewConvEncoder(HelperModule):
                             f"{tuple(h.shape[2:])}; the backbone downsamples by {self.backbone_stride}."
                         )
                     h = F.adaptive_avg_pool3d(h, tuple(grid))
-                feat = self.to_encoding(h.flatten(2).transpose(1, 2)).transpose(1, 2)
+                feat = self.patch_readout(h.flatten(2).transpose(1, 2)).transpose(1, 2)
                 if not pool_only:
-                    feat = feat.reshape(h.shape[0], self.latent_dim, *h.shape[2:])
+                    feat = feat.reshape(h.shape[0], feat.shape[1], *h.shape[2:])
             return (
                 None,
                 [x.new_zeros(())],
@@ -214,7 +237,7 @@ class MultiviewConvEncoder(HelperModule):
                 [list(range(self.content_channels))],
                 [],
                 [],
-                {0: self.content_mask},
+                {0: self.content_mask[:, : feat.shape[1]]},
                 {},
             )
 

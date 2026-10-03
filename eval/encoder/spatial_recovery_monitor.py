@@ -102,10 +102,16 @@ def evaluate_spatial_recovery(model, cfg, device, save_dir, step, initial=None, 
         protocol="75/25 validation fit/tune; separate diagnostic cohort; fixed splits; ridge and RBF with shuffled controls",
         evaluation_only=True,
         feature_banks_retained=False,
+        projected_readouts={
+            "grid_1": "global",
+            "larger_grids": "spatial" if model.separate_spatial_readout else "global",
+        },
     )
     save_report(directory, report)
     before, started = state_digest(model), time.perf_counter()
     print(f"  [eval] spatial recovery @ step {step}; grids={args.grids}; native={args.include_native}", flush=True)
+    if model.separate_spatial_readout:
+        print("  projected: grid 1 = global head; larger grids = separate spatial head", flush=True)
     try:
         with preserve_training_state(model, device), tempfile.TemporaryDirectory(
             prefix=".features-", dir=directory

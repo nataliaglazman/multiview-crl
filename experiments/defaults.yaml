@@ -45,7 +45,7 @@ scale_recon_loss: 1.0
 recon_loss_start_step: 0
 # Cross-modal reconstruction: decode each view's content with the OTHER view's style and
 # score it against the other view's image. Off by default; needs inject_style_to_decoder
-# and level 0 in content_style_levels. See experiments/ablation_cross_recon.yaml.
+# and level 0 in content_style_levels. See the 16 Sep 2026 entry in METHODOLOGY_REPORT.md.
 scale_cross_recon_loss: 0.0
 cross_recon_start_step: 0
 # Whose style the swap borrows: other_subject (a different subject in the batch) or

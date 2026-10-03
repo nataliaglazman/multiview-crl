@@ -3,17 +3,17 @@
 
 Usage:
     # Dry run — print resolved config + command, don't submit:
-    python scripts/launch.py experiments/ablation_baseline.yaml --cluster runai --dry-run
+    python scripts/launch.py experiments/synthetic_causal.yaml --cluster runai --dry-run
 
     # Submit to RunAI (needs Python on cluster):
-    python scripts/launch.py experiments/ablation_baseline.yaml --cluster runai
+    python scripts/launch.py experiments/synthetic_causal.yaml --cluster runai
 
     # Generate bash scripts for ALL experiments (no Python needed on cluster):
     python scripts/launch.py --generate --cluster runai
-    # Then on cluster:  bash experiments/generated/ablation_baseline.runai.sh
+    # Then on cluster:  bash experiments/generated/synthetic_causal.runai.sh
 
     # Override any parameter from CLI:
-    python scripts/launch.py experiments/ablation_baseline.yaml --cluster runai --set lr=5e-4 train_steps=50000
+    python scripts/launch.py experiments/synthetic_causal.yaml --cluster runai --set lr=5e-4 train_steps=50000
 
     # Re-launch from a previous run's settings.json:
     python scripts/launch.py --from-config results/my-run/settings.json --cluster slurm --dry-run
@@ -627,9 +627,9 @@ def parse_cli_overrides(override_strs: list[str]) -> dict:
 
 
 def find_experiment_yamls() -> list[Path]:
-    """Find all experiment YAML files (excluding cluster configs and defaults)."""
+    """Find all experiment YAML files (excluding cluster configs and the two base configs)."""
     exp_dir = REPO_ROOT / "experiments"
-    skip = {"defaults.yaml", "cluster"}
+    skip = {"defaults.yaml", "synthetic_defaults.yaml", "cluster"}
     yamls = []
     for p in sorted(exp_dir.glob("*.yaml")):
         if p.name not in skip:

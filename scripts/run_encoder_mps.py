@@ -58,6 +58,7 @@ def make_options(args):
     if patch_grid is not None:
         options["train_patch_grid"] = patch_grid
     for key in (
+        "separate_spatial_readout",
         "spatial_recovery_eval",
         "spatial_recovery_grids",
         "spatial_recovery_native",
@@ -77,6 +78,11 @@ def make_options(args):
     weight = options.get("patch_loss_weight", 0.0)
     if not math.isfinite(weight) or weight < 0:
         raise ValueError("Patch loss weight must be finite and nonnegative")
+    if options.get("separate_spatial_readout", False):
+        if options["encoder_architecture"] == "conv" and options.get("conv_readout", "linear") != "mlp":
+            raise ValueError("Separate spatial readout requires the Conv MLP or ResNet variant")
+        if weight <= 0 or options.get("contrastive_proj_dim", 0) != 0:
+            raise ValueError("Separate spatial readout requires positive patch weight and no loss projector")
     if weight > 0:
         options.setdefault("train_patch_grid", [8, 8, 8])
         if options["contrastive_loss_type"] != "infonce":
@@ -97,6 +103,8 @@ def make_options(args):
     suffix = "".join(f"_{tag}{options[key]}" for key, tag in OVERRIDES.items() if options[key] != recipe[key])
     if weight > 0:
         suffix += "_patch" + "x".join(map(str, options["train_patch_grid"])) + f"_w{weight:g}"
+    if options.get("separate_spatial_readout", False):
+        suffix += "_separate_spatial"
     if options.get("synthetic_lesion_radius", 0.1) != recipe.get("synthetic_lesion_radius", 0.1):
         suffix += f"_lr{options['synthetic_lesion_radius']:g}"
     options["model_id"] = args.model_id or f"{args.variant}_s{args.seed}_{options['device']}{suffix}"
@@ -184,7 +192,7 @@ def _disposable_step(options, device):
     if not torch.isfinite(loss).item():
         raise RuntimeError("Backend check: non-finite loss")
     loss.backward()
-    for part in (model.encoder, model.encoder_v1, model.to_encoding):
+    for part in (model.encoder, model.encoder_v1, model.to_encoding, model.spatial_readout):
         grad = None if part is None else next(part.parameters()).grad
         if part is not None and (grad is None or not torch.isfinite(grad).all().item() or not grad.any().item()):
             raise RuntimeError("Backend check: missing, non-finite or zero gradient")
@@ -213,6 +221,7 @@ def main(argv=None):
     parser.add_argument("--eval-every", type=int, help="Default: the recipe's")
     parser.add_argument("--patch-loss-weight", type=float, help="Add spatial InfoNCE; 0 keeps global-only training")
     parser.add_argument("--train-patch-grid", type=int, nargs=3, help="Default for patch training: 8 8 8")
+    parser.add_argument("--separate-spatial-readout", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--spatial-recovery-eval", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--spatial-recovery-grids", type=int, nargs="+")
     parser.add_argument("--spatial-recovery-native", action=argparse.BooleanOptionalAction, default=None)

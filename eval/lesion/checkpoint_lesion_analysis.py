@@ -52,7 +52,8 @@ def batch_features(model, x, grids):
     """One real forward; capture backbone maps and the encoding's content and style units.
 
     ``projected`` is the content block and ``style`` the units after it; ``style`` is
-    omitted when ``latent_dim == content_channels``.
+    omitted when the active head has no style units. Grid 1 reads the global
+    encoding; larger grids read the active patch head (shared or separate).
     """
     if any(module.training for module in model.modules()):
         raise ValueError("Frozen lesion analysis requires model.eval(), including all BatchNorm modules")
@@ -85,12 +86,12 @@ def batch_features(model, x, grids):
             code = global_code
         elif model.readout_type == "mlp":
             # Nonlinear head is applied AFTER bin averaging, as in model.forward.
-            code = model.to_encoding(pooled.flatten(2).transpose(1, 2)).transpose(1, 2)
+            code = model.patch_readout(pooled.flatten(2).transpose(1, 2)).transpose(1, 2)
         else:
             code = F.adaptive_avg_pool3d(captured["to_encoding"], (grid,) * 3)
         result[(grid, "backbone")] = pooled.flatten(1).cpu().numpy()
         result[(grid, "projected")] = code[:, : model.content_channels].flatten(1).cpu().numpy()
-        if model.latent_dim > model.content_channels:
+        if code.shape[1] > model.content_channels:
             result[(grid, "style")] = code[:, model.content_channels :].flatten(1).cpu().numpy()
     return result, tuple(h.shape[2:]), int(h.shape[1])
 
@@ -128,6 +129,7 @@ def extract(model, ds, device, batch_size, grids, with_targets=True):
         "model_sha256": before,
         "spatial_shape": spatial_shape,
         "backbone_channels": channels,
+        "separate_spatial_readout": model.separate_spatial_readout,
     }
 
 
@@ -208,7 +210,7 @@ def run_analysis(model, floor_factory, ds, device, batch_size, grids=(1, 4), n_s
             "seed_std is spread across three CV-seed means, not a confidence interval.",
             "Shuffles permute whole six-target rows; axes and latent/centroid relationships are kept together.",
             "Backbone and projected feature counts differ; probe scores measure accessibility, not total information.",
-            "'projected' is the encoding's content block and 'style' the units after it (absent with no style units).",
+            "'projected' reads the global head at grid 1 and the active patch head at larger grids; style is absent for a separate content-only spatial head.",
             "wm_interior controls are anatomy-dependent quantiles, not Cartesian positions; voxelization can be many-to-one.",
             "MLP patch readouts apply the nonlinear head after pooling each bin; their mean need not equal GAP.",
             "The untrained twin is a seeded initialization reference, not a saved pre-training checkpoint.",
@@ -281,6 +283,8 @@ def print_analysis(report):
                         and r["target"].startswith(family)
                     ]
                     real = [r for r in selected if r["arm"] == "trained"]
+                    if not real:
+                        continue
                     floor = [r["r2"] for r in selected if r["arm"] == "untrained"]
                     scores = [
                         np.mean([r["r2"] for r in real]),

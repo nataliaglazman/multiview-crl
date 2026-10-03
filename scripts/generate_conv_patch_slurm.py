@@ -19,6 +19,7 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--patch-loss-weight", type=float, default=1.0)
     parser.add_argument("--train-patch-grid", type=int, nargs=3, default=[8, 8, 8])
+    parser.add_argument("--separate-spatial-readout", action="store_true")
     parser.add_argument("--cluster-config", type=Path, default=ROOT / "experiments/cluster/slurm_bio.yaml")
     parser.add_argument("--results-dir", default="/scratch/users/k24058220/encoder_patch_slurm_bio")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "experiments/generated")
@@ -35,18 +36,22 @@ def main(argv=None):
         parser.error(f"Patch grid must fit the {spatial}^3 Conv map")
     grid = "x".join(map(str, args.train_patch_grid))
     name = f"conv_mlp_patch_g{grid}_w{args.patch_loss_weight:g}"
+    tag = "_separate_spatial" if args.separate_spatial_readout else ""
+    name += tag
     options = slurm.ablations.training_options(
         config, {"reference": "conv", "overrides": {"conv_readout": "mlp"}}, name, args.seed, args.results_dir
     )
     options.update(
         patch_loss_weight=args.patch_loss_weight, train_patch_grid=args.train_patch_grid, spatial_recovery_eval=True
     )
+    if args.separate_spatial_readout:
+        options["separate_spatial_readout"] = True
     command = shlex.join(["python", "scripts/generate_conv_patch_slurm.py", *arguments])
     script = slurm.render_script(
-        config, options, slurm.load_resources(args.cluster_config), f"encoder-conv-patch-s{args.seed}", command
+        config, options, slurm.load_resources(args.cluster_config), f"encoder-conv-patch{tag}-s{args.seed}", command
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    path = args.output_dir / f"encoder_conv_mlp_patch_s{args.seed}.slurm_bio.sh"
+    path = args.output_dir / f"encoder_conv_mlp_patch{tag}_s{args.seed}.slurm_bio.sh"
     path.write_text(script)
     path.chmod(0o755)
     print(path)

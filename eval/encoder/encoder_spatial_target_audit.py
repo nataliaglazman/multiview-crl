@@ -109,6 +109,7 @@ def extract(model, ds, args, device, directory):
             "native_shape": list(shape),
             "channels": channels,
             "model_state_sha256": before,
+            "separate_spatial_readout": model.separate_spatial_readout,
         },
     )
 
@@ -127,7 +128,22 @@ def score_banks(banks, args, arm, directory):
         gram, width = block_gram(x, np.arange(x.shape[1]), splits[0])
         scores, predicted = fit_readouts(gram, width, targets, splits, args.seed, target_names=TARGETS)
         rows.extend(
-            {"arm": arm, "view": view, "grid": grid, "stage": stage, "dimensions": x.shape[1], **row} for row in scores
+            {
+                "arm": arm,
+                "view": view,
+                "grid": grid,
+                "stage": stage,
+                "dimensions": x.shape[1],
+                "readout_head": (
+                    ("spatial" if grid != 1 and val[2].get("separate_spatial_readout", False) else "global")
+                    if stage == "projected"
+                    else "global"
+                    if stage == "hidden"
+                    else None
+                ),
+                **row,
+            }
+            for row in scores
         )
         predictions.update({f"{view}_g{grid}_{stage}_{key}": value for key, value in predicted.items()})
         del x, gram
