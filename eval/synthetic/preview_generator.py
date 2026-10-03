@@ -43,7 +43,7 @@ CONTENT_NAMES = [
 ]
 
 # The two configs this project actually compares: the flagship, and the flagship with every
-# generator-side defect closed (experiments/synthetic_identifiable.yaml).
+# generator-side defect closed (the removed experiments/synthetic_identifiable.yaml; see git history).
 OLD = dict(
     synthetic_content_prior="normal",
     synthetic_content_squash="auto",

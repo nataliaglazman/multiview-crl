@@ -43,7 +43,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `utils/helper.py` — `HelperModule`, `get_parameter_count` (used by vqvae.py).
 - `experiments/defaults.yaml` — base config (all shared flags). Experiment YAMLs override only what differs.
 - `experiments/cluster/{runai,slurm}.yaml` — cluster-specific paths and job resource configs.
-- `experiments/*.yaml` — per-experiment configs (e.g. `ablation_baseline.yaml`).
+- `experiments/*.yaml` — per-experiment configs (main recipe: `synthetic_causal.yaml`; also `adni_real`, `synthetic_causal_frozen_encoder`, `synthetic_causal_groupnorm_control`, `encoder_ablations/`). One-off variants go through `--set`, not new YAMLs.
 - `scripts/launch.py` — reads experiment YAML, merges defaults+cluster+overrides, submits to RunAI/SLURM/local. Saves timestamped resolved config snapshot with git SHA to the run's output directory.
 - `scripts/sweep_config.yaml` + `sweep_train.py` — W&B Bayesian sweep wrapper (handles bool flags + constraints).
 - `scripts/compare_dino_objectives.sh` — end-to-end DINO objective ablation: verifies each fine-tune run's recorded objective, extracts bundles + floors, scores the content block and the full embedding separately, plots both.

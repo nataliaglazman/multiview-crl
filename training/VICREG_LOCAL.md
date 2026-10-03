@@ -94,14 +94,16 @@ silently changing alignment semantics. Multi-step accumulation does not increase
 the number of subjects used for a covariance estimate. The training loader already
 drops incomplete batches; direct callers must supply at least two subjects.
 
-`experiments/synthetic_causal_vicregl.yaml` supplies a 5,000-step example. Review its
-resolved settings before using it as a matched comparison; synthetic defaults
-also supply encoder/style flags. To preserve the exact architecture and generator
-of an existing experiment, apply the block above to a copy of that experiment and
-give it a new run name. Start fresh rather than resuming an incompatible BT state.
+To run it, apply the block above to `experiments/synthetic_causal.yaml` with `--set`
+and give it a new run name, so the architecture and generator stay those of the
+main recipe. Review the resolved settings before using it as a matched comparison.
+Start fresh rather than resuming an incompatible BT state. (The former 5,000-step
+`experiments/synthetic_causal_vicregl.yaml` is in git history:
+`git log --diff-filter=D -- experiments/synthetic_causal_vicregl.yaml`.)
 
 ```bash
-python scripts/launch.py experiments/synthetic_causal_vicregl.yaml --cluster local --dry-run
+python scripts/launch.py experiments/synthetic_causal.yaml --cluster local --dry-run \
+  --set tag=synthetic-causal-vicregl contrastive_loss_type=vicregl patch_contrastive=True ...
 ```
 
 For the heads-off ablation use a separate run name and
