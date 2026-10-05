@@ -39,6 +39,7 @@ STORE_TRUE = {
     "deterministic",
     "deterministic_warn_only",
     "hash_training_inputs",
+    "patch_foreground_mask",
 }
 RESERVED = {
     "seed",

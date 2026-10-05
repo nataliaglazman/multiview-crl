@@ -21,6 +21,18 @@ def main(argv=None):
     parser.add_argument("--train-patch-grid", type=int, nargs=3, default=[8, 8, 8])
     parser.add_argument("--separate-spatial-readout", action="store_true")
     parser.add_argument(
+        "--patch-foreground-mask",
+        action="store_true",
+        help="Drop always-background positions from the patch loss; script and run names gain _fgmask",
+    )
+    parser.add_argument("--patch-foreground-thresh", type=float, default=0.05)
+    parser.add_argument(
+        "--norm-type",
+        choices=("group", "layer"),
+        default="group",
+        help="Conv encoder norm; layer adds _layernorm to the script and run names",
+    )
+    parser.add_argument(
         "--synthetic-lesion-intensity",
         choices=("fixed", "styled"),
         default="fixed",
@@ -37,12 +49,18 @@ def main(argv=None):
         parser.error("Choose a seed from the comparison recipe")
     if not math.isfinite(args.patch_loss_weight) or args.patch_loss_weight <= 0:
         parser.error("Patch loss weight must be finite and positive")
+    if not 0 < args.patch_foreground_thresh <= 1:
+        parser.error("--patch-foreground-thresh must be in (0, 1]")
     spatial = config["shared"]["res"] // config["shared"]["downscale_factor"]
     if any(g < 1 or g > spatial for g in args.train_patch_grid):
         parser.error(f"Patch grid must fit the {spatial}^3 Conv map")
     grid = "x".join(map(str, args.train_patch_grid))
     name = f"conv_mlp_patch_g{grid}_w{args.patch_loss_weight:g}"
     tag = "_separate_spatial" if args.separate_spatial_readout else ""
+    if args.patch_foreground_mask:
+        tag += "_fgmask" + ("" if args.patch_foreground_thresh == 0.05 else f"{args.patch_foreground_thresh:g}")
+    if args.norm_type != "group":
+        tag += f"_{args.norm_type}norm"
     if args.synthetic_lesion_intensity != "fixed":
         tag += f"_lesion{args.synthetic_lesion_intensity}"
     name += tag
@@ -54,6 +72,10 @@ def main(argv=None):
     )
     if args.separate_spatial_readout:
         options["separate_spatial_readout"] = True
+    if args.patch_foreground_mask:
+        options.update(patch_foreground_mask=True, patch_foreground_thresh=args.patch_foreground_thresh)
+    if args.norm_type != "group":
+        options["norm_type"] = args.norm_type
     if args.synthetic_lesion_intensity != "fixed":
         options["synthetic_lesion_intensity"] = args.synthetic_lesion_intensity
     command = shlex.join(["python", "scripts/generate_conv_patch_slurm.py", *arguments])

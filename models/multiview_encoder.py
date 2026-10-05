@@ -52,6 +52,7 @@ class MultiviewConvEncoder(HelperModule):
         global_pool: str = "gap",
         attention_pool_heads: int = 4,
         attention_pool_frequencies: int = 4,
+        norm_type: str = "group",
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -78,8 +79,14 @@ class MultiviewConvEncoder(HelperModule):
             raise ValueError("separate_spatial_readout requires an MLP readout")
         if separate_spatial_readout and proj_dim != 0:
             raise ValueError("separate_spatial_readout currently requires proj_dim=0 (no shared loss projector)")
+        # "group": GroupNorm statistics pool over all positions of a sample, so they reach
+        # background cells. "layer": per-voxel LayerNorm over channels, no spatial pooling.
+        if norm_type not in ("group", "layer"):
+            raise ValueError(f"norm_type must be group or layer, got {norm_type!r}")
+        if encoder_architecture == "resnet18" and norm_type != "group":
+            raise ValueError("norm_type applies to the conv architecture; use resnet_norm for resnet18")
         self.backbone_stride = resnet_output_stride if encoder_architecture == "resnet18" else downscale_factor
-        self.normalization = resnet_norm if encoder_architecture == "resnet18" else "group"
+        self.normalization = resnet_norm if encoder_architecture == "resnet18" else norm_type
         if self.readout_type == "mlp" and encoder_head_hidden <= 0:
             raise ValueError("encoder_head_hidden must be positive")
         if global_pool not in ("gap", "attention"):
@@ -94,7 +101,13 @@ class MultiviewConvEncoder(HelperModule):
             from models.vqvae import Encoder
 
             self.encoder = Encoder(
-                in_channels, hidden_channels, res_channels, nb_res_layers, downscale_factor, use_checkpoint
+                in_channels,
+                hidden_channels,
+                res_channels,
+                nb_res_layers,
+                downscale_factor,
+                use_checkpoint,
+                norm_type=norm_type,
             )
         else:
             self.encoder = ResNet18Features3d(in_channels, norm=resnet_norm, output_stride=resnet_output_stride)

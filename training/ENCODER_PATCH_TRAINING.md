@@ -130,9 +130,9 @@ bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
   --synthetic-lesion-intensity styled
 ```
 
-This writes `results/encoder_patch_cuda/runs/conv_mlp_s42_cuda_patch8x8x8_w1_lesionstyled/`.
-The flag works the same way with the `.mps.sh` launcher and with
-`scripts/run_encoder_mps.py` directly. For SLURM:
+The run directory is the control's with `_lesionstyled` appended. The flag works
+the same way with the `.mps.sh` launcher and with `scripts/run_encoder_mps.py`
+directly. For SLURM:
 
 ```bash
 python scripts/generate_conv_patch_slurm.py --synthetic-lesion-intensity styled
@@ -144,6 +144,40 @@ training-time spatial monitor and every `eval/encoder` audit. Runs saved before
 the flag existed evaluate as `fixed`. Compare against the fixed-intensity run at
 matched seeds, batch size, steps and lesion radius, with the lesion-movement and
 contrast audits.
+
+## Foreground-masked patch loss
+
+By default the patch InfoNCE averages over every position of the training grid.
+At resolution 64 about 77% of a subject's 8³ grid is background, and those bins
+still differ between subjects: receptive fields reach the brain edge and GroupNorm
+writes whole-volume statistics into every position. Most of the patch loss can
+therefore be met with global information such as brain size, and a lesion touches
+1–2 of 512 bins.
+
+`--patch-foreground-mask` uses the VQ-VAE trainer's rule and flag names. Each
+batch, the brain mask is pooled to `--train-patch-grid`, and a position stays in
+the patch loss if any sample has at least `--patch-foreground-thresh` brain there
+(default 0.05). All subjects keep the same positions, and every position is kept
+if none qualifies. With 32 subjects per batch at resolution 64 this keeps 180–200
+of 512 positions; `--patch-foreground-thresh 0.5` keeps about 140. The mask comes
+from the input itself, never from generator factors. The global loss is
+unchanged, and the first batch's kept count is printed at the start of training.
+
+It requires a positive `--patch-loss-weight`. The CUDA wrapper may default to
+global-only training, so pass the weight explicitly:
+
+```bash
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --patch-loss-weight 1 --patch-foreground-mask --check
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --patch-loss-weight 1 --patch-foreground-mask
+```
+
+The run ID gains `_fgmask` (`_fgmask<thresh>` for a non-default threshold). For
+SLURM, `python scripts/generate_conv_patch_slurm.py --patch-foreground-mask` writes
+`encoder_conv_mlp_patch_fgmask_s42.slurm_bio.sh`. Compare against the unmasked
+patch run at matched seeds, batch size, steps, grid and weight. This changes
+training only, so the evaluation tools need no setting from it.
 
 ## Local MPS run
 

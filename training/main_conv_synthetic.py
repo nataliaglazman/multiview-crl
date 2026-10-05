@@ -84,6 +84,13 @@ def parse_args(argv=None):
     )
     p.add_argument("--resnet-norm", choices=("batch", "group"), default="batch")
     p.add_argument(
+        "--norm-type",
+        choices=("group", "layer"),
+        default="group",
+        help="Conv encoder norm. group (legacy) pools each sample's statistics over all positions, "
+        "so they reach background cells; layer normalizes channels at each voxel independently",
+    )
+    p.add_argument(
         "--resnet-output-stride",
         type=int,
         choices=(8, 16, 32),
@@ -114,6 +121,20 @@ def parse_args(argv=None):
         nargs=3,
         default=[8, 8, 8],
         help="Training-only patch grid; must fit the backbone map when --patch-loss-weight > 0",
+    )
+    # Same names, default and rule as utils/config.py's VQ-VAE flags.
+    p.add_argument(
+        "--patch-foreground-mask",
+        action="store_true",
+        help="Drop always-background positions from the patch InfoNCE: each batch, the brain mask is "
+        "pooled to --train-patch-grid and a position is kept if any sample has at least "
+        "--patch-foreground-thresh brain there. At res 64, ~77%% of an 8³ grid is background per subject",
+    )
+    p.add_argument(
+        "--patch-foreground-thresh",
+        type=float,
+        default=0.05,
+        help="Brain fraction a patch position needs in at least one batch sample to stay in the patch loss",
     )
     p.add_argument(
         "--cross-view-negs-only",
@@ -314,6 +335,10 @@ def parse_args(argv=None):
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if not 0 <= args.patch_loss_weight < float("inf"):
         p.error("--patch-loss-weight must be finite and nonnegative")
+    if args.patch_foreground_mask and args.patch_loss_weight <= 0:
+        p.error("--patch-foreground-mask requires a positive --patch-loss-weight")
+    if not 0 < args.patch_foreground_thresh <= 1:
+        p.error("--patch-foreground-thresh must be in (0, 1]")
     if args.separate_spatial_readout:
         if args.encoder_architecture == "conv" and args.conv_readout != "mlp":
             p.error("--separate-spatial-readout requires an MLP readout (--conv-readout mlp for Conv)")
@@ -335,6 +360,8 @@ def parse_args(argv=None):
     if args.encoder_architecture == "resnet18":
         if args.conv_readout != "linear":
             p.error("--conv-readout only applies to --encoder-architecture conv")
+        if args.norm_type != "group":
+            p.error("--norm-type only applies to --encoder-architecture conv; use --resnet-norm for ResNet")
         if args.encoder_head_hidden <= 0:
             p.error("--encoder-head-hidden must be positive")
         spatial_size = (args.res + args.resnet_output_stride - 1) // args.resnet_output_stride
@@ -458,12 +485,31 @@ def contrastive_loss(pooled, model, args, sim_metric, criterion):
     return loss.squeeze()
 
 
-def patch_contrastive_loss(patches, model, args, sim_metric, criterion):
+def foreground_positions(foreground, grid, threshold):
+    """Positions kept by --patch-foreground-mask: some sample has >= threshold brain there.
+
+    ``foreground`` is the batch's brain masks, (images, 1, D, H, W). The rule matches
+    main_multimodal's, so both trainers drop the same always-background positions. All
+    subjects keep the same positions, and every position is kept if none qualifies.
+    """
+    with torch.no_grad():
+        fraction = torch.nn.functional.adaptive_avg_pool3d(foreground.float(), tuple(grid)).flatten(1)
+        keep = (fraction >= threshold).any(dim=0)
+    return keep if bool(keep.any()) else torch.ones_like(keep)
+
+
+def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground=None):
     """Registered positions are paired; negatives are subjects at the SAME position.
 
-    Only image-derived features enter this loss. All grid positions participate;
-    there is no lesion/brain-mask sampling or access to generator factor labels.
+    Only image-derived features and the input's own brain mask enter this loss; there
+    is no lesion sampling or access to generator factor labels. All grid positions
+    participate unless --patch-foreground-mask drops the always-background ones.
     """
+    if getattr(args, "patch_foreground_mask", False):
+        if foreground is None:
+            raise ValueError("--patch-foreground-mask needs the batch's brain masks")
+        keep = foreground_positions(foreground, args.train_patch_grid, args.patch_foreground_thresh)
+        patches = patches[..., keep.to(patches.device)]
     a, b = patches[:, : args.content_channels, :].chunk(2, dim=0)
     hz = torch.stack((a, b), dim=0)  # views, subjects, content channels, positions
     # A configured projector acts on channels, never on the position axis.
@@ -479,16 +525,26 @@ def patch_contrastive_loss(patches, model, args, sim_metric, criterion):
     ).squeeze()
 
 
-def training_objective(model, images, args, sim_metric, criterion):
-    """Keep the old global path exact when local training is disabled."""
+def training_objective(model, images, args, sim_metric, criterion, masks=None):
+    """Keep the old global path exact when local training is disabled.
+
+    ``masks`` are the batch's brain masks in image order, used by --patch-foreground-mask.
+    Without them the inputs' nonzero support stands in; the synthetic inputs are zero
+    outside the brain mask, so the two agree.
+    """
     weight = getattr(args, "patch_loss_weight", 0.0)
     if weight > 0:
         pooled, patches = model.global_and_patch_features(images, args.train_patch_grid, n_views=2)
     else:
         pooled = model(images, pool_only=True, n_views=2)[2][0]
     global_loss = contrastive_loss(pooled, model, args, sim_metric, criterion)
+    foreground = None
+    if weight > 0 and getattr(args, "patch_foreground_mask", False):
+        foreground = masks if masks is not None else images != 0
     patch_loss = (
-        patch_contrastive_loss(patches, model, args, sim_metric, criterion) if weight > 0 else global_loss.new_zeros(())
+        patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground)
+        if weight > 0
+        else global_loss.new_zeros(())
     )
     weighted = weight * patch_loss
     total = global_loss + weighted if weight > 0 else global_loss
@@ -719,17 +775,21 @@ def main():
         global_pool=args.global_pool,
         attention_pool_heads=args.attention_pool_heads,
         attention_pool_frequencies=args.attention_pool_frequencies,
+        norm_type=args.norm_type,
     ).to(device)
+    pool_name = "attention pool" if model.attention_pool is not None else "GAP"
     if args.encoder_architecture == "resnet18":
         print(
             f"encoder: 3D ResNet-18, {args.resnet_norm} norm, stride {args.resnet_output_stride}, "
-            f"GAP -> 512 -> {args.encoder_head_hidden} -> {args.latent_dim}; "
+            f"{pool_name} -> 512 -> {args.encoder_head_hidden} -> {args.latent_dim}; "
             f"{'separate' if model.separate_encoders else 'shared'} view backbone(s). "
             "The conv-only width, residual-layer and downscale flags are inactive.",
             flush=True,
         )
     elif args.conv_readout == "mlp":
-        print(f"encoder: conv, GAP -> {args.hidden_channels} -> {args.encoder_head_hidden} -> {args.latent_dim}")
+        print(
+            f"encoder: conv, {pool_name} -> {args.hidden_channels} -> {args.encoder_head_hidden} -> {args.latent_dim}"
+        )
     if model.attention_pool is not None:
         pool = model.attention_pool
         print(
@@ -847,8 +907,12 @@ def main():
             if input_images is not None:
                 input_images.update(images.contiguous().numpy().tobytes())
             x = images.to(device)  # (2B, 1, res, res, res)
+            masks = torch.cat(batch["mask"], dim=0).to(device) if args.patch_foreground_mask else None
+            if masks is not None and step == 0:
+                kept = int(foreground_positions(masks, args.train_patch_grid, args.patch_foreground_thresh).sum())
+                print(f"  patch foreground mask: first batch keeps {kept}/{np.prod(args.train_patch_grid)} positions")
 
-            pooled, loss, terms = training_objective(model, x, args, sim_metric, criterion)
+            pooled, loss, terms = training_objective(model, x, args, sim_metric, criterion, masks)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()

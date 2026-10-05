@@ -81,9 +81,19 @@ def make_options(args):
     lesion_intensity = getattr(args, "synthetic_lesion_intensity", None)
     if lesion_intensity is not None:
         options["synthetic_lesion_intensity"] = lesion_intensity
+    if getattr(args, "patch_foreground_mask", None):
+        options["patch_foreground_mask"] = True
+    if getattr(args, "patch_foreground_thresh", None) is not None:
+        options["patch_foreground_thresh"] = args.patch_foreground_thresh
+    if getattr(args, "norm_type", None) is not None:
+        options["norm_type"] = args.norm_type
+    if options.get("norm_type", "group") != "group" and options["encoder_architecture"] != "conv":
+        raise ValueError("--norm-type applies to the Conv encoder; ResNet variants use resnet_norm")
     weight = options.get("patch_loss_weight", 0.0)
     if not math.isfinite(weight) or weight < 0:
         raise ValueError("Patch loss weight must be finite and nonnegative")
+    if options.get("patch_foreground_mask", False) and weight <= 0:
+        raise ValueError("The patch foreground mask requires patch training (a positive patch loss weight)")
     if options.get("separate_spatial_readout", False):
         if options["encoder_architecture"] == "conv" and options.get("conv_readout", "linear") != "mlp":
             raise ValueError("Separate spatial readout requires the Conv MLP or ResNet variant")
@@ -115,10 +125,15 @@ def make_options(args):
     suffix = "".join(f"_{tag}{options[key]}" for key, tag in OVERRIDES.items() if options[key] != recipe[key])
     if weight > 0:
         suffix += "_patch" + "x".join(map(str, options["train_patch_grid"])) + f"_w{weight:g}"
+    if options.get("patch_foreground_mask", False):
+        threshold = options.get("patch_foreground_thresh", 0.05)
+        suffix += "_fgmask" + ("" if threshold == 0.05 else f"{threshold:g}")
     if options.get("separate_spatial_readout", False):
         suffix += "_separate_spatial"
     if options.get("global_pool", "gap") == "attention":
         suffix += f"_attnpool_h{options.get('attention_pool_heads', 4)}_f{options.get('attention_pool_frequencies', 4)}"
+    if options.get("norm_type", "group") != recipe.get("norm_type", "group"):
+        suffix += f"_{options['norm_type']}norm"
     if options.get("synthetic_lesion_radius", 0.1) != recipe.get("synthetic_lesion_radius", 0.1):
         suffix += f"_lr{options['synthetic_lesion_radius']:g}"
     if options.get("synthetic_lesion_intensity", "fixed") != recipe.get("synthetic_lesion_intensity", "fixed"):
@@ -260,6 +275,19 @@ def main(argv=None):
         "--synthetic-lesion-intensity",
         choices=("fixed", "styled"),
         help="styled puts the lesion on the acquisition gain/bias map; default: the recipe's (trainer default fixed)",
+    )
+    parser.add_argument(
+        "--norm-type",
+        choices=("group", "layer"),
+        help="Conv encoder norm; default: the recipe's (trainer default group). layer adds _layernorm to the run ID",
+    )
+    parser.add_argument(
+        "--patch-foreground-mask",
+        action="store_true",
+        help="Drop always-background positions from the patch loss; the run ID gains _fgmask",
+    )
+    parser.add_argument(
+        "--patch-foreground-thresh", type=float, help="Brain fraction a position needs; trainer default 0.05"
     )
     parser.add_argument(
         "--model-id",

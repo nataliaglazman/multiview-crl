@@ -153,6 +153,7 @@ def build_model(cfg, device, state_dict=None):
         global_pool=cfg.get("global_pool", "gap"),
         attention_pool_heads=cfg.get("attention_pool_heads", 4),
         attention_pool_frequencies=cfg.get("attention_pool_frequencies", 4),
+        norm_type=cfg.get("norm_type", "group"),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)

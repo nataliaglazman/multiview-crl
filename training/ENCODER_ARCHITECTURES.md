@@ -134,3 +134,35 @@ row is 1 by construction. `model.attention_maps(x, n_views=2)` returns the
   generalization audit's backbone stage reads the pool's output. Locally,
   `scripts/run_encoder_mps.py --global-pool attention` adds it to a recipe variant.
   The Run:ai/SLURM variant files have no attention variant yet.
+
+## Normalization
+
+`--norm-type` sets the Conv encoder's normalization. ResNet keeps `--resnet-norm`.
+
+- `group` (default, and every run so far): GroupNorm in every block, with the
+  largest group count up to 32 that divides the width. At the default widths that is
+  one channel per group in the first downsampling block and inside each ReZero block
+  (an instance norm), and two per group elsewhere. Each sample's statistics are
+  pooled over all positions and written back into every cell. Background cells
+  therefore carry whole-volume information such as brain size and cortical
+  thickness, and the norm divides out a uniform scaling of its input.
+- `layer`: `ChannelLayerNorm3d`, a LayerNorm over the channels at each voxel. No
+  statistic is shared between positions. A cell whose receptive field misses the
+  brain is identical for every subject, so the background stops carrying global
+  factors. The VQ-VAE recipe already uses it; there, switching from GroupNorm took
+  the coupling between brain and background features from 1.377 to 0.
+
+```sh
+--norm-type layer
+```
+
+- Norm layers draw no random numbers. A `layer` run's convolutions and head start
+  identical to the `group` run with the same seed, so the two arms compare directly.
+- Saved settings restore the norm in `eval.protocol.score_checkpoint`; runs saved
+  before the flag existed load as `group`. The two norms' parameter names differ,
+  so a checkpoint cannot load into the wrong one silently.
+- `scripts/run_encoder_mps.py --norm-type layer` (and the wrappers) add
+  `_layernorm` to the run ID. `python scripts/generate_conv_patch_slurm.py
+  --norm-type layer` writes `encoder_conv_mlp_patch_layernorm_s42.slurm_bio.sh`.
+- `eval.encoder.encoder_spatial_maps` reports each factor's readout in brain, edge
+  and background cells, which is where the difference between the arms shows.
