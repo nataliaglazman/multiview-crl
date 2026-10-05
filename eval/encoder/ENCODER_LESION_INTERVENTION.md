@@ -137,6 +137,11 @@ Checkpoints and rendered images are not copied into this output. Large feature
 arrays are removed automatically. `report.json` records failures if an audit
 cannot complete.
 
+To test whether low T1 lesion contrast explains larger physical-location errors,
+reuse these predictions with the [contrast follow-up](ENCODER_LESION_CONTRAST.md).
+It runs on CPU without checkpoints or probe refitting and can export compressed
+NIfTI images from the low/high T1 contrast groups, with matched FLAIR and masks.
+
 ## Verification
 
 ```bash
