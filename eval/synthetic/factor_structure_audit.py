@@ -133,7 +133,11 @@ def response_geometry(maps, active, valid, rtol=1e-5):
     flat = np.asarray(maps, np.float64).reshape(len(maps), -1)
     norms = np.linalg.norm(flat, axis=1)
     normalized = np.divide(flat, norms[:, None], out=np.zeros_like(flat), where=np.asarray(active)[:, None])
-    gram = normalized @ normalized.T
+    # Explicit reductions avoid macOS Accelerate's spurious floating-point flags
+    # for tall/skinny products, without suppressing genuine numerical failures.
+    gram = np.einsum("iv,jv->ij", normalized, normalized, optimize=False)
+    if not np.isfinite(gram).all():
+        raise ValueError("Non-finite response Gram matrix")
 
     def residual_fraction(k, refs):
         if not active[k] or not all(valid[j] for j in refs):
@@ -198,12 +202,15 @@ def response_geometry(maps, active, valid, rtol=1e-5):
 def residual_map(k, refs, normalized, gram, norms, rtol):
     inv, _ = inverse_and_basis(gram[np.ix_(refs, refs)], rtol)
     coefficients = inv @ gram[list(refs), k]
-    return (normalized[k] - coefficients @ normalized[list(refs)]) * norms[k]
+    projection = np.einsum("i,ij->j", coefficients, normalized[list(refs)], optimize=False)
+    return (normalized[k] - projection) * norms[k]
 
 
 def write_nifti(path, array):
     import nibabel as nib
 
+    if not np.isfinite(array).all():
+        raise ValueError(f"Non-finite NIfTI map: {path}")
     image = nib.Nifti1Image(np.asarray(array, np.float32), np.eye(4))
     image.set_qform(np.eye(4), code=0)
     image.set_sform(np.eye(4), code=2)

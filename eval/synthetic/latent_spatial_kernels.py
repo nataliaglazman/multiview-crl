@@ -23,8 +23,11 @@ PAPER = "https://proceedings.mlr.press/v238/halva24a.html"
 
 def covariance(samples):
     samples = np.asarray(samples, np.float64)
+    if samples.ndim != 2 or len(samples) < 2 or not np.isfinite(samples).all():
+        raise ValueError("Covariance requires >=2 finite vector observations")
     centered = samples - samples.mean(0)
-    return centered.T @ centered / (len(samples) - 1)
+    # Avoid Accelerate's spurious floating-point flags on these matrix shapes.
+    return np.einsum("ni,nj->ij", centered, centered, optimize=False) / (len(samples) - 1)
 
 
 def correlation(cov):
@@ -212,7 +215,7 @@ def kernel_audit(ds, args, out):
     comparisons, differences = [], []
     for a, b in combinations(fields, 2):
         x, y = fields[a] - fields[a].mean(0), fields[b] - fields[b].mean(0)
-        cross = x.T @ y / (len(x) - 1)
+        cross = np.einsum("ni,nj->ij", x, y, optimize=False) / (len(x) - 1)
         va, vb = np.diag(archive[a + "_covariance"]), np.diag(archive[b + "_covariance"])
         denominator = np.sqrt(np.outer(va, vb))
         corr = np.divide(cross, denominator, out=np.full_like(cross, np.nan), where=denominator > 1e-15)
