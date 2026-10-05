@@ -687,6 +687,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_lesion_placement="legacy",
         synthetic_cortex_parameterization="additive",
         synthetic_center_local_deformations=False,
+        synthetic_lesion_intensity="fixed",
         synthetic_style_alignment_pairs=False,
         **kwargs,
     ):
@@ -759,6 +760,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             lesion_placement=synthetic_lesion_placement,
             cortex_parameterization=synthetic_cortex_parameterization,
             center_local_deformations=synthetic_center_local_deformations,
+            lesion_intensity=synthetic_lesion_intensity,
         )
         if synthetic_normalize in ("per_sample", "shared") and synthetic_n_style > 0:
             import warnings

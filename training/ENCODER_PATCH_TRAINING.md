@@ -107,6 +107,44 @@ recovery would support the shared-readout bottleneck hypothesis. A change in bot
 means the backbone also adapted. Track sulcal recovery and initialization/shuffled
 controls, and repeat across seeds before treating differences as reliable.
 
+## Lesion intensity that follows acquisition style
+
+By default the renderer blends the lesion in at a fixed intensity after the style
+gain/bias have set the tissue intensities, so T1 lesion contrast ranges from 0.06
+to 0.74 and nearly vanishes in low-gain scans
+([details](../eval/encoder/ENCODER_LESION_CONTRAST.md)). With
+`--synthetic-lesion-intensity styled` the lesion goes through the same gain/bias
+map as the tissues: T1 contrast becomes `0.4*gain` (0.28 to 0.52) and FLAIR
+`0.6*gain` (0.42 to 0.78). In the raw render only the lesion and its one-voxel
+blur ring change. The `fixed_reference` normalization constants include lesion
+voxels, so they shift by about 0.2%. This changes the training data and needs a
+new run from scratch. Only this encoder-only trainer has the flag.
+
+Add the flag to the command that trained the fixed-intensity control. The run ID
+gains `_lesionstyled`, so the two never share a directory:
+
+```bash
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --synthetic-lesion-intensity styled --check
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --synthetic-lesion-intensity styled
+```
+
+This writes `results/encoder_patch_cuda/runs/conv_mlp_s42_cuda_patch8x8x8_w1_lesionstyled/`.
+The flag works the same way with the `.mps.sh` launcher and with
+`scripts/run_encoder_mps.py` directly. For SLURM:
+
+```bash
+python scripts/generate_conv_patch_slurm.py --synthetic-lesion-intensity styled
+sbatch experiments/generated/encoder_conv_mlp_patch_lesionstyled_s42.slurm_bio.sh
+```
+
+The setting is saved in `settings.json` and restored by `score_checkpoint`, the
+training-time spatial monitor and every `eval/encoder` audit. Runs saved before
+the flag existed evaluate as `fixed`. Compare against the fixed-intensity run at
+matched seeds, batch size, steps and lesion radius, with the lesion-movement and
+contrast audits.
+
 ## Local MPS run
 
 From the repository root, in the local PyTorch environment:

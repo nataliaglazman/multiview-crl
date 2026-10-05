@@ -3,8 +3,33 @@
 This follow-up tests whether lower rendered lesion contrast is associated with
 larger T1 physical-location errors. It reuses the predictions from
 `encoder_lesion_intervention`; it does not load an encoder, fit another probe, or
-train anything. It runs on CPU, including on a laptop. The default also renders
+train anything. It runs on CPU in about a minute. The default also renders
 compressed NIfTI examples from the low- and high-contrast T1 groups.
+
+## Why T1 lesion contrast varies
+
+By default (`--synthetic-lesion-intensity fixed`), `PseudoMRIRenderer.render_modality`
+applies the style gain and bias to the tissue intensities (`lut = base * gain + bias`)
+and then blends the lesion in at a fixed intensity (T1 0.4, FLAIR 1.0) that gain
+and bias never touch. Before bias field, noise and blur, the white-matter lesion
+contrast is therefore:
+
+```text
+T1:    0.8*gain + bias - 0.4      0.06 to 0.74 over the clamped style range
+FLAIR: 1.0 - (0.4*gain + bias)    0.38 to 0.82
+```
+
+A low-gain, negative-bias T1 view puts white matter almost at the lesion
+intensity, so its lesion nearly disappears; FLAIR never gets close. T1 and FLAIR
+styles are drawn independently, so one subject can have a faint T1 lesion and a
+strong FLAIR lesion.
+
+Encoder-only runs trained with `--synthetic-lesion-intensity styled` put the lesion
+through the same gain/bias map as the tissues. T1 contrast is then `0.4*gain`
+(0.28 to 0.52) and FLAIR `0.6*gain` (0.42 to 0.78); see
+[ENCODER_PATCH_TRAINING.md](../../training/ENCODER_PATCH_TRAINING.md). This
+analysis measures contrast against a lesion-free render and restores the setting
+from the audit, so it handles both kinds of run.
 
 ## Run on the NVIDIA PC
 
@@ -27,12 +52,15 @@ If it is missing from your environment, install it with `python -m pip install n
 
 The minimum inputs are `report.json`, `pairs.csv`, `trained_predictions.npz`, and
 `initial_predictions.npz` if that arm was included. No checkpoint or feature banks
-are needed. These are the only files to copy to a laptop for this test. The saved
-settings, subject IDs, intervention axes and normalization reconstruct the images.
-Exact image SHA256 must match the original audit before the analysis or NIfTI
-exports proceed. If replay fails, use the renderer and Python/PyTorch environment
-that produced the source audit; the program refuses to pair changed images with
-old predictions. The saved CPU thread count is honored when present.
+are needed. The saved settings, subject IDs, intervention axes and normalization
+reconstruct the images. Exact image SHA256 must match the original audit before
+the analysis or NIfTI exports proceed; the program refuses to pair changed images
+with old predictions. The saved CPU thread count is honored when present.
+
+Run it on the machine and Python/PyTorch environment that produced the audit.
+Another CPU architecture (an Apple-silicon laptop versus the x86 PC) or PyTorch
+version can change the last bits of the rendered noise, and the replay then
+refuses. To view the examples on a laptop, copy the finished `nifti/` folder.
 
 ## Contrast definition
 
@@ -68,7 +96,9 @@ calibrated contrast-to-noise ratio.
 - **`contrast_groups.csv`**: low/middle/high subject contrast thirds and their
   movement skill, gain, movement error and endpoint error. `own_view` uses each
   modality's contrast groups; `t1_matched` compares T1 and FLAIR on exactly the
-  same subjects, grouped by T1 contrast.
+  same subjects, grouped by T1 contrast. The console prints the trained ridge
+  `t1_matched` movement skill: a rising T1 row and a flat FLAIR row point at
+  contrast; T1 still below FLAIR in the high third points elsewhere.
 - **`paired_views.csv`**: one matched T1/FLAIR comparison per subject and probe.
   Positive `t1_minus_flair_endpoint_error_vox` means T1's error was larger.
 - **`subject_errors.csv`**: per-subject contrast, errors and movement counts.

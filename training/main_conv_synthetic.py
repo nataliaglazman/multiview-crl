@@ -231,6 +231,13 @@ def parse_args(argv=None):
         default=0.1,
         help="Sphere-mode lesion radius in [-1,1] coords (0.1 = 1.6 voxels at res=32)",
     )
+    p.add_argument(
+        "--synthetic-lesion-intensity",
+        choices=("fixed", "styled"),
+        default="fixed",
+        help="styled passes the lesion through the acquisition gain/bias like every tissue (T1 contrast "
+        "0.4*gain); fixed reproduces old runs, whose T1 lesion nearly vanishes at low gain",
+    )
     p.add_argument("--synthetic-n-deformation-grid", type=int, default=4)
     p.add_argument("--synthetic-n-fissure-grid", type=int, default=8)
     p.add_argument("--synthetic-hierarchical-content", action="store_true")
@@ -380,6 +387,7 @@ def make_dataset(args, mode, num_samples):
         synthetic_clean_content=args.synthetic_clean_content,
         synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
         synthetic_lesion_radius=getattr(args, "synthetic_lesion_radius", 0.1),
+        synthetic_lesion_intensity=getattr(args, "synthetic_lesion_intensity", "fixed"),
     )
 
 

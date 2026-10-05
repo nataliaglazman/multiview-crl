@@ -143,6 +143,7 @@ class PseudoMRIRenderer(nn.Module):
         cortex_parameterization="additive",
         center_local_deformations=False,
         lesion_placement="legacy",
+        lesion_intensity="fixed",
     ):
         super().__init__()
         self.res = res
@@ -182,6 +183,14 @@ class PseudoMRIRenderer(nn.Module):
         if lesion_placement == "wm_interior" and (res < 2 or not np.isfinite(lesion_radius) or lesion_radius <= 0):
             raise ValueError("wm_interior requires res >= 2 and a positive finite lesion_radius")
         self.lesion_placement = lesion_placement
+        # "fixed" (default, legacy) blends the lesion in at a constant intensity AFTER the
+        # style gain/bias have set every tissue's, so T1 lesion contrast 0.8*gain + bias - 0.4
+        # spans 0.06-0.74 and nearly vanishes in low-gain, negative-bias scans. "styled" puts
+        # the lesion through the same gain/bias map as the tissues: contrast 0.4*gain (T1),
+        # 0.6*gain (FLAIR). See eval/encoder/ENCODER_LESION_CONTRAST.md.
+        if lesion_intensity not in ("fixed", "styled"):
+            raise ValueError(f"lesion_intensity must be fixed|styled, got {lesion_intensity!r}")
+        self.lesion_intensity = lesion_intensity
         if cortex_parameterization not in ("additive", "nested", "midsurface", "patterned"):
             raise ValueError(
                 f"cortex_parameterization must be additive|nested|midsurface, got {cortex_parameterization!r}"
@@ -538,7 +547,8 @@ class PseudoMRIRenderer(nn.Module):
         # Convex blend, smooth and strictly monotone in the load. With a binary load
         # this is exactly the old torch.where, so sphere mode is unchanged.
         lesion_load = lesion_load.to(volume.dtype)
-        volume = (1.0 - lesion_load) * volume + lesion_load * lesion_int
+        lesion_value = lesion_int * gain + bias if self.lesion_intensity == "styled" else lesion_int
+        volume = (1.0 - lesion_load) * volume + lesion_load * lesion_value
 
         bias_field = 1.0 + self._seeded_noise(scale=4, gen=gen, device=device) * 0.15 * self.style_scale
         volume = volume * bias_field
@@ -701,6 +711,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         cortex_parameterization="additive",
         center_local_deformations=False,
         lesion_placement="legacy",
+        lesion_intensity="fixed",
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -847,6 +858,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 lesion_placement=lesion_placement,
                 cortex_parameterization=cortex_parameterization,
                 center_local_deformations=center_local_deformations,
+                lesion_intensity=lesion_intensity,
             )
             if lesion_mode == "field" and n_content > 2:
                 import warnings
