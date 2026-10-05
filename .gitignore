@@ -76,6 +76,7 @@ test.ipynb
 # One-off console dumps once committed at the root
 /dino.txt
 /notebook_diff.txt
+final_compare*
 
 # Run output dirs at the root (checkpoints, tensorboard, wandb ids)
 /synthetic-*/
