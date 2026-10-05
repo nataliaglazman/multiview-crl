@@ -3,7 +3,7 @@
 python -m eval.encoder.encoder_spatial_maps --run-dir RUN --out-dir NEW_OUTPUT
 
 Stages: ``backbone`` is the encoder's last feature map (16³ x 64 for the Conv recipe),
-``projected`` the active spatial content head applied at every native cell, and
+``projected`` the active spatial content head on each bin of the training grid, and
 ``global`` the content vector the model outputs (GAP, then the global head).
 
 1. Gallery: what the maps look like for a few test subjects.
@@ -206,26 +206,31 @@ def decodability(model, cfg, args, device, scratch, arm):
             close_arrays(bank[0])
 
 
-def native_maps(model, x, device, native):
-    """(images, native³ cells, channels) backbone/projected maps and the global content code."""
-    features, shape, channels = batch_features(model, x.to(device), [1, native])
+def native_maps(model, x, device, native, grid):
+    """(images, cells, channels) maps: backbone at the native grid, content head at the analysis grid.
+
+    The content head is read on the training grid's bins, as training and the spatial monitor
+    use it; applying it to single native cells would feed it inputs it never saw.
+    """
+    features, shape, channels = batch_features(model, x.to(device), sorted({1, native, grid}))
     if shape != (native,) * 3:
         raise ValueError(f"Expected a cubic {native}³ backbone map, got {shape}")
     b = x.shape[0]
     return dict(
         backbone=features[native, "backbone"].reshape(b, channels, native**3).transpose(0, 2, 1),
-        projected=features[native, "projected"].reshape(b, -1, native**3).transpose(0, 2, 1),
+        projected=features[grid, "projected"].reshape(b, -1, grid**3).transpose(0, 2, 1),
         global_code=features[1, "projected"],
     )
 
 
 def gallery(model, ds, args, device, arm, out):
     """Unperturbed maps of the first test subjects; returns per-view channel scales."""
-    n = args.native
+    n, m = args.native, args.grid
     items = [ds[i] for i in range(args.gallery_subjects)]
     x = torch.cat([torch.stack([item["image"][v] for item in items]) for v in range(2)])
-    maps = native_maps(model, x, device, n)
+    maps = native_maps(model, x, device, n, m)
     g, k, stride = len(items), n // 2, ds.res // n
+    km = min(m - 1, int((k + 0.5) * m / n))  # content-grid slice covering the same input slab
     columns = [
         "input",
         "|backbone|",
@@ -260,7 +265,7 @@ def gallery(model, ds, args, device, arm, out):
                 panels.append((scores[s, :, p].reshape(n, n, n)[:, :, k], dict(cmap="RdBu_r", vmin=-lim, vmax=lim)))
             for c in range(projected.shape[2]):
                 lim = content_range[c]
-                panels.append((projected[s, :, c].reshape(n, n, n)[:, :, k], dict(cmap="RdBu_r", vmin=-lim, vmax=lim)))
+                panels.append((projected[s, :, c].reshape(m, m, m)[:, :, km], dict(cmap="RdBu_r", vmin=-lim, vmax=lim)))
             for col, (panel, kw) in enumerate(panels):
                 ax = axes[row, col]
                 ax.imshow(panel.T, origin="lower", interpolation="nearest", **kw)
@@ -270,7 +275,9 @@ def gallery(model, ds, args, device, arm, out):
                     ax.set_title(columns[col], fontsize=7)
             axes[row, 0].set_ylabel(f"{view} s{items[s]['index']}", fontsize=7)
     fig.suptitle(
-        f"{arm}: final-stage maps, axial cell slice {k} of {n}³ (input slice {int((k + 0.5) * stride)})", fontsize=9
+        f"{arm}: final-stage maps at input slice {int((k + 0.5) * stride)}; backbone slice {k} of {n}³, "
+        f"content slice {km} of {m}³",
+        fontsize=9,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(out / f"gallery_{arm}.png", dpi=110)
@@ -292,7 +299,8 @@ def responses(model, ds, args, device, arm, scales, global_sd):
                 skipped += 1
                 skipped_reasons.append(f"{factor} subject {idx}: {error}")
                 continue
-            encoded = native_maps(model, torch.cat([torch.stack([a[v], b[v]]) for v in range(2)]), device, args.native)
+            pair = torch.cat([torch.stack([a[v], b[v]]) for v in range(2)])
+            encoded = native_maps(model, pair, device, args.native, args.grid)
             for v, view in enumerate(VIEWS):
                 difference = (b[v] - a[v]).double().numpy()[0]
                 fields[view, "input"].append(np.abs(difference))
@@ -302,7 +310,9 @@ def responses(model, ds, args, device, arm, scales, global_sd):
                 for stage in SPATIAL_STAGES:
                     delta = (encoded[stage][2 * v + 1] - encoded[stage][2 * v]) / scales[view][stage]
                     magnitude = np.linalg.norm(delta, axis=1) / np.sqrt(delta.shape[1])
-                    fields[view, stage].append(magnitude.reshape((args.native,) * 3))
+                    fields[view, stage].append(
+                        magnitude.reshape((args.native if stage == "backbone" else args.grid,) * 3)
+                    )
                     coherent = np.linalg.norm(delta.mean(0)) / np.sqrt(delta.shape[1])
                     values[view, stage].append((magnitude.mean(), coherent, survival(delta), np.nan))
                 change = (encoded["global_code"][2 * v + 1] - encoded["global_code"][2 * v]) / global_sd[view]
@@ -435,8 +445,9 @@ def main(argv=None):
         evaluation_only=True,
         cohorts={},
         notes=[
-            "backbone = the encoder's last feature map; projected = the active spatial content head at every native "
-            "cell; global = the model's content vector (GAP, then the global head).",
+            "backbone = the encoder's last feature map (native grid); projected = the active spatial content head on "
+            "each bin of the analysis grid (the training patch grid by default); global = the model's content "
+            "vector (GAP, then the global head).",
             "Interventions change one raw content control by -/+delta. Everything else in the anatomy, the acquisition "
             "draws and the subject's normalization affine is fixed. Non-lesion factors keep the subject's own lesion in "
             "place; lesion coordinates move only the lesion. Causal descendants are not propagated.",
