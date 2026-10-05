@@ -59,6 +59,9 @@ def make_options(args):
         options["train_patch_grid"] = patch_grid
     for key in (
         "separate_spatial_readout",
+        "global_pool",
+        "attention_pool_heads",
+        "attention_pool_frequencies",
         "spatial_recovery_eval",
         "spatial_recovery_grids",
         "spatial_recovery_native",
@@ -86,15 +89,21 @@ def make_options(args):
             raise ValueError("Separate spatial readout requires the Conv MLP or ResNet variant")
         if weight <= 0 or options.get("contrastive_proj_dim", 0) != 0:
             raise ValueError("Separate spatial readout requires positive patch weight and no loss projector")
+    stride = (
+        options["downscale_factor"] if options["encoder_architecture"] == "conv" else options["resnet_output_stride"]
+    )
+    if options.get("global_pool", "gap") == "attention":
+        # As in the trainer: padded ResNet layers round odd sizes up, the conv backbone rounds down.
+        res = options["res"]
+        native = res // stride if options["encoder_architecture"] == "conv" else (res + stride - 1) // stride
+        if native < 2:
+            raise ValueError("Attention pooling needs a backbone map with more than one position")
+    elif any(key in options for key in ("attention_pool_heads", "attention_pool_frequencies")):
+        raise ValueError("Attention-pool heads/frequencies require --global-pool attention")
     if weight > 0:
         options.setdefault("train_patch_grid", [8, 8, 8])
         if options["contrastive_loss_type"] != "infonce":
             raise ValueError("Patch training requires InfoNCE")
-        stride = (
-            options["downscale_factor"]
-            if options["encoder_architecture"] == "conv"
-            else options["resnet_output_stride"]
-        )
         spatial = options["res"] // stride
         if len(options["train_patch_grid"]) != 3 or any(g < 1 or g > spatial for g in options["train_patch_grid"]):
             raise ValueError(f"Training patch grid must fit the {spatial}^3 backbone map")
@@ -108,6 +117,8 @@ def make_options(args):
         suffix += "_patch" + "x".join(map(str, options["train_patch_grid"])) + f"_w{weight:g}"
     if options.get("separate_spatial_readout", False):
         suffix += "_separate_spatial"
+    if options.get("global_pool", "gap") == "attention":
+        suffix += f"_attnpool_h{options.get('attention_pool_heads', 4)}_f{options.get('attention_pool_frequencies', 4)}"
     if options.get("synthetic_lesion_radius", 0.1) != recipe.get("synthetic_lesion_radius", 0.1):
         suffix += f"_lr{options['synthetic_lesion_radius']:g}"
     if options.get("synthetic_lesion_intensity", "fixed") != recipe.get("synthetic_lesion_intensity", "fixed"):
@@ -197,7 +208,7 @@ def _disposable_step(options, device):
     if not torch.isfinite(loss).item():
         raise RuntimeError("Backend check: non-finite loss")
     loss.backward()
-    for part in (model.encoder, model.encoder_v1, model.to_encoding, model.spatial_readout):
+    for part in (model.encoder, model.encoder_v1, model.to_encoding, model.spatial_readout, model.attention_pool):
         grad = None if part is None else next(part.parameters()).grad
         if part is not None and (grad is None or not torch.isfinite(grad).all().item() or not grad.any().item()):
             raise RuntimeError("Backend check: missing, non-finite or zero gradient")
@@ -227,6 +238,13 @@ def main(argv=None):
     parser.add_argument("--patch-loss-weight", type=float, help="Add spatial InfoNCE; 0 keeps global-only training")
     parser.add_argument("--train-patch-grid", type=int, nargs=3, help="Default for patch training: 8 8 8")
     parser.add_argument("--separate-spatial-readout", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--global-pool", choices=("gap", "attention"), help="Global pooling; default: the recipe's (trainer: gap)"
+    )
+    parser.add_argument("--attention-pool-heads", type=int, help="With --global-pool attention; trainer default 4")
+    parser.add_argument(
+        "--attention-pool-frequencies", type=int, help="With --global-pool attention; trainer default 4"
+    )
     parser.add_argument("--spatial-recovery-eval", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--spatial-recovery-grids", type=int, nargs="+")
     parser.add_argument("--spatial-recovery-native", action=argparse.BooleanOptionalAction, default=None)

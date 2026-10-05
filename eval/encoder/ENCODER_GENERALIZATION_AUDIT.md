@@ -55,7 +55,9 @@ do not identify which shortcut was used.
 
 For each view, capture one real forward through:
 
-1. Backbone features after global average pooling (512 dimensions for ResNet).
+1. Backbone features after the global pool (512 dimensions for ResNet): global
+   average pooling, or the attention pool's output for a `--global-pool attention`
+   run.
 2. The nonlinear readout's hidden activation (100 dimensions by default).
 3. The final content vector (9 dimensions in this run).
 4. The L2-normalized content vector and its scalar norm, as additional controls.

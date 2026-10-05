@@ -86,6 +86,7 @@ class SpatialMapTests(unittest.TestCase):
         with (out / "channel_mcc.csv").open() as stream:
             channels = list(csv.DictReader(stream))
         self.assertEqual(len(channels), 2 * 2 * 9)  # arms x views x content channels
+        self.assertTrue(all(r["local_best_factor"] in spatial_maps.CONTENT_FACTOR_NAMES for r in channels))
         for arm in ("trained", "initial"):
             self.assertTrue((out / f"channel_maps_{arm}.png").exists())
             for view in ("t1", "flair"):

@@ -65,6 +65,9 @@ SHOWN_TARGETS = (
     "centroid_z",
 )
 ALPHAS = (1e-2, 1e-1, 1.0, 10.0, 100.0, 1e3, 1e4)
+# Display flag only: Hungarian matching pairs every channel, so a matched |r| this low on
+# ~400 test subjects (standard error ~0.05) is barely above what leftover channels get by chance.
+WEAK_MATCH = 0.2
 
 
 @torch.inference_mode()
@@ -177,8 +180,9 @@ def match_channels(fit_arrays, test_arrays, y_fit, y_test, grid, arm):
     """Global channel MCC per view, plus where each channel tracks its factor on the content grid.
 
     The global match uses the model's content vector on test subjects, exactly as the DCI
-    table's chanMCC. The spatial match picks each (channel, factor)'s best cell and the
-    Hungarian assignment on validation subjects, then reports |r| on test subjects.
+    table's chanMCC. ``local_best_factor`` is the factor each channel tracks most strongly at
+    any single cell, with the cell and factor chosen on validation subjects and |r| reported
+    on test subjects. It is per channel, not a joint assignment.
     """
     n = len(CONTENT_FACTOR_NAMES)
     rows, maps, assignments = [], {}, {}
@@ -191,11 +195,11 @@ def match_channels(fit_arrays, test_arrays, y_fit, y_test, grid, arm):
         r_fit = cell_correlations(cells(fit_arrays[view, grid, "projected"], grid), y_fit[:, :n])
         r_test = cell_correlations(cells(test_arrays[view, grid, "projected"], grid), y_test[:, :n])
         best = np.abs(r_fit).argmax(0)  # (channels, factors): cell chosen on validation subjects
-        spatial = dict(zip(*map(np.ndarray.tolist, linear_sum_assignment(-np.abs(r_fit).max(0)))))
+        local = np.abs(r_fit).max(0).argmax(1)  # (channels,): strongest factor at its best cell
         assignments[view] = {c: (CONTENT_FACTOR_NAMES[f], r) for c, (f, r) in assignment.items()}
         for c in range(r_test.shape[1]):
             f = assignment.get(c, (None, np.nan))[0]
-            s = spatial.get(c)
+            s = int(local[c])
             if f is not None:
                 maps[f"{arm}/{view}/channel{c + 1}"] = r_test[:, c, f].reshape((grid,) * 3).astype(np.float32)
             rows.append(
@@ -206,9 +210,9 @@ def match_channels(fit_arrays, test_arrays, y_fit, y_test, grid, arm):
                     global_factor=CONTENT_FACTOR_NAMES[f] if f is not None else None,
                     global_abs_r=assignment.get(c, (None, np.nan))[1],
                     best_cell_abs_r_for_global_factor=float(np.abs(r_test[:, c, f]).max()) if f is not None else np.nan,
-                    spatial_factor=CONTENT_FACTOR_NAMES[s] if s is not None else None,
-                    spatial_abs_r=float(abs(r_test[best[c, s], c, s])) if s is not None else np.nan,
-                    spatial_cell=[int(i) for i in np.unravel_index(best[c, s], (grid,) * 3)] if s is not None else None,
+                    local_best_factor=CONTENT_FACTOR_NAMES[s],
+                    local_best_abs_r=float(abs(r_test[best[c, s], c, s])),
+                    local_best_cell=[int(i) for i in np.unravel_index(best[c, s], (grid,) * 3)],
                 )
             )
     return rows, maps, assignments
@@ -285,6 +289,10 @@ def native_maps(model, x, device, native, grid):
     )
 
 
+def match_label(factor, r):
+    return f"{factor} {r:.2f}" + (" (weak)" if r < WEAK_MATCH else "")
+
+
 def channel_order(assignments, n_channels):
     """Content channels sorted by their T1 channel-MCC factor; titles name both views' matches."""
     position = {name: i for i, name in enumerate(CONTENT_FACTOR_NAMES)}
@@ -292,10 +300,10 @@ def channel_order(assignments, n_channels):
     order = sorted(range(n_channels), key=lambda c: (position[t1[c][0]] if c in t1 else len(position), c))
     titles = []
     for c in order:
-        title = f"c{c + 1}: {t1[c][0]}\n|r| {t1[c][1]:.2f}" if c in t1 else f"c{c + 1}: unmatched"
+        title = f"c{c + 1}\nT1: {match_label(*t1[c])}" if c in t1 else f"c{c + 1}\nT1: unmatched"
         flair = assignments.get("flair", {}).get(c)
         if flair and (c not in t1 or flair[0] != t1[c][0]):
-            title += f"; FLAIR {flair[0]} {flair[1]:.2f}"
+            title += f"\nFLAIR: {match_label(*flair)}"
         titles.append(title)
     return order, titles
 
@@ -314,7 +322,7 @@ def gallery(model, ds, args, device, arm, out, assignments):
     order, titles = channel_order(assignments, maps["projected"].shape[2])
     columns = ["input", "|backbone|", "PC1", "PC2", "PC3", *titles]
     content_range = np.percentile(np.abs(maps["projected"]), 99, axis=(0, 1)) + 1e-8
-    fig, axes = plt.subplots(2 * g, len(columns), figsize=(1.55 * len(columns), 1.65 * 2 * g + 0.4), squeeze=False)
+    fig, axes = plt.subplots(2 * g, len(columns), figsize=(1.95 * len(columns), 1.65 * 2 * g + 0.5), squeeze=False)
     scales = {}
     for v, view in enumerate(VIEWS):
         backbone, projected = maps["backbone"][v * g : (v + 1) * g], maps["projected"][v * g : (v + 1) * g]
@@ -346,7 +354,7 @@ def gallery(model, ds, args, device, arm, out, assignments):
                 ax.set_xticks([])
                 ax.set_yticks([])
                 if row == 0:
-                    ax.set_title(columns[col], fontsize=7)
+                    ax.set_title(columns[col], fontsize=6.5)
             axes[row, 0].set_ylabel(f"{view} s{items[s]['index']}", fontsize=7)
     fig.suptitle(
         f"{arm}: final-stage maps at input slice {int((k + 0.5) * stride)}; backbone slice {k} of {n}³, "
@@ -452,33 +460,71 @@ def response_figure(maps, rows, arms, view, out):
     plt.close(fig)
 
 
-def decodability_figure(maps, rows, arm, grid, out):
+def brain_fraction(ds, count, grid):
+    """Mean foreground fraction per grid cell over the first test subjects: (grid, grid, grid)."""
+    masks = torch.stack([ds[i]["mask"][0] for i in range(count)]).float()
+    return torch.nn.functional.adaptive_avg_pool3d(masks, (grid,) * 3).mean(0)[0].numpy()
+
+
+def regions(fraction):
+    """Brain cells (mostly foreground), edge cells (mixed) and background cells (almost never brain)."""
+    return {"brain": fraction >= 0.5, "edge": (fraction > 0.05) & (fraction < 0.5), "background": fraction <= 0.05}
+
+
+def add_region_summaries(decode_rows, maps, channel_rows, channel_maps, fraction, arm):
+    """Per-region summaries: is a factor carried inside the brain, at its edge, or in the background?"""
+    masks = regions(fraction)
+    for row in decode_rows:
+        values = maps[f"{arm}/{row['view']}/{row['stage']}/{row['target']}"]
+        for name, mask in masks.items():
+            row[f"{name}_median_r2"] = float(np.median(values[mask])) if mask.any() else np.nan
+    for row in channel_rows:
+        values = channel_maps.get(f"{arm}/{row['view']}/channel{row['channel']}")
+        for name, mask in masks.items():
+            row[f"{name}_mean_abs_r"] = (
+                float(np.abs(values[mask]).mean()) if values is not None and mask.any() else np.nan
+            )
+
+
+def draw_outline(ax, outline):
+    if outline is not None and outline.min() < 0.5 < outline.max():
+        ax.contour(outline.T, levels=[0.5], colors="white", linewidths=0.7)
+
+
+def decodability_figure(maps, rows, arm, grid, out, outline=None):
     lookup = {(r["view"], r["stage"], r["target"]): r for r in rows if r["arm"] == arm}
     columns = [(view, stage) for view in VIEWS for stage in SPATIAL_STAGES]
-    fig, axes = plt.subplots(len(SHOWN_TARGETS), len(columns), figsize=(2.1 * len(columns), 1.95 * len(SHOWN_TARGETS)))
+    fig, axes = plt.subplots(len(SHOWN_TARGETS), len(columns), figsize=(2.5 * len(columns), 2.2 * len(SHOWN_TARGETS)))
     for r, target in enumerate(SHOWN_TARGETS):
         for c, (view, stage) in enumerate(columns):
             ax = axes[r, c]
             grid_map = np.clip(maps[f"{arm}/{view}/{stage}/{target}"], 0, 1)
             ax.imshow(grid_map.max(2).T, origin="lower", cmap="viridis", vmin=0, vmax=1, interpolation="nearest")
+            draw_outline(ax, outline)
             row = lookup[view, stage, target]
-            ax.set_title(f"{view} {stage}\nbest cell {row['max_cell_r2']:.2f} | GAP {row['gap_r2']:.2f}", fontsize=7)
+            ax.set_title(
+                f"{view} {stage}\nbest cell {row['max_cell_r2']:.2f} | GAP {row['gap_r2']:.2f}\n"
+                f"median brain {row['brain_median_r2']:.2f} | bg {row['background_median_r2']:.2f}",
+                fontsize=7,
+            )
             ax.set_xticks([])
             ax.set_yticks([])
         axes[r, 0].set_ylabel(target, fontsize=8)
     fig.suptitle(
-        f"{arm}: held-out R² from each {grid}³ cell alone (max over z); GAP = same probe on pooled features", fontsize=8
+        f"{arm}: held-out R² from each {grid}³ cell alone (max over z); GAP = same probe on pooled features\n"
+        "white line: brain outline",
+        fontsize=8,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     fig.savefig(out / f"decodability_{arm}.png", dpi=110)
     plt.close(fig)
 
 
-def channel_figure(channel_maps, channel_rows, assignments, arm, grid, out):
+def channel_figure(channel_maps, channel_rows, assignments, arm, grid, out, outline=None):
     """Where each content channel tracks its channel-MCC factor: |r| across test subjects per cell."""
     rows = {(r["view"], r["channel"]): r for r in channel_rows if r["arm"] == arm}
     order, _ = channel_order(assignments, max(c for _, c in rows))
-    fig, axes = plt.subplots(len(order), len(VIEWS), figsize=(2.7 * len(VIEWS), 2.15 * len(order)), squeeze=False)
+    fig, axes = plt.subplots(len(order), len(VIEWS), figsize=(3.8 * len(VIEWS), 2.45 * len(order)), squeeze=False)
     for i, c in enumerate(order):
         for j, view in enumerate(VIEWS):
             ax = axes[i, j]
@@ -496,16 +542,16 @@ def channel_figure(channel_maps, channel_rows, assignments, arm, grid, out):
                 vmax=1,
                 interpolation="nearest",
             )
+            draw_outline(ax, outline)
             title = (
-                f"{view} c{c + 1} → {row['global_factor']}\n"
-                f"global |r| {row['global_abs_r']:.2f} | best cell {row['best_cell_abs_r_for_global_factor']:.2f}"
+                f"{view} c{c + 1} → {match_label(row['global_factor'], row['global_abs_r'])}\n"
+                f"best cell |r| {row['best_cell_abs_r_for_global_factor']:.2f}; mean |r| brain "
+                f"{row['brain_mean_abs_r']:.2f}, edge {row['edge_mean_abs_r']:.2f}, bg {row['background_mean_abs_r']:.2f}"
             )
-            if row["spatial_factor"] != row["global_factor"]:
-                title += f"\nlocally best: {row['spatial_factor']} {row['spatial_abs_r']:.2f}"
             ax.set_title(title, fontsize=7)
     fig.suptitle(
-        f"{arm}: where each content channel tracks its channel-MCC factor "
-        f"(|r| across test subjects at each {grid}³ cell, max over z)",
+        f"{arm}: where each content channel tracks its channel-MCC factor\n"
+        f"|r| across test subjects at each {grid}³ cell (max over z); white line: brain outline",
         fontsize=8,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.98))
@@ -574,8 +620,9 @@ def main(argv=None):
             "Channel MCC is chanMCC from the DCI table: Hungarian matching on |Pearson r| between each raw channel of "
             "the content vector and the nine content factors, on test subjects. The gallery orders and titles content "
             "maps by it. channel_maps shows each channel's |r| with its matched factor at every content-grid cell. "
-            "spatial_factor repeats the matching at each pair's best cell; cells and assignment are chosen on "
-            "validation subjects and scored on test subjects.",
+            "local_best_factor is the factor each channel tracks most strongly at any single cell, chosen on "
+            "validation subjects and scored on test subjects (per channel, not a joint assignment). Matches "
+            "with |r| < 0.2 are flagged weak in figures: Hungarian matching pairs every channel.",
             "Finite-probe readouts on a fixed checkpoint; not an identifiability guarantee.",
         ],
     )
@@ -600,6 +647,8 @@ def main(argv=None):
                 print(f"[{arm}] per-cell decodability at {args.grid}³ (native map {shape[0]}³)", flush=True)
                 rows, arm_maps, global_sd, meta, channels = decodability(model, cfg, args, device, Path(tmp), arm)
                 arm_channels, arm_channel_maps, assignments = channels
+                fraction = brain_fraction(test, min(32, args.test_samples), args.grid)
+                add_region_summaries(rows, arm_maps, arm_channels, arm_channel_maps, fraction, arm)
                 channel_rows.extend(arm_channels)
                 channel_maps.update(arm_channel_maps)
                 if report["cohorts"] and any(
@@ -617,8 +666,9 @@ def main(argv=None):
                 skipped.extend(f"{arm}: {reason}" for reason in reasons)
                 if state_digest(model) != before:
                     raise RuntimeError("Analysis changed encoder parameters or buffers")
-                decodability_figure(maps, decode_rows, arm, args.grid, args.out_dir)
-                channel_figure(channel_maps, channel_rows, assignments, arm, args.grid, args.out_dir)
+                outline = fraction.max(2)
+                decodability_figure(maps, decode_rows, arm, args.grid, args.out_dir, outline)
+                channel_figure(channel_maps, channel_rows, assignments, arm, args.grid, args.out_dir, outline)
                 del model
         arms = list(checkpoints)
         for view in VIEWS:
@@ -657,8 +707,10 @@ def main(argv=None):
         print(f"\n{arms[0]}: channel MCC of the content vector (as chanMCC in the DCI table)")
         matches = {(r["view"], r["channel"]): r for r in channel_rows if r["arm"] == arms[0]}
         for (view, channel), r in sorted(matches.items(), key=lambda item: (item[0][1], item[0][0])):
-            local = "" if r["spatial_factor"] == r["global_factor"] else f"  (locally: {r['spatial_factor']})"
-            print(f"  c{channel} {view:5s} -> {r['global_factor']:20s} |r| {r['global_abs_r']:.2f}{local}")
+            print(
+                f"  c{channel} {view:5s} -> {r['global_factor']:20s} |r| {r['global_abs_r']:.2f}"
+                f"  (best cell {r['best_cell_abs_r_for_global_factor']:.2f})"
+            )
         print(f"Saved final-stage spatial map analysis: {args.out_dir}", flush=True)
     except Exception as error:
         report.update(status="failed", error=str(error))

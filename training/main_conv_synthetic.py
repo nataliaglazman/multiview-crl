@@ -5,6 +5,8 @@ The default ``conv`` architecture uses the VQ-VAE convolutional backbone with
 an affine readout. ``--encoder-architecture resnet18`` uses a 3D adaptation of
 the upstream image encoder: ResNet-18 -> GAP -> Linear -> LeakyReLU -> Linear.
 This architecture option does not change the loss, data, or view-sharing policy.
+``--global-pool attention`` replaces the GAP before either readout with multi-head
+attention pooling (``models.attention_pool``), which starts as exact GAP.
 
 Identifiability is scored with ``eval.metrics.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
@@ -58,6 +60,27 @@ def parse_args(argv=None):
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Use an independent content-only patch MLP, copied from the global head at initialization",
+    )
+    p.add_argument(
+        "--global-pool",
+        choices=("gap", "attention"),
+        default="gap",
+        help="How the global encoding pools the backbone map. attention: multi-head attention pooling with a "
+        "Fourier positional encoding, initialized to exact GAP without drawing random numbers, so the "
+        "untrained floor matches the GAP run's. Patch readouts still average each bin.",
+    )
+    p.add_argument(
+        "--attention-pool-heads",
+        type=int,
+        default=4,
+        help="Attention heads; each pools its own slice of the backbone channels, which it must divide",
+    )
+    p.add_argument(
+        "--attention-pool-frequencies",
+        type=int,
+        default=4,
+        help="Fourier frequencies per axis in the positional encoding. 0 leaves attention permutation-"
+        "invariant over positions, like GAP, so it cannot report where a structure is",
     )
     p.add_argument("--resnet-norm", choices=("batch", "group"), default="batch")
     p.add_argument(
@@ -322,6 +345,20 @@ def parse_args(argv=None):
             p.error("--resnet-norm and --resnet-output-stride only apply to --encoder-architecture resnet18")
         if args.conv_readout == "mlp" and args.encoder_head_hidden <= 0:
             p.error("--encoder-head-hidden must be positive")
+    if args.global_pool == "attention":
+        channels = 512 if args.encoder_architecture == "resnet18" else args.hidden_channels
+        if args.attention_pool_heads < 1 or channels % args.attention_pool_heads:
+            p.error(f"--attention-pool-heads must divide the {channels} backbone channels")
+        if args.attention_pool_frequencies < 0:
+            p.error("--attention-pool-frequencies must be nonnegative")
+        stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
+        if stride < 1:
+            p.error("Encoder stride must be positive")
+        spatial = (args.res + stride - 1) // stride if args.encoder_architecture == "resnet18" else args.res // stride
+        if spatial < 2:
+            p.error(f"--global-pool attention needs more than one position; the backbone map is {spatial}^3")
+    elif (args.attention_pool_heads, args.attention_pool_frequencies) != (4, 4):
+        p.error("--attention-pool-heads and --attention-pool-frequencies only apply to --global-pool attention")
     if args.spatial_recovery_eval:
         if args.n_content != 9 or args.synthetic_mode != "pseudo_mri":
             p.error("Spatial recovery requires the nine-factor pseudo_mri recipe")
@@ -555,6 +592,24 @@ def best_metric_value(flat, floor_flat, name):
     return float(v)
 
 
+def attention_spread(model, dataset, device, batch_size):
+    """Each global-attention head's effective positions as a fraction of the map, per view.
+
+    exp(entropy) of a head's weights over the N backbone positions, divided by N and
+    averaged over the first ``batch_size`` subjects. 1 is uniform, i.e. GAP, as at
+    initialization; 1/N is a single position. None for a GAP model.
+    """
+    if model.attention_pool is None:
+        return None
+    batch = next(iter(DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)))
+    with torch.no_grad():
+        weights = model.attention_maps(torch.cat(batch["image"], dim=0).to(device), n_views=2)
+    weights = weights.flatten(2).double().cpu()
+    fraction = torch.special.entr(weights).sum(-1).exp() / weights.shape[-1]
+    b = fraction.shape[0] // 2
+    return {"t1": fraction[:b].mean(0).tolist(), "flair": fraction[b:].mean(0).tolist()}
+
+
 def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
     print(f"  [eval] synthetic DCI @ step {step} ...", flush=True)
     pooling = "gap" if args.eval_pooling == "gap" else tuple(args.eval_patch_grid)
@@ -589,6 +644,16 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
     scores = per_factor_scores(results)
     print_per_factor(scores, floor=floor, writer=writer, step=step)
 
+    # Attention pooling starts as GAP; this shows whether, and per head how far, it left it.
+    spread = attention_spread(model, val_dataset, device, args.batch_size)
+    if spread is not None:
+        print("    --- global attention: effective positions / map size, per head (1 = GAP) ---", flush=True)
+        for view, values in spread.items():
+            print(f"      {view:<8s}" + "".join(f"{v:8.3f}" for v in values), flush=True)
+            if writer is not None:
+                for head, value in enumerate(values):
+                    writer.add_scalar(f"attention_pool/{view}/head{head}_effective_fraction", value, step)
+
     if writer is not None:
         for k, v in flat.items():
             if np.isfinite(v):
@@ -596,6 +661,8 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
 
     payload = {k: float(v) for k, v in flat.items()}
     payload["per_factor"] = scores  # nested, so the existing flat keys stay at top level
+    if spread is not None:
+        payload["attention_effective_fraction"] = spread
     with open(os.path.join(save_dir, f"dci_step{step}.json"), "w") as fp:
         json.dump(payload, fp, indent=2)
     return flat, scores
@@ -649,6 +716,9 @@ def main():
         resnet_norm=args.resnet_norm,
         resnet_output_stride=args.resnet_output_stride,
         separate_spatial_readout=args.separate_spatial_readout,
+        global_pool=args.global_pool,
+        attention_pool_heads=args.attention_pool_heads,
+        attention_pool_frequencies=args.attention_pool_frequencies,
     ).to(device)
     if args.encoder_architecture == "resnet18":
         print(
@@ -660,6 +730,15 @@ def main():
         )
     elif args.conv_readout == "mlp":
         print(f"encoder: conv, GAP -> {args.hidden_channels} -> {args.encoder_head_hidden} -> {args.latent_dim}")
+    if model.attention_pool is not None:
+        pool = model.attention_pool
+        print(
+            f"global pool: attention replaces GAP; {pool.num_heads} heads x {pool.channels // pool.num_heads} "
+            f"channels, {pool.num_frequencies} Fourier frequencies/axis, "
+            f"{sum(p.numel() for p in pool.parameters())} parameters; starts as exact GAP. "
+            "Patch readouts still average each bin.",
+            flush=True,
+        )
     if model.projector is not None:
         print(
             f"projection head: {args.content_channels} -> {args.contrastive_proj_hidden} -> "
@@ -706,6 +785,10 @@ def main():
                 sum(p.numel() for p in model.spatial_readout.parameters()) if model.spatial_readout is not None else 0
             ),
             "normalization": model.normalization,
+            "global_pool": model.global_pool,
+            "attention_pool_parameter_count": (
+                sum(p.numel() for p in model.attention_pool.parameters()) if model.attention_pool is not None else 0
+            ),
             "optimizer": "AdamW",
             "optimizer_defaults": optimizer.defaults,
             "elapsed_seconds_including_evaluation": time.perf_counter() - started,

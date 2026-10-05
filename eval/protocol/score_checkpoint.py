@@ -150,6 +150,9 @@ def build_model(cfg, device, state_dict=None):
         resnet_norm=cfg.get("resnet_norm", "batch"),
         resnet_output_stride=cfg.get("resnet_output_stride", 32),
         separate_spatial_readout=cfg.get("separate_spatial_readout", False),
+        global_pool=cfg.get("global_pool", "gap"),
+        attention_pool_heads=cfg.get("attention_pool_heads", 4),
+        attention_pool_frequencies=cfg.get("attention_pool_frequencies", 4),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)

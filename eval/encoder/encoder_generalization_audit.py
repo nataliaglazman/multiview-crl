@@ -92,14 +92,19 @@ def capture_batch(model, x):
         modules = {"encoder": model.encoder, "encoder_v1": model.encoder_v1}
         if model.readout_type == "mlp":
             modules["hidden"] = model.to_encoding[1]  # Actual post-LeakyReLU readout.
+        # With attention pooling the readout's input is the pool's output, not GAP.
+        modules["pooled"] = getattr(model, "attention_pool", None)
         for name, module in modules.items():
             if module is not None:
                 stack.callback(module.register_forward_hook(tap(name)).remove)
         content = model(x, pool_only=True, n_views=2)[2][0][:, : model.content_channels]
-    backbone = captured["encoder"]
-    if model.encoder_v1 is not None:
-        backbone = torch.cat((backbone, captured["encoder_v1"]), dim=0)
-    values = {"backbone": backbone.mean((2, 3, 4))}
+    if "pooled" in captured:
+        values = {"backbone": captured["pooled"]}
+    else:
+        backbone = captured["encoder"]
+        if model.encoder_v1 is not None:
+            backbone = torch.cat((backbone, captured["encoder_v1"]), dim=0)
+        values = {"backbone": backbone.mean((2, 3, 4))}
     if "hidden" in captured:
         values["hidden"] = captured["hidden"]
     values.update(
