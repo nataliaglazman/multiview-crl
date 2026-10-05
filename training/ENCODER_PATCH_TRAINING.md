@@ -326,6 +326,11 @@ python -m eval.encoder.encoder_spatial_target_audit \
 
 ## Verification
 
+To distinguish lesion sensitivity from predictions based on anatomy, run the
+[frozen lesion-movement test](../eval/encoder/ENCODER_LESION_INTERVENTION.md).
+It moves only the lesion with acquisition/anatomy fixed and tests the backbone,
+global code and active spatial readout without retraining the encoder.
+
 ```bash
 python -m unittest tests.test_separate_spatial_readout tests.test_spatial_recovery_monitor tests.test_encoder_patch_training tests.test_encoder_mps_runner -v
 ```
