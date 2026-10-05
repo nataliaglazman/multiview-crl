@@ -16,9 +16,11 @@ Weights and source files are hash-checked.
 
 - `backbone`: the encoder's last feature map (16³ × 64 for the Conv recipe at
   resolution 64).
-- `projected`: the active spatial content head applied at every native cell
-  (9 content channels). With `--separate-spatial-readout` this is the separate
-  head; otherwise the shared head.
+- `projected`: the active spatial content head applied to each bin of the
+  analysis grid (9 content channels). The grid defaults to the run's training
+  patch grid, which is how training and the spatial-recovery monitor use the
+  head. With `--separate-spatial-readout` this is the separate head; otherwise
+  the shared head.
 - `global`: the content vector the model actually outputs (GAP, then the global
   head). This is what the DCI table probes.
 
