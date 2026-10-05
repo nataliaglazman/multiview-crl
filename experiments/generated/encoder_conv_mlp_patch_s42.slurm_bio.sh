@@ -49,7 +49,7 @@ TRAIN_ARGS=(
     --contrastive-proj-dim 0
     --lr 0.0001
     --grad-clip 2.0
-    --train-steps 10000
+    --train-steps 20000
     --eval-every 2000
     --eval-pooling gap
     --floor-eval
@@ -64,13 +64,14 @@ TRAIN_ARGS=(
     --loader-seed 10042
     --encoder-architecture conv
     --require-new-run
-    --model-id conv_mlp_patch_g8x8x8_w1_s42
+    --model-id conv_mlp_patch_lesion_corrected
     --conv-readout mlp
     --resnet-norm batch
     --resnet-output-stride 32
     --patch-loss-weight 1.0
     --train-patch-grid 8 8 8
     --spatial-recovery-eval
+    --synthetic-lesion-intensity styled
     --out-dir "$OUT_DIR"
 )
 
