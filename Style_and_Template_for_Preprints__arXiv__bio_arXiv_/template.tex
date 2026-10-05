@@ -1,0 +1,151 @@
+\documentclass{article}
+
+
+\usepackage{arxiv}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{lipsum}
+\usepackage{graphicx}
+\graphicspath{ {./images/} }
+
+
+\title{Causal Representation Learning for Brain MRI}
+
+
+\author{
+ Natalia Glazman}
+
+  %% \AND
+  %% Coauthor \\
+  %% Affiliation \\
+  %% Address \\
+  %% \texttt{email} \\
+  %% \And
+  %% Coauthor \\
+  %% Affiliation \\
+  %% Address \\
+  %% \texttt{email} \\
+  %% \And
+  %% Coauthor \\
+  %% Affiliation \\
+  %% Address \\
+  %% \texttt{email} \\
+
+
+\begin{document}
+\maketitle
+
+
+
+\section{Introduction}
+
+Causal representation learning (CRL) is a relatively novel field seeking to recover the true data-generating and causally faithful generative factors that underlie a high-dimensional system. It has been previously shown that without any inductive biases, these factors are not uniquely identifiable.
+
+While CRL has been widely applied to synthetic and object-centred imaging datasets to recover true generative factors, applications to real imaging data have been scarce. One of the main challenges in identifying effective CRL application to real-life images with is the lack of knowledge of both the causal graphs and the generative latent features. While previous methods have addressed identifiability of generative features via multi-view or
+
+\section{Considerations and Background}
+\label{sec:headings}
+
+\subsection{Problem definition}
+We formulate the problem using a causal latent variable model. Let $\mathbf{z}$ define a set of latent causal variables such that the observed image, $\mathbf{x}:=f(\mathbf{z}, \epsilon)$ where $\epsilon$ is exogenous noise. Given that we have access to the observed image, we wish to identify the latent generative factors up to some permutation, $h(\mathbf{z})$ as well as the causal relationship matrix that defines $f$, $\mathbf{W}$.
+
+\subsection{Identifiability levels}
+\begin{enumerate}
+    \item \textbf{Component-wise identifiability}
+    Component-wise identifiability of causal factors is achieved when each factor has been uniquely identified so that the learned representation $z$
+
+    \item \textbf{Block-wise identifiability}
+    A set $z$ of the latent variables is block-identified if the learned representation $z := g(x)$ contains all and only information about the ground truth $z$, i.e. $z = h(z)$ for some diffeomorphism $h : \mathbb{R} \mapsto \mathbb{R}$.
+\end{enumerate}
+
+\paragraph{Why is a block-identified representation useful for brain MRI?}
+
+\section{Model choices}
+Multi-scale, abstraction, discrete/continuous, spatial/feature vector...
+
+\subsection{Entropy maximization}
+We make the assumption here that each of the latent random variables, $z_i \in \mathbb{R}$ is one-dimensional and that the function $f$ is injective.
+
+\subsection{Reconstruction}
+
+
+
+\subsection{Open questions}
+\begin{enumerate}
+    \item Is pursuing component-wise identifiability in brain MRI worthwhile and realistic?
+    \item Is block-wise identifiability worthwhile in MRI?
+    \item Can we achieve good empirical results on causal factor recovery and causal graph recovery when not all theoretical guarantees are preserved?
+    \item Is reconstruction necessary to preserve a faithful representation of an MRI image?
+    \item Is obtaining more accurate counterfactuals possible if we can't achieve component-wise identifiability?
+    \item Can we identify a causal graph without component-wise guarantees?
+    \item Does having fine spatial features improve the causal estimation of the graph/block significantly?
+
+\end{enumerate}
+
+\section{Routes to identifiability}
+
+Throughout this section, we invoke the invariance principle, formalised by Yao et al. to unify the different approaches to identifiability in causal representation learning.
+
+\subsection{Multi-view}
+
+\subsection{Soft interventions/multiple environments}
+
+\subsection{Temporal}
+
+\subsection{Multi-modal}
+
+\section{Synthetic Dataset}
+
+\subsection{Synthetic paired-contrast data}
+\label{sec:synthetic-data}
+
+Since real paired MRI has no ground-truth latents, we evaluate on a procedural
+generator that renders a T1-like and a FLAIR-like $64^3$ volume of the same
+subject. Each subject has a content vector $\mathbf{c}\in[-1,1]^{9}$ shared by
+both views and a style vector $\mathbf{s}^{(v)}\in\mathbb{R}^{3}$ drawn
+independently for each view.
+
+\paragraph{Content.}
+The nine factors are brain size, ventricle size, lesion position (3D),
+cortical thickness, temporal-lobe atrophy, left--right asymmetry and sulcal
+depth. They are sampled from a nonlinear structural causal model over a random
+DAG, so the factors are dependent, and are then mapped monotonically to
+$[-1,1]$. Each factor deforms a tissue-label map of white matter, grey matter,
+ventricles and a white-matter lesion. Local factors are constructed so that
+they do not change total brain volume, which keeps them distinguishable from
+brain size.
+
+\paragraph{Style.}
+Each view assigns intensities to the tissue labels with a modality-specific
+lookup table (e.g.\ white matter brighter than grey matter in T1, and the
+reverse in FLAIR; the lesion is hypointense in T1 and hyperintense in FLAIR).
+The style vector sets a global intensity gain, an offset and the noise level.
+A smooth bias field and Rician noise are then applied. Since style is redrawn
+for each view, it differs within every positive pair, whereas content is
+identical.
+
+\section{Evaluations}
+
+\section{Results}
+Here we show the results
+
+
+
+
+
+\bibliographystyle{unsrt}
+%\bibliography{references}  %%% Remove comment to use the external .bib file (using bibtex).
+%%% and comment out the ``thebibliography'' section.
+
+
+
+
+
+\end{document}
