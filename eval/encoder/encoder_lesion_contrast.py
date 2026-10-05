@@ -350,7 +350,7 @@ def analyze(pairs, truth, predictions, contrasts, resolution, bootstrap, seed):
     for identity, t1 in indexed.items():
         if identity[-1] != "t1" or (*identity[:-1], "flair") not in indexed:
             continue
-        flair = indexed[*identity[:-1], "flair"]
+        flair = indexed[(*identity[:-1], "flair")]
         paired.append(
             dict(
                 **{
@@ -563,6 +563,16 @@ def main(argv=None):
                     f"{row['view']:5s} {row['grid']:4d} {row['stage']:12s} {row['error_metric']:27s} "
                     f"{row['spearman']:+6.3f} {row['partial_spearman']:+10.3f} {row['n_subjects']:3d}"
                 )
+        print("\nTrained ridge movement skill by T1-contrast third (both views on the same subjects)")
+        print("view  grid stage             low   middle     high")
+        wanted, skills = ("trained", "ridge", "observed", "t1_matched"), {}
+        for row in tables["contrast_groups"]:
+            if tuple(row[k] for k in ("arm", "probe", "condition", "grouping")) == wanted:
+                key = (row["view"], row["grid"], row["stage"])
+                skills.setdefault(key, {})[row["contrast_group"]] = row["movement_skill"]
+        for (view, grid, stage), skill in skills.items():
+            values = " ".join(f"{skill[g]:+8.3f}" for g in ("low", "middle", "high"))
+            print(f"{view:5s} {grid:4d} {stage:12s} {values}")
         print(f"Saved contrast test and {len(examples)} T1/FLAIR endpoint examples: {args.out_dir}", flush=True)
     except Exception as error:
         report.update(status="failed", error=str(error))

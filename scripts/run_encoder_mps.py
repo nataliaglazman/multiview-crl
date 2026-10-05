@@ -75,6 +75,9 @@ def make_options(args):
         if not 0 < lesion_radius < float("inf"):
             raise ValueError("Lesion radius must be finite and positive")
         options["synthetic_lesion_radius"] = lesion_radius
+    lesion_intensity = getattr(args, "synthetic_lesion_intensity", None)
+    if lesion_intensity is not None:
+        options["synthetic_lesion_intensity"] = lesion_intensity
     weight = options.get("patch_loss_weight", 0.0)
     if not math.isfinite(weight) or weight < 0:
         raise ValueError("Patch loss weight must be finite and nonnegative")
@@ -107,6 +110,8 @@ def make_options(args):
         suffix += "_separate_spatial"
     if options.get("synthetic_lesion_radius", 0.1) != recipe.get("synthetic_lesion_radius", 0.1):
         suffix += f"_lr{options['synthetic_lesion_radius']:g}"
+    if options.get("synthetic_lesion_intensity", "fixed") != recipe.get("synthetic_lesion_intensity", "fixed"):
+        suffix += f"_lesion{options['synthetic_lesion_intensity']}"
     options["model_id"] = args.model_id or f"{args.variant}_s{args.seed}_{options['device']}{suffix}"
     if Path(options["model_id"]).name != options["model_id"] or options["model_id"] in (".", ".."):
         raise ValueError("--model-id must be a directory name, not a path")
@@ -234,8 +239,13 @@ def main(argv=None):
         help="Sphere lesion radius in [-1,1] coords; default: the recipe's (trainer default 0.1)",
     )
     parser.add_argument(
+        "--synthetic-lesion-intensity",
+        choices=("fixed", "styled"),
+        help="styled puts the lesion on the acquisition gain/bias map; default: the recipe's (trainer default fixed)",
+    )
+    parser.add_argument(
         "--model-id",
-        help="Default: <variant>_s<seed>_<device>, with suffixes for batch/steps/patch/lesion-radius overrides",
+        help="Default: <variant>_s<seed>_<device>, with suffixes for batch/steps/patch/lesion overrides",
     )
     parser.add_argument("--results-dir", type=Path, help="Default: results/encoder_ablations_<device>")
     mode = parser.add_mutually_exclusive_group()
