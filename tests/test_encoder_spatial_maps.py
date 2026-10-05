@@ -83,8 +83,37 @@ class SpatialMapTests(unittest.TestCase):
         with np.load(out / "decodability_maps.npz") as bank:
             self.assertEqual(bank["trained/t1/projected/ventricle_size"].shape, (2, 2, 2))
             self.assertEqual(len(bank.files), 2 * 2 * 2 * len(spatial_maps.TARGETS))
+        with (out / "channel_mcc.csv").open() as stream:
+            channels = list(csv.DictReader(stream))
+        self.assertEqual(len(channels), 2 * 2 * 9)  # arms x views x content channels
+        for arm in ("trained", "initial"):
+            self.assertTrue((out / f"channel_maps_{arm}.png").exists())
+            for view in ("t1", "flair"):
+                matched = [r["global_factor"] for r in channels if (r["arm"], r["view"]) == (arm, view)]
+                self.assertEqual(sorted(matched), sorted(spatial_maps.CONTENT_FACTOR_NAMES))  # one-to-one
+        with np.load(out / "channel_maps.npz") as bank:
+            self.assertEqual(len(bank.files), 2 * 2 * 9)
+            self.assertLessEqual(np.abs(bank["trained/t1/channel1"]).max(), 1.0 + 1e-9)
         with self.assertRaises(FileExistsError):
             spatial_maps.main(args)
+
+    def test_channel_matching_equals_channel_mcc_and_locates_local_encoding(self):
+        rng = np.random.default_rng(3)
+        factors = rng.normal(size=(300, 3))
+        codes = np.column_stack((-factors[:, 2], factors[:, 0], factors[:, 1])) + 0.3 * rng.normal(size=(300, 3))
+        assignment = spatial_maps.channel_assignment(codes, factors)
+        self.assertEqual({c: f for c, (f, _) in assignment.items()}, {0: 2, 1: 0, 2: 1})
+        official = spatial_maps.channel_mcc(codes, factors)["per_factor"]
+        for f, r in assignment.values():
+            self.assertAlmostEqual(official[f], r, places=12)
+        grid = np.zeros((300, 4, 2))  # channel 0 tracks factor 1 only at cell 3; cell 0 is constant
+        grid[:, 1:] = rng.normal(size=(300, 3, 2))
+        grid[:, 3, 0] += 3 * factors[:, 1]
+        r = spatial_maps.cell_correlations(grid, factors)
+        self.assertEqual(r.shape, (4, 2, 3))
+        self.assertEqual(int(np.abs(r[:, 0, 1]).argmax()), 3)
+        self.assertGreater(abs(r[3, 0, 1]), 0.9)
+        np.testing.assert_array_equal(r[0], 0.0)
 
     def test_cellwise_ridge_matches_sklearn_and_finds_the_informative_cell(self):
         rng = np.random.default_rng(0)

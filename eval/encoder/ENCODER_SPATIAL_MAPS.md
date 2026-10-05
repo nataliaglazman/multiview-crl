@@ -45,7 +45,9 @@ Add `--skip-initial` if `model_init.pt` is missing.
 
 | File | Contents |
 |---|---|
-| `gallery_<arm>.png` | For the first test subjects, both views: input slice, backbone activity, its top three principal components, and the nine content-channel maps (one shared colour scale per channel). |
+| `gallery_<arm>.png` | For the first test subjects, both views: input slice, backbone activity, its top three principal components, and the nine content-channel maps (one shared colour scale per channel). Content columns are ordered and titled by each channel's channel-MCC factor and |r|; a different FLAIR match is noted. |
+| `channel_maps_<arm>.png` | For each content channel and view: |r| between the channel and its matched factor at every content-grid cell across test subjects (maximum over z), i.e. where in the brain that channel carries its factor. |
+| `channel_mcc.csv`, `channel_maps.npz` | Per arm, view and channel: matched factor and |r| (equal to `chanMCC` in the DCI table), the best cell's |r| for that factor, and the factor matched at each channel's best cells. Map keys are `arm/view/channelN` (signed r). |
 | `responses_<view>.png` | One row per factor: where changing it alters the input, the backbone and the content map (subject mean, maximum over z), trained beside initial on one colour scale. |
 | `responses.csv` | Per arm, view, factor and stage: local response, coherent response, `gap_survival`, and for `global` the shift of the content vector. |
 | `decodability_<arm>.png` | Held-out R² from each grid cell alone (maximum over z) for both views and stages, with the GAP R² in each title. |
@@ -76,6 +78,12 @@ actually moves, in validation-SD units.
 Spatial response magnitudes are in units of each channel's spread over the
 gallery subjects' unperturbed cells. Compare factors within a stage, not across
 architectures.
+
+Channel labels use channel MCC, the `chanMCC` of the DCI table: Hungarian matching on
+|Pearson r| between each raw channel of the content vector and the nine content
+factors on test subjects. A channel whose locally best factor (best cells and
+matching chosen on validation subjects, scored on test subjects) differs from its
+global match carries that factor spatially in a way the content vector loses.
 
 Per-cell probes fit ridge on one cell's features, choose the penalty on a 75/25
 split of validation subjects, refit on all of them and score held-out test
