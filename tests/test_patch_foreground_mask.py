@@ -89,6 +89,20 @@ class PatchForegroundMaskTests(unittest.TestCase):
         torch.testing.assert_close(with_masks, trainer.training_objective(model, images, on, *self.criteria)[1])
         self.assertFalse(torch.allclose(with_masks, off))
 
+    def test_launcher_options_without_a_threshold_use_the_default(self):
+        # scripts/run_encoder_mps.py --check builds this namespace from raw launcher options,
+        # which carry the mask flag but not the parser's 0.05 default.
+        cfg = vars(trainer.parse_args(BASE + ["--patch-foreground-mask"]))
+        model = build_model(cfg, "cpu").eval()
+        masks = torch.zeros(4, 1, 16, 16, 16)
+        masks[..., :6, :6, :6] = 1
+        images = torch.randn(4, 1, 16, 16, 16) * masks
+        raw = {k: v for k, v in cfg.items() if k != "patch_foreground_thresh"}
+        loss = trainer.training_objective(model, images, SimpleNamespace(**raw), *self.criteria)[1]
+        torch.testing.assert_close(
+            loss, trainer.training_objective(model, images, SimpleNamespace(**cfg), *self.criteria)[1]
+        )
+
     def test_real_training_records_the_flag_and_reports_kept_positions(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = ["--out-dir", tmp, "--model-id", "fg_smoke", "--require-new-run", "--device", "cpu", *BASE]

@@ -508,7 +508,8 @@ def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foregrou
     if getattr(args, "patch_foreground_mask", False):
         if foreground is None:
             raise ValueError("--patch-foreground-mask needs the batch's brain masks")
-        keep = foreground_positions(foreground, args.train_patch_grid, args.patch_foreground_thresh)
+        # The launcher's backend check passes raw options, which omit the parser's default.
+        keep = foreground_positions(foreground, args.train_patch_grid, getattr(args, "patch_foreground_thresh", 0.05))
         patches = patches[..., keep.to(patches.device)]
     a, b = patches[:, : args.content_channels, :].chunk(2, dim=0)
     hz = torch.stack((a, b), dim=0)  # views, subjects, content channels, positions
