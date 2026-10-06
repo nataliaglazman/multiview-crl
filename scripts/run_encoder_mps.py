@@ -232,6 +232,30 @@ def check_training_step(options):
     )
 
 
+def compare_backend(expected, got, options):
+    """Raise AssertionError unless the GPU forward pass matches CPU on the same weights.
+
+    ``expected``/``got`` are (pooled, loss, global term, patch term). Without a lesion branch
+    everything is compared at rtol 1e-3, atol 1e-4. With one, the global code and the
+    global/patch terms keep that tolerance, but the keypoint coordinates are a softmax whose
+    logits are divided by --lesion-temperature, which amplifies backend rounding (TF32
+    convolutions on CUDA) by 1/temperature, so their tolerance is scaled by it. The total loss
+    is then not compared: it includes the lesion loss, which under within-modality pairing
+    draws random augmentations that differ between the CPU and GPU generators.
+    """
+    import torch
+
+    got = [t.cpu() for t in got]
+    latent = options["latent_dim"]
+    if options.get("lesion_keypoints", 0) <= 0:
+        torch.testing.assert_close(got, list(expected), rtol=1e-3, atol=1e-4)
+        return
+    strict = [expected[0][:, :latent], expected[2], expected[3]]
+    torch.testing.assert_close([got[0][:, :latent], got[2], got[3]], strict, rtol=1e-3, atol=1e-4)
+    scale = 1.0 / options.get("lesion_temperature", 1.0)
+    torch.testing.assert_close(got[0][:, latent:], expected[0][:, latent:], rtol=1e-3, atol=1e-4 * scale)
+
+
 def _disposable_step(options, device):
     import torch
 
@@ -253,7 +277,7 @@ def _disposable_step(options, device):
     with torch.no_grad():
         expected, got = forward(reference, pair), forward(model, pair.to(device))
     try:
-        torch.testing.assert_close([t.cpu() for t in got], list(expected), rtol=1e-3, atol=1e-4)
+        compare_backend(expected, got, options)
     except AssertionError as error:
         raise RuntimeError(f"Backend check: {str(device).upper()} forward pass differs from CPU\n{error}") from error
     del reference

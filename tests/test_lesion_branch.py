@@ -283,6 +283,27 @@ class LesionBranchEncoderTests(unittest.TestCase):
             np.testing.assert_allclose(blocks["content"][view], content[2 * view : 2 * view + 2], atol=1e-6)
             np.testing.assert_allclose(blocks["style"][view], style[2 * view : 2 * view + 2], atol=1e-6)
 
+    def test_backend_check_scales_the_keypoint_tolerance_by_temperature(self):
+        expected = (torch.zeros(4, 24), torch.tensor(1.0), torch.tensor(0.5), torch.tensor(0.0))
+
+        def got(latent_shift=0.0, lesion_shift=0.0, loss=1.0):
+            pooled = torch.zeros(4, 24)
+            pooled[:, :12] += latent_shift
+            pooled[:, 12:] += lesion_shift
+            return (pooled, torch.tensor(loss), torch.tensor(0.5), torch.tensor(0.0))
+
+        sharp = dict(latent_dim=12, lesion_keypoints=4, lesion_temperature=0.02)
+        # The cluster failure: ~2e-3 on the keypoints at temperature 0.02, plus a random lesion loss.
+        runner.compare_backend(expected, got(lesion_shift=2e-3, loss=1.7), sharp)
+        for bad, options in (
+            (got(latent_shift=2e-3), sharp),
+            (got(lesion_shift=0.05), sharp),
+            (got(lesion_shift=2e-3), dict(sharp, lesion_temperature=1.0)),
+            (got(loss=1.7), dict(latent_dim=12)),
+        ):
+            with self.subTest(options=options), self.assertRaises(AssertionError):
+                runner.compare_backend(expected, bad, options)
+
     def test_local_runner_passes_lesion_options_through(self):
         def runner_args(**changes):
             values = dict(
