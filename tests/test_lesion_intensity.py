@@ -1,4 +1,4 @@
-"""Lesion on the acquisition gain/bias map: renderer, trainer, encoder evaluation and launchers."""
+"""Lesion on the acquisition gain/bias map: renderer, encoder and VQ-VAE trainers, evaluation and launchers."""
 
 import ast
 import contextlib
@@ -37,6 +37,22 @@ def trainer_make_dataset():
     namespace = {"SyntheticBrainDataset": SyntheticBrainDataset}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(path), "exec"), namespace)
     return namespace["make_dataset"]
+
+
+def vqvae_dataset_kwargs(args):
+    # The dataset_kwargs block of training.main_multimodal.main, without importing the trainer.
+    path = ROOT / "training/main_multimodal.py"
+    main = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    start = next(
+        i
+        for i, n in enumerate(main.body)
+        if isinstance(n, ast.Assign) and [getattr(t, "id", None) for t in n.targets] == ["dataset_kwargs"]
+    )
+    block = main.body[start : start + 2]  # noqa: E203
+    assert isinstance(block[1], ast.If) and "dataset_kwargs.update" in ast.unparse(block[1].body[0])
+    namespace = {"args": args}
+    exec(compile(ast.Module(body=block, type_ignores=[]), str(path), "exec"), namespace)
+    return namespace["dataset_kwargs"]
 
 
 class LesionIntensityTests(unittest.TestCase):
@@ -120,6 +136,33 @@ class LesionIntensityTests(unittest.TestCase):
         self.assertEqual(make_dataset(settings, 4, "val")._inner.renderer.lesion_intensity, "fixed")
         with self.assertRaisesRegex(ValueError, "lesion_intensity"):
             SyntheticBrainDataset(spatial_size=(16,) * 3, synthetic_num_samples=2, synthetic_lesion_intensity="bright")
+
+    def test_flag_reaches_vqvae_training_and_evaluation(self):
+        from eval.protocol.run_dci_synthetic import build_synthetic_test_set, load_run_args
+        from utils.config import parse_args
+
+        parser = parse_args()
+        base = ["--dataset-name", "synthetic", "--synthetic-res", "16", "--synthetic-clean-content"]
+        self.assertEqual(parser.parse_args(base).synthetic_lesion_intensity, "fixed")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(base + ["--synthetic-lesion-intensity", "bright"])
+        args = parser.parse_args(base + ["--synthetic-lesion-intensity", "styled"])
+        trained = SyntheticBrainDataset(mode="test", spatial_size=(16,) * 3, cache=False, **vqvae_dataset_kwargs(args))
+        settings = json.loads(json.dumps(vars(args), default=str))  # what training saves as settings.json
+        with tempfile.TemporaryDirectory() as run_dir:
+            Path(run_dir, "settings.json").write_text(json.dumps(settings))
+            scored = build_synthetic_test_set(load_run_args(run_dir), 4, causal=False, cache=False)
+            for ds in (trained, scored):
+                self.assertEqual(ds._inner.renderer.lesion_intensity, "styled")
+            for a, b in zip(trained._inner[0][:2], scored._inner[0][:2]):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
+            # settings.json files written before the flag existed restore the legacy renderer.
+            del settings["synthetic_lesion_intensity"]
+            Path(run_dir, "settings.json").write_text(json.dumps(settings))
+            legacy = load_run_args(run_dir)
+            self.assertEqual(vqvae_dataset_kwargs(legacy)["synthetic_lesion_intensity"], "fixed")
+            scored = build_synthetic_test_set(legacy, 4, causal=False, cache=False)
+            self.assertEqual(scored._inner.renderer.lesion_intensity, "fixed")
 
     def test_launchers_add_only_the_flag_and_a_distinct_run_id(self):
         parse = trainer_parse_args()

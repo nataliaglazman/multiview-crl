@@ -48,7 +48,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from data.datasets import SyntheticBrainDataset
-from eval.metrics.dci import CONTENT_FACTOR_NAMES, STYLE_FACTOR_NAMES
+from eval.metrics.dci import STYLE_FACTOR_NAMES, content_factor_names
 from eval.metrics.identifiability_metrics import block_mcc, channel_mcc, cv_probe_acc, cv_probe_r2
 from models.multiview_encoder import MultiviewConvEncoder
 from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
@@ -159,6 +159,12 @@ def build_model(cfg, device, state_dict=None):
         lesion_frame=cfg.get("lesion_frame", "brain"),
         lesion_proj_dim=cfg.get("lesion_proj_dim", 8),
         lesion_temperature=cfg.get("lesion_temperature", 1.0),
+        lesion_input=cfg.get("lesion_input", "features"),
+        lesion_normative_components=cfg.get("lesion_normative_components", 20),
+        lesion_input_size=cfg.get("res", 0),
+        lesion_head_init=cfg.get("lesion_head_init", "positive"),
+        lesion_detector=cfg.get("lesion_detector", "shared"),
+        lesion_branch_frozen=cfg.get("lesion_branch_frozen", False),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)
@@ -197,6 +203,8 @@ def make_dataset(cfg, num_samples, mode="val"):
         synthetic_lesion_placement=cfg.get("synthetic_lesion_placement", "legacy"),
         synthetic_lesion_radius=cfg.get("synthetic_lesion_radius", 0.1),
         synthetic_lesion_intensity=cfg.get("synthetic_lesion_intensity", "fixed"),
+        synthetic_lesion_target=cfg.get("synthetic_lesion_target", "position"),
+        synthetic_lesion_count=cfg.get("synthetic_lesion_count", 4),
     )
 
 
@@ -650,7 +658,7 @@ def main():
     blocks = encode_blocks(model, ds, device, args.batch_size, cfg["content_channels"], patch_grid)
     X, X2 = blocks["content"]
     z, adj = blocks["z_content"], blocks["adjacency"]
-    names = CONTENT_FACTOR_NAMES[: z.shape[1]]
+    names = content_factor_names(z.shape[1], cfg.get("synthetic_lesion_target", "position"))
 
     report = {"run_dir": args.run_dir, "pooling": pooling, "num_samples": int(len(X)), "settings": cfg}
     report["trained"] = recovery(X, X2, z, names, with_dci=not args.no_dci)

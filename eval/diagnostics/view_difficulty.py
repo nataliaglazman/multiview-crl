@@ -244,6 +244,7 @@ def main():
                     "synthetic_content_amp_scale",
                     "synthetic_lesion_radius",
                     "synthetic_lesion_placement",
+                    "synthetic_lesion_intensity",
                     "synthetic_cortex_parameterization",
                     "synthetic_center_local_deformations",
                 )

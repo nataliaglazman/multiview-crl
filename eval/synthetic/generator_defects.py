@@ -118,6 +118,7 @@ def _build_dataset(args, normalize=None):
         synthetic_content_amp_scale=args.content_amp_scale,
         synthetic_lesion_radius=args.lesion_radius,
         synthetic_lesion_placement=getattr(args, "lesion_placement", "legacy"),
+        synthetic_lesion_intensity=getattr(args, "lesion_intensity", "fixed"),
         synthetic_cortex_parameterization=args.cortex_parameterization,
         synthetic_center_local_deformations=args.center_local_deformations,
     )

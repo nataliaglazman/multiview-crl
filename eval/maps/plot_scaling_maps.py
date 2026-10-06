@@ -780,6 +780,7 @@ def generator_args(cli):
                 content_amp_scale=getattr(a, "synthetic_content_amp_scale", None),
                 lesion_radius=getattr(a, "synthetic_lesion_radius", 0.1),
                 lesion_placement=getattr(a, "synthetic_lesion_placement", "legacy"),
+                lesion_intensity=getattr(a, "synthetic_lesion_intensity", "fixed"),
                 cortex_parameterization=getattr(a, "synthetic_cortex_parameterization", "additive"),
                 center_local_deformations=bool(getattr(a, "synthetic_center_local_deformations", False)),
             ),

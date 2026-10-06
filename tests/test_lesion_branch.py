@@ -18,6 +18,7 @@ import torch
 from eval.lesion.checkpoint_lesion_analysis import batch_features
 from eval.protocol.score_checkpoint import build_model, encode_blocks
 from models.keypoint_pool import KeypointPool3d, brain_frame, cell_centres
+from models.normative_residual import NormativeResidual
 
 if importlib.util.find_spec("lpips") is None:
     # training.losses imports LPIPS at module scope; the encoder-only trainer never builds it.
@@ -178,6 +179,43 @@ class KeypointPoolModuleTests(unittest.TestCase):
             KeypointPool3d(4, frame="grid")(torch.zeros(1, 3, 2, 2, 2))
 
 
+class NormativeResidualTests(unittest.TestCase):
+    def test_low_rank_variation_is_explained_away_and_a_sparse_blob_is_kept(self):
+        g = torch.Generator().manual_seed(9)
+        brain = ball(16, 0.8)
+        axis = (torch.arange(16) * 2 + 1) / 16 - 1
+        zz, yy, xx = torch.meshgrid(axis, axis, axis, indexing="ij")
+        modes = torch.stack([xx, yy * zz])  # two smooth population modes
+
+        def subjects(n):
+            weights = torch.randn(n, 2, generator=g)
+            base = 1 + torch.einsum("nm,mdhw->ndhw", weights, modes)
+            return (base + 0.02 * torch.randn(n, 16, 16, 16, generator=g)) * brain
+
+        fit, cal = subjects(20), subjects(10)
+        model = NormativeResidual(2, 2, (16, 16, 16))
+        model.fit(torch.stack([fit, fit], 1), torch.stack([cal, cal], 1))
+        self.assertTrue(bool(model.fitted))
+        test = subjects(1)
+        test[0, 5, 9, 7] += 1.0  # the "lesion"
+        z = model(test[:, None], 0)[0, 0]
+        self.assertEqual(np.unravel_index(int(z.abs().argmax()), z.shape), (5, 9, 7))
+        self.assertTrue(torch.equal(z[brain == 0], torch.zeros_like(z[brain == 0])))
+        plain = (test[0] - fit.mean(0)) / fit.std(0).clamp_min(1e-3) * brain
+        lesion_margin = z.abs()[5, 9, 7] / z.abs().flatten().topk(2).values[1]
+        plain_margin = plain.abs()[5, 9, 7] / plain.abs().flatten().topk(2).values[1]
+        self.assertGreater(lesion_margin, plain_margin)
+
+    def test_invalid_fits_fail(self):
+        with self.assertRaises(ValueError):
+            NormativeResidual(2, 0, (4, 4, 4))
+        model = NormativeResidual(2, 5, (4, 4, 4))
+        with self.assertRaisesRegex(ValueError, "Need more than 5"):
+            model.fit(torch.ones(5, 2, 4, 4, 4), torch.ones(2, 2, 4, 4, 4))
+        with self.assertRaisesRegex(ValueError, "Expected"):
+            model.fit(torch.ones(8, 1, 4, 4, 4), torch.ones(2, 1, 4, 4, 4))
+
+
 class LesionBranchEncoderTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(torch.set_num_threads, torch.get_num_threads())
@@ -324,6 +362,13 @@ class LesionBranchEncoderTests(unittest.TestCase):
         sharp, _ = runner.make_options(runner_args(lesion_keypoints=4, lesion_temperature=0.02))
         self.assertEqual(sharp["model_id"], "conv_mlp_s42_mps_lesionkp4_temp0.02")
         self.assertEqual(trainer.parse_args(runner.comparison.cli_arguments(sharp)).lesion_temperature, 0.02)
+        resid, _ = runner.make_options(runner_args(lesion_keypoints=4, lesion_input="residual"))
+        self.assertEqual(resid["model_id"], "conv_mlp_s42_mps_lesionkp4_lresid")
+        avoid, _ = runner.make_options(
+            runner_args(lesion_keypoints=4, lesion_input="residual", lesion_head_init="negative")
+        )
+        self.assertEqual(avoid["model_id"], "conv_mlp_s42_mps_lesionkp4_lresid_hinitnegative")
+        self.assertEqual(trainer.parse_args(runner.comparison.cli_arguments(avoid)).lesion_head_init, "negative")
         within, _ = runner.make_options(runner_args(lesion_keypoints=4, lesion_pairing="within_modality"))
         self.assertEqual(within["model_id"], "conv_mlp_s42_mps_lesionkp4_lpwithin")
         parsed = trainer.parse_args(runner.comparison.cli_arguments(within))
@@ -395,6 +440,50 @@ class LesionBranchEncoderTests(unittest.TestCase):
         total.backward()
         self.assertGreater(model.lesion_pool.logits.weight.grad.abs().sum().item(), 0)
 
+    def test_residual_branch_reads_each_views_normative_model_and_restores(self):
+        cfg = config(
+            conv_readout="mlp", lesion_keypoints=2, lesion_input="residual", lesion_normative_components=3, res=16
+        )
+        model = build_model(cfg, "cpu")
+        images = torch.stack([brain_images(16).view(2, 2, 16, 16, 16).transpose(0, 1) for _ in range(1)])[0]
+        reference = torch.cat([images + 0.05 * k for k in range(8)])  # (16, 2, D, H, W)
+        model.fit_normative(reference[:12], reference[12:])
+        x = brain_images(16)
+        with torch.no_grad():
+            code = model(x, pool_only=True, n_views=2)[2][0]
+            self.assertEqual(code.shape, (4, 12 + 6))
+            flair = model.lesion_code(x[2:], view_idx=1)
+            torch.testing.assert_close(flair, code[2:, 12:])
+            state = {key: value.clone() for key, value in model.state_dict().items()}
+            # Changing the FLAIR normative model must leave the T1 half untouched.
+            model.normative.mean[1] += 0.5
+            changed = model(x, pool_only=True, n_views=2)[2][0]
+            torch.testing.assert_close(changed[:2, 12:], code[:2, 12:])
+            self.assertGreater((changed[2:, 12:] - code[2:, 12:]).abs().max().item(), 1e-4)
+            restored = build_model(cfg, "cpu", state)
+            torch.testing.assert_close(restored(x, pool_only=True, n_views=2)[2][0], code)
+        self.assertTrue(bool(restored.normative.fitted))
+        self.assertTrue(torch.all(model.lesion_pool.logits.weight >= 0))
+
+    def test_head_init_sets_only_the_signs_of_the_same_draws(self):
+        weights = {}
+        for init in ("positive", "random", "negative"):
+            torch.manual_seed(0)
+            cfg = config(
+                conv_readout="mlp",
+                lesion_keypoints=4,
+                lesion_input="residual",
+                lesion_normative_components=3,
+                res=16,
+                lesion_head_init=init,
+            )
+            weights[init] = build_model(cfg, "cpu").lesion_pool.logits.weight.detach().flatten()
+        torch.testing.assert_close(weights["positive"], weights["random"].abs())
+        torch.testing.assert_close(weights["negative"], -weights["random"].abs())
+        self.assertTrue(bool((weights["random"] > 0).any() and (weights["random"] < 0).any()))
+        with self.assertRaisesRegex(ValueError, "only applies"):
+            build_model(config(conv_readout="mlp", lesion_keypoints=4, lesion_head_init="negative"), "cpu")
+
     def test_cli_validates_lesion_options(self):
         args = trainer.parse_args([])
         self.assertEqual(
@@ -402,6 +491,8 @@ class LesionBranchEncoderTests(unittest.TestCase):
             (0, "none", "brain", 8, 1.0),
         )
         trainer.parse_args(["--lesion-keypoints", "4", "--lesion-norm", "layer", "--lesion-frame", "grid"])
+        avoid = ["--lesion-keypoints", "2", "--lesion-input", "residual", "--lesion-head-init", "negative"]
+        self.assertEqual(trainer.parse_args(avoid).lesion_head_init, "negative")
         for argv in (
             ["--lesion-keypoints", "-1"],
             ["--lesion-norm", "layer"],
@@ -413,12 +504,50 @@ class LesionBranchEncoderTests(unittest.TestCase):
             ["--lesion-decorrelation-weight", "1"],
             ["--lesion-temperature", "0.1"],
             ["--lesion-pairing", "within_modality"],
+            ["--lesion-input", "residual"],
+            ["--lesion-keypoints", "2", "--lesion-input", "residual", "--lesion-pairing", "within_modality"],
+            ["--lesion-keypoints", "2", "--lesion-input", "residual", "--lesion-normative-components", "0"],
+            ["--lesion-keypoints", "2", "--lesion-input", "residual", "--lesion-normative-subjects", "20"],
+            ["--lesion-keypoints", "2", "--lesion-input", "residual", "--lesion-normative-subjects", "5000"],
+            ["--lesion-keypoints", "2", "--lesion-head-init", "negative"],
+            ["--lesion-head-init", "random"],
             ["--lesion-keypoints", "2", "--lesion-temperature", "0"],
             ["--lesion-keypoints", "2", "--contrastive-loss-type", "barlow_twins"],
             ["--lesion-keypoints", "2", "--res", "4"],
         ):
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 trainer.parse_args(argv)
+
+    def test_real_training_fits_the_normative_model_and_trains_the_residual_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = [
+                *("--out-dir", tmp, "--model-id", "resid_smoke", "--require-new-run", "--device", "cpu"),
+                *("--res", "16", "--hidden-channels", "64", "--res-channels", "4", "--nb-res-layers", "1"),
+                *("--latent-dim", "12", "--conv-readout", "mlp", "--encoder-head-hidden", "8"),
+                *("--lesion-keypoints", "2", "--lesion-input", "residual"),
+                *("--lesion-normative-components", "3", "--lesion-normative-subjects", "9"),
+                *("--tau", "0.1", "--lr", "0.05", "--batch-size", "2", "--train-steps", "2", "--eval-every", "2"),
+                *("--log-every", "1", "--num-train-samples", "10", "--num-val-samples", "20", "--no-cache"),
+                *("--best-metric", "none", "--synthetic-clean-content", "--synthetic-normalize", "fixed_reference"),
+            ]
+            with patch.object(sys, "argv", ["trainer", *argv]), patch.object(
+                trainer.dci, "compute_dci_synthetic", return_value={}
+            ), patch.object(trainer.dci, "flatten_dci_results", return_value={}), contextlib.redirect_stdout(
+                io.StringIO()
+            ) as output:
+                trainer.main()
+            log = output.getvalue()
+            self.assertIn("lesion normative model: 3 components per view from 6 training subjects", log)
+            self.assertIn("reads residual, positive head init", log)
+            self.assertIn("lesion heads: logit per unit residual z [brighter, darker]", log)
+            run = Path(tmp) / "resid_smoke"
+            heads = json.loads((run / "dci_step2.json").read_text())["lesion_branch"]["head_weights"]
+            self.assertEqual(np.array(heads).shape, (2, 2))
+            init = torch.load(run / "model_init.pt", weights_only=True)
+            self.assertTrue(bool(init["normative.fitted"]))
+            cfg = json.loads((run / "settings.json").read_text())
+            restored = build_model(cfg, "cpu", torch.load(run / "model.pt", weights_only=True))
+            self.assertEqual(restored.lesion_input, "residual")
 
     def test_real_training_reports_what_the_lesion_branch_encodes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -440,7 +569,8 @@ class LesionBranchEncoderTests(unittest.TestCase):
             run = Path(tmp) / "lesion_smoke"
             log = output.getvalue()
             self.assertIn(
-                "lesion branch: 2 spatial-softmax keypoints (brain frame, norm none, temperature 1, cross_modal pairs)",
+                "lesion branch: 2 spatial-softmax keypoints (brain frame, norm none, temperature 1, cross_modal pairs, "
+                "reads features)",
                 log,
             )
             self.assertIn("lesion InfoNCE", log)

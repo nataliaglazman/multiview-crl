@@ -70,6 +70,13 @@ def make_options(args):
         "lesion_decorrelation_weight",
         "lesion_temperature",
         "lesion_pairing",
+        "lesion_input",
+        "lesion_normative_components",
+        "lesion_normative_subjects",
+        "lesion_head_init",
+        "lesion_detector",
+        "lesion_branch_frozen",
+        "lesion_localization_eval",
         "spatial_recovery_eval",
         "spatial_recovery_grids",
         "spatial_recovery_native",
@@ -89,6 +96,9 @@ def make_options(args):
     lesion_intensity = getattr(args, "synthetic_lesion_intensity", None)
     if lesion_intensity is not None:
         options["synthetic_lesion_intensity"] = lesion_intensity
+    for key in ("synthetic_lesion_target", "synthetic_lesion_count"):
+        if getattr(args, key, None) is not None:
+            options[key] = getattr(args, key)
     if getattr(args, "patch_foreground_mask", None):
         options["patch_foreground_mask"] = True
     if getattr(args, "patch_foreground_thresh", None) is not None:
@@ -119,6 +129,9 @@ def make_options(args):
     elif any(key in options for key in ("attention_pool_heads", "attention_pool_frequencies")):
         raise ValueError("Attention-pool heads/frequencies require --global-pool attention")
     lesion_keys = (
+        "lesion_detector",
+        "lesion_branch_frozen",
+        "lesion_localization_eval",
         "lesion_norm",
         "lesion_frame",
         "lesion_proj_dim",
@@ -126,6 +139,10 @@ def make_options(args):
         "lesion_decorrelation_weight",
         "lesion_temperature",
         "lesion_pairing",
+        "lesion_input",
+        "lesion_normative_components",
+        "lesion_normative_subjects",
+        "lesion_head_init",
     )
     if options.get("lesion_keypoints", 0) > 0:
         res = options["res"]
@@ -162,6 +179,10 @@ def make_options(args):
         suffix += f"_attnpool_h{options.get('attention_pool_heads', 4)}_f{options.get('attention_pool_frequencies', 4)}"
     if options.get("lesion_keypoints", 0) > 0:
         suffix += f"_lesionkp{options['lesion_keypoints']}"
+        if options.get("lesion_detector", "shared") != "shared":
+            suffix += f"_ld{options['lesion_detector']}"
+        if options.get("lesion_branch_frozen", False):
+            suffix += "_lfrozen"
         if options.get("lesion_frame", "brain") != "brain":
             suffix += f"_{options['lesion_frame']}frame"
         if options.get("lesion_norm", "none") != "none":
@@ -174,12 +195,22 @@ def make_options(args):
             suffix += f"_temp{options['lesion_temperature']:g}"
         if options.get("lesion_pairing", "cross_modal") != "cross_modal":
             suffix += "_lpwithin"
+        if options.get("lesion_input", "features") == "residual":
+            suffix += "_lresid"
+            if options.get("lesion_normative_components", 20) != 20:
+                suffix += f"_nk{options['lesion_normative_components']}"
+            if options.get("lesion_head_init", "positive") != "positive":
+                suffix += f"_hinit{options['lesion_head_init']}"
     if options.get("norm_type", "group") != recipe.get("norm_type", "group"):
         suffix += f"_{options['norm_type']}norm"
     if options.get("synthetic_lesion_radius", 0.1) != recipe.get("synthetic_lesion_radius", 0.1):
         suffix += f"_lr{options['synthetic_lesion_radius']:g}"
     if options.get("synthetic_lesion_intensity", "fixed") != recipe.get("synthetic_lesion_intensity", "fixed"):
         suffix += f"_lesion{options['synthetic_lesion_intensity']}"
+    if options.get("synthetic_lesion_target", "position") == "burden":
+        suffix += "_burden"
+        if options.get("synthetic_lesion_count", 4) != 4:
+            suffix += f"{options['synthetic_lesion_count']}"
     options["model_id"] = args.model_id or f"{args.variant}_s{args.seed}_{options['device']}{suffix}"
     if Path(options["model_id"]).name != options["model_id"] or options["model_id"] in (".", ".."):
         raise ValueError("--model-id must be a directory name, not a path")
@@ -289,13 +320,16 @@ def _disposable_step(options, device):
     if not torch.isfinite(loss).item():
         raise RuntimeError("Backend check: non-finite loss")
     loss.backward()
+    # An unfitted normative model gives the residual lesion branch all-zero inputs, so its
+    # gradient is legitimately zero here; its forward values are still compared above.
+    unfitted = getattr(model, "normative", None) is not None and not bool(model.normative.fitted)
     for part in (
         model.encoder,
         model.encoder_v1,
         model.to_encoding,
         model.spatial_readout,
         model.attention_pool,
-        model.lesion_pool,
+        None if unfitted else model.lesion_pool,
     ):
         grad = None if part is None else next(part.parameters()).grad
         if part is not None and (grad is None or not torch.isfinite(grad).all().item() or not grad.any().item()):
@@ -345,10 +379,23 @@ def main(argv=None):
     )
     parser.add_argument("--lesion-temperature", type=float, help="With --lesion-keypoints; trainer default 1")
     parser.add_argument(
+        "--lesion-input", choices=("features", "residual"), help="With --lesion-keypoints; trainer default features"
+    )
+    parser.add_argument("--lesion-normative-components", type=int, help="With --lesion-input residual; default 20")
+    parser.add_argument("--lesion-normative-subjects", type=int, help="With --lesion-input residual; default 300")
+    parser.add_argument(
+        "--lesion-head-init",
+        choices=("positive", "random", "negative"),
+        help="With --lesion-input residual; trainer default positive",
+    )
+    parser.add_argument(
         "--lesion-pairing",
         choices=("cross_modal", "within_modality"),
         help="With --lesion-keypoints; trainer default cross_modal",
     )
+    parser.add_argument("--lesion-detector", choices=("shared", "separate", "separate_conv"))
+    parser.add_argument("--lesion-branch-frozen", action="store_true", default=None)
+    parser.add_argument("--lesion-localization-eval", action="store_true", default=None)
     parser.add_argument("--spatial-recovery-eval", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--spatial-recovery-grids", type=int, nargs="+")
     parser.add_argument("--spatial-recovery-native", action=argparse.BooleanOptionalAction, default=None)
@@ -364,6 +411,14 @@ def main(argv=None):
         "--synthetic-lesion-intensity",
         choices=("fixed", "styled"),
         help="styled puts the lesion on the acquisition gain/bias map; default: the recipe's (trainer default fixed)",
+    )
+    parser.add_argument(
+        "--synthetic-lesion-target",
+        choices=("position", "burden"),
+        help="burden: z_content[2] is the total lesion volume (adds _burden to the run ID); trainer default position",
+    )
+    parser.add_argument(
+        "--synthetic-lesion-count", type=int, help="With --synthetic-lesion-target burden; trainer default 4"
     )
     parser.add_argument(
         "--norm-type",

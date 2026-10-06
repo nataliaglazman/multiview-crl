@@ -27,6 +27,7 @@ from torch import nn
 
 from models.attention_pool import AttentionPool3d
 from models.keypoint_pool import KeypointPool3d
+from models.normative_residual import NormativeResidual
 from models.resnet3d import ResNet18Features3d
 from utils.helper import HelperModule
 
@@ -62,6 +63,12 @@ class MultiviewConvEncoder(HelperModule):
         lesion_frame: str = "brain",
         lesion_proj_dim: int = 8,
         lesion_temperature: float = 1.0,
+        lesion_input: str = "features",
+        lesion_normative_components: int = 20,
+        lesion_input_size: int = 0,
+        lesion_head_init: str = "positive",
+        lesion_detector: str = "shared",
+        lesion_branch_frozen: bool = False,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -106,6 +113,25 @@ class MultiviewConvEncoder(HelperModule):
         if lesion_keypoints > 0 and lesion_proj_dim < 1:
             raise ValueError(f"lesion_proj_dim must be positive, got {lesion_proj_dim}")
         self.lesion_units = 3 * lesion_keypoints
+        if lesion_input not in ("features", "residual"):
+            raise ValueError(f"lesion_input must be features or residual, got {lesion_input!r}")
+        if lesion_keypoints > 0 and lesion_input == "residual" and lesion_input_size < 1:
+            raise ValueError("lesion_input='residual' needs lesion_input_size (the cubic input resolution)")
+        self.lesion_input = lesion_input
+        if lesion_detector not in ("shared", "separate", "separate_conv"):
+            raise ValueError("lesion_detector must be shared, separate or separate_conv")
+        if (lesion_detector != "shared" or lesion_branch_frozen) and (
+            lesion_input != "residual" or lesion_keypoints < 1
+        ):
+            raise ValueError("Separate/frozen lesion detectors require a residual lesion branch")
+        self.lesion_detector = lesion_detector
+        self.lesion_branch_frozen = lesion_branch_frozen
+        if lesion_head_init not in ("positive", "random", "negative"):
+            raise ValueError(f"lesion_head_init must be positive, random or negative, got {lesion_head_init!r}")
+        if lesion_head_init != "positive" and lesion_input != "residual":
+            raise ValueError("lesion_head_init only applies to lesion_input='residual'")
+        if lesion_detector == "separate_conv" and lesion_head_init != "positive":
+            raise ValueError("lesion_head_init sign controls only apply to simple residual detectors")
 
         # --- View-specific encoders ---
         # Encoder 1 is a deep copy of encoder 0 so both views start in the same
@@ -189,17 +215,93 @@ class MultiviewConvEncoder(HelperModule):
         # every weight above, and the untrained floor of those units, equal to the model
         # without the branch from the same seed. Shared across views. Its InfoNCE runs on
         # lesion_projector's output while probes read the raw coordinates.
+        # With lesion_input="residual" the heads read each view's residual against a low-rank
+        # normative model (models.normative_residual) instead of the backbone map: brighter- and
+        # darker-than-normal channels, pooled to the feature grid. This reduces dominant anatomy
+        # variation, but residual anatomy can still capture a head. Separate detectors can learn
+        # distinct T1/FLAIR appearances while reporting coordinates in the same frame.
         self.lesion_pool = None
+        self.lesion_pool_v1 = None
+        self.lesion_adapter = None
+        self.lesion_adapter_v1 = None
         self.lesion_projector = None
+        self.normative = None
         if lesion_keypoints > 0:
+            if lesion_input == "residual":
+                # Buffers only, no random draws; fit_normative() fills them before training.
+                self.normative = NormativeResidual(2, lesion_normative_components, (lesion_input_size,) * 3)
             self.lesion_pool = KeypointPool3d(
-                512 if encoder_architecture == "resnet18" else hidden_channels,
+                2 if lesion_input == "residual" else (512 if encoder_architecture == "resnet18" else hidden_channels),
                 num_keypoints=lesion_keypoints,
                 norm=lesion_norm,
                 frame=lesion_frame,
                 temperature=lesion_temperature,
             )
+            if lesion_input == "residual" and lesion_head_init != "random":
+                with torch.no_grad():
+                    # positive: every head starts attending TO anomalies; random signs would point half
+                    # away. negative: every head starts avoiding them, the control for whether training
+                    # finds the lesion without that head start. Same draws either way, only the signs differ.
+                    self.lesion_pool.logits.weight.abs_()
+                    if lesion_head_init == "negative":
+                        self.lesion_pool.logits.weight.neg_()
             self.lesion_projector = nn.Linear(self.lesion_units, lesion_proj_dim)
+            # Additional capacity must not change the global/projector initialisation or
+            # the RNG state seen by the data loader. Separate simple heads start identical
+            # to the shared control, but receive independent modality-specific gradients.
+            if lesion_detector == "separate_conv":
+                with torch.random.fork_rng(devices=[]):
+                    self.lesion_adapter = nn.Sequential(
+                        nn.Conv3d(2, 16, 3, padding=1),
+                        nn.GELU(),
+                        nn.Conv3d(16, 16, 3, padding=1),
+                        nn.GELU(),
+                    )
+                    self.lesion_pool = KeypointPool3d(
+                        16, lesion_keypoints, lesion_norm, lesion_frame, lesion_temperature
+                    )
+                self.lesion_adapter_v1 = copy.deepcopy(self.lesion_adapter)
+            if lesion_detector != "shared":
+                self.lesion_pool_v1 = copy.deepcopy(self.lesion_pool)
+            if lesion_branch_frozen:
+                for part in self.lesion_modules():
+                    part.requires_grad_(False)
+
+    def lesion_modules(self):
+        """Trainable parts of the branch, excluding the frozen normative buffers."""
+        return tuple(
+            part
+            for part in (
+                self.lesion_pool,
+                self.lesion_pool_v1,
+                self.lesion_adapter,
+                self.lesion_adapter_v1,
+                self.lesion_projector,
+            )
+            if part is not None
+        )
+
+    def _lesion_readout(self, inputs, support, n_views=1, view_idx=None, maps=False):
+        def read(h, mask, view):
+            pool = self.lesion_pool_v1 if view == 1 and self.lesion_pool_v1 is not None else self.lesion_pool
+            adapter = self.lesion_adapter_v1 if view == 1 else self.lesion_adapter
+            if adapter is not None:
+                h = adapter(h)
+            return pool.maps(h, mask) if maps else pool(h, mask)
+
+        if self.lesion_pool_v1 is None:
+            return read(inputs, support, 0)
+        if n_views == 2:
+            if len(inputs) % 2:
+                raise ValueError("Two-view lesion batches must have even length")
+            b = len(inputs) // 2
+            return torch.cat(
+                [
+                    read(inputs[:b], None if support is None else support[:b], 0),
+                    read(inputs[b:], None if support is None else support[b:], 1),
+                ]
+            )
+        return read(inputs, support, 1 if view_idx == 1 else 0)
 
     def _encode(self, x: torch.FloatTensor, n_views: int, view_idx) -> torch.FloatTensor:
         """Route each view through its own encoder, returning a (B, hidden, d, h, w) map."""
@@ -231,10 +333,13 @@ class MultiviewConvEncoder(HelperModule):
         """The active spatial head; the legacy shared head when separation is off."""
         return self.to_encoding if self.spatial_readout is None else self.spatial_readout
 
-    def _global_code(self, h: torch.FloatTensor, x: torch.FloatTensor = None) -> torch.FloatTensor:
+    def _global_code(
+        self, h: torch.FloatTensor, x: torch.FloatTensor = None, n_views: int = 1, view_idx=None
+    ) -> torch.FloatTensor:
         """(B, latent_dim [+ lesion_units]) global encoding: pool the backbone map, then apply the global head.
 
-        ``x`` is the input batch that produced ``h``; only the lesion branch's brain frame reads it.
+        ``x`` is the input batch that produced ``h`` (view-major when ``n_views`` is 2); only the
+        lesion branch reads it, for its brain frame and its residual input.
         """
         if self.attention_pool is None:
             # The original GAP expressions, so existing checkpoints replay bit-for-bit.
@@ -248,13 +353,40 @@ class MultiviewConvEncoder(HelperModule):
                 code = self.to_encoding(pooled)
             else:
                 code = self.to_encoding(pooled[:, :, None, None, None]).flatten(1)
-        return self._append_lesion(code, h, x)
+        return self._append_lesion(code, h, x, n_views, view_idx)
 
-    def _append_lesion(self, code: torch.FloatTensor, h: torch.FloatTensor, x: torch.FloatTensor) -> torch.FloatTensor:
+    def _append_lesion(
+        self, code: torch.FloatTensor, h: torch.FloatTensor, x: torch.FloatTensor, n_views: int = 1, view_idx=None
+    ) -> torch.FloatTensor:
         """Concatenate the lesion branch's keypoint coordinates after the global code's units."""
         if self.lesion_pool is None:
             return code
-        return torch.cat([code, self.lesion_pool(h, self._lesion_support(h, x))], dim=1)
+        inputs = self._lesion_inputs(h, x, n_views, view_idx)
+        return torch.cat([code, self._lesion_readout(inputs, self._lesion_support(h, x), n_views, view_idx)], dim=1)
+
+    def _lesion_inputs(self, h: torch.FloatTensor, x: torch.FloatTensor, n_views: int = 1, view_idx=None):
+        """What the keypoint heads read: the backbone map, or each view's normative residual.
+
+        The residual is split into brighter- and darker-than-normal channels and average-pooled to
+        the feature grid. With two views the first half of ``x`` is T1 (view 0) and the second FLAIR.
+        """
+        if self.lesion_input != "residual":
+            return h
+        if x is None:
+            raise ValueError("The residual lesion input needs the input images")
+        if n_views == 2:
+            b = x.shape[0] // 2
+            z = torch.cat([self.normative(x[:b], 0), self.normative(x[b:], 1)])
+        else:
+            z = self.normative(x, 1 if view_idx == 1 else 0)
+        maps = torch.cat([z.clamp_min(0), (-z).clamp_min(0)], dim=1)
+        return F.adaptive_avg_pool3d(maps, tuple(h.shape[2:]))
+
+    def fit_normative(self, fit_images: torch.FloatTensor, calibration_images: torch.FloatTensor) -> None:
+        """Fit the residual input's normative model from (N, 2, D, H, W) training images."""
+        if self.normative is None:
+            raise ValueError("This model's lesion branch does not read a normative residual")
+        self.normative.fit(fit_images, calibration_images)
 
     def _lesion_support(self, h: torch.FloatTensor, x: torch.FloatTensor):
         """Brain occupancy on the feature grid for the brain frame; None for the grid frame.
@@ -296,14 +428,16 @@ class MultiviewConvEncoder(HelperModule):
         if self.lesion_pool is None:
             raise ValueError("This model has no lesion branch")
         h = self._encode(x, 1, view_idx)
-        return self.lesion_pool(h, self._lesion_support(h, x))
+        return self._lesion_readout(self._lesion_inputs(h, x, 1, view_idx), self._lesion_support(h, x), 1, view_idx)
 
     def lesion_maps(self, x: torch.FloatTensor, n_views: int = 1, view_idx=None) -> torch.FloatTensor:
         """Lesion keypoint weights, (B, K, d, h, w); each head's map sums to 1."""
         if self.lesion_pool is None:
             raise ValueError("This model has no lesion branch")
         h = self._encode(x, n_views, view_idx)
-        return self.lesion_pool.maps(h, self._lesion_support(h, x))
+        return self._lesion_readout(
+            self._lesion_inputs(h, x, n_views, view_idx), self._lesion_support(h, x), n_views, view_idx, maps=True
+        )
 
     def attention_maps(self, x: torch.FloatTensor, n_views: int = 1, view_idx=None) -> torch.FloatTensor:
         """Global attention weights, (B, heads, d, h, w); each head's map sums to 1.
@@ -329,14 +463,14 @@ class MultiviewConvEncoder(HelperModule):
         if len(grid) != 3 or any(g < 1 or g > size for g, size in zip(grid, h.shape[2:])):
             raise ValueError(f"Training patch grid {grid} must fit spatial map {tuple(h.shape[2:])}")
         if self.readout_type == "mlp":
-            pooled = self._global_code(h, x)
+            pooled = self._global_code(h, x, n_views)
             patches = self.patch_readout(self._patch_pool(h, grid).transpose(1, 2)).transpose(1, 2)
         else:
             features = self.to_encoding(h)
             if self.attention_pool is None:
-                pooled = self._append_lesion(features.mean(dim=[2, 3, 4]), h, x)
+                pooled = self._append_lesion(features.mean(dim=[2, 3, 4]), h, x, n_views)
             else:
-                pooled = self._global_code(h, x)
+                pooled = self._global_code(h, x, n_views)
             patches = self._patch_pool(features, grid)
         return pooled, patches
 
@@ -367,7 +501,7 @@ class MultiviewConvEncoder(HelperModule):
         h = self._encode(x, n_views, view_idx)
         if self.readout_type == "mlp":
             if pool_only and patch_grid is None:
-                feat = self._global_code(h, x)
+                feat = self._global_code(h, x, n_views, view_idx)
             else:
                 if pool_only:
                     grid = (
@@ -397,7 +531,7 @@ class MultiviewConvEncoder(HelperModule):
             )
 
         if pool_only and patch_grid is None:
-            encoder_features: List[torch.Tensor] = [self._global_code(h, x)]
+            encoder_features: List[torch.Tensor] = [self._global_code(h, x, n_views, view_idx)]
         else:
             feat = self.to_encoding(h)  # (B, latent_dim, d, h, w)
             encoder_features = [self._patch_pool(feat, patch_grid) if pool_only else feat]

@@ -158,6 +158,13 @@ def parse_args() -> argparse.ArgumentParser:
         "Fails explicitly if no centre fits. legacy reproduces previous data/checkpoints.",
     )
     parser.add_argument(
+        "--synthetic-lesion-intensity",
+        choices=("fixed", "styled"),
+        default="fixed",
+        help="styled passes the lesion through the acquisition gain/bias like every tissue (T1 contrast "
+        "0.4*gain). fixed reproduces previous data/checkpoints, whose T1 lesion nearly vanishes at low gain.",
+    )
+    parser.add_argument(
         "--synthetic-cortex-parameterization",
         type=str,
         default="additive",

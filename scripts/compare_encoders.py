@@ -30,6 +30,8 @@ BOOLEAN_OPTIONAL = {
     "separate_spatial_readout",
 }
 STORE_TRUE = {
+    "lesion_branch_frozen",
+    "lesion_localization_eval",
     "no_separate_encoders",
     "synthetic_clean_content",
     "synthetic_causal",

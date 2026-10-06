@@ -248,6 +248,30 @@ CONTENT_FACTOR_NAMES = [
 STYLE_FACTOR_NAMES = ["gain", "bias", "noise_sigma"]
 
 
+def content_factor_names(n, lesion_target="position"):
+    """Names of the first ``n`` z_content factors.
+
+    Under ``--synthetic-lesion-target burden`` dim 2 is the total lesion volume and dims 3-4 are
+    drawn but render nothing, so their recovery is 0 by construction.
+    """
+    names = list(CONTENT_FACTOR_NAMES)
+    if lesion_target == "burden":
+        names[2:5] = ["lesion_burden", "unused_3", "unused_4"]
+    return names[:n]
+
+
+def dataset_lesion_target(dataset):
+    """``lesion_target`` of a synthetic dataset, a wrapper of one, or a Subset of either."""
+    for _ in range(4):
+        target = getattr(dataset, "lesion_target", None)
+        if target is not None:
+            return target
+        dataset = getattr(dataset, "_inner", None) or getattr(dataset, "dataset", None)
+        if dataset is None:
+            break
+    return "position"
+
+
 def _parse_content_indices(content_idx_raw):
     """Normalise the various formats content_idx can arrive in to a plain list[int]."""
     if content_idx_raw is None:
@@ -492,7 +516,7 @@ def _extract_synthetic_representations(
             content_v2,
             style_v2,
             {
-                "content_names": CONTENT_FACTOR_NAMES[:n_c],
+                "content_names": content_factor_names(n_c, dataset_lesion_target(dataset)),
                 "style_names": STYLE_FACTOR_NAMES[:n_s],
                 "n_content": n_c,
                 "n_style": n_s,

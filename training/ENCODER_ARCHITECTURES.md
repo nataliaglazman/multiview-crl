@@ -182,6 +182,25 @@ loss   = InfoNCE(content) + w * InfoNCE(lesion_projector(c))
   to suppress it. On a patch-loss checkpoint, cross-view patch retrieval at a subject's lesion
   position was 0.088, against 0.146 at the same positions in subjects without a lesion there.
   It costs one more FLAIR encoder pass per step.
+- **`--lesion-input residual`.** The heads read each view's residual against a low-rank
+  normative model (`models/normative_residual.py`) instead of the backbone map.
+  - Before step 0, a per-view PCA is fitted on the first `--lesion-normative-subjects` (300)
+    training subjects. Two thirds give the mean and `--lesion-normative-components` (20) modes;
+    one third gives the per-voxel residual SD.
+  - The residual z is split into brighter- and darker-than-normal channels and averaged to the
+    feature grid.
+  - The branch then shares nothing with the backbone. The content InfoNCE trains the encoders;
+    the lesion InfoNCE trains only the heads' K × 2 weights and the projector.
+  - Global shape is explained away before the heads see anything, and the residual's magnitude
+    agrees across views where the lesion's sign does not.
+  - Untrained, it already reads lesion x/y/z at about 0.45–0.7 R². Read the step-0 row before
+    crediting training. Needs cross-modal pairs.
+- **`--lesion-head-init`** (residual input only) sets the signs of the heads' initial weights:
+  - `positive` (default): every head attends to anomalies.
+  - `random`: plain random signs.
+  - `negative`: every head avoids anomalies. The lesion floor is about 0–0.25, so this is the
+    control for whether training finds the lesion by itself.
+  - Each evaluation prints every head's logit per unit residual z [brighter, darker].
 - **Use `--norm-type layer` for the backbone.** Even untrained, the branch already encodes
   brain size, because GroupNorm writes each subject's global statistics into every voxel
   and so rescales the keypoint logits like a gain. Measured on the conv_mlp recipe (240
@@ -205,6 +224,17 @@ loss   = InfoNCE(content) + w * InfoNCE(lesion_projector(c))
   factor from the raw coordinates (T1 and FLAIR), plus each head's effective positions.
   lesion_x/y/z means the heads found the lesion. brain_size or ventricle_size means a
   factor that moves where attention lands captured them. Compare against the step-0 rows.
+  - A head spread over ~16% of the map covers the whole brain. Its coordinate is then the
+    brain's tissue centroid, which every global shape factor moves. That was the outcome of
+    every real run so far.
+  - Sharp heads (`--lesion-temperature 0.02`) locked onto anatomical edges instead.
+- **content→view near 1 is mostly a constant per-view offset.** With `--cross-view-negs-only`,
+  a shift shared by every vector of one view cancels in the softmax, so the loss never removes
+  it. Subtract each view's mean before reading the view probe; its floor is ~0.36, not 0.5.
+- **Backend check.** At low `--lesion-temperature`, CUDA's TF32 convolutions shift the keypoint
+  coordinates by ~2e-3 against CPU. `run_encoder_mps.compare_backend` therefore scales their
+  tolerance by 1/temperature, and skips the lesion loss, which is random under within-modality
+  pairing.
 - **Scoring.** The content mask marks the lesion units, so `compute_dci_synthetic`,
   `score_checkpoint.encode_blocks` and `checkpoint_lesion_analysis` count them as
   content. Patch and unpooled outputs have none. Readers that slice the global code by
@@ -212,10 +242,15 @@ loss   = InfoNCE(content) + w * InfoNCE(lesion_projector(c))
 
 ```sh
 --lesion-keypoints 4 [--lesion-frame brain] [--lesion-norm none] [--lesion-proj-dim 8] [--lesion-loss-weight 1]
+[--lesion-temperature 1] [--lesion-decorrelation-weight 0] [--lesion-pairing cross_modal]
+[--lesion-input features] [--lesion-normative-components 20] [--lesion-normative-subjects 300]
+[--lesion-head-init positive]
 ```
 
 Locally: `scripts/run_encoder_mps.py --variant conv_mlp --lesion-keypoints 4` (run ID
 gains `_lesionkp4`). Saved settings restore the branch in `eval.protocol.score_checkpoint`.
+Results so far, the diagnoses behind them, and open threads are in `LESION_BRANCH_HANDOFF.md`
+at the repo root.
 
 ## Normalization
 

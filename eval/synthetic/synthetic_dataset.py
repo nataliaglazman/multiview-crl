@@ -144,6 +144,8 @@ class PseudoMRIRenderer(nn.Module):
         center_local_deformations=False,
         lesion_placement="legacy",
         lesion_intensity="fixed",
+        lesion_target="position",
+        lesion_count=4,
     ):
         super().__init__()
         self.res = res
@@ -191,6 +193,18 @@ class PseudoMRIRenderer(nn.Module):
         if lesion_intensity not in ("fixed", "styled"):
             raise ValueError(f"lesion_intensity must be fixed|styled, got {lesion_intensity!r}")
         self.lesion_intensity = lesion_intensity
+        # "position" (default): z_content[2:5] place one sphere. "burden": z_content[2] sets the
+        # TOTAL volume of lesion_count spheres at nuisance positions (z_lesion), an amount like
+        # ventricle size and the synthetic counterpart of a WMH volume; z_content[3:5] are unused.
+        if lesion_target not in ("position", "burden"):
+            raise ValueError(f"lesion_target must be position|burden, got {lesion_target!r}")
+        if lesion_target == "burden":
+            if lesion_placement != "wm_interior":
+                raise ValueError("lesion_target='burden' needs lesion_placement='wm_interior'")
+            if isinstance(lesion_count, bool) or not isinstance(lesion_count, int) or lesion_count < 1:
+                raise ValueError(f"lesion_count must be a positive integer, got {lesion_count!r}")
+        self.lesion_target = lesion_target
+        self.lesion_count = lesion_count
         if cortex_parameterization not in ("additive", "nested", "midsurface", "patterned"):
             raise ValueError(
                 f"cortex_parameterization must be additive|nested|midsurface, got {cortex_parameterization!r}"
@@ -294,6 +308,65 @@ class PseudoMRIRenderer(nn.Module):
             raise RuntimeError("White-matter sphere containment failed; refusing to truncate the lesion")
         return sphere.to(self.coords.dtype)
 
+    def _burden_in_white_matter(self, tissue_map, burden, quantiles):
+        """``lesion_count`` partial-volume spheres whose total volume is linear in ``burden``.
+
+        ``burden`` in [-1, 1] gives every sphere the radius lesion_radius * ((burden + 1) / 2) ** (1/3),
+        so the summed load runs linearly from 0 to ``lesion_count`` full-size spheres. The edge is a
+        one-voxel partial-volume ramp, and a sphere smaller than half a voxel fades out with its
+        radius, so the load is continuous and monotone in ``burden``.
+
+        Centres come from ``quantiles`` (lesion_count, 3) in [0, 1) by the conditional x, y|x, z|x,y
+        quantiles of ``_sphere_in_white_matter``. Admissible centres hold a FULL-size sphere and its
+        edge inside final white matter, at least two full radii plus a voxel from every earlier
+        centre. So the positions never depend on the burden, the spheres never overlap and the
+        load is additive. A subject with no room raises ``LesionPlacementError`` and is redrawn.
+        """
+        from scipy.ndimage import distance_transform_edt
+
+        q = quantiles.detach().double().cpu().numpy()
+        if q.shape != (self.lesion_count, 3) or not np.isfinite(q).all() or (q < 0).any() or (q >= 1).any():
+            raise ValueError(f"burden lesions need ({self.lesion_count}, 3) placement quantiles in [0, 1)")
+        b = float(burden)
+        if not -1.0 - 1e-6 <= b <= 1.0 + 1e-6:
+            raise ValueError(f"burden must lie in [-1, 1], got {b}")
+        fraction = min(max((b + 1.0) / 2.0, 0.0), 1.0)
+        spacing = 2.0 / (self.res - 1)
+        reach = self.lesion_radius + spacing / 2  # the full-size sphere's support, edge included
+        white = tissue_map.detach().cpu().numpy() == 2
+        positions = np.argwhere(white)
+        if not len(positions):
+            raise LesionPlacementError("No white matter available for burden lesion placement")
+        lower, upper = positions.min(0), positions.max(0) + 1
+        slices = tuple(slice(int(a), int(c)) for a, c in zip(lower, upper))
+        distance = distance_transform_edt(np.pad(white[slices], 1), sampling=spacing)[1:-1, 1:-1, 1:-1]
+        admissible = distance > reach + 1e-7
+        grid = self.coords[slices].double().cpu().numpy()
+
+        def choose(counts, quantile):
+            cumulative = np.cumsum(counts, dtype=np.int64)
+            return int(np.searchsorted(cumulative, quantile * cumulative[-1], side="right"))
+
+        radius = self.lesion_radius * fraction ** (1.0 / 3.0)
+        fade = min(1.0, 2.0 * radius / spacing)
+        load = torch.zeros_like(self.coords[..., 0])
+        for k in range(self.lesion_count):
+            if not admissible.any():
+                raise LesionPlacementError(
+                    f"No room for burden lesion {k + 1} of {self.lesion_count} (radius {self.lesion_radius:g}) in "
+                    f"final white matter at res={self.res}; the subject is redrawn"
+                )
+            ix = choose(admissible.sum((1, 2)), q[k, 0])
+            iy = choose(admissible[ix].sum(1), q[k, 1])
+            iz = choose(admissible[ix, iy], q[k, 2])
+            centre = self.coords[tuple(int(i) for i in lower + np.array([ix, iy, iz]))]
+            admissible &= np.linalg.norm(grid - centre.double().cpu().numpy(), axis=-1) >= 2 * reach
+            ramp = ((radius - torch.norm(self.coords - centre, dim=-1)) / spacing + 0.5).clamp(0.0, 1.0)
+            load = load + fade * ramp
+        if bool(((load > 0) & (tissue_map != 2)).any()):
+            raise RuntimeError("White-matter containment failed for a burden lesion; refusing to truncate it")
+        return load.clamp(0.0, 1.0)
+
     def render_structure(self, z_content, z_deformation, z_fissure, device, clean=False, z_lesion=None):
         """Deterministic given (z_content, z_deformation, z_fissure). Shared across views.
 
@@ -301,7 +374,9 @@ class PseudoMRIRenderer(nn.Module):
             [0]  brain size      — WM radius ±0.1 around 0.5
             [1]  ventricle size  — CSF cavity ±0.05 around 0.15
             [2:5] lesion xyz     — WM lesion position; wm_interior maps these to
-                                  conditional x/y/z quantiles of valid centres
+                                  conditional x/y/z quantiles of valid centres.
+                                  With lesion_target="burden", [2] is the total
+                                  lesion volume instead and [3:5] are unused
             [5]  cortical thickness — GM shell width ±0.06 around 0.15
             [6]  temporal atrophy — shrinks a compact bilateral inferior–lateral
                                    temporal region (hippocampal volume proxy)
@@ -491,6 +566,10 @@ class PseudoMRIRenderer(nn.Module):
                 # the local field value everywhere and the local mixing stays injective.
                 lesion_load = torch.sigmoid(self.lesion_sharpness * (z_les_up - self.lesion_threshold))
                 lesion_load = lesion_load * wm_weight
+        elif self.lesion_target == "burden":
+            if z_lesion is None:
+                raise ValueError("lesion_target='burden' needs z_lesion, the lesions' placement quantiles")
+            lesion_load = self._burden_in_white_matter(tissue_map, _sq(z_content[2], 1.0), z_lesion).to(device)
         else:
             lesion_dir = _sq(z_content[2:5], 1.0).to(device)
             # Margin tracks the lesion radius (+0.02) so a larger lesion still lands
@@ -712,6 +791,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
         center_local_deformations=False,
         lesion_placement="legacy",
         lesion_intensity="fixed",
+        lesion_target="position",
+        lesion_count=4,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -726,6 +807,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
         self.causal_noise_scale = causal_noise_scale
         self.causal_nonlinearity = causal_nonlinearity
         self.clean_content = clean_content
+        self.lesion_target = lesion_target
+        self.lesion_count = lesion_count
         # Accepted candidate draw per subject; see _first_fitting.
         self._accepted_attempt = {}
 
@@ -859,6 +942,8 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 cortex_parameterization=cortex_parameterization,
                 center_local_deformations=center_local_deformations,
                 lesion_intensity=lesion_intensity,
+                lesion_target=lesion_target,
+                lesion_count=lesion_count,
             )
             if lesion_mode == "field" and n_content > 2:
                 import warnings
@@ -997,7 +1082,12 @@ class Synthetic3DDisentanglementDataset(Dataset):
             self._first_fitting(
                 idx,
                 lambda seed, d: self.renderer.render_structure(
-                    d["z_content"], d["z_deformation"], d["z_fissure"], "cpu", clean=self.clean_content
+                    d["z_content"],
+                    d["z_deformation"],
+                    d["z_fissure"],
+                    "cpu",
+                    clean=self.clean_content,
+                    z_lesion=d["z_lesion"],
                 ),
             )
         return self._candidate_seed(idx, self._accepted_attempt[idx])
@@ -1124,6 +1214,9 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 field_lengthscales = torch.tensor([ls_def, ls_fis], dtype=torch.float32)
         z_style_v1 = torch.randn(self.n_style, generator=sample_gen)
         z_style_v2 = torch.randn(self.n_style, generator=sample_gen)
+        if self.lesion_target == "burden":
+            # Drawn last, so every other latent matches position mode for the same seed.
+            z_lesion = torch.rand(self.lesion_count, 3, generator=sample_gen)
         return {
             "z_content": z_content,
             "z_deformation": z_deformation,

@@ -117,6 +117,34 @@ def parse_args(argv=None):
         "brighter in FLAIR)",
     )
     p.add_argument(
+        "--lesion-input",
+        choices=("features", "residual"),
+        default="features",
+        help="With --lesion-keypoints: what the heads read. residual: each view's brighter/darker-than-normal "
+        "residual against a low-rank normative model fitted on training subjects (models.normative_residual)",
+    )
+    p.add_argument(
+        "--lesion-normative-components",
+        type=int,
+        default=20,
+        help="With --lesion-input residual: principal components the normative model explains away",
+    )
+    p.add_argument(
+        "--lesion-normative-subjects",
+        type=int,
+        default=300,
+        help="With --lesion-input residual: training subjects for the normative model (2/3 fit, 1/3 calibrate)",
+    )
+    p.add_argument(
+        "--lesion-head-init",
+        choices=("positive", "random", "negative"),
+        default="positive",
+        help="With --lesion-input residual: signs of the heads' initial weights on the brighter- and "
+        "darker-than-normal channels. positive: every head starts attending to anomalies; random: plain "
+        "random signs; negative: every head starts avoiding them, the control for whether training finds "
+        "the lesion without that head start",
+    )
+    p.add_argument(
         "--lesion-temperature",
         type=float,
         default=1.0,
@@ -128,6 +156,22 @@ def parse_args(argv=None):
         default=0.0,
         help="With --lesion-keypoints: penalty on the squared correlation between the keypoint coordinates "
         "and the (detached) content block, so the branch carries what the content does not already encode",
+    )
+    p.add_argument(
+        "--lesion-detector",
+        choices=("shared", "separate", "separate_conv"),
+        default="shared",
+        help="Residual branch: shared 1x1 heads, per-view 1x1 heads, or per-view two-layer 16-channel conv detectors",
+    )
+    p.add_argument(
+        "--lesion-branch-frozen",
+        action="store_true",
+        help="Freeze residual detector and projector; global encoder still trains",
+    )
+    p.add_argument(
+        "--lesion-localization-eval",
+        action="store_true",
+        help="At each DCI evaluation report every head's native voxel error and hit rate (no fitted probe)",
     )
     p.add_argument("--resnet-norm", choices=("batch", "group"), default="batch")
     p.add_argument(
@@ -329,6 +373,21 @@ def parse_args(argv=None):
         help="styled passes the lesion through the acquisition gain/bias like every tissue (T1 contrast "
         "0.4*gain); fixed reproduces old runs, whose T1 lesion nearly vanishes at low gain",
     )
+    p.add_argument(
+        "--synthetic-lesion-target",
+        choices=("position", "burden"),
+        default="position",
+        help="What the lesion content factors are. position: z_content[2:5] place one sphere (lesion_x/y/z). "
+        "burden: z_content[2] sets the total volume of --synthetic-lesion-count spheres at nuisance positions, "
+        "an amount like ventricle size and the synthetic counterpart of a WMH volume; z_content[3:5] are unused. "
+        "Needs --synthetic-lesion-placement wm_interior; --synthetic-lesion-radius is then the largest radius",
+    )
+    p.add_argument(
+        "--synthetic-lesion-count",
+        type=int,
+        default=4,
+        help="With --synthetic-lesion-target burden: lesions per subject sharing the burden",
+    )
     p.add_argument("--synthetic-n-deformation-grid", type=int, default=4)
     p.add_argument("--synthetic-n-fissure-grid", type=int, default=8)
     p.add_argument("--synthetic-hierarchical-content", action="store_true")
@@ -378,6 +437,15 @@ def parse_args(argv=None):
         p.error("--deterministic-warn-only requires --deterministic")
     if not 0 < args.synthetic_lesion_radius < float("inf"):
         p.error("--synthetic-lesion-radius must be finite and positive")
+    if args.synthetic_lesion_target == "burden":
+        if args.synthetic_lesion_placement != "wm_interior":
+            p.error("--synthetic-lesion-target burden needs --synthetic-lesion-placement wm_interior")
+        if args.synthetic_lesion_count < 1:
+            p.error("--synthetic-lesion-count must be positive")
+        if args.lesion_keypoints > 0:
+            p.error("The lesion branch localises one lesion; it does not apply to --synthetic-lesion-target burden")
+    elif args.synthetic_lesion_count != 4:
+        p.error("--synthetic-lesion-count only applies with --synthetic-lesion-target burden")
     if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if not 0 <= args.patch_loss_weight < float("inf"):
@@ -435,6 +503,14 @@ def parse_args(argv=None):
         p.error("--attention-pool-heads and --attention-pool-frequencies only apply to --global-pool attention")
     if args.lesion_keypoints < 0:
         p.error("--lesion-keypoints must be nonnegative")
+    if (args.lesion_detector != "shared" or args.lesion_branch_frozen) and (
+        args.lesion_input != "residual" or args.lesion_keypoints < 1
+    ):
+        p.error("Separate/frozen detectors require --lesion-input residual and --lesion-keypoints")
+    if args.lesion_detector == "separate_conv" and args.lesion_head_init != "positive":
+        p.error("--lesion-head-init sign controls only apply to simple residual detectors")
+    if args.lesion_localization_eval and (args.lesion_keypoints < 1 or args.synthetic_mode != "pseudo_mri"):
+        p.error("--lesion-localization-eval requires a pseudo_mri lesion branch")
     if args.lesion_keypoints > 0:
         if args.contrastive_loss_type != "infonce":
             p.error("The lesion branch trains with its own InfoNCE; use --contrastive-loss-type infonce")
@@ -448,6 +524,21 @@ def parse_args(argv=None):
             p.error("--lesion-decorrelation-weight must be finite and nonnegative")
         if not 0 < args.lesion_temperature < float("inf"):
             p.error("--lesion-temperature must be finite and positive")
+        if args.lesion_head_init != "positive" and args.lesion_input != "residual":
+            p.error("--lesion-head-init only applies with --lesion-input residual")
+        if args.lesion_input == "residual":
+            if args.lesion_pairing != "cross_modal":
+                p.error(
+                    "--lesion-input residual needs cross_modal pairs: augmented intensities break the normative model"
+                )
+            if args.lesion_normative_components < 1:
+                p.error("--lesion-normative-components must be positive")
+            if not args.lesion_normative_components + 2 <= (2 * args.lesion_normative_subjects) // 3:
+                p.error(
+                    "--lesion-normative-subjects must fit more than --lesion-normative-components subjects (2/3 of it)"
+                )
+            if args.lesion_normative_subjects > args.num_train_samples:
+                p.error("--lesion-normative-subjects cannot exceed --num-train-samples")
         stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
         if stride < 1:
             p.error("Encoder stride must be positive")
@@ -462,7 +553,11 @@ def parse_args(argv=None):
         args.lesion_decorrelation_weight,
         args.lesion_temperature,
         args.lesion_pairing,
-    ) != ("none", "brain", 8, 1.0, 0.0, 1.0, "cross_modal"):
+        args.lesion_input,
+        args.lesion_normative_components,
+        args.lesion_normative_subjects,
+        args.lesion_head_init,
+    ) != ("none", "brain", 8, 1.0, 0.0, 1.0, "cross_modal", "features", 20, 300, "positive"):
         p.error(
             "--lesion-norm/-frame/-proj-dim/-loss-weight/-decorrelation-weight only apply with --lesion-keypoints > 0"
         )
@@ -532,6 +627,8 @@ def make_dataset(args, mode, num_samples):
         synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
         synthetic_lesion_radius=getattr(args, "synthetic_lesion_radius", 0.1),
         synthetic_lesion_intensity=getattr(args, "synthetic_lesion_intensity", "fixed"),
+        synthetic_lesion_target=getattr(args, "synthetic_lesion_target", "position"),
+        synthetic_lesion_count=getattr(args, "synthetic_lesion_count", 4),
     )
 
 
@@ -846,7 +943,17 @@ def holdout_r2(features, targets, ridge=1e-2):
     return 1 - residual / np.maximum(total, 1e-12)
 
 
-def lesion_branch_report(model, dataset, device, batch_size):
+def clip_encoder_gradients(model, max_norm):
+    """Keep the raw-residual and global paths independent during norm clipping too."""
+    if model.normative is None:
+        return torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+    branch = [p for module in model.lesion_modules() for p in module.parameters()]
+    branch_ids = {id(p) for p in branch}
+    torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if id(p) not in branch_ids], max_norm)
+    return torch.nn.utils.clip_grad_norm_(branch, max_norm)
+
+
+def lesion_branch_report(model, dataset, device, batch_size, localization=False):
     """What the lesion keypoints alone encode, per view, plus each head's spread. None without the branch.
 
     Linear R² of every content factor from the raw keypoint coordinates (not the projector),
@@ -859,6 +966,7 @@ def lesion_branch_report(model, dataset, device, batch_size):
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     coords = {"t1": [], "flair": []}
     factors, spread = [], None
+    native, truth, offset = [], [], 0
     with torch.no_grad():
         for batch in loader:
             x = torch.cat(batch["image"], dim=0).to(device)
@@ -867,14 +975,41 @@ def lesion_branch_report(model, dataset, device, batch_size):
             coords["t1"].append(code[:b])
             coords["flair"].append(code[b:])
             factors.append(batch["gt_latents"]["z_content"].double().numpy())
-            if spread is None:
-                weights = model.lesion_maps(x, n_views=2).flatten(2).cpu().double()
+            if spread is None or localization:
+                maps = model.lesion_maps(x, n_views=2)
+                weights = maps.flatten(2).cpu().double()
                 fraction = torch.special.entr(weights).sum(-1).exp() / weights.shape[-1]
-                spread = {"t1": fraction[:b].mean(0).tolist(), "flair": fraction[b:].mean(0).tolist()}
+                if spread is None:
+                    spread = {"t1": fraction[:b].mean(0).tolist(), "flair": fraction[b:].mean(0).tolist()}
+                if localization:
+                    from eval.lesion.lesion_detector_audit import native_positions, true_centroid
+
+                    positions = native_positions(maps, x.shape[2:]).cpu().numpy()
+                    native.append(np.stack([positions[:b], positions[b:]], axis=1))
+                    truth.extend(true_centroid(dataset, idx) for idx in range(offset, offset + b))
+            offset += b
     factors = np.concatenate(factors)
-    names = list(dci.CONTENT_FACTOR_NAMES[: factors.shape[1]])
+    names = dci.content_factor_names(factors.shape[1], dci.dataset_lesion_target(dataset))
     r2 = {view: dict(zip(names, holdout_r2(np.concatenate(c), factors).tolist())) for view, c in coords.items()}
-    return {"r2": r2, "effective_fraction": spread}
+    report = {"r2": r2, "effective_fraction": spread}
+    if localization:
+        from eval.lesion.lesion_detector_audit import localization_metrics
+
+        predictions, targets = np.concatenate(native), np.asarray(truth)
+        report["localization"] = {
+            view: [localization_metrics(targets, predictions[:, v, head]) for head in range(predictions.shape[2])]
+            for v, view in enumerate(("t1", "flair"))
+        }
+    if model.normative is not None and model.lesion_adapter is None:
+        # Each head's logit per unit of brighter- and darker-than-normal residual: whether it
+        # attends to anomalies (both positive), avoids them, or reads only one polarity.
+        pool = model.lesion_pool
+        report["head_weights"] = (pool.logits.weight.detach().flatten(1).cpu() / pool.temperature).tolist()
+        report["head_weights_by_view"] = {
+            view: (p.logits.weight.detach().flatten(1).cpu() / p.temperature).tolist()
+            for view, p in (("t1", pool), ("flair", model.lesion_pool_v1 or pool))
+        }
+    return report
 
 
 def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
@@ -923,7 +1058,7 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
 
     # The lesion branch is only useful if its heads found the lesion rather than a factor
     # that moves where attention lands; its coordinates alone say which.
-    lesion = lesion_branch_report(model, val_dataset, device, args.batch_size)
+    lesion = lesion_branch_report(model, val_dataset, device, args.batch_size, args.lesion_localization_eval)
     if lesion is not None:
         print("    --- lesion branch alone: linear R² per content factor (T1 / FLAIR) ---", flush=True)
         for name in lesion["r2"]["t1"]:
@@ -931,6 +1066,20 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
         print("    --- lesion keypoints: effective positions / map size, per head ---", flush=True)
         for view, values in lesion["effective_fraction"].items():
             print(f"      {view:<8s}" + "".join(f"{v:8.3f}" for v in values), flush=True)
+        if "head_weights" in lesion:
+            print("    --- lesion heads: logit per unit residual z [brighter, darker] ---", flush=True)
+            for view, weights in lesion["head_weights_by_view"].items():
+                print(f"      {view:<8s}" + " ".join(f"[{b:+.1f} {d:+.1f}]" for b, d in weights), flush=True)
+        if "localization" in lesion:
+            print("    --- native lesion localisation: mean error (vox) / hit <=3 vox; per head ---", flush=True)
+            for view, metrics in lesion["localization"].items():
+                print(
+                    f"      {view:<8s}"
+                    + "  ".join(
+                        f"h{k}: {m['mean_error_vox']:.3f} / {m['hit_within_3_vox']:.3f}" for k, m in enumerate(metrics)
+                    ),
+                    flush=True,
+                )
         if writer is not None:
             for view, values in lesion["r2"].items():
                 for name, value in values.items():
@@ -1009,7 +1158,24 @@ def main():
         lesion_frame=args.lesion_frame,
         lesion_proj_dim=args.lesion_proj_dim,
         lesion_temperature=args.lesion_temperature,
+        lesion_input=args.lesion_input,
+        lesion_normative_components=args.lesion_normative_components,
+        lesion_input_size=args.res,
+        lesion_head_init=args.lesion_head_init,
+        lesion_detector=args.lesion_detector,
+        lesion_branch_frozen=args.lesion_branch_frozen,
     ).to(device)
+    if model.normative is not None:
+        # The first training subjects, in order, so a run's normative model is reproducible.
+        n = args.lesion_normative_subjects
+        images = torch.stack([torch.stack(train_dataset[i]["image"])[:, 0] for i in range(n)])
+        model.fit_normative(images[: (2 * n) // 3], images[(2 * n) // 3 :])
+        del images
+        print(
+            f"lesion normative model: {args.lesion_normative_components} components per view from "
+            f"{(2 * n) // 3} training subjects, residual SD from {n - (2 * n) // 3} more",
+            flush=True,
+        )
     pool_name = "attention pool" if model.attention_pool is not None else "GAP"
     if args.encoder_architecture == "resnet18":
         print(
@@ -1034,8 +1200,17 @@ def main():
         )
     if model.lesion_pool is not None:
         print(
+            f"lesion detector: {args.lesion_detector}; "
+            f"{'frozen' if args.lesion_branch_frozen else 'trainable'}; "
+            f"gradient clipping {'separate from global' if model.normative is not None else 'joint'}",
+            flush=True,
+        )
+        print(
             f"lesion branch: {args.lesion_keypoints} spatial-softmax keypoints ({args.lesion_frame} frame, "
-            f"norm {args.lesion_norm}, temperature {args.lesion_temperature:g}, {args.lesion_pairing} pairs) -> "
+            f"norm {args.lesion_norm}, temperature {args.lesion_temperature:g}, {args.lesion_pairing} pairs, "
+            f"reads {args.lesion_input}"
+            + (f", {args.lesion_head_init} head init" if args.lesion_input == "residual" else "")
+            + ") -> "
             f"{model.lesion_units} "
             f"content units after the {args.latent_dim} "
             f"global units; own InfoNCE x {args.lesion_loss_weight:g} via a {model.lesion_units} -> "
@@ -1118,7 +1293,10 @@ def main():
         }
         if model.lesion_pool is not None:
             payload["lesion_branch_parameter_count"] = sum(
-                p.numel() for part in (model.lesion_pool, model.lesion_projector) for p in part.parameters()
+                p.numel() for part in model.lesion_modules() for p in part.parameters()
+            )
+            payload["lesion_branch_trainable_parameter_count"] = sum(
+                p.numel() for part in model.lesion_modules() for p in part.parameters() if p.requires_grad
             )
         path = os.path.join(save_dir, "training_progress.json")
         with open(path + ".tmp", "w") as fp:
@@ -1176,7 +1354,7 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                clip_encoder_gradients(model, args.grad_clip)
             optimizer.step()
 
             running["loss"] += loss.item()
