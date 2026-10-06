@@ -82,6 +82,38 @@ def parse_args(argv=None):
         help="Fourier frequencies per axis in the positional encoding. 0 leaves attention permutation-"
         "invariant over positions, like GAP, so it cannot report where a structure is",
     )
+    p.add_argument(
+        "--lesion-keypoints",
+        type=int,
+        default=0,
+        help="Lesion branch: spatial-softmax keypoint heads whose (x, y, z) are appended to the content "
+        "code and trained by their own InfoNCE (models.keypoint_pool); 0 disables",
+    )
+    p.add_argument(
+        "--lesion-norm",
+        choices=("none", "layer"),
+        default="none",
+        help="With --lesion-keypoints: per-voxel LayerNorm before the keypoint logits",
+    )
+    p.add_argument(
+        "--lesion-frame",
+        choices=("brain", "grid"),
+        default="brain",
+        help="With --lesion-keypoints: coordinates relative to the input brain's centroid/spread, or absolute",
+    )
+    p.add_argument(
+        "--lesion-proj-dim", type=int, default=8, help="With --lesion-keypoints: output size of its loss projector"
+    )
+    p.add_argument(
+        "--lesion-loss-weight", type=float, default=1.0, help="With --lesion-keypoints: weight of its InfoNCE"
+    )
+    p.add_argument(
+        "--lesion-decorrelation-weight",
+        type=float,
+        default=0.0,
+        help="With --lesion-keypoints: penalty on the squared correlation between the keypoint coordinates "
+        "and the (detached) content block, so the branch carries what the content does not already encode",
+    )
     p.add_argument("--resnet-norm", choices=("batch", "group"), default="batch")
     p.add_argument(
         "--norm-type",
@@ -386,6 +418,35 @@ def parse_args(argv=None):
             p.error(f"--global-pool attention needs more than one position; the backbone map is {spatial}^3")
     elif (args.attention_pool_heads, args.attention_pool_frequencies) != (4, 4):
         p.error("--attention-pool-heads and --attention-pool-frequencies only apply to --global-pool attention")
+    if args.lesion_keypoints < 0:
+        p.error("--lesion-keypoints must be nonnegative")
+    if args.lesion_keypoints > 0:
+        if args.contrastive_loss_type != "infonce":
+            p.error("The lesion branch trains with its own InfoNCE; use --contrastive-loss-type infonce")
+        if not 0 < args.tau < float("inf"):
+            p.error("The lesion branch's InfoNCE requires a finite positive --tau")
+        if args.lesion_proj_dim < 1:
+            p.error("--lesion-proj-dim must be positive")
+        if not 0 <= args.lesion_loss_weight < float("inf"):
+            p.error("--lesion-loss-weight must be finite and nonnegative")
+        if not 0 <= args.lesion_decorrelation_weight < float("inf"):
+            p.error("--lesion-decorrelation-weight must be finite and nonnegative")
+        stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
+        if stride < 1:
+            p.error("Encoder stride must be positive")
+        spatial = (args.res + stride - 1) // stride if args.encoder_architecture == "resnet18" else args.res // stride
+        if spatial < 2:
+            p.error(f"--lesion-keypoints needs more than one position; the backbone map is {spatial}^3")
+    elif (
+        args.lesion_norm,
+        args.lesion_frame,
+        args.lesion_proj_dim,
+        args.lesion_loss_weight,
+        args.lesion_decorrelation_weight,
+    ) != ("none", "brain", 8, 1.0, 0.0):
+        p.error(
+            "--lesion-norm/-frame/-proj-dim/-loss-weight/-decorrelation-weight only apply with --lesion-keypoints > 0"
+        )
     if args.spatial_recovery_eval:
         if args.n_content != 9 or args.synthetic_mode != "pseudo_mri":
             p.error("Spatial recovery requires the nine-factor pseudo_mri recipe")
@@ -485,6 +546,45 @@ def contrastive_loss(pooled, model, args, sim_metric, criterion):
     return loss.squeeze()
 
 
+def lesion_contrastive_loss(pooled, model, args, sim_metric, criterion):
+    """InfoNCE on the lesion branch's keypoint coordinates alone, through their own projector.
+
+    Kept apart from the content InfoNCE on purpose: a lesion code mixed into the content
+    readout is ignored once easier shared factors already identify the subjects (see the
+    lesion-branch section of training/ENCODER_ARCHITECTURES.md). The coordinates sit after
+    the latent_dim units of the global code; probes read them raw, the loss reads the projection.
+    """
+    b = pooled.shape[0] // 2
+    block = pooled[:, args.latent_dim :]
+    hz = model.project_lesion(torch.stack([block[:b], block[b:]], dim=0))
+    return losses.infonce_loss(
+        hz,
+        sim_metric=sim_metric,
+        criterion=criterion,
+        tau=args.tau,
+        estimated_content_indices=[list(range(hz.shape[-1]))],
+        subsets=[(0, 1)],
+        cross_view_negs_only=args.cross_view_negs_only,
+    ).squeeze()
+
+
+def lesion_decorrelation(pooled, args):
+    """Sum of squared correlations between the keypoint coordinates and the content block.
+
+    Both are standardized over the batch (both views). The content side is detached, so it
+    keeps what it encodes and only the branch moves. A branch that duplicates a factor the
+    content already carries (brain size, captured through any boundary that moves with it)
+    is penalized without the factor ever being named.
+    """
+
+    def standardize(z):
+        return (z - z.mean(0)) / z.std(0).clamp_min(1e-6)
+
+    coords = standardize(pooled[:, args.latent_dim :])
+    content = standardize(pooled[:, : args.content_channels].detach())
+    return ((coords.T @ content) / coords.shape[0]).square().sum()
+
+
 def foreground_positions(foreground, grid, threshold):
     """Positions kept by --patch-foreground-mask: some sample has >= threshold brain there.
 
@@ -549,7 +649,18 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
     )
     weighted = weight * patch_loss
     total = global_loss + weighted if weight > 0 else global_loss
-    return (pooled, total, {"global": global_loss, "patch": patch_loss, "patch_weighted": weighted})
+    terms = {"global": global_loss, "patch": patch_loss, "patch_weighted": weighted}
+    if getattr(args, "lesion_keypoints", 0) > 0:
+        lesion_loss = lesion_contrastive_loss(pooled, model, args, sim_metric, criterion)
+        terms["lesion"] = lesion_loss
+        # The launcher's backend check passes raw options, which omit the parser's default.
+        terms["lesion_weighted"] = getattr(args, "lesion_loss_weight", 1.0) * lesion_loss
+        total = total + terms["lesion_weighted"]
+        decorrelation_weight = getattr(args, "lesion_decorrelation_weight", 0.0)
+        if decorrelation_weight > 0:
+            terms["lesion_decorrelation"] = lesion_decorrelation(pooled, args)
+            total = total + decorrelation_weight * terms["lesion_decorrelation"]
+    return (pooled, total, terms)
 
 
 def effective_rank(feat):
@@ -661,10 +772,61 @@ def attention_spread(model, dataset, device, batch_size):
     batch = next(iter(DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)))
     with torch.no_grad():
         weights = model.attention_maps(torch.cat(batch["image"], dim=0).to(device), n_views=2)
-    weights = weights.flatten(2).double().cpu()
+    weights = weights.flatten(2).cpu().double()
     fraction = torch.special.entr(weights).sum(-1).exp() / weights.shape[-1]
     b = fraction.shape[0] // 2
     return {"t1": fraction[:b].mean(0).tolist(), "flair": fraction[b:].mean(0).tolist()}
+
+
+def holdout_r2(features, targets, ridge=1e-2):
+    """Per-target R² of a ridge fit on the first half of the subjects, scored on the second.
+
+    Features are standardized with the fit half's statistics and clipped at 5 SD: a keypoint
+    head that barely moves has a near-zero spread, and without the clip one outlying test
+    subject dominates the score.
+    """
+    n = features.shape[0] // 2
+    mean, sd = features[:n].mean(0), features[:n].std(0).clip(min=1e-4)
+
+    def design(z):
+        return np.concatenate([np.clip((z - mean) / sd, -5, 5), np.ones((len(z), 1))], axis=1)
+
+    fit, test = design(features[:n]), design(features[n:])
+    weights = np.linalg.solve(fit.T @ fit + ridge * n * np.eye(fit.shape[1]), fit.T @ targets[:n])
+    residual = ((test @ weights - targets[n:]) ** 2).sum(0)
+    total = ((targets[n:] - targets[n:].mean(0)) ** 2).sum(0)
+    return 1 - residual / np.maximum(total, 1e-12)
+
+
+def lesion_branch_report(model, dataset, device, batch_size):
+    """What the lesion keypoints alone encode, per view, plus each head's spread. None without the branch.
+
+    Linear R² of every content factor from the raw keypoint coordinates (not the projector),
+    so a branch that found the lesion shows lesion_x/y/z, and a branch captured by a factor
+    that moves where attention lands shows brain_size or ventricle_size instead. Read it
+    against the step-0 row: random heads already carry some position by chance.
+    """
+    if model.lesion_pool is None:
+        return None
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    coords = {"t1": [], "flair": []}
+    factors, spread = [], None
+    with torch.no_grad():
+        for batch in loader:
+            x = torch.cat(batch["image"], dim=0).to(device)
+            code = model(x, pool_only=True, n_views=2)[2][0][:, model.latent_dim :].cpu().double().numpy()
+            b = code.shape[0] // 2
+            coords["t1"].append(code[:b])
+            coords["flair"].append(code[b:])
+            factors.append(batch["gt_latents"]["z_content"].double().numpy())
+            if spread is None:
+                weights = model.lesion_maps(x, n_views=2).flatten(2).cpu().double()
+                fraction = torch.special.entr(weights).sum(-1).exp() / weights.shape[-1]
+                spread = {"t1": fraction[:b].mean(0).tolist(), "flair": fraction[b:].mean(0).tolist()}
+    factors = np.concatenate(factors)
+    names = list(dci.CONTENT_FACTOR_NAMES[: factors.shape[1]])
+    r2 = {view: dict(zip(names, holdout_r2(np.concatenate(c), factors).tolist())) for view, c in coords.items()}
+    return {"r2": r2, "effective_fraction": spread}
 
 
 def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
@@ -711,6 +873,21 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
                 for head, value in enumerate(values):
                     writer.add_scalar(f"attention_pool/{view}/head{head}_effective_fraction", value, step)
 
+    # The lesion branch is only useful if its heads found the lesion rather than a factor
+    # that moves where attention lands; its coordinates alone say which.
+    lesion = lesion_branch_report(model, val_dataset, device, args.batch_size)
+    if lesion is not None:
+        print("    --- lesion branch alone: linear R² per content factor (T1 / FLAIR) ---", flush=True)
+        for name in lesion["r2"]["t1"]:
+            print(f"      {name:<24s}{lesion['r2']['t1'][name]:8.3f}{lesion['r2']['flair'][name]:8.3f}", flush=True)
+        print("    --- lesion keypoints: effective positions / map size, per head ---", flush=True)
+        for view, values in lesion["effective_fraction"].items():
+            print(f"      {view:<8s}" + "".join(f"{v:8.3f}" for v in values), flush=True)
+        if writer is not None:
+            for view, values in lesion["r2"].items():
+                for name, value in values.items():
+                    writer.add_scalar(f"lesion_branch/{view}/r2_{name}", value, step)
+
     if writer is not None:
         for k, v in flat.items():
             if np.isfinite(v):
@@ -720,6 +897,8 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
     payload["per_factor"] = scores  # nested, so the existing flat keys stay at top level
     if spread is not None:
         payload["attention_effective_fraction"] = spread
+    if lesion is not None:
+        payload["lesion_branch"] = lesion
     with open(os.path.join(save_dir, f"dci_step{step}.json"), "w") as fp:
         json.dump(payload, fp, indent=2)
     return flat, scores
@@ -777,6 +956,10 @@ def main():
         attention_pool_heads=args.attention_pool_heads,
         attention_pool_frequencies=args.attention_pool_frequencies,
         norm_type=args.norm_type,
+        lesion_keypoints=args.lesion_keypoints,
+        lesion_norm=args.lesion_norm,
+        lesion_frame=args.lesion_frame,
+        lesion_proj_dim=args.lesion_proj_dim,
     ).to(device)
     pool_name = "attention pool" if model.attention_pool is not None else "GAP"
     if args.encoder_architecture == "resnet18":
@@ -800,6 +983,19 @@ def main():
             "Patch readouts still average each bin.",
             flush=True,
         )
+    if model.lesion_pool is not None:
+        print(
+            f"lesion branch: {args.lesion_keypoints} spatial-softmax keypoints ({args.lesion_frame} frame, "
+            f"norm {args.lesion_norm}) -> {model.lesion_units} content units after the {args.latent_dim} "
+            f"global units; own InfoNCE x {args.lesion_loss_weight:g} via a {model.lesion_units} -> "
+            f"{args.lesion_proj_dim} projector"
+            + (
+                f"; decorrelation from the content block x {args.lesion_decorrelation_weight:g}"
+                if args.lesion_decorrelation_weight > 0
+                else ""
+            ),
+            flush=True,
+        )
     if model.projector is not None:
         print(
             f"projection head: {args.content_channels} -> {args.contrastive_proj_hidden} -> "
@@ -812,9 +1008,14 @@ def main():
             if args.separate_spatial_readout
             else "shared global/spatial readout"
         )
+        positions = (
+            f"positions with >= {args.patch_foreground_thresh:g} brain in some batch image"
+            if args.patch_foreground_mask
+            else "all positions"
+        )
         print(
             f"objective: global InfoNCE + {args.patch_loss_weight:g} * patch InfoNCE; "
-            f"grid={args.train_patch_grid}; {readout}; both losses update the backbones; all positions; no target labels",
+            f"grid={args.train_patch_grid}; {readout}; both losses update the backbones; {positions}; no target labels",
             flush=True,
         )
 
@@ -864,6 +1065,10 @@ def main():
             "train_patch_grid": (args.train_patch_grid if args.patch_loss_weight > 0 else None),
             "last_loss_terms": last_loss_terms,
         }
+        if model.lesion_pool is not None:
+            payload["lesion_branch_parameter_count"] = sum(
+                p.numel() for part in (model.lesion_pool, model.lesion_projector) for p in part.parameters()
+            )
         path = os.path.join(save_dir, "training_progress.json")
         with open(path + ".tmp", "w") as fp:
             json.dump(payload, fp, indent=2)
@@ -897,7 +1102,9 @@ def main():
     best = {"value": None, "step": None}
 
     step = 0
-    running = dict(loss=0.0, rank=0.0, n=0, global_loss=0.0, patch=0.0, patch_weighted=0.0)
+    running = dict(
+        loss=0.0, rank=0.0, n=0, global_loss=0.0, patch=0.0, patch_weighted=0.0, lesion=0.0, decorrelation=0.0
+    )
     model.train()
     while step < args.train_steps:
         for batch in train_loader:
@@ -927,6 +1134,8 @@ def main():
             running["global_loss"] += last_loss_terms["global"]
             running["patch"] += last_loss_terms["patch"]
             running["patch_weighted"] += last_loss_terms["patch_weighted"]
+            running["lesion"] += last_loss_terms.get("lesion", 0.0)
+            running["decorrelation"] += last_loss_terms.get("lesion_decorrelation", 0.0)
             running["rank"] += effective_rank(pooled[: pooled.shape[0] // 2, : args.content_channels])
             running["n"] += 1
             step += 1
@@ -941,12 +1150,22 @@ def main():
                         f"| weighted patch {running['patch_weighted']/n:.4f}"
                         if args.patch_loss_weight > 0
                         else ""
+                    )
+                    + (f" | lesion InfoNCE {running['lesion']/n:.4f}" if args.lesion_keypoints > 0 else "")
+                    + (
+                        f" | lesion decorrelation {running['decorrelation']/n:.4f}"
+                        if args.lesion_decorrelation_weight > 0
+                        else ""
                     ),
                     flush=True,
                 )
                 if writer is not None:
                     writer.add_scalar("train/contrastive", running["loss"] / n, step)
                     writer.add_scalar("train/content_eff_rank", running["rank"] / n, step)
+                    if args.lesion_keypoints > 0:
+                        writer.add_scalar("train/lesion_infonce", running["lesion"] / n, step)
+                    if args.lesion_decorrelation_weight > 0:
+                        writer.add_scalar("train/lesion_decorrelation", running["decorrelation"] / n, step)
                     if args.patch_loss_weight > 0:
                         for tag, key in (
                             ("global_infonce", "global_loss"),
@@ -954,7 +1173,16 @@ def main():
                             ("patch_infonce_weighted", "patch_weighted"),
                         ):
                             writer.add_scalar(f"train/{tag}", running[key] / n, step)
-                running = dict(loss=0.0, rank=0.0, n=0, global_loss=0.0, patch=0.0, patch_weighted=0.0)
+                running = dict(
+                    loss=0.0,
+                    rank=0.0,
+                    n=0,
+                    global_loss=0.0,
+                    patch=0.0,
+                    patch_weighted=0.0,
+                    lesion=0.0,
+                    decorrelation=0.0,
+                )
 
             if step % args.eval_every == 0 or step == args.train_steps:
                 model.eval()

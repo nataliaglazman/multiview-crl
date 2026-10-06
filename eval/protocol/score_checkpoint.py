@@ -154,6 +154,10 @@ def build_model(cfg, device, state_dict=None):
         attention_pool_heads=cfg.get("attention_pool_heads", 4),
         attention_pool_frequencies=cfg.get("attention_pool_frequencies", 4),
         norm_type=cfg.get("norm_type", "group"),
+        lesion_keypoints=cfg.get("lesion_keypoints", 0),
+        lesion_norm=cfg.get("lesion_norm", "none"),
+        lesion_frame=cfg.get("lesion_frame", "brain"),
+        lesion_proj_dim=cfg.get("lesion_proj_dim", 8),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)
@@ -224,7 +228,13 @@ def encode_blocks(model, ds, device, batch_size, content_channels, patch_grid=No
         feats = model(x, pool_only=True, n_views=2, patch_grid=patch_grid)[2][0]
         feats = feats.reshape(feats.shape[0], feats.shape[1], -1) if feats.dim() > 2 else feats.unsqueeze(-1)
         n = feats.shape[0] // 2
-        for name, block in (("content", feats[:, :content_channels]), ("style", feats[:, content_channels:])):
+        content, style = feats[:, :content_channels], feats[:, content_channels:]
+        latent_dim = getattr(model, "latent_dim", feats.shape[1])
+        if feats.shape[1] > latent_dim:
+            # A lesion branch appends keypoint coordinates after the style units; they are content.
+            content = torch.cat([content, feats[:, latent_dim:]], dim=1)
+            style = feats[:, content_channels:latent_dim]
+        for name, block in (("content", content), ("style", style)):
             block = block.flatten(1).cpu()
             blocks[name][0].append(block[:n])
             blocks[name][1].append(block[n:])

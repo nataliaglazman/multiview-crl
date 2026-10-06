@@ -90,9 +90,15 @@ def batch_features(model, x, grids):
         else:
             code = F.adaptive_avg_pool3d(captured["to_encoding"], (grid,) * 3)
         result[(grid, "backbone")] = pooled.flatten(1).cpu().numpy()
-        result[(grid, "projected")] = code[:, : model.content_channels].flatten(1).cpu().numpy()
-        if code.shape[1] > model.content_channels:
-            result[(grid, "style")] = code[:, model.content_channels :].flatten(1).cpu().numpy()
+        content, style = code[:, : model.content_channels], code[:, model.content_channels :]
+        latent_dim = getattr(model, "latent_dim", code.shape[1])
+        if code.shape[1] > latent_dim:
+            # A lesion branch appends keypoint coordinates after the style units; they are content.
+            content = torch.cat([content, code[:, latent_dim:]], dim=1)
+            style = code[:, model.content_channels : latent_dim]
+        result[(grid, "projected")] = content.flatten(1).cpu().numpy()
+        if style.shape[1] > 0:
+            result[(grid, "style")] = style.flatten(1).cpu().numpy()
     return result, tuple(h.shape[2:]), int(h.shape[1])
 
 

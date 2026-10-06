@@ -62,6 +62,12 @@ def make_options(args):
         "global_pool",
         "attention_pool_heads",
         "attention_pool_frequencies",
+        "lesion_keypoints",
+        "lesion_norm",
+        "lesion_frame",
+        "lesion_proj_dim",
+        "lesion_loss_weight",
+        "lesion_decorrelation_weight",
         "spatial_recovery_eval",
         "spatial_recovery_grids",
         "spatial_recovery_native",
@@ -110,6 +116,24 @@ def make_options(args):
             raise ValueError("Attention pooling needs a backbone map with more than one position")
     elif any(key in options for key in ("attention_pool_heads", "attention_pool_frequencies")):
         raise ValueError("Attention-pool heads/frequencies require --global-pool attention")
+    lesion_keys = (
+        "lesion_norm",
+        "lesion_frame",
+        "lesion_proj_dim",
+        "lesion_loss_weight",
+        "lesion_decorrelation_weight",
+    )
+    if options.get("lesion_keypoints", 0) > 0:
+        res = options["res"]
+        native = res // stride if options["encoder_architecture"] == "conv" else (res + stride - 1) // stride
+        if native < 2:
+            raise ValueError("The lesion branch needs a backbone map with more than one position")
+        if options["contrastive_loss_type"] != "infonce":
+            raise ValueError("The lesion branch trains with its own InfoNCE")
+    elif options.get("lesion_keypoints", 0) < 0:
+        raise ValueError("Lesion keypoints must be nonnegative")
+    elif any(key in options for key in lesion_keys):
+        raise ValueError("Lesion norm/frame/projector/weight require --lesion-keypoints")
     if weight > 0:
         options.setdefault("train_patch_grid", [8, 8, 8])
         if options["contrastive_loss_type"] != "infonce":
@@ -132,6 +156,16 @@ def make_options(args):
         suffix += "_separate_spatial"
     if options.get("global_pool", "gap") == "attention":
         suffix += f"_attnpool_h{options.get('attention_pool_heads', 4)}_f{options.get('attention_pool_frequencies', 4)}"
+    if options.get("lesion_keypoints", 0) > 0:
+        suffix += f"_lesionkp{options['lesion_keypoints']}"
+        if options.get("lesion_frame", "brain") != "brain":
+            suffix += f"_{options['lesion_frame']}frame"
+        if options.get("lesion_norm", "none") != "none":
+            suffix += f"_{options['lesion_norm']}lnorm"
+        if options.get("lesion_loss_weight", 1.0) != 1.0:
+            suffix += f"_lw{options['lesion_loss_weight']:g}"
+        if options.get("lesion_decorrelation_weight", 0.0) > 0:
+            suffix += f"_dc{options['lesion_decorrelation_weight']:g}"
     if options.get("norm_type", "group") != recipe.get("norm_type", "group"):
         suffix += f"_{options['norm_type']}norm"
     if options.get("synthetic_lesion_radius", 0.1) != recipe.get("synthetic_lesion_radius", 0.1):
@@ -223,7 +257,14 @@ def _disposable_step(options, device):
     if not torch.isfinite(loss).item():
         raise RuntimeError("Backend check: non-finite loss")
     loss.backward()
-    for part in (model.encoder, model.encoder_v1, model.to_encoding, model.spatial_readout, model.attention_pool):
+    for part in (
+        model.encoder,
+        model.encoder_v1,
+        model.to_encoding,
+        model.spatial_readout,
+        model.attention_pool,
+        model.lesion_pool,
+    ):
         grad = None if part is None else next(part.parameters()).grad
         if part is not None and (grad is None or not torch.isfinite(grad).all().item() or not grad.any().item()):
             raise RuntimeError("Backend check: missing, non-finite or zero gradient")
@@ -259,6 +300,16 @@ def main(argv=None):
     parser.add_argument("--attention-pool-heads", type=int, help="With --global-pool attention; trainer default 4")
     parser.add_argument(
         "--attention-pool-frequencies", type=int, help="With --global-pool attention; trainer default 4"
+    )
+    parser.add_argument(
+        "--lesion-keypoints", type=int, help="Lesion keypoint branch heads; the run ID gains _lesionkp<K>"
+    )
+    parser.add_argument("--lesion-norm", choices=("none", "layer"), help="With --lesion-keypoints; trainer: none")
+    parser.add_argument("--lesion-frame", choices=("brain", "grid"), help="With --lesion-keypoints; trainer: brain")
+    parser.add_argument("--lesion-proj-dim", type=int, help="With --lesion-keypoints; trainer default 8")
+    parser.add_argument("--lesion-loss-weight", type=float, help="With --lesion-keypoints; trainer default 1")
+    parser.add_argument(
+        "--lesion-decorrelation-weight", type=float, help="With --lesion-keypoints; trainer default 0 (off)"
     )
     parser.add_argument("--spatial-recovery-eval", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--spatial-recovery-grids", type=int, nargs="+")

@@ -11,6 +11,9 @@ GroupNorm, remove late ResNet strides, or replace the global GAP with attention
 pooling (``models.attention_pool``). Defaults preserve existing checkpoints.
 
 The first ``content_channels`` units are the content block, the rest are style.
+An optional lesion branch (``models.keypoint_pool``) appends ``3 * lesion_keypoints``
+keypoint coordinates AFTER the style units of the global code; the content mask marks
+them as content, so the DCI probes score them with the content block.
 ``forward`` returns the same 8-tuple as ``VQVAE``/``MultiviewVAE`` so
 ``eval.metrics.dci.compute_dci_synthetic`` scores this model unchanged.
 """
@@ -23,6 +26,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from models.attention_pool import AttentionPool3d
+from models.keypoint_pool import KeypointPool3d
 from models.resnet3d import ResNet18Features3d
 from utils.helper import HelperModule
 
@@ -53,6 +57,10 @@ class MultiviewConvEncoder(HelperModule):
         attention_pool_heads: int = 4,
         attention_pool_frequencies: int = 4,
         norm_type: str = "group",
+        lesion_keypoints: int = 0,
+        lesion_norm: str = "none",
+        lesion_frame: str = "brain",
+        lesion_proj_dim: int = 8,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -92,6 +100,11 @@ class MultiviewConvEncoder(HelperModule):
         if global_pool not in ("gap", "attention"):
             raise ValueError(f"Unknown global_pool: {global_pool!r}")
         self.global_pool = global_pool
+        if lesion_keypoints < 0:
+            raise ValueError(f"lesion_keypoints must be nonnegative, got {lesion_keypoints}")
+        if lesion_keypoints > 0 and lesion_proj_dim < 1:
+            raise ValueError(f"lesion_proj_dim must be positive, got {lesion_proj_dim}")
+        self.lesion_units = 3 * lesion_keypoints
 
         # --- View-specific encoders ---
         # Encoder 1 is a deep copy of encoder 0 so both views start in the same
@@ -136,8 +149,10 @@ class MultiviewConvEncoder(HelperModule):
             output.out_features = content_channels
 
         # --- Fixed content/style mask over the latent units ---
-        fixed_mask = torch.zeros(1, latent_dim)
+        # Lesion keypoint coordinates, if any, follow the style units and count as content.
+        fixed_mask = torch.zeros(1, latent_dim + self.lesion_units)
         fixed_mask[0, :content_channels] = 1.0
+        fixed_mask[0, latent_dim:] = 1.0
         self.register_buffer("content_mask", fixed_mask)
 
         # --- Contrastive projection head (SimCLR/MoCo recipe) ---
@@ -167,6 +182,22 @@ class MultiviewConvEncoder(HelperModule):
                 num_heads=attention_pool_heads,
                 num_frequencies=attention_pool_frequencies,
             )
+
+        # --- Lesion branch ---
+        # Built after everything else: it draws random numbers, so building it last leaves
+        # every weight above, and the untrained floor of those units, equal to the model
+        # without the branch from the same seed. Shared across views. Its InfoNCE runs on
+        # lesion_projector's output while probes read the raw coordinates.
+        self.lesion_pool = None
+        self.lesion_projector = None
+        if lesion_keypoints > 0:
+            self.lesion_pool = KeypointPool3d(
+                512 if encoder_architecture == "resnet18" else hidden_channels,
+                num_keypoints=lesion_keypoints,
+                norm=lesion_norm,
+                frame=lesion_frame,
+            )
+            self.lesion_projector = nn.Linear(self.lesion_units, lesion_proj_dim)
 
     def _encode(self, x: torch.FloatTensor, n_views: int, view_idx) -> torch.FloatTensor:
         """Route each view through its own encoder, returning a (B, hidden, d, h, w) map."""
@@ -198,17 +229,68 @@ class MultiviewConvEncoder(HelperModule):
         """The active spatial head; the legacy shared head when separation is off."""
         return self.to_encoding if self.spatial_readout is None else self.spatial_readout
 
-    def _global_code(self, h: torch.FloatTensor) -> torch.FloatTensor:
-        """(B, latent_dim) global encoding: pool the backbone map, then apply the global head."""
+    def _global_code(self, h: torch.FloatTensor, x: torch.FloatTensor = None) -> torch.FloatTensor:
+        """(B, latent_dim [+ lesion_units]) global encoding: pool the backbone map, then apply the global head.
+
+        ``x`` is the input batch that produced ``h``; only the lesion branch's brain frame reads it.
+        """
         if self.attention_pool is None:
             # The original GAP expressions, so existing checkpoints replay bit-for-bit.
             if self.readout_type == "mlp":
-                return self.to_encoding(self.avgpool(h).flatten(1))
-            return self.to_encoding(h).mean(dim=[2, 3, 4])
-        pooled = self.attention_pool(h)
-        if self.readout_type == "mlp":
-            return self.to_encoding(pooled)
-        return self.to_encoding(pooled[:, :, None, None, None]).flatten(1)
+                code = self.to_encoding(self.avgpool(h).flatten(1))
+            else:
+                code = self.to_encoding(h).mean(dim=[2, 3, 4])
+        else:
+            pooled = self.attention_pool(h)
+            if self.readout_type == "mlp":
+                code = self.to_encoding(pooled)
+            else:
+                code = self.to_encoding(pooled[:, :, None, None, None]).flatten(1)
+        return self._append_lesion(code, h, x)
+
+    def _append_lesion(self, code: torch.FloatTensor, h: torch.FloatTensor, x: torch.FloatTensor) -> torch.FloatTensor:
+        """Concatenate the lesion branch's keypoint coordinates after the global code's units."""
+        if self.lesion_pool is None:
+            return code
+        return torch.cat([code, self.lesion_pool(h, self._lesion_support(h, x))], dim=1)
+
+    def _lesion_support(self, h: torch.FloatTensor, x: torch.FloatTensor):
+        """Brain occupancy on the feature grid for the brain frame; None for the grid frame.
+
+        From the input's nonzero support: the synthetic and skull-stripped inputs are
+        exactly zero outside the brain.
+        """
+        if self.lesion_pool.frame != "brain":
+            return None
+        if x is None:
+            raise ValueError("The lesion branch's brain frame needs the input images")
+        return F.adaptive_avg_pool3d((x != 0).to(h.dtype), tuple(h.shape[2:]))
+
+    def _content_indices(self, width: int) -> List[int]:
+        """Content units of an output with ``width`` units: the content block, then any lesion units.
+
+        Integer arithmetic, not the mask, so no forward pays a device sync for it.
+        """
+        return list(range(min(self.content_channels, width))) + list(range(self.latent_dim, width))
+
+    def project_lesion(self, lesion_block: torch.FloatTensor) -> torch.FloatTensor:
+        """Map the lesion coordinates into their own loss-facing space (last dimension).
+
+        Each coordinate is first standardized over every subject and view in the call. An
+        untrained head spreads over most of the brain, so its coordinates differ between
+        subjects by ~1e-2 or less, every projected code is nearly the same direction, and the
+        branch's InfoNCE sits at chance with almost no gradient. Probes read the raw coordinates.
+        """
+        flat = lesion_block.reshape(-1, lesion_block.shape[-1])
+        standardized = (lesion_block - flat.mean(0)) / flat.std(0).clamp_min(1e-6)
+        return self.lesion_projector(standardized)
+
+    def lesion_maps(self, x: torch.FloatTensor, n_views: int = 1, view_idx=None) -> torch.FloatTensor:
+        """Lesion keypoint weights, (B, K, d, h, w); each head's map sums to 1."""
+        if self.lesion_pool is None:
+            raise ValueError("This model has no lesion branch")
+        h = self._encode(x, n_views, view_idx)
+        return self.lesion_pool.maps(h, self._lesion_support(h, x))
 
     def attention_maps(self, x: torch.FloatTensor, n_views: int = 1, view_idx=None) -> torch.FloatTensor:
         """Global attention weights, (B, heads, d, h, w); each head's map sums to 1.
@@ -234,11 +316,14 @@ class MultiviewConvEncoder(HelperModule):
         if len(grid) != 3 or any(g < 1 or g > size for g, size in zip(grid, h.shape[2:])):
             raise ValueError(f"Training patch grid {grid} must fit spatial map {tuple(h.shape[2:])}")
         if self.readout_type == "mlp":
-            pooled = self._global_code(h)
+            pooled = self._global_code(h, x)
             patches = self.patch_readout(self._patch_pool(h, grid).transpose(1, 2)).transpose(1, 2)
         else:
             features = self.to_encoding(h)
-            pooled = features.mean(dim=[2, 3, 4]) if self.attention_pool is None else self._global_code(h)
+            if self.attention_pool is None:
+                pooled = self._append_lesion(features.mean(dim=[2, 3, 4]), h, x)
+            else:
+                pooled = self._global_code(h, x)
             patches = self._patch_pool(features, grid)
         return pooled, patches
 
@@ -269,7 +354,7 @@ class MultiviewConvEncoder(HelperModule):
         h = self._encode(x, n_views, view_idx)
         if self.readout_type == "mlp":
             if pool_only and patch_grid is None:
-                feat = self._global_code(h)
+                feat = self._global_code(h, x)
             else:
                 if pool_only:
                     grid = (
@@ -286,25 +371,28 @@ class MultiviewConvEncoder(HelperModule):
                 feat = self.patch_readout(h.flatten(2).transpose(1, 2)).transpose(1, 2)
                 if not pool_only:
                     feat = feat.reshape(h.shape[0], feat.shape[1], *h.shape[2:])
+            mask = self.content_mask[:, : feat.shape[1]]
             return (
                 None,
                 [x.new_zeros(())],
                 [feat],
-                [list(range(self.content_channels))],
+                [self._content_indices(feat.shape[1])],
                 [],
                 [],
-                {0: self.content_mask[:, : feat.shape[1]]},
+                {0: mask},
                 {},
             )
 
         if pool_only and patch_grid is None:
-            encoder_features: List[torch.Tensor] = [self._global_code(h)]
+            encoder_features: List[torch.Tensor] = [self._global_code(h, x)]
         else:
             feat = self.to_encoding(h)  # (B, latent_dim, d, h, w)
             encoder_features = [self._patch_pool(feat, patch_grid) if pool_only else feat]
 
-        soft_content_masks = {0: self.content_mask}
-        estimated_content_indices = [list(range(self.content_channels))]
+        # Only the global code carries lesion units; patch and unpooled maps have latent_dim.
+        mask = self.content_mask[:, : encoder_features[0].shape[1]]
+        soft_content_masks = {0: mask}
+        estimated_content_indices = [self._content_indices(encoder_features[0].shape[1])]
 
         return (
             None,

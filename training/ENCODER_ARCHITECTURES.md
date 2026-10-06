@@ -135,6 +135,73 @@ row is 1 by construction. `model.attention_maps(x, n_views=2)` returns the
   `scripts/run_encoder_mps.py --global-pool attention` adds it to a recipe variant.
   The Run:ai/SLURM variant files have no attention variant yet.
 
+## Lesion branch
+
+`--lesion-keypoints K` adds a branch that reports *where* things are as scalars,
+`models/keypoint_pool.py`. Position-capable pooling is not enough on its own: in toy
+runs, once an easy shared factor (brain size, a global gain) separates the subjects,
+InfoNCE never learns the lesion, even when the pooled features could carry it. This is
+feature suppression (Chen, Luo & Li, NeurIPS 2021). The branch gives the lesion its own
+units and its own loss:
+
+```text
+a_k(p) = softmax_p(w_k . h_p + b_k [+ log brain occupancy])   one 1x1-conv detector per head
+c_k    = sum_p a_k(p) p                                        expected (x, y, z) of head k
+code   = [content (content_channels) | style | c_1 ... c_K]   3K content units after latent_dim
+loss   = InfoNCE(content) + w * InfoNCE(lesion_projector(c))
+```
+
+- **Own InfoNCE.** The coordinates train through their own InfoNCE, via `lesion_projector`
+  (3K -> `--lesion-proj-dim`). Probes read the raw coordinates. Mixed into the content
+  readout instead, they were ignored in the toy. Before the projector, each coordinate is
+  standardized over the batch (all subjects, both views). Untrained heads spread over most
+  of the brain, so with a LayerNorm backbone the coordinates differed between subjects by
+  ~7e-3. Every projected code then pointed almost the same way (mean cosine 0.9996), and
+  the branch's InfoNCE sat at exactly chance.
+- **`--lesion-frame brain` (default).** Heads only look inside the brain (weights
+  proportional to exp(logit) times the brain occupancy from the input's nonzero support).
+  Coordinates are relative to that brain's centroid and per-axis spread. A head on the
+  boundary, or spread evenly over the brain, reports the same coordinate whatever the
+  brain size. The generator places lesions relative to the white-matter extent, so
+  lesion_x/y/z live in this frame. `grid` keeps absolute coordinates over the whole map.
+- **`--lesion-norm layer`.** A per-voxel LayerNorm before the logits removes a per-voxel
+  gain. In the toy it helped partly against a pure gain and hurt against a geometric
+  factor, so it is off by default.
+- **Use `--norm-type layer` for the backbone.** Even untrained, the branch already encodes
+  brain size, because GroupNorm writes each subject's global statistics into every voxel
+  and so rescales the keypoint logits like a gain. Measured on the conv_mlp recipe (240
+  validation subjects, mean of 3 init seeds, linear R² T1/FLAIR):
+
+  | backbone | branch norm | frame | brain_size |
+  |---|---|---|---|
+  | group | none | brain | 0.62 / 0.70 |
+  | group | layer | brain | 0.50 / 0.56 |
+  | group | none | grid | 0.71 / 0.76 |
+  | layer | none | brain | 0.33 / 0.34 |
+  | layer | none | grid | 0.69 / 0.71 |
+
+  lesion_x/y/z start near 0 everywhere. The brain frame only helps once GroupNorm's gain
+  path is gone. The ~0.33 that remains is shape change with brain size that a
+  centroid-and-spread frame cannot remove.
+- **Initialization.** The branch is built last, so every other weight matches the run
+  without it. Its logits start small and random: zero would put every subject at the
+  same point, and the branch's InfoNCE would have no gradient.
+- **Reading a run.** Each evaluation prints the branch alone: linear R² of every content
+  factor from the raw coordinates (T1 and FLAIR), plus each head's effective positions.
+  lesion_x/y/z means the heads found the lesion. brain_size or ventricle_size means a
+  factor that moves where attention lands captured them. Compare against the step-0 rows.
+- **Scoring.** The content mask marks the lesion units, so `compute_dci_synthetic`,
+  `score_checkpoint.encode_blocks` and `checkpoint_lesion_analysis` count them as
+  content. Patch and unpooled outputs have none. Readers that slice the global code by
+  position, such as `encoder_generalization_audit`'s `[:, :content_channels]`, do not see them.
+
+```sh
+--lesion-keypoints 4 [--lesion-frame brain] [--lesion-norm none] [--lesion-proj-dim 8] [--lesion-loss-weight 1]
+```
+
+Locally: `scripts/run_encoder_mps.py --variant conv_mlp --lesion-keypoints 4` (run ID
+gains `_lesionkp4`). Saved settings restore the branch in `eval.protocol.score_checkpoint`.
+
 ## Normalization
 
 `--norm-type` sets the Conv encoder's normalization. ResNet keeps `--resnet-norm`.

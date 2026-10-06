@@ -62,7 +62,7 @@ class Extractor:
             return images.numpy(), None
         h = self.model._encode(images.to(self.device), n_views=1, view_idx=VIEWS.index(self.args.view))
         pooled = pool_grid(h, self.args.grid).cpu().numpy()
-        reference = self.model._global_code(h)[:, :9].cpu().numpy()
+        reference = self.model._global_code(h, images.to(self.device))[:, :9].cpu().numpy()
         if not np.isfinite(pooled).all() or not np.isfinite(reference).all():
             raise ValueError("Non-finite frozen encoder features")
         return pooled, reference
