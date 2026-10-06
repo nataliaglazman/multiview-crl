@@ -158,6 +158,7 @@ def build_model(cfg, device, state_dict=None):
         lesion_norm=cfg.get("lesion_norm", "none"),
         lesion_frame=cfg.get("lesion_frame", "brain"),
         lesion_proj_dim=cfg.get("lesion_proj_dim", 8),
+        lesion_temperature=cfg.get("lesion_temperature", 1.0),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)

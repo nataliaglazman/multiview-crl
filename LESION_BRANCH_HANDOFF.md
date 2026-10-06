@@ -142,12 +142,75 @@ step-2000 "lesion branch alone" blocks in
 `results/encoder_ablations_mps/logs/conv_mlp_s42_mps_t2000_lesionkp4_layernorm_dc1.log`.
 Success means lesion_x/y/z clearly above step 0 while brain_size in the branch drops.
 
+**6. Decorrelation and styled intensity, step 1000 (LayerNorm backbone, brain frame).** None find the lesion.
+
+| Lesion branch R² (T1 / FLAIR) | fixed | styled | fixed + decor | styled + decor |
+|---|---|---|---|---|
+| brain_size | 0.88 / 0.86 | 0.88 / 0.87 | 0.44 / 0.72 | 0.55 / 0.80 |
+| lr_asymmetry | 0.90 / 0.90 | 0.90 / 0.90 | 0.85 / 0.87 | 0.87 / 0.88 |
+| cortical_thickness | 0.83 / 0.87 | 0.83 / 0.88 | 0.65 / 0.80 | 0.69 / 0.85 |
+| temporal_atrophy | 0.73 / 0.73 | 0.73 / 0.75 | 0.15 / 0.25 | 0.51 / 0.57 |
+| lesion x / y / z | ≤ 0.05 | ≤ 0.04 | ≤ 0.12 | ≤ 0.02 |
+| head spread | ≈0.16 | ≈0.16 | ≈0.16 | ≈0.16 |
+
+**Root cause: the heads never focus.** In every run, each head's effective positions stay at
+0.13–0.16 of the map, i.e. uniform over the brain, at step 0 and at step 1000. The coordinates are
+therefore whole-brain tissue moments, which brain size, asymmetry, thickness and temporal atrophy
+all move. That gives InfoNCE subject identity without localizing anything. The lesion is about 1
+of ~650 brain cells, and nothing rewards a head for sharpening onto it.
+- Styled intensity changes nothing at step 1000.
+- Decorrelation removes some brain size, but the branch moves to the other global shape factors.
+
+Next levers:
+- Force sharp heads: an entropy penalty or a low, fixed softmax temperature.
+- Give the backbone a local discovery signal: `--patch-loss-weight` with `--patch-foreground-mask`.
+  In deep white matter, the lesion is the main thing that differs between subjects at a fixed position.
+- Normative-anomaly logits: attend where a subject's features deviate most from the population mean
+  at that position.
+
+**7. Sharp heads (temperature 0.02), with and without the patch loss** (styled, LayerNorm, brain
+frame, step 1000). The heads sharpen (0.2–4% of the map), but they lock onto anatomical edges.
+
+| Lesion branch (T1 / FLAIR) | sharp | sharp + patch loss |
+|---|---|---|
+| lr_asymmetry | 0.92 / 0.91 | 0.92 / 0.89 |
+| cortical_thickness | 0.81 / 0.85 | 0.80 / 0.83 |
+| lesion x / y / z | ≤ 0.01 | ≤ −0.01 |
+
+**8. Why the patch loss doesn't help: the lesion is anti-aligned across views.** Cross-view patch
+retrieval among 32 subjects, on the patch-loss checkpoint:
+
+| Positions | Retrieval |
+|---|---|
+| All lesion-free positions | 0.361 |
+| Deep-white-matter lesion positions, subject without a lesion there | 0.146 |
+| Same positions, subject's lesion there | **0.088** |
+
+The lesion has opposite contrast in the two views (T1 0.4 vs white matter 0.8; FLAIR 1.0 vs 0.4;
+styled mode too), and the two encoders start identical. So the lesion pushes the T1 and FLAIR codes
+of the same patch apart, and alignment suppresses it. Patch codes are only ~40% explained by the
+global code (median R² 0.41), so global identity is not the main issue. Published dense SSL works
+because its two views are same-modality augmentations, in which a lesion is consistent. **Next test:
+same-modality pairs (two FLAIR renders with different noise/bias draws) for the lesion branch and/or
+patch loss.** `training/finetune_dino.py` has `--pairing within_modality`; the encoder trainer does
+not yet.
+
+**9. In progress: same-modality pairs for the branch.**
+- New option: `--lesion-pairing within_modality`. The branch's InfoNCE pairs two intensity-augmented
+  copies of FLAIR through the FLAIR encoder; the content block keeps T1/FLAIR.
+- Two arms are queued behind the sharp-head arms. Launcher: scratchpad `launch_within.sh`, which waits
+  on PIDs 43986/43987. Both use sharp heads (0.02), the LayerNorm backbone, the brain frame and styled
+  intensity:
+  - `conv_mlp_s42_mps_t2000_lesionkp4_temp0.02_lpwithin_layernorm_lesionstyled`
+  - `conv_mlp_s42_mps_t2000_lesionkp4_dc1_temp0.02_lpwithin_layernorm_lesionstyled` (+ decorrelation 1,
+    against capture by anatomical edges)
+- Read their step-1000 "lesion branch alone" blocks. The FLAIR column is the one this pairing trains.
+
 ## Caveats
 
 - **Lesion contrast in T1.** All real runs used the default `--synthetic-lesion-intensity fixed`.
   The lesion is inserted after gain/bias, so T1 lesion contrast ranges 0.06–0.74. The lesion is
-  partly FLAIR-only, and InfoNCE alignment penalizes coding it. **Re-run the best config with
-  `--synthetic-lesion-intensity styled`.** This alone may matter.
+  partly FLAIR-only, and InfoNCE alignment penalizes coding it. Re-running with `--synthetic-lesion-intensity styled` changed nothing at step 1000 (see 6).
 - **Decorrelation is linear and assumes independent factors.** Under `--synthetic-causal`, lesion
   position correlates with other content factors, and the penalty would strip real lesion signal.
   The current recipe has independent factors.

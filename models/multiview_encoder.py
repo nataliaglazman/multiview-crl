@@ -61,6 +61,7 @@ class MultiviewConvEncoder(HelperModule):
         lesion_norm: str = "none",
         lesion_frame: str = "brain",
         lesion_proj_dim: int = 8,
+        lesion_temperature: float = 1.0,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -196,6 +197,7 @@ class MultiviewConvEncoder(HelperModule):
                 num_keypoints=lesion_keypoints,
                 norm=lesion_norm,
                 frame=lesion_frame,
+                temperature=lesion_temperature,
             )
             self.lesion_projector = nn.Linear(self.lesion_units, lesion_proj_dim)
 
@@ -284,6 +286,17 @@ class MultiviewConvEncoder(HelperModule):
         flat = lesion_block.reshape(-1, lesion_block.shape[-1])
         standardized = (lesion_block - flat.mean(0)) / flat.std(0).clamp_min(1e-6)
         return self.lesion_projector(standardized)
+
+    def lesion_code(self, x: torch.FloatTensor, view_idx=None) -> torch.FloatTensor:
+        """(B, lesion_units) keypoint coordinates of a single-view batch, through one view's encoder.
+
+        For training the branch on pairs that the global code never sees, e.g. two augmented
+        copies of the FLAIR view, both routed through the FLAIR encoder (``view_idx=1``).
+        """
+        if self.lesion_pool is None:
+            raise ValueError("This model has no lesion branch")
+        h = self._encode(x, 1, view_idx)
+        return self.lesion_pool(h, self._lesion_support(h, x))
 
     def lesion_maps(self, x: torch.FloatTensor, n_views: int = 1, view_idx=None) -> torch.FloatTensor:
         """Lesion keypoint weights, (B, K, d, h, w); each head's map sums to 1."""

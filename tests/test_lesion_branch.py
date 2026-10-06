@@ -132,6 +132,26 @@ class KeypointPoolModuleTests(unittest.TestCase):
             maps = pool.maps(h, support)
             self.assertLess(maps[0, 0][support[0, 0] < 1e-3].sum().item(), 1e-3)
 
+    def test_temperature_sharpens_the_heads_without_scaling_the_brain_mask(self):
+        h = torch.randn(1, 6, 8, 8, 8, generator=torch.Generator().manual_seed(6))
+        support = ball(8, 0.8, soft=0.05)[None, None]
+        spreads = []
+        for temperature in (1.0, 0.1, 0.01):
+            pool = KeypointPool3d(6, num_keypoints=2, frame="brain", temperature=temperature)
+            with torch.no_grad():
+                pool.logits.weight.copy_(torch.randn(2, 6, 1, 1, 1, generator=torch.Generator().manual_seed(7)) * 0.05)
+            maps = pool.maps(h, support).flatten(2)
+            spreads.append(torch.special.entr(maps).sum(-1).exp().mean().item())
+        self.assertGreater(spreads[0], spreads[1])
+        self.assertGreater(spreads[1], spreads[2])
+        # Uniform logits: a temperature must not turn partial-volume edge cells into a hard mask.
+        flat = KeypointPool3d(6, num_keypoints=1, frame="brain", temperature=0.01)
+        detector(flat, weight=0.0)
+        torch.testing.assert_close(flat.maps(h, support).flatten(), support.flatten() / support.sum())
+        for temperature in (0.0, -1.0, float("inf")):
+            with self.subTest(temperature=temperature), self.assertRaises(ValueError):
+                KeypointPool3d(6, temperature=temperature)
+
     def test_layer_norm_removes_a_per_voxel_gain(self):
         h = torch.randn(2, 6, 4, 4, 4, generator=torch.Generator().manual_seed(1))
         normed = KeypointPool3d(6, num_keypoints=3, norm="layer", frame="grid")
@@ -280,6 +300,13 @@ class LesionBranchEncoderTests(unittest.TestCase):
 
         options, recipe = runner.make_options(runner_args(lesion_keypoints=4, lesion_frame="grid"))
         self.assertEqual(options["model_id"], "conv_mlp_s42_mps_lesionkp4_gridframe")
+        sharp, _ = runner.make_options(runner_args(lesion_keypoints=4, lesion_temperature=0.02))
+        self.assertEqual(sharp["model_id"], "conv_mlp_s42_mps_lesionkp4_temp0.02")
+        self.assertEqual(trainer.parse_args(runner.comparison.cli_arguments(sharp)).lesion_temperature, 0.02)
+        within, _ = runner.make_options(runner_args(lesion_keypoints=4, lesion_pairing="within_modality"))
+        self.assertEqual(within["model_id"], "conv_mlp_s42_mps_lesionkp4_lpwithin")
+        parsed = trainer.parse_args(runner.comparison.cli_arguments(within))
+        self.assertEqual(parsed.lesion_pairing, "within_modality")
         self.assertNotIn("lesion_keypoints", recipe)
         parsed = trainer.parse_args(runner.comparison.cli_arguments(options))
         self.assertEqual((parsed.lesion_keypoints, parsed.lesion_frame, parsed.lesion_norm), (4, "grid", "none"))
@@ -309,6 +336,44 @@ class LesionBranchEncoderTests(unittest.TestCase):
             trainer.training_objective(model, brain_images(), trainer.parse_args(argv), sim, ce)[2],
         )
 
+    def test_intensity_augmentation_keeps_the_background_and_the_lesion_polarity(self):
+        x = ball(16, 0.7)[None, None].repeat(3, 1, 1, 1, 1)
+        x[:, :, 8, 8, 8] = 3.0  # a bright "lesion" voxel inside the brain
+        torch.manual_seed(0)
+        a, b = trainer.augment_intensity(x), trainer.augment_intensity(x)
+        outside = x == 0
+        self.assertTrue(torch.equal(a[outside], torch.zeros_like(a[outside])))
+        self.assertFalse(torch.equal(a, b))
+        for view in (a, b):
+            rest = view[(x != 0) & (x < 2)].view(3, -1).mean(1)
+            self.assertTrue(torch.all(view[:, 0, 8, 8, 8] > rest + 1.0))
+
+    def test_within_modality_pairs_are_two_flair_draws_through_the_flair_encoder(self):
+        model = build_model(config(conv_readout="mlp", lesion_keypoints=2), "cpu").train()
+        argv = ["--conv-readout", "mlp", "--latent-dim", "12", "--tau", "0.1", "--lesion-keypoints", "2"]
+        args = trainer.parse_args([*argv, "--lesion-pairing", "within_modality"])
+        x = brain_images()
+        calls, original = [], model.lesion_code
+
+        def spy(batch, view_idx=None):
+            calls.append((view_idx, batch.detach().clone()))
+            return original(batch, view_idx=view_idx)
+
+        model.lesion_code = spy
+        sim, ce = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
+        pooled, total, terms = trainer.training_objective(model, x, args, sim, ce)
+        self.assertEqual(len(calls), 1)
+        view_idx, batch = calls[0]
+        self.assertEqual((view_idx, batch.shape[0]), (1, 4))
+        outside = x[2:] == 0
+        for half in (batch[:2], batch[2:]):
+            self.assertTrue(torch.equal(half[outside], torch.zeros_like(half[outside])))
+            self.assertFalse(torch.equal(half, x[2:]))
+        self.assertFalse(torch.equal(batch[:2], batch[2:]))
+        self.assertEqual(pooled.shape, (4, 12 + 6))
+        total.backward()
+        self.assertGreater(model.lesion_pool.logits.weight.grad.abs().sum().item(), 0)
+
     def test_cli_validates_lesion_options(self):
         args = trainer.parse_args([])
         self.assertEqual(
@@ -325,6 +390,9 @@ class LesionBranchEncoderTests(unittest.TestCase):
             ["--lesion-keypoints", "2", "--lesion-loss-weight", "-1"],
             ["--lesion-keypoints", "2", "--lesion-decorrelation-weight", "-1"],
             ["--lesion-decorrelation-weight", "1"],
+            ["--lesion-temperature", "0.1"],
+            ["--lesion-pairing", "within_modality"],
+            ["--lesion-keypoints", "2", "--lesion-temperature", "0"],
             ["--lesion-keypoints", "2", "--contrastive-loss-type", "barlow_twins"],
             ["--lesion-keypoints", "2", "--res", "4"],
         ):
@@ -350,7 +418,10 @@ class LesionBranchEncoderTests(unittest.TestCase):
                 trainer.main()
             run = Path(tmp) / "lesion_smoke"
             log = output.getvalue()
-            self.assertIn("lesion branch: 2 spatial-softmax keypoints (brain frame, norm none)", log)
+            self.assertIn(
+                "lesion branch: 2 spatial-softmax keypoints (brain frame, norm none, temperature 1, cross_modal pairs)",
+                log,
+            )
             self.assertIn("lesion InfoNCE", log)
             self.assertIn("lesion branch alone: linear R² per content factor", log)
             report = json.loads((run / "dci_step2.json").read_text())["lesion_branch"]

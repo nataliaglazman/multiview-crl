@@ -108,6 +108,21 @@ def parse_args(argv=None):
         "--lesion-loss-weight", type=float, default=1.0, help="With --lesion-keypoints: weight of its InfoNCE"
     )
     p.add_argument(
+        "--lesion-pairing",
+        choices=("cross_modal", "within_modality"),
+        default="cross_modal",
+        help="With --lesion-keypoints: what the branch's own InfoNCE pairs. cross_modal: the T1/FLAIR pair, "
+        "like the content block. within_modality: two intensity-augmented copies of FLAIR through the FLAIR "
+        "encoder, so the lesion keeps one polarity in both views (it is darker than white matter in T1 and "
+        "brighter in FLAIR)",
+    )
+    p.add_argument(
+        "--lesion-temperature",
+        type=float,
+        default=1.0,
+        help="With --lesion-keypoints: divides the keypoint logits; below 1 makes the heads sharp",
+    )
+    p.add_argument(
         "--lesion-decorrelation-weight",
         type=float,
         default=0.0,
@@ -431,6 +446,8 @@ def parse_args(argv=None):
             p.error("--lesion-loss-weight must be finite and nonnegative")
         if not 0 <= args.lesion_decorrelation_weight < float("inf"):
             p.error("--lesion-decorrelation-weight must be finite and nonnegative")
+        if not 0 < args.lesion_temperature < float("inf"):
+            p.error("--lesion-temperature must be finite and positive")
         stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
         if stride < 1:
             p.error("Encoder stride must be positive")
@@ -443,7 +460,9 @@ def parse_args(argv=None):
         args.lesion_proj_dim,
         args.lesion_loss_weight,
         args.lesion_decorrelation_weight,
-    ) != ("none", "brain", 8, 1.0, 0.0):
+        args.lesion_temperature,
+        args.lesion_pairing,
+    ) != ("none", "brain", 8, 1.0, 0.0, 1.0, "cross_modal"):
         p.error(
             "--lesion-norm/-frame/-proj-dim/-loss-weight/-decorrelation-weight only apply with --lesion-keypoints > 0"
         )
@@ -546,17 +565,46 @@ def contrastive_loss(pooled, model, args, sim_metric, criterion):
     return loss.squeeze()
 
 
-def lesion_contrastive_loss(pooled, model, args, sim_metric, criterion):
+def augment_intensity(x):
+    """One acquisition-like intensity draw per subject, applied inside the brain only.
+
+    Contrast gain in [0.7, 1.3] about the brain mean, an offset within +/-0.2 brain SD and
+    Gaussian noise up to 0.05 brain SD. A positive gain keeps the lesion's polarity, so two
+    draws of FLAIR agree on it, unlike T1 vs FLAIR. Voxels outside the brain stay exactly
+    zero, so the brain frame's support is unchanged.
+    """
+    brain = (x != 0).to(x.dtype)
+    dims = tuple(range(1, x.dim()))
+    count = brain.sum(dim=dims, keepdim=True).clamp_min(1)
+    mean = (x * brain).sum(dim=dims, keepdim=True) / count
+    sd = (((x - mean) * brain).square().sum(dim=dims, keepdim=True) / count).sqrt()
+    shape = (x.shape[0],) + (1,) * (x.dim() - 1)
+    gain = torch.empty(shape, device=x.device, dtype=x.dtype).uniform_(0.7, 1.3)
+    offset = torch.empty(shape, device=x.device, dtype=x.dtype).uniform_(-0.2, 0.2) * sd
+    noise = torch.randn_like(x) * torch.empty(shape, device=x.device, dtype=x.dtype).uniform_(0.0, 0.05) * sd
+    return (mean + gain * (x - mean) + offset + noise) * brain
+
+
+def lesion_contrastive_loss(pooled, model, args, sim_metric, criterion, images=None):
     """InfoNCE on the lesion branch's keypoint coordinates alone, through their own projector.
 
     Kept apart from the content InfoNCE on purpose: a lesion code mixed into the content
     readout is ignored once easier shared factors already identify the subjects (see the
     lesion-branch section of training/ENCODER_ARCHITECTURES.md). The coordinates sit after
     the latent_dim units of the global code; probes read them raw, the loss reads the projection.
+
+    With ``--lesion-pairing within_modality`` the pair is two intensity-augmented copies of the
+    FLAIR view (``images`` second half), both through the FLAIR encoder, instead of T1/FLAIR.
     """
     b = pooled.shape[0] // 2
-    block = pooled[:, args.latent_dim :]
-    hz = model.project_lesion(torch.stack([block[:b], block[b:]], dim=0))
+    if getattr(args, "lesion_pairing", "cross_modal") == "within_modality":
+        flair = images[b:]
+        coords = model.lesion_code(torch.cat([augment_intensity(flair), augment_intensity(flair)]), view_idx=1)
+        pair = (coords[:b], coords[b:])
+    else:
+        block = pooled[:, args.latent_dim :]
+        pair = (block[:b], block[b:])
+    hz = model.project_lesion(torch.stack(pair, dim=0))
     return losses.infonce_loss(
         hz,
         sim_metric=sim_metric,
@@ -651,7 +699,7 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
     total = global_loss + weighted if weight > 0 else global_loss
     terms = {"global": global_loss, "patch": patch_loss, "patch_weighted": weighted}
     if getattr(args, "lesion_keypoints", 0) > 0:
-        lesion_loss = lesion_contrastive_loss(pooled, model, args, sim_metric, criterion)
+        lesion_loss = lesion_contrastive_loss(pooled, model, args, sim_metric, criterion, images)
         terms["lesion"] = lesion_loss
         # The launcher's backend check passes raw options, which omit the parser's default.
         terms["lesion_weighted"] = getattr(args, "lesion_loss_weight", 1.0) * lesion_loss
@@ -960,6 +1008,7 @@ def main():
         lesion_norm=args.lesion_norm,
         lesion_frame=args.lesion_frame,
         lesion_proj_dim=args.lesion_proj_dim,
+        lesion_temperature=args.lesion_temperature,
     ).to(device)
     pool_name = "attention pool" if model.attention_pool is not None else "GAP"
     if args.encoder_architecture == "resnet18":
@@ -986,7 +1035,9 @@ def main():
     if model.lesion_pool is not None:
         print(
             f"lesion branch: {args.lesion_keypoints} spatial-softmax keypoints ({args.lesion_frame} frame, "
-            f"norm {args.lesion_norm}) -> {model.lesion_units} content units after the {args.latent_dim} "
+            f"norm {args.lesion_norm}, temperature {args.lesion_temperature:g}, {args.lesion_pairing} pairs) -> "
+            f"{model.lesion_units} "
+            f"content units after the {args.latent_dim} "
             f"global units; own InfoNCE x {args.lesion_loss_weight:g} via a {model.lesion_units} -> "
             f"{args.lesion_proj_dim} projector"
             + (

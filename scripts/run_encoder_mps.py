@@ -68,6 +68,8 @@ def make_options(args):
         "lesion_proj_dim",
         "lesion_loss_weight",
         "lesion_decorrelation_weight",
+        "lesion_temperature",
+        "lesion_pairing",
         "spatial_recovery_eval",
         "spatial_recovery_grids",
         "spatial_recovery_native",
@@ -122,6 +124,8 @@ def make_options(args):
         "lesion_proj_dim",
         "lesion_loss_weight",
         "lesion_decorrelation_weight",
+        "lesion_temperature",
+        "lesion_pairing",
     )
     if options.get("lesion_keypoints", 0) > 0:
         res = options["res"]
@@ -166,6 +170,10 @@ def make_options(args):
             suffix += f"_lw{options['lesion_loss_weight']:g}"
         if options.get("lesion_decorrelation_weight", 0.0) > 0:
             suffix += f"_dc{options['lesion_decorrelation_weight']:g}"
+        if options.get("lesion_temperature", 1.0) != 1.0:
+            suffix += f"_temp{options['lesion_temperature']:g}"
+        if options.get("lesion_pairing", "cross_modal") != "cross_modal":
+            suffix += "_lpwithin"
     if options.get("norm_type", "group") != recipe.get("norm_type", "group"):
         suffix += f"_{options['norm_type']}norm"
     if options.get("synthetic_lesion_radius", 0.1) != recipe.get("synthetic_lesion_radius", 0.1):
@@ -310,6 +318,12 @@ def main(argv=None):
     parser.add_argument("--lesion-loss-weight", type=float, help="With --lesion-keypoints; trainer default 1")
     parser.add_argument(
         "--lesion-decorrelation-weight", type=float, help="With --lesion-keypoints; trainer default 0 (off)"
+    )
+    parser.add_argument("--lesion-temperature", type=float, help="With --lesion-keypoints; trainer default 1")
+    parser.add_argument(
+        "--lesion-pairing",
+        choices=("cross_modal", "within_modality"),
+        help="With --lesion-keypoints; trainer default cross_modal",
     )
     parser.add_argument("--spatial-recovery-eval", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--spatial-recovery-grids", type=int, nargs="+")

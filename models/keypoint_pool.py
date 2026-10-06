@@ -23,6 +23,11 @@ absolute cell-centre coordinates over the whole grid.
 per-voxel gain on the features. It helped against a pure gain and hurt against a geometric factor
 in a toy, so it is off by default.
 
+``temperature`` divides the logits (not the brain-occupancy term). Below 1 it makes the heads
+sharp. A head spread over the whole brain reports the brain's tissue centroid, which every global
+shape factor moves, so InfoNCE can identify subjects without the head ever localizing anything; on
+the real recipe every head stayed at ~16% of the map (the whole brain) through training.
+
 The logits start small and random rather than at zero: with zero weights every subject's
 coordinates are exactly the grid centre, the branch's own InfoNCE sees identical codes and its
 gradient vanishes.
@@ -58,7 +63,9 @@ def brain_frame(support, grid, eps=1e-6):
 class KeypointPool3d(nn.Module):
     """(B, C, D, H, W) -> (B, 3K): one expected (x, y, z) per head."""
 
-    def __init__(self, channels: int, num_keypoints: int = 4, norm: str = "none", frame: str = "brain"):
+    def __init__(
+        self, channels: int, num_keypoints: int = 4, norm: str = "none", frame: str = "brain", temperature: float = 1.0
+    ):
         super().__init__()
         if num_keypoints < 1:
             raise ValueError(f"num_keypoints must be positive, got {num_keypoints}")
@@ -66,10 +73,13 @@ class KeypointPool3d(nn.Module):
             raise ValueError(f"norm must be none or layer, got {norm!r}")
         if frame not in ("brain", "grid"):
             raise ValueError(f"frame must be brain or grid, got {frame!r}")
+        if not 0 < temperature < float("inf"):
+            raise ValueError(f"temperature must be finite and positive, got {temperature}")
         self.channels = channels
         self.num_keypoints = num_keypoints
         self.norm = norm
         self.frame = frame
+        self.temperature = float(temperature)
         self.logits = nn.Conv3d(channels, num_keypoints, 1)
         nn.init.normal_(self.logits.weight, std=0.1 / math.sqrt(channels))
         nn.init.zeros_(self.logits.bias)
@@ -82,13 +92,13 @@ class KeypointPool3d(nn.Module):
         """Per-head weights (B, K, N) over the positions; each row sums to 1.
 
         With ``support`` (brain occupancy on the feature grid) the weights are proportional to
-        exp(logit) times occupancy, so heads only look inside the brain.
+        exp(logit / temperature) times occupancy, so heads only look inside the brain.
         """
         if h.shape[1] != self.channels:
             raise ValueError(f"Expected {self.channels} channels, got {h.shape[1]}")
         if self.norm == "layer":
             h = F.layer_norm(h.movedim(1, -1), (self.channels,)).movedim(-1, 1)
-        logits = self.logits(h).flatten(2)
+        logits = self.logits(h).flatten(2) / self.temperature
         if support is not None:
             logits = logits + support.to(h.dtype).flatten(2).clamp_min(1e-6).log()
         return logits.softmax(dim=-1)

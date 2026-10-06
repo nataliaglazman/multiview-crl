@@ -167,6 +167,21 @@ loss   = InfoNCE(content) + w * InfoNCE(lesion_projector(c))
 - **`--lesion-norm layer`.** A per-voxel LayerNorm before the logits removes a per-voxel
   gain. In the toy it helped partly against a pure gain and hurt against a geometric
   factor, so it is off by default.
+- **`--lesion-temperature T`.** Divides the keypoint logits (not the brain-occupancy term), so
+  T < 1 makes the heads sharp. At the default T = 1 every head on the real recipe stayed spread
+  over the whole brain (~16% of the map) through training. Its coordinate was then the brain's
+  tissue centroid, which brain size, asymmetry and thickness all move: InfoNCE got subject
+  identity without any head localizing anything. At initialization (LayerNorm backbone, ~818
+  brain cells), each head covers 699 effective cells at T = 1, 412 at 0.05, 68 at 0.02 and 9 at 0.01.
+- **`--lesion-pairing within_modality`.** The branch's own InfoNCE pairs two copies of the
+  FLAIR view, each with its own random gain (0.7–1.3 about the brain mean), offset (±0.2
+  brain SD) and noise (≤0.05 brain SD) inside the brain. Both go through the FLAIR encoder;
+  the content block keeps its T1/FLAIR pairs. The reason: the lesion is darker than white
+  matter in T1 (0.4 vs 0.8) and brighter in FLAIR (1.0 vs 0.4), and the two encoders start
+  identical. So cross-modal alignment pushes the lesion's T1 and FLAIR codes apart and learns
+  to suppress it. On a patch-loss checkpoint, cross-view patch retrieval at a subject's lesion
+  position was 0.088, against 0.146 at the same positions in subjects without a lesion there.
+  It costs one more FLAIR encoder pass per step.
 - **Use `--norm-type layer` for the backbone.** Even untrained, the branch already encodes
   brain size, because GroupNorm writes each subject's global statistics into every voxel
   and so rescales the keypoint logits like a gain. Measured on the conv_mlp recipe (240
