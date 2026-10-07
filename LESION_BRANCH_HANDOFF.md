@@ -557,8 +557,9 @@ ventricle size, which already works, and it is what ADNI measures (the UC Davis 
     +0.45. Bright, above every tissue, same sign as FLAIR.
   - **Arm B** (`conv_mlp_s42_mps_lesionstyled_burden_t1les0`): T1 lesion 0.0, contrast −0.45.
     Dark, opposite sign. Its rendered value still overlaps the darker tissues.
-  - Both run the full recipe (10,000 steps, GroupNorm, styled), launched locally on 7 Oct ~10:40.
-    Step-0 burden is −0.02 in both.
+  - Both run the full recipe (10,000 steps, GroupNorm, styled) on the user's CUDA PC. Local copies
+    were stopped after the step-0 evaluation, where burden was −0.02 in both. Their partial
+    folders in `results/encoder_ablations_mps/` can be deleted.
   - **Reading them:**
     - B learns burden: weak T1 contrast was the problem.
     - Only A learns it: the sign, or how distinct the lesion is, matters. Those two stay
