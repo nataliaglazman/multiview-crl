@@ -146,6 +146,7 @@ class PseudoMRIRenderer(nn.Module):
         lesion_intensity="fixed",
         lesion_target="position",
         lesion_count=4,
+        lesion_t1_value=0.4,
     ):
         super().__init__()
         self.res = res
@@ -205,6 +206,13 @@ class PseudoMRIRenderer(nn.Module):
                 raise ValueError(f"lesion_count must be a positive integer, got {lesion_count!r}")
         self.lesion_target = lesion_target
         self.lesion_count = lesion_count
+        # The T1 lesion's base intensity on the tissue LUT (bg 0, CSF 0.1, WM 0.8, GM 0.5). The default
+        # 0.4 is darker than WM but close to GM and to WM/GM partial volume, while FLAIR's 1.0 is the
+        # brightest tissue. 1.6 and 0.0 give the same |contrast| with WM (0.8), above and below every
+        # tissue, so they separate the lesion's sign from how distinct it is.
+        if not np.isfinite(lesion_t1_value) or lesion_t1_value < 0:
+            raise ValueError(f"lesion_t1_value must be finite and nonnegative, got {lesion_t1_value!r}")
+        self.lesion_t1_value = float(lesion_t1_value)
         if cortex_parameterization not in ("additive", "nested", "midsurface", "patterned"):
             raise ValueError(
                 f"cortex_parameterization must be additive|nested|midsurface, got {cortex_parameterization!r}"
@@ -605,7 +613,7 @@ class PseudoMRIRenderer(nn.Module):
         # byte-identical. The fissure intensity is deliberately distinct from CSF.
         if modality == "T1":
             base = torch.tensor([0.0, 0.1, 0.8, 0.5, 0.3], device=device)
-            lesion_int = 0.4
+            lesion_int = self.lesion_t1_value
         elif modality == "FLAIR":
             base = torch.tensor([0.0, 0.1, 0.4, 0.8, 0.3], device=device)
             lesion_int = 1.0
@@ -793,6 +801,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         lesion_intensity="fixed",
         lesion_target="position",
         lesion_count=4,
+        lesion_t1_value=0.4,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -944,6 +953,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 lesion_intensity=lesion_intensity,
                 lesion_target=lesion_target,
                 lesion_count=lesion_count,
+                lesion_t1_value=lesion_t1_value,
             )
             if lesion_mode == "field" and n_content > 2:
                 import warnings

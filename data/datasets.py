@@ -690,6 +690,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_lesion_intensity="fixed",
         synthetic_lesion_target="position",
         synthetic_lesion_count=4,
+        synthetic_lesion_t1_value=0.4,
         synthetic_style_alignment_pairs=False,
         **kwargs,
     ):
@@ -765,6 +766,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             lesion_intensity=synthetic_lesion_intensity,
             lesion_target=synthetic_lesion_target,
             lesion_count=synthetic_lesion_count,
+            lesion_t1_value=synthetic_lesion_t1_value,
         )
         if synthetic_normalize in ("per_sample", "shared") and synthetic_n_style > 0:
             import warnings

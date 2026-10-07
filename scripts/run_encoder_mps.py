@@ -96,7 +96,7 @@ def make_options(args):
     lesion_intensity = getattr(args, "synthetic_lesion_intensity", None)
     if lesion_intensity is not None:
         options["synthetic_lesion_intensity"] = lesion_intensity
-    for key in ("synthetic_lesion_target", "synthetic_lesion_count"):
+    for key in ("synthetic_lesion_target", "synthetic_lesion_count", "synthetic_lesion_t1_value"):
         if getattr(args, key, None) is not None:
             options[key] = getattr(args, key)
     if getattr(args, "patch_foreground_mask", None):
@@ -211,6 +211,8 @@ def make_options(args):
         suffix += "_burden"
         if options.get("synthetic_lesion_count", 4) != 4:
             suffix += f"{options['synthetic_lesion_count']}"
+    if options.get("synthetic_lesion_t1_value", 0.4) != 0.4:
+        suffix += f"_t1les{options['synthetic_lesion_t1_value']:g}"
     options["model_id"] = args.model_id or f"{args.variant}_s{args.seed}_{options['device']}{suffix}"
     if Path(options["model_id"]).name != options["model_id"] or options["model_id"] in (".", ".."):
         raise ValueError("--model-id must be a directory name, not a path")
@@ -419,6 +421,11 @@ def main(argv=None):
     )
     parser.add_argument(
         "--synthetic-lesion-count", type=int, help="With --synthetic-lesion-target burden; trainer default 4"
+    )
+    parser.add_argument(
+        "--synthetic-lesion-t1-value",
+        type=float,
+        help="T1 lesion base intensity on the tissue LUT (adds _t1les<value> to the run ID); trainer default 0.4",
     )
     parser.add_argument(
         "--norm-type",

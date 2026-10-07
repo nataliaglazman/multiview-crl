@@ -205,6 +205,7 @@ def make_dataset(cfg, num_samples, mode="val"):
         synthetic_lesion_intensity=cfg.get("synthetic_lesion_intensity", "fixed"),
         synthetic_lesion_target=cfg.get("synthetic_lesion_target", "position"),
         synthetic_lesion_count=cfg.get("synthetic_lesion_count", 4),
+        synthetic_lesion_t1_value=cfg.get("synthetic_lesion_t1_value", 0.4),
     )
 
 

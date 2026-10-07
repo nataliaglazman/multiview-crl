@@ -1,13 +1,14 @@
 # Lesion branch: findings and handoff (updated 2026-10-06)
 
-Code through `e35a9a5` is committed. Two additions are **not committed yet**:
+All code below is committed (through `4ff4bdb`). That includes:
 - the residual input: `models/normative_residual.py`, `--lesion-input residual` and its
   normative-model flags, `--lesion-head-init`, and the head-weight lines in each evaluation;
 - the lesion-burden generator option: `--synthetic-lesion-target burden` and
-  `--synthetic-lesion-count`. Real-data numbers come from
-local MPS runs of the `conv_mlp` recipe: 2,000 steps (the recipe has 10,000), one seed each. Toy
-numbers have 3 seeds where stated. R² is linear (ridge), held out. "T1 / FLAIR" means the probe
-read the T1 or the FLAIR view.
+  `--synthetic-lesion-count`.
+
+Real-data numbers come from local MPS runs of the `conv_mlp` recipe: 2,000 steps (the recipe has
+10,000), one seed each. Toy numbers have 3 seeds where stated. R² is linear (ridge), held out.
+"T1 / FLAIR" means the probe read the T1 or the FLAIR view.
 
 ## The question
 
@@ -145,6 +146,63 @@ so the lesion loss trains the backbone too.
       two channels about equally, because only an unsigned detector finds the lesion in both views.
     - FLAIR loses its best bright-only detector (0.68 → 0.61), and the four heads become redundant.
     - With 8 learnable weights on a fixed map, the branch cannot do better than the map.
+14. **The objective carries the lesion across views, but it cannot find it from nothing.**
+    The head-init control and a 30,000-step replay of the branch alone show this (tables under
+    "Real-data results").
+    - **From plain random signs, training gets to the same solution as the hand-set positive start.**
+      - It reaches the same loss (3.54 vs 3.57) and the same lesion R²: T1 0.50 / 0.55 / 0.36,
+        FLAIR 0.66 / 0.63 / 0.33.
+      - The T1 part is learned: T1 lesion R² goes from about 0 to 0.50 / 0.55 / 0.36.
+      - Heads that started bright-only already found the FLAIR lesion. Cross-view InfoNCE then
+        flipped their darker-than-normal weight to positive (−3.6 → +2.0, −1.1 → +2.0,
+        −0.4 → +5.0), so they also find the T1 lesion, which is dark.
+      - So the hand-set positive init is not needed. With 4 heads, all of them start negative on
+        both channels with probability 1/256.
+      - **Confirmed by a real run** (`..._lresid_hinitrandom_...`, 2,000 steps, the full model):
+        - Heads go from [−2.8 −1.1] [+1.1 −3.6] [+1.2 −1.1] [+4.5 −0.4] to
+          [−0.5 −0.6] [+2.1 −0.1] [+2.2 +1.6] [+3.1 +3.9], the same as the replay.
+        - Branch T1: −0.09 / 0.14 / −0.04 → 0.48 / 0.52 / 0.38. FLAIR: 0.68 / 0.68 / 0.39 → 0.61 / 0.62 / 0.36.
+        - Content block: 0.47 / 0.59 / 0.40. **Δ vs floor +0.47 / +0.46 / +0.42**, the first large
+          learned lesion gain in the content block. Lesion InfoNCE 4.17 (positive init 4.61).
+    - **From negative weights, training never reaches the lesion.**
+      - The weights shrink towards zero but do not cross it, even after 30,000 steps. They end at
+        [−0.1 −0.1] [−0.7 −0.8] [−0.1 −0.2] [−0.6 −0.7].
+      - Lesion R² stops at about T1 0.01 / 0.29 / 0.14, FLAIR 0.07 / 0.33 / 0.17, and the loss
+        plateaus at 5.56 (chance 6.93).
+    - **Why it stalls:** coordinates are z-scored over the batch before the projector, so the loss
+      cannot see a head's scale. Near zero weights, a head's coordinate is ±(the anomaly map's
+      dipole), and its sign only flips with the weights' sign. So zero is a flat ridge that
+      gradient descent approaches but cannot cross.
+    - **What this means:** the normative residual is necessary, because it makes the lesion the
+      dominant anomaly. The contrastive objective adds the polarity-invariant detector, provided
+      some head starts on the lesion in at least one view.
+15. **Lesion burden (2,000 steps): not learned yet, and training first removes it.**
+    - In the 9-unit content code, `lesion_burden` R² is −0.02 at steps 0, 1000 and 2000. So is
+      `ventricle_size` (−0.02 to −0.03). The code still carries only brain size (0.70) and
+      thickness (0.33), with effective rank ~2.
+    - In the encoder's 64-channel features, burden is 0.06 (T1) / 0.14 (FLAIR) untrained, and 0.00
+      after 2,000 steps. Training removes it.
+    - This fits finding 8: the lesion is dark in T1 and bright in FLAIR, the encoders start
+      identical, and cross-view alignment first suppresses an anti-aligned response. The
+      ventricle is same-sign in both views.
+    - In the full encoder-only recipe the ventricle reaches GAP R² 0.83 only by step ~8,000. So
+      2,000 steps cannot say whether burden recovers the same way.
+16. **Lesion burden on the full recipe (10,000 steps, GroupNorm): the encoder carries it, the
+    content code drops it.**
+    - In the content code, `lesion_burden` stays at ~0 (−0.04 to 0.04) at every evaluation. Over
+      the same run, ventricle goes 0.18 → 0.84, temporal atrophy −0.03 → 0.80, asymmetry → 0.90,
+      thickness → 0.79, brain size → 0.89, and style leak → ~0.
+    - In the encoder's 64 GAP channels, burden rises with training: T1 0.04 → 0.16, FLAIR 0.22 → 0.38.
+    - The 9-unit code keeps only 0.03 (T1) / 0.11 (FLAIR) of it. The ventricle passes through
+      intact (0.85 in both).
+    - Two candidate causes, not yet separated:
+      1. **Cross-view inconsistency.** Burden is much weaker in T1. The T1 lesion (0.4) sits
+         between CSF (0.1) and GM (0.5), so it looks like ordinary tissue. The FLAIR lesion (1.0)
+         is the brightest thing in the image. Contrastive alignment keeps only what both views
+         agree on.
+      2. **A saturated loss.** InfoNCE is at 0.51 by step 10,000 (chance 6.93). Five factors
+         already identify subjects at batch 32, so nothing pushes burden in. This is feature
+         suppression.
 
 ## Real-data results
 
@@ -279,6 +337,67 @@ untrained floor):
   a little lesion signal, through the hole it leaves, plus asymmetry.
 - Script: scratchpad `head_init_floor.py`.
 
+**Branch-only replay, 30,000 steps** (scratchpad `branch_alone.py`):
+- With residual input, the lesion InfoNCE trains only the heads and the projector, so the replay
+  trains those two alone on the same objective (batch 32, τ 0.1, cross-view negatives, AdamW
+  lr 1e-4, 2,000 training subjects).
+- It reproduces the real run: the same initial heads and step-0 R² for every factor, step-100 loss
+  14.3 vs 14.6, and negative-init heads at step 2500 of [−0.6 −0.7] [−1.6 −2.0] [−0.6 −0.8] [−1.6 −2.0],
+  against the real run's [−0.7 −0.8] [−1.7 −2.0] [−0.7 −0.8] [−1.7 −2.0] at step 2000.
+- The real run also clips the gradient norm of all parameters at 2, which the replay leaves out.
+- Lesion x / y / z R² in the table; heads are logits per unit residual z [brighter, darker].
+
+| Init | Step 0, T1 / FLAIR | Step 30,000, T1 / FLAIR | Loss | Heads at 30,000 |
+|---|---|---|---|---|
+| positive | 0.48 / 0.48 / 0.39 · 0.68 / 0.68 / 0.35 | 0.49 / 0.55 / 0.36 · 0.67 / 0.63 / 0.33 | 3.57 | [+1.9 +2.6] [+4.5 +5.3] [+0.1 +0.1] [+2.2 +2.9] |
+| random (the real draws' signs) | −0.09 / 0.14 / −0.04 · 0.68 / 0.68 / 0.39 | **0.50 / 0.55 / 0.36** · 0.66 / 0.63 / 0.33 | 3.54 | [−0.1 −0.2] [+1.4 +2.0] [+1.4 +2.0] [+4.3 +5.0] |
+| negative | −0.01 / 0.07 / 0.00 · 0.03 / 0.22 / 0.05 | 0.01 / 0.29 / 0.14 · 0.07 / 0.33 / 0.17 | 5.56 | [−0.1 −0.1] [−0.7 −0.8] [−0.1 −0.2] [−0.6 −0.7] |
+
+The random-init heads started at [−2.8 −1.1] [+1.1 −3.6] [+1.2 −1.1] [+4.5 −0.4].
+
+**Linear vs kernel-ridge readout of the lesion units** (scratchpad `krr_probe.py`):
+- 1,000 held-out subjects (val 400 + test 600), 5 random 70/30 splits, standardised features.
+- RBF kernel-ridge with (alpha, gamma) chosen by 3-fold CV inside train. The ± is the SD over splits.
+
+| Lesion units | lesion x / y / z, linear | lesion x / y / z, kernel | brain_size, kernel | lr_asym, kernel |
+|---|---|---|---|---|
+| random init, step 2000, T1 | 0.46 / 0.61 / 0.38 | **0.46 / 0.61 / 0.38** | 0.21 | 0.44 |
+| random init, step 2000, FLAIR | 0.65 / 0.69 / 0.49 | **0.69 / 0.72 / 0.52** | 0.18 | 0.24 |
+| random init, untrained, T1 | 0.02 / 0.15 / 0.00 | 0.01 / 0.13 / 0.00 | 0.25 | 0.51 |
+| random init, untrained, FLAIR | 0.71 / 0.74 / 0.51 | 0.73 / 0.76 / 0.53 | 0.09 | 0.17 |
+| positive init, step 2000, T1 | 0.41 / 0.61 / 0.38 | 0.44 / 0.62 / 0.40 | 0.04 | 0.20 |
+| positive init, step 2000, FLAIR | 0.66 / 0.66 / 0.47 | 0.66 / 0.66 / 0.50 | 0.06 | 0.23 |
+| negative init, step 2000, T1 | 0.01 / 0.29 / 0.11 | 0.02 / 0.19 / 0.06 | 0.25 | 0.41 |
+| negative init, step 2000, FLAIR | 0.06 / 0.40 / 0.21 | 0.03 / 0.25 / 0.15 | 0.23 | 0.28 |
+| CEILING: true centroid, brain frame | 0.82 / 0.88 / 0.69 | **0.94 / 0.94 / 0.74** | | |
+| CEILING: centroid + 6 anatomy latents | 0.83 / 0.88 / 0.69 | 0.92 / 0.92 / 0.69 | | |
+
+- **Kernel ≈ linear on the learned lesion units.** The gap to the ceiling is missing information,
+  probably missed detections, not a nonlinear distortion.
+  - T1 reaches 49 / 65 / 51% of the kernel ceiling, FLAIR 73 / 77 / 70%.
+  - So this is approximate, not exact, identifiability. A full invertible function of position
+    would reach the ceiling under a flexible readout.
+- **The training gain survives the flexible probe.** T1 goes from 0.01 / 0.13 / 0.00 to
+  0.46 / 0.61 / 0.38.
+- **The block is not clean.** The random-init units carry brain size only nonlinearly (0.21 kernel,
+  0.00 linear), plus asymmetry 0.24–0.44.
+  - The source is the heads that never found the lesion: head 1 stayed near-uniform. The
+    negative-init run, where every head stalled, shows the same 0.25 / 0.41.
+  - Positive init, where every head found the lesion, leaks less (brain size 0.04–0.06).
+  - Fixes: drop or penalise heads that stay diffuse, or add the decorrelation term.
+
+**Lesion burden, 2,000 steps** (`conv_mlp_s42_mps_t2000_layernorm_lesionstyled_burden`):
+
+| Readout | Factor | Step 0 | Step 2000 |
+|---|---|---|---|
+| Content block (9 units) | lesion_burden | −0.02 | −0.02 |
+| Content block (9 units) | ventricle_size | −0.02 | −0.03 |
+| Backbone GAP (64 channels), T1 / FLAIR | lesion_burden | 0.06 / 0.14 | −0.01 / 0.00 |
+| Backbone GAP (64 channels), T1 / FLAIR | ventricle | 0.04 / 0.02 | −0.04 / −0.01 |
+| Backbone GAP (64 channels), T1 / FLAIR | brain_size | 0.77 / 0.74 | 0.67 / 0.68 |
+
+Script: scratchpad `burden_gap_probe.py`.
+
 ## Toy evidence
 
 Fixed translation-equivariant features on a 16³ grid: a registered anatomy field, an easy shared
@@ -320,15 +439,15 @@ which the toys did not have. Toy scripts are in the session scratchpad and may b
 | File | What |
 |---|---|
 | `models/keypoint_pool.py` | `KeypointPool3d`: per head, 1x1-conv logits divided by `temperature`, softmax over positions, expected (x, y, z). `frame="brain"` confines attention to the brain (logits + log occupancy) and gives coordinates relative to the brain's centroid and per-axis spread. Optional per-voxel LayerNorm. Logits start small and random. |
-| `models/normative_residual.py` (uncommitted) | `NormativeResidual`: per-view mean, k principal modes and residual SD, fitted once from training subjects and held in buffers, so checkpoints restore it. `forward` returns one view's residual z, zero outside the brain. |
-| `models/multiview_encoder.py` | Branch built last, so all other weights match the run without it. 3K coordinates appended after the style units and marked as content. `project_lesion` standardises over the batch before the projector. `lesion_code(x, view_idx)` and `lesion_maps()`. Uncommitted: `lesion_input="residual"` reads `[relu(z), relu(−z)]` pooled to the feature grid (`_lesion_inputs`, `fit_normative`); `lesion_head_init` sets the heads' initial signs. |
-| `training/main_conv_synthetic.py` | `--lesion-keypoints`, `--lesion-norm`, `--lesion-frame`, `--lesion-proj-dim`, `--lesion-loss-weight`, `--lesion-temperature`, `--lesion-decorrelation-weight`, `--lesion-pairing {cross_modal,within_modality}`; uncommitted: `--lesion-input {features,residual}`, `--lesion-normative-components`, `--lesion-normative-subjects`, `--lesion-head-init {positive,random,negative}`. Own InfoNCE for the branch; `augment_intensity` for same-modality pairs. The normative model is fitted on the first training subjects before step 0. Every evaluation prints "lesion branch alone" (R² per factor, T1/FLAIR), head spread and, for residual input, head weights, also saved under `lesion_branch` in `dci_step*.json`. |
+| `models/normative_residual.py` | `NormativeResidual`: per-view mean, k principal modes and residual SD, fitted once from training subjects and held in buffers, so checkpoints restore it. `forward` returns one view's residual z, zero outside the brain. |
+| `models/multiview_encoder.py` | Branch built last, so all other weights match the run without it. 3K coordinates appended after the style units and marked as content. `project_lesion` standardises over the batch before the projector. `lesion_code(x, view_idx)` and `lesion_maps()`. `lesion_input="residual"` reads `[relu(z), relu(−z)]` pooled to the feature grid (`_lesion_inputs`, `fit_normative`); `lesion_head_init` sets the heads' initial signs. |
+| `training/main_conv_synthetic.py` | `--lesion-keypoints`, `--lesion-norm`, `--lesion-frame`, `--lesion-proj-dim`, `--lesion-loss-weight`, `--lesion-temperature`, `--lesion-decorrelation-weight`, `--lesion-pairing {cross_modal,within_modality}`; `--lesion-input {features,residual}`, `--lesion-normative-components`, `--lesion-normative-subjects`, `--lesion-head-init {positive,random,negative}`. Own InfoNCE for the branch; `augment_intensity` for same-modality pairs. The normative model is fitted on the first training subjects before step 0. Every evaluation prints "lesion branch alone" (R² per factor, T1/FLAIR), head spread and, for residual input, head weights, also saved under `lesion_branch` in `dci_step*.json`. |
 | `eval/protocol/score_checkpoint.py`, `eval/lesion/checkpoint_lesion_analysis.py` | Restore the branch; count lesion units as content, not style. |
 | `scripts/run_encoder_mps.py` | Passes all lesion flags through and adds run-ID suffixes (`_lresid`, `_nk{k}`, `_hinit{init}` for the residual options). `compare_backend` scales the keypoint tolerance by 1/temperature and skips the random lesion loss: CUDA's TF32 convolutions differ from CPU by ~2e-3 at temperature 0.02. |
 | `tests/test_lesion_branch.py` | 24 tests. |
-| `eval/synthetic/synthetic_dataset.py`, `data/datasets.py` (uncommitted) | `lesion_target` / `lesion_count` (`synthetic_lesion_target` / `synthetic_lesion_count` on the wrapper): `PseudoMRIRenderer._burden_in_white_matter`, and a `z_lesion` draw of placement quantiles in burden mode. |
-| `eval/metrics/dci.py` (uncommitted) | `content_factor_names(n, lesion_target)` and `dataset_lesion_target(dataset)`, so burden runs report `lesion_burden` / `unused_3` / `unused_4`. |
-| `tests/test_lesion_burden.py` (uncommitted) | 5 tests: volume linear in the burden, white-matter containment, positions independent of the burden, other latents unchanged, CLI, runner and scorer. |
+| `eval/synthetic/synthetic_dataset.py`, `data/datasets.py` | `lesion_target` / `lesion_count` (`synthetic_lesion_target` / `synthetic_lesion_count` on the wrapper): `PseudoMRIRenderer._burden_in_white_matter`, and a `z_lesion` draw of placement quantiles in burden mode. |
+| `eval/metrics/dci.py` | `content_factor_names(n, lesion_target)` and `dataset_lesion_target(dataset)`, so burden runs report `lesion_burden` / `unused_3` / `unused_4`. |
+| `tests/test_lesion_burden.py` | 5 tests: volume linear in the burden, white-matter containment, positions independent of the burden, other latents unchanged, CLI, runner and scorer. |
 
 Bugs fixed along the way:
 - `attention_spread` crashed on MPS (float64); this also affected the attention-pool arm.
@@ -356,19 +475,10 @@ learning. The closest work supports the findings above:
      - unique-information objectives (FactorCL/CoMM);
      - a nonlinear (HSIC) decorrelation;
      - on synthetic data only, an oracle per-view brain-size re-render for the branch.
-2. **Negative-init control for the residual branch.**
-   - It is queued locally behind the positive-init run, as
-     `conv_mlp_s42_mps_t2000_lesionkp4_temp0.03_lresid_hinitnegative_layernorm_lesionstyled`.
-   - With `--lesion-head-init negative`, every head starts avoiding anomalies, so the lesion floor
-     is about 0 (lesion_y about 0.1–0.25).
-   - Read the head-weight line at each evaluation:
-     - Weights cross to positive and lesion R² climbs towards ~0.5: the objective selects the lesion
-       on residual views. That is a learned result.
-     - Weights stay negative, or the heads settle on asymmetry (0.48 at init): the normative model
-       does all the work.
-   - 2,000 steps may be short, so read the direction of travel as well as the endpoint. Adam at
-     lr 1e-4 moves a weight by at most ~0.1 per 1,000 steps (~0.07 observed), and the largest
-     initial magnitude is 0.135.
+2. **Head-init control: done (finding 14), including the real random-init run.** The objective
+   carries the lesion from one view to the other but cannot find it from nothing. Open: 3 seeds, and
+   a nonlinear (kernel-ridge) probe on the lesion units, because identifiability is only up to an
+   invertible map.
    - Why not a near-zero init: with near-uniform attention, the coordinates still carry the dipole
      of the anomaly map. At tiny scales `holdout_r2`'s 1e-4 std floor hides it, so R² would rise
      with the weights' scale alone.
@@ -379,10 +489,12 @@ learning. The closest work supports the findings above:
      in T1.
    - Risk: it may learn leftover boundary residuals instead (the 0.24 lr_asymmetry already is
      that), so keep the decorrelation term ready.
-4. **If neither 2 nor 3 beats the normative model, stop asking for lesion position.**
-   - Write it up as a characterisation. Pooling cannot see position, global shape suppresses the
-     lesion, and its polarity flips between T1 and FLAIR. A label-free normative model gets
-     around all three, but the model, not the contrastive objective, does the work.
+4. **Writing it up.** Lesion position is now a split result.
+   - Three things block it: pooling cannot see position, global shape suppresses the lesion, and
+     its polarity flips between T1 and FLAIR.
+   - A label-free normative residual gets around all three. It makes the lesion findable.
+   - The cross-modal objective then learns the polarity-invariant detector from a random start
+     (finding 14). It cannot find a lesion that no head sees in either view.
    - Use a burden factor instead (see "Lesion burden" below). It is an amount, like ventricle size,
      which already works, and it is what ADNI measures.
 5. **A learned explain-away** would replace the PCA with a decoder from the model's own global code.
@@ -393,7 +505,7 @@ learning. The closest work supports the findings above:
    offset in the model (finding 11).
 7. **Statistics:** confirm any positive result with 3 seeds and the full 10,000-step recipe.
 
-## Lesion burden (`--synthetic-lesion-target burden`, uncommitted)
+## Lesion burden (`--synthetic-lesion-target burden`)
 
 Lesion position has no ADNI counterpart, and pooling cannot carry it. Burden is an amount, like
 ventricle size, which already works, and it is what ADNI measures (the UC Davis WMH volumes).
@@ -425,9 +537,35 @@ ventricle size, which already works, and it is what ADNI measures (the UC Davis 
   `eval.protocol.score_checkpoint` restore it. Not yet: `main_multimodal`/`utils/config.py`,
   `run_dci_synthetic`, `radial_factor_profile`, `plot_scaling_maps`, `view_difficulty`,
   `generator_defects`. Those would rebuild position-mode data.
-- **First run** (local, queued to start alongside the negative-init control):
-  `conv_mlp_s42_mps_t2000_layernorm_lesionstyled_burden`. Read `lesion_burden` against its
-  untrained floor, next to `ventricle_size`.
+- **First run (2,000 steps, LayerNorm), finding 15:** `lesion_burden` and `ventricle_size` both
+  read about 0. Training removes the burden signal the untrained FLAIR features carried (0.14 →
+  0.00).
+- **Full recipe (10,000 steps, GroupNorm), finding 16:** `conv_mlp_s42_mps_lesionstyled_burden`.
+  The ventricle reaches 0.84; burden stays at 0.00 in the code, with 0.16 / 0.38 in the encoder's
+  GAP channels.
+- **T1 lesion intensity control: `--synthetic-lesion-t1-value`** (default 0.4, so the data is
+  unchanged).
+  - Measured T1 contrast with white matter (rendered, scratchpad `t1_contrast.py`, 127 subjects):
+
+    | T1 value | 0.4 (default) | 0.0 | 1.2 | 1.3 | 1.37 | 1.4 | 1.6 |
+    |---|---|---|---|---|---|---|---|
+    | T1 contrast | −0.22 | −0.45 | +0.33 | +0.40 | ≈ +0.45 | +0.47 | +0.61 |
+
+    FLAIR is +0.41. The magnitude image (√ of the noisy signal) and the final 3×3×3 blur lift a
+    dark lesion off zero, so the same LUT distance gives less contrast below WM than above it.
+  - **Arm A** (`conv_mlp_s42_mps_lesionstyled_burden_t1les1.37`): T1 lesion 1.37, contrast
+    +0.45. Bright, above every tissue, same sign as FLAIR.
+  - **Arm B** (`conv_mlp_s42_mps_lesionstyled_burden_t1les0`): T1 lesion 0.0, contrast −0.45.
+    Dark, opposite sign. Its rendered value still overlaps the darker tissues.
+  - Both run the full recipe (10,000 steps, GroupNorm, styled), launched locally on 7 Oct ~10:40.
+    Step-0 burden is −0.02 in both.
+  - **Reading them:**
+    - B learns burden: weak T1 contrast was the problem.
+    - Only A learns it: the sign, or how distinct the lesion is, matters. Those two stay
+      confounded, because the dark side of WM is crowded with other tissues.
+    - Neither learns it: suspect saturation.
+  - Saturation is tested with a larger batch or harder negatives (not run; needs the PC).
+- Script for the encoder-channel probe: scratchpad `burden_gap_probe.py <run>`.
 
 ## Caveats
 

@@ -140,5 +140,72 @@ class BurdenPipelineTests(unittest.TestCase):
         self.assertEqual(trainer.parse_args(runner.comparison.cli_arguments(six)).synthetic_lesion_count, 6)
 
 
+class LesionT1ValueTests(unittest.TestCase):
+    def test_t1_value_changes_only_the_t1_lesion(self):
+        views = {}
+        for value in (0.4, 1.6, 0.0):
+            renderer = PseudoMRIRenderer(
+                res=64,
+                lesion_placement="wm_interior",
+                lesion_target="burden",
+                lesion_intensity="styled",
+                lesion_t1_value=value,
+            )
+            z = torch.zeros(9)
+            z[2] = 2.0
+            tissue, load = renderer.render_structure(
+                z,
+                torch.zeros(4, 4, 4),
+                torch.zeros(8, 8, 8),
+                "cpu",
+                clean=True,
+                z_lesion=torch.rand(4, 3, generator=torch.Generator().manual_seed(0)),
+            )
+            style = torch.tensor([0.5, -0.5, 0.2])
+            views[value] = [
+                renderer.render_modality(tissue, load, style, modality, view_seed=7, device="cpu")
+                for modality in ("T1", "FLAIR")
+            ]
+        # The renderer ends with a 3x3x3 average, so the lesion reaches one voxel past its support.
+        reach = torch.nn.functional.max_pool3d((load > 0).float()[None, None], 3, 1, 1)[0, 0] > 0
+        inside = load > 0.99
+        for value in (1.6, 0.0):
+            torch.testing.assert_close(views[value][1], views[0.4][1])
+            torch.testing.assert_close(views[value][0][0][~reach], views[0.4][0][0][~reach])
+        t1 = {value: views[value][0][0][inside].mean().item() for value in views}
+        white = views[0.4][0][0][(tissue == 2) & ~reach].mean().item()
+        self.assertGreater(t1[1.6], white)
+        self.assertLess(t1[0.0], t1[0.4])
+        self.assertLess(t1[0.4], white)
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            PseudoMRIRenderer(res=32, lesion_t1_value=-0.1)
+
+    def test_cli_runner_and_scorer_pass_the_t1_value(self):
+        parsed = trainer.parse_args(["--synthetic-lesion-t1-value", "1.6"])
+        self.assertEqual(parsed.synthetic_lesion_t1_value, 1.6)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            trainer.parse_args(["--synthetic-lesion-t1-value", "-1"])
+        values = dict(
+            config=ROOT / "experiments/encoder_comparison.json",
+            variant="conv_mlp",
+            seed=42,
+            batch_size=None,
+            train_steps=None,
+            eval_every=None,
+            model_id=None,
+            results_dir=Path("/tmp/encoder_ablations_mps"),
+            synthetic_lesion_target="burden",
+        )
+        for value, suffix in ((1.6, "_burden_t1les1.6"), (0.0, "_burden_t1les0")):
+            options, _ = runner.make_options(types.SimpleNamespace(**values, synthetic_lesion_t1_value=value))
+            self.assertEqual(options["model_id"], "conv_mlp_s42_mps" + suffix)
+            cfg = vars(trainer.parse_args(runner.comparison.cli_arguments(options)))
+            self.assertEqual(cfg["synthetic_lesion_t1_value"], value)
+            cfg.update(res=32)
+            self.assertEqual(score_checkpoint.make_dataset(cfg, 2)._inner.renderer.lesion_t1_value, value)
+        default, _ = runner.make_options(types.SimpleNamespace(**values))
+        self.assertEqual(default["model_id"], "conv_mlp_s42_mps_burden")
+
+
 if __name__ == "__main__":
     unittest.main()

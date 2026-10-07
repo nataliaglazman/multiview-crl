@@ -388,6 +388,15 @@ def parse_args(argv=None):
         default=4,
         help="With --synthetic-lesion-target burden: lesions per subject sharing the burden",
     )
+    p.add_argument(
+        "--synthetic-lesion-t1-value",
+        type=float,
+        default=0.4,
+        help="T1 lesion base intensity on the tissue LUT (bg 0, CSF 0.1, WM 0.8, GM 0.5; FLAIR's lesion is "
+        "1.0). The default 0.4 is darker than WM but close to GM. 1.6 (above every tissue, the same sign as "
+        "FLAIR) and 0.0 (below every tissue) both differ from WM by 0.8, so they separate the lesion's sign "
+        "from how distinct it is",
+    )
     p.add_argument("--synthetic-n-deformation-grid", type=int, default=4)
     p.add_argument("--synthetic-n-fissure-grid", type=int, default=8)
     p.add_argument("--synthetic-hierarchical-content", action="store_true")
@@ -446,6 +455,8 @@ def parse_args(argv=None):
             p.error("The lesion branch localises one lesion; it does not apply to --synthetic-lesion-target burden")
     elif args.synthetic_lesion_count != 4:
         p.error("--synthetic-lesion-count only applies with --synthetic-lesion-target burden")
+    if not 0 <= args.synthetic_lesion_t1_value < float("inf"):
+        p.error("--synthetic-lesion-t1-value must be finite and nonnegative")
     if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if not 0 <= args.patch_loss_weight < float("inf"):
@@ -629,6 +640,7 @@ def make_dataset(args, mode, num_samples):
         synthetic_lesion_intensity=getattr(args, "synthetic_lesion_intensity", "fixed"),
         synthetic_lesion_target=getattr(args, "synthetic_lesion_target", "position"),
         synthetic_lesion_count=getattr(args, "synthetic_lesion_count", 4),
+        synthetic_lesion_t1_value=getattr(args, "synthetic_lesion_t1_value", 0.4),
     )
 
 
