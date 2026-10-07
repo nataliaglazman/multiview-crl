@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the frozen-probe and supervised-control SLURM arrays; never submit jobs."""
+"""Generate the frozen-probe, supervised-control and GAP-control SLURM arrays; never submit jobs."""
 
 import argparse
 import shlex
@@ -12,10 +12,22 @@ if str(ROOT) not in sys.path:
 
 from scripts.generate_encoder_ablation_slurm import load_resources  # noqa: E402
 
+GAP_ARMS = {
+    # Same features, budget and seed; only the readout pooling (and label order) differs.
+    "gap": "--grid 1",
+    "grid8": "--grid 8",
+    "gap_shuffled": "--grid 1 --shuffle-targets",
+}
+
 
 def render(kind, resources, steps, include_native):
     frozen = kind == "spatial_probes"
-    names = ["conv_mlp_s42", "resnet_groupnorm_s42", "resnet_stride8_s42"] if frozen else ["t1", "flair"]
+    if frozen:
+        names = ["conv_mlp_s42", "resnet_groupnorm_s42", "resnet_stride8_s42"]
+    elif kind == "gap_controls":
+        names = [f"{view}_{arm}" for view in ("t1", "flair") for arm in GAP_ARMS]
+    else:
+        names = ["t1", "flair"]
     directives = {
         "job-name": f"encoder-{kind.replace('_', '-')}-s42",
         "output": "/scratch/users/%u/%x-%A_%a.out",
@@ -47,6 +59,14 @@ def render(kind, resources, steps, include_native):
         'COMMAND=("$PYTHON" -m training.encoder_target_control --run-dir "$REFERENCE" '
         '--out-dir "$OUTPUT/supervised/${NAME}_${STAMP}" --view "$NAME" --device cuda '
         f"--steps {steps} --batch-size 8 --width 24 --grid 8 --test-samples 400 --seed 42)"
+        if kind == "target_controls"
+        else 'REFERENCE="${ENCODER_REFERENCE_RUN:-$RUNS/conv_mlp_s42}"\n'
+        'VIEW="${NAME%%_*}"\n'
+        'case "${NAME#*_}" in\n' + "".join(f"  {arm}) ARM=({flags}) ;;\n" for arm, flags in GAP_ARMS.items()) + "esac\n"
+        'COMMAND=("$PYTHON" -m training.encoder_target_control --run-dir "$REFERENCE" '
+        '--out-dir "$OUTPUT/gap_control/${NAME}_${STAMP}" --view "$VIEW" --device cuda '
+        f"--steps {steps} --batch-size 8 --width 24 --readout-channels 24 --lesion-weight 0 "
+        '--magnitude-head --eval-every 500 --test-samples 400 --seed 42 "${ARM[@]}")'
     )
     return "\n".join(
         [
@@ -95,18 +115,22 @@ def main(argv=None):
     p.add_argument("--cluster-config", type=Path, default=ROOT / "experiments/cluster/slurm_bio.yaml")
     p.add_argument("--output-dir", type=Path, default=ROOT / "experiments/generated")
     p.add_argument("--supervised-steps", type=int, default=2000)
+    p.add_argument(
+        "--gap-control-steps", type=int, default=6000, help="Longer than the 8³ default: pooled readouts plateau first"
+    )
     p.add_argument("--no-native", action="store_true", help="Probe only grids 1 and 2 to reduce disk/probe cost")
     args = p.parse_args(argv)
-    if args.supervised_steps < 1:
-        p.error("--supervised-steps must be positive")
+    if min(args.supervised_steps, args.gap_control_steps) < 1:
+        p.error("Step counts must be positive")
     resources = load_resources(args.cluster_config)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    for kind in ("spatial_probes", "target_controls"):
+    for kind in ("spatial_probes", "target_controls", "gap_controls"):
         path = args.output_dir / f"encoder_{kind}_s42.slurm_bio.sh"
-        path.write_text(render(kind, resources, args.supervised_steps, not args.no_native))
+        steps = args.gap_control_steps if kind == "gap_controls" else args.supervised_steps
+        path.write_text(render(kind, resources, steps, not args.no_native))
         path.chmod(0o755)
         print(path)
-    print("Generated 3 frozen-probe tasks and 2 supervised-control tasks. No jobs submitted.")
+    print("Generated 3 frozen-probe, 2 supervised-control and 6 GAP-control tasks. No jobs submitted.")
 
 
 if __name__ == "__main__":

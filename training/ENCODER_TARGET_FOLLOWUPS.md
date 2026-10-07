@@ -153,6 +153,57 @@ Outputs include `report.json`, `test_scores.csv`, `test_predictions.npz`, cached
 data, and a new control `model.pt` containing model weights and target scaling.
 This file is separate from the original encoder checkpoint.
 
+## Experiment 3: supervised GAP control for signed sulcal
+
+Question: does the GAP score for `sulcal_widening` stay at the floor because GAP
+*cannot* carry the sign of a zero-mean corrugation, or only because no
+objective asks for it? Flipping the sign of z8 shifts `sin(12x)sin(12y)sin(12z)`
+by half a period. The spatial mean of a translation-equivariant feature map is
+unchanged by that shift, so GAP is sign-blind up to the leaks that break
+equivariance: the brain mask, the volume boundary, and zero padding. A network
+trained end to end, with the sign as its explicit target, is the strongest
+attempt to exploit those leaks.
+
+The three arms use `training.encoder_target_control` with matched features,
+budget and seed. Every arm uses `--lesion-weight 0` (features trained for
+regression only), `--readout-channels 24` (so the GAP arm pools 24 nonlinear
+channels, not 4) and `--magnitude-head`:
+
+| Arm | Readout | Role |
+|---|---|---|
+| `gap` | `--grid 1` | The test |
+| `grid8` | `--grid 8` | Positive control: the same network can read the sign when position survives pooling |
+| `gap_shuffled` | `--grid 1 --shuffle-targets` | Floor |
+
+```bash
+python scripts/generate_encoder_followups_slurm.py   # writes encoder_gap_controls_s42.slurm_bio.sh (6 tasks: t1/flair × 3 arms)
+sbatch experiments/generated/encoder_gap_controls_s42.slurm_bio.sh
+```
+
+The default is 6,000 steps (`--gap-control-steps`), longer than the 8³ control,
+because pooled readouts can sit on a plateau before escaping. Read
+`history[*].validation` in `report.json`: a GAP sulcal R² still rising at the
+final step makes the result inconclusive, not negative.
+
+The reference run `conv_mlp_s42` uses `synthetic_clean_content=True` and
+`synthetic_causal=False`. This removes both other explanations for a low GAP
+score: the nuisance deformation field competing at the same spatial frequency,
+and sulcal signal inherited from its parents in the causal graph. A
+nuisance-on or SCM reference run answers a different question.
+
+| `gap` result | Interpretation |
+|---|---|
+| `sulcal_amplitude` ≈ shuffled, sign accuracy ≈ 0.5, `sulcal_magnitude_head` well above shuffled | GAP is sign-blind by construction; the magnitude head shows the arm trained and sees the corrugation |
+| Signed and magnitude both ≈ shuffled | Inconclusive: the arm may simply have failed to train. Check `grid8` and the loss history |
+| Signed clearly above shuffled | Equivariance leaks carry the sign; a flat GAP under a contrastive objective was the objective's choice, not a limit of pooling |
+| `grid8` signed ≈ shuffled | The control network failed; the GAP arm says nothing |
+
+The derived `sulcal_magnitude` row (|signed prediction|) is kept for continuity.
+Under GAP it reads low whenever the sign head collapses to ~0, so judge
+magnitude by `sulcal_magnitude_head`. Lesion centroid rows are meaningless at
+`--lesion-weight 0`, but the regressed `lesion_x/y/z` give a free GAP
+replication of the lesion-position cancellation.
+
 ## How to interpret the pair of experiments
 
 | Finding | Supported interpretation |
@@ -180,5 +231,5 @@ Tests include real CPU forwards through Conv and both ResNet variants, complete
 small synthetic frozen/supervised workflows, checkpoint immutability, native-grid
 extraction, physical-coordinate conversion, both-head gradient updates, absence
 of test access during optimization, invariance of fitted probe predictions to test
-label changes, and previews of all five cluster tasks. Full experiments require
+label changes, and previews of all eleven cluster tasks (including that the GAP-control arms differ only in pooling and label order). Full experiments require
 the original cluster files and have not been run by these checks.

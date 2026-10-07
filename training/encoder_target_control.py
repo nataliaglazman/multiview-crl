@@ -30,29 +30,35 @@ from eval.protocol.score_checkpoint import load_settings
 from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
 REGRESSION_NAMES = ("lesion_x", "lesion_y", "lesion_z", "sulcal_widening", "sulcal_amplitude")
-REGRESSION_INDICES = [TARGETS.index(name) for name in REGRESSION_NAMES]
+# Optional extra head: |amplitude| regressed directly. Under a GAP readout it is the
+# within-arm positive control (rectified depth can survive averaging; sign cannot).
+MAGNITUDE_NAMES = (*REGRESSION_NAMES, "sulcal_magnitude")
+
+
+def regression_names(magnitude_head=False):
+    return MAGNITUDE_NAMES if magnitude_head else REGRESSION_NAMES
 
 
 class TargetControl(nn.Module):
     """Full-volume image -> stride-2 lesion map and spatial (non-GAP) factor readout."""
 
-    def __init__(self, width=24, grid=8):
+    def __init__(self, width=24, grid=8, readout_channels=4, outputs=len(REGRESSION_NAMES)):
         super().__init__()
-        if width < 4 or width % 4 or grid < 1:
-            raise ValueError("Width must be a positive multiple of four (>=4), grid positive")
+        if width < 4 or width % 4 or grid < 1 or readout_channels < 1 or outputs < 1:
+            raise ValueError("Width must be a positive multiple of four (>=4); grid/readout/outputs positive")
         layers = []
         for incoming, stride in ((1, 1), (width, 2), (width, 1), (width, 1)):
             layers.extend((nn.Conv3d(incoming, width, 3, stride=stride, padding=1), nn.GroupNorm(4, width), nn.SiLU()))
         self.features = nn.Sequential(*layers)
         self.lesion = nn.Conv3d(width, 1, 1)
         self.regression = nn.Sequential(
-            nn.Conv3d(width, 4, 1),
+            nn.Conv3d(width, readout_channels, 1),
             nn.SiLU(),
             nn.AdaptiveAvgPool3d(grid),
             nn.Flatten(),
-            nn.Linear(4 * grid**3, 128),
+            nn.Linear(readout_channels * grid**3, 128),
             nn.SiLU(),
-            nn.Linear(128, len(REGRESSION_NAMES)),
+            nn.Linear(128, outputs),
         )
         self.grid = grid
 
@@ -110,8 +116,8 @@ def render_bank(cfg, split, count, view, directory):
     }
 
 
-def target_scaler(training_targets):
-    values = training_targets[:, REGRESSION_INDICES]
+def target_scaler(training_targets, names=REGRESSION_NAMES):
+    values = training_targets[:, [TARGETS.index(name) for name in names]]
     mean, std = values.mean(0), values.std(0)
     if not np.isfinite(values).all() or np.any(std < 1e-8):
         raise ValueError("Training targets must be finite and nonconstant")
@@ -130,15 +136,17 @@ def predict(model, bank, device, batch_size, resolution, scaler):
     return {"centroid": np.concatenate(centroids), "regression": np.concatenate(regression)}
 
 
-def score_predictions(predictions, truth, training_targets, resolution, radius):
+def score_predictions(predictions, truth, training_targets, resolution, radius, names=REGRESSION_NAMES):
     rows = []
     estimates = predictions["regression"]
-    targets = truth[:, REGRESSION_INDICES]
-    baseline = np.broadcast_to(training_targets[:, REGRESSION_INDICES].mean(0), targets.shape)
-    for j, name in enumerate(REGRESSION_NAMES):
+    indices = [TARGETS.index(name) for name in names]
+    targets = truth[:, indices]
+    baseline = np.broadcast_to(training_targets[:, indices].mean(0), targets.shape)
+    for j, name in enumerate(names):
         rows.append(
             {
-                "target": name,
+                # The derived |signed| row below keeps the historical "sulcal_magnitude" name.
+                "target": "sulcal_magnitude_head" if name == "sulcal_magnitude" else name,
                 "r2": float(r2(targets[:, j : j + 1], estimates[:, j : j + 1])[0]),
                 "rmse": float(np.sqrt(np.mean((targets[:, j] - estimates[:, j]) ** 2))),
                 "train_mean_baseline_r2": float(r2(targets[:, j : j + 1], baseline[:, j : j + 1])[0]),
@@ -156,8 +164,9 @@ def score_predictions(predictions, truth, training_targets, resolution, radius):
                 "train_mean_baseline_r2": float(r2(actual[:, j : j + 1], base[:, j : j + 1])[0]),
             }
         )
-    # No second magnitude head: test whether the signed prediction also recovers depth.
-    mag = np.abs(estimates[:, -1:])
+    # Test whether the signed prediction also recovers depth (separate from any magnitude head).
+    signed = estimates[:, names.index("sulcal_amplitude")]
+    mag = np.abs(signed[:, None])
     mag_true = truth[:, -1:]
     rows.append(
         {
@@ -174,13 +183,15 @@ def score_predictions(predictions, truth, training_targets, resolution, radius):
         "median_centroid_error_vox": float(np.median(error)),
         "mean_centroid_error_vox": float(np.mean(error)),
         "within_one_lesion_radius": float(np.mean(error <= radius * (resolution - 1) / 2)),
-        "sulcal_sign_accuracy": float(np.mean(np.sign(estimates[sign_mask, -1]) == np.sign(truth[sign_mask, -2]))),
+        "sulcal_sign_accuracy": float(np.mean(np.sign(signed[sign_mask]) == np.sign(truth[sign_mask, -2]))),
     }
 
 
 def train(model, banks, args, device, scaler, directory, report):
     # This function deliberately never reads banks['test'].
     training = banks["train"]
+    names = regression_names(getattr(args, "magnitude_head", False))
+    indices = [TARGETS.index(name) for name in names]
     mean, std = (torch.as_tensor(x, device=device) for x in scaler)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.steps)
@@ -199,7 +210,7 @@ def train(model, banks, args, device, scaler, directory, report):
         label_ids = permutation[ids]
         images = torch.from_numpy(np.array(training["images"][ids])).to(device)
         heat = torch.from_numpy(np.array(training["heatmaps"][label_ids])).to(device)
-        labels = torch.from_numpy(training["targets"][label_ids][:, REGRESSION_INDICES].copy()).to(device)
+        labels = torch.from_numpy(training["targets"][label_ids][:, indices].copy()).to(device)
         logits, estimates = model(images)
         location_loss = -(heat.flatten(1) * logits.flatten(1).log_softmax(1)).sum(1).mean()
         regression_loss = F.mse_loss(estimates, (labels - mean) / std)
@@ -218,7 +229,9 @@ def train(model, banks, args, device, scaler, directory, report):
             )
         if step % args.eval_every == 0 or step == args.steps:
             predictions = predict(model, banks["val"], device, args.batch_size, args.resolution, scaler)
-            scores = score_predictions(predictions, banks["val"]["targets"], training["targets"], args.resolution, 0.1)
+            scores = score_predictions(
+                predictions, banks["val"]["targets"], training["targets"], args.resolution, 0.1, names
+            )
             report["history"].append({"step": step, "validation": scores, "loss": float(loss.item())})
             report["completed_steps"] = step
             save_report(directory, report)
@@ -240,9 +253,15 @@ def main(argv=None):
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--width", type=int, default=24)
-    p.add_argument("--grid", type=int, default=8)
+    p.add_argument("--grid", type=int, default=8, help="Readout pooling grid; 1 is a GAP readout")
+    p.add_argument(
+        "--readout-channels", type=int, default=4, help="Channels pooled by the readout (widen for the GAP control)"
+    )
+    p.add_argument(
+        "--magnitude-head", action="store_true", help="Also regress |sulcal amplitude| directly (GAP positive control)"
+    )
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--lesion-weight", type=float, default=1.0)
+    p.add_argument("--lesion-weight", type=float, default=1.0, help="0 trains features for regression only")
     p.add_argument("--regression-weight", type=float, default=1.0)
     p.add_argument("--eval-every", type=int, default=500)
     p.add_argument("--log-every", type=int, default=100)
@@ -253,17 +272,29 @@ def main(argv=None):
     args = p.parse_args(argv)
     cfg = load_settings(args.run_dir)
     args.resolution = cfg["res"]
-    if min(args.steps, args.batch_size, args.test_samples, args.eval_every, args.log_every, args.grid) < 1:
-        p.error("Step, sample, batch, and grid counts must be positive")
+    if (
+        min(
+            args.steps,
+            args.batch_size,
+            args.test_samples,
+            args.eval_every,
+            args.log_every,
+            args.grid,
+            args.readout_channels,
+        )
+        < 1
+    ):
+        p.error("Step, sample, batch, grid, and readout-channel counts must be positive")
     if cfg["res"] % 2 or args.grid > cfg["res"] // 2 or args.batch_size > cfg["num_train_samples"]:
         p.error("Need even resolution, grid <= res/2, and batch <= training cohort")
     if (
         args.width < 4
         or args.width % 4
         or not np.isfinite([args.lr, args.lesion_weight, args.regression_weight]).all()
-        or min(args.lr, args.lesion_weight, args.regression_weight) <= 0
+        or min(args.lr, args.regression_weight) <= 0
+        or args.lesion_weight < 0
     ):
-        p.error("Need width divisible by four and finite positive learning rate/loss weights")
+        p.error("Need width divisible by four, positive learning rate/regression weight, nonnegative lesion weight")
     if min(cfg["num_train_samples"], cfg["num_val_samples"], args.test_samples) < 2:
         p.error("Each split needs at least two subjects")
     device = select_encoder_device(args.device)
@@ -274,7 +305,7 @@ def main(argv=None):
         protocol="Supervised from scratch, fixed final step, training-only target scaling, independent final test",
         selection="final_step",
         view=args.view,
-        regression_targets=list(REGRESSION_NAMES),
+        regression_targets=list(regression_names(args.magnitude_head)),
     )
     save_report(args.out_dir, report)
     try:
@@ -287,11 +318,12 @@ def main(argv=None):
             )
         }
         report["cohorts"] = {split: bank["metadata"] for split, bank in banks.items()}
-        scaler = target_scaler(banks["train"]["targets"])
+        names = regression_names(args.magnitude_head)
+        scaler = target_scaler(banks["train"]["targets"], names)
         report["target_scaler"] = {"mean": scaler[0].tolist(), "std": scaler[1].tolist(), "fit_split": "train"}
         # Rendering can change global RNGs. Seed AFTER all data creation.
         torch.manual_seed(args.seed)
-        model = TargetControl(args.width, args.grid).to(device)
+        model = TargetControl(args.width, args.grid, args.readout_channels, len(names)).to(device)
         report["parameters"] = sum(p.numel() for p in model.parameters())
         train(model, banks, args, device, scaler, args.out_dir, report)
         torch.save(
@@ -304,7 +336,7 @@ def main(argv=None):
         )
         predictions = predict(model, banks["test"], device, args.batch_size, cfg["res"], scaler)
         report["test"] = score_predictions(
-            predictions, banks["test"]["targets"], banks["train"]["targets"], cfg["res"], 0.1
+            predictions, banks["test"]["targets"], banks["train"]["targets"], cfg["res"], 0.1, names
         )
         np.savez_compressed(args.out_dir / "test_predictions.npz", truth=banks["test"]["targets"], **predictions)
         save_csv(args.out_dir / "test_scores.csv", report["test"]["factors"])

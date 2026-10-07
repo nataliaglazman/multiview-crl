@@ -118,7 +118,7 @@ map as the tissues: T1 contrast becomes `0.4*gain` (0.28 to 0.52) and FLAIR
 `0.6*gain` (0.42 to 0.78). In the raw render only the lesion and its one-voxel
 blur ring change. The `fixed_reference` normalization constants include lesion
 voxels, so they shift by about 0.2%. This changes the training data and needs a
-new run from scratch. Only this encoder-only trainer has the flag.
+new run from scratch. The VQ-VAE trainer has the same flag.
 
 Add the flag to the command that trained the fixed-intensity control. The run ID
 gains `_lesionstyled`, so the two never share a directory:
@@ -144,6 +144,90 @@ training-time spatial monitor and every `eval/encoder` audit. Runs saved before
 the flag existed evaluate as `fixed`. Compare against the fixed-intensity run at
 matched seeds, batch size, steps and lesion radius, with the lesion-movement and
 contrast audits.
+
+## Identifiable ventricle
+
+The VQ-VAE recipe (`experiments/synthetic_causal.yaml`) renders the ventricle with
+`synthetic_identifiable_ventricle: true`, but encoder-only runs before this flag
+always used the default ventricle. So ventricle numbers compared across the two
+model families describe different ventricles. `--synthetic-identifiable-ventricle`
+gives the encoder-only trainer the VQ-VAE ventricle:
+
+| | default | `--synthetic-identifiable-ventricle` |
+|---|---|---|
+| radius | 0.10–0.20 | 0.12–0.28 |
+| shape | read off the deformed radius, so L–R asymmetry, temporal atrophy and the sulcal corrugation reshape it | read off the undeformed radius; no other factor moves it |
+| fissure | ventricle CSF (same label and intensity) | its own label, at intensity 0.3 in both views |
+
+This changes the training data and needs a new run. The run ID gains `_identvent`:
+
+```bash
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --synthetic-identifiable-ventricle --check
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --synthetic-identifiable-ventricle
+python scripts/generate_conv_patch_slurm.py --synthetic-identifiable-ventricle
+sbatch experiments/generated/encoder_conv_mlp_patch_identvent_s42.slurm_bio.sh
+```
+
+The setting is saved in `settings.json` and restored by `score_checkpoint`, the
+training-time spatial monitor and the `eval/encoder` audits, which used to refuse
+it. Runs saved before the flag existed evaluate with the default ventricle.
+
+## Sulcal widening as atrophy
+
+By default `sulcal_widening` (`z_content[8]`) is the signed depth of a fixed
+zero-mean corrugation, `sin(12x)sin(12y)sin(12z)`, of the cortical surfaces. Its
+image change cancels under spatial averaging, so a GAP readout cannot see it: an
+untrained encoder's GAP reads it at R² −0.03. It also moves the brain outline and
+the white matter, and the ventricle unless the ventricle flag above is set.
+
+`--synthetic-sulcal-mode atrophy` makes the factor what sulcal widening is in
+atrophy: more CSF in the sulci. The corrugation is switched off, and grey matter
+inside fixed radial clefts becomes CSF:
+
+- A cleft is every direction within an angular half-width of the zero set of a
+  gyroid (frequency 9) on the direction sphere. All clefts share one width, run
+  radially and scale with the brain.
+- The half-width is `0.031 + 0.019·tanh(z8)` rad, 0.5 to 2 voxels across at the
+  pial surface at resolution 64. Sulcal CSF goes from 7% to 28% of the cortex,
+  linear in `tanh(z8)` and independent of brain size.
+- Clefts reach 0.8 of the way from the pial surface to the white matter, so grey
+  matter lines their floor.
+- Only grey-matter labels change. The brain outline, white matter, ventricles,
+  fissure and lesion are identical at every `z8`. Wider clefts darken both views
+  (CSF is darker than grey matter in T1 and FLAIR), so every change has one sign.
+
+On 400 validation subjects of the clean encoder recipe, an untrained encoder's GAP
+reads the factor at R² 0.73 instead of −0.03. The other factors read the same as
+before: brain size 0.94, thickness 0.86 → 0.85, ventricle 0.36 → 0.38. Caveats:
+
+- Tissue volumes alone no longer identify the ventricle (R² 0.90 → 0.00). Four
+  factors now move three volumes, and only location separates sulcal from
+  ventricular CSF. A conv encoder sees location, but a probe that pools without
+  spatial context mixes the two.
+- It adds a factor that is easy to read at GAP. Easy global factors suppress the
+  lesion under InfoNCE, so lesion recovery may get harder.
+- Every subject has the same cleft pattern, the white matter does not fold, and
+  clefts narrower than a voxel render as dotted lines.
+
+In this mode the `sulcal_amplitude` and `sulcal_magnitude` evaluation targets both
+hold the cleft half-width; `sulcal_widening` is `z8` as before. The run ID gains
+`_sulcalatrophy`:
+
+```bash
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --synthetic-sulcal-mode atrophy --check
+bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
+  --synthetic-sulcal-mode atrophy
+python scripts/generate_conv_patch_slurm.py --synthetic-sulcal-mode atrophy
+sbatch experiments/generated/encoder_conv_mlp_patch_sulcalatrophy_s42.slurm_bio.sh
+```
+
+The two flags are independent and can be combined. Settings are restored the same
+way as above, and runs saved before the flag existed evaluate as `corrugation`.
+Only the encoder-only trainer has this flag. Compare against the corrugation run
+at matched seeds, batch size and steps.
 
 ## Foreground-masked patch loss
 

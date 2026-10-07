@@ -165,6 +165,13 @@ def parse_args() -> argparse.ArgumentParser:
         "0.4*gain). fixed reproduces previous data/checkpoints, whose T1 lesion nearly vanishes at low gain.",
     )
     parser.add_argument(
+        "--synthetic-shared-gain-bias",
+        action="store_true",
+        help="Give both views the same acquisition gain and bias (z_style_v2[:2] = z_style_v1[:2]); "
+        "noise sigma and the bias field stay per view. Gain/bias then become per-subject factors "
+        "shared across views, i.e. content-like, rather than view-specific style.",
+    )
+    parser.add_argument(
         "--synthetic-cortex-parameterization",
         type=str,
         default="additive",

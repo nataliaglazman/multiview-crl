@@ -259,6 +259,73 @@ class EncoderTargetFollowupTests(unittest.TestCase):
             self.assertTrue((out / "model.pt").is_file())
             self.assertEqual(len(report["test"]["factors"]), 9)
 
+    def test_gap_control_regression_only_with_magnitude_head(self):
+        model = control.TargetControl(4, 1, readout_channels=8, outputs=len(control.MAGNITUDE_NAMES))
+        self.assertEqual(model.regression[4].in_features, 8)
+        self.assertEqual(model(torch.zeros(2, 1, 8, 8, 8))[1].shape, (2, 6))
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            run = Path(tmp) / "original"
+            run.mkdir()
+            (run / "settings.json").write_text(json.dumps(config()))
+            out = Path(tmp) / "gap"
+            control.main(
+                [
+                    *("--run-dir", str(run), "--out-dir", str(out), "--view", "t1", "--device", "cpu"),
+                    *("--steps", "2", "--width", "4", "--grid", "1", "--batch-size", "4", "--test-samples", "10"),
+                    *("--readout-channels", "8", "--lesion-weight", "0", "--magnitude-head"),
+                ]
+            )
+            report = json.loads((out / "report.json").read_text())
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(report["regression_targets"][-1], "sulcal_magnitude")
+        self.assertEqual(len(report["target_scaler"]["mean"]), 6)
+        rows = [row["target"] for row in report["test"]["factors"]]
+        self.assertIn("sulcal_magnitude_head", rows)
+        self.assertIn("sulcal_magnitude", rows)
+        self.assertEqual(len(rows), len(set(rows)))
+
+    def test_gap_control_rejects_negative_lesion_weight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "settings.json").write_text(json.dumps(config()))
+            out = Path(tmp) / "never"
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                control.main(["--run-dir", tmp, "--out-dir", str(out), "--view", "t1", "--lesion-weight", "-1"])
+            self.assertFalse(out.exists())
+
+    def test_gap_control_arms_differ_only_in_pooling_and_label_order(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            slurm.main(["--output-dir", tmp])
+            script = Path(tmp) / "encoder_gap_controls_s42.slurm_bio.sh"
+            env = {k: v for k, v in os.environ.items() if not k.startswith("SLURM_")}
+            previews = {}
+            for idx in range(6):
+                text = subprocess.check_output(
+                    ["bash", str(script), "--dry-run"], env={**env, "ENCODER_TASK_ID": str(idx)}, text=True
+                )
+                previews[idx] = shlex.split(text)
+        for idx, tokens in previews.items():
+            view, arm = ("t1", "flair")[idx // 3], ("gap", "grid8", "gap_shuffled")[idx % 3]
+            self.assertEqual(tokens[tokens.index("--view") + 1], view)
+            self.assertEqual(tokens[tokens.index("--grid") + 1], "8" if arm == "grid8" else "1")
+            self.assertEqual("--shuffle-targets" in tokens, arm == "gap_shuffled")
+            self.assertEqual(tokens[tokens.index("--lesion-weight") + 1], "0")
+            self.assertIn("--magnitude-head", tokens)
+            self.assertEqual(tokens[tokens.index("--steps") + 1], "6000")
+        strip = {"--grid", "--shuffle-targets", "--out-dir", "--view"}
+
+        def shared(tokens):
+            kept, skip = [], False
+            for token in tokens:
+                if skip:
+                    skip = False
+                elif token in strip:
+                    skip = token != "--shuffle-targets"
+                else:
+                    kept.append(token)
+            return kept
+
+        self.assertEqual(len({tuple(shared(tokens)) for tokens in previews.values()}), 1)
+
     def test_slurm_arrays_preview_all_tasks_and_validate_indices(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             slurm.main(["--output-dir", tmp])
@@ -267,6 +334,7 @@ class EncoderTargetFollowupTests(unittest.TestCase):
             for kind, count, module in (
                 ("spatial_probes", 3, "eval.encoder.encoder_spatial_target_audit"),
                 ("target_controls", 2, "training.encoder_target_control"),
+                ("gap_controls", 6, "training.encoder_target_control"),
             ):
                 script = Path(tmp) / f"encoder_{kind}_s42.slurm_bio.sh"
                 subprocess.run(["bash", "-n", str(script)], check=True)

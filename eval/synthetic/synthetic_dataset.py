@@ -125,6 +125,34 @@ def sample_gp_field(grid, lengthscale, generator, *, prior="gp", dof=8.0, tau_se
 # full amplitude.
 CLEAN_NUISANCE_SCALE = 0.0
 
+# Sulcal widening as atrophy (sulcal_mode="atrophy"). A cleft is every direction within an
+# angular half-width of the zero set of a gyroid on the direction sphere, so all clefts share one
+# width, run radially and scale with the brain. The half-width is 0.031 +- 0.019 rad, 0.5-2 voxels
+# across at the pial surface at res 64, which turns 7-28% of the cortex into sulcal CSF. Clefts
+# reach 0.8 of the way from the pial surface to the white matter, leaving a grey-matter floor.
+SULCAL_CLEFT_FREQUENCY = 9.0
+SULCAL_CLEFT_HALF_WIDTH = (0.031, 0.019)
+SULCAL_CLEFT_DEPTH = 0.8
+
+
+def sulcal_cleft_distance(coords, frequency=SULCAL_CLEFT_FREQUENCY):
+    """First-order angular distance (radians) from each voxel's direction to the gyroid's zero set."""
+    u = coords / coords.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    s = u * frequency
+    x, y, z = s[..., 0], s[..., 1], s[..., 2]
+    field = torch.sin(x) * torch.cos(y) + torch.sin(y) * torch.cos(z) + torch.sin(z) * torch.cos(x)
+    gradient = torch.stack(
+        (
+            torch.cos(x) * torch.cos(y) - torch.sin(z) * torch.sin(x),
+            torch.cos(y) * torch.cos(z) - torch.sin(x) * torch.sin(y),
+            torch.cos(z) * torch.cos(x) - torch.sin(y) * torch.sin(z),
+        ),
+        -1,
+    )
+    # Only motion along the sphere changes a direction, so the radial part of the gradient is dropped.
+    tangential = gradient - (gradient * u).sum(-1, keepdim=True) * u
+    return field.abs() / (frequency * tangential.norm(dim=-1)).clamp_min(1e-6)
+
 
 class PseudoMRIRenderer(nn.Module):
     def __init__(
@@ -147,6 +175,7 @@ class PseudoMRIRenderer(nn.Module):
         lesion_target="position",
         lesion_count=4,
         lesion_t1_value=0.4,
+        sulcal_mode="corrugation",
     ):
         super().__init__()
         self.res = res
@@ -224,11 +253,20 @@ class PseudoMRIRenderer(nn.Module):
         # tissue label so "total CSF" is no longer fissure-dominated. Default False =
         # byte-identical to prior runs. See render_structure / render_modality.
         self.identifiable_ventricle = identifiable_ventricle
+        # What z_content[8] does. "corrugation" (default, legacy) is the signed depth of a fixed
+        # zero-mean corrugation of the cortical surfaces, which cancels under spatial averaging.
+        # "atrophy" widens fixed sulcal clefts, turning grey matter into CSF, so every change has
+        # the same sign; the brain outline, white matter, ventricles and fissure do not move.
+        if sulcal_mode not in ("corrugation", "atrophy"):
+            raise ValueError(f"sulcal_mode must be corrugation|atrophy, got {sulcal_mode!r}")
+        self.sulcal_mode = sulcal_mode
         grid = torch.linspace(-1, 1, res)
         self.register_buffer(
             "coords",
             torch.stack(torch.meshgrid(grid, grid, grid, indexing="ij"), dim=-1),
         )
+        if sulcal_mode == "atrophy":
+            self.register_buffer("cleft_distance", sulcal_cleft_distance(self.coords), persistent=False)
 
     def _seeded_noise(self, scale, gen, device):
         n = torch.randn(
@@ -389,7 +427,8 @@ class PseudoMRIRenderer(nn.Module):
             [6]  temporal atrophy — shrinks a compact bilateral inferior–lateral
                                    temporal region (hippocampal volume proxy)
             [7]  L–R asymmetry   — differential atrophy across hemispheres
-            [8]  sulcal widening  — depth of a deterministic gyral corrugation
+            [8]  sulcal widening  — depth of a deterministic gyral corrugation, or with
+                                   sulcal_mode="atrophy" the width of fixed sulcal clefts
 
         z_deformation: small (K, K, K) grid → trilinear-upsampled into a random
             per-sample gyral corrugation. Pure nuisance: zeroed in clean mode.
@@ -494,10 +533,12 @@ class PseudoMRIRenderer(nn.Module):
         # corrugation whose depth is set by z_content[8]. Unlike the nuisance
         # field above it does not vanish in clean-content mode, so it stays a
         # recoverable named factor. Sign flips the gyral phase (map stays
-        # injective); |z| sets sulcal depth → surface roughness.
-        gyral_pattern = torch.sin(12 * x_coords) * torch.sin(12 * y_coords) * torch.sin(12 * z_coords)
-        sulcal_amp = _sq(z_content[8]) * _amp(8, 0.06) * self.content_scale
-        deformed_dist = deformed_dist + gyral_pattern * sulcal_amp
+        # injective); |z| sets sulcal depth → surface roughness. sulcal_mode="atrophy"
+        # replaces it with the clefts applied to the tissue labels below.
+        if self.sulcal_mode == "corrugation":
+            gyral_pattern = torch.sin(12 * x_coords) * torch.sin(12 * y_coords) * torch.sin(12 * z_coords)
+            sulcal_amp = _sq(z_content[8]) * _amp(8, 0.06) * self.content_scale
+            deformed_dist = deformed_dist + gyral_pattern * sulcal_amp
 
         # Temporal-lobe atrophy (z_content[6]): shrink the WM/GM boundary inside a
         # compact, BILATERAL region over the (inferior, lateral, mid-A/P) temporal
@@ -552,6 +593,17 @@ class PseudoMRIRenderer(nn.Module):
         # CSF from fissure CSF. Otherwise "total CSF" tracks the brain-size-driven
         # fissure sheet, not the ventricle signal (see render_modality's 5th LUT entry).
         tissue_map[fissure_mask] = 4 if self.identifiable_ventricle else 1
+
+        # Sulcal widening as atrophy: grey matter inside the fixed clefts becomes CSF, and
+        # z_content[8] sets their angular half-width. Depth runs from 0 at the pial surface to
+        # 1 at the white matter, and the clefts stop at SULCAL_CLEFT_DEPTH, so grey matter
+        # lines their floor. Only GM labels change, so the lesion placement below is unaffected.
+        if self.sulcal_mode == "atrophy":
+            mid, half = SULCAL_CLEFT_HALF_WIDTH
+            half_width = (mid + _sq(z_content[8]) * _amp(8, half) * self.content_scale).clamp_min(0.0)
+            depth = (radii_gm - deformed_dist) / (radii_gm - radii_wm).clamp_min(1e-6)
+            cleft = (self.cleft_distance < half_width) & (depth < SULCAL_CLEFT_DEPTH)
+            tissue_map[(tissue_map == 3) & cleft] = 1
 
         # Sphere lesions: wm_interior uses the final tissue labels, avoiding CSF,
         # fissure and cortex. Legacy placement uses only the geometric WM envelope
@@ -786,6 +838,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         field_tp_dof=8.0,
         field_scale=1.0,
         identifiable_ventricle=False,
+        sulcal_mode="corrugation",
         lesion_mode="sphere",
         lesion_lengthscale=0.4,
         lesion_sharpness=10.0,
@@ -802,9 +855,11 @@ class Synthetic3DDisentanglementDataset(Dataset):
         lesion_target="position",
         lesion_count=4,
         lesion_t1_value=0.4,
+        shared_gain_bias=False,
     ):
         super().__init__()
         self.num_samples = num_samples
+        self.shared_gain_bias = shared_gain_bias
         self.identifiable_ventricle = identifiable_ventricle
         self.res = res
         self.mode = mode
@@ -940,6 +995,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 style_scale=style_scale,
                 content_scale=content_scale,
                 identifiable_ventricle=identifiable_ventricle,
+                sulcal_mode=sulcal_mode,
                 lesion_mode=lesion_mode,
                 lesion_sharpness=lesion_sharpness,
                 lesion_threshold=lesion_threshold,
@@ -1224,6 +1280,12 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 field_lengthscales = torch.tensor([ls_def, ls_fis], dtype=torch.float32)
         z_style_v1 = torch.randn(self.n_style, generator=sample_gen)
         z_style_v2 = torch.randn(self.n_style, generator=sample_gen)
+        if self.shared_gain_bias:
+            # Both views get view 1's gain (z_style[0]) and bias (z_style[1]); noise sigma and
+            # the bias field stay per view. Overwritten after the draw so every other latent
+            # matches the unshared generator for the same seed.
+            z_style_v2 = z_style_v2.clone()
+            z_style_v2[:2] = z_style_v1[:2]
         if self.lesion_target == "burden":
             # Drawn last, so every other latent matches position mode for the same seed.
             z_lesion = torch.rand(self.lesion_count, 3, generator=sample_gen)

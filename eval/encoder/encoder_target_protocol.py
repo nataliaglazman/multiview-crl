@@ -11,6 +11,7 @@ import torch
 from eval.lesion.checkpoint_lesion_analysis import json_safe
 from eval.metrics.dci import CONTENT_FACTOR_NAMES
 from eval.protocol.score_checkpoint import make_dataset
+from eval.synthetic.synthetic_dataset import SULCAL_CLEFT_HALF_WIDTH
 
 VIEWS = ("t1", "flair")
 TARGETS = (*CONTENT_FACTOR_NAMES, "centroid_x", "centroid_y", "centroid_z", "sulcal_amplitude", "sulcal_magnitude")
@@ -68,7 +69,6 @@ def dataset(cfg, count, split):
         "synthetic_content_prior": "normal",
         "synthetic_content_squash": "auto",
         "synthetic_content_amp_scale": None,
-        "synthetic_identifiable_ventricle": False,
         "synthetic_cortex_parameterization": "additive",
         "synthetic_center_local_deformations": False,
     }
@@ -81,8 +81,10 @@ def dataset(cfg, count, split):
 
 
 def sample_targets(inner, latents):
-    """Original nine controls, physical centroid, and signed/absolute corrugation amplitude.
+    """Original nine controls, physical centroid, and the sulcal factor's physical size.
 
+    The size is the signed corrugation amplitude and its magnitude, or under
+    sulcal_mode="atrophy" the cleft half-width, which is positive, so both columns hold it.
     No target is inferred from a model or used to pick a crop. Lesion support is
     returned for the explicitly supervised control's loss only.
     """
@@ -104,7 +106,11 @@ def sample_targets(inner, latents):
     if squash not in ("tanh", "clamp", "none"):
         raise ValueError(f"Unknown content squash: {squash}")
     amp_scale = 1.0 if r.content_amp_scale is None else r.content_amp_scale[8]
-    amplitude = value * (0.06 * r.content_scale * amp_scale)
+    if r.sulcal_mode == "atrophy":
+        mid, half = SULCAL_CLEFT_HALF_WIDTH
+        amplitude = (mid + value * (half * r.content_scale * amp_scale)).clamp_min(0.0)
+    else:
+        amplitude = value * (0.06 * r.content_scale * amp_scale)
     target = torch.cat((z, centroid, amplitude.reshape(1), amplitude.abs().reshape(1))).numpy()
     if not np.isfinite(target).all():
         raise ValueError("Non-finite targets")

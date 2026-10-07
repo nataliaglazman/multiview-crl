@@ -34,6 +34,7 @@ STORE_TRUE = {
     "lesion_localization_eval",
     "no_separate_encoders",
     "synthetic_clean_content",
+    "synthetic_identifiable_ventricle",
     "synthetic_causal",
     "synthetic_hierarchical_content",
     "no_cuda",

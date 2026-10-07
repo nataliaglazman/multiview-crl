@@ -99,6 +99,11 @@ def make_options(args):
     for key in ("synthetic_lesion_target", "synthetic_lesion_count", "synthetic_lesion_t1_value"):
         if getattr(args, key, None) is not None:
             options[key] = getattr(args, key)
+    if getattr(args, "synthetic_identifiable_ventricle", None):
+        options["synthetic_identifiable_ventricle"] = True
+    sulcal_mode = getattr(args, "synthetic_sulcal_mode", None)
+    if sulcal_mode is not None:
+        options["synthetic_sulcal_mode"] = sulcal_mode
     if getattr(args, "patch_foreground_mask", None):
         options["patch_foreground_mask"] = True
     if getattr(args, "patch_foreground_thresh", None) is not None:
@@ -222,6 +227,10 @@ def make_options(args):
             suffix += f"{options['synthetic_lesion_count']}"
     if options.get("synthetic_lesion_t1_value", 0.4) != 0.4:
         suffix += f"_t1les{options['synthetic_lesion_t1_value']:g}"
+    if options.get("synthetic_identifiable_ventricle", False) != recipe.get("synthetic_identifiable_ventricle", False):
+        suffix += "_identvent"
+    if options.get("synthetic_sulcal_mode", "corrugation") != recipe.get("synthetic_sulcal_mode", "corrugation"):
+        suffix += f"_sulcal{options['synthetic_sulcal_mode']}"
     options["model_id"] = args.model_id or f"{args.variant}_s{args.seed}_{options['device']}{suffix}"
     if Path(options["model_id"]).name != options["model_id"] or options["model_id"] in (".", ".."):
         raise ValueError("--model-id must be a directory name, not a path")
@@ -435,6 +444,19 @@ def main(argv=None):
         "--synthetic-lesion-t1-value",
         type=float,
         help="T1 lesion base intensity on the tissue LUT (adds _t1les<value> to the run ID); trainer default 0.4",
+    )
+    parser.add_argument(
+        "--synthetic-identifiable-ventricle",
+        action="store_true",
+        default=None,
+        help="The VQ-VAE recipe's larger, undeformed ventricle and separately labelled fissure; adds _identvent "
+        "to the run ID",
+    )
+    parser.add_argument(
+        "--synthetic-sulcal-mode",
+        choices=("corrugation", "atrophy"),
+        help="atrophy widens fixed sulcal clefts instead of the zero-mean corrugation (adds _sulcalatrophy to the "
+        "run ID); default: the recipe's (trainer default corrugation)",
     )
     parser.add_argument(
         "--downscale-factor",

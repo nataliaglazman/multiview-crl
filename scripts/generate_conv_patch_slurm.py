@@ -38,6 +38,18 @@ def main(argv=None):
         default="fixed",
         help="styled puts the lesion on the acquisition gain/bias map; script and run names gain _lesionstyled",
     )
+    parser.add_argument(
+        "--synthetic-identifiable-ventricle",
+        action="store_true",
+        help="The VQ-VAE recipe's larger, undeformed ventricle; script and run names gain _identvent",
+    )
+    parser.add_argument(
+        "--synthetic-sulcal-mode",
+        choices=("corrugation", "atrophy"),
+        default="corrugation",
+        help="atrophy widens fixed sulcal clefts instead of the zero-mean corrugation; script and run names gain "
+        "_sulcalatrophy",
+    )
     parser.add_argument("--cluster-config", type=Path, default=ROOT / "experiments/cluster/slurm_bio.yaml")
     parser.add_argument("--results-dir", default="/scratch/users/k24058220/encoder_patch_slurm_bio")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "experiments/generated")
@@ -63,6 +75,10 @@ def main(argv=None):
         tag += f"_{args.norm_type}norm"
     if args.synthetic_lesion_intensity != "fixed":
         tag += f"_lesion{args.synthetic_lesion_intensity}"
+    if args.synthetic_identifiable_ventricle:
+        tag += "_identvent"
+    if args.synthetic_sulcal_mode != "corrugation":
+        tag += f"_sulcal{args.synthetic_sulcal_mode}"
     name += tag
     options = slurm.ablations.training_options(
         config, {"reference": "conv", "overrides": {"conv_readout": "mlp"}}, name, args.seed, args.results_dir
@@ -78,6 +94,10 @@ def main(argv=None):
         options["norm_type"] = args.norm_type
     if args.synthetic_lesion_intensity != "fixed":
         options["synthetic_lesion_intensity"] = args.synthetic_lesion_intensity
+    if args.synthetic_identifiable_ventricle:
+        options["synthetic_identifiable_ventricle"] = True
+    if args.synthetic_sulcal_mode != "corrugation":
+        options["synthetic_sulcal_mode"] = args.synthetic_sulcal_mode
     command = shlex.join(["python", "scripts/generate_conv_patch_slurm.py", *arguments])
     script = slurm.render_script(
         config, options, slurm.load_resources(args.cluster_config), f"encoder-conv-patch{tag}-s{args.seed}", command

@@ -680,6 +680,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_lesion_threshold=1.0,
         synthetic_wm_softness=0.0,
         synthetic_identifiable_ventricle=False,
+        synthetic_sulcal_mode="corrugation",
         synthetic_content_prior="normal",
         synthetic_content_squash="auto",
         synthetic_content_amp_scale=None,
@@ -692,6 +693,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_lesion_count=4,
         synthetic_lesion_t1_value=0.4,
         synthetic_style_alignment_pairs=False,
+        synthetic_shared_gain_bias=False,
         **kwargs,
     ):
         super().__init__()
@@ -756,6 +758,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             lesion_threshold=synthetic_lesion_threshold,
             wm_softness=synthetic_wm_softness,
             identifiable_ventricle=synthetic_identifiable_ventricle,
+            sulcal_mode=synthetic_sulcal_mode,
             content_prior=synthetic_content_prior,
             content_squash=synthetic_content_squash,
             content_amp_scale=synthetic_content_amp_scale,
@@ -767,6 +770,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             lesion_target=synthetic_lesion_target,
             lesion_count=synthetic_lesion_count,
             lesion_t1_value=synthetic_lesion_t1_value,
+            shared_gain_bias=synthetic_shared_gain_bias,
         )
         if synthetic_normalize in ("per_sample", "shared") and synthetic_n_style > 0:
             import warnings

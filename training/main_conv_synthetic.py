@@ -352,6 +352,21 @@ def parse_args(argv=None):
         action="store_true",
         help="Zero the unlabeled deformation/fissure nuisance so the named content factors dominate",
     )
+    p.add_argument(
+        "--synthetic-identifiable-ventricle",
+        action="store_true",
+        help="The VQ-VAE recipe's ventricle: radius 0.12-0.28 instead of 0.10-0.20, read off the undeformed "
+        "radius so no other factor reshapes it, and a fissure with its own label and intensity instead of "
+        "ventricle CSF. Off reproduces old encoder-only runs",
+    )
+    p.add_argument(
+        "--synthetic-sulcal-mode",
+        choices=("corrugation", "atrophy"),
+        default="corrugation",
+        help="What sulcal_widening (z_content[8]) does. corrugation reproduces old runs: the signed depth of a "
+        "fixed zero-mean corrugation, which cancels under GAP. atrophy widens fixed sulcal clefts, turning 7-28%% "
+        "of the cortex into CSF without moving the brain outline, white matter or ventricles",
+    )
     p.add_argument("--synthetic-style-scale", type=float, default=1.0)
     p.add_argument("--synthetic-content-scale", type=float, default=1.0)
     p.add_argument(
@@ -635,6 +650,8 @@ def make_dataset(args, mode, num_samples):
         synthetic_causal_noise_scale=args.synthetic_causal_noise_scale,
         synthetic_causal_nonlinearity=args.synthetic_causal_nonlinearity,
         synthetic_clean_content=args.synthetic_clean_content,
+        synthetic_identifiable_ventricle=getattr(args, "synthetic_identifiable_ventricle", False),
+        synthetic_sulcal_mode=getattr(args, "synthetic_sulcal_mode", "corrugation"),
         synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
         synthetic_lesion_radius=getattr(args, "synthetic_lesion_radius", 0.1),
         synthetic_lesion_intensity=getattr(args, "synthetic_lesion_intensity", "fixed"),
