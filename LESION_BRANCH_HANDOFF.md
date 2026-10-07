@@ -182,9 +182,14 @@ so the lesion loss trains the backbone too.
       thickness (0.33), with effective rank ~2.
     - In the encoder's 64-channel features, burden is 0.06 (T1) / 0.14 (FLAIR) untrained, and 0.00
       after 2,000 steps. Training removes it.
-    - This fits finding 8: the lesion is dark in T1 and bright in FLAIR, the encoders start
-      identical, and cross-view alignment first suppresses an anti-aligned response. The
-      ventricle is same-sign in both views.
+    - At first this looked like finding 8 (the lesion is dark in T1 and bright in FLAIR). That
+      reading is wrong for the global code.
+      - Grey matter also flips sign (T1 0.5 < WM 0.8; FLAIR 0.8 > WM 0.4), and thickness is learned
+        to 0.83.
+      - Arm B learns burden with the sign still flipped.
+      - The separate encoders absorb a sign flip. Polarity only bites where weights are shared
+        across views (the keypoint heads), and in patch alignment from identical initial encoders.
+      - What blocks burden is T1 visibility (finding 16).
     - In the full encoder-only recipe the ventricle reaches GAP R² 0.83 only by step ~8,000. So
       2,000 steps cannot say whether burden recovers the same way.
 16. **Lesion burden on the full recipe (10,000 steps, GroupNorm): the encoder carries it, the
@@ -533,10 +538,16 @@ ventricle size, which already works, and it is what ADNI measures (the UC Davis 
   - Tests: `tests/test_lesion_burden.py` (5).
 - **Constraints.** Needs `--synthetic-lesion-placement wm_interior`, and the lesion branch is not
   allowed with it.
-- **Where the option is restored.** The trainer's own evaluation and
-  `eval.protocol.score_checkpoint` restore it. Not yet: `main_multimodal`/`utils/config.py`,
-  `run_dci_synthetic`, `radial_factor_profile`, `plot_scaling_maps`, `view_difficulty`,
-  `generator_defects`. Those would rebuild position-mode data.
+- **Where the option is restored.**
+  - Restored: the trainer's own evaluation, `eval.protocol.score_checkpoint`, and
+    `run_dci_synthetic.build_synthetic_test_set`. The last one means
+    `eval.diagnostics.supervised_ceiling` too, which now takes `--view 1|2` (T1 or FLAIR) and
+    labels the burden dims correctly.
+  - Not yet restored: `main_multimodal`/`utils/config.py`, `radial_factor_profile`,
+    `plot_scaling_maps`, `view_difficulty`, `generator_defects`. Those would rebuild
+    position-mode data.
+- **`--downscale-factor`** (runner, conv only, power of 2; run ID gains `_ds<k>`) sets the
+  backbone's downsampling. At 2, a 4–6-voxel lesion spans 2–3 cells instead of ~1.
 - **First run (2,000 steps, LayerNorm), finding 15:** `lesion_burden` and `ventricle_size` both
   read about 0. Training removes the burden signal the untrained FLAIR features carried (0.14 →
   0.00).
@@ -566,6 +577,18 @@ ventricle size, which already works, and it is what ADNI measures (the UC Davis 
       confounded, because the dark side of WM is crowded with other tissues.
     - Neither learns it: suspect saturation.
   - Saturation is tested with a larger batch or harder negatives (not run; needs the PC).
+  - **Arm B at step 2,000 (CUDA), vs the 0.4 baseline at step 2,000 (MPS):**
+
+    | | lesion_burden | ventricle | brain | thickness | temporal | lr_asym | gain leak | loss | eff rank |
+    |---|---|---|---|---|---|---|---|---|---|
+    | 0.4 baseline | 0.00 | 0.39 | 0.90 | 0.84 | 0.14 | 0.87 | 0.03 | 1.74 | 3.40 |
+    | B (0.0) | **0.20** | 0.46 | 0.90 | 0.83 | 0.15 | 0.82 | **0.24** | 1.77 | 3.45 |
+
+    - Everything else tracks within ~0.05, so the burden gain is not a hardware artefact.
+    - Burden is learned with the sign still opposite to FLAIR. The baseline's failure was T1
+      contrast (too faint, close to GM), not polarity.
+    - The extra gain leak fits the arithmetic: T1 lesion contrast = −0.8·gain, so a burden
+      feature carries burden × gain.
 - Script for the encoder-channel probe: scratchpad `burden_gap_probe.py <run>`.
 
 ## Caveats

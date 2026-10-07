@@ -12,13 +12,15 @@ recover it — stop chasing it.
 
 Data config is taken from a run's settings.json (via ``load_run_args``) so the
 ceiling is measured on exactly the distribution that run trained/eval'd on
-(same seed, normalization, scales, clean_content, ...). Content factors and the
-view-1 style factors are predicted from the view-1 image; content is shared
-across views so a single view is the honest per-image ceiling.
+(same seed, normalization, scales, clean_content, lesion target and T1 lesion
+value, ...). Content factors and that view's style factors are predicted from
+one view's image (``--view 1`` T1, ``--view 2`` FLAIR). Content is shared across
+views, so a single view is the honest per-image ceiling, and comparing the two
+views shows which one carries a factor.
 
 Usage:
     python -m eval.diagnostics.supervised_ceiling --run-dir results/synthetic/<run> \
-        --num-samples 3000 --epochs 60 --device cuda
+        --num-samples 3000 --epochs 60 --device cuda [--view 2]
 """
 
 from __future__ import annotations
@@ -35,37 +37,39 @@ import torch.nn as nn
 from sklearn.metrics import r2_score
 from torch.utils.data import DataLoader, Subset
 
-from eval.metrics.dci import CONTENT_FACTOR_NAMES, STYLE_FACTOR_NAMES
+from eval.metrics.dci import CONTENT_FACTOR_NAMES, STYLE_FACTOR_NAMES, content_factor_names
 from eval.protocol.run_dci_synthetic import build_synthetic_test_set, load_run_args
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
-FACTOR_NAMES = list(CONTENT_FACTOR_NAMES) + list(STYLE_FACTOR_NAMES)
 N_CONTENT = len(CONTENT_FACTOR_NAMES)  # 9
 N_STYLE = len(STYLE_FACTOR_NAMES)  # 3
 
 
 class _ViewFactorDataset(torch.utils.data.Dataset):
-    """Wrap the synthetic dataset to yield ``(view-1 image, target vector)``.
+    """Wrap the synthetic dataset to yield ``(one view's image, target vector)``.
 
-    target = [z_content (9) | z_style_v1 (3)]. z_content indexes CONTENT_FACTOR_NAMES
-    directly (render_structure: 0=brain_size .. 8=sulcal_widening), and z_style_v1
-    indexes STYLE_FACTOR_NAMES directly (0=gain, 1=bias, 2=noise_sigma).
+    target = [z_content (9) | that view's z_style (3)]. z_content indexes the content
+    factor names directly (render_structure: 0=brain_size .. 8=sulcal_widening), and
+    z_style indexes STYLE_FACTOR_NAMES directly (0=gain, 1=bias, 2=noise_sigma).
     """
 
-    def __init__(self, base):
+    def __init__(self, base, view=1):
+        if view not in (1, 2):
+            raise ValueError(f"view must be 1 (T1) or 2 (FLAIR), got {view!r}")
         self.base = base
+        self.view = view
 
     def __len__(self):
         return len(self.base)
 
     def __getitem__(self, i):
         item = self.base[i]
-        x = item["image"][0]  # view 1, shape (1, D, H, W)
+        x = item["image"][self.view - 1]  # shape (1, D, H, W)
         gt = item["gt_latents"]
         zc = torch.as_tensor(gt["z_content"], dtype=torch.float32).flatten()[:N_CONTENT]
-        zs = torch.as_tensor(gt["z_style_v1"], dtype=torch.float32).flatten()[:N_STYLE]
+        zs = torch.as_tensor(gt[f"z_style_v{self.view}"], dtype=torch.float32).flatten()[:N_STYLE]
         # Right-pad defensively if a run used fewer components than the renderer names.
         if zc.numel() < N_CONTENT:
             zc = torch.cat([zc, torch.zeros(N_CONTENT - zc.numel())])
@@ -150,6 +154,7 @@ def main():
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--view", type=int, choices=(1, 2), default=1, help="Image to predict from: 1 = T1, 2 = FLAIR.")
     p.add_argument("--out", default=None, help="JSON output path (default: <run-dir>/supervised_ceiling.json).")
     cli = p.parse_args()
 
@@ -161,7 +166,9 @@ def main():
     device = torch.device(cli.device)
 
     args = load_run_args(cli.run_dir)
-    base = _ViewFactorDataset(build_synthetic_test_set(args, num_samples=cli.num_samples))
+    factor_names = content_factor_names(N_CONTENT, getattr(args, "synthetic_lesion_target", "position"))
+    factor_names += list(STYLE_FACTOR_NAMES)
+    base = _ViewFactorDataset(build_synthetic_test_set(args, num_samples=cli.num_samples), view=cli.view)
     train_idx, val_idx, test_idx = _run_split(base, cli.seed)
     logger.info("splits: train=%d val=%d test=%d", len(train_idx), len(val_idx), len(test_idx))
 
@@ -176,7 +183,7 @@ def main():
     t_mean = torch.tensor(y_train.mean(0), dtype=torch.float32, device=device)
     t_std = torch.tensor(y_train.std(0) + 1e-6, dtype=torch.float32, device=device)
 
-    model = _SmallCNN3D(n_out=len(FACTOR_NAMES), width=cli.width).to(device)
+    model = _SmallCNN3D(n_out=len(factor_names), width=cli.width).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cli.lr)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=4)
     loss_fn = nn.MSELoss()
@@ -216,24 +223,31 @@ def main():
 
     tp, tt = _predict(model, test_loader, device)
     tp = tp * t_std.cpu().numpy() + t_mean.cpu().numpy()
-    per_factor = {FACTOR_NAMES[j]: float(r2_score(tt[:, j], tp[:, j])) for j in range(tt.shape[1])}
+    per_factor = {factor_names[j]: float(r2_score(tt[:, j], tp[:, j])) for j in range(tt.shape[1])}
 
     print("\n" + "=" * 60)
-    print("  SUPERVISED CEILING  (test R^2, raw image -> factor)")
+    print(f"  SUPERVISED CEILING  (test R^2, raw {'T1' if cli.view == 1 else 'FLAIR'} image -> factor)")
     print("  high => factor IS in the pixels (representation gap is fixable)")
     print("  low  => factor not recoverable from the image (stop chasing)")
     print("=" * 60)
-    for kind, names in (("content", CONTENT_FACTOR_NAMES), ("style ", STYLE_FACTOR_NAMES)):
+    for kind, names in (("content", factor_names[:N_CONTENT]), ("style ", STYLE_FACTOR_NAMES)):
         for name in names:
             r2 = per_factor[name]
             bar = "#" * int(max(0.0, min(1.0, r2)) * 10)
             print(f"  {kind}  {name:18s} {r2:+.3f} [{bar:<10}]")
     print("=" * 60)
 
-    out_path = cli.out or os.path.join(cli.run_dir, "supervised_ceiling.json")
+    filename = "supervised_ceiling.json" if cli.view == 1 else f"supervised_ceiling_view{cli.view}.json"
+    out_path = cli.out or os.path.join(cli.run_dir, filename)
     with open(out_path, "w") as f:
         json.dump(
-            {"per_factor": per_factor, "val_mean_r2": best_val, "num_samples": cli.num_samples, "seed": cli.seed},
+            {
+                "per_factor": per_factor,
+                "val_mean_r2": best_val,
+                "num_samples": cli.num_samples,
+                "seed": cli.seed,
+                "view": cli.view,
+            },
             f,
             indent=2,
         )

@@ -69,6 +69,17 @@ class EncoderMpsRunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.make_options(runner_args(**bad))
 
+    def test_downscale_factor_overrides_the_conv_stride_and_the_run_id(self):
+        options, recipe = runner.make_options(runner_args(variant="conv_mlp", downscale_factor=2))
+        self.assertEqual(recipe["downscale_factor"], 4)
+        self.assertEqual(options["model_id"], "conv_mlp_s42_mps_ds2")
+        self.assertEqual(trainer_parse_args()(runner.comparison.cli_arguments(options)).downscale_factor, 2)
+        same, _ = runner.make_options(runner_args(variant="conv_mlp", downscale_factor=4))
+        self.assertEqual(same["model_id"], "conv_mlp_s42_mps")
+        for bad in (dict(variant="conv_mlp", downscale_factor=3), dict(downscale_factor=2)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                runner.make_options(runner_args(**bad))
+
     def test_shell_wrapper_previews_the_runner_command(self):
         subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
         env = {**os.environ, "ENCODER_PYTHON": sys.executable}

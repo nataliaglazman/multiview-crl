@@ -107,6 +107,13 @@ def make_options(args):
         options["norm_type"] = args.norm_type
     if options.get("norm_type", "group") != "group" and options["encoder_architecture"] != "conv":
         raise ValueError("--norm-type applies to the Conv encoder; ResNet variants use resnet_norm")
+    factor = getattr(args, "downscale_factor", None)
+    if factor is not None:
+        if options["encoder_architecture"] != "conv":
+            raise ValueError("--downscale-factor applies to the Conv encoder; ResNet variants use resnet_output_stride")
+        if factor < 1 or factor & (factor - 1):
+            raise ValueError("--downscale-factor must be a power of 2")
+        options["downscale_factor"] = factor
     weight = options.get("patch_loss_weight", 0.0)
     if not math.isfinite(weight) or weight < 0:
         raise ValueError("Patch loss weight must be finite and nonnegative")
@@ -203,6 +210,8 @@ def make_options(args):
                 suffix += f"_hinit{options['lesion_head_init']}"
     if options.get("norm_type", "group") != recipe.get("norm_type", "group"):
         suffix += f"_{options['norm_type']}norm"
+    if options.get("downscale_factor") != recipe.get("downscale_factor"):
+        suffix += f"_ds{options['downscale_factor']}"
     if options.get("synthetic_lesion_radius", 0.1) != recipe.get("synthetic_lesion_radius", 0.1):
         suffix += f"_lr{options['synthetic_lesion_radius']:g}"
     if options.get("synthetic_lesion_intensity", "fixed") != recipe.get("synthetic_lesion_intensity", "fixed"):
@@ -426,6 +435,12 @@ def main(argv=None):
         "--synthetic-lesion-t1-value",
         type=float,
         help="T1 lesion base intensity on the tissue LUT (adds _t1les<value> to the run ID); trainer default 0.4",
+    )
+    parser.add_argument(
+        "--downscale-factor",
+        type=int,
+        help="Conv encoder downsampling, a power of 2; default: the recipe's (4). Adds _ds<k> to the run ID. "
+        "2 keeps small lesions at 2-3 cells instead of ~1, at roughly 8x the backbone compute",
     )
     parser.add_argument(
         "--norm-type",

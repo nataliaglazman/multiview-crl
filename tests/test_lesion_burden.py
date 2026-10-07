@@ -207,5 +207,31 @@ class LesionT1ValueTests(unittest.TestCase):
         self.assertEqual(default["model_id"], "conv_mlp_s42_mps_burden")
 
 
+class BurdenEvaluationPathTests(unittest.TestCase):
+    def test_shared_test_set_and_supervised_ceiling_restore_the_burden_generator(self):
+        from eval.diagnostics.supervised_ceiling import _ViewFactorDataset
+        from eval.protocol.run_dci_synthetic import build_synthetic_test_set
+
+        settings = types.SimpleNamespace(
+            synthetic_res=64,
+            synthetic_clean_content=True,
+            synthetic_normalize="fixed_reference",
+            synthetic_lesion_placement="wm_interior",
+            synthetic_lesion_intensity="styled",
+            synthetic_lesion_target="burden",
+            synthetic_lesion_t1_value=0.0,
+        )
+        base = build_synthetic_test_set(settings, num_samples=2, cache=False, causal=False)
+        self.assertEqual(dci.dataset_lesion_target(base), "burden")
+        self.assertEqual(base._inner.renderer.lesion_t1_value, 0.0)
+        item = base[0]
+        for view in (1, 2):
+            x, y = _ViewFactorDataset(base, view=view)[0]
+            torch.testing.assert_close(x, item["image"][view - 1].float())
+            torch.testing.assert_close(y[9:], item["gt_latents"][f"z_style_v{view}"].float())
+        with self.assertRaisesRegex(ValueError, "view"):
+            _ViewFactorDataset(base, view=3)
+
+
 if __name__ == "__main__":
     unittest.main()
