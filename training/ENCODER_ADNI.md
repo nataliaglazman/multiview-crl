@@ -3,10 +3,39 @@
 `training/main_conv_synthetic.py --dataset-name ADNI_stripped_masks` trains the
 encoder-only models on paired T1/FLAIR volumes. These are the conv or ResNet-18
 backbones, with InfoNCE or Barlow Twins and the optional patch loss. The model and
-objective are unchanged; only the data, preprocessing and evaluation differ. Submit
-with `scripts/run_encoder_adni_slurm.sh` (`--dry-run` previews the command). Run
-`scripts/preflight_adni.py experiments/adni_real.yaml --cluster slurm --sample 8`
-first: it checks the same paths, size and split.
+objective are unchanged; only the data, preprocessing and evaluation differ.
+
+## Launching
+
+The recipe lives in `scripts/encoder_adni_recipe.sh`, and one wrapper per cluster
+sources it. The wrappers add only their cluster's paths (from
+`experiments/cluster/<cluster>.yaml`) and submission. Each recipe knob (`MODEL_ID`,
+`PATCH_WEIGHT`, `CONTENT_CHANNELS`, ...) is an environment variable, overridable at
+submit time. `tests/test_encoder_adni.py` checks that the two clusters' commands
+differ only in the five path flags.
+
+| Cluster | Preview | Submit |
+| --- | --- | --- |
+| CREATE (SLURM) | `bash scripts/run_encoder_adni_slurm.sh --dry-run` | `sbatch scripts/run_encoder_adni_slurm.sh` |
+| Run:ai | `bash scripts/run_encoder_adni_runai.sh --dry-run` | `bash scripts/run_encoder_adni_runai.sh` |
+
+The Run:ai job runs the checkout at `/nfs/home/nglazman/crl-2/multiview-crl` inside
+the training image. Sync the code there first. Runs land in that checkout's
+`results/encoder_adni/runs/<MODEL_ID>`, and the job is named after `MODEL_ID`.
+
+Run the data preflight first; it checks the same paths, size and split. On CREATE,
+run it in the training env on the login node:
+`python scripts/preflight_adni.py experiments/adni_real.yaml --cluster slurm --sample 8`.
+On Run:ai the host Python has none of the dependencies, so run it as a job in the
+training image and read the log from the host afterwards:
+
+```bash
+runai training standard submit preflight-adni-$(date +%H%M) \
+    --project nglazman --image aicregistry:5000/nglazman:multiview-crl --run-as-user \
+    --node-type A100 --gpu-devices-request 1 --cpu-core-request 16 --cpu-core-limit 32 \
+    --cpu-memory-request 64G --cpu-memory-limit 128G --host-path path=/nfs,mount=/nfs,readwrite \
+    --command -- bash -c "cd /nfs/home/nglazman/crl-2/multiview-crl && PYTHONPATH=. python scripts/preflight_adni.py experiments/adni_real.yaml --cluster runai --sample 8 > /nfs/home/nglazman/preflight_adni.log 2>&1"
+```
 
 ## What differs from a synthetic run
 
@@ -60,7 +89,7 @@ Both were measured on a fake tree, and both hold with and without `--cache`:
    masks are not transformed at all.
 
 `--asymmetric-aug` draws the intensity augmentation independently per view and
-re-applies the mask afterwards, which fixes both. The launcher turns it on. The
+re-applies the mask afterwards, which fixes both. The recipe turns it on. The
 spatial affine stays shared, which keeps the views registered for the patch loss.
 That affine's pose (small rotation and shear, up to 5% scaling) is still a shared
 nuisance. Content can absorb it, and it confounds any brain-size readout. This flag also differs from
@@ -80,7 +109,7 @@ one was built. The conv encoder at stride 4 then gives a **24×28×24** map.
 
 - Every grid must fit that map per axis; the parser checks this.
   `--train-patch-grid 8 8 8` fits, but 28/8 makes uneven, overlapping adaptive-pool
-  bins. `6 7 6` gives cubic 4×4×4-cell bins, and the launcher uses it with
+  bins. `6 7 6` gives cubic 4×4×4-cell bins, and the recipe uses it with
   `PATCH_WEIGHT=1`.
 - ResNet-18 at stride 32 rounds up to a 3×4×3 map: too coarse for patch work.
   Stride 8 gives 12×14×12.
@@ -106,7 +135,7 @@ WM-referenced normalisation (WhiteStripe) would be the fix; it is not implemente
 - About 1,170 training subjects make 36 steps per epoch, so 10k steps is about 275
   epochs. Overfitting is the expected failure mode. Watch the train-vs-held-out loss
   gap, and keep `val_loss` selection (or a prespecified `none` endpoint). The
-  launcher evaluates every 500 steps.
+  recipe evaluates every 500 steps.
 - Use `--tau 0.1` as in the recipe. The trainer's default of 1.0 learns much more
   slowly; on fake data it sat at chance for about 100 steps.
 
@@ -114,8 +143,9 @@ WM-referenced normalisation (WhiteStripe) would be the fix; it is not implemente
 
 Real data has no true `n_content`, and the shared T1/FLAIR content is far larger
 than 9 factors. `12 / 9` mirrors the synthetic recipe for comparability. A sweep is
-a natural first experiment (launcher header: 9 / 16 / 32), judged on held-out
-retrieval, the per-view diagnosis probes and effective rank, each against its floor.
+a natural first experiment (9 / 16 / 32; the SLURM wrapper's header has the loop).
+Judge it on held-out retrieval, the per-view diagnosis probes and effective rank,
+each against its floor.
 The loss reads only the content block, so **the style units receive no gradient**.
 They are an untrained readout of the trained backbone. The style rows, and anything
 that mixes them in (`separation_score`), describe that readout, not a learned style
@@ -137,8 +167,13 @@ keep it matched to the synthetic run you compare against. Separate per-view enco
   validation images in RAM, another 2.4 GB.
 - Augmentation runs on the CPU (an affine on four volumes per subject), so use
   `--num-workers 8` on the cluster. Each worker reseeds its augmentation from the
-  loader's generator, so runs still replay. On macOS keep 0: workers are spawned, and
-  each receives a pickled copy of the dataset, RAM cache included.
+  loader's generator, so runs still replay.
+- The worker count is part of the recipe, not just a throughput setting. Batches go
+  to workers in turn and each worker has its own augmentation stream, so a different
+  count trains on different augmentations. The recipe keeps 8 on both clusters,
+  although Run:ai allocates 16 cores.
+- On macOS keep 0 workers: they are spawned, and each receives a pickled copy of the
+  dataset, RAM cache included.
 - Do not pin `--cpu-threads 1` with `--num-workers 0`. Skip
   `--hash-training-inputs`: it hashes about 260 MB per step at batch 32. The batch
   order is still hashed.

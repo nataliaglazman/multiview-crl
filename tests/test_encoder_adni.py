@@ -1,8 +1,11 @@
-"""Encoder-only training on real paired volumes: the flag rules, a real loop on a fake ADNI tree, the cache."""
+"""Encoder-only training on real paired volumes: flag rules, a real loop on a fake ADNI tree, cache, launchers."""
 
 import contextlib
 import io
 import json
+import os
+import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,8 +18,10 @@ import numpy as np
 import torch
 
 from eval.protocol import score_checkpoint
+from scripts import launch
 from training import main_conv_synthetic as trainer
 
+ROOT = Path(__file__).resolve().parents[1]
 GROUPS = ("CN", "MCI", "AD")
 SHAPE = (16, 20, 16)
 REAL = ["--dataset-name", "ADNI_stripped_masks", "--dataroot", "/data", "--labels-path", "/labels.csv"]
@@ -213,6 +218,61 @@ class RealTrainingTests(unittest.TestCase):
                     trainer.seed_augmentation_worker(0)
             draws.append(torch.cat(dataset[0]["image"]).as_subclass(torch.Tensor))
         self.assertFalse(torch.equal(*draws))
+
+
+def dry_run(script, **env):
+    """A launcher's --dry-run command as tokens (the Run:ai one prints its submit command last)."""
+    output = subprocess.run(
+        ["bash", str(ROOT / "scripts" / script), "--dry-run"],
+        cwd=ROOT,
+        env={**os.environ, **env},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return shlex.split(output.strip().splitlines()[-1])
+
+
+def training_argv(tokens):
+    """The trainer's arguments; for Run:ai, from inside the container command after ``bash -c``."""
+    if tokens[0] == "runai":
+        tokens = shlex.split(tokens[tokens.index("-c") + 1])
+    return tokens[tokens.index("training.main_conv_synthetic") + 1 :]
+
+
+class LauncherTests(unittest.TestCase):
+    def test_clusters_train_the_same_recipe(self):
+        for env in (
+            {},
+            {"PATCH_WEIGHT": "1"},
+            {"ASYMMETRIC_AUG": "0", "ARCH": "resnet18", "CONTENT_CHANNELS": "16", "LATENT_DIM": "19"},
+        ):
+            with self.subTest(env=env):
+                slurm = vars(trainer.parse_args(training_argv(dry_run("run_encoder_adni_slurm.sh", **env))))
+                runai = vars(trainer.parse_args(training_argv(dry_run("run_encoder_adni_runai.sh", **env))))
+                changed = {key for key in slurm if slurm[key] != runai[key]}
+                self.assertEqual(changed, {"dataroot", "labels_path", "masks_dir", "cache_dir", "out_dir"})
+
+    def test_paths_and_resources_come_from_the_cluster_configs(self):
+        for script, cluster in (("run_encoder_adni_slurm.sh", "slurm"), ("run_encoder_adni_runai.sh", "runai")):
+            config = launch.load_yaml(ROOT / "experiments" / "cluster" / f"{cluster}.yaml")
+            args = trainer.parse_args(training_argv(dry_run(script)))
+            for key in ("dataroot", "labels_path", "masks_dir", "cache_dir"):
+                self.assertEqual(getattr(args, key), config[key], f"{script}: {key}")
+        runai = launch.load_yaml(ROOT / "experiments" / "cluster" / "runai.yaml")["_runai"]
+        tokens = dry_run("run_encoder_adni_runai.sh")
+        self.assertEqual(tokens[:5], ["runai", "training", "standard", "submit", "encoder-adni-conv-s42"])
+        expected = [part for pair in launch._runai_submit_flags(runai) for part in pair if part is not None]
+        self.assertEqual(tokens[5 : 5 + len(expected)], expected)
+        self.assertIn(f"cd {runai['repo_path']} ;", tokens[tokens.index("-c") + 1])
+        bad = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "run_encoder_adni_runai.sh"), "--dry-run"],
+            cwd=ROOT,
+            env={**os.environ, "MODEL_ID": "bad.name"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(bad.returncode, 2)
 
 
 if __name__ == "__main__":
