@@ -104,6 +104,21 @@ def make_options(args):
     sulcal_mode = getattr(args, "synthetic_sulcal_mode", None)
     if sulcal_mode is not None:
         options["synthetic_sulcal_mode"] = sulcal_mode
+    if getattr(args, "synthetic_causal", None) is not None:
+        options["synthetic_causal"] = args.synthetic_causal
+    for key in (
+        "synthetic_causal_graph",
+        "synthetic_causal_edge_prob",
+        "synthetic_causal_noise_scale",
+        "synthetic_causal_nonlinearity",
+    ):
+        if getattr(args, key, None) is not None:
+            if not options.get("synthetic_causal", False):
+                raise ValueError(f"--{key.replace('_', '-')} requires --synthetic-causal")
+            options[key] = getattr(args, key)
+    edge_prob = options.get("synthetic_causal_edge_prob", 0.5)
+    if not 0.0 <= edge_prob <= 1.0:
+        raise ValueError("--synthetic-causal-edge-prob must be between 0 and 1")
     if getattr(args, "patch_foreground_mask", None):
         options["patch_foreground_mask"] = True
     if getattr(args, "patch_foreground_thresh", None) is not None:
@@ -231,6 +246,15 @@ def make_options(args):
         suffix += "_identvent"
     if options.get("synthetic_sulcal_mode", "corrugation") != recipe.get("synthetic_sulcal_mode", "corrugation"):
         suffix += f"_sulcal{options['synthetic_sulcal_mode']}"
+    if options.get("synthetic_causal", False) and not recipe.get("synthetic_causal", False):
+        graph = options.get("synthetic_causal_graph", "chain")
+        suffix += f"_causal{graph}"
+        if graph == "random" and edge_prob != 0.5:
+            suffix += f"{edge_prob:g}"
+        if options.get("synthetic_causal_noise_scale", 0.4) != 0.4:
+            suffix += f"_cnoise{options['synthetic_causal_noise_scale']:g}"
+        if options.get("synthetic_causal_nonlinearity", "leaky_relu") != "leaky_relu":
+            suffix += f"_clin{options['synthetic_causal_nonlinearity']}"
     options["model_id"] = args.model_id or f"{args.variant}_s{args.seed}_{options['device']}{suffix}"
     if Path(options["model_id"]).name != options["model_id"] or options["model_id"] in (".", ".."):
         raise ValueError("--model-id must be a directory name, not a path")
@@ -457,6 +481,29 @@ def main(argv=None):
         choices=("corrugation", "atrophy"),
         help="atrophy widens fixed sulcal clefts instead of the zero-mean corrugation (adds _sulcalatrophy to the "
         "run ID); default: the recipe's (trainer default corrugation)",
+    )
+    parser.add_argument(
+        "--synthetic-causal",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Draw content factors from an SCM (needed for causal-discovery evals); adds _causal<graph> to the "
+        "run ID. Default: the recipe's (off)",
+    )
+    parser.add_argument(
+        "--synthetic-causal-graph",
+        choices=("chain", "full", "random"),
+        help="With --synthetic-causal; trainer default chain",
+    )
+    parser.add_argument(
+        "--synthetic-causal-edge-prob", type=float, help="With --synthetic-causal-graph random; trainer default 0.5"
+    )
+    parser.add_argument(
+        "--synthetic-causal-noise-scale", type=float, help="With --synthetic-causal; trainer default 0.4"
+    )
+    parser.add_argument(
+        "--synthetic-causal-nonlinearity",
+        choices=("leaky_relu", "none"),
+        help="With --synthetic-causal; trainer default leaky_relu",
     )
     parser.add_argument(
         "--downscale-factor",

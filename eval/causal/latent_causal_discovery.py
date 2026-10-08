@@ -3,6 +3,9 @@
 
     python -m eval.causal.latent_causal_discovery --run-dirs RUN --reduce gap --floor --ceiling
 
+Encoder-only (``main_conv_synthetic``) runs are detected from ``settings.json`` and read from
+``model.pt``; ``--pooling 1,1,1`` scores their global output vector, ``--view`` picks the encoder.
+
 ``run_causal_recovery`` never hands PC a representation.  It hands PC ``n_content``
 supervised ``RidgeCV`` reconstructions of the true factors, so the labels build the
 variables before any independence test runs.  Measured consequence on this project: a
@@ -356,6 +359,50 @@ def _self_test():
     return 1 if failures else 0
 
 
+def is_encoder_only(settings):
+    """``main_conv_synthetic`` runs never save ``content_style_levels``; VQ runs always do."""
+    return "content_style_levels" not in settings
+
+
+def encode_encoder_only(run_dir, settings, cli, random_init=False, init_seed=0):
+    """``(N, content_channels, P)`` maps from an encoder-only run, plus its factors and SCM.
+
+    Rebuilt through ``score_checkpoint`` so the architecture and the generator match the run.
+    ``--pooling 1,1,1`` reads the model's own global code (its output vector, through the
+    global head); any other grid reads the patch readout averaged over that grid.
+    """
+    import numpy as np
+    import torch
+
+    from eval.protocol.score_checkpoint import build_model, encode_blocks, make_val_dataset
+    from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
+
+    configure_encoder_runtime(settings)
+    device = select_encoder_device(cli.device or "auto", False)
+    if random_init:
+        init = run_dir / "model_init.pt"
+        if init_seed == 0 and init.is_file():
+            # The run's own saved initialisation: the exact untrained twin of these weights.
+            state = torch.load(init, map_location="cpu")
+        else:
+            state = None
+            settings = dict(settings, model_seed=(settings.get("model_seed") or settings.get("seed", 42)) + init_seed)
+    else:
+        checkpoint = run_dir / (cli.checkpoint or "model.pt")
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
+        state = torch.load(checkpoint, map_location="cpu")
+    model = build_model(settings, device, state)
+    n = cli.num_samples or settings.get("num_val_samples", 400)
+    dataset = make_val_dataset(settings, n)
+    grid = None if tuple(cli.pooling) == (1, 1, 1) else tuple(cli.pooling)
+    blocks = encode_blocks(model, dataset, device, cli.batch_size, settings["content_channels"], grid)
+    if blocks["adjacency"] is None:
+        raise ValueError("Dataset exposed no causal SCM adjacency")
+    flat = blocks["content"][cli.view - 1]
+    return flat.reshape(len(flat), -1, int(np.prod(cli.pooling))), blocks["z_content"], blocks["adjacency"]
+
+
 def evaluate_run(run_dir, cli, random_init=False, init_seed=0):
     """Encode a run, reduce its channels, and score the label-free graph."""
     import numpy as np
@@ -367,7 +414,12 @@ def evaluate_run(run_dir, cli, random_init=False, init_seed=0):
         settings = json.load(fh)
     if not settings.get("synthetic_causal", False):
         return None, None, dict(status="skipped", reason="settings['synthetic_causal'] is False")
-    checkpoint = run_dir / cli.checkpoint
+    if is_encoder_only(settings):
+        logger.info(
+            "Encoding %s [encoder-only]%s", run_dir, f" [UNTRAINED FLOOR, seed {init_seed}]" if random_init else ""
+        )
+        return encode_encoder_only(run_dir, settings, cli, random_init, init_seed)
+    checkpoint = run_dir / (cli.checkpoint or "vqvae_model.pt")
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
     logger.info("Encoding %s%s", run_dir, f" [UNTRAINED FLOOR, seed {init_seed}]" if random_init else "")
@@ -390,7 +442,10 @@ def evaluate_run(run_dir, cli, random_init=False, init_seed=0):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dirs", nargs="+", default=[], help="Run directories")
-    parser.add_argument("--checkpoint", default="vqvae_model.pt")
+    parser.add_argument("--checkpoint", help="Default: vqvae_model.pt, or model.pt for an encoder-only run")
+    parser.add_argument(
+        "--view", type=int, default=1, choices=[1, 2], help="Encoder-only runs: which view's encoder to read"
+    )
     parser.add_argument("--level", type=int, help="Default: first content_style_levels entry")
     parser.add_argument("--pooling", default="4,4,4", help="3D patch grid the channels are reduced over")
     parser.add_argument("--num-samples", type=int, help="Default: each run's synthetic_num_test")
