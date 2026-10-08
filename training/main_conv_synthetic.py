@@ -1,4 +1,4 @@
-"""Encoder-only multi-view contrastive learning on the 3D synthetic data.
+"""Encoder-only multi-view contrastive learning on the 3D synthetic data or real T1/FLAIR MRI.
 
 3D encoders trained with InfoNCE or Barlow Twins, without reconstruction.
 The default ``conv`` architecture uses the VQ-VAE convolutional backbone with
@@ -11,6 +11,13 @@ attention pooling (``models.attention_pool``), which starts as exact GAP.
 Identifiability is scored with ``eval.metrics.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
 independent style → ~chance is the block-identification signal.
+
+``--dataset-name ADNI_stripped_masks`` (or another real dataset) trains the same models on
+paired T1/FLAIR volumes read by ``data.datasets.MyCustomDataset``, with the VQ-VAE trainer's
+flag names, preprocessing and cache. Real data has no generator factors, so each evaluation
+reports the held-out objective, cross-view subject retrieval and
+``eval.metrics.cross_reconstruction``'s content/style probes against the untrained floor.
+See training/ENCODER_ADNI.md.
 
 Example:
     python -m training.main_conv_synthetic --model-id conv_c9 \
@@ -29,9 +36,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+import eval.metrics.cross_reconstruction as cross_reconstruction
 import eval.metrics.dci as dci
 import training.losses as losses
-from data.datasets import SyntheticBrainDataset
+from data.datasets import MyCustomDataset, SyntheticBrainDataset
+from data.splits import split_summary, subject_level_split
 from models.multiview_encoder import MultiviewConvEncoder
 from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
@@ -261,7 +270,12 @@ def parse_args(argv=None):
     p.add_argument("--grad-clip", type=float, default=2.0, help="Max grad 2-norm (paper uses 2); 0 disables")
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--data-seed", type=int, default=None, help="Generator seed; defaults to --seed")
+    p.add_argument(
+        "--data-seed",
+        type=int,
+        default=None,
+        help="Generator seed (synthetic) or augmentation seed (real data); defaults to --seed",
+    )
     p.add_argument("--model-seed", type=int, default=None, help="Initialization seed; defaults to --seed")
     p.add_argument("--loader-seed", type=int, default=None, help="Independent shuffle seed; defaults to --seed + 10000")
     p.add_argument("--require-new-run", action="store_true", help="Refuse to overwrite an existing run directory")
@@ -298,11 +312,13 @@ def parse_args(argv=None):
     p.add_argument(
         "--best-metric",
         type=str,
-        default="block_mcc",
-        choices=["block_mcc", "ridge_r2", "none"],
+        default=None,
+        choices=["block_mcc", "ridge_r2", "val_loss", "none"],
         help="Validation metric that decides which checkpoint is kept as model_best.pt. "
-        "Floor-subtracted when --floor-eval gave a floor, since the raw value is mostly "
-        "floor. 'none' keeps only the last-step model.pt.",
+        "block_mcc and ridge_r2 (synthetic; default block_mcc) are floor-subtracted when "
+        "--floor-eval gave a floor, since the raw value is mostly floor. val_loss (real data; "
+        "the default there) keeps the lowest training objective on the held-out subjects. "
+        "'none' keeps only the last-step model.pt.",
     )
     p.add_argument("--eval-pooling", type=str, default="gap", choices=["gap", "patch"])
     p.add_argument("--eval-patch-grid", type=int, nargs=3, default=[4, 5, 4])
@@ -341,7 +357,8 @@ def parse_args(argv=None):
         help="Hold rendered volumes in RAM (default). The cache is (samples x 2 views x res^3 x 4B) "
         "per split once full -- 23.5 GB for 1000 train + 400 val at res 128, which the OOM killer "
         "takes out on the first eval. Pass --no-cache at high res to re-render each sample instead: "
-        "slower per step, constant memory.",
+        "slower per step, constant memory. With real data it holds the preprocessed volumes and masks "
+        "instead: on disk under --cache-dir, else in RAM; --no-cache re-reads and resamples every NIfTI.",
     )
     p.add_argument("--synthetic-mode", type=str, default="pseudo_mri")
     p.add_argument(
@@ -445,6 +462,87 @@ def parse_args(argv=None):
         choices=["leaky_relu", "none"],
         help="Nonlinearity in causal mechanisms.",
     )
+
+    # Real data. Same names, defaults and meaning as utils/config.py's flags, so the cluster
+    # YAMLs' paths apply as written, and a run with the VQ-VAE run's spacing, size, masks and
+    # labels reuses its preprocessing cache (data.datasets fingerprints exactly those).
+    p.add_argument(
+        "--dataset-name",
+        choices=("synthetic", "adni", "ADNI_registered", "ADNI_stripped_masks", "custom"),
+        default="synthetic",
+        help="synthetic: the generator above. Anything else reads paired T1/FLAIR volumes from "
+        "<--dataroot>/<--dataset-name>/<Subject>/{t1,t2} with data.datasets.MyCustomDataset. Real data "
+        "has no generator factors, so evaluation reports the held-out objective, cross-view subject "
+        "retrieval and the content/style probes instead of DCI. See training/ENCODER_ADNI.md",
+    )
+    p.add_argument("--dataroot", type=str, default=None, help="Real data: the directory holding --dataset-name")
+    p.add_argument(
+        "--labels-path",
+        type=str,
+        default=None,
+        help="Real data: labels CSV with Subject and Group columns (e.g. labels_cleaned_3class.csv). Group is "
+        "what the split stratifies on and what the diagnosis probe reads",
+    )
+    p.add_argument(
+        "--masks-dir",
+        type=str,
+        default=None,
+        help="Real data: root of the per-subject *_brain_mask files, laid out like the images. By default they "
+        "are looked for next to the images. If any subject lacks one, EVERY subject is masked by "
+        "thresholding (image > 0) instead",
+    )
+    p.add_argument(
+        "--cache-dir",
+        type=str,
+        default=None,
+        help="Real data with --cache: keep the preprocessed volumes here as .pt files, reused by later runs "
+        "(and by VQ-VAE runs with the same preprocessing). Without it the cache is held in RAM, "
+        "16 bytes per voxel per subject (two views and two masks)",
+    )
+    p.add_argument("--image-spacing", type=float, default=2.0, help="Real data: isotropic voxel spacing in mm")
+    p.add_argument(
+        "--spatial-size",
+        type=int,
+        nargs=3,
+        default=None,
+        metavar=("D", "H", "W"),
+        help="Real data (required): volume size after resampling. Choose sizes the backbone stride divides, "
+        "e.g. 96 112 96 at 2 mm as experiments/adni_real.yaml does (a 24x28x24 map at stride 4)",
+    )
+    p.add_argument(
+        "--val-frac",
+        type=float,
+        default=0.0,
+        help="Real data (required, > 0): fraction of SUBJECTS held out for validation, subject-level and "
+        "stratified by Group (data/splits.py). The labels CSV is read in full, so without a split the "
+        "validation subjects are the training subjects",
+    )
+    p.add_argument(
+        "--test-frac",
+        type=float,
+        default=0.0,
+        help="Real data: fraction of SUBJECTS held out for test. Never loaded by training; split.json lists them",
+    )
+    p.add_argument(
+        "--split-seed",
+        type=int,
+        default=0,
+        help="Real data: seed of the subject split. Keep it fixed across runs you intend to compare",
+    )
+    p.add_argument(
+        "--asymmetric-aug",
+        action="store_true",
+        help="Real data: draw the intensity augmentation independently per view, then re-apply the brain "
+        "mask. Without it both views of a training pair get the SAME random intensity shift (p=0.2), "
+        "background included, so a pair shares a non-anatomical offset the cross-view loss can match on. "
+        "The spatial augmentation is shared either way, keeping the views registered",
+    )
+    p.add_argument(
+        "--shared-brain-mask",
+        action="store_true",
+        help="Real data: intersect the T1 and FLAIR brain masks so both views share one outline, removing "
+        "the modality-specific mask boundary",
+    )
     args = p.parse_args(argv)
     if args.no_cuda and args.device not in ("auto", "cpu"):
         p.error("--no-cuda forces CPU; it cannot be combined with --device cuda/mps")
@@ -453,8 +551,60 @@ def parse_args(argv=None):
             setattr(args, name, default)
     if args.train_steps < 1 or args.eval_every < 1 or args.batch_size < 2:
         p.error("Need positive train/evaluation steps and at least two subjects per batch")
-    if args.num_train_samples < args.batch_size:
-        p.error("--num-train-samples must allow at least one full training batch")
+    real = args.dataset_name != "synthetic"
+    if args.best_metric is None:
+        args.best_metric = "val_loss" if real else "block_mcc"
+    if real:
+        # Generator and factor-evaluation flags would be silently ignored on real volumes;
+        # refuse them rather than record settings that did nothing.
+        synthetic_only = [k for k in vars(args) if k.startswith(("synthetic_", "spatial_recovery_"))]
+        synthetic_only += ["res", "n_content", "n_style", "num_train_samples", "num_val_samples"]
+        synthetic_only += ["eval_pooling", "eval_patch_grid", "lesion_keypoints"]
+        changed = [k for k in synthetic_only if getattr(args, k) != p.get_default(k)]
+        if changed:
+            p.error(
+                f"--dataset-name {args.dataset_name} reads real volumes; these flags only configure the synthetic "
+                "generator or its factor-based evaluation: " + ", ".join("--" + k.replace("_", "-") for k in changed)
+            )
+        if not args.dataroot or not args.labels_path:
+            p.error("Real data needs --dataroot and --labels-path (experiments/cluster/<cluster>.yaml has both)")
+        if args.spatial_size is None or min(args.spatial_size) < 1:
+            p.error("Real data needs a positive --spatial-size D H W, e.g. 96 112 96 at --image-spacing 2")
+        if not 0 < args.image_spacing < float("inf"):
+            p.error("--image-spacing must be finite and positive")
+        if not 0 < args.val_frac < 1:
+            p.error(
+                "Real data needs held-out subjects: --val-frac in (0, 1), e.g. 0.2 with --test-frac 0.1 as in "
+                "experiments/adni_real.yaml. Without a split the validation subjects are the training subjects"
+            )
+        if not 0 <= args.test_frac < 1 or args.val_frac + args.test_frac >= 1:
+            p.error("--test-frac must be in [0, 1) and leave training subjects after --val-frac")
+        if args.best_metric not in ("val_loss", "none"):
+            p.error(f"--best-metric {args.best_metric} scores generator factors; real data selects on val_loss or none")
+    else:
+        real_only = ["dataroot", "labels_path", "masks_dir", "cache_dir", "image_spacing", "spatial_size"]
+        real_only += ["val_frac", "test_frac", "split_seed", "asymmetric_aug", "shared_brain_mask"]
+        changed = [k for k in real_only if getattr(args, k) != p.get_default(k)]
+        if changed:
+            p.error(", ".join("--" + k.replace("_", "-") for k in changed) + " only apply with a real --dataset-name")
+        if args.best_metric == "val_loss":
+            p.error(
+                "--best-metric val_loss is computed on real data only; synthetic runs select on block_mcc or ridge_r2"
+            )
+        if args.num_train_samples < args.batch_size:
+            p.error("--num-train-samples must allow at least one full training batch")
+    # The backbone map every grid must fit: the conv encoder floors at each stride-2 step,
+    # ResNet's padded strides round up. Cubic for synthetic, the resampled volume otherwise.
+    stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
+    if stride < 1:
+        p.error("Encoder stride must be positive")
+    volume = tuple(args.spatial_size) if real else (args.res,) * 3
+    if args.encoder_architecture == "resnet18":
+        backbone_map = tuple((size + stride - 1) // stride for size in volume)
+    else:
+        backbone_map = tuple(size // stride for size in volume)
+    map_name = f"{backbone_map[0]}^3" if len(set(backbone_map)) == 1 else "x".join(map(str, backbone_map))
+    map_positions = backbone_map[0] * backbone_map[1] * backbone_map[2]
     if args.cpu_threads is not None and args.cpu_threads < 1:
         p.error("--cpu-threads must be positive")
     if args.deterministic_warn_only and not args.deterministic:
@@ -492,12 +642,8 @@ def parse_args(argv=None):
             p.error("Patch training currently supports global + patch InfoNCE only")
         if not 0 < args.tau < float("inf"):
             p.error("Patch InfoNCE requires a finite positive --tau")
-        stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
-        if stride < 1:
-            p.error("Encoder stride must be positive")
-        spatial = (args.res + stride - 1) // stride if args.encoder_architecture == "resnet18" else args.res // stride
-        if any(g < 1 or g > spatial for g in args.train_patch_grid):
-            p.error(f"--train-patch-grid must fit the {spatial}^3 backbone map")
+        if any(g < 1 or g > size for g, size in zip(args.train_patch_grid, backbone_map)):
+            p.error(f"--train-patch-grid must fit the {map_name} backbone map")
     if args.encoder_architecture == "resnet18":
         if args.conv_readout != "linear":
             p.error("--conv-readout only applies to --encoder-architecture conv")
@@ -505,9 +651,10 @@ def parse_args(argv=None):
             p.error("--norm-type only applies to --encoder-architecture conv; use --resnet-norm for ResNet")
         if args.encoder_head_hidden <= 0:
             p.error("--encoder-head-hidden must be positive")
-        spatial_size = (args.res + args.resnet_output_stride - 1) // args.resnet_output_stride
-        if args.eval_pooling == "patch" and any(g < 1 or g > spatial_size for g in args.eval_patch_grid):
-            p.error(f"ResNet at --res {args.res} has a {spatial_size}^3 map; --eval-patch-grid must fit it")
+        if args.eval_pooling == "patch" and any(
+            g < 1 or g > size for g, size in zip(args.eval_patch_grid, backbone_map)
+        ):
+            p.error(f"ResNet at --res {args.res} has a {map_name} map; --eval-patch-grid must fit it")
     else:
         if args.resnet_norm != "batch" or args.resnet_output_stride != 32:
             p.error("--resnet-norm and --resnet-output-stride only apply to --encoder-architecture resnet18")
@@ -519,12 +666,8 @@ def parse_args(argv=None):
             p.error(f"--attention-pool-heads must divide the {channels} backbone channels")
         if args.attention_pool_frequencies < 0:
             p.error("--attention-pool-frequencies must be nonnegative")
-        stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
-        if stride < 1:
-            p.error("Encoder stride must be positive")
-        spatial = (args.res + stride - 1) // stride if args.encoder_architecture == "resnet18" else args.res // stride
-        if spatial < 2:
-            p.error(f"--global-pool attention needs more than one position; the backbone map is {spatial}^3")
+        if map_positions < 2:
+            p.error(f"--global-pool attention needs more than one position; the backbone map is {map_name}")
     elif (args.attention_pool_heads, args.attention_pool_frequencies) != (4, 4):
         p.error("--attention-pool-heads and --attention-pool-frequencies only apply to --global-pool attention")
     if args.lesion_keypoints < 0:
@@ -565,12 +708,8 @@ def parse_args(argv=None):
                 )
             if args.lesion_normative_subjects > args.num_train_samples:
                 p.error("--lesion-normative-subjects cannot exceed --num-train-samples")
-        stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
-        if stride < 1:
-            p.error("Encoder stride must be positive")
-        spatial = (args.res + stride - 1) // stride if args.encoder_architecture == "resnet18" else args.res // stride
-        if spatial < 2:
-            p.error(f"--lesion-keypoints needs more than one position; the backbone map is {spatial}^3")
+        if map_positions < 2:
+            p.error(f"--lesion-keypoints needs more than one position; the backbone map is {map_name}")
     elif (
         args.lesion_norm,
         args.lesion_frame,
@@ -594,10 +733,7 @@ def parse_args(argv=None):
             p.error(
                 "Spatial recovery needs >=20 validation subjects, >=10 diagnostic subjects and a positive batch size"
             )
-        stride = args.resnet_output_stride if args.encoder_architecture == "resnet18" else args.downscale_factor
-        if stride < 1:
-            p.error("Encoder stride must be positive")
-        spatial = (args.res + stride - 1) // stride if args.encoder_architecture == "resnet18" else args.res // stride
+        spatial = backbone_map[0]  # cubic: spatial recovery is synthetic-only
         if args.spatial_recovery_grids is None:
             if args.patch_loss_weight > 0:
                 if len(set(args.train_patch_grid)) != 1:
@@ -618,6 +754,8 @@ def cache_gb(res, num_samples):
 
 def make_dataset(args, mode, num_samples):
     """Single factory for train/val/test so the generative distribution is identical."""
+    if getattr(args, "dataset_name", "synthetic") != "synthetic":
+        return make_real_dataset(args, mode)
     if args.cache:
         gb = cache_gb(args.res, num_samples)
         # The cache fills lazily, so an over-large one survives training and is killed
@@ -659,6 +797,93 @@ def make_dataset(args, mode, num_samples):
         synthetic_lesion_count=getattr(args, "synthetic_lesion_count", 4),
         synthetic_lesion_t1_value=getattr(args, "synthetic_lesion_t1_value", 0.4),
     )
+
+
+def make_real_dataset(args, mode):
+    """One subject split of the paired T1/FLAIR volumes, preprocessed as the VQ-VAE trainer does.
+
+    The constructor arguments match training/main_multimodal.py's (crop margin 0), so with the
+    same spacing, size, masks and subject list both trainers resolve to one cache directory.
+    Only the train split augments; its MONAI transforms are seeded from --data-seed.
+    """
+    dataset = MyCustomDataset(
+        data_dir=os.path.join(args.dataroot, args.dataset_name),
+        mode=mode,
+        spacing=args.image_spacing,
+        crop_margin=0,
+        spatial_size=args.spatial_size,
+        cache=args.cache,
+        cache_dir=args.cache_dir,
+        labels_path=args.labels_path,
+        masks_dir=args.masks_dir,
+        asymmetric_aug=args.asymmetric_aug,
+        shared_brain_mask=args.shared_brain_mask,
+        val_frac=args.val_frac,
+        test_frac=args.test_frac,
+        split_seed=args.split_seed,
+    )
+    seed_augmentation(dataset, args.data_seed)
+    return dataset
+
+
+def seed_augmentation(dataset, seed):
+    """Seed a real dataset's MONAI pipelines, which otherwise share a RandomState seeded at import."""
+    for name in ("_aug_transform", "monai_transform"):
+        transform = getattr(dataset, name, None)
+        if transform is not None:
+            transform.set_random_state(seed=seed)
+
+
+def seed_augmentation_worker(worker_id):
+    """DataLoader ``worker_init_fn`` for real data: give each worker its own augmentation stream.
+
+    Workers start from copies of the main process's RandomStates, so unseeded they would all
+    replay one sequence. ``torch.initial_seed()`` differs per worker and derives from the
+    loader's generator, so the streams still replay from --loader-seed and --data-seed.
+    """
+    seed_augmentation(torch.utils.data.get_worker_info().dataset, torch.initial_seed() % 2**32)
+
+
+def describe_real_split(args, train_dataset, val_dataset, save_dir):
+    """Print the subject split and write it to split.json for scoring the held-out subjects later.
+
+    Recomputed with the dataset's own function and arguments, then checked against the indices
+    each split actually loaded, so the file cannot describe a different split.
+    """
+    items = train_dataset._all_items
+    split = subject_level_split(items, val_frac=args.val_frac, test_frac=args.test_frac, seed=args.split_seed)
+    if split["train"] != train_dataset._indices or split["val"] != val_dataset._indices:
+        raise RuntimeError("The recomputed subject split differs from the one the datasets loaded")
+    names = {index: group for group, index in train_dataset.label_map.items()}
+    print(f"real data: {args.dataset_name}, subject-level split (seed {args.split_seed})", flush=True)
+    for line in split_summary(items, split, label_names=names):
+        print(line, flush=True)
+    payload = {
+        "dataset_name": args.dataset_name,
+        "labels_path": args.labels_path,
+        "val_frac": args.val_frac,
+        "test_frac": args.test_frac,
+        "split_seed": args.split_seed,
+        "label_map": train_dataset.label_map,
+        "subjects": {mode: [items[i]["subject"] for i in indices] for mode, indices in split.items()},
+    }
+    with open(os.path.join(save_dir, "split.json"), "w") as fp:
+        json.dump(payload, fp, indent=2)
+    if len(train_dataset) < args.batch_size or len(val_dataset) < args.batch_size:
+        raise SystemExit(
+            f"--batch-size {args.batch_size} needs a full batch in both splits; train has {len(train_dataset)} "
+            f"scans and val {len(val_dataset)}"
+        )
+    voxels = args.spatial_size[0] * args.spatial_size[1] * args.spatial_size[2]
+    if args.cache and args.cache_dir is None:
+        gb = 16 * voxels * (len(train_dataset) + len(val_dataset)) / 1e9
+        print(f"  RAM cache: ~{gb:.1f} GB once full; --cache-dir keeps it on disk instead", flush=True)
+    if not args.asymmetric_aug:
+        print(
+            "  NOTE: without --asymmetric-aug both training views share one random intensity shift (p=0.2), "
+            "background included",
+            flush=True,
+        )
 
 
 def contrastive_loss(pooled, model, args, sim_metric, criterion):
@@ -914,7 +1139,11 @@ def print_per_factor(scores, floor=None, writer=None, step=0):
                 writer.add_scalar(f"per_factor/{tag}/{nm}/channel_mcc", v["chan"], step)
 
 
-BEST_METRIC_KEYS = {"block_mcc": "content->content/block_mcc", "ridge_r2": "content->content/informativeness_ridge"}
+BEST_METRIC_KEYS = {
+    "block_mcc": "content->content/block_mcc",
+    "ridge_r2": "content->content/informativeness_ridge",
+    "val_loss": "val/loss",
+}
 
 
 def best_metric_value(flat, floor_flat, name):
@@ -922,11 +1151,14 @@ def best_metric_value(flat, floor_flat, name):
 
     Raw block-MCC on this generator is mostly floor — an untrained encoder scores ~0.38 —
     so selecting on it would rank checkpoints partly by how much untrained structure the
-    architecture happens to carry. The delta ranks them by what training added.
+    architecture happens to carry. The delta ranks them by what training added. The
+    held-out loss has no such floor, and lower is better, so it is negated instead.
     """
     v = flat.get(BEST_METRIC_KEYS[name])
     if v is None or not np.isfinite(v):
         return None
+    if name == "val_loss":
+        return -float(v)
     if floor_flat is not None:
         f = floor_flat.get(BEST_METRIC_KEYS[name])
         if f is not None and np.isfinite(f):
@@ -1130,6 +1362,111 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
     return flat, scores
 
 
+# What each real-data evaluation prints against the step-0 floor; the JSON and TensorBoard get
+# the whole separation suite. Style units take no part in the loss, so the style rows describe
+# an untrained readout of the trained backbone.
+REAL_SUMMARY = (
+    ("val/loss", "held-out training objective"),
+    ("val/content_retrieval_top1", "T1<->FLAIR subject retrieval, content"),
+    ("content/diagnosis_probe_acc_v0", "diagnosis probe, T1 content"),
+    ("content/diagnosis_probe_acc_v1", "diagnosis probe, FLAIR content"),
+    ("content/modality_probe_acc", "modality probe, content (0.5 = none)"),
+    ("content/eff_rank_v0", "content effective rank, T1"),
+    ("content/eff_rank_v1", "content effective rank, FLAIR"),
+    ("style/modality_probe_acc", "modality probe, style"),
+    ("style/subject_retrieval_top1", "T1<->FLAIR subject retrieval, style"),
+)
+
+
+@torch.no_grad()
+def held_out_objective(model, batches, device, args):
+    """The training objective and cross-view subject retrieval on the held-out subjects.
+
+    The loss averages full batches only: InfoNCE's value depends on the number of negatives,
+    so a short last batch would read low. Retrieval ranks every held-out subject's FLAIR
+    content against its T1 content and the reverse (chance 1/N), the question InfoNCE asks
+    within a batch asked of the whole split. A subject with several scans counts its other
+    scans as misses. Without masks, --patch-foreground-mask falls back to the image support.
+    """
+    sim_metric, criterion = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
+    sums, full, content = {}, 0, ([], [])
+    for data in batches:
+        x = torch.cat(data["image"], dim=0).as_subclass(torch.Tensor).to(device)
+        b = x.shape[0] // 2
+        if b == args.batch_size:
+            pooled, loss, terms = training_objective(model, x, args, sim_metric, criterion)
+            for key, value in {"loss": loss, **terms}.items():
+                sums[key] = sums.get(key, 0.0) + float(value)
+            full += 1
+        else:
+            pooled = model(x, pool_only=True, n_views=2)[2][0]
+        content[0].append(pooled[:b, : args.content_channels].float().cpu())
+        content[1].append(pooled[b:, : args.content_channels].float().cpu())
+    out = {f"val/{key}": value / full for key, value in sums.items()} if full else {}
+    t1 = torch.nn.functional.normalize(torch.cat(content[0]), dim=1)
+    flair = torch.nn.functional.normalize(torch.cat(content[1]), dim=1)
+    similarity = t1 @ flair.T
+    target = torch.arange(similarity.shape[0])
+    hits = (similarity.argmax(1) == target).double().mean() + (similarity.argmax(0) == target).double().mean()
+    out["val/content_retrieval_top1"] = float(hits / 2)
+    out["val/content_retrieval_chance"] = 1.0 / similarity.shape[0]
+    return out
+
+
+def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
+    """Real-data counterpart of ``evaluate``: no generator factors, so no DCI.
+
+    Reports the held-out objective, cross-view retrieval and
+    ``eval.metrics.cross_reconstruction``'s content/style probes (the VQ-VAE trainer's ADNI
+    readout, so the metric definitions match its runs), each against ``floor``, the step-0
+    result. The validation volumes are read once and then held in RAM by that module.
+    Returns the flat metrics twice, so the call matches ``evaluate``'s (flat, floor) shape.
+    """
+    print(f"  [eval] held-out subjects @ step {step} ...", flush=True)
+    loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    batches = cross_reconstruction._get_cached_batches(loader, len(loader))
+    flat = held_out_objective(model, batches, device, args)
+    flat.update(cross_reconstruction.evaluate_content_style_separation(model, loader, args, device, len(loader)))
+    flat = {key: float(value) for key, value in flat.items()}
+
+    has_floor = bool(floor)
+    print("    --- held-out subjects ---", flush=True)
+    print(f"      {'':<40s}{'value':>9s}" + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""), flush=True)
+    for key, label in REAL_SUMMARY:
+        value = flat.get(key)
+        if value is None or not np.isfinite(value):
+            continue
+        line = f"      {label:<40s}{value:>9.3f}"
+        if has_floor and np.isfinite(floor.get(key, float("nan"))):
+            line += f"{floor[key]:>9.3f}{value - floor[key]:>+12.3f}"
+        print(line, flush=True)
+    chance = flat.get("content/diagnosis_probe_chance", float("nan"))
+    print(
+        f"      chance: retrieval {flat['val/content_retrieval_chance']:.3f}, diagnosis {chance:.3f} (majority group)",
+        flush=True,
+    )
+
+    spread = attention_spread(model, val_dataset, device, args.batch_size)
+    if spread is not None:
+        print("    --- global attention: effective positions / map size, per head (1 = GAP) ---", flush=True)
+        for view, values in spread.items():
+            print(f"      {view:<8s}" + "".join(f"{v:8.3f}" for v in values), flush=True)
+            if writer is not None:
+                for head, value in enumerate(values):
+                    writer.add_scalar(f"attention_pool/{view}/head{head}_effective_fraction", value, step)
+
+    if writer is not None:
+        for key, value in flat.items():
+            if np.isfinite(value):
+                writer.add_scalar(key, value, step)
+    payload = dict(flat)
+    if spread is not None:
+        payload["attention_effective_fraction"] = spread
+    with open(os.path.join(save_dir, f"separation_step{step}.json"), "w") as fp:
+        json.dump(payload, fp, indent=2)
+    return flat, flat
+
+
 def main():
     args = parse_args()
     configure_encoder_runtime(vars(args))
@@ -1147,8 +1484,14 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    real = args.dataset_name != "synthetic"
     train_dataset = make_dataset(args, "train", args.num_train_samples)
     val_dataset = make_dataset(args, "val", args.num_val_samples)
+    if real:
+        describe_real_split(args, train_dataset, val_dataset, save_dir)
+    # Real volumes are augmented on the CPU, so workers matter there; they need their own
+    # augmentation streams, and persistence spares a respawn every epoch of ~35 steps.
+    workers = {"worker_init_fn": seed_augmentation_worker, "persistent_workers": True}
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -1156,6 +1499,7 @@ def main():
         num_workers=args.num_workers,
         drop_last=True,
         generator=torch.Generator().manual_seed(args.loader_seed),
+        **(workers if real and args.num_workers > 0 else {}),
     )
 
     # Dataset construction resets the global RNG. Seed initialization explicitly,
@@ -1206,6 +1550,17 @@ def main():
             flush=True,
         )
     pool_name = "attention pool" if model.attention_pool is not None else "GAP"
+    if real:
+        # parse_args' rule (conv floors, ResNet rounds up); a probe forward would move BatchNorm statistics.
+        stride = model.backbone_stride
+        backbone = [
+            -(-s // stride) if args.encoder_architecture == "resnet18" else s // stride for s in args.spatial_size
+        ]
+        print(
+            f"input: {'x'.join(map(str, args.spatial_size))} volumes at {args.image_spacing:g} mm -> "
+            f"{'x'.join(map(str, backbone))} backbone map (stride {stride})",
+            flush=True,
+        )
     if args.encoder_architecture == "resnet18":
         print(
             f"encoder: 3D ResNet-18, {args.resnet_norm} norm, stride {args.resnet_output_stride}, "
@@ -1346,18 +1701,19 @@ def main():
     # 0.2 from a random encoder, so the raw number alone cannot say whether it was learned.
     floor = floor_flat = None
     spatial_initial = None
+    evaluation = evaluate_real if real else evaluate
     if args.spatial_recovery_eval:
         from eval.encoder.spatial_recovery_monitor import evaluate_spatial_recovery
     if args.floor_eval:
         model.eval()
-        floor_flat, floor = evaluate(model, val_dataset, device, args, save_dir, 0, writer)
+        floor_flat, floor = evaluation(model, val_dataset, device, args, save_dir, 0, writer)
         if args.spatial_recovery_eval:
             spatial_initial = evaluate_spatial_recovery(model, vars(args), device, save_dir, 0, writer=writer)
         model.train()
 
     # Step 0 is the untrained floor, not a candidate: with every delta at or below zero it
     # would win on a tie and save an untrained encoder as "best".
-    best = {"value": None, "step": None}
+    best = {"value": None, "step": None, "raw": None}
 
     step = 0
     running = dict(
@@ -1369,11 +1725,16 @@ def main():
             if step >= args.train_steps:
                 break
             batch_order.update(batch["index"].cpu().numpy().astype("<i8").tobytes())
-            images = torch.cat(batch["image"], dim=0)
+            # Real volumes arrive as MONAI MetaTensors; a plain view skips their per-op metadata work.
+            images = torch.cat(batch["image"], dim=0).as_subclass(torch.Tensor)
             if input_images is not None:
                 input_images.update(images.contiguous().numpy().tobytes())
             x = images.to(device)  # (2B, 1, res, res, res)
-            masks = torch.cat(batch["mask"], dim=0).to(device) if args.patch_foreground_mask else None
+            masks = (
+                torch.cat(batch["mask"], dim=0).as_subclass(torch.Tensor).to(device)
+                if args.patch_foreground_mask
+                else None
+            )
             if masks is not None and step == 0:
                 kept = int(foreground_positions(masks, args.train_patch_grid, args.patch_foreground_thresh).sum())
                 print(f"  patch foreground mask: first batch keeps {kept}/{np.prod(args.train_patch_grid)} positions")
@@ -1444,7 +1805,7 @@ def main():
 
             if step % args.eval_every == 0 or step == args.train_steps:
                 model.eval()
-                flat, _ = evaluate(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
+                flat, _ = evaluation(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
                 torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
                 save_progress(step, "running")
                 if args.spatial_recovery_eval:
@@ -1455,7 +1816,7 @@ def main():
                 if args.best_metric != "none":
                     value = best_metric_value(flat, floor_flat, args.best_metric)
                     if value is not None and (best["value"] is None or value > best["value"]):
-                        best = {"value": value, "step": step}
+                        best = {"value": value, "step": step, "raw": flat.get(BEST_METRIC_KEYS[args.best_metric])}
                         # A bare state_dict, so --checkpoint model_best.pt loads exactly like
                         # model.pt does; the provenance goes in a sidecar rather than wrapping
                         # the tensors in a dict every reader would then have to unwrap.
@@ -1466,20 +1827,22 @@ def main():
                                     "step": step,
                                     "metric": args.best_metric,
                                     "value": value,
-                                    "floor_subtracted": floor_flat is not None,
-                                    "raw": flat.get(BEST_METRIC_KEYS[args.best_metric]),
+                                    "floor_subtracted": floor_flat is not None and args.best_metric != "val_loss",
+                                    "raw": best["raw"],
                                 },
                                 fp,
                                 indent=2,
                             )
-                        print(f"    new best {args.best_metric} {value:+.4f} -> model_best.pt", flush=True)
+                        shown = f"{best['raw']:.4f}" if args.best_metric == "val_loss" else f"{value:+.4f}"
+                        print(f"    new best {args.best_metric} {shown} -> model_best.pt", flush=True)
                 model.train()
 
     torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
     save_progress(step, "complete")
     if best["step"] is not None:
+        shown = f"{best['raw']:.4f}" if args.best_metric == "val_loss" else f"{best['value']:+.4f}"
         print(
-            f"best {args.best_metric} {best['value']:+.4f} at step {best['step']} -> model_best.pt "
+            f"best {args.best_metric} {shown} at step {best['step']} -> model_best.pt "
             f"(model.pt is the last step, {step}). Score the best one with "
             f"--checkpoint model_best.pt.",
             flush=True,
@@ -1488,7 +1851,7 @@ def main():
             # Worth saying out loud: past the peak the run is spending compute making the
             # representation worse, which at this dataset size is the expected shape.
             print(f"  NOTE: peak was {step - best['step']} steps before the end.", flush=True)
-    print(f"done. checkpoints + DCI logs in {save_dir}", flush=True)
+    print(f"done. checkpoints + {'evaluation' if real else 'DCI'} logs in {save_dir}", flush=True)
 
 
 if __name__ == "__main__":

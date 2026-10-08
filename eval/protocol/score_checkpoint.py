@@ -173,6 +173,11 @@ def build_model(cfg, device, state_dict=None):
 
 def make_dataset(cfg, num_samples, mode="val"):
     """Restore the encoder-only run's generator on a named subject split."""
+    if cfg.get("dataset_name", "synthetic") != "synthetic":
+        raise ValueError(
+            f"This run trained on real data ({cfg['dataset_name']}): there is no generator to restore, and "
+            "synthetic volumes would score a distribution it never saw"
+        )
     if mode not in ("train", "val", "test"):
         raise ValueError(f"Unknown dataset split: {mode!r}")
     res = cfg["res"]

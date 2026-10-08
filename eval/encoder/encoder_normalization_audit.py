@@ -162,7 +162,7 @@ def targets_for_sample(inner, latents):
     return torch.cat((z, centroid, amplitude.reshape(1), amplitude.abs().reshape(1))).numpy()
 
 
-def extract(model, ds, args, device, directory):
+def extract(model, ds, args, device, directory, capture_fn=capture):
     directory.mkdir(parents=True)
     arrays, targets, ids = {}, [], []
     image_hash = hashlib.sha256()
@@ -172,7 +172,7 @@ def extract(model, ds, args, device, directory):
         b = len(batch["index"])
         for i in range(b):
             image_hash.update(torch.stack((images[i], images[b + i])).numpy().tobytes())
-        features, metadata = capture(model, images.to(device), args.norm_layer, args.spatial_grid)
+        features, metadata = capture_fn(model, images.to(device), args.norm_layer, args.spatial_grid)
         for stage, values in features.items():
             for view, block in zip(VIEWS, (values[:b], values[b:])):
                 key = (view, stage)
