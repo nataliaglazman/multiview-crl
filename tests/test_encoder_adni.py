@@ -245,6 +245,7 @@ class LauncherTests(unittest.TestCase):
         for env in (
             {},
             {"PATCH_WEIGHT": "1"},
+            {"NORM_TYPE": "layer", "READOUT": "linear"},
             {"ASYMMETRIC_AUG": "0", "ARCH": "resnet18", "CONTENT_CHANNELS": "16", "LATENT_DIM": "19"},
         ):
             with self.subTest(env=env):
@@ -261,18 +262,28 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(getattr(args, key), config[key], f"{script}: {key}")
         runai = launch.load_yaml(ROOT / "experiments" / "cluster" / "runai.yaml")["_runai"]
         tokens = dry_run("run_encoder_adni_runai.sh")
-        self.assertEqual(tokens[:5], ["runai", "training", "standard", "submit", "encoder-adni-conv-s42"])
+        self.assertEqual(tokens[:5], ["runai", "training", "standard", "submit", "encoder-adni-conv-mlp-s42"])
         expected = [part for pair in launch._runai_submit_flags(runai) for part in pair if part is not None]
         self.assertEqual(tokens[5 : 5 + len(expected)], expected)
         self.assertIn(f"cd {runai['repo_path']} ;", tokens[tokens.index("-c") + 1])
-        bad = subprocess.run(
-            ["bash", str(ROOT / "scripts" / "run_encoder_adni_runai.sh"), "--dry-run"],
-            cwd=ROOT,
-            env={**os.environ, "MODEL_ID": "bad.name"},
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(bad.returncode, 2)
+        for env in ({"MODEL_ID": "bad.name"}, {"ARCH": "resnet18", "NORM_TYPE": "layer"}):
+            with self.subTest(rejected=env):
+                bad = subprocess.run(
+                    ["bash", str(ROOT / "scripts" / "run_encoder_adni_runai.sh"), "--dry-run"],
+                    cwd=ROOT,
+                    env={**os.environ, **env},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(bad.returncode, 2)
+
+    def test_default_model_is_the_synthetic_reference(self):
+        args = trainer.parse_args(training_argv(dry_run("run_encoder_adni_runai.sh")))
+        self.assertEqual((args.encoder_architecture, args.conv_readout, args.norm_type), ("conv", "mlp", "group"))
+        self.assertEqual((args.latent_dim, args.content_channels, args.encoder_head_hidden), (12, 9, 100))
+        reference = json.loads((ROOT / "experiments" / "encoder_comparison.json").read_text())["shared"]
+        for key in ("hidden_channels", "res_channels", "nb_res_layers", "downscale_factor", "batch_size", "tau", "lr"):
+            self.assertEqual(getattr(args, key), reference[key], key)
 
 
 if __name__ == "__main__":

@@ -19,8 +19,13 @@ ASYMMETRIC_AUG=${ASYMMETRIC_AUG:-1}
 WORKERS=${WORKERS:-8}
 
 # ---- Model and objective (experiments/encoder_comparison.json, except where noted) ----
-MODEL_ID=${MODEL_ID:-encoder_adni_conv_s42}
+MODEL_ID=${MODEL_ID:-encoder_adni_conv_mlp_s42}
 ARCH=${ARCH:-conv}
+# Conv only. The MLP readout is conv_mlp_s42's, the reference model of the synthetic
+# encoder-only experiments. GroupNorm is what every one of those runs used; LayerNorm
+# starts from identical weights at the same seed, so NORM_TYPE=layer is a paired arm.
+READOUT=${READOUT:-mlp}
+NORM_TYPE=${NORM_TYPE:-group}
 LATENT_DIM=${LATENT_DIM:-12}
 CONTENT_CHANNELS=${CONTENT_CHANNELS:-9}
 BATCH_SIZE=${BATCH_SIZE:-32}
@@ -71,6 +76,12 @@ TRAIN_ARGS=(
     --model-id "$MODEL_ID"
     --require-new-run
 )
+if [[ "$ARCH" == "conv" ]]; then
+    TRAIN_ARGS+=(--conv-readout "$READOUT" --norm-type "$NORM_TYPE")
+elif [[ "$READOUT" != "mlp" || "$NORM_TYPE" != "group" ]]; then
+    echo "READOUT and NORM_TYPE apply to ARCH=conv; ResNet-18 always has the MLP head (--resnet-norm via EXTRA_ARGS)" >&2
+    exit 2
+fi
 if [[ "$ASYMMETRIC_AUG" == "1" ]]; then
     TRAIN_ARGS+=(--asymmetric-aug)
 fi

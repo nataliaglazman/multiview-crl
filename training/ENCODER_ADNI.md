@@ -10,8 +10,8 @@ objective are unchanged; only the data, preprocessing and evaluation differ.
 The recipe lives in `scripts/encoder_adni_recipe.sh`, and one wrapper per cluster
 sources it. The wrappers add only their cluster's paths (from
 `experiments/cluster/<cluster>.yaml`) and submission. Each recipe knob (`MODEL_ID`,
-`PATCH_WEIGHT`, `CONTENT_CHANNELS`, ...) is an environment variable, overridable at
-submit time. `tests/test_encoder_adni.py` checks that the two clusters' commands
+`READOUT`, `NORM_TYPE`, `PATCH_WEIGHT`, `CONTENT_CHANNELS`, ...) is an environment
+variable, overridable at submit time. `tests/test_encoder_adni.py` checks that the two clusters' commands
 differ only in the five path flags.
 
 | Cluster | Preview | Submit |
@@ -130,8 +130,9 @@ WM-referenced normalisation (WhiteStripe) would be the fix; it is not implemente
 
 - 32 per view gives InfoNCE 31 negatives. Within a batch, a few global factors
   (brain size, ventricles) already tell 32 subjects apart, so the loss can saturate
-  on easy factors. Larger batches help but are memory-bound. The trainer has no AMP
-  or gradient checkpointing.
+  on easy factors. The conv model has the GPU memory for 64 or 128 per view (see
+  Architecture), which would make negatives harder. That changes the recipe relative
+  to the synthetic runs, so treat it as its own arm.
 - About 1,170 training subjects make 36 steps per epoch, so 10k steps is about 275
   epochs. Overfitting is the expected failure mode. Watch the train-vs-held-out loss
   gap, and keep `val_loss` selection (or a prespecified `none` endpoint). The
@@ -151,13 +152,25 @@ They are an untrained readout of the trained backbone. The style rows, and anyth
 that mixes them in (`separation_score`), describe that readout, not a learned style
 code, so they are not a selection target here.
 
-### Architecture: `--encoder-architecture`, `--norm-type`, separate encoders
+### Architecture: `--encoder-architecture`, `--conv-readout`, `--norm-type`
 
-The conv backbone (stride 4) is the default and the one with a usable map at 2 mm.
-GroupNorm pools statistics over all positions, background included, and the brain
-fills only part of the volume. `--norm-type layer` normalises each voxel on its own;
-keep it matched to the synthetic run you compare against. Separate per-view encoders
-(the default) follow the paper.
+The recipe's default model is `conv_mlp_s42`, the reference model of the synthetic
+encoder-only experiments (patch training, target follow-ups, lesion branch). That is
+the conv backbone at stride 4, GAP, then a Linear(64, 100) → LeakyReLU → Linear(100, 12)
+readout (`READOUT=mlp`), with GroupNorm and separate per-view encoders. The trainer's
+own default is the linear readout, under which `--encoder-head-hidden` does nothing.
+The conv backbone is also the only one with a usable map at 2 mm.
+
+GroupNorm (`NORM_TYPE=group`) is what every encoder-only synthetic run used, so it
+keeps ADNI comparable with them. It pools each scan's statistics over all positions,
+background included, and writes them back into every cell. Background cells therefore
+carry whole-volume quantities such as brain size. `NORM_TYPE=layer` normalises each
+voxel across channels instead. It is the VQ-VAE ADNI run's encoder norm, and it starts
+from the same weights at the same seed, so a `layer` run is a paired arm.
+
+Measured at 96×112×96, the conv model saves about 5 GiB of activations at batch 32
+per view, under either norm and readout. ResNet-18 saves 15.5 GiB (stride 32) to
+18.7 GiB (stride 8). GPU memory is therefore not what limits the batch size.
 
 ### Cache, workers, threads: `--cache`, `--cache-dir`, `--num-workers`, `--hash-training-inputs`
 
@@ -165,9 +178,11 @@ keep it matched to the synthetic run you compare against. Separate per-view enco
   views and two masks, float32. That is about 24 GB on disk for train plus val.
   Without `--cache-dir` the same 24 GB sits in RAM. Evaluation also holds the
   validation images in RAM, another 2.4 GB.
-- Augmentation runs on the CPU (an affine on four volumes per subject), so use
-  `--num-workers 8` on the cluster. Each worker reseeds its augmentation from the
-  loader's generator, so runs still replay.
+- Augmentation runs on the CPU (an affine on four volumes per subject). Measured
+  single-threaded at 96×112×96 it takes about 0.06 s per subject, so 8 workers need
+  about 0.2 s per step and keep up; with 0 workers it would be about 2 s per step.
+  Each worker reseeds its augmentation from the loader's generator, so runs still
+  replay.
 - The worker count is part of the recipe, not just a throughput setting. Batches go
   to workers in turn and each worker has its own augmentation stream, so a different
   count trains on different augmentations. The recipe keeps 8 on both clusters,
