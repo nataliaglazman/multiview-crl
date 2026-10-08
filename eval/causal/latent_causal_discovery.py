@@ -88,6 +88,23 @@ def reduce_channels(maps, mode="gap"):
     raise ValueError(f"reduce must be one of {REDUCTIONS}, got {mode!r}")
 
 
+def top_variance_channels(reduced, k):
+    """Keep the ``k`` reduced channels with the largest variance across subjects. No labels.
+
+    A subset, not a rotation: the kept channels' correlations are untouched, so PC sees the
+    same dependencies it would among those channels in the full set.  Variance is read on the
+    raw scale, so a channel can be kept for being loud rather than for carrying a factor.
+    Returns ``(subset, kept)`` with ``kept`` the original channel indices, largest first.
+    """
+    import numpy as np
+
+    reduced = np.asarray(reduced, dtype=np.float64)
+    if not 1 <= k <= reduced.shape[1]:
+        raise ValueError(f"--top-var-channels must be in [1, {reduced.shape[1]}], got {k}")
+    kept = np.argsort(-reduced.var(axis=0), kind="stable")[:k]
+    return reduced[:, kept], kept
+
+
 def discover(values, alphas=DEFAULT_ALPHAS, indep_test="fisherz", max_cond_set=None):
     """``{alpha: boolean skeleton}`` over the columns of ``values``. No labels involved."""
     import numpy as np
@@ -318,6 +335,10 @@ def _self_test():
     check(f"pc1 keeps it (|r|={r_pc1:.2f})", r_pc1 > 0.80)
     check(f"pc1 beats gap by a wide margin ({r_pc1 / r_gap:.1f}x)", r_pc1 > 2.0 * r_gap)
     check("std/max run", reduce_channels(maps, "std").shape == (N, C))
+    scaled = rng.standard_normal((N, 6)) * np.array([1.0, 5.0, 0.5, 3.0, 2.0, 0.1])
+    subset, kept = top_variance_channels(scaled, 3)
+    check("top-variance keeps the loudest channels in order", list(kept) == [1, 3, 4])
+    check("top-variance subsets without rotating", np.array_equal(subset, scaled[:, [1, 3, 4]]))
     try:
         reduce_channels(maps, "stats")
         check("an unknown reduction is rejected", False)
@@ -453,6 +474,11 @@ def main(argv=None):
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device")
     parser.add_argument("--reduce", default="gap", choices=list(REDUCTIONS), help="Scalar per channel")
+    parser.add_argument(
+        "--top-var-channels",
+        type=int,
+        help="After --reduce, run PC on only the K highest-variance channels (label-free subset, no rotation)",
+    )
     parser.add_argument("--alphas", type=float, nargs="+", default=list(DEFAULT_ALPHAS))
     parser.add_argument("--indep-test", default="fisherz", choices=list(INDEP_TESTS))
     parser.add_argument("--max-cond-set", type=int, help="Cap PC's conditioning-set size")
@@ -495,7 +521,12 @@ def main(argv=None):
             results.append(dict(label=label, **adj))
             continue
         reduced = reduce_channels(maps, cli.reduce)
-        results.append(dict(evaluate_run_status="ok", **evaluate_reduced(reduced, z, adj, cli, label)))
+        extra = {}
+        if cli.top_var_channels:
+            # Per row, so the floor keeps ITS loudest channels rather than the trained run's.
+            reduced, kept = top_variance_channels(reduced, cli.top_var_channels)
+            extra = dict(top_var_channels=kept.tolist(), channels_before_selection=int(maps.shape[1]))
+        results.append(dict(evaluate_run_status="ok", **evaluate_reduced(reduced, z, adj, cli, label), **extra))
         if cli.ceiling and not ceiling_done:
             ceiling_done = True
             # PC on the true factors, scored through the identity naming: the bound on what
