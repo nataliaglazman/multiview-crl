@@ -1,0 +1,306 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+\usepackage[margin=0.72in,columnsep=0.25in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,booktabs,graphicx}
+\usepackage[T1]{fontenc}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+\hypersetup{pdftitle={Discovering Anatomical Factors Beyond Predefined Causal Graphs with Multiview Representation Learning},pdfauthor={Natalia Glazman},pdfsubject={Conference-style framework draft}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\pa}{\mathrm{pa}}
+\newcommand{\cf}{\mathrm{cf}}
+\newcommand{\obs}{\mathrm{obs}}
+\newcommand{\rec}{\mathrm{rec}}
+\newcommand{\KL}{\mathrm{KL}}
+\newtheorem{definition}{Definition}
+\newtheorem{observation}{Observation}
+\setlength{\parskip}{2pt}
+\raggedbottom
+\title{Discovering Anatomical Factors Beyond Predefined Causal Graphs\\with Multiview Representation Learning}
+\author{Natalia Glazman}
+\date{Framework draft, 9 October 2026\\\small Proposed method and evaluation protocol; no empirical results are asserted.}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Causal models of neuroimaging commonly describe a predefined set of demographic, clinical, and regional anatomical variables. Such models can support image generation while leaving image-derived variation outside their explicit causal vocabulary. We propose a multiview framework for recovering known anatomical factors and identifying additional, reproducible factors that may extend these models. Paired T1- and T2-weighted MRI provide complementary measurements of anatomy; demographics, regional volumes, cognitive scores, and diagnosis provide observed variables against which candidate factors can be interpreted and evaluated. The method separates shared representation learning, candidate factorisation, and graph estimation. Reconstruction preserves spatial information and grounds candidate factors in image space, while multiview agreement constrains acquisition dependence. An existing causal graph supplies revisable background knowledge rather than an exhaustive list of factors. We distinguish identifiable content blocks from individually identified variables and evaluate graph extensions without forcing unresolved blocks into scalar nodes. A controlled benchmark with factors concealed from the supplied metadata tests recovery of omitted variables. In real data, replication, incremental information, acquisition robustness, and graph uncertainty determine the strength of discovery claims. Counterfactual decoding and approximate causal abstraction provide additional validation when justified interventions are available.
+\end{abstract}
+
+\begin{figure*}[t]
+\centering
+\fbox{\begin{minipage}{0.96\textwidth}
+\small
+\textbf{Representation:} paired T1/T2 $\longrightarrow$ shared spatial content $H$ and private codes $S_k$.\\[3pt]
+\textbf{Factor discovery:} $H\longrightarrow Z_1,\ldots,Z_J$; preserve image information, anchor selected known measurements, and retain unresolved blocks.\\[3pt]
+\textbf{Graph expansion:} observed variables $W$ and candidate factors $Z\longrightarrow$ constrained graph estimation with revisable reference edges.\\[3pt]
+\textbf{Validation:} concealed-factor recovery, held-out cognition, acquisition robustness, and decoded intervention responses where justified.
+\end{minipage}}
+\caption{Proposed computational workflow. These arrows describe computation, not biological causation. Discovery is evaluated separately from graph orientation and counterfactual identification.}
+\label{fig:framework}
+\end{figure*}
+
+\section{Introduction}
+
+An image contains anatomical information at a much finer resolution than a small collection of regional volumes or clinical labels. Nevertheless, many causal imaging models begin with a fixed graph over such variables and treat the image, or its compressed representation, as an endpoint. This supports clinically specified counterfactual queries but does not directly address whether additional image-derived variables should enter the graph.
+
+Our objective is to recover as many \emph{distinguishable and reproducible} anatomical factors as the available evidence supports, compare them with factors in existing models, and identify candidates omitted from those models. Maximising the number of latent coordinates would not accomplish this: one underlying factor can be duplicated across coordinates, while several factors can remain inseparably mixed in a single block. We therefore couple factor recovery with explicit tests of redundancy, resolution, and causal interpretability.
+
+The motivating setting is paired ADNI T1/T2 MRI with age, sex, other demographics, regional volumes, cognitive scores, and diagnosis. The exact variable list and acquisition metadata will be fixed before experimentation. Additional visits can support a longitudinal extension if suitable repeated observations are available; the core formulation does not assume them.
+
+Our proposed contribution has three parts. First, a multiview model represents anatomy at a resolution that is not limited to the nodes of an existing graph. Second, a factor-discovery stage uses observed variables as partial semantic anchors and evaluates whether further factors provide information beyond those anchors. Third, a graph and counterfactual evaluation protocol distinguishes reproducible image phenotypes, candidate causal variables, and factors with validated intervention semantics. The contribution is a framework and a testable research programme; component identifiability and biological novelty are not assumed outcomes.
+
+\section{Problem Formulation}
+\label{sec:problem}
+
+For subject $n$, let
+\begin{equation}
+ \mathcal D=\{x_n^{(1)},x_n^{(2)},w_n,e_n\}_{n=1}^{N},
+\end{equation}
+where $x^{(1)},x^{(2)}$ are registered MRI contrasts, $w$ contains available observed variables, and $e$ records acquisition or environment information when available. Missing metadata are handled by explicit observation masks; missingness patterns are reported rather than implicitly assumed ignorable. All visits from a subject belong to one data partition.
+
+Let $C=(C_1,\ldots,C_K)$ denote latent anatomical factors. A measurement model is
+\begin{equation}
+ X^{(k)}=g_k(C_{\mathcal S_k},S_k,\epsilon_k),\quad k\in\{1,2\},
+ \label{eq:measurement}
+\end{equation}
+where $\mathcal S_k$ indexes the factors visible in modality $k$, $S_k$ denotes acquisition variation, and $\epsilon_k$ denotes measurement noise. The factors in $C$ may be causally dependent. Shared variation need not be biological: scanner, site, registration, and subject motion can influence both modalities. Cross-view agreement is therefore necessary evidence for shared content, not by itself evidence of anatomy.
+
+The primary identification target is the anatomy recoverable from the relevant shared views. A pathology visible only in one modality is outside a purely shared-content guarantee. Unshared information is not automatically labelled nuisance; it is retained and audited separately, and adding it as a biological graph node requires additional evidence.
+
+\subsection{Observed variables have different roles}
+
+We distinguish antecedent or contextual variables $A$, anatomical measurements $M$, cognitive outcomes $Y$, and diagnosis $D$, all contained in $W$ where available. Their roles are specified from measurement procedures and temporal ordering. For example, a regional volume computed from an MRI is a measurement of anatomy, not an independent cause of the image merely because it is tabular. Cognitive scores may be descendants of anatomical processes. Diagnosis may depend on cognition or on the clinical assessment used to select subjects. A diagnostic label must not be treated as an upstream intervention without a scientific model supporting that interpretation.
+
+One illustrative measurement-aware model is
+\begin{align}
+ C_j &= f_j(C_{\pa(j)},A_{\pa(j)},U_j), \label{eq:anatomical-scm}\\
+ M &= m(C,\epsilon_M),\qquad Y=f_Y(C,A,U_Y).
+\end{align}
+This is a template, not a committed biological graph. When $M$ is extracted from $X$, its image-derived measurement relationship is retained explicitly instead of assuming independent measurement errors. Demographic variables are not presumed to be mutually independent or uniformly upstream. Diagnosis and other variables are placed according to the chosen scientific question.
+
+Let $G_0$ be a reference graph or partially directed graph over the observed variables. We seek candidate image-derived factors $Z$ and a graph $G$ over the observed variables and supported candidates. This is a \emph{node expansion with revisable edges}: introducing a mediator or common cause can change an apparent edge between observed variables. We do not require the subgraph induced by $W$ to reproduce every edge of $G_0$.
+
+\subsection{Meaning of an additional factor}
+
+\begin{definition}[Candidate beyond the reference graph]
+A learned factor is a candidate beyond $G_0$ if it is reproducibly recoverable from images, is not adequately represented by the existing graph variables under the specified comparison, and contributes stable anatomical or predictive information on held-out data. This definition establishes a candidate omitted from a particular graph, not a previously unknown biological cause.
+\end{definition}
+
+An additional factor may be correlated with existing variables or mediate their effects. Independence from age, diagnosis, or known anatomy is therefore not a novelty requirement. Similarly, unexplained image residuals can contain artefacts and measurement error; residual variation is not automatically a new factor.
+
+\section{Representation and Factor Discovery}
+\label{sec:method}
+
+\subsection{Shared spatial content with modality-specific decoding}
+
+Each encoder produces a content field and a private code,
+\begin{equation}
+ (H^{(k)},S^{(k)})=E_k(X^{(k)}),\qquad
+ H^{(k)}\in\R^{m\times|\Omega|}.
+\end{equation}
+Here $\Omega$ is a spatial grid. A channel is not assumed to correspond to a scalar causal factor. In the primary shared-anatomy experiment, the private route is intended to model acquisition variation; its capacity and anatomical leakage are measured. If modality-specific anatomy is retained there, that route is explicitly treated as mixed private information and is not held fixed during counterfactuals without justification.
+
+The initial representation objective is
+\begin{equation}
+ \mathcal L_{\mathrm{rep}}
+ =\lambda_r\mathcal L_{\rec}
+ +\lambda_v\mathcal L_{\mathrm{view}}
+ +\lambda_n\mathcal L_{\mathrm{nc}},
+ \label{eq:representation-loss}
+\end{equation}
+with reconstruction, registered cross-view agreement, and a noncollapse surrogate, respectively. In particular,
+\begin{align}
+ \mathcal L_{\rec}&=\E\sum_k d_X(D_k(H^{(k)},S^{(k)}),X^{(k)}),\\
+ \mathcal L_{\mathrm{view}}&=\E\|\widetilde H^{(1)}-\widetilde H^{(2)}\|_F^2.
+\end{align}
+The transforms defining $\widetilde H$ and the corresponding coordinate conventions are fixed and reported. Noncollapse statistics are computed across subjects, controlling for fixed positional templates. Contrastive or variance/covariance objectives are practical surrogates; their optimisation does not certify information preservation. Registration failures and weakly shared signals are evaluated separately.
+
+Reconstruction preserves details that may be absent from the observed metadata and supplies a map back to anatomy. It can also preserve nuisance or allow anatomy to pass through a private route. We therefore evaluate reconstruction together with content sufficiency, acquisition sensitivity, and decoder reliance on each pathway. Controlled acquisition changes in the simulator provide stronger evidence than unconditional independence penalties between correlated real-world variables.
+
+\subsection{From a content block to candidate factors}
+
+A factoriser reads the complete content field,
+\begin{align}
+ Z&=P_\phi(H)=(Z_1,\ldots,Z_J),\quad Z_j\in\R^{d_j},\\
+ \widehat H&=R_\omega(Z).
+\end{align}
+Scalar factors and vector-valued blocks are both allowed. Spatially aware readouts are used instead of requiring global average pooling. A preservation objective,
+\begin{equation}
+ \mathcal L_{\mathrm{pres}}=\E\|H-R_\omega(P_\phi(H))\|_F^2,
+\end{equation}
+checks the cost of factorisation. Image decoding in the factor model uses $D_k(R_\omega(Z),S^{(k)})$. There is no unrestricted shared-content bypass around $Z$; otherwise the decoder could ignore the proposed factors. The earlier unfactorised model supplies a reconstruction and information-preservation reference.
+
+The number and dimensions of slots are selected from a prespecified capacity range using validation data. A complexity penalty discourages redundant slots; a factor is not retained merely because it has nonzero variance. When two coordinates cannot be separated reliably, they are reported as a joint block. We do not impose marginal independence on endogenous factors that may cause one another.
+
+\subsection{Known variables as partial anchors}
+
+Observed anatomical measurements supply semantic anchors through sparse readouts,
+\begin{equation}
+ \widehat M_l=a_l(Z),\qquad
+ \mathcal L_{\mathrm{anchor}}=\E\sum_{l\in\mathcal O_n}
+ \ell_l(a_l(Z_n),M_{nl}),
+\end{equation}
+where $\mathcal O_n$ contains the observed, designated anchor targets for subject $n$. Readout sparsity encourages a small set of slots to explain each measurement, but neither sparse prediction nor a good readout proves one-to-one factor identification. Age, demographics, cognition, and diagnosis retain their separate roles in the graph rather than all being reconstruction targets for anatomy.
+
+The representation is not restricted to predicting anchors. Image preservation and cross-view consistency permit additional factors to remain. We compare an anchor-free version with a partially supervised version, since anchor supervision changes the information available to the learner. At least one prespecified anatomical or clinical target family is withheld from representation and factor selection for independent validation. A target used to train an anchor cannot subsequently serve as independent discovery evidence for that same factor.
+
+The factorisation objective is
+\begin{equation}
+ \begin{aligned}
+ \mathcal L_{\mathrm{factor}}
+ &=\lambda_p\mathcal L_{\mathrm{pres}}+\lambda_a\mathcal L_{\mathrm{anchor}}\\
+ &\quad+\lambda_s\Omega_{\mathrm{readout}}+\lambda_c\Omega_{\mathrm{capacity}}.
+ \end{aligned}
+\end{equation}
+This proposes candidate decompositions; it is not an identifiability theorem. Additional structure is required to resolve factors with identical observational signatures.
+
+\subsection{Progressive refinement and selection}
+
+We begin with the shared block and propose low-dimensional splits within a prespecified capacity budget. Candidate splits are fitted on training subjects and evaluated on validation subjects for preservation, redundancy, stability, and sparse relationships with designated anchors. Graph estimation then compares the candidates using the same estimator and background constraints. A split is retained only if the additional complexity is supported by a preregistered combination of held-out fit and reproducibility; otherwise its coordinates remain a vector-valued block. Selection thresholds are calibrated with simulated redundant-factor and nuisance-only controls, not chosen to maximise the reported number of discoveries.
+
+Graph structure can subsequently inform a separate refinement arm through a properly normalised latent-variable model. For observed biological variables $W_b$ excluding deterministic MRI-derived summaries, an acquisition-independent idealisation is
+\begin{equation}
+ \begin{aligned}
+ p_\Theta(x,w_b,z,s)&=p_G(w_b,z)\\
+ &\quad\times\prod_k p(s_k)\,p_{D_k}(x^{(k)}\mid z,s_k).
+ \end{aligned}
+\end{equation}
+Its negative evidence lower bound includes both reconstruction and the entropy of the variational posterior $q_\phi(z,s\mid x)$, rather than adding an uncorrected latent-density score to a deterministic encoder. Acquisition dependence is included explicitly when the factorisation of $p(s)$ is unjustified. This joint arm may favour factors participating in simple mechanisms, but its identifiability still depends on substantive assumptions. It is compared with the frozen staged pipeline, and improvement is assessed on observed endpoints and independent synthetic truth.
+
+\section{What Can Be Identified?}
+\label{sec:identification}
+
+Under their stated observation, regularity, variation, dimensionality, and objective assumptions, multiview results identify shared latent blocks up to smooth bijections \cite{yao2024}. Our spatial formulation targets an embedding $H=\Phi(C)$ with a left inverse on its image. An overcomplete spatial tensor is not required to fill its ambient Euclidean space. Quantisation is evaluated as an approximation; a finite code cannot be a smooth bijection of continuously varying anatomy.
+
+\begin{observation}[A shared block does not determine its internal factors]
+If $H=\Phi(C)$ preserves a block and the downstream model classes are unrestricted, an invertible change of coordinates within $C$ can be absorbed into the encoder, decoder, and downstream mechanisms. The observational fit alone therefore does not select a unique decomposition into scalar factors.
+\end{observation}
+\noindent The argument is composition with an invertible map and its inverse. In particular, two modalities that both observe the same full anatomical block do not distinguish all factors merely by being two modalities.
+
+The stronger target is a finest supported partition $\mathcal B$ such that, up to permutation,
+\begin{equation}
+ Z_j=h_j(C_{B_j}),\qquad B_j\in\mathcal B,
+ \label{eq:blocktarget}
+\end{equation}
+where each $h_j$ is invertible on the relevant support. We investigate refinements using distinct visibility patterns, scientifically justified sparse mechanisms, and, where available, temporal or intervention information. Mechanism-sparsity theory provides relevant precedents under specific variation and graph conditions \cite{lachapelle2022}; adding a generic sparsity penalty does not inherit those guarantees. Anatomical crops and additional resolutions likewise do not automatically supply valid latent-subset views.
+
+Our claims follow three levels: \emph{shared-content recovery}, \emph{reproducible factor or block separation}, and \emph{causal identification}. The core observational implementation targets the first two empirically. The third requires an explicit assumption set or additional evidence. Independent disturbances, if recovered, are not silently relabelled as causally dependent anatomical states. Spatial locality is also assessed separately: an arbitrary invertible block representation need not preserve anatomical localisation.
+
+\section{Extending the Reference Graph}
+\label{sec:graph}
+
+We first freeze the representation and factorisation, then estimate models over $V=(W,Z)$ with measurement relationships and admissible directions specified in advance. This separates representation error from graph-estimation error. A generic scoring formulation is
+\begin{align}
+ \mathcal J(G,\theta)&=-\sum_{n,j}\log p_{\theta_j}
+       (v_{nj}\mid v_{n,\pa_G(j)})\nonumber\\
+ &\quad+\lambda_E|E_G|+\lambda_0\Omega_0(G,G_0),
+ \label{eq:graphscore}
+\end{align}
+subject to the chosen graph class. $\Omega_0$ distinguishes hard temporal or measurement constraints from revisable scientific priors. A Markovian DAG fit is one explicitly conditional analysis, not a universal assumption. When latent confounding remains plausible, the reported object should allow it, for example through a partial ancestral graph where its assumptions apply. Near-deterministic image-derived measurements also require special treatment rather than indiscriminate conditional-independence testing.
+
+Observational scores can leave multiple orientations equivalent. We report supported skeletons, equivalence classes, and bootstrap stability rather than force a single directed graph. Under a causal-sufficiency analysis, assumptions include the relevant Markov and faithfulness conditions; allowing hidden confounding changes both the estimator and the interpretation. A newly added mediator may replace a direct observed-variable edge. Alternative reference graphs are included in sensitivity analyses.
+
+Latent-density scores are compared within a fixed representation. Optimising an arbitrary rescaling of $Z$ against an uncorrected latent likelihood would make scores incomparable. Comparisons across representation models therefore use held-out observed targets, reconstruction, and matched complexity; a joint generative likelihood would need the appropriate density and Jacobian accounting.
+
+For each proposed factor $Z_j$, we evaluate four questions. Is it reproducible up to the allowed within-factor transformation? Does it contain information not adequately represented by $W$ and the other retained slots? Does it correspond to stable anatomical variation? Does its proposed graph role survive alternative nuisance adjustments, graph priors, and resampling? Predictive improvement is evidence of information, not evidence of causal direction. Acquisition adjustment follows an explicit measurement model; indiscriminately removing site-associated variation can remove biological signal when site and population differ.
+
+\section{Counterfactual Grounding and Abstraction}
+\label{sec:counterfactual}
+
+Peng et al. train an image autoencoder before fitting an attribute SCM and a linear residual model for the image code \cite{peng2026}. We adopt this staged evaluation as a baseline. For code $z$, parent vector $p$, and fitted coefficient matrix $B$, their residual-preserving edit is
+\begin{equation}
+ z^{\cf}=z+(p^{\cf}-p)B.
+\end{equation}
+It is inexpensive and testable, but its linear additive assumption is coordinate dependent. A nonlinear reparameterisation permitted by block identification need not preserve it. Regression residuals are not automatically independent causal disturbances. We compare this baseline with nonlinear mechanisms only under clearly specified fitting and abduction assumptions.
+
+Once a candidate SCM and intervention semantics are specified, we infer the factual exogenous context, replace the intervened equations, recompute descendants, and decode each modality. For a retained context $u$ and intervention $i$,
+\begin{equation}
+ \widehat X^{(k),i}=D_k(R_\omega(Z^i),S_k^i).
+\end{equation}
+Acquisition variables remain fixed only when their mechanisms are unaffected. Uncertain exogenous states are integrated over their posterior. A latent traversal with other coordinates fixed is a decoder sensitivity analysis unless it corresponds to the stated SCM intervention. Neither realistic images nor agreement between two decoders proves the intervention is biologically valid.
+
+For synthetic systems with known micro-level mechanisms, the additional target is approximate causal abstraction \cite{beckers2019,beckers2020}. Let $M_L$ be the detailed SCM, $M_H$ the proposed macro SCM, $\tau$ a state map, $\tau_U$ a context map, and $\omega_\tau$ a compatible intervention map. We evaluate
+\begin{equation}
+ \mathcal E_{\mathrm{abs}}=
+ \E_{u,i}d_V\!\left(
+ \tau(M_L(u,i)),M_H(\tau_U(u),\omega_\tau(i))\right).
+ \label{eq:abstraction}
+\end{equation}
+The maps and intervention family must be specified independently of the final test outcomes. Exact compatibility concerns every allowed context and intervention; empirical averages establish only sampled approximate agreement. Full abstraction additionally requires the relevant coverage and mapping conditions. Retaining an outcome at macro level can preserve its counterfactual even when fine image detail is discarded; faithful pixel-level decoding is an additional requirement. Conditioning on compressed factual evidence may also lose information required for individual abduction.
+
+Paired low-level counterfactuals can support an optional training loss comparing predicted macro states and decoded images with their true counterparts. This is a separate, intervention-supervised extension. The primary observational arm uses synthetic interventions for evaluation only. We do not infer causal faithfulness by training and testing against the same learned generator.
+
+\section{Experimental Protocol}
+\label{sec:experiments}
+
+\subsection{Controlled discovery of omitted factors}
+
+The primary synthetic benchmark uses a known SCM over anatomical factors and an incomplete observed graph. A subset of factors is supplied as metadata or anchor targets; other factors remain active in both image generation and the SCM but are concealed from training labels, graph priors, factor matching, and hyperparameter selection. The benchmark distinguishes omitted causes, mediators, effects, and factors sharing the same visibility pattern. A negative control removes additional biological factors while retaining acquisition variation.
+
+All factors and exogenous contexts are retained by the evaluator. Interventions replace structural equations and recompute descendants under the same context. Single-coordinate renderer perturbations with other realised factors fixed are reported separately as controlled sensitivity tests. This distinction matters in the existing pseudo-MRI benchmark. Thresholded rendering also limits exact continuous recovery; recoverability ceilings and intervention sizes are calibrated against observable image changes.
+
+We measure known-factor and concealed-factor recovery, redundancy, the number of supported factors or blocks, nuisance leakage, spatial response fidelity, and graph recovery at the appropriate equivalence-class level. Scalar recovery uses one-to-one matching and suitable univariate readouts; unrestricted multivariate probes are reported as block-information metrics. A successful multivariate readout is not scored as coordinate disentanglement. Nonlinear within-block reparameterisation controls test whether conclusions depend on a favourable coordinate system.
+
+Counterfactual evaluation compares predicted latent and image responses against simulator ground truth for held-out subjects, targets, intervention magnitudes, and combinations. It reports effect direction, magnitude, affected anatomy, and spurious changes outside that anatomy. Endpoint reconstruction establishes the decoder's error floor; the no-intervention output is compared with the factual reconstruction rather than required to equal the original noisy image exactly.
+
+\subsection{ADNI evaluation and discovery claims}
+
+Subjects are partitioned before representation training, preprocessing estimation, and model selection. All visits remain within a subject partition. The analysis records missingness, image quality, registration, available scanner/site variables, and the construction of diagnosis and cognitive endpoints. Exact sample sizes and exclusions are filled in after the data audit; this framework asserts none.
+
+Known-factor recovery is assessed against held-out regional and clinical measurements. Candidates beyond the reference graph are assessed by cross-view agreement, resampling stability, anatomical decoding, redundancy with existing variables, and incremental prediction of prespecified held-out endpoints. Cognitive outcomes used for validation are not used as representation anchors in that experiment. If repeat visits are available, baseline factors can be tested against subsequent cognition under an explicit temporal protocol. A cognitive score used to define diagnosis is not treated as independent validation of that diagnosis.
+
+Sensitivity analyses use alternative reference graphs, acquisition adjustments, factor counts, and readout classes. Site-held-out analyses are performed only where sample support permits meaningful comparison. All factor selection and matching occur before final evaluation, with correction or independent confirmation for multiple candidate discoveries. Replication in a separate cohort is required before describing a factor as a generalisable new phenotype; biological novelty additionally requires comparison with established phenotypes and external scientific validation. Cross-sectional ADNI associations alone do not establish new causal directions.
+
+\subsection{Matched comparisons and ablations}
+
+The comparisons separate representation, mechanism, and supervision:
+\begin{enumerate}
+ \item An observed-variable model using $G_0$, without learned image factors.
+ \item A reconstruction-only autoencoder with the same image capacity and preprocessing.
+ \item A Peng-style two-stage model with a linear residual mechanism on the reconstruction code.
+ \item An encoder-only multiview model; attach a decoder after freezing it for matched image-space evaluation.
+ \item The multiview reconstruction model with factorisation, first without and then with anchors.
+ \item Graph expansion with the same causal estimator across representations; linear and nonlinear mechanisms are compared in a separate factorial ablation.
+\end{enumerate}
+We also compare supplied versus inferred factor counts, scalar versus unresolved vector blocks, and factual-only versus explicitly intervention-supervised training. An existing identifiability method is a theoretical baseline only on a benchmark satisfying its assumptions. Matching labels, intervention access, readout flexibility, and training data prevents extra supervision from being attributed to architecture.
+
+\section{Expected Scope and Limitations}
+
+The intended outcome is a representation that recovers known anatomy and proposes additional factors with reproducible image and graph relationships. It is possible that the data support only a large shared block, or that all stable candidates are refinements of existing measurements. These are informative outcomes. The framework must not manufacture a larger causal vocabulary by splitting correlated features or counting duplicated coordinates.
+
+The main unresolved step is refining block recovery into distinct causal variables. Cross-view alignment, sparse readouts, and reconstruction alone do not generally identify that refinement. Measurement error, shared acquisition effects, latent confounding, diagnostic ascertainment, and limited interventions further restrict causal conclusions. Counterfactual generation is used to expose the implications of an explicit model and, where ground truth is available, to test those implications. It does not convert observational factor discovery into validated biology.
+
+\begin{thebibliography}{9}
+\bibitem{yao2024}
+D. Yao et al.
+\newblock Multi-View Causal Representation Learning with Partial Observability.
+\newblock ICLR, 2024.
+\newblock \url{https://arxiv.org/abs/2311.04056}.
+
+\bibitem{lachapelle2022}
+S. Lachapelle et al.
+\newblock Disentanglement via Mechanism Sparsity Regularization: A New Principle for Nonlinear ICA.
+\newblock CLeaR, PMLR 177:428--484, 2022.
+\newblock \url{https://proceedings.mlr.press/v177/lachapelle22a.html}.
+
+\bibitem{peng2026}
+W. Peng et al.
+\newblock Latent Causal Modeling for 3D Brain MRI Counterfactuals.
+\newblock arXiv:2409.05585, version 3, March 2026.
+\newblock \url{https://arxiv.org/abs/2409.05585v3}.
+
+\bibitem{beckers2019}
+S. Beckers and J. Y. Halpern.
+\newblock Abstracting Causal Models.
+\newblock AAAI 33(1):2678--2685, 2019.
+\newblock \url{https://doi.org/10.1609/aaai.v33i01.33012678}.
+
+\bibitem{beckers2020}
+S. Beckers, F. Eberhardt, and J. Y. Halpern.
+\newblock Approximate Causal Abstractions.
+\newblock UAI, PMLR 115:606--615, 2020.
+\newblock \url{https://proceedings.mlr.press/v115/beckers20a.html}.
+\end{thebibliography}
+
+\end{document}
