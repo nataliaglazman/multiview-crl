@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-causal-12-4-2-levels
+tag: synthetic-causal-12-4-shared-style-cross-recon
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -20,7 +20,9 @@ grad_clip_norm: 100
 batch_size: 64
 synthetic_identifiable_ventricle: true
 contrastive_proj_dim: 0
+synthetic_shared_gain_bias: true
 synthetic_lesion_placement: wm_interior
+synthetic_lesion_intensity: styled
 synthetic_lesion_radius: 0.1
 
 # # --- leak (b): make style non-degenerate so recon stops using content ---
@@ -29,7 +31,7 @@ scale_style_contrastive_loss: 0
 style_spatial_size: 1
 style_contrastive_mode: within_modality
 # style_dropout_prob: 0.2
-# style_nb_entries: 
+# style_nb_entries:
 # quantize_style: false
 
 
@@ -39,18 +41,18 @@ synthetic_causal: false
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
 synthetic_res: 64
-norm_type: layer
+norm_type: group
 decoder_norm_type: group
 no_final_recon_norm: true
 inject_style_to_decoder: true
 style_injection_mode: input
 separate_style_codebooks: true
 separate_content_codebooks: false
-vqvae_nb_levels: 2
+vqvae_nb_levels: 1
 vqvae_nb_res_layers: 2
 vqvae_hidden_channels: 16
 vqvae_embed_dim: 16
-vqvae_scaling_rates: [2, 2]
+vqvae_scaling_rates: [4]
 deterministic: true
 checkpoint_steps: 1000
 eval_dci: true
