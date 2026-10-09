@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-causal-12-4-style-cross-recon-sulcal
+tag: synthetic-causal-12-4-cross-recon-sulcal-layer
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true
@@ -40,7 +40,7 @@ synthetic_causal: false
 synthetic_causal_graph: random
 synthetic_causal_edge_prob: 0.5
 synthetic_res: 64
-norm_type: group
+norm_type: layer
 decoder_norm_type: group
 no_final_recon_norm: true
 inject_style_to_decoder: true
