@@ -16,24 +16,33 @@ python -m eval.adni.encoder_modality_gap \
     --checkpoint model_best.pt --device cuda --batch-size 4
 ```
 
-On the Run:ai submission host, after syncing this code to the NFS checkout:
+On the Run:ai submission host, after syncing this code to the NFS checkout, use
+the launcher (no Python dependencies are needed on the submitting host):
 
 ```bash
-runai training standard submit adni-modality-gap-$(date +%s) \
-    --project nglazman \
-    --image aicregistry:5000/nglazman:multiview-crl \
-    --run-as-user --large-shm --node-type A100 --gpu-devices-request 1 \
-    --cpu-core-request 4 --cpu-core-limit 8 \
-    --cpu-memory-request 32G --cpu-memory-limit 64G \
-    --host-path path=/nfs,mount=/nfs,readwrite \
-    --command -- bash -c 'set -euo pipefail
-        cd /nfs/home/nglazman/crl-2/multiview-crl
-        export PYTHONPATH="$PWD" PYTHONUNBUFFERED=1
-        export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
-        python -m eval.adni.encoder_modality_gap \
-            --run-dir results/encoder_adni/runs/encoder_adni_conv_mlp_layernorm_s42 \
-            --checkpoint model_best.pt --device cuda --batch-size 4'
+bash scripts/run_encoder_adni_modality_gap_runai.sh --dry-run
+bash scripts/run_encoder_adni_modality_gap_runai.sh
 ```
+
+The launcher passes one quoted, single-line `bash -c` command with `--run-dir`
+included. This avoids embedded continuation backslashes/newlines in the container
+command. An error saying `one of the arguments --run-dir --features is required`
+means the diagnostic started without its source argument, before loading a
+checkpoint; inspect the launcher's dry run to check the complete command.
+
+Defaults match the LayerNorm run above. Override `MODEL_ID` or `RUN_DIR` for a
+different run, `CHECKPOINT` for another checkpoint, and `REPO_PATH` for another
+NFS checkout. Additional CLI arguments are forwarded as individual arguments:
+
+```bash
+bash scripts/run_encoder_adni_modality_gap_runai.sh --checkpoint model_init.pt
+MODEL_ID=encoder_adni_conv_mlp_s42 bash scripts/run_encoder_adni_modality_gap_runai.sh
+```
+
+It requests one A100, 4 CPU cores (limit 8), and 32G memory (limit 64G). The
+`RUNAI_PROJECT`, `RUNAI_IMAGE`, `RUNAI_NODE_TYPE`, `RUNAI_CPU`, `RUNAI_CPU_LIMIT`,
+`RUNAI_MEMORY`, and `RUNAI_MEMORY_LIMIT` environment overrides are supported.
+It prints the new job name for `runai training standard logs <job-name>`.
 
 Change the run directory for other model IDs. To compare with the actual untrained
 floor, repeat with `--checkpoint model_init.pt`; both runs use identical probe folds
@@ -129,9 +138,13 @@ within every fold and explicitly groups subjects.
 
 ```bash
 python -m unittest discover -s tests -p test_encoder_modality_gap.py -v
+python -m unittest discover -s tests -p test_encoder_modality_gap_runai.py -v
 ```
 
 Tests cover a tiny planted offset, a residual nonlinear modality difference with
 equal population means, identical/collapsed features, repeated-subject grouping,
 training-only centering, saved-feature replay, and frozen extraction from a small
 fake ADNI tree with validation membership verified against the saved run.
+Launcher tests execute both shell boundaries with local stand-ins for Run:ai and
+Python, checking that the required run directory, quoted paths, and extra
+arguments reach Python intact. They do not submit a cluster job.
