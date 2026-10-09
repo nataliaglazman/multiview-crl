@@ -273,6 +273,14 @@ def parse_args() -> argparse.ArgumentParser:
         "ventricle CSF from fissure CSF. Lifts pooled ventricle R^2 from ~0.03 to ~0.92. "
         "Default off = byte-identical to prior runs.",
     )
+    parser.add_argument(
+        "--synthetic-sulcal-mode",
+        choices=("corrugation", "atrophy"),
+        default="corrugation",
+        help="What sulcal_widening (z_content[8]) does. corrugation reproduces old runs: the signed depth of a "
+        "fixed zero-mean corrugation. atrophy widens fixed sulcal clefts, turning grey matter into CSF "
+        "without moving the brain outline, white matter or ventricles.",
+    )
     parser.add_argument("--model-dir", type=str, default="results")
     parser.add_argument("--model-id", type=str, default=None)
     parser.add_argument("--tau", type=float, default=1.0)

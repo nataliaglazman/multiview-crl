@@ -1,4 +1,4 @@
-"""--synthetic-sulcal-mode atrophy: renderer, encoder-only trainer, evaluation targets and launchers."""
+"""--synthetic-sulcal-mode atrophy: renderer, encoder/VQ-VAE trainers, evaluation and launchers."""
 
 import contextlib
 import io
@@ -20,7 +20,7 @@ from eval.synthetic.synthetic_dataset import SULCAL_CLEFT_HALF_WIDTH, PseudoMRIR
 from scripts import generate_conv_patch_slurm, run_encoder_mps
 from tests.test_encoder_mps_runner import runner_args, trainer_parse_args
 from tests.test_encoder_target_followups import config
-from tests.test_lesion_intensity import trainer_make_dataset
+from tests.test_lesion_intensity import trainer_make_dataset, vqvae_dataset_kwargs
 
 ROOT = Path(__file__).resolve().parents[1]
 FIELDS = (torch.zeros(4, 4, 4), torch.zeros(8, 8, 8), "cpu")
@@ -138,6 +138,44 @@ class SulcalModeTests(unittest.TestCase):
         # settings.json files written before the flag existed restore the corrugation.
         del settings["synthetic_sulcal_mode"]
         self.assertEqual(make_dataset(settings, 4, "val")._inner.renderer.sulcal_mode, "corrugation")
+
+    def test_flag_reaches_vqvae_training_and_saved_evaluation(self):
+        from eval.protocol.run_dci_synthetic import build_synthetic_test_set, load_run_args
+        from utils.config import parse_args
+
+        parser = parse_args()
+        base = ["--dataset-name", "synthetic", "--synthetic-res", "16", "--synthetic-clean-content"]
+        base += ["--synthetic-normalize", "fixed_reference"]
+        base += ["--synthetic-num-train", "4", "--synthetic-num-val", "4", "--synthetic-num-test", "4"]
+        self.assertEqual(parser.parse_args(base).synthetic_sulcal_mode, "corrugation")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(base + ["--synthetic-sulcal-mode", "widen"])
+        args = parser.parse_args(base + ["--synthetic-sulcal-mode", "atrophy"])
+        settings = json.loads(json.dumps(vars(args)))
+        with tempfile.TemporaryDirectory() as run_dir:
+            settings_path = Path(run_dir, "settings.json")
+            settings_path.write_text(json.dumps(settings))
+            restored = load_run_args(run_dir)
+            for split in ("train", "val", "test"):
+                with self.subTest(split=split):
+                    trained = SyntheticBrainDataset(
+                        mode=split, spatial_size=(16,) * 3, cache=False, **vqvae_dataset_kwargs(args)
+                    )
+                    scored = build_synthetic_test_set(restored, 4, causal=False, cache=False, split=split)
+                    for ds in (trained, scored):
+                        self.assertEqual(ds._inner.renderer.sulcal_mode, "atrophy")
+                    for a, b in zip(trained._inner[0][:2], scored._inner[0][:2]):
+                        torch.testing.assert_close(a, b, rtol=0, atol=0)
+            # Older settings retain the renderer used before this flag existed.
+            del settings["synthetic_sulcal_mode"]
+            settings_path.write_text(json.dumps(settings))
+            legacy = load_run_args(run_dir)
+            trained = SyntheticBrainDataset(
+                mode="test", spatial_size=(16,) * 3, cache=False, **vqvae_dataset_kwargs(legacy)
+            )
+            scored = build_synthetic_test_set(legacy, 4, causal=False, cache=False)
+            for ds in (trained, scored):
+                self.assertEqual(ds._inner.renderer.sulcal_mode, "corrugation")
 
     def test_launchers_add_only_the_flag_and_a_distinct_run_id(self):
         parse = trainer_parse_args()

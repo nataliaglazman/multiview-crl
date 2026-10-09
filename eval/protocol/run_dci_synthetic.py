@@ -271,6 +271,7 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None, sp
         # data distribution than it saw. Every default here matches utils/config.py, so a
         # run whose settings.json predates a flag still builds the generator it trained on.
         synthetic_identifiable_ventricle=getattr(args, "synthetic_identifiable_ventricle", False),
+        synthetic_sulcal_mode=getattr(args, "synthetic_sulcal_mode", "corrugation"),
         synthetic_content_prior=getattr(args, "synthetic_content_prior", "normal"),
         synthetic_content_squash=getattr(args, "synthetic_content_squash", "auto"),
         synthetic_content_amp_scale=getattr(args, "synthetic_content_amp_scale", None),
