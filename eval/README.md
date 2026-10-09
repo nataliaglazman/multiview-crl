@@ -16,7 +16,7 @@ Each topic's write-ups (`*.md`) live next to its code.
 | `encoder/` | Encoder-only ablation audits (generalization, spatial targets, target-control protocol); [GN/LN normalization and pooling probe](encoder/ENCODER_NORMALIZATION_AUDIT.md), [early-layer lesion movement test](encoder/ENCODER_LESION_NORM_AUDIT.md). |
 | `maps/` | Voxelwise/spatial maps: `recovery_maps`, `identifiability_maps`, phase-0 extraction, SPM, receptive-field and radial-profile plots. |
 | `diagnostics/` | One-question checkpoint/representation probes: style/content path audits, pooling and patch-signal probes, norm and BT calibration, background/view leak, checkpoint forensics, entropy/uniformity, patch-MCC decay. |
-| `adni/` | Real-ADNI probes: disease classifier, anatomy and channel probes. |
+| `adni/` | Real-ADNI probes: disease classifier, anatomy and channel probes; [encoder modality-gap diagnostic](adni/ENCODER_MODALITY_GAP.md). |
 | `plots/` | Figure scripts that read saved JSON and never re-score. |
 | `notebooks/` | Analysis notebooks (they add `../..` to `sys.path`). |
 

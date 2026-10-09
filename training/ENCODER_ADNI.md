@@ -201,6 +201,10 @@ derive from both. CUDA adaptive-pooling backward has no deterministic kernel, so
 
 ## Reading the evaluation
 
+- If the content modality probe remains high despite improving InfoNCE, run the
+  [checkpoint modality-gap diagnostic](../eval/adni/ENCODER_MODALITY_GAP.md). It
+  measures normalized geometry and compares linear/nonlinear probes before and
+  after subtracting modality means fitted only on each fold's training subjects.
 - **Read the Δ column.** An untrained encoder already reads diagnosis and modality
   from raw anatomy and contrast.
 - **Prefer the per-view diagnosis probes** (`_v0`, `_v1`). The pooled probe stacks
