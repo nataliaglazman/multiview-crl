@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/adni_real.yaml
-# Generated at: 2026-10-09T12:58:12Z
-# Git SHA: 307284d
+# Generated at: 2026-10-09T12:58:56Z
+# Git SHA: 34dff2e
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail

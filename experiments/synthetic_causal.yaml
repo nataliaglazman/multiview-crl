@@ -1,5 +1,5 @@
 _base_: synthetic_defaults
-tag: synthetic-causal-12-4-shared-style-cross-recon-sulcal
+tag: synthetic-causal-12-4-style-cross-recon-sulcal
 contrastive_loss_type: barlow_twins
 # bt_lambda: 0.16                 # NOT 0.005 — see the calibration note above
 patch_contrastive: true

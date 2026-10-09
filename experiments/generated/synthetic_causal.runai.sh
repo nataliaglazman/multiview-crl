@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Auto-generated from: experiments/synthetic_causal.yaml
-# Generated at: 2026-10-09T12:58:12Z
-# Git SHA: 307284d
+# Generated at: 2026-10-09T12:58:56Z
+# Git SHA: 34dff2e
 # Re-generate with: python scripts/launch.py --generate --cluster runai
 
 set -euo pipefail
@@ -88,7 +88,7 @@ python -m training.main_multimodal
     --synthetic-res 64
     --synthetic-shared-gain-bias
     --synthetic-sulcal-mode atrophy
-    --model-id synthetic-causal-12-4-shared-style-cross-recon-sulcal
+    --model-id synthetic-causal-12-4-style-cross-recon-sulcal
     --tau 0.1
     --total-dim 512
     --train-steps 200000
@@ -107,7 +107,7 @@ TRAIN_EOF
 )
 
 # --- RunAI submission ---
-runai training standard submit synthetic-causal-12-4-shared-style-cross-recon-sulcal \
+runai training standard submit synthetic-causal-12-4-style-cross-recon-sulcal \
     --project nglazman \
     --image aicregistry:5000/nglazman:multiview-crl \
     --run-as-user \
