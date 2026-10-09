@@ -8,8 +8,9 @@ objective are unchanged; only the data, preprocessing and evaluation differ.
 ## Launching
 
 The recipe lives in `scripts/encoder_adni_recipe.sh`, and one wrapper per cluster
-sources it. The wrappers add only their cluster's paths (from
-`experiments/cluster/<cluster>.yaml`) and submission. Each recipe knob (`MODEL_ID`,
+sources it. The wrappers add their cluster's paths (from
+`experiments/cluster/<cluster>.yaml`, with the enriched labels filename described below)
+and submission. Each recipe knob (`MODEL_ID`,
 `READOUT`, `NORM_TYPE`, `PATCH_WEIGHT`, `CONTENT_CHANNELS`, ...) is an environment
 variable, overridable at submit time. `tests/test_encoder_adni.py` checks that the two clusters' commands
 differ only in the five path flags.
@@ -22,6 +23,17 @@ differ only in the five path flags.
 The Run:ai job runs the checkout at `/nfs/home/nglazman/crl-2/multiview-crl` inside
 the training image. Sync the code there first. Runs land in that checkout's
 `results/encoder_adni/runs/<MODEL_ID>`, and the job is named after `MODEL_ID`.
+
+The encoder wrappers now default to `labels_cleaned_3class_demog.csv`, in the
+same directory as the previous labels CSV. For example, on Run:ai:
+
+```bash
+MODEL_ID=encoder_adni_conv_mlp_demog_s42 bash scripts/run_encoder_adni_runai.sh
+```
+
+For a direct Python launch, set `--labels-path` to the enriched CSV. `LABELS_PATH`
+still overrides either wrapper; the original `Subject,Group` CSV remains supported
+and runs diagnosis-only probing. The shared VQ-VAE cluster configs are unchanged.
 
 Run the data preflight first; it checks the same paths, size and split. On CREATE,
 run it in the training env on the login node:
@@ -51,7 +63,9 @@ runai training standard submit preflight-adni-$(date +%H%M) \
   - the training objective on the held-out subjects;
   - T1↔FLAIR subject retrieval from content (chance 1/N);
   - the `eval.metrics.cross_reconstruction` probes (diagnosis, modality, effective
-    rank, style retrieval). Their definitions match the VQ-VAE ADNI runs.
+    rank, style retrieval), plus optional gender and race probes. Diagnosis and
+    demographic probing use the subject-disjoint protocol below; the other metric
+    definitions match the VQ-VAE ADNI runs.
 - **Selection.** `--best-metric val_loss` (the real-data default) keeps the lowest
   held-out objective. `none` keeps the last step only.
 - **Files.** `split.json` lists the train/val/test subjects. Training never loads the
@@ -201,14 +215,59 @@ derive from both. CUDA adaptive-pooling backward has no deterministic kernel, so
 
 ## Reading the evaluation
 
+### Diagnosis and demographics
+
+`Group` supplies diagnosis; optional `PTGENDER` and `PTRACCAT` columns supply
+gender and race. Each target gets its own **linear logistic-regression probe** of
+the frozen content vector, independently for T1 (`v0`), FLAIR (`v1`), and pooled
+views. With the default model, that vector has nine channels after the encoder's
+linear/MLP readout. These are evaluation targets only: they do not enter the
+contrastive loss or checkpoint selection.
+
+The probe trains and predicts out of fold within the validation cohort. It uses
+three deterministic folds (seed 0), stratified over unique subjects, reducing to
+two if a retained class has only two subjects. Both modalities and repeat scans
+of a subject always stay together. L2 normalization, StandardScaler and the
+classifier are fitted as a pipeline within each training fold. Diagnosis now uses
+this protocol too, so its scores are not directly comparable to older runs whose
+scaling preceded cross-validation and whose pooled folds could share subjects.
+
+For each target, logs show ordinary accuracy, **balanced accuracy** (mean recall
+across classes), the majority-class baseline and balanced baseline (`1 / classes`).
+Race is highly imbalanced, so inspect balanced accuracy as well as accuracy.
+Step-0 values and changes from that floor appear alongside diagnosis. JSON and
+TensorBoard keys include `content/gender_probe_acc_v0`,
+`content/race_probe_balanced_acc_v1`, and corresponding `_v0`/`_v1`/pooled metrics.
+Coverage is recorded under `content/<target>_probe_{n,subjects,missing,rare,conflicting,classes,folds}`;
+`class_<code>_subjects` records support before rare-class exclusion.
+
+Label handling is explicit:
+
+- Gender accepts codes 1 and 2. Race retains single codes 1–6, 8 and 9 as
+  categorical values, with no numerical ordering in the classifier.
+- Multiple known race selections (`1|5`, for example) map to code 6, “more than
+  one race,” following [ADNI's documented harmonization option](https://adni.loni.usc.edu/support/experts-knowledge-base/question/?QID=2582).
+- Blank/invalid values and race code 7 (“Unknown,” including combinations
+  containing it) are excluded from that target's probe. ADNI describes its
+  [race coding and missing-value conventions here](https://adni.loni.usc.edu/quick-start-guide-asset/anatomy2.html).
+- Classes with fewer than two labeled validation subjects are excluded from that
+  probe; counts are reported. Subjects with conflicting nonmissing labels for a
+  target are also excluded from that probe. If fewer than two classes remain,
+  the probe is reported as unavailable, with NaN scores in JSON.
+- Missing demographics never remove a subject from encoder training, diagnosis
+  probing, or retrieval. Demographics are read from the current CSV outside the
+  image cache, so existing preprocessed volumes can be reused.
+
+### Representation checks
+
 - If the content modality probe remains high despite improving InfoNCE, run the
   [checkpoint modality-gap diagnostic](../eval/adni/ENCODER_MODALITY_GAP.md). It
   measures normalized geometry and compares linear/nonlinear probes before and
   after subtracting modality means fitted only on each fold's training subjects.
 - **Read the Δ column.** An untrained encoder already reads diagnosis and modality
   from raw anatomy and contrast.
-- **Prefer the per-view diagnosis probes** (`_v0`, `_v1`). The pooled probe stacks
-  both views, and its folds put a subject's T1 in one fold and its FLAIR in another.
+- **Prefer the per-view target probes** (`_v0`, `_v1`) to see what each encoder
+  retains; pooled scores can hide a weak view.
 - **Retrieval assumes one scan per subject**, which holds for this CSV. Chance is
   about 1/291.
 - **Style rows**: see the content-size section above.

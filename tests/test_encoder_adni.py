@@ -1,6 +1,7 @@
 """Encoder-only training on real paired volumes: flag rules, a real loop on a fake ADNI tree, cache, launchers."""
 
 import contextlib
+import csv
 import io
 import json
 import os
@@ -11,12 +12,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import nibabel as nib
 import numpy as np
 import torch
 
+from eval.metrics import cross_reconstruction
 from eval.protocol import score_checkpoint
 from scripts import launch
 from training import main_conv_synthetic as trainer
@@ -219,6 +221,67 @@ class RealTrainingTests(unittest.TestCase):
             draws.append(torch.cat(dataset[0]["image"]).as_subclass(torch.Tensor))
         self.assertFalse(torch.equal(*draws))
 
+    def test_demographics_reuse_image_cache_and_reach_floor_training_and_tensorboard(
+        self,
+    ):
+        argv = self.data + TINY + ["--cache-dir", str(self.root / "cache"), "--model-id", "demog"]
+        args = trainer.parse_args(argv)
+        old = trainer.make_dataset(args, "val", None)
+        with self.labels.open() as fp:
+            rows = list(csv.DictReader(fp))
+        expected = {}
+        for i, row in enumerate(rows):
+            row["PTGENDER"] = "" if i == 0 else str(i % 2 + 1)
+            row["PTRACCAT"] = "1|5" if i % 3 == 0 else "5"
+            expected[row["Subject"]] = {
+                "gender": -1 if i == 0 else i % 2 + 1,
+                "race": 6 if i % 3 == 0 else 5,
+            }
+        with self.labels.open("w") as fp:
+            writer = csv.DictWriter(fp, fieldnames=["Subject", "Group", "PTGENDER", "PTRACCAT"])
+            writer.writeheader()
+            writer.writerows(rows)
+        cached = trainer.make_dataset(args, "val", None)
+        args.cache = False
+        uncached = trainer.make_dataset(args, "val", None)
+        self.assertEqual(old._indices, cached._indices)
+        self.assertEqual(old._cache_fingerprint(), cached._cache_fingerprint())
+        self.assertEqual(
+            [item["subject"] for item in old.items],
+            [item["subject"] for item in cached.items],
+        )
+        for dataset in (cached, uncached):
+            loader = torch.utils.data.DataLoader(dataset, batch_size=5, shuffle=False)
+            batches = cross_reconstruction._get_cached_batches(loader, len(loader))
+            for batch in batches:
+                for i, subject in enumerate(batch["subject"]):
+                    self.assertEqual(
+                        {k: int(v[i]) for k, v in batch["demographics"].items()},
+                        expected[subject],
+                    )
+        self.assertNotIn("demographics", old[0])
+        writer = Mock()
+        with patch.dict(
+            sys.modules, {"torch.utils.tensorboard": SimpleNamespace(SummaryWriter=Mock(return_value=writer))}
+        ):
+            output = run(argv)
+        self.assertIn("gender balanced acc, T1 content", output)
+        self.assertIn("race balanced acc, FLAIR content", output)
+        run_dir = self.root / "runs" / "demog"
+        for step in (0, 2):
+            metrics = json.loads((run_dir / f"separation_step{step}.json").read_text())
+            for target in ("diagnosis", "gender", "race"):
+                for view in (0, 1):
+                    self.assertTrue(np.isfinite(metrics[f"content/{target}_probe_acc_v{view}"]))
+                    self.assertTrue(np.isfinite(metrics[f"content/{target}_probe_balanced_acc_v{view}"]))
+                self.assertGreaterEqual(metrics[f"content/{target}_probe_folds"], 2)
+        logged = [
+            call.args
+            for call in writer.add_scalar.call_args_list
+            if call.args[0] == "content/race_probe_balanced_acc_v0"
+        ]
+        self.assertEqual([call[2] for call in logged], [0, 2])
+
 
 def dry_run(script, **env):
     """A launcher's --dry-run command as tokens (the Run:ai one prints its submit command last)."""
@@ -255,21 +318,42 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(changed, {"dataroot", "labels_path", "masks_dir", "cache_dir", "out_dir"})
 
     def test_paths_and_resources_come_from_the_cluster_configs(self):
-        for script, cluster in (("run_encoder_adni_slurm.sh", "slurm"), ("run_encoder_adni_runai.sh", "runai")):
+        for script, cluster in (
+            ("run_encoder_adni_slurm.sh", "slurm"),
+            ("run_encoder_adni_runai.sh", "runai"),
+        ):
             config = launch.load_yaml(ROOT / "experiments" / "cluster" / f"{cluster}.yaml")
             args = trainer.parse_args(training_argv(dry_run(script)))
             for key in ("dataroot", "labels_path", "masks_dir", "cache_dir"):
-                self.assertEqual(getattr(args, key), config[key], f"{script}: {key}")
+                expected = config[key]
+                if key == "labels_path":
+                    expected = str(Path(expected).with_name("labels_cleaned_3class_demog.csv"))
+                self.assertEqual(getattr(args, key), expected, f"{script}: {key}")
+            override = "/alternate/labels_cleaned_3class.csv"
+            self.assertEqual(
+                trainer.parse_args(training_argv(dry_run(script, LABELS_PATH=override))).labels_path,
+                override,
+            )
         runai = launch.load_yaml(ROOT / "experiments" / "cluster" / "runai.yaml")["_runai"]
         tokens = dry_run("run_encoder_adni_runai.sh")
-        self.assertEqual(tokens[:5], ["runai", "training", "standard", "submit", "encoder-adni-conv-mlp-s42"])
+        self.assertEqual(
+            tokens[:5],
+            ["runai", "training", "standard", "submit", "encoder-adni-conv-mlp-s42"],
+        )
         expected = [part for pair in launch._runai_submit_flags(runai) for part in pair if part is not None]
         self.assertEqual(tokens[5 : 5 + len(expected)], expected)
         self.assertIn(f"cd {runai['repo_path']} ;", tokens[tokens.index("-c") + 1])
-        for env in ({"MODEL_ID": "bad.name"}, {"ARCH": "resnet18", "NORM_TYPE": "layer"}):
+        for env in (
+            {"MODEL_ID": "bad.name"},
+            {"ARCH": "resnet18", "NORM_TYPE": "layer"},
+        ):
             with self.subTest(rejected=env):
                 bad = subprocess.run(
-                    ["bash", str(ROOT / "scripts" / "run_encoder_adni_runai.sh"), "--dry-run"],
+                    [
+                        "bash",
+                        str(ROOT / "scripts" / "run_encoder_adni_runai.sh"),
+                        "--dry-run",
+                    ],
                     cwd=ROOT,
                     env={**os.environ, **env},
                     capture_output=True,

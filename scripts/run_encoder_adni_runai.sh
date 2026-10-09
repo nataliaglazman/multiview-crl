@@ -23,7 +23,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---- Paths (experiments/cluster/runai.yaml) ----
 REPO_PATH=${REPO_PATH:-/nfs/home/nglazman/crl-2/multiview-crl}
 DATAROOT=${DATAROOT:-/nfs/home/nglazman/data}
-LABELS_PATH=${LABELS_PATH:-/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class.csv}
+LABELS_PATH=${LABELS_PATH:-/nfs/home/nglazman/nmpevqvae/labels_cleaned_3class_demog.csv}
 MASKS_DIR=${MASKS_DIR:-/nfs/home/nglazman/data/ADNI_stripped_masks}
 # Same spacing, size and masks as experiments/adni_real.yaml, so its preprocessed cache is reused.
 CACHE_DIR=${CACHE_DIR:-/nfs/home/nglazman/cache/multiview}

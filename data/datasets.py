@@ -612,7 +612,7 @@ class MyCustomDataset(MultiviewDataset):
             except (TypeError, ValueError):
                 lbl = -1
 
-        return {
+        result = {
             "image": [img_t1, img_t2],
             "mask": [mask_t1, mask_t2],
             "z_image": [{}, {}],
@@ -621,6 +621,10 @@ class MyCustomDataset(MultiviewDataset):
             # Several rows can share a subject; the cross-subject style swap must tell them apart.
             "subject": self.items[idx]["subject"],
         }
+        # Targets come from this CSV, even when reusing an older image cache.
+        if "demographics" in self.items[idx]:
+            result["demographics"] = dict(self.items[idx]["demographics"])
+        return result
 
 
 class SyntheticBrainDataset(MultiviewDataset):

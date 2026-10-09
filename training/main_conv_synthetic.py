@@ -1370,6 +1370,19 @@ REAL_SUMMARY = (
     ("val/content_retrieval_top1", "T1<->FLAIR subject retrieval, content"),
     ("content/diagnosis_probe_acc_v0", "diagnosis probe, T1 content"),
     ("content/diagnosis_probe_acc_v1", "diagnosis probe, FLAIR content"),
+    ("content/diagnosis_probe_balanced_acc_v0", "diagnosis balanced acc, T1 content"),
+    (
+        "content/diagnosis_probe_balanced_acc_v1",
+        "diagnosis balanced acc, FLAIR content",
+    ),
+    ("content/gender_probe_acc_v0", "gender probe, T1 content"),
+    ("content/gender_probe_acc_v1", "gender probe, FLAIR content"),
+    ("content/gender_probe_balanced_acc_v0", "gender balanced acc, T1 content"),
+    ("content/gender_probe_balanced_acc_v1", "gender balanced acc, FLAIR content"),
+    ("content/race_probe_acc_v0", "race probe, T1 content"),
+    ("content/race_probe_acc_v1", "race probe, FLAIR content"),
+    ("content/race_probe_balanced_acc_v0", "race balanced acc, T1 content"),
+    ("content/race_probe_balanced_acc_v1", "race balanced acc, FLAIR content"),
     ("content/modality_probe_acc", "modality probe, content (0.5 = none)"),
     ("content/eff_rank_v0", "content effective rank, T1"),
     ("content/eff_rank_v1", "content effective rank, FLAIR"),
@@ -1417,8 +1430,8 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
     """Real-data counterpart of ``evaluate``: no generator factors, so no DCI.
 
     Reports the held-out objective, cross-view retrieval and
-    ``eval.metrics.cross_reconstruction``'s content/style probes (the VQ-VAE trainer's ADNI
-    readout, so the metric definitions match its runs), each against ``floor``, the step-0
+    ``eval.metrics.cross_reconstruction``'s content/style probes, with subject-disjoint
+    diagnosis/demographic probes, each against ``floor``, the step-0
     result. The validation volumes are read once and then held in RAM by that module.
     Returns the flat metrics twice, so the call matches ``evaluate``'s (flat, floor) shape.
     """
@@ -1426,12 +1439,19 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
     loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     batches = cross_reconstruction._get_cached_batches(loader, len(loader))
     flat = held_out_objective(model, batches, device, args)
-    flat.update(cross_reconstruction.evaluate_content_style_separation(model, loader, args, device, len(loader)))
+    flat.update(
+        cross_reconstruction.evaluate_content_style_separation(
+            model, loader, args, device, len(loader), subject_probes=True
+        )
+    )
     flat = {key: float(value) for key, value in flat.items()}
 
     has_floor = bool(floor)
     print("    --- held-out subjects ---", flush=True)
-    print(f"      {'':<40s}{'value':>9s}" + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""), flush=True)
+    print(
+        f"      {'':<40s}{'value':>9s}" + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""),
+        flush=True,
+    )
     for key, label in REAL_SUMMARY:
         value = flat.get(key)
         if value is None or not np.isfinite(value):
@@ -1445,15 +1465,48 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
         f"      chance: retrieval {flat['val/content_retrieval_chance']:.3f}, diagnosis {chance:.3f} (majority group)",
         flush=True,
     )
+    for target in ("diagnosis", "gender", "race"):
+        prefix = f"content/{target}_probe"
+        if f"{prefix}_n" not in flat:
+            continue
+        stats = {
+            key: flat[f"{prefix}_{key}"]
+            for key in (
+                "n",
+                "subjects",
+                "classes",
+                "folds",
+                "missing",
+                "rare",
+                "conflicting",
+                "chance",
+                "balanced_chance",
+            )
+        }
+        print(
+            f"      {target}: {stats['n']:.0f} pairs / {stats['subjects']:.0f} subjects, "
+            f"{stats['classes']:.0f} classes, {stats['folds']:.0f} folds; "
+            f"excluded missing={stats['missing']:.0f}, rare={stats['rare']:.0f}, conflicting={stats['conflicting']:.0f}; "
+            f"majority={stats['chance']:.3f}, balanced chance={stats['balanced_chance']:.3f}"
+            + (" (probe unavailable: insufficient labeled subjects)" if not stats["folds"] else ""),
+            flush=True,
+        )
 
     spread = attention_spread(model, val_dataset, device, args.batch_size)
     if spread is not None:
-        print("    --- global attention: effective positions / map size, per head (1 = GAP) ---", flush=True)
+        print(
+            "    --- global attention: effective positions / map size, per head (1 = GAP) ---",
+            flush=True,
+        )
         for view, values in spread.items():
             print(f"      {view:<8s}" + "".join(f"{v:8.3f}" for v in values), flush=True)
             if writer is not None:
                 for head, value in enumerate(values):
-                    writer.add_scalar(f"attention_pool/{view}/head{head}_effective_fraction", value, step)
+                    writer.add_scalar(
+                        f"attention_pool/{view}/head{head}_effective_fraction",
+                        value,
+                        step,
+                    )
 
     if writer is not None:
         for key, value in flat.items():

@@ -44,7 +44,7 @@ PYTHON="${ENCODER_PYTHON:-${HOME}/.conda/envs/${CONDA_ENV_NAME}/bin/python}"
 
 # ---- Paths (experiments/cluster/slurm.yaml) ----
 DATAROOT=${DATAROOT:-/scratch/users/k24058220}
-LABELS_PATH=${LABELS_PATH:-/users/k24058220/multiview-crl/labels_cleaned_3class.csv}
+LABELS_PATH=${LABELS_PATH:-/users/k24058220/multiview-crl/labels_cleaned_3class_demog.csv}
 MASKS_DIR=${MASKS_DIR:-/scratch/users/k24058220/ADNI_stripped_masks}
 # Same spacing, size and masks as experiments/adni_real.yaml, so its preprocessed cache is reused.
 CACHE_DIR=${CACHE_DIR:-/scratch/users/k24058220/cache/multiview}

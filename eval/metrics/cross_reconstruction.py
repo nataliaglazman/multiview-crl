@@ -22,6 +22,8 @@ from sklearn.model_selection import cross_val_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import Normalizer, StandardScaler
 
+from eval.adni.encoder_probes import evaluate_subject_probes
+
 # Module-level cache of validation input batches. The val set is fixed across
 # training, but NFS reads + torch.load of the .pt cache dominated the periodic
 # eval cost. We pull the batches once into CPU memory and reuse them on every
@@ -42,6 +44,13 @@ def _get_cached_batches(dataloader, max_batches):
         if "label" in data:
             lbl = data["label"]
             entry["label"] = lbl.detach().cpu() if torch.is_tensor(lbl) else np.asarray(lbl)
+        if "subject" in data:
+            entry["subject"] = np.asarray(data["subject"])
+        if "demographics" in data:
+            entry["demographics"] = {
+                key: (value.detach().cpu().numpy() if torch.is_tensor(value) else np.asarray(value))
+                for key, value in data["demographics"].items()
+            }
         cached.append(entry)
     _BATCH_CACHE["key"] = key
     _BATCH_CACHE["batches"] = cached
@@ -87,6 +96,8 @@ def _collect_representations(vqvae_model, dataloader, args, device, max_batches=
         # Accumulate per-level lists
         per_level = {lvl: {"c_v0": [], "c_v1": [], "s_v0": [], "s_v1": []} for lvl in levels}
         labels_buf = []
+        subjects_buf = []
+        demographics_buf = {}
 
         batches = _get_cached_batches(dataloader, max_batches)
 
@@ -103,6 +114,10 @@ def _collect_representations(vqvae_model, dataloader, args, device, max_batches=
                     labels_buf.append(lbl.detach().cpu().numpy())
                 else:
                     labels_buf.append(np.asarray(lbl))
+            if "subject" in data:
+                subjects_buf.append(data["subject"])
+            for target, values in data.get("demographics", {}).items():
+                demographics_buf.setdefault(target, []).append(values)
 
             (
                 _recon,
@@ -154,6 +169,10 @@ def _collect_representations(vqvae_model, dataloader, args, device, max_batches=
                 # longer if more batches were iterated than stored — slice down).
                 n = per_lvl["content_v0"].shape[0]
                 per_lvl["labels"] = labels_arr[:n]
+            if subjects_buf:
+                per_lvl["subjects"] = np.concatenate(subjects_buf)
+            if demographics_buf:
+                per_lvl["demographics"] = {key: np.concatenate(values) for key, values in demographics_buf.items()}
             out[lvl] = per_lvl
         return out
     finally:
@@ -221,7 +240,7 @@ def _balance_ratio(a, b):
     return float(min(a, b) / max(a, b))
 
 
-def _metrics_for_level(reps_lvl):
+def _metrics_for_level(reps_lvl, subject_probes=False):
     """Compute the full set of content/style separation metrics for one level.
 
     Returns a dict with un-suffixed keys; the caller is responsible for
@@ -250,7 +269,7 @@ def _metrics_for_level(reps_lvl):
 
     content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
     try:
-        clf = LogisticRegression(max_iter=200, solver="lbfgs", n_jobs=-1)
+        clf = LogisticRegression(max_iter=200, solver="lbfgs")
         scores = cross_val_score(clf, content_scaled, modality_labels, cv=3, scoring="accuracy", n_jobs=-1)
         content_modality_acc = float(np.mean(scores))
     except Exception:
@@ -283,7 +302,7 @@ def _metrics_for_level(reps_lvl):
     style_all = np.concatenate([reps_lvl["style_v0"], reps_lvl["style_v1"]], axis=0)
     style_all_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(style_all)
     try:
-        clf2 = LogisticRegression(max_iter=200, solver="lbfgs", n_jobs=-1)
+        clf2 = LogisticRegression(max_iter=200, solver="lbfgs")
         scores2 = cross_val_score(clf2, style_all_scaled, modality_labels, cv=3, scoring="accuracy", n_jobs=-1)
         style_modality_acc = float(np.mean(scores2))
     except Exception:
@@ -297,15 +316,20 @@ def _metrics_for_level(reps_lvl):
     # High content/modality_invariance is only meaningful if content still
     # carries anatomical signal. diagnosis_info = 0 at chance, 1 at perfect.
     labels = reps_lvl.get("labels")
-    if labels is not None and len(np.unique(labels[labels >= 0])) >= 2:
+    if subject_probes:
+        m.update(evaluate_subject_probes(reps_lvl))
+    elif labels is not None and len(np.unique(labels[labels >= 0])) >= 2:
         mask_valid = labels >= 0
-        content_all = np.concatenate([reps_lvl["content_v0"][mask_valid], reps_lvl["content_v1"][mask_valid]], axis=0)
+        content_all = np.concatenate(
+            [reps_lvl["content_v0"][mask_valid], reps_lvl["content_v1"][mask_valid]],
+            axis=0,
+        )
         y_all = np.concatenate([labels[mask_valid], labels[mask_valid]], axis=0)
         counts = np.bincount(y_all)
         chance = float(counts.max()) / float(len(y_all))
         try:
             content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
-            clf_d = LogisticRegression(max_iter=200, solver="lbfgs", n_jobs=-1)
+            clf_d = LogisticRegression(max_iter=200, solver="lbfgs")
             scores_d = cross_val_score(clf_d, content_scaled, y_all, cv=3, scoring="accuracy", n_jobs=-1)
             diag_acc = float(np.mean(scores_d))
         except Exception:
@@ -322,7 +346,7 @@ def _metrics_for_level(reps_lvl):
             yv = labels[mask_valid]
             try:
                 Xv_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(Xv)
-                clf_v = LogisticRegression(max_iter=200, solver="lbfgs", n_jobs=-1)
+                clf_v = LogisticRegression(max_iter=200, solver="lbfgs")
                 acc_v = float(np.mean(cross_val_score(clf_v, Xv_scaled, yv, cv=3, scoring="accuracy", n_jobs=-1)))
             except Exception:
                 acc_v = chance
@@ -345,7 +369,10 @@ def _metrics_for_level(reps_lvl):
     # both encoders are equally exercised; well below flags one view lagging.
     for rep in ("content", "style"):
         for stat in ("eff_rank", "feat_std"):
-            ratio = _balance_ratio(m.get(f"{rep}/{stat}_v0", float("nan")), m.get(f"{rep}/{stat}_v1", float("nan")))
+            ratio = _balance_ratio(
+                m.get(f"{rep}/{stat}_v0", float("nan")),
+                m.get(f"{rep}/{stat}_v1", float("nan")),
+            )
             if np.isfinite(ratio):
                 m[f"{rep}/view_balance_{stat}"] = ratio
 
@@ -359,7 +386,7 @@ def _metrics_for_level(reps_lvl):
     return m
 
 
-def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max_batches=200):
+def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max_batches=200, *, subject_probes=False):
     """Run all content/style separation metrics for every masked level.
 
     For each level ``lvl`` in ``args.content_style_levels`` the full metric
@@ -376,7 +403,7 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
 
     per_level_sep = {}
     for lvl, reps_lvl in reps.items():
-        level_metrics = _metrics_for_level(reps_lvl)
+        level_metrics = _metrics_for_level(reps_lvl, subject_probes=subject_probes)
         for k, v in level_metrics.items():
             metrics[f"{k}_L{lvl}"] = v
         per_level_sep[lvl] = level_metrics["separation_score"]
@@ -400,6 +427,11 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
     # ``content/modality_invariance`` keep working.
     if reps:
         finest = min(reps.keys())
+        if subject_probes:
+            suffix = f"_L{finest}"
+            for key, value in list(metrics.items()):
+                if key.endswith(suffix) and key.startswith(("content/diagnosis_", "content/gender_", "content/race_")):
+                    metrics[key[: -len(suffix)]] = value
         for k in (
             "content/cross_view_cosine_mean",
             "content/cross_view_cosine_std",

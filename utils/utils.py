@@ -26,6 +26,8 @@ from monai.transforms import (
     ToTensord,
 )
 
+from data.adni_demographics import decode_demographics
+
 
 class CreateBrainMaskd(MapTransform):
     """Create a binary brain mask from the image (nonzero voxels) before resampling."""
@@ -462,6 +464,9 @@ def load_data(df_filtered, data_dir, label_map, masks_dir=None):
                 "label": label_map[row["Group"]],
                 "subject": subj,
             }
+            demographics = decode_demographics(row)
+            if demographics:
+                item["demographics"] = demographics
             if found_mask_t1 and found_mask_t2:
                 item["mask_image"] = found_mask_t1
                 item["mask_z_image"] = found_mask_t2
