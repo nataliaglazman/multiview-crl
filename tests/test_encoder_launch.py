@@ -88,7 +88,6 @@ class ExperimentTests(unittest.TestCase):
             ("conv_mlp", "conv_mlp_patch", {"patch_loss_weight", "spatial_recovery_eval"}),
             ("conv_mlp_patch", "conv_mlp_patch_separate_spatial", {"separate_spatial_readout"}),
             ("conv_mlp_patch", "conv_mlp_patch_lesion_corrected", {"synthetic_lesion_intensity", "train_steps"}),
-            ("conv_mlp", "conv_mlp_gumbel", {"mask_mode", "mask_lr_scale"}),
             ("adni", "adni_gumbel", {"mask_mode", "mask_lr_scale"}),
             ("adni", "adni_patch", {"patch_loss_weight", "train_patch_grid", "patch_foreground_mask"}),
         ):
@@ -96,6 +95,33 @@ class ExperimentTests(unittest.TestCase):
                 a, b = parsed(resolve(reference)), parsed(resolve(variant))
                 changed = {key for key in a if a[key] != b[key]} - {"model_id", "spatial_recovery_grids"}
                 self.assertEqual(changed, keys)
+
+    def test_gumbel_uses_the_causal_lesion_recipe_with_a_learned_mask(self):
+        for cluster in (*CLUSTERS, "local"):
+            with self.subTest(cluster=cluster):
+                args = parsed(resolve("conv_mlp_gumbel", cluster))
+                self.assertEqual(args["model_id"], "conv_mlp_gumbel_s42")
+                self.assertEqual(
+                    (args["mask_mode"], args["mask_estimator"], args["mask_lr_scale"]), ("learned", "relaxed", 10)
+                )
+                self.assertEqual(
+                    (
+                        args["lesion_keypoints"],
+                        args["lesion_input"],
+                        args["lesion_head_init"],
+                        args["lesion_temperature"],
+                    ),
+                    (4, "residual", "random", 0.03),
+                )
+                self.assertEqual(args["synthetic_lesion_intensity"], "styled")
+                self.assertTrue(args["synthetic_identifiable_ventricle"])
+                self.assertEqual(args["synthetic_sulcal_mode"], "atrophy")
+                self.assertTrue(args["synthetic_causal"])
+                self.assertEqual(args["synthetic_causal_graph"], "random")
+                self.assertTrue(args["spatial_recovery_eval"])
+                self.assertEqual(args["spatial_recovery_grids"], [1, 8])
+                self.assertEqual(args["device"], "cuda")
+                self.assertEqual((args["data_seed"], args["model_seed"], args["loader_seed"]), (42, 42, 10042))
 
     def test_a_seed_override_renames_the_run_and_keeps_the_paired_data(self):
         args = parsed(resolve("conv_mlp", seed=142))

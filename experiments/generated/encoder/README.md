@@ -67,6 +67,12 @@ scripts have fixed run IDs: when overriding `--seed` locally, also override `--m
 use the YAML launcher to derive the ID automatically. Existing run directories are refused;
 use a new tag/model ID or output directory for a fresh attempt.
 
+`conv_mlp_gumbel` explicitly uses CUDA and the causal lesion-keypoint recipe with a learned
+content mask, residual lesion input, styled lesions, identifiable ventricles, sulcal atrophy,
+and spatial recovery evaluation. For a Mac run, append `--device mps` to its local script.
+Its model and loader seeds are pinned to the supplied recipe; for another paired seed, use
+the YAML launcher with `--set seed=142 model_seed=142 loader_seed=10142` (data seed stays 42).
+
 ## Local ADNI data
 
 The three `adni*.local.sh` scripts require your paths at runtime. For example:

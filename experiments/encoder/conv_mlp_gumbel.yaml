@@ -1,6 +1,132 @@
-# conv_mlp with a learned top-k Gumbel-softmax content mask; mask_lr_scale as in adni_gumbel.yaml.
+# Causal pseudo-MRI lesion-keypoint recipe with a learned top-k Gumbel-softmax content mask.
+# Keep this complete recipe explicit, including options equal to the trainer's defaults.
+# The run ID distinguishes it from the fixed-mask reference supplied with these settings.
 _base_: encoder/synthetic_defaults
 tag: conv_mlp_gumbel_s{seed}
+
+# ---- Model and learned content mask ----
+encoder_architecture: conv
+encoder_head_hidden: 100
 conv_readout: mlp
+separate_spatial_readout: false
+global_pool: gap
+attention_pool_heads: 4
+attention_pool_frequencies: 4
+resnet_norm: batch
+norm_type: group
+resnet_output_stride: 32
+latent_dim: 12
+content_channels: 9
+hidden_channels: 64
+res_channels: 32
+nb_res_layers: 2
+downscale_factor: 4
+no_separate_encoders: false
 mask_mode: learned
+mask_estimator: relaxed
 mask_lr_scale: 10
+
+# ---- Residual lesion branch ----
+lesion_keypoints: 4
+lesion_norm: none
+lesion_frame: brain
+lesion_proj_dim: 8
+lesion_loss_weight: 1.0
+lesion_pairing: cross_modal
+lesion_input: residual
+lesion_normative_components: 20
+lesion_normative_subjects: 300
+lesion_head_init: random
+lesion_temperature: 0.03
+lesion_decorrelation_weight: 0.0
+lesion_detector: shared
+lesion_branch_frozen: false
+lesion_localization_eval: false
+
+# ---- Objective and optimisation ----
+contrastive_loss_type: infonce
+tau: 0.1
+bt_lambda: 0.005
+patch_loss_weight: 0.0
+train_patch_grid: [8, 8, 8]
+patch_foreground_mask: false
+patch_foreground_thresh: 0.05
+cross_view_negs_only: true
+contrastive_proj_dim: 0
+contrastive_proj_hidden: 256
+lr: 0.0001
+batch_size: 32
+train_steps: 10000
+eval_every: 2000
+log_every: 100
+grad_clip: 2.0
+num_workers: 0
+
+# ---- Reproducibility and device ----
+# Model/loader seeds are explicit in this recipe; override them too for another paired seed.
+seed: 42
+data_seed: 42
+model_seed: 42
+loader_seed: 10042
+require_new_run: true
+deterministic: true
+deterministic_warn_only: true
+cpu_threads: 1
+hash_training_inputs: true
+no_cuda: false
+device: cuda
+
+# ---- Evaluation ----
+floor_eval: true
+best_metric: none
+eval_pooling: gap
+eval_patch_grid: [4, 5, 4]
+spatial_recovery_eval: true
+spatial_recovery_grids: [1, 8]
+spatial_recovery_native: false
+spatial_recovery_batch_size: 4
+spatial_recovery_test_samples: 400
+spatial_recovery_seed: 1729
+
+# ---- Synthetic data ----
+res: 64
+n_content: 9
+n_style: 3
+num_train_samples: 2000
+num_val_samples: 400
+cache: false
+synthetic_mode: pseudo_mri
+synthetic_normalize: fixed_reference
+synthetic_clean_content: true
+synthetic_identifiable_ventricle: true
+synthetic_sulcal_mode: atrophy
+synthetic_style_scale: 1.0
+synthetic_content_scale: 1.0
+synthetic_lesion_placement: wm_interior
+synthetic_lesion_radius: 0.1
+synthetic_lesion_intensity: styled
+synthetic_lesion_target: position
+synthetic_lesion_count: 4
+synthetic_lesion_t1_value: 0.4
+synthetic_n_deformation_grid: 4
+synthetic_n_fissure_grid: 8
+synthetic_hierarchical_content: false
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_causal_noise_scale: 0.4
+synthetic_causal_nonlinearity: leaky_relu
+
+# ---- Dataset selection (no real-data paths) ----
+dataset_name: synthetic
+dataroot: null
+labels_path: null
+masks_dir: null
+cache_dir: null
+image_spacing: 2.0
+spatial_size: null
+val_frac: 0.0
+test_frac: 0.0
+split_seed: 0
+asymmetric_aug: false
+shared_brain_mask: false
