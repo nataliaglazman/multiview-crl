@@ -46,6 +46,10 @@ the two equal.
 
 ## Launch
 
+Every arm has generated local, SLURM, SLURM Bio, and Run:ai scripts. See the
+[backend quickstart](../experiments/generated/encoder/README.md) for commands, local MPS/CUDA
+selection, and regeneration from the shared YAMLs.
+
 Preview first: `--dry-run` prints the resolved config and the exact command or script.
 
 ```bash

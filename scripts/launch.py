@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch an experiment from a YAML config on RunAI or SLURM.
+"""Launch an experiment from a YAML config locally, on RunAI or on SLURM.
 
 Usage:
     # Dry run — print resolved config + command, don't submit:
@@ -708,12 +708,13 @@ def build_local_command(config: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def encoder_cli_args(config: dict) -> list[str]:
+def encoder_cli_args(config: dict, *, allow_missing_data_paths: bool = False) -> list[str]:
     """The encoder trainer's arguments for ``config``, refused here exactly as the trainer would.
 
     ``training.encoder_args`` is the trainer's own parser without torch, so a misspelt key, a
     wrong value or an invalid combination stops the launch before anything is written or
-    submitted, rather than when the job starts on the cluster.
+    submitted, rather than when the job starts on the cluster. Generated local scripts may
+    leave the real-data paths for runtime; all other checks still apply during generation.
     """
     from training import encoder_args
 
@@ -728,9 +729,14 @@ def encoder_cli_args(config: dict) -> list[str]:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
     messages = io.StringIO()
+    validation_arguments = list(arguments)
+    if allow_missing_data_paths and config.get("dataset_name", "synthetic") != "synthetic":
+        for key in ("dataroot", "labels_path"):
+            if not config.get(key):
+                validation_arguments += [f"--{key.replace('_', '-')}", "<required-at-runtime>"]
     try:
         with contextlib.redirect_stderr(messages):
-            encoder_args.parse_args(arguments)
+            encoder_args.parse_args(validation_arguments)
     except SystemExit:
         # argparse prints its whole usage first; the reason is the last line.
         reason = (messages.getvalue().strip().splitlines() or ["invalid configuration"])[-1].split("error: ", 1)[-1]
@@ -807,12 +813,12 @@ def build_encoder_runai_command(config: dict) -> list[str]:
 def build_encoder_script(config: dict, cluster_name: str, experiment_path: Path, regenerate: str) -> str:
     """A self-contained bash script for one encoder run on ``cluster_name``.
 
-    Run:ai and SLURM scripts take ``--dry-run``, which prints the command without submitting.
+    All scripts take ``--dry-run``, which prints the command without running or submitting.
     Unlike the VQ-VAE's SLURM script, the SLURM one never installs packages: concurrent jobs
     would race on one conda environment, so a missing environment stops the job instead.
     No timestamp or git SHA is written, so regenerating an unchanged experiment changes nothing.
     """
-    arguments = encoder_cli_args(config)
+    arguments = encoder_cli_args(config, allow_missing_data_paths=cluster_name == "local")
     tag = str(config["tag"])
     try:
         source = experiment_path.resolve().relative_to(REPO_ROOT)
@@ -930,23 +936,26 @@ def build_encoder_script(config: dict, cluster_name: str, experiment_path: Path,
             ]
         )
 
-    # Local: the active environment's Python, from the repository root; extra arguments go to the trainer.
-    exports = " ".join(f"{name}={shlex.quote(value)}" for name, value in _encoder_env(config).items())
+    # Local: preserve the frozen recipe, but share runtime setup with the YAML launcher.
+    # Resolve the checkout relative to the generated script, including when invoked elsewhere.
+    out_path = generated_path(experiment_path, experiment_path.stem, cluster_name)
+    repo_relative = os.path.relpath(REPO_ROOT, out_path.parent)
     return "\n".join(
         [
             "#!/usr/bin/env bash",
             *header,
-            "# Run from the repository root (or set ENCODER_REPO); extra arguments are passed to the trainer.",
+            "# Preview: bash <this script> --dry-run. Extra trainer flags override the recipe.",
             "set -euo pipefail",
             "",
-            'REPO="${ENCODER_REPO:-$PWD}"',
+            'SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"',
+            f'REPO="${{ENCODER_REPO:-$(cd -- "$SCRIPT_DIR"/{shlex.quote(repo_relative)} && pwd)}}"',
+            'PYTHON="${ENCODER_PYTHON:-python}"',
             f"if [[ ! -f \"$REPO/{ENCODER_ENTRYPOINT.replace('.', '/')}.py\" ]]; then",
-            '    echo "Run from the repository root or set ENCODER_REPO." >&2',
+            '    echo "Repository missing at $REPO; set ENCODER_REPO to its root." >&2',
             "    exit 1",
             "fi",
             'cd "$REPO"',
-            f'export PYTHONPATH="$REPO" {exports}',
-            f"exec python -m {ENCODER_ENTRYPOINT} \\",
+            'exec "$PYTHON" -m scripts.run_encoder_local \\',
             *(f"    {line} \\" for line in _encoder_arg_lines(arguments)),
             '    "$@"',
             "",
@@ -974,13 +983,21 @@ def lpips_stand_in() -> Path | None:
 
 
 def encoder_local_launch(config: dict) -> tuple[list[str], dict[str, str]]:
-    """The command and environment of a local encoder run with this interpreter.
+    """The command and environment of a local encoder config with this interpreter."""
+    return encoder_local_command(encoder_cli_args(config))
+
+
+def encoder_local_command(arguments: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Validate trainer arguments and prepare the shared local runtime.
 
     MPS gets PyTorch's CPU fallback (read once, when torch is imported); on macOS the run is wrapped
     in ``caffeinate -i`` so the machine does not sleep under it; without lpips installed, the
     stand-in above is put on PYTHONPATH.
     """
-    command = [sys.executable, "-m", ENCODER_ENTRYPOINT, *encoder_cli_args(config)]
+    from training import encoder_args
+
+    config = vars(encoder_args.parse_args(arguments))
+    command = [sys.executable, "-m", ENCODER_ENTRYPOINT, *arguments]
     env = dict(os.environ, **_encoder_env(config))
     paths = [str(REPO_ROOT)]
     stand_in = lpips_stand_in()
@@ -1073,7 +1090,8 @@ def generate_all(cluster_name: str, directory: Path | None = None):
     if where.is_relative_to(REPO_ROOT):
         where = where.relative_to(REPO_ROOT)
     print(f"\nGenerated {len(experiments)} scripts in experiments/generated/")
-    print(f"On cluster: bash {where}")
+    runner = "sbatch" if "slurm" in cluster_name else "bash"
+    print(f"Run from the repository root: {runner} {where}")
 
 
 def launch_encoder(config: dict, cluster_name: str, experiment_source: Path, snapshot: dict, dry_run: bool):

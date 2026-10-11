@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts import launch
+from scripts import launch, run_encoder_local
 from training import encoder_args
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -206,24 +207,107 @@ class CommandTests(unittest.TestCase):
 
 
 class ScriptTests(unittest.TestCase):
-    def test_committed_runai_scripts_are_current_and_preview_a_valid_command(self):
+    def test_committed_scripts_are_current_and_preview_the_same_recipe_on_every_backend(self):
         """Each experiment's script is exactly what launch.py writes, so nothing was edited by hand."""
-        committed = sorted((ROOT / "experiments" / "generated" / "encoder").glob("*.runai.sh"))
-        self.assertEqual(
-            [p.name.split(".")[0] for p in committed], sorted(p.stem for p in launch.find_experiment_yamls(ENCODER))
+        for cluster in (*CLUSTERS, "local"):
+            committed = sorted((ROOT / "experiments" / "generated" / "encoder").glob(f"*.{cluster}.sh"))
+            self.assertEqual(
+                [p.name.split(".")[0] for p in committed], sorted(p.stem for p in launch.find_experiment_yamls(ENCODER))
+            )
+            for script in committed:
+                name = script.name.split(".")[0]
+                with self.subTest(script=script.name):
+                    path = ENCODER / f"{name}.yaml"
+                    config = launch.resolve_config(path, cluster, {})
+                    regenerate = (
+                        f"python scripts/launch.py experiments/encoder/{name}.yaml --cluster {cluster} --generate"
+                    )
+                    expected = launch.build_encoder_script(config, cluster, path, regenerate)
+                    self.assertEqual(script.read_text(), expected)
+                    subprocess.run(["bash", "-n", str(script)], check=True)
+                    extra = []
+                    if cluster == "local" and name.startswith("adni"):
+                        config.update(dataroot="/local data", labels_path="/local labels.csv", masks_dir="/local masks")
+                        extra = ["--dataroot", config["dataroot"], "--labels-path", config["labels_path"]]
+                        extra += ["--masks-dir", config["masks_dir"]]
+                    preview = subprocess.run(
+                        ["bash", str(script), "--dry-run", *extra],
+                        env={**os.environ, "ENCODER_PYTHON": sys.executable},
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    actual = vars(encoder_args.parse_args(trainer_command(shlex.split(preview.stdout))))
+                    self.assertEqual(actual, parsed(config))
+
+    def test_local_script_runs_from_another_directory_and_preserves_overrides(self):
+        script = ROOT / "experiments" / "generated" / "encoder" / "conv_mlp.local.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            preview = subprocess.run(
+                [
+                    "bash",
+                    str(script),
+                    "--dry-run",
+                    "--device",
+                    "mps",
+                    "--batch-size",
+                    "8",
+                    "--out-dir",
+                    f"{tmp}/results with spaces",
+                    "--model-id",
+                    "local_smoke",
+                ],
+                cwd=tmp,
+                env={**os.environ, "ENCODER_PYTHON": sys.executable},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            command = shlex.split(preview.stdout)
+            args = encoder_args.parse_args(trainer_command(command))
+            self.assertIn(sys.executable, command)
+            self.assertEqual((args.device, args.batch_size, args.model_id), ("mps", 8, "local_smoke"))
+            self.assertEqual(args.out_dir, f"{tmp}/results with spaces")
+            self.assertFalse(Path(args.out_dir).exists())
+
+    def test_local_adni_paths_are_required_at_runtime_and_other_errors_still_fail_generation(self):
+        script = ROOT / "experiments" / "generated" / "encoder" / "adni.local.sh"
+        refused = subprocess.run(
+            ["bash", str(script), "--dry-run"],
+            env={**os.environ, "ENCODER_PYTHON": sys.executable},
+            capture_output=True,
+            text=True,
         )
-        for script in committed:
-            name = script.name.split(".")[0]
-            with self.subTest(script=script.name):
-                path = ENCODER / f"{name}.yaml"
-                regenerate = f"python scripts/launch.py experiments/encoder/{name}.yaml --cluster runai --generate"
-                expected = launch.build_encoder_script(
-                    launch.resolve_config(path, "runai", {}), "runai", path, regenerate
-                )
-                self.assertEqual(script.read_text(), expected)
-                preview = subprocess.run(["bash", str(script), "--dry-run"], capture_output=True, text=True, check=True)
-                args = encoder_args.parse_args(trainer_command(shlex.split(preview.stdout)))
-                self.assertEqual(args.model_id, launch.resolve_config(path, "runai", {})["tag"])
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("Real data needs --dataroot and --labels-path", refused.stderr)
+        exits(
+            self,
+            2,
+            launch.build_encoder_script,
+            resolve("adni", "local", batch_size=1),
+            "local",
+            ENCODER / "adni.yaml",
+            "regenerate",
+        )
+
+    def test_local_runner_uses_shared_environment_and_dry_run_never_executes(self):
+        arguments = launch.encoder_cli_args(resolve("conv_mlp", "local"))
+        arguments += ["--device", "mps", "--cpu-threads", "3"]
+        with patch.object(launch, "lpips_stand_in", return_value=None):
+            with patch.object(os, "execvpe") as execute, patch.object(os, "chdir") as chdir:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    run_encoder_local.main([*arguments, "--dry-run"])
+                execute.assert_not_called()
+                chdir.assert_not_called()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    run_encoder_local.main(arguments)
+                chdir.assert_called_once_with(ROOT)
+                executable, command, env = execute.call_args.args
+                self.assertEqual(executable, command[0])
+                self.assertEqual(trainer_command(command), arguments)
+                self.assertEqual(env["OMP_NUM_THREADS"], "3")
+                self.assertEqual(env["CUBLAS_WORKSPACE_CONFIG"], ":4096:8")
+                self.assertEqual(env["PYTORCH_ENABLE_MPS_FALLBACK"], "1")
 
     def test_slurm_script_previews_never_installs_and_refuses_to_run_outside_a_job(self):
         for cluster in ("slurm", "slurm_bio"):
@@ -257,11 +341,15 @@ class ScriptTests(unittest.TestCase):
             self.assertIn("runai training standard submit encoder-adni-gumbel \\", text)
             self.assertIn("--mask-mode learned", text)
             self.assertIn("--set mask_mode=learned tag=encoder_adni_gumbel", text.splitlines()[2])
-            with patch.object(sys, "argv", ["launch.py", str(ENCODER), "--cluster", "slurm", "--generate"]):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    launch.main()
-            written = {path.name.split(".")[0] for path in (Path(tmp) / "encoder").glob("*.slurm.sh")}
-            self.assertEqual(written, {path.stem for path in launch.find_experiment_yamls(ENCODER)})
+            for cluster in (*CLUSTERS, "local"):
+                with patch.object(sys, "argv", ["launch.py", str(ENCODER), "--cluster", cluster, "--generate"]):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        launch.main()
+                written = {path.name.split(".")[0] for path in (Path(tmp) / "encoder").glob(f"*.{cluster}.sh")}
+                expected = {path.stem for path in launch.find_experiment_yamls(ENCODER)}
+                if cluster == "runai":
+                    expected.add("encoder_adni_gumbel")
+                self.assertEqual(written, expected)
             with patch.object(sys, "argv", ["launch.py", str(ENCODER), "--generate", "--set", "seed=1"]):
                 exits(self, 2, launch.main)
 
