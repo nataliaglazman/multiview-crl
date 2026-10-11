@@ -12,6 +12,7 @@
 #
 # Variants (override via environment), e.g.:
 #     MODEL_ID=encoder_adni_patch PATCH_WEIGHT=1 bash scripts/run_encoder_adni_runai.sh
+#     MODEL_ID=encoder_adni_gumbel MASK_MODE=learned bash scripts/run_encoder_adni_runai.sh
 # The job name is MODEL_ID with '_' -> '-'; a name already in use is rejected by Run:ai.
 #
 # Output: $OUT_DIR/$MODEL_ID/ (settings.json, split.json, separation_step*.json,

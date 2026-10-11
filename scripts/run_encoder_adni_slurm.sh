@@ -15,6 +15,8 @@
 #     MODEL_ID=encoder_adni_sharedaug ASYMMETRIC_AUG=0 sbatch scripts/run_encoder_adni_slurm.sh
 #     # add patch InfoNCE on cubic 4x4x4-cell bins of the 24x28x24 map, brain positions only:
 #     MODEL_ID=encoder_adni_patch PATCH_WEIGHT=1 sbatch scripts/run_encoder_adni_slurm.sh
+#     # learn which units are content with a Gumbel-softmax mask (MASK_LR_SCALE, default 10):
+#     MODEL_ID=encoder_adni_gumbel MASK_MODE=learned sbatch scripts/run_encoder_adni_slurm.sh
 #     # content size sweep:
 #     for c in 9 16 32; do MODEL_ID=encoder_adni_c$c CONTENT_CHANNELS=$c LATENT_DIM=$((c + 3)) \
 #         sbatch scripts/run_encoder_adni_slurm.sh; done

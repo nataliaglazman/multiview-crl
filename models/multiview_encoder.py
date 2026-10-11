@@ -11,6 +11,8 @@ GroupNorm, remove late ResNet strides, or replace the global GAP with attention
 pooling (``models.attention_pool``). Defaults preserve existing checkpoints.
 
 The first ``content_channels`` units are the content block, the rest are style.
+With ``mask_mode="learned"`` a top-k Gumbel-softmax mask over learnable per-unit logits
+chooses which ``content_channels`` units are content instead (``content_units``).
 An optional lesion branch (``models.keypoint_pool``) appends ``3 * lesion_keypoints``
 keypoint coordinates AFTER the style units of the global code; the content mask marks
 them as content, so the DCI probes score them with the content block.
@@ -33,7 +35,7 @@ from utils.helper import HelperModule
 
 
 class MultiviewConvEncoder(HelperModule):
-    """Two-encoder 3D conv model with a fixed content/style channel split. No decoder."""
+    """Two-encoder 3D conv model with a fixed or Gumbel-softmax content/style unit split. No decoder."""
 
     def build(
         self,
@@ -69,10 +71,18 @@ class MultiviewConvEncoder(HelperModule):
         lesion_head_init: str = "positive",
         lesion_detector: str = "shared",
         lesion_branch_frozen: bool = False,
+        mask_mode: str = "fixed",
     ):
         assert (
             0 < content_channels <= latent_dim
         ), f"content_channels ({content_channels}) must be in (0, latent_dim={latent_dim}]"
+        if mask_mode not in ("fixed", "learned"):
+            raise ValueError(f"mask_mode must be fixed or learned, got {mask_mode!r}")
+        if mask_mode == "learned" and content_channels == latent_dim:
+            raise ValueError("A learned content mask needs style units to choose from: content_channels < latent_dim")
+        if mask_mode == "learned" and proj_dim != 0:
+            raise ValueError("A learned content mask requires proj_dim=0: the projector reads a fixed set of units")
+        self.mask_mode = mask_mode
         self.in_channels = in_channels
         self.latent_dim = latent_dim
         self.content_channels = content_channels
@@ -181,6 +191,20 @@ class MultiviewConvEncoder(HelperModule):
         fixed_mask[0, :content_channels] = 1.0
         fixed_mask[0, latent_dim:] = 1.0
         self.register_buffer("content_mask", fixed_mask)
+
+        # --- Learned content selector (Yao et al. 2024, App. E): one logit per latent unit ---
+        # Training draws a top-content_channels Gumbel-softmax sample per step (relaxed, or binary
+        # with a straight-through gradient); evaluation takes the largest logits. One set
+        # of logits serves both views, because the readout producing these units is shared, so
+        # unit i is the same unit in either view. The +2/-2 start (models/vqvae.py's "learned"
+        # init) selects the fixed split's units at step 0, so the untrained floor is unchanged.
+        # Only the lesion entries of content_mask are read in this mode. torch.full draws no
+        # random numbers, so every weight matches the fixed model from the same seed.
+        self.mask_logits = None
+        if mask_mode == "learned":
+            logits = torch.full((latent_dim,), -2.0)
+            logits[:content_channels] = 2.0
+            self.mask_logits = nn.Parameter(logits)
 
         # --- Contrastive projection head (SimCLR/MoCo recipe) ---
         # The loss runs on the head's output while probes keep reading the pre-head
@@ -407,6 +431,62 @@ class MultiviewConvEncoder(HelperModule):
         """
         return list(range(min(self.content_channels, width))) + list(range(self.latent_dim, width))
 
+    def content_units(self) -> List[int]:
+        """The latent units read as content, ascending.
+
+        The first ``content_channels`` under the fixed split; with a learned mask, the units with
+        the ``content_channels`` largest logits (ties go to the lower unit). This is the
+        selection every evaluation reads; training samples around it (``sample_content_mask``).
+        """
+        if self.mask_logits is None:
+            return list(range(self.content_channels))
+        order = torch.sort(self.mask_logits.detach(), descending=True, stable=True).indices
+        return sorted(order[: self.content_channels].tolist())
+
+    def unit_split(self, width: int) -> Tuple[List[int], List[int]]:
+        """(content, style) unit indices of an output with ``width`` units.
+
+        The global code has the latent units plus any lesion units, which count as content.
+        Patch and unpooled outputs have the latent units, or only ``content_channels`` units
+        from the separate spatial head, which has no style units.
+        """
+        if self.spatial_readout is not None and width == self.content_channels:
+            return list(range(width)), []
+        units = self.content_units()
+        content = [u for u in units if u < width] + list(range(self.latent_dim, width))
+        style = [u for u in range(min(width, self.latent_dim)) if u not in units]
+        return content, style
+
+    def _output_mask(self, width: int):
+        """The (1, width) content mask and content indices ``forward`` reports for an output."""
+        if self.mask_logits is None:
+            return self.content_mask[:, :width], self._content_indices(width)
+        content, _ = self.unit_split(width)
+        mask = self.content_mask.new_zeros(1, width)
+        mask[0, content] = 1.0
+        return mask, content
+
+    def sample_content_mask(self, hard: bool = False):
+        """(1, latent_dim) content mask for one training step's losses; None under the fixed split.
+
+        In training mode a top-``content_channels`` Gumbel-softmax sample over the logits (tau 1, as
+        in models/vqvae.py). ``hard=False`` returns the relaxed sample itself: a left-out unit keeps a
+        small weight, so the loss's gradient says whether it would help as content. ``hard=True``
+        returns the binary draw with a straight-through gradient, models/vqvae.py's estimator. Under a
+        cosine loss that gradient is exactly zero for a unit the draw zeroed in both views, so such a
+        unit learns only when a draw happens to include it. In eval mode, the deterministic selection
+        ``content_units`` names, so held-out losses use what is scored.
+        """
+        if self.mask_logits is None:
+            return None
+        if not self.training:
+            mask = torch.zeros_like(self.mask_logits.detach())
+            mask[self.content_units()] = 1.0
+            return mask.unsqueeze(0)
+        from utils.utils import topk_gumbel_softmax
+
+        return topk_gumbel_softmax(k=self.content_channels, logits=self.mask_logits.unsqueeze(0), tau=1.0, hard=hard)
+
     def project_lesion(self, lesion_block: torch.FloatTensor) -> torch.FloatTensor:
         """Map the lesion coordinates into their own loss-facing space (last dimension).
 
@@ -490,6 +570,8 @@ class MultiviewConvEncoder(HelperModule):
         but ignored — there is no decoder. Returns the 8-tuple
         ``(reconstruction=None, diffs=[0], encoder_features, content_indices,
         [], [], soft_content_masks, {})`` so the synthetic-DCI eval is unchanged.
+        With a learned mask, the reported mask is the deterministic selection in either
+        mode; training draws its Gumbel sample separately (``sample_content_mask``).
 
         The global pool (GAP, or attention pooling) precedes the global head. Patch
         and unpooled outputs use patch_readout, after bin averaging or at each
@@ -518,12 +600,12 @@ class MultiviewConvEncoder(HelperModule):
                 feat = self.patch_readout(h.flatten(2).transpose(1, 2)).transpose(1, 2)
                 if not pool_only:
                     feat = feat.reshape(h.shape[0], feat.shape[1], *h.shape[2:])
-            mask = self.content_mask[:, : feat.shape[1]]
+            mask, content_indices = self._output_mask(feat.shape[1])
             return (
                 None,
                 [x.new_zeros(())],
                 [feat],
-                [self._content_indices(feat.shape[1])],
+                [content_indices],
                 [],
                 [],
                 {0: mask},
@@ -537,9 +619,9 @@ class MultiviewConvEncoder(HelperModule):
             encoder_features = [self._patch_pool(feat, patch_grid) if pool_only else feat]
 
         # Only the global code carries lesion units; patch and unpooled maps have latent_dim.
-        mask = self.content_mask[:, : encoder_features[0].shape[1]]
+        mask, content_indices = self._output_mask(encoder_features[0].shape[1])
         soft_content_masks = {0: mask}
-        estimated_content_indices = [self._content_indices(encoder_features[0].shape[1])]
+        estimated_content_indices = [content_indices]
 
         return (
             None,

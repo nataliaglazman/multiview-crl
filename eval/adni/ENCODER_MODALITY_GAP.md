@@ -71,8 +71,8 @@ subjects or non-finite features rather than substituting a chance score.
 
 ## What is measured
 
-The content block is the first `content_channels` global encoder outputs, before
-any contrastive projector, matching the training-time modality probe. Each vector
+The content block is the first `content_channels` global encoder outputs (the units
+selected by `--mask-mode learned`, if used), before any contrastive projector, matching the training-time modality probe. Each vector
 is first L2-normalized. Zero vectors remain zero and are counted explicitly;
 cosine averages exclude pairs containing them.
 

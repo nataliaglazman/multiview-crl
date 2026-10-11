@@ -35,6 +35,13 @@ STEPS=${STEPS:-10000}
 EVAL_EVERY=${EVAL_EVERY:-500}   # ~14 epochs of ~1,170 training subjects at batch 32
 PATCH_WEIGHT=${PATCH_WEIGHT:-0}
 PATCH_GRID=${PATCH_GRID:-"6 7 6"}
+# Content units: fixed (the first CONTENT_CHANNELS) or learned (top-k Gumbel-softmax mask).
+# The logits start 4 apart and Adam moves each by about its lr per step, so they need
+# LR x MASK_LR_SCALE x STEPS above ~2 to change sides at all: 10 gives 10 at 1e-4 x 10k steps.
+# MASK_ESTIMATOR=straight_through is the VQ-VAE trainer's estimator (see --mask-estimator).
+MASK_MODE=${MASK_MODE:-fixed}
+MASK_LR_SCALE=${MASK_LR_SCALE:-10}
+MASK_ESTIMATOR=${MASK_ESTIMATOR:-relaxed}
 SEED=${SEED:-42}
 EXTRA_ARGS=${EXTRA_ARGS:-}
 
@@ -87,6 +94,9 @@ if [[ "$ASYMMETRIC_AUG" == "1" ]]; then
 fi
 if [[ "$PATCH_WEIGHT" != "0" ]]; then
     TRAIN_ARGS+=(--patch-loss-weight "$PATCH_WEIGHT" --train-patch-grid $PATCH_GRID --patch-foreground-mask)
+fi
+if [[ "$MASK_MODE" != "fixed" ]]; then
+    TRAIN_ARGS+=(--mask-mode "$MASK_MODE" --mask-lr-scale "$MASK_LR_SCALE" --mask-estimator "$MASK_ESTIMATOR")
 fi
 if [[ -n "$EXTRA_ARGS" ]]; then
     read -r -a EXTRA <<< "$EXTRA_ARGS"

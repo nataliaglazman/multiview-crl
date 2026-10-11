@@ -37,7 +37,7 @@ class FrozenExtractor:
             h = self.model._encode(x, n_views=1, view_idx=VIEWS.index(view))
             output.append(pool_grid(h, self.grid).cpu().numpy())
             support.append(pool_grid((x != 0).float(), self.grid).cpu().numpy())
-            global_code.append(self.model._global_code(h, x)[:, : self.model.content_channels].cpu().numpy())
+            global_code.append(self.model._global_code(h, x)[:, self.model.content_units()].cpu().numpy())
         result = dict(
             features=np.stack(output, 1),
             support=np.stack(support, 1),

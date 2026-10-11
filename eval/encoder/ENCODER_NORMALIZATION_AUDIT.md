@@ -51,7 +51,7 @@ than loading complete spatial banks into RAM.
 |---|---|
 | `backbone_spatial` | Backbone map, flattened with spatial positions retained |
 | `backbone_gap` | One spatial average per backbone channel |
-| `global_content` | The actual forward's first `content_channels` outputs, usually nine |
+| `global_content` | The actual forward's content units, usually nine: the first `content_channels`, or those a learned mask selected |
 | `global_all` | The global content and style units together |
 | `lesion_branch` | Appended lesion keypoint coordinates, if present; kept separate |
 | `norm_pre_spatial`, `norm_post_spatial` | Maps immediately before/after the selected normalization, before a following activation |

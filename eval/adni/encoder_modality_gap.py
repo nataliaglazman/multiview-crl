@@ -204,7 +204,7 @@ def extract_checkpoint(args):
         for step, batch in enumerate(loader, 1):
             images = torch.cat(batch["image"], dim=0).as_subclass(torch.Tensor).to(device)
             b = len(batch["index"])
-            content = model(images, pool_only=True, n_views=2)[2][0][:, : cfg["content_channels"]]
+            content = model(images, pool_only=True, n_views=2)[2][0][:, model.content_units()]
             chunks[0].append(content[:b].float().cpu().numpy())
             chunks[1].append(content[b:].float().cpu().numpy())
             if step == 1 or step == len(loader) or step % 10 == 0:

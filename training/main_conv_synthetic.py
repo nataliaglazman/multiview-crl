@@ -7,6 +7,8 @@ the upstream image encoder: ResNet-18 -> GAP -> Linear -> LeakyReLU -> Linear.
 This architecture option does not change the loss, data, or view-sharing policy.
 ``--global-pool attention`` replaces the GAP before either readout with multi-head
 attention pooling (``models.attention_pool``), which starts as exact GAP.
+``--mask-mode learned`` replaces the fixed content block (the first ``--content-channels``
+units) with a top-k Gumbel-softmax content selector over learnable per-unit logits.
 
 Identifiability is scored with ``eval.metrics.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
@@ -199,6 +201,35 @@ def parse_args(argv=None):
     )
     p.add_argument("--latent-dim", type=int, default=16, help="Total encoding size (content + style)")
     p.add_argument("--content-channels", type=int, default=9, help="Content units (set to the true n_content)")
+    p.add_argument(
+        "--mask-mode",
+        choices=("fixed", "learned"),
+        default="fixed",
+        help="Which latent units are content. fixed: the first --content-channels. learned: a top-k "
+        "Gumbel-softmax mask over one learnable logit per unit, k = --content-channels (Yao et al. 2024's "
+        "content selector; the VQ-VAE trainer's --mask-mode learned). Each training step draws a mask (see "
+        "--mask-estimator); evaluation reads the k largest logits. Shared by both views, whose readout head "
+        "is shared. Starts at the fixed split (logits +2/-2)",
+    )
+    p.add_argument(
+        "--mask-estimator",
+        choices=("relaxed", "straight_through"),
+        default="relaxed",
+        help="With --mask-mode learned: what the loss sees of each draw. relaxed: the continuous Gumbel-softmax "
+        "sample, so a left-out unit keeps a small weight and a gradient on whether it would help as content. "
+        "straight_through: the binary draw with a straight-through gradient (the VQ-VAE trainer's estimator). "
+        "Cosine similarity has zero gradient for a unit zeroed in both views, so a left-out unit then learns "
+        "only when a draw includes it. On toy features (tests/test_encoder_gumbel_mask.py) straight_through "
+        "swapped a noisy content unit for a shared style unit in 0/10 seeds, relaxed in 10/10",
+    )
+    p.add_argument(
+        "--mask-lr-scale",
+        type=float,
+        default=1.0,
+        help="With --mask-mode learned: the mask logits' learning rate is --lr times this (no weight decay). "
+        "Adam moves a logit by at most about that much per step, and the content and style logits start 4 "
+        "apart, so a unit can change sides only once --lr x this x --train-steps exceeds about 2",
+    )
     p.add_argument("--hidden-channels", type=int, default=64, help="conv architecture only")
     p.add_argument("--res-channels", type=int, default=32, help="conv architecture only")
     p.add_argument("--nb-res-layers", type=int, default=2, help="conv architecture only")
@@ -630,6 +661,20 @@ def parse_args(argv=None):
         p.error("--patch-foreground-mask requires a positive --patch-loss-weight")
     if not 0 < args.patch_foreground_thresh <= 1:
         p.error("--patch-foreground-thresh must be in (0, 1]")
+    if args.mask_mode == "learned":
+        if args.content_channels >= args.latent_dim:
+            p.error("--mask-mode learned chooses content among the latent units: --content-channels < --latent-dim")
+        if args.contrastive_loss_type != "infonce":
+            p.error(
+                "--mask-mode learned needs --contrastive-loss-type infonce: Barlow Twins standardises each unit "
+                "over the batch, which divides the mask back out, so no gradient would reach the logits"
+            )
+        if args.contrastive_proj_dim != 0:
+            p.error("--mask-mode learned requires --contrastive-proj-dim 0: the projector reads a fixed set of units")
+        if not 0 < args.mask_lr_scale < float("inf"):
+            p.error("--mask-lr-scale must be finite and positive")
+    elif args.mask_lr_scale != 1.0 or args.mask_estimator != "relaxed":
+        p.error("--mask-lr-scale and --mask-estimator only apply with --mask-mode learned")
     if args.separate_spatial_readout:
         if args.encoder_architecture == "conv" and args.conv_readout != "mlp":
             p.error("--separate-spatial-readout requires an MLP readout (--conv-readout mlp for Conv)")
@@ -886,7 +931,7 @@ def describe_real_split(args, train_dataset, val_dataset, save_dir):
         )
 
 
-def contrastive_loss(pooled, model, args, sim_metric, criterion):
+def contrastive_loss(pooled, model, args, sim_metric, criterion, mask=None):
     """Content-alignment − entropy on the pooled content block across the two views.
 
     The content block is selected first and then projected, so with a head every output
@@ -894,14 +939,28 @@ def contrastive_loss(pooled, model, args, sim_metric, criterion):
     is applied here rather than handed to the losses' ``projector`` argument, which
     ``infonce_base_loss`` accepts but never calls. Without a head ``project`` is the
     identity and this is the same tensor the loss selected internally before.
+
+    ``mask`` is a learned model's (1, latent_dim) content mask for this step
+    (``model.sample_content_mask``). The latent units are multiplied by it rather than sliced, so
+    the gradient reaches every unit's logit. Under a binary mask the left-out units are exact zeros
+    and the cosine similarities equal those of the selected units alone.
     """
     b = pooled.shape[0] // 2
     hz = torch.stack([pooled[:b], pooled[b:]], dim=0)  # (2, B, C)
-    hz = model.project(hz[..., : args.content_channels])
+    if mask is None:
+        hz = model.project(hz[..., : args.content_channels])
+    else:
+        hz = hz[..., : model.latent_dim] * mask
     content_indices = [list(range(hz.shape[-1]))]
     if args.contrastive_loss_type == "barlow_twins":
+        # With a mask, Barlow Twins keeps only the selected units (losses.barlow_twins_loss); a
+        # zeroed unit would otherwise enter its correlation matrix as 0/0.
         loss = losses.barlow_twins_loss(
-            hz, estimated_content_indices=content_indices, subsets=[(0, 1)], lambd=args.bt_lambda
+            hz,
+            estimated_content_indices=content_indices,
+            subsets=[(0, 1)],
+            soft_content_mask=mask,
+            lambd=args.bt_lambda,
         )
     else:
         loss = losses.infonce_loss(
@@ -967,20 +1026,24 @@ def lesion_contrastive_loss(pooled, model, args, sim_metric, criterion, images=N
     ).squeeze()
 
 
-def lesion_decorrelation(pooled, args):
+def lesion_decorrelation(pooled, args, units=None):
     """Sum of squared correlations between the keypoint coordinates and the content block.
 
     Both are standardized over the batch (both views). The content side is detached, so it
     keeps what it encodes and only the branch moves. A branch that duplicates a factor the
     content already carries (brain size, captured through any boundary that moves with it)
-    is penalized without the factor ever being named.
+    is penalized without the factor ever being named. ``units`` are a learned mask's content
+    units; by default the first ``content_channels``.
     """
 
     def standardize(z):
         return (z - z.mean(0)) / z.std(0).clamp_min(1e-6)
 
     coords = standardize(pooled[:, args.latent_dim :])
-    content = standardize(pooled[:, : args.content_channels].detach())
+    if units is None:
+        content = standardize(pooled[:, : args.content_channels].detach())
+    else:
+        content = standardize(pooled[:, units].detach())
     return ((coords.T @ content) / coords.shape[0]).square().sum()
 
 
@@ -997,12 +1060,14 @@ def foreground_positions(foreground, grid, threshold):
     return keep if bool(keep.any()) else torch.ones_like(keep)
 
 
-def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground=None):
+def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground=None, mask=None):
     """Registered positions are paired; negatives are subjects at the SAME position.
 
     Only image-derived features and the input's own brain mask enter this loss; there
     is no lesion sampling or access to generator factor labels. All grid positions
     participate unless --patch-foreground-mask drops the always-background ones.
+    A learned ``mask`` multiplies the shared head's units, as in ``contrastive_loss``;
+    the separate spatial head has only content units, so it is read whole.
     """
     if getattr(args, "patch_foreground_mask", False):
         if foreground is None:
@@ -1010,7 +1075,10 @@ def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foregrou
         # The launcher's backend check passes raw options, which omit the parser's default.
         keep = foreground_positions(foreground, args.train_patch_grid, getattr(args, "patch_foreground_thresh", 0.05))
         patches = patches[..., keep.to(patches.device)]
-    a, b = patches[:, : args.content_channels, :].chunk(2, dim=0)
+    if mask is not None and model.spatial_readout is None:
+        a, b = (patches * mask.unsqueeze(-1)).chunk(2, dim=0)
+    else:
+        a, b = patches[:, : args.content_channels, :].chunk(2, dim=0)
     hz = torch.stack((a, b), dim=0)  # views, subjects, content channels, positions
     # A configured projector acts on channels, never on the position axis.
     hz = model.project(hz.permute(0, 1, 3, 2)).permute(0, 1, 3, 2)
@@ -1031,18 +1099,22 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
     ``masks`` are the batch's brain masks in image order, used by --patch-foreground-mask.
     Without them the inputs' nonzero support stands in; the synthetic inputs are zero
     outside the brain mask, so the two agree.
+
+    A learned content mask is drawn once here, so every term of the step uses one selection.
     """
     weight = getattr(args, "patch_loss_weight", 0.0)
     if weight > 0:
         pooled, patches = model.global_and_patch_features(images, args.train_patch_grid, n_views=2)
     else:
         pooled = model(images, pool_only=True, n_views=2)[2][0]
-    global_loss = contrastive_loss(pooled, model, args, sim_metric, criterion)
+    # The launcher's backend check passes raw options, which omit the parser's default.
+    content_mask = model.sample_content_mask(hard=getattr(args, "mask_estimator", "relaxed") == "straight_through")
+    global_loss = contrastive_loss(pooled, model, args, sim_metric, criterion, content_mask)
     foreground = None
     if weight > 0 and getattr(args, "patch_foreground_mask", False):
         foreground = masks if masks is not None else images != 0
     patch_loss = (
-        patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground)
+        patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground, content_mask)
         if weight > 0
         else global_loss.new_zeros(())
     )
@@ -1057,9 +1129,35 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
         total = total + terms["lesion_weighted"]
         decorrelation_weight = getattr(args, "lesion_decorrelation_weight", 0.0)
         if decorrelation_weight > 0:
-            terms["lesion_decorrelation"] = lesion_decorrelation(pooled, args)
+            units = model.content_units() if content_mask is not None else None
+            terms["lesion_decorrelation"] = lesion_decorrelation(pooled, args, units)
             total = total + decorrelation_weight * terms["lesion_decorrelation"]
+    if content_mask is not None and model.training:
+        # Not a loss term: the mask weight this step's draw put on units outside the evaluated
+        # selection; for binary draws, the number of style units swapped in. Eval draws have none.
+        selected = torch.zeros_like(content_mask[0], dtype=torch.bool)
+        selected[model.content_units()] = True
+        terms["mask_leak"] = content_mask.detach()[0][~selected].sum()
     return (pooled, total, terms)
+
+
+def mask_state(model):
+    """A learned content mask as evaluated: its units, every logit, and the selection's margin.
+
+    The margin is the smallest selected logit minus the largest left-out one, i.e. how far the
+    selection is from changing. None under the fixed split.
+    """
+    if model.mask_logits is None:
+        return None
+    logits = model.mask_logits.detach().float().cpu()
+    units = model.content_units()
+    selected = torch.zeros(len(logits), dtype=torch.bool)
+    selected[units] = True
+    return {
+        "content_units": units,
+        "logits": logits.tolist(),
+        "margin": float(logits[selected].min() - logits[~selected].max()),
+    }
 
 
 def effective_rank(feat):
@@ -1293,6 +1391,9 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
                 print(f"      {k:60s} {flat[k]:.3f}", flush=True)
 
     print("    --- identifiability summary ---", flush=True)
+    mask = mask_state(model)
+    if mask is not None:
+        print(f"      content units {mask['content_units']} (learned mask, margin {mask['margin']:.2f})", flush=True)
     show("content->content/block_mcc")
     show("content->content/channel_mcc")
     show("content->content/informativeness_ridge")
@@ -1353,6 +1454,8 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
 
     payload = {k: float(v) for k, v in flat.items()}
     payload["per_factor"] = scores  # nested, so the existing flat keys stay at top level
+    if mask is not None:
+        payload["content_mask"] = mask
     if spread is not None:
         payload["attention_effective_fraction"] = spread
     if lesion is not None:
@@ -1413,8 +1516,9 @@ def held_out_objective(model, batches, device, args):
             full += 1
         else:
             pooled = model(x, pool_only=True, n_views=2)[2][0]
-        content[0].append(pooled[:b, : args.content_channels].float().cpu())
-        content[1].append(pooled[b:, : args.content_channels].float().cpu())
+        units = model.content_units()
+        content[0].append(pooled[:b, units].float().cpu())
+        content[1].append(pooled[b:, units].float().cpu())
     out = {f"val/{key}": value / full for key, value in sums.items()} if full else {}
     t1 = torch.nn.functional.normalize(torch.cat(content[0]), dim=1)
     flair = torch.nn.functional.normalize(torch.cat(content[1]), dim=1)
@@ -1448,6 +1552,9 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
 
     has_floor = bool(floor)
     print("    --- held-out subjects ---", flush=True)
+    mask = mask_state(model)
+    if mask is not None:
+        print(f"      content units {mask['content_units']} (learned mask, margin {mask['margin']:.2f})", flush=True)
     print(
         f"      {'':<40s}{'value':>9s}" + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""),
         flush=True,
@@ -1513,6 +1620,8 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
             if np.isfinite(value):
                 writer.add_scalar(key, value, step)
     payload = dict(flat)
+    if mask is not None:
+        payload["content_mask"] = mask
     if spread is not None:
         payload["attention_effective_fraction"] = spread
     with open(os.path.join(save_dir, f"separation_step{step}.json"), "w") as fp:
@@ -1590,6 +1699,7 @@ def main():
         lesion_head_init=args.lesion_head_init,
         lesion_detector=args.lesion_detector,
         lesion_branch_frozen=args.lesion_branch_frozen,
+        mask_mode=args.mask_mode,
     ).to(device)
     if model.normative is not None:
         # The first training subjects, in order, so a run's normative model is reproducible.
@@ -1659,6 +1769,23 @@ def main():
             ),
             flush=True,
         )
+    if model.mask_logits is not None:
+        mask_lr = args.lr * args.mask_lr_scale
+        print(
+            f"content mask: learned top-{args.content_channels} of {args.latent_dim} units, Gumbel-softmax "
+            f"(tau 1, {args.mask_estimator.replace('_', '-')}), shared by both views; starts at units "
+            f"0-{args.content_channels - 1} (logits +2/-2); logit lr {mask_lr:g} (--lr x {args.mask_lr_scale:g}), "
+            "no weight decay",
+            flush=True,
+        )
+        budget = mask_lr * args.train_steps
+        if budget <= 2:
+            print(
+                f"  NOTE: --lr x --mask-lr-scale x --train-steps = {budget:g}. Adam moves a logit by about its lr "
+                "per step at most, and content and style logits start 4 apart, so the evaluated selection can "
+                "hardly change in this run; raise --mask-lr-scale to let it",
+                flush=True,
+            )
     if model.projector is not None:
         print(
             f"projection head: {args.content_channels} -> {args.contrastive_proj_hidden} -> "
@@ -1682,7 +1809,14 @@ def main():
             flush=True,
         )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    if model.mask_logits is None:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    else:
+        # The logits rank units rather than weight anything: decay would pull them toward an even
+        # draw. As for the VQ-VAE trainer's mask group, they get their own lr and no decay.
+        weights = [p for p in model.parameters() if p is not model.mask_logits]
+        mask_group = {"params": [model.mask_logits], "lr": args.lr * args.mask_lr_scale, "weight_decay": 0.0}
+        optimizer = torch.optim.AdamW([{"params": weights}, mask_group], lr=args.lr)
     sim_metric = torch.nn.CosineSimilarity(dim=-1)
     criterion = torch.nn.CrossEntropyLoss()
     torch.save(model.state_dict(), os.path.join(save_dir, "model_init.pt"))
@@ -1728,6 +1862,8 @@ def main():
             "train_patch_grid": (args.train_patch_grid if args.patch_loss_weight > 0 else None),
             "last_loss_terms": last_loss_terms,
         }
+        if model.mask_logits is not None:
+            payload["content_mask"] = {**mask_state(model), "lr": args.lr * args.mask_lr_scale}
         if model.lesion_pool is not None:
             payload["lesion_branch_parameter_count"] = sum(
                 p.numel() for part in model.lesion_modules() for p in part.parameters()
@@ -1770,8 +1906,17 @@ def main():
 
     step = 0
     running = dict(
-        loss=0.0, rank=0.0, n=0, global_loss=0.0, patch=0.0, patch_weighted=0.0, lesion=0.0, decorrelation=0.0
+        loss=0.0,
+        rank=0.0,
+        n=0,
+        global_loss=0.0,
+        patch=0.0,
+        patch_weighted=0.0,
+        lesion=0.0,
+        decorrelation=0.0,
+        mask_leak=0.0,
     )
+    logged_units = model.content_units()
     model.train()
     while step < args.train_steps:
         for batch in train_loader:
@@ -1808,12 +1953,14 @@ def main():
             running["patch_weighted"] += last_loss_terms["patch_weighted"]
             running["lesion"] += last_loss_terms.get("lesion", 0.0)
             running["decorrelation"] += last_loss_terms.get("lesion_decorrelation", 0.0)
-            running["rank"] += effective_rank(pooled[: pooled.shape[0] // 2, : args.content_channels])
+            running["mask_leak"] += last_loss_terms.get("mask_leak", 0.0)
+            running["rank"] += effective_rank(pooled[: pooled.shape[0] // 2, model.content_units()])
             running["n"] += 1
             step += 1
 
             if step % args.log_every == 0:
                 n = max(running["n"], 1)
+                mask_info = mask_state(model)
                 print(
                     f"step {step:6d} | contrastive {running['loss']/n:.4f} "
                     f"| content eff_rank {running['rank']/n:.2f}/{args.content_channels}"
@@ -1828,11 +1975,24 @@ def main():
                         f" | lesion decorrelation {running['decorrelation']/n:.4f}"
                         if args.lesion_decorrelation_weight > 0
                         else ""
+                    )
+                    + (
+                        f" | mask leak {running['mask_leak']/n:.3f}, margin {mask_info['margin']:.2f}"
+                        if mask_info is not None
+                        else ""
                     ),
                     flush=True,
                 )
+                if mask_info is not None and mask_info["content_units"] != logged_units:
+                    print(f"  content units changed: {logged_units} -> {mask_info['content_units']}", flush=True)
+                    logged_units = mask_info["content_units"]
                 if writer is not None:
                     writer.add_scalar("train/contrastive", running["loss"] / n, step)
+                    if mask_info is not None:
+                        writer.add_scalar("mask/leak", running["mask_leak"] / n, step)
+                        writer.add_scalar("mask/margin", mask_info["margin"], step)
+                        for unit, logit in enumerate(mask_info["logits"]):
+                            writer.add_scalar(f"mask/logit_unit{unit}", logit, step)
                     writer.add_scalar("train/content_eff_rank", running["rank"] / n, step)
                     if args.lesion_keypoints > 0:
                         writer.add_scalar("train/lesion_infonce", running["lesion"] / n, step)
@@ -1854,6 +2014,7 @@ def main():
                     patch_weighted=0.0,
                     lesion=0.0,
                     decorrelation=0.0,
+                    mask_leak=0.0,
                 )
 
             if step % args.eval_every == 0 or step == args.train_steps:

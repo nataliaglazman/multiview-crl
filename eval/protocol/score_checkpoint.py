@@ -14,9 +14,10 @@ and reports three things about the resulting vectors:
    its own floor. Under ``--separate-encoders`` (the default) the two are tied only by a
    loss on their OUTPUTS, so nothing makes them equally good at carrying a factor;
    reporting view 1 as "the model" hides a lopsided pair.
-2c. **Style block** — the units after ``content_channels``, per view: style->style should
-   be high, content->style and style->content should stay near the floor. Style targets
-   are the gain / bias / noise sigma the renderer applied to that view, not the raw draws.
+2c. **Style block** — the units after ``content_channels`` (or those a learned mask left out),
+   per view: style->style should be high, content->style and style->content should stay near
+   the floor. Style targets are the gain / bias / noise sigma the renderer applied to that
+   view, not the raw draws.
 3. **Causal graph** — the PC algorithm run on the decoded factors, scored against the
    generator's true SCM adjacency, via ``eval.causal.run_causal_recovery.evaluate_arrays`` (the
    same protocol the rest of the repo uses; not re-derived here). Alongside it, PC run on
@@ -165,6 +166,7 @@ def build_model(cfg, device, state_dict=None):
         lesion_head_init=cfg.get("lesion_head_init", "positive"),
         lesion_detector=cfg.get("lesion_detector", "shared"),
         lesion_branch_frozen=cfg.get("lesion_branch_frozen", False),
+        mask_mode=cfg.get("mask_mode", "fixed"),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)
@@ -232,7 +234,12 @@ def encode_blocks(model, ds, device, batch_size, content_channels, patch_grid=No
     renderer clips gain and bias to [-1, 1] and uses only |z| for noise, so the noise draw's
     sign never reaches the image and a raw target caps even a perfect block near R² 0.
     ``style_targets`` is None when the samples carry no style draws or no renderer.
+
+    The split is the model's own (``unit_split``): the first ``content_channels`` units, or the
+    units a learned mask selected. ``content_channels`` must match the model's.
     """
+    if content_channels != model.content_channels:
+        raise ValueError(f"content_channels={content_channels}, but the model has {model.content_channels}")
     blocks = {"content": ([], []), "style": ([], [])}
     gt, adj = [], None
     renderer = getattr(getattr(ds, "_inner", None), "renderer", None)
@@ -245,12 +252,9 @@ def encode_blocks(model, ds, device, batch_size, content_channels, patch_grid=No
         feats = model(x, pool_only=True, n_views=2, patch_grid=patch_grid)[2][0]
         feats = feats.reshape(feats.shape[0], feats.shape[1], -1) if feats.dim() > 2 else feats.unsqueeze(-1)
         n = feats.shape[0] // 2
-        content, style = feats[:, :content_channels], feats[:, content_channels:]
-        latent_dim = getattr(model, "latent_dim", feats.shape[1])
-        if feats.shape[1] > latent_dim:
-            # A lesion branch appends keypoint coordinates after the style units; they are content.
-            content = torch.cat([content, feats[:, latent_dim:]], dim=1)
-            style = feats[:, content_channels:latent_dim]
+        # A lesion branch appends keypoint coordinates after the style units; they are content.
+        content_units, style_units = model.unit_split(feats.shape[1])
+        content, style = feats[:, content_units], feats[:, style_units]
         for name, block in (("content", content), ("style", style)):
             block = block.flatten(1).cpu()
             blocks[name][0].append(block[:n])
@@ -280,8 +284,7 @@ def encode(model, ds, device, batch_size, content_channels, patch_grid=None):
     """Content block of both views, plus GT factors and the SCM adjacency when present.
 
     Returns ``(content_v1, content_v2, z_content, adjacency_or_None)``. The content block is
-    the first ``content_channels`` units, matching the split the loss and the training-time
-    eval both use.
+    the model's content units, matching the split the loss and the training-time eval both use.
     """
     blocks = encode_blocks(model, ds, device, batch_size, content_channels, patch_grid)
     return (*blocks["content"], blocks["z_content"], blocks["adjacency"])
@@ -650,6 +653,8 @@ def main():
     state = torch.load(os.path.join(args.run_dir, args.checkpoint), map_location="cpu")
     model = build_model(cfg, device, state)
     del state
+    if model.mask_logits is not None:
+        print(f"content units: {model.content_units()} (learned mask)", flush=True)
     report = {
         "run_dir": args.run_dir,
         "checkpoint": args.checkpoint,
@@ -669,6 +674,7 @@ def main():
     names = content_factor_names(z.shape[1], cfg.get("synthetic_lesion_target", "position"))
 
     report = {"run_dir": args.run_dir, "pooling": pooling, "num_samples": int(len(X)), "settings": cfg}
+    report["content_units"] = model.content_units()
     report["trained"] = recovery(X, X2, z, names, with_dci=not args.no_dci)
 
     floor = None

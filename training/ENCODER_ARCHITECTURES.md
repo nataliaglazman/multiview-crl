@@ -283,3 +283,56 @@ at the repo root.
   --norm-type layer` writes `encoder_conv_mlp_patch_layernorm_s42.slurm_bio.sh`.
 - `eval.encoder.encoder_spatial_maps` reports each factor's readout in brain, edge
   and background cells, which is where the difference between the arms shows.
+
+## Learned content mask
+
+`--mask-mode learned` replaces the fixed content block (the first `--content-channels`
+units of the encoding) with the content selector of Yao et al. (2024, App. E): one
+learnable logit per latent unit and a top-k Gumbel-softmax mask, k = `--content-channels`.
+It works the same on synthetic data and on ADNI (`MASK_MODE=learned` in
+`scripts/encoder_adni_recipe.sh`, or `scripts/run_conv_synthetic_slurm.sh`).
+
+```sh
+--mask-mode learned --mask-lr-scale 10
+```
+
+- **Selection.** Evaluation reads the k units with the largest logits
+  (`MultiviewConvEncoder.content_units`). The logits start at +2 for the first k units
+  and -2 for the rest, so the step-0 floor is the fixed split's. `torch.full` draws no
+  random numbers, so every other weight matches the fixed model from the same seed.
+- **One mask for both views.** The readout head that produces the units is shared, so
+  unit i is the same unit in either view. The VQ-VAE trainer's `learned` mode gives each
+  view its own logits under `--separate-encoders`; this one does not.
+- **Training draws.** Each step draws one mask, used by the global and the patch loss
+  (the lesion decorrelation reads the evaluated selection). `--mask-estimator relaxed` (default) passes the
+  continuous Gumbel-softmax sample to the loss. `straight_through` passes the binary draw
+  with a straight-through gradient, as the VQ-VAE trainer does. Cosine similarity has zero
+  gradient for a unit zeroed in both views, so under binary draws a left-out unit gets a
+  signal only when a draw includes it. In `tests/test_encoder_gumbel_mask.py`, fixed
+  features make a style unit shared and a content unit noise; taking the shared one lowers
+  InfoNCE 14 to 29 times. The relaxed estimator made the swap in 10/10 seeds, and
+  straight-through in 0/10. Relaxed draws give left-out units a small weight in training
+  (about 0.06 each at the start), and that shrinks as the logits separate.
+- **Logit learning rate.** `--mask-lr-scale` multiplies `--lr` for the logits, which get
+  no weight decay. Adam moves a logit by about its lr per step at most, and the content and
+  style logits start 4 apart. A unit can therefore change sides only once
+  `lr x scale x steps` exceeds about 2. At the trainer's default scale of 1, that budget is
+  1 for the ADNI recipe (lr 1e-4, 10k steps), so the recipe sets 10. The trainer prints a
+  NOTE when the budget is 2 or less.
+- **Not combined with:** Barlow Twins (per-unit standardisation divides the mask back
+  out, so the logits get no gradient), `--contrastive-proj-dim` (the projector reads a
+  fixed set of units), or `--content-channels` equal to `--latent-dim`. The separate
+  spatial head (`--separate-spatial-readout`) has only content units, so the mask
+  selects among the global head's units only.
+- **Style units still get little training.** The loss reads only the masked content.
+  Style units get a gradient through their small relaxed weights, or when a draw swaps
+  them in.
+- **Outputs.** Every log line adds the mask leak (the draw's weight outside the evaluated
+  selection) and the margin (smallest selected logit minus largest left-out one). A
+  changed selection is printed. TensorBoard gets `mask/leak`, `mask/margin` and
+  `mask/logit_unit<i>`. Each `dci_step*.json`, `separation_step*.json` and
+  `training_progress.json` has a `content_mask` entry with the units, logits and margin.
+- **Readers.** The DCI and separation probes read the mask the forward returns.
+  `score_checkpoint.encode_blocks` and the spatial, normalisation, generalisation and
+  modality-gap audits read `content_units` / `unit_split`. Fixed-split checkpoints
+  score exactly as before.

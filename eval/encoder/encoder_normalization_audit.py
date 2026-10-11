@@ -116,7 +116,7 @@ def capture(model, images, norm_layer="pre_residual", spatial_grid=0):
         features[f"{stage}_gap"] = flatten(values[source].mean((2, 3, 4)))
     features["norm_mean"] = flatten(values["mean"])
     features["norm_scale"] = flatten(values["scale"])
-    features["global_content"] = flatten(code[:, : model.content_channels])
+    features["global_content"] = flatten(code[:, model.content_units()])
     features["global_all"] = flatten(code[:, : model.latent_dim])
     if code.shape[1] > model.latent_dim:
         features["lesion_branch"] = flatten(code[:, model.latent_dim :])

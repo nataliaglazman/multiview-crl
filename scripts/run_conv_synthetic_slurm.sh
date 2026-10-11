@@ -16,6 +16,8 @@
 #     MODEL_ID=conv_clean CLEAN_CONTENT=1 NORMALIZE=fixed_reference sbatch scripts/run_conv_synthetic_slurm.sh
 #     # probe at patch resolution instead of GAP (tests the GAP ceiling):
 #     MODEL_ID=conv_patch EVAL_POOLING=patch sbatch scripts/run_conv_synthetic_slurm.sh
+#     # learn which units are content with a top-k Gumbel-softmax mask (the paper's content selector):
+#     MODEL_ID=conv_gumbel MASK_MODE=learned sbatch scripts/run_conv_synthetic_slurm.sh
 #
 # Output: results/<MODEL_ID>/ (settings.json, model.pt, dci_step*.json, TensorBoard).
 
@@ -47,6 +49,7 @@ LOSS_TYPE=${LOSS_TYPE:-infonce}           # infonce | barlow_twins
 EVAL_POOLING=${EVAL_POOLING:-gap}         # gap | patch
 NORMALIZE=${NORMALIZE:-per_sample}        # per_sample | shared | fixed_reference
 CLEAN_CONTENT=${CLEAN_CONTENT:-0}         # 1 -> zero the deformation/fissure nuisance
+MASK_MODE=${MASK_MODE:-fixed}             # fixed (first CONTENT_CHANNELS units) | learned (Gumbel-softmax)
 EXTRA_ARGS=${EXTRA_ARGS:-}
 
 CLEAN_FLAG=""
@@ -94,6 +97,7 @@ conda activate "${CONDA_ENV_NAME}"
     --contrastive-loss-type "${LOSS_TYPE}" \
     --eval-pooling "${EVAL_POOLING}" \
     --synthetic-normalize "${NORMALIZE}" \
+    --mask-mode "${MASK_MODE}" \
     --num-workers 8 \
     ${CLEAN_FLAG} \
     ${EXTRA_ARGS}

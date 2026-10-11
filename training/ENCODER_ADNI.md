@@ -164,7 +164,30 @@ each against its floor.
 The loss reads only the content block, so **the style units receive no gradient**.
 They are an untrained readout of the trained backbone. The style rows, and anything
 that mixes them in (`separation_score`), describe that readout, not a learned style
-code, so they are not a selection target here.
+code, so they are not a selection target here. A learned mask (below) changes this
+only slightly.
+
+### Content selection: `--mask-mode`, `--mask-estimator`, `--mask-lr-scale`
+
+`MASK_MODE=learned` lets a top-k Gumbel-softmax mask choose which `CONTENT_CHANNELS`
+units are content, instead of the first ones (details and evidence in
+[ENCODER_ARCHITECTURES.md](ENCODER_ARCHITECTURES.md#learned-content-mask)).
+
+```bash
+MODEL_ID=encoder_adni_gumbel MASK_MODE=learned bash scripts/run_encoder_adni_runai.sh
+```
+
+- The recipe sets `MASK_LR_SCALE=10`. At lr 1e-4 over 10k steps, the trainer's default
+  of 1 lets a logit move about 1 in total, and the content and style logits start 4
+  apart, so the selection could not change.
+- `MASK_ESTIMATOR=relaxed` (default) or `straight_through` (the VQ-VAE trainer's). In a
+  toy test only the relaxed one swapped a noisy content unit for a shared one. In that
+  toy it was less reliable at the recipe's batch of 32 (5/10 seeds within 2,000 steps)
+  than at 64 or 128 (10/10).
+- The step-0 floor is the fixed split's, so the Δ column still reads against the same
+  untrained encoder. Each `separation_step*.json` records the selected units and logits.
+- Retrieval, the held-out loss and the probes read the selected units. The style rows
+  are the left-out units, which the loss still barely trains.
 
 ### Architecture: `--encoder-architecture`, `--conv-readout`, `--norm-type`
 

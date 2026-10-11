@@ -97,7 +97,7 @@ def capture_batch(model, x):
         for name, module in modules.items():
             if module is not None:
                 stack.callback(module.register_forward_hook(tap(name)).remove)
-        content = model(x, pool_only=True, n_views=2)[2][0][:, : model.content_channels]
+        content = model(x, pool_only=True, n_views=2)[2][0][:, model.content_units()]
     if "pooled" in captured:
         values = {"backbone": captured["pooled"]}
     else:
