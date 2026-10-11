@@ -1,0 +1,7 @@
+# adni with a learned top-k Gumbel-softmax content mask (training/ENCODER_ARCHITECTURES.md, "Learned
+# content mask"). The content and style logits start 4 apart and Adam moves each by about its lr per
+# step, so lr x mask_lr_scale x train_steps must exceed ~2 for a unit to change sides: 10 here.
+_base_: encoder/adni
+tag: encoder_adni_gumbel_s{seed}
+mask_mode: learned
+mask_lr_scale: 10

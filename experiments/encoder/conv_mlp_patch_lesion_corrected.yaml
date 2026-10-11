@@ -1,0 +1,11 @@
+# conv_mlp_patch with the lesion passed through the acquisition gain/bias like every tissue
+# (--synthetic-lesion-intensity styled), for 20k steps. Previously a hand edit of the generated
+# encoder_conv_mlp_patch_s42.slurm_bio.sh, under the same run ID.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_patch_lesion_corrected
+conv_readout: mlp
+patch_loss_weight: 1.0
+train_patch_grid: [8, 8, 8]
+spatial_recovery_eval: true
+synthetic_lesion_intensity: styled
+train_steps: 20000

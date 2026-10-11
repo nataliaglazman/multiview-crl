@@ -448,11 +448,11 @@ which the toys did not have. Toy scripts are in the session scratchpad and may b
 | `models/multiview_encoder.py` | Branch built last, so all other weights match the run without it. 3K coordinates appended after the style units and marked as content. `project_lesion` standardises over the batch before the projector. `lesion_code(x, view_idx)` and `lesion_maps()`. `lesion_input="residual"` reads `[relu(z), relu(−z)]` pooled to the feature grid (`_lesion_inputs`, `fit_normative`); `lesion_head_init` sets the heads' initial signs. |
 | `training/main_conv_synthetic.py` | `--lesion-keypoints`, `--lesion-norm`, `--lesion-frame`, `--lesion-proj-dim`, `--lesion-loss-weight`, `--lesion-temperature`, `--lesion-decorrelation-weight`, `--lesion-pairing {cross_modal,within_modality}`; `--lesion-input {features,residual}`, `--lesion-normative-components`, `--lesion-normative-subjects`, `--lesion-head-init {positive,random,negative}`. Own InfoNCE for the branch; `augment_intensity` for same-modality pairs. The normative model is fitted on the first training subjects before step 0. Every evaluation prints "lesion branch alone" (R² per factor, T1/FLAIR), head spread and, for residual input, head weights, also saved under `lesion_branch` in `dci_step*.json`. |
 | `eval/protocol/score_checkpoint.py`, `eval/lesion/checkpoint_lesion_analysis.py` | Restore the branch; count lesion units as content, not style. |
-| `scripts/run_encoder_mps.py` | Passes all lesion flags through and adds run-ID suffixes (`_lresid`, `_nk{k}`, `_hinit{init}` for the residual options). `compare_backend` scales the keypoint tolerance by 1/temperature and skips the random lesion loss: CUDA's TF32 convolutions differ from CPU by ~2e-3 at temperature 0.02. |
-| `tests/test_lesion_branch.py` | 24 tests. |
+| `scripts/launch.py`, `experiments/encoder/` | The lesion flags are ordinary trainer options (`--set lesion_keypoints=4 ...`), checked by the trainer's parser at launch. Across backends, CUDA's TF32 convolutions shift the keypoints by ~2e-3 against CPU at temperature 0.02 (the shift scales with 1/temperature). |
+| `tests/test_lesion_branch.py` | 22 tests. |
 | `eval/synthetic/synthetic_dataset.py`, `data/datasets.py` | `lesion_target` / `lesion_count` (`synthetic_lesion_target` / `synthetic_lesion_count` on the wrapper): `PseudoMRIRenderer._burden_in_white_matter`, and a `z_lesion` draw of placement quantiles in burden mode. |
 | `eval/metrics/dci.py` | `content_factor_names(n, lesion_target)` and `dataset_lesion_target(dataset)`, so burden runs report `lesion_burden` / `unused_3` / `unused_4`. |
-| `tests/test_lesion_burden.py` | 5 tests: volume linear in the burden, white-matter containment, positions independent of the burden, other latents unchanged, CLI, runner and scorer. |
+| `tests/test_lesion_burden.py` | 5 tests: volume linear in the burden, white-matter containment, positions independent of the burden, other latents unchanged, CLI and scorer. |
 
 Bugs fixed along the way:
 - `attention_spread` crashed on MPS (float64); this also affected the attention-pool arm.
@@ -608,20 +608,20 @@ ventricle size, which already works, and it is what ADNI measures (the UC Davis 
 ## How to run
 
 ```bash
-python scripts/run_encoder_mps.py --variant conv_mlp --lesion-keypoints 4 --norm-type layer --synthetic-lesion-intensity styled --lesion-temperature 0.02 --lesion-pairing within_modality --train-steps 2000 --eval-every 1000
+python scripts/launch.py experiments/encoder/conv_mlp.yaml --cluster local --set device=mps lesion_keypoints=4 norm_type=layer synthetic_lesion_intensity=styled lesion_temperature=0.02 lesion_pairing=within_modality train_steps=2000 eval_every=1000 'tag=conv_mlp_lesionkp4_within_s{seed}'
 ```
 
-Residual input; add `--lesion-head-init negative` for the control:
+Residual input; add `lesion_head_init=negative` (and a tag of its own) for the control:
 
 ```bash
-python scripts/run_encoder_mps.py --variant conv_mlp --lesion-keypoints 4 --lesion-input residual --lesion-temperature 0.03 --norm-type layer --synthetic-lesion-intensity styled --train-steps 2000 --eval-every 1000
+python scripts/launch.py experiments/encoder/conv_mlp.yaml --cluster local --set device=mps lesion_keypoints=4 lesion_input=residual lesion_temperature=0.03 norm_type=layer synthetic_lesion_intensity=styled train_steps=2000 eval_every=1000 'tag=conv_mlp_lesionkp4_resid_s{seed}'
 ```
 
 The normative model is fitted from the first 300 training subjects before step 0, which takes a few
 seconds. It is saved with the checkpoint.
 
-On CUDA, pass the same lesion flags through the CUDA wrapper. It forwards extra arguments to
-`run_encoder_mps.py --device cuda`.
+On CUDA, use `device=cuda`; on a cluster, `--cluster slurm_bio` or `--cluster runai` with
+`--generate`.
 
 Tests: use `/opt/miniconda3/envs/adni-analysis/bin/python`. A site-packages `tests` package shadows
 the repo's and `lpips` is missing, so make a shim directory containing:
@@ -633,10 +633,6 @@ Then, from the repo root:
 ```bash
 PYTHONPATH=<shim>:. /opt/miniconda3/envs/adni-analysis/bin/python tests/test_lesion_branch.py
 ```
-
-Two launcher tests fail on clean HEAD as well (unrelated drift):
-`test_encoder_mps_runner.test_cuda_patch_launcher_matches_mps_and_has_separate_outputs` and
-`test_separate_spatial_readout.test_launchers_change_only_readout_and_run_id`.
 
 ## Housekeeping
 

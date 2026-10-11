@@ -3,9 +3,6 @@
 import contextlib
 import io
 import json
-import os
-import shlex
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,8 +15,6 @@ import torch
 
 from eval.encoder.encoder_spatial_target_audit import capture
 from eval.protocol.score_checkpoint import build_model
-from scripts import generate_conv_patch_slurm, run_encoder_mps
-from tests.test_encoder_mps_runner import runner_args
 from tests.test_spatial_recovery_monitor import arguments
 from training import main_conv_synthetic as trainer
 
@@ -93,7 +88,6 @@ class SeparateSpatialReadoutTests(unittest.TestCase):
             model.global_and_patch_features(images, [2] * 3), restored.global_and_patch_features(images, [2] * 3)
         ):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        self.assertGreater(run_encoder_mps._disposable_step(self.cfg, "cpu"), 0)
 
     def test_spatial_probes_read_new_head_and_keep_gap_global(self):
         model = build_model(self.cfg, "cpu")
@@ -128,47 +122,6 @@ class SeparateSpatialReadoutTests(unittest.TestCase):
         for changes in (dict(conv_readout="linear"), dict(contrastive_proj_dim=5)):
             with self.assertRaises(ValueError):
                 build_model({**self.cfg, **changes}, "cpu")
-
-    def test_launchers_change_only_readout_and_run_id(self):
-        for device in ("cuda", "mps"):
-            common = dict(variant="conv_mlp", patch_loss_weight=1, train_patch_grid=[8] * 3, device=device)
-            shared, _ = run_encoder_mps.make_options(runner_args(**common))
-            separate, _ = run_encoder_mps.make_options(runner_args(**common, separate_spatial_readout=True))
-            self.assertEqual(
-                {k for k in shared.keys() | separate.keys() if shared.get(k) != separate.get(k)},
-                {"separate_spatial_readout", "model_id"},
-            )
-            self.assertEqual(separate["model_id"], shared["model_id"] + "_separate_spatial")
-            env = {**os.environ, "ENCODER_PYTHON": sys.executable}
-            preview = subprocess.check_output(
-                [
-                    "bash",
-                    str(ROOT / f"experiments/generated/encoder_conv_mlp_patch_s42.{device}.sh"),
-                    "--separate-spatial-readout",
-                    "--dry-run",
-                ],
-                env=env,
-                text=True,
-            )
-            parsed = trainer.parse_args(shlex.split(preview)[3:])
-            self.assertTrue(parsed.separate_spatial_readout)
-            self.assertTrue(parsed.spatial_recovery_eval)
-        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
-            generate_conv_patch_slurm.main(["--output-dir", tmp])
-            original = Path(tmp) / "encoder_conv_mlp_patch_s42.slurm_bio.sh"
-            before = original.read_bytes()
-            generate_conv_patch_slurm.main(["--output-dir", tmp, "--separate-spatial-readout"])
-            self.assertEqual(before, original.read_bytes())
-            separate_script = Path(tmp) / "encoder_conv_mlp_patch_separate_spatial_s42.slurm_bio.sh"
-            subprocess.run(["bash", "-n", str(separate_script)], check=True)
-            configs = []
-            for script in (original, separate_script):
-                preview = subprocess.check_output(["bash", str(script), "--dry-run"], text=True)
-                configs.append(vars(trainer.parse_args(shlex.split(preview)[3:])))
-            self.assertEqual(
-                {k for k in configs[0] if configs[0][k] != configs[1][k]}, {"separate_spatial_readout", "model_id"}
-            )
-            self.assertTrue(configs[1]["out_dir"].startswith("/scratch/users/k24058220/"))
 
     def test_real_training_monitor_and_checkpoint_with_matched_inputs(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(trainer, "evaluate", return_value=({}, {})):

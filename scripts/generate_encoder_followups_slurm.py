@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.generate_encoder_ablation_slurm import load_resources  # noqa: E402
+from scripts.launch import load_yaml  # noqa: E402
 
 GAP_ARMS = {
     # Same features, budget and seed; only the readout pooling (and label order) differs.
@@ -18,6 +18,15 @@ GAP_ARMS = {
     "grid8": "--grid 8",
     "gap_shuffled": "--grid 1 --shuffle-targets",
 }
+
+
+def load_resources(path):
+    config = load_yaml(path)
+    # The checked-in slurm_bio.yaml uses _slurm, not _slurm_bio.
+    resources = config.get("_slurm_bio", config.get("_slurm"))
+    if not isinstance(resources, dict) or not resources:
+        raise ValueError("Cluster config must contain _slurm_bio or _slurm resources")
+    return resources.copy()
 
 
 def render(kind, resources, steps, include_native):

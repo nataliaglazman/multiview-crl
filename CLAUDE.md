@@ -8,6 +8,8 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 
 - `training/main_multimodal.py` — primary training entrypoint (VQ-VAE-2, InfoNCE/MoCo/BT/VICReg, Gumbel content mask, optional style quantization). ~2300 lines.
 - `training/main_numerical.py` — small numerical theory-validation experiments (separate, simpler).
+- `training/main_conv_synthetic.py` — encoder-only trainer (no decoder): conv or 3D ResNet-18 backbones, InfoNCE/Barlow Twins, optional patch loss, lesion branch, fixed or learned (Gumbel) content mask; synthetic data, or ADNI with `--dataset-name`. Model: `models/multiview_encoder.py` (`MultiviewConvEncoder`, same 8-tuple forward as `VQVAE`).
+- `training/encoder_args.py` — that trainer's CLI without torch (`parse_args`, `cli_arguments`), so `scripts/launch.py` checks an encoder run with the trainer's own rules before submitting. Add encoder-only flags here.
 - `training/losses.py` — contrastive + recon losses (InfoNCE, MoCo, Barlow Twins, VICReg, patch-InfoNCE, LPIPS-based `BaselineLoss`, `cross_reconstruction_loss` for the style-swapped decode).
 - `training/bt_objective.py` — builds the Barlow Twins plain/patch/GAP loss callables (arm weights, GAP overrides, per-arm correlation EMA) for training AND the gradient audit, so the two cannot drift. Change BT arm wiring here, not in `main_multimodal.py`.
 - `models/vqvae.py` — hierarchical 3D VQ-VAE-2 (content/style split, Gumbel mask, style codebooks). Primary model.
@@ -43,8 +45,9 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - `utils/helper.py` — `HelperModule`, `get_parameter_count` (used by vqvae.py).
 - `experiments/defaults.yaml` — base config (all shared flags). Experiment YAMLs override only what differs.
 - `experiments/cluster/{runai,slurm}.yaml` — cluster-specific paths and job resource configs.
-- `experiments/*.yaml` — per-experiment configs (main recipe: `synthetic_causal.yaml`; also `adni_real`, `synthetic_causal_frozen_encoder`, `synthetic_causal_groupnorm_control`, `encoder_ablations/`). One-off variants go through `--set`, not new YAMLs.
-- `scripts/launch.py` — reads experiment YAML, merges defaults+cluster+overrides, submits to RunAI/SLURM/local. Saves timestamped resolved config snapshot with git SHA to the run's output directory.
+- `experiments/*.yaml` — per-experiment configs (main recipe: `synthetic_causal.yaml`; also `adni_real`, `synthetic_causal_frozen_encoder`, `synthetic_causal_groupnorm_control`). One-off variants go through `--set`, not new YAMLs.
+- `experiments/encoder/*.yaml` — encoder-only experiments: `defaults.yaml` (model/objective) and `synthetic_defaults.yaml` (= `experiments/encoder_comparison.json`'s recipe, kept equal by a test) under `conv`, `conv_mlp`, `resnet*`, `conv_mlp_patch*`, `*_gumbel`, `adni*`. Tags like `conv_mlp_s{seed}` fill from the config; `_cluster:` blocks hold per-cluster settings. Run:ai scripts for them are generated into `experiments/generated/encoder/` (a test checks they are current; never edit them by hand).
+- `scripts/launch.py` — reads experiment YAML, merges defaults+cluster+overrides, submits to RunAI/SLURM/local. Saves timestamped resolved config snapshot with git SHA to the run's output directory (`results/launches/<tag>/` for encoder runs). Each experiment directory's `defaults.yaml` picks the track: `experiments/` = VQ-VAE (`training.main_multimodal`), `experiments/encoder/` = encoder-only (`training.main_conv_synthetic`).
 - `scripts/sweep_config.yaml` + `sweep_train.py` — W&B Bayesian sweep wrapper (handles bool flags + constraints).
 - `scripts/compare_dino_objectives.sh` — end-to-end DINO objective ablation: verifies each fine-tune run's recorded objective, extracts bundles + floors, scores the content block and the full embedding separately, plots both.
 - `scripts/launch_sweep.sh`, `sweep_runai.sh`, `analyze_sweep.py` — RunAI sweep launchers and analysis.
@@ -54,7 +57,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 ## Key facts
 
 - 3D volumes, target shape `(91, 109, 91)` at 2mm isotropic.
-- VQ-VAE-2 is the only encoder type. 3 levels, content channels via learned/fixed Gumbel mask at level 0 (finest), separate style codebook per level (optional).
+- VQ-VAE-2 is the only encoder type in `main_multimodal`. 3 levels, content channels via learned/fixed Gumbel mask at level 0 (finest), separate style codebook per level (optional).
 - `VQVAE.forward()` returns an 8-tuple; callers assume that signature.
 - Persistent `.pt` cache with SHA-256 fingerprint over `(spacing, crop_margin, paths)`; NFS-safe atomic writes.
 - W&B + TensorBoard logging. Contrastive diagnostics (top-1 acc, pos/neg sim) logged per level.
@@ -63,7 +66,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 ## Conventions
 
 - Imports are first-party package style (`import training.losses`, `import models.vqvae`), not relative.
-- Arg parsing is centralized in `utils/config.py`; add new flags there.
+- Arg parsing is centralized in `utils/config.py`; add new flags there. Encoder-only flags go in `training/encoder_args.py`; they need no launcher code (any option works with `--set`).
 - When touching `VQVAE.forward` tuple, update: training loop, `visualisation.py`, eval notebook.
 - Any new term added to `total_loss` in `train_step` must also go through `observe(prefix, loss, weight)` with the weight training applies; otherwise the gradient audit's parity check fails.
 - Don't add docstrings/comments to code you aren't changing.
@@ -73,6 +76,7 @@ Multiview contrastive representation learning on paired T1/T2 brain MRI (ADNI). 
 - Launch experiment: `python scripts/launch.py experiments/<name>.yaml --cluster runai` (or `--cluster slurm`, `--cluster local`).
 - Dry run (show resolved config + command): `python scripts/launch.py experiments/<name>.yaml --cluster runai --dry-run`.
 - Override at launch: `python scripts/launch.py experiments/<name>.yaml --cluster runai --set lr=5e-4 train_steps=50000`.
+- Encoder-only: `python scripts/launch.py experiments/encoder/conv_mlp.yaml --cluster slurm_bio --set seed=142 [--dry-run]`; locally `--cluster local --set device=mps`. Run:ai (no Python on the submit host): `bash experiments/generated/encoder/<name>.runai.sh`, or generate a variant with `--cluster runai --generate --set ...`.
 - Direct train: `python -m training.main_multimodal --dataroot ... --dataset-name ADNI_stripped ...`
 - Sweep: `wandb sweep scripts/sweep_config.yaml` then `./scripts/launch_sweep.sh`.
 - Docker: `./docker/run_docker.sh`.

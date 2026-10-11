@@ -332,27 +332,24 @@ class RunTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
-    def test_both_clusters_pass_the_mask_knobs(self):
-        from tests.test_encoder_adni import dry_run, training_argv
+    def test_learned_mask_experiments_resolve_on_every_cluster(self):
+        from scripts import launch
 
-        for env, expected in (
-            ({"MASK_MODE": "learned"}, ("learned", 10.0, "relaxed")),
-            (
-                {"MASK_MODE": "learned", "MASK_LR_SCALE": "3", "MASK_ESTIMATOR": "straight_through"},
-                ("learned", 3.0, "straight_through"),
-            ),
-        ):
-            with self.subTest(env=env):
-                slurm, runai = (
-                    vars(trainer.parse_args(training_argv(dry_run(script, **env))))
-                    for script in ("run_encoder_adni_slurm.sh", "run_encoder_adni_runai.sh")
-                )
-                self.assertEqual(
-                    {key for key in slurm if slurm[key] != runai[key]},
-                    {"dataroot", "labels_path", "masks_dir", "cache_dir", "out_dir"},
-                )
-                self.assertEqual((slurm["mask_mode"], slurm["mask_lr_scale"], slurm["mask_estimator"]), expected)
-        self.assertFalse(any(token.startswith("--mask-") for token in dry_run("run_encoder_adni_slurm.sh")))
+        experiments = Path(__file__).resolve().parents[1] / "experiments" / "encoder"
+        for name in ("adni_gumbel", "conv_mlp_gumbel"):
+            for cluster in ("runai", "slurm", "slurm_bio"):
+                with self.subTest(name=name, cluster=cluster):
+                    config = launch.resolve_config(experiments / f"{name}.yaml", cluster, {})
+                    args = trainer.parse_args(launch.encoder_cli_args(config))
+                    self.assertEqual(
+                        (args.mask_mode, args.mask_lr_scale, args.mask_estimator), ("learned", 10.0, "relaxed")
+                    )
+        override = {"mask_estimator": "straight_through", "mask_lr_scale": 3}
+        config = launch.resolve_config(experiments / "adni_gumbel.yaml", "runai", override)
+        args = trainer.parse_args(launch.encoder_cli_args(config))
+        self.assertEqual((args.mask_lr_scale, args.mask_estimator), (3.0, "straight_through"))
+        fixed = launch.encoder_cli_args(launch.resolve_config(experiments / "adni.yaml", "runai", {}))
+        self.assertFalse(any(token.startswith("--mask-") for token in fixed))
 
 
 if __name__ == "__main__":

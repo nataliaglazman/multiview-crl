@@ -1,0 +1,9 @@
+# conv_mlp_patch with its own content-only patch MLP, copied from the global head at
+# initialisation. training/ENCODER_PATCH_TRAINING.md
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_patch_separate_spatial_s{seed}
+conv_readout: mlp
+patch_loss_weight: 1.0
+train_patch_grid: [8, 8, 8]
+spatial_recovery_eval: true
+separate_spatial_readout: true

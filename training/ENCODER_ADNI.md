@@ -7,33 +7,40 @@ objective are unchanged; only the data, preprocessing and evaluation differ.
 
 ## Launching
 
-The recipe lives in `scripts/encoder_adni_recipe.sh`, and one wrapper per cluster
-sources it. The wrappers add their cluster's paths (from
-`experiments/cluster/<cluster>.yaml`, with the enriched labels filename described below)
-and submission. Each recipe knob (`MODEL_ID`,
-`READOUT`, `NORM_TYPE`, `PATCH_WEIGHT`, `CONTENT_CHANNELS`, ...) is an environment
-variable, overridable at submit time. `tests/test_encoder_adni.py` checks that the two clusters' commands
-differ only in the five path flags.
+The recipe is `experiments/encoder/adni.yaml`, on top of the encoder defaults in
+`experiments/encoder/defaults.yaml`. `scripts/launch.py` adds the cluster's data paths from
+`experiments/cluster/<cluster>.yaml`. The YAML's `_cluster` block adds the per-cluster
+settings: the labels file with demographics, and the scratch output directory on SLURM. Any
+setting changes with `--set`, and a run is checked by the trainer's own parser before
+anything is written or submitted. `tests/test_encoder_launch.py` checks that the clusters'
+commands differ only in the data paths and the output directory.
 
 | Cluster | Preview | Submit |
 | --- | --- | --- |
-| CREATE (SLURM) | `bash scripts/run_encoder_adni_slurm.sh --dry-run` | `sbatch scripts/run_encoder_adni_slurm.sh` |
-| Run:ai | `bash scripts/run_encoder_adni_runai.sh --dry-run` | `bash scripts/run_encoder_adni_runai.sh` |
+| CREATE (SLURM) | `python scripts/launch.py experiments/encoder/adni.yaml --cluster slurm --dry-run` | the same without `--dry-run` |
+| Run:ai | `bash experiments/generated/encoder/adni.runai.sh --dry-run` | `bash experiments/generated/encoder/adni.runai.sh` |
 
-The Run:ai job runs the checkout at `/nfs/home/nglazman/crl-2/multiview-crl` inside
-the training image. Sync the code there first. Runs land in that checkout's
-`results/encoder_adni/runs/<MODEL_ID>`, and the job is named after `MODEL_ID`.
+The Run:ai submit host has no Python packages, so it runs the generated script. The job runs
+the checkout at `/nfs/home/nglazman/crl-2/multiview-crl` inside the training image; sync the
+code, including `experiments/generated/encoder/`, there first. Runs land in that checkout's
+`results/encoder_adni/runs/<tag>`, and the job is named after the tag (`_` becomes `-`). On
+SLURM they land in `/scratch/users/k24058220/encoder_adni/runs/<tag>`.
 
-The encoder wrappers now default to `labels_cleaned_3class_demog.csv`, in the
-same directory as the previous labels CSV. For example, on Run:ai:
+Variants are experiments built on `adni.yaml` (`adni_patch.yaml`, `adni_gumbel.yaml`), or
+`--set` overrides under a tag of their own. A one-off Run:ai variant is generated where Python
+is available, then synced and submitted:
 
 ```bash
-MODEL_ID=encoder_adni_conv_mlp_demog_s42 bash scripts/run_encoder_adni_runai.sh
+python scripts/launch.py experiments/encoder/adni.yaml --cluster runai --generate \
+    --set norm_type=layer 'tag=encoder_adni_conv_mlp_layernorm_s{seed}'
+bash experiments/generated/encoder/encoder_adni_conv_mlp_layernorm_s42.runai.sh
 ```
 
-For a direct Python launch, set `--labels-path` to the enriched CSV. `LABELS_PATH`
-still overrides either wrapper; the original `Subject,Group` CSV remains supported
-and runs diagnosis-only probing. The shared VQ-VAE cluster configs are unchanged.
+The labels are `labels_cleaned_3class_demog.csv`, next to each cluster's labels CSV (its
+`_cluster` block). `--set labels_path=...` overrides it; the original `Subject,Group` CSV
+remains supported and runs diagnosis-only probing. The shared VQ-VAE cluster configs are
+unchanged. With `--cluster local`, pass `dataroot`, `labels_path`, `masks_dir` and
+`cache_dir` with `--set`.
 
 Run the data preflight first; it checks the same paths, size and split. On CREATE,
 run it in the training env on the login node:
@@ -123,8 +130,7 @@ one was built. The conv encoder at stride 4 then gives a **24×28×24** map.
 
 - Every grid must fit that map per axis; the parser checks this.
   `--train-patch-grid 8 8 8` fits, but 28/8 makes uneven, overlapping adaptive-pool
-  bins. `6 7 6` gives cubic 4×4×4-cell bins, and the recipe uses it with
-  `PATCH_WEIGHT=1`.
+  bins. `6 7 6` gives cubic 4×4×4-cell bins, which `adni_patch.yaml` uses.
 - ResNet-18 at stride 32 rounds up to a 3×4×3 map: too coarse for patch work.
   Stride 8 gives 12×14×12.
 - Cost: 1.03 M voxels per view is about 4× a synthetic `--res 64` volume, in
@@ -158,7 +164,8 @@ WM-referenced normalisation (WhiteStripe) would be the fix; it is not implemente
 
 Real data has no true `n_content`, and the shared T1/FLAIR content is far larger
 than 9 factors. `12 / 9` mirrors the synthetic recipe for comparability. A sweep is
-a natural first experiment (9 / 16 / 32; the SLURM wrapper's header has the loop).
+a natural first experiment (9 / 16 / 32: `--set content_channels=16 latent_dim=19
+'tag=encoder_adni_c16_s{seed}'`, and so on).
 Judge it on held-out retrieval, the per-view diagnosis probes and effective rank,
 each against its floor.
 The loss reads only the content block, so **the style units receive no gradient**.
@@ -169,18 +176,18 @@ only slightly.
 
 ### Content selection: `--mask-mode`, `--mask-estimator`, `--mask-lr-scale`
 
-`MASK_MODE=learned` lets a top-k Gumbel-softmax mask choose which `CONTENT_CHANNELS`
+`adni_gumbel.yaml` lets a top-k Gumbel-softmax mask choose which `content_channels`
 units are content, instead of the first ones (details and evidence in
 [ENCODER_ARCHITECTURES.md](ENCODER_ARCHITECTURES.md#learned-content-mask)).
 
 ```bash
-MODEL_ID=encoder_adni_gumbel MASK_MODE=learned bash scripts/run_encoder_adni_runai.sh
+bash experiments/generated/encoder/adni_gumbel.runai.sh
 ```
 
-- The recipe sets `MASK_LR_SCALE=10`. At lr 1e-4 over 10k steps, the trainer's default
-  of 1 lets a logit move about 1 in total, and the content and style logits start 4
-  apart, so the selection could not change.
-- `MASK_ESTIMATOR=relaxed` (default) or `straight_through` (the VQ-VAE trainer's). In a
+- It sets `mask_lr_scale: 10`. At lr 1e-4 over 10k steps, the trainer's default of 1
+  lets a logit move about 1 in total, and the content and style logits start 4 apart,
+  so the selection could not change.
+- `mask_estimator` is `relaxed` (default) or `straight_through` (the VQ-VAE trainer's). In a
   toy test only the relaxed one swapped a noisy content unit for a shared one. In that
   toy it was less reliable at the recipe's batch of 32 (5/10 seeds within 2,000 steps)
   than at 64 or 128 (10/10).
@@ -194,14 +201,14 @@ MODEL_ID=encoder_adni_gumbel MASK_MODE=learned bash scripts/run_encoder_adni_run
 The recipe's default model is `conv_mlp_s42`, the reference model of the synthetic
 encoder-only experiments (patch training, target follow-ups, lesion branch). That is
 the conv backbone at stride 4, GAP, then a Linear(64, 100) → LeakyReLU → Linear(100, 12)
-readout (`READOUT=mlp`), with GroupNorm and separate per-view encoders. The trainer's
+readout (`conv_readout: mlp`), with GroupNorm and separate per-view encoders. The trainer's
 own default is the linear readout, under which `--encoder-head-hidden` does nothing.
 The conv backbone is also the only one with a usable map at 2 mm.
 
-GroupNorm (`NORM_TYPE=group`) is what every encoder-only synthetic run used, so it
+GroupNorm (`norm_type: group`) is what every encoder-only synthetic run used, so it
 keeps ADNI comparable with them. It pools each scan's statistics over all positions,
 background included, and writes them back into every cell. Background cells therefore
-carry whole-volume quantities such as brain size. `NORM_TYPE=layer` normalises each
+carry whole-volume quantities such as brain size. `--set norm_type=layer` normalises each
 voxel across channels instead. It is the VQ-VAE ADNI run's encoder norm, and it starts
 from the same weights at the same seed, so a `layer` run is a paired arm.
 

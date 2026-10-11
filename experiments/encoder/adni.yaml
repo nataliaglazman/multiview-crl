@@ -1,0 +1,30 @@
+# Encoder-only training on real paired T1/FLAIR volumes (ADNI), with the synthetic reference model
+# (conv_mlp, GroupNorm). Flags and their trade-offs: training/ENCODER_ADNI.md. The data paths come
+# from the cluster YAML; with --cluster local, pass them with --set.
+tag: encoder_adni_conv_mlp_s{seed}
+dataset_name: ADNI_stripped_masks
+image_spacing: 2.0
+spatial_size: [96, 112, 96]
+val_frac: 0.2
+test_frac: 0.1
+split_seed: 0
+asymmetric_aug: true
+# Part of the recipe, not just throughput: each worker draws its own augmentation stream.
+num_workers: 8
+conv_readout: mlp
+norm_type: group
+eval_every: 500
+floor_eval: true
+best_metric: val_loss
+out_dir: results/encoder_adni/runs
+
+# The labels with the demographics columns sit next to each cluster's labels file.
+_cluster:
+  runai:
+    labels_path: /nfs/home/nglazman/nmpevqvae/labels_cleaned_3class_demog.csv
+  slurm:
+    labels_path: /users/k24058220/multiview-crl/labels_cleaned_3class_demog.csv
+    out_dir: /scratch/users/k24058220/encoder_adni/runs
+  slurm_bio:
+    labels_path: /users/k24058220/multiview-crl/labels_cleaned_3class_demog.csv
+    out_dir: /scratch/users/k24058220/encoder_adni/runs

@@ -1,0 +1,6 @@
+# conv_mlp with a learned top-k Gumbel-softmax content mask; mask_lr_scale as in adni_gumbel.yaml.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_gumbel_s{seed}
+conv_readout: mlp
+mask_mode: learned
+mask_lr_scale: 10

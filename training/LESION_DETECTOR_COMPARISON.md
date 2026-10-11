@@ -80,17 +80,17 @@ Repeat the same command to reuse completed, verified runs. Incomplete training
 is not resumed automatically. Source/settings changes require a new directory.
 Use exactly the same experiment options with separate driver actions.
 
-For a single arm through the existing local launcher:
+For a single arm through the launcher:
 
 ```bash
-python scripts/run_encoder_mps.py --device cuda --variant conv_mlp \
-  --lesion-keypoints 4 --lesion-input residual --lesion-detector separate \
-  --lesion-temperature 0.03 --norm-type layer --synthetic-lesion-intensity styled \
-  --lesion-localization-eval --train-steps 2000 --eval-every 1000
+python scripts/launch.py experiments/encoder/conv_mlp.yaml --cluster local --set device=cuda \
+  lesion_keypoints=4 lesion_input=residual lesion_detector=separate \
+  lesion_temperature=0.03 norm_type=layer synthetic_lesion_intensity=styled \
+  lesion_localization_eval=True train_steps=2000 eval_every=1000 'tag=lesion_separate_s{seed}'
 ```
 
-Use `--lesion-detector separate_conv` for convolutional capacity, or
-`--lesion-detector shared --lesion-branch-frozen` for the frozen control.
+Use `lesion_detector=separate_conv` for convolutional capacity, or
+`lesion_detector=shared lesion_branch_frozen=True` for the frozen control.
 The single-run launcher logs validation localisation; the four-arm driver also
 automatically runs the held-out movement audit.
 
@@ -146,9 +146,6 @@ arms, the frozen detector stayed unchanged, and the PCA/input hashes matched.
 Those tiny runs validate the pipeline, not scientific recovery performance.
 CUDA/MPS execution was unavailable in the test host.
 
-Broader checks retain the pre-existing failure in
-`test_encoder_mps_runner.test_cuda_patch_launcher_matches_mps_and_has_separate_outputs`
-(the older CUDA/MPS patch wrappers use different patch-loss weights). The eight
-existing checkpoint-analysis tests pass with normal warning handling; this Mac's
+The eight existing checkpoint-analysis tests pass with normal warning handling; this Mac's
 NumPy/sklearn matmul RuntimeWarnings make four fail when warnings are promoted
 to errors. The new detector tests pass with RuntimeWarnings treated as errors.

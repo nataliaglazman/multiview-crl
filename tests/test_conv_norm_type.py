@@ -3,9 +3,6 @@
 import contextlib
 import io
 import json
-import os
-import shlex
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,8 +14,6 @@ import torch
 from eval.protocol.score_checkpoint import build_model
 from models.multiview_encoder import MultiviewConvEncoder
 from models.vqvae import ChannelLayerNorm3d
-from scripts import generate_conv_patch_slurm, run_encoder_mps
-from tests.test_encoder_mps_runner import runner_args
 from tests.test_encoder_target_followups import config
 from training import main_conv_synthetic as trainer
 
@@ -108,45 +103,6 @@ class ConvNormTypeTests(unittest.TestCase):
             (cfg["norm_type"], progress["normalization"], progress["status"]), ("layer", "layer", "complete")
         )
         self.assertEqual(restored.normalization, "layer")
-
-    def test_launchers_add_only_norm_type_and_a_distinct_run_id(self):
-        for device in ("cuda", "mps"):
-            common = dict(variant="conv_mlp", device=device)
-            plain, _ = run_encoder_mps.make_options(runner_args(**common))
-            layer, _ = run_encoder_mps.make_options(runner_args(**common, norm_type="layer"))
-            self.assertEqual(
-                {k for k in plain.keys() | layer.keys() if plain.get(k) != layer.get(k)}, {"norm_type", "model_id"}
-            )
-            self.assertEqual(layer["model_id"], plain["model_id"] + "_layernorm")
-            with self.assertRaises(ValueError):
-                run_encoder_mps.make_options(runner_args(device=device, norm_type="layer"))  # ResNet variant
-            preview = subprocess.check_output(
-                [
-                    "bash",
-                    str(ROOT / f"experiments/generated/encoder_conv_mlp_patch_s42.{device}.sh"),
-                    "--norm-type",
-                    "layer",
-                    "--dry-run",
-                ],
-                env={**os.environ, "ENCODER_PYTHON": sys.executable},
-                text=True,
-            )
-            parsed = trainer.parse_args(shlex.split(preview)[3:])
-            self.assertEqual(parsed.norm_type, "layer")
-            self.assertTrue(parsed.model_id.endswith("_layernorm"))
-        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
-            generate_conv_patch_slurm.main(["--output-dir", tmp])
-            original = Path(tmp) / "encoder_conv_mlp_patch_s42.slurm_bio.sh"
-            before = original.read_bytes()
-            generate_conv_patch_slurm.main(["--output-dir", tmp, "--norm-type", "layer"])
-            self.assertEqual(before, original.read_bytes())
-            layer_script = Path(tmp) / "encoder_conv_mlp_patch_layernorm_s42.slurm_bio.sh"
-            subprocess.run(["bash", "-n", str(layer_script)], check=True)
-            configs = []
-            for script in (original, layer_script):
-                preview = subprocess.check_output(["bash", str(script), "--dry-run"], text=True)
-                configs.append(vars(trainer.parse_args(shlex.split(preview)[3:])))
-            self.assertEqual({k for k in configs[0] if configs[0][k] != configs[1][k]}, {"norm_type", "model_id"})
 
 
 if __name__ == "__main__":

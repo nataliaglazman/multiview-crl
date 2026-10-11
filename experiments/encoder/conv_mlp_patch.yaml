@@ -1,0 +1,8 @@
+# conv_mlp plus unit-weight patch InfoNCE on an 8^3 grid, with the frozen spatial-recovery probes
+# at every evaluation. training/ENCODER_PATCH_TRAINING.md
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_patch_s{seed}
+conv_readout: mlp
+patch_loss_weight: 1.0
+train_patch_grid: [8, 8, 8]
+spatial_recovery_eval: true

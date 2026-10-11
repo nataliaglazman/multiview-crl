@@ -1,0 +1,6 @@
+# resnet18 with every BatchNorm, shortcuts included, replaced by 32-group GroupNorm.
+# training/ENCODER_ABLATIONS.md
+_base_: encoder/synthetic_defaults
+tag: resnet_groupnorm_s{seed}
+encoder_architecture: resnet18
+resnet_norm: group

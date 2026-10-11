@@ -3,9 +3,6 @@
 import contextlib
 import io
 import json
-import os
-import shlex
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,8 +13,6 @@ from unittest.mock import patch
 import torch
 
 from eval.protocol.score_checkpoint import build_model
-from scripts import generate_conv_patch_slurm, run_encoder_mps
-from tests.test_encoder_mps_runner import runner_args
 from training import main_conv_synthetic as trainer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,20 +84,6 @@ class PatchForegroundMaskTests(unittest.TestCase):
         torch.testing.assert_close(with_masks, trainer.training_objective(model, images, on, *self.criteria)[1])
         self.assertFalse(torch.allclose(with_masks, off))
 
-    def test_launcher_options_without_a_threshold_use_the_default(self):
-        # scripts/run_encoder_mps.py --check builds this namespace from raw launcher options,
-        # which carry the mask flag but not the parser's 0.05 default.
-        cfg = vars(trainer.parse_args(BASE + ["--patch-foreground-mask"]))
-        model = build_model(cfg, "cpu").eval()
-        masks = torch.zeros(4, 1, 16, 16, 16)
-        masks[..., :6, :6, :6] = 1
-        images = torch.randn(4, 1, 16, 16, 16) * masks
-        raw = {k: v for k, v in cfg.items() if k != "patch_foreground_thresh"}
-        loss = trainer.training_objective(model, images, SimpleNamespace(**raw), *self.criteria)[1]
-        torch.testing.assert_close(
-            loss, trainer.training_objective(model, images, SimpleNamespace(**cfg), *self.criteria)[1]
-        )
-
     def test_real_training_records_the_flag_and_reports_kept_positions(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = ["--out-dir", tmp, "--model-id", "fg_smoke", "--require-new-run", "--device", "cpu", *BASE]
@@ -120,55 +101,6 @@ class PatchForegroundMaskTests(unittest.TestCase):
         self.assertEqual(cfg["patch_foreground_thresh"], 0.05)
         self.assertEqual((progress["status"], progress["step"]), ("complete", 2))
         self.assertRegex(output.getvalue(), r"first batch keeps \d+/8 positions")
-
-    def test_launchers_add_only_the_flag_and_a_distinct_run_id(self):
-        for device in ("cuda", "mps"):
-            common = dict(variant="conv_mlp", patch_loss_weight=1, train_patch_grid=[8] * 3, device=device)
-            plain, _ = run_encoder_mps.make_options(runner_args(**common))
-            masked, _ = run_encoder_mps.make_options(runner_args(**common, patch_foreground_mask=True))
-            self.assertEqual(
-                {k for k in plain.keys() | masked.keys() if plain.get(k) != masked.get(k)},
-                {"patch_foreground_mask", "model_id"},
-            )
-            self.assertEqual(masked["model_id"], plain["model_id"] + "_fgmask")
-            stricter, _ = run_encoder_mps.make_options(
-                runner_args(**common, patch_foreground_mask=True, patch_foreground_thresh=0.2)
-            )
-            self.assertTrue(stricter["model_id"].endswith("_fgmask0.2"))
-            with self.assertRaises(ValueError):
-                run_encoder_mps.make_options(runner_args(variant="conv_mlp", device=device, patch_foreground_mask=True))
-            parsed = trainer.parse_args(run_encoder_mps.comparison.training_command(stricter)[3:])
-            self.assertTrue(parsed.patch_foreground_mask)
-            self.assertEqual(parsed.patch_foreground_thresh, 0.2)
-            preview = subprocess.check_output(
-                [
-                    "bash",
-                    str(ROOT / f"experiments/generated/encoder_conv_mlp_patch_s42.{device}.sh"),
-                    "--patch-loss-weight",  # the wrappers' own default may be global-only
-                    "1",
-                    "--patch-foreground-mask",
-                    "--dry-run",
-                ],
-                env={**os.environ, "ENCODER_PYTHON": sys.executable},
-                text=True,
-            )
-            self.assertTrue(trainer.parse_args(shlex.split(preview)[3:]).patch_foreground_mask)
-        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
-            generate_conv_patch_slurm.main(["--output-dir", tmp])
-            original = Path(tmp) / "encoder_conv_mlp_patch_s42.slurm_bio.sh"
-            before = original.read_bytes()
-            generate_conv_patch_slurm.main(["--output-dir", tmp, "--patch-foreground-mask"])
-            self.assertEqual(before, original.read_bytes())
-            masked_script = Path(tmp) / "encoder_conv_mlp_patch_fgmask_s42.slurm_bio.sh"
-            subprocess.run(["bash", "-n", str(masked_script)], check=True)
-            configs = []
-            for script in (original, masked_script):
-                preview = subprocess.check_output(["bash", str(script), "--dry-run"], text=True)
-                configs.append(vars(trainer.parse_args(shlex.split(preview)[3:])))
-            self.assertEqual(
-                {k for k in configs[0] if configs[0][k] != configs[1][k]}, {"patch_foreground_mask", "model_id"}
-            )
-            self.assertTrue(configs[1]["model_id"].endswith("_fgmask_s42"))
 
 
 if __name__ == "__main__":

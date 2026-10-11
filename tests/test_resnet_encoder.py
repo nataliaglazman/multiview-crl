@@ -1,6 +1,5 @@
 """Upstream architecture parity, pooling order, learning and checkpoint compatibility."""
 
-import argparse
 import ast
 import copy
 import gc
@@ -13,6 +12,7 @@ from unittest.mock import patch
 import torch
 from torch import nn
 
+import training.encoder_args as encoder_args
 from eval.protocol.score_checkpoint import build_model, encode
 from models.multiview_encoder import MultiviewConvEncoder
 from models.vqvae import Encoder
@@ -210,8 +210,7 @@ class ResNetEncoderTests(unittest.TestCase):
             torch.testing.assert_close(restored(x, pool_only=True, n_views=2)[2][0], expected, atol=0, rtol=0)
 
     def test_cli_defaults_and_new_flags(self):
-        ns = functions_from_file("training/main_conv_synthetic.py", {"parse_args"}, {"argparse": argparse})
-        parse_args = ns["parse_args"]
+        parse_args = encoder_args.parse_args
         self.assertEqual(parse_args([]).encoder_architecture, "conv")
         args = parse_args(["--encoder-architecture", "resnet18", "--res", "64", "--no-separate-encoders"])
         self.assertEqual(args.encoder_head_hidden, 100)

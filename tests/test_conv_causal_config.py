@@ -1,6 +1,5 @@
 """SCM flags must select the same generative graph in training and evaluation."""
 
-import argparse
 import ast
 import contextlib
 import io
@@ -11,22 +10,21 @@ from pathlib import Path
 import numpy as np
 import torch
 
+import training.encoder_args as encoder_args
 from data.datasets import SyntheticBrainDataset
 from eval.protocol.score_checkpoint import make_val_dataset
 from eval.synthetic.synthetic_dataset import build_content_scm
 
 
 def training_functions():
-    # Execute the real parser and dataset factory without importing unrelated
-    # training/perceptual-loss dependencies.
+    # The real parser is torch-free; the dataset factory is executed on its own, without
+    # importing unrelated training/perceptual-loss dependencies.
     source = Path(__file__).resolve().parents[1] / "training/main_conv_synthetic.py"
     tree = ast.parse(source.read_text())
-    tree.body = [
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in ("parse_args", "make_dataset")
-    ]
-    namespace = {"argparse": argparse, "SyntheticBrainDataset": SyntheticBrainDataset}
+    tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "make_dataset"]
+    namespace = {"SyntheticBrainDataset": SyntheticBrainDataset}
     exec(compile(tree, str(source), "exec"), namespace)
-    return namespace["parse_args"], namespace["make_dataset"]
+    return encoder_args.parse_args, namespace["make_dataset"]
 
 
 class ConvCausalConfigTests(unittest.TestCase):

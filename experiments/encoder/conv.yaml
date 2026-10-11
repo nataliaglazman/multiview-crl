@@ -1,0 +1,4 @@
+# Native conv encoder with the linear readout: the reference for conv_mlp.
+# training/ENCODER_COMPARISON.md, training/ENCODER_ABLATIONS.md
+_base_: encoder/synthetic_defaults
+tag: conv_s{seed}

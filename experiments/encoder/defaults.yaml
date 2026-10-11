@@ -1,0 +1,39 @@
+# Encoder-only track: training/main_conv_synthetic.py, contrastive encoders with no decoder.
+# Every experiment in this directory starts from these settings, then its _base_ (if any), the
+# cluster's paths, its own overrides, its _cluster block and --set. Keys are the trainer's option
+# names (training/encoder_args.py), and each resolved run is checked by the trainer's own parser
+# before anything is written or submitted.
+#
+#   python scripts/launch.py experiments/encoder/<name>.yaml --cluster runai|slurm|slurm_bio|local --dry-run
+_entrypoint: training.main_conv_synthetic
+
+# ---- Model ----
+encoder_architecture: conv
+conv_readout: linear
+latent_dim: 12
+content_channels: 9
+hidden_channels: 64
+res_channels: 32
+nb_res_layers: 2
+downscale_factor: 4
+encoder_head_hidden: 100
+no_separate_encoders: false
+
+# ---- Objective ----
+contrastive_loss_type: infonce
+tau: 0.1
+cross_view_negs_only: true
+contrastive_proj_dim: 0
+
+# ---- Optimisation ----
+lr: 0.0001
+grad_clip: 2.0
+batch_size: 32
+train_steps: 10000
+
+# ---- Reproducibility and output ----
+seed: 42
+deterministic: true
+deterministic_warn_only: true
+require_new_run: true
+out_dir: results/encoder/runs

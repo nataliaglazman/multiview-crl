@@ -59,41 +59,24 @@ The initial implementation requires an MLP readout, positive patch weight and
 `--contrastive-proj-dim 0`, so no shared loss projector reconnects the heads.
 The default shared-head model and its checkpoint keys are preserved.
 
-On the NVIDIA PC, after syncing the updated source using the command below:
+The experiment is `experiments/encoder/conv_mlp_patch_separate_spatial.yaml`. On the NVIDIA PC
+(after syncing the source as below), on SLURM, or on the Mac:
 
 ```bash
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --separate-spatial-readout --check
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --separate-spatial-readout
+python scripts/launch.py experiments/encoder/conv_mlp_patch_separate_spatial.yaml --cluster local --set device=cuda
+python scripts/launch.py experiments/encoder/conv_mlp_patch_separate_spatial.yaml --cluster slurm_bio
 ```
 
-For MPS, use the same flags with `encoder_conv_mlp_patch_s42.mps.sh`. The default
-CUDA output is a distinct run:
+Its run is `results/encoder/runs/conv_mlp_patch_separate_spatial_s42/`, next to the
+shared-head control's `conv_mlp_patch_s42/`.
 
-```text
-results/encoder_patch_cuda/runs/conv_mlp_s42_cuda_patch8x8x8_w1_separate_spatial/
-```
+Keep every override matched to the shared-head patch control: batch size, training
+steps, lesion radius, seeds, patch weight/grid and evaluation settings. For example, if
+the control used `--set synthetic_lesion_radius=0.14`, pass it to this run too, with a tag
+that says so (`tag=conv_mlp_patch_separate_spatial_lr0.14_s{seed}`). Changing the batch size
+for one arm only changes the contrastive negatives as well as memory use.
 
-Keep all overrides matched to the shared-head patch control: batch size, training
-steps, lesion radius, data/model/loader seeds, patch weight/grid and evaluation
-settings. For example, if the control used `--synthetic-lesion-radius 0.14`, pass
-that to the new CUDA/MPS run too; its run ID gains `_lr0.14`. Changing batch size
-only for one arm changes the contrastive negatives as well as memory usage.
-
-The separate-head SLURM launcher is generated without replacing the shared-head
-script and retains scratch output paths:
-
-```bash
-python scripts/generate_conv_patch_slurm.py --separate-spatial-readout
-bash experiments/generated/encoder_conv_mlp_patch_separate_spatial_s42.slurm_bio.sh --dry-run
-sbatch experiments/generated/encoder_conv_mlp_patch_separate_spatial_s42.slurm_bio.sh
-```
-
-Its default run is
-`/scratch/users/k24058220/encoder_patch_slurm_bio/runs/conv_mlp_patch_g8x8x8_w1_separate_spatial_s42/`.
-
-Spatial recovery is enabled by these launchers. In reports, **`projected` at grid
+Spatial recovery is enabled by both patch experiments. In reports, **`projected` at grid
 1 reads the global head; at larger grids it reads the separate spatial head**.
 The CSV's `readout_head` field identifies the mapping. Spatial style probes are
 absent because this head has only content outputs. Global DCI still reads the
@@ -120,24 +103,16 @@ blur ring change. The `fixed_reference` normalization constants include lesion
 voxels, so they shift by about 0.2%. This changes the training data and needs a
 new run from scratch. The VQ-VAE trainer has the same flag.
 
-Add the flag to the command that trained the fixed-intensity control. The run ID
-gains `_lesionstyled`, so the two never share a directory:
+Add the flag to the experiment that trained the fixed-intensity control, with a tag of
+its own so the two never share a directory:
 
 ```bash
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --synthetic-lesion-intensity styled --check
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --synthetic-lesion-intensity styled
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster slurm_bio \
+  --set synthetic_lesion_intensity=styled tag=conv_mlp_patch_lesionstyled_s{seed}
 ```
 
-The run directory is the control's with `_lesionstyled` appended. The flag works
-the same way with the `.mps.sh` launcher and with `scripts/run_encoder_mps.py`
-directly. For SLURM:
-
-```bash
-python scripts/generate_conv_patch_slurm.py --synthetic-lesion-intensity styled
-sbatch experiments/generated/encoder_conv_mlp_patch_lesionstyled_s42.slurm_bio.sh
-```
+`experiments/encoder/conv_mlp_patch_lesion_corrected.yaml` is the styled patch run that was
+trained for 20k steps.
 
 The setting is saved in `settings.json` and restored by `score_checkpoint`, the
 training-time spatial monitor and every `eval/encoder` audit. Runs saved before
@@ -159,15 +134,12 @@ gives the encoder-only trainer the VQ-VAE ventricle:
 | shape | read off the deformed radius, so L–R asymmetry, temporal atrophy and the sulcal corrugation reshape it | read off the undeformed radius; no other factor moves it |
 | fissure | ventricle CSF (same label and intensity) | its own label, at intensity 0.3 in both views |
 
-This changes the training data and needs a new run. The run ID gains `_identvent`:
+This changes the training data and needs a new run, under a tag of its own (`--set` reads
+booleans as Python literals, so `True`):
 
 ```bash
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --synthetic-identifiable-ventricle --check
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --synthetic-identifiable-ventricle
-python scripts/generate_conv_patch_slurm.py --synthetic-identifiable-ventricle
-sbatch experiments/generated/encoder_conv_mlp_patch_identvent_s42.slurm_bio.sh
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster slurm_bio \
+  --set synthetic_identifiable_ventricle=True tag=conv_mlp_patch_identvent_s{seed}
 ```
 
 The setting is saved in `settings.json` and restored by `score_checkpoint`, the
@@ -212,16 +184,12 @@ before: brain size 0.94, thickness 0.86 → 0.85, ventricle 0.36 → 0.38. Cavea
   clefts narrower than a voxel render as dotted lines.
 
 In this mode the `sulcal_amplitude` and `sulcal_magnitude` evaluation targets both
-hold the cleft half-width; `sulcal_widening` is `z8` as before. The run ID gains
-`_sulcalatrophy`:
+hold the cleft half-width; `sulcal_widening` is `z8` as before. Run it under a tag of
+its own:
 
 ```bash
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --synthetic-sulcal-mode atrophy --check
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --synthetic-sulcal-mode atrophy
-python scripts/generate_conv_patch_slurm.py --synthetic-sulcal-mode atrophy
-sbatch experiments/generated/encoder_conv_mlp_patch_sulcalatrophy_s42.slurm_bio.sh
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster slurm_bio \
+  --set synthetic_sulcal_mode=atrophy tag=conv_mlp_patch_sulcalatrophy_s{seed}
 ```
 
 The two flags are independent and can be combined. Settings are restored the same
@@ -247,66 +215,47 @@ of 512 positions; `--patch-foreground-thresh 0.5` keeps about 140. The mask come
 from the input itself, never from generator factors. The global loss is
 unchanged, and the first batch's kept count is printed at the start of training.
 
-It requires a positive `--patch-loss-weight`. The CUDA wrapper may default to
-global-only training, so pass the weight explicitly:
+It requires a positive `--patch-loss-weight`, which the patch experiments have:
 
 ```bash
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --patch-loss-weight 1 --patch-foreground-mask --check
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --patch-loss-weight 1 --patch-foreground-mask
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster slurm_bio \
+  --set patch_foreground_mask=True tag=conv_mlp_patch_fgmask_s{seed}
 ```
 
-The run ID gains `_fgmask` (`_fgmask<thresh>` for a non-default threshold). For
-SLURM, `python scripts/generate_conv_patch_slurm.py --patch-foreground-mask` writes
-`encoder_conv_mlp_patch_fgmask_s42.slurm_bio.sh`. Compare against the unmasked
+Compare against the unmasked
 patch run at matched seeds, batch size, steps, grid and weight. This changes
 training only, so the evaluation tools need no setting from it.
 
-## Local MPS run
+## Local runs (Mac MPS or a Linux PC with CUDA)
 
-From the repository root, in the local PyTorch environment:
-
-```bash
-# Preview only; no imports of PyTorch, allocation, or training output.
-bash experiments/generated/encoder_conv_mlp_patch_s42.mps.sh --dry-run
-
-# Check one disposable update on MPS, including both losses and CPU agreement.
-bash experiments/generated/encoder_conv_mlp_patch_s42.mps.sh --check
-
-# Train the full experiment only after the check succeeds.
-bash experiments/generated/encoder_conv_mlp_patch_s42.mps.sh
-```
-
-Set `ENCODER_PYTHON` to choose Python, or activate the intended environment.
-Set `ENCODER_PATCH_RESULTS` to change the local output root. Defaults:
-
-```text
-results/encoder_patch_mps/
-  runs/conv_mlp_s42_mps_patch8x8x8_w1/
-  logs/conv_mlp_s42_mps_patch8x8x8_w1.log
-```
-
-The launcher uses batch 32 per view and 10,000 steps to match the original
-recipe. Smaller batches are available if needed, but change the number of
-negatives and subjects seen. Compare both objectives at the same batch size:
+From the repository root, in the local PyTorch environment, `--cluster local` runs the
+trainer with the Python that runs the launcher:
 
 ```bash
-# Matched smaller-batch control and patch experiment, in distinct directories.
-bash experiments/generated/encoder_conv_mlp_patch_s42.mps.sh --batch-size 8 --patch-loss-weight 0
-bash experiments/generated/encoder_conv_mlp_patch_s42.mps.sh --batch-size 8
+# Preview only: the resolved config and command; nothing is imported or written.
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster local --set device=mps --dry-run
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster local --set device=mps
 ```
 
-Batch/step overrides and active patch settings appear in the default run ID;
-existing directories are refused. `--train-steps 200 --eval-every 100` creates a
-shorter run with a distinct ID. No long training job is launched by the tests.
+The launcher sets `PYTORCH_ENABLE_MPS_FALLBACK=1` for MPS, keeps a Mac awake under
+`caffeinate`, pins one numerical thread, and supplies a stand-in for `lpips` when it is not
+installed (the encoder trainer imports it but never uses it). The run lands in
+`results/encoder/runs/conv_mlp_patch_s42/`.
 
-## Local NVIDIA GPU / Linux PC
+The recipe uses batch 32 per view and 10,000 steps. Smaller batches change the number of
+negatives and subjects seen, so compare both objectives at the same batch size, each under
+its own tag:
 
-Copy the updated source and CUDA launcher to the PC first. From the repository
-root on the laptop, this transfers code/configuration only, including the current
-`eval/encoder`, `eval/protocol`, and `eval/metrics` package layout. It excludes
-checkpoints, datasets, result directories, and Python caches:
+```bash
+python scripts/launch.py experiments/encoder/conv_mlp.yaml --cluster local --set device=mps batch_size=8 tag=conv_mlp_b8_s{seed}
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster local --set device=mps batch_size=8 tag=conv_mlp_patch_b8_s{seed}
+```
+
+Existing run directories are refused. `--set train_steps=200 eval_every=100 tag=...` makes a
+short run.
+
+On the NVIDIA PC, copy the code and configuration first. From the repository root on the
+laptop, this excludes checkpoints, datasets, results and Python caches:
 
 ```bash
 rsync -avR \
@@ -317,45 +266,27 @@ rsync -avR \
   ng24@sie114-u-pc:~/projects/multiview-crl/
 ```
 
-On the PC:
+Then, on the PC:
 
 ```bash
 cd ~/projects/multiview-crl
 conda activate monai_env
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh --dry-run
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh --check
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster local --set device=cuda
 ```
 
-The script requires CUDA; it does not silently run on CPU. It uses the active
-environment's Python and the same seed, data, batch 32 per view, 10,000 steps,
-temperature, and unit-weight 8³ patch loss as the other launchers. Despite its
-legacy filename, `scripts/run_encoder_mps.py` now supports `--device cuda` too.
-The existing deterministic warning mode is retained.
-
-```text
-results/encoder_patch_cuda/
-  runs/conv_mlp_s42_cuda_patch8x8x8_w1/
-  logs/conv_mlp_s42_cuda_patch8x8x8_w1.log
-```
-
-The full command also runs the disposable backend check before training.
-Use `CUDA_VISIBLE_DEVICES=0` to choose a GPU, `ENCODER_PYTHON` to choose Python,
-or `ENCODER_PATCH_RESULTS` to change the output root. If batch 32 does not fit,
-pass `--batch-size 8` to both `--check` and training, and use the same batch size
-for the global-only control. As on MPS, this creates a distinct run ID.
-For the spatial audit below, set `RUN` to the CUDA run and use `--device cuda`.
+`--set device=cuda` fails at once without a usable GPU instead of falling back to CPU. Use
+`CUDA_VISIBLE_DEVICES=0` to choose a GPU. For the spatial audit below, set `RUN` to the PC's
+run and use `--device cuda`.
 
 ## Spatial recovery during training
 
-The patch CUDA, MPS, and generated SLURM launchers now enable
-`--spatial-recovery-eval`. At initialization (when `--floor-eval` is enabled)
+The patch experiments (`conv_mlp_patch*.yaml`) enable `--spatial-recovery-eval`. At initialization (when `--floor-eval` is enabled)
 and every `--eval-every` steps, this adds a frozen probe evaluation alongside
 the unchanged global DCI evaluation. Direct trainer invocations keep it off
 unless explicitly requested. A global-only control can enable the same flag.
 
 The default reads backbone and content features at GAP and the training grid
-(1³ and 8³ for these launchers), for **both T1 and FLAIR**. `projected` in reports
+(1³ and 8³ for these experiments), for **both T1 and FLAIR**. `projected` in reports
 means the content readout before the optional contrastive projector. Feature
 maps are flattened with spatial order retained; patches are not averaged back
 into one vector before probing. The optional `--spatial-recovery-native` also
@@ -391,19 +322,19 @@ The monitor restores Python/NumPy/PyTorch random states and module modes, checks
 encoder weights/buffers are unchanged, and never updates gradients or selects an
 encoder checkpoint. Labels supervise only the diagnostic probes.
 
-Useful overrides on the CUDA/MPS launcher:
+Useful overrides:
 
 ```bash
 # A new run directory is needed if this experiment was already started.
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh \
-  --results-dir results/encoder_patch_cuda_spatial \
-  --spatial-recovery-native --spatial-recovery-batch-size 2
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster local --set device=cuda \
+  out_dir=results/encoder_spatial/runs spatial_recovery_native=True spatial_recovery_batch_size=2
 
-# Disable the additional evaluation; training objective is unchanged.
-bash experiments/generated/encoder_conv_mlp_patch_s42.cuda.sh --no-spatial-recovery-eval
+# Disable the additional evaluation; the training objective is unchanged.
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster local --set device=cuda \
+  spatial_recovery_eval=False
 ```
 
-`--spatial-recovery-grids 1 8` fixes the grids explicitly, useful when matching a
+`--set 'spatial_recovery_grids=[1,8]'` fixes the grids explicitly, useful when matching a
 global-only control. `--spatial-recovery-test-samples` changes diagnostic cohort
 size; keep it and `--spatial-recovery-seed` matched across compared runs.
 
@@ -415,24 +346,15 @@ rejects checkpoint files that change while it is running.
 ## SLURM run
 
 ```bash
-bash experiments/generated/encoder_conv_mlp_patch_s42.slurm_bio.sh --dry-run
-sbatch experiments/generated/encoder_conv_mlp_patch_s42.slurm_bio.sh
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster slurm_bio --dry-run
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster slurm_bio
 ```
 
-New cluster results default to:
-
-```text
-/scratch/users/k24058220/encoder_patch_slurm_bio/runs/conv_mlp_patch_g8x8x8_w1_s42/
-```
-
-SLURM stdout/stderr also go to the user's scratch directory. The script retains
-the cluster resource/environment settings used by the original encoder scripts.
-Regenerate only this new launcher, optionally changing its output root:
-
-```bash
-python scripts/generate_conv_patch_slurm.py \
-  --results-dir /scratch/users/k24058220/encoder_patch_slurm_bio
-```
+The run lands in the checkout's `results/encoder/runs/conv_mlp_patch_s42/`. Earlier patch runs
+are under `/scratch/users/k24058220/encoder_patch_slurm_bio/runs/`;
+`--set out_dir=/scratch/users/k24058220/encoder_patch_slurm_bio/runs` keeps new ones there.
+SLURM stdout/stderr go to the user's scratch directory. Resources come from
+`experiments/cluster/slurm_bio.yaml`, as for every encoder job.
 
 ## Trainer flags and diagnostics
 
@@ -452,7 +374,7 @@ without improving the final global content vector.
 After training, run the same spatial audit on the new checkpoint:
 
 ```bash
-RUN="$PWD/results/encoder_patch_mps/runs/conv_mlp_s42_mps_patch8x8x8_w1"
+RUN="$PWD/results/encoder/runs/conv_mlp_patch_s42"
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 python -m eval.encoder.encoder_spatial_target_audit \
   --run-dir "$RUN" \
@@ -469,10 +391,10 @@ initial weights, both views, shuffled controls, and spatial versus global stages
 omit it if those arrays are needed for further analysis. The audit restores the
 saved lesion radius, including non-default radii.
 
-For the existing default PC run, after training finishes:
+On the PC, after training finishes:
 
 ```bash
-RUN="$PWD/results/encoder_patch_cuda/runs/conv_mlp_s42_cuda_patch8x8x8_w1"
+RUN="$PWD/results/encoder/runs/conv_mlp_patch_s42"
 python -m eval.encoder.encoder_spatial_target_audit \
   --run-dir "$RUN" \
   --out-dir "$RUN/evaluation/spatial_$(date +%Y%m%d_%H%M%S)" \
@@ -488,17 +410,17 @@ It moves only the lesion with acquisition/anatomy fixed and tests the backbone,
 global code and active spatial readout without retraining the encoder.
 
 ```bash
-python -m unittest tests.test_separate_spatial_readout tests.test_spatial_recovery_monitor tests.test_encoder_patch_training tests.test_encoder_mps_runner -v
+python -m unittest tests.test_separate_spatial_readout tests.test_spatial_recovery_monitor tests.test_encoder_patch_training tests.test_encoder_launch -v
 ```
 
 Tests check actual local gradients into both encoders/readouts, content-only
 selection, same-position subject comparisons, exact global-only regression,
-one backbone pass per view, real short CPU training/checkpoint replay, and both
-launchers. GPU-specific tests require their accelerator; use `--check` on the
-laptop to validate its installed MPS backend before a long run.
+one backbone pass per view, real short CPU training/checkpoint replay, and that each
+patch experiment differs from `conv_mlp` only in its patch settings. A short local run
+(`--set train_steps=200 eval_every=100 tag=...`) checks an accelerator before a long one.
 Monitor tests additionally compare real training with evaluation enabled/disabled:
 weights, input hashes, and batch order remain identical. They check RNG/mode/gradient
 preservation, held-out controls, initialization pairing, and temporary-file cleanup.
 Separate-head tests check copied initialization and RNG state, isolated head
-gradients, active-head probe routing, strict checkpoint replay, matched inputs
-through real short training, and independent run paths on all launchers.
+gradients, active-head probe routing, strict checkpoint replay, and matched inputs
+through real short training.

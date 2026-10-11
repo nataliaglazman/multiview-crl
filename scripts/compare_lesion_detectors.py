@@ -10,7 +10,6 @@ import argparse
 import csv
 import os
 import shlex
-import shutil
 import sys
 from pathlib import Path
 
@@ -24,9 +23,9 @@ ARMS = ("frozen_shared", "shared", "separate", "separate_conv")
 
 
 def execute(command, log, threads):
-    # Reuse the local launcher's optional-dependency workaround. LPIPS is never
+    # Reuse the launcher's optional-dependency workaround. LPIPS is never
     # constructed by encoder-only training; the stand-in raises if that changes.
-    from scripts.run_encoder_mps import lpips_stand_in
+    from scripts.launch import lpips_stand_in
 
     directory = lpips_stand_in()
     previous = os.environ.get("PYTHONPATH")
@@ -39,8 +38,6 @@ def execute(command, log, threads):
             os.environ.pop("PYTHONPATH", None)
         else:
             os.environ["PYTHONPATH"] = previous
-        if directory is not None:
-            shutil.rmtree(directory)
 
 
 def training_options(args, config, arm, seed):

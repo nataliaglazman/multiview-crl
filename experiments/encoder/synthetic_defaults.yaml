@@ -1,0 +1,32 @@
+# Synthetic data and evaluation of the matched encoder experiments: the recipe in
+# experiments/encoder_comparison.json, which scripts/compare_encoders.py reads (a test keeps the two
+# equal). Synthetic experiments start with `_base_: encoder/synthetic_defaults`.
+res: 64
+n_content: 9
+n_style: 3
+synthetic_mode: pseudo_mri
+synthetic_normalize: fixed_reference
+synthetic_clean_content: true
+synthetic_lesion_placement: wm_interior
+synthetic_style_scale: 1.0
+synthetic_content_scale: 1.0
+synthetic_causal: false
+synthetic_hierarchical_content: false
+num_train_samples: 2000
+num_val_samples: 400
+num_workers: 0
+cache: false
+eval_every: 2000
+eval_pooling: gap
+floor_eval: true
+best_metric: none
+cpu_threads: 1
+hash_training_inputs: true
+# Paired runs share the data and differ in initialisation and batch order: --set seed=142.
+data_seed: 42
+
+# The cluster YAMLs' data paths are for real data; the trainer refuses them on synthetic runs.
+dataroot: null
+labels_path: null
+masks_dir: null
+cache_dir: null

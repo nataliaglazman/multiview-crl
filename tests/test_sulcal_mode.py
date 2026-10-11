@@ -3,22 +3,17 @@
 import contextlib
 import io
 import json
-import os
-import shlex
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import torch
 
+import training.encoder_args as encoder_args
 from data.datasets import SyntheticBrainDataset
 from eval.encoder.encoder_target_protocol import dataset, sample_targets
 from eval.protocol.score_checkpoint import make_dataset
 from eval.synthetic.synthetic_dataset import SULCAL_CLEFT_HALF_WIDTH, PseudoMRIRenderer, sulcal_cleft_distance
-from scripts import generate_conv_patch_slurm, run_encoder_mps
-from tests.test_encoder_mps_runner import runner_args, trainer_parse_args
 from tests.test_encoder_target_followups import config
 from tests.test_lesion_intensity import trainer_make_dataset, vqvae_dataset_kwargs
 
@@ -120,7 +115,7 @@ class SulcalModeTests(unittest.TestCase):
                 self.assertAlmostEqual(magnitude, abs(0.06 * value), places=6)
 
     def test_flag_reaches_training_and_encoder_evaluation_factories(self):
-        parse = trainer_parse_args()
+        parse = encoder_args.parse_args
         base = ["--res", "16", "--no-cache", "--synthetic-clean-content", "--synthetic-lesion-placement", "wm_interior"]
         base += ["--synthetic-normalize", "fixed_reference"]
         self.assertEqual(parse(base).synthetic_sulcal_mode, "corrugation")
@@ -176,48 +171,6 @@ class SulcalModeTests(unittest.TestCase):
             scored = build_synthetic_test_set(legacy, 4, causal=False, cache=False)
             for ds in (trained, scored):
                 self.assertEqual(ds._inner.renderer.sulcal_mode, "corrugation")
-
-    def test_launchers_add_only_the_flag_and_a_distinct_run_id(self):
-        parse = trainer_parse_args()
-        for device in ("cuda", "mps"):
-            common = dict(variant="conv_mlp", patch_loss_weight=1, train_patch_grid=[8] * 3, device=device)
-            plain, _ = run_encoder_mps.make_options(runner_args(**common))
-            flagged, _ = run_encoder_mps.make_options(runner_args(**common, synthetic_sulcal_mode="atrophy"))
-            self.assertEqual(
-                {k for k in plain.keys() | flagged.keys() if plain.get(k) != flagged.get(k)},
-                {"synthetic_sulcal_mode", "model_id"},
-            )
-            self.assertEqual(flagged["model_id"], plain["model_id"] + "_sulcalatrophy")
-            preview = subprocess.check_output(
-                [
-                    "bash",
-                    str(ROOT / f"experiments/generated/encoder_conv_mlp_patch_s42.{device}.sh"),
-                    "--synthetic-sulcal-mode",
-                    "atrophy",
-                    "--dry-run",
-                ],
-                env={**os.environ, "ENCODER_PYTHON": sys.executable},
-                text=True,
-            )
-            parsed = parse(shlex.split(preview)[3:])
-            self.assertEqual(parsed.synthetic_sulcal_mode, "atrophy")
-            self.assertTrue(parsed.model_id.endswith("_sulcalatrophy"))
-        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
-            generate_conv_patch_slurm.main(["--output-dir", tmp])
-            original = Path(tmp) / "encoder_conv_mlp_patch_s42.slurm_bio.sh"
-            before = original.read_bytes()
-            generate_conv_patch_slurm.main(["--output-dir", tmp, "--synthetic-sulcal-mode", "atrophy"])
-            self.assertEqual(before, original.read_bytes())
-            flagged_script = Path(tmp) / "encoder_conv_mlp_patch_sulcalatrophy_s42.slurm_bio.sh"
-            subprocess.run(["bash", "-n", str(flagged_script)], check=True)
-            configs = []
-            for script in (original, flagged_script):
-                preview = subprocess.check_output(["bash", str(script), "--dry-run"], text=True)
-                configs.append(vars(parse(shlex.split(preview)[3:])))
-            self.assertEqual(
-                {k for k in configs[0] if configs[0][k] != configs[1][k]}, {"synthetic_sulcal_mode", "model_id"}
-            )
-            self.assertEqual(configs[1]["model_id"], configs[0]["model_id"].replace("_w1_s42", "_w1_sulcalatrophy_s42"))
 
 
 if __name__ == "__main__":

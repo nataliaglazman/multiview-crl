@@ -18,8 +18,6 @@ from eval.encoder import spatial_recovery_monitor as monitor
 from eval.encoder.encoder_target_protocol import TARGETS
 from eval.lesion.checkpoint_lesion_analysis import state_digest
 from eval.protocol.score_checkpoint import build_model
-from scripts import run_encoder_mps
-from tests.test_encoder_mps_runner import runner_args
 from training import main_conv_synthetic as trainer
 
 
@@ -83,7 +81,7 @@ class SpatialRecoveryMonitorTests(unittest.TestCase):
         self.addCleanup(torch.set_num_threads, torch.get_num_threads())
         torch.set_num_threads(1)
 
-    def test_configuration_and_launcher_flags(self):
+    def test_configuration_flags(self):
         self.assertFalse(trainer.parse_args([]).spatial_recovery_eval)
         cfg = trainer.parse_args(arguments())
         self.assertEqual(cfg.spatial_recovery_grids, [1, 2])
@@ -99,18 +97,6 @@ class SpatialRecoveryMonitorTests(unittest.TestCase):
         ):
             with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 trainer.parse_args(arguments() + extra)
-        options, _ = run_encoder_mps.make_options(
-            runner_args(
-                variant="conv_mlp",
-                spatial_recovery_eval=True,
-                spatial_recovery_grids=[8, 8],
-                spatial_recovery_native=True,
-                spatial_recovery_test_samples=40,
-            )
-        )
-        parsed = trainer.parse_args(run_encoder_mps.comparison.cli_arguments(options))
-        for key, value in options.items():
-            self.assertEqual(getattr(parsed, key), value, key)
 
     def test_real_probes_preserve_state_match_initial_and_delete_feature_banks(self):
         cfg = vars(trainer.parse_args(arguments() + ["--spatial-recovery-native"]))

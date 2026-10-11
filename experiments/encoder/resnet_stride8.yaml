@@ -1,0 +1,6 @@
+# resnet18 without the layer3/layer4 downsampling: an 8^3 final map from 64^3 inputs instead of 2^3.
+# training/ENCODER_ABLATIONS.md
+_base_: encoder/synthetic_defaults
+tag: resnet_stride8_s{seed}
+encoder_architecture: resnet18
+resnet_output_stride: 8

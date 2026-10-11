@@ -1,7 +1,9 @@
 # Encoder-only architecture comparison
 
-`training.main_conv_synthetic` defaults to the existing `conv` architecture.
-Add these flags to an existing command, using a new model ID:
+`training.main_conv_synthetic` defaults to the existing `conv` architecture. The arms are
+experiment YAMLs in `experiments/encoder/` (`resnet18.yaml`, `conv_mlp.yaml`, ...), launched
+with `scripts/launch.py` ([ENCODER_ABLATIONS.md](ENCODER_ABLATIONS.md)). For a direct trainer
+command, add these flags to an existing one, using a new model ID:
 
 ```sh
 --model-id infonce_resnet18_3d \
@@ -131,9 +133,8 @@ row is 1 by construction. `model.attention_maps(x, n_views=2)` returns the
   (e.g. 8, 16 or 32), the GAP vector is ~0 for every subject at initialization. The
   global loss's gradient is then float noise in either arm. Width 64 is not affected.
 - Saved settings restore the pool in `eval.protocol.score_checkpoint`. The
-  generalization audit's backbone stage reads the pool's output. Locally,
-  `scripts/run_encoder_mps.py --global-pool attention` adds it to a recipe variant.
-  The Run:ai/SLURM variant files have no attention variant yet.
+  generalization audit's backbone stage reads the pool's output. Any experiment takes
+  it with `--set global_pool=attention 'tag=<name>_attnpool_s{seed}'`.
 
 ## Lesion branch
 
@@ -231,14 +232,13 @@ loss   = InfoNCE(content) + w * InfoNCE(lesion_projector(c))
 - **content→view near 1 is mostly a constant per-view offset.** With `--cross-view-negs-only`,
   a shift shared by every vector of one view cancels in the softmax, so the loss never removes
   it. Subtract each view's mean before reading the view probe; its floor is ~0.36, not 0.5.
-- **Backend check.** At low `--lesion-temperature`, CUDA's TF32 convolutions shift the keypoint
-  coordinates by ~2e-3 against CPU. `run_encoder_mps.compare_backend` therefore scales their
-  tolerance by 1/temperature, and skips the lesion loss, which is random under within-modality
-  pairing.
+- **CUDA vs CPU.** At low `--lesion-temperature`, CUDA's TF32 convolutions shift the keypoint
+  coordinates by ~2e-3 against CPU, scaled by 1/temperature, so compare backends with that
+  tolerance.
 - **Scoring.** The content mask marks the lesion units, so `compute_dci_synthetic`,
   `score_checkpoint.encode_blocks` and `checkpoint_lesion_analysis` count them as
-  content. Patch and unpooled outputs have none. Readers that slice the global code by
-  position, such as `encoder_generalization_audit`'s `[:, :content_channels]`, do not see them.
+  content. Patch and unpooled outputs have none. Readers that take only the latent content
+  units, such as `encoder_generalization_audit`'s `[:, model.content_units()]`, do not see them.
 
 ```sh
 --lesion-keypoints 4 [--lesion-frame brain] [--lesion-norm none] [--lesion-proj-dim 8] [--lesion-loss-weight 1]
@@ -247,8 +247,9 @@ loss   = InfoNCE(content) + w * InfoNCE(lesion_projector(c))
 [--lesion-head-init positive]
 ```
 
-Locally: `scripts/run_encoder_mps.py --variant conv_mlp --lesion-keypoints 4` (run ID
-gains `_lesionkp4`). Saved settings restore the branch in `eval.protocol.score_checkpoint`.
+Locally: `python scripts/launch.py experiments/encoder/conv_mlp.yaml --cluster local --set
+device=mps lesion_keypoints=4 'tag=conv_mlp_lesionkp4_s{seed}'`. Saved settings restore the
+branch in `eval.protocol.score_checkpoint`.
 Results so far, the diagnoses behind them, and open threads are in `LESION_BRANCH_HANDOFF.md`
 at the repo root.
 
@@ -278,9 +279,9 @@ at the repo root.
 - Saved settings restore the norm in `eval.protocol.score_checkpoint`; runs saved
   before the flag existed load as `group`. The two norms' parameter names differ,
   so a checkpoint cannot load into the wrong one silently.
-- `scripts/run_encoder_mps.py --norm-type layer` (and the wrappers) add
-  `_layernorm` to the run ID. `python scripts/generate_conv_patch_slurm.py
-  --norm-type layer` writes `encoder_conv_mlp_patch_layernorm_s42.slurm_bio.sh`.
+- Any experiment takes it with `--set norm_type=layer 'tag=<name>_layernorm_s{seed}'`, e.g.
+  `python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster slurm_bio --set
+  norm_type=layer 'tag=conv_mlp_patch_layernorm_s{seed}'`.
 - `eval.encoder.encoder_spatial_maps` reports each factor's readout in brain, edge
   and background cells, which is where the difference between the arms shows.
 
@@ -289,8 +290,8 @@ at the repo root.
 `--mask-mode learned` replaces the fixed content block (the first `--content-channels`
 units of the encoding) with the content selector of Yao et al. (2024, App. E): one
 learnable logit per latent unit and a top-k Gumbel-softmax mask, k = `--content-channels`.
-It works the same on synthetic data and on ADNI (`MASK_MODE=learned` in
-`scripts/encoder_adni_recipe.sh`, or `scripts/run_conv_synthetic_slurm.sh`).
+It works the same on synthetic data and on ADNI: `experiments/encoder/conv_mlp_gumbel.yaml`
+and `adni_gumbel.yaml`, or `--set mask_mode=learned mask_lr_scale=10` on any experiment.
 
 ```sh
 --mask-mode learned --mask-lr-scale 10
@@ -317,8 +318,8 @@ It works the same on synthetic data and on ADNI (`MASK_MODE=learned` in
   no weight decay. Adam moves a logit by about its lr per step at most, and the content and
   style logits start 4 apart. A unit can therefore change sides only once
   `lr x scale x steps` exceeds about 2. At the trainer's default scale of 1, that budget is
-  1 for the ADNI recipe (lr 1e-4, 10k steps), so the recipe sets 10. The trainer prints a
-  NOTE when the budget is 2 or less.
+  1 for the encoder recipes (lr 1e-4, 10k steps), so the two Gumbel experiments set 10. The
+  trainer prints a NOTE when the budget is 2 or less.
 - **Not combined with:** Barlow Twins (per-unit standardisation divides the mask back
   out, so the logits get no gradient), `--contrastive-proj-dim` (the projector reads a
   fixed set of units), or `--content-channels` equal to `--latent-dim`. The separate

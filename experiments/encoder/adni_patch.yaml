@@ -1,0 +1,7 @@
+# adni plus patch InfoNCE on cubic 4x4x4-cell bins of the 24x28x24 map, brain positions only
+# (training/ENCODER_ADNI.md, "Volume size").
+_base_: encoder/adni
+tag: encoder_adni_patch_s{seed}
+patch_loss_weight: 1.0
+train_patch_grid: [6, 7, 6]
+patch_foreground_mask: true

@@ -4,9 +4,6 @@ import contextlib
 import copy
 import io
 import json
-import os
-import shlex
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,7 +15,6 @@ import torch
 import torch.nn.functional as F
 
 from eval.protocol.score_checkpoint import build_model
-from scripts import generate_conv_patch_slurm, run_encoder_mps
 from training import main_conv_synthetic as trainer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -237,32 +233,6 @@ class EncoderPatchTrainingTests(unittest.TestCase):
             restored = build_model(cfg, "cpu", state)
             self.assertEqual(restored(torch.zeros(2, 1, 16, 16, 16), pool_only=True, n_views=2)[2][0].shape, (2, 12))
             self.assertFalse((directory / "model_best.pt").exists())
-
-    def test_local_and_slurm_launchers_use_matched_recipe_and_separate_outputs(self):
-        local = ROOT / "experiments/generated/encoder_conv_mlp_patch_s42.mps.sh"
-        subprocess.run(["bash", "-n", str(local)], check=True)
-        env = {**os.environ, "ENCODER_PYTHON": sys.executable}
-        preview = subprocess.check_output(["bash", str(local), "--dry-run"], env=env, text=True)
-        args = trainer.parse_args(shlex.split(preview)[3:])
-        self.assertEqual((args.conv_readout, args.patch_loss_weight, args.best_metric), ("mlp", 1, "none"))
-        self.assertEqual(args.train_patch_grid, [8, 8, 8])
-        self.assertEqual(args.batch_size, 32)
-        self.assertIn("patch8x8x8_w1", args.model_id)
-        options = self.config(batch_size=2, model_seed=42, lr=1e-4, grad_clip=2)
-        self.assertGreater(run_encoder_mps._disposable_step(options, "cpu"), 0)
-        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
-            generate_conv_patch_slurm.main(["--output-dir", tmp])
-            script = Path(tmp) / "encoder_conv_mlp_patch_s42.slurm_bio.sh"
-            subprocess.run(["bash", "-n", str(script)], check=True)
-            preview = subprocess.check_output(["bash", str(script), "--dry-run"], env=env, text=True)
-            cluster = trainer.parse_args(shlex.split(preview)[3:])
-            self.assertEqual(cluster.out_dir, "/scratch/users/k24058220/encoder_patch_slurm_bio/runs")
-            self.assertEqual(cluster.patch_loss_weight, 1)
-            ignored = {"device", "out_dir", "model_id"}
-            self.assertEqual(
-                {k: v for k, v in vars(args).items() if k not in ignored},
-                {k: v for k, v in vars(cluster).items() if k not in ignored},
-            )
 
 
 if __name__ == "__main__":

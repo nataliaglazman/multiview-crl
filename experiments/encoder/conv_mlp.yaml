@@ -1,0 +1,5 @@
+# Conv backbone with the MLP readout, GAP -> Linear(64, 100) -> LeakyReLU -> Linear(100, 12): the
+# reference model of the synthetic encoder experiments. training/ENCODER_ABLATIONS.md
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_s{seed}
+conv_readout: mlp

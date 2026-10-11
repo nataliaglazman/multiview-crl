@@ -1,0 +1,5 @@
+# 3D ResNet-18 (BatchNorm, output stride 32): the reference for the two ResNet ablations.
+# training/ENCODER_COMPARISON.md, training/ENCODER_ABLATIONS.md
+_base_: encoder/synthetic_defaults
+tag: resnet18_s{seed}
+encoder_architecture: resnet18

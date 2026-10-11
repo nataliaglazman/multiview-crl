@@ -25,7 +25,6 @@ if importlib.util.find_spec("lpips") is None:
     # training.losses imports LPIPS at module scope; the encoder-only trainer never builds it.
     sys.modules["lpips"] = types.ModuleType("lpips")
     sys.modules["lpips"].LPIPS = None
-from scripts import run_encoder_mps as runner  # noqa: E402
 from training import main_conv_synthetic as trainer  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -234,33 +233,6 @@ class AttentionPoolEncoderTests(unittest.TestCase):
         ):
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 trainer.parse_args(argv)
-
-    def test_local_runner_passes_attention_options_through(self):
-        def runner_args(**changes):
-            values = dict(
-                config=ROOT / "experiments/encoder_comparison.json",
-                variant="conv_mlp",
-                seed=42,
-                batch_size=None,
-                train_steps=None,
-                eval_every=None,
-                model_id=None,
-                results_dir=Path("/tmp/encoder_ablations_mps"),
-            )
-            values.update(changes)
-            return types.SimpleNamespace(**values)
-
-        options, recipe = runner.make_options(runner_args(global_pool="attention", attention_pool_heads=8))
-        self.assertEqual(options["model_id"], "conv_mlp_s42_mps_attnpool_h8_f4")
-        self.assertNotIn("global_pool", recipe)
-        parsed = trainer.parse_args(runner.comparison.cli_arguments(options))
-        self.assertEqual(
-            (parsed.global_pool, parsed.attention_pool_heads, parsed.attention_pool_frequencies), ("attention", 8, 4)
-        )
-        self.assertNotIn("global_pool", runner.make_options(runner_args())[0])
-        for changes in (dict(attention_pool_heads=8), dict(attention_pool_frequencies=0)):
-            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "require --global-pool attention"):
-                runner.make_options(runner_args(**changes))
 
     def test_real_training_logs_attention_spread_and_writes_replayable_run(self):
         with tempfile.TemporaryDirectory() as tmp:

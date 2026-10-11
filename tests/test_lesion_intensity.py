@@ -4,10 +4,6 @@ import ast
 import contextlib
 import io
 import json
-import os
-import shlex
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,13 +12,12 @@ import numpy as np
 import torch
 from scipy.ndimage import binary_erosion, maximum_filter
 
+import training.encoder_args as encoder_args
 from data.datasets import SyntheticBrainDataset
 from eval.encoder.encoder_lesion_contrast import contrast_metrics
 from eval.encoder.encoder_target_protocol import dataset
 from eval.protocol.score_checkpoint import make_dataset
 from eval.synthetic.synthetic_dataset import PseudoMRIRenderer
-from scripts import generate_conv_patch_slurm, run_encoder_mps
-from tests.test_encoder_mps_runner import runner_args, trainer_parse_args
 from tests.test_encoder_target_followups import config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,7 +111,7 @@ class LesionIntensityTests(unittest.TestCase):
             self.assertGreater(np.abs(styled - fixed)[~outside].max(), 0.05)
 
     def test_flag_reaches_training_and_encoder_evaluation_factories(self):
-        parse = trainer_parse_args()
+        parse = encoder_args.parse_args
         base = ["--res", "16", "--no-cache", "--synthetic-clean-content", "--synthetic-lesion-placement", "wm_interior"]
         base += ["--synthetic-normalize", "fixed_reference"]
         self.assertEqual(parse(base).synthetic_lesion_intensity, "fixed")
@@ -163,48 +158,6 @@ class LesionIntensityTests(unittest.TestCase):
             self.assertEqual(vqvae_dataset_kwargs(legacy)["synthetic_lesion_intensity"], "fixed")
             scored = build_synthetic_test_set(legacy, 4, causal=False, cache=False)
             self.assertEqual(scored._inner.renderer.lesion_intensity, "fixed")
-
-    def test_launchers_add_only_the_flag_and_a_distinct_run_id(self):
-        parse = trainer_parse_args()
-        for device in ("cuda", "mps"):
-            common = dict(variant="conv_mlp", patch_loss_weight=1, train_patch_grid=[8] * 3, device=device)
-            fixed, _ = run_encoder_mps.make_options(runner_args(**common))
-            styled, _ = run_encoder_mps.make_options(runner_args(**common, synthetic_lesion_intensity="styled"))
-            self.assertEqual(
-                {k for k in fixed.keys() | styled.keys() if fixed.get(k) != styled.get(k)},
-                {"synthetic_lesion_intensity", "model_id"},
-            )
-            self.assertEqual(styled["model_id"], fixed["model_id"] + "_lesionstyled")
-            preview = subprocess.check_output(
-                [
-                    "bash",
-                    str(ROOT / f"experiments/generated/encoder_conv_mlp_patch_s42.{device}.sh"),
-                    "--synthetic-lesion-intensity",
-                    "styled",
-                    "--dry-run",
-                ],
-                env={**os.environ, "ENCODER_PYTHON": sys.executable},
-                text=True,
-            )
-            parsed = parse(shlex.split(preview)[3:])
-            self.assertEqual(parsed.synthetic_lesion_intensity, "styled")
-            self.assertTrue(parsed.model_id.endswith("_lesionstyled"))
-        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
-            generate_conv_patch_slurm.main(["--output-dir", tmp])
-            original = Path(tmp) / "encoder_conv_mlp_patch_s42.slurm_bio.sh"
-            before = original.read_bytes()
-            generate_conv_patch_slurm.main(["--output-dir", tmp, "--synthetic-lesion-intensity", "styled"])
-            self.assertEqual(before, original.read_bytes())
-            styled_script = Path(tmp) / "encoder_conv_mlp_patch_lesionstyled_s42.slurm_bio.sh"
-            subprocess.run(["bash", "-n", str(styled_script)], check=True)
-            configs = []
-            for script in (original, styled_script):
-                preview = subprocess.check_output(["bash", str(script), "--dry-run"], text=True)
-                configs.append(vars(parse(shlex.split(preview)[3:])))
-            self.assertEqual(
-                {k for k in configs[0] if configs[0][k] != configs[1][k]}, {"synthetic_lesion_intensity", "model_id"}
-            )
-            self.assertEqual(configs[1]["model_id"], configs[0]["model_id"].replace("_w1_s42", "_w1_lesionstyled_s42"))
 
 
 if __name__ == "__main__":

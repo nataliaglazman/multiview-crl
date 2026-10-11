@@ -24,7 +24,6 @@ if importlib.util.find_spec("lpips") is None:
     # training.losses imports LPIPS at module scope; the encoder-only trainer never builds it.
     sys.modules["lpips"] = types.ModuleType("lpips")
     sys.modules["lpips"].LPIPS = None
-from scripts import run_encoder_mps as runner  # noqa: E402
 from training import main_conv_synthetic as trainer  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -320,65 +319,6 @@ class LesionBranchEncoderTests(unittest.TestCase):
         for view in range(2):
             np.testing.assert_allclose(blocks["content"][view], content[2 * view : 2 * view + 2], atol=1e-6)
             np.testing.assert_allclose(blocks["style"][view], style[2 * view : 2 * view + 2], atol=1e-6)
-
-    def test_backend_check_scales_the_keypoint_tolerance_by_temperature(self):
-        expected = (torch.zeros(4, 24), torch.tensor(1.0), torch.tensor(0.5), torch.tensor(0.0))
-
-        def got(latent_shift=0.0, lesion_shift=0.0, loss=1.0):
-            pooled = torch.zeros(4, 24)
-            pooled[:, :12] += latent_shift
-            pooled[:, 12:] += lesion_shift
-            return (pooled, torch.tensor(loss), torch.tensor(0.5), torch.tensor(0.0))
-
-        sharp = dict(latent_dim=12, lesion_keypoints=4, lesion_temperature=0.02)
-        # The cluster failure: ~2e-3 on the keypoints at temperature 0.02, plus a random lesion loss.
-        runner.compare_backend(expected, got(lesion_shift=2e-3, loss=1.7), sharp)
-        for bad, options in (
-            (got(latent_shift=2e-3), sharp),
-            (got(lesion_shift=0.05), sharp),
-            (got(lesion_shift=2e-3), dict(sharp, lesion_temperature=1.0)),
-            (got(loss=1.7), dict(latent_dim=12)),
-        ):
-            with self.subTest(options=options), self.assertRaises(AssertionError):
-                runner.compare_backend(expected, bad, options)
-
-    def test_local_runner_passes_lesion_options_through(self):
-        def runner_args(**changes):
-            values = dict(
-                config=ROOT / "experiments/encoder_comparison.json",
-                variant="conv_mlp",
-                seed=42,
-                batch_size=None,
-                train_steps=None,
-                eval_every=None,
-                model_id=None,
-                results_dir=Path("/tmp/encoder_ablations_mps"),
-            )
-            values.update(changes)
-            return types.SimpleNamespace(**values)
-
-        options, recipe = runner.make_options(runner_args(lesion_keypoints=4, lesion_frame="grid"))
-        self.assertEqual(options["model_id"], "conv_mlp_s42_mps_lesionkp4_gridframe")
-        sharp, _ = runner.make_options(runner_args(lesion_keypoints=4, lesion_temperature=0.02))
-        self.assertEqual(sharp["model_id"], "conv_mlp_s42_mps_lesionkp4_temp0.02")
-        self.assertEqual(trainer.parse_args(runner.comparison.cli_arguments(sharp)).lesion_temperature, 0.02)
-        resid, _ = runner.make_options(runner_args(lesion_keypoints=4, lesion_input="residual"))
-        self.assertEqual(resid["model_id"], "conv_mlp_s42_mps_lesionkp4_lresid")
-        avoid, _ = runner.make_options(
-            runner_args(lesion_keypoints=4, lesion_input="residual", lesion_head_init="negative")
-        )
-        self.assertEqual(avoid["model_id"], "conv_mlp_s42_mps_lesionkp4_lresid_hinitnegative")
-        self.assertEqual(trainer.parse_args(runner.comparison.cli_arguments(avoid)).lesion_head_init, "negative")
-        within, _ = runner.make_options(runner_args(lesion_keypoints=4, lesion_pairing="within_modality"))
-        self.assertEqual(within["model_id"], "conv_mlp_s42_mps_lesionkp4_lpwithin")
-        parsed = trainer.parse_args(runner.comparison.cli_arguments(within))
-        self.assertEqual(parsed.lesion_pairing, "within_modality")
-        self.assertNotIn("lesion_keypoints", recipe)
-        parsed = trainer.parse_args(runner.comparison.cli_arguments(options))
-        self.assertEqual((parsed.lesion_keypoints, parsed.lesion_frame, parsed.lesion_norm), (4, "grid", "none"))
-        self.assertNotIn("lesion_keypoints", runner.make_options(runner_args())[0])
-        with self.assertRaisesRegex(ValueError, "require --lesion-keypoints"):
-            runner.make_options(runner_args(lesion_norm="layer"))
 
     def test_decorrelation_moves_only_the_branch(self):
         model = build_model(config(conv_readout="mlp", lesion_keypoints=2), "cpu").train()

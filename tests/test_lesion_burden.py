@@ -19,7 +19,6 @@ if importlib.util.find_spec("lpips") is None:
     # training.losses imports LPIPS at module scope; the encoder-only trainer never builds it.
     sys.modules["lpips"] = types.ModuleType("lpips")
     sys.modules["lpips"].LPIPS = None
-from scripts import run_encoder_mps as runner  # noqa: E402
 from training import main_conv_synthetic as trainer  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,9 +104,10 @@ class BurdenPipelineTests(unittest.TestCase):
         cfg = vars(trainer.parse_args(SMALL + BURDEN))
         self.assertEqual(score_checkpoint.make_dataset(cfg, 2)._inner.lesion_target, "burden")
 
-    def test_cli_and_runner(self):
+    def test_cli(self):
         parsed = trainer.parse_args(BURDEN)
         self.assertEqual((parsed.synthetic_lesion_target, parsed.synthetic_lesion_count), ("burden", 4))
+        self.assertEqual(trainer.parse_args(BURDEN + ["--synthetic-lesion-count", "6"]).synthetic_lesion_count, 6)
         for argv in (
             ["--synthetic-lesion-target", "burden"],
             ["--synthetic-lesion-count", "3"],
@@ -116,28 +116,6 @@ class BurdenPipelineTests(unittest.TestCase):
         ):
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 trainer.parse_args(argv)
-
-        def runner_args(**changes):
-            values = dict(
-                config=ROOT / "experiments/encoder_comparison.json",
-                variant="conv_mlp",
-                seed=42,
-                batch_size=None,
-                train_steps=None,
-                eval_every=None,
-                model_id=None,
-                results_dir=Path("/tmp/encoder_ablations_mps"),
-            )
-            values.update(changes)
-            return types.SimpleNamespace(**values)
-
-        options, _ = runner.make_options(runner_args(synthetic_lesion_target="burden"))
-        self.assertEqual(options["model_id"], "conv_mlp_s42_mps_burden")
-        parsed = trainer.parse_args(runner.comparison.cli_arguments(options))
-        self.assertEqual(parsed.synthetic_lesion_target, "burden")
-        six, _ = runner.make_options(runner_args(synthetic_lesion_target="burden", synthetic_lesion_count=6))
-        self.assertEqual(six["model_id"], "conv_mlp_s42_mps_burden6")
-        self.assertEqual(trainer.parse_args(runner.comparison.cli_arguments(six)).synthetic_lesion_count, 6)
 
 
 class LesionT1ValueTests(unittest.TestCase):
@@ -180,31 +158,15 @@ class LesionT1ValueTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nonnegative"):
             PseudoMRIRenderer(res=32, lesion_t1_value=-0.1)
 
-    def test_cli_runner_and_scorer_pass_the_t1_value(self):
+    def test_cli_and_scorer_pass_the_t1_value(self):
         parsed = trainer.parse_args(["--synthetic-lesion-t1-value", "1.6"])
         self.assertEqual(parsed.synthetic_lesion_t1_value, 1.6)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             trainer.parse_args(["--synthetic-lesion-t1-value", "-1"])
-        values = dict(
-            config=ROOT / "experiments/encoder_comparison.json",
-            variant="conv_mlp",
-            seed=42,
-            batch_size=None,
-            train_steps=None,
-            eval_every=None,
-            model_id=None,
-            results_dir=Path("/tmp/encoder_ablations_mps"),
-            synthetic_lesion_target="burden",
-        )
-        for value, suffix in ((1.6, "_burden_t1les1.6"), (0.0, "_burden_t1les0")):
-            options, _ = runner.make_options(types.SimpleNamespace(**values, synthetic_lesion_t1_value=value))
-            self.assertEqual(options["model_id"], "conv_mlp_s42_mps" + suffix)
-            cfg = vars(trainer.parse_args(runner.comparison.cli_arguments(options)))
+        for value in (1.6, 0.0):
+            cfg = vars(trainer.parse_args(BURDEN + ["--synthetic-lesion-t1-value", str(value)]))
             self.assertEqual(cfg["synthetic_lesion_t1_value"], value)
-            cfg.update(res=32)
             self.assertEqual(score_checkpoint.make_dataset(cfg, 2)._inner.renderer.lesion_t1_value, value)
-        default, _ = runner.make_options(types.SimpleNamespace(**values))
-        self.assertEqual(default["model_id"], "conv_mlp_s42_mps_burden")
 
 
 class BurdenEvaluationPathTests(unittest.TestCase):

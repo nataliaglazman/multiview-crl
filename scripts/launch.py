@@ -29,25 +29,51 @@ Usage:
 
     # Save a settings.json as an experiment YAML (for version control):
     python scripts/launch.py --from-config results/my-run/settings.json --save-yaml experiments/rerun.yaml
+
+Encoder-only experiments (training/main_conv_synthetic.py) live in experiments/encoder/ and start
+from experiments/encoder/defaults.yaml instead of experiments/defaults.yaml:
+
+    python scripts/launch.py experiments/encoder/conv_mlp.yaml --cluster slurm --set seed=142 --dry-run
+    python scripts/launch.py experiments/encoder/adni.yaml --cluster local --set device=mps dataroot=...
+    # One script for a Python-less submit host (written to experiments/generated/encoder/):
+    python scripts/launch.py experiments/encoder/adni.yaml --cluster runai --generate --set mask_mode=learned
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
+import importlib.util
+import io
 import json
 import os
+import re
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULTS_PATH = REPO_ROOT / "experiments" / "defaults.yaml"
-CLUSTER_DIR = REPO_ROOT / "experiments" / "cluster"
-GENERATED_DIR = REPO_ROOT / "experiments" / "generated"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+EXPERIMENTS_DIR = REPO_ROOT / "experiments"
+DEFAULTS_PATH = EXPERIMENTS_DIR / "defaults.yaml"
+CLUSTER_DIR = EXPERIMENTS_DIR / "cluster"
+GENERATED_DIR = EXPERIMENTS_DIR / "generated"
+# Track defaults and bases: never launched or generated on their own.
+BASE_CONFIG_NAMES = {"defaults.yaml", "synthetic_defaults.yaml"}
+
+VQ_ENTRYPOINT = "training.main_multimodal"
+ENCODER_ENTRYPOINT = "training.main_conv_synthetic"
+# Where encoder launches keep their resolved-config snapshot: never the run directory itself,
+# which the trainer creates and, under require_new_run, refuses to find already present.
+ENCODER_LAUNCH_DIR = REPO_ROOT / "results" / "launches"
 
 # Boolean flags in argparse that are store_true (no value, just the flag name).
 # Maintained here so the launcher knows to emit `--flag` instead of `--flag True`.
@@ -152,6 +178,9 @@ def load_from_config(path: Path, strip_cluster: bool = False) -> dict:
     else:
         config = load_yaml(path)
 
+    if is_encoder(config) or "encoder_architecture" in config:
+        return _load_encoder_settings(config, path, strip_cluster)
+
     # Strip runtime keys that aren't part of the experiment config.
     for key in _RUNTIME_KEYS:
         config.pop(key, None)
@@ -189,9 +218,64 @@ def load_from_config(path: Path, strip_cluster: bool = False) -> dict:
     return config
 
 
+def _load_encoder_settings(config: dict, path: Path, strip_cluster: bool) -> dict:
+    """``load_from_config`` for an encoder-only run's settings.json or config snapshot.
+
+    settings.json is the trainer's whole namespace, so every key is an option; keys a newer
+    trainer no longer has are dropped with a warning, as for the VQ-VAE.
+    """
+    from training import encoder_args
+
+    config = {key: value for key, value in config.items() if key != "_provenance"}
+    if strip_cluster:
+        for key in ("_slurm", "_runai"):
+            config.pop(key, None)
+    if "model_id" in config:
+        config.setdefault("tag", config["model_id"])
+        del config["model_id"]
+    config["_entrypoint"] = ENCODER_ENTRYPOINT
+    known = {action.dest for action in encoder_args.build_parser()._actions}
+    stale = [key for key in config if not key.startswith("_") and key != "tag" and key not in known]
+    if stale:
+        print(f"Warning: dropping unrecognised keys from {path.name}: {stale}", file=sys.stderr)
+        for key in stale:
+            del config[key]
+    return config
+
+
 def load_yaml(path: Path) -> dict:
     with open(path) as f:
         return yaml.safe_load(f) or {}
+
+
+def is_encoder(config: dict) -> bool:
+    """Whether ``config`` runs the encoder-only trainer rather than the VQ-VAE one."""
+    return config.get("_entrypoint", VQ_ENTRYPOINT) == ENCODER_ENTRYPOINT
+
+
+def defaults_path_for(experiment_path: Path) -> Path:
+    """The track defaults an experiment starts from: the defaults.yaml in its own directory.
+
+    experiments/<name>.yaml get experiments/defaults.yaml (VQ-VAE) and experiments/encoder/<name>.yaml
+    get experiments/encoder/defaults.yaml (encoder-only). A YAML elsewhere falls back to the VQ-VAE's.
+    """
+    local = Path(experiment_path).resolve().parent / "defaults.yaml"
+    return local if local.exists() else DEFAULTS_PATH
+
+
+def format_tag(config: dict) -> None:
+    """Fill ``{key}`` references in the tag from the resolved config, e.g. ``conv_mlp_s{seed}``.
+
+    So ``--set seed=142`` names the run after its seed without a second override.
+    """
+    tag = config.get("tag")
+    if not isinstance(tag, str) or "{" not in tag:
+        return
+    try:
+        config["tag"] = tag.format(**{key: value for key, value in config.items() if not key.startswith("_")})
+    except (KeyError, IndexError, ValueError) as error:
+        print(f"Error: tag {tag!r} refers to a setting the config does not have ({error})", file=sys.stderr)
+        sys.exit(1)
 
 
 def git_sha() -> str:
@@ -222,17 +306,21 @@ def git_dirty() -> bool:
 
 
 def resolve_config(experiment_path: Path, cluster_name: str | None, cli_overrides: dict) -> dict:
-    """Merge defaults <- base (if any) <- cluster <- experiment <- CLI overrides.
+    """Merge defaults <- base (if any) <- cluster <- experiment <- its _cluster block <- CLI overrides.
 
-    If the experiment YAML contains a ``_base_`` key (e.g. ``_base_: synthetic_defaults``),
-    that file is loaded on top of defaults.yaml before the experiment overrides.
-    This lets synthetic experiments inherit from ``synthetic_defaults.yaml`` instead of
-    repeating all the synthetic-specific settings.
+    The defaults are the track's: the defaults.yaml in the experiment's own directory
+    (``defaults_path_for``). If the experiment YAML contains a ``_base_`` key (e.g.
+    ``_base_: synthetic_defaults``), that file is loaded on top of the defaults before the
+    experiment overrides. This lets synthetic experiments inherit from ``synthetic_defaults.yaml``
+    instead of repeating all the synthetic-specific settings. An experiment's ``_cluster`` block
+    (and its base's) maps a cluster name to settings that apply only there (e.g. a per-cluster
+    labels file).
     """
-    config = load_yaml(DEFAULTS_PATH)
+    config = load_yaml(defaults_path_for(experiment_path))
 
     # Check the experiment for a _base_ reference before merging cluster/experiment.
     experiment_cfg = load_yaml(experiment_path)
+    cluster_overrides = experiment_cfg.pop("_cluster", None) or {}
     base_name = experiment_cfg.pop("_base_", None)
     base_cfg = {}
     if base_name is not None:
@@ -242,6 +330,11 @@ def resolve_config(experiment_path: Path, cluster_name: str | None, cli_override
             sys.exit(1)
         base_cfg = load_yaml(base_path)
         base_cfg.pop("_base_", None)  # Don't chain further.
+        base_cluster = base_cfg.pop("_cluster", None) or {}
+        cluster_overrides = {
+            name: {**(base_cluster.get(name) or {}), **(cluster_overrides.get(name) or {})}
+            for name in {*base_cluster, *cluster_overrides}
+        }
         config.update(base_cfg)
 
     if cluster_name and cluster_name != "local":
@@ -260,9 +353,11 @@ def resolve_config(experiment_path: Path, cluster_name: str | None, cli_override
             config[key] = None
 
     config.update(experiment_cfg)
+    config.update(cluster_overrides.get(cluster_name or "local") or {})
 
     # CLI --set overrides take highest priority.
     config.update(cli_overrides)
+    format_tag(config)
 
     return config
 
@@ -608,6 +703,312 @@ def build_local_command(config: dict) -> str:
     return f"python -m training.main_multimodal {' '.join(cli_args)}"
 
 
+# ---------------------------------------------------------------------------
+# Encoder-only track (training/main_conv_synthetic.py)
+# ---------------------------------------------------------------------------
+
+
+def encoder_cli_args(config: dict) -> list[str]:
+    """The encoder trainer's arguments for ``config``, refused here exactly as the trainer would.
+
+    ``training.encoder_args`` is the trainer's own parser without torch, so a misspelt key, a
+    wrong value or an invalid combination stops the launch before anything is written or
+    submitted, rather than when the job starts on the cluster.
+    """
+    from training import encoder_args
+
+    options = {key: value for key, value in sorted(config.items()) if not key.startswith("_") and key != "tag"}
+    if "model_id" in options:
+        print("Error: name encoder runs with tag, not model_id", file=sys.stderr)
+        sys.exit(1)
+    options["model_id"] = str(config["tag"])
+    try:
+        arguments = encoder_args.cli_arguments(options)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+    messages = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(messages):
+            encoder_args.parse_args(arguments)
+    except SystemExit:
+        # argparse prints its whole usage first; the reason is the last line.
+        reason = (messages.getvalue().strip().splitlines() or ["invalid configuration"])[-1].split("error: ", 1)[-1]
+        print(f"Error: {config['tag']}: the trainer refuses this configuration: {reason}", file=sys.stderr)
+        sys.exit(2)
+    return arguments
+
+
+def _encoder_arg_lines(arguments: list[str]) -> list[str]:
+    """One shell-quoted ``--flag value...`` per line."""
+    groups = []
+    for value in arguments:
+        if value.startswith("--"):
+            groups.append([])
+        groups[-1].append(value)
+    return [shlex.join(group) for group in groups]
+
+
+def _encoder_env(config: dict) -> dict[str, str]:
+    """Environment of an encoder job: one native thread per process unless cpu_threads says otherwise.
+
+    The main process feeds the GPU and DataLoader workers augment on the CPU, so a thread pool
+    sized from the host's core count only adds contention; the synthetic recipe pins cpu_threads
+    for its paired rendering.
+    """
+    threads = str(config.get("cpu_threads") or 1)
+    env = {"PYTHONUNBUFFERED": "1", **{name: threads for name in THREAD_ENV_VARS}}
+    if config.get("deterministic"):
+        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    return env
+
+
+def runai_job_name(tag: str) -> str:
+    """Run:ai job names allow lowercase letters, digits and hyphens: the tag with '_' -> '-'."""
+    name = str(tag).replace("_", "-").lower()
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", name) or len(name) > 63:
+        print(f"Error: tag {tag!r} gives Run:ai job name {name!r}, which is not a valid name", file=sys.stderr)
+        sys.exit(1)
+    return name
+
+
+def _encoder_container_command(config: dict, arguments: list[str]) -> str:
+    """Body of an encoder Run:ai job, one statement per line; folded to one line before submission.
+
+    The environment is exported inside the command, so it reaches the job whatever the Run:ai
+    CLI version calls its environment flag, and a job without a usable GPU stops at once.
+    """
+    runai = config.get("_runai", {})
+    repo = runai.get("repo_path", "/nfs/home/nglazman/crl-2/multiview-crl")
+    _, mount_path = _runai_host_path(runai)
+    env = {str(k): str(v) for k, v in (runai.get("environment") or {}).items()}
+    env.update(PYTHONPATH=repo, **_encoder_env(config))
+    return "\n".join(
+        [
+            f"cd {repo} || {{ echo ERROR: {repo} is missing inside the container - check the "
+            f"--host-path mount of {mount_path} >&2 ; exit 1 ; }} ;",
+            "export " + " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items()) + " ;",
+            "python -c 'import torch; assert torch.cuda.is_available(), \"Run:ai job has no usable CUDA device\"' ;",
+            f"python -m {ENCODER_ENTRYPOINT}",
+            *(f"    {line}" for line in _encoder_arg_lines(arguments)),
+        ]
+    )
+
+
+def build_encoder_runai_command(config: dict) -> list[str]:
+    """``runai training standard submit`` for an encoder run, as one argument list."""
+    command = ["runai", "training", "standard", "submit", runai_job_name(config["tag"])]
+    for flag, value in _runai_submit_flags(config.get("_runai", {})):
+        command += [flag] if value is None else [flag, value]
+    body = " ".join(_encoder_container_command(config, encoder_cli_args(config)).split())
+    return command + ["--command", "--", "bash", "-c", body]
+
+
+def build_encoder_script(config: dict, cluster_name: str, experiment_path: Path, regenerate: str) -> str:
+    """A self-contained bash script for one encoder run on ``cluster_name``.
+
+    Run:ai and SLURM scripts take ``--dry-run``, which prints the command without submitting.
+    Unlike the VQ-VAE's SLURM script, the SLURM one never installs packages: concurrent jobs
+    would race on one conda environment, so a missing environment stops the job instead.
+    No timestamp or git SHA is written, so regenerating an unchanged experiment changes nothing.
+    """
+    arguments = encoder_cli_args(config)
+    tag = str(config["tag"])
+    try:
+        source = experiment_path.resolve().relative_to(REPO_ROOT)
+    except ValueError:
+        source = experiment_path
+    header = [
+        f"# Auto-generated from {source} (encoder-only: {ENCODER_ENTRYPOINT}); edit the YAML, not this file.",
+        f"# Re-generate with: {regenerate}",
+    ]
+    usage = [
+        'if [[ "$#" -gt 1 ]]; then echo "Usage: $0 [--dry-run]" >&2; exit 2; fi',
+        'case "${1:-}" in',
+    ]
+
+    if cluster_name == "runai":
+        runai = config.get("_runai", {})
+        flags = [
+            f"    {flag}{'' if value is None else ' ' + shlex.quote(value)} \\"
+            for flag, value in _runai_submit_flags(runai)
+        ]
+        return "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                *header,
+                "# Preview without submitting: bash <this script> --dry-run",
+                "set -euo pipefail",
+                "",
+                "# Folded to one line: backslash continuations do not survive the trip through runai ... bash -c.",
+                "TRAIN_CMD=$(tr '\\n' ' ' <<'TRAIN_EOF'",
+                _encoder_container_command(config, arguments),
+                "TRAIN_EOF",
+                ")",
+                "",
+                *usage,
+                "    --dry-run) printf '%s\\n' \"$TRAIN_CMD\"; exit 0 ;;",
+                '    "") ;;',
+                '    *) echo "Usage: $0 [--dry-run]" >&2; exit 2 ;;',
+                "esac",
+                "",
+                f"runai training standard submit {runai_job_name(tag)} \\",
+                *flags,
+                '    --command -- bash -c "${TRAIN_CMD}"',
+                "",
+            ]
+        )
+
+    if "slurm" in cluster_name:
+        slurm = config.get("_slurm", {})
+        directives = {
+            "job-name": tag,
+            "output": "/scratch/users/%u/%x-%j.out",
+            "error": "/scratch/users/%u/%x-%j.err",
+            "partition": slurm.get("partition", "gpu"),
+            "gres": slurm.get("gres", "gpu:1"),
+            "nodes": slurm.get("nodes", 1),
+            "ntasks": 1,
+            "mem": slurm.get("mem", "64G"),
+            "cpus-per-task": slurm.get("cpus_per_task", 8),
+            "time": slurm.get("time", "48:00:00"),
+        }
+        if slurm.get("constraint"):
+            directives["constraint"] = slurm["constraint"]
+        conda_env = str(slurm.get("conda_env", "multiview-env"))
+        module = str(slurm.get("module", "anaconda3/2022.10-gcc-13.2.0"))
+        exports = " ".join(f"{name}={shlex.quote(value)}" for name, value in _encoder_env(config).items())
+        check = "import torch; print(f'torch={torch.__version__} cuda={torch.version.cuda}'); "
+        check += "assert torch.cuda.is_available(), 'Allocated job has no usable CUDA device'"
+        return "\n".join(
+            [
+                "#!/bin/bash -l",
+                *header,
+                "# Submit from the repository root: sbatch <this script>. Preview: bash <this script> --dry-run",
+                # Not read by a shell, so written unquoted (`a100|h200|l40s` is one constraint).
+                *(f"#SBATCH --{key}={value}" for key, value in directives.items()),
+                "",
+                "set -euo pipefail",
+                "",
+                "# sbatch runs a spooled copy of this script, so the repository is the submit directory.",
+                'REPO="${ENCODER_REPO:-${SLURM_SUBMIT_DIR:-$PWD}}"',
+                f"CONDA_ENV_NAME={shlex.quote(conda_env)}",
+                'PYTHON="${ENCODER_PYTHON:-${HOME}/.conda/envs/${CONDA_ENV_NAME}/bin/python}"',
+                "TRAIN_ARGS=(",
+                *(f"    {line}" for line in _encoder_arg_lines(arguments)),
+                ")",
+                "",
+                *usage,
+                "    --dry-run)",
+                f'        printf \'%q \' "$PYTHON" -m {ENCODER_ENTRYPOINT} "${{TRAIN_ARGS[@]}}"',
+                "        printf '\\n'",
+                "        exit 0 ;;",
+                '    "") ;;',
+                '    *) echo "Usage: $0 [--dry-run]" >&2; exit 2 ;;',
+                "esac",
+                'if [[ -z "${SLURM_JOB_ID:-}" ]]; then',
+                '    echo "Submit with sbatch from the repository root; use --dry-run to preview locally." >&2',
+                "    exit 2",
+                "fi",
+                'cd "$REPO"',
+                f"if [[ ! -f {ENCODER_ENTRYPOINT.replace('.', '/')}.py ]]; then",
+                '    echo "Repository missing at $REPO. Submit from its root or set ENCODER_REPO." >&2',
+                "    exit 1",
+                "fi",
+                "",
+                "# Reuse the prepared environment; concurrent jobs never install or remove packages.",
+                f"module load {shlex.quote(module)}",
+                'if [[ ! -x "$PYTHON" ]]; then',
+                '    echo "Python not found at $PYTHON. Prepare $CONDA_ENV_NAME or set ENCODER_PYTHON before sbatch." >&2',
+                "    exit 1",
+                "fi",
+                f'export PYTHONPATH="$REPO" PYTHONNOUSERSITE=1 {exports}',
+                'echo "Node: $(hostname)  Job: $SLURM_JOB_ID  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"',
+                f'"$PYTHON" -c {shlex.quote(check)}',
+                f'exec "$PYTHON" -m {ENCODER_ENTRYPOINT} "${{TRAIN_ARGS[@]}}"',
+                "",
+            ]
+        )
+
+    # Local: the active environment's Python, from the repository root; extra arguments go to the trainer.
+    exports = " ".join(f"{name}={shlex.quote(value)}" for name, value in _encoder_env(config).items())
+    return "\n".join(
+        [
+            "#!/usr/bin/env bash",
+            *header,
+            "# Run from the repository root (or set ENCODER_REPO); extra arguments are passed to the trainer.",
+            "set -euo pipefail",
+            "",
+            'REPO="${ENCODER_REPO:-$PWD}"',
+            f"if [[ ! -f \"$REPO/{ENCODER_ENTRYPOINT.replace('.', '/')}.py\" ]]; then",
+            '    echo "Run from the repository root or set ENCODER_REPO." >&2',
+            "    exit 1",
+            "fi",
+            'cd "$REPO"',
+            f'export PYTHONPATH="$REPO" {exports}',
+            f"exec python -m {ENCODER_ENTRYPOINT} \\",
+            *(f"    {line} \\" for line in _encoder_arg_lines(arguments)),
+            '    "$@"',
+            "",
+        ]
+    )
+
+
+def lpips_stand_in() -> Path | None:
+    """A directory holding a stand-in ``lpips`` package, or None when lpips is installed.
+
+    ``training.losses`` imports LPIPS at module scope for the reconstruction losses, which the
+    encoder-only trainer never builds; the stand-in raises if anything ever does. The directory
+    is fixed, so a run started with ``exec`` needs no cleanup.
+    """
+    if importlib.util.find_spec("lpips") is not None:
+        return None
+    directory = Path(tempfile.gettempdir()) / "multiview-crl-lpips-stand-in"
+    (directory / "lpips").mkdir(parents=True, exist_ok=True)
+    (directory / "lpips" / "__init__.py").write_text(
+        "class LPIPS:\n"
+        "    def __init__(self, *args, **kwargs):\n"
+        "        raise ImportError('lpips is not installed; encoder-only training should never build LPIPS')\n"
+    )
+    return directory
+
+
+def encoder_local_launch(config: dict) -> tuple[list[str], dict[str, str]]:
+    """The command and environment of a local encoder run with this interpreter.
+
+    MPS gets PyTorch's CPU fallback (read once, when torch is imported); on macOS the run is wrapped
+    in ``caffeinate -i`` so the machine does not sleep under it; without lpips installed, the
+    stand-in above is put on PYTHONPATH.
+    """
+    command = [sys.executable, "-m", ENCODER_ENTRYPOINT, *encoder_cli_args(config)]
+    env = dict(os.environ, **_encoder_env(config))
+    paths = [str(REPO_ROOT)]
+    stand_in = lpips_stand_in()
+    if stand_in is not None:
+        paths.insert(0, str(stand_in))
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [*paths, os.environ.get("PYTHONPATH")]))
+    if config.get("device") == "mps":
+        env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    if sys.platform == "darwin" and shutil.which("caffeinate"):
+        command = ["caffeinate", "-i", *command]
+    return command, env
+
+
+def save_encoder_launch(config: dict, snapshot: dict, script: str | None = None) -> Path:
+    """Write the resolved config (and the submitted script) under results/launches/<tag>/."""
+    directory = ENCODER_LAUNCH_DIR / str(config["tag"])
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    with open(directory / f"config_{stamp}.yaml", "w") as f:
+        yaml.dump(snapshot, f, default_flow_style=False, sort_keys=False)
+    print(f"Config snapshot saved to: {directory / f'config_{stamp}.yaml'}")
+    if script is None:
+        return directory
+    path = directory / f"submit_{stamp}.sh"
+    path.write_text(script)
+    return path
+
+
 def parse_cli_overrides(override_strs: list[str]) -> dict:
     """Parse 'key=value' pairs from --set arguments."""
     overrides = {}
@@ -626,40 +1027,88 @@ def parse_cli_overrides(override_strs: list[str]) -> dict:
     return overrides
 
 
-def find_experiment_yamls() -> list[Path]:
-    """Find all experiment YAML files (excluding cluster configs and the two base configs)."""
-    exp_dir = REPO_ROOT / "experiments"
-    skip = {"defaults.yaml", "synthetic_defaults.yaml", "cluster"}
-    yamls = []
-    for p in sorted(exp_dir.glob("*.yaml")):
-        if p.name not in skip:
-            yamls.append(p)
-    return yamls
+def find_experiment_yamls(directory: Path | None = None) -> list[Path]:
+    """Experiment YAMLs in ``directory`` (default: experiments/ and experiments/encoder/), without bases."""
+    directories = [EXPERIMENTS_DIR, EXPERIMENTS_DIR / "encoder"] if directory is None else [Path(directory)]
+    return [p for d in directories for p in sorted(d.glob("*.yaml")) if p.name not in BASE_CONFIG_NAMES]
 
 
-def generate_all(cluster_name: str):
-    """Generate bash scripts for all experiment YAMLs."""
-    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-    experiments = find_experiment_yamls()
+def generated_path(experiment_path: Path, name: str, cluster_name: str) -> Path:
+    """experiments/<sub>/<x>.yaml -> experiments/generated/<sub>/<name>.<cluster>.sh."""
+    try:
+        sub = experiment_path.resolve().parent.relative_to(EXPERIMENTS_DIR)
+    except ValueError:
+        sub = Path()
+    return GENERATED_DIR / sub / f"{name}.{cluster_name}.sh"
+
+
+def write_generated(config: dict, experiment_path: Path, cluster_name: str, name: str, regenerate: str) -> Path:
+    """Write one experiment's script for ``cluster_name`` and return its path."""
+    if is_encoder(config):
+        script = build_encoder_script(config, cluster_name, experiment_path, regenerate)
+    else:
+        script = build_training_script(config, config.get("tag", experiment_path.stem), cluster_name, experiment_path)
+    out_path = generated_path(experiment_path, name, cluster_name)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(script)
+    os.chmod(out_path, 0o755)
+    print(f"  {out_path}")
+    return out_path
+
+
+def generate_all(cluster_name: str, directory: Path | None = None):
+    """Generate bash scripts for every experiment YAML (or every one in ``directory``)."""
+    experiments = find_experiment_yamls(directory)
     if not experiments:
-        print("No experiment YAMLs found in experiments/", file=sys.stderr)
+        print(f"No experiment YAMLs found in {directory or 'experiments/'}", file=sys.stderr)
         sys.exit(1)
 
-    generated = []
     for exp_path in experiments:
         config = resolve_config(exp_path, cluster_name, {})
-        tag = config.get("tag", exp_path.stem)
-        script = build_training_script(config, tag, cluster_name, exp_path)
-        out_name = f"{exp_path.stem}.{cluster_name}.sh"
-        out_path = GENERATED_DIR / out_name
-        with open(out_path, "w") as f:
-            f.write(script)
-        os.chmod(out_path, 0o755)
-        generated.append(out_name)
-        print(f"  {out_path}")
+        rel = exp_path.resolve().relative_to(REPO_ROOT)
+        regenerate = f"python scripts/launch.py {rel} --cluster {cluster_name} --generate"
+        write_generated(config, exp_path, cluster_name, exp_path.stem, regenerate)
 
-    print(f"\nGenerated {len(generated)} scripts in experiments/generated/")
-    print(f"On cluster: bash experiments/generated/<name>.{cluster_name}.sh")
+    where = generated_path(experiments[0], "<name>", cluster_name)
+    if where.is_relative_to(REPO_ROOT):
+        where = where.relative_to(REPO_ROOT)
+    print(f"\nGenerated {len(experiments)} scripts in experiments/generated/")
+    print(f"On cluster: bash {where}")
+
+
+def launch_encoder(config: dict, cluster_name: str, experiment_source: Path, snapshot: dict, dry_run: bool):
+    """Run, submit or preview an encoder-only experiment."""
+    if cluster_name == "local":
+        command, env = encoder_local_launch(config)
+        if dry_run:
+            print(f"COMMAND:\n  {shlex.join(command)}")
+            return
+        print(f"Running locally: {shlex.join(command)}", flush=True)
+        os.chdir(REPO_ROOT)
+        os.execvpe(command[0], command, env)
+    elif cluster_name == "runai" or "_runai" in config:
+        command = build_encoder_runai_command(config)
+        if dry_run:
+            print(f"RUNAI COMMAND:\n  {shlex.join(command)}")
+            return
+        save_encoder_launch(config, snapshot)
+        print(f"Submitting to Run:ai: {command[4]}")
+        subprocess.run(command, check=True)
+    elif "slurm" in cluster_name or "_slurm" in config:
+        script = build_encoder_script(config, cluster_name, experiment_source, shlex.join(["python", *sys.argv]))
+        if dry_run:
+            print(f"SLURM SCRIPT:\n{script}")
+            return
+        script_path = save_encoder_launch(config, snapshot, script)
+        print(f"Submitting to SLURM: {config['tag']}")
+        # From the repository root, which the script takes as its working directory.
+        subprocess.run(["sbatch", str(script_path)], check=True, cwd=REPO_ROOT)
+    else:
+        print(
+            f"Error: unknown cluster '{cluster_name}'. Expected 'local', 'runai', 'slurm' or 'slurm_bio'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def main():
@@ -672,7 +1121,8 @@ def main():
         type=Path,
         nargs="?",
         default=None,
-        help="Path to experiment YAML (omit when using --generate)",
+        help="Path to experiment YAML. With --generate: omit it for every experiment, or give a directory "
+        "(e.g. experiments/encoder) for every YAML in it",
     )
     parser.add_argument(
         "--cluster",
@@ -688,7 +1138,8 @@ def main():
     parser.add_argument(
         "--generate",
         action="store_true",
-        help="Generate bash scripts for all experiment YAMLs (no Python needed on cluster)",
+        help="Write bash scripts into experiments/generated/ instead of launching, for hosts without Python "
+        "(no Python needed on cluster): for every experiment, a directory's, or one YAML with --set applied",
     )
     parser.add_argument(
         "--from-config",
@@ -738,13 +1189,14 @@ def main():
         "'a100' or 'h200|l40s'. Takes precedence over --no-constraint.",
     )
     args = parser.parse_args()
-
-    # --generate mode: batch-generate scripts for all experiments.
-    if args.generate:
-        generate_all(args.cluster)
-        return
-
     cli_overrides = parse_cli_overrides(args.overrides)
+
+    # --generate mode: batch-generate scripts for all experiments, or for every YAML in a directory.
+    if args.generate and (args.experiment is None or args.experiment.is_dir()):
+        if cli_overrides:
+            parser.error("--set applies to one experiment: pass its YAML with --generate")
+        generate_all(args.cluster, args.experiment)
+        return
 
     # --from-config mode: reconstruct config from a previous run's settings.json
     # or config YAML, instead of resolving from an experiment YAML.
@@ -802,6 +1254,14 @@ def main():
         if args.constraint is not None:
             slurm_cfg["constraint"] = args.constraint
 
+    # --generate with one experiment: write its script, named after the tag when --set changed it.
+    if args.generate:
+        if args.from_config is not None:
+            parser.error("--generate takes an experiment YAML, not --from-config")
+        name = config.get("tag", args.experiment.stem) if cli_overrides else args.experiment.stem
+        write_generated(config, args.experiment, args.cluster, str(name), shlex.join(["python", *sys.argv]))
+        return
+
     # -- Provenance snapshot --
     snapshot = save_resolved_config(config, experiment_source)
 
@@ -812,7 +1272,9 @@ def main():
         print(yaml.dump(snapshot, default_flow_style=False, sort_keys=False))
         print("=" * 60)
 
-    if args.cluster == "local":
+    if is_encoder(config):
+        launch_encoder(config, args.cluster, experiment_source, snapshot, args.dry_run)
+    elif args.cluster == "local":
         cmd_str = build_local_command(config)
         if args.dry_run:
             print(f"COMMAND:\n  {cmd_str}")

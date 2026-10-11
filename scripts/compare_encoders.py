@@ -20,30 +20,12 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from training import encoder_args  # noqa: E402  (argparse only; no torch)
+
 ARCHITECTURES = ("conv", "resnet18")
-BOOLEAN_OPTIONAL = {
-    "cache",
-    "floor_eval",
-    "cross_view_negs_only",
-    "spatial_recovery_eval",
-    "spatial_recovery_native",
-    "separate_spatial_readout",
-}
-STORE_TRUE = {
-    "lesion_branch_frozen",
-    "lesion_localization_eval",
-    "no_separate_encoders",
-    "synthetic_clean_content",
-    "synthetic_identifiable_ventricle",
-    "synthetic_causal",
-    "synthetic_hierarchical_content",
-    "no_cuda",
-    "require_new_run",
-    "deterministic",
-    "deterministic_warn_only",
-    "hash_training_inputs",
-    "patch_foreground_mask",
-}
 RESERVED = {
     "seed",
     "data_seed",
@@ -84,21 +66,7 @@ def source_hashes():
 
 
 def cli_arguments(options):
-    arguments = []
-    for key, value in options.items():
-        flag = "--" + key.replace("_", "-")
-        if isinstance(value, bool):
-            if key in BOOLEAN_OPTIONAL:
-                arguments.append(flag if value else "--no-" + key.replace("_", "-"))
-            elif key in STORE_TRUE:
-                if value:
-                    arguments.append(flag)
-            else:
-                raise ValueError(f"Unknown boolean training option: {key}")
-        elif value is not None:
-            arguments.append(flag)
-            arguments.extend(str(item) for item in (value if isinstance(value, list) else [value]))
-    return arguments
+    return encoder_args.cli_arguments(options)
 
 
 def validate_config(config):
