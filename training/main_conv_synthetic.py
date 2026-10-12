@@ -630,6 +630,88 @@ def lesion_branch_report(model, dataset, device, batch_size, localization=False)
     return report
 
 
+CAUSAL_VIEWS = ("view1", "view2")
+
+
+def causal_discovery_eval(model, val_dataset, device, args, save_dir, step, writer=None, initial=None):
+    """Label-free PC on each view's content channels, scored against the generator's SCM.
+
+    ``eval.causal.latent_causal_discovery`` applied in-loop: every content channel becomes one
+    scalar per subject, PC runs on those alone, and labels enter only afterwards, to name nodes
+    through one Hungarian match on ``|corr|``. Each F1 prints beside the random-naming null, the
+    step-0 floor (``initial``) and PC on the TRUE factors (the ceiling at this row count). The
+    best alpha is chosen against the truth, so read it relative to those rows, not alone.
+    """
+    from types import SimpleNamespace
+
+    from eval.causal.latent_causal_discovery import evaluate_reduced, reduce_channels
+    from eval.protocol.score_checkpoint import encode_blocks
+
+    print(f"  [eval] causal discovery @ step {step} ...", flush=True)
+    grid = tuple(args.causal_eval_grid)
+    blocks = encode_blocks(
+        model, val_dataset, device, args.batch_size, model.content_channels, None if grid == (1, 1, 1) else grid
+    )
+    adj = blocks["adjacency"]
+    if adj is None:
+        scm = getattr(getattr(val_dataset, "_inner", val_dataset), "scm", None)
+        adj = scm.get("adj") if isinstance(scm, dict) else None
+    if adj is None:
+        print("    no causal SCM on the validation set; skipped", flush=True)
+        return None
+    cli = SimpleNamespace(
+        reduce=args.causal_eval_reduce,
+        alphas=args.causal_eval_alphas,
+        indep_test=args.causal_eval_indep_test,
+        max_cond_set=args.causal_eval_max_cond_set,
+        null_draws=args.causal_eval_null_draws,
+    )
+    z = np.asarray(blocks["z_content"], dtype=np.float64)
+    positions = int(np.prod(grid))
+    out = {}
+    for view, flat in zip(CAUSAL_VIEWS, blocks["content"]):
+        maps = flat.reshape(len(flat), -1, positions)
+        try:
+            out[view] = evaluate_reduced(reduce_channels(maps, cli.reduce), z, adj, cli, view)
+        except Exception as exc:  # a dead representation must not end the run
+            out[view] = dict(status="error", reason=f"{type(exc).__name__}: {exc}")
+    ceiling = (initial or {}).get("ceiling")
+    if ceiling is None:
+        ceiling = evaluate_reduced(z, z, adj, cli, "truth-ceiling")
+    out["ceiling"] = ceiling
+
+    print(f"    --- label-free PC on content channels ({cli.reduce}, grid {'x'.join(map(str, grid))}) ---", flush=True)
+    head = f"      {'':<14s}{'alpha':>7s}{'F1':>7s}{'null F1':>9s}{'SHD':>6s}{'null SHD':>10s}{'match |r|':>11s}"
+    print(head + (f"{'floor F1':>10s}{'Δ floor':>9s}" if initial else ""), flush=True)
+    for name in (*CAUSAL_VIEWS, "ceiling"):
+        row = out[name]
+        if "best" not in row:
+            print(f"      {name:<14s}{row.get('reason', 'no result')}", flush=True)
+            continue
+        b = row["best"]
+        line = (
+            f"      {name:<14s}{b['alpha']:>7.2f}{b['f1']:>7.3f}{b['null']['f1_mean']:>9.3f}"
+            f"{b['skeleton_shd']:>6d}{b['null']['shd_mean']:>10.1f}{np.mean(row['match_quality']):>11.3f}"
+        )
+        floor_row = (initial or {}).get(name) or {}
+        if name != "ceiling" and "best" in floor_row:
+            line += f"{floor_row['best']['f1']:>10.3f}{b['f1'] - floor_row['best']['f1']:>+9.3f}"
+        print(line, flush=True)
+        if writer is not None and name != "ceiling":
+            writer.add_scalar(f"causal_discovery/{name}/f1", b["f1"], step)
+            writer.add_scalar(f"causal_discovery/{name}/f1_over_null", b["f1_over_null"], step)
+            writer.add_scalar(f"causal_discovery/{name}/skeleton_shd", b["skeleton_shd"], step)
+            writer.add_scalar(f"causal_discovery/{name}/match_quality", float(np.mean(row["match_quality"])), step)
+            for sweep in row["alpha_sweep"]:
+                writer.add_scalar(f"causal_discovery/{name}/f1_alpha{sweep['alpha']:g}", sweep["f1"], step)
+
+    with open(os.path.join(save_dir, f"causal_step{step}.json"), "w") as fp:
+        json.dump(
+            dict(protocol=dict(readout="none", naming="hungarian_abs_corr", grid=list(grid)), **out), fp, indent=2
+        )
+    return out
+
+
 def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
     print(f"  [eval] synthetic DCI @ step {step} ...", flush=True)
     pooling = "gap" if args.eval_pooling == "gap" else tuple(args.eval_patch_grid)
@@ -1148,7 +1230,7 @@ def main():
     # Per-factor R² needs it more than the block means do -- a localised factor can read
     # 0.2 from a random encoder, so the raw number alone cannot say whether it was learned.
     floor = floor_flat = None
-    spatial_initial = None
+    spatial_initial = causal_initial = None
     evaluation = evaluate_real if real else evaluate
     if args.spatial_recovery_eval:
         from eval.encoder.spatial_recovery_monitor import evaluate_spatial_recovery
@@ -1157,6 +1239,8 @@ def main():
         floor_flat, floor = evaluation(model, val_dataset, device, args, save_dir, 0, writer)
         if args.spatial_recovery_eval:
             spatial_initial = evaluate_spatial_recovery(model, vars(args), device, save_dir, 0, writer=writer)
+        if args.causal_eval:
+            causal_initial = causal_discovery_eval(model, val_dataset, device, args, save_dir, 0, writer)
         model.train()
 
     # Step 0 is the untrained floor, not a candidate: with every delta at or below zero it
@@ -1284,6 +1368,10 @@ def main():
                 if args.spatial_recovery_eval:
                     evaluate_spatial_recovery(
                         model, vars(args), device, save_dir, step, initial=spatial_initial, writer=writer
+                    )
+                if args.causal_eval:
+                    causal_discovery_eval(
+                        model, val_dataset, device, args, save_dir, step, writer, initial=causal_initial
                     )
 
                 if args.best_metric != "none":

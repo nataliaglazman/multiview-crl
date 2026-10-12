@@ -7,6 +7,11 @@ a dict of option values into the arguments that reproduce it.
 
 import argparse
 
+# Both modules import only the standard library at load time, so this stays torch-free.
+from eval.causal.latent_causal_discovery import REDUCTIONS as CAUSAL_REDUCTIONS
+from eval.causal.run_causal_recovery import DEFAULT_ALPHAS as CAUSAL_ALPHAS
+from eval.causal.run_causal_recovery import INDEP_TESTS as CAUSAL_INDEP_TESTS
+
 PROG = "python -m training.main_conv_synthetic"
 
 
@@ -340,6 +345,30 @@ def build_parser(description=None):
     p.add_argument("--spatial-recovery-batch-size", type=int, default=4)
     p.add_argument("--spatial-recovery-test-samples", type=int, default=400)
     p.add_argument("--spatial-recovery-seed", type=int, default=1729)
+    p.add_argument(
+        "--causal-eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="At each evaluation, run label-free PC on each view's content channels and score the graph "
+        "against the generator's SCM (eval.causal.latent_causal_discovery). Needs --synthetic-causal",
+    )
+    p.add_argument(
+        "--causal-eval-grid",
+        type=int,
+        nargs=3,
+        default=[1, 1, 1],
+        help="Grid the content channels are read on; 1 1 1 is the model's own global output vector",
+    )
+    p.add_argument(
+        "--causal-eval-reduce",
+        choices=CAUSAL_REDUCTIONS,
+        default="gap",
+        help="Scalar per channel over the grid; only gap applies at grid 1 1 1",
+    )
+    p.add_argument("--causal-eval-indep-test", choices=CAUSAL_INDEP_TESTS, default="fisherz")
+    p.add_argument("--causal-eval-alphas", type=float, nargs="+", default=list(CAUSAL_ALPHAS))
+    p.add_argument("--causal-eval-max-cond-set", type=int, default=None, help="Cap PC's conditioning-set size")
+    p.add_argument("--causal-eval-null-draws", type=int, default=200, help="Random namings in the null")
 
     # Synthetic dataset (forwarded in full to train AND val so the distributions match).
     p.add_argument("--res", type=int, default=32, help="Cubic resolution (power of 2)")
@@ -560,7 +589,7 @@ def parse_args(argv=None, description=None):
     if real:
         # Generator and factor-evaluation flags would be silently ignored on real volumes;
         # refuse them rather than record settings that did nothing.
-        synthetic_only = [k for k in vars(args) if k.startswith(("synthetic_", "spatial_recovery_"))]
+        synthetic_only = [k for k in vars(args) if k.startswith(("synthetic_", "spatial_recovery_", "causal_eval"))]
         synthetic_only += ["res", "n_content", "n_style", "num_train_samples", "num_val_samples"]
         synthetic_only += ["eval_pooling", "eval_patch_grid", "lesion_keypoints"]
         changed = [k for k in synthetic_only if getattr(args, k) != p.get_default(k)]
@@ -695,6 +724,22 @@ def parse_args(argv=None, description=None):
         p.error("Separate/frozen detectors require --lesion-input residual and --lesion-keypoints")
     if args.lesion_detector == "separate_conv" and args.lesion_head_init != "positive":
         p.error("--lesion-head-init sign controls only apply to simple residual detectors")
+    causal_defaults = ("grid", "reduce", "indep_test", "alphas", "max_cond_set", "null_draws")
+    if args.causal_eval:
+        if not args.synthetic_causal:
+            p.error("--causal-eval scores against the generator's SCM; it needs --synthetic-causal")
+        if args.content_channels < args.n_content:
+            p.error("--causal-eval names one channel per factor: --content-channels must be >= --n-content")
+        if any(g < 1 or g > size for g, size in zip(args.causal_eval_grid, backbone_map)):
+            p.error(f"--causal-eval-grid must fit the {map_name} backbone map")
+        if tuple(args.causal_eval_grid) == (1, 1, 1) and args.causal_eval_reduce != "gap":
+            p.error("--causal-eval-reduce reduces over a grid; at --causal-eval-grid 1 1 1 only gap applies")
+        if not args.causal_eval_alphas or any(not 0 < a < 1 for a in args.causal_eval_alphas):
+            p.error("--causal-eval-alphas must lie in (0, 1)")
+        if args.causal_eval_null_draws < 1:
+            p.error("--causal-eval-null-draws must be positive")
+    elif any(getattr(args, f"causal_eval_{k}") != p.get_default(f"causal_eval_{k}") for k in causal_defaults):
+        p.error("--causal-eval-* options only apply with --causal-eval")
     if args.lesion_localization_eval and (args.lesion_keypoints < 1 or args.synthetic_mode != "pseudo_mri"):
         p.error("--lesion-localization-eval requires a pseudo_mri lesion branch")
     if args.lesion_keypoints > 0:
