@@ -391,6 +391,12 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
             units = model.content_units() if content_mask is not None else None
             terms["lesion_decorrelation"] = lesion_decorrelation(pooled, args, units)
             total = total + decorrelation_weight * terms["lesion_decorrelation"]
+    if getattr(model, "mask_mode", "fixed") == "learned_size":
+        # Each content unit costs this much, so a unit stays content only while it lowers the
+        # InfoNCE by more; the gates' probabilities make the count differentiable.
+        terms["mask_size"] = model.expected_content_size()
+        terms["mask_size_weighted"] = args.mask_size_weight * terms["mask_size"]
+        total = total + terms["mask_size_weighted"]
     if content_mask is not None and model.training:
         # Not a loss term: the mask weight this step's draw put on units outside the evaluated
         # selection; for binary draws, the number of style units swapped in. Eval draws have none.
@@ -404,12 +410,22 @@ def mask_state(model):
     """A learned content mask as evaluated: its units, every logit, and the selection's margin.
 
     The margin is the smallest selected logit minus the largest left-out one, i.e. how far the
-    selection is from changing. None under the fixed split.
+    selection is from changing. Under a learned size it is the smallest |logit|, how far the
+    nearest gate is from flipping, and the size and expected size (sum of the gates'
+    probabilities) are reported too. None under the fixed split.
     """
     if model.mask_logits is None:
         return None
     logits = model.mask_logits.detach().float().cpu()
     units = model.content_units()
+    if model.mask_mode == "learned_size":
+        return {
+            "content_units": units,
+            "logits": logits.tolist(),
+            "margin": float(logits.abs().min()),
+            "content_size": len(units),
+            "expected_size": float(torch.sigmoid(logits).sum()),
+        }
     selected = torch.zeros(len(logits), dtype=torch.bool)
     selected[units] = True
     return {
@@ -432,7 +448,8 @@ def effective_rank(feat):
         # This small diagnostic is outside autograd; keep eigvalsh off MPS.
         x = x.cpu()
     x = x - x.mean(dim=0, keepdim=True)
-    ev = torch.linalg.eigvalsh(torch.cov(x.T)).clamp(min=0)
+    # A one-unit block (a learned size can shrink to it) has a 0-d covariance.
+    ev = torch.linalg.eigvalsh(torch.atleast_2d(torch.cov(x.T))).clamp(min=0)
     total = ev.sum()
     return float(total**2 / ev.pow(2).sum()) if total > 0 else 0.0
 
@@ -734,7 +751,10 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
     print("    --- identifiability summary ---", flush=True)
     mask = mask_state(model)
     if mask is not None:
-        print(f"      content units {mask['content_units']} (learned mask, margin {mask['margin']:.2f})", flush=True)
+        size = f", size {mask['content_size']}" if "content_size" in mask else ""
+        print(
+            f"      content units {mask['content_units']} (learned mask{size}, margin {mask['margin']:.2f})", flush=True
+        )
     show("content->content/block_mcc")
     show("content->content/channel_mcc")
     show("content->content/informativeness_ridge")
@@ -895,7 +915,10 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
     print("    --- held-out subjects ---", flush=True)
     mask = mask_state(model)
     if mask is not None:
-        print(f"      content units {mask['content_units']} (learned mask, margin {mask['margin']:.2f})", flush=True)
+        size = f", size {mask['content_size']}" if "content_size" in mask else ""
+        print(
+            f"      content units {mask['content_units']} (learned mask{size}, margin {mask['margin']:.2f})", flush=True
+        )
     print(
         f"      {'':<40s}{'value':>9s}" + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""),
         flush=True,
@@ -1114,9 +1137,15 @@ def main():
     if model.mask_logits is not None:
         mask_lr = args.lr * args.mask_lr_scale
         half_gap = args.mask_init_gap / 2
+        estimator = args.mask_estimator.replace("_", "-")
+        kind = (
+            f"learned size of at most {args.latent_dim} units, one binary-Concrete gate per unit (tau 1, "
+            f"{estimator}), {args.mask_size_weight:g} per expected content unit"
+            if args.mask_mode == "learned_size"
+            else f"learned top-{args.content_channels} of {args.latent_dim} units, Gumbel-softmax (tau 1, {estimator})"
+        )
         print(
-            f"content mask: learned top-{args.content_channels} of {args.latent_dim} units, Gumbel-softmax "
-            f"(tau 1, {args.mask_estimator.replace('_', '-')}), shared by both views; starts at units "
+            f"content mask: {kind}, shared by both views; starts at units "
             f"0-{args.content_channels - 1} (logits +{half_gap:g}/-{half_gap:g}, initial gap {args.mask_init_gap:g}); "
             f"logit lr {mask_lr:g} (--lr x {args.mask_lr_scale:g}), "
             "no weight decay",
@@ -1261,6 +1290,7 @@ def main():
         lesion=0.0,
         decorrelation=0.0,
         mask_leak=0.0,
+        mask_size=0.0,
     )
     logged_units = model.content_units()
     model.train()
@@ -1300,6 +1330,7 @@ def main():
             running["lesion"] += last_loss_terms.get("lesion", 0.0)
             running["decorrelation"] += last_loss_terms.get("lesion_decorrelation", 0.0)
             running["mask_leak"] += last_loss_terms.get("mask_leak", 0.0)
+            running["mask_size"] += last_loss_terms.get("mask_size", 0.0)
             running["rank"] += effective_rank(pooled[: pooled.shape[0] // 2, model.content_units()])
             running["n"] += 1
             step += 1
@@ -1309,7 +1340,7 @@ def main():
                 mask_info = mask_state(model)
                 print(
                     f"step {step:6d} | contrastive {running['loss']/n:.4f} "
-                    f"| content eff_rank {running['rank']/n:.2f}/{args.content_channels}"
+                    f"| content eff_rank {running['rank']/n:.2f}/{len(model.content_units())}"
                     + (
                         f" | global {running['global_loss']/n:.4f} | patch {running['patch']/n:.4f} "
                         f"| weighted patch {running['patch_weighted']/n:.4f}"
@@ -1326,6 +1357,11 @@ def main():
                         f" | mask leak {running['mask_leak']/n:.3f}, margin {mask_info['margin']:.2f}"
                         if mask_info is not None
                         else ""
+                    )
+                    + (
+                        f" | content size {mask_info['content_size']} (expected {running['mask_size']/n:.2f})"
+                        if mask_info is not None and "content_size" in mask_info
+                        else ""
                     ),
                     flush=True,
                 )
@@ -1337,6 +1373,9 @@ def main():
                     if mask_info is not None:
                         writer.add_scalar("mask/leak", running["mask_leak"] / n, step)
                         writer.add_scalar("mask/margin", mask_info["margin"], step)
+                        if "content_size" in mask_info:
+                            writer.add_scalar("mask/content_size", mask_info["content_size"], step)
+                            writer.add_scalar("mask/expected_size", running["mask_size"] / n, step)
                         for unit, logit in enumerate(mask_info["logits"]):
                             writer.add_scalar(f"mask/logit_unit{unit}", logit, step)
                     writer.add_scalar("train/content_eff_rank", running["rank"] / n, step)
@@ -1361,6 +1400,7 @@ def main():
                     lesion=0.0,
                     decorrelation=0.0,
                     mask_leak=0.0,
+                    mask_size=0.0,
                 )
 
             if step % args.eval_every == 0 or step == args.train_steps:

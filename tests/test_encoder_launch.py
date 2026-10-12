@@ -58,6 +58,7 @@ class ExperimentTests(unittest.TestCase):
                 "adni",
                 "adni_gumbel",
                 "adni_patch",
+                "conv_mlp_learned_size",
             },
         )
         for path in experiments:
@@ -90,6 +91,7 @@ class ExperimentTests(unittest.TestCase):
             ("conv_mlp_patch", "conv_mlp_patch_lesion_corrected", {"synthetic_lesion_intensity", "train_steps"}),
             ("adni", "adni_gumbel", {"mask_mode", "mask_lr_scale"}),
             ("adni", "adni_patch", {"patch_loss_weight", "train_patch_grid", "patch_foreground_mask"}),
+            ("conv_mlp_gumbel", "conv_mlp_learned_size", {"mask_mode", "mask_size_weight", "latent_dim"}),
         ):
             with self.subTest(variant=variant):
                 a, b = parsed(resolve(reference)), parsed(resolve(variant))
@@ -212,7 +214,8 @@ class CommandTests(unittest.TestCase):
         args = encoder_args.parse_args(trainer_command(shlex.split(body)))
         self.assertEqual((args.mask_mode, args.model_id), ("learned", "encoder_adni_conv_mlp_s42"))
         self.assertEqual(launch.runai_job_name("Conv_MLP_s42"), "conv-mlp-s42")
-        exits(self, 1, launch.runai_job_name, "bad.name")
+        self.assertEqual(launch.runai_job_name("size_w0.01_s42"), "size-w0p01-s42")
+        exits(self, 1, launch.runai_job_name, "bad/name")
 
     def test_local_launch_uses_this_python_and_the_lpips_stand_in(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(launch.tempfile, "gettempdir", return_value=tmp):

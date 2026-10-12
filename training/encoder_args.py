@@ -174,28 +174,40 @@ def build_parser(description=None):
     p.add_argument("--content-channels", type=int, default=9, help="Content units (set to the true n_content)")
     p.add_argument(
         "--mask-mode",
-        choices=("fixed", "learned"),
+        choices=("fixed", "learned", "learned_size"),
         default="fixed",
         help="Which latent units are content. fixed: the first --content-channels. learned: a top-k "
         "Gumbel-softmax mask over one learnable logit per unit, k = --content-channels (Yao et al. 2024's "
         "content selector; the VQ-VAE trainer's --mask-mode learned). Each training step draws a mask (see "
-        "--mask-estimator); evaluation reads the k largest logits. Shared by both views, whose readout head "
-        "is shared. Starts at the fixed split (logits +/- half of --mask-init-gap)",
+        "--mask-estimator); evaluation reads the k largest logits. learned_size: one gate per unit, so the "
+        "number of content units is learned too, against --mask-size-weight; evaluation reads the units "
+        "with a positive logit and --content-channels is only the starting size. Shared by both views, whose "
+        "readout head is shared. Starts at the fixed split (logits +/- half of --mask-init-gap)",
+    )
+    p.add_argument(
+        "--mask-size-weight",
+        type=float,
+        default=None,
+        help="With --mask-mode learned_size (required there): the loss adds this times the expected number "
+        "of content units (the sum of the gates' probabilities), so a unit stays content only while it lowers "
+        "the InfoNCE by more than this. It sets the size the mask settles at; sweep it and look for a range "
+        "where the learned size holds steady",
     )
     p.add_argument(
         "--mask-init-gap",
         type=float,
         default=4.0,
-        help="With --mask-mode learned: initial selected-minus-excluded logit gap. Selected units start at "
+        help="With a learned --mask-mode: initial selected-minus-excluded logit gap. Selected units start at "
         "+gap/2, excluded units at -gap/2. Default 4 reproduces +2/-2; 1 gives +0.5/-0.5. "
-        "Must be finite and nonnegative; 0 starts all logits equal (evaluation ties select the first units). "
+        "Must be finite and nonnegative; 0 starts all logits equal (evaluation ties select the first units; "
+        "learned_size needs a positive gap). "
         "Only affects fresh initialization; loading a checkpoint restores its learned logits",
     )
     p.add_argument(
         "--mask-estimator",
         choices=("relaxed", "straight_through"),
         default="relaxed",
-        help="With --mask-mode learned: what the loss sees of each draw. relaxed: the continuous Gumbel-softmax "
+        help="With a learned --mask-mode: what the loss sees of each draw. relaxed: the continuous Gumbel-softmax "
         "sample, so a left-out unit keeps a small weight and a gradient on whether it would help as content. "
         "straight_through: the binary draw with a straight-through gradient (the VQ-VAE trainer's estimator). "
         "Cosine similarity has zero gradient for a unit zeroed in both views, so a left-out unit then learns "
@@ -206,7 +218,7 @@ def build_parser(description=None):
         "--mask-lr-scale",
         type=float,
         default=1.0,
-        help="With --mask-mode learned: the mask logits' learning rate is --lr times this (no weight decay). "
+        help="With a learned --mask-mode: the mask logits' learning rate is --lr times this (no weight decay). "
         "Compare --lr x this x --train-steps with half of --mask-init-gap as a rough movement scale. "
         "Actual Adam updates depend on gradient history",
     )
@@ -673,20 +685,31 @@ def parse_args(argv=None, description=None):
         p.error("--patch-foreground-thresh must be in (0, 1]")
     if not 0 <= args.mask_init_gap < float("inf"):
         p.error("--mask-init-gap must be finite and nonnegative")
-    if args.mask_mode == "learned":
-        if args.content_channels >= args.latent_dim:
+    if args.mask_mode != "fixed":
+        if args.mask_mode == "learned" and args.content_channels >= args.latent_dim:
             p.error("--mask-mode learned chooses content among the latent units: --content-channels < --latent-dim")
         if args.contrastive_loss_type != "infonce":
             p.error(
-                "--mask-mode learned needs --contrastive-loss-type infonce: Barlow Twins standardises each unit "
-                "over the batch, which divides the mask back out, so no gradient would reach the logits"
+                f"--mask-mode {args.mask_mode} needs --contrastive-loss-type infonce: Barlow Twins standardises "
+                "each unit over the batch, which divides the mask back out, so no gradient would reach the logits"
             )
         if args.contrastive_proj_dim != 0:
-            p.error("--mask-mode learned requires --contrastive-proj-dim 0: the projector reads a fixed set of units")
+            p.error(
+                f"--mask-mode {args.mask_mode} requires --contrastive-proj-dim 0: the projector reads a fixed set of units"
+            )
         if not 0 < args.mask_lr_scale < float("inf"):
             p.error("--mask-lr-scale must be finite and positive")
     elif args.mask_lr_scale != 1.0 or args.mask_estimator != "relaxed" or args.mask_init_gap != 4.0:
-        p.error("--mask-lr-scale, --mask-estimator and --mask-init-gap only apply with --mask-mode learned")
+        p.error("--mask-lr-scale, --mask-estimator and --mask-init-gap only apply with a learned --mask-mode")
+    if args.mask_mode == "learned_size":
+        if args.mask_size_weight is None or not 0 <= args.mask_size_weight < float("inf"):
+            p.error("--mask-mode learned_size needs a finite, nonnegative --mask-size-weight")
+        if args.mask_init_gap == 0:
+            p.error("--mask-mode learned_size needs a positive --mask-init-gap: a zero logit is neither side")
+        if args.separate_spatial_readout:
+            p.error("--mask-mode learned_size cannot drive --separate-spatial-readout, whose head has a fixed width")
+    elif args.mask_size_weight is not None:
+        p.error("--mask-size-weight only applies with --mask-mode learned_size")
     if args.separate_spatial_readout:
         if args.encoder_architecture == "conv" and args.conv_readout != "mlp":
             p.error("--separate-spatial-readout requires an MLP readout (--conv-readout mlp for Conv)")

@@ -142,7 +142,7 @@ class SelectionTests(unittest.TestCase):
     def test_construction_rules(self):
         common = dict(hidden_channels=8, res_channels=4, nb_res_layers=1, latent_dim=12, content_channels=9)
         for changes, message in (
-            (dict(mask_mode="onthefly"), "fixed or learned"),
+            (dict(mask_mode="onthefly"), "fixed, learned or learned_size"),
             (dict(mask_mode="learned", content_channels=12), "style units"),
             (dict(mask_mode="learned", proj_dim=4), "proj_dim=0"),
             (dict(mask_mode="learned", mask_init_gap=-1), "finite and nonnegative"),
@@ -376,6 +376,141 @@ class RunTests(unittest.TestCase):
         self.assertEqual(floor["content_mask"]["content_units"], list(range(9)))
         self.assertNotEqual(trained["content_mask"]["logits"], floor["content_mask"]["logits"])
         self.assertIn("val/loss", trained)
+
+
+class LearnedSizeTests(unittest.TestCase):
+    """--mask-mode learned_size: one gate per unit, so the number of content units is learned too."""
+
+    def setUp(self):
+        self.addCleanup(torch.set_num_threads, torch.get_num_threads())
+        torch.set_num_threads(1)
+        torch.manual_seed(17)
+
+    @staticmethod
+    def config(*argv, **changes):
+        cfg = vars(trainer.parse_args([*TINY, "--mask-mode", "learned_size", "--mask-size-weight", "0.05", *argv]))
+        cfg.update(changes)
+        return cfg
+
+    def rejects(self, argv):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            trainer.parse_args(argv)
+
+    def test_flag_rules(self):
+        args = trainer.parse_args(
+            TINY + ["--mask-mode", "learned_size", "--mask-size-weight", "0", "--content-channels", "12"]
+        )
+        self.assertEqual((args.mask_mode, args.mask_size_weight, args.content_channels), ("learned_size", 0.0, 12))
+        size = TINY + ["--mask-mode", "learned_size"]
+        for argv in (
+            size,
+            size + ["--mask-size-weight", "-1"],
+            size + ["--mask-size-weight", "nan"],
+            size + ["--mask-size-weight", "0.1", "--mask-init-gap", "0"],
+            size + ["--mask-size-weight", "0.1", "--contrastive-loss-type", "barlow_twins"],
+            size + ["--mask-size-weight", "0.1", "--contrastive-proj-dim", "8"],
+            size + ["--mask-size-weight", "0.1", "--separate-spatial-readout", "--patch-loss-weight", "1"],
+            LEARNED + ["--mask-size-weight", "0.1"],
+            TINY + ["--mask-size-weight", "0.1"],
+        ):
+            with self.subTest(argv=argv[len(TINY) :]):
+                self.rejects(argv)
+
+    def test_selection_is_the_positive_gates_and_never_empty(self):
+        model = build_model(self.config(), "cpu")
+        self.assertEqual(model.content_units(), list(range(9)))
+        with torch.no_grad():
+            model.mask_logits[[1, 4]] = -1.0
+            model.mask_logits[[10, 11]] = 0.5
+        units = [0, 2, 3, 5, 6, 7, 8, 10, 11]
+        self.assertEqual(model.content_units(), units)
+        self.assertEqual(model.unit_split(12), (units, [1, 4, 9]))
+        with torch.no_grad():
+            out = model(images(), pool_only=True, n_views=2)
+        self.assertEqual(out[3], [units])
+        self.assertEqual(torch.nonzero(out[6][0][0]).flatten().tolist(), units)
+        state = trainer.mask_state(model)
+        self.assertEqual((state["content_size"], state["margin"]), (9, 0.5))
+        self.assertAlmostEqual(state["expected_size"], float(torch.sigmoid(model.mask_logits).sum()), places=5)
+        with torch.no_grad():
+            model.mask_logits.fill_(-1.0)
+            model.mask_logits[7] = -0.5
+        self.assertEqual(model.content_units(), [7])  # all gates off: the strongest unit stays content
+        self.assertEqual(trainer.effective_rank(torch.randn(10, 1)), 1.0)
+
+    def test_draws_gate_each_unit_and_the_objective_charges_for_size(self):
+        cfg = self.config()
+        model, args, x = build_model(cfg, "cpu").train(), SimpleNamespace(**cfg), images()
+        draws = torch.stack([model.sample_content_mask()[0] for _ in range(200)]).detach()
+        self.assertTrue(((draws > 0) & (draws < 1)).all())
+        self.assertGreater(draws.sum(1).std(), 0.1)  # unlike top-k, the drawn size varies
+        hard = model.sample_content_mask(hard=True)
+        torch.testing.assert_close(hard, hard.round(), atol=1e-6, rtol=0)
+        self.assertTrue(hard.requires_grad)
+        pooled, total, terms = trainer.training_objective(model, x, args, *CRITERIA)
+        torch.testing.assert_close(terms["mask_size"], torch.sigmoid(model.mask_logits).sum())
+        torch.testing.assert_close(total, terms["global"] + 0.05 * terms["mask_size"])
+        total.backward()
+        self.assertTrue((model.mask_logits.grad != 0).all())
+        model.eval()
+        _, _, terms = trainer.training_objective(model, x, args, *CRITERIA)
+        self.assertIn("mask_size", terms)  # the held-out objective is the training objective
+        self.assertNotIn("mask_leak", terms)
+
+    def test_gates_find_the_shared_units_from_too_few_and_too_many(self):
+        """Fixed toy features, logits only: 9 shared units, 2 copies of the first, 5 per-view noise units.
+
+        From 4 or 14 starting units the gates settle on the 9 shared units. On frozen features the
+        noise and the copies do not help, so any small weight works here; in training the encoder can
+        fill any open unit, which is what a weight sweep on real runs has to test.
+        """
+        cfg = self.config(latent_dim=16)
+        args = SimpleNamespace(**cfg)
+        g = torch.Generator().manual_seed(100)
+        shared = torch.randn(64, 9, generator=g) * torch.linspace(1.0, 0.3, 9)
+        views = []
+        for _ in range(2):
+            view = torch.empty(64, 16)
+            view[:, :9] = shared + 0.1 * torch.randn(64, 9, generator=g)
+            view[:, 9:11] = shared[:, :1] + 0.1 * torch.randn(64, 2, generator=g)
+            view[:, 11:] = torch.randn(64, 5, generator=g)
+            views.append(view)
+        pooled = torch.cat(views)
+        for start in (4, 14):
+            with self.subTest(start=start):
+                torch.manual_seed(0)
+                model = build_model({**cfg, "content_channels": start}, "cpu").train()
+                optimizer = torch.optim.Adam([model.mask_logits], lr=0.05)
+                for _ in range(2000):
+                    mask = model.sample_content_mask()
+                    loss = trainer.contrastive_loss(pooled, model, args, *CRITERIA, mask=mask)
+                    loss = loss + 0.01 * model.expected_content_size()
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                self.assertEqual(model.content_units(), list(range(9)))
+
+    def test_synthetic_run_records_the_learned_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = [*TINY, "--mask-mode", "learned_size", "--mask-size-weight", "0.05", "--mask-lr-scale", "1000"]
+            argv += ["--out-dir", tmp, "--model-id", "size", "--device", "cpu", "--batch-size", "2"]
+            argv += ["--train-steps", "2", "--eval-every", "2", "--log-every", "1", "--num-train-samples", "8"]
+            argv += ["--num-val-samples", "20", "--no-cache", "--synthetic-clean-content"]
+            with patch.object(sys, "argv", ["trainer", *argv]), patch.object(
+                trainer.dci, "compute_dci_synthetic", return_value={}
+            ), patch.object(trainer.dci, "flatten_dci_results", return_value={}), contextlib.redirect_stdout(
+                io.StringIO()
+            ) as output:
+                trainer.main()
+            run, text = Path(tmp) / "size", output.getvalue()
+            self.assertIn("content mask: learned size of at most 12 units", text)
+            self.assertIn("| content size ", text)
+            floor = json.loads((run / "dci_step0.json").read_text())["content_mask"]
+            trained = json.loads((run / "dci_step2.json").read_text())["content_mask"]
+            progress = json.loads((run / "training_progress.json").read_text())
+        self.assertEqual((floor["content_size"], floor["content_units"]), (9, list(range(9))))
+        self.assertIn("expected_size", trained)
+        self.assertIn("mask_size_weighted", progress["last_loss_terms"])
 
 
 class LauncherTests(unittest.TestCase):

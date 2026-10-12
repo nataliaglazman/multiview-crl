@@ -1,0 +1,13 @@
+# conv_mlp_gumbel with a learned content size: one gate per unit, plus a cost per expected content
+# unit (training/ENCODER_ARCHITECTURES.md, "Learned content size"). latent_dim 16 leaves room above
+# the 9 generator factors, and content_channels is only the starting size. To check that the size is
+# learned rather than inherited, launch it from both sides and over a few weights, e.g.
+#   for k in 4 14; do for w in 0 0.01 0.03; do
+#     python scripts/launch.py experiments/encoder/conv_mlp_learned_size.yaml --cluster slurm_bio \
+#       --set content_channels=$k mask_size_weight=$w; done; done
+_base_: encoder/conv_mlp_gumbel
+tag: conv_mlp_size_w{mask_size_weight}_k{content_channels}_s{seed}
+mask_mode: learned_size
+mask_size_weight: 0.01
+latent_dim: 16
+content_channels: 9

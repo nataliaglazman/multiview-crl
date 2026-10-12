@@ -12,7 +12,9 @@ pooling (``models.attention_pool``). Defaults preserve existing checkpoints.
 
 The first ``content_channels`` units are the content block, the rest are style.
 With ``mask_mode="learned"`` a top-k Gumbel-softmax mask over learnable per-unit logits
-chooses which ``content_channels`` units are content instead (``content_units``).
+chooses which ``content_channels`` units are content instead (``content_units``). With
+``mask_mode="learned_size"`` each unit has its own gate, so the number of content units is
+learned too; ``content_channels`` is then only the starting size.
 An optional lesion branch (``models.keypoint_pool``) appends ``3 * lesion_keypoints``
 keypoint coordinates AFTER the style units of the global code; the content mask marks
 them as content, so the DCI probes score them with the content block.
@@ -77,16 +79,20 @@ class MultiviewConvEncoder(HelperModule):
         assert (
             0 < content_channels <= latent_dim
         ), f"content_channels ({content_channels}) must be in (0, latent_dim={latent_dim}]"
-        if mask_mode not in ("fixed", "learned"):
-            raise ValueError(f"mask_mode must be fixed or learned, got {mask_mode!r}")
+        if mask_mode not in ("fixed", "learned", "learned_size"):
+            raise ValueError(f"mask_mode must be fixed, learned or learned_size, got {mask_mode!r}")
         if mask_mode == "learned" and content_channels == latent_dim:
             raise ValueError("A learned content mask needs style units to choose from: content_channels < latent_dim")
-        if mask_mode == "learned" and proj_dim != 0:
+        if mask_mode != "fixed" and proj_dim != 0:
             raise ValueError("A learned content mask requires proj_dim=0: the projector reads a fixed set of units")
+        if mask_mode == "learned_size" and separate_spatial_readout:
+            raise ValueError("A learned content size cannot drive the separate spatial head, which has a fixed width")
         if not 0 <= mask_init_gap < float("inf"):
             raise ValueError("mask_init_gap must be finite and nonnegative")
-        if mask_mode != "learned" and mask_init_gap != 4.0:
-            raise ValueError("mask_init_gap only applies with mask_mode='learned'")
+        if mask_mode == "learned_size" and mask_init_gap == 0:
+            raise ValueError("mask_mode='learned_size' needs a positive mask_init_gap: a zero logit is neither side")
+        if mask_mode == "fixed" and mask_init_gap != 4.0:
+            raise ValueError("mask_init_gap only applies with a learned mask_mode")
         self.mask_mode = mask_mode
         self.mask_init_gap = float(mask_init_gap)
         self.in_channels = in_channels
@@ -207,8 +213,10 @@ class MultiviewConvEncoder(HelperModule):
         # to the first units), so the untrained floor is unchanged.
         # Only the lesion entries of content_mask are read in this mode. torch.full draws no
         # random numbers, so every weight matches the fixed model from the same seed.
+        # "learned_size" starts from the same logits, but reads each one as its own gate: a unit
+        # is content while its logit is positive, so the first content_channels start as content.
         self.mask_logits = None
-        if mask_mode == "learned":
+        if mask_mode != "fixed":
             logits = torch.full((latent_dim,), -self.mask_init_gap / 2)
             logits[:content_channels] = self.mask_init_gap / 2
             self.mask_logits = nn.Parameter(logits)
@@ -442,13 +450,24 @@ class MultiviewConvEncoder(HelperModule):
         """The latent units read as content, ascending.
 
         The first ``content_channels`` under the fixed split; with a learned mask, the units with
-        the ``content_channels`` largest logits (ties go to the lower unit). This is the
+        the ``content_channels`` largest logits (ties go to the lower unit); with a learned size,
+        the units whose logit is positive, or the single largest if none is. This is the
         selection every evaluation reads; training samples around it (``sample_content_mask``).
         """
         if self.mask_logits is None:
             return list(range(self.content_channels))
-        order = torch.sort(self.mask_logits.detach(), descending=True, stable=True).indices
+        logits = self.mask_logits.detach()
+        if self.mask_mode == "learned_size":
+            units = torch.nonzero(logits > 0).flatten().tolist()
+            return units or [int(torch.argmax(logits))]
+        order = torch.sort(logits, descending=True, stable=True).indices
         return sorted(order[: self.content_channels].tolist())
+
+    def expected_content_size(self) -> torch.FloatTensor:
+        """Differentiable expected number of content units under a learned size: the sum of the gates' probabilities."""
+        if self.mask_mode != "learned_size":
+            raise ValueError("Only mask_mode='learned_size' learns the content size")
+        return torch.sigmoid(self.mask_logits).sum()
 
     def unit_split(self, width: int) -> Tuple[List[int], List[int]]:
         """(content, style) unit indices of an output with ``width`` units.
@@ -483,6 +502,10 @@ class MultiviewConvEncoder(HelperModule):
         cosine loss that gradient is exactly zero for a unit the draw zeroed in both views, so such a
         unit learns only when a draw happens to include it. In eval mode, the deterministic selection
         ``content_units`` names, so held-out losses use what is scored.
+
+        Under ``learned_size`` each unit draws its own gate instead, a binary-Concrete sample
+        ``sigmoid(logit + logistic noise)`` (tau 1), so a draw can hold any number of units;
+        ``hard`` rounds it at 0.5 with the same straight-through gradient.
         """
         if self.mask_logits is None:
             return None
@@ -490,6 +513,12 @@ class MultiviewConvEncoder(HelperModule):
             mask = torch.zeros_like(self.mask_logits.detach())
             mask[self.content_units()] = 1.0
             return mask.unsqueeze(0)
+        if self.mask_mode == "learned_size":
+            uniform = torch.rand_like(self.mask_logits).clamp(1e-6, 1 - 1e-6)
+            gates = torch.sigmoid(self.mask_logits + uniform.log() - (1 - uniform).log()).unsqueeze(0)
+            if not hard:
+                return gates
+            return (gates > 0.5).to(gates.dtype) - gates.detach() + gates
         from utils.utils import topk_gumbel_softmax
 
         return topk_gumbel_softmax(k=self.content_channels, logits=self.mask_logits.unsqueeze(0), tau=1.0, hard=hard)

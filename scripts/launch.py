@@ -770,8 +770,11 @@ def _encoder_env(config: dict) -> dict[str, str]:
 
 
 def runai_job_name(tag: str) -> str:
-    """Run:ai job names allow lowercase letters, digits and hyphens: the tag with '_' -> '-'."""
-    name = str(tag).replace("_", "-").lower()
+    """Run:ai job names allow lowercase letters, digits and hyphens: the tag with '_' -> '-' and '.' -> 'p'.
+
+    So a weight in a tag survives: ``conv_mlp_size_w0.01_k9_s42`` -> ``conv-mlp-size-w0p01-k9-s42``.
+    """
+    name = str(tag).replace("_", "-").replace(".", "p").lower()
     if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", name) or len(name) > 63:
         print(f"Error: tag {tag!r} gives Run:ai job name {name!r}, which is not a valid name", file=sys.stderr)
         sys.exit(1)

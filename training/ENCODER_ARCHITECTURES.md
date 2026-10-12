@@ -344,3 +344,61 @@ and `adni_gumbel.yaml`, or `--set mask_mode=learned mask_lr_scale=10` on any exp
   `score_checkpoint.encode_blocks` and the spatial, normalisation, generalisation and
   modality-gap audits read `content_units` / `unit_split`. Fixed-split checkpoints
   score exactly as before.
+
+## Learned content size
+
+`--mask-mode learned_size --mask-size-weight <w>` learns how many units are content, as well as
+which ones.
+
+- **Gates.** Each latent unit keeps one logit, but reads it as its own gate. A training draw is a
+  binary-Concrete sample per unit, `sigmoid(logit + logistic noise)` (tau 1), so unlike the top-k
+  mask a draw can hold any number of units. `--mask-estimator straight_through` rounds each gate
+  at 0.5 with a straight-through gradient. Evaluation reads the units with a positive logit, or
+  the single largest if none is positive. `--content-channels` is only the starting size: the
+  logits start at +/- half of `--mask-init-gap`, so step 0 is still the fixed split.
+- **Cost.** The loss adds `w` times the expected number of content units, the sum of the gates'
+  probabilities. A unit stays content only while it lowers the InfoNCE by more than `w`. InfoNCE
+  on its own favours more content units, so `w` decides where the size settles. Read one run's
+  size as the size at that `w`, not as the size of the data.
+- **What to look for.** Look for a range of `w` over which the learned size holds steady from both
+  a too-small and a too-large start. That plateau is the evidence for a natural size.
+- **Toy check** (`tests/test_encoder_gumbel_mask.py`). The features are fixed, and only the logits
+  train. They hold 9 shared units of decreasing strength, 2 copies of the first and 5 per-view
+  noise units.
+  - From 4 or from 14 starting units, every run settled on 9 units for `w` from 0 to 0.03 (2 seeds,
+    gate temperatures 0.5, 0.67 and 1). Mostly these were the 9 shared units; from 14, one seed
+    sometimes kept a copy of the strongest factor in place of the weakest shared unit, which has
+    strength 0.3.
+  - Across those temperatures, the size falls to 7–9 at `w` 0.1 and to 2–7 at 0.3, and no unit
+    survives at 1.
+  - Noise units were always dropped.
+  - Because the features are frozen, even `w` 0 works: noise and copies do not lower the InfoNCE.
+    In training the encoder can make any open unit useful, for example as a finer split of a
+    factor. So `w` 0 may keep growing, and the weight sweep below is the real test.
+- **Synthetic test.** `experiments/encoder/conv_mlp_learned_size.yaml` is `conv_mlp_gumbel`'s
+  causal lesion recipe with a 16-unit encoding, which leaves room above the 9 factors. Start
+  from both sides:
+
+  ```bash
+  for k in 4 14; do for w in 0 0.01 0.03; do
+      python scripts/launch.py experiments/encoder/conv_mlp_learned_size.yaml --cluster slurm_bio \
+          --set content_channels=$k mask_size_weight=$w
+  done; done
+  ```
+
+  Runs are tagged `conv_mlp_size_w<w>_k<k>_s<seed>` (Run:ai job names write the decimal point as
+  `p`). The generator has 9 content factors, but the lesion's x/y/z barely reach a GAP code (the
+  lesion branch carries them separately). The size the global code can use may therefore be
+  nearer 6. Compare the learned size with the per-factor R² of the fixed-size reference
+  (`conv_mlp_gumbel`, 9 units), not with 9 alone.
+- **Outputs.** Log lines add `content size N (expected X)`. TensorBoard adds `mask/content_size` and
+  `mask/expected_size`. The `content_mask` JSON entries add `content_size` and `expected_size`,
+  and the margin becomes the smallest |logit|, how close the nearest gate is to flipping. The loss
+  terms add `mask_size` and `mask_size_weighted`. The held-out objective includes them too, so
+  `val_loss` selection pays the same cost.
+- **Not combined with:** Barlow Twins, `--contrastive-proj-dim`, `--separate-spatial-readout` (its
+  head has a fixed width) or `--mask-init-gap 0`. `--content-channels` may equal `--latent-dim`,
+  which starts with every unit on and prunes.
+- **On ADNI** there is no true size: use `--set mask_mode=learned_size mask_size_weight=0.01` on
+  `adni.yaml` with a tag of its own. Judge it on held-out retrieval and the probes against fixed
+  sizes.
