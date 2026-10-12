@@ -1665,6 +1665,7 @@ def main(args):
                 "synthetic_n_style": getattr(args, "synthetic_n_style", 3),
                 "synthetic_style_scale": getattr(args, "synthetic_style_scale", 1.0),
                 "synthetic_content_scale": getattr(args, "synthetic_content_scale", 1.0),
+                "synthetic_temporal_sigma": getattr(args, "synthetic_temporal_sigma", 0.18),
                 "synthetic_normalize": getattr(args, "synthetic_normalize", "per_sample"),
                 "synthetic_style_alignment_pairs": (
                     getattr(args, "style_contrastive_mode", "cosine") == "within_modality"

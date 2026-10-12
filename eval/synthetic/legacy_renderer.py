@@ -200,6 +200,7 @@ def use_legacy_renderer(dataset, verify=True):
         "content_squash": ("auto",),
         "cortex_parameterization": ("additive",),
         "center_local_deformations": (False,),
+        "temporal_sigma": (0.18,),
         "identifiable_ventricle": (False,),
         "lesion_radius": (0.1,),
         "content_amp_scale": (None,),

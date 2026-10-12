@@ -284,6 +284,7 @@ def build_synthetic_test_set(args, num_samples=None, cache=True, causal=None, sp
         synthetic_lesion_t1_value=getattr(args, "synthetic_lesion_t1_value", 0.4),
         synthetic_cortex_parameterization=getattr(args, "synthetic_cortex_parameterization", "additive"),
         synthetic_center_local_deformations=getattr(args, "synthetic_center_local_deformations", False),
+        synthetic_temporal_sigma=getattr(args, "synthetic_temporal_sigma", 0.18),
     )
 
 

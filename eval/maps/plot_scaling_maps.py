@@ -783,6 +783,7 @@ def generator_args(cli):
                 lesion_intensity=getattr(a, "synthetic_lesion_intensity", "fixed"),
                 cortex_parameterization=getattr(a, "synthetic_cortex_parameterization", "additive"),
                 center_local_deformations=bool(getattr(a, "synthetic_center_local_deformations", False)),
+                temporal_sigma=getattr(a, "synthetic_temporal_sigma", 0.18),
             ),
             a,
         )
@@ -807,6 +808,7 @@ def generator_args(cli):
             lesion_radius=cli.lesion_radius,
             cortex_parameterization=cli.cortex_parameterization,
             center_local_deformations=cli.center_local_deformations,
+            temporal_sigma=cli.temporal_sigma,
         ),
         None,
     )
@@ -1073,6 +1075,7 @@ def main():
         "--cortex-parameterization", default="additive", choices=["additive", "nested", "midsurface", "patterned"]
     )
     ap.add_argument("--center-local-deformations", action="store_true")
+    ap.add_argument("--temporal-sigma", type=float, default=0.18)
     cli = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 

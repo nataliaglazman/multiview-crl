@@ -247,6 +247,7 @@ def main():
                     "synthetic_lesion_intensity",
                     "synthetic_cortex_parameterization",
                     "synthetic_center_local_deformations",
+                    "synthetic_temporal_sigma",
                 )
                 if hasattr(args_, k)
             },

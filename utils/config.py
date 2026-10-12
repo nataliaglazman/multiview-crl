@@ -184,6 +184,14 @@ def parse_args() -> argparse.ArgumentParser:
         "Measure with: python -m eval.synthetic.generator_defects --tests degeneracy.",
     )
     parser.add_argument(
+        "--synthetic-temporal-sigma",
+        type=float,
+        default=0.18,
+        help="Positive Gaussian width of temporal atrophy in [-1,1] coordinates. Smaller values "
+        "localize z_content[6] around the same bilateral centres without changing its strength coefficient. "
+        "0.18 reproduces existing runs; try 0.12 or 0.10 for a smaller region.",
+    )
+    parser.add_argument(
         "--synthetic-center-local-deformations",
         action="store_true",
         help="Subtract the DC component of the temporal-atrophy bump over the nominal brain. A "

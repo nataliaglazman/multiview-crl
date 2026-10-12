@@ -698,6 +698,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_lesion_t1_value=0.4,
         synthetic_style_alignment_pairs=False,
         synthetic_shared_gain_bias=False,
+        synthetic_temporal_sigma=0.18,
         **kwargs,
     ):
         super().__init__()
@@ -770,6 +771,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             lesion_placement=synthetic_lesion_placement,
             cortex_parameterization=synthetic_cortex_parameterization,
             center_local_deformations=synthetic_center_local_deformations,
+            temporal_sigma=synthetic_temporal_sigma,
             lesion_intensity=synthetic_lesion_intensity,
             lesion_target=synthetic_lesion_target,
             lesion_count=synthetic_lesion_count,

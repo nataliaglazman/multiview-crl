@@ -121,6 +121,7 @@ def _build_dataset(args, normalize=None):
         synthetic_lesion_intensity=getattr(args, "lesion_intensity", "fixed"),
         synthetic_cortex_parameterization=args.cortex_parameterization,
         synthetic_center_local_deformations=args.center_local_deformations,
+        synthetic_temporal_sigma=getattr(args, "temporal_sigma", 0.18),
     )
 
 
@@ -523,6 +524,7 @@ def main():
         "--cortex-parameterization", default="additive", choices=["additive", "nested", "midsurface", "patterned"]
     )
     p.add_argument("--center-local-deformations", action="store_true")
+    p.add_argument("--temporal-sigma", type=float, default=0.18)
     args = p.parse_args()
 
     if args.preset == "flagship":

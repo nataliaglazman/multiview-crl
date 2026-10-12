@@ -434,6 +434,13 @@ def build_parser(description=None):
     p.add_argument("--synthetic-style-scale", type=float, default=1.0)
     p.add_argument("--synthetic-content-scale", type=float, default=1.0)
     p.add_argument(
+        "--synthetic-temporal-sigma",
+        type=float,
+        default=0.18,
+        help="Positive Gaussian width of temporal atrophy in [-1,1] coordinates. Smaller values "
+        "localize z_content[6] without changing its strength coefficient; 0.18 reproduces old runs",
+    )
+    p.add_argument(
         "--synthetic-lesion-placement",
         choices=("legacy", "wm_interior"),
         default="legacy",
@@ -664,6 +671,8 @@ def parse_args(argv=None, description=None):
         p.error("--deterministic-warn-only requires --deterministic")
     if not 0 < args.synthetic_lesion_radius < float("inf"):
         p.error("--synthetic-lesion-radius must be finite and positive")
+    if not 0 < args.synthetic_temporal_sigma < float("inf"):
+        p.error("--synthetic-temporal-sigma must be finite and positive")
     if args.synthetic_lesion_target == "burden":
         if args.synthetic_lesion_placement != "wm_interior":
             p.error("--synthetic-lesion-target burden needs --synthetic-lesion-placement wm_interior")

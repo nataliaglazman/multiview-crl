@@ -176,6 +176,7 @@ class PseudoMRIRenderer(nn.Module):
         lesion_count=4,
         lesion_t1_value=0.4,
         sulcal_mode="corrugation",
+        temporal_sigma=0.18,
     ):
         super().__init__()
         self.res = res
@@ -248,6 +249,9 @@ class PseudoMRIRenderer(nn.Module):
             )
         self.cortex_parameterization = cortex_parameterization
         self.center_local_deformations = center_local_deformations
+        if not np.isfinite(temporal_sigma) or temporal_sigma <= 0:
+            raise ValueError(f"temporal_sigma must be finite and positive, got {temporal_sigma!r}")
+        self.temporal_sigma = float(temporal_sigma)
         # When True, the ventricle is made recoverable: larger effect size, read off
         # the UNdeformed radius (no gyral-field swamping), and the fissure gets its own
         # tissue label so "total CSF" is no longer fissure-dominated. Default False =
@@ -550,7 +554,8 @@ class PseudoMRIRenderer(nn.Module):
         tw_x = torch.abs(x_coords) - 0.30  # lateral lobes at |x| ≈ 0.30
         tw_y = y_coords - 0.05
         tw_z = z_coords + 0.35  # inferior
-        temporal_weight = torch.exp(-(tw_x**2 + tw_y**2 + tw_z**2) / (2 * 0.18**2))
+        # Width controls spatial extent independently of the z6 strength below.
+        temporal_weight = torch.exp(-(tw_x**2 + tw_y**2 + tw_z**2) / (2 * self.temporal_sigma**2))
         if self.center_local_deformations:
             # A strictly-positive bump has a DC component, and a uniform radial offset IS
             # brain_size — exactly the confound sample_gp_field centres its fields to avoid
@@ -856,6 +861,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         lesion_count=4,
         lesion_t1_value=0.4,
         shared_gain_bias=False,
+        temporal_sigma=0.18,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -1006,6 +1012,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 lesion_placement=lesion_placement,
                 cortex_parameterization=cortex_parameterization,
                 center_local_deformations=center_local_deformations,
+                temporal_sigma=temporal_sigma,
                 lesion_intensity=lesion_intensity,
                 lesion_target=lesion_target,
                 lesion_count=lesion_count,

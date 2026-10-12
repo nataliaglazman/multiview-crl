@@ -20,6 +20,27 @@ Each topic's write-ups (`*.md`) live next to its code.
 | `plots/` | Figure scripts that read saved JSON and never re-score. |
 | `notebooks/` | Analysis notebooks (they add `../..` to `sys.path`). |
 
+## Temporal atrophy width
+
+`--synthetic-temporal-sigma 0.12` (or YAML `synthetic_temporal_sigma: 0.12`)
+narrows the bilateral temporal-atrophy Gaussian. The default `0.18` preserves
+existing images; `0.10` is narrower still. This changes spatial extent while
+leaving the strength coefficient and centres fixed. With local-deformation
+centring enabled, a small compensating deformation still extends elsewhere.
+At small widths, fewer tissue boundaries are reached, so the visible effect
+and total image signal also decrease.
+
+Render matched T1/FLAIR slices and difference maps using the actual generator:
+
+```bash
+python -m eval.synthetic.preview_temporal_atrophy --out-dir out/temporal_width
+```
+
+The preview holds every other latent and acquisition seed fixed, compares
+`z6=0` with `z6=1` at widths `0.18`, `0.12`, and `0.10`, and saves raw volumes,
+tissue maps and comparison settings. Add `--center-local-deformations` to
+inspect the compensation, or `--sigmas 0.18 0.14 0.12` to choose other widths.
+
 ## Removed scripts
 
 Deleted in commit `8e1341c`; recover any with

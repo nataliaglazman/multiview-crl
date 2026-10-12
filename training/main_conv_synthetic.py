@@ -82,6 +82,7 @@ def make_dataset(args, mode, num_samples):
         synthetic_n_style=args.n_style,
         synthetic_style_scale=args.synthetic_style_scale,
         synthetic_content_scale=args.synthetic_content_scale,
+        synthetic_temporal_sigma=getattr(args, "synthetic_temporal_sigma", 0.18),
         synthetic_n_deformation_grid=args.synthetic_n_deformation_grid,
         synthetic_n_fissure_grid=args.synthetic_n_fissure_grid,
         synthetic_hierarchical_content=args.synthetic_hierarchical_content,
