@@ -656,7 +656,9 @@ class PseudoMRIRenderer(nn.Module):
     # missing components simply default to "no modulation".
     N_STYLE_COMPONENTS = 3
 
-    def render_modality(self, tissue_map, lesion_load, z_style, modality, view_seed, device, noise_seed=None):
+    def render_modality(
+        self, tissue_map, lesion_load, z_style, modality, view_seed, device, noise_seed=None, lesion_contrast_scale=1.0
+    ):
         """Render acquisition effects; optionally redraw noise while preserving the bias field.
 
         With noise_seed=None the original RNG sequence is unchanged. A separate
@@ -692,6 +694,12 @@ class PseudoMRIRenderer(nn.Module):
         # this is exactly the old torch.where, so sphere mode is unchanged.
         lesion_load = lesion_load.to(volume.dtype)
         lesion_value = lesion_int * gain + bias if self.lesion_intensity == "styled" else lesion_int
+        if not np.isfinite(lesion_contrast_scale) or lesion_contrast_scale <= 0:
+            raise ValueError("lesion_contrast_scale must be finite and positive")
+        if lesion_contrast_scale != 1.0:
+            lesion_value = volume + lesion_contrast_scale * (lesion_value - volume)
+            if bool((lesion_value[lesion_load > 0] < 0).any()):
+                raise ValueError("Lesion contrast scaling would create negative pre-Rician intensities")
         volume = (1.0 - lesion_load) * volume + lesion_load * lesion_value
 
         bias_field = 1.0 + self._seeded_noise(scale=4, gen=gen, device=device) * 0.15 * self.style_scale
