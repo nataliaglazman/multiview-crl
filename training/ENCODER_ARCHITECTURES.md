@@ -298,9 +298,15 @@ and `adni_gumbel.yaml`, or `--set mask_mode=learned mask_lr_scale=10` on any exp
 ```
 
 - **Selection.** Evaluation reads the k units with the largest logits
-  (`MultiviewConvEncoder.content_units`). The logits start at +2 for the first k units
-  and -2 for the rest, so the step-0 floor is the fixed split's. `torch.full` draws no
-  random numbers, so every other weight matches the fixed model from the same seed.
+  (`MultiviewConvEncoder.content_units`). `--mask-init-gap` sets their initial separation:
+  the first k logits start at `+gap/2`, the rest at `-gap/2`. The default `4` preserves
+  `+2/-2`; `--mask-init-gap 1` gives `+0.5/-0.5` and more weight to excluded units in
+  relaxed training draws. Any finite nonnegative gap is accepted. At `0` all logits
+  start tied, and evaluation's stable ordering still selects the first k units.
+  Every gap preserves that initial evaluation selection and consumes no extra random
+  draws, so the step-0 floor and every other weight match the fixed model from the
+  same seed. The option affects fresh initialization only: checkpoint loading restores
+  the saved logits. Older settings without the key use the default gap of 4.
 - **One mask for both views.** The readout head that produces the units is shared, so
   unit i is the same unit in either view. The VQ-VAE trainer's `learned` mode gives each
   view its own logits under `--separate-encoders`; this one does not.
@@ -315,11 +321,12 @@ and `adni_gumbel.yaml`, or `--set mask_mode=learned mask_lr_scale=10` on any exp
   straight-through in 0/10. Relaxed draws give left-out units a small weight in training
   (about 0.06 each at the start), and that shrinks as the logits separate.
 - **Logit learning rate.** `--mask-lr-scale` multiplies `--lr` for the logits, which get
-  no weight decay. Adam moves a logit by about its lr per step at most, and the content and
-  style logits start 4 apart. A unit can therefore change sides only once
-  `lr x scale x steps` exceeds about 2. At the trainer's default scale of 1, that budget is
-  1 for the encoder recipes (lr 1e-4, 10k steps), so the two Gumbel experiments set 10. The
-  trainer prints a NOTE when the budget is 2 or less.
+  no weight decay. Compare `lr x scale x steps` to half the initial gap as a rough
+  movement scale, not a bound on Adam's history-dependent updates. At the default gap
+  of 4, scale 1 gives a budget of 1 for the encoder recipes (lr 1e-4, 10k steps), so the
+  two Gumbel experiments set 10. The trainer prints a NOTE when the budget is at most
+  half the configured gap. To reduce the initial preference without changing the LR,
+  use `--mask-init-gap 1` directly or `--set mask_init_gap=1` with the YAML launcher.
 - **Not combined with:** Barlow Twins (per-unit standardisation divides the mask back
   out, so the logits get no gradient), `--contrastive-proj-dim` (the projector reads a
   fixed set of units), or `--content-channels` equal to `--latent-dim`. The separate

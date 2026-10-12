@@ -1041,6 +1041,7 @@ def main():
         lesion_detector=args.lesion_detector,
         lesion_branch_frozen=args.lesion_branch_frozen,
         mask_mode=args.mask_mode,
+        mask_init_gap=args.mask_init_gap,
     ).to(device)
     if model.normative is not None:
         # The first training subjects, in order, so a run's normative model is reproducible.
@@ -1112,19 +1113,21 @@ def main():
         )
     if model.mask_logits is not None:
         mask_lr = args.lr * args.mask_lr_scale
+        half_gap = args.mask_init_gap / 2
         print(
             f"content mask: learned top-{args.content_channels} of {args.latent_dim} units, Gumbel-softmax "
             f"(tau 1, {args.mask_estimator.replace('_', '-')}), shared by both views; starts at units "
-            f"0-{args.content_channels - 1} (logits +2/-2); logit lr {mask_lr:g} (--lr x {args.mask_lr_scale:g}), "
+            f"0-{args.content_channels - 1} (logits +{half_gap:g}/-{half_gap:g}, initial gap {args.mask_init_gap:g}); "
+            f"logit lr {mask_lr:g} (--lr x {args.mask_lr_scale:g}), "
             "no weight decay",
             flush=True,
         )
         budget = mask_lr * args.train_steps
-        if budget <= 2:
+        if budget <= half_gap:
             print(
-                f"  NOTE: --lr x --mask-lr-scale x --train-steps = {budget:g}. Adam moves a logit by about its lr "
-                "per step at most, and content and style logits start 4 apart, so the evaluated selection can "
-                "hardly change in this run; raise --mask-lr-scale to let it",
+                f"  NOTE: --lr x --mask-lr-scale x --train-steps = {budget:g}, at most half the initial "
+                f"logit gap ({args.mask_init_gap:g}). The selection may move slowly; consider a larger "
+                "--mask-lr-scale or smaller --mask-init-gap. This is a heuristic; Adam updates depend on gradient history",
                 flush=True,
             )
     if model.projector is not None:

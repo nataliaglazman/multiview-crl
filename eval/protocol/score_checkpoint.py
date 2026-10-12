@@ -167,6 +167,7 @@ def build_model(cfg, device, state_dict=None):
         lesion_detector=cfg.get("lesion_detector", "shared"),
         lesion_branch_frozen=cfg.get("lesion_branch_frozen", False),
         mask_mode=cfg.get("mask_mode", "fixed"),
+        mask_init_gap=cfg.get("mask_init_gap", 4.0),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)

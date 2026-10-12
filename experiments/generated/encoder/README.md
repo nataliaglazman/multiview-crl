@@ -73,6 +73,22 @@ and spatial recovery evaluation. For a Mac run, append `--device mps` to its loc
 Its model and loader seeds are pinned to the supplied recipe; for another paired seed, use
 the YAML launcher with `--set seed=142 model_seed=142 loader_seed=10142` (data seed stays 42).
 
+To reduce the learned mask's initial preference while keeping its learning rate unchanged:
+
+```bash
+bash experiments/generated/encoder/conv_mlp_gumbel.local.sh \
+  --mask-init-gap 1 --model-id conv_mlp_gumbel_gap1_s42
+```
+
+The gap is the **total** selected-minus-excluded difference: `1` initializes at `+0.5/-0.5`;
+the default `4` keeps `+2/-2`. This applies to fresh runs. To launch on any backend or generate
+its script, use the YAML launcher, for example:
+
+```bash
+python scripts/launch.py experiments/encoder/conv_mlp_gumbel.yaml --cluster runai --generate \
+  --set mask_init_gap=1 'tag=conv_mlp_gumbel_gap1_s{seed}'
+```
+
 ## Local ADNI data
 
 The three `adni*.local.sh` scripts require your paths at runtime. For example:

@@ -180,7 +180,16 @@ def build_parser(description=None):
         "Gumbel-softmax mask over one learnable logit per unit, k = --content-channels (Yao et al. 2024's "
         "content selector; the VQ-VAE trainer's --mask-mode learned). Each training step draws a mask (see "
         "--mask-estimator); evaluation reads the k largest logits. Shared by both views, whose readout head "
-        "is shared. Starts at the fixed split (logits +2/-2)",
+        "is shared. Starts at the fixed split (logits +/- half of --mask-init-gap)",
+    )
+    p.add_argument(
+        "--mask-init-gap",
+        type=float,
+        default=4.0,
+        help="With --mask-mode learned: initial selected-minus-excluded logit gap. Selected units start at "
+        "+gap/2, excluded units at -gap/2. Default 4 reproduces +2/-2; 1 gives +0.5/-0.5. "
+        "Must be finite and nonnegative; 0 starts all logits equal (evaluation ties select the first units). "
+        "Only affects fresh initialization; loading a checkpoint restores its learned logits",
     )
     p.add_argument(
         "--mask-estimator",
@@ -198,8 +207,8 @@ def build_parser(description=None):
         type=float,
         default=1.0,
         help="With --mask-mode learned: the mask logits' learning rate is --lr times this (no weight decay). "
-        "Adam moves a logit by at most about that much per step, and the content and style logits start 4 "
-        "apart, so a unit can change sides only once --lr x this x --train-steps exceeds about 2",
+        "Compare --lr x this x --train-steps with half of --mask-init-gap as a rough movement scale. "
+        "Actual Adam updates depend on gradient history",
     )
     p.add_argument("--hidden-channels", type=int, default=64, help="conv architecture only")
     p.add_argument("--res-channels", type=int, default=32, help="conv architecture only")
@@ -662,6 +671,8 @@ def parse_args(argv=None, description=None):
         p.error("--patch-foreground-mask requires a positive --patch-loss-weight")
     if not 0 < args.patch_foreground_thresh <= 1:
         p.error("--patch-foreground-thresh must be in (0, 1]")
+    if not 0 <= args.mask_init_gap < float("inf"):
+        p.error("--mask-init-gap must be finite and nonnegative")
     if args.mask_mode == "learned":
         if args.content_channels >= args.latent_dim:
             p.error("--mask-mode learned chooses content among the latent units: --content-channels < --latent-dim")
@@ -674,8 +685,8 @@ def parse_args(argv=None, description=None):
             p.error("--mask-mode learned requires --contrastive-proj-dim 0: the projector reads a fixed set of units")
         if not 0 < args.mask_lr_scale < float("inf"):
             p.error("--mask-lr-scale must be finite and positive")
-    elif args.mask_lr_scale != 1.0 or args.mask_estimator != "relaxed":
-        p.error("--mask-lr-scale and --mask-estimator only apply with --mask-mode learned")
+    elif args.mask_lr_scale != 1.0 or args.mask_estimator != "relaxed" or args.mask_init_gap != 4.0:
+        p.error("--mask-lr-scale, --mask-estimator and --mask-init-gap only apply with --mask-mode learned")
     if args.separate_spatial_readout:
         if args.encoder_architecture == "conv" and args.conv_readout != "mlp":
             p.error("--separate-spatial-readout requires an MLP readout (--conv-readout mlp for Conv)")

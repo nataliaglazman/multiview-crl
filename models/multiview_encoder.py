@@ -72,6 +72,7 @@ class MultiviewConvEncoder(HelperModule):
         lesion_detector: str = "shared",
         lesion_branch_frozen: bool = False,
         mask_mode: str = "fixed",
+        mask_init_gap: float = 4.0,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -82,7 +83,12 @@ class MultiviewConvEncoder(HelperModule):
             raise ValueError("A learned content mask needs style units to choose from: content_channels < latent_dim")
         if mask_mode == "learned" and proj_dim != 0:
             raise ValueError("A learned content mask requires proj_dim=0: the projector reads a fixed set of units")
+        if not 0 <= mask_init_gap < float("inf"):
+            raise ValueError("mask_init_gap must be finite and nonnegative")
+        if mask_mode != "learned" and mask_init_gap != 4.0:
+            raise ValueError("mask_init_gap only applies with mask_mode='learned'")
         self.mask_mode = mask_mode
+        self.mask_init_gap = float(mask_init_gap)
         self.in_channels = in_channels
         self.latent_dim = latent_dim
         self.content_channels = content_channels
@@ -196,14 +202,15 @@ class MultiviewConvEncoder(HelperModule):
         # Training draws a top-content_channels Gumbel-softmax sample per step (relaxed, or binary
         # with a straight-through gradient); evaluation takes the largest logits. One set
         # of logits serves both views, because the readout producing these units is shared, so
-        # unit i is the same unit in either view. The +2/-2 start (models/vqvae.py's "learned"
-        # init) selects the fixed split's units at step 0, so the untrained floor is unchanged.
+        # unit i is the same unit in either view. The default gap 4 reproduces the +2/-2 start.
+        # Smaller nonnegative gaps keep the same initial evaluation selection (zero ties go
+        # to the first units), so the untrained floor is unchanged.
         # Only the lesion entries of content_mask are read in this mode. torch.full draws no
         # random numbers, so every weight matches the fixed model from the same seed.
         self.mask_logits = None
         if mask_mode == "learned":
-            logits = torch.full((latent_dim,), -2.0)
-            logits[:content_channels] = 2.0
+            logits = torch.full((latent_dim,), -self.mask_init_gap / 2)
+            logits[:content_channels] = self.mask_init_gap / 2
             self.mask_logits = nn.Parameter(logits)
 
         # --- Contrastive projection head (SimCLR/MoCo recipe) ---

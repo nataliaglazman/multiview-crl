@@ -55,6 +55,9 @@ class ParserTests(unittest.TestCase):
     def test_flags_and_their_rules(self):
         default = trainer.parse_args([])
         self.assertEqual((default.mask_mode, default.mask_lr_scale, default.mask_estimator), ("fixed", 1.0, "relaxed"))
+        self.assertEqual(default.mask_init_gap, 4.0)
+        for gap in (0.0, 1.0, 4.0):
+            self.assertEqual(trainer.parse_args(LEARNED + ["--mask-init-gap", str(gap)]).mask_init_gap, gap)
         args = trainer.parse_args(LEARNED + ["--mask-lr-scale", "10", "--mask-estimator", "straight_through"])
         self.assertEqual(
             (args.mask_mode, args.mask_lr_scale, args.mask_estimator), ("learned", 10.0, "straight_through")
@@ -68,6 +71,10 @@ class ParserTests(unittest.TestCase):
             LEARNED + ["--mask-lr-scale", "inf"],
             TINY + ["--mask-lr-scale", "10"],
             TINY + ["--mask-estimator", "straight_through"],
+            TINY + ["--mask-init-gap", "1"],
+            LEARNED + ["--mask-init-gap", "-1"],
+            LEARNED + ["--mask-init-gap", "nan"],
+            LEARNED + ["--mask-init-gap", "inf"],
         ):
             with self.subTest(argv=argv[len(TINY) :]):
                 self.rejects(argv)
@@ -99,12 +106,49 @@ class SelectionTests(unittest.TestCase):
                 torch.testing.assert_close(a[6][0], b[6][0], rtol=0, atol=0)
                 self.assertEqual(a[3], b[3])
 
+    def test_smaller_initial_gap_preserves_weights_rng_and_evaluation_selection(self):
+        legacy = config()
+        legacy.pop("mask_init_gap")  # Settings from before this option existed.
+        reference = build_model(legacy, "cpu")
+        reference_rng = torch.get_rng_state().clone()
+        self.assertEqual(trainer.mask_state(reference)["logits"], [2.0] * 9 + [-2.0] * 3)
+        with torch.no_grad():
+            expected = reference(self.x, pool_only=True, n_views=2)
+        for gap in (1.0, 0.0):
+            with self.subTest(gap=gap):
+                model = build_model(config(mask_init_gap=gap), "cpu")
+                torch.testing.assert_close(torch.get_rng_state(), reference_rng, rtol=0, atol=0)
+                info = trainer.mask_state(model)
+                self.assertEqual(info["margin"], gap)
+                self.assertEqual(info["content_units"], list(range(9)))
+                self.assertEqual(info["logits"], [gap / 2] * 9 + [-gap / 2] * 3)
+                for key, value in reference.state_dict().items():
+                    if key != "mask_logits":
+                        torch.testing.assert_close(model.state_dict()[key], value, rtol=0, atol=0)
+                with torch.no_grad():
+                    actual = model(self.x, pool_only=True, n_views=2)
+                torch.testing.assert_close(actual[2][0], expected[2][0], rtol=0, atol=0)
+                torch.testing.assert_close(actual[6][0], expected[6][0], rtol=0, atol=0)
+
+    def test_loading_a_checkpoint_restores_logits_instead_of_reinitializing_them(self):
+        trained = move_units(build_model(config(mask_init_gap=1.0), "cpu"))
+        legacy = config()
+        legacy.pop("mask_init_gap")
+        for cfg in (legacy, config(mask_init_gap=0.0)):
+            restored = build_model(cfg, "cpu", trained.state_dict())
+            self.assertEqual(restored.content_units(), MOVED)
+            torch.testing.assert_close(restored.mask_logits, trained.mask_logits, rtol=0, atol=0)
+
     def test_construction_rules(self):
         common = dict(hidden_channels=8, res_channels=4, nb_res_layers=1, latent_dim=12, content_channels=9)
         for changes, message in (
             (dict(mask_mode="onthefly"), "fixed or learned"),
             (dict(mask_mode="learned", content_channels=12), "style units"),
             (dict(mask_mode="learned", proj_dim=4), "proj_dim=0"),
+            (dict(mask_mode="learned", mask_init_gap=-1), "finite and nonnegative"),
+            (dict(mask_mode="learned", mask_init_gap=float("nan")), "finite and nonnegative"),
+            (dict(mask_mode="learned", mask_init_gap=float("inf")), "finite and nonnegative"),
+            (dict(mask_init_gap=1), "only applies"),
         ):
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, message):
                 MultiviewConvEncoder(**{**common, **changes})
@@ -285,6 +329,7 @@ class RunTests(unittest.TestCase):
     def test_synthetic_run_trains_the_logits_and_records_the_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
             argv = [*LEARNED, "--mask-lr-scale", "1000", "--out-dir", tmp, "--model-id", "gumbel"]
+            argv += ["--mask-init-gap", "1"]
             argv += ["--require-new-run", "--device", "cpu", "--batch-size", "2", "--train-steps", "2"]
             argv += ["--eval-every", "2", "--log-every", "1", "--num-train-samples", "8", "--num-val-samples", "20"]
             argv += ["--no-cache", "--synthetic-clean-content", "--synthetic-normalize", "fixed_reference"]
@@ -298,15 +343,17 @@ class RunTests(unittest.TestCase):
             run, text = Path(tmp) / "gumbel", output.getvalue()
             self.assertIn("content mask: learned top-9 of 12 units, Gumbel-softmax (tau 1, relaxed)", text)
             self.assertIn("NOTE: --lr x --mask-lr-scale x --train-steps = 0.2", text)
+            self.assertIn("logits +0.5/-0.5, initial gap 1", text)
             self.assertIn("| mask leak ", text)
             floor = json.loads((run / "dci_step0.json").read_text())["content_mask"]
             trained = json.loads((run / "dci_step2.json").read_text())["content_mask"]
-            self.assertEqual((floor["content_units"], floor["logits"]), (list(range(9)), [2.0] * 9 + [-2.0] * 3))
+            self.assertEqual((floor["content_units"], floor["logits"]), (list(range(9)), [0.5] * 9 + [-0.5] * 3))
             self.assertNotEqual(trained["logits"], floor["logits"])
             progress = json.loads((run / "training_progress.json").read_text())
             self.assertAlmostEqual(progress["content_mask"]["lr"], 0.1)
             self.assertIn("mask_leak", progress["last_loss_terms"])
             cfg = json.loads((run / "settings.json").read_text())
+            self.assertEqual(cfg["mask_init_gap"], 1.0)
             restored = build_model(cfg, "cpu", torch.load(run / "model.pt", weights_only=True))
         self.assertEqual(restored.content_units(), trained["content_units"])
         torch.testing.assert_close(restored.mask_logits.detach(), torch.tensor(trained["logits"]))

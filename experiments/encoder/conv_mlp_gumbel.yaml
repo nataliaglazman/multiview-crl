@@ -23,6 +23,8 @@ nb_res_layers: 2
 downscale_factor: 4
 no_separate_encoders: false
 mask_mode: learned
+# Selected logits +gap/2, excluded logits -gap/2; set 1.0 for +0.5/-0.5.
+mask_init_gap: 4.0
 mask_estimator: relaxed
 mask_lr_scale: 10
 

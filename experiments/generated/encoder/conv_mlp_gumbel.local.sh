@@ -61,6 +61,7 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --log-every 100 \
     --lr 0.0001 \
     --mask-estimator relaxed \
+    --mask-init-gap 4.0 \
     --mask-lr-scale 10 \
     --mask-mode learned \
     --model-seed 42 \

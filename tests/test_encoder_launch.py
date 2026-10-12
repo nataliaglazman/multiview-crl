@@ -233,6 +233,24 @@ class CommandTests(unittest.TestCase):
 
 
 class ScriptTests(unittest.TestCase):
+    def test_mask_init_gap_reaches_generated_commands_on_every_backend(self):
+        for cluster in (*CLUSTERS, "local"):
+            with self.subTest(cluster=cluster), tempfile.TemporaryDirectory() as tmp:
+                config = resolve("conv_mlp_gumbel", cluster, mask_init_gap=1.0)
+                script = Path(tmp) / "run.sh"
+                script.write_text(
+                    launch.build_encoder_script(config, cluster, ENCODER / "conv_mlp_gumbel.yaml", "regen")
+                )
+                preview = subprocess.run(
+                    ["bash", str(script), "--dry-run"],
+                    env={**os.environ, "ENCODER_PYTHON": sys.executable, "ENCODER_REPO": str(ROOT)},
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                args = encoder_args.parse_args(trainer_command(shlex.split(preview.stdout)))
+                self.assertEqual((args.mask_mode, args.mask_init_gap), ("learned", 1.0))
+
     def test_committed_scripts_are_current_and_preview_the_same_recipe_on_every_backend(self):
         """Each experiment's script is exactly what launch.py writes, so nothing was edited by hand."""
         for cluster in (*CLUSTERS, "local"):
