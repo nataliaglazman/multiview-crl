@@ -6,8 +6,10 @@ python -m training.feature_competition --help
 import argparse
 from pathlib import Path
 
-# Kept equal to training.feature_competition_data.ARMS by a test; this module avoids importing torch.
-ARMS = ("A", "B", "Bp", "C", "D")
+# Kept equal to training.feature_competition_data.ARMS and ANATOMY_FACTORS by a test; this module avoids torch.
+ARMS = ("A", "B", "Bp", "C", "D", "R", "Rp")
+PREPARE_ARMS = ("A", "B", "Bp", "C", "D")
+ANATOMY = ("brain_size", "ventricle_size", "cortical_thickness", "temporal_atrophy", "lr_asymmetry", "sulcal_widening")
 # supervised: spatial heatmap localizer (does the image hold the location?);
 # supervised_gap: the SSL encoder's own architecture trained with labels (can its GAP code carry it?).
 KINDS = ("ssl", "supervised", "supervised_gap")
@@ -23,7 +25,11 @@ def parse_args(argv=None):
         if name in ("prepare", "train", "evaluate", "curves"):
             help_text = "Arms to render" if name == "prepare" else "Arms to use (default: every arm in the bank)"
             q.add_argument(
-                "--arms", nargs="+", choices=ARMS, default=list(ARMS) if name == "prepare" else None, help=help_text
+                "--arms",
+                nargs="+",
+                choices=ARMS,
+                default=list(PREPARE_ARMS) if name == "prepare" else None,
+                help=help_text,
             )
         if name == "prepare":
             for flag, value in (
@@ -37,7 +43,19 @@ def parse_args(argv=None):
                 q.add_argument(f"--{flag}", type=int, default=value)
             q.add_argument("--radius", type=float, default=0.1)
             q.add_argument("--high-contrast", type=float, default=1.5)
-            q.add_argument("--brain-scale", type=float, default=0.5)
+            q.add_argument(
+                "--brain-scale",
+                type=float,
+                default=0.5,
+                help="Amplitude of every competitor factor: effective values lie in [-scale, scale]",
+            )
+            q.add_argument(
+                "--competitors",
+                nargs="+",
+                choices=ANATOMY,
+                default=["brain_size"],
+                help="Anatomy factors arms R and Rp vary (B, Bp and D vary brain size alone); must include brain_size",
+            )
         if name == "audit":
             q.add_argument("--noise-subjects", type=int, default=32)
             q.add_argument("--noise-repeats", type=int, default=32)
@@ -108,6 +126,10 @@ def parse_args(argv=None):
             p.error("Invalid radius, contrast (1 < k <= 1.5), brain scale or data seed")
         if max(a.train_samples, a.probe_samples, a.test_samples, a.pilot_samples) >= 10_000_000:
             p.error("Too many subjects for seed namespaces")
+        if "brain_size" not in a.competitors or len(set(a.competitors)) != len(a.competitors):
+            p.error("--competitors must be distinct and include brain_size")
+        if {"R", "Rp"} & set(a.arms) and len(a.competitors) < 2:
+            p.error("Arms R and Rp need --competitors beyond brain_size; with brain size alone they equal B and Bp")
     if a.command == "audit" and not 2 <= a.noise_repeats < 4000:
         p.error("Need 2 <= noise repeats < 4000")
     if (

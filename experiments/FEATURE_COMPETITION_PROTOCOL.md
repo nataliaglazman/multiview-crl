@@ -134,6 +134,48 @@ control, hence a maximum radius shift of 0.05 here). Record both the raw draw an
 effective value. Do not use `synthetic_content_scale=0` to remove the competitor:
 that changes multiple factors. Freeze or scale brain size alone.
 
+### Rich competitor: R and R′
+
+B tests one competitor that carries limited information: brain size alone leaves about 9% of subjects confused
+in a batch of 32, so the lesion still helps tell them apart, and in the A/B/B′ run B learned the lesion earlier
+than A. In real images many shared anatomical features together identify every subject, and the loss may then
+have no use for the lesion. R and R′ test that, on a bank of their own with lesions identical across arms:
+
+- **R**: brain size, cortical thickness and temporal atrophy, each drawn once per subject and shared by T1 and FLAIR.
+- **R′** (`Rp`): the same three factors drawn independently for each view. Every image has R's variation, but the
+  views disagree, so the loss cannot use it.
+
+Why three: every lesion position must stay inside white matter for every anatomy the factors can produce. With
+each factor's amplitude at 0.5, as for B:
+
+| Factors that vary | Lesion positions safe for every anatomy |
+| --- | --- |
+| brain size | 376 |
+| brain size + cortical thickness | 376 |
+| brain size + temporal atrophy | 158 |
+| brain size + thickness + temporal atrophy | 158 |
+| any four or more of the six | under 60 |
+| all six | 0 |
+
+With the three, each (y, z) column holds a single safe x, so the movement audit measures y and z moves only and
+records x as unmovable. Lesion-core pixels and the lesion's response are still checked to be identical to A for
+every audit subject.
+
+| If the truth is… | A | B | R | R′ |
+| --- | --- | --- | --- | --- |
+| Shared anatomy supplies the identity information instead (option 1) | learned | learned | less, or later | ≈ A |
+| Anatomy variation in the images hides the lesion | learned | learned | less | less |
+| No suppression | learned | learned | ≈ A | ≈ A |
+
+**Lesion reliance.** Every self-supervised evaluation also scores held-out matching (top-1 among batches of the
+training size) on 256 test subjects of the arm, once with their lesions and once with lesion-free twins rendered
+from the same anatomy, style, bias field and noise. In A matching without the lesion falls to chance. If R's
+matching barely drops without it, the trained code does not use the lesion to tell subjects apart: substitution,
+measured directly. The summary reports A − R and A − R′, and splits the penalty into input interference (A − R′)
+and competition through the loss (R′ − R).
+
+Run it with `scripts/feature_competition_rich.sh` (see `FEATURE_COMPETITION_RUN.md`).
+
 ### Lesion geometry must be independent of the competitor
 
 The current `wm_interior` placement maps position controls through the available

@@ -18,22 +18,28 @@ from threadpoolctl import threadpool_limits
 
 from training.feature_competition_data import (
     ARMS,
-    BRAIN_RULE,
     COMMON_ARM,
+    COMPETITOR_RULE,
     VIEWS,
     bootstrap_interval,
     file_hash,
     images,
     load_bank,
+    renderer_for,
     targets,
     write_json,
 )
-from training.feature_competition_train import build_model, run_path, torch_load
+from training.feature_competition_train import build_model, heldout_check, run_path, torch_load
 from utils.encoder_runtime import select_encoder_device
 
 # Reference arm -> arms compared with it. A-B is the competition penalty; A-Bp separates input
 # interference (competitor variation in the images) from competition through the loss (B vs Bp).
-COMPARISONS = {"A": ("B", "Bp"), "C": ("D",)}
+COMPARISONS = {"A": ("B", "Bp", "R", "Rp"), "C": ("D",)}
+# (shared arm, per-view arm): the penalty A - shared splits into input interference (A - per-view) and
+# competition through the loss (per-view - shared).
+FAMILIES = (("B", "Bp"), ("R", "Rp"))
+# Held-out test subjects scored with and without their lesion (whole batches of the training size).
+RELIANCE_SUBJECTS = 256
 # Frozen-feature readouts: the 9 content units the loss acts on, the backbone map averaged over all positions
 # (the vector the global head reads), and the map pooled to a grid. Probing the pooled vector shows what the
 # backbone has learned before the head passes it on (in the arm-A pilot it led the head by ~1,000 steps).
@@ -165,16 +171,69 @@ def evaluate(args):
     train_y, test_y = targets(root, "probe"), targets(root, "test")
     evaluator = file_hash(Path(__file__))
     split = hemisphere_split(np.load(root / "centres.npy")[:, 0])
+    ssl = args.kind == "ssl"
+    renderer, lesion_free = (renderer_for(meta, np.load(root / "centres.npy")), {}) if ssl else (None, None)
     for arm in args.arms:
         common = COMMON_ARM[arm]
         for seed in args.seeds:
             for run_view in args.views if args.kind != "ssl" else ["paired"]:
                 folder = run_path(root, args.kind, arm, seed, run_view, "std" if args.standardize_code else "")
                 for path in checkpoint_files(folder, args.checkpoint):
-                    evaluate_checkpoint(args, root, meta, device, path, arm, common, train_y, test_y, evaluator, split)
+                    evaluate_checkpoint(
+                        args,
+                        root,
+                        meta,
+                        device,
+                        path,
+                        arm,
+                        common,
+                        train_y,
+                        test_y,
+                        evaluator,
+                        split,
+                        renderer,
+                        lesion_free,
+                    )
 
 
-def evaluate_checkpoint(args, root, meta, device, path, arm, common, train_y, test_y, evaluator, split):
+@torch.no_grad()
+def lesion_reliance(model, root, meta, arm, settings, device, renderer, lesion_free):
+    """Held-out cross-view matching on this arm's test images, with and without the lesion.
+
+    The bank holds the images with lesions; their lesion-free twins (same anatomy, style, bias field and noise)
+    are rendered once per arm and cached. Matching that barely drops without the lesion means the trained code
+    does not use it to tell subjects apart, i.e. other shared features supply that information.
+    """
+    batch = settings["batch_size"]
+    count = min(RELIANCE_SUBJECTS, meta["counts"]["test"]) // batch * batch
+    if count == 0:
+        return {}
+    if arm not in lesion_free:
+        lesion_free[arm] = np.stack(
+            [
+                renderer.render(renderer.subject("test", i), arm, meta["normalization"], lesion_on=False)[0]
+                for i in range(count)
+            ]
+        )
+    standardize = bool(settings.get("standardize_code"))
+    with_lesion = heldout_check(
+        model, "ssl", images(root, "test", arm)[:count], None, batch, device, standardize=standardize
+    )
+    without = heldout_check(model, "ssl", lesion_free[arm], None, batch, device, standardize=standardize)
+    model.eval()
+    return dict(
+        top1_with_lesion=with_lesion["heldout_top1"],
+        top1_without_lesion=without["heldout_top1"],
+        loss_with_lesion=with_lesion["heldout_loss"],
+        loss_without_lesion=without["heldout_loss"],
+        chance_top1=with_lesion["chance_top1"],
+        subjects=count,
+    )
+
+
+def evaluate_checkpoint(
+    args, root, meta, device, path, arm, common, train_y, test_y, evaluator, split, renderer=None, lesion_free=None
+):
     ckpt = torch_load(path, device)
     settings = ckpt["settings"]
     if settings["bank_id"] != meta["bank_id"]:
@@ -227,9 +286,9 @@ def evaluate_checkpoint(args, root, meta, device, path, arm, common, train_y, te
                                 **metrics(test_y[:, :3], prediction, split),
                             )
                         )
-                if regime == "own" and BRAIN_RULE[arm] != "fixed":
+                if regime == "own" and COMPETITOR_RULE[arm] != "fixed":
                     # Manipulation check: is the competitor in the code? Bp's FLAIR view has its own draw.
-                    column = 4 if BRAIN_RULE[arm] == "per_view" and view == "flair" else 3
+                    column = 4 if COMPETITOR_RULE[arm] == "per_view" and view == "flair" else 3
                     prediction, _ = fit_probe(
                         train_f[view]["global"], train_y[:, column], test_f[view]["global"], "ridge"
                     )
@@ -281,6 +340,10 @@ def evaluate_checkpoint(args, root, meta, device, path, arm, common, train_y, te
                                 **metrics(test_y[:, :3], prediction, split),
                             )
                         )
+    if args.kind == "ssl" and renderer is not None:
+        reliance = lesion_reliance(model, root, meta, arm, settings, device, renderer, lesion_free)
+        if reliance:
+            rows.append(dict(regime="reliance", view="paired", **reliance))
     constant = np.broadcast_to(train_y[:, :3].mean(0), test_y[:, :3].shape)
     write_json(
         done,
@@ -403,14 +466,20 @@ def summarize(args):
     shared_keys = ("kind", "seed", "step", "regime", "view", "source", "probe")
     # R_A - R_B = (R_A - R_Bp) + (R_Bp - R_B): input interference plus competition through the loss.
     decomposition = []
-    for a in comparisons:
-        if a["pair"] != "AB" or a["r2_penalty"] is None:
-            continue
-        match = next((b for b in comparisons if b["pair"] == "ABp" and all(a[k] == b[k] for k in shared_keys)), None)
-        if match and match["r2_penalty"] is not None:
+    for shared_arm, split_arm in FAMILIES:
+        for a in comparisons:
+            if a["pair"] != "A" + shared_arm or a["r2_penalty"] is None:
+                continue
+            match = next(
+                (b for b in comparisons if b["pair"] == "A" + split_arm and all(a[k] == b[k] for k in shared_keys)),
+                None,
+            )
+            if not match or match["r2_penalty"] is None:
+                continue
             decomposition.append(
                 {
                     **{k: a[k] for k in shared_keys},
+                    "competitor": shared_arm,
                     "total_penalty": a["r2_penalty"],
                     "input_interference": match["r2_penalty"],
                     "through_loss": a["r2_penalty"] - match["r2_penalty"],
@@ -501,13 +570,27 @@ TABLE_COLUMNS = {
 }
 VIEW_COLORS = {"t1": "#2a78d6", "flair": "#eb6834"}
 # Categorical slots in fixed order for arm identity, and the readouts the arm comparison shows.
-ARM_COLORS = {"A": "#2a78d6", "B": "#eb6834", "Bp": "#1baf7a", "C": "#eda100", "D": "#e87ba4"}
+# Colour is the competitor family (none, brain size, several factors) and is fixed per arm; the per-view
+# controls B′ and R′ take their family's colour and are dashed, so every colour pair that can share a figure
+# passes the colour-blind checks.
+ARM_COLORS = {
+    "A": "#2a78d6",
+    "B": "#eb6834",
+    "Bp": "#eb6834",
+    "C": "#eda100",
+    "D": "#e87ba4",
+    "R": "#4a3aa7",
+    "Rp": "#4a3aa7",
+}
+ARM_STYLES = {arm: "--" if arm in ("Bp", "Rp") else "-" for arm in ARMS}
 ARM_LABELS = {
     "A": "A: brain size fixed",
     "B": "B: brain size shared by both views",
     "Bp": "B′: brain size drawn per view",
     "C": "C: fixed, lesion contrast ×1.5",
     "D": "D: shared, lesion contrast ×1.5",
+    "R": "R: several anatomy factors shared",
+    "Rp": "R′: the same factors drawn per view",
 }
 COMPARISON_PANELS = (
     ("global", "rbf", "9-unit code, nonlinear probe"),
@@ -550,6 +633,11 @@ def curves(args):
             readouts = [r for r in rows if r["regime"] == "common" and "mean_r2" in r]
             # Manipulation check, per view: brain size read from the code, in arms where it varies.
             competitor = {r["view"]: r["brain_size_r2"] for r in rows if r["regime"] == "competitor"}
+            reliance = next((r for r in rows if r["regime"] == "reliance"), {})
+            base.update(
+                top1_with_lesion=reliance.get("top1_with_lesion"),
+                top1_without_lesion=reliance.get("top1_without_lesion"),
+            )
             for r in readouts or [{}]:
                 records.append(
                     dict(
@@ -614,6 +702,12 @@ def print_curves(records):
             lead = f"{step:7d}  {number(at[0]['heldout_loss'], 7)}" + (
                 f" {number(at[0]['heldout_top1'], 6)}" if chance else ""
             )
+            if at[0].get("top1_without_lesion") is not None:
+                print(
+                    f"{step:7d}  test matching top-1 with lesion {at[0]['top1_with_lesion']:.2f},"
+                    f" without {at[0]['top1_without_lesion']:.2f}",
+                    flush=True,
+                )
             views = [v for v in VIEWS if any(r["view"] == v for r in at)] or [None]
             for i, view in enumerate(views):
                 cells = []
@@ -762,6 +856,7 @@ def plot_arm_comparison(records, variant, path):
         ax.plot(
             *zip(*sorted(points)),
             color=ARM_COLORS[arm],
+            linestyle=ARM_STYLES[arm],
             linewidth=line,
             marker="o",
             markersize=marker,
@@ -823,7 +918,14 @@ def plot_arm_comparison(records, variant, path):
                 ax.text(0.5, 0.5, "no evaluations", ha="center", va="center", color=MUTED, transform=ax.transAxes)
     for arm in arms:
         axes[0, 3].plot(
-            [], [], color=ARM_COLORS[arm], linewidth=line, marker="o", markersize=marker, label=ARM_LABELS[arm]
+            [],
+            [],
+            color=ARM_COLORS[arm],
+            linestyle=ARM_STYLES[arm],
+            linewidth=line,
+            marker="o",
+            markersize=marker,
+            label=ARM_LABELS[arm],
         )
     axes[0, 3].legend(loc="lower right", frameon=False, fontsize=8, labelcolor=INK)
     fig.suptitle(

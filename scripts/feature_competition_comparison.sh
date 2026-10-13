@@ -11,6 +11,8 @@
 # Mac, one seed (about 12 h on an M4 Pro):   bash scripts/feature_competition_comparison.sh
 # CUDA PC, three seeds:                       DEVICE=cuda PYTHON=python SEEDS="42 142 242" bash scripts/feature_competition_comparison.sh
 # SUPERVISED=1 also trains the same-architecture supervised GAP control for every arm and view.
+# BANK_ARMS and COMPETITORS choose what the bank renders (scripts/feature_competition_rich.sh uses them for the
+# rich-competitor arms R and R'); ARMS chooses what is trained, in order.
 # Rerunning skips finished runs and resumes unfinished ones. Resuming needs the hashed source files unchanged.
 set -euo pipefail
 
@@ -20,6 +22,8 @@ BANK="${BANK:-$REPO/results/feature_competition/abbp}"
 DEVICE="${DEVICE:-mps}"
 SEEDS="${SEEDS:-42}"
 ARMS="${ARMS:-B Bp A}"
+BANK_ARMS="${BANK_ARMS:-A B Bp}"
+COMPETITORS="${COMPETITORS:-brain_size}"
 STEPS="${STEPS:-10000}"
 SUPERVISED="${SUPERVISED:-0}"
 
@@ -31,7 +35,7 @@ fi
 
 mkdir -p "$(dirname "$BANK")"
 exec > >(tee -a "$BANK.log") 2>&1
-echo "== feature-competition A/B/B' comparison: $(date), bank $BANK, arms $ARMS, seeds $SEEDS, device $DEVICE"
+echo "== feature-competition comparison: $(date), bank $BANK, arms $ARMS, competitors $COMPETITORS, seeds $SEEDS, device $DEVICE"
 
 # training.losses imports LPIPS at module scope; nothing in this experiment builds it.
 if ! "$PYTHON" -c "import lpips" 2>/dev/null; then
@@ -54,7 +58,8 @@ complete() {
     "$BANK/runs/$1/progress.json" "$2" 2>/dev/null
 }
 
-[[ -f "$BANK/manifest.json" ]] || fc prepare --arms A B Bp
+# shellcheck disable=SC2086  # word-split the arm and competitor lists on purpose
+[[ -f "$BANK/manifest.json" ]] || fc prepare --arms $BANK_ARMS --competitors $COMPETITORS
 [[ -f "$BANK/audit/report.json" ]] || fc audit
 
 for seed in $SEEDS; do

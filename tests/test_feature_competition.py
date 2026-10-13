@@ -78,7 +78,7 @@ class CompetitionTests(unittest.TestCase):
     def test_default_contrast_replays_existing_renderer_and_invalid_scale_rejected(self):
         r = self.renderer
         s = r.subject("train", 1)
-        tissue, mask = r.tissue(0), r.lesion(s["centre"])
+        tissue, mask = r.tissue({}), r.lesion(s["centre"])
         kw = dict(
             tissue_map=tissue,
             lesion_load=mask,
@@ -166,7 +166,7 @@ class CompetitionTests(unittest.TestCase):
         norm = dict(mean=0.5, scale=0.6)
         subjects = [s for s in (r.subject("pilot", i) for i in range(30)) if abs(s["brain"] - s["brain_other"]) > 0.1]
         for s in subjects[:3]:
-            self.assertEqual(r.brain_sizes(s, "Bp"), (s["brain"], s["brain_other"]))
+            self.assertEqual(r.competitor_values(s, "Bp"), ({0: s["brain"]}, {0: s["brain_other"]}))
             b, bp = r.render(s, "B", norm), r.render(s, "Bp", norm)
             # T1 is B's T1. FLAIR keeps B's style, bias field, noise draw and lesion, with its own brain size.
             np.testing.assert_array_equal(b[0][0], bp[0][0])
@@ -244,17 +244,45 @@ class CompetitionTests(unittest.TestCase):
         from training import feature_competition_data
 
         self.assertEqual(feature_competition.ARMS, feature_competition_data.ARMS)
+        self.assertEqual(feature_competition.ANATOMY, tuple(feature_competition_data.ANATOMY_FACTORS))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(["prepare", "--bank", "/tmp/x", "--arms", "A", "R"])
         a = parse_args(
             ["train", "--bank", "/tmp/x", "--kind", "supervised_gap", "--arms", "A", "Bp", "--save-steps", "250", "500"]
         )
         self.assertEqual((a.arms, a.save_steps, a.batch_size), (["A", "Bp"], [250, 500], 8))
         self.assertIsNone(parse_args(["evaluate", "--bank", "/tmp/x", "--kind", "ssl"]).arms)
-        self.assertEqual(parse_args(["prepare", "--bank", "/tmp/x"]).arms, list(ARMS))
+        self.assertEqual(parse_args(["prepare", "--bank", "/tmp/x"]).arms, list(feature_competition.PREPARE_ARMS))
         self.assertEqual(
             parse_args(["evaluate", "--bank", "/tmp/x", "--kind", "ssl", "--checkpoint", "all"]).checkpoint, "all"
         )
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parse_args(["train", "--bank", "/tmp/x", "--kind", "ssl", "--save-steps", "0"])
+
+    def test_rich_arms_share_or_split_several_factors_but_never_the_lesion(self):
+        r = CompetitionRenderer(competitors=("brain_size", "cortical_thickness"))
+        # More competitors can only shrink the white matter every anatomy shares.
+        self.assertLessEqual({tuple(c) for c in r.centres}, {tuple(c) for c in self.renderer.centres})
+        self.assertGreater(len(r.centres), 300)
+        norm = dict(mean=0.5, scale=0.6)
+        subjects = [s for s in (r.subject("pilot", i) for i in range(30)) if abs(s["brain"] - s["brain_other"]) > 0.1]
+        for s in subjects[:3]:
+            plain = self.renderer.subject("pilot", int(s["id"].split(":")[1]))
+            for key in ("raw_brain", "centre", "styles", "raw_brain_other"):
+                np.testing.assert_array_equal(s[key], plain[key])
+            shared, second = r.competitor_values(s, "R")
+            self.assertEqual((shared, set(shared)), (second, {0, 5}))
+            self.assertNotEqual(*r.competitor_values(s, "Rp"))
+            a, rich, split = (r.render(s, arm, norm) for arm in ("A", "R", "Rp"))
+            core = a[2] > 0
+            for other in (rich, split):
+                np.testing.assert_array_equal(a[2], other[2])
+                np.testing.assert_array_equal(a[0][:, 0, core], other[0][:, 0, core])
+            np.testing.assert_array_equal(rich[1][0], rich[1][1])
+            self.assertFalse(np.array_equal(split[1][0], split[1][1]))
+            self.assertFalse(np.array_equal(rich[0], r.render(s, "B", norm)[0]))
+        with self.assertRaises(ValueError):
+            CompetitionRenderer(competitors=("cortical_thickness",))
 
     def test_pilot_pipeline_runs_end_to_end_on_a_tiny_bank(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -262,8 +290,8 @@ class CompetitionTests(unittest.TestCase):
             common = ["--seeds", "42", "--device", "cpu", "--batch-size", "2"]
             small = ["--hidden-channels", "8", "--res-channels", "4"]
             commands = [
-                ["prepare", "--arms", "A", "Bp", "--train-samples", "8", "--probe-samples", "8", "--test-samples", "8"]
-                + ["--pilot-samples", "6"],
+                ["prepare", "--arms", "A", "Bp", "R", "Rp", "--competitors", "brain_size", "cortical_thickness"]
+                + ["--train-samples", "8", "--probe-samples", "8", "--test-samples", "8", "--pilot-samples", "6"],
                 ["audit", "--noise-subjects", "3", "--noise-repeats", "2"],
                 ["train", "--kind", "ssl", *common, *small, "--steps", "2", "--save-every", "2", "--save-steps", "1"],
                 [
@@ -294,11 +322,15 @@ class CompetitionTests(unittest.TestCase):
                     ["evaluate", "--kind", "ssl", *common, "--checkpoint", "all"]
                     + ["--spatial-grid", "2", "--bank", str(root)]
                 )
-            self.assertEqual(json.loads((root / "manifest.json").read_text())["arms"], ["A", "Bp"])
+            manifest = json.loads((root / "manifest.json").read_text())
+            self.assertEqual(manifest["arms"], ["A", "Bp", "R", "Rp"])
+            self.assertEqual(manifest["competitors"], ["brain_size", "cortical_thickness"])
             audit = json.loads((root / "audit/report.json").read_text())
-            self.assertEqual(audit["matched_pairs"], [["A", "Bp"]])
+            self.assertEqual(audit["matched_pairs"], [["A", "Bp"], ["A", "R"], ["A", "Rp"]])
             self.assertTrue(audit["input_gate_passed"])
-            self.assertEqual(set(audit["visibility"]), {"t1_A", "flair_A", "t1_Bp", "flair_Bp"})
+            self.assertEqual(
+                set(audit["visibility"]), {f"{v}_{a}" for v in ("t1", "flair") for a in ("A", "Bp", "R", "Rp")}
+            )
             progress = json.loads((root / "runs/ssl_A_s42_paired/progress.json").read_text())
             self.assertEqual([row["step"] for row in progress["monitor"]], [0, 1, 2])
             self.assertAlmostEqual(progress["monitor"][0]["chance_loss"], 2 * np.log(2))
@@ -307,7 +339,10 @@ class CompetitionTests(unittest.TestCase):
             bp = json.loads((root / "runs/ssl_Bp_s42_paired/eval_000002/metrics.json").read_text())
             self.assertEqual({row["view"] for row in bp["rows"] if row["regime"] == "competitor"}, {"t1", "flair"})
             ssl = json.loads((root / "runs/ssl_A_s42_paired/eval_000002/metrics.json").read_text())
-            self.assertEqual({row["source"] for row in ssl["rows"]}, {"global", "pooled", "spatial"})
+            self.assertEqual({row["source"] for row in ssl["rows"] if "source" in row}, {"global", "pooled", "spatial"})
+            reliance = next(row for row in ssl["rows"] if row["regime"] == "reliance")
+            self.assertEqual(reliance["subjects"], 8)
+            self.assertTrue(0 <= reliance["top1_without_lesion"] <= 1 and 0 <= reliance["top1_with_lesion"] <= 1)
             gap = json.loads((root / "runs/supervised_gap_A_s42_flair/eval_000001/metrics.json").read_text())
             self.assertEqual(
                 {(row["source"], row["probe"]) for row in gap["rows"] if row["regime"] == "common"},
@@ -320,13 +355,15 @@ class CompetitionTests(unittest.TestCase):
                 },
             )
             report = json.loads((root / "summary/report.json").read_text())
-            self.assertIn("ABp", {row["pair"] for row in report["comparisons"]})
+            self.assertLessEqual({"ABp", "AR", "ARp"}, {row["pair"] for row in report["comparisons"]})
+            self.assertIn("R", {row["competitor"] for row in report["decomposition"]})
+            self.assertIn("top1_without_lesion", (root / "summary/curves.csv").read_text().splitlines()[0])
             standardized = json.loads((root / "runs/ssl-std_A_s42_paired/settings.json").read_text())
             self.assertTrue(standardized["standardize_code"])
             self.assertIn("batch-standardized", (root / "summary/curves.csv").read_text())
             for name in ("curves.csv", "curves_A.png", "curves_Bp.png", "curves_arms_plain.png"):
                 self.assertTrue((root / "summary" / name).exists())
-            self.assertEqual(log.getvalue().count("Evaluation exists"), 6)
+            self.assertEqual(log.getvalue().count("Evaluation exists"), 12)
 
 
 if __name__ == "__main__":

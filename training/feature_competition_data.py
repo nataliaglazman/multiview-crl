@@ -1,6 +1,7 @@
-"""Matched, independent lesion-location and brain-size interventions."""
+"""Matched, independent lesion-location and competitor (brain size, or several anatomy factors) interventions."""
 
 import hashlib
+import itertools
 import json
 from pathlib import Path
 
@@ -10,17 +11,36 @@ from scipy.ndimage import binary_dilation, binary_erosion, distance_transform_ed
 
 from eval.synthetic.synthetic_dataset import PseudoMRIRenderer
 
-ARMS = ("A", "B", "Bp", "C", "D")
+ARMS = ("A", "B", "Bp", "C", "D", "R", "Rp")
 VIEWS = ("t1", "flair")
 SPLITS = {"train": 1, "probe": 2, "test": 3, "pilot": 4}
 VERSION = 2
-# Brain size per view: fixed at 0, one draw shared by both views, or an independent draw per view.
-# Bp ("B prime") has B's brain-size variation in every image, but its views disagree, so the loss can't use it.
-BRAIN_RULE = {"A": "fixed", "B": "shared", "Bp": "per_view", "C": "fixed", "D": "shared"}
+# Anatomy factors a competitor can vary, as indices of the renderer's content vector (names as in eval/metrics/dci.py).
+ANATOMY_FACTORS = {
+    "brain_size": 0,
+    "ventricle_size": 1,
+    "cortical_thickness": 5,
+    "temporal_atrophy": 6,
+    "lr_asymmetry": 7,
+    "sulcal_widening": 8,
+}
+# The competitor in each view: absent (anatomy at 0), one draw shared by both views, or an independent draw per view.
+# B, Bp and D vary brain size alone; R ("rich") and Rp vary every factor in the bank's competitor list. Bp and Rp
+# carry the variation of B and R in every image, but their views disagree, so the loss can't use it.
+COMPETITOR_RULE = {
+    "A": "fixed",
+    "B": "shared",
+    "Bp": "per_view",
+    "C": "fixed",
+    "D": "shared",
+    "R": "shared",
+    "Rp": "per_view",
+}
+RICH_ARMS = ("R", "Rp")
 HIGH_CONTRAST_ARMS = ("C", "D")
-COMMON_ARM = {"A": "A", "B": "A", "Bp": "A", "C": "C", "D": "C"}
+COMMON_ARM = {"A": "A", "B": "A", "Bp": "A", "C": "C", "D": "C", "R": "A", "Rp": "A"}
 # Input visibility must match within MATCHED_PAIRS and rise within INCREASED_PAIRS.
-MATCHED_PAIRS = (("A", "B"), ("A", "Bp"), ("C", "D"))
+MATCHED_PAIRS = (("A", "B"), ("A", "Bp"), ("C", "D"), ("A", "R"), ("A", "Rp"))
 INCREASED_PAIRS = (("A", "C"), ("B", "D"))
 
 
@@ -58,17 +78,32 @@ def file_hash(path):
 
 
 class CompetitionRenderer:
-    def __init__(self, res=64, radius=0.1, high_contrast=1.5, seed=42, brain_scale=0.5):
+    def __init__(
+        self, res=64, radius=0.1, high_contrast=1.5, seed=42, brain_scale=0.5, competitors=("brain_size",), centres=None
+    ):
         self.res, self.radius = res, radius
         self.high_contrast, self.seed = high_contrast, seed
+        # The amplitude of every competitor factor: effective values lie in [-brain_scale, brain_scale].
         self.brain_scale = brain_scale
-        # Feed already-squashed brain size; all other anatomical controls are zero.
+        if (
+            any(name not in ANATOMY_FACTORS for name in competitors)
+            or "brain_size" not in competitors
+            or len(set(competitors)) != len(competitors)
+        ):
+            raise ValueError(f"Competitors must be distinct names from {list(ANATOMY_FACTORS)} including brain_size")
+        self.competitors = tuple(competitors)
+        # Feed already-squashed controls; anatomy outside the competitor set is zero.
         # The native lesion is discarded in favor of a common, explicit mask.
         self.renderer = PseudoMRIRenderer(res=res, lesion_radius=radius, content_squash="none")
         self.zero_deformation = torch.zeros(4, 4, 4)
         self.zero_fissure = torch.zeros(8, 8, 8)
-        lower, upper = self.tissue(-brain_scale), self.tissue(brain_scale)
-        common = (lower.numpy() == 2) & (upper.numpy() == 2)
+        if centres is not None:
+            # A bank's saved centres: skip recomputing the shared white matter (the audit recomputes and checks it).
+            self.centres = np.asarray(centres)
+            self.admissible = np.zeros((res,) * 3, dtype=bool)
+            self.admissible[tuple(self.centres.T)] = True
+            return
+        common = self.common_white_matter()
         distance = distance_transform_edt(np.pad(common, 1), sampling=2 / (res - 1))[1:-1, 1:-1, 1:-1]
         admissible = distance > radius + 1e-7
         # The complete blur neighbourhood of lesion voxels stays inside WM.
@@ -78,15 +113,32 @@ class CompetitionRenderer:
         if len(self.centres) < 8:
             raise ValueError("Too few common lesion centres including blur halo; revise resolution/radius")
         self.admissible = admissible
-        # With neutral other anatomy the WM sets are nested in brain size; the
-        # smallest WM bound is therefore sufficient for every intermediate size.
-        for value in np.linspace(-brain_scale, brain_scale, 9):
-            if np.any(common & (self.tissue(float(value)).numpy() != 2)):
-                raise RuntimeError("WM nesting assumption failed")
 
-    def tissue(self, brain):
+    def common_white_matter(self):
+        """White matter present in every anatomy the competitor factors can produce.
+
+        Brain size alone gives nested WM sets, so its two extremes bound every size in between (checked).
+        Several factors are not nested: intersect every corner of the competitor box with 100 seeded interior
+        draws. Rendering then refuses any lesion outside WM, and the audit checks the local evidence.
+        """
+        s = self.brain_scale
+        if self.competitors == ("brain_size",):
+            common = (self.tissue({0: -s}).numpy() == 2) & (self.tissue({0: s}).numpy() == 2)
+            for value in np.linspace(-s, s, 9):
+                if np.any(common & (self.tissue({0: float(value)}).numpy() != 2)):
+                    raise RuntimeError("WM nesting assumption failed")
+            return common
+        indices = [ANATOMY_FACTORS[name] for name in self.competitors]
+        rng = np.random.default_rng(np.random.SeedSequence([self.seed, 99]))
+        draws = [dict(zip(indices, corner)) for corner in itertools.product((-s, s), repeat=len(indices))]
+        draws += [dict(zip(indices, rng.uniform(-s, s, len(indices)).tolist())) for _ in range(100)]
+        return np.logical_and.reduce([self.tissue(values).numpy() == 2 for values in draws])
+
+    def tissue(self, values):
+        """Tissue labels for anatomy controls {content index: effective value}; all other anatomy at 0."""
         z = torch.zeros(9)
-        z[0] = brain
+        for index, value in values.items():
+            z[index] = value
         return self.renderer.render_structure(z, self.zero_deformation, self.zero_fissure, "cpu", clean=True)[0]
 
     def subject(self, split, index):
@@ -98,6 +150,12 @@ class CompetitionRenderer:
         styles = rng.normal(size=(2, 3)).astype(np.float32)
         # Drawn last, so every earlier draw is unchanged; only Bp's FLAIR view uses it.
         raw_brain_other = float(rng.normal())
+        # Every other competitor factor, after all of the above: a shared value and a second-view value (R and Rp).
+        anatomy = {
+            name: (self.brain_scale * np.tanh(rng.normal(size=2))).tolist()
+            for name in self.competitors
+            if name != "brain_size"
+        }
         # Seed namespaces are unique across subjects and splits, including noise redraws.
         namespace = (SPLITS[split] * 10_000_000 + index) * 10_000
         return dict(
@@ -107,17 +165,21 @@ class CompetitionRenderer:
             brain=float(self.brain_scale * np.tanh(raw_brain)),
             raw_brain_other=raw_brain_other,
             brain_other=float(self.brain_scale * np.tanh(raw_brain_other)),
+            anatomy=anatomy,
             styles=styles,
             namespace=namespace,
         )
 
-    @staticmethod
-    def brain_sizes(subject, arm):
-        """(T1, FLAIR) effective brain size in this arm."""
-        rule = BRAIN_RULE[arm]
+    def competitor_values(self, subject, arm):
+        """(T1, FLAIR) anatomy controls in this arm, as {content index: effective value}."""
+        rule = COMPETITOR_RULE[arm]
         if rule == "fixed":
-            return 0.0, 0.0
-        return subject["brain"], subject["brain"] if rule == "shared" else subject["brain_other"]
+            return {}, {}
+        shared, second = {}, {}
+        for name in self.competitors if arm in RICH_ARMS else ("brain_size",):
+            pair = (subject["brain"], subject["brain_other"]) if name == "brain_size" else subject["anatomy"][name]
+            shared[ANATOMY_FACTORS[name]], second[ANATOMY_FACTORS[name]] = pair
+        return shared, shared if rule == "shared" else second
 
     def lesion(self, centre):
         coordinate = self.renderer.coords[tuple(np.asarray(centre, dtype=int))]
@@ -129,12 +191,13 @@ class CompetitionRenderer:
         contrast = self.high_contrast if arm in HIGH_CONTRAST_ARMS else 1.0
         lesion = self.lesion(subject["centre"] if centre is None else centre)
         tissues, images, masks = {}, [], []
-        for v, (modality, brain) in enumerate(zip(("T1", "FLAIR"), self.brain_sizes(subject, arm))):
-            if brain not in tissues:
-                tissues[brain] = self.tissue(brain)
-                if bool(((lesion > 0) & (tissues[brain] != 2)).any()):
+        for v, (modality, values) in enumerate(zip(("T1", "FLAIR"), self.competitor_values(subject, arm))):
+            key = tuple(sorted(values.items()))
+            if key not in tissues:
+                tissues[key] = self.tissue(values)
+                if bool(((lesion > 0) & (tissues[key] != 2)).any()):
                     raise RuntimeError("Lesion escaped common WM support")
-            tissue = tissues[brain]
+            tissue = tissues[key]
             mask = (tissue > 0).numpy()[None]
             raw = self.renderer.render_modality(
                 tissue,
@@ -174,7 +237,9 @@ def prepare(args):
     root = Path(args.bank)
     if root.exists():
         raise FileExistsError(f"Bank already exists: {root}; use a new directory")
-    r = CompetitionRenderer(args.res, args.radius, args.high_contrast, args.data_seed, args.brain_scale)
+    r = CompetitionRenderer(
+        args.res, args.radius, args.high_contrast, args.data_seed, args.brain_scale, args.competitors
+    )
     counts = dict(train=args.train_samples, probe=args.probe_samples, test=args.test_samples, pilot=args.pilot_samples)
     # Images are deterministic given these settings, so a bank of some arms (e.g. the arm-A
     # pilot) holds exactly the images those arms have in a bank of all five.
@@ -185,6 +250,7 @@ def prepare(args):
         version=VERSION,
         ready=False,
         arms=arms,
+        competitors=list(r.competitors),
         res=args.res,
         radius=args.radius,
         high_contrast=args.high_contrast,
@@ -202,8 +268,12 @@ def prepare(args):
     print(f"Preparing {gib:.2f} GiB of float32 images for arms {', '.join(arms)} in {root}", flush=True)
     for split, count in counts.items():
         subjects = [r.subject(split, i) for i in range(count)]
-        # Columns: lesion centre x/y/z (input voxels), brain size, and Bp's FLAIR brain size.
-        labels = np.array([np.r_[s["centre"], s["brain"], s["brain_other"]] for s in subjects], dtype=np.float32)
+        # Columns: lesion centre x/y/z (input voxels), brain size, Bp's FLAIR brain size, then each other
+        # competitor's shared and second-view values in competitor order.
+        labels = np.array(
+            [np.r_[s["centre"], s["brain"], s["brain_other"], *sum(s["anatomy"].values(), [])] for s in subjects],
+            dtype=np.float32,
+        )
         np.save(root / f"{split}_targets.npy", labels)
         write_json(root / f"{split}_subjects.json", subjects)
         if split == "pilot":
@@ -226,6 +296,19 @@ def prepare(args):
     meta["bank_id"] = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest()
     write_json(root / "manifest.json", meta)
     print(f"Bank ready: {root / 'manifest.json'}", flush=True)
+
+
+def renderer_for(meta, centres=None):
+    """The renderer a bank was made with; banks from before competitor lists vary brain size alone."""
+    return CompetitionRenderer(
+        meta["res"],
+        meta["radius"],
+        meta["high_contrast"],
+        meta["seed"],
+        meta["brain_scale"],
+        meta.get("competitors", ["brain_size"]),
+        centres,
+    )
 
 
 def load_bank(root):
@@ -258,7 +341,7 @@ def audit(args):
     meta = load_bank(root)
     out = root / "audit"
     out.mkdir(exist_ok=args.overwrite)
-    r = CompetitionRenderer(meta["res"], meta["radius"], meta["high_contrast"], meta["seed"], meta["brain_scale"])
+    r = renderer_for(meta)
     if array_hash(r.centres) != meta["centres_hash"]:
         raise ValueError("Renderer geometry differs from prepared bank")
     for filename, expected in meta["files"].items():
@@ -315,9 +398,22 @@ def audit(args):
     fig.savefig(out / "matched_images.png", dpi=150)
     plt.close(fig)
     rows, skipped = [], []
+    # Axes along which some admissible centre has a neighbour at the movement distance. With several competitor
+    # factors the shared white matter can leave a single safe x per (y, z), so x-moves do not exist there.
+    movable = [
+        axis
+        for axis in range(3)
+        if any(
+            np.all(c + np.eye(3, dtype=int)[axis] * args.displacement < r.res)
+            and r.admissible[tuple(c + np.eye(3, dtype=int)[axis] * args.displacement)]
+            for c in r.centres
+        )
+    ]
+    if not movable:
+        raise ValueError(f"No admissible lesion centre can move {args.displacement} voxel(s) along any axis")
     # Direction/axis depend only on the subject index; no arm-specific pair selection.
     for i, s in enumerate(subjects[: args.noise_subjects]):
-        axis = i % 3
+        axis = movable[i % len(movable)]
         candidates = []
         for centre in r.centres:
             endpoint = centre.copy()
@@ -403,7 +499,8 @@ def audit(args):
         noise_repeats=args.noise_repeats,
         displacement=args.displacement,
         axis_coverage=coverage,
-        input_gate_passed=bool(matched and increased and coverage == [0, 1, 2] and not skipped),
+        unmovable_axes=[axis for axis in range(3) if axis not in movable],
+        input_gate_passed=bool(matched and increased and coverage == movable and not skipped),
         scope="Input visibility only; supervised recovery and SSL comparison still required.",
     )
     write_json(out / "report.json", result)

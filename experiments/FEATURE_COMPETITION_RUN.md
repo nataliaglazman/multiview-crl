@@ -51,6 +51,23 @@ axes), `summary/report.json` (A−B and A−B′ penalties, and the split into i
 through the loss) and the per-run tables in `results/feature_competition/abbp.log`. `SUPERVISED=1` adds the
 same-architecture supervised control for every arm and view.
 
+## Rich-competitor test (protocol section 1, "Rich competitor")
+
+Does lesion learning drop once several shared anatomy factors can tell subjects apart? Arms A, B, R
+(brain size, cortical thickness and temporal atrophy shared) and R′ (the same factors drawn per view), all with
+batch-standardized InfoNCE, on a bank of their own:
+
+```bash
+DEVICE=cuda PYTHON=python bash scripts/feature_competition_rich.sh
+DEVICE=cuda PYTHON=python SEEDS="42 142 242" bash scripts/feature_competition_rich.sh   # three seeds
+```
+
+It builds `results/feature_competition/rich` (about 26 GiB), audits it, then trains and scores R, R′, B and A
+in turn (10,000 steps each, checkpoints dense between steps 2,500 and 4,500). Read
+`summary/curves_arms_batch-standardized.png` (R violet, R′ violet dashed), the "test matching top-1 with lesion /
+without" lines in `results/feature_competition/rich.log` (lesion reliance), and `summary/report.json` (A−R,
+A−R′, and the split into input interference and competition through the loss). Rerunning resumes.
+
 ## Prepare once and verify the input intervention
 
 Choose a new output directory on a disk with at least 40 GiB free. The default
