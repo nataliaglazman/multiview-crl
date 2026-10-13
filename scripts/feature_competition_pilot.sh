@@ -49,6 +49,15 @@ fi
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 cd "$REPO"
 fc() { "$PYTHON" -m training.feature_competition "$@" --bank "$BANK"; }
+# True when every listed run of this kind has reached the requested step. A finished run is skipped rather
+# than resumed, because resuming re-checks the code hashes it recorded, and later code edits fail that check.
+complete() {
+  local kind=$1 steps=$2 view
+  for view in "${@:3}"; do
+    "$PYTHON" -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["step"] < int(sys.argv[2]))' \
+      "$BANK/runs/${kind}_A_s${SEED}_${view}/progress.json" "$steps" 2>/dev/null || return 1
+  done
+}
 
 [[ -f "$BANK/manifest.json" ]] || fc prepare --arms A
 [[ -f "$BANK/audit/report.json" ]] || fc audit
@@ -56,15 +65,18 @@ fc() { "$PYTHON" -m training.feature_competition "$@" --bank "$BANK"; }
 run=(--arms A --seeds "$SEED" --device "$DEVICE")
 # 1. Same architecture with labels (~30 min): can the GAP code carry location at all? If not, the SSL arm
 #    below cannot learn it either, and the readout needs changing before any A/B/B' comparison.
-fc train --kind supervised_gap "${run[@]}" --steps "$SUPERVISED_STEPS" --save-every 1000 --save-steps 250 500 --resume
+complete supervised_gap "$SUPERVISED_STEPS" t1 flair ||
+  fc train --kind supervised_gap "${run[@]}" --steps "$SUPERVISED_STEPS" --save-every 1000 --save-steps 250 500 --resume
 fc evaluate --kind supervised_gap "${run[@]}" --checkpoint all --batch-size 32
 fc curves --arms A
 # 2. Self-supervised, no competitor (~4 h).
-fc train --kind ssl "${run[@]}" --steps "$SSL_STEPS" --save-every 1000 --save-steps 250 500 1500 --resume
+complete ssl "$SSL_STEPS" paired ||
+  fc train --kind ssl "${run[@]}" --steps "$SSL_STEPS" --save-every 1000 --save-steps 250 500 1500 --resume
 fc evaluate --kind ssl "${run[@]}" --checkpoint all --batch-size 32
 fc curves --arms A
 # 3. Heatmap localizer with labels (~1 h; its pooling runs on the CPU under MPS): does the image hold location?
-fc train --kind supervised "${run[@]}" --steps "$SUPERVISED_STEPS" --save-every 1000 --save-steps 250 500 --resume
+complete supervised "$SUPERVISED_STEPS" t1 flair ||
+  fc train --kind supervised "${run[@]}" --steps "$SUPERVISED_STEPS" --save-every 1000 --save-steps 250 500 --resume
 fc evaluate --kind supervised "${run[@]}" --checkpoint all --batch-size 32
 fc curves --arms A
 echo "== done: $(date). Figure: $BANK/summary/curves_A.png; tables above and in $BANK.log"

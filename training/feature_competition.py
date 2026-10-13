@@ -49,6 +49,11 @@ def parse_args(argv=None):
             q.add_argument("--views", nargs="+", choices=("t1", "flair"), default=["t1", "flair"])
             q.add_argument("--device", choices=("auto", "cuda", "cpu", "mps"), default="auto")
             q.add_argument("--batch-size", type=int, default=None)
+            q.add_argument(
+                "--standardize-code",
+                action="store_true",
+                help="SSL only: centre and scale the code over the batch, per view, before InfoNCE (own run folder)",
+            )
         if name == "train":
             q.add_argument("--steps", type=int, default=10000)
             q.add_argument("--save-every", type=int, default=2000)
@@ -120,6 +125,8 @@ def parse_args(argv=None):
         p.error("Learning rate must be finite and positive")
     if a.command == "train" and any(s < 1 for s in a.save_steps):
         p.error("save_steps must be positive")
+    if a.command in ("train", "evaluate") and a.standardize_code and a.kind != "ssl":
+        p.error("--standardize-code applies to --kind ssl only")
     return a
 
 

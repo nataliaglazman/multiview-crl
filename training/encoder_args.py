@@ -283,6 +283,15 @@ def build_parser(description=None):
         help="Hidden width of the projection head MLP (Linear -> ReLU -> Linear). "
         "Only used when --contrastive-proj-dim > 0.",
     )
+    p.add_argument(
+        "--standardize-code",
+        action="store_true",
+        help="Global InfoNCE only: centre and scale every unit of the loss-facing code over the batch, separately "
+        "for each view, before the cosine. Raw cosines are dominated by the units that vary most across subjects, "
+        "and when subjects barely differ (cosine ~0.996) the softmax stays uniform; standardized, every unit's "
+        "spread counts equally. Loss-side only: the representation the probes read is unchanged. In the "
+        "feature-competition pilot this let a fixed-anatomy arm learn lesion location that plain InfoNCE never did.",
+    )
 
     # Optimisation.
     p.add_argument("--lr", type=float, default=1e-4)
@@ -719,6 +728,14 @@ def parse_args(argv=None, description=None):
             p.error("--mask-mode learned_size cannot drive --separate-spatial-readout, whose head has a fixed width")
     elif args.mask_size_weight is not None:
         p.error("--mask-size-weight only applies with --mask-mode learned_size")
+    if args.standardize_code:
+        if args.contrastive_loss_type != "infonce":
+            p.error("--standardize-code applies to InfoNCE; Barlow Twins already standardizes each unit over the batch")
+        if args.mask_mode != "fixed":
+            p.error(
+                "--standardize-code needs --mask-mode fixed: standardizing each unit divides a learned mask back out, "
+                "so no gradient would reach its logits"
+            )
     if args.separate_spatial_readout:
         if args.encoder_architecture == "conv" and args.conv_readout != "mlp":
             p.error("--separate-spatial-readout requires an MLP readout (--conv-readout mlp for Conv)")

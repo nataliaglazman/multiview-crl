@@ -93,8 +93,9 @@ def state_hash(model):
     return h.hexdigest()
 
 
-def run_path(root, kind, arm, seed, view="paired"):
-    return Path(root) / "runs" / f"{kind}_{arm}_s{seed}_{view}"
+def run_path(root, kind, arm, seed, view="paired", variant=""):
+    # A loss variant gets its own folder, e.g. ssl-std_A_s42_paired for the batch-standardized code.
+    return Path(root) / "runs" / f"{kind}{'-' + variant if variant else ''}_{arm}_s{seed}_{view}"
 
 
 def batch_indices(count, batch_size, seed, step):
@@ -115,9 +116,18 @@ def ssl_code(model, paired_images):
     return model(x, pool_only=True, n_views=2)[2][0].reshape(2, b, -1)
 
 
-def infonce(code):
+def standardize_batch(code):
+    """Centre and scale every unit over the batch, separately for each view.
+
+    In arm A every subject has the same anatomy, so raw codes are nearly identical (cosine ~0.996 between
+    subjects) and the cosine softmax is almost uniform. Standardized, the small differences reach the loss.
+    """
+    return (code - code.mean(1, keepdim=True)) / (code.std(1, keepdim=True) + 1e-6)
+
+
+def infonce(code, standardize=False):
     return infonce_base_loss(
-        code,
+        standardize_batch(code) if standardize else code,
         list(range(9)),
         nn.CosineSimilarity(dim=-1),
         nn.CrossEntropyLoss(),
@@ -126,12 +136,12 @@ def infonce(code):
     ).sum()
 
 
-def ssl_loss(model, paired_images):
-    return infonce(ssl_code(model, paired_images))
+def ssl_loss(model, paired_images, standardize=False):
+    return infonce(ssl_code(model, paired_images), standardize)
 
 
 @torch.no_grad()
-def heldout_check(model, kind, bank, labels, batch_size, device, view=None):
+def heldout_check(model, kind, bank, labels, batch_size, device, view=None, standardize=False):
     """The training loss on held-out subjects, in fixed consecutive batches of the training size.
 
     For SSL also the cross-view top-1 retrieval rate. Chance is 2 ln B and 1/B. In arm A the lesion is
@@ -143,8 +153,8 @@ def heldout_check(model, kind, bank, labels, batch_size, device, view=None):
         x = torch.from_numpy(np.array(bank[start : start + batch_size], copy=True)).to(device)
         if kind == "ssl":
             code = ssl_code(model, x)
-            losses.append(float(infonce(code)))
-            unit = F.normalize(code[..., :9], dim=-1)
+            losses.append(float(infonce(code, standardize)))
+            unit = F.normalize((standardize_batch(code) if standardize else code)[..., :9], dim=-1)
             scores = unit[0] @ unit[1].T
             target = torch.arange(batch_size, device=device)
             hits = (scores.argmax(1) == target).float().mean() + (scores.argmax(0) == target).float().mean()
@@ -204,6 +214,7 @@ def train(args):
     if missing:
         raise ValueError(f"Arms not in this bank or its audit: {missing}")
     supervised = args.kind != "ssl"
+    standardize = args.kind == "ssl" and args.standardize_code
     train_targets = targets(args.bank, "train")[:, :3]
     probe_targets = targets(args.bank, "probe")[:, :3]
     if args.batch_size > meta["counts"]["probe"]:
@@ -220,7 +231,7 @@ def train(args):
                 torch.manual_seed(seed)
                 np.random.seed(seed)
                 random.seed(seed)
-                folder = run_path(args.bank, args.kind, arm, seed, view)
+                folder = run_path(args.bank, args.kind, arm, seed, view, "std" if standardize else "")
                 settings = dict(
                     kind=args.kind,
                     arm=arm,
@@ -240,6 +251,8 @@ def train(args):
                     source_hashes=source_hashes(),
                     minibatches="independent without-replacement draw per step; paired across arms",
                 )
+                if standardize:
+                    settings.update(standardize_code=True)
                 if args.kind == "supervised_gap":
                     # Standardize the regression target with training-split statistics only.
                     settings.update(
@@ -267,7 +280,14 @@ def train(args):
 
                 def save(step):
                     check = heldout_check(
-                        model, args.kind, heldout_bank, probe_targets, args.batch_size, device, view=view
+                        model,
+                        args.kind,
+                        heldout_bank,
+                        probe_targets,
+                        args.batch_size,
+                        device,
+                        view=view,
+                        standardize=standardize,
                     )
                     monitor[:] = [row for row in monitor if row["step"] != step] + [dict(step=step, **check)]
                     chance = f" (chance {check['chance_loss']:.3f})" if "chance_loss" in check else ""
@@ -298,7 +318,7 @@ def train(args):
                     ids = batch_indices(len(x_bank), args.batch_size, seed, step)
                     x = torch.from_numpy(np.array(x_bank[ids], copy=True)).to(device)
                     if args.kind == "ssl":
-                        loss = ssl_loss(model, x)
+                        loss = ssl_loss(model, x, standardize)
                     else:
                         y = torch.from_numpy(y_bank[ids].copy()).to(device)
                         loss = model.loss(x[:, VIEWS.index(view)], y)

@@ -211,6 +211,9 @@ def contrastive_loss(pooled, model, args, sim_metric, criterion, mask=None):
         hz = model.project(hz[..., : args.content_channels])
     else:
         hz = hz[..., : model.latent_dim] * mask
+    if getattr(args, "standardize_code", False):
+        # Per view, over the batch, so every unit's spread counts equally in the cosine (--standardize-code).
+        hz = (hz - hz.mean(1, keepdim=True)) / (hz.std(1, keepdim=True) + 1e-6)
     content_indices = [list(range(hz.shape[-1]))]
     if args.contrastive_loss_type == "barlow_twins":
         # With a mask, Barlow Twins keeps only the selected units (losses.barlow_twins_loss); a

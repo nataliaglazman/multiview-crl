@@ -179,7 +179,7 @@ Use `experiments/encoder/conv_mlp.yaml` as the model/objective reference:
 | Setting | Proposed value |
 | --- | --- |
 | Model | Existing Conv backbone with MLP global readout; train from scratch |
-| Objective | Existing paired T1/FLAIR InfoNCE recipe, temperature 0.1 |
+| Objective | Paired T1/FLAIR InfoNCE, temperature 0.1, with the code batch-standardized per view before the cosine (`--standardize-code`). Plain InfoNCE stayed at chance for 8,000 steps in the arm-A pilot (a cold start: near-identical codes), so it cannot serve as the competitor-free baseline; the standardized loss learned the lesion from about step 3,000 |
 | Resolution / lesion radius | 64 cubed / 0.1 in renderer coordinates |
 | Generator baseline | Clean content; style/content scales 1; T1 lesion value 0.4, FLAIR value 1.0 |
 | Batch size / learning rate | 32 / 0.0001 |

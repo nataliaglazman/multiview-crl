@@ -32,6 +32,25 @@ rerunning continues after Ctrl-C. Output is logged to
 `results/feature_competition/pilot_A.log`. Read the tables there or
 `summary/curves_A.png`, against the decision table in protocol section 0.
 
+## A/B/B′ comparison with batch-standardized InfoNCE (protocol section 1)
+
+The arm-A pilot showed plain InfoNCE never leaves chance in arm A: every subject has the same anatomy, so the
+codes start nearly identical (cosine 0.996) and the loss has nothing to grip. With `--standardize-code` (each
+code unit centred and scaled over the batch, per view, before the cosine) arm A learns the lesion from about
+step 3,000; held-out InfoNCE is 4.77 against chance 6.93 at step 10,000. The comparison therefore uses the
+standardized loss in every arm:
+
+```bash
+bash scripts/feature_competition_comparison.sh                                            # Mac, seed 42, ~12 h
+DEVICE=cuda PYTHON=python SEEDS="42 142 242" bash scripts/feature_competition_comparison.sh  # CUDA PC
+```
+
+It builds an A/B/B′ bank in `results/feature_competition/abbp` (about 20 GiB) and audits it, then trains and
+scores B, B′ and A in turn. Results go to `summary/curves_arms_batch-standardized.png` (the arms on shared
+axes), `summary/report.json` (A−B and A−B′ penalties, and the split into input interference and competition
+through the loss) and the per-run tables in `results/feature_competition/abbp.log`. `SUPERVISED=1` adds the
+same-architecture supervised control for every arm and view.
+
 ## Prepare once and verify the input intervention
 
 Choose a new output directory on a disk with at least 40 GiB free. The default

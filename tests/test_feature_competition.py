@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from scipy.ndimage import binary_dilation
 
-from eval.synthetic.feature_competition_report import fit_probe, metrics
+from eval.synthetic.feature_competition_report import fit_probe, hemisphere_split, metrics
 from training import feature_competition
 from training.feature_competition import parse_args
 from training.feature_competition_data import (
@@ -29,7 +29,10 @@ from training.feature_competition_train import (
     batch_indices,
     build_ssl,
     heldout_check,
+    infonce,
+    run_path,
     ssl_loss,
+    standardize_batch,
     state_hash,
 )
 
@@ -134,6 +137,22 @@ class CompetitionTests(unittest.TestCase):
         self.assertGreater(metrics(truth, prediction)["mean_r2"], 0.99)
         self.assertEqual(metrics(truth, truth)["mean_error_vox"], 0)
 
+    def test_hemisphere_metrics_separate_the_side_from_fine_position(self):
+        self.assertEqual(hemisphere_split(self.renderer.centres[:, 0]), 31.5)
+        self.assertIsNone(hemisphere_split(np.arange(20.0, 40.0)))
+        rng = np.random.default_rng(3)
+        truth = np.c_[rng.choice([22, 23, 24, 25, 26, 37, 38, 39, 40, 41], 200), rng.integers(24, 40, (200, 2))]
+        side = truth[:, 0] > 31.5
+        # Knows only the side: the hemisphere is perfect, the position within it is not known at all.
+        side_only = np.c_[np.where(side, 39.0, 24.0), np.full((200, 2), 31.5)]
+        result = metrics(truth, side_only, split=31.5)
+        self.assertEqual((result["hemisphere_auc"], result["hemisphere_accuracy"]), (1.0, 1.0))
+        self.assertGreater(result["mean_r2"], 0.25)
+        self.assertLess(abs(result["fine_position_r2"]), 0.05)
+        perfect = metrics(truth, truth.astype(float), split=31.5)
+        self.assertAlmostEqual(perfect["fine_position_r2"], 1.0)
+        self.assertNotIn("hemisphere_auc", metrics(truth, side_only))
+
     def test_cli_defaults_and_incomplete_bank(self):
         a = parse_args(["train", "--bank", "/tmp/example", "--kind", "ssl"])
         self.assertEqual(a.batch_size, 32)
@@ -190,6 +209,26 @@ class CompetitionTests(unittest.TestCase):
         torch.testing.assert_close(restored(x), model(x))
         self.assertEqual(tuple(model(x).shape), (2, 3))
 
+    def test_standardized_infonce_centres_and_scales_each_view_over_the_batch(self):
+        torch.manual_seed(1)
+        code = 1 + 0.01 * torch.randn(2, 6, 12)
+        z = (code - code.mean(1, keepdim=True)) / (code.std(1, keepdim=True) + 1e-6)
+        torch.testing.assert_close(standardize_batch(code), z)
+        unit = torch.nn.functional.normalize(z[..., :9], dim=-1)
+        scores = unit[0] @ unit[1].T / 0.1
+        target = torch.arange(6)
+        expected = torch.nn.functional.cross_entropy(scores, target) + torch.nn.functional.cross_entropy(
+            scores.T, target
+        )
+        torch.testing.assert_close(infonce(code, standardize=True), expected)
+        # Raw codes this alike leave the loss at chance; standardized, the same codes are told apart.
+        self.assertAlmostEqual(float(infonce(code)), 2 * np.log(6), places=2)
+        self.assertGreater(abs(float(infonce(code, standardize=True)) - 2 * np.log(6)), 0.1)
+        self.assertEqual(run_path("/b", "ssl", "A", 42, "paired", "std").name, "ssl-std_A_s42_paired")
+        self.assertEqual(run_path("/b", "ssl", "A", 42).name, "ssl_A_s42_paired")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(["train", "--bank", "/tmp/x", "--kind", "supervised", "--standardize-code"])
+
     def test_heldout_check_sits_at_chance_without_shared_content(self):
         torch.manual_seed(0)
         model = build_ssl(dict(hidden_channels=8, res_channels=4))
@@ -242,6 +281,8 @@ class CompetitionTests(unittest.TestCase):
                 ],
                 ["evaluate", "--kind", "ssl", *common, "--checkpoint", "all", "--spatial-grid", "2"],
                 ["evaluate", "--kind", "supervised_gap", "--arms", "A", "--views", "flair", *common],
+                ["train", "--kind", "ssl", "--standardize-code", "--arms", "A", *common, *small, "--steps", "1"],
+                ["evaluate", "--kind", "ssl", "--standardize-code", "--arms", "A", *common, "--spatial-grid", "2"],
                 ["summarize"],
                 ["curves"],
             ]
@@ -265,13 +306,25 @@ class CompetitionTests(unittest.TestCase):
                 self.assertTrue((root / f"runs/ssl_A_s42_paired/eval_{step:06d}/metrics.json").exists())
             bp = json.loads((root / "runs/ssl_Bp_s42_paired/eval_000002/metrics.json").read_text())
             self.assertEqual({row["view"] for row in bp["rows"] if row["regime"] == "competitor"}, {"t1", "flair"})
+            ssl = json.loads((root / "runs/ssl_A_s42_paired/eval_000002/metrics.json").read_text())
+            self.assertEqual({row["source"] for row in ssl["rows"]}, {"global", "pooled", "spatial"})
             gap = json.loads((root / "runs/supervised_gap_A_s42_flair/eval_000001/metrics.json").read_text())
             self.assertEqual(
-                {(row["regime"], row["source"]) for row in gap["rows"]}, {("common", "global"), ("own", "global")}
+                {(row["source"], row["probe"]) for row in gap["rows"] if row["regime"] == "common"},
+                {
+                    ("global", "supervised"),
+                    ("global", "ridge"),
+                    ("global", "rbf"),
+                    ("pooled", "ridge"),
+                    ("pooled", "rbf"),
+                },
             )
             report = json.loads((root / "summary/report.json").read_text())
             self.assertIn("ABp", {row["pair"] for row in report["comparisons"]})
-            for name in ("curves.csv", "curves_A.png", "curves_Bp.png"):
+            standardized = json.loads((root / "runs/ssl-std_A_s42_paired/settings.json").read_text())
+            self.assertTrue(standardized["standardize_code"])
+            self.assertIn("batch-standardized", (root / "summary/curves.csv").read_text())
+            for name in ("curves.csv", "curves_A.png", "curves_Bp.png", "curves_arms_plain.png"):
                 self.assertTrue((root / "summary" / name).exists())
             self.assertEqual(log.getvalue().count("Evaluation exists"), 6)
 
