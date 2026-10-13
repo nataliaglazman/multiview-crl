@@ -456,6 +456,15 @@ def build_parser(description=None):
         help="wm_interior places a full fixed-radius sphere inside final WM labels; legacy reproduces old runs",
     )
     p.add_argument(
+        "--synthetic-lesion-margin",
+        type=int,
+        default=0,
+        help="With --synthetic-lesion-placement wm_interior: voxels of white matter wanted on every side of the "
+        "lesion (a cube neighbourhood). 1 keeps the renderer's 3x3x3 smoothing from mixing cortex or fluid into "
+        "the lesion's edge, as the feature-competition bank does; 0 only asks that the sphere fit. A brain without "
+        "room for the full margin gets the widest one it has room for, so no subject is dropped or redrawn",
+    )
+    p.add_argument(
         "--synthetic-lesion-radius",
         type=float,
         default=0.1,
@@ -680,6 +689,12 @@ def parse_args(argv=None, description=None):
         p.error("--deterministic-warn-only requires --deterministic")
     if not 0 < args.synthetic_lesion_radius < float("inf"):
         p.error("--synthetic-lesion-radius must be finite and positive")
+    if args.synthetic_lesion_margin < 0:
+        p.error("--synthetic-lesion-margin must be nonnegative")
+    if args.synthetic_lesion_margin and args.synthetic_lesion_placement != "wm_interior":
+        p.error("--synthetic-lesion-margin needs --synthetic-lesion-placement wm_interior")
+    if args.synthetic_lesion_margin and args.synthetic_lesion_target != "position":
+        p.error("--synthetic-lesion-margin places one lesion; it does not apply to --synthetic-lesion-target burden")
     if not 0 < args.synthetic_temporal_sigma < float("inf"):
         p.error("--synthetic-temporal-sigma must be finite and positive")
     if args.synthetic_lesion_target == "burden":

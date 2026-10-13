@@ -212,6 +212,7 @@ def make_dataset(cfg, num_samples, mode="val"):
         synthetic_identifiable_ventricle=cfg.get("synthetic_identifiable_ventricle", False),
         synthetic_sulcal_mode=cfg.get("synthetic_sulcal_mode", "corrugation"),
         synthetic_lesion_placement=cfg.get("synthetic_lesion_placement", "legacy"),
+        synthetic_lesion_margin=cfg.get("synthetic_lesion_margin", 0),
         synthetic_lesion_radius=cfg.get("synthetic_lesion_radius", 0.1),
         synthetic_lesion_intensity=cfg.get("synthetic_lesion_intensity", "fixed"),
         synthetic_lesion_target=cfg.get("synthetic_lesion_target", "position"),

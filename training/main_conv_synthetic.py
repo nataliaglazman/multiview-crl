@@ -96,6 +96,7 @@ def make_dataset(args, mode, num_samples):
         synthetic_identifiable_ventricle=getattr(args, "synthetic_identifiable_ventricle", False),
         synthetic_sulcal_mode=getattr(args, "synthetic_sulcal_mode", "corrugation"),
         synthetic_lesion_placement=getattr(args, "synthetic_lesion_placement", "legacy"),
+        synthetic_lesion_margin=getattr(args, "synthetic_lesion_margin", 0),
         synthetic_lesion_radius=getattr(args, "synthetic_lesion_radius", 0.1),
         synthetic_lesion_intensity=getattr(args, "synthetic_lesion_intensity", "fixed"),
         synthetic_lesion_target=getattr(args, "synthetic_lesion_target", "position"),

@@ -177,6 +177,7 @@ class PseudoMRIRenderer(nn.Module):
         lesion_t1_value=0.4,
         sulcal_mode="corrugation",
         temporal_sigma=0.18,
+        lesion_margin=0,
     ):
         super().__init__()
         self.res = res
@@ -236,6 +237,17 @@ class PseudoMRIRenderer(nn.Module):
                 raise ValueError(f"lesion_count must be a positive integer, got {lesion_count!r}")
         self.lesion_target = lesion_target
         self.lesion_count = lesion_count
+        # Voxels of final white matter wanted on every side of a wm_interior lesion (a cube
+        # neighbourhood). 0 (default) asks only that the lesion fit. 1 also keeps render_modality's
+        # 3x3x3 smoothing from mixing cortex or fluid into the lesion's edge, as the feature-competition
+        # bank's lesion centres do. Each brain gets the widest margin up to this that its white matter
+        # has room for: a strict margin would redraw the brains with the least white matter (small, with
+        # large ventricles), changing the anatomy the encoder sees along with the lesion's surroundings.
+        if isinstance(lesion_margin, bool) or not isinstance(lesion_margin, (int, np.integer)) or lesion_margin < 0:
+            raise ValueError(f"lesion_margin must be a nonnegative integer, got {lesion_margin!r}")
+        if lesion_margin and (lesion_placement != "wm_interior" or lesion_target != "position"):
+            raise ValueError("lesion_margin needs lesion_placement='wm_interior' and lesion_target='position'")
+        self.lesion_margin = int(lesion_margin)
         # The T1 lesion's base intensity on the tissue LUT (bg 0, CSF 0.1, WM 0.8, GM 0.5). The default
         # 0.4 is darker than WM but close to GM and to WM/GM partial volume, while FLAIR's 1.0 is the
         # brightest tissue. 1.6 and 0.0 give the same |contrast| with WM (0.8), above and below every
@@ -308,6 +320,24 @@ class PseudoMRIRenderer(nn.Module):
     # [7] left–right asymmetry, [8] sulcal widening.
     N_CONTENT_COMPONENTS = 9
 
+    def _widest_margin(self, admissible):
+        """The centres with the widest white-matter margin, up to ``lesion_margin``, this brain has room for.
+
+        One 3x3x3 erosion keeps the centres whose every neighbour also holds a complete lesion. The cube
+        dilation of a voxel-centred lesion is the union of that lesion moved to each neighbour, so each
+        erosion adds one voxel of white matter around it. Voxels outside the crop are not admissible.
+        Stops at the last non-empty erosion, so the margin never costs a subject its lesion.
+        """
+        from scipy.ndimage import binary_erosion
+
+        margin = 0
+        while margin < self.lesion_margin:
+            wider = binary_erosion(admissible, structure=np.ones((3, 3, 3), dtype=bool))
+            if not wider.any():
+                break
+            admissible, margin = wider, margin + 1
+        return admissible, margin
+
     def _sphere_in_white_matter(self, tissue_map, lesion_dir):
         """Map three bounded position latents to an untruncated, voxel-centred sphere.
 
@@ -342,6 +372,7 @@ class PseudoMRIRenderer(nn.Module):
                 f"at res={self.res} (maximum centre clearance {distance.max():.6g}). "
                 "wm_interior will not shrink or discard the lesion."
             )
+        admissible, margin = self._widest_margin(admissible)
         quantiles = np.clip((direction + 1) / 2, 0, np.nextafter(1.0, 0.0))
 
         def choose(counts, quantile):
@@ -356,6 +387,12 @@ class PseudoMRIRenderer(nn.Module):
         sphere = torch.norm(self.coords - centre, dim=-1) < self.lesion_radius
         if not sphere.any() or bool((sphere & (tissue_map != 2)).any()):
             raise RuntimeError("White-matter sphere containment failed; refusing to truncate the lesion")
+        if margin:
+            reach = F.max_pool3d(sphere[None, None].to(self.coords.dtype), 2 * margin + 1, stride=1, padding=margin)
+            if bool(((reach[0, 0] > 0) & (tissue_map != 2)).any()):
+                raise RuntimeError(
+                    "White-matter margin containment failed; refusing a lesion that touches other tissue"
+                )
         return sphere.to(self.coords.dtype)
 
     def _burden_in_white_matter(self, tissue_map, burden, quantiles):
@@ -870,6 +907,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         lesion_t1_value=0.4,
         shared_gain_bias=False,
         temporal_sigma=0.18,
+        lesion_margin=0,
     ):
         super().__init__()
         self.num_samples = num_samples
@@ -1025,6 +1063,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 lesion_target=lesion_target,
                 lesion_count=lesion_count,
                 lesion_t1_value=lesion_t1_value,
+                lesion_margin=lesion_margin,
             )
             if lesion_mode == "field" and n_content > 2:
                 import warnings

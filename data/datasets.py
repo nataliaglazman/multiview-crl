@@ -699,6 +699,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_style_alignment_pairs=False,
         synthetic_shared_gain_bias=False,
         synthetic_temporal_sigma=0.18,
+        synthetic_lesion_margin=0,
         **kwargs,
     ):
         super().__init__()
@@ -777,6 +778,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             lesion_count=synthetic_lesion_count,
             lesion_t1_value=synthetic_lesion_t1_value,
             shared_gain_bias=synthetic_shared_gain_bias,
+            lesion_margin=synthetic_lesion_margin,
         )
         if synthetic_normalize in ("per_sample", "shared") and synthetic_n_style > 0:
             import warnings
