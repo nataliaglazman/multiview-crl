@@ -22,6 +22,8 @@ from sklearn.model_selection import cross_val_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import Normalizer, StandardScaler
 
+from eval.adni.encoder_alignment import PROBE_SEED, alignment_metrics
+from eval.adni.encoder_modality_gap import diagnose
 from eval.adni.encoder_probes import evaluate_subject_probes
 
 # Module-level cache of validation input batches. The val set is fixed across
@@ -267,13 +269,17 @@ def _metrics_for_level(reps_lvl, subject_probes=False):
     content_all = np.concatenate([reps_lvl["content_v0"], reps_lvl["content_v1"]], axis=0)
     modality_labels = np.array([0] * N + [1] * N)
 
-    content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
-    try:
-        clf = LogisticRegression(max_iter=200, solver="lbfgs")
-        scores = cross_val_score(clf, content_scaled, modality_labels, cv=3, scoring="accuracy", n_jobs=-1)
-        content_modality_acc = float(np.mean(scores))
-    except Exception:
-        content_modality_acc = 0.5
+    aligned = alignment_metrics(reps_lvl) if subject_probes else None
+    if aligned is not None:
+        content_modality_acc = aligned["content/modality_probe_acc"]
+    else:
+        content_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(content_all)
+        try:
+            clf = LogisticRegression(max_iter=200, solver="lbfgs")
+            scores = cross_val_score(clf, content_scaled, modality_labels, cv=3, scoring="accuracy", n_jobs=-1)
+            content_modality_acc = float(np.mean(scores))
+        except Exception:
+            content_modality_acc = 0.5
     m["content/modality_probe_acc"] = content_modality_acc
     m["content/modality_invariance"] = 1.0 - abs(content_modality_acc - 0.5) * 2
 
@@ -300,13 +306,25 @@ def _metrics_for_level(reps_lvl, subject_probes=False):
 
     # --- 5. Linear probe: modality from style (should be high ~1.0) ---
     style_all = np.concatenate([reps_lvl["style_v0"], reps_lvl["style_v1"]], axis=0)
-    style_all_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(style_all)
-    try:
-        clf2 = LogisticRegression(max_iter=200, solver="lbfgs")
-        scores2 = cross_val_score(clf2, style_all_scaled, modality_labels, cv=3, scoring="accuracy", n_jobs=-1)
-        style_modality_acc = float(np.mean(scores2))
-    except Exception:
-        style_modality_acc = 0.5
+    if subject_probes:
+        style_modality_acc = float("nan")
+        if style_all.shape[1]:
+            report, _ = diagnose(
+                reps_lvl["style_v0"],
+                reps_lvl["style_v1"],
+                reps_lvl["subjects"],
+                n_splits=int(aligned["alignment/probe_folds"]),
+                seed=PROBE_SEED,
+            )
+            style_modality_acc = report["probes"]["normalized_linear"]["accuracy"]
+    else:
+        style_all_scaled = make_pipeline(Normalizer(norm="l2"), StandardScaler()).fit_transform(style_all)
+        try:
+            clf2 = LogisticRegression(max_iter=200, solver="lbfgs")
+            scores2 = cross_val_score(clf2, style_all_scaled, modality_labels, cv=3, scoring="accuracy", n_jobs=-1)
+            style_modality_acc = float(np.mean(scores2))
+        except Exception:
+            style_modality_acc = 0.5
     m["style/modality_probe_acc"] = style_modality_acc
 
     # Per-level composite (same formula as the old global separation_score)
@@ -383,10 +401,14 @@ def _metrics_for_level(reps_lvl, subject_probes=False):
     shuffled_sim = _cosine_sim(reps_lvl["content_v0"], reps_lvl["content_v1"][perm])
     m["content/cross_view_cosine_shuffled"] = float(np.mean(shuffled_sim))
     m["content/alignment_gap"] = float(np.mean(content_sim) - np.mean(shuffled_sim))
+    if aligned is not None:
+        m.update(aligned)
     return m
 
 
-def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max_batches=200, *, subject_probes=False):
+def evaluate_content_style_separation(
+    vqvae_model, dataloader, args, device, max_batches=200, *, subject_probes=False, representations=None
+):
     """Run all content/style separation metrics for every masked level.
 
     For each level ``lvl`` in ``args.content_style_levels`` the full metric
@@ -398,7 +420,11 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
     """
     torch.manual_seed(0)
     np.random.seed(0)
-    reps = _collect_representations(vqvae_model, dataloader, args, device, max_batches)
+    reps = (
+        representations
+        if representations is not None
+        else _collect_representations(vqvae_model, dataloader, args, device, max_batches)
+    )
     metrics = {}
 
     per_level_sep = {}
@@ -430,7 +456,7 @@ def evaluate_content_style_separation(vqvae_model, dataloader, args, device, max
         if subject_probes:
             suffix = f"_L{finest}"
             for key, value in list(metrics.items()):
-                if key.endswith(suffix) and key.startswith(("content/diagnosis_", "content/gender_", "content/race_")):
+                if key.endswith(suffix):
                     metrics[key[: -len(suffix)]] = value
         for k in (
             "content/cross_view_cosine_mean",

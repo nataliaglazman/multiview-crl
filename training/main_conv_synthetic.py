@@ -43,6 +43,7 @@ import training.encoder_args as encoder_args
 import training.losses as losses
 from data.datasets import MyCustomDataset, SyntheticBrainDataset
 from data.splits import split_summary, subject_level_split
+from eval.adni.encoder_alignment import print_alignment_report
 from models.multiview_encoder import MultiviewConvEncoder
 from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
@@ -830,47 +831,15 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
     return flat, scores
 
 
-# What each real-data evaluation prints against the step-0 floor; the JSON and TensorBoard get
-# the whole separation suite. Style units take no part in the loss, so the style rows describe
-# an untrained readout of the trained backbone.
-REAL_SUMMARY = (
-    ("val/loss", "held-out training objective"),
-    ("val/content_retrieval_top1", "T1<->FLAIR subject retrieval, content"),
-    ("content/diagnosis_probe_acc_v0", "diagnosis probe, T1 content"),
-    ("content/diagnosis_probe_acc_v1", "diagnosis probe, FLAIR content"),
-    ("content/diagnosis_probe_balanced_acc_v0", "diagnosis balanced acc, T1 content"),
-    (
-        "content/diagnosis_probe_balanced_acc_v1",
-        "diagnosis balanced acc, FLAIR content",
-    ),
-    ("content/gender_probe_acc_v0", "gender probe, T1 content"),
-    ("content/gender_probe_acc_v1", "gender probe, FLAIR content"),
-    ("content/gender_probe_balanced_acc_v0", "gender balanced acc, T1 content"),
-    ("content/gender_probe_balanced_acc_v1", "gender balanced acc, FLAIR content"),
-    ("content/race_probe_acc_v0", "race probe, T1 content"),
-    ("content/race_probe_acc_v1", "race probe, FLAIR content"),
-    ("content/race_probe_balanced_acc_v0", "race balanced acc, T1 content"),
-    ("content/race_probe_balanced_acc_v1", "race balanced acc, FLAIR content"),
-    ("content/modality_probe_acc", "modality probe, content (0.5 = none)"),
-    ("content/eff_rank_v0", "content effective rank, T1"),
-    ("content/eff_rank_v1", "content effective rank, FLAIR"),
-    ("style/modality_probe_acc", "modality probe, style"),
-    ("style/subject_retrieval_top1", "T1<->FLAIR subject retrieval, style"),
-)
-
-
 @torch.no_grad()
 def held_out_objective(model, batches, device, args):
-    """The training objective and cross-view subject retrieval on the held-out subjects.
+    """Average the held-out training objective over full batches only.
 
-    The loss averages full batches only: InfoNCE's value depends on the number of negatives,
-    so a short last batch would read low. Retrieval ranks every held-out subject's FLAIR
-    content against its T1 content and the reverse (chance 1/N), the question InfoNCE asks
-    within a batch asked of the whole split. A subject with several scans counts its other
-    scans as misses. Without masks, --patch-foreground-mask falls back to the image support.
+    InfoNCE depends on the number of negatives, so omit a short final batch here.
+    Alignment and retrieval use every validation row in the representation pass.
     """
     sim_metric, criterion = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
-    sums, full, content = {}, 0, ([], [])
+    sums, full = {}, 0
     for data in batches:
         x = torch.cat(data["image"], dim=0).as_subclass(torch.Tensor).to(device)
         b = x.shape[0] // 2
@@ -879,23 +848,10 @@ def held_out_objective(model, batches, device, args):
             for key, value in {"loss": loss, **terms}.items():
                 sums[key] = sums.get(key, 0.0) + float(value)
             full += 1
-        else:
-            pooled = model(x, pool_only=True, n_views=2)[2][0]
-        units = model.content_units()
-        content[0].append(pooled[:b, units].float().cpu())
-        content[1].append(pooled[b:, units].float().cpu())
-    out = {f"val/{key}": value / full for key, value in sums.items()} if full else {}
-    t1 = torch.nn.functional.normalize(torch.cat(content[0]), dim=1)
-    flair = torch.nn.functional.normalize(torch.cat(content[1]), dim=1)
-    similarity = t1 @ flair.T
-    target = torch.arange(similarity.shape[0])
-    hits = (similarity.argmax(1) == target).double().mean() + (similarity.argmax(0) == target).double().mean()
-    out["val/content_retrieval_top1"] = float(hits / 2)
-    out["val/content_retrieval_chance"] = 1.0 / similarity.shape[0]
-    return out
+    return {f"val/{key}": value / full for key, value in sums.items()} if full else {}
 
 
-def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
+def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None, floor=None, previous=None):
     """Real-data counterpart of ``evaluate``: no generator factors, so no DCI.
 
     Reports the held-out objective, cross-view retrieval and
@@ -908,14 +864,14 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
     loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     batches = cross_reconstruction._get_cached_batches(loader, len(loader))
     flat = held_out_objective(model, batches, device, args)
+    reps = cross_reconstruction._collect_representations(model, loader, args, device, len(loader))
     flat.update(
         cross_reconstruction.evaluate_content_style_separation(
-            model, loader, args, device, len(loader), subject_probes=True
+            model, loader, args, device, len(loader), subject_probes=True, representations=reps
         )
     )
     flat = {key: float(value) for key, value in flat.items()}
 
-    has_floor = bool(floor)
     print("    --- held-out subjects ---", flush=True)
     mask = mask_state(model)
     if mask is not None:
@@ -923,49 +879,7 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
         print(
             f"      content units {mask['content_units']} (learned mask{size}, margin {mask['margin']:.2f})", flush=True
         )
-    print(
-        f"      {'':<40s}{'value':>9s}" + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""),
-        flush=True,
-    )
-    for key, label in REAL_SUMMARY:
-        value = flat.get(key)
-        if value is None or not np.isfinite(value):
-            continue
-        line = f"      {label:<40s}{value:>9.3f}"
-        if has_floor and np.isfinite(floor.get(key, float("nan"))):
-            line += f"{floor[key]:>9.3f}{value - floor[key]:>+12.3f}"
-        print(line, flush=True)
-    chance = flat.get("content/diagnosis_probe_chance", float("nan"))
-    print(
-        f"      chance: retrieval {flat['val/content_retrieval_chance']:.3f}, diagnosis {chance:.3f} (majority group)",
-        flush=True,
-    )
-    for target in ("diagnosis", "gender", "race"):
-        prefix = f"content/{target}_probe"
-        if f"{prefix}_n" not in flat:
-            continue
-        stats = {
-            key: flat[f"{prefix}_{key}"]
-            for key in (
-                "n",
-                "subjects",
-                "classes",
-                "folds",
-                "missing",
-                "rare",
-                "conflicting",
-                "chance",
-                "balanced_chance",
-            )
-        }
-        print(
-            f"      {target}: {stats['n']:.0f} pairs / {stats['subjects']:.0f} subjects, "
-            f"{stats['classes']:.0f} classes, {stats['folds']:.0f} folds; "
-            f"excluded missing={stats['missing']:.0f}, rare={stats['rare']:.0f}, conflicting={stats['conflicting']:.0f}; "
-            f"majority={stats['chance']:.3f}, balanced chance={stats['balanced_chance']:.3f}"
-            + (" (probe unavailable: insufficient labeled subjects)" if not stats["folds"] else ""),
-            flush=True,
-        )
+    print_alignment_report(flat, floor=floor, previous=previous)
 
     spread = attention_spread(model, val_dataset, device, args.batch_size)
     if spread is not None:
@@ -987,7 +901,28 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
         for key, value in flat.items():
             if np.isfinite(value):
                 writer.add_scalar(key, value, step)
+    finest = reps[min(reps)]
+    feature_name = f"alignment_step{step}.npz"
+    metadata = {
+        "run_dir": os.path.abspath(save_dir),
+        "step": step,
+        "content_units": model.content_units(),
+        "content_channels": int(flat["alignment/content_channels"]),
+        "feature_space": "content before projector or loss-side standardization",
+        "probe_seed": int(flat["alignment/probe_seed"]),
+        "probe_folds": int(flat["alignment/probe_folds"]),
+        "protocol": "encoder_modality_gap.diagnose; subject-disjoint CV and fold-fitted scaling",
+        "features_file": feature_name,
+    }
+    np.savez_compressed(
+        os.path.join(save_dir, feature_name),
+        content_t1=finest["content_v0"],
+        content_flair=finest["content_v1"],
+        subjects=finest["subjects"],
+        metadata_json=np.array(json.dumps(metadata)),
+    )
     payload = dict(flat)
+    payload["alignment_evaluation"] = metadata
     if mask is not None:
         payload["content_mask"] = mask
     if spread is not None:
@@ -1282,6 +1217,7 @@ def main():
     # Step 0 is the untrained floor, not a candidate: with every delta at or below zero it
     # would win on a tie and save an untrained encoder as "best".
     best = {"value": None, "step": None, "raw": None}
+    previous_real = floor_flat if real else None
 
     step = 0
     running = dict(
@@ -1409,7 +1345,12 @@ def main():
 
             if step % args.eval_every == 0 or step == args.train_steps:
                 model.eval()
-                flat, _ = evaluation(model, val_dataset, device, args, save_dir, step, writer, floor=floor)
+                eval_kwargs = {"previous": previous_real} if real else {}
+                flat, _ = evaluation(
+                    model, val_dataset, device, args, save_dir, step, writer, floor=floor, **eval_kwargs
+                )
+                if real:
+                    previous_real = flat
                 torch.save(model.state_dict(), os.path.join(save_dir, "model.pt"))
                 save_progress(step, "running")
                 if args.spatial_recovery_eval:

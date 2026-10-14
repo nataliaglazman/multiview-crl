@@ -15,6 +15,7 @@ import nibabel as nib
 import numpy as np
 import torch
 
+from eval.adni.encoder_modality_gap import diagnose
 from eval.metrics import cross_reconstruction
 from eval.protocol import score_checkpoint
 from training import main_conv_synthetic as trainer
@@ -147,6 +148,10 @@ class RealTrainingTests(unittest.TestCase):
         run_dir = self.root / "runs" / "adni"
         self.assertIn("input: 16x20x16 volumes at 1 mm -> 4x5x4 backbone map (stride 4)", output)
         self.assertIn("held-out subjects", output)
+        self.assertIn("subject alignment", output)
+        self.assertIn("modality leakage", output)
+        self.assertIn("representation health", output)
+        self.assertIn("Δ previous", output)
 
         split = json.loads((run_dir / "split.json").read_text())["subjects"]
         sets = {mode: set(subjects) for mode, subjects in split.items()}
@@ -163,10 +168,27 @@ class RealTrainingTests(unittest.TestCase):
             "val/content_retrieval_top1",
             "content/diagnosis_probe_acc_v0",
             "style/modality_probe_acc",
+            "content/modality_normalized_rbf_acc",
+            "content/modality_mean_centered_rbf_acc",
+            "content/alignment_gap",
+            "content/normalized_spread_v0",
+            "val/content_retrieval_top5",
         ):
             self.assertIn(key, trained)
         self.assertAlmostEqual(trained["val/content_retrieval_chance"], 1 / 12)
         self.assertNotEqual(floor["val/loss"], trained["val/loss"])
+        for step in (0, 2):
+            saved = json.loads((run_dir / f"separation_step{step}.json").read_text())
+            self.assertEqual(saved["alignment/content_channels"], 9)
+            with np.load(run_dir / f"alignment_step{step}.npz", allow_pickle=False) as features:
+                report, _ = diagnose(features["content_t1"], features["content_flair"], features["subjects"])
+                self.assertEqual(features["subjects"].tolist(), split["val"])
+                meta = json.loads(str(features["metadata_json"]))
+                self.assertEqual(meta["step"], step)
+                self.assertEqual(meta["content_units"], list(range(9)))
+            for key, score in report["probes"].items():
+                self.assertEqual(saved[f"content/modality_{key}_acc"], score["accuracy"])
+            self.assertEqual(saved["content/modality_probe_acc"], report["probes"]["normalized_linear"]["accuracy"])
 
         best = json.loads((run_dir / "best_checkpoint.json").read_text())
         self.assertEqual((best["metric"], best["step"], best["floor_subtracted"]), ("val_loss", 2, False))
@@ -190,6 +212,7 @@ class RealTrainingTests(unittest.TestCase):
         output = run(argv)
         self.assertIn("patch foreground mask: first batch keeps", output)
         self.assertNotIn("NOTE: without --asymmetric-aug", output)
+        self.assertNotIn("Δ initial", output)
         caches = list((self.root / "cache").glob("preprocessed_*"))
         self.assertEqual(len(caches), 1)
         # Train and val are preprocessed; the test subjects are never read.
@@ -216,6 +239,36 @@ class RealTrainingTests(unittest.TestCase):
                     trainer.seed_augmentation_worker(0)
             draws.append(torch.cat(dataset[0]["image"]).as_subclass(torch.Tensor))
         self.assertFalse(torch.equal(*draws))
+
+    def test_learned_mask_export_and_empty_style_are_supported(self):
+        argv = (
+            self.data
+            + TINY
+            + [
+                "--no-cache",
+                "--mask-mode",
+                "learned_size",
+                "--mask-size-weight",
+                "0.05",
+                "--content-channels",
+                "12",
+                "--model-id",
+                "all-content",
+                "--train-steps",
+                "1",
+                "--no-floor-eval",
+            ]
+        )
+        output = run(argv)
+        run_dir = self.root / "runs" / "all-content"
+        saved = json.loads((run_dir / "separation_step1.json").read_text())
+        self.assertIn("12 content channels", output)
+        self.assertEqual(saved["alignment_evaluation"]["content_units"], list(range(12)))
+        self.assertTrue(np.isnan(saved["style/modality_probe_acc"]))
+        with np.load(run_dir / "alignment_step1.npz", allow_pickle=False) as features:
+            self.assertEqual(features["content_t1"].shape, (12, 12))
+        self.assertNotIn("Δ initial", output)
+        self.assertNotIn("Δ previous", output)
 
     def test_demographics_reuse_image_cache_and_reach_floor_training_and_tensorboard(
         self,
@@ -277,6 +330,8 @@ class RealTrainingTests(unittest.TestCase):
             if call.args[0] == "content/race_probe_balanced_acc_v0"
         ]
         self.assertEqual([call[2] for call in logged], [0, 2])
+        for tag in ("content/alignment_gap", "content/modality_normalized_rbf_acc", "val/content_retrieval_top5"):
+            self.assertEqual([call.args[2] for call in writer.add_scalar.call_args_list if call.args[0] == tag], [0, 2])
 
 
 if __name__ == "__main__":

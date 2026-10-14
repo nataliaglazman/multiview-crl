@@ -130,9 +130,20 @@ intervention; it must not be reported as invariance learned by the encoder. It a
 does not test diagnosis/anatomy preservation. A constant offset before normalization
 need not be constant after normalization, so conclusions refer to normalized space.
 
-The diagnostic does not change the training-time probe. Its scores may differ
-because the original probe fits StandardScaler before CV; this diagnostic fits it
-within every fold and explicitly groups subjects.
+Encoder-only ADNI training now calls this same diagnostic for its modality scores.
+Older training logs used a different probe that fitted StandardScaler before CV
+and did not explicitly group subjects; those historical numbers are not directly
+comparable. New evaluations save `alignment_step<N>.npz` alongside their metrics,
+so an exact training step can be replayed without checkpoint selection or MRI:
+
+```bash
+python -m eval.adni.encoder_modality_gap \
+    --features results/encoder_adni/runs/<MODEL_ID>/alignment_step500.npz
+```
+
+Keep the default seed 1729 and three folds (two for a two-subject fixture) to
+reproduce the training-time scores. Normalized linear/RBF accuracy measures the
+original content; centered accuracy is a separate intervention in both reports.
 
 ## Verification
 

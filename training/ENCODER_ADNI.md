@@ -69,10 +69,9 @@ runai training standard submit preflight-adni-$(date +%H%M) \
   `separation_step<N>.json` and prints these readouts against the step-0 floor:
   - the training objective on the held-out subjects;
   - T1↔FLAIR subject retrieval from content (chance 1/N);
-  - the `eval.metrics.cross_reconstruction` probes (diagnosis, modality, effective
-    rank, style retrieval), plus optional gender and race probes. Diagnosis and
-    demographic probing use the subject-disjoint protocol below; the other metric
-    definitions match the VQ-VAE ADNI runs.
+  - paired-subject alignment, modality leakage and representation health, using
+    the protocol below;
+  - diagnosis and optional gender/race probes on held-out subjects.
 - **Selection.** `--best-metric val_loss` (the real-data default) keeps the lowest
   held-out objective. `none` keeps the last step only.
 - **Files.** `split.json` lists the train/val/test subjects. Training never loads the
@@ -245,6 +244,69 @@ derive from both. CUDA adaptive-pooling backward has no deterministic kernel, so
 
 ## Reading the evaluation
 
+### Alignment during training
+
+Each evaluation now prints separate **subject alignment**, **modality leakage**,
+**representation health**, **label information** and **training objective** tables.
+The columns show the current value, reference baseline, initialization value,
+change from initialization and change from the preceding evaluation. Arrows mark
+the desired direction where one exists; these changes are descriptive, not
+statistical significance tests. With `--no-floor-eval`, the initialization columns
+are absent; changes from the previous evaluation appear once one exists.
+
+Read the tables together:
+
+| Question | Readout | Evidence of improvement |
+| --- | --- | --- |
+| Can T1 identify the same subject's FLAIR and vice versa? | Retrieval top-1/top-5 | Increasing above the random-matching reference and initial values |
+| Are paired scans specifically similar? | Paired cosine minus different-subject cosine | Increasing; high paired cosine alone is insufficient |
+| Are modalities still distinguishable? | Uncentered normalized-content linear and RBF probes | Moving toward 0.5 while subject information is preserved |
+| Are the modality means approaching? | Centroid distance divided by within-view RMS spread | Decreasing; matching means does not imply matching distributions |
+| Is subject variation disappearing? | Effective rank and RMS spread of normalized content, per view | Inspect for drops alongside retrieval/label performance; higher rank alone is not a quality score |
+| Is useful label information retained? | Diagnosis/gender/race balanced accuracy | Compare with the target-specific balanced baseline and initial encoder |
+
+Alignment uses every validation pair, including a partial last batch. The unpaired
+cosine baseline averages **all different-subject pairs**, rather than one random
+shuffle that can include true matches. Retrieval treats other visits of the same
+subject as positives. Ties receive expected credit under random tie-breaking, so
+a constant representation gets chance retrieval, including at top-5. Random
+matching references account for the gallery size and repeated subjects.
+
+The header prints the actual number of content channels, including learned-mask
+changes. The health table uses **L2-normalized content**: its rank and spread match
+the geometry used for retrieval and modality probes. The old raw-feature health
+metrics remain in JSON/TensorBoard. Nearly constant content produces an explicit
+collapse warning. Undefined cosines/spread ratios print as `n/a`, never as success.
+
+The content modality probes now call **the same implementation as the offline
+modality-gap diagnostic**: three subject-disjoint folds, seed 1729, fold-fitted
+scaling, the same classifiers and numerical tolerance. Two subjects use two
+folds. `content/modality_probe_acc` is an alias of
+`content/modality_normalized_linear_acc`; the old preprocessing-before-CV score
+is no longer used for encoder-only ADNI training. Compare historical runs with
+care. The centered RBF row remains explicitly labeled as a diagnostic intervention.
+
+All metrics are saved in `separation_step<N>.json` and TensorBoard, including
+direction-specific retrieval, raw label accuracy and the secondary style metrics.
+Style metrics are omitted from the main console tables because those units do
+not participate in the encoder-only objective. Checkpoint selection remains
+`val_loss`; these reporting changes do not add a training loss.
+
+Every evaluation also saves `alignment_step<N>.npz`: the small frozen content
+arrays, aligned subject IDs, selected channel indices, step and probe protocol.
+This reuses the representation pass already needed for evaluation. Reproduce a
+particular step's modality scores without loading MRI or choosing a checkpoint:
+
+```bash
+python -m eval.adni.encoder_modality_gap \
+    --features results/encoder_adni/runs/<MODEL_ID>/alignment_step500.npz
+```
+
+Use the default seed/folds for parity (or `--folds 2` for a two-subject validation
+fixture). Re-extracting a checkpoint at a different encoding batch size can have
+small floating-point differences; replaying these saved arrays removes that source
+of disagreement.
+
 ### Diagnosis and demographics
 
 `Group` supplies diagnosis; optional `PTGENDER` and `PTRACCAT` columns supply
@@ -265,6 +327,8 @@ scaling preceded cross-validation and whose pooled folds could share subjects.
 For each target, logs show ordinary accuracy, **balanced accuracy** (mean recall
 across classes), the majority-class baseline and balanced baseline (`1 / classes`).
 Race is highly imbalanced, so inspect balanced accuracy as well as accuracy.
+The console prioritizes balanced accuracy; ordinary accuracy remains in JSON and
+TensorBoard, with both baselines and coverage printed below the tables.
 Step-0 values and changes from that floor appear alongside diagnosis. JSON and
 TensorBoard keys include `content/gender_probe_acc_v0`,
 `content/race_probe_balanced_acc_v1`, and corresponding `_v0`/`_v1`/pooled metrics.
@@ -298,8 +362,8 @@ Label handling is explicit:
   from raw anatomy and contrast.
 - **Prefer the per-view target probes** (`_v0`, `_v1`) to see what each encoder
   retains; pooled scores can hide a weak view.
-- **Retrieval assumes one scan per subject**, which holds for this CSV. Chance is
-  about 1/291.
+- **Retrieval counts matching subject IDs**, including repeat scans; for one scan
+  per subject its top-1 chance is `1 / subjects`.
 - **Style rows**: see the content-size section above.
 
 ## Not wired yet
