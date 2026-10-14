@@ -584,6 +584,27 @@ def _ridge_informativeness(repr_arr, factor_arr, seeds=(0, 1, 2)):
     return (float(finite.mean()) if finite.size else float("nan")), per_factor
 
 
+def _score_extra_targets(detail, repr_arr, names, values):
+    """Targets outside the generator's factors, read by the factor rows' own probes and kept out of every aggregate.
+
+    Per-target ridge R², block MCC and channel MCC, so an extra target and a factor can be compared row
+    for row on the same block.
+    """
+    if not isinstance(detail, dict):
+        return
+    from eval.metrics.identifiability_metrics import block_mcc, channel_mcc
+
+    _, ridge = _ridge_informativeness(repr_arr, values)
+    block, channel = block_mcc(repr_arr, values), channel_mcc(repr_arr, values)
+    detail.update(
+        extra_factor_names=list(names),
+        per_extra_ridge=ridge,
+        per_extra_mcc=block["per_factor"],
+        per_extra_mcc_std=block["per_factor_std"],
+        per_extra_channel_mcc=channel["per_factor"],
+    )
+
+
 def compute_dci_synthetic(
     encoder,
     dataset,
@@ -597,6 +618,7 @@ def compute_dci_synthetic(
     null_permute=False,
     n_null=5,
     null_seed=0,
+    extra_targets=None,
 ):
     """Compute DCI metrics for a synthetic dataset with known GT content/style factors.
 
@@ -631,6 +653,11 @@ def compute_dci_synthetic(
             from noise alone.  Real minus null is the non-structural signal.
         n_null: Number of permutations to average for the null floor.
         null_seed: Seed for the permutation RNG.
+        extra_targets: Optional ``(names, values)``, values of shape (n_samples, len(names)) in dataset
+            order: further per-subject content targets, such as the lesion's rendered centroid. Each
+            content block (``content→content``, ``content_v2→content``) reads them with its per-factor
+            ridge, block-MCC and channel-MCC probes into ``extra_*`` keys of its ``detail``; no aggregate
+            score includes them.
 
     Returns:
         dict with keys like ``"L0/content→content/disentanglement"``.
@@ -653,6 +680,13 @@ def compute_dci_synthetic(
     n = gt_content.shape[0]
     split = int(n * train_ratio)
     gt_style = gt_style_v1
+    if extra_targets is not None:
+        extra_names, extra_values = extra_targets
+        extra_values = np.asarray(extra_values, dtype=np.float64)
+        if extra_values.shape != (n, len(extra_names)):
+            raise ValueError(
+                f"extra_targets need ({n}, {len(extra_names)}) values in dataset order, got {extra_values.shape}"
+            )
 
     results = {}
     null_rng = np.random.RandomState(null_seed)
@@ -717,6 +751,9 @@ def compute_dci_synthetic(
                 logger.warning("Ridge informativeness failed for %s: %s", label, e)
                 results[f"{label}/informativeness_ridge"] = float("nan")
 
+            if extra_targets is not None and label.endswith(("content→content", "content_v2→content")):
+                _score_extra_targets(results.get(f"{label}/detail"), repr_arr, extra_names, extra_values)
+
             if null_permute:
                 null = _null_permuted_dci(repr_arr, factor_arr, split, factor_types, n_null, null_rng)
                 for k, v in null.items():
@@ -761,7 +798,7 @@ def compute_dci_synthetic(
                 results[f"{prefix}style->style/block_mcc"] = _block_mcc(style_repr, gt_style)["mean"]
                 _keep_mcc("content->style", content_repr, gt_style)
             if per_encoder and content_v2 is not None:
-                results[f"{prefix}content_v2->content/block_mcc"] = _block_mcc(content_v2, gt_content)["mean"]
+                _keep_mcc("content_v2->content", content_v2, gt_content)
                 if style_v2 is not None:
                     results[f"{prefix}style_v2->style/block_mcc"] = _block_mcc(style_v2, gt_style_v2)["mean"]
                     results[f"{prefix}content_v2->style/block_mcc"] = _block_mcc(content_v2, gt_style_v2)["mean"]

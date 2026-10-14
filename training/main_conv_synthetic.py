@@ -459,15 +459,60 @@ def effective_rank(feat):
     return float(total**2 / ev.pow(2).sum()) if total > 0 else 0.0
 
 
+CENTROID_NAMES = ("centroid_x", "centroid_y", "centroid_z")
+# Blocks the per-factor table shows; content_v2 is the second (FLAIR) encoder's code.
+PER_FACTOR_BLOCKS = {"content→content": " (T1)", "content→style": " (T1)", "content_v2→content": " (FLAIR encoder)"}
+
+
+def lesion_centroid_targets(dataset):
+    """Where each subject's lesion actually is: its rendered centroid in [-1, 1] coordinates, in dataset order.
+
+    lesion_x/y/z are the generator's draws. Under wm_interior they place the lesion by rank within each
+    brain's own white matter, so they ask more than where the lesion is. Read next to them on the same
+    features, the centroid separates what the encoder carries from what that yardstick asks. Renders the
+    anatomy only, once per dataset. None unless every subject has one sphere lesion to locate.
+    """
+    if not hasattr(dataset, "_lesion_centroids"):
+        dataset._lesion_centroids = None
+        inner = getattr(dataset, "_inner", None)
+        renderer = getattr(inner, "renderer", None)
+        if (
+            getattr(inner, "mode", None) == "pseudo_mri"
+            and getattr(renderer, "lesion_mode", None) == "sphere"
+            and getattr(renderer, "lesion_target", None) == "position"
+        ):
+            rows = []
+            for idx in range(len(dataset)):
+                _, _, (_, load) = inner._first_fitting(
+                    idx,
+                    lambda seed, d: renderer.render_structure(
+                        d["z_content"],
+                        d["z_deformation"],
+                        d["z_fissure"],
+                        "cpu",
+                        clean=inner.clean_content,
+                        z_lesion=d["z_lesion"],
+                    ),
+                )
+                rows.append(((load[..., None] * renderer.coords).sum((0, 1, 2)) / load.sum()).numpy())
+            centroids = np.stack(rows)
+            if np.isfinite(centroids).all():
+                dataset._lesion_centroids = centroids
+            else:
+                print("    [eval] some subjects have no lesion voxels; lesion centroid rows skipped", flush=True)
+    return dataset._lesion_centroids
+
+
 def per_factor_scores(results):
     """Per-factor ridge R² and block-MCC, keyed by block then factor name.
 
     Both are already computed inside ``compute_dci_synthetic``; this just reads them off
     the block detail dicts. Returned in a plain-dict shape so a step-0 call can be kept
-    as the untrained floor and subtracted from every later eval.
+    as the untrained floor and subtracted from every later eval. Extra targets (the lesion
+    centroid) follow a block's factors, marked ``extra``.
     """
     out = {}
-    for block in ("content→content", "content→style"):
+    for block in PER_FACTOR_BLOCKS:
         detail = results.get(f"{block}/detail")
         if not isinstance(detail, dict):
             continue
@@ -484,6 +529,16 @@ def per_factor_scores(results):
             nm: {"ridge": at(ridge, j), "mcc": at(mcc, j), "mcc_std": at(mcc_std, j), "chan": at(chan, j)}
             for j, nm in enumerate(names)
         }
+        extra = [detail.get(k) for k in ("per_extra_ridge", "per_extra_mcc", "per_extra_mcc_std")]
+        extra.append(detail.get("per_extra_channel_mcc"))
+        for j, nm in enumerate(detail.get("extra_factor_names") or []):
+            out[block][nm] = {
+                "ridge": at(extra[0], j),
+                "mcc": at(extra[1], j),
+                "mcc_std": at(extra[2], j),
+                "chan": at(extra[3], j),
+                "extra": True,
+            }
     return out
 
 
@@ -499,10 +554,12 @@ def print_per_factor(scores, floor=None, writer=None, step=0):
         if not rows:
             continue
         has_floor = bool(floor) and block in floor
-        print(f"    --- per-factor recovery: {block} ---", flush=True)
+        print(f"    --- per-factor recovery: {block}{PER_FACTOR_BLOCKS.get(block, '')} ---", flush=True)
         head = f"      {'factor':<20s}{'ridge R²':>9s}{'blockMCC':>10s}{'±':>7s}{'chanMCC':>9s}"
         print(head + (f"{'floor':>9s}{'Δ vs floor':>12s}" if has_floor else ""), flush=True)
         for nm, v in rows.items():
+            if v.get("extra") and nm == next(n for n, r in rows.items() if r.get("extra")):
+                print("      rendered lesion centroid: where the lesion is, not a generator factor", flush=True)
             line = (
                 f"      {nm:<20s}{v['ridge']:>9.3f}{v['mcc']:>10.3f}{v['mcc_std']:>7.3f}"
                 f"{v.get('chan', float('nan')):>9.3f}"
@@ -516,6 +573,18 @@ def print_per_factor(scores, floor=None, writer=None, step=0):
                 writer.add_scalar(f"per_factor/{tag}/{nm}/ridge_r2", v["ridge"], step)
                 writer.add_scalar(f"per_factor/{tag}/{nm}/mcc", v["mcc"], step)
                 writer.add_scalar(f"per_factor/{tag}/{nm}/channel_mcc", v["chan"], step)
+        drawn = [rows[f"lesion_{axis}"]["ridge"] for axis in "xyz" if f"lesion_{axis}" in rows]
+        placed = [rows[nm]["ridge"] for nm in CENTROID_NAMES if nm in rows]
+        if len(drawn) == len(placed) == 3:
+            print(
+                f"      lesion x/y/z mean ridge R²: generator draws {np.mean(drawn):+.3f}, "
+                f"rendered centroid {np.mean(placed):+.3f}",
+                flush=True,
+            )
+            if writer is not None:
+                tag = block.replace("→", "_to_")
+                writer.add_scalar(f"per_factor/{tag}/lesion_xyz_mean/ridge_r2", float(np.mean(drawn)), step)
+                writer.add_scalar(f"per_factor/{tag}/centroid_xyz_mean/ridge_r2", float(np.mean(placed)), step)
 
 
 BEST_METRIC_KEYS = {
@@ -737,6 +806,7 @@ def causal_discovery_eval(model, val_dataset, device, args, save_dir, step, writ
 def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floor=None):
     print(f"  [eval] synthetic DCI @ step {step} ...", flush=True)
     pooling = "gap" if args.eval_pooling == "gap" else tuple(args.eval_patch_grid)
+    centroids = lesion_centroid_targets(val_dataset)
     results = dci.compute_dci_synthetic(
         encoder=model,
         dataset=val_dataset,
@@ -745,6 +815,7 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
         num_workers=0,
         pooling=pooling,
         per_encoder=not args.no_separate_encoders,
+        extra_targets=None if centroids is None else (CENTROID_NAMES, centroids),
     )
     flat = dci.flatten_dci_results(results)
 
