@@ -101,6 +101,19 @@ class ModalityGapLauncherTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--checkpoint") + 1], "model init.pt")
         self.assertEqual(argv[-len(extra) :], extra)
 
+    def test_module_override_runs_the_causes_follow_up_and_rejects_other_names(self):
+        self.env["MODULE"] = "eval.adni.encoder_modality_gap_causes"
+        result = self.launch("--splits", "val", "train")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads((self.root / "python.json").read_text())["argv"]
+        self.assertEqual(argv[:2], ["-m", "eval.adni.encoder_modality_gap_causes"])
+        self.assertEqual(argv[-3:], ["--splits", "val", "train"])
+        for bad in ("eval.adni.x; rm -rf /", "training.main_conv_synthetic", "eval.adni."):
+            self.env["MODULE"] = bad
+            (self.root / "submit.json").unlink(missing_ok=True)
+            self.assertEqual(self.launch().returncode, 2)
+            self.assertFalse((self.root / "submit.json").exists())
+
     def test_rejects_bad_job_names_and_preserves_exit_status(self):
         for bad in ("bad.name", "x" * 64):
             self.env["JOB_NAME"] = bad

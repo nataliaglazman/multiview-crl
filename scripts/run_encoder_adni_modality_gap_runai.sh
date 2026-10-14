@@ -3,6 +3,7 @@
 # Sync this checkout to REPO_PATH first. Extra arguments go directly to the probe.
 #   bash scripts/run_encoder_adni_modality_gap_runai.sh --dry-run
 #   bash scripts/run_encoder_adni_modality_gap_runai.sh --checkpoint model_init.pt
+# MODULE=eval.adni.encoder_modality_gap_causes runs the follow-up that tests candidate causes.
 set -euo pipefail
 
 DRY_RUN=0
@@ -16,6 +17,11 @@ MODEL_ID=${MODEL_ID:-encoder_adni_conv_mlp_layernorm_s42}
 RUN_DIR=${RUN_DIR:-$REPO_PATH/results/encoder_adni/runs/$MODEL_ID}
 CHECKPOINT=${CHECKPOINT:-model_best.pt}
 BATCH_SIZE=${BATCH_SIZE:-4}
+MODULE=${MODULE:-eval.adni.encoder_modality_gap}
+if [[ ! "$MODULE" =~ ^eval\.adni\.[a-z0-9_]+$ ]]; then
+    echo "MODULE must name a module under eval.adni, e.g. eval.adni.encoder_modality_gap_causes." >&2
+    exit 2
+fi
 JOB_NAME=${JOB_NAME:-adni-modality-gap-$(date +%s)}
 if [[ ! "$JOB_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ || ${#JOB_NAME} -gt 63 ]]; then
     echo "Run:ai JOB_NAME must contain at most 63 lowercase letters, digits and hyphens, starting/ending alphanumeric." >&2
@@ -29,7 +35,7 @@ ARGS_Q=$(printf '%q ' "${PROBE_ARGS[@]}")
 # whose meaning could change if a submission client folds embedded newlines.
 PROBE_CMD="set -euo pipefail ; cd $REPO_Q ; export PYTHONPATH=$REPO_Q PYTHONUNBUFFERED=1"
 PROBE_CMD+=" CUBLAS_WORKSPACE_CONFIG=:4096:8 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1"
-PROBE_CMD+=" NUMEXPR_NUM_THREADS=1 ; exec python -m eval.adni.encoder_modality_gap ${ARGS_Q% }"
+PROBE_CMD+=" NUMEXPR_NUM_THREADS=1 ; exec python -m $MODULE ${ARGS_Q% }"
 
 RUNAI_CMD=(
     runai training standard submit "$JOB_NAME"
