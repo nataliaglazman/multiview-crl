@@ -1,0 +1,7 @@
+# conv_mlp with temporal atrophy confined to a sigma 0.09 Gaussian (~200-370 changed voxels at res 64).
+# On the untrained backbone, GAP reads it at R² 0.00 (T1) while weights at the true site read 0.53.
+# GAP arm of the pairing with conv_mlp_temporal009_attnfull: same data, seed and initial function.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_temporal009_s{seed}
+conv_readout: mlp
+synthetic_temporal_sigma: 0.09

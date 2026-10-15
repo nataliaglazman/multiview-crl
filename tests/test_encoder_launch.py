@@ -59,6 +59,8 @@ class ExperimentTests(unittest.TestCase):
                 "adni_gumbel",
                 "adni_patch",
                 "conv_mlp_learned_size",
+                "conv_mlp_temporal009",
+                "conv_mlp_temporal009_attnfull",
             },
         )
         for path in experiments:
@@ -92,6 +94,8 @@ class ExperimentTests(unittest.TestCase):
             ("adni", "adni_gumbel", {"mask_mode", "mask_lr_scale"}),
             ("adni", "adni_patch", {"patch_loss_weight", "train_patch_grid", "patch_foreground_mask"}),
             ("conv_mlp_gumbel", "conv_mlp_learned_size", {"mask_mode", "mask_size_weight", "latent_dim"}),
+            ("conv_mlp", "conv_mlp_temporal009", {"synthetic_temporal_sigma"}),
+            ("conv_mlp_temporal009", "conv_mlp_temporal009_attnfull", {"global_pool", "attention_pool_width"}),
         ):
             with self.subTest(variant=variant):
                 a, b = parsed(resolve(reference)), parsed(resolve(variant))

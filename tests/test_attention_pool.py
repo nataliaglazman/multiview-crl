@@ -103,6 +103,27 @@ class AttentionPoolModuleTests(unittest.TestCase):
             pool.position.normal_()
         torch.testing.assert_close(pool.maps(h).flatten(2).sum(-1), torch.ones(3, 4))
 
+    def test_full_width_starts_as_the_slices_and_lets_a_head_report_any_channel(self):
+        # Head 0 locks onto a blob in channel 0. Channel 5, in head 1's slice, is nonzero only at
+        # the blob, so sliced pooling reports it through head 1, which looks everywhere else.
+        h = torch.zeros(1, 8, 4, 4, 4)
+        h[0, 0, 1, 2, 3] = 50.0
+        h[0, 5, 1, 2, 3] = 3.0
+        sliced = AttentionPool3d(8, num_heads=2, num_frequencies=0)
+        full = AttentionPool3d(8, num_heads=2, num_frequencies=0, width="full")
+        torch.testing.assert_close(full(h), h.mean((2, 3, 4)), atol=0, rtol=0)
+        with torch.no_grad():
+            for pool in (sliced, full):
+                pool.query.copy_(20.0 * F.one_hot(torch.tensor([0, 1]), 8))
+            torch.testing.assert_close(full(h), sliced(h), atol=0, rtol=0)
+            self.assertLess(sliced(h)[0, 5].item(), 1e-3)
+            full.mix[1, 5, 5] = 0.0
+            full.mix[0, 5, 5] = 1.0
+            self.assertAlmostEqual(full(h)[0, 5].item(), 3.0, places=4)
+        rng = torch.get_rng_state()
+        AttentionPool3d(16, num_heads=4, num_frequencies=3, width="full")
+        self.assertTrue(torch.equal(rng, torch.get_rng_state()))
+
     def test_fourier_features_are_distinct_and_monotone_along_each_axis(self):
         phi = fourier_positions((5, 4, 3), 3)
         self.assertEqual(phi.shape, (60, 18))
@@ -118,6 +139,8 @@ class AttentionPoolModuleTests(unittest.TestCase):
                     AttentionPool3d(channels, heads, frequencies)
         with self.assertRaisesRegex(ValueError, "Expected 8 channels"):
             AttentionPool3d(8, 2)(torch.zeros(1, 4, 2, 2, 2))
+        with self.assertRaisesRegex(ValueError, "width"):
+            AttentionPool3d(8, 2, width="wide")
 
 
 class AttentionPoolEncoderTests(unittest.TestCase):
@@ -129,16 +152,19 @@ class AttentionPoolEncoderTests(unittest.TestCase):
         gc.collect()
 
     def test_initial_model_matches_gap_model_without_drawing_random_numbers(self):
-        for variant in VARIANTS:
-            with self.subTest(variant=variant):
+        for variant, width in ((v, w) for v in VARIANTS for w in ("slice", "full")):
+            with self.subTest(variant=variant, width=width):
                 size = 32 if variant["encoder_architecture"] == "resnet18" else 16
                 gap = build_model(config(**variant), "cpu")
                 rng = torch.get_rng_state()
-                pooled = build_model(config(global_pool="attention", **variant), "cpu")
+                pooled = build_model(config(global_pool="attention", attention_pool_width=width, **variant), "cpu")
                 self.assertTrue(torch.equal(rng, torch.get_rng_state()))
                 self.assertIsNone(gap.attention_pool)
                 state, gap_state = pooled.state_dict(), gap.state_dict()
-                self.assertEqual(set(state) - set(gap_state), {"attention_pool.query", "attention_pool.position"})
+                extra = {"attention_pool.query", "attention_pool.position"}
+                self.assertEqual(
+                    set(state) - set(gap_state), extra | ({"attention_pool.mix"} if width == "full" else set())
+                )
                 for key, value in gap_state.items():
                     torch.testing.assert_close(state[key], value, atol=0, rtol=0)
                 x = paired_images(size)
@@ -195,6 +221,33 @@ class AttentionPoolEncoderTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     build_model(cfg, "cpu", build_model(gap_cfg, "cpu").state_dict())
 
+    def test_full_width_mix_trains_off_its_slices_and_checkpoint_replays(self):
+        cfg = config(global_pool="attention", attention_pool_width="full", conv_readout="mlp")
+        model = build_model(cfg, "cpu").train()
+        x = paired_images()
+        off_slice = model.attention_pool.mix.detach() == 0
+        infonce(model, x).backward()
+        grad = model.attention_pool.mix.grad
+        self.assertTrue(torch.isfinite(grad).all())
+        self.assertGreater(grad[off_slice].abs().sum().item(), 0)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+        for _ in range(3):
+            optimizer.step()
+            optimizer.zero_grad()
+            infonce(model, x).backward()
+        self.assertGreater(model.attention_pool.mix.detach()[off_slice].abs().max().item(), 0)
+        model.eval()
+        restored = build_model(cfg, "cpu", model.state_dict())
+        with torch.no_grad():
+            torch.testing.assert_close(
+                restored(x, pool_only=True, n_views=2)[2][0], model(x, pool_only=True, n_views=2)[2][0], atol=0, rtol=0
+            )
+        sliced_cfg = config(global_pool="attention", conv_readout="mlp")
+        with self.assertRaises(RuntimeError):
+            build_model(sliced_cfg, "cpu", model.state_dict())
+        with self.assertRaises(RuntimeError):
+            build_model(cfg, "cpu", build_model(sliced_cfg, "cpu").state_dict())
+
     def test_eval_readers_take_the_attention_pooled_code(self):
         model = build_model(config(global_pool="attention", conv_readout="mlp"), "cpu")
         with torch.no_grad():
@@ -218,8 +271,11 @@ class AttentionPoolEncoderTests(unittest.TestCase):
     def test_cli_validates_attention_options(self):
         args = trainer.parse_args([])
         self.assertEqual((args.global_pool, args.attention_pool_heads, args.attention_pool_frequencies), ("gap", 4, 4))
+        self.assertEqual(args.attention_pool_width, "slice")
         args = trainer.parse_args(["--global-pool", "attention", "--attention-pool-heads", "8"])
         self.assertEqual((args.global_pool, args.attention_pool_heads), ("attention", 8))
+        args = trainer.parse_args(["--global-pool", "attention", "--attention-pool-width", "full"])
+        self.assertEqual(args.attention_pool_width, "full")
         trainer.parse_args(["--global-pool", "attention", "--encoder-architecture", "resnet18", "--res", "64"])
         trainer.parse_args(["--global-pool", "attention", "--attention-pool-frequencies", "0"])
         for argv in (
@@ -228,6 +284,8 @@ class AttentionPoolEncoderTests(unittest.TestCase):
             ["--global-pool", "attention", "--attention-pool-frequencies", "-1"],
             ["--attention-pool-heads", "8"],
             ["--attention-pool-frequencies", "2"],
+            ["--attention-pool-width", "full"],
+            ["--global-pool", "attention", "--attention-pool-width", "wide"],
             ["--global-pool", "attention", "--encoder-architecture", "resnet18", "--res", "32"],
             ["--global-pool", "attention", "--res", "4"],
         ):

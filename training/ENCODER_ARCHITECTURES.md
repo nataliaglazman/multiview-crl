@@ -125,6 +125,15 @@ row is 1 by construction. `model.attention_maps(x, n_views=2)` returns the
 - `--attention-pool-frequencies 0` removes the positional encoding. Attention is
   then permutation-invariant over positions, like GAP. Use it as the matched
   control for whether position is what helps.
+- `--attention-pool-width full` lets every head pool all channels. A per-head
+  channels × channels mix sums the heads back to the backbone width, so the readout is
+  unchanged. The mix starts as each head's slice selector. The pool therefore equals
+  the sliced one, and GAP, until training moves it, and building it draws no random
+  numbers. With slices, a head that finds a site can only report it in channels /
+  heads channels. Measured on the untrained conv backbone with temporal atrophy at
+  `--synthetic-temporal-sigma 0.09`: weights at the true site read the atrophy at R²
+  0.53 (T1) through all 64 channels but 0.32 through one head's 16 (GAP: 0.00). The
+  cost is heads × channels² parameters (16,384 for 4 heads at width 64).
 - The backbone map needs more than one position. ResNet at stride 32 and 64³ has
   only 2³; stride 8 gives 8³, and conv at downscale 4 gives 16³.
 - Patch readouts, patch training and the unpooled map still average each bin. Patch

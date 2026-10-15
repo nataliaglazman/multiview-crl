@@ -61,6 +61,7 @@ class MultiviewConvEncoder(HelperModule):
         global_pool: str = "gap",
         attention_pool_heads: int = 4,
         attention_pool_frequencies: int = 4,
+        attention_pool_width: str = "slice",
         norm_type: str = "group",
         lesion_keypoints: int = 0,
         lesion_norm: str = "none",
@@ -247,6 +248,7 @@ class MultiviewConvEncoder(HelperModule):
                 512 if encoder_architecture == "resnet18" else hidden_channels,
                 num_heads=attention_pool_heads,
                 num_frequencies=attention_pool_frequencies,
+                width=attention_pool_width,
             )
 
         # --- Lesion branch ---

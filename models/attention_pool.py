@@ -23,6 +23,17 @@ vanishes and the pool equals GAP up to float rounding. Zero initialization draws
 random numbers: every other weight of a model built from the same seed is unchanged,
 and so is its untrained floor. ``num_frequencies=0`` drops the positional encoding,
 which leaves attention permutation-invariant over positions, like GAP.
+
+``width="full"`` lets every head pool all C channels instead of its slice. A per-head
+C x C mix sums the heads back to C, so the readout that follows is unchanged:
+
+    out = sum_m M_m sum_p a_m(p) x_p
+
+M_m starts as head m's slice selector (ones on its own channels), so the full-width
+pool equals the sliced one, and with zero query and position equals GAP, until
+training moves the mix. It draws no random numbers either. A slice is a hard limit:
+a head that finds a site through its attention can only report that site in C / heads
+channels.
 """
 
 import math
@@ -47,22 +58,30 @@ def fourier_positions(spatial_size, num_frequencies, device=None, dtype=None):
 
 
 class AttentionPool3d(nn.Module):
-    """(B, C, D, H, W) -> (B, C): per-head softmax over positions, one channel slice per head."""
+    """(B, C, D, H, W) -> (B, C): per-head softmax over positions; one channel slice per head, or all."""
 
-    def __init__(self, channels: int, num_heads: int = 4, num_frequencies: int = 4):
+    def __init__(self, channels: int, num_heads: int = 4, num_frequencies: int = 4, width: str = "slice"):
         super().__init__()
         if num_heads < 1 or channels % num_heads:
             raise ValueError(f"num_heads ({num_heads}) must divide the {channels} pooled channels")
         if num_frequencies < 0:
             raise ValueError(f"num_frequencies must be nonnegative, got {num_frequencies}")
+        if width not in ("slice", "full"):
+            raise ValueError(f"width must be slice or full, got {width!r}")
         self.channels = channels
         self.num_heads = num_heads
         self.num_frequencies = num_frequencies
+        self.width = width
         self.query = nn.Parameter(torch.zeros(num_heads, channels))
         if num_frequencies > 0:
             self.position = nn.Parameter(torch.zeros(channels, 6 * num_frequencies))
         else:
             self.register_parameter("position", None)
+        if width == "full":
+            heads = torch.arange(channels) // (channels // num_heads)
+            self.mix = nn.Parameter(torch.diag_embed((heads == torch.arange(num_heads)[:, None]).float()))
+        else:
+            self.register_parameter("mix", None)
 
     def tokens(self, h: torch.Tensor) -> torch.Tensor:
         """Backbone map -> position-augmented tokens (B, N, C)."""
@@ -82,6 +101,8 @@ class AttentionPool3d(nn.Module):
             raise ValueError(f"Expected {self.channels} channels, got {h.shape[1]}")
         x = self.tokens(h)
         b, n, c = x.shape
+        if self.mix is not None:
+            return torch.einsum("bmc,mdc->bd", torch.einsum("bmn,bnc->bmc", self.attention(x), x), self.mix)
         values = x.reshape(b, n, self.num_heads, c // self.num_heads)
         return torch.einsum("bmn,bnmc->bmc", self.attention(x), values).reshape(b, c)
 

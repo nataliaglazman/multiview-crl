@@ -55,7 +55,8 @@ def build_parser(description=None):
         "--attention-pool-heads",
         type=int,
         default=4,
-        help="Attention heads; each pools its own slice of the backbone channels, which it must divide",
+        help="Attention heads; each pools its own slice of the backbone channels (or all of them with "
+        "--attention-pool-width full); the heads must divide the channels",
     )
     p.add_argument(
         "--attention-pool-frequencies",
@@ -63,6 +64,14 @@ def build_parser(description=None):
         default=4,
         help="Fourier frequencies per axis in the positional encoding. 0 leaves attention permutation-"
         "invariant over positions, like GAP, so it cannot report where a structure is",
+    )
+    p.add_argument(
+        "--attention-pool-width",
+        choices=("slice", "full"),
+        default="slice",
+        help="slice: each head pools its own channels / heads channels. full: each head pools every channel "
+        "and a per-head channels x channels mix, started at the head's slice selector, sums the heads back to "
+        "the backbone width. Starts identical to slice (and so to GAP); the readout is unchanged",
     )
     p.add_argument(
         "--lesion-keypoints",
@@ -774,8 +783,11 @@ def parse_args(argv=None, description=None):
             p.error("--attention-pool-frequencies must be nonnegative")
         if map_positions < 2:
             p.error(f"--global-pool attention needs more than one position; the backbone map is {map_name}")
-    elif (args.attention_pool_heads, args.attention_pool_frequencies) != (4, 4):
-        p.error("--attention-pool-heads and --attention-pool-frequencies only apply to --global-pool attention")
+    elif (args.attention_pool_heads, args.attention_pool_frequencies, args.attention_pool_width) != (4, 4, "slice"):
+        p.error(
+            "--attention-pool-heads, --attention-pool-frequencies and --attention-pool-width only apply to "
+            "--global-pool attention"
+        )
     if args.lesion_keypoints < 0:
         p.error("--lesion-keypoints must be nonnegative")
     if (args.lesion_detector != "shared" or args.lesion_branch_frozen) and (

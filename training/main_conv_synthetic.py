@@ -990,6 +990,7 @@ def main():
         global_pool=args.global_pool,
         attention_pool_heads=args.attention_pool_heads,
         attention_pool_frequencies=args.attention_pool_frequencies,
+        attention_pool_width=args.attention_pool_width,
         norm_type=args.norm_type,
         lesion_keypoints=args.lesion_keypoints,
         lesion_norm=args.lesion_norm,
@@ -1042,9 +1043,13 @@ def main():
         )
     if model.attention_pool is not None:
         pool = model.attention_pool
+        if pool.mix is None:
+            width = f"{pool.channels // pool.num_heads} channels"
+        else:
+            width = f"{pool.channels} channels (full width, mixed back to {pool.channels})"
         print(
-            f"global pool: attention replaces GAP; {pool.num_heads} heads x {pool.channels // pool.num_heads} "
-            f"channels, {pool.num_frequencies} Fourier frequencies/axis, "
+            f"global pool: attention replaces GAP; {pool.num_heads} heads x {width}, "
+            f"{pool.num_frequencies} Fourier frequencies/axis, "
             f"{sum(p.numel() for p in pool.parameters())} parameters; starts as exact GAP. "
             "Patch readouts still average each bin.",
             flush=True,

@@ -154,6 +154,7 @@ def build_model(cfg, device, state_dict=None):
         global_pool=cfg.get("global_pool", "gap"),
         attention_pool_heads=cfg.get("attention_pool_heads", 4),
         attention_pool_frequencies=cfg.get("attention_pool_frequencies", 4),
+        attention_pool_width=cfg.get("attention_pool_width", "slice"),
         norm_type=cfg.get("norm_type", "group"),
         lesion_keypoints=cfg.get("lesion_keypoints", 0),
         lesion_norm=cfg.get("lesion_norm", "none"),

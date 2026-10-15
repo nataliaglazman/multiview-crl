@@ -1,0 +1,9 @@
+# Attention arm of conv_mlp_temporal009: full-width attention pooling (every head pools all 64 channels,
+# mixed back to 64). It starts as exact GAP, so the two arms differ only in what training does with the pool.
+# training/ENCODER_ARCHITECTURES.md, "Attention pooling"
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_temporal009_attnfull_s{seed}
+conv_readout: mlp
+synthetic_temporal_sigma: 0.09
+global_pool: attention
+attention_pool_width: full
