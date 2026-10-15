@@ -258,11 +258,7 @@ def stratified_batch_sampler(args, train_dataset, device, save_dir):
     anatomy = cluster_batches.anatomy_columns(names)
     started = time.perf_counter()
     if args.stratify_batches == "oracle":
-        inner = train_dataset._inner
-        # The accepted candidate's draw, as the dataset renders it (sample_seed_for checks lesion fit).
-        factors = np.stack(
-            [inner._draw_pseudo_mri(inner.sample_seed_for(i))["z_content"].numpy() for i in range(len(train_dataset))]
-        ).astype(np.float64)
+        factors = cluster_batches.bank_latents(train_dataset)
         features = factors[:, anatomy]
         source = "the true anatomy latents (" + ", ".join(names[j] for j in anatomy) + "), lesion latents left out"
     else:

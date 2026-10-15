@@ -23,6 +23,21 @@ def anatomy_columns(names):
     return [j for j, name in enumerate(names) if not name.startswith(LESION_PREFIXES)]
 
 
+def bank_latents(dataset):
+    """Every subject's z_content in a SyntheticBrainDataset, read from the generator without rendering a view.
+
+    ``sample_seed_for`` settles which candidate draw a subject keeps (it checks that the lesion fits),
+    so these are the latents of the images the dataset renders. About 10 ms a subject at res 64.
+    """
+    inner = dataset._inner
+    return np.stack(
+        [
+            np.asarray(inner._draw_pseudo_mri(inner.sample_seed_for(i))["z_content"], dtype=np.float64)
+            for i in range(len(dataset))
+        ]
+    )
+
+
 def standardize(features):
     """Each column centred and scaled to unit SD over the rows; a constant column is only centred."""
     features = np.asarray(features, dtype=np.float64)

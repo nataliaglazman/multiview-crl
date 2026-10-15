@@ -108,6 +108,12 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(summary["anatomy_factors"], ["brain_size", "ventricle_size"])
         self.assertAlmostEqual(summary["theory_k_pow_minus_1_over_d"], 6**-0.5)
 
+    def test_within_cluster_probe_self_test(self):
+        from eval.encoder import within_cluster_probe
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            within_cluster_probe.self_test()
+
 
 SYNTHETIC = ["--res", "32", "--num-train-samples", "640", "--batch-size", "32"]
 
