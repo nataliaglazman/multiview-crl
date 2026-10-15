@@ -1,0 +1,19 @@
+# conv_mlp on the lesion-burden recipe, every training batch drawn from one k-means cluster of the TRUE anatomy
+# latents (--stratify-batches oracle, data/cluster_batches.py), so InfoNCE's negatives share their anatomy.
+# K = 60, the most MCL allows here (K <= 2000 subjects // batch 32 = 62): about 60^(-1/6) = 0.51 of the spread.
+# The arms K = 1, 10 and 60 differ only in stratify_clusters. This is the oracle upper bound for MCL (Zhang et al.
+# 2024, arXiv 2402.11816): if anatomy-conditioned negatives do not let lesion_burden into the 9-unit code, MCL's
+# label-free k-means will not either. The T1 lesion is set to 0.0, dark and distinct, so T1 visibility is not
+# the blocker. --standardize-code is on because codes within a cluster start near-identical, which gives plain
+# InfoNCE a cold start.
+# Read per_factor["content→content"].lesion_burden.ridge in each dci_step*.json, beside ventricle_size, against K = 1;
+# stratification.json has the clusters kept and each factor's within-cluster SD ratio.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_burden_oracle_k60_s{seed}
+conv_readout: mlp
+synthetic_lesion_target: burden
+synthetic_lesion_intensity: styled
+synthetic_lesion_t1_value: 0.0
+standardize_code: true
+stratify_batches: oracle
+stratify_clusters: 60

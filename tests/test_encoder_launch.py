@@ -61,6 +61,9 @@ class ExperimentTests(unittest.TestCase):
                 "conv_mlp_learned_size",
                 "conv_mlp_temporal009",
                 "conv_mlp_temporal009_attnfull",
+                "conv_mlp_burden_oracle_k1",
+                "conv_mlp_burden_oracle_k10",
+                "conv_mlp_burden_oracle_k60",
             },
         )
         for path in experiments:
@@ -96,6 +99,20 @@ class ExperimentTests(unittest.TestCase):
             ("conv_mlp_gumbel", "conv_mlp_learned_size", {"mask_mode", "mask_size_weight", "latent_dim"}),
             ("conv_mlp", "conv_mlp_temporal009", {"synthetic_temporal_sigma"}),
             ("conv_mlp_temporal009", "conv_mlp_temporal009_attnfull", {"global_pool", "attention_pool_width"}),
+            (
+                "conv_mlp",
+                "conv_mlp_burden_oracle_k1",
+                {
+                    "synthetic_lesion_target",
+                    "synthetic_lesion_intensity",
+                    "synthetic_lesion_t1_value",
+                    "standardize_code",
+                    "stratify_batches",
+                    "stratify_clusters",
+                },
+            ),
+            ("conv_mlp_burden_oracle_k1", "conv_mlp_burden_oracle_k10", {"stratify_clusters"}),
+            ("conv_mlp_burden_oracle_k1", "conv_mlp_burden_oracle_k60", {"stratify_clusters"}),
         ):
             with self.subTest(variant=variant):
                 a, b = parsed(resolve(reference)), parsed(resolve(variant))

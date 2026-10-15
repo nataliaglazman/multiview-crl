@@ -9,6 +9,9 @@ This architecture option does not change the loss, data, or view-sharing policy.
 attention pooling (``models.attention_pool``), which starts as exact GAP.
 ``--mask-mode learned`` replaces the fixed content block (the first ``--content-channels``
 units) with a top-k Gumbel-softmax content selector over learnable per-unit logits.
+``--stratify-batches oracle|code`` draws every training batch from one k-means cluster of the
+training subjects (MCL's batch rule; ``data.cluster_batches``), so InfoNCE's negatives share the
+clustered anatomy.
 
 Identifiability is scored with ``eval.metrics.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
@@ -37,6 +40,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+import data.cluster_batches as cluster_batches
 import eval.metrics.cross_reconstruction as cross_reconstruction
 import eval.metrics.dci as dci
 import training.encoder_args as encoder_args
@@ -190,6 +194,116 @@ def describe_real_split(args, train_dataset, val_dataset, save_dir):
             "background included",
             flush=True,
         )
+
+
+STAGE0_DATA_KEYS = ("res", "n_content", "n_style", "num_train_samples", "data_seed")
+
+
+def stage0_code(args, train_dataset, device):
+    """--stratify-batches code: the --stratify-from run's content code of every training subject.
+
+    Both views' content units at the model's own pooling, concatenated, then the true content factors
+    of the same subjects. The stage-0 model is rebuilt from its settings, used once and dropped; the
+    run being trained starts from its own initialization.
+    """
+    from eval.protocol.score_checkpoint import build_model, encode_blocks, load_settings
+
+    path = args.stratify_from
+    run_dir, checkpoint = (
+        (os.path.dirname(path), path) if os.path.isfile(path) else (path, os.path.join(path, "model.pt"))
+    )
+    if not (os.path.isfile(checkpoint) and os.path.isfile(os.path.join(run_dir, "settings.json"))):
+        raise SystemExit(
+            f"--stratify-from {path}: need a run directory with settings.json and model.pt, or a checkpoint inside one"
+        )
+    cfg = load_settings(run_dir)
+    differ = [k for k in vars(args) if k in STAGE0_DATA_KEYS or k.startswith("synthetic_")]
+    differ = [k for k in differ if cfg.get(k) != getattr(args, k)]
+    if differ:
+        print(
+            "  NOTE: the stage-0 run's data differs from this run's in "
+            + ", ".join(f"{k} ({cfg.get(k)} vs {getattr(args, k)})" for k in differ)
+            + "; MCL clusters the code of the bank the stage-0 encoder was trained on",
+            flush=True,
+        )
+    # build_model applies the stage-0 run's runtime settings; this run keeps its own.
+    runtime = (
+        torch.are_deterministic_algorithms_enabled(),
+        torch.is_deterministic_algorithms_warn_only_enabled(),
+        torch.get_num_threads(),
+        torch.backends.cudnn.benchmark,
+        torch.backends.cudnn.deterministic,
+    )
+    stage0 = build_model(cfg, device, torch.load(checkpoint, map_location="cpu"))
+    torch.use_deterministic_algorithms(runtime[0], warn_only=runtime[1])
+    torch.set_num_threads(runtime[2])
+    torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = runtime[3:]
+    blocks = encode_blocks(stage0, train_dataset, device, args.batch_size, stage0.content_channels)
+    del stage0
+    code = np.concatenate([view.reshape(len(view), -1) for view in blocks["content"]], axis=1)
+    source = f"the content code of {checkpoint} ({code.shape[1] // 2} units per view, both views)"
+    return code, np.asarray(blocks["z_content"], dtype=np.float64), source
+
+
+def stratified_batch_sampler(args, train_dataset, device, save_dir):
+    """--stratify-batches: k-means on the training subjects, then every batch from one cluster.
+
+    oracle clusters the true anatomy latents, read from the generator without rendering a view;
+    code clusters a stage-0 run's content code (``stage0_code``). Prints and writes to
+    stratification.json the clusters kept and, per true content factor, the SD inside a batch's
+    cluster over the SD across the bank: the anatomy should sit near K^(-1/d), the lesion near 1.
+    The summary also rides on the sampler as ``summary``.
+    """
+    names = dci.content_factor_names(args.n_content, args.synthetic_lesion_target)
+    anatomy = cluster_batches.anatomy_columns(names)
+    started = time.perf_counter()
+    if args.stratify_batches == "oracle":
+        inner = train_dataset._inner
+        # The accepted candidate's draw, as the dataset renders it (sample_seed_for checks lesion fit).
+        factors = np.stack(
+            [inner._draw_pseudo_mri(inner.sample_seed_for(i))["z_content"].numpy() for i in range(len(train_dataset))]
+        ).astype(np.float64)
+        features = factors[:, anatomy]
+        source = "the true anatomy latents (" + ", ".join(names[j] for j in anatomy) + "), lesion latents left out"
+    else:
+        features, factors, source = stage0_code(args, train_dataset, device)
+    labels = cluster_batches.kmeans_labels(features, args.stratify_clusters, args.data_seed)
+    sampler = cluster_batches.ClusterBatchSampler(labels, args.batch_size, args.loader_seed)
+    summary = cluster_batches.summarize(labels, args.batch_size, factors, names, anatomy, args.stratify_clusters)
+    print(
+        f"stratified batches: {args.stratify_batches}, every batch from one of K = {args.stratify_clusters} k-means "
+        f"clusters of {source}, standardized ({time.perf_counter() - started:.0f} s)",
+        flush=True,
+    )
+    print(
+        f"  clusters kept (>= {args.batch_size} subjects): {summary['clusters_kept']} of {summary['clusters']}, "
+        f"holding {summary['subjects_in_kept_clusters']} of {summary['subjects']} training subjects; "
+        f"{summary['batches_per_epoch']} batches ({summary['subjects_per_epoch']} subjects) per epoch",
+        flush=True,
+    )
+    print("  within-cluster SD / bank SD per content factor (what a batch's negatives keep of it):", flush=True)
+    for j, name in enumerate(names):
+        role = ("clustered" if args.stratify_batches == "oracle" else "anatomy") if j in anatomy else ""
+        print(f"      {name:<20s}{summary['sd_ratio'][name]:7.3f}  {role}", flush=True)
+    print(
+        f"    anatomy mean {summary['sd_ratio_anatomy_mean']:.3f}; theory K^(-1/{len(anatomy)}) = "
+        f"{summary['theory_k_pow_minus_1_over_d']:.3f}",
+        flush=True,
+    )
+    payload = {
+        "mode": args.stratify_batches,
+        "k": args.stratify_clusters,
+        "source": source,
+        "stratify_from": args.stratify_from,
+        "kmeans_seed": args.data_seed,
+        "sampler_seed": args.loader_seed,
+        **summary,
+        "labels": labels.tolist(),
+    }
+    with open(os.path.join(save_dir, "stratification.json"), "w") as fp:
+        json.dump(payload, fp, indent=2)
+    sampler.summary = summary
+    return sampler
 
 
 def contrastive_loss(pooled, model, args, sim_metric, criterion, mask=None):
@@ -959,13 +1073,14 @@ def main():
     workers = {"worker_init_fn": seed_augmentation_worker, "persistent_workers": True}
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
         num_workers=args.num_workers,
-        drop_last=True,
         generator=torch.Generator().manual_seed(args.loader_seed),
+        **cluster_batches.loader_batching(
+            args, lambda: stratified_batch_sampler(args, train_dataset, device, save_dir)
+        ),
         **(workers if real and args.num_workers > 0 else {}),
     )
+    stratification = getattr(train_loader.batch_sampler, "summary", None)
 
     # Dataset construction resets the global RNG. Seed initialization explicitly,
     # while the loader's private generator isolates batch order from architecture.
@@ -1201,6 +1316,11 @@ def main():
         writer = SummaryWriter(os.path.join(save_dir, "tensorboard"))
     except Exception:
         writer = None
+    if stratification is not None and writer is not None:
+        writer.add_scalar("stratify/clusters_kept", stratification["clusters_kept"], 0)
+        writer.add_scalar("stratify/subjects_per_epoch", stratification["subjects_per_epoch"], 0)
+        for name, value in stratification["sd_ratio"].items():
+            writer.add_scalar(f"stratify/sd_ratio/{name}", value, 0)
 
     # Step-0 eval doubles as the untrained floor: same architecture, same seed, no training.
     # Per-factor R² needs it more than the block means do -- a localised factor can read

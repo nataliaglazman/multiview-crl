@@ -301,6 +301,34 @@ def build_parser(description=None):
         "spread counts equally. Loss-side only: the representation the probes read is unchanged. In the "
         "feature-competition pilot this let a fixed-anatomy arm learn lesion location that plain InfoNCE never did.",
     )
+    p.add_argument(
+        "--stratify-batches",
+        choices=("none", "oracle", "code"),
+        default="none",
+        help="Draw every training batch from one k-means cluster of the training subjects (data.cluster_batches), "
+        "so a subject's negatives share the clustered factors: the batch rule of MCL (Zhang et al. 2024, arXiv "
+        "2402.11816, Algorithm 1). oracle clusters the TRUE anatomy latents of the training bank, standardized, "
+        "every lesion latent left out: an upper bound on what MCL's label-free clustering can give. code clusters "
+        "the content code of a stage-0 run (--stratify-from), MCL's stage 1; this run still trains from scratch. "
+        "Clusters smaller than --batch-size are dropped; stratification.json in the run directory lists what was "
+        "kept. none (default) keeps the shuffled loader. Synthetic pseudo_mri data only",
+    )
+    p.add_argument(
+        "--stratify-clusters",
+        type=int,
+        default=None,
+        help="With --stratify-batches oracle/code (required there): k-means clusters K. Inside a cluster each of d "
+        "clustered factors keeps about K^(-1/d) of its spread. MCL bounds K by the batches the bank holds: "
+        "K <= --num-train-samples // --batch-size. 1 is one cluster, the unstratified control through the same sampler",
+    )
+    p.add_argument(
+        "--stratify-from",
+        type=str,
+        default=None,
+        help="With --stratify-batches code (required there): the stage-0 run directory (settings.json and model.pt), "
+        "or a checkpoint file inside one. Only its content code of this run's training subjects (both views, "
+        "concatenated) is read; no weights are copied",
+    )
 
     # Optimisation.
     p.add_argument("--lr", type=float, default=1e-4)
@@ -744,6 +772,23 @@ def parse_args(argv=None, description=None):
             p.error(
                 "--standardize-code needs --mask-mode fixed: standardizing each unit divides a learned mask back out, "
                 "so no gradient would reach its logits"
+            )
+    if args.stratify_batches == "none":
+        if args.stratify_clusters is not None or args.stratify_from is not None:
+            p.error("--stratify-clusters and --stratify-from only apply with --stratify-batches oracle or code")
+    else:
+        if real or args.synthetic_mode != "pseudo_mri":
+            p.error(f"--stratify-batches {args.stratify_batches} clusters the synthetic pseudo_mri training bank")
+        if args.stratify_clusters is None or args.stratify_clusters < 1:
+            p.error(f"--stratify-batches {args.stratify_batches} needs a positive --stratify-clusters")
+        if args.stratify_clusters > args.num_train_samples // args.batch_size:
+            p.error(
+                f"--stratify-clusters {args.stratify_clusters} leaves an average cluster smaller than a batch: MCL's "
+                f"bound is K <= --num-train-samples // --batch-size = {args.num_train_samples // args.batch_size}"
+            )
+        if (args.stratify_batches == "code") != (args.stratify_from is not None):
+            p.error(
+                "--stratify-from names the stage-0 run of --stratify-batches code; it is required there and only there"
             )
     if args.separate_spatial_readout:
         if args.encoder_architecture == "conv" and args.conv_readout != "mlp":
