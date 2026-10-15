@@ -172,7 +172,11 @@ class MetaContractTests(unittest.TestCase):
     because reaching that line for real needs weights and a GPU.
     """
 
-    WRITERS = ("eval/dino/dinov3_embed_synthetic.py", "eval/protocol/export_vq_bundle.py")
+    WRITERS = (
+        "eval/dino/dinov3_embed_synthetic.py",
+        "eval/protocol/export_vq_bundle.py",
+        "eval/protocol/export_normative_bundle.py",
+    )
 
     def meta_call(self, path):
         tree = ast.parse((Path(__file__).resolve().parents[1] / path).read_text())

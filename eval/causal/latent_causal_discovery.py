@@ -44,6 +44,28 @@ constrained to uniform spatial weighting and so can carry a localised factor tha
 drops.  ``std`` and ``max`` are the order statistics the stats pooling adds.  One scalar per
 channel either way -- a multi-statistic pooling would put several nodes per channel and
 break the one-node-one-channel premise the matching rests on.
+
+Bundles
+-------
+``--bundles label=path`` scores feature bundles in the shared format (``export_vq_bundle``,
+``export_normative_bundle``, the DINO embedders) next to, or instead of, run directories.
+A bundle column is already one scalar per subject, so it is one node as it stands and
+``--reduce`` and ``--pooling`` do not apply. Bundles must describe the same rows (their
+factor digests are compared, as in ``compare_bundles``); ``--bundle-floors`` adds a floor
+bundle per label as its own row.
+
+The mixing null
+---------------
+``--mixing-null DRAWS`` asks whether a row's choice of basis matters. Each draw replaces
+the row's channels by a random non-orthogonal mixing of them and reruns the whole panel.
+A mixing preserves the block's linear information, so a row that beats these draws owes
+it to how its channels were chosen, not to what the block holds. Finite-sample regularized
+readouts need not give numerically identical block MCC after a change of basis.
+For a bundle that records ``rotated_channels`` (the normative export does), only those
+columns are mixed and the rest stay as they are. That matters when every candidate shares
+some channels: the naming null cannot see a basis choice at all, and channels that are
+right in every candidate, like the normative block's lesion coordinates, lift every row
+above it.
 """
 
 from __future__ import annotations
@@ -242,8 +264,68 @@ def evaluate_reduced(reduced, factors, truth_dag, cli, label=""):
         max_cond_set=cli.max_cond_set,
         assignment=assignment.tolist(),
         match_quality=[float(q) for q in quality],
+        # The mean matched |corr|: channel-wise MCC, the same quantity as
+        # identifiability_metrics.channel_mcc.
+        channel_mcc=float(np.mean(quality)),
         alpha_sweep=rows,
         best=best,
+    )
+
+
+def mixing_columns(columns, width):
+    """Validate the original bundle indices before any channel selection remaps them."""
+    import numpy as np
+
+    if columns is None:
+        return np.arange(width)
+    columns = np.asarray(columns)
+    if columns.ndim != 1 or (columns.size and columns.dtype.kind not in "iu"):
+        raise ValueError("rotated_channels must be a list of integer column indices")
+    columns = columns.astype(int)
+    if len(np.unique(columns)) != len(columns) or np.any((columns < 0) | (columns >= width)):
+        raise ValueError(f"rotated_channels must contain unique indices in [0, {width})")
+    return columns
+
+
+def mixing_null(reduced, factors, truth_dag, cli, columns=None, draws=30, seed=0):
+    """The panel over random non-orthogonal mixings of ``columns``; every other column kept.
+
+    Columns are standardized before mixing so a loud channel does not dominate every draw.
+    Each draw is scored exactly like the row itself, alpha selection included, so the
+    summaries compare directly with that row's ``best`` F1 and its channel MCC.
+    """
+    import numpy as np
+
+    reduced = np.asarray(reduced, dtype=np.float64)
+    if draws < 1:
+        raise ValueError("mixing-null draws must be positive")
+    columns = mixing_columns(columns, reduced.shape[1])
+    if len(columns) < 2:
+        return None
+    block = reduced[:, columns]
+    sd = block.std(0)
+    block = (block - block.mean(0)) / np.where(sd > 0, sd, 1.0)
+    rng = np.random.default_rng(seed)
+    f1, mcc, by_alpha = [], [], {alpha: [] for alpha in cli.alphas}
+    for _ in range(draws):
+        mixed = reduced.copy()
+        mixed[:, columns] = block @ rng.standard_normal((len(columns), len(columns)))
+        got = evaluate_reduced(mixed, factors, truth_dag, cli)
+        f1.append(got["best"]["f1"])
+        mcc.append(got["channel_mcc"])
+        for row in got["alpha_sweep"]:
+            by_alpha[row["alpha"]].append(row["f1"])
+    return dict(
+        draws=draws,
+        seed=seed,
+        columns=columns.tolist(),
+        f1=f1,
+        f1_mean=float(np.mean(f1)),
+        f1_std=float(np.std(f1)),
+        f1_by_alpha={str(alpha): dict(mean=float(np.mean(v)), std=float(np.std(v))) for alpha, v in by_alpha.items()},
+        channel_mcc=mcc,
+        channel_mcc_mean=float(np.mean(mcc)),
+        channel_mcc_std=float(np.std(mcc)),
     )
 
 
@@ -252,27 +334,38 @@ def format_report(results):
     from eval.causal.causal_factor_diagnostics import factor_name
 
     out = []
-    head = ["Row", "reduce", "chan", "F1", "null F1", "learned", "SHD", "null SHD", "match |r|"]
+    mixing = any(r.get("mixing_null") for r in results)
+    head = ["Row", "reduce", "chan", "F1", "null F1", "learned", "SHD", "null SHD", "MCC", "match |r|"]
+    if mixing:
+        head += ["mix F1", "mix MCC"]
     table = [head]
     for r in results:
         b = r.get("best")
         if not b:
-            table.append([r["label"], r["reduce"], str(r["n_channels"]), *(["—"] * 6)])
+            row = [r["label"], r.get("reduce", "—"), str(r.get("n_channels", "—"))]
+            table.append(row + ["—"] * (len(head) - len(row)))
             continue
         q = r["match_quality"]
-        table.append(
-            [
-                r["label"],
-                r["reduce"],
-                str(r["n_channels"]),
-                f"{b['f1']:.3f}",
-                f"{b['null']['f1_mean']:.3f}",
-                f"{b['f1_over_null']:+.3f}",
-                str(b["skeleton_shd"]),
-                f"{b['null']['shd_mean']:.1f}",
-                f"{min(q):.2f}-{max(q):.2f}",
-            ]
-        )
+        row = [
+            r["label"],
+            r["reduce"],
+            str(r["n_channels"]),
+            f"{b['f1']:.3f}",
+            f"{b['null']['f1_mean']:.3f}",
+            f"{b['f1_over_null']:+.3f}",
+            str(b["skeleton_shd"]),
+            f"{b['null']['shd_mean']:.1f}",
+            f"{r['channel_mcc']:.3f}",
+            f"{min(q):.2f}-{max(q):.2f}",
+        ]
+        if mixing:
+            m = r.get("mixing_null")
+            row += (
+                [f"{m['f1_mean']:.3f}±{m['f1_std']:.3f}", f"{m['channel_mcc_mean']:.3f}±{m['channel_mcc_std']:.3f}"]
+                if m
+                else ["—", "—"]
+            )
+        table.append(row)
     widths = [max(len(row[i]) for row in table) for i in range(len(head))]
     line = lambda row: "  ".join(  # noqa: E731
         v.ljust(w) if i < 2 else v.rjust(w) for i, (v, w) in enumerate(zip(row, widths))
@@ -285,7 +378,18 @@ def format_report(results):
     out.append("by one Hungarian match on |corr|. 'null' holds that graph fixed and randomises the naming,")
     out.append("so a 'learned' at or below 0 means the recovered structure is not aligned to the truth.")
     out.append("'match |r|' is the range of matched correlations: a low one means the node a factor was")
-    out.append("scored at barely tracks it, whatever the F1 says.")
+    out.append("scored at barely tracks it, whatever the F1 says. 'MCC' is their mean, the channel-wise MCC.")
+    out.append(
+        "With multiple alphas, F1 and SHD use each row's best-F1 alpha, selected against the truth (optimistic)."
+    )
+    out.append("The JSON alpha_sweep retains every alpha for comparisons at a prespecified threshold.")
+    if mixing:
+        out.append("'mix' reruns the panel on random mixings of the row's channels (mean±sd over draws): what the")
+        out.append("same block gives with no rule for choosing its channels, with the same best-alpha selection.")
+        out.append("Only the recorded columns are mixed; the other channels stay fixed. Read F1 and MCC against it.")
+    for r in results:
+        if r.get("status") in ("skipped", "error"):
+            out.append(f"  {r['label']}: {r['status']} -- {r.get('reason', '')}")
     for r in results:
         b = r.get("best")
         if b and b["edges_unscorable"]:
@@ -293,11 +397,14 @@ def format_report(results):
                 f"  {r['label']}: {b['edges_unscorable']} of {b['edges_total']} recovered edges touch an "
                 f"unmatched channel and are outside the score."
             )
-    if results and results[0].get("match_quality"):
+    if any(r.get("match_quality") for r in results):
         out.append("\nPer-factor match quality (best channel for each factor, |corr|):")
         for r in results:
             q = r.get("match_quality") or []
-            named = ", ".join(f"{factor_name(i)} {v:.2f}" for i, v in enumerate(q))
+            if not q:
+                continue
+            names = r.get("factor_names") or [factor_name(i) for i in range(len(q))]
+            named = ", ".join(f"{name} {v:.2f}" for name, v in zip(names, q))
             out.append(f"  {r['label']}: {named}")
     return "\n".join(out) + "\n"
 
@@ -460,9 +567,75 @@ def evaluate_run(run_dir, cli, random_init=False, init_seed=0):
     return maps, z, scm["adj"]
 
 
+def load_bundles(cli):
+    """Every ``--bundles`` entry followed by its floor, as ``[(label, bundle, is_floor)]``.
+
+    Refuses bundles that do not describe the same rows, by ``compare_bundles``' own check,
+    unless ``--allow-row-mismatch``: the ceiling row is computed once and describes one set
+    of rows.
+    """
+    from eval.dino.dinov3_identifiability import load_bundle
+    from eval.protocol.compare_bundles import check_alignment, parse_named
+
+    named, floors = parse_named(cli.bundles, "--bundles"), parse_named(cli.bundle_floors, "--bundle-floors")
+    stray = sorted(set(floors) - set(named))
+    if stray:
+        raise argparse.ArgumentTypeError(f"--bundle-floors labels {stray} have no --bundles entry")
+    labels = list(named) + [f"{label}-floor" for label in floors]
+    if len(labels) != len(set(labels)):
+        raise argparse.ArgumentTypeError("--bundles labels collide with generated '-floor' labels")
+    if cli.ceiling and "truth-ceiling" in labels:
+        raise argparse.ArgumentTypeError("'truth-ceiling' is reserved when --ceiling is requested")
+    entries = []
+    for label, path in named.items():
+        entries.append((label, load_bundle(path, cli.bundle_view), False))
+        if label in floors:
+            entries.append((f"{label}-floor", load_bundle(floors[label], cli.bundle_view), True))
+    check_alignment({label: bundle for label, bundle, _ in entries}, strict=not cli.allow_row_mismatch)
+    return entries
+
+
+def score_row(reduced, z, adj, cli, label, mixable=None, mixing=0, **extra):
+    """One table row: the panel on ``reduced``, plus the mixing null when ``mixing`` draws are asked for."""
+    if mixing:
+        mixable = mixing_columns(mixable, reduced.shape[1])
+    if cli.top_var_channels:
+        # Per row, so a floor keeps ITS loudest channels rather than the trained run's.
+        before = reduced.shape[1]
+        reduced, kept = top_variance_channels(reduced, cli.top_var_channels)
+        extra.update(top_var_channels=kept.tolist(), channels_before_selection=int(before))
+        if mixable is not None:
+            mixable = [i for i, channel in enumerate(kept.tolist()) if channel in set(mixable)]
+    row = dict(evaluate_run_status="ok", **evaluate_reduced(reduced, z, adj, cli, label), **extra)
+    if mixing:
+        row["mixing_null"] = mixing_null(reduced, z, adj, cli, mixable, mixing)
+    return row
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dirs", nargs="+", default=[], help="Run directories")
+    parser.add_argument(
+        "--bundles",
+        nargs="+",
+        default=[],
+        metavar="LABEL=PATH",
+        help="Feature bundles in the shared format; each column is one node, so --reduce/--pooling do not apply",
+    )
+    parser.add_argument(
+        "--bundle-floors", nargs="+", default=[], metavar="LABEL=PATH", help="A floor bundle for a --bundles label"
+    )
+    parser.add_argument("--bundle-view", default="1", choices=["1", "2"], help="Which view's columns a bundle gives")
+    parser.add_argument(
+        "--allow-row-mismatch", action="store_true", help="Score bundles even when they describe different rows"
+    )
+    parser.add_argument(
+        "--mixing-null",
+        type=int,
+        default=0,
+        metavar="DRAWS",
+        help="Also rerun each row on DRAWS random mixings of its channels (a bundle's rotated_channels only)",
+    )
     parser.add_argument("--checkpoint", help="Default: vqvae_model.pt, or model.pt for an encoder-only run")
     parser.add_argument(
         "--view", type=int, default=1, choices=[1, 2], help="Encoder-only runs: which view's encoder to read"
@@ -491,8 +664,16 @@ def main(argv=None):
     cli = parser.parse_args(argv)
     if cli.self_test:
         return _self_test()
-    if not cli.run_dirs:
-        parser.error("Supply --run-dirs")
+    if not cli.run_dirs and not cli.bundles:
+        parser.error("Supply --run-dirs and/or --bundles")
+    if cli.bundle_floors and not cli.bundles:
+        parser.error("--bundle-floors needs --bundles")
+    if cli.mixing_null < 0:
+        parser.error("--mixing-null must be nonnegative")
+    if cli.null_draws < 1:
+        parser.error("--null-draws must be positive")
+    if any(not 0 < alpha < 1 for alpha in cli.alphas):
+        parser.error("--alphas must be between 0 and 1")
     try:
         cli.pooling = tuple(int(x) for x in cli.pooling.split(","))
         if len(cli.pooling) != 3 or min(cli.pooling) < 1:
@@ -500,10 +681,28 @@ def main(argv=None):
     except ValueError:
         parser.error("--pooling must be three positive integers, e.g. 4,4,4")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+    try:
+        bundles = load_bundles(cli) if cli.bundles else []
+    except (argparse.ArgumentTypeError, OSError, ValueError, KeyError) as exc:
+        parser.error(str(exc))
 
     import numpy as np
 
-    results, ceiling_done = [], False
+    results, rows = [], {}
+
+    def add(row, z, adj):
+        """Append a scored row; the first one also brings the ceiling, if asked for."""
+        results.append(row)
+        if cli.ceiling and not rows:
+            # PC on the true factors, scored through the identity naming: the bound on what
+            # this estimator reaches at this row count, before any representation.
+            truth_cli = argparse.Namespace(**{**vars(cli), "reduce": "none"})
+            truth_rows = dict(evaluate_reduced(np.asarray(z), np.asarray(z), adj, truth_cli, "truth-ceiling"))
+            if row.get("factor_names"):
+                truth_rows["factor_names"] = row["factor_names"]
+            results.append(dict(evaluate_run_status="ok", **truth_rows))
+        rows[row["label"]] = np.asarray(z, dtype=np.float32)
+
     plan = []
     for run in cli.run_dirs:
         plan.append((Path(run).resolve(), False, 0))
@@ -520,25 +719,45 @@ def main(argv=None):
         if maps is None:
             results.append(dict(label=label, **adj))
             continue
-        reduced = reduce_channels(maps, cli.reduce)
-        extra = {}
-        if cli.top_var_channels:
-            # Per row, so the floor keeps ITS loudest channels rather than the trained run's.
-            reduced, kept = top_variance_channels(reduced, cli.top_var_channels)
-            extra = dict(top_var_channels=kept.tolist(), channels_before_selection=int(maps.shape[1]))
-        results.append(dict(evaluate_run_status="ok", **evaluate_reduced(reduced, z, adj, cli, label), **extra))
-        if cli.ceiling and not ceiling_done:
-            ceiling_done = True
-            # PC on the true factors, scored through the identity naming: the bound on what
-            # this estimator reaches at this row count, before any representation.
-            truth_rows = dict(evaluate_reduced(np.asarray(z), np.asarray(z), adj, cli, "truth-ceiling"))
-            results.append(dict(evaluate_run_status="ok", **truth_rows))
+        mixing = 0 if random_init else cli.mixing_null
+        add(score_row(reduce_channels(maps, cli.reduce), z, adj, cli, label, mixing=mixing), z, adj)
+
+    # A bundle column is already one scalar per subject: no reduction, and the row says so.
+    bundle_cli = argparse.Namespace(**{**vars(cli), "reduce": "none"})
+    for label, bundle, is_floor in bundles:
+        if bundle["adjacency"] is None:
+            reason = "no causal_adj: built with --causal iid, or from a run trained without --synthetic-causal"
+            results.append(dict(label=label, status="skipped", reason=reason))
+            continue
+        row = score_row(
+            bundle["X"],
+            bundle["z_content"],
+            bundle["adjacency"],
+            bundle_cli,
+            label,
+            mixable=bundle["meta"].get("rotated_channels"),
+            mixing=0 if is_floor else cli.mixing_null,
+            bundle=bundle["path"],
+            bundle_view=cli.bundle_view,
+            factor_names=bundle["content_names"],
+        )
+        add(row, bundle["z_content"], bundle["adjacency"])
+
+    # Run directories are not covered by the bundles' digest check, and two runs may not share
+    # rows at all; the ceiling then describes only the first row's.
+    first = next(iter(rows), None)
+    differ = [label for label, z in rows.items() if z.shape != rows[first].shape or not np.array_equal(z, rows[first])]
+    if differ:
+        logger.warning(
+            "Rows %s were scored on different subjects from %s: compare them with their own ceiling, not this one.",
+            ", ".join(differ),
+            first,
+        )
     print("\n" + format_report([r for r in results if r.get("best") or r.get("status")]))
     if cli.out:
         cli.out.parent.mkdir(parents=True, exist_ok=True)
-        cli.out.write_text(
-            json.dumps(dict(protocol=dict(readout="none", naming="hungarian_abs_corr"), runs=results), indent=2) + "\n"
-        )
+        protocol = dict(readout="none", naming="hungarian_abs_corr", mixing_null_draws=cli.mixing_null)
+        cli.out.write_text(json.dumps(dict(protocol=protocol, runs=results), indent=2) + "\n")
         print(f"Saved JSON to {cli.out.resolve()}")
     return int(any(r.get("status") == "error" for r in results))
 

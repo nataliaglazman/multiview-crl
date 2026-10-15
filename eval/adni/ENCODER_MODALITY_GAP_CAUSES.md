@@ -72,6 +72,15 @@ modality label were arbitrary.
   that beats most random directions runs along directions subjects barely vary in,
   which makes it a near-constant modality tag rather than a bias on a large anatomical
   axis. The low-variance-half share says the same thing geometrically.
+- **Used vs unused directions.** Contrastive codes often use only a few of their
+  dimensions: the used ones are the fewest principal directions holding 95% of the
+  within-modality variance. The offset is split between them and the rest, with the
+  accuracy each part gives alone. In such low-rank codes a sliver of offset in the
+  unused directions is a near-perfect tag, and any random direction crosses them, so
+  the random-direction reference saturates at 1.000 and the report says so. Read the
+  split instead. The ladder adds the held-out counterpart (`subspace_*_linear`): a
+  linear probe on the used directions only and on the unused ones only, with the
+  subspace refitted on each training fold.
 - Read this section only when the centroid distance is well above its swap-null p95.
 
 ### shape: variance ratios per direction
@@ -92,6 +101,10 @@ channels' scales do not matter.
   eigenvalues spread away from 1 even when the covariances are equal. Directions
   outside it are ones the two encoders read at a different gain. The shape distance
   `sqrt(sum(log(ratio)^2))` is the omnibus test.
+- Next to each extreme ratio is the percentage of T1's and FLAIR's variance along that
+  direction. A ratio of 50 in a direction holding 0.1% of the variance is a difference
+  in what each encoder leaves unused (one varies a little where the other is flat), not
+  in how it reads the anatomy both modalities show.
 
 ### ladder: probes after each removal
 
@@ -127,6 +140,11 @@ run's batch size and four times it.
 - **In-batch top-1 near 1** means batches are saturated: once the true partner wins the
   softmax, every gradient is small, the one that would remove the offset included.
 - **Offset share**: the fraction of the loss above that floor the offset accounts for.
+- **Used part / unused part**: the loss change from removing only the offset's component
+  in the used directions, or only the rest (normalized space). A tag in the unused
+  directions that costs the loss almost nothing can survive training indefinitely; a
+  costly used part that survives is an optimization question, settled by following the
+  offset across the `alignment_step<N>.npz` files.
 - Barlow Twins, `--standardize-code` and projection-head runs are blind to a per-view
   offset by construction or are not reproducible from these features; the check says so.
 - These are held-out, unaugmented pairs; training saw augmented training pairs. With a
@@ -152,13 +170,19 @@ They are tested against:
   axes' steps, plus which axis it was. It is about 1 for an isotropic scan and lower
   along the slice axis of a thick-slice acquisition such as ADNI-GO/2's 2D FLAIR. If
   registration tilted the slice axis off the grid, the effect spreads over two axes.
+  Anatomy also sets these steps: on encoder_adni_conv_mlp_s42_demog the blurriest axis
+  was axis 1 for about 90% of T1 and 95% of FLAIR scans, so there the ratio did not
+  detect FLAIR protocol. To test protocol, pass slice thickness or series description
+  from ADNI's acquisition metadata through `--covariates`.
 - **Site**, parsed from ADNI PTIDs (`<site>_S_<RID>`).
 - **`--covariates`**: any CSV keyed by `--subject-column`, e.g. WMH volume (UC Davis
   tables), FLAIR acquisition type, scanner vendor, diagnosis. Columns with more than
   ten distinct numbers are numeric (Spearman); others are categories (Kruskal-Wallis
   over groups of at least `--min-group` subjects, effect epsilon-squared).
 
-Benjamini-Hochberg q-values run over all tests of a split, and q < 0.1 is printed.
+The descriptors' 10th, 50th and 90th percentiles are printed first, so a correlation
+can be read against the range it spans. Benjamini-Hochberg q-values run over all tests
+of a split, and q < 0.1 is printed.
 These are correlations: a mask-ratio association says the offset tracks the mask
 mismatch, not that the mask causes it. The arm `--set shared_brain_mask=True` is the
 interventional test.

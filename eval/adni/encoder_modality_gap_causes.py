@@ -39,6 +39,8 @@ SPLITS = ("val", "train")
 ADNI_SITE = re.compile(r"^(\d{3})_S_\d{4}$")
 MISSING = ("", "na", "nan", "none", "null")
 TINY = 1e-12
+# The "used" subspace: the fewest within-modality principal directions holding this much variance.
+USED_VARIANCE = 0.95
 # What the loss check assumes when the features carry no run settings (the encoder ADNI recipe).
 RECIPE = {
     "contrastive_loss_type": "infonce",
@@ -118,6 +120,21 @@ def within_covariance(a, b):
     return (ca.T @ ca + cb.T @ cb) / (len(a) + len(b))
 
 
+def used_subspace(cov, threshold=USED_VARIANCE):
+    """Orthonormal bases of the directions subjects vary along and of the rest, plus how many are used.
+
+    The used directions are the fewest top principal directions of ``cov`` holding ``threshold`` of
+    its variance; contrastive codes often leave most of their dimensions nearly constant.
+    """
+    values, vectors = np.linalg.eigh(cov)
+    order = np.argsort(values)[::-1]
+    values, vectors = np.clip(values[order], 0, None), vectors[:, order]
+    if values.sum() <= TINY:
+        return vectors[:, :0], vectors, 0
+    k = min(int(np.searchsorted(np.cumsum(values) / values.sum(), threshold)) + 1, len(values))
+    return vectors[:, :k], vectors[:, k:], k
+
+
 def offset_geometry(a, b, rng, directions=4000):
     """Where the offset between the mean L2-normalized T1 row and the mean FLAIR row lies.
 
@@ -129,6 +146,11 @@ def offset_geometry(a, b, rng, directions=4000):
     Gaussian with the pooled within-modality covariance. The same offset pointed in a random direction
     gives ``random_direction_accuracy``; an offset that beats most random directions runs along
     directions in which subjects barely vary.
+
+    ``used_subspace`` splits the offset between the directions subjects vary along and the rest.
+    When the codes use only a few of their dimensions, a sliver of offset in the unused ones is a
+    near-perfect modality tag, and every random direction crosses them, so the random-direction
+    reference saturates (``random_direction_saturated``); read the split instead.
     """
     ma, mb = a.mean(0), b.mean(0)
     gap, centre = ma - mb, (ma + mb) / 2
@@ -145,6 +167,8 @@ def offset_geometry(a, b, rng, directions=4000):
         "random_direction_percentile": None,
         "low_variance_half_share": None,
         "random_low_variance_half_share": None,
+        "random_direction_saturated": None,
+        "used_subspace": None,
     }
     if length > TINY and np.linalg.norm(centre) > TINY:
         out["radial_share"] = float((gap @ centre) ** 2 / (length**2 * (centre @ centre)))
@@ -175,8 +199,38 @@ def offset_geometry(a, b, rng, directions=4000):
             "median": float(np.median(low)),
             "p95": float(np.quantile(low, 0.95)),
         },
+        random_direction_saturated=bool(_gaussian_accuracy(np.median(random_distance)) > 0.99),
     )
+    out["used_subspace"] = _offset_split(gap, cov, *used_subspace(cov))
     return out
+
+
+def _offset_split(gap, cov, inside, outside, k):
+    """How much of the offset lies in the used directions, and the accuracy each part gives alone.
+
+    Principal directions are uncorrelated, so the squared Mahalanobis distance of the offset is
+    the sum of its two parts' distances.
+    """
+    jitter = _jitter(cov)
+    length2 = float(gap @ gap)
+
+    def part(basis):
+        if basis.shape[1] == 0:
+            return 0.0, 0.5
+        g = basis.T @ gap
+        variance = np.einsum("ij,ik,kj->j", basis, cov + jitter, basis)
+        return float(g @ g / length2), _gaussian_accuracy(np.sqrt(np.sum(g**2 / variance)))
+
+    share_inside, accuracy_inside = part(inside)
+    _, accuracy_outside = part(outside)
+    return {
+        "directions": int(k),
+        "of": int(len(cov)),
+        "variance_threshold": USED_VARIANCE,
+        "offset_share_inside": share_inside,
+        "accuracy_inside": accuracy_inside,
+        "accuracy_outside": accuracy_outside,
+    }
 
 
 def check_offset(a, b, rng, permutations):
@@ -192,16 +246,25 @@ def check_offset(a, b, rng, permutations):
 # ---------------------------------------------------------------------------
 
 
-def variance_ratios(a, b):
+def variance_ratios(a, b, directions=False):
     """FLAIR/T1 variance along each direction that decorrelates both modalities at once, ascending.
 
     These generalized eigenvalues do not change under any invertible linear map applied to both
-    modalities, so they compare the two clouds' shapes whatever the channels' scales.
+    modalities, so they compare the two clouds' shapes whatever the channels' scales. With
+    ``directions`` it also returns the share of each modality's total variance along each direction:
+    a huge ratio in a direction holding 0.1% of the variance is a difference in what each encoder
+    leaves unused, not in how it reads the anatomy both see.
     """
     ca, cb = a - a.mean(0), b - b.mean(0)
     sa, sb = ca.T @ ca / len(ca), cb.T @ cb / len(cb)
     jitter = _jitter((sa + sb) / 2)
-    return linalg.eigh(sb + jitter, sa + jitter, eigvals_only=True)
+    if not directions:
+        return linalg.eigh(sb + jitter, sa + jitter, eigvals_only=True)
+    ratios, vectors = linalg.eigh(sb + jitter, sa + jitter)
+    u = vectors / np.linalg.norm(vectors, axis=0)
+    share_a = np.einsum("ij,ik,kj->j", u, sa, u) / max(np.trace(sa), TINY)
+    share_b = np.einsum("ij,ik,kj->j", u, sb, u) / max(np.trace(sb), TINY)
+    return ratios, share_a, share_b
 
 
 def effective_rank(x):
@@ -243,10 +306,15 @@ def check_shape(a, b, rng, permutations):
     }
     if np.square(ca).sum() + np.square(cb).sum() <= TINY or a.shape[1] < 2:
         return out
-    relative = relative_ratios(ca, cb)
+    ratios, share_t1, share_flair = variance_ratios(ca, cb, directions=True)
+    relative = ratios / np.median(ratios)
     distance = float(np.sqrt(np.square(np.log(relative)).sum()))
     out.update(
-        variance_ratios=variance_ratios(ca, cb).tolist(), relative_ratios=relative.tolist(), shape_distance=distance
+        variance_ratios=ratios.tolist(),
+        relative_ratios=relative.tolist(),
+        t1_variance_share=share_t1.tolist(),
+        flair_variance_share=share_flair.tolist(),
+        shape_distance=distance,
     )
     if permutations:
         null = np.array([relative_ratios(*swap_pairs(ca, cb, rng)) for _ in range(permutations)])
@@ -337,19 +405,56 @@ def probe_ladder(raw_a, raw_b, folds, decisions=False):
     return accuracy, (margin if decisions else None)
 
 
+def subspace_probes(raw_a, raw_b, folds):
+    """Held-out linear modality probe on the used directions only, and on the unused ones only.
+
+    Each fold finds the used subspace from its own training rows. A high ``unused_linear`` means
+    the linear modality tag sits in directions the codes otherwise leave nearly constant.
+    """
+    a, b = normalize_rows(raw_a), normalize_rows(raw_b)
+    n = len(a)
+    labels = np.repeat([0, 1], n)
+    predictions = {"used": np.full(2 * n, -1), "unused": np.full(2 * n, -1)}
+    sizes = []
+    for train, test in folds:
+        used, unused, k = used_subspace(within_covariance(a[train], b[train]))
+        sizes.append(k)
+        y_train = np.repeat([0, 1], len(train))
+        rows = np.r_[test, n + test]
+        for part, basis in (("used", used), ("unused", unused)):
+            if basis.shape[1] == 0:
+                predictions[part][rows] = 0  # nothing to read: one class for every row, accuracy 0.5
+                continue
+            x_train = np.concatenate([a[train], b[train]]) @ basis
+            x_test = np.concatenate([a[test], b[test]]) @ basis
+            constant = x_train.std(axis=0) <= TINY
+            x_train[:, constant] = 0
+            x_test[:, constant] = 0
+            clf = make_pipeline(StandardScaler(), _estimator("linear")).fit(x_train, y_train)
+            predictions[part][rows] = clf.predict(x_test)
+    out = {f"{part}_linear": float(np.mean(pred == labels)) for part, pred in predictions.items()}
+    out["used_directions_per_fold"] = sizes
+    return out
+
+
 def check_ladder(raw_a, raw_b, subjects, n_splits, seed, rng, permutations):
     """The ladder on every pair, plus its within-pair swap null at this split's size."""
     folds = list(subject_folds(subjects, n_splits, seed))
     with threadpool_limits(limits=1):
         accuracy, margin = probe_ladder(raw_a, raw_b, folds, decisions=True)
+        subspace = subspace_probes(raw_a, raw_b, folds)
         null = [probe_ladder(*swap_pairs(raw_a, raw_b, rng), folds)[0] for _ in range(permutations)]
-    out = {"pairs": len(raw_a), "accuracy": accuracy, "permutations": permutations}
+    out = {"pairs": len(raw_a), "accuracy": accuracy, "subspace": subspace, "permutations": permutations}
     if permutations:
         out["null_p95"] = {key: float(np.quantile([n[key] for n in null], 0.95)) for key in accuracy}
         out["p_value"] = {
             key: float((1 + sum(n[key] >= value for n in null)) / (1 + permutations)) for key, value in accuracy.items()
         }
     return out, margin
+
+
+def _subspace_accuracy(subspace):
+    return {f"subspace_{part}_linear": subspace[f"{part}_linear"] for part in ("used", "unused")}
 
 
 def retrieval_top1(a, b):
@@ -367,7 +472,8 @@ def check_matched(raw_a, raw_b, subjects, size, draws, n_splits, seed, rng):
         for _ in range(draws):
             keep = np.isin(subjects, rng.choice(unique, size, replace=False))
             folds = list(subject_folds(subjects[keep], n_splits, seed))
-            ladders.append(probe_ladder(raw_a[keep], raw_b[keep], folds)[0])
+            subspace = subspace_probes(raw_a[keep], raw_b[keep], folds)
+            ladders.append({**probe_ladder(raw_a[keep], raw_b[keep], folds)[0], **_subspace_accuracy(subspace)})
             retrievals.append(retrieval_top1(normalize_rows(raw_a[keep]), normalize_rows(raw_b[keep])))
     return {
         "subjects": int(size),
@@ -418,6 +524,10 @@ def check_loss(raw_a, raw_b, settings, rng, batches, batch_sizes):
     ``offset_removed`` gives both modalities the pooled raw mean, which is all a per-modality bias in
     the encoders could change. ``aligned`` feeds the pair average as both views, the loss's floor for
     this spread of subjects. ``offset_share`` is the fraction of the gap to that floor the offset accounts for.
+
+    ``used_part_cost`` and ``unused_part_cost`` remove only the normalized-space offset's component in
+    the used directions, or only the rest, against the same codes normalized (the cosine ignores each
+    row's length, so without --standardize-code that baseline is the as-is loss).
     """
     kind = settings["contrastive_loss_type"]
     if kind != "infonce":
@@ -428,10 +538,17 @@ def check_loss(raw_a, raw_b, settings, rng, batches, batch_sizes):
     if settings["contrastive_proj_dim"]:
         return {"skipped": "the loss reads a projection head's output, which these features do not include"}
     average = (raw_a + raw_b) / 2
+    na, nb = normalize_rows(raw_a), normalize_rows(raw_b)
+    half = (na.mean(0) - nb.mean(0)) / 2
+    used, _, _ = used_subspace(within_covariance(na, nb))
+    used_half = used @ (used.T @ half)
     variants = {
         "as_is": (raw_a, raw_b),
         "offset_removed": remove_raw_offset(raw_a, raw_b),
         "aligned": (average, average),
+        "normalized": (na, nb),
+        "used_part_removed": (na - used_half, nb + used_half),
+        "unused_part_removed": (na - (half - used_half), nb + (half - used_half)),
     }
     loss_args = (settings["tau"], settings["cross_view_negs_only"], settings["standardize_code"])
     out = {
@@ -455,6 +572,8 @@ def check_loss(raw_a, raw_b, settings, rng, batches, batch_sizes):
         result["offset_cost"] = offset
         result["misalignment_cost"] = misalignment
         result["offset_share"] = offset / misalignment if misalignment > TINY else None
+        for part in ("used", "unused"):
+            result[f"{part}_part_cost"] = result["normalized"]["loss"] - result[f"{part}_part_removed"]["loss"]
         out["by_batch_size"][str(size)] = result
     return out
 
@@ -571,6 +690,21 @@ def check_subjects(measures, covariates, min_group):
     return sorted(tests, key=lambda t: (t["q"], t["p"]))
 
 
+def summarize_descriptors(descriptors):
+    """Each descriptor's 10th, 50th and 90th percentile, or the count per blurriest axis."""
+    out = {}
+    for name, values in descriptors.items():
+        if name.startswith("blur_axis"):
+            axes, counts = np.unique(np.asarray(values).astype(int), return_counts=True)
+            out[name] = {f"axis{axis}": int(count) for axis, count in zip(axes, counts)}
+            continue
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        if len(values):
+            out[name] = dict(zip(("p10", "median", "p90"), map(float, np.quantile(values, [0.1, 0.5, 0.9]))))
+    return out
+
+
 def descriptor_covariates(descriptors):
     """Extraction descriptors as covariates: the blurriest axis is a category, the rest are numeric."""
     covariates = {}
@@ -622,6 +756,7 @@ def analyse_split(data, settings, args, matched_size=None, probe_permutations=0,
     sizes = args.loss_batch_sizes or [settings["batch_size"], 4 * settings["batch_size"]]
     report["loss"] = check_loss(raw_a, raw_b, settings, rngs["loss"], args.loss_batches, sizes)
     measures = subject_measures(a, b, margin)
+    report["descriptors"] = summarize_descriptors(data.get("descriptors", {}))
     covariates = descriptor_covariates(data.get("descriptors", {}))
     sites = site_codes(subjects)
     if sites is not None:
@@ -670,6 +805,10 @@ COMPARISON = (
     ("spread T1", ("shape", "spread_t1")),
     ("spread FLAIR", ("shape", "spread_flair")),
     ("shape distance (relative ratios)", ("shape", "shape_distance")),
+    ("used directions (95% of variance)", ("offset", "used_subspace", "directions")),
+    ("offset share in the used directions", ("offset", "used_subspace", "offset_share_inside")),
+    ("accuracy from the offset's used part", ("offset", "used_subspace", "accuracy_inside")),
+    ("accuracy from the offset's unused part", ("offset", "used_subspace", "accuracy_outside")),
 )
 
 
@@ -677,12 +816,12 @@ def comparison(reports):
     """Side by side; n-dependent probe and retrieval numbers come from the size-matched draws."""
     names = list(reports)
     table = {label: {s: _lookup(reports[s], path) for s in names} for label, path in COMPARISON}
-    for key in (f"{c}_{p}" for c in CONDITIONS for p in PROBES):
+    for key in [f"{c}_{p}" for c in CONDITIONS for p in PROBES] + ["subspace_used_linear", "subspace_unused_linear"]:
         table[f"probe {key}"] = {
             s: (
                 reports[s]["matched"]["accuracy_mean"][key]
                 if "matched" in reports[s]
-                else reports[s]["ladder"]["accuracy"][key]
+                else {**reports[s]["ladder"]["accuracy"], **_subspace_accuracy(reports[s]["ladder"]["subspace"])}[key]
             )
             for s in names
         }
@@ -695,9 +834,14 @@ def comparison(reports):
         for s in names
     }
     for size in sorted({k for s in names for k in reports[s]["loss"].get("by_batch_size", {})}, key=int):
-        table[f"offset cost to the loss, batch {size}"] = {
-            s: reports[s]["loss"]["by_batch_size"].get(size, {}).get("offset_cost") for s in names
-        }
+        for key, label in (
+            ("offset_cost", "offset"),
+            ("used_part_cost", "  used part"),
+            ("unused_part_cost", "  unused part"),
+        ):
+            table[f"{label} cost to the loss, batch {size}"] = {
+                s: reports[s]["loss"]["by_batch_size"].get(size, {}).get(key) for s in names
+            }
     return table
 
 
@@ -783,16 +927,29 @@ def print_split(name, r):
     )
     print(f"          radial share {_f(o['radial_share'])}  (1 = concentration difference, 0 = sideways shift)")
     if o["lda_accuracy"] is not None:
-        rd, lo = o["random_direction_accuracy"], o["random_low_variance_half_share"]
+        u = o["used_subspace"]
         print(
-            f"          accuracy the offset alone gives: {_f(o['lda_accuracy'])}; same length, random direction: "
-            f"median {_f(rd['median'])}, p95 {_f(rd['p95'])} (beats {100 * o['random_direction_percentile']:.0f}% of "
-            f"directions); isotropic {_f(o['isotropic_accuracy'])}"
+            f"          accuracy the offset alone gives: {_f(o['lda_accuracy'])} (isotropic cloud: "
+            f"{_f(o['isotropic_accuracy'])})"
         )
         print(
-            f"          offset share in the low-variance half of directions {_f(o['low_variance_half_share'])} "
-            f"(random direction: median {_f(lo['median'])}, p95 {_f(lo['p95'])})"
+            f"          the codes use {u['directions']} of {u['of']} directions (95% of their variance): "
+            f"{100 * u['offset_share_inside']:.0f}% of the offset lies in them and gives {_f(u['accuracy_inside'])} "
+            f"alone; the {100 * (1 - u['offset_share_inside']):.0f}% in the unused directions gives "
+            f"{_f(u['accuracy_outside'])} alone"
         )
+        if o["random_direction_saturated"]:
+            print(
+                "          (any random direction crosses the unused directions and separates perfectly, so the "
+                "random-direction reference does not apply)"
+            )
+        else:
+            rd, lo = o["random_direction_accuracy"], o["random_low_variance_half_share"]
+            print(
+                f"          same length, random direction: median {_f(rd['median'])}, p95 {_f(rd['p95'])} (beats "
+                f"{100 * o['random_direction_percentile']:.0f}% of directions); offset share in the low-variance "
+                f"half {_f(o['low_variance_half_share'])} (random: median {_f(lo['median'])}, p95 {_f(lo['p95'])})"
+            )
     print(
         f"shape     spread T1 {_f(s['spread_t1'])}, FLAIR {_f(s['spread_flair'])}; effective rank T1 "
         f"{_f(s['effective_rank_t1'], 1)}, FLAIR {_f(s['effective_rank_flair'], 1)}"
@@ -802,6 +959,11 @@ def print_split(name, r):
         line = f"          FLAIR/T1 variance ratio over its median, lowest {', '.join(_f(x, 2) for x in ratios[:3])}"
         line += f"; highest {', '.join(_f(x, 2) for x in ratios[-3:][::-1])}"
         print(line)
+        share = [f"{100 * t:.1f}/{100 * f:.1f}" for t, f in zip(s["t1_variance_share"], s["flair_variance_share"])]
+        print(
+            f"          % of T1/FLAIR variance along them: lowest {', '.join(share[:3])}; highest "
+            f"{', '.join(share[-3:][::-1])}"
+        )
         if "null_upper" in s:
             print(
                 f"          swap envelope: lowest >= {', '.join(_f(x, 2) for x in s['null_lower'][:3])}; highest <= "
@@ -821,11 +983,17 @@ def print_split(name, r):
             key = f"{c}_{p}"
             cells.append(f"{_f(lad['accuracy'][key])}" + (f" [{_f(null[key])}]" if null else ""))
         print(f"          {c:<20s}" + "   ".join(f"{cell:>15s}" for cell in cells))
+    sub = lad["subspace"]
+    print(
+        f"          linear probe on the used directions only {_f(sub['used_linear'])}, on the unused ones only "
+        f"{_f(sub['unused_linear'])} (used directions per fold: {', '.join(map(str, sub['used_directions_per_fold']))})"
+    )
     if "matched" in r:
         m = r["matched"]
+        keys = ("mean_centered_rbf", "whitened_rbf", "subspace_used_linear", "subspace_unused_linear")
         print(
             f"          size-matched ({m['subjects']} subjects x {m['draws']} draws): "
-            + ", ".join(f"{k} {_f(m['accuracy_mean'][k])}" for k in ("mean_centered_rbf", "whitened_rbf"))
+            + ", ".join(f"{k} {_f(m['accuracy_mean'][k])}" for k in keys)
             + f"; retrieval top-1 {_f(m['retrieval_top1_mean'])}"
         )
     loss = r["loss"]
@@ -841,11 +1009,21 @@ def print_split(name, r):
                 continue
             print(
                 f"          batch {size}: in-batch top-1 {_f(res['as_is']['top1'])}, loss {_f(res['as_is']['loss'])}; "
-                f"change with the offset removed {-res['offset_cost']:+.3f}, fully aligned "
+                f"change with the offset removed {-res['offset_cost']:+.3f} (its used part only "
+                f"{-res['used_part_cost']:+.3f}, unused part only {-res['unused_part_cost']:+.3f}), fully aligned "
                 f"{-res['misalignment_cost']:+.3f} (offset share {_f(res['offset_share'], 2)})"
             )
+    if r["descriptors"]:
+        parts = []
+        for name, value in r["descriptors"].items():
+            if "median" in value:
+                parts.append(f"{name} {_f(value['median'], 2)} [{_f(value['p10'], 2)}-{_f(value['p90'], 2)}]")
+            else:
+                parts.append(f"{name} " + "/".join(f"{k} {v}" for k, v in value.items()))
+        print("subjects  descriptors, median [p10-p90]: " + "; ".join(parts))
     hits = [t for t in r["associations"] if t["q"] < 0.1]
-    print(f"subjects  {len(r['associations'])} tests over covariates: {', '.join(r['covariates']) or 'none'}")
+    lead = "          " if r["descriptors"] else "subjects  "
+    print(f"{lead}{len(r['associations'])} tests over covariates: {', '.join(r['covariates']) or 'none'}")
     for t in hits[:8]:
         effect = "rho" if t["test"] == "spearman" else "eps2"
         print(f"          {t['measure']} ~ {t['covariate']}: {effect} {_f(t['effect'], 2)}, n {t['n']}, q {t['q']:.2g}")

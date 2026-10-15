@@ -53,6 +53,27 @@ def pair(n=289, seed=1, offset=0.38, offset_dirs=slice(0, 3), flair_gain=None):
     return a, b, np.array([f"{i % 30 + 2:03d}_S_{4000 + i:04d}" for i in range(n)])
 
 
+def low_rank_pair(outside_share, n=289, seed=4, flair_private=0.0):
+    """Codes that use 7 of 20 directions (like the measured run); ``outside_share`` of the offset's
+    squared length lies in the unused 13. ``flair_private`` adds FLAIR-only variation along one unused direction."""
+    rng = np.random.default_rng(seed)
+    q = basis()
+    variance = np.r_[np.geomspace(1.0, 0.25, 7), np.full(13, 0.004)]
+    variance *= 0.79 / variance.sum()
+    inside = q[:, :7] @ rng.standard_normal(7)
+    outside = q[:, 7:19] @ rng.standard_normal(12)
+    g = 0.38 * (
+        np.sqrt(1 - outside_share) * inside / np.linalg.norm(inside)
+        + np.sqrt(outside_share) * outside / np.linalg.norm(outside)
+    )
+    s = rng.standard_normal((n, D)) * np.sqrt(variance) @ q.T
+    noise = 0.07 * np.sqrt(variance / variance.mean())
+    a = 0.25 * q[:, -1] + s + g / 2 + rng.standard_normal((n, D)) * noise @ q.T
+    b = 0.25 * q[:, -1] + s - g / 2 + rng.standard_normal((n, D)) * noise @ q.T
+    b += flair_private * rng.standard_normal((n, 1)) * q[:, 12]
+    return a, b, np.arange(n).astype(str)
+
+
 def args(**changes):
     values = dict(
         folds=3,
@@ -100,6 +121,23 @@ class OffsetTests(unittest.TestCase):
         self.assertGreater(out["radial_share"], 0.9)
         self.assertGreater(out["mean_length_flair"], out["mean_length_t1"])
 
+    def test_low_rank_codes_keep_the_linear_tag_in_unused_directions(self):
+        a, b, subjects = low_rank_pair(0.1)
+        out = causes.offset_geometry(causes.normalize_rows(a), causes.normalize_rows(b), rng())
+        split = out["used_subspace"]
+        self.assertEqual(split["directions"], 7)
+        self.assertTrue(out["random_direction_saturated"])
+        self.assertGreater(split["offset_share_inside"], 0.8)
+        self.assertLess(split["accuracy_inside"], 0.8)
+        self.assertGreater(split["accuracy_outside"], 0.9)
+        folds = list(causes.subject_folds(subjects, 3, 1729))
+        probes = causes.subspace_probes(a, b, folds)
+        self.assertEqual(probes["used_directions_per_fold"], [7, 7, 7])
+        self.assertLess(probes["used_linear"], 0.8)
+        self.assertGreater(probes["unused_linear"], 0.9)
+        a, b, subjects = low_rank_pair(0.0)
+        self.assertLess(causes.subspace_probes(a, b, folds)["unused_linear"], 0.6)
+
     def test_swap_null_bounds_the_centroid_distance_of_identical_modalities(self):
         a, b, _ = pair(offset=0.0)
         out = causes.check_offset(causes.normalize_rows(a), causes.normalize_rows(b), rng(), 200)
@@ -129,6 +167,13 @@ class ShapeTests(unittest.TestCase):
         # Normalizing first would compress each cloud along its own mean direction.
         distorted = causes.check_shape(causes.normalize_rows(a), causes.normalize_rows(b), rng(), 300)
         self.assertLess(distorted["shape_distance_p"], out["shape_distance_p"])
+
+    def test_variance_shares_locate_a_private_direction(self):
+        out = shape(*low_rank_pair(0.0, flair_private=0.06)[:2])
+        self.assertGreaterEqual(out["directions_flair_higher"], 1)
+        top_t1, top_flair = out["t1_variance_share"][-1], out["flair_variance_share"][-1]
+        self.assertGreater(top_flair, 3 * top_t1)
+        self.assertLess(top_flair, 0.05)  # a small share of FLAIR's variance, but one T1 lacks
 
     def test_ratios_ignore_any_linear_map_applied_to_both(self):
         a, b, _ = pair(offset=0.0, flair_gain=0.5)
@@ -189,7 +234,10 @@ class LadderTests(unittest.TestCase):
         self.assertLessEqual(out["p_value"]["normalized_linear"], 1 / 6)
         matched = causes.check_matched(a, b, subjects, 60, 2, 3, 1729, rng())
         self.assertEqual(matched["subjects"], 60)
-        self.assertEqual(set(matched["accuracy_mean"]), set(out["accuracy"]))
+        self.assertEqual(
+            set(matched["accuracy_mean"]), set(out["accuracy"]) | {"subspace_used_linear", "subspace_unused_linear"}
+        )
+        self.assertEqual(set(out["subspace"]), {"used_linear", "unused_linear", "used_directions_per_fold"})
 
 
 class LossTests(unittest.TestCase):
@@ -241,6 +289,13 @@ class LossTests(unittest.TestCase):
         a, b, _ = pair(offset=0.0)
         out = causes.check_loss(a, b, self.settings(), rng(), 50, [32])["by_batch_size"]["32"]
         self.assertLess(abs(out["offset_cost"]), 0.1 * out["misalignment_cost"])
+
+    def test_a_tag_in_unused_directions_is_nearly_free(self):
+        a, b, _ = low_rank_pair(0.1)
+        out = causes.check_loss(a, b, self.settings(), rng(), 50, [32])["by_batch_size"]["32"]
+        # The cosine ignores row length, so the normalized baseline is the as-is loss.
+        self.assertAlmostEqual(out["normalized"]["loss"], out["as_is"]["loss"], places=9)
+        self.assertGreater(out["used_part_cost"], 20 * abs(out["unused_part_cost"]))
 
     def test_standardized_code_and_other_losses_are_blind_or_skipped(self):
         a, b, _ = pair()
@@ -327,7 +382,10 @@ class FeatureCliTests(unittest.TestCase):
             self.assertEqual(first["splits"]["train"]["ladder"]["permutations"], 0)
             self.assertEqual(first["splits"]["train"]["matched"]["subjects"], 90)
             self.assertIn("16", first["splits"]["val"]["loss"]["by_batch_size"])
+            self.assertAlmostEqual(first["splits"]["val"]["descriptors"]["mask_volume_ratio"]["median"], 1.0, places=6)
+            self.assertEqual(first["splits"]["train"]["descriptors"], {})
             self.assertIsNotNone(first["comparison"])
+            self.assertIn("probe subspace_unused_linear", first["comparison"])
             saved = json.loads((root / "out/report.json").read_text())
             self.assertEqual(saved["splits"]["val"]["ladder"], first["splits"]["val"]["ladder"])
             with (root / "out/subjects_val.csv").open() as fp:

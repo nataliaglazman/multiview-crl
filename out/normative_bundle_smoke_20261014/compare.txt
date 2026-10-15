@@ -1,0 +1,36 @@
+============================================================================================
+MATCHED BUNDLE COMPARISON
+============================================================================================
+
+FEATURE WIDTH  (scoring the all block of each embedding)
+  normative            9 features ->     9 probed   floor: no    voxels: no
+  vq                  12 features ->    12 probed   floor: no    voxels: no
+
+  NOTE: the bundles were probed at different widths, so part of any difference
+        below is probe capacity rather than representation. Pass --equal-width.
+
+CONTENT · real − permutation null
+factor              normative      vq  vq−normative
+------------------  ---------  ------  ------------
+brain_size             +1.030  +0.956        -0.074
+ventricle_size         +0.792  +0.408        -0.384
+lesion_x               +0.261  +0.629        +0.368
+lesion_y               +0.480  +0.770        +0.290
+lesion_z               +0.170  +0.077        -0.094
+cortical_thickness     +0.006  +0.353        +0.347
+temporal_atrophy       +0.598  +0.693        +0.095
+lr_asymmetry           +0.936  +1.135        +0.199
+sulcal_widening        +0.024  +0.114        +0.090
+mean                   +0.478  +0.571
+
+STYLE · real − permutation null
+factor       normative      vq  vq−normative
+-----------  ---------  ------  ------------
+gain            +0.073  +0.660        +0.588
+bias            -0.236  +0.295        +0.530
+noise_sigma     +0.070  +0.070        -0.000
+mean            -0.031  +0.341
+
+Read across a row for the same factor under different representations. 'gap' is
+comparable everywhere; 'Δfloor' only where each bundle has its own floor, and
+'Δvoxels' only where the bundle stored one (export with --raw-grid).
