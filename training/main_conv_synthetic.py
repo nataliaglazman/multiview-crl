@@ -319,6 +319,20 @@ def stratified_batch_sampler(args, train_dataset, device, save_dir):
     return sampler
 
 
+def contrastive_code(pooled, model, args, mask=None):
+    """Select/project the global content code before optional batch standardization."""
+    b = pooled.shape[0] // 2
+    hz = torch.stack([pooled[:b], pooled[b:]], dim=0)
+    if mask is None:
+        return model.project(hz[..., : args.content_channels])
+    return hz[..., : model.latent_dim] * mask
+
+
+def standardize_contrastive_code(hz):
+    """The per-view, per-dimension batch transform used by --standardize-code."""
+    return (hz - hz.mean(1, keepdim=True)) / (hz.std(1, keepdim=True) + 1e-6)
+
+
 def contrastive_loss(pooled, model, args, sim_metric, criterion, mask=None):
     """Content-alignment − entropy on the pooled content block across the two views.
 
@@ -333,15 +347,10 @@ def contrastive_loss(pooled, model, args, sim_metric, criterion, mask=None):
     the gradient reaches every unit's logit. Under a binary mask the left-out units are exact zeros
     and the cosine similarities equal those of the selected units alone.
     """
-    b = pooled.shape[0] // 2
-    hz = torch.stack([pooled[:b], pooled[b:]], dim=0)  # (2, B, C)
-    if mask is None:
-        hz = model.project(hz[..., : args.content_channels])
-    else:
-        hz = hz[..., : model.latent_dim] * mask
+    hz = contrastive_code(pooled, model, args, mask)
     if getattr(args, "standardize_code", False):
         # Per view, over the batch, so every unit's spread counts equally in the cosine (--standardize-code).
-        hz = (hz - hz.mean(1, keepdim=True)) / (hz.std(1, keepdim=True) + 1e-6)
+        hz = standardize_contrastive_code(hz)
     content_indices = [list(range(hz.shape[-1]))]
     if args.contrastive_loss_type == "barlow_twins":
         # With a mask, Barlow Twins keeps only the selected units (losses.barlow_twins_loss); a

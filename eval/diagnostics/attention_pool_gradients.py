@@ -128,6 +128,7 @@ Example:
 import argparse
 import contextlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -1166,23 +1167,25 @@ def _self_test():
     assert np.allclose(profiles.max(axis=(1, 2, 3)), 1) and np.allclose(profiles[0], template / template.max())
     scales = [1.0, 4.0]
     pulls = np.einsum("kvmdhw,tdhw->ktm", descent, profiles)
-    planted = 2.0 - np.concatenate([pulls.sum(-1, keepdims=True), pulls], axis=-1)[..., None] * np.array(scales)
-    planted[:, 0, 3] -= 0.01 * np.square(scales)
+    bent = np.zeros((count, len(profiles), 1 + n_heads, len(scales)))
+    bent[:, 0, 3] = -0.01 * np.square(scales)
+    planted = 2.0 - np.concatenate([pulls.sum(-1, keepdims=True), pulls], axis=-1)[..., None] * np.array(scales) + bent
     moves, move_arrays = score_moves(
         {"baseline": np.full(count, 2.0), "losses": planted}, descent, profiles, groups, scales, np.full(count, 2.0)
     )
     rows = {(row["heads"], row["scale"]): row for row in moves["rows"]}
     assert len(rows) == (1 + n_heads) * len(scales) and moves["baseline_vs_step_max_abs"] == 0
-    assert np.allclose(move_arrays["move_change"], move_arrays["move_first_order"] - planted.__eq__(planted) * 0)
+    assert np.allclose(move_arrays["move_change"] - move_arrays["move_first_order"], bent, rtol=0, atol=1e-12)
+    # Head 0's descent map is the template minus its mean, in both views.
     expected = -2 * ((template - template.mean()) * profiles[0]).sum()
     assert np.isclose(rows[(0, 4.0)]["first_order"], 4.0 * expected, rtol=1e-3), (rows[(0, 4.0)], expected)
+    assert rows[(0, 1.0)]["reading"] == "rewards site" and rows[(0, 1.0)]["null_z"] > 3, rows[(0, 1.0)]
     for heads in ("all", 0, 1, 3, 4):
         assert all(abs(rows[(heads, s)]["beyond_first_order"]) < 1e-12 for s in scales)
     for scale in scales:
         row = rows[(2, scale)]
         assert np.isclose(row["beyond_first_order"], -0.01 * scale**2) and row["reading"] == "rewards site", row
-        assert row["beyond_null_rank"] == 1 and row["beyond_shell_null_rank"] == 1 and row["beyond_null_z"] is None
-    assert rows[(0, 1.0)]["reading"] == "rewards site" and rows[(0, 1.0)]["null_z"] > 3, rows[(0, 1.0)]
+        assert row["beyond_null_rank"] == 1 and row["beyond_shell_null_rank"] == 1, row
     assert 0 < moves["overlap_from_uniform"][0] < moves["overlap_from_uniform"][1] < 1, moves["overlap_from_uniform"]
 
     assert parse_args(["--offset-scales", "2,0.5"]).offset_scales == [2.0, 0.5]
@@ -1202,7 +1205,9 @@ def _self_test():
     print(
         "self-test OK (dL/dl matches autograd, the query gradient rebuilds from the capture, dL/dW splits into "
         "logits and values and is zero through the logits at q = 0, a planted site reward reads back, the CLI "
-        "draws the trainer's batches)",
+        "draws the trainer's batches, the per-view query parts sum to autograd's and each is autograd's with the "
+        "other view detached, small offsets change the loss by their first-order prediction, finite offsets find "
+        "a site the first-order pull reads as zero, a learned mask's draws replay)",
         flush=True,
     )
 
@@ -1261,6 +1266,9 @@ def _self_test_torch():
     assert np.abs(collected["logit_grad"].sum(axis=(3, 4, 5))).max() < 1e-5 * scale * 512
     assert np.all(collected["position_grad_keys"] == 0) and np.abs(collected["position_grad"]).max() > 0
     assert 0.1 < collected["voxel_brain"].mean() < 0.9 and collected["cell_brain"].shape == (2, 8, 8, 8)
+    # The two views' parts of the query gradient sum to autograd's.
+    parts_sum = collected["query_grad_views"].sum(1) - collected["query_grad"]
+    assert np.abs(parts_sum).max() < 1e-4 * np.abs(collected["query_grad"]).max(), np.abs(parts_sum).max()
 
     # Off q = 0, dL/dW through the logits (rebuilt here) plus dL/dW with the weights detached is the total.
     with torch.no_grad():
@@ -1278,6 +1286,50 @@ def _self_test_torch():
     assert np.abs(out["position_grad_keys"]).max() > 0 and out["parity"] < 1e-4, out["parity"]
     residual = out["position_grad"] - out["position_grad_keys"].sum(0) - values_only
     assert np.abs(residual).max() < 1e-5 * np.abs(out["position_grad"]).max(), np.abs(residual).max()
+
+    def drawn(seed, count=2):
+        """``count`` batches of 4 subjects per view, shuffled by ``seed``: the same ones on every call."""
+        return training_batches(
+            DataLoader(dataset, batch_size=4, shuffle=True, generator=torch.Generator().manual_seed(seed)), count
+        )
+
+    # In float64, with a random query and position weights: each view's part of the query gradient is
+    # autograd's with the other view's weights detached, and a small offset changes the real training
+    # loss by its first-order prediction, -s sum_views D . o, for every template and head choice.
+    double = build_model(cfg, "cpu").double().train()
+    with torch.no_grad():
+        double.attention_pool.query.normal_(0.0, 0.5)
+        double.attention_pool.position.normal_(0.0, 0.1)
+    step = training_loss(double, options, "cpu")
+
+    def step64(batch):
+        return step(dict(batch, image=[image.double() for image in batch["image"]]))
+
+    exact = collect(double, drawn(1), step64)
+    assert (
+        np.abs(exact["query_grad_views"].sum(1) - exact["query_grad"]).max() < 1e-12 * np.abs(exact["query_grad"]).max()
+    )
+    attention = double.attention_pool.attention
+    for v in range(2):
+
+        def one_view(x, v=v):
+            weights = attention(x)
+            b = len(weights) // 2
+            return torch.cat([weights[:b], weights[b:].detach()] if v == 0 else [weights[:b].detach(), weights[b:]])
+
+        double.attention_pool.attention = one_view
+        double.zero_grad(set_to_none=True)
+        step64(next(drawn(1))).backward()
+        del double.attention_pool.attention
+        part = exact["query_grad_views"][0, v]
+        assert np.allclose(double.attention_pool.query.grad.numpy(), part, rtol=1e-9, atol=1e-12 * np.abs(part).max())
+    exact_report, exact_arrays = analyse(exact, 32, 0.09)
+    profiles, groups = offset_profiles(exact_arrays["template"], exact_arrays["nulls"])
+    small = offset_losses(double, drawn(1), step64, profiles, [1e-4])
+    moved, moved_arrays = score_moves(small, exact_arrays["descent"], profiles, groups, [1e-4], exact["loss"])
+    assert moved["baseline_vs_step_max_abs"] < 1e-12 and small["indices"] == exact["indices"], moved
+    change, predicted = moved_arrays["move_change"], moved_arrays["move_first_order"]
+    assert np.abs(predicted).max() > 0 and np.abs(change - predicted).max() < 1e-3 * np.abs(predicted).max()
 
     # A planted loss that rewards head 0's weight on the site, and nothing else: at q = 0 its descent map
     # is the template minus its mean, so the analysis must read the site, exactly, and no push elsewhere.
@@ -1298,6 +1350,50 @@ def _self_test_torch():
     assert all(row["reading"] == "inconsistent" and row["split_half_r"] is None for row in rest), rest
     assert all(row["agreement"] is None for row in planted_report["heads"][1:])
 
+    # A planted loss flat to first order at uniform attention that falls when head 0 concentrates on the
+    # site: minus the square of head 0's weight on the site minus its uniform value. Its pull is zero, so
+    # the first-order reading cannot see the site; the finite moves must.
+    site = target[0]
+
+    def flat(batch):
+        h = model._encode(torch.cat(batch["image"], dim=0), 2, None)
+        on_site = (pool.attention(pool.tokens(h))[:, 0] * site).sum(-1)
+        return -(on_site - site.mean()).square().mean()
+
+    flat_gradients = collect(model, drawn(0), flat)
+    _, flat_arrays = analyse(flat_gradients, 32, 0.09)
+    profiles, groups = offset_profiles(flat_arrays["template"], flat_arrays["nulls"])
+    flat_moves, flat_arrays = score_moves(
+        offset_losses(model, drawn(0), flat, profiles, [1.0, 4.0]),
+        flat_arrays["descent"],
+        profiles,
+        groups,
+        [1.0, 4.0],
+        flat_gradients["loss"],
+    )
+    rows = {(row["heads"], row["scale"]): row for row in flat_moves["rows"]}
+    for heads in ("all", 0):
+        for scale in (1.0, 4.0):
+            row = rows[(heads, scale)]
+            assert row["reading"] == "rewards site" and row["null_z"] > 3 and row["shell_null_z"] > 3, row
+            assert abs(row["first_order"]) < 1e-3 * abs(row["change"]) and row["beyond_null_rank"] == 1, row
+    assert np.all(flat_arrays["move_change"][:, :, 2:] == 0), "heads 1-3 alone moved a loss that only reads head 0"
+
+    # A learned content mask draws a sample every step; each batch's evaluations replay its step's draws,
+    # and the sweep leaves the generator where the steps did.
+    learned_cfg = json.loads(json.dumps(vars(encoder_args.parse_args(argv + ["--mask-mode", "learned"]))))
+    learned = build_model(learned_cfg, "cpu").train()
+    learned_step = training_loss(learned, training_options(learned_cfg)[0], "cpu")
+    batch = next(drawn(0))
+    assert float(learned_step(batch)) != float(learned_step(batch)), "the learned mask drew the same sample twice"
+    torch.manual_seed(5)
+    steps = collect(learned, drawn(0), learned_step)
+    after_steps = torch.rand(3)
+    torch.manual_seed(5)
+    replayed = offset_losses(learned, drawn(0), learned_step, profiles[:2], [1.0, 1.0])
+    assert np.array_equal(replayed["baseline"], steps["loss"]) and torch.equal(torch.rand(3), after_steps)
+    assert np.array_equal(replayed["losses"][..., 0], replayed["losses"][..., 1])
+
     # The CLI on a saved step-0 run reads the same batches and gradients as above.
     with tempfile.TemporaryDirectory() as tmp:
         run = os.path.join(tmp, "run")
@@ -1316,10 +1412,21 @@ def _self_test_torch():
         maps = np.load(os.path.join(run, "attention_pool_gradients_maps.npz"))
         assert maps["descent"].shape == (3, 2, 4, 8, 8, 8)
         assert np.allclose(maps["descent"], -collected["logit_grad"], rtol=1e-5, atol=1e-12)
+        assert len(saved["query_views"]) == 4 and saved["query_views_parity_max"] < 1e-4
+        assert np.allclose(maps["query_grad_views"], collected["query_grad_views"], rtol=1e-5, atol=1e-12)
+        moves = saved["finite_move"]
+        templates = 1 + sum(null["count"] for null in saved["nulls"].values())
+        assert moves["scales"] == [0.5, 1.0, 2.0, 4.0, 8.0] and moves["head_choices"] == ["all", 0, 1, 2, 3]
+        assert len(moves["rows"]) == 25 and moves["batches"] == 3 and moves["baseline_vs_step_max_abs"] < 1e-6
+        assert maps["move_change"].shape == maps["move_first_order"].shape == (3, templates, 5, 5)
 
-        main(["--run-dir", run, "--batches", "2", "--batch-size", "2", "--device", "cpu", "--out", f"{tmp}/b2.json"])
+        main(
+            ["--run-dir", run, "--batches", "2", "--batch-size", "2", "--device", "cpu", "--out", f"{tmp}/b2.json"]
+            + ["--offset-scales", "1,4"]
+        )
         with open(f"{tmp}/b2.json") as fp:
-            assert json.load(fp)["batch_size"] == 2
+            b2 = json.load(fp)
+            assert b2["batch_size"] == 2 and b2["finite_move"]["scales"] == [1.0, 4.0], b2["finite_move"]["scales"]
 
         for change, message in (({"global_pool": "gap"}, "GAP"), ({"n_content": 6}, "z_content[6]")):
             with open(os.path.join(run, "settings.json"), "w") as fp:
