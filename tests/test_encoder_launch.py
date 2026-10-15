@@ -197,6 +197,8 @@ class CommandTests(unittest.TestCase):
                 value = not action.default
             elif action.choices:
                 value = next(choice for choice in action.choices if choice != action.default)
+                if action.nargs == "+":
+                    value = [value]
             elif action.nargs in (3, "+"):
                 value = [1, 2, 3]
             elif action.type in (int, float):

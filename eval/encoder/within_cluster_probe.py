@@ -7,13 +7,15 @@ cluster to cluster. The usual per-factor probe fits one readout across every tes
 can score such a code low on a factor the code still resolves finely inside each cluster.
 
 This script scores both. Each test subject goes to the nearest centre of a run's oracle clusters
-(the centres of its stratification.json labels, in the standardized anatomy space k-means used).
+(the centres of its stratification.json labels, in the standardized space of the factors k-means
+clustered).
 The **within** score subtracts every cluster's mean from both the code and the factor before the
 probe. The **global** score is the training-time probe on the raw code. Both are
 ``cv_probe_r2``'s ridge R² (5-fold CV, seeds 0-2), as ``dci_step*.json`` reports per factor.
 Clusters with a single test subject drop out of the within score. ``within share`` is the part of
 a factor's test variance left after the cluster means are removed: the variance the within score
-explains a share of. Lesion factors are not clustered, so their two scores should agree.
+explains a share of. Lesion factors are not clustered (nor is anatomy --stratify-factors left out), so
+their two scores should agree up to the small-cluster shrinkage that ``within share`` shows.
 
 Example:
     python -m eval.encoder.within_cluster_probe \
@@ -193,14 +195,16 @@ def run(args):
             raise SystemExit(f"{r['run_dir']} and {source} use different data: {', '.join(sorted(differ))}")
 
     names = content_factor_names(cfg["n_content"], cfg.get("synthetic_lesion_target", "position"))
-    anatomy = [names.index(name) for name in strat["anatomy_factors"]]
-    print(f"clusters: {source}, K = {strat['k']} oracle clusters of {', '.join(strat['anatomy_factors'])}", flush=True)
+    # Runs from before --stratify-factors record only the anatomy, which they clustered whole.
+    chosen = strat.get("clustered_factors") or strat["anatomy_factors"]
+    clustered = [names.index(name) for name in chosen]
+    print(f"clusters: {source}, K = {strat['k']} oracle clusters of {', '.join(chosen)}", flush=True)
     bank = cluster_batches.bank_latents(make_dataset(cfg, cfg["num_train_samples"], mode="train"))
     labels = np.asarray(strat["labels"])
     if len(labels) != len(bank):
         raise SystemExit(f"stratification.json has {len(labels)} labels for {len(bank)} training subjects")
-    centre_fit = cluster_centres(bank[:, anatomy], labels)
-    agreement = float((assign(bank[:, anatomy], *centre_fit) == labels).mean())
+    centre_fit = cluster_centres(bank[:, clustered], labels)
+    agreement = float((assign(bank[:, clustered], *centre_fit) == labels).mean())
     print(f"  training subjects back in their own cluster after recomputing the centres: {agreement:.1%}", flush=True)
 
     device = select_encoder_device(args.device)
@@ -211,7 +215,7 @@ def run(args):
     num_samples = args.num_samples or cfg["num_val_samples"]
     dataset = make_dataset(cfg, num_samples, mode=args.split)
     codes, factors = encode_runs(models, dataset, device, args.batch_size)
-    groups = assign(factors[:, anatomy], *centre_fit)
+    groups = assign(factors[:, clustered], *centre_fit)
     keep, _ = demean_within(groups, factors)
     present = len(np.unique(groups))
     print(
@@ -228,7 +232,7 @@ def run(args):
     report = {
         "clusters_from": source,
         "k": strat["k"],
-        "anatomy_factors": strat["anatomy_factors"],
+        "clustered_factors": chosen,
         "split": args.split,
         "num_samples": num_samples,
         "clusters_present": present,
@@ -251,9 +255,9 @@ def run(args):
         for j, name in enumerate(names):
             row = f"  {name:<20s}{share[j]:>13.3f}"
             row += "".join(f"{s[j]['global']:>11.3f}{s[j]['within']:>11.3f}" for s in scores)
-            print(row + ("   clustered" if j in anatomy else ""), flush=True)
+            print(row + ("   clustered" if j in clustered else ""), flush=True)
             report["views"][view][name] = {
-                "clustered": j in anatomy,
+                "clustered": j in clustered,
                 "within_share": float(share[j]),
                 "runs": [{"label": letter, **s[j]} for letter, s in zip(letters, scores)],
             }

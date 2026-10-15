@@ -256,16 +256,29 @@ def stratified_batch_sampler(args, train_dataset, device, save_dir):
     """
     names = dci.content_factor_names(args.n_content, args.synthetic_lesion_target)
     anatomy = cluster_batches.anatomy_columns(names)
+    clustered = free = None
     started = time.perf_counter()
     if args.stratify_batches == "oracle":
+        # Hand-built option namespaces may omit the parser's default.
+        chosen = getattr(args, "stratify_factors", None) or [names[j] for j in anatomy]
+        missing = [name for name in chosen if name not in names]
+        if missing:
+            raise SystemExit(f"--stratify-factors {' '.join(missing)}: not among this run's content factors {names}")
+        clustered = sorted(names.index(name) for name in chosen)
+        free = [j for j in anatomy if j not in clustered]
         factors = cluster_batches.bank_latents(train_dataset)
-        features = factors[:, anatomy]
-        source = "the true anatomy latents (" + ", ".join(names[j] for j in anatomy) + "), lesion latents left out"
+        features = factors[:, clustered]
+        source = "the true anatomy latents (" + ", ".join(names[j] for j in clustered) + ")"
+        if free:
+            source += " chosen by --stratify-factors, " + ", ".join(names[j] for j in free) + " left free"
+        source += ", lesion latents left out"
     else:
         features, factors, source = stage0_code(args, train_dataset, device)
     labels = cluster_batches.kmeans_labels(features, args.stratify_clusters, args.data_seed)
     sampler = cluster_batches.ClusterBatchSampler(labels, args.batch_size, args.loader_seed)
-    summary = cluster_batches.summarize(labels, args.batch_size, factors, names, anatomy, args.stratify_clusters)
+    summary = cluster_batches.summarize(
+        labels, args.batch_size, factors, names, anatomy, args.stratify_clusters, clustered
+    )
     print(
         f"stratified batches: {args.stratify_batches}, every batch from one of K = {args.stratify_clusters} k-means "
         f"clusters of {source}, standardized ({time.perf_counter() - started:.0f} s)",
@@ -279,13 +292,17 @@ def stratified_batch_sampler(args, train_dataset, device, save_dir):
     )
     print("  within-cluster SD / bank SD per content factor (what a batch's negatives keep of it):", flush=True)
     for j, name in enumerate(names):
-        role = ("clustered" if args.stratify_batches == "oracle" else "anatomy") if j in anatomy else ""
+        role = "clustered" if clustered and j in clustered else ("anatomy" if j in anatomy else "")
         print(f"      {name:<20s}{summary['sd_ratio'][name]:7.3f}  {role}", flush=True)
-    print(
-        f"    anatomy mean {summary['sd_ratio_anatomy_mean']:.3f}; theory K^(-1/{len(anatomy)}) = "
-        f"{summary['theory_k_pow_minus_1_over_d']:.3f}",
-        flush=True,
-    )
+    theory = f"theory K^(-1/{len(clustered or anatomy)}) = {summary['theory_k_pow_minus_1_over_d']:.3f}"
+    if clustered is None:
+        print(f"    anatomy mean {summary['sd_ratio_anatomy_mean']:.3f}; {theory}", flush=True)
+    else:
+        line = f"    clustered mean {summary['sd_ratio_clustered_mean']:.3f}; {theory}"
+        if free:
+            other = np.mean([summary["sd_ratio"][names[j]] for j in free])
+            line += f"; anatomy left free mean {other:.3f}"
+        print(line, flush=True)
     payload = {
         "mode": args.stratify_batches,
         "k": args.stratify_clusters,

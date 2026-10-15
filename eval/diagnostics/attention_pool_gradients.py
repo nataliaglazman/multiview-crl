@@ -68,10 +68,55 @@ dL/dW via keys  the largest |dL/dW| entry of any batch through the head's logits
 ``parity`` checks the capture: autograd's query gradient must equal sum_p dL/dl(p) k(p) rebuilt
 from the captured weights; a mismatch means the wrapper caught the wrong call.
 
+query by view   the query gradient split by the view whose logits it comes through,
+                g = g_t1 + g_flair, where g_v sums dL/dl(p) k(p) over view v's subjects (k(p) is a
+                subject's LayerNorm key at p). Per head: each part's |mean_k g_v,k|, its agreement
+                as above, and the cosine between the two views' mean parts, near -1 when the views
+                pull the one shared query in opposite directions. Its parity checks that the parts
+                sum to autograd's query gradient.
+
+Finite moves. The pull is the slope of L along an offset toward the site, and a zero slope does
+not show that a head sitting on the site would not lower L. A head that starts to pool a factor
+the code lacks adds a new feature to the code; the feature's cross terms with the existing code
+average out over the batch's pairs, and only its squared term favours the true pairs, so InfoNCE
+falls at second order. So the script also evaluates L itself with the logits offset,
+
+    l_m(p) + s o(p),   o = the template average-pooled onto the grid and scaled to peak 1,
+
+in both views at once (q and W are shared by the views), for all heads together and for each head
+alone, at each ``--offset-scales`` s; and the same with every null template, each scaled to peak 1,
+in place of the site's. Started from uniform weights, the offset gives the template's peak cells
+e^s times the weight of a cell outside it; ``overlap`` per s is sum_p min(softmax(s o), t), the
+share of a uniform head that the offset moves onto the site. Per head choice and s:
+
+change          L(s) - L(0) with the site's offset, averaged over the K batches: negative when the
+                offset lowers L.
+first order     -s sum_views D . o, the change the descent maps predict; the change approaches it
+                as s -> 0. ``beyond`` is the change minus it: what the slope misses.
+z (rank)        of the site's fall (minus its change) among the null templates' falls, and of its
+                fall beyond first order among theirs: rank 1 = the offset toward the site lowers L
+                more than the offset toward any null template.
+
+``reading``: ``rewards site`` when the site's change is negative and ranks 1 against both nulls,
+``rewards site beyond 1st order`` when only its part beyond first order does, else ``no site
+reward``. If offsets toward the site lower L more than offsets elsewhere while the pull does not
+favour the site, the objective does reward the site and the uniform start is the blocker: it has
+no first-order path there. If they do not, the objective is the blocker.
+
+The sweep draws the same K batches a second time (their indices are checked). Per batch it runs
+the plain step loss once, keeping the backbone map it encodes, then re-evaluates the step loss under
+no_grad with ``model._encode`` returning that map and ``pool.attention`` adding the offset, so an
+evaluation costs only the pool, the readout and the loss: (1 + both nulls' templates) x (1 + heads)
+x scales evaluations per batch, about 60 ms each on one CPU thread at the run's size. Every
+evaluation replays the random draws of the batch's training step (only a learned content mask
+draws), and without an offset it reproduces the step loss (``baseline``).
+
 Run it on the trained checkpoint and on ``--checkpoint model_init.pt`` (step 0, saved by the
 trainer) of the same run: the seeds are the run's, so both see the same batches. Writes the JSON
 report and, beside it, ``*_maps.npz``: every batch's descent maps, their mean and split halves,
-the realisable changes, the template and the brain fraction. Only encoder-only ``--global-pool
+the realisable changes, the template and the brain fraction, every batch's per-view query
+gradients, and the finite moves' changes and first-order predictions per batch, offset profile
+(the site's, then each null's), head choice and scale. Only encoder-only ``--global-pool
 attention`` runs on the synthetic generator are accepted, as for ``attention_template_overlap``.
 
 Example:
@@ -98,6 +143,7 @@ from eval.diagnostics.attention_template_overlap import (
     generator_axis,
     grid_template,
     in_brain_centres,
+    overlap,
     pool_parameters,
     pool_to_grid,
     refusal,
@@ -108,6 +154,19 @@ from eval.diagnostics.attention_template_overlap import (
 SPLIT_HALF_MIN = 0.5
 # Autograd's query gradient and the one rebuilt from the captured weights agree to float32 rounding.
 PARITY_TOLERANCE = 1e-3
+# The offset sweep's evaluation without an offset reproduces the step loss to this share of it.
+BASELINE_TOLERANCE = 1e-5
+
+
+def offset_scales(text):
+    """``--offset-scales``: comma-separated positive logit-offset scales."""
+    try:
+        scales = [float(part) for part in text.split(",") if part.strip()]
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected comma-separated numbers, got {text!r}")
+    if not scales or not all(0 < scale < float("inf") for scale in scales):
+        raise argparse.ArgumentTypeError(f"expected positive finite scales, got {text!r}")
+    return scales
 
 
 def parse_args(argv=None):
@@ -137,6 +196,12 @@ def parse_args(argv=None):
         help="Null centres lie farther than this many sigma from the true centre",
     )
     p.add_argument("--null-seed", type=int, default=0)
+    p.add_argument(
+        "--offset-scales",
+        type=offset_scales,
+        default=[0.5, 1.0, 2.0, 4.0, 8.0],
+        help="Finite moves: the logit offsets s * o to evaluate, o a template scaled to peak 1 (comma-separated)",
+    )
     p.add_argument("--out", default=None, help="Report JSON (default: <run-dir>/attention_pool_gradients.json)")
     p.add_argument("--self-test", action="store_true")
     args = p.parse_args(argv)
@@ -257,10 +322,11 @@ def batch_gradients(model, batch, objective, calls):
     """One forward and backward of ``objective`` on ``batch``, with no optimizer step.
 
     ``calls`` is the list ``captured_attention`` fills. Returns numpy arrays: dL/dl summed over
-    each view's subjects (2, heads, D, H, W), the query gradient (heads, C), the LayerNorm keys
-    summed over each view's subjects (2, N, C), and with a positional encoding the position
-    gradient (C, 6F) in total and through each head's logits (heads, C, 6F); plus the loss and
-    the parity error of the query gradient rebuilt from dL/dl and the keys.
+    each view's subjects (2, heads, D, H, W), the query gradient (heads, C) and its part through
+    each view's logits (2, heads, C), the LayerNorm keys summed over each view's subjects (2, N, C),
+    and with a positional encoding the position gradient (C, 6F) in total and through each head's
+    logits (heads, C, 6F); plus the loss and the parity error of the query gradient rebuilt from
+    dL/dl and the keys.
     """
     import torch
     import torch.nn.functional as F
@@ -287,6 +353,9 @@ def batch_gradients(model, batch, objective, calls):
         "loss": float(loss.detach()),
         "logit_grad": torch.stack([dl[:b].sum(0), dl[b:].sum(0)]).reshape(2, pool.num_heads, *grid).numpy(),
         "query_grad": query_grad.numpy(),
+        "query_grad_views": torch.stack(
+            [torch.einsum("bmn,bnc->mc", dl[:b], keys[:b]), torch.einsum("bmn,bnc->mc", dl[b:], keys[b:])]
+        ).numpy(),
         "key_sum": torch.stack([keys[:b].sum(0), keys[b:].sum(0)]).numpy(),
         "parity": float((rebuilt - query_grad).norm() / query_grad.norm().clamp_min(1e-30)),
         "grid": grid,
@@ -313,16 +382,16 @@ def batch_gradients(model, batch, objective, calls):
 def collect(model, batches, objective):
     """The attention pool's gradients under ``objective`` for each of ``batches`` (the trainer's batch dicts).
 
-    Returns per-batch arrays (``logit_grad``, ``query_grad``, ``position_grad``,
-    ``position_grad_keys``, ``loss``, ``parity``, ``indices``) and, over every subject of every
-    batch, each view's mean LayerNorm key (``keys``, (2, N, C)) and per-cell brain fraction
-    (``cell_brain``, (2, D, H, W)), and view 1's mean brain mask at full resolution
+    Returns per-batch arrays (``logit_grad``, ``query_grad``, ``query_grad_views``,
+    ``position_grad``, ``position_grad_keys``, ``loss``, ``parity``, ``indices``) and, over every
+    subject of every batch, each view's mean LayerNorm key (``keys``, (2, N, C)) and per-cell brain
+    fraction (``cell_brain``, (2, D, H, W)), and view 1's mean brain mask at full resolution
     (``voxel_brain``), from which the in-brain null centres are drawn.
     """
     import torch
     import torch.nn.functional as F
 
-    names = ("logit_grad", "query_grad", "position_grad", "position_grad_keys", "loss", "parity")
+    names = ("logit_grad", "query_grad", "query_grad_views", "position_grad", "position_grad_keys", "loss", "parity")
     per_batch = {name: [] for name in names}
     key_sum = brain_sum = voxel_sum = 0.0
     subjects, indices = 0, []
@@ -353,6 +422,115 @@ def collect(model, batches, objective):
     return collected
 
 
+def generator_states(device):
+    """The global random states a step on ``device`` draws from: the CPU generator's and the device's own."""
+    import torch
+
+    states = {"cpu": torch.get_rng_state()}
+    if device.type == "cuda":
+        states["cuda"] = torch.cuda.get_rng_state(device)
+    elif device.type == "mps":
+        states["mps"] = torch.mps.get_rng_state()
+    return states
+
+
+def restore_generators(states, device):
+    """Set the global random states ``generator_states`` returned."""
+    import torch
+
+    torch.set_rng_state(states["cpu"])
+    if "cuda" in states:
+        torch.cuda.set_rng_state(states["cuda"], device)
+    if "mps" in states:
+        torch.mps.set_rng_state(states["mps"])
+
+
+def offset_losses(model, batches, objective, profiles, scales):
+    """``objective`` on each of ``batches`` with the global heads' logits offset to l_m(p) + s o(p).
+
+    For every profile o in ``profiles`` (T, D, H, W), scale s in ``scales`` and head choice: all
+    heads at once, then each head alone; an offset applies to both views. Per batch, the first
+    evaluation is the plain step and keeps each backbone map it encodes. Every later one runs with
+    ``model._encode`` returning those maps in call order and ``pool.attention`` returning
+    softmax(q . LayerNorm(x) + offset). All run under no_grad, and each starts from the random
+    state the first did, which the batch then leaves as one step does: a pass seeded as
+    ``collect``'s was replays its draws.
+
+    Returns ``baseline``, the plain step loss (K,), ``losses`` with each offset (K, T, 1 + heads,
+    S), and the batches' ``indices``.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    pool = model.attention_pool
+    encode, attention = model._encode, pool.attention
+    parameter = next(model.parameters())
+    device = parameter.device
+    profiles = torch.as_tensor(np.reshape(profiles, (len(profiles), 1, -1)), dtype=parameter.dtype, device=device)
+    heads = torch.eye(pool.num_heads, dtype=parameter.dtype, device=device)
+    # (1 + heads, heads, 1): which heads' logits an offset moves.
+    choices = torch.cat([heads.sum(0, keepdim=True), heads])[..., None]
+    plan = [(profile, choice, scale) for profile in profiles for choice in choices for scale in scales]
+    state = {"maps": [], "next": None, "offset": None, "attention": 0}
+
+    def cached(x, n_views, view_idx=None):
+        if state["next"] is None:
+            state["maps"].append(encode(x, n_views, view_idx))
+            return state["maps"][-1]
+        if state["next"] == len(state["maps"]):
+            raise RuntimeError("An offset evaluation encoded more often than the plain step")
+        state["next"] += 1
+        return state["maps"][state["next"] - 1]
+
+    def shifted(x):
+        state["attention"] += 1
+        if state["offset"] is None:
+            return attention(x)
+        logits = torch.einsum("bnc,mc->bmn", F.layer_norm(x, (pool.channels,)), pool.query)
+        return (logits + state["offset"]).softmax(dim=-1)
+
+    def evaluate(batch, offset):
+        state.update(offset=offset, attention=0)
+        loss = objective(batch)
+        if state["attention"] != 1:
+            raise RuntimeError(f"The attention pool ran {state['attention']} times in one evaluation; expected once")
+        if state["next"] not in (None, len(state["maps"])):
+            raise RuntimeError("An offset evaluation encoded less often than the plain step")
+        return loss.detach()
+
+    baseline, losses, indices = [], [], []
+    started = time.perf_counter()
+    model._encode, pool.attention = cached, shifted
+    try:
+        with torch.no_grad():
+            for k, batch in enumerate(batches):
+                # On the device once, so the objective's own transfer of the inputs is a no-op.
+                staged = dict(batch)
+                for key in ("image", "mask"):
+                    if key in batch:
+                        staged[key] = [part.as_subclass(torch.Tensor).to(device) for part in batch[key]]
+                start = generator_states(device)
+                state.update(maps=[], next=None)
+                values = [evaluate(staged, None)]
+                for profile, choice, scale in plan:
+                    restore_generators(start, device)
+                    state["next"] = 0
+                    values.append(evaluate(staged, scale * choice * profile))
+                values = torch.stack(values).cpu().double().numpy()
+                baseline.append(values[0])
+                losses.append(values[1:].reshape(len(profiles), len(choices), len(scales)))
+                if "index" in batch:
+                    indices.append([int(i) for i in batch["index"]])
+                print(
+                    f"  offsets, batch {k + 1}: loss {values[0]:.4f} without offset, {len(plan)} offsets "
+                    f"({time.perf_counter() - started:.0f} s)",
+                    flush=True,
+                )
+    finally:
+        del model._encode, pool.attention
+    return {"baseline": np.array(baseline), "losses": np.stack(losses), "indices": indices}
+
+
 def correlation(a, b):
     """Pearson r over every cell; None when either map is constant."""
     a = np.ravel(a) - np.mean(a)
@@ -369,6 +547,15 @@ def brain_residual(descent, brain):
     return (y - slope * x).reshape(np.shape(descent))
 
 
+def z_rank(value, scores):
+    """``value``'s z-score in units of the null ``scores``' SD (None when they are constant), and its rank.
+
+    Rank 1 means no null score reaches ``value``.
+    """
+    sd = float(scores.std(ddof=1))
+    return ((value - float(scores.mean())) / sd if sd > 0 else None), int(1 + (scores >= value).sum())
+
+
 def site_pull(descent, template, nulls, prefix=""):
     """``descent . template``, and its z-score and rank among the same products with each null's templates.
 
@@ -379,11 +566,9 @@ def site_pull(descent, template, nulls, prefix=""):
     out = {f"{prefix}pull": pull}
     for name, stack in nulls.items():
         scores = (stack * descent).sum(axis=(-3, -2, -1))
-        sd = float(scores.std(ddof=1))
         out[f"{prefix}{name}_median"] = float(np.median(scores))
         out[f"{prefix}{name}_p90"] = float(np.percentile(scores, 90))
-        out[f"{prefix}{name}_z"] = (pull - float(scores.mean())) / sd if sd > 0 else None
-        out[f"{prefix}{name}_rank"] = int(1 + (scores >= pull).sum())
+        out[f"{prefix}{name}_z"], out[f"{prefix}{name}_rank"] = z_rank(pull, scores)
     return out
 
 
@@ -395,11 +580,118 @@ def reading(row):
     return "no site reward"
 
 
+def query_views(parts, total):
+    """Each head's query gradient split by view, from the per-batch parts (K, 2, heads, C) and autograd's total.
+
+    Returns a row per head (each part's |mean_k g_k|, mean_k |g_k| and agreement, and the cosine
+    between the two views' mean parts) and the largest relative error of the parts' sum against
+    ``total`` (K, heads, C) over the batches.
+    """
+    mean = parts.mean(0)
+    mean_norm = np.linalg.norm(mean, axis=-1)
+    batch_norm = np.linalg.norm(parts, axis=-1).mean(0)
+    rows = []
+    for head in range(parts.shape[2]):
+        row = {"head": head}
+        for v, view in enumerate(VIEWS):
+            row[f"{view}_norm"] = float(mean_norm[v, head])
+            row[f"{view}_batch_norm"] = float(batch_norm[v, head])
+            row[f"{view}_agreement"] = (
+                float(mean_norm[v, head] / batch_norm[v, head]) if batch_norm[v, head] > 0 else None
+            )
+        scale = float(mean_norm[0, head] * mean_norm[1, head])
+        row["cosine"] = float(mean[0, head] @ mean[1, head]) / scale if scale > 0 else None
+        rows.append(row)
+    flat = total.reshape(len(total), -1)
+    residual = np.linalg.norm(parts.sum(1).reshape(len(total), -1) - flat, axis=1)
+    return rows, float((residual / np.maximum(np.linalg.norm(flat, axis=1), 1e-30)).max())
+
+
+def offset_profiles(template, nulls):
+    """The site's template and then every null template, each scaled to peak 1, (T, D, H, W); and each null's rows."""
+    profiles = np.concatenate([template[None], *nulls.values()])
+    profiles = profiles / profiles.max(axis=(1, 2, 3), keepdims=True)
+    groups, start = {}, 1
+    for name, stack in nulls.items():
+        groups[name] = slice(start, start + len(stack))
+        start += len(stack)
+    return profiles, groups
+
+
+def move_reading(row):
+    if row["change"] < 0 and row["null_rank"] == 1 and row["shell_null_rank"] == 1:
+        return "rewards site"
+    if row["beyond_first_order"] < 0 and row["beyond_null_rank"] == 1 and row["beyond_shell_null_rank"] == 1:
+        return "rewards site beyond 1st order"
+    return "no site reward"
+
+
+def score_moves(moves, descent, profiles, groups, scales, step_loss):
+    """Per head choice and scale: the site's loss change, its first-order prediction, and both against the nulls'.
+
+    ``moves`` is ``offset_losses``' output for ``profiles`` (the site's first; ``groups`` gives each
+    null's rows), ``descent`` the batches' descent maps (K, 2, heads, D, H, W) and ``step_loss``
+    their step losses, which the evaluations without an offset must reproduce. Returns the report
+    section and the per-batch arrays.
+    """
+    baseline = np.asarray(moves["baseline"], dtype=np.float64)
+    change = np.asarray(moves["losses"], dtype=np.float64) - baseline[:, None, None, None]
+    # dL/ds at s = 0 is minus each profile's pull, summed over both views and the chosen heads.
+    pulls = np.einsum("kvmdhw,tdhw->ktm", descent, profiles)
+    pulls = np.concatenate([pulls.sum(-1, keepdims=True), pulls], axis=-1)
+    first = -pulls[..., None] * np.asarray(scales, dtype=np.float64)
+    mean_change, mean_first = change.mean(0), first.mean(0)
+    beyond = mean_change - mean_first
+    choices = ["all", *range(descent.shape[2])]
+    rows = []
+    for c, heads in enumerate(choices):
+        for s, scale in enumerate(scales):
+            row = {
+                "heads": heads,
+                "scale": float(scale),
+                "change": float(mean_change[0, c, s]),
+                "first_order": float(mean_first[0, c, s]),
+                "beyond_first_order": float(beyond[0, c, s]),
+            }
+            for name, part in groups.items():
+                row[f"{name}_median_change"] = float(np.median(mean_change[part, c, s]))
+                row[f"{name}_z"], row[f"{name}_rank"] = z_rank(-row["change"], -mean_change[part, c, s])
+            for name, part in groups.items():
+                z, rank = z_rank(-row["beyond_first_order"], -beyond[part, c, s])
+                row[f"beyond_{name}_z"], row[f"beyond_{name}_rank"] = z, rank
+            row["reading"] = move_reading(row)
+            rows.append(row)
+    site = profiles[0]
+    overlaps = []
+    for scale in scales:
+        weights = np.exp(scale * (site - site.max()))
+        overlaps.append(float(overlap(weights / weights.sum(), site / site.sum())))
+    report = {
+        "scales": [float(scale) for scale in scales],
+        "head_choices": choices,
+        "profiles": {"site": 1, **{name: part.stop - part.start for name, part in groups.items()}},
+        "batches": int(len(baseline)),
+        "baseline_loss": float(baseline.mean()),
+        "baseline_vs_step_max_abs": float(np.abs(baseline - np.asarray(step_loss, dtype=np.float64)).max()),
+        "overlap_from_uniform": overlaps,
+        "rows": rows,
+    }
+    arrays = {
+        "move_change": change,
+        "move_first_order": first,
+        "move_profiles": profiles,
+        "move_scales": np.asarray(scales, dtype=np.float64),
+    }
+    return report, arrays
+
+
 def analyse(collected, res, sigma, null_count=20, min_distance=3.0, seed=0):
     """Score every head and view's descent map against the template and both nulls; returns the report and maps.
 
     ``collected`` is ``collect``'s output. The null centres use ``attention_template_overlap``'s
-    seeds, so with the same mean brain mask the two scripts compare against the same templates.
+    seeds, so with the same mean brain mask the two scripts compare against the same templates;
+    ``arrays["nulls"]`` holds those templates for the offset sweep. Also splits each head's query
+    gradient by view.
     """
     descent = -np.asarray(collected["logit_grad"], dtype=np.float64)
     count, n_heads = descent.shape[0], descent.shape[2]
@@ -465,6 +757,8 @@ def analyse(collected, res, sigma, null_count=20, min_distance=3.0, seed=0):
             "via_keys_max_abs": float(np.abs(through_keys).max()),
             "via_values_max_abs": float(np.abs(total - through_keys).max()),
         }
+    parts = np.asarray(collected["query_grad_views"], dtype=np.float64)
+    views, views_parity = query_views(parts, query)
     loss = np.asarray(collected["loss"], dtype=np.float64)
     report = {
         "sigma": float(sigma),
@@ -488,6 +782,8 @@ def analyse(collected, res, sigma, null_count=20, min_distance=3.0, seed=0):
         "rows": rows,
         "heads": heads,
         "position": position,
+        "query_views": views,
+        "query_views_parity_max": views_parity,
     }
     arrays = {
         "descent": descent,
@@ -496,6 +792,8 @@ def analyse(collected, res, sigma, null_count=20, min_distance=3.0, seed=0):
         "realisable": realisable,
         "template": template,
         "cell_brain": brain,
+        "query_grad_views": parts,
+        "nulls": nulls,
     }
     return report, arrays
 
@@ -579,14 +877,108 @@ def print_report(report):
         f"{report['noise_agreement']:.2f}.",
         flush=True,
     )
+    views = report.get("query_views")
+    if views is not None:
+        print_query_views(views, report["query_views_parity_max"])
+    if report.get("finite_move") is not None:
+        print_moves(report["finite_move"])
+
+
+def print_query_views(views, parity):
+    print(
+        "\n  query gradient by view: g = g_t1 + g_flair, g_v = sum over view v's subjects of dL/dl times the "
+        f"LayerNorm keys\n  (the parts' sum against autograd's query gradient: parity {parity:.1e})",
+        flush=True,
+    )
+    if parity > PARITY_TOLERANCE:
+        print("  WARNING: the per-view parts do not sum to autograd's query gradient", flush=True)
+
+    def agreement(value):
+        return "n/a" if value is None else f"{value:.2f}"
+
+    print(
+        f"  {'head':>6s}{'|mean g_t1|':>13s}{'|mean g_flair|':>16s}{'agreement: t1':>15s}{'flair':>7s}"
+        f"{'cos(t1, flair)':>16s}",
+        flush=True,
+    )
+    for row in views:
+        cosine = "n/a" if row["cosine"] is None else f"{row['cosine']:+.2f}"
+        print(
+            f"  {row['head']:>6d}{row['t1_norm']:>13.2e}{row['flair_norm']:>16.2e}"
+            f"{agreement(row['t1_agreement']):>15s}{agreement(row['flair_agreement']):>7s}{cosine:>16s}",
+            flush=True,
+        )
+    print(
+        "  |mean g_v|: the view's part averaged over the batches; agreement as above, per view; cos near -1: the views\n"
+        "  pull the one shared query in opposite directions.",
+        flush=True,
+    )
+
+
+def print_moves(moves):
+    others = ", ".join(
+        f"{count} {name.replace('_', ' ')}" for name, count in moves["profiles"].items() if name != "site"
+    )
+    print(
+        f"\n=== finite moves: the step loss with logits offset by s * o, o a template scaled to peak 1, in both views "
+        f"({moves['batches']} batches) ===",
+        flush=True,
+    )
+    print(
+        f"  the site's template, and {others} templates in its place; without offset the loss is "
+        f"{moves['baseline_loss']:.4f}, the step loss to {moves['baseline_vs_step_max_abs']:.1e}",
+        flush=True,
+    )
+    if moves["baseline_vs_step_max_abs"] > BASELINE_TOLERANCE * max(1.0, abs(moves["baseline_loss"])):
+        print(
+            "  WARNING: without offset the sweep does not reproduce the step loss; the cached map is suspect",
+            flush=True,
+        )
+    print(
+        "  overlap of softmax(s o) with the template, from uniform weights: "
+        + ", ".join(f"s {s:g}: {o:.2f}" for s, o in zip(moves["scales"], moves["overlap_from_uniform"])),
+        flush=True,
+    )
+
+    def zr(row, key):
+        z = row[f"{key}_z"]
+        return f"{'n/a' if z is None else format(z, '+.2f')} ({row[f'{key}_rank']})"
+
+    print(
+        f"\n  {'heads':<6s}{'s':>5s}{'change':>11s}{'1st order':>11s}{'beyond':>11s}   {'fall z (rank): null':>20s}"
+        f"{'shell':>12s}   {'beyond: null':>12s}{'shell':>12s}  reading",
+        flush=True,
+    )
+    for row in moves["rows"]:
+        print(
+            f"  {str(row['heads']):<6s}{row['scale']:>5g}{row['change']:>11.2e}{row['first_order']:>11.2e}"
+            f"{row['beyond_first_order']:>11.2e}   {zr(row, 'null'):>20s}{zr(row, 'shell_null'):>12s}   "
+            f"{zr(row, 'beyond_null'):>12s}{zr(row, 'beyond_shell_null'):>12s}  {row['reading']}",
+            flush=True,
+        )
+    rewarded = sum(row["reading"] == "rewards site" for row in moves["rows"])
+    beyond = sum(row["reading"] != "no site reward" for row in moves["rows"])
+    print(
+        f"  {rewarded} of {len(moves['rows'])} rows read 'rewards site' and {beyond} reward it at least beyond first "
+        "order (rows share batches and templates, so they are not independent)",
+        flush=True,
+    )
+    print(
+        "  change: L(s) - L(0) with the site's offset, mean over batches (negative = the loss falls). 1st order:\n"
+        "  -s sum_views D . o from the descent maps above; beyond = change - 1st order. fall z (rank): the site's fall\n"
+        "  (minus its change) against the null templates' falls (rank 1 = falls more than with any null template);\n"
+        "  beyond: the same for the fall beyond first order. heads: all at once, or one head alone.",
+        flush=True,
+    )
 
 
 def write_outputs(report, arrays, out):
-    """The JSON report, and the descent and realisable maps beside it."""
+    """The JSON report, and the descent and realisable maps, the per-view query gradients and the finite moves beside it."""
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as fp:
         json.dump(report, fp, indent=2, default=float)
     maps_path = os.path.splitext(out)[0] + "_maps.npz"
+    added = ("query_grad_views", "move_change", "move_first_order", "move_profiles", "move_scales")
     np.savez_compressed(
         maps_path,
         views=np.array(VIEWS),
@@ -596,6 +988,7 @@ def write_outputs(report, arrays, out):
         realisable=arrays["realisable"].astype(np.float32),
         template=arrays["template"].astype(np.float32),
         cell_brain=arrays["cell_brain"].astype(np.float32),
+        **{name: np.asarray(arrays[name], dtype=np.float32) for name in added if name in arrays},
     )
     print(f"\nwrote {out}\nwrote {maps_path}", flush=True)
     return out, maps_path
@@ -647,9 +1040,10 @@ def main(argv=None):
     options.cache = False
     dataset = trainer.make_dataset(options, "train", options.num_train_samples)
     loader = training_loader(options, dataset, device)
+    objective = training_loss(model, options, device)
     # Only a learned content mask draws from the global RNG within a step; seeded so a rerun repeats it.
     torch.manual_seed(options.seed)
-    collected = collect(model, training_batches(loader, args.batches), training_loss(model, options, device))
+    collected = collect(model, training_batches(loader, args.batches), objective)
     report, arrays = analyse(collected, options.res, sigma, args.null_templates, args.null_min_distance, args.null_seed)
     report = {
         "run_dir": args.run_dir,
@@ -664,6 +1058,26 @@ def main(argv=None):
         "settings": cfg,
     }
     print_report(report)
+
+    profiles, groups = offset_profiles(arrays["template"], arrays["nulls"])
+    print(
+        f"\nfinite moves: {len(profiles)} templates x {1 + model.attention_pool.num_heads} head choices x "
+        f"{len(args.offset_scales)} scales on each of the {args.batches} batches, drawn again",
+        flush=True,
+    )
+    loader = training_loader(options, dataset, device)
+    # Seeded as for the gradients, so each batch's evaluations replay its step's draws.
+    torch.manual_seed(options.seed)
+    moves = offset_losses(model, training_batches(loader, args.batches), objective, profiles, args.offset_scales)
+    if moves["indices"] != collected["indices"]:
+        raise SystemExit(
+            "The offset sweep drew other batches than the gradients; the trainer's order is not reproducible"
+        )
+    report["finite_move"], move_arrays = score_moves(
+        moves, arrays["descent"], profiles, groups, args.offset_scales, collected["loss"]
+    )
+    arrays.update(move_arrays)
+    print_moves(report["finite_move"])
     write_outputs(report, arrays, args.out or os.path.join(args.run_dir, "attention_pool_gradients.json"))
 
 
@@ -697,12 +1111,16 @@ def _self_test():
     query = np.stack([-unit[0], unit[1], np.zeros(channels), -unit[0], -unit[0]])[None].repeat(count, axis=0)
     query = query + rng.normal(scale=1e-4, size=query.shape)
     query[:, 2] = rng.normal(size=(count, channels))
+    # Per-view parts that sum to the query gradient: head 0's views pull it to -e0/2 + 3 e5 and -e0/2 - 3 e5.
+    split = np.zeros((count, n_heads, channels))
+    split[:, 0, 5] = 3.0
     position_keys = np.zeros((count, n_heads, 4, 6))
     position = np.zeros((count, 4, 6))
     position[3, 1, 2] = -0.04
     collected = {
         "logit_grad": -descent,
         "query_grad": query,
+        "query_grad_views": np.stack([query / 2 + split, query / 2 - split], axis=1),
         "position_grad": position,
         "position_grad_keys": position_keys,
         "keys": keys,
@@ -731,7 +1149,51 @@ def _self_test():
     assert report["position"] == {"max_abs": 0.04, "via_keys_max_abs": 0.0, "via_values_max_abs": 0.04}
     assert np.allclose(arrays["mean_descent"], descent.mean(0))
     assert arrays["half_descent"].shape == (2, 2, n_heads, *grid)
-    print("self-test: planted descent maps read back (numpy)", flush=True)
+
+    # The query split: head 0's views nearly oppose (cosine -8.75 / 9.25); the noise head's views share its noise.
+    views = report["query_views"]
+    assert report["query_views_parity_max"] < 1e-12 and len(views) == n_heads, report["query_views_parity_max"]
+    assert (
+        abs(views[0]["cosine"] + 8.75 / 9.25) < 1e-3
+        and min(views[0]["t1_agreement"], views[0]["flair_agreement"]) > 0.99
+    )
+    assert views[2]["cosine"] > 0.999 and abs(views[2]["flair_agreement"] - heads[2]["agreement"]) < 1e-9, views[2]
+
+    # Finite moves, scored: a planted sweep whose change is exactly the first-order prediction, plus a
+    # curvature that lowers the loss only for the site's offset on head 2 (whose descent map is noise).
+    profiles, groups = offset_profiles(arrays["template"], arrays["nulls"])
+    assert len(profiles) == 1 + sum(null["count"] for null in report["nulls"].values())
+    assert np.allclose(profiles.max(axis=(1, 2, 3)), 1) and np.allclose(profiles[0], template / template.max())
+    scales = [1.0, 4.0]
+    pulls = np.einsum("kvmdhw,tdhw->ktm", descent, profiles)
+    planted = 2.0 - np.concatenate([pulls.sum(-1, keepdims=True), pulls], axis=-1)[..., None] * np.array(scales)
+    planted[:, 0, 3] -= 0.01 * np.square(scales)
+    moves, move_arrays = score_moves(
+        {"baseline": np.full(count, 2.0), "losses": planted}, descent, profiles, groups, scales, np.full(count, 2.0)
+    )
+    rows = {(row["heads"], row["scale"]): row for row in moves["rows"]}
+    assert len(rows) == (1 + n_heads) * len(scales) and moves["baseline_vs_step_max_abs"] == 0
+    assert np.allclose(move_arrays["move_change"], move_arrays["move_first_order"] - planted.__eq__(planted) * 0)
+    expected = -2 * ((template - template.mean()) * profiles[0]).sum()
+    assert np.isclose(rows[(0, 4.0)]["first_order"], 4.0 * expected, rtol=1e-3), (rows[(0, 4.0)], expected)
+    for heads in ("all", 0, 1, 3, 4):
+        assert all(abs(rows[(heads, s)]["beyond_first_order"]) < 1e-12 for s in scales)
+    for scale in scales:
+        row = rows[(2, scale)]
+        assert np.isclose(row["beyond_first_order"], -0.01 * scale**2) and row["reading"] == "rewards site", row
+        assert row["beyond_null_rank"] == 1 and row["beyond_shell_null_rank"] == 1 and row["beyond_null_z"] is None
+    assert rows[(0, 1.0)]["reading"] == "rewards site" and rows[(0, 1.0)]["null_z"] > 3, rows[(0, 1.0)]
+    assert 0 < moves["overlap_from_uniform"][0] < moves["overlap_from_uniform"][1] < 1, moves["overlap_from_uniform"]
+
+    assert parse_args(["--offset-scales", "2,0.5"]).offset_scales == [2.0, 0.5]
+    for bad in ("0", "1,-2", "x", "inf"):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                parse_args(["--offset-scales", bad])
+            except SystemExit:
+                continue
+        raise AssertionError(f"--offset-scales {bad} was accepted")
+    print("self-test: planted descent maps, query split and finite moves read back (numpy)", flush=True)
 
     if importlib.util.find_spec("torch") is None:
         print("self-test: torch is not installed; the gradient, capture and CLI checks were skipped", flush=True)

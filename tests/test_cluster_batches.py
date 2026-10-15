@@ -1,8 +1,12 @@
 """--stratify-batches without torch: the one-cluster batch sampler, its diagnostics and its flag rules."""
 
+import ast
 import contextlib
 import io
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -76,12 +80,13 @@ class SamplerTests(unittest.TestCase):
 
 class DiagnosticTests(unittest.TestCase):
     def test_anatomy_leaves_out_every_lesion_latent_under_either_target(self):
-        # eval.metrics.dci.content_factor_names(9, target), which imports torch.
-        anatomy = ["brain_size", "ventricle_size"], ["cortical_thickness", "temporal_atrophy", "lr_asymmetry"]
-        for lesion in (["lesion_x", "lesion_y", "lesion_z"], ["lesion_burden", "unused_3", "unused_4"]):
-            with self.subTest(lesion=lesion[0]):
-                names = [*anatomy[0], *lesion, *anatomy[1], "sulcal_widening"]
-                self.assertEqual(cluster_batches.anatomy_columns(names), [0, 1, 5, 6, 7, 8])
+        # eval.metrics.dci.content_factor_names(9, target), read from its source: the module imports torch.
+        names = dci_content_factor_names()
+        burden = [*names[:2], "lesion_burden", "unused_3", "unused_4", *names[5:]]
+        for target, listed in (("position", names), ("burden", burden)):
+            with self.subTest(target=target):
+                self.assertEqual(cluster_batches.anatomy_columns(listed), [0, 1, 5, 6, 7, 8])
+                self.assertEqual(tuple(listed[j] for j in [0, 1, 5, 6, 7, 8]), encoder_args.ANATOMY_FACTORS)
 
     def test_sd_ratio_is_one_for_one_cluster_and_shrinks_only_the_clustered_factor(self):
         rng = np.random.default_rng(0)
@@ -106,7 +111,16 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(summary["batches_per_epoch"], len(sampler))
         self.assertEqual(summary["subjects_per_epoch"], 16 * len(sampler))
         self.assertEqual(summary["anatomy_factors"], ["brain_size", "ventricle_size"])
+        # A code was clustered: no factor was, and the theory line refers to the anatomy.
+        self.assertIsNone(summary["clustered_factors"])
+        self.assertIsNone(summary["sd_ratio_clustered_mean"])
         self.assertAlmostEqual(summary["theory_k_pow_minus_1_over_d"], 6**-0.5)
+        # The oracle clustered one of the two anatomy factors (--stratify-factors brain_size).
+        chosen = cluster_batches.summarize(labels, 16, factors, names, [0, 2], k=6, clustered=[0])
+        self.assertEqual(chosen["clustered_factors"], ["brain_size"])
+        self.assertEqual(chosen["anatomy_factors"], ["brain_size", "ventricle_size"])
+        self.assertAlmostEqual(chosen["sd_ratio_clustered_mean"], chosen["sd_ratio"]["brain_size"])
+        self.assertAlmostEqual(chosen["theory_k_pow_minus_1_over_d"], 1 / 6)
 
     def test_within_cluster_probe_self_test(self):
         from eval.encoder import within_cluster_probe
@@ -159,6 +173,38 @@ class FlagTests(unittest.TestCase):
         refused(self, "--stratify-batches", "oracle", "--stratify-clusters", "10", "--stratify-from", "runs/x")
         refused(self, "--stratify-batches", "code", "--stratify-clusters", "10")
         refused(self, "--stratify-batches", "oracle", "--stratify-clusters", "10", "--synthetic-mode", "categorical")
+
+    def test_the_cli_module_needs_only_the_standard_library(self):
+        # scripts/launch.py imports it on submit hosts that may have nothing but PyYAML.
+        code = "import sys; sys.modules.update(numpy=None, torch=None, sklearn=None); import training.encoder_args"
+        subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1], check=True)
+
+    def test_stratify_factors_rules(self):
+        oracle = ["--stratify-batches", "oracle", "--stratify-clusters", "10"]
+        self.assertIsNone(parse(*oracle).stratify_factors)
+        chosen = parse(*oracle, "--stratify-factors", "brain_size", "cortical_thickness").stratify_factors
+        self.assertEqual(chosen, ["brain_size", "cortical_thickness"])
+        refused(self, "--stratify-factors", "brain_size")  # without --stratify-batches
+        code = ["--stratify-batches", "code", "--stratify-clusters", "10", "--stratify-from", "runs/x"]
+        refused(self, *code, "--stratify-factors", "brain_size")  # code mode clusters a code, not factors
+        refused(self, *oracle, "--stratify-factors", "lesion_x")  # lesion latents are never clustered
+        refused(self, *oracle, "--stratify-factors", "brain_sise")
+        refused(self, *oracle, "--stratify-factors", "brain_size", "brain_size")
+        refused(self, *oracle, "--stratify-factors")
+        # The launcher writes a YAML list or a --set list back as one option and its items.
+        options = {"stratify_batches": "oracle", "stratify_clusters": 10, "stratify_factors": chosen}
+        self.assertEqual(
+            encoder_args.parse_args([*SYNTHETIC, *encoder_args.cli_arguments(options)]).stratify_factors, chosen
+        )
+
+
+def dci_content_factor_names():
+    """``eval.metrics.dci.CONTENT_FACTOR_NAMES`` without importing its module (which imports torch)."""
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "eval" / "metrics" / "dci.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "CONTENT_FACTOR_NAMES" for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError("CONTENT_FACTOR_NAMES not found in eval/metrics/dci.py")
 
 
 if __name__ == "__main__":

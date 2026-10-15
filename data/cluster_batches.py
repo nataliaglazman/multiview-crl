@@ -134,18 +134,23 @@ def within_cluster_sd_ratio(values, labels, batch_size):
         return np.sqrt(variance / max(weight, 1)) / bank
 
 
-def summarize(labels, batch_size, factors, names, anatomy, k):
+def summarize(labels, batch_size, factors, names, anatomy, k, clustered=None):
     """Clusters kept, subjects and batches per epoch, and each factor's within-cluster SD ratio.
 
-    ``anatomy`` are the columns of ``factors`` the clustering should condition. Their mean ratio is
-    set beside K^(-1/d), d = len(anatomy): the share of each factor's spread left inside one of K
+    ``anatomy`` are the anatomy columns of ``factors``; ``clustered`` the columns k-means saw (the
+    oracle's, all of ``anatomy`` unless --stratify-factors chose fewer), or None when it clustered
+    something else, a stage-0 code. The mean ratio of the clustered columns (the anatomy for a code)
+    is set beside K^(-1/d), d their number: the share of each factor's spread left inside one of K
     equal cells of a d-dimensional cube.
     """
     sizes = np.unique(np.asarray(labels), return_counts=True)[1]
     kept = sizes[sizes >= batch_size]
     batches = int((sizes // batch_size).sum())
     ratio = within_cluster_sd_ratio(factors, labels, batch_size)
+    reference = anatomy if clustered is None else clustered
     return {
+        "clustered_factors": None if clustered is None else [names[j] for j in clustered],
+        "sd_ratio_clustered_mean": None if clustered is None else float(np.mean(ratio[clustered])),
         "clusters": int(len(sizes)),
         "cluster_sizes": sorted(int(n) for n in sizes),
         "clusters_kept": int(len(kept)),
@@ -156,5 +161,5 @@ def summarize(labels, batch_size, factors, names, anatomy, k):
         "anatomy_factors": [names[j] for j in anatomy],
         "sd_ratio": {name: float(r) for name, r in zip(names, ratio)},
         "sd_ratio_anatomy_mean": float(np.mean(ratio[anatomy])),
-        "theory_k_pow_minus_1_over_d": float(k ** (-1.0 / len(anatomy))),
+        "theory_k_pow_minus_1_over_d": float(k ** (-1.0 / len(reference))),
     }

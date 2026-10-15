@@ -13,6 +13,16 @@ from eval.causal.run_causal_recovery import DEFAULT_ALPHAS as CAUSAL_ALPHAS
 from eval.causal.run_causal_recovery import INDEP_TESTS as CAUSAL_INDEP_TESTS
 
 PROG = "python -m training.main_conv_synthetic"
+# The anatomy factors of the nine-factor pseudo_mri generator, which --stratify-factors chooses among.
+# tests/test_cluster_batches.py reads eval.metrics.dci.CONTENT_FACTOR_NAMES (without torch) to keep them equal.
+ANATOMY_FACTORS = (
+    "brain_size",
+    "ventricle_size",
+    "cortical_thickness",
+    "temporal_atrophy",
+    "lr_asymmetry",
+    "sulcal_widening",
+)
 
 
 def build_parser(description=None):
@@ -320,6 +330,15 @@ def build_parser(description=None):
         help="With --stratify-batches oracle/code (required there): k-means clusters K. Inside a cluster each of d "
         "clustered factors keeps about K^(-1/d) of its spread. MCL bounds K by the batches the bank holds: "
         "K <= --num-train-samples // --batch-size. 1 is one cluster, the unstratified control through the same sampler",
+    )
+    p.add_argument(
+        "--stratify-factors",
+        nargs="+",
+        choices=ANATOMY_FACTORS,
+        default=None,
+        help="With --stratify-batches oracle: the anatomy latents k-means clusters (default: all six). Fewer "
+        "factors give tighter clusters at the same K, about K^(-1/d) of each one's spread for d factors, and "
+        "leave the others varying freely within a batch. Lesion latents are never clustered",
     )
     p.add_argument(
         "--stratify-from",
@@ -773,6 +792,11 @@ def parse_args(argv=None, description=None):
                 "--standardize-code needs --mask-mode fixed: standardizing each unit divides a learned mask back out, "
                 "so no gradient would reach its logits"
             )
+    if args.stratify_factors is not None:
+        if args.stratify_batches != "oracle":
+            p.error("--stratify-factors chooses the latents --stratify-batches oracle clusters; it applies only there")
+        if len(set(args.stratify_factors)) != len(args.stratify_factors):
+            p.error("--stratify-factors lists a factor twice")
     if args.stratify_batches == "none":
         if args.stratify_clusters is not None or args.stratify_from is not None:
             p.error("--stratify-clusters and --stratify-from only apply with --stratify-batches oracle or code")
