@@ -157,7 +157,11 @@ predicts it on held-out test subjects:
   hyperparameters and the parity record), `factor_recovery.csv` (one row per
   representation, probe and factor, with per-view R²) and `comparisons.csv`
   (`z` minus each baseline, with a paired bootstrap interval over test subjects
-  and the share of draws at or below zero).
+  and the share of draws at or below zero). `--save-predictions` adds
+  `test_predictions.csv`: every test subject's prediction per representation,
+  probe, view and target, indexed by its position in the test split (the index
+  the lesion audits use). `eval.lesion.lesion_miss_location --predictions` reads
+  it to compare decoding on the lesions a reconstruction keeps and loses.
 
 Read `z - gap` and `z - patch` for local factors (lesion centre, temporal
 atrophy, sulcal widening), `z - pca{d}` for whether the learned readout beats

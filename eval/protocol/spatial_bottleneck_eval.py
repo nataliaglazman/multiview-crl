@@ -672,6 +672,25 @@ def write_outputs(out_dir, payload):
                     )
 
 
+def write_predictions(path, scored, targets, test_rows, names):
+    """Every test prediction: one row per subject, view, representation, probe and target.
+
+    ``subject`` is the subject's index in the test split, the index the lesion audits use.
+    """
+    with path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["subject", "view", "representation", "probe", "factor", "truth", "prediction"])
+        for name, by_probe in scored.items():
+            for kind, record in by_probe.items():
+                for view, predicted in enumerate(record["test_pred"]):
+                    truth = targets[view][test_rows]
+                    for subject in range(len(test_rows)):
+                        for j, factor in enumerate(names):
+                            writer.writerow(
+                                [subject, view + 1, name, kind, factor, truth[subject, j], predicted[subject, j]]
+                            )
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -698,6 +717,11 @@ def parse_args(argv=None):
     parser.add_argument("--val-samples", type=int, default=None, help="Extend validation (>= the run's count)")
     parser.add_argument("--test-samples", type=int, default=None, help="Extend test (>= the run's count)")
     parser.add_argument("--max-map-gib", type=float, default=None, help="Map bank cap (default: the run's)")
+    parser.add_argument(
+        "--save-predictions",
+        action="store_true",
+        help="Also write test_predictions.csv: every test subject's prediction per representation, probe and target",
+    )
     parser.add_argument(
         "--burden-images",
         action="store_true",
@@ -1020,6 +1044,8 @@ def main(argv=None):
     )
     payload = _json_safe(payload)
     write_outputs(args.out_dir, payload)
+    if args.save_predictions:
+        write_predictions(args.out_dir / "test_predictions.csv", scored, targets, rows[2], names)
     print_report(payload)
     print(f"\nSaved {args.out_dir / 'factor_recovery.json'} and CSVs", flush=True)
     return payload

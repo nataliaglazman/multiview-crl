@@ -1,6 +1,7 @@
 """Spatial preservation, frozen VQ extraction, and a real checkpoint-to-report run."""
 
 import contextlib
+import csv
 import io
 import json
 import tempfile
@@ -334,6 +335,7 @@ class FactorEvaluationTests(unittest.TestCase):
             experiment.main(trainer_argv(run, first, 2))
             experiment.main(trainer_argv(run, second, 3))
             argv = ["--out-dir", str(root / "eval"), "--device", "cpu", "--bootstrap", "100", "--test-samples", "6"]
+            argv.append("--save-predictions")
             payload = factor_eval.main(["--bottleneck-dirs", str(first), str(second)] + argv)
 
             names = {"map", "patch2x2x2", "gap", "pca2", "pca3", "z:d2", "z_init:d2", "z:d3", "z_init:d3"}
@@ -345,6 +347,20 @@ class FactorEvaluationTests(unittest.TestCase):
             self.assertEqual([n for n in factors if blocks[n] == "lesion_centre"], list(factor_eval.CENTRES))
             self.assertEqual([blocks[n] for n in factors[-3:]], ["style_shared", "style_shared", "style"])
             self.assertTrue(payload["lesion_targets"]["included"])
+            with (root / "eval" / "test_predictions.csv").open() as handle:
+                predictions = list(csv.DictReader(handle))
+            self.assertEqual(len(predictions), len(names) * 2 * 2 * 6 * len(factors))
+            r2 = []
+            for view in ("1", "2"):
+                rows = [
+                    (float(r["truth"]), float(r["prediction"]))
+                    for r in predictions
+                    if (r["representation"], r["probe"], r["factor"], r["view"])
+                    == ("z:d2", "linear", "brain_size", view)
+                ]
+                truth, predicted = np.array(rows).T
+                r2.append(1 - np.square(truth - predicted).sum() / np.square(truth - truth.mean()).sum())
+            self.assertAlmostEqual(np.mean(r2), payload["results"]["z:d2"]["linear"]["test_r2"]["brain_size"], places=6)
             self.assertNotIn("lesion_volume", blocks)
             for record in payload["bottlenecks"]:
                 self.assertTrue(record["z_init_reproduced"])
