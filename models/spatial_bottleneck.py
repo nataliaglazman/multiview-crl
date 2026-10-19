@@ -124,8 +124,87 @@ def deviation_weights(model, maps, strength=1.0):
     return weights / weights.mean((-3, -2, -1), keepdim=True)
 
 
+def reconstruction_terms(
+    error,
+    recon_weights=None,
+    foreground=None,
+    hard_patch_weight=0.0,
+    hard_patch_fraction=0.1,
+    hard_patch_size=(4, 4, 4),
+):
+    """Mean error + weighted top-fraction patch error, selected per subject and view.
+
+    ``error`` is (B,2,C,D,H,W) squared error in channel-normalised units. Foreground
+    is (B,2,1,D,H,W) occupancy in [0,1], not a feature-value threshold. Empty
+    patches never enter top-k. Nonoverlapping patches cover partial edge cells.
+    Optional reconstruction weights are renormalised over foreground per map;
+    patch means then divide by foreground occupancy, not patch volume.
+    """
+    if error.ndim != 6 or error.shape[1] != 2:
+        raise ValueError("Expected error shaped (B,2,C,D,H,W)")
+    if not math.isfinite(hard_patch_weight) or hard_patch_weight < 0:
+        raise ValueError("hard_patch_weight must be finite and nonnegative")
+    if not 0 < hard_patch_fraction <= 1:
+        raise ValueError("hard_patch_fraction must lie in (0, 1]")
+    if len(hard_patch_size) != 3 or any(not isinstance(s, int) or s < 1 for s in hard_patch_size):
+        raise ValueError("hard_patch_size must contain three positive integers")
+    weights = None
+    if recon_weights is not None:
+        weights = torch.broadcast_to(recon_weights.detach().to(error), error.shape)
+        if not torch.isfinite(weights).all() or (weights < 0).any():
+            raise ValueError("Reconstruction weights must be finite and nonnegative")
+    occupancy = None
+    if foreground is not None:
+        if tuple(foreground.shape) != (*error.shape[:2], 1, *error.shape[-3:]):
+            raise ValueError("Foreground must have shape (B,2,1,D,H,W) matching the maps")
+        occupancy = foreground.detach().to(error)
+        if not torch.isfinite(occupancy).all() or (occupancy < 0).any() or (occupancy > 1).any():
+            raise ValueError("Foreground occupancy must be finite and lie in [0, 1]")
+        mass = occupancy.sum((2, 3, 4, 5))
+        if (mass <= 0).any():
+            raise ValueError("Every subject and view needs nonempty foreground")
+        if weights is not None:
+            weighted_mass = (weights * occupancy).sum((2, 3, 4, 5))
+            if (weighted_mass <= 0).any():
+                raise ValueError("Reconstruction weights must have positive mass in foreground")
+            weights = weights * (mass * error.shape[2] / weighted_mass)[:, :, None, None, None, None]
+    weighted_error = error if weights is None else error * weights
+    if occupancy is None:
+        mean = weighted_error.mean()
+    else:
+        mean = ((weighted_error * occupancy).sum((2, 3, 4, 5)) / (mass * error.shape[2])).mean()
+    hard = error.new_zeros(())
+    if hard_patch_weight > 0:
+        if occupancy is None:
+            occupancy = torch.ones_like(error[:, :, :1])
+        numerator = (weighted_error.mean(2, keepdim=True) * occupancy).flatten(0, 1)
+        denominator = occupancy.flatten(0, 1)
+        padding = tuple(
+            p for n, size in zip(reversed(error.shape[-3:]), reversed(hard_patch_size)) for p in (0, -n % size)
+        )
+        numerator = F.avg_pool3d(F.pad(numerator, padding), hard_patch_size, stride=hard_patch_size).flatten(1)
+        denominator = F.avg_pool3d(F.pad(denominator, padding), hard_patch_size, stride=hard_patch_size).flatten(1)
+        selected = []
+        for sums, counts in zip(numerator, denominator):
+            valid = counts > 0
+            patch_means = sums[valid] / counts[valid]
+            k = max(1, math.ceil(hard_patch_fraction * patch_means.numel()))
+            selected.append(patch_means.topk(k).values.mean())
+        hard = torch.stack(selected).mean()
+    return dict(reconstruction=mean + hard_patch_weight * hard, reconstruction_mean=mean, reconstruction_hard=hard)
+
+
 def paired_objective(
-    model, maps, reconstruction_weight=1.0, alignment_weight=1.0, variance_weight=0.1, recon_weights=None
+    model,
+    maps,
+    reconstruction_weight=1.0,
+    alignment_weight=1.0,
+    variance_weight=0.1,
+    recon_weights=None,
+    foreground=None,
+    hard_patch_weight=0.0,
+    hard_patch_fraction=0.1,
+    hard_patch_size=(4, 4, 4),
 ):
     """No labels or interventions; variance is across subjects within each view.
 
@@ -141,10 +220,10 @@ def paired_objective(
     code = code.reshape(len(maps), 2, -1)
     reconstruction = reconstruction.reshape_as(targets)
     error = ((reconstruction - targets) / model.scale).square()
-    terms = {
-        "reconstruction": error.mean() if recon_weights is None else (error * recon_weights).mean(),
-        "alignment": F.mse_loss(code[:, 0], code[:, 1]),
-        "variance": F.relu(1 - (code.var(0, unbiased=False) + 1e-4).sqrt()).mean(),
-    }
-    loss = sum(w * terms[name] for w, name in zip(weights, terms))
+    terms = reconstruction_terms(
+        error, recon_weights, foreground, hard_patch_weight, hard_patch_fraction, hard_patch_size
+    )
+    terms["alignment"] = F.mse_loss(code[:, 0], code[:, 1])
+    terms["variance"] = F.relu(1 - (code.var(0, unbiased=False) + 1e-4).sqrt()).mean()
+    loss = sum(w * terms[name] for w, name in zip(weights, ("reconstruction", "alignment", "variance")))
     return loss, terms

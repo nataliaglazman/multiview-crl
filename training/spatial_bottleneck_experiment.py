@@ -16,7 +16,13 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from models.spatial_bottleneck import SpatialBottleneck, deviation_weights, paired_objective, position_weights
+from models.spatial_bottleneck import (
+    SpatialBottleneck,
+    deviation_weights,
+    paired_objective,
+    position_weights,
+    reconstruction_terms,
+)
 from utils.encoder_runtime import select_encoder_device
 
 RECON_WEIGHTINGS = ("none", "position", "deviation")
@@ -31,17 +37,21 @@ def file_digest(path):
 
 
 @torch.no_grad()
-def extract_content_maps(model, loader, device, level=0, max_bytes=2**30, expected_indices=None):
+def extract_content_maps(
+    model, loader, device, level=0, max_bytes=2**30, expected_indices=None, return_foreground=False
+):
     """Keep the native lattice, continuous pre-codebook features and fixed columns.
 
     Returned maps include VQ-VAE's content normalization when present. On-the-fly
     masks are rejected because even evaluation selection depends on the batch.
-    No factor labels are read or returned.
+    No factor labels are read or returned. ``return_foreground`` appends a third
+    return value: input-mask occupancy averaged onto the feature grid. Maps are
+    never zeroed or otherwise modified by this option.
     """
     if getattr(model, "mask_mode", None) == "onthefly":
         raise ValueError("On-the-fly content masks are batch-dependent; use a fixed or learned-mask checkpoint")
     model.eval().requires_grad_(False)
-    bank, selected, offset = None, expected_indices, 0
+    bank, foreground_bank, selected, offset = None, None, expected_indices, 0
     for batch in loader:
         images = batch["image"]
         if len(images) != 2 or images[0].shape != images[1].shape:
@@ -50,7 +60,17 @@ def extract_content_maps(model, loader, device, level=0, max_bytes=2**30, expect
         masks = batch.get("mask")
         if getattr(model, "latent_mask", False) and masks is None:
             raise ValueError("This checkpoint requires input foreground masks")
+        if return_foreground and masks is None:
+            raise ValueError("Foreground reconstruction requires input foreground masks in every batch")
         mask = torch.cat(masks, 0).to(device) if masks is not None else None
+        if return_foreground and (
+            len(masks) != 2
+            or mask.shape != (len(x), 1, *x.shape[-3:])
+            or not torch.isfinite(mask).all()
+            or (mask < 0).any()
+            or (mask > 1).any()
+        ):
+            raise ValueError("Need two finite input foreground masks shaped (B,1,D,H,W) in [0,1]")
         output = model(x, return_recon=False, pool_only=False, n_views=2, mask=mask)
         if not 0 <= level < len(output[2]):
             raise ValueError(f"Level {level} is not present in this checkpoint")
@@ -72,26 +92,53 @@ def extract_content_maps(model, loader, device, level=0, max_bytes=2**30, expect
         pair = torch.stack((features[:count, indices[0]], features[count:, indices[1]]), 1).float().cpu()
         if not torch.isfinite(pair).all():
             raise ValueError("Non-finite frozen encoder maps")
+        foreground = None
+        if return_foreground:
+            occupancy = torch.nn.functional.adaptive_avg_pool3d(mask.float(), pair.shape[-3:]).cpu()
+            foreground = torch.stack((occupancy[:count], occupancy[count:]), 1)
+            if (foreground.sum((2, 3, 4, 5)) <= 0).any():
+                raise ValueError("Every subject and view needs nonempty foreground")
         if bank is None:
             required = len(loader.dataset) * pair[0].numel() * pair.element_size()
+            if foreground is not None:
+                required += len(loader.dataset) * foreground[0].numel() * foreground.element_size()
             if required > max_bytes:
                 raise ValueError(
                     f"Map bank needs {required / 2**30:.2f} GiB; reduce sample counts or raise --max-map-gib"
                 )
             bank = torch.empty((len(loader.dataset), *pair.shape[1:]), dtype=torch.float32)
+            if foreground is not None:
+                foreground_bank = torch.empty((len(loader.dataset), *foreground.shape[1:]), dtype=torch.float32)
         bank[offset : offset + count] = pair
+        if foreground is not None:
+            foreground_bank[offset : offset + count] = foreground
         offset += count
     if bank is None or offset != len(loader.dataset):
         raise ValueError("Extraction requires a complete, non-dropping loader")
-    return bank, selected
+    return (bank, selected, foreground_bank) if return_foreground else (bank, selected)
 
 
 @torch.no_grad()
-def evaluate(model, maps, batch_size, device, weigh=None):
+def evaluate(
+    model,
+    maps,
+    batch_size,
+    device,
+    weigh=None,
+    foreground=None,
+    hard_patch_weight=0.0,
+    hard_patch_fraction=0.1,
+    hard_patch_size=(4, 4, 4),
+):
     """Unweighted map metrics; ``weigh`` (from ``loss_weighting``) adds the training-weighted error."""
     model.eval()
     codes = []
     weighted, used = 0.0, False
+    local = foreground is not None or hard_patch_weight > 0
+    objective = dict(reconstruction_objective=0.0, reconstruction_mean=0.0, reconstruction_hard=0.0)
+    foreground_error, foreground_baseline = 0.0, 0.0
+    if foreground is not None and tuple(foreground.shape) != (*maps.shape[:2], 1, *maps.shape[-3:]):
+        raise ValueError("Foreground bank must match the map subjects, views and spatial grid")
     errors = torch.zeros(maps.shape[2:], dtype=torch.float64)
     per_view = torch.zeros(2, dtype=torch.float64)
     raw_sum = 0.0
@@ -106,6 +153,20 @@ def evaluate(model, maps, batch_size, device, weigh=None):
         if weights is not None:
             weighted += (error * weights).mean().item() * len(target)
             used = True
+        support = None if foreground is None else foreground[start : start + batch_size].to(device)
+        if local:
+            terms = reconstruction_terms(
+                error, weights, support, hard_patch_weight, hard_patch_fraction, hard_patch_size
+            )
+            for name in objective:
+                key = "reconstruction" if name == "reconstruction_objective" else name
+                objective[name] += terms[key].item() * len(target)
+        if support is not None:
+            foreground_error += reconstruction_terms(error, foreground=support)["reconstruction"].item() * len(target)
+            template_error = ((target - model.template) / model.scale).square()
+            foreground_baseline += reconstruction_terms(template_error, foreground=support)[
+                "reconstruction"
+            ].item() * len(target)
         errors += error.sum((0, 1)).cpu().double()
         per_view += error.mean((2, 3, 4, 5)).sum(0).cpu().double()
         raw_sum += residual.square().mean().item() * len(target)
@@ -130,12 +191,28 @@ def evaluate(model, maps, batch_size, device, weigh=None):
     )
     if used:
         metrics["weighted_reconstruction"] = weighted / len(maps)
+    if local:
+        metrics.update({k: v / len(maps) for k, v in objective.items()})
+    if foreground is not None:
+        metrics.update(
+            foreground_reconstruction=foreground_error / len(maps),
+            foreground_template_normalized_mse=foreground_baseline / len(maps),
+            foreground_reconstruction_over_template=(
+                foreground_error / foreground_baseline if foreground_baseline > 1e-12 else None
+            ),
+            foreground_occupancy=foreground.mean().item(),
+        )
     return metrics, code, (errors / (2 * len(maps))).mean(0).float()
 
 
 def objective_score(metrics, args):
     """The training objective on held-out maps, with the reconstruction weighted as in training."""
-    terms = dict(metrics, reconstruction=metrics.get("weighted_reconstruction", metrics["reconstruction"]))
+    terms = dict(
+        metrics,
+        reconstruction=metrics.get(
+            "reconstruction_objective", metrics.get("weighted_reconstruction", metrics["reconstruction"])
+        ),
+    )
     return sum(getattr(args, name + "_weight") * terms[name] for name in ("reconstruction", "alignment", "variance"))
 
 
@@ -162,10 +239,22 @@ def loss_weighting(model, training, args):
     )
 
 
-def fit_readout(training, validation, args, device):
+def reconstruction_options(args):
+    return {
+        name: getattr(args, name, default)
+        for name, default in (("hard_patch_weight", 0.0), ("hard_patch_fraction", 0.1), ("hard_patch_size", (4, 4, 4)))
+    }
+
+
+def fit_readout(training, validation, args, device, training_foreground=None, validation_foreground=None):
     """Validation selects checkpoints but never updates parameters or normalization."""
     if training.shape[1:] != validation.shape[1:]:
         raise ValueError("Training and validation maps must have the same shape")
+    if getattr(args, "recon_foreground_only", False) and (training_foreground is None or validation_foreground is None):
+        raise ValueError("Foreground reconstruction requires training and validation foreground banks")
+    for maps, foreground in ((training, training_foreground), (validation, validation_foreground)):
+        if foreground is not None and tuple(foreground.shape) != (*maps.shape[:2], 1, *maps.shape[-3:]):
+            raise ValueError("Foreground bank must match the map subjects, views and spatial grid")
     torch.manual_seed(args.seed)
     model = SpatialBottleneck(tuple(training.shape[2:]), args.latent_dim, args.width, args.hidden)
     model.fit_normalization(training)
@@ -173,7 +262,8 @@ def fit_readout(training, validation, args, device):
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     rng = torch.Generator().manual_seed(args.seed + 1)
-    initial, _, _ = evaluate(model, validation, args.batch_size, device, weigh)
+    options = reconstruction_options(args)
+    initial, _, _ = evaluate(model, validation, args.batch_size, device, weigh, validation_foreground, **options)
     best_score, best_step = objective_score(initial, args), 0
     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     history = []
@@ -181,8 +271,16 @@ def fit_readout(training, validation, args, device):
         model.train()
         indices = torch.randperm(len(training), generator=rng)[: args.batch_size]
         batch = training[indices].to(device)
+        support = None if training_foreground is None else training_foreground[indices].to(device)
         loss, terms = paired_objective(
-            model, batch, args.reconstruction_weight, args.alignment_weight, args.variance_weight, weigh(batch)
+            model,
+            batch,
+            args.reconstruction_weight,
+            args.alignment_weight,
+            args.variance_weight,
+            weigh(batch),
+            foreground=support,
+            **options,
         )
         if not torch.isfinite(loss):
             raise RuntimeError(f"Non-finite bottleneck loss at step {step}")
@@ -191,7 +289,9 @@ def fit_readout(training, validation, args, device):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0, error_if_nonfinite=True)
         optimizer.step()
         if step % args.log_every == 0 or step == args.steps:
-            metrics, _, _ = evaluate(model, validation, args.batch_size, device, weigh)
+            metrics, _, _ = evaluate(
+                model, validation, args.batch_size, device, weigh, validation_foreground, **options
+            )
             score = objective_score(metrics, args)
             if not math.isfinite(score):
                 raise RuntimeError(f"Non-finite validation loss at step {step}")
@@ -211,6 +311,12 @@ def fit_readout(training, validation, args, device):
         best_validation_score=best_score,
         history=history,
         recon_weighting=weighting,
+        reconstruction_objective=dict(
+            **options,
+            foreground_only=training_foreground is not None,
+            formula="mean error + hard_patch_weight * mean of top ceil(fraction * nonempty patches), per subject/view",
+            mask="input foreground occupancy averaged onto feature grid; loss only",
+        ),
     )
 
 
@@ -239,6 +345,31 @@ def parse_args(argv=None):
     parser.add_argument("--reconstruction-weight", type=float, default=1.0)
     parser.add_argument("--alignment-weight", type=float, default=1.0)
     parser.add_argument("--variance-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--hard-patch-weight",
+        type=float,
+        default=0.0,
+        help="Add this times the mean error of the hardest patches to mean reconstruction (0 disables)",
+    )
+    parser.add_argument(
+        "--hard-patch-fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of nonempty patches selected separately per subject/view, rounded up (default: 0.1)",
+    )
+    parser.add_argument(
+        "--hard-patch-size",
+        type=int,
+        nargs=3,
+        default=(4, 4, 4),
+        metavar=("D", "H", "W"),
+        help="Nonoverlapping patch size in feature-map cells; partial edge patches are retained",
+    )
+    parser.add_argument(
+        "--recon-foreground-only",
+        action="store_true",
+        help="Exclude background from reconstruction and hard-patch selection using input-mask occupancy; loss only",
+    )
     parser.add_argument(
         "--recon-weighting",
         choices=RECON_WEIGHTINGS,
@@ -277,11 +408,15 @@ def parse_args(argv=None):
     for name in ("lr", "reconstruction_weight", "max_map_gib"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(f"{name} must be positive and finite")
-    for name in ("alignment_weight", "variance_weight", "deviation_strength"):
+    for name in ("alignment_weight", "variance_weight", "deviation_strength", "hard_patch_weight"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) < 0:
             parser.error(f"{name} must be nonnegative and finite")
     if not 0 < args.position_floor <= 1:
         parser.error("position-floor must lie in (0, 1]")
+    if not 0 < args.hard_patch_fraction <= 1:
+        parser.error("hard-patch-fraction must lie in (0, 1]")
+    if min(args.hard_patch_size) < 1:
+        parser.error("hard-patch-size must contain positive integers")
     return args
 
 
@@ -340,20 +475,36 @@ def main(argv=None):
         level=args.level,
         representation="continuous encoder maps, after content normalization, before codebook projection",
     )
-    banks, splits, indices = {}, {}, None
+    banks, foregrounds, splits, indices = {}, {}, {}, None
     remaining = int(args.max_map_gib * 2**30)
     for split, count in (("train", args.train_samples), ("val", args.val_samples), ("test", args.test_samples)):
         dataset = build_split_dataset(saved_args, split, count)
         loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
-        banks[split], indices = extract_content_maps(model, loader, device, args.level, remaining, indices)
+        extracted = extract_content_maps(
+            model, loader, device, args.level, remaining, indices, return_foreground=args.recon_foreground_only
+        )
+        banks[split], indices = extracted[:2]
+        if args.recon_foreground_only:
+            foregrounds[split] = extracted[2]
+            remaining -= foregrounds[split].numel() * foregrounds[split].element_size()
         remaining -= banks[split].numel() * banks[split].element_size()
         splits[split] = dict(subject_ids=[f"{split}:{i}" for i in range(count)], sample_seed=int(dataset._inner.seed))
         print(f"Extracted {split}: {tuple(banks[split].shape)}", flush=True)
     source["content_indices_per_view"] = indices
     del model
-    head, training = fit_readout(banks["train"], banks["val"], args, device)
-    validation, _, _ = evaluate(head, banks["val"], args.batch_size, device)
-    testing, codes, error_map = evaluate(head, banks["test"], args.batch_size, device)
+    head, training = fit_readout(
+        banks["train"], banks["val"], args, device, foregrounds.get("train"), foregrounds.get("val")
+    )
+    # Preserve whole-map metrics used by existing factor/intervention parity
+    # checks, and add the new loss and foreground metrics under separate names.
+    options = reconstruction_options(args)
+    weigh = None
+    if args.recon_foreground_only or args.hard_patch_weight > 0:
+        weigh, _ = loss_weighting(head, banks["train"], args)
+    validation, _, _ = evaluate(head, banks["val"], args.batch_size, device, weigh, foregrounds.get("val"), **options)
+    testing, codes, error_map = evaluate(
+        head, banks["test"], args.batch_size, device, weigh, foregrounds.get("test"), **options
+    )
     if file_digest(checkpoint) != source["checkpoint_sha256"]:
         raise RuntimeError("Source checkpoint changed during this experiment")
     report = dict(
@@ -381,6 +532,7 @@ def main(argv=None):
             codes=codes,
             gap=banks["test"].mean((3, 4, 5)),
             normalized_error_map=error_map,
+            **({"foreground_occupancy": foregrounds["test"]} if args.recon_foreground_only else {}),
             subject_ids=splits["test"]["subject_ids"],
         ),
         args.out_dir / "test_outputs.pt",

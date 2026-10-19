@@ -38,11 +38,71 @@ its size against alignment and variance:
   from the average (a lesion, but also ventricle and brain edges) weigh more.
 
 The weights shape training and checkpoint selection, which uses the same
-weighted objective on validation maps. Every reported metric, and everything
-`spatial_bottleneck_eval` computes, stays unweighted, so runs with different
-weightings remain comparable. The weights are not stored in `bottleneck.pt`;
+weighted objective on validation maps. The original whole-map metrics and
+everything `spatial_bottleneck_eval` computes stay unweighted, so runs with
+different weightings remain comparable. The weights are not stored in `bottleneck.pt`;
 `report.json` records the choice under `training.recon_weighting` (for
 `position`, also the fraction of entries held at the floor and the weight range).
+
+### Hard patches and foreground
+
+Add these options to give large local errors more influence and exclude background:
+
+~~~sh
+python -m training.spatial_bottleneck_experiment \
+  --run-dir /absolute/path/to/synthetic-vq-run \
+  --out-dir /absolute/path/to/new-hard-foreground-run \
+  --latent-dim 16 --device cuda \
+  --hard-patch-weight 1.0 --hard-patch-fraction 0.1 \
+  --hard-patch-size 4 4 4 --recon-foreground-only
+~~~
+
+The reconstruction term becomes
+
+    mean reconstruction error
+  + hard_patch_weight * mean error of the hardest patches
+
+The existing `reconstruction_weight` multiplies this entire term. Alignment and
+variance retain their existing weights. Defaults preserve the old objective:
+`--hard-patch-weight 0` and no foreground masking.
+
+- Patches are nonoverlapping blocks of **feature-map cells**, not input voxels.
+  Partial blocks at the edges are included without padding diluting their means.
+  For each subject and view separately, select the highest-error
+  `ceil(hard_patch_fraction * number_of_nonempty_patches)` patches (at least one).
+  The whole-map mean remains in the loss, including the easier foreground patches.
+  If the patch size covers the entire map, the hard term is just another copy
+  of its mean; choose smaller patches to focus on local errors.
+- `--recon-foreground-only` uses each input view's existing brain/foreground mask,
+  average-pooled to the feature grid. Zero-occupancy cells contribute no error;
+  boundary cells contribute according to foreground occupancy. Means divide by
+  foreground mass, so adding background does not dilute them. Empty patches are
+  excluded before selecting the hardest fraction. Missing or empty subject/view
+  masks raise an error. Mask banks count toward `--max-map-gib`.
+- Masking is **loss-only**: readout inputs, the frozen VQ model, normalization,
+  and decoder inputs are unchanged. The decoder still receives only `z`.
+  Downsampled masks approximate spatial foreground; they are not exact receptive
+  field masks, and features outside them may still carry anatomy.
+- The options compose with `position` and `deviation` weighting. With foreground
+  masking, those weights are renormalized to mean one over each map's foreground.
+  Both patch ranking and patch losses use the resulting weighted errors. No
+  lesion labels or coordinates are used to select patches; high-error patches
+  can also contain noise or anatomical boundaries.
+- Training and validation checkpoint selection use the same combined loss.
+  `report.json` records settings under `training.reconstruction_objective`.
+  Validation/test metrics add `reconstruction_mean`, `reconstruction_hard`, and
+  `reconstruction_objective`; the last equals mean + weight * hard.
+  Foreground masking also adds unweighted `foreground_reconstruction`,
+  `foreground_template_normalized_mse`, `foreground_reconstruction_over_template`,
+  and `foreground_occupancy`. `test_outputs.pt` saves each test map's foreground
+  occupancy. Original whole-map metrics and factor-evaluation parity remain
+  available under their existing names.
+
+For a controlled comparison, keep data, seed, architecture and other settings
+fixed, and train mean-only, mean + hard patches, foreground mean-only, and
+foreground mean + hard patches in four new output directories. Compare factor
+recovery with `spatial_bottleneck_eval`; lower reconstruction loss alone does
+not establish better lesion recovery.
 
 ## Run
 
