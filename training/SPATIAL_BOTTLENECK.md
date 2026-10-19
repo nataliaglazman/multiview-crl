@@ -15,6 +15,35 @@ Variance is computed separately in each view. There is no decorrelation penalty
 on the code: anatomical variables can be correlated. This loss is a practical
 preservation objective, not an implementation of a causal identifiability theorem.
 
+### Reconstruction weighting
+
+The plain mean counts every map entry equally, so a small local feature such as
+a lesion (a handful of the map's positions) barely moves the loss, while a
+global factor changes every position. `--recon-weighting` multiplies the
+squared error by label-free weights, renormalised to mean 1 so the term keeps
+its size against alignment and variance:
+
+- `none` (default): the plain mean above, unchanged.
+- `position`: each map entry's error is put in units of that entry's own spread
+  around the template across training subjects and both views, so entries that
+  rarely vary (deep white matter) weigh more and highly variable ones less. The
+  spread is floored at `--position-floor` (default 0.25) times its channel's
+  scale, which caps a weight at 1/floor² before renormalising; otherwise
+  near-constant entries such as background would dominate. Fitted once on the
+  training maps.
+- `deviation`: each position gets weight `1 + --deviation-strength * d`
+  (default strength 1), where `d` is the RMS over channels of that position's
+  standardised departure from the template in the map being reconstructed,
+  renormalised to mean 1 within each map. Positions where a subject departs
+  from the average (a lesion, but also ventricle and brain edges) weigh more.
+
+The weights shape training and checkpoint selection, which uses the same
+weighted objective on validation maps. Every reported metric, and everything
+`spatial_bottleneck_eval` computes, stays unweighted, so runs with different
+weightings remain comparable. The weights are not stored in `bottleneck.pt`;
+`report.json` records the choice under `training.recon_weighting` (for
+`position`, also the fraction of entries held at the floor and the weight range).
+
 ## Run
 
 From the repository root, in the normal PyTorch/MONAI environment:
@@ -272,6 +301,12 @@ Tests cover spatial sensitivity when GAP is constant, training-only normalizatio
 variance across subjects, decoder isolation, fixed and per-view learned masks,
 frozen encoder/codebook state, a learned toy spatial compression task, and a real
 small VQ-VAE checkpoint-to-report run including reload and output protection.
+Reconstruction weighting is tested for: weights with mean 1, the floor and the
+(scale / spread)² ratio; deviation weights peaking where a map departs; the
+default path matching weights of one exactly; the weighted validation objective
+used for selection while reported metrics stay unweighted; flag validation; and
+position- and deviation-weighted runs that record their choice, reload, and pass
+the factor evaluator's parity check.
 The factor evaluator's tests check kernel ridge and PCA against sklearn on
 explicit features (including PCA's reconstruction ratio), that test labels never
 move a fit or a selection, that a GAP-invisible spatial factor is read from the

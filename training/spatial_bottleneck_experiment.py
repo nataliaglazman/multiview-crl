@@ -16,8 +16,10 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from models.spatial_bottleneck import SpatialBottleneck, paired_objective
+from models.spatial_bottleneck import SpatialBottleneck, deviation_weights, paired_objective, position_weights
 from utils.encoder_runtime import select_encoder_device
+
+RECON_WEIGHTINGS = ("none", "position", "deviation")
 
 
 def file_digest(path):
@@ -85,9 +87,11 @@ def extract_content_maps(model, loader, device, level=0, max_bytes=2**30, expect
 
 
 @torch.no_grad()
-def evaluate(model, maps, batch_size, device):
+def evaluate(model, maps, batch_size, device, weigh=None):
+    """Unweighted map metrics; ``weigh`` (from ``loss_weighting``) adds the training-weighted error."""
     model.eval()
     codes = []
+    weighted, used = 0.0, False
     errors = torch.zeros(maps.shape[2:], dtype=torch.float64)
     per_view = torch.zeros(2, dtype=torch.float64)
     raw_sum = 0.0
@@ -98,6 +102,10 @@ def evaluate(model, maps, batch_size, device):
         code, reconstruction = model(target.flatten(0, 1))
         residual = reconstruction.reshape_as(target) - target
         error = (residual / model.scale).square()
+        weights = None if weigh is None else weigh(target)
+        if weights is not None:
+            weighted += (error * weights).mean().item() * len(target)
+            used = True
         errors += error.sum((0, 1)).cpu().double()
         per_view += error.mean((2, 3, 4, 5)).sum(0).cpu().double()
         raw_sum += residual.square().mean().item() * len(target)
@@ -120,11 +128,38 @@ def evaluate(model, maps, batch_size, device):
         code_std_per_view=code.std(0, unbiased=False).tolist(),
         original_map_alignment=map_gap / len(maps),
     )
+    if used:
+        metrics["weighted_reconstruction"] = weighted / len(maps)
     return metrics, code, (errors / (2 * len(maps))).mean(0).float()
 
 
 def objective_score(metrics, args):
-    return sum(getattr(args, name + "_weight") * metrics[name] for name in ("reconstruction", "alignment", "variance"))
+    """The training objective on held-out maps, with the reconstruction weighted as in training."""
+    terms = dict(metrics, reconstruction=metrics.get("weighted_reconstruction", metrics["reconstruction"]))
+    return sum(getattr(args, name + "_weight") * terms[name] for name in ("reconstruction", "alignment", "variance"))
+
+
+def loss_weighting(model, training, args):
+    """Reconstruction weights for a batch of paired maps (None = plain mean), and a record of them.
+
+    Fitted on training maps only, after the model's normalisation; never stored in the model.
+    """
+    mode = getattr(args, "recon_weighting", "none")
+    if mode == "none":
+        return (lambda maps: None), dict(mode=mode)
+    if mode == "position":
+        weights, floored = position_weights(model, training, args.position_floor)
+        record = dict(
+            mode=mode,
+            floor=args.position_floor,
+            floored_fraction=floored,
+            min_weight=weights.min().item(),
+            max_weight=weights.max().item(),
+        )
+        return (lambda maps: weights.to(maps.device)), record
+    return (lambda maps: deviation_weights(model, maps, args.deviation_strength)), dict(
+        mode=mode, strength=args.deviation_strength
+    )
 
 
 def fit_readout(training, validation, args, device):
@@ -134,10 +169,11 @@ def fit_readout(training, validation, args, device):
     torch.manual_seed(args.seed)
     model = SpatialBottleneck(tuple(training.shape[2:]), args.latent_dim, args.width, args.hidden)
     model.fit_normalization(training)
+    weigh, weighting = loss_weighting(model, training, args)
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     rng = torch.Generator().manual_seed(args.seed + 1)
-    initial, _, _ = evaluate(model, validation, args.batch_size, device)
+    initial, _, _ = evaluate(model, validation, args.batch_size, device, weigh)
     best_score, best_step = objective_score(initial, args), 0
     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     history = []
@@ -146,7 +182,7 @@ def fit_readout(training, validation, args, device):
         indices = torch.randperm(len(training), generator=rng)[: args.batch_size]
         batch = training[indices].to(device)
         loss, terms = paired_objective(
-            model, batch, args.reconstruction_weight, args.alignment_weight, args.variance_weight
+            model, batch, args.reconstruction_weight, args.alignment_weight, args.variance_weight, weigh(batch)
         )
         if not torch.isfinite(loss):
             raise RuntimeError(f"Non-finite bottleneck loss at step {step}")
@@ -155,7 +191,7 @@ def fit_readout(training, validation, args, device):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0, error_if_nonfinite=True)
         optimizer.step()
         if step % args.log_every == 0 or step == args.steps:
-            metrics, _, _ = evaluate(model, validation, args.batch_size, device)
+            metrics, _, _ = evaluate(model, validation, args.batch_size, device, weigh)
             score = objective_score(metrics, args)
             if not math.isfinite(score):
                 raise RuntimeError(f"Non-finite validation loss at step {step}")
@@ -170,7 +206,11 @@ def fit_readout(training, validation, args, device):
     model.load_state_dict(best_state)
     model.eval()
     return model, dict(
-        initial_validation=initial, best_step=best_step, best_validation_score=best_score, history=history
+        initial_validation=initial,
+        best_step=best_step,
+        best_validation_score=best_score,
+        history=history,
+        recon_weighting=weighting,
     )
 
 
@@ -199,6 +239,26 @@ def parse_args(argv=None):
     parser.add_argument("--reconstruction-weight", type=float, default=1.0)
     parser.add_argument("--alignment-weight", type=float, default=1.0)
     parser.add_argument("--variance-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--recon-weighting",
+        choices=RECON_WEIGHTINGS,
+        default="none",
+        help="Re-weight the training reconstruction error: none (plain mean), position (each map entry in units "
+        "of its own spread across training subjects) or deviation (more weight where a map departs from the "
+        "template). Checkpoints are selected on the same weighted objective; reported metrics stay unweighted.",
+    )
+    parser.add_argument(
+        "--position-floor",
+        type=float,
+        default=0.25,
+        help="position: floor on an entry's spread, as a fraction of its channel's scale (caps a weight at 1/floor^2)",
+    )
+    parser.add_argument(
+        "--deviation-strength",
+        type=float,
+        default=1.0,
+        help="deviation: a position's weight is 1 + strength * its RMS standardised departure from the template",
+    )
     parser.add_argument("--max-map-gib", type=float, default=1.0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--seed", type=int, default=42)
@@ -217,9 +277,11 @@ def parse_args(argv=None):
     for name in ("lr", "reconstruction_weight", "max_map_gib"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(f"{name} must be positive and finite")
-    for name in ("alignment_weight", "variance_weight"):
+    for name in ("alignment_weight", "variance_weight", "deviation_strength"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) < 0:
             parser.error(f"{name} must be nonnegative and finite")
+    if not 0 < args.position_floor <= 1:
+        parser.error("position-floor must lie in (0, 1]")
     return args
 
 

@@ -14,7 +14,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from eval.protocol import spatial_bottleneck_eval as factor_eval
-from models.spatial_bottleneck import SpatialBottleneck, paired_objective
+from models.spatial_bottleneck import SpatialBottleneck, deviation_weights, paired_objective, position_weights
 from models.vqvae import VQVAE
 from training import spatial_bottleneck_experiment as experiment
 
@@ -244,6 +244,69 @@ class SpatialBottleneckTests(unittest.TestCase):
             self.assertEqual(outputs["gap"].shape, (2, 2, 2))
             with self.assertRaisesRegex(ValueError, "new directory"):
                 experiment.main(argv)
+
+    def test_reconstruction_weights_reweight_only_the_training_error(self):
+        model = SpatialBottleneck((2, 3, 3, 3), 2, 2, 8)
+        maps = torch.randn(8, 2, 2, 3, 3, 3)
+        maps[:, :, 0, 0, 0, 0] = 1.5
+        maps[:, :, 1, 2, 2, 2] *= 6
+        model.fit_normalization(maps)
+
+        weights, floored = position_weights(model, maps, floor=0.25)
+        self.assertAlmostEqual(weights.mean().item(), 1.0, places=5)
+        self.assertGreater(floored, 0)
+        self.assertEqual(weights[0, 0, 0, 0].item(), weights.max().item())
+        spread = (maps - model.template).square().mean((0, 1)).sqrt()
+        a, b = (1, 0, 0, 1), (1, 1, 1, 1)
+        self.assertAlmostEqual((weights[a] / weights[b]).item(), (spread[b] / spread[a]).square().item(), places=4)
+        self.assertLess(weights[1, 2, 2, 2].item(), weights[a].item())
+
+        target = model.template.expand(3, 2, *model.map_shape).clone()
+        target[0, 1, :, 1, 1, 1] += 5 * model.scale[:, 0, 0, 0]
+        departures = deviation_weights(model, target, strength=2.0)
+        torch.testing.assert_close(departures.mean((-3, -2, -1)), torch.ones(3, 2, 1))
+        self.assertEqual(departures[0, 1, 0].flatten().argmax().item(), 13)
+        torch.testing.assert_close(departures[1], torch.ones_like(departures[1]))
+        torch.testing.assert_close(deviation_weights(model, maps, 0.0), torch.ones(8, 2, 1, 3, 3, 3))
+
+        plain, _ = paired_objective(model, maps)
+        ones, _ = paired_objective(model, maps, recon_weights=torch.ones(model.map_shape))
+        torch.testing.assert_close(plain, ones, rtol=0, atol=0)
+        _, terms = paired_objective(model, maps, recon_weights=weights)
+        with torch.no_grad():
+            error = ((model(maps.flatten(0, 1))[1].reshape_as(maps) - maps) / model.scale).square()
+        torch.testing.assert_close(terms["reconstruction"].detach(), (error * weights).mean())
+
+        args = experiment.parse_args(["--run-dir", "/tmp/s", "--out-dir", "/tmp/o", "--recon-weighting", "position"])
+        weigh, record = experiment.loss_weighting(model, maps, args)
+        self.assertEqual((record["mode"], record["floor"]), ("position", 0.25))
+        plain_metrics, _, _ = experiment.evaluate(model, maps, 4, "cpu")
+        weighted_metrics, _, _ = experiment.evaluate(model, maps, 4, "cpu", weigh)
+        self.assertNotIn("weighted_reconstruction", plain_metrics)
+        self.assertEqual(plain_metrics["reconstruction"], weighted_metrics["reconstruction"])
+        self.assertAlmostEqual(weighted_metrics["weighted_reconstruction"], (error * weights).mean().item(), places=5)
+        expected = weighted_metrics["weighted_reconstruction"] + weighted_metrics["alignment"]
+        expected += 0.1 * weighted_metrics["variance"]
+        self.assertAlmostEqual(experiment.objective_score(weighted_metrics, args), expected, places=6)
+        for bad in (["--position-floor", "0"], ["--deviation-strength", "-1"]):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                experiment.parse_args(["--run-dir", "/tmp/s", "--out-dir", "/tmp/o"] + bad)
+
+    def test_weighted_training_records_choice_and_stays_evaluable(self):
+        with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temp)
+            run = write_source_run(root)
+            for mode in ("position", "deviation"):
+                report = experiment.main(trainer_argv(run, root / mode) + ["--recon-weighting", mode])
+                self.assertEqual(report["training"]["recon_weighting"]["mode"], mode)
+                self.assertTrue(
+                    all("weighted_reconstruction" in h["validation"] for h in report["training"]["history"])
+                )
+                self.assertNotIn("weighted_reconstruction", report["test"])
+                experiment.load_bottleneck(root / mode / "bottleneck.pt")
+            argv = ["--bottleneck-dirs", str(root / "position"), "--out-dir", str(root / "eval"), "--device", "cpu"]
+            payload = factor_eval.main(argv + ["--bootstrap", "100"])
+            self.assertTrue(all(v < 1e-5 for v in payload["bottlenecks"][0]["parity"].values()))
 
 
 def trainer_argv(run, out, latent_dim=2, train_samples=6):

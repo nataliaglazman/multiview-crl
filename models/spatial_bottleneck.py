@@ -86,8 +86,52 @@ class SpatialBottleneck(nn.Module):
         return code, self.decode(code)
 
 
-def paired_objective(model, maps, reconstruction_weight=1.0, alignment_weight=1.0, variance_weight=0.1):
-    """No labels or interventions; variance is across subjects within each view."""
+@torch.no_grad()
+def position_weights(model, training_maps, floor=0.25):
+    """Loss weights that put each map entry's error in units of its own spread across subjects.
+
+    The spread is each (channel, position) entry's RMS deviation from the template over the
+    training subjects and both views, floored at ``floor`` times its channel's scale so that
+    near-constant entries cannot dominate. Weights are (channel scale / spread)^2, renormalised to
+    mean 1 so the reconstruction term keeps its size against the alignment and variance terms.
+    Returns the weights and the fraction of entries held at the floor.
+    """
+    model._check_pairs(training_maps)
+    if not 0 < floor <= 1:
+        raise ValueError("floor must lie in (0, 1]")
+    template, scale = model.template.cpu(), model.scale.cpu()
+    variance = torch.zeros(model.map_shape, dtype=torch.float64)
+    for pair in training_maps:
+        variance += (pair.cpu() - template).double().square().mean(0)
+    spread = (variance / len(training_maps)).sqrt().float()
+    floored = spread < floor * scale
+    weights = (scale / spread.maximum(floor * scale)).square()
+    return weights / weights.mean(), floored.float().mean().item()
+
+
+@torch.no_grad()
+def deviation_weights(model, maps, strength=1.0):
+    """Per-position loss weights that grow with how far each map departs from the template.
+
+    The departure is the RMS over channels of the standardised deviation, so all channels at a
+    position share the weight 1 + strength * departure, renormalised to mean 1 within each map.
+    It is computed from the targets: it re-weights errors and is not itself optimised.
+    """
+    if not math.isfinite(strength) or strength < 0:
+        raise ValueError("strength must be finite and nonnegative")
+    departure = ((maps - model.template) / model.scale).square().mean(-4, keepdim=True).sqrt()
+    weights = 1 + strength * departure
+    return weights / weights.mean((-3, -2, -1), keepdim=True)
+
+
+def paired_objective(
+    model, maps, reconstruction_weight=1.0, alignment_weight=1.0, variance_weight=0.1, recon_weights=None
+):
+    """No labels or interventions; variance is across subjects within each view.
+
+    ``recon_weights`` (broadcastable to the paired maps, mean 1) re-weight the reconstruction error,
+    as ``position_weights`` or ``deviation_weights`` produce; None is the plain mean.
+    """
     model._check_pairs(maps)
     weights = (reconstruction_weight, alignment_weight, variance_weight)
     if any(not math.isfinite(w) or w < 0 for w in weights) or reconstruction_weight <= 0:
@@ -96,8 +140,9 @@ def paired_objective(model, maps, reconstruction_weight=1.0, alignment_weight=1.
     code, reconstruction = model(targets.flatten(0, 1))
     code = code.reshape(len(maps), 2, -1)
     reconstruction = reconstruction.reshape_as(targets)
+    error = ((reconstruction - targets) / model.scale).square()
     terms = {
-        "reconstruction": ((reconstruction - targets) / model.scale).square().mean(),
+        "reconstruction": error.mean() if recon_weights is None else (error * recon_weights).mean(),
         "alignment": F.mse_loss(code[:, 0], code[:, 1]),
         "variance": F.relu(1 - (code.var(0, unbiased=False) + 1e-4).sqrt()).mean(),
     }
