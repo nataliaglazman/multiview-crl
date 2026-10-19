@@ -1,0 +1,12 @@
+# Dose-response step 1 of 4 from conv_mlp_lesion_anatfixed: brain size and thickness vary (both views
+# share them); ventricle, temporal, asymmetry and sulcal stay at their mean anatomy. Adds thickness to
+# conv_mlp_lesion_brainonly. Everything else is conv_mlp_lesion_anatfixed's recipe; only
+# synthetic_content_amp_scale changes (indexed like z_content: brain, ventricle, lesion x/y/z, thickness, temporal,
+# asymmetry, sulcal; the renderer ignores the lesion entries, which stay 1). Read lesion_x/y/z against
+# conv_mlp_lesion_anatfixed at the same steps, as there.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_lesion_anat2_s{seed}
+conv_readout: mlp
+standardize_code: true
+synthetic_content_amp_scale: [1, 0, 1, 1, 1, 1, 0, 0, 0]
+eval_every: 1000

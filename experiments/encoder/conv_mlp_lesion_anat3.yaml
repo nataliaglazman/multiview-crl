@@ -1,0 +1,9 @@
+# Dose-response step 2 of 4 from conv_mlp_lesion_anatfixed: conv_mlp_lesion_anat2 plus ventricle size, so brain
+# size, thickness and ventricle vary; temporal, asymmetry and sulcal stay at their mean anatomy. Only
+# synthetic_content_amp_scale differs from conv_mlp_lesion_anatfixed (see conv_mlp_lesion_anat2 for its indexing).
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_lesion_anat3_s{seed}
+conv_readout: mlp
+standardize_code: true
+synthetic_content_amp_scale: [1, 1, 1, 1, 1, 1, 0, 0, 0]
+eval_every: 1000
