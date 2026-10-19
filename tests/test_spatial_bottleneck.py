@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
@@ -343,7 +344,8 @@ class FactorEvaluationTests(unittest.TestCase):
             blocks = {f["name"]: f["block"] for f in payload["factors"]}
             self.assertEqual([n for n in factors if blocks[n] == "lesion_centre"], list(factor_eval.CENTRES))
             self.assertEqual([blocks[n] for n in factors[-3:]], ["style_shared", "style_shared", "style"])
-            self.assertTrue(payload["lesion_centre_targets"]["included"])
+            self.assertTrue(payload["lesion_targets"]["included"])
+            self.assertNotIn("lesion_volume", blocks)
             for record in payload["bottlenecks"]:
                 self.assertTrue(record["z_init_reproduced"])
                 self.assertTrue(all(v < 1e-5 for v in record["parity"].values()), record["parity"])
@@ -359,6 +361,29 @@ class FactorEvaluationTests(unittest.TestCase):
             expected = [sample_targets(dataset._inner, dataset[i]["gt_latents"])[0][9:12] for i in range(3)]
             np.testing.assert_allclose(tap.centre_labels(), np.stack(expected))
             self.assertIsNone(factor_eval.centre_generator(object())[0])
+
+            burden_args = Namespace(**{**vars(load_run_args(run)), **factor_eval.BURDEN_OVERRIDES})
+            dataset = experiment.build_split_dataset(burden_args, "test", 8)
+            tap = factor_eval.LabelTap(DataLoader(dataset, batch_size=4), None, dataset._inner)
+            self.assertEqual(len(list(tap)), 2)
+            fraction = (np.tanh(tap.labels()[0][:, 2]) + 1) / 2
+            self.assertGreater(np.corrcoef(tap.lesion_labels()[:, 0], fraction)[0, 1], 0.95)
+            burden = factor_eval.main(
+                ["--bottleneck-dirs", str(first), "--out-dir", str(root / "burden"), "--device", "cpu"]
+                + ["--bootstrap", "100", "--burden-images"]
+            )
+            self.assertEqual(burden["generator_overrides"], factor_eval.BURDEN_OVERRIDES)
+            burden_blocks = {f["name"]: f["block"] for f in burden["factors"]}
+            self.assertEqual(
+                (burden_blocks["lesion_burden"], burden_blocks["lesion_volume"]), ("content", "lesion_size")
+            )
+            self.assertFalse(any(name.startswith("unused") for name in burden_blocks))
+            self.assertTrue(all(v < 1e-5 for v in burden["bottlenecks"][0]["parity"].values()))
+            halves = burden["lesion_centre_by_size"]["z:d2"]["linear"]
+            self.assertEqual(
+                {half: set(r2) for half, r2 in halves.items()},
+                {h: set(factor_eval.CENTRES) for h in ("larger", "smaller")},
+            )
             compared = payload["comparisons"]["d2"]["rbf"]
             self.assertEqual(set(compared), {"map", "patch2x2x2", "gap", "pca2", "z_init:d2"})
             self.assertEqual(set(payload["latent_dim_selection"]), {"linear", "rbf"})

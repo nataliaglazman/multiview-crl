@@ -52,6 +52,13 @@ Protocol
   cross-view code is expected to carry it; only per-view style counts as leakage.
 * **Compression reference.** Next to the code's reconstruction error over the training
   template, the same ratio for the map's top-d PCA projection on the same test subjects.
+* **Burden images.** ``--burden-images`` renders every split with one lesion per subject whose
+  volume varies as well as its position (``synthetic_lesion_target=burden``,
+  ``synthetic_lesion_count=1``); anatomy and style come from the same latents as before. The
+  frozen encoder and bottleneck are applied unchanged, which is out of distribution for them:
+  they were trained on lesions of one size. Lesion volume and centre are read from the same
+  images, and the centre is also scored on the larger and the smaller half of the lesions.
+  Parity is still checked on the bottleneck's original subjects, rendered as in training.
 
 What this does not show
 -----------------------
@@ -90,11 +97,14 @@ PARITY_TOLERANCE = 1e-2
 BASELINES = ("map", "patch", "gap", "pca", "z_init")
 #: Rendered lesion centre, in the generator's [-1, 1] coordinates.
 CENTRES = ("centroid_x", "centroid_y", "centroid_z")
-#: Latents ``sample_targets`` re-renders the lesion from.
-STRUCTURE_LATENTS = ("z_content", "z_deformation", "z_fissure")
+#: Latents the lesion is re-rendered from; ``z_lesion`` exists only in burden mode.
+STRUCTURE_LATENTS = ("z_content", "z_deformation", "z_fissure", "z_lesion")
+#: Generator settings ``--burden-images`` overrides.
+BURDEN_OVERRIDES = {"synthetic_lesion_target": "burden", "synthetic_lesion_count": 1}
 #: Target blocks in table order, with their headings.
 BLOCK_TITLES = {
     "content": "content",
+    "lesion_size": "lesion volume (rendered)",
     "lesion_centre": "lesion centre (rendered position)",
     "style_shared": "style shared by both views (expected in a shared code)",
     "style": "per-view style (leakage; lower is better)",
@@ -237,6 +247,7 @@ def score_representations(kernels, targets, rows, probes, draws):
                 val_r2=np.mean([fit["val_r2"] for fit in fits], axis=0),
                 choice=[fit["choice"] for fit in fits],
                 boot=boot,
+                test_pred=[fit["test_pred"] for fit in fits],
             )
     return scored
 
@@ -280,8 +291,8 @@ class LabelTap:
 
     ``extract_content_maps`` never sees ``gt_latents``. Labels are recorded in loader order,
     which is the row order of the maps it returns; ``index`` is checked to be sequential.
-    With ``generator`` set, ``sample_targets`` re-renders each subject's lesion centre; a
-    subject without a rendered lesion drops the centres for the whole split.
+    With ``generator`` set, each subject's lesion is re-rendered (``rendered_lesion``); a
+    subject without a rendered lesion drops the lesion targets for the whole split.
     """
 
     def __init__(self, loader, style_scale, generator=None):
@@ -289,14 +300,12 @@ class LabelTap:
         self.dataset = loader.dataset
         self.style_scale = style_scale
         self.generator = generator
-        self.content, self.style, self.centres, self.seen = [], ([], []), [], 0
-        self.centre_error = None
+        self.content, self.style, self.lesions, self.seen = [], ([], []), [], 0
+        self.lesion_error = None
 
     def __iter__(self):
         from eval.diagnostics.style_path_audit import effective_style
 
-        if self.generator is not None:
-            from eval.encoder.encoder_target_protocol import sample_targets
         for batch in self.loader:
             index = batch["index"].tolist()
             if index != list(range(self.seen, self.seen + len(index))):
@@ -309,16 +318,14 @@ class LabelTap:
                 if self.style_scale is not None and draws is not None and draws.shape[1]:
                     width = min(draws.shape[1], 3)
                     self.style[view].append(np.stack([effective_style(z, self.style_scale)[:width] for z in draws]))
-            if self.generator is not None and self.centre_error is None:
+            if self.generator is not None and self.lesion_error is None:
                 try:
-                    # sample_targets returns the nine controls, then the centroid.
-                    rendered = [
-                        sample_targets(self.generator, {k: latents[k][i] for k in STRUCTURE_LATENTS})[0][9:12]
-                        for i in range(len(index))
+                    subjects = [
+                        {k: latents[k][i] for k in STRUCTURE_LATENTS if k in latents} for i in range(len(index))
                     ]
-                    self.centres.append(np.stack(rendered))
+                    self.lesions.append(np.stack([rendered_lesion(self.generator, z) for z in subjects]))
                 except ValueError as exc:
-                    self.centre_error = str(exc)
+                    self.lesion_error = str(exc)
             yield batch
 
     def labels(self):
@@ -326,11 +333,51 @@ class LabelTap:
         style = tuple(np.concatenate(parts) if parts else np.zeros((len(content), 0)) for parts in self.style)
         return content, style
 
-    def centre_labels(self):
-        """Rendered lesion centres ``(n, 3)``, or None when any subject had no lesion."""
-        if self.generator is None or self.centre_error is not None:
+    def lesion_labels(self):
+        """Rendered lesion volume and centre ``(n, 4)``, or None when any subject had no lesion."""
+        if self.generator is None or self.lesion_error is not None:
             return None
-        return np.concatenate(self.centres)
+        return np.concatenate(self.lesions)
+
+    def centre_labels(self):
+        lesions = self.lesion_labels()
+        return None if lesions is None else lesions[:, 1:]
+
+
+def rendered_lesion(inner, latents):
+    """Volume (partial-volume voxels) and centroid ([-1, 1] coordinates) of the rendered lesion.
+
+    The centroid is ``sample_targets``'; ``z_lesion`` is passed too, which burden placement needs.
+    """
+    import torch
+
+    renderer = inner.renderer
+    _, support = renderer.render_structure(
+        latents["z_content"],
+        latents["z_deformation"],
+        latents["z_fissure"],
+        "cpu",
+        clean=inner.clean_content,
+        z_lesion=latents.get("z_lesion"),
+    )
+    mass = support.sum()
+    if not torch.isfinite(support).all() or mass <= 0:
+        raise ValueError("Empty or non-finite rendered lesion")
+    centre = (support[..., None] * renderer.coords).sum((0, 1, 2)) / mass
+    return np.concatenate([[float(mass)], centre.double().cpu().numpy()])
+
+
+def lesion_source(dataset):
+    """The generator one sphere lesion per subject is re-rendered from, or None and the reason."""
+    inner = getattr(dataset, "_inner", None)
+    if getattr(inner, "mode", None) != "pseudo_mri" or getattr(inner.renderer, "lesion_mode", None) != "sphere":
+        return None, "needs pseudo_mri sphere lesions"
+    target = getattr(inner, "lesion_target", "position")
+    if target == "burden" and getattr(inner.renderer, "lesion_count", 1) != 1:
+        return None, "needs one lesion per subject"
+    if target not in ("position", "burden") or getattr(inner, "n_content", 9) != 9:
+        return None, "needs single-lesion position or burden targets and nine content factors"
+    return inner, None
 
 
 def centre_generator(dataset):
@@ -343,23 +390,23 @@ def centre_generator(dataset):
     return inner, None
 
 
-def extract_split(source, dataset, batch_size, device, level, max_bytes, indices, with_centres=False):
-    """Maps and labels of one split; ``with_centres`` adds ``(centres or None, why not)``."""
+def extract_split(source, dataset, batch_size, device, level, max_bytes, indices, with_lesion=False):
+    """Maps and labels of one split; ``with_lesion`` adds ``(volume and centre or None, why not)``."""
     from torch.utils.data import DataLoader
 
     from training import spatial_bottleneck_experiment as experiment
 
     renderer = getattr(getattr(dataset, "_inner", None), "renderer", None)
-    generator, reason = centre_generator(dataset) if with_centres else (None, None)
+    generator, reason = lesion_source(dataset) if with_lesion else (None, None)
     tap = LabelTap(
         DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0),
         getattr(renderer, "style_scale", None),
         generator,
     )
     bank, indices = experiment.extract_content_maps(source, tap, device, level, max_bytes, indices)
-    if not with_centres:
+    if not with_lesion:
         return bank, indices, tap.labels()
-    return bank, indices, tap.labels(), (tap.centre_labels(), reason or tap.centre_error)
+    return bank, indices, tap.labels(), (tap.lesion_labels(), reason or tap.lesion_error)
 
 
 def encode_views(head, bank, batch_size, device):
@@ -515,8 +562,14 @@ def print_report(payload):
             f"(pca{run['latent_dim']} {_cell(test['pca_reconstruction_over_template'])}), "
             f"alignment {_cell(test['alignment'])} vs mismatched {_cell(test['mismatched_alignment'])}"
         )
-    if not payload["lesion_centre_targets"]["included"]:
-        print(f"  Lesion-centre targets omitted: {payload['lesion_centre_targets']['note']}")
+    if payload["generator_overrides"]:
+        print(
+            "Images: one lesion per subject, varying in volume as well as position. The frozen encoder and "
+            "bottleneck were trained on one lesion size, so this is out of distribution for them; parity was "
+            "checked on the original subjects."
+        )
+    if not payload["lesion_targets"]["included"]:
+        print(f"  Lesion targets omitted: {payload['lesion_targets']['note']}")
     for kind in payload["probes"]:
         print(f"\n== {kind} probe: test R², mean over views ==")
         print(f"{'factor':<20}" + "".join(f"{n:>{width}}" for n in names))
@@ -540,6 +593,16 @@ def print_report(payload):
                 print(f"{factor:<20}" + "".join(f"{c:>{column}}" for c in cells))
             cells = [_interval_cell(record["content_mean"]) for record in block.values()]
             print(f"{'content mean':<20}" + "".join(f"{c:>{column}}" for c in cells))
+    halves = payload["lesion_centre_by_size"]
+    for kind in payload["probes"] if halves else ():
+        column = max(width, 15)
+        print(f"\n== {kind} probe: lesion centre R² on the larger / smaller half of the test lesions ==")
+        print(f"{'factor':<20}" + "".join(f"{n:>{column}}" for n in names))
+        for factor in CENTRES:
+            cells = [
+                f"{_cell(halves[n][kind]['larger'][factor])}/{_cell(halves[n][kind]['smaller'][factor])}" for n in names
+            ]
+            print(f"{factor:<20}" + "".join(f"{c:>{column}}" for c in cells))
     if payload.get("latent_dim_selection"):
         print("\nLatent size chosen by validation content-mean R² (mean over runs with that size):")
         for kind, choice in payload["latent_dim_selection"].items():
@@ -635,6 +698,11 @@ def parse_args(argv=None):
     parser.add_argument("--val-samples", type=int, default=None, help="Extend validation (>= the run's count)")
     parser.add_argument("--test-samples", type=int, default=None, help="Extend test (>= the run's count)")
     parser.add_argument("--max-map-gib", type=float, default=None, help="Map bank cap (default: the run's)")
+    parser.add_argument(
+        "--burden-images",
+        action="store_true",
+        help="One lesion per subject whose volume varies as well as its position (out of distribution)",
+    )
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--cpu-threads", type=int, default=0, help="0 keeps torch's default")
     args = parser.parse_args(argv)
@@ -672,21 +740,31 @@ def main(argv=None):
             raise ValueError(f"--{split}-samples must be at least the bottleneck's {trained[split]}")
     batch_size = first["arguments"]["batch_size"]
     budget = int((args.max_map_gib or first["arguments"]["max_map_gib"]) * 2**30)
-    banks, labels, centres, indices, datasets = {}, {}, {}, shared["content_indices_per_view"], {}
-    centre_note = None
+    scored_args = Namespace(**{**vars(saved_args), **BURDEN_OVERRIDES}) if args.burden_images else saved_args
+    banks, labels, lesions, indices, datasets = {}, {}, {}, shared["content_indices_per_view"], {}
+    lesion_note = None
     for split in SPLITS:
-        dataset = experiment.build_split_dataset(saved_args, split, wanted[split])
+        dataset = experiment.build_split_dataset(scored_args, split, wanted[split])
         if int(dataset._inner.seed) != shared["sample_seeds"][split]:
             raise ValueError(f"Regenerated {split} split has seed {dataset._inner.seed}, not the recorded one")
         found = extract_split(
-            source, dataset, batch_size, device, shared["level"], budget, indices, with_centres=centre_note is None
+            source, dataset, batch_size, device, shared["level"], budget, indices, with_lesion=lesion_note is None
         )
         banks[split], indices, labels[split] = found[:3]
-        if centre_note is None:
-            centres[split], centre_note = found[3]
+        if lesion_note is None:
+            lesions[split], lesion_note = found[3]
         budget -= banks[split].numel() * banks[split].element_size()
         datasets[split] = dataset
         print(f"Extracted {split}: {tuple(banks[split].shape)}", flush=True)
+    # Parity always reads the bottleneck's own subjects, rendered as in training.
+    reference = {split: banks[split][: trained[split]] for split in ("val", "test")}
+    if args.burden_images:
+        for split in ("val", "test"):
+            dataset = experiment.build_split_dataset(saved_args, split, trained[split])
+            reference[split], indices, _ = extract_split(
+                source, dataset, batch_size, device, shared["level"], budget, indices
+            )
+            budget -= reference[split].numel() * reference[split].element_size()
     del source
 
     counts = [len(banks[split]) for split in SPLITS]
@@ -697,21 +775,26 @@ def main(argv=None):
     n_style = labels["train"][1][0].shape[1]
     content_names = content_factor_names(n_content, dataset_lesion_target(datasets["test"]))
     content_names += [f"z_content_{j}" for j in range(len(content_names), n_content)]
+    # Burden mode draws two latents it never renders; they are not targets.
+    drawn = [j for j, n in enumerate(content_names) if not n.startswith("unused")]
     style = [np.concatenate([labels[s][1][view] for s in SPLITS]) for view in (0, 1)]
     shared_style = [bool(np.array_equal(style[0][:, j], style[1][:, j])) for j in range(n_style)]
-    factors = [dict(name=n, block="content") for n in content_names]
-    shared_targets = [np.concatenate([labels[s][0] for s in SPLITS])]
-    if centre_note is None:
+    factors = [dict(name=content_names[j], block="content") for j in drawn]
+    shared_targets = [np.concatenate([labels[s][0] for s in SPLITS])[:, drawn]]
+    if lesion_note is None:
+        lesion = np.concatenate([lesions[s] for s in SPLITS])
+        volume = lesion[rows[0], 0]
+        if volume.std() > 1e-9 * (1.0 + abs(volume.mean())):
+            factors.append(dict(name="lesion_volume", block="lesion_size"))
+            shared_targets.append(lesion[:, :1])
         factors += [dict(name=n, block="lesion_centre") for n in CENTRES]
-        shared_targets.append(np.concatenate([centres[s] for s in SPLITS]))
+        shared_targets.append(lesion[:, 1:])
     factors += [
         dict(name=n, block="style_shared" if same else "style")
         for n, same in zip(STYLE_FACTOR_NAMES[:n_style], shared_style)
     ]
     names = [f["name"] for f in factors]
-    content_columns = [
-        j for j, f in enumerate(factors) if f["block"] == "content" and not f["name"].startswith("unused")
-    ]
+    content_columns = [j for j, f in enumerate(factors) if f["block"] == "content"]
     targets = [np.concatenate(shared_targets + [style[view]], 1) for view in (0, 1)]
 
     # Representations: per view, an (n_all, n_all) kernel over train|val|test subjects.
@@ -761,22 +844,21 @@ def main(argv=None):
         codes = {s: encode_views(head, banks[s], batch_size, device) for s in SPLITS}
         init = initial_readout(saved, report["arguments"]["seed"]).to(device)
         init_codes = {s: encode_views(init, banks[s], batch_size, device) for s in SPLITS}
-        seen_val, seen_test = banks["val"][: trained["val"]], trained["test"]
         parity = dict(
-            test_codes=relative_error(codes["test"][:seen_test], outputs["codes"]),
-            test_gap=relative_error(gap[rows[2][:seen_test]], outputs["gap"]),
+            test_codes=relative_error(encode_views(head, reference["test"], batch_size, device), outputs["codes"]),
+            test_gap=relative_error(reference["test"].mean((3, 4, 5)).numpy(), outputs["gap"]),
             val_reconstruction=relative_error(
-                experiment.evaluate(head, seen_val, batch_size, device)[0]["reconstruction"],
+                experiment.evaluate(head, reference["val"], batch_size, device)[0]["reconstruction"],
                 report["validation"]["reconstruction"],
             ),
             initial_val_reconstruction=relative_error(
-                experiment.evaluate(init, seen_val, batch_size, device)[0]["reconstruction"],
+                experiment.evaluate(init, reference["val"], batch_size, device)[0]["reconstruction"],
                 report["training"]["initial_validation"]["reconstruction"],
             ),
         )
         failed = {k: v for k, v in parity.items() if k != "initial_val_reconstruction" and v > PARITY_TOLERANCE}
         if failed:
-            extended = wanted != trained
+            extended = wanted != trained and not args.burden_images
             raise ValueError(
                 f"{run['dir']}: regenerated subjects do not reproduce the saved outputs (relative error {failed}); "
                 "the generator, source checkpoint or code changed since training"
@@ -822,6 +904,17 @@ def main(argv=None):
     rng = np.random.default_rng(args.seed)
     draws = rng.integers(0, counts[2], size=(args.bootstrap, counts[2]))
     scored = score_representations(kernels, targets, rows, args.probes, draws)
+    by_size = {}
+    if "lesion_volume" in names:
+        volume = targets[0][rows[2], names.index("lesion_volume")]
+        larger = volume >= np.median(volume)
+        columns = [names.index(n) for n in CENTRES]
+        for name, by_probe in scored.items():
+            for kind, record in by_probe.items():
+                for half, mask in (("larger", larger), ("smaller", ~larger)):
+                    per_view = [r2_columns(targets[v][rows[2]][mask], record["test_pred"][v][mask]) for v in (0, 1)]
+                    r2 = np.mean(per_view, axis=0)[columns]
+                    by_size.setdefault(name, {}).setdefault(kind, {})[half] = dict(zip(CENTRES, r2))
 
     results = {}
     for name, by_probe in scored.items():
@@ -895,7 +988,10 @@ def main(argv=None):
         },
         factors=factors,
         content_mean_factors=[names[j] for j in content_columns],
-        lesion_centre_targets=dict(included=centre_note is None, note=centre_note),
+        images="one-lesion burden mode" if args.burden_images else "as in training",
+        generator_overrides=BURDEN_OVERRIDES if args.burden_images else {},
+        lesion_targets=dict(included=lesion_note is None, note=lesion_note),
+        lesion_centre_by_size=by_size,
         pca_reconstruction_over_template=pca_reconstruction,
         probes=list(args.probes),
         bottlenecks=bottlenecks,
@@ -910,7 +1006,8 @@ def main(argv=None):
             views="each view probed separately; tables average the two",
             uncertainty=f"paired bootstrap over test subjects, {args.bootstrap} draws, probe fits held fixed",
             style_targets="gain/bias/noise sigma as rendered; a factor identical in both views is style_shared",
-            lesion_centre="rendered lesion centroid from sample_targets, in [-1, 1] generator coordinates",
+            lesion="rendered lesion volume (when it varies) and centroid in [-1, 1] coordinates, from the latents",
+            lesion_centre_by_size="centre R² on test subjects at/above vs below the median rendered volume",
             compression="recon/template and PCA-d's ratio on the same test subjects, both views",
             linear_penalties=list(LINEAR_PENALTIES),
             rbf_widths=list(RBF_WIDTHS),

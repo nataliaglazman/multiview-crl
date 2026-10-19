@@ -28,14 +28,29 @@ Protocol
   render seed, so both conditions share their bias field and noise. Under ``--synthetic-causal`` the
   moved factor's descendants are held as well (an intervention, not conditioning), which can leave
   the SCM's support. A style target moves its coordinate in both views; each view's code sees only
-  its own scan, so a view's response is that view's leakage. The two nuisance targets move the
-  deformation and fissure fields along a fixed random unit direction.
+  its own scan, so a view's response is that view's sensitivity. That is leakage for per-view style,
+  but a style factor identical in both views (gain and bias under ``synthetic_shared_gain_bias``) is
+  shared information, which a cross-view code is expected to carry. The two nuisance targets move
+  the deformation and fissure fields along a fixed random unit direction.
+* **Where the lesion went.** With a single sphere lesion and nine content factors, each content and
+  nuisance intervention also records the rendered lesion centre at both endpoints
+  (``eval.encoder.encoder_target_protocol.sample_targets``, generator coordinates), written per
+  subject to ``lesion_moves.csv`` with the displacement in voxels and whether the centre crossed the
+  midline. Under ``wm_interior`` the lesion latents are not coordinates but conditional quantiles
+  (x, then y given x, then z given x and y) through each subject's own white matter. So a nudge can
+  leave the centre on its voxel (an unchanged image, not a blind code), a lesion near the median x
+  quantile can jump hemispheres, moving ``lesion_x`` shifts the centre in y and z too, and an anatomy
+  intervention can move the lesion; confusions among them start there. ``snr_render_per_voxel``
+  divides a lesion coordinate's response by how far the centre actually moved.
 * **Responses** ``f(x(z_j + eps)) - f(x(z_j - eps))`` per subject and view, in the units each probe of
   ``spatial_bottleneck_eval`` sees: the map divided by the bottleneck's per-channel scale; every other
   representation divided by its training-subject standard deviation in that view, with constant
   columns dropped. PCA components are fitted on both views' training maps, as there. The linear
   readouts (map, patch, GAP, PCA) are applied to the change in the map, so a change one cannot see
-  reads exactly zero.
+  reads exactly zero. A subject whose images an intervention leaves bit-identical (a quantised
+  lesion centre that did not move, a clamped style value) is not measured for that factor: its
+  response is set to 0, which the metrics skip, per-sample SNRs average over the measured subjects
+  only, and ``active_frac`` reports the share that moved.
 * **Nulls.** The render null re-renders the same latents with another render seed (bias field and
   noise redrawn). The nuisance null is the largest deformation/fissure response. They are biased in
   opposite directions. The two views of a subject differ in modality, style, bias field and noise,
@@ -52,6 +67,7 @@ Reported per representation and factor
 snr_render, snr_nuisance  mean response norm over the null's. Both conditions share the render seed,
                           so a representation that ignores the factor reads 0, and 1 means the
                           factor moves it as much as redrawing the noise does.
+snr_render_per_voxel      lesion coordinates only: snr_render per voxel of actual centre displacement.
 pop_snr                   norm of the mean response over the sign-flip render-null floor: whether
                           subjects share a response direction. A code with a lesion coordinate does;
                           a local map change at a subject-specific site does not.
@@ -72,9 +88,7 @@ What this does not show
 A response shows that the code changes when the lesion moves, not that a probe reads the right
 coordinate from it; ``spatial_bottleneck_eval`` measures that. The mean-direction metrics (pop_snr,
 alias, rank) assume subjects share a response direction. In the full map a lesion move is a local
-change at a subject-specific site, so read snr_render and recall there. With ``wm_interior`` placement
-an anatomy intervention can also move the lesion, because its position is relative to the white
-matter.
+change at a subject-specific site, so read snr_render and recall there.
 """
 
 from __future__ import annotations
@@ -94,8 +108,8 @@ from eval.protocol import interventional_identifiability as interventional
 from eval.protocol import spatial_bottleneck_eval as observational
 
 NULL = "__null__"
-VIEW_MEANS = ("response", "snr_render", "snr_nuisance", "pop_snr", "pop_snr_nuisance", "consistency")
-BOOTSTRAPPED = ("snr_render", "snr_nuisance")
+BOOTSTRAPPED = ("snr_render", "snr_nuisance", "snr_render_per_voxel")
+VIEW_MEANS = ("response", *BOOTSTRAPPED, "pop_snr", "pop_snr_nuisance", "consistency")
 
 
 def _ratio(numerator, denominator):
@@ -163,16 +177,31 @@ def render_pair(dataset, latents, seed):
     return x1, x2, mask
 
 
+def lesion_centre(generator, latents):
+    """Rendered lesion centre ``(3,)`` from ``sample_targets``; NaN when the lesion is empty."""
+    import torch
+
+    from eval.encoder.encoder_target_protocol import sample_targets
+
+    try:
+        return torch.from_numpy(sample_targets(generator, latents)[0][9:12]).double()
+    except ValueError:
+        return torch.full((3,), math.nan, dtype=torch.float64)
+
+
 class ConditionRenders:
     """Subject ``i`` at ``-eps`` (item ``2i``) and at ``+eps`` (item ``2i + 1``), as a map-style dataset.
 
     ``target=None`` is the render null: the same latents at the original and at a shifted render
     seed. A subject whose moved anatomy leaves no room for its lesion (``wm_interior``) comes back
-    blank with ``ok=False`` and is dropped from every condition afterwards.
+    blank with ``ok=False`` and is dropped from every condition afterwards. With ``generator`` set,
+    content and nuisance interventions also return the rendered lesion centre.
     """
 
-    def __init__(self, dataset, base, target, eps, null_offset):
+    def __init__(self, dataset, base, target, eps, null_offset, generator=None):
         self.dataset, self.base, self.target, self.eps, self.null_offset = dataset, base, target, eps, null_offset
+        moves_structure = target is not None and target["kind"] in ("content", "nuisance")
+        self.generator = generator if moves_structure else None
 
     def __len__(self):
         return 2 * len(self.base)
@@ -194,20 +223,24 @@ class ConditionRenders:
         except LesionPlacementError:
             x1 = x2 = mask = torch.zeros(1, *(self.dataset.res,) * 3)
             ok = False
-        return {"image": [x1, x2], "mask": [mask, mask.clone()], "ok": ok}
+        out = {"image": [x1, x2], "mask": [mask, mask.clone()], "ok": ok}
+        if self.generator is not None:
+            out["centre"] = lesion_centre(self.generator, latents) if ok else torch.full((3,), math.nan).double()
+        return out
 
 
 class PairTap:
     """Passes interleaved ``(-eps, +eps)`` batches to the label-free map extractor.
 
-    Keeps, per subject, whether both renders succeeded and how far the image moved (L2 over both
-    views); an intervention that leaves an image bit-identical was not an intervention for it.
+    Keeps, per subject, whether both renders succeeded, how far the image moved (L2 over both
+    views) and, when rendered, the lesion centre at both endpoints. An intervention that leaves an
+    image bit-identical was not an intervention for that subject.
     """
 
     def __init__(self, loader):
         self.loader = loader
         self.dataset = loader.dataset
-        self.ok, self.image_change = [], []
+        self.ok, self.image_change, self.centres = [], [], []
 
     def __iter__(self):
         import torch
@@ -219,25 +252,33 @@ class PairTap:
             images = torch.cat([view.flatten(1) for view in batch["image"]], 1).double()
             self.ok.append((ok[0::2] & ok[1::2]).numpy())
             self.image_change.append((images[1::2] - images[0::2]).norm(dim=1).numpy())
+            centre = batch.pop("centre", None)
+            if centre is not None:
+                self.centres.append(torch.stack((centre[0::2], centre[1::2]), 1).numpy())
             yield batch
 
     def result(self):
-        return np.concatenate(self.ok), np.concatenate(self.image_change)
+        centres = np.concatenate(self.centres) if self.centres else None
+        return np.concatenate(self.ok), np.concatenate(self.image_change), centres
 
 
 def extract_condition(
-    source, dataset, base, target, eps, null_offset, batch_size, workers, device, level, budget, indices
+    source, dataset, base, target, eps, null_offset, batch_size, workers, device, level, budget, indices, generator
 ):
-    """Paired maps ``(n, 2, C, D, H, W)`` at ``-eps`` and ``+eps``, render status and image change per subject."""
+    """Paired maps at ``-eps`` and ``+eps``, with each subject's render status, image change and centres.
+
+    The maps are ``(n, 2, C, D, H, W)``; the lesion centres are ``(n, 2, 3)`` at ``-eps`` and
+    ``+eps`` in generator coordinates, or None unless ``generator`` renders them.
+    """
     from torch.utils.data import DataLoader
 
     from training import spatial_bottleneck_experiment as experiment
 
-    renders = ConditionRenders(dataset, base, target, eps, null_offset)
+    renders = ConditionRenders(dataset, base, target, eps, null_offset, generator)
     tap = PairTap(DataLoader(renders, batch_size=batch_size, shuffle=False, num_workers=workers))
     bank, _ = experiment.extract_content_maps(source, tap, device, level, budget, indices)
-    ok, change = tap.result()
-    return bank[0::2], bank[1::2], ok, change
+    ok, change, centres = tap.result()
+    return bank[0::2], bank[1::2], ok, change, centres
 
 
 # --------------------------------------------------------------------------- #
@@ -341,23 +382,40 @@ class Readouts:
 # --------------------------------------------------------------------------- #
 
 
-def score_view(responses, null, factors, moved, draws):
+def _subset_mean(values, subset, draws=None):
+    """Mean over ``subset`` rows; with ``draws``, one mean per bootstrap row (NaN if none drawn)."""
+    weights = subset.astype(np.float64)
+    if draws is None:
+        return float(_ratio((values * weights).sum(), weights.sum()))
+    return _ratio((values * weights)[draws].sum(1), weights[draws].sum(1))
+
+
+def score_view(responses, null, factors, measured, draws, displacement=None):
     """Probe-free intervention metrics of one representation in one view.
 
     ``responses[name]`` is ``(n, k)``, ``f(+eps) - f(-eps)`` per subject; ``null`` is the render-null
-    response of the same subjects; ``moved[name]`` says whether the intervention changed any image.
-    ``draws`` is ``(B, n)`` bootstrap rows, shared by every representation.
+    response of the same subjects. ``measured[name]`` marks the subjects whose images the
+    intervention changed: per-sample SNRs average over those, so a centre that stayed on its voxel
+    is not read as blindness (a factor that changed no image keeps every subject and reads 0).
+    ``displacement[name]``, in voxels, adds ``snr_render_per_voxel``. ``draws`` is ``(B, n)``
+    bootstrap rows, shared by every representation.
     """
+    displacement = displacement or {}
     kinds = {f["name"]: f["kind"] for f in factors}
+    moved = {name: bool(mask.any()) for name, mask in measured.items()}
+    subsets = {name: mask if mask.any() else np.ones_like(mask) for name, mask in measured.items()}
     wrapped = {name: {"content": value} for name, value in responses.items()}
     norms = {name: interventional._fro(value) for name, value in responses.items()}
     null_norm = interventional._fro(null)
     nuisance = [name for name in responses if kinds[name] == "nuisance" and moved[name]]
-    reference = max(nuisance, key=lambda name: norms[name].mean(), default=None)
+    nuisance_mean = {name: _subset_mean(norms[name], subsets[name]) for name in nuisance}
+    reference = max(nuisance, key=nuisance_mean.get, default=None)
     pop, pop_floor = interventional.population_snr(wrapped, list(responses), null)
     nuisance_pop = max((pop[name] for name in nuisance), default=np.nan)
     null_boot = null_norm[draws].mean(1)
-    nuisance_boot = np.max([norms[name][draws].mean(1) for name in nuisance], axis=0) if nuisance else None
+    nuisance_boot = (
+        np.max([_subset_mean(norms[name], subsets[name], draws) for name in nuisance], axis=0) if nuisance else None
+    )
     record = dict(
         null_response=float(null_norm.mean()),
         pop_floor=pop_floor,
@@ -366,19 +424,30 @@ def score_view(responses, null, factors, moved, draws):
         boot={},
     )
     for name, value in responses.items():
-        mean = norms[name].mean()
+        mean, boot = _subset_mean(norms[name], subsets[name]), _subset_mean(norms[name], subsets[name], draws)
+        per_voxel, per_voxel_boot = np.nan, None
+        if name in displacement:
+            distance = np.nan_to_num(displacement[name], nan=0.0)
+            moving = subsets[name] & (distance > 0)
+            if moving.any():
+                travel = _subset_mean(distance, moving)
+                per_voxel = float(_ratio(_subset_mean(norms[name], moving), travel * null_norm.mean()))
+                per_voxel_boot = _ratio(
+                    _subset_mean(norms[name], moving, draws), _subset_mean(distance, moving, draws) * null_boot
+                )
         record["factors"][name] = dict(
-            response=float(mean),
+            response=mean,
             snr_render=float(_ratio(mean, null_norm.mean())),
-            snr_nuisance=float(_ratio(mean, norms[reference].mean())) if reference else np.nan,
+            snr_nuisance=float(_ratio(mean, nuisance_mean[reference])) if reference else np.nan,
+            snr_render_per_voxel=per_voxel,
             pop_snr=pop[name],
             pop_snr_nuisance=float(_ratio(pop[name], nuisance_pop)),
             consistency=interventional.loo_consistency(value),
         )
-        boot = norms[name][draws].mean(1)
         record["boot"][name] = dict(
             snr_render=_ratio(boot, null_boot),
             snr_nuisance=_ratio(boot, nuisance_boot) if nuisance_boot is not None else None,
+            snr_render_per_voxel=per_voxel_boot,
         )
     present = [f["name"] for f in factors if f["kind"] == "content" and moved[f["name"]]]
     if len(present) >= 2:
@@ -463,11 +532,16 @@ def combine_views(views, factors):
     return combined
 
 
-def score_representation(by_target, factors, moved, draws):
+def score_representation(by_target, factors, measured, draws, displacement=None):
     """``by_target[name]`` is ``(n, 2, k)`` for every factor, ``by_target[NULL]`` the render null."""
     views = [
         score_view(
-            {f["name"]: by_target[f["name"]][:, view] for f in factors}, by_target[NULL][:, view], factors, moved, draws
+            {f["name"]: by_target[f["name"]][:, view] for f in factors},
+            by_target[NULL][:, view],
+            factors,
+            measured,
+            draws,
+            displacement,
         )
         for view in (0, 1)
     ]
@@ -514,7 +588,8 @@ def _cell(value, width=0, digits=2):
 def print_report(payload):
     reps, results, factors = payload["representations"], payload["results"], payload["factors"]
     meta = {f["name"]: f for f in factors}
-    names = {kind: [f["name"] for f in factors if f["kind"] == kind] for kind in ("content", "style", "nuisance")}
+    kinds = ("content", "style_shared", "style", "nuisance")
+    names = {kind: [f["name"] for f in factors if f["kind"] == kind] for kind in kinds}
     moved = [n for n in names["content"] if meta[n]["moved"]]
     width = max(12, *(len(rep) + 2 for rep in reps))
     subjects, nulls = payload["subjects"], payload["nulls"]
@@ -533,16 +608,38 @@ def print_report(payload):
         print(f"Changed no image (left out of identification and aliasing): {', '.join(ignored)}")
     for name, reason in payload["void_representations"].items():
         print(f"Not scored: {name} ({reason})")
-    print("snr: 0 = no response (both conditions share the render seed); 1 = as large as redrawing the noise.")
+    shifted_centre = [f for f in factors if f["centre_shift"] is not None]
+    if shifted_centre:
+        print("Rendered lesion centre per intervention: mean |delta| in x / y / z (generator coordinates),")
+        print("mean displacement in voxels, share of subjects whose centre moved, and midline crossings:")
+        for f in shifted_centre:
+            print(
+                f"  {f['name']:<20}"
+                + " ".join(_cell(v, 6, 3) for v in f["centre_shift"])
+                + f"{_cell(f['displacement_vox'], 8)} vox{f['centre_moved_frac']:>6.0%} moved"
+                + f"{f['midline_crossings']:>4} crossed"
+            )
+    elif payload["lesion_centre"]["note"]:
+        print(f"Rendered lesion centres not tracked: {payload['lesion_centre']['note']}")
+    print(
+        "snr averages over subjects whose images changed: 0 = no response (both renders share the render seed); "
+        "1 = as large as redrawing the noise."
+    )
 
     for factor in (n for n in moved if n.startswith("lesion")):
         print(
             f"\n== {factor} moved by ±{payload['eps']}, everything else held "
             f"(image changed for {meta[factor]['active_frac']:.0%} of subjects) =="
         )
+        if meta[factor]["displacement_vox"] is not None:
+            print(
+                f"   rendered centre moved {meta[factor]['displacement_vox']:.1f} voxels on average; "
+                f"{meta[factor]['midline_crossings']} subject(s) crossed the midline. "
+                "snr/vox divides snr_render by that displacement."
+            )
         print(
-            f"{'representation':<{width}}{'snr_render [95% CI]':>23}{'snr_nuis':>10}{'pop_snr':>9}{'consist':>9}"
-            f"{'recall':>8}   {'mistaken for':<26}max |cos| (with)"
+            f"{'representation':<{width}}{'snr_render [95% CI]':>23}{'snr/vox':>9}{'snr_nuis':>10}{'pop_snr':>9}"
+            f"{'consist':>9}{'recall':>8}   {'mistaken for':<26}max |cos| (with)"
         )
         for rep in reps:
             row = results[rep]["per_factor"][factor]
@@ -551,7 +648,8 @@ def print_report(payload):
             alias = f"{_cell(row.get('max_alias'))} ({row['alias_with']})" if row.get("alias_with") else "n/a"
             print(
                 f"{rep:<{width}}{_cell(row['snr_render'], 8)} [{_cell(low, 5)},{_cell(high, 6)}]"
-                f"{_cell(row['snr_nuisance'], 10)}{_cell(row['pop_snr'], 9, 1)}{_cell(row['consistency'], 9)}"
+                f"{_cell(row['snr_render_per_voxel'], 9, 3)}{_cell(row['snr_nuisance'], 10)}"
+                f"{_cell(row['pop_snr'], 9, 1)}{_cell(row['consistency'], 9)}"
                 f"{_cell(row.get('recall'), 8)}   {mistaken:<26}{alias}"
             )
         others = [n for n in moved if n != factor]
@@ -570,7 +668,8 @@ def print_report(payload):
             continue
         print(f"\n== {key}: response over {title}, every factor (mean over views) ==")
         print(f"{'factor':<20}" + "".join(f"{rep:>{width}}" for rep in reps))
-        sections = [("content", names["content"]), ("style (leakage into a content code)", names["style"])]
+        sections = [("content", names["content"])]
+        sections += [(observational.BLOCK_TITLES[kind], names[kind]) for kind in ("style_shared", "style")]
         if key == "snr_render":
             sections.append(("nuisance", names["nuisance"]))
         for label, rows in sections:
@@ -591,8 +690,11 @@ def print_report(payload):
             print(f"{rep:<{width}}{_cell(ident['accuracy'], 8)}{rank:>10}{cells}")
 
 
-def write_outputs(out_dir, payload):
-    """``payload`` must already be JSON-safe; missing values become empty CSV cells."""
+def write_outputs(out_dir, payload, lesion_moves=()):
+    """``payload`` must already be JSON-safe; missing values become empty CSV cells.
+
+    ``lesion_moves`` holds one row per tracked intervention and subject (both centre endpoints).
+    """
     out_dir.mkdir(parents=True, exist_ok=False)
     (out_dir / "interventions.json").write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
     meta = {f["name"]: f for f in payload["factors"]}
@@ -605,6 +707,11 @@ def write_outputs(out_dir, payload):
                 "kind",
                 "active_frac",
                 "image_change",
+                "centre_shift_x",
+                "centre_shift_y",
+                "centre_shift_z",
+                "displacement_vox",
+                "midline_crossings",
                 "response",
                 "snr_render",
                 "snr_render_low",
@@ -612,6 +719,9 @@ def write_outputs(out_dir, payload):
                 "snr_nuisance",
                 "snr_nuisance_low",
                 "snr_nuisance_high",
+                "snr_render_per_voxel",
+                "snr_render_per_voxel_low",
+                "snr_render_per_voxel_high",
                 "pop_snr",
                 "pop_snr_nuisance",
                 "consistency",
@@ -631,10 +741,15 @@ def write_outputs(out_dir, payload):
             result = payload["results"][rep]
             ident = result.get("identification") or {}
             for name, row in result["per_factor"].items():
+                factor = meta[name]
+                shift = factor["centre_shift"] or [None] * 3
                 writer.writerow(
-                    [rep, name, meta[name]["kind"], meta[name]["active_frac"], meta[name]["image_change"]]
+                    [rep, name, factor["kind"], factor["active_frac"], factor["image_change"], *shift]
+                    + [factor["displacement_vox"], factor["midline_crossings"]]
                     + [row["response"], row["snr_render"], *row["snr_render_ci"]]
-                    + [row["snr_nuisance"], *row["snr_nuisance_ci"], row["pop_snr"], row["pop_snr_nuisance"]]
+                    + [row["snr_nuisance"], *row["snr_nuisance_ci"]]
+                    + [row["snr_render_per_voxel"], *row["snr_render_per_voxel_ci"]]
+                    + [row["pop_snr"], row["pop_snr_nuisance"]]
                     + [row["consistency"], row.get("recall"), row.get("confused_with"), row.get("confused_share")]
                     + [row.get("max_alias"), row.get("alias_with"), row.get("direction_estimable")]
                     + [*row["snr_render_by_view"], ident.get("accuracy"), ident.get("chance")]
@@ -661,6 +776,12 @@ def write_outputs(out_dir, payload):
             for i, factor in enumerate(ident["factors"]):
                 for j, other in enumerate(ident["factors"]):
                     writer.writerow([rep, factor, other, ident["confusion"][i][j]])
+    if lesion_moves:
+        with (out_dir / "lesion_moves.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(lesion_moves[0]))
+            writer.writeheader()
+            for row in lesion_moves:
+                writer.writerow({k: "" if isinstance(v, float) and not math.isfinite(v) else v for k, v in row.items()})
 
 
 # --------------------------------------------------------------------------- #
@@ -824,6 +945,12 @@ def main(argv=None):
     content_names += [f"z_content_{j}" for j in range(len(content_names), n_content)]
     style_names = STYLE_FACTOR_NAMES[: base[0][0]["z_style_v1"].numel()]
     targets = build_targets(content_names, style_names, base[0][0])
+    for target in targets:
+        index = target.get("index")
+        if target["kind"] == "style" and all(
+            torch.equal(z["z_style_v1"][index], z["z_style_v2"][index]) for z, _ in base
+        ):
+            target["kind"] = "style_shared"
     if args.factors:
         unknown = sorted(set(args.factors) - {t["name"] for t in targets})
         if unknown:
@@ -836,12 +963,13 @@ def main(argv=None):
             "or raise --max-response-gib"
         )
 
+    generator, centre_note = observational.centre_generator(test)
     print(f"Rendering {len(targets)} interventions and the render null for {n} subjects", flush=True)
     responses, status = {name: {} for name in readouts.names}, {}
     for target in [None, *targets]:
         label = NULL if target is None else target["name"]
         tic = time.time()
-        minus, plus, ok, change = extract_condition(
+        minus, plus, ok, change, centres = extract_condition(
             source,
             test,
             base,
@@ -854,14 +982,15 @@ def main(argv=None):
             shared["level"],
             budget,
             indices,
+            generator,
         )
         for name, value in readouts.respond(minus, plus).items():
             responses[name][label] = value
-        status[label] = (ok, change)
+        status[label] = (ok, change, centres)
         print(f"  {label:<20} rendered and encoded in {time.time() - tic:.1f}s", flush=True)
     del source, minus, plus
 
-    keep = np.logical_and.reduce([ok for ok, _ in status.values()])
+    keep = np.logical_and.reduce([ok for ok, _, _ in status.values()])
     if keep.sum() < 3:
         raise ValueError("Fewer than three subjects rendered under every intervention; lower --eps")
     if not keep.all():
@@ -871,25 +1000,58 @@ def main(argv=None):
     # The encoder is deterministic, so a subject whose images the intervention left bit-identical
     # was not measured: its response is set to exactly 0, which the metrics skip. Anything nonzero
     # there is device noise, recorded as unchanged_response (exactly 0 on CPU).
-    factors = []
+    ids = np.array([f"test:{i}" for i in range(n)])
+    voxel = (test.res - 1) / 2
+    factors, measured, displacement, lesion_moves = [], {}, {}, []
     for target in targets:
-        change = status[target["name"]][1][keep]
+        name = target["name"]
+        _, change, centres = status[name]
+        change = change[keep]
+        measured[name] = change > 0
         unchanged, noise = change == 0, 0.0
         if unchanged.any():
             for by_target in responses.values():
-                value = by_target[target["name"]]
+                value = by_target[name]
                 noise = max(noise, float(np.abs(value[unchanged]).max()))
                 value[unchanged] = 0.0
-        factors.append(
-            dict(
-                name=target["name"],
-                kind=target["kind"],
-                moved=bool((change > 0).any()),
-                active_frac=float((change > 0).mean()),
-                image_change=float(change.mean()),
-                unchanged_response=noise,
-            )
+        record = dict(
+            name=name,
+            kind=target["kind"],
+            moved=bool(measured[name].any()),
+            active_frac=float(measured[name].mean()),
+            image_change=float(change.mean()),
+            unchanged_response=noise,
+            centre_shift=None,
+            centre_moved_frac=None,
+            displacement_vox=None,
+            midline_crossings=None,
         )
+        if centres is not None:
+            centres = centres[keep]
+            shift = centres[:, 1] - centres[:, 0]
+            distance = np.linalg.norm(shift, axis=1) * voxel
+            crossed = np.sign(centres[:, 0, 0]) * np.sign(centres[:, 1, 0]) < 0
+            record.update(
+                centre_shift=_mean(np.abs(shift), axis=0),
+                centre_moved_frac=float((distance > 0).mean()),
+                displacement_vox=float(_mean(distance)),
+                midline_crossings=int(crossed.sum()),
+            )
+            if name.startswith("lesion_"):
+                displacement[name] = distance
+            for subject, ends, travel, across, changed in zip(ids[keep], centres, distance, crossed, measured[name]):
+                lesion_moves.append(
+                    dict(
+                        factor=name,
+                        subject_id=str(subject),
+                        **{f"centre_minus_{axis}": float(ends[0, j]) for j, axis in enumerate("xyz")},
+                        **{f"centre_plus_{axis}": float(ends[1, j]) for j, axis in enumerate("xyz")},
+                        displacement_vox=float(travel),
+                        crossed_midline=bool(across),
+                        image_changed=bool(changed),
+                    )
+                )
+        factors.append(record)
     moved = {f["name"]: f["moved"] for f in factors}
     void = {
         name: "every feature is constant on training subjects in at least one view"
@@ -902,7 +1064,7 @@ def main(argv=None):
     for name in readouts.names:
         by_target = responses.pop(name)
         if name not in void:
-            results[name] = score_representation(by_target, factors, moved, draws)
+            results[name] = score_representation(by_target, factors, measured, draws, displacement)
 
     nuisance = [f["name"] for f in factors if f["kind"] == "nuisance"]
     if any(moved[name] for name in nuisance):
@@ -921,7 +1083,6 @@ def main(argv=None):
             )
         )
         nuisance_null = dict(available=False, reason=reason)
-    ids = np.array([f"test:{i}" for i in range(n)])
     payload = dict(
         source=dict(run_dir=run_dir, checkpoint=checkpoint, **{k: v for k, v in shared.items() if k != "counts"}),
         splits={
@@ -949,10 +1110,17 @@ def main(argv=None):
             render_image_change=float(status[NULL][1][keep].mean()),
             nuisance=nuisance_null,
         ),
+        lesion_centre=dict(rendered=generator is not None, note=centre_note),
         results=results,
         protocol=dict(
             interventions="z_j - eps and z_j + eps; every other latent and the render seed held",
-            style_targets="the coordinate moves in both views; each view's code is read from its own scan",
+            style_targets="the coordinate moves in both views; each view's code is read from its own scan; "
+            "a coordinate identical in both views for every subject is style_shared",
+            centre_shift="mean |change| of the rendered lesion centre (sample_targets), generator coordinates",
+            displacement="Euclidean centre displacement in voxels, (res - 1) / 2 per generator unit; "
+            "midline crossing = the x-centre changes sign",
+            measured_subjects="per-sample SNRs average over subjects whose images the intervention changed",
+            snr_render_per_voxel="lesion coordinates: snr_render over the mean displacement of the measured subjects",
             nuisance_targets="deformation/fissure field moved by -eps/+eps along a fixed random unit direction",
             responses="f(+eps) - f(-eps) per subject and view, in the probe units of spatial_bottleneck_eval",
             map_units="divided by the bottleneck's per-channel scale",
@@ -970,7 +1138,7 @@ def main(argv=None):
         elapsed_seconds=round(time.time() - started, 1),
     )
     payload = observational._json_safe(payload)
-    write_outputs(args.out_dir, payload)
+    write_outputs(args.out_dir, payload, lesion_moves)
     print_report(payload)
     print(f"\nSaved {args.out_dir / 'interventions.json'} and CSVs", flush=True)
     return payload
