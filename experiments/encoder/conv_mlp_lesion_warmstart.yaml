@@ -1,0 +1,13 @@
+# conv_mlp_lesion_anat6 (the full anatomy) started from conv_mlp_lesion_anatfixed's weights instead of a random init,
+# with a fresh optimizer and step counter (--init-from; the source's model.pt, SHA-256 recorded in settings.json).
+# Tells apart "the full recipe can't discover the lesion" (it survives here, since it starts already learned) from
+# "the loss prefers anatomy" (training erases it). The step-0 evaluation is the warm-started model, so per-factor
+# deltas are against the source; the untrained floor is conv_mlp_lesion_anat6's step 0 (same architecture and seed).
+# Train the source first: init_from must hold its model.pt. The path is the seed-42 run's; --set init_from=... else.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_lesion_warmstart_s{seed}
+conv_readout: mlp
+standardize_code: true
+synthetic_content_amp_scale: [1, 1, 1, 1, 1, 1, 1, 1, 1]
+eval_every: 1000
+init_from: results/encoder/runs/conv_mlp_lesion_anatfixed_s42

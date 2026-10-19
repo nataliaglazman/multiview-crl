@@ -33,6 +33,7 @@ Example:
 """
 
 import hashlib
+import io
 import json
 import os
 import random
@@ -1073,10 +1074,102 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
     return flat, flat
 
 
+def build_encoder(args):
+    """The run's encoder, on the CPU, initialized from the global torch RNG as it stands."""
+    return MultiviewConvEncoder(
+        in_channels=1,
+        hidden_channels=args.hidden_channels,
+        res_channels=args.res_channels,
+        nb_res_layers=args.nb_res_layers,
+        downscale_factor=args.downscale_factor,
+        latent_dim=args.latent_dim,
+        content_channels=args.content_channels,
+        separate_encoders=not args.no_separate_encoders,
+        proj_dim=args.contrastive_proj_dim,
+        proj_hidden=args.contrastive_proj_hidden,
+        encoder_architecture=args.encoder_architecture,
+        encoder_head_hidden=args.encoder_head_hidden,
+        conv_readout=args.conv_readout,
+        resnet_norm=args.resnet_norm,
+        resnet_output_stride=args.resnet_output_stride,
+        separate_spatial_readout=args.separate_spatial_readout,
+        global_pool=args.global_pool,
+        attention_pool_heads=args.attention_pool_heads,
+        attention_pool_frequencies=args.attention_pool_frequencies,
+        attention_pool_width=args.attention_pool_width,
+        norm_type=args.norm_type,
+        lesion_keypoints=args.lesion_keypoints,
+        lesion_norm=args.lesion_norm,
+        lesion_frame=args.lesion_frame,
+        lesion_proj_dim=args.lesion_proj_dim,
+        lesion_temperature=args.lesion_temperature,
+        lesion_input=args.lesion_input,
+        lesion_normative_components=args.lesion_normative_components,
+        lesion_input_size=args.res,
+        lesion_head_init=args.lesion_head_init,
+        lesion_detector=args.lesion_detector,
+        lesion_branch_frozen=args.lesion_branch_frozen,
+        mask_mode=args.mask_mode,
+        mask_init_gap=args.mask_init_gap,
+    )
+
+
+def read_init_from(args):
+    """--init-from: the checkpoint's state dict and provenance, refused before the run directory exists.
+
+    The file is read once, so the bytes hashed are the bytes loaded. A missing file, bytes other than
+    --init-from-sha256, or another architecture stops the launch without leaving a directory that
+    --require-new-run would refuse next time. The architecture check loads strictly into a model this
+    run builds, then compares the fixed content mask, which a different --content-channels changes
+    without changing any shape. That model draws from the torch RNG before the trainer seeds it, so the
+    run's own streams are untouched.
+    """
+    path = args.init_from
+    checkpoint = path if os.path.isfile(path) else os.path.join(path, "model.pt")
+    if not os.path.isfile(checkpoint):
+        raise SystemExit(f"--init-from {path}: need a checkpoint file, or a run directory with model.pt")
+    with open(checkpoint, "rb") as fp:
+        raw = fp.read()
+    digest = hashlib.sha256(raw).hexdigest()
+    if args.init_from_sha256 is not None and args.init_from_sha256 != digest:
+        raise SystemExit(
+            f"--init-from {checkpoint}: its SHA-256 is {digest}, not --init-from-sha256 {args.init_from_sha256}; "
+            "the checkpoint changed since that was recorded"
+        )
+    state = torch.load(io.BytesIO(raw), map_location="cpu")
+    model = build_encoder(args)
+    content_mask = model.content_mask.clone()
+    try:
+        model.load_state_dict(state)
+    except (RuntimeError, TypeError) as error:
+        raise SystemExit(
+            f"--init-from {checkpoint}: not this run's architecture; strict load_state_dict refused it:\n{error}"
+        ) from None
+    if not torch.equal(model.content_mask, content_mask):
+        raise SystemExit(
+            f"--init-from {checkpoint}: not this run's architecture; its fixed content mask marks units "
+            f"{torch.nonzero(model.content_mask[0]).flatten().tolist()} where this run's marks "
+            f"{torch.nonzero(content_mask[0]).flatten().tolist()} (--content-channels)"
+        )
+    provenance = {"path": path, "checkpoint": os.path.abspath(checkpoint), "sha256": digest}
+    provenance.update(source_step=None, source_status=None)
+    # model.pt is saved with each evaluation, just before training_progress.json records its step.
+    progress = os.path.join(os.path.dirname(checkpoint), "training_progress.json")
+    if os.path.basename(checkpoint) == "model.pt" and os.path.isfile(progress):
+        with open(progress) as fp:
+            recorded = json.load(fp)
+        provenance.update(source_step=recorded.get("step"), source_status=recorded.get("status"))
+    return state, provenance
+
+
 def main():
     args = parse_args()
     configure_encoder_runtime(vars(args))
     device = select_encoder_device(args.device, args.no_cuda)
+    init_state = init_from = None
+    if args.init_from is not None:
+        init_state, init_from = read_init_from(args)
+        args.init_from_sha256 = init_from["sha256"]
     save_dir = os.path.join(args.out_dir, args.model_id)
     os.makedirs(save_dir, exist_ok=not args.require_new_run)
     with open(os.path.join(save_dir, "settings.json"), "w") as fp:
@@ -1112,42 +1205,7 @@ def main():
     # Dataset construction resets the global RNG. Seed initialization explicitly,
     # while the loader's private generator isolates batch order from architecture.
     torch.manual_seed(args.model_seed)
-    model = MultiviewConvEncoder(
-        in_channels=1,
-        hidden_channels=args.hidden_channels,
-        res_channels=args.res_channels,
-        nb_res_layers=args.nb_res_layers,
-        downscale_factor=args.downscale_factor,
-        latent_dim=args.latent_dim,
-        content_channels=args.content_channels,
-        separate_encoders=not args.no_separate_encoders,
-        proj_dim=args.contrastive_proj_dim,
-        proj_hidden=args.contrastive_proj_hidden,
-        encoder_architecture=args.encoder_architecture,
-        encoder_head_hidden=args.encoder_head_hidden,
-        conv_readout=args.conv_readout,
-        resnet_norm=args.resnet_norm,
-        resnet_output_stride=args.resnet_output_stride,
-        separate_spatial_readout=args.separate_spatial_readout,
-        global_pool=args.global_pool,
-        attention_pool_heads=args.attention_pool_heads,
-        attention_pool_frequencies=args.attention_pool_frequencies,
-        attention_pool_width=args.attention_pool_width,
-        norm_type=args.norm_type,
-        lesion_keypoints=args.lesion_keypoints,
-        lesion_norm=args.lesion_norm,
-        lesion_frame=args.lesion_frame,
-        lesion_proj_dim=args.lesion_proj_dim,
-        lesion_temperature=args.lesion_temperature,
-        lesion_input=args.lesion_input,
-        lesion_normative_components=args.lesion_normative_components,
-        lesion_input_size=args.res,
-        lesion_head_init=args.lesion_head_init,
-        lesion_detector=args.lesion_detector,
-        lesion_branch_frozen=args.lesion_branch_frozen,
-        mask_mode=args.mask_mode,
-        mask_init_gap=args.mask_init_gap,
-    ).to(device)
+    model = build_encoder(args).to(device)
     if model.normative is not None:
         # The first training subjects, in order, so a run's normative model is reproducible.
         n = args.lesion_normative_subjects
@@ -1157,6 +1215,16 @@ def main():
         print(
             f"lesion normative model: {args.lesion_normative_components} components per view from "
             f"{(2 * n) // 3} training subjects, residual SD from {n - (2 * n) // 3} more",
+            flush=True,
+        )
+    if init_state is not None:
+        # After any normative fit, so every buffer is the source's too.
+        model.load_state_dict(init_state)
+        del init_state
+        step_note = "" if init_from["source_step"] is None else f", recorded at its step {init_from['source_step']}"
+        print(
+            f"init: warm start from {init_from['checkpoint']} (sha256 {init_from['sha256']}{step_note}); fresh "
+            "AdamW and step counter. model_init.pt and the step-0 evaluation are this model, not an untrained floor",
             flush=True,
         )
     pool_name = {"gap": "GAP", "attention": "attention pool", "moments": "GAP + moments"}[model.global_pool]
@@ -1328,6 +1396,7 @@ def main():
             "patch_loss_weight": args.patch_loss_weight,
             "train_patch_grid": (args.train_patch_grid if args.patch_loss_weight > 0 else None),
             "last_loss_terms": last_loss_terms,
+            "init_from": init_from,
         }
         if model.mask_logits is not None:
             payload["content_mask"] = {**mask_state(model), "lr": args.lr * args.mask_lr_scale}

@@ -378,6 +378,24 @@ def build_parser(description=None):
     )
     p.add_argument("--model-seed", type=int, default=None, help="Initialization seed; defaults to --seed")
     p.add_argument("--loader-seed", type=int, default=None, help="Independent shuffle seed; defaults to --seed + 10000")
+    p.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="Warm start: load an encoder run's weights (its run directory, read as model.pt, or a checkpoint file "
+        "such as model_best.pt) into this run's freshly built model before step 0, with a fresh optimizer and step "
+        "counter. The architecture must match exactly (strict load_state_dict, same content split), checked before "
+        "the run directory is made. model_init.pt and the step-0 evaluation are then the loaded model, not an "
+        "untrained floor",
+    )
+    p.add_argument(
+        "--init-from-sha256",
+        type=str,
+        default=None,
+        help="With --init-from: the checkpoint's SHA-256, which the trainer must read or refuse to start. Left "
+        "out, the trainer records the one it read in settings.json, so relaunching from that file warm-starts "
+        "from the same bytes or refuses",
+    )
     p.add_argument("--require-new-run", action="store_true", help="Refuse to overwrite an existing run directory")
     p.add_argument("--deterministic", action="store_true", help="Require deterministic PyTorch operations")
     p.add_argument(
@@ -700,6 +718,12 @@ def parse_args(argv=None, description=None):
             setattr(args, name, default)
     if args.train_steps < 1 or args.eval_every < 1 or args.batch_size < 2:
         p.error("Need positive train/evaluation steps and at least two subjects per batch")
+    if args.init_from_sha256 is not None:
+        if args.init_from is None:
+            p.error("--init-from-sha256 checks the --init-from checkpoint; it applies only with --init-from")
+        args.init_from_sha256 = args.init_from_sha256.lower()
+        if len(args.init_from_sha256) != 64 or not set(args.init_from_sha256) <= set("0123456789abcdef"):
+            p.error("--init-from-sha256 takes the checkpoint's SHA-256 as 64 hex digits")
     real = args.dataset_name != "synthetic"
     if args.best_metric is None:
         args.best_metric = "val_loss" if real else "block_mcc"

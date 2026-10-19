@@ -1,0 +1,11 @@
+# Dose-response step 4 of 4 from conv_mlp_lesion_anatfixed: conv_mlp_lesion_anat4 plus focal temporal atrophy and
+# sulcal widening, so all six anatomy factors vary over their full generator ranges: unit amplitudes reproduce the
+# default generator exactly. The full-recipe control at the anatfixed recipe's standardize_code and eval_every:
+# conv_mlp with only those two and this list changed. conv_mlp_lesion_warmstart starts this arm from
+# conv_mlp_lesion_anatfixed's weights.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_lesion_anat6_s{seed}
+conv_readout: mlp
+standardize_code: true
+synthetic_content_amp_scale: [1, 1, 1, 1, 1, 1, 1, 1, 1]
+eval_every: 1000
