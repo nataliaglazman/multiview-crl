@@ -17,6 +17,7 @@ from training.feature_competition import parse_args
 from training.feature_competition_data import (
     ARMS,
     MATCHED_PAIRS,
+    PLACEMENTS,
     SPLITS,
     CompetitionRenderer,
     array_hash,
@@ -152,6 +153,61 @@ class CompetitionTests(unittest.TestCase):
         perfect = metrics(truth, truth.astype(float), split=31.5)
         self.assertAlmostEqual(perfect["fine_position_r2"], 1.0)
         self.assertNotIn("hemisphere_auc", metrics(truth, side_only))
+
+    def test_brain_placement_lifts_every_lesion_restriction_and_wm_stays_the_original_design(self):
+        # The original geometry, byte for byte: the abbp bank's manifest records this centres hash.
+        self.assertEqual(
+            array_hash(self.renderer.centres), "a25e64e0d82bd4c5dac98153eebbd6fc3f5340a78cde32420661dcc4697dafd5"
+        )
+        r = CompetitionRenderer(placement="brain")
+        smallest = r.tissue(-r.brain_scale).numpy()
+        np.testing.assert_array_equal(r.centres, np.argwhere(smallest > 0))
+        tissue = r.tissue(0.0).numpy()
+        labels = {int(tissue[tuple(c)]) for c in r.centres}
+        self.assertTrue({1, 2, 3} <= labels)  # CSF/fissure, white and grey matter
+        self.assertGreater(r.centres.std(0).min(), 2 * self.renderer.centres.std(0).min())
+        grey = next(c for c in r.centres if tissue[tuple(c)] == 3)
+        subject = dict(r.subject("pilot", 0), centre=grey)
+        images, masks, lesion = r.render(subject, "B", dict(mean=0.5, scale=0.6))
+        self.assertGreater(lesion.sum(), 0)
+        with self.assertRaisesRegex(RuntimeError, "escaped common WM"):
+            self.renderer.render(dict(self.renderer.subject("pilot", 0), centre=grey), "A")
+        with self.assertRaises(ValueError):
+            CompetitionRenderer(placement="anywhere")
+        self.assertEqual(parse_args(["prepare", "--bank", "/tmp/x"]).lesion_placement, "wm")
+        self.assertEqual(set(PLACEMENTS), {"wm", "brain"})
+        for placement in PLACEMENTS:
+            parse_args(["prepare", "--bank", "/tmp/x", "--lesion-placement", placement])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(["prepare", "--bank", "/tmp/x", "--lesion-placement", "anywhere"])
+
+    def test_brain_placement_bank_audits_trains_and_reports_without_a_hemisphere_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bank"
+            common = ["--seeds", "42", "--device", "cpu", "--batch-size", "2"]
+            commands = [
+                ["prepare", "--arms", "A", "B", "--lesion-placement", "brain"]
+                + ["--train-samples", "8", "--probe-samples", "8", "--test-samples", "8", "--pilot-samples", "6"],
+                ["audit", "--noise-subjects", "3", "--noise-repeats", "2"],
+                ["train", "--kind", "ssl", "--standardize-code", "--arms", "A", *common]
+                + ["--hidden-channels", "8", "--res-channels", "4", "--steps", "1"],
+                ["evaluate", "--kind", "ssl", "--standardize-code", "--arms", "A", *common, "--spatial-grid", "2"],
+                ["summarize"],
+            ]
+            with contextlib.redirect_stdout(io.StringIO()):
+                for command in commands:
+                    feature_competition.main([*command, "--bank", str(root)])
+            self.assertEqual(json.loads((root / "manifest.json").read_text())["lesion_placement"], "brain")
+            audit = json.loads((root / "audit/report.json").read_text())
+            self.assertEqual(audit["lesion_placement"], "brain")
+            self.assertTrue(audit["input_gate_passed"])
+            differs = audit["matched_pair_subjects_with_different_lesion_input"]
+            self.assertEqual(set(differs), {"A_B"})
+            self.assertTrue(0 <= differs["A_B"] <= 6)
+            self.assertIsNone(hemisphere_split(np.load(root / "centres.npy")[:, 0]))
+            metrics_file = root / "runs/ssl-std_A_s42_paired/eval_000001/metrics.json"
+            rows = json.loads(metrics_file.read_text())["rows"]
+            self.assertTrue(rows and all("hemisphere_auc" not in row for row in rows))
 
     def test_cli_defaults_and_incomplete_bank(self):
         a = parse_args(["train", "--bank", "/tmp/example", "--kind", "ssl"])

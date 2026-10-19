@@ -49,11 +49,47 @@ class StandardizeCodeTests(unittest.TestCase):
 
     def test_settings_without_the_flag_keep_the_plain_loss(self):
         pooled = torch.randn(16, 12)
-        old = SimpleNamespace(**{k: v for k, v in vars(trainer.parse_args(TINY)).items() if k != "standardize_code"})
+        old = SimpleNamespace(
+            **{k: v for k, v in vars(trainer.parse_args(TINY)).items() if k not in ("standardize_code", "center_code")}
+        )
         torch.testing.assert_close(
             trainer.contrastive_loss(pooled, NO_HEAD, old, *CRITERIA),
             trainer.contrastive_loss(pooled, NO_HEAD, trainer.parse_args(TINY), *CRITERIA),
         )
+
+    def test_center_only_overrides_a_generated_standardized_recipe(self):
+        args = trainer.parse_args([*TINY, "--standardize-code", "--no-standardize-code", "--center-code"])
+        self.assertTrue(args.center_code)
+        self.assertFalse(args.standardize_code)
+        self.assertFalse(trainer.parse_args(TINY).center_code)
+        for extra in (["--standardize-code"], ["--contrastive-loss-type", "barlow_twins"]):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                trainer.parse_args([*TINY, "--center-code", *extra])
+
+    def test_center_only_matches_loss_and_gradients_and_removes_offsets_without_scaling(self):
+        torch.manual_seed(143)
+        hz = torch.randn(2, 8, 12, dtype=torch.float64) * torch.linspace(0.01, 2, 12)
+        pooled = hz.flatten(0, 1).requires_grad_(True)
+        args = trainer.parse_args([*TINY, "--center-code"])
+        actual = trainer.contrastive_loss(pooled, NO_HEAD, args, *CRITERIA)
+        content = pooled.reshape(2, 8, 12)[..., :9]
+        expected = losses.infonce_loss(
+            content - content.mean(1, keepdim=True),
+            sim_metric=CRITERIA[0],
+            criterion=CRITERIA[1],
+            tau=args.tau,
+            cross_view_negs_only=args.cross_view_negs_only,
+        ).squeeze()
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual, pooled, retain_graph=True)[0], torch.autograd.grad(expected, pooled)[0]
+        )
+        shifted = (hz + torch.randn(2, 1, 12) * 10).flatten(0, 1)
+        torch.testing.assert_close(trainer.contrastive_loss(shifted, NO_HEAD, args, *CRITERIA), actual)
+        standardized = trainer.contrastive_loss(
+            pooled, NO_HEAD, trainer.parse_args([*TINY, "--standardize-code"]), *CRITERIA
+        )
+        self.assertGreater(abs(float(actual.detach() - standardized.detach())), 0.01)
 
 
 if __name__ == "__main__":

@@ -55,11 +55,14 @@ def build_parser(description=None):
     )
     p.add_argument(
         "--global-pool",
-        choices=("gap", "attention"),
+        choices=("gap", "attention", "moments"),
         default="gap",
         help="How the global encoding pools the backbone map. attention: multi-head attention pooling with a "
         "Fourier positional encoding, initialized to exact GAP without drawing random numbers, so the "
-        "untrained floor matches the GAP run's. Patch readouts still average each bin.",
+        "untrained floor matches the GAP run's. moments: GAP plus every channel's first spatial moments "
+        "(mean of x, y and z times the channel over the map), which keep where a structure sits; they enter "
+        "the global readout's first layer through zero-initialized columns, also without random draws, so "
+        "step 0 is the GAP model exactly (models/moment_pool.py). Patch readouts still average each bin.",
     )
     p.add_argument(
         "--attention-pool-heads",
@@ -304,12 +307,21 @@ def build_parser(description=None):
     )
     p.add_argument(
         "--standardize-code",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help="Global InfoNCE only: centre and scale every unit of the loss-facing code over the batch, separately "
         "for each view, before the cosine. Raw cosines are dominated by the units that vary most across subjects, "
         "and when subjects barely differ (cosine ~0.996) the softmax stays uniform; standardized, every unit's "
         "spread counts equally. Loss-side only: the representation the probes read is unchanged. In the "
         "feature-competition pilot this let a fixed-anatomy arm learn lesion location that plain InfoNCE never did.",
+    )
+    p.add_argument(
+        "--center-code",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Global InfoNCE only: subtract each view's batch mean from each loss-facing code dimension, "
+        "without dividing by its SD. Use with --no-standardize-code to isolate centering from scaling. "
+        "Probes still read the untransformed representation.",
     )
     p.add_argument(
         "--stratify-batches",
@@ -784,6 +796,10 @@ def parse_args(argv=None, description=None):
             p.error("--mask-mode learned_size cannot drive --separate-spatial-readout, whose head has a fixed width")
     elif args.mask_size_weight is not None:
         p.error("--mask-size-weight only applies with --mask-mode learned_size")
+    if args.center_code and args.standardize_code:
+        p.error("Choose --center-code or --standardize-code; for centering only use --no-standardize-code")
+    if args.center_code and args.contrastive_loss_type != "infonce":
+        p.error("--center-code applies to InfoNCE; Barlow Twins already centers and scales each unit")
     if args.standardize_code:
         if args.contrastive_loss_type != "infonce":
             p.error("--standardize-code applies to InfoNCE; Barlow Twins already standardizes each unit over the batch")
@@ -852,7 +868,13 @@ def parse_args(argv=None, description=None):
             p.error("--attention-pool-frequencies must be nonnegative")
         if map_positions < 2:
             p.error(f"--global-pool attention needs more than one position; the backbone map is {map_name}")
-    elif (args.attention_pool_heads, args.attention_pool_frequencies, args.attention_pool_width) != (4, 4, "slice"):
+    elif args.global_pool == "moments" and map_positions < 2:
+        p.error(f"--global-pool moments needs more than one position; the backbone map is {map_name}")
+    if args.global_pool != "attention" and (
+        args.attention_pool_heads,
+        args.attention_pool_frequencies,
+        args.attention_pool_width,
+    ) != (4, 4, "slice"):
         p.error(
             "--attention-pool-heads, --attention-pool-frequencies and --attention-pool-width only apply to "
             "--global-pool attention"

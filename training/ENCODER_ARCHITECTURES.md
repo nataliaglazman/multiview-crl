@@ -72,7 +72,8 @@ python -m eval.protocol.score_checkpoint --run-dir results/infonce_resnet18_3d -
 ```
 
 Training always pools the backbone features **before** the nonlinear readout:
-by averaging, or with `--global-pool attention` (below) by attention pooling.
+by averaging, with `--global-pool attention` (below) by attention pooling, or with
+`--global-pool moments` by averaging plus each channel's first spatial moments.
 For optional patch diagnostics, the readout is applied after averaging each
 spatial bin. At input resolution 64, `--pooling patch --patch-grid 2 2 2` is the
 finest available grid; larger grids raise an error rather than duplicating
@@ -144,6 +145,39 @@ row is 1 by construction. `model.attention_maps(x, n_views=2)` returns the
 - Saved settings restore the pool in `eval.protocol.score_checkpoint`. The
   generalization audit's backbone stage reads the pool's output. Any experiment takes
   it with `--set global_pool=attention 'tag=<name>_attnpool_s{seed}'`.
+
+## Moment pooling
+
+`--global-pool moments` keeps GAP and adds every channel's first spatial moments to the
+global readout, `models/moment_pool.py`. For backbone features `h_c(p)` at the N
+positions `p` of the map, with coordinates `(x, y, z)` scaled to [-1, 1] per axis:
+
+```text
+m_c^x = (1/N) sum_p x_p h_c(p)              likewise m_c^y, m_c^z
+first readout layer = W GAP(h) + b + W_m [m^x, m^y, m^z]
+```
+
+The moments are linear in the map. A channel that responds only to a fixed-size blob
+has moments mass × centre / N, so the blob's position becomes a linear readout, which
+GAP cannot give. A fixed-site change that is off-centre also moves the moments (the
+temporal site is inferior, so atrophy there shifts the z centre of mass), while
+brain-size scaling about the centre does not.
+
+`W_m` (first-layer width × 3 · channels: 100 × 192 for the conv MLP readout, 12 × 192
+for the linear one) starts at zero and is built without random draws. Every other
+weight matches the GAP run with the same seed. The global code equals the GAP model's
+exactly until training moves `W_m`, so the untrained floors match too.
+
+- The pairs `conv_mlp_temporal009` / `conv_mlp_temporal009_moments` and
+  `conv_mlp_lesionpos` / `conv_mlp_lesionpos_moments` differ only in `global_pool`.
+- The attention-only flags are refused with moments, and the backbone map needs more
+  than one position.
+- Patch readouts, patch training and the unpooled map are unchanged.
+- `eval.protocol.score_checkpoint` restores the pool from saved settings. The
+  generalization audit's backbone stage and the normalization audit's `actual_pool` read
+  GAP and the moments together, the readout's actual input.
+- Making a factor readable does not make the loss want it. Read the learned delta
+  against the GAP arm, not the floor alone.
 
 ## Lesion branch
 

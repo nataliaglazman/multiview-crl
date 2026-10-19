@@ -86,8 +86,10 @@ falls at second order. So the script also evaluates L itself with the logits off
 in both views at once (q and W are shared by the views), for all heads together and for each head
 alone, at each ``--offset-scales`` s; and the same with every null template, each scaled to peak 1,
 in place of the site's. Started from uniform weights, the offset gives the template's peak cells
-e^s times the weight of a cell outside it; ``overlap`` per s is sum_p min(softmax(s o), t), the
-share of a uniform head that the offset moves onto the site. Per head choice and s:
+e^s times the weight of a cell outside it. Per s the report gives that head's ``core mass``, its
+weight on the template's cells above half its peak (at sigma 0.09 on a 16^3 grid: 0.04 at s = 4,
+0.6 at s = 8, all of it at s = 16), and its ``overlap`` with the template, sum_p min(softmax(s o),
+t), as ``attention_template_overlap`` scores a head. Per head choice and s:
 
 change          L(s) - L(0) with the site's offset, averaged over the K batches: negative when the
                 offset lowers L.
@@ -662,11 +664,15 @@ def score_moves(moves, descent, profiles, groups, scales, step_loss):
                 row[f"beyond_{name}_z"], row[f"beyond_{name}_rank"] = z, rank
             row["reading"] = move_reading(row)
             rows.append(row)
+    # A uniform head offset toward the site: its weight on the template's cells above half its peak, and its overlap.
     site = profiles[0]
-    overlaps = []
+    core = site >= 0.5 * site.max()
+    core_mass, overlaps = [], []
     for scale in scales:
         weights = np.exp(scale * (site - site.max()))
-        overlaps.append(float(overlap(weights / weights.sum(), site / site.sum())))
+        weights /= weights.sum()
+        core_mass.append(float(weights[core].sum()))
+        overlaps.append(float(overlap(weights, site / site.sum())))
     report = {
         "scales": [float(scale) for scale in scales],
         "head_choices": choices,
@@ -674,6 +680,8 @@ def score_moves(moves, descent, profiles, groups, scales, step_loss):
         "batches": int(len(baseline)),
         "baseline_loss": float(baseline.mean()),
         "baseline_vs_step_max_abs": float(np.abs(baseline - np.asarray(step_loss, dtype=np.float64)).max()),
+        "core_cells": int(core.sum()),
+        "core_mass_from_uniform": core_mass,
         "overlap_from_uniform": overlaps,
         "rows": rows,
     }
@@ -936,8 +944,12 @@ def print_moves(moves):
             flush=True,
         )
     print(
-        "  overlap of softmax(s o) with the template, from uniform weights: "
-        + ", ".join(f"s {s:g}: {o:.2f}" for s, o in zip(moves["scales"], moves["overlap_from_uniform"])),
+        f"  a uniform head offset by s: its weight on the template's {moves['core_cells']} cells above half its "
+        "peak, and its overlap with the template\n  "
+        + "; ".join(
+            f"s {s:g}: {mass:.1%}, {o:.2f}"
+            for s, mass, o in zip(moves["scales"], moves["core_mass_from_uniform"], moves["overlap_from_uniform"])
+        ),
         flush=True,
     )
 
@@ -1187,6 +1199,7 @@ def _self_test():
         assert np.isclose(row["beyond_first_order"], -0.01 * scale**2) and row["reading"] == "rewards site", row
         assert row["beyond_null_rank"] == 1 and row["beyond_shell_null_rank"] == 1, row
     assert 0 < moves["overlap_from_uniform"][0] < moves["overlap_from_uniform"][1] < 1, moves["overlap_from_uniform"]
+    assert 0 < moves["core_mass_from_uniform"][0] < moves["core_mass_from_uniform"][1] < 1 and moves["core_cells"] > 0
 
     assert parse_args(["--offset-scales", "2,0.5"]).offset_scales == [2.0, 0.5]
     for bad in ("0", "1,-2", "x", "inf"):

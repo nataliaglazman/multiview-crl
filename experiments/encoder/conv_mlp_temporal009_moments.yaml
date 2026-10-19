@@ -1,0 +1,12 @@
+# Moments arm of conv_mlp_temporal009: GAP plus every backbone channel's first spatial moments (the mean of x, y and z
+# times the channel over the 16^3 map), read into the MLP's first layer through zero-initialized columns
+# (models/moment_pool.py). Step 0 is the GAP arm exactly, so the two arms differ only in what training does with the
+# moments. At sigma 0.09 temporal atrophy's GAP signal is ~1% of brain size's and mostly looks like it; in a
+# random-feature audit the first moments carried a part brain size and thickness cannot reproduce (the site is
+# inferior, so atrophy shifts the z centre of mass). Read content->content/per_factor_test/temporal_atrophy in
+# dci_step*.json against conv_mlp_temporal009 at the same steps.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_temporal009_moments_s{seed}
+conv_readout: mlp
+synthetic_temporal_sigma: 0.09
+global_pool: moments

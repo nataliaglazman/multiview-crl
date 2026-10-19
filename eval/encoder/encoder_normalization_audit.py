@@ -124,12 +124,15 @@ def capture(model, images, norm_layer="pre_residual", spatial_grid=0):
     # the actual readout input. The GN/LN experiment should keep pooling matched.
     if model.attention_pool is not None:
         features["actual_pool"] = flatten(model.attention_pool(values["backbone"]))
+    elif getattr(model, "moment_pool", None) is not None:
+        backbone = values["backbone"]
+        features["actual_pool"] = flatten(torch.cat((backbone.mean((2, 3, 4)), model.moment_pool.moments(backbone)), 1))
     return features, {
         "normalizers": descriptions,
         "backbone_shape": list(values["backbone"].shape[1:]),
         "norm_shape": list(values["pre"].shape[1:]),
         "spatial_grid": spatial_grid or "native",
-        "global_pool": "gap" if model.attention_pool is None else "attention",
+        "global_pool": getattr(model, "global_pool", "gap"),
         "global_content_channels": model.content_channels,
         "global_all_channels": model.latent_dim,
         "lesion_branch_units": code.shape[1] - model.latent_dim,

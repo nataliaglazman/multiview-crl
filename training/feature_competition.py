@@ -38,6 +38,14 @@ def parse_args(argv=None):
             q.add_argument("--radius", type=float, default=0.1)
             q.add_argument("--high-contrast", type=float, default=1.5)
             q.add_argument("--brain-scale", type=float, default=0.5)
+            q.add_argument(
+                "--lesion-placement",
+                choices=("wm", "brain"),
+                default="wm",
+                help="wm (default): a complete lesion and its blur halo inside the white matter every brain size "
+                "shares. brain: any voxel of the smallest brain, no margin; the lesion may overlap any tissue or the "
+                "brain edge, and brain size changes its surroundings, so matched-pair evidence is measured, not gated",
+            )
         if name == "audit":
             q.add_argument("--noise-subjects", type=int, default=32)
             q.add_argument("--noise-repeats", type=int, default=32)

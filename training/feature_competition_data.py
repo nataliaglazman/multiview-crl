@@ -22,6 +22,11 @@ COMMON_ARM = {"A": "A", "B": "A", "Bp": "A", "C": "C", "D": "C"}
 # Input visibility must match within MATCHED_PAIRS and rise within INCREASED_PAIRS.
 MATCHED_PAIRS = (("A", "B"), ("A", "Bp"), ("C", "D"))
 INCREASED_PAIRS = (("A", "C"), ("B", "D"))
+# Where lesion centres may sit. "wm": the original design, a complete sphere plus its blur halo inside the white
+# matter shared by every brain size, so the competitor never changes the lesion's input evidence. "brain": any voxel
+# of the smallest brain, with no margin, so the lesion can overlap grey matter, CSF, the fissure or the brain edge
+# (parts outside the brain are masked) and brain size changes what surrounds it.
+PLACEMENTS = ("wm", "brain")
 
 
 def safe_json(value):
@@ -58,16 +63,28 @@ def file_hash(path):
 
 
 class CompetitionRenderer:
-    def __init__(self, res=64, radius=0.1, high_contrast=1.5, seed=42, brain_scale=0.5):
+    def __init__(self, res=64, radius=0.1, high_contrast=1.5, seed=42, brain_scale=0.5, placement="wm"):
+        if placement not in PLACEMENTS:
+            raise ValueError(f"placement must be one of {PLACEMENTS}, got {placement!r}")
         self.res, self.radius = res, radius
         self.high_contrast, self.seed = high_contrast, seed
         self.brain_scale = brain_scale
+        self.placement = placement
         # Feed already-squashed brain size; all other anatomical controls are zero.
         # The native lesion is discarded in favor of a common, explicit mask.
         self.renderer = PseudoMRIRenderer(res=res, lesion_radius=radius, content_squash="none")
         self.zero_deformation = torch.zeros(4, 4, 4)
         self.zero_fissure = torch.zeros(8, 8, 8)
         lower, upper = self.tissue(-brain_scale), self.tissue(brain_scale)
+        if placement == "brain":
+            # The smallest brain lies inside every larger one, so a centre in it is inside the brain at every size.
+            admissible = lower.numpy() > 0
+            for value in np.linspace(-brain_scale, brain_scale, 9):
+                if np.any(admissible & (self.tissue(float(value)).numpy() == 0)):
+                    raise RuntimeError("Brain nesting assumption failed")
+            self.centres = np.argwhere(admissible)
+            self.admissible = admissible
+            return
         common = (lower.numpy() == 2) & (upper.numpy() == 2)
         distance = distance_transform_edt(np.pad(common, 1), sampling=2 / (res - 1))[1:-1, 1:-1, 1:-1]
         admissible = distance > radius + 1e-7
@@ -132,7 +149,7 @@ class CompetitionRenderer:
         for v, (modality, brain) in enumerate(zip(("T1", "FLAIR"), self.brain_sizes(subject, arm))):
             if brain not in tissues:
                 tissues[brain] = self.tissue(brain)
-                if bool(((lesion > 0) & (tissues[brain] != 2)).any()):
+                if self.placement == "wm" and bool(((lesion > 0) & (tissues[brain] != 2)).any()):
                     raise RuntimeError("Lesion escaped common WM support")
             tissue = tissues[brain]
             mask = (tissue > 0).numpy()[None]
@@ -174,7 +191,9 @@ def prepare(args):
     root = Path(args.bank)
     if root.exists():
         raise FileExistsError(f"Bank already exists: {root}; use a new directory")
-    r = CompetitionRenderer(args.res, args.radius, args.high_contrast, args.data_seed, args.brain_scale)
+    r = CompetitionRenderer(
+        args.res, args.radius, args.high_contrast, args.data_seed, args.brain_scale, args.lesion_placement
+    )
     counts = dict(train=args.train_samples, probe=args.probe_samples, test=args.test_samples, pilot=args.pilot_samples)
     # Images are deterministic given these settings, so a bank of some arms (e.g. the arm-A
     # pilot) holds exactly the images those arms have in a bank of all five.
@@ -190,6 +209,7 @@ def prepare(args):
         high_contrast=args.high_contrast,
         seed=args.data_seed,
         brain_scale=args.brain_scale,
+        lesion_placement=args.lesion_placement,
         counts=counts,
         normalization=norm,
         centres_hash=array_hash(r.centres),
@@ -258,7 +278,10 @@ def audit(args):
     meta = load_bank(root)
     out = root / "audit"
     out.mkdir(exist_ok=args.overwrite)
-    r = CompetitionRenderer(meta["res"], meta["radius"], meta["high_contrast"], meta["seed"], meta["brain_scale"])
+    placement = meta.get("lesion_placement", "wm")
+    r = CompetitionRenderer(
+        meta["res"], meta["radius"], meta["high_contrast"], meta["seed"], meta["brain_scale"], placement
+    )
     if array_hash(r.centres) != meta["centres_hash"]:
         raise ValueError("Renderer geometry differs from prepared bank")
     for filename, expected in meta["files"].items():
@@ -278,6 +301,9 @@ def audit(args):
                     raise ValueError("Current renderer does not reproduce the saved bank")
     subjects = [r.subject("pilot", i) for i in range(meta["counts"]["pilot"])]
     geometry = []
+    # Under "brain" placement the competitor changes the tissue around the lesion by design, so the matched pairs'
+    # lesion evidence is measured (how many subjects differ) instead of required to be identical.
+    input_differs = {f"{a}_{b}": 0 for a, b in matched_pairs}
     for s in subjects:
         rendered = {a: r.render(s, a, meta["normalization"]) for a in arms}
         if len({array_hash(x[2]) for x in rendered.values()}) != 1:
@@ -287,11 +313,16 @@ def audit(args):
         off = {a: r.render(s, a, meta["normalization"], lesion_on=False)[0] for p in matched_pairs for a in p}
         core = lesion > 0
         for first, second in matched_pairs:
-            if not np.array_equal(rendered[first][0][:, 0, core], rendered[second][0][:, 0, core]):
-                raise RuntimeError("Competitor changed lesion-core input evidence")
             response_a = (rendered[first][0] - off[first])[:, 0, roi]
             response_b = (rendered[second][0] - off[second])[:, 0, roi]
-            if not np.allclose(response_a, response_b, atol=5e-7, rtol=1e-5):
+            same_core = np.array_equal(rendered[first][0][:, 0, core], rendered[second][0][:, 0, core])
+            same_response = np.allclose(response_a, response_b, atol=5e-7, rtol=1e-5)
+            if placement == "brain":
+                input_differs[f"{first}_{second}"] += int(not (same_core and same_response))
+                continue
+            if not same_core:
+                raise RuntimeError("Competitor changed lesion-core input evidence")
+            if not same_response:
                 raise RuntimeError("Competitor changed the rendered lesion intervention response")
         geometry.append(dict(subject=s["id"], mask_sha256=array_hash(lesion), voxels=float(lesion.sum())))
     # Save reviewable slices at the actual rendered lesion, with common scales per view.
@@ -374,6 +405,9 @@ def audit(args):
     matched = all(
         comparisons[f"{view}_{b}_over_{a}"]["equivalent_within_10_percent"] for view in VIEWS for a, b in matched_pairs
     )
+    if placement == "brain":
+        # Brain size changes the lesion's surroundings by design here, so matched visibility is reported, not gated.
+        matched = True
     increased = all(
         comparisons[f"{view}_{b}_over_{a}"]["ratio_ci"][0] is not None
         and comparisons[f"{view}_{b}_over_{a}"]["ratio_ci"][0] > 1
@@ -393,7 +427,9 @@ def audit(args):
     result = dict(
         bank_id=meta["bank_id"],
         arms=arms,
+        lesion_placement=placement,
         matched_pairs=matched_pairs,
+        matched_pair_subjects_with_different_lesion_input=input_differs if placement == "brain" else None,
         increased_pairs=increased_pairs,
         geometry=geometry,
         noise_rows=rows,

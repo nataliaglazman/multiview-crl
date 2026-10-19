@@ -104,7 +104,11 @@ def capture_batch(model, x):
         backbone = captured["encoder"]
         if model.encoder_v1 is not None:
             backbone = torch.cat((backbone, captured["encoder_v1"]), dim=0)
-        values = {"backbone": backbone.mean((2, 3, 4))}
+        pooled = backbone.mean((2, 3, 4))
+        if getattr(model, "moment_pool", None) is not None:
+            # With moment pooling the readout reads GAP and each channel's first moments.
+            pooled = torch.cat((pooled, model.moment_pool.moments(backbone)), dim=1)
+        values = {"backbone": pooled}
     if "hidden" in captured:
         values["hidden"] = captured["hidden"]
     values.update(

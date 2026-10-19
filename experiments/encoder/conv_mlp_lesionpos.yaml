@@ -1,0 +1,14 @@
+# conv_mlp on the single-lesion POSITION target (z_content[2:5], the default) with the settings under which the
+# burden target was learned (conv_mlp_burden_oracle_k1, without its one-cluster sampler): the lesion goes through the
+# acquisition gain/bias, the T1 lesion is 0.0 so it is dark and distinct in T1, and --standardize-code is on.
+# GAP arm of the pairing with conv_mlp_lesionpos_moments. Under GAP, moving the lesion changes the pooled features by
+# ~0.001-0.002 of a between-subject difference, 10-30x below any factor training has learned.
+# Read per_factor["content→content"].lesion_x/y/z.ridge in dci_step*.json. Even a perfect localiser reads only about
+# 0.58/0.84/0.62 against these latent targets (wm_interior maps them through conditional quantiles), so judge
+# against that, not against 1.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_lesionpos_s{seed}
+conv_readout: mlp
+synthetic_lesion_intensity: styled
+synthetic_lesion_t1_value: 0.0
+standardize_code: true

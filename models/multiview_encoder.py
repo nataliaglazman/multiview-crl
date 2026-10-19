@@ -7,8 +7,9 @@
 The hidden readout width is configurable. This is a 3D adaptation, not a change
 to the training objective or the view-sharing policy. Both have no decoder.
 Optional ablations add a pooled MLP to conv, replace ResNet BatchNorm with
-GroupNorm, remove late ResNet strides, or replace the global GAP with attention
-pooling (``models.attention_pool``). Defaults preserve existing checkpoints.
+GroupNorm, remove late ResNet strides, replace the global GAP with attention
+pooling (``models.attention_pool``), or read each channel's first spatial moments
+beside it (``models.moment_pool``). Defaults preserve existing checkpoints.
 
 The first ``content_channels`` units are the content block, the rest are style.
 With ``mask_mode="learned"`` a top-k Gumbel-softmax mask over learnable per-unit logits
@@ -31,6 +32,7 @@ from torch import nn
 
 from models.attention_pool import AttentionPool3d
 from models.keypoint_pool import KeypointPool3d
+from models.moment_pool import MomentPool3d
 from models.normative_residual import NormativeResidual
 from models.resnet3d import ResNet18Features3d
 from utils.helper import HelperModule
@@ -128,7 +130,7 @@ class MultiviewConvEncoder(HelperModule):
         self.normalization = resnet_norm if encoder_architecture == "resnet18" else norm_type
         if self.readout_type == "mlp" and encoder_head_hidden <= 0:
             raise ValueError("encoder_head_hidden must be positive")
-        if global_pool not in ("gap", "attention"):
+        if global_pool not in ("gap", "attention", "moments"):
             raise ValueError(f"Unknown global_pool: {global_pool!r}")
         self.global_pool = global_pool
         if lesion_keypoints < 0:
@@ -249,6 +251,15 @@ class MultiviewConvEncoder(HelperModule):
                 num_heads=attention_pool_heads,
                 num_frequencies=attention_pool_frequencies,
                 width=attention_pool_width,
+            )
+        # Moment pooling keeps GAP and adds every channel's first spatial moments to the global
+        # readout's first layer, through zero-initialized columns built without random draws, so
+        # the readout starts as the GAP model's. Shared across views, like the readout.
+        self.moment_pool = None
+        if global_pool == "moments":
+            self.moment_pool = MomentPool3d(
+                512 if encoder_architecture == "resnet18" else hidden_channels,
+                encoder_head_hidden if self.readout_type == "mlp" else latent_dim,
             )
 
         # --- Lesion branch ---
@@ -383,11 +394,18 @@ class MultiviewConvEncoder(HelperModule):
         lesion branch reads it, for its brain frame and its residual input.
         """
         if self.attention_pool is None:
-            # The original GAP expressions, so existing checkpoints replay bit-for-bit.
+            # The original GAP expressions, so existing checkpoints replay bit-for-bit. The moment
+            # term is added to the first readout layer's output, where zero weights leave it exact.
             if self.readout_type == "mlp":
-                code = self.to_encoding(self.avgpool(h).flatten(1))
+                if self.moment_pool is None:
+                    code = self.to_encoding(self.avgpool(h).flatten(1))
+                else:
+                    first = self.to_encoding[0](self.avgpool(h).flatten(1)) + self.moment_pool(h)
+                    code = self.to_encoding[1:](first)
             else:
                 code = self.to_encoding(h).mean(dim=[2, 3, 4])
+                if self.moment_pool is not None:
+                    code = code + self.moment_pool(h)
         else:
             pooled = self.attention_pool(h)
             if self.readout_type == "mlp":
@@ -563,14 +581,14 @@ class MultiviewConvEncoder(HelperModule):
         Views are routed as in ``forward``. A GAP model has no maps (its weights are uniform).
         """
         if self.attention_pool is None:
-            raise ValueError("This model pools globally with GAP; it has no attention maps")
+            raise ValueError(f"This model pools globally with {self.global_pool}; it has no attention maps")
         return self.attention_pool.maps(self._encode(x, n_views, view_idx))
 
     def global_and_patch_features(self, x, patch_grid, n_views=2):
         """Two training readouts from ONE backbone pass, before any loss projector.
 
         Returns (2B, latent_dim) and (2B, spatial_channels, P). The global MLP
-        receives globally pooled features (GAP or attention); the active patch MLP
+        receives globally pooled features (GAP, attention, or GAP plus moments); the active patch MLP
         receives each averaged bin.
         The separate spatial head has content_channels outputs and no style units;
         the legacy shared head has latent_dim outputs.
@@ -585,7 +603,7 @@ class MultiviewConvEncoder(HelperModule):
             patches = self.patch_readout(self._patch_pool(h, grid).transpose(1, 2)).transpose(1, 2)
         else:
             features = self.to_encoding(h)
-            if self.attention_pool is None:
+            if self.attention_pool is None and self.moment_pool is None:
                 pooled = self._append_lesion(features.mean(dim=[2, 3, 4]), h, x, n_views)
             else:
                 pooled = self._global_code(h, x, n_views)

@@ -6,7 +6,9 @@ an affine readout. ``--encoder-architecture resnet18`` uses a 3D adaptation of
 the upstream image encoder: ResNet-18 -> GAP -> Linear -> LeakyReLU -> Linear.
 This architecture option does not change the loss, data, or view-sharing policy.
 ``--global-pool attention`` replaces the GAP before either readout with multi-head
-attention pooling (``models.attention_pool``), which starts as exact GAP.
+attention pooling (``models.attention_pool``), which starts as exact GAP. ``--global-pool moments``
+keeps GAP and adds each channel's first spatial moments to the readout (``models.moment_pool``),
+through zero-initialized columns, so it starts as exact GAP too.
 ``--mask-mode learned`` replaces the fixed content block (the first ``--content-channels``
 units) with a top-k Gumbel-softmax content selector over learnable per-unit logits.
 ``--stratify-batches oracle|code`` draws every training batch from one k-means cluster of the
@@ -351,6 +353,8 @@ def contrastive_loss(pooled, model, args, sim_metric, criterion, mask=None):
     if getattr(args, "standardize_code", False):
         # Per view, over the batch, so every unit's spread counts equally in the cosine (--standardize-code).
         hz = standardize_contrastive_code(hz)
+    elif getattr(args, "center_code", False):
+        hz = hz - hz.mean(1, keepdim=True)
     content_indices = [list(range(hz.shape[-1]))]
     if args.contrastive_loss_type == "barlow_twins":
         # With a mask, Barlow Twins keeps only the selected units (losses.barlow_twins_loss); a
@@ -1154,7 +1158,7 @@ def main():
             f"{(2 * n) // 3} training subjects, residual SD from {n - (2 * n) // 3} more",
             flush=True,
         )
-    pool_name = "attention pool" if model.attention_pool is not None else "GAP"
+    pool_name = {"gap": "GAP", "attention": "attention pool", "moments": "GAP + moments"}[model.global_pool]
     if real:
         # parse_args' rule (conv floors, ResNet rounds up); a probe forward would move BatchNorm statistics.
         stride = model.backbone_stride
@@ -1189,6 +1193,13 @@ def main():
             f"{pool.num_frequencies} Fourier frequencies/axis, "
             f"{sum(p.numel() for p in pool.parameters())} parameters; starts as exact GAP. "
             "Patch readouts still average each bin.",
+            flush=True,
+        )
+    if model.moment_pool is not None:
+        print(
+            f"global pool: GAP plus first spatial moments; {3 * model.moment_pool.channels} moment features into "
+            f"the readout's first layer through {model.moment_pool.weight.numel()} zero-initialized weights, so it "
+            "starts as exact GAP. Patch readouts still average each bin.",
             flush=True,
         )
     if model.lesion_pool is not None:
@@ -1302,6 +1313,7 @@ def main():
             "attention_pool_parameter_count": (
                 sum(p.numel() for p in model.attention_pool.parameters()) if model.attention_pool is not None else 0
             ),
+            "moment_pool_parameter_count": model.moment_pool.weight.numel() if model.moment_pool is not None else 0,
             "optimizer": "AdamW",
             "optimizer_defaults": optimizer.defaults,
             "elapsed_seconds_including_evaluation": time.perf_counter() - started,

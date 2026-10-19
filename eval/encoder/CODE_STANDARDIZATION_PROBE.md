@@ -30,7 +30,7 @@ Subject indices and image hashes must agree between checkpoints.
 Training mode is the default for the encoder forward. Model buffers, module modes,
 and parameter gradients are preserved. `--model-mode eval` explicitly uses the
 checkpoint's evaluation behavior instead. The projection head and content selection
-are shared with training. Both standardization toggles are checked against the
+are shared with training. All three code transformations are checked against the
 trainer's actual global InfoNCE on every batch. Learned masks, non-InfoNCE losses,
 real data, and within-modality augmented pairing are rejected. Other training loss
 terms are outside this probe's scope.
@@ -103,3 +103,67 @@ standardization would ultimately learn more lesion information; that requires
 a matched training experiment. It can support or refute the simpler explanation
 that the current objective becomes more dependent on residual anatomy when
 standardization is applied.
+
+## Matched training follow-up
+
+Compare the existing standardized run with two fresh runs, retaining the saved
+data generator, lesion target, clustering, model/loader seeds, learning rate,
+temperature, batch size, and step budget:
+
+| Arm | Trainer flags | What it tests |
+| --- | --- | --- |
+| Standardized | `--standardize-code --no-center-code` | Existing reference |
+| Centered | `--no-standardize-code --center-code` | Remove SD scaling while retaining centering |
+| Raw | `--no-standardize-code --no-center-code` | Remove both transforms |
+
+From the repository root, after syncing the updated trainer and launcher to the
+training machine:
+
+```bash
+RUN=results/encoder/runs/conv_mlp_burden_oracle_k60_s42
+
+python -m scripts.run_encoder_code_ablation \
+  --reference-run "$RUN" --modes centered raw --device cuda --dry-run
+
+nohup python -u -m scripts.run_encoder_code_ablation \
+  --reference-run "$RUN" --modes centered raw --device cuda \
+  > code_ablation_s42.log 2>&1 &
+```
+
+This runs sequentially, starting from fresh initialization. It writes siblings
+`${RUN}_code_centered` and `${RUN}_code_raw`, refuses existing outputs, and stops
+on failure. It reads `settings.json`, not the current experiment YAML or the
+folder name, and prints the saved lesion target first. A folder named `burden`
+can therefore still produce position-target runs if that is what it actually
+trained. Unknown saved settings are refused rather than silently omitted.
+
+If the original run was trained with different code or dependencies, include
+`--modes standardized centered raw` to produce a fresh standardized control too.
+Saved settings/seeds cannot reproduce older generator or model implementations;
+compare `stratification.json`, initialization tensors, and training input hashes
+when reusing an older control.
+
+The primary outcome is held-out per-factor lesion ridge R² relative to the
+untrained floor, in both encoders, at the same training step. The trainer already
+logs these in `dci_step*.json` when using the synthetic recipe. Compare brain size,
+cortical thickness, and other anatomy factors as secondary outcomes. A lower
+training loss alone does not establish improved lesion recovery; the objectives
+have different geometries. Loss of anatomy without a lesion gain is not the
+desired result either.
+
+Rerun the frozen-checkpoint probe with automatic factor selection so it uses the
+actual target. A separate output directory preserves the first probe:
+
+```bash
+for DIR in "$RUN" "${RUN}_code_centered" "${RUN}_code_raw"; do
+  python -m eval.encoder.code_standardization_probe \
+    --run-dir "$DIR" --checkpoints model_init.pt model.pt \
+    --batches 16 --shuffles 16 --device cuda \
+    --out-dir "$DIR/standardization_probe_followup" || break
+done
+```
+
+For replication, use all three modes and `--seed 43` (then `--seed 44`). This
+changes the model seed and loader order together, keeps the saved data seed, and
+adds `_seed43` or `_seed44` to each output name. Start with the seed-42 comparison
+before spending compute on more K values or other model changes.

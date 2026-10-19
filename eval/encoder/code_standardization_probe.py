@@ -285,16 +285,22 @@ def extract_code(model, images, options, mode):
         with torch.no_grad():
             pooled = model(images, pool_only=True, n_views=2)[2][0]
             raw = trainer.contrastive_code(pooled, model, options)
-            # Check both toggles against the real trainer, including the actual projector.
+            # Check all three transforms against the real trainer, including the actual projector.
             parity = {}
-            for standardize in (False, True):
-                args = SimpleNamespace(**{**vars(options), "standardize_code": standardize})
+            for transform_mode in MODES:
+                args = SimpleNamespace(
+                    **{
+                        **vars(options),
+                        "standardize_code": transform_mode == "standardized",
+                        "center_code": transform_mode == "centered",
+                    }
+                )
                 expected = trainer.contrastive_loss(
                     pooled, model, args, torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
                 )
-                actual = code_loss(transform(raw, "standardized" if standardize else "raw"), args)
+                actual = code_loss(transform(raw, transform_mode), args)
                 torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
-                parity[str(standardize)] = float((actual - expected).abs())
+                parity[transform_mode] = float((actual - expected).abs())
             return raw.detach().cpu(), parity
     finally:
         with torch.no_grad():

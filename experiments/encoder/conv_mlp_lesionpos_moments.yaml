@@ -1,0 +1,12 @@
+# Moments arm of conv_mlp_lesionpos: GAP plus every backbone channel's first spatial moments, read into the MLP's
+# first layer through zero-initialized columns (models/moment_pool.py), so step 0 is the GAP arm exactly. A channel
+# that responds only to the fixed-size lesion has first moments mass x centre / positions, so the lesion's position
+# becomes a linear readout; in a random-feature audit the moments moved ~10x more than GAP when the lesion moved.
+# Read lesion_x/y/z against conv_mlp_lesionpos at the same steps.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_lesionpos_moments_s{seed}
+conv_readout: mlp
+synthetic_lesion_intensity: styled
+synthetic_lesion_t1_value: 0.0
+standardize_code: true
+global_pool: moments
