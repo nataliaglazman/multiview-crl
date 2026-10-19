@@ -42,9 +42,16 @@ Protocol
   representation is resampled with the same draws, so ``z - gap`` and the other differences
   compare the same subjects. Training-sample and seed variability are not included; pass
   several bottleneck seeds for that.
-* **Style targets** are the gain, bias and noise sigma the renderer applied
-  (``eval.diagnostics.style_path_audit.effective_style``); the raw noise draw's sign never
-  reaches the image. For a content code these measure leakage, so lower is better.
+* **Targets.** The content latents, the rendered lesion centre and the style the renderer
+  applied. Under ``wm_interior`` placement the lesion latents are quantiles through each
+  subject's own white matter, so reading them means redoing a subject-specific count; the
+  centre (``centroid_x/y/z``, re-rendered by ``eval.encoder.encoder_target_protocol.sample_targets``)
+  is where the lesion actually sits. Style targets are the gain, bias and noise sigma
+  actually rendered (``eval.diagnostics.style_path_audit.effective_style``). A style factor
+  that is identical in both views (``synthetic_shared_gain_bias``) is shared information, so a
+  cross-view code is expected to carry it; only per-view style counts as leakage.
+* **Compression reference.** Next to the code's reconstruction error over the training
+  template, the same ratio for the map's top-d PCA projection on the same test subjects.
 
 What this does not show
 -----------------------
@@ -81,6 +88,17 @@ RBF_PENALTIES = tuple(float(p) for p in np.logspace(-5, 1, 13))
 PARITY_TOLERANCE = 1e-2
 #: Baselines each trained code is compared with (``pca`` and ``z_init`` resolve per run).
 BASELINES = ("map", "patch", "gap", "pca", "z_init")
+#: Rendered lesion centre, in the generator's [-1, 1] coordinates.
+CENTRES = ("centroid_x", "centroid_y", "centroid_z")
+#: Latents ``sample_targets`` re-renders the lesion from.
+STRUCTURE_LATENTS = ("z_content", "z_deformation", "z_fissure")
+#: Target blocks in table order, with their headings.
+BLOCK_TITLES = {
+    "content": "content",
+    "lesion_centre": "lesion centre (rendered position)",
+    "style_shared": "style shared by both views (expected in a shared code)",
+    "style": "per-view style (leakage; lower is better)",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -124,6 +142,16 @@ def pca_scores(gram, fit_rows, n_components):
     if len(w) < n_components or w[-1] <= 1e-10 * max(w[0], 1e-300):
         raise ValueError(f"Training maps span fewer than {n_components} components; PCA size is too large")
     return centred[:, fit_rows] @ U / np.sqrt(w)
+
+
+def pca_reconstruction_ratio(gram, fit_rows, scores, rows):
+    """Squared error of the PCA reconstruction on ``rows`` over that of the ``fit_rows`` mean.
+
+    The map-side counterpart of the trainer's ``reconstruction_over_template``: the same
+    normalisation and template, with the top-d projection in place of the decoder.
+    """
+    energy = np.diag(center_kernel(gram, fit_rows))[rows]
+    return float((energy - np.square(scores[rows]).sum(1)).sum() / energy.sum())
 
 
 def probe_kernels(K, train, kind):
@@ -252,17 +280,23 @@ class LabelTap:
 
     ``extract_content_maps`` never sees ``gt_latents``. Labels are recorded in loader order,
     which is the row order of the maps it returns; ``index`` is checked to be sequential.
+    With ``generator`` set, ``sample_targets`` re-renders each subject's lesion centre; a
+    subject without a rendered lesion drops the centres for the whole split.
     """
 
-    def __init__(self, loader, style_scale):
+    def __init__(self, loader, style_scale, generator=None):
         self.loader = loader
         self.dataset = loader.dataset
         self.style_scale = style_scale
-        self.content, self.style, self.seen = [], ([], []), 0
+        self.generator = generator
+        self.content, self.style, self.centres, self.seen = [], ([], []), [], 0
+        self.centre_error = None
 
     def __iter__(self):
         from eval.diagnostics.style_path_audit import effective_style
 
+        if self.generator is not None:
+            from eval.encoder.encoder_target_protocol import sample_targets
         for batch in self.loader:
             index = batch["index"].tolist()
             if index != list(range(self.seen, self.seen + len(index))):
@@ -275,6 +309,16 @@ class LabelTap:
                 if self.style_scale is not None and draws is not None and draws.shape[1]:
                     width = min(draws.shape[1], 3)
                     self.style[view].append(np.stack([effective_style(z, self.style_scale)[:width] for z in draws]))
+            if self.generator is not None and self.centre_error is None:
+                try:
+                    # sample_targets returns the nine controls, then the centroid.
+                    rendered = [
+                        sample_targets(self.generator, {k: latents[k][i] for k in STRUCTURE_LATENTS})[0][9:12]
+                        for i in range(len(index))
+                    ]
+                    self.centres.append(np.stack(rendered))
+                except ValueError as exc:
+                    self.centre_error = str(exc)
             yield batch
 
     def labels(self):
@@ -282,19 +326,40 @@ class LabelTap:
         style = tuple(np.concatenate(parts) if parts else np.zeros((len(content), 0)) for parts in self.style)
         return content, style
 
+    def centre_labels(self):
+        """Rendered lesion centres ``(n, 3)``, or None when any subject had no lesion."""
+        if self.generator is None or self.centre_error is not None:
+            return None
+        return np.concatenate(self.centres)
 
-def extract_split(source, dataset, batch_size, device, level, max_bytes, indices):
+
+def centre_generator(dataset):
+    """The generator ``sample_targets`` re-renders lesion centres from, or None and the reason."""
+    inner = getattr(dataset, "_inner", None)
+    if getattr(inner, "mode", None) != "pseudo_mri" or getattr(inner.renderer, "lesion_mode", None) != "sphere":
+        return None, "needs pseudo_mri sphere lesions"
+    if getattr(inner, "lesion_target", "position") != "position" or getattr(inner, "n_content", 9) != 9:
+        return None, "needs single-lesion position targets and nine content factors"
+    return inner, None
+
+
+def extract_split(source, dataset, batch_size, device, level, max_bytes, indices, with_centres=False):
+    """Maps and labels of one split; ``with_centres`` adds ``(centres or None, why not)``."""
     from torch.utils.data import DataLoader
 
     from training import spatial_bottleneck_experiment as experiment
 
     renderer = getattr(getattr(dataset, "_inner", None), "renderer", None)
+    generator, reason = centre_generator(dataset) if with_centres else (None, None)
     tap = LabelTap(
         DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0),
         getattr(renderer, "style_scale", None),
+        generator,
     )
     bank, indices = experiment.extract_content_maps(source, tap, device, level, max_bytes, indices)
-    return bank, indices, tap.labels()
+    if not with_centres:
+        return bank, indices, tap.labels()
+    return bank, indices, tap.labels(), (tap.centre_labels(), reason or tap.centre_error)
 
 
 def encode_views(head, bank, batch_size, device):
@@ -430,9 +495,8 @@ def _interval_cell(entry):
 
 
 def print_report(payload):
-    factors = payload["factors"]
-    content = [f["name"] for f in factors if f["block"] == "content"]
-    style = [f["name"] for f in factors if f["block"] == "style"]
+    by_block = {block: [f["name"] for f in payload["factors"] if f["block"] == block] for block in BLOCK_TITLES}
+    ordered = [factor for rows in by_block.values() for factor in rows]
     names = list(payload["results"])
     width = max(9, *(len(n) + 1 for n in names))
     print(f"\nSource {payload['source']['checkpoint']}  level {payload['source']['level']}")
@@ -446,17 +510,21 @@ def print_report(payload):
     for run in payload["bottlenecks"]:
         test = run["compression"]
         print(
-            f"  {run['name']}: d={run['latent_dim']}, selected step {run['best_step']}, "
-            f"recon/template {_cell(test.get('reconstruction_over_template'))}, "
-            f"alignment {_cell(test.get('alignment'))} vs mismatched {_cell(test.get('mismatched_alignment'))}"
+            f"  {run['name']}: d={run['latent_dim']}, selected step {run['best_step']}. "
+            f"On the {test['n_test']} test subjects: recon/template {_cell(test['reconstruction_over_template'])} "
+            f"(pca{run['latent_dim']} {_cell(test['pca_reconstruction_over_template'])}), "
+            f"alignment {_cell(test['alignment'])} vs mismatched {_cell(test['mismatched_alignment'])}"
         )
+    if not payload["lesion_centre_targets"]["included"]:
+        print(f"  Lesion-centre targets omitted: {payload['lesion_centre_targets']['note']}")
     for kind in payload["probes"]:
         print(f"\n== {kind} probe: test R², mean over views ==")
         print(f"{'factor':<20}" + "".join(f"{n:>{width}}" for n in names))
-        for block, rows in (("content", content), ("style (leakage; lower is better)", style)):
+        for block, title in BLOCK_TITLES.items():
+            rows = by_block[block]
             if not rows:
                 continue
-            print(f"-- {block}")
+            print(f"-- {title}")
             for factor in rows:
                 cells = [payload["results"][n][kind]["test_r2"][factor] for n in names]
                 print(f"{factor:<20}" + "".join(_cell(v, width) for v in cells))
@@ -467,7 +535,7 @@ def print_report(payload):
             column = max(25, *(len(b) + 4 for b in block))
             print(f"\n   z:{run_name} minus each baseline ({kind}), [95% bootstrap interval over test subjects]")
             print(f"{'factor':<20}" + "".join(f"{'- ' + b:>{column}}" for b in block))
-            for factor in content + style:
+            for factor in ordered:
                 cells = [_interval_cell(record["factors"][factor]) for record in block.values()]
                 print(f"{factor:<20}" + "".join(f"{c:>{column}}" for c in cells))
             cells = [_interval_cell(record["content_mean"]) for record in block.values()]
@@ -604,14 +672,18 @@ def main(argv=None):
             raise ValueError(f"--{split}-samples must be at least the bottleneck's {trained[split]}")
     batch_size = first["arguments"]["batch_size"]
     budget = int((args.max_map_gib or first["arguments"]["max_map_gib"]) * 2**30)
-    banks, labels, indices, datasets = {}, {}, shared["content_indices_per_view"], {}
+    banks, labels, centres, indices, datasets = {}, {}, {}, shared["content_indices_per_view"], {}
+    centre_note = None
     for split in SPLITS:
         dataset = experiment.build_split_dataset(saved_args, split, wanted[split])
         if int(dataset._inner.seed) != shared["sample_seeds"][split]:
             raise ValueError(f"Regenerated {split} split has seed {dataset._inner.seed}, not the recorded one")
-        banks[split], indices, labels[split] = extract_split(
-            source, dataset, batch_size, device, shared["level"], budget, indices
+        found = extract_split(
+            source, dataset, batch_size, device, shared["level"], budget, indices, with_centres=centre_note is None
         )
+        banks[split], indices, labels[split] = found[:3]
+        if centre_note is None:
+            centres[split], centre_note = found[3]
         budget -= banks[split].numel() * banks[split].element_size()
         datasets[split] = dataset
         print(f"Extracted {split}: {tuple(banks[split].shape)}", flush=True)
@@ -625,14 +697,22 @@ def main(argv=None):
     n_style = labels["train"][1][0].shape[1]
     content_names = content_factor_names(n_content, dataset_lesion_target(datasets["test"]))
     content_names += [f"z_content_{j}" for j in range(len(content_names), n_content)]
+    style = [np.concatenate([labels[s][1][view] for s in SPLITS]) for view in (0, 1)]
+    shared_style = [bool(np.array_equal(style[0][:, j], style[1][:, j])) for j in range(n_style)]
     factors = [dict(name=n, block="content") for n in content_names]
-    factors += [dict(name=n, block="style") for n in STYLE_FACTOR_NAMES[:n_style]]
+    shared_targets = [np.concatenate([labels[s][0] for s in SPLITS])]
+    if centre_note is None:
+        factors += [dict(name=n, block="lesion_centre") for n in CENTRES]
+        shared_targets.append(np.concatenate([centres[s] for s in SPLITS]))
+    factors += [
+        dict(name=n, block="style_shared" if same else "style")
+        for n, same in zip(STYLE_FACTOR_NAMES[:n_style], shared_style)
+    ]
     names = [f["name"] for f in factors]
     content_columns = [
         j for j, f in enumerate(factors) if f["block"] == "content" and not f["name"].startswith("unused")
     ]
-    z_content = np.concatenate([labels[s][0] for s in SPLITS])
-    targets = [np.concatenate([z_content, np.concatenate([labels[s][1][view] for s in SPLITS])], 1) for view in (0, 1)]
+    targets = [np.concatenate(shared_targets + [style[view]], 1) for view in (0, 1)]
 
     # Representations: per view, an (n_all, n_all) kernel over train|val|test subjects.
     kernels = {}
@@ -668,9 +748,12 @@ def main(argv=None):
     gap = torch.cat([banks[s].mean((3, 4, 5)) for s in SPLITS]).numpy()
     kernels["gap"] = [standardized_kernel(gap[:, view], rows[0]) for view in (0, 1)]
     pca_fit_rows = np.concatenate([view * n_all + rows[0] for view in (0, 1)])
+    test_rows = np.concatenate([view * n_all + rows[2] for view in (0, 1)])
+    pca_reconstruction = {}
     for d in sorted({head.latent_dim for head in heads}):
         scores = pca_scores(gram, pca_fit_rows, d)
         kernels[f"pca{d}"] = [standardized_kernel(scores[r], rows[0]) for r in view_rows]
+        pca_reconstruction[f"pca{d}"] = pca_reconstruction_ratio(gram, pca_fit_rows, scores, test_rows)
 
     for run, head in zip(runs, heads):
         report, saved = run["report"], torch.load(run["dir"] / "bottleneck.pt", map_location="cpu", weights_only=True)
@@ -711,6 +794,7 @@ def main(argv=None):
                 "loss (different torch version?). z_init is a random readout at the same seed, not the exact one.",
                 flush=True,
             )
+        tested = experiment.evaluate(head, banks["test"], batch_size, device)[0]
         for label, values in (("z", codes), ("z_init", init_codes)):
             stacked = np.concatenate([values[s] for s in SPLITS])
             kernels[f"{label}:{run['name']}"] = [standardized_kernel(stacked[:, view], rows[0]) for view in (0, 1)]
@@ -721,10 +805,13 @@ def main(argv=None):
                 latent_dim=head.latent_dim,
                 seed=report["arguments"]["seed"],
                 best_step=report["training"]["best_step"],
-                compression={
-                    k: report["test"].get(k)
-                    for k in ("reconstruction_over_template", "alignment", "mismatched_alignment")
-                },
+                compression=dict(
+                    n_test=counts[2],
+                    reconstruction_over_template=tested["reconstruction_over_template"],
+                    pca_reconstruction_over_template=pca_reconstruction[f"pca{head.latent_dim}"],
+                    alignment=tested["alignment"],
+                    mismatched_alignment=tested["mismatched_alignment"],
+                ),
                 parity=parity,
                 z_init_reproduced=z_init_reproduced,
             )
@@ -808,6 +895,8 @@ def main(argv=None):
         },
         factors=factors,
         content_mean_factors=[names[j] for j in content_columns],
+        lesion_centre_targets=dict(included=centre_note is None, note=centre_note),
+        pca_reconstruction_over_template=pca_reconstruction,
         probes=list(args.probes),
         bottlenecks=bottlenecks,
         results=results,
@@ -820,7 +909,9 @@ def main(argv=None):
             pca="fitted on both views' training maps; components standardised before probing",
             views="each view probed separately; tables average the two",
             uncertainty=f"paired bootstrap over test subjects, {args.bootstrap} draws, probe fits held fixed",
-            style_targets="effective gain/bias/noise sigma applied by the renderer",
+            style_targets="gain/bias/noise sigma as rendered; a factor identical in both views is style_shared",
+            lesion_centre="rendered lesion centroid from sample_targets, in [-1, 1] generator coordinates",
+            compression="recon/template and PCA-d's ratio on the same test subjects, both views",
             linear_penalties=list(LINEAR_PENALTIES),
             rbf_widths=list(RBF_WIDTHS),
             rbf_penalties=list(RBF_PENALTIES),

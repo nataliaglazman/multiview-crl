@@ -125,21 +125,36 @@ predicts it on held-out test subjects:
 - Several bottleneck directories trained on the same source and splits are
   evaluated together. Different seeds at one size show seed variability;
   different sizes add a "latent size chosen by validation" line.
+- Targets, in four blocks:
+  - **content:** the content latents.
+  - **lesion centre:** `centroid_x/y/z`, where the lesion actually sits
+    (re-rendered by `eval.encoder.encoder_target_protocol.sample_targets`).
+    Under `wm_interior` placement the lesion latents are quantiles through each
+    subject's own white matter, so a probe must redo a subject-specific count
+    to read them; read the centre rows for whether a representation knows
+    where the lesion is. The block is omitted, with the reason printed, when a
+    subject has no rendered lesion or the generator has no single sphere lesion.
+  - **shared style:** a style factor identical in both views (gain and bias
+    under `synthetic_shared_gain_bias`). This is shared information, so a
+    cross-view code is expected to carry it.
+  - **per-view style:** leakage into the code, so lower is better.
+- The header gives each code's reconstruction error over the training template
+  on the evaluated test subjects, next to the same ratio for the map's top-d PCA
+  projection: the linear reference at the same size.
 - Outputs: `factor_recovery.json` (everything, including each factor's chosen
   hyperparameters and the parity record), `factor_recovery.csv` (one row per
   representation, probe and factor, with per-view R²) and `comparisons.csv`
   (`z` minus each baseline, with a paired bootstrap interval over test subjects
   and the share of draws at or below zero).
 
-Read `z - gap` and `z - patch` for local factors (lesion coordinates, temporal
+Read `z - gap` and `z - patch` for local factors (lesion centre, temporal
 atrophy, sulcal widening), `z - pca{d}` for whether the learned readout beats
 linear compression at the same size, `z - map` for what compression lost, and
-`z - z_init` for what training the readout bought. Style rows (gain, bias,
-noise sigma as rendered) measure leakage into a content code, so lower is better.
-The bootstrap holds probe fits fixed; use several bottleneck seeds for training
-variability. Under `--synthetic-causal` a factor can be predicted through
-correlated anatomy, so a lesion-coordinate R² is not on its own evidence that the
-lesion's position is encoded; that needs an intervention test.
+`z - z_init` for what training the readout bought. The bootstrap holds probe
+fits fixed; use several bottleneck seeds for training variability. Under
+`--synthetic-causal` a factor can be predicted through correlated anatomy, so a
+lesion R² is not on its own evidence that the lesion's position is encoded; that
+needs an intervention test.
 
 ## Validation
 
@@ -152,7 +167,8 @@ variance across subjects, decoder isolation, fixed and per-view learned masks,
 frozen encoder/codebook state, a learned toy spatial compression task, and a real
 small VQ-VAE checkpoint-to-report run including reload and output protection.
 The factor evaluator's tests check kernel ridge and PCA against sklearn on
-explicit features, that test labels never move a fit or a selection, that a
-GAP-invisible spatial factor is read from the map and PCA but not GAP, and a
-checkpoint-to-factor-report run with extended test subjects, a tampered test
-output and mismatched splits.
+explicit features (including PCA's reconstruction ratio), that test labels never
+move a fit or a selection, that a GAP-invisible spatial factor is read from the
+map and PCA but not GAP, and a checkpoint-to-factor-report run with extended test
+subjects, shared gain/bias, per-subject lesion centres matching `sample_targets`,
+a tampered test output and mismatched splits.

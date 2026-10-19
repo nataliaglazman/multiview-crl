@@ -37,7 +37,7 @@ def source_model(mode="fixed"):
     )
 
 
-def write_source_run(root):
+def write_source_run(root, **overrides):
     """A tiny synthetic VQ-VAE run directory with settings.json and a checkpoint."""
     run = Path(root) / "source"
     run.mkdir()
@@ -64,6 +64,7 @@ def write_source_run(root):
         synthetic_n_content=9,
         synthetic_n_style=3,
     )
+    cfg.update(overrides)
     (run / "settings.json").write_text(json.dumps(cfg))
     torch.save({"encoders": source_model().state_dict(), "step": 1}, run / "vqvae_model.pt")
     return run
@@ -271,8 +272,12 @@ class FactorEvaluationTests(unittest.TestCase):
         np.testing.assert_allclose(fit["test_pred"][:, 0], expected, rtol=1e-8, atol=1e-8)
 
         scores = factor_eval.pca_scores(X @ X.T, train, 4)
-        reference = PCA(4).fit(X[train]).transform(X)
-        np.testing.assert_allclose(np.abs(scores), np.abs(reference), rtol=1e-6, atol=1e-8)
+        pca = PCA(4).fit(X[train])
+        np.testing.assert_allclose(np.abs(scores), np.abs(pca.transform(X)), rtol=1e-6, atol=1e-8)
+        residual = np.square(X[test] - pca.inverse_transform(pca.transform(X[test]))).sum()
+        total = np.square(X[test] - X[train].mean(0)).sum()
+        ratio = factor_eval.pca_reconstruction_ratio(X @ X.T, train, scores, test)
+        self.assertAlmostEqual(ratio, residual / total, places=8)
         with self.assertRaisesRegex(ValueError, "fewer than"):
             factor_eval.pca_scores(X @ X.T, train[:5], 8)
 
@@ -323,7 +328,7 @@ class FactorEvaluationTests(unittest.TestCase):
     def test_checkpoint_to_factor_report_with_parity_guards(self):
         with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()):
             root = Path(temp)
-            run = write_source_run(root)
+            run = write_source_run(root, synthetic_shared_gain_bias=True, synthetic_lesion_placement="wm_interior")
             first, second = root / "d2", root / "d3"
             experiment.main(trainer_argv(run, first, 2))
             experiment.main(trainer_argv(run, second, 3))
@@ -335,9 +340,25 @@ class FactorEvaluationTests(unittest.TestCase):
             factors = [f["name"] for f in payload["factors"]]
             self.assertEqual(factors[:2], ["brain_size", "ventricle_size"])
             self.assertEqual(factors[-3:], ["gain", "bias", "noise_sigma"])
+            blocks = {f["name"]: f["block"] for f in payload["factors"]}
+            self.assertEqual([n for n in factors if blocks[n] == "lesion_centre"], list(factor_eval.CENTRES))
+            self.assertEqual([blocks[n] for n in factors[-3:]], ["style_shared", "style_shared", "style"])
+            self.assertTrue(payload["lesion_centre_targets"]["included"])
             for record in payload["bottlenecks"]:
                 self.assertTrue(record["z_init_reproduced"])
                 self.assertTrue(all(v < 1e-5 for v in record["parity"].values()), record["parity"])
+                self.assertEqual(record["compression"]["n_test"], 6)
+                self.assertTrue(0 <= record["compression"]["pca_reconstruction_over_template"] <= 1)
+
+            from eval.encoder.encoder_target_protocol import sample_targets
+            from eval.protocol.run_dci_synthetic import load_run_args
+
+            dataset = experiment.build_split_dataset(load_run_args(run), "test", 3)
+            tap = factor_eval.LabelTap(DataLoader(dataset, batch_size=2), None, dataset._inner)
+            self.assertEqual(len(list(tap)), 2)
+            expected = [sample_targets(dataset._inner, dataset[i]["gt_latents"])[0][9:12] for i in range(3)]
+            np.testing.assert_allclose(tap.centre_labels(), np.stack(expected))
+            self.assertIsNone(factor_eval.centre_generator(object())[0])
             compared = payload["comparisons"]["d2"]["rbf"]
             self.assertEqual(set(compared), {"map", "patch2x2x2", "gap", "pca2", "z_init:d2"})
             self.assertEqual(set(payload["latent_dim_selection"]), {"linear", "rbf"})
