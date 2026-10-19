@@ -29,6 +29,17 @@ def axis_coordinates(size: int, like: torch.Tensor) -> torch.Tensor:
     return torch.linspace(-1.0, 1.0, size, device=like.device, dtype=like.dtype)
 
 
+def spatial_moments(h: torch.Tensor) -> torch.Tensor:
+    """Return each channel's coordinate-weighted means as ``(B, 3C)``."""
+    if h.ndim != 5:
+        raise ValueError(f"Expected a 5D feature map, got {tuple(h.shape)}")
+    d, hh, w = h.shape[2:]
+    mx = (h.mean((3, 4)) * axis_coordinates(d, h)).mean(-1)
+    my = (h.mean((2, 4)) * axis_coordinates(hh, h)).mean(-1)
+    mz = (h.mean((2, 3)) * axis_coordinates(w, h)).mean(-1)
+    return torch.cat([mx, my, mz], dim=1)
+
+
 class MomentPool3d(nn.Module):
     def __init__(self, channels: int, out_features: int):
         super().__init__()
@@ -41,11 +52,7 @@ class MomentPool3d(nn.Module):
         """(B, C, D, H, W) map -> (B, 3C): every channel's x moments, then y, then z."""
         if h.ndim != 5 or h.shape[1] != self.channels:
             raise ValueError(f"Expected a (B, {self.channels}, D, H, W) map, got {tuple(h.shape)}")
-        d, hh, w = h.shape[2:]
-        mx = (h.mean((3, 4)) * axis_coordinates(d, h)).mean(-1)
-        my = (h.mean((2, 4)) * axis_coordinates(hh, h)).mean(-1)
-        mz = (h.mean((2, 3)) * axis_coordinates(w, h)).mean(-1)
-        return torch.cat([mx, my, mz], dim=1)
+        return spatial_moments(h)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
         """The readout's extra pre-activation, (B, out_features)."""

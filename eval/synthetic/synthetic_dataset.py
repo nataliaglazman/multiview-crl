@@ -209,12 +209,14 @@ class PseudoMRIRenderer(nn.Module):
         # not boundary displacements and ignore this — use lesion_radius for those.
         self.content_amp_scale = content_amp_scale
         self.lesion_radius = lesion_radius
-        if lesion_placement not in ("legacy", "wm_interior"):
-            raise ValueError(f"lesion_placement must be legacy|wm_interior, got {lesion_placement!r}")
+        if lesion_placement not in ("legacy", "wm_interior", "canonical"):
+            raise ValueError(f"lesion_placement must be legacy|wm_interior|canonical, got {lesion_placement!r}")
         if lesion_placement == "wm_interior" and lesion_mode != "sphere":
             raise ValueError("wm_interior placement is defined only for sphere lesions")
-        if lesion_placement == "wm_interior" and (res < 2 or not np.isfinite(lesion_radius) or lesion_radius <= 0):
-            raise ValueError("wm_interior requires res >= 2 and a positive finite lesion_radius")
+        if lesion_placement in ("wm_interior", "canonical") and (
+            res < 2 or not np.isfinite(lesion_radius) or lesion_radius <= 0
+        ):
+            raise ValueError(f"{lesion_placement} requires res >= 2 and a positive finite lesion_radius")
         self.lesion_placement = lesion_placement
         # "fixed" (default, legacy) blends the lesion in at a constant intensity AFTER the
         # style gain/bias have set every tissue's, so T1 lesion contrast 0.8*gain + bias - 0.4
@@ -357,6 +359,14 @@ class PseudoMRIRenderer(nn.Module):
         if not sphere.any() or bool((sphere & (tissue_map != 2)).any()):
             raise RuntimeError("White-matter sphere containment failed; refusing to truncate the lesion")
         return sphere.to(self.coords.dtype)
+
+    def _sphere_in_canonical_space(self, lesion_dir):
+        """Map bounded position latents to a fixed, anatomy-independent coordinate cube."""
+        direction = lesion_dir.to(self.coords)
+        if direction.shape != (3,) or not torch.isfinite(direction).all() or (direction.abs() > 1 + 1e-6).any():
+            raise ValueError("canonical placement needs three finite position values in [-1,1]")
+        centre = 0.3 * direction.clamp(-1.0, 1.0)
+        return (torch.norm(self.coords - centre, dim=-1) < self.lesion_radius).to(self.coords.dtype)
 
     def _burden_in_white_matter(self, tissue_map, burden, quantiles):
         """``lesion_count`` partial-volume spheres whose total volume is linear in ``burden``.
@@ -642,6 +652,8 @@ class PseudoMRIRenderer(nn.Module):
             # and turning its own support into a function of brain_size.
             if self.lesion_placement == "wm_interior":
                 lesion_load = self._sphere_in_white_matter(tissue_map, lesion_dir)
+            elif self.lesion_placement == "canonical":
+                lesion_load = self._sphere_in_canonical_space(lesion_dir)
             else:
                 lesion_reach = (radii_wm - (self.lesion_radius + 0.02)).clamp_min(0.05)
                 lesion_xyz = lesion_dir * (lesion_reach / (3**0.5))

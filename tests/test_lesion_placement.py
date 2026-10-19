@@ -61,6 +61,17 @@ class PlacementTests(unittest.TestCase):
             self.assertGreater(len(set(centres)), 4)
             self.assertTrue(np.all(np.diff(centres) >= 0))
 
+    def test_canonical_position_is_anatomy_independent(self):
+        r = PseudoMRIRenderer(res=64, lesion_placement="canonical")
+        z = torch.tensor([0.0, 0.0, 0.0, 0.4, -0.5, 0.0, 0.0, 0.0, 0.0])
+        _, load_a = self.render(r, z)
+        _, load_b = r.render_structure(z, torch.zeros(4, 4, 4), torch.zeros(8, 8, 8), "cpu", clean=True)
+        expected = 0.3 * z[2:5]
+        centroid = (load_a[..., None] * r.coords).sum((0, 1, 2)) / load_a.sum()
+        torch.testing.assert_close(centroid, expected, atol=2.0 / 63, rtol=0)
+        torch.testing.assert_close(load_a, load_b, atol=0, rtol=0)
+        torch.testing.assert_close(r._sphere_in_canonical_space(z[2:5]), load_a, atol=0, rtol=0)
+
     def test_admissible_quantiles_handle_endpoints_and_cavities(self):
         r = PseudoMRIRenderer(res=32, lesion_radius=0.14, lesion_placement="wm_interior")
         tissue = torch.full((32, 32, 32), 2)

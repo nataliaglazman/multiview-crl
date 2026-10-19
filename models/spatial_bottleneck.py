@@ -6,6 +6,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from models.moment_pool import spatial_moments
+
 
 class SpatialBottleneck(nn.Module):
     """Shared readout/decoder for registered, continuous content maps.
@@ -15,16 +17,20 @@ class SpatialBottleneck(nn.Module):
     decoding. This template contains no subject-dependent information.
     """
 
-    def __init__(self, map_shape, latent_dim=16, width=8, hidden=128):
+    def __init__(self, map_shape, latent_dim=16, width=8, hidden=128, moment_channels=None):
         super().__init__()
         shape = tuple(map_shape)
         if len(shape) != 4 or any(not isinstance(n, int) or n < 1 for n in shape):
             raise ValueError("map_shape must contain four positive integers: C,D,H,W")
         if any(not isinstance(n, int) or n < 1 for n in (latent_dim, width, hidden)):
             raise ValueError("latent_dim, width and hidden must be positive integers")
+        if moment_channels is not None and (not isinstance(moment_channels, int) or moment_channels != shape[0]):
+            raise ValueError("moment_channels must match map_shape[0]")
         if latent_dim >= math.prod(shape):
             raise ValueError("latent_dim must be smaller than the complete map")
-        self.config = dict(map_shape=shape, latent_dim=latent_dim, width=width, hidden=hidden)
+        self.config = dict(
+            map_shape=shape, latent_dim=latent_dim, width=width, hidden=hidden, moment_channels=moment_channels
+        )
         self.map_shape = shape
         self.latent_dim = latent_dim
         channels, *grid = shape
@@ -51,6 +57,10 @@ class SpatialBottleneck(nn.Module):
         )
         self.register_buffer("template", torch.zeros(shape))
         self.register_buffer("scale", torch.ones(channels, 1, 1, 1))
+        self.moment_head = None if moment_channels is None else nn.Linear(latent_dim, 3 * moment_channels)
+        if self.moment_head is not None:
+            self.register_buffer("moment_mean", torch.zeros(3 * moment_channels))
+            self.register_buffer("moment_scale", torch.ones(3 * moment_channels))
 
     @torch.no_grad()
     def fit_normalization(self, training_maps):
@@ -64,6 +74,10 @@ class SpatialBottleneck(nn.Module):
         scale = (variance / len(training_maps)).sqrt().clamp_min(1e-5)
         self.template.copy_(template)
         self.scale.copy_(scale)
+        if self.moment_head is not None:
+            targets = spatial_moments(training_maps.flatten(0, 1))
+            self.moment_mean.copy_(targets.mean(0))
+            self.moment_scale.copy_(targets.std(0, unbiased=False).clamp_min(1e-5))
 
     def _check_pairs(self, maps):
         if maps.ndim != 6 or maps.shape[1] != 2 or tuple(maps.shape[2:]) != self.map_shape:
@@ -84,6 +98,16 @@ class SpatialBottleneck(nn.Module):
     def forward(self, maps):
         code = self.encode(maps)
         return code, self.decode(code)
+
+    def predict_moments(self, code):
+        if self.moment_head is None:
+            raise RuntimeError("Moment prediction head is not configured")
+        return self.moment_head(code)
+
+    def standardized_moments(self, maps):
+        if self.moment_head is None:
+            raise RuntimeError("Moment prediction head is not configured")
+        return (spatial_moments(maps) - self.moment_mean) / self.moment_scale
 
 
 @torch.no_grad()
@@ -205,6 +229,7 @@ def paired_objective(
     hard_patch_weight=0.0,
     hard_patch_fraction=0.1,
     hard_patch_size=(4, 4, 4),
+    spatial_moment_weight=0.0,
 ):
     """No labels or interventions; variance is across subjects within each view.
 
@@ -225,5 +250,17 @@ def paired_objective(
     )
     terms["alignment"] = F.mse_loss(code[:, 0], code[:, 1])
     terms["variance"] = F.relu(1 - (code.var(0, unbiased=False) + 1e-4).sqrt()).mean()
+    if not math.isfinite(spatial_moment_weight) or spatial_moment_weight < 0:
+        raise ValueError("spatial_moment_weight must be finite and nonnegative")
+    if spatial_moment_weight > 0:
+        if model.moment_head is None:
+            raise ValueError("spatial_moment_weight requires a moment prediction head")
+        flat_code = code.reshape(-1, code.shape[-1])
+        terms["spatial_moment"] = F.mse_loss(
+            model.predict_moments(flat_code), model.standardized_moments(targets.flatten(0, 1))
+        )
+    else:
+        terms["spatial_moment"] = code.new_zeros(())
     loss = sum(w * terms[name] for w, name in zip(weights, ("reconstruction", "alignment", "variance")))
+    loss = loss + spatial_moment_weight * terms["spatial_moment"]
     return loss, terms

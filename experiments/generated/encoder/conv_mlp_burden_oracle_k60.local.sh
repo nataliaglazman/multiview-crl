@@ -28,7 +28,7 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --downscale-factor 4 \
     --encoder-architecture conv \
     --encoder-head-hidden 100 \
-    --eval-every 2000 \
+    --eval-every 1000 \
     --eval-pooling gap \
     --floor-eval \
     --grad-clip 2.0 \
@@ -47,19 +47,19 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --res 64 \
     --res-channels 32 \
     --seed 42 \
-    --standardize-code \
     --stratify-batches oracle \
     --stratify-clusters 60 \
+    --synthetic-lesion-target burden \
     --synthetic-clean-content \
     --synthetic-content-scale 1.0 \
     --synthetic-lesion-intensity styled \
     --synthetic-lesion-placement wm_interior \
-    --synthetic-lesion-t1-value 0.0 \
-    --synthetic-lesion-target burden \
+    --synthetic-lesion-t1-value 0.4 \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \
     --synthetic-style-scale 1.0 \
+    --synthetic-temporal-sigma 0.09 \
     --tau 0.1 \
     --train-steps 10000 \
-    --model-id conv_mlp_burden_oracle_k60_s42 \
+    --model-id conv_mlp_burden_oracle_k60_s42_burden_unstandardized \
     "$@"

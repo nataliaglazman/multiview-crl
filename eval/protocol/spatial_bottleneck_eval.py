@@ -15,6 +15,8 @@ Representations, all computed from the same frozen VQ-VAE content maps ``H``:
     map         full map, standardised by the bottleneck's template and per-channel scale (reference)
     patchDxHxW  channel means on a coarse grid (the existing local readout)
     gap         channel means over the whole map (the existing global readout)
+    moments     raw first spatial moments of every channel (with --with-moments)
+    gap_moments GAP concatenated with the raw moments (with --with-moments)
     pca{d}      top-d principal components of the map, fitted on training subjects (linear compression, same size)
     z_init:RUN  the bottleneck readout at its initialisation: same seed, same normalisation (floor)
     z:RUN       the trained, validation-selected bottleneck code (proposed)
@@ -95,6 +97,7 @@ RBF_PENALTIES = tuple(float(p) for p in np.logspace(-5, 1, 13))
 PARITY_TOLERANCE = 1e-2
 #: Baselines each trained code is compared with (``pca`` and ``z_init`` resolve per run).
 BASELINES = ("map", "patch", "gap", "pca", "z_init")
+MOMENT_BASELINES = ("moments", "gap_moments")
 #: Rendered lesion centre, in the generator's [-1, 1] coordinates.
 CENTRES = ("centroid_x", "centroid_y", "centroid_z")
 #: Latents the lesion is re-rendered from; ``z_lesion`` exists only in burden mode.
@@ -712,6 +715,11 @@ def parse_args(argv=None):
     parser.add_argument("--run-dir", type=Path, default=None, help="Source VQ run, if it moved since training")
     parser.add_argument("--probes", nargs="+", choices=PROBES, default=list(PROBES))
     parser.add_argument("--patch-grid", type=parse_grid, default=(2, 2, 2), help="D,H,W or 'none'")
+    parser.add_argument(
+        "--with-moments",
+        action="store_true",
+        help="Probe raw first spatial moments and GAP plus moments as additional frozen-map baselines",
+    )
     parser.add_argument("--bootstrap", type=int, default=2000, help="Bootstrap resamples of the test subjects")
     parser.add_argument("--seed", type=int, default=0, help="Bootstrap seed")
     parser.add_argument("--val-samples", type=int, default=None, help="Extend validation (>= the run's count)")
@@ -854,6 +862,16 @@ def main(argv=None):
         patch_name = None
     gap = torch.cat([banks[s].mean((3, 4, 5)) for s in SPLITS]).numpy()
     kernels["gap"] = [standardized_kernel(gap[:, view], rows[0]) for view in (0, 1)]
+    if args.with_moments:
+        from models.moment_pool import spatial_moments
+
+        moments = torch.cat(
+            [spatial_moments(banks[s].flatten(0, 1)).reshape(len(banks[s]), 2, -1) for s in SPLITS]
+        ).numpy()
+        kernels["moments"] = [standardized_kernel(moments[:, view], rows[0]) for view in (0, 1)]
+        kernels["gap_moments"] = [
+            standardized_kernel(np.concatenate((gap[:, view], moments[:, view]), axis=1), rows[0]) for view in (0, 1)
+        ]
     pca_fit_rows = np.concatenate([view * n_all + rows[0] for view in (0, 1)])
     test_rows = np.concatenate([view * n_all + rows[2] for view in (0, 1)])
     pca_reconstruction = {}
@@ -967,6 +985,8 @@ def main(argv=None):
             "map": "map",
             "patch": patch_name,
             "gap": "gap",
+            "moments": "moments" if args.with_moments else None,
+            "gap_moments": "gap_moments" if args.with_moments else None,
             "pca": f"pca{run['latent_dim']}",
             "z_init": f"z_init:{run['name']}",
         }
@@ -974,7 +994,8 @@ def main(argv=None):
         for kind in args.probes:
             mine = scored[f"z:{run['name']}"][kind]
             comparisons[run["name"]][kind] = {}
-            for label in BASELINES:
+            baseline_labels = BASELINES + (MOMENT_BASELINES if args.with_moments else ())
+            for label in baseline_labels:
                 other = baselines[label]
                 if other is None:
                     continue
@@ -1026,6 +1047,7 @@ def main(argv=None):
             fitting="standardisation, PCA and probe weights fitted on training subjects only",
             selection="per factor, by validation R² over the probe's grid (validation R² is optimistic)",
             map_features="(H - template) / per-channel scale from the bottleneck; probed through the Gram matrix",
+            moments="raw coordinate-weighted channel means; gap_moments concatenates them with channel means",
             pca="fitted on both views' training maps; components standardised before probing",
             views="each view probed separately; tables average the two",
             uncertainty=f"paired bootstrap over test subjects, {args.bootstrap} draws, probe fits held fixed",

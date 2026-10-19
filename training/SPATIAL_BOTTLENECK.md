@@ -10,10 +10,21 @@ The objective is
     reconstruction_weight * mean(((R(z) - H) / scale)^2)
   + alignment_weight      * mean((z_view1 - z_view2)^2)
   + variance_weight       * mean(relu(1 - sqrt(Var_subject(z) + 1e-4)))
+  + spatial_moment_weight  * mean((g(z) - standardized_moments(H))²)
 
 Variance is computed separately in each view. There is no decorrelation penalty
 on the code: anatomical variables can be correlated. This loss is a practical
 preservation objective, not an implementation of a causal identifiability theorem.
+
+`--spatial-moment-weight` enables the final term. `g` is a linear head from
+`z` to the `3C` first spatial moments of the frozen map: each channel's
+coordinate-weighted means along the three map axes. The target mean and scale
+are fitted on training subjects (both views) and the target is detached, so
+large anatomical signals do not dominate. This is label-free, but it should
+only be used after probing the moments themselves: the evaluator's
+`--with-moments` option adds raw moments and GAP-plus-moments baselines without
+retraining the bottleneck. If those baselines cannot recover a lesion centre,
+the prediction term cannot create that information in `z`.
 
 ### Reconstruction weighting
 
@@ -194,6 +205,8 @@ predicts it on held-out test subjects:
 | `map` | full content map (the bottleneck's normalisation): what was available before compression |
 | `patch2x2x2` | channel means on a coarse grid: the existing local readout |
 | `gap` | channel means: the existing global readout |
+| `moments` | raw first spatial moments of every map channel (`--with-moments`) |
+| `gap_moments` | GAP concatenated with those moments (`--with-moments`) |
 | `pca{d}` | top-d principal components of the map, at each bottleneck's size: linear compression |
 | `z_init:RUN` | the readout at its initialisation (same seed and normalisation): the floor |
 | `z:RUN` | the trained code |
@@ -202,6 +215,9 @@ predicts it on held-out test subjects:
   Each factor's ridge penalty / RBF width is chosen by validation R², and test
   labels are used once. Both a linear and an RBF kernel probe are reported;
   the full map is probed exactly through its Gram matrix.
+- Pass `--with-moments` to include the two moment baselines. Their feature
+  standardisation is also fitted on training subjects only; no bottleneck
+  retraining is performed.
 - Before scoring, the regenerated test maps must reproduce the saved test codes
   and GAP vectors, and the source checkpoint and settings must match their
   recorded hashes; otherwise the script stops. Use `--run-dir` if the source run
@@ -320,6 +336,14 @@ subject's own white matter, so:
 - a lesion near the median x quantile can jump hemispheres;
 - moving `lesion_x` also shifts y and z, and an anatomy intervention can move the
   lesion, so some confusion among these comes from the generator, not the code.
+
+  For a clean position-control experiment, use
+  `--synthetic-lesion-placement canonical`. In this mode `lesion_x/y/z` map
+  directly to a fixed coordinate cube (`0.3 * [-1, 1]^3`) and the sphere is not
+  clipped by subject-specific tissue labels. The rendered centroid is therefore
+  the intended physical target, up to voxel-grid quantisation. This mode is
+  deliberately less anatomical than `wm_interior`; compare it as an
+  identifiability control, not as the realistic lesion protocol.
 
 Read the lesion blocks first. The code encodes the lesion if its `snr_render`
 (or `snr_render_per_voxel`) is clearly above `z_init`'s (what an untrained

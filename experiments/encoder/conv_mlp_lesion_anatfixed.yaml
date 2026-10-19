@@ -8,5 +8,4 @@ _base_: encoder/synthetic_defaults
 tag: conv_mlp_lesion_anatfixed_s{seed}
 conv_readout: mlp
 standardize_code: true
-synthetic_content_amp_scale: [0, 0, 1, 1, 1, 0, 0, 0, 0]
 eval_every: 1000

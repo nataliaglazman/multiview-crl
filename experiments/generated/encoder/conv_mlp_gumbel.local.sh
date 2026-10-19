@@ -34,7 +34,7 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --downscale-factor 4 \
     --encoder-architecture conv \
     --encoder-head-hidden 100 \
-    --eval-every 2000 \
+    --eval-every 500 \
     --eval-patch-grid 4 5 4 \
     --eval-pooling gap \
     --floor-eval \
@@ -44,26 +44,12 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --hidden-channels 64 \
     --image-spacing 2.0 \
     --latent-dim 12 \
-    --lesion-decorrelation-weight 0.0 \
-    --lesion-detector shared \
-    --lesion-frame brain \
-    --lesion-head-init random \
-    --lesion-input residual \
-    --lesion-keypoints 4 \
-    --lesion-loss-weight 1.0 \
-    --lesion-norm none \
-    --lesion-normative-components 20 \
-    --lesion-normative-subjects 300 \
-    --lesion-pairing cross_modal \
-    --lesion-proj-dim 8 \
-    --lesion-temperature 0.03 \
+    --lesion-input features \
+    --lesion-keypoints 0 \
     --loader-seed 10042 \
     --log-every 100 \
     --lr 0.0001 \
-    --mask-estimator relaxed \
-    --mask-init-gap 4.0 \
-    --mask-lr-scale 10 \
-    --mask-mode learned \
+    --mask-mode fixed \
     --model-seed 42 \
     --n-content 9 \
     --n-style 3 \
@@ -89,7 +75,6 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --spatial-recovery-seed 1729 \
     --spatial-recovery-test-samples 400 \
     --split-seed 0 \
-    --synthetic-causal \
     --synthetic-causal-edge-prob 0.5 \
     --synthetic-causal-graph random \
     --synthetic-causal-noise-scale 0.4 \
@@ -97,7 +82,6 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --synthetic-clean-content \
     --synthetic-content-scale 1.0 \
     --synthetic-identifiable-ventricle \
-    --synthetic-lesion-count 4 \
     --synthetic-lesion-intensity styled \
     --synthetic-lesion-placement wm_interior \
     --synthetic-lesion-radius 0.1 \
@@ -108,11 +92,33 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --synthetic-n-fissure-grid 8 \
     --synthetic-normalize fixed_reference \
     --synthetic-style-scale 1.0 \
+    --synthetic-temporal-sigma 0.05 \
     --synthetic-sulcal-mode atrophy \
     --tau 0.1 \
     --test-frac 0.0 \
     --train-patch-grid 8 8 8 \
-    --train-steps 10000 \
+    --train-steps 20000 \
     --val-frac 0.0 \
-    --model-id conv_mlp_gumbel_s42 \
+    --standardize-code \
+    --model-id conv_mlp_gumbel_temp05 \
     "$@"
+
+    # --lesion-loss-weight 0 \
+    # --lesion-norm none \
+    # --lesion-normative-components 20 \
+    # --lesion-normative-subjects 300 \
+    # --lesion-pairing cross_modal \
+    # --lesion-proj-dim 8 \
+    # --lesion-temperature 0.03 \
+    #     --lesion-decorrelation-weight 0.0 \
+    #     --lesion-frame brain \
+    #     --lesion-detector shared \
+    # --lesion-head-init random \
+    #     --synthetic-causal \
+        # --causal-eval \
+        #     --synthetic-lesion-count 1 \
+
+    # --mask-estimator relaxed \
+    # --mask-init-gap 1.0 \
+    # --mask-lr-scale 30 \
+    #     

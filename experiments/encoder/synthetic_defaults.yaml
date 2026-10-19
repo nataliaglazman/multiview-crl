@@ -16,7 +16,7 @@ num_train_samples: 2000
 num_val_samples: 400
 num_workers: 0
 cache: false
-eval_every: 2000
+eval_every: 1000
 eval_pooling: gap
 floor_eval: true
 best_metric: none

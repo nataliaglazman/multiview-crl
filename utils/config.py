@@ -152,9 +152,10 @@ def parse_args() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--synthetic-lesion-placement",
-        choices=("legacy", "wm_interior"),
+        choices=("legacy", "wm_interior", "canonical"),
         default="legacy",
-        help="wm_interior places an untruncated fixed-radius sphere inside actual WM. "
+        help="canonical maps lesion position directly to a fixed coordinate cube without tissue clipping; "
+        "wm_interior places an untruncated fixed-radius sphere inside actual WM. "
         "Fails explicitly if no centre fits. legacy reproduces previous data/checkpoints.",
     )
     parser.add_argument(

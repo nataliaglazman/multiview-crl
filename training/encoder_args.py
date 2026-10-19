@@ -530,9 +530,10 @@ def build_parser(description=None):
     )
     p.add_argument(
         "--synthetic-lesion-placement",
-        choices=("legacy", "wm_interior"),
+        choices=("legacy", "wm_interior", "canonical"),
         default="legacy",
-        help="wm_interior places a full fixed-radius sphere inside final WM labels; legacy reproduces old runs",
+        help="canonical maps lesion_x/y/z directly to a fixed coordinate cube without anatomy-dependent clipping; "
+        "wm_interior places a full sphere inside final WM labels; legacy reproduces old runs",
     )
     p.add_argument(
         "--synthetic-lesion-radius",

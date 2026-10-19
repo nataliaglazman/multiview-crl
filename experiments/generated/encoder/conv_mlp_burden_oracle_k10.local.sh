@@ -28,7 +28,7 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --downscale-factor 4 \
     --encoder-architecture conv \
     --encoder-head-hidden 100 \
-    --eval-every 2000 \
+    --eval-every 1000 \
     --eval-pooling gap \
     --floor-eval \
     --grad-clip 2.0 \
@@ -54,7 +54,7 @@ exec "$PYTHON" -m scripts.run_encoder_local \
     --synthetic-content-scale 1.0 \
     --synthetic-lesion-intensity styled \
     --synthetic-lesion-placement wm_interior \
-    --synthetic-lesion-t1-value 0.0 \
+    --synthetic-lesion-t1-value 0.4 \
     --synthetic-lesion-target burden \
     --synthetic-mode pseudo_mri \
     --synthetic-normalize fixed_reference \

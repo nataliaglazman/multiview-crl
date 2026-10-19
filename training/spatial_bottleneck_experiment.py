@@ -129,6 +129,7 @@ def evaluate(
     hard_patch_weight=0.0,
     hard_patch_fraction=0.1,
     hard_patch_size=(4, 4, 4),
+    spatial_moment_weight=0.0,
 ):
     """Unweighted map metrics; ``weigh`` (from ``loss_weighting``) adds the training-weighted error."""
     model.eval()
@@ -144,9 +145,17 @@ def evaluate(
     raw_sum = 0.0
     baseline = 0.0
     map_gap = 0.0
+    moment_error = 0.0
     for start in range(0, len(maps), batch_size):
         target = maps[start : start + batch_size].to(device)
         code, reconstruction = model(target.flatten(0, 1))
+        if model.moment_head is not None:
+            moment_error += (
+                torch.nn.functional.mse_loss(
+                    model.predict_moments(code), model.standardized_moments(target.flatten(0, 1))
+                ).item()
+                * len(target)
+            )
         residual = reconstruction.reshape_as(target) - target
         error = (residual / model.scale).square()
         weights = None if weigh is None else weigh(target)
@@ -188,6 +197,7 @@ def evaluate(
         variance=torch.relu(1 - std).mean().item(),
         code_std_per_view=code.std(0, unbiased=False).tolist(),
         original_map_alignment=map_gap / len(maps),
+        spatial_moment=moment_error / len(maps) if model.moment_head is not None else 0.0,
     )
     if used:
         metrics["weighted_reconstruction"] = weighted / len(maps)
@@ -213,7 +223,8 @@ def objective_score(metrics, args):
             "reconstruction_objective", metrics.get("weighted_reconstruction", metrics["reconstruction"])
         ),
     )
-    return sum(getattr(args, name + "_weight") * terms[name] for name in ("reconstruction", "alignment", "variance"))
+    score = sum(getattr(args, name + "_weight") * terms[name] for name in ("reconstruction", "alignment", "variance"))
+    return score + getattr(args, "spatial_moment_weight", 0.0) * terms["spatial_moment"]
 
 
 def loss_weighting(model, training, args):
@@ -256,7 +267,8 @@ def fit_readout(training, validation, args, device, training_foreground=None, va
         if foreground is not None and tuple(foreground.shape) != (*maps.shape[:2], 1, *maps.shape[-3:]):
             raise ValueError("Foreground bank must match the map subjects, views and spatial grid")
     torch.manual_seed(args.seed)
-    model = SpatialBottleneck(tuple(training.shape[2:]), args.latent_dim, args.width, args.hidden)
+    moment_channels = training.shape[2] if args.spatial_moment_weight > 0 else None
+    model = SpatialBottleneck(tuple(training.shape[2:]), args.latent_dim, args.width, args.hidden, moment_channels)
     model.fit_normalization(training)
     weigh, weighting = loss_weighting(model, training, args)
     model.to(device)
@@ -280,6 +292,7 @@ def fit_readout(training, validation, args, device, training_foreground=None, va
             args.variance_weight,
             weigh(batch),
             foreground=support,
+            spatial_moment_weight=args.spatial_moment_weight,
             **options,
         )
         if not torch.isfinite(loss):
@@ -290,7 +303,14 @@ def fit_readout(training, validation, args, device, training_foreground=None, va
         optimizer.step()
         if step % args.log_every == 0 or step == args.steps:
             metrics, _, _ = evaluate(
-                model, validation, args.batch_size, device, weigh, validation_foreground, **options
+                model,
+                validation,
+                args.batch_size,
+                device,
+                weigh,
+                validation_foreground,
+                spatial_moment_weight=args.spatial_moment_weight,
+                **options,
             )
             score = objective_score(metrics, args)
             if not math.isfinite(score):
@@ -345,6 +365,13 @@ def parse_args(argv=None):
     parser.add_argument("--reconstruction-weight", type=float, default=1.0)
     parser.add_argument("--alignment-weight", type=float, default=1.0)
     parser.add_argument("--variance-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--spatial-moment-weight",
+        "--spatial-moment-loss-weight",
+        type=float,
+        default=0.0,
+        help="Add a linear-head MSE for standardized first spatial moments of the input maps (0 disables)",
+    )
     parser.add_argument(
         "--hard-patch-weight",
         type=float,
@@ -408,7 +435,7 @@ def parse_args(argv=None):
     for name in ("lr", "reconstruction_weight", "max_map_gib"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(f"{name} must be positive and finite")
-    for name in ("alignment_weight", "variance_weight", "deviation_strength", "hard_patch_weight"):
+    for name in ("alignment_weight", "variance_weight", "deviation_strength", "hard_patch_weight", "spatial_moment_weight"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) < 0:
             parser.error(f"{name} must be nonnegative and finite")
     if not 0 < args.position_floor <= 1:
