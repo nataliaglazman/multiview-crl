@@ -223,6 +223,22 @@ def parse_args(argv=None):
     return args
 
 
+def build_split_dataset(saved_args, split, count):
+    """The synthetic split this CLI uses; the factor evaluator rebuilds splits through it too."""
+    from data.datasets import SyntheticBrainDataset
+
+    # Forward all saved generator switches, including field/lesion options that
+    # older evaluation helpers do not yet expose. Keep the original SCM seed.
+    generator_args = {k: v for k, v in vars(saved_args).items() if k.startswith("synthetic_")}
+    generator_args.pop("synthetic_num_samples", None)
+    generator_args.pop("synthetic_num_samples_per_mode", None)
+    resolution = getattr(saved_args, "synthetic_res", 64)
+    spatial_size = getattr(saved_args, "spatial_size", None) or (resolution,) * 3
+    return SyntheticBrainDataset(
+        mode=split, cache=False, spatial_size=spatial_size, synthetic_num_samples=count, **generator_args
+    )
+
+
 def load_source(args, device):
     from eval.protocol.run_dci_synthetic import load_model_from_run_dir, load_run_args
 
@@ -262,21 +278,10 @@ def main(argv=None):
         level=args.level,
         representation="continuous encoder maps, after content normalization, before codebook projection",
     )
-    from data.datasets import SyntheticBrainDataset
-
-    # Forward all saved generator switches, including field/lesion options that
-    # older evaluation helpers do not yet expose. Keep the original SCM seed.
-    generator_args = {k: v for k, v in vars(saved_args).items() if k.startswith("synthetic_")}
-    generator_args.pop("synthetic_num_samples", None)
-    generator_args.pop("synthetic_num_samples_per_mode", None)
-    resolution = getattr(saved_args, "synthetic_res", 64)
-    spatial_size = getattr(saved_args, "spatial_size", None) or (resolution,) * 3
     banks, splits, indices = {}, {}, None
     remaining = int(args.max_map_gib * 2**30)
     for split, count in (("train", args.train_samples), ("val", args.val_samples), ("test", args.test_samples)):
-        dataset = SyntheticBrainDataset(
-            mode=split, cache=False, spatial_size=spatial_size, synthetic_num_samples=count, **generator_args
-        )
+        dataset = build_split_dataset(saved_args, split, count)
         loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
         banks[split], indices = extract_content_maps(model, loader, device, args.level, remaining, indices)
         remaining -= banks[split].numel() * banks[split].element_size()

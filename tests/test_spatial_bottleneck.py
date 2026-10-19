@@ -7,9 +7,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from eval.protocol import spatial_bottleneck_eval as factor_eval
 from models.spatial_bottleneck import SpatialBottleneck, paired_objective
 from models.vqvae import VQVAE
 from training import spatial_bottleneck_experiment as experiment
@@ -33,6 +35,38 @@ def source_model(mode="fixed"):
         norm_type="layer",
         use_checkpoint=False,
     )
+
+
+def write_source_run(root):
+    """A tiny synthetic VQ-VAE run directory with settings.json and a checkpoint."""
+    run = Path(root) / "source"
+    run.mkdir()
+    cfg = dict(
+        dataset_name="synthetic",
+        vqvae_hidden_channels=4,
+        vqvae_res_channels=2,
+        vqvae_nb_res_layers=1,
+        vqvae_nb_levels=1,
+        vqvae_embed_dim=4,
+        vqvae_nb_entries=8,
+        vqvae_scaling_rates=[2],
+        content_indices=[[0, 1]],
+        style_indices=[2, 3],
+        content_style_levels=[0],
+        separate_encoders=True,
+        mask_mode="fixed",
+        norm_type="layer",
+        synthetic_mode="pseudo_mri",
+        synthetic_res=16,
+        synthetic_seed=42,
+        synthetic_normalize="none",
+        synthetic_clean_content=True,
+        synthetic_n_content=9,
+        synthetic_n_style=3,
+    )
+    (run / "settings.json").write_text(json.dumps(cfg))
+    torch.save({"encoders": source_model().state_dict(), "step": 1}, run / "vqvae_model.pt")
+    return run
 
 
 class SpatialBottleneckTests(unittest.TestCase):
@@ -161,33 +195,7 @@ class SpatialBottleneckTests(unittest.TestCase):
     def test_real_checkpoint_cli_roundtrip_and_disjoint_splits(self):
         with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()):
             root = Path(temp)
-            run, out = root / "source", root / "bottleneck"
-            run.mkdir()
-            cfg = dict(
-                dataset_name="synthetic",
-                vqvae_hidden_channels=4,
-                vqvae_res_channels=2,
-                vqvae_nb_res_layers=1,
-                vqvae_nb_levels=1,
-                vqvae_embed_dim=4,
-                vqvae_nb_entries=8,
-                vqvae_scaling_rates=[2],
-                content_indices=[[0, 1]],
-                style_indices=[2, 3],
-                content_style_levels=[0],
-                separate_encoders=True,
-                mask_mode="fixed",
-                norm_type="layer",
-                synthetic_mode="pseudo_mri",
-                synthetic_res=16,
-                synthetic_seed=42,
-                synthetic_normalize="none",
-                synthetic_clean_content=True,
-                synthetic_n_content=9,
-                synthetic_n_style=3,
-            )
-            (run / "settings.json").write_text(json.dumps(cfg))
-            torch.save({"encoders": source_model().state_dict(), "step": 1}, run / "vqvae_model.pt")
+            run, out = write_source_run(root), root / "bottleneck"
             before = experiment.file_digest(run / "vqvae_model.pt")
             argv = [
                 "--run-dir",
@@ -233,6 +241,122 @@ class SpatialBottleneckTests(unittest.TestCase):
             self.assertEqual(outputs["gap"].shape, (2, 2, 2))
             with self.assertRaisesRegex(ValueError, "new directory"):
                 experiment.main(argv)
+
+
+def trainer_argv(run, out, latent_dim=2, train_samples=6):
+    counts = ["--train-samples", str(train_samples), "--val-samples", "4", "--test-samples", "4"]
+    sizes = ["--latent-dim", str(latent_dim), "--width", "2", "--hidden", "8", "--batch-size", "2"]
+    return ["--run-dir", str(run), "--out-dir", str(out), "--device", "cpu", "--steps", "3", "--log-every", "1"] + (
+        counts + sizes
+    )
+
+
+class FactorEvaluationTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(torch.set_num_threads, torch.get_num_threads())
+        torch.set_num_threads(1)
+        self.rng = np.random.default_rng(0)
+
+    def test_kernel_probe_and_pca_match_explicit_features(self):
+        from sklearn.decomposition import PCA
+        from sklearn.linear_model import Ridge
+
+        X = self.rng.normal(size=(40, 60))
+        y = X[:, :3] @ np.array([1.0, -2.0, 0.5]) + 0.1 * self.rng.normal(size=40)
+        train, val, test = np.arange(24), np.arange(24, 32), np.arange(32, 40)
+        K = factor_eval.center_kernel(X @ X.T, train)
+        fit = factor_eval.fit_select([({"kernel": "linear"}, K, [3.0])], y[:, None], train, val, test)
+        self.assertEqual(fit["choice"][0], {"kernel": "linear", "penalty": 3.0})
+        expected = Ridge(alpha=3.0).fit(X[train], y[train]).predict(X[test])
+        np.testing.assert_allclose(fit["test_pred"][:, 0], expected, rtol=1e-8, atol=1e-8)
+
+        scores = factor_eval.pca_scores(X @ X.T, train, 4)
+        reference = PCA(4).fit(X[train]).transform(X)
+        np.testing.assert_allclose(np.abs(scores), np.abs(reference), rtol=1e-6, atol=1e-8)
+        with self.assertRaisesRegex(ValueError, "fewer than"):
+            factor_eval.pca_scores(X @ X.T, train[:5], 8)
+
+    def test_selection_and_fit_never_read_test_labels(self):
+        X = self.rng.normal(size=(30, 5))
+        Y = np.stack([X[:, 0] ** 2, X[:, 1]], 1)
+        train, val, test = np.arange(18), np.arange(18, 24), np.arange(24, 30)
+        K = factor_eval.standardized_kernel(X, train)
+        scrambled = Y.copy()
+        scrambled[test] = self.rng.normal(size=(len(test), 2)) * 100
+        for kind in factor_eval.PROBES:
+            a = factor_eval.fit_select(factor_eval.probe_kernels(K, train, kind), Y, train, val, test)
+            b = factor_eval.fit_select(factor_eval.probe_kernels(K, train, kind), scrambled, train, val, test)
+            np.testing.assert_array_equal(a["test_pred"], b["test_pred"])
+            self.assertEqual(a["choice"], b["choice"])
+
+    def test_gap_blind_spatial_factor_is_read_from_map_and_pca_not_gap(self):
+        # Factor 0 moves mass between two voxels (GAP constant); factor 1 shifts the whole map.
+        n = 90
+        factors = self.rng.normal(size=(n, 2))
+        pattern = torch.zeros(1, 4, 4, 4)
+        pattern[0, 0, 1, 1], pattern[0, 3, 2, 2] = 1.0, -1.0
+        maps = factors[:, 0, None, None, None, None] * pattern.numpy() + factors[:, 1, None, None, None, None]
+        maps = torch.tensor(maps + 0.05 * self.rng.normal(size=maps.shape), dtype=torch.float32)
+        pairs = torch.stack((maps, maps + 0.05 * torch.randn_like(maps)), 1)
+        rows = (np.arange(60), np.arange(60, 75), np.arange(75, n))
+        gram = factor_eval.map_gram([pairs[:, 0], pairs[:, 1]], pairs[:60].mean((0, 1)), torch.ones(1, 1, 1, 1))
+        views = [np.arange(n), np.arange(n, 2 * n)]
+        gap = pairs.mean((3, 4, 5)).double().numpy()
+        scores = factor_eval.pca_scores(gram, np.concatenate([rows[0], n + rows[0]]), 2)
+        kernels = {
+            "map": [gram[np.ix_(v, v)] for v in views],
+            "gap": [factor_eval.standardized_kernel(gap[:, view], rows[0]) for view in (0, 1)],
+            "pca2": [factor_eval.standardized_kernel(scores[v], rows[0]) for v in views],
+        }
+        draws = self.rng.integers(0, 15, size=(200, 15))
+        scored = factor_eval.score_representations(kernels, [factors, factors], rows, factor_eval.PROBES, draws)
+        for kind in factor_eval.PROBES:
+            self.assertLess(scored["gap"][kind]["test_r2"][0], 0.2)
+            self.assertGreater(scored["gap"][kind]["test_r2"][1], 0.9)
+            for name in ("map", "pca2"):
+                self.assertGreater(scored[name][kind]["test_r2"][0], 0.9)
+            self.assertEqual(scored["map"][kind]["boot"].shape, (200, 2))
+        diff = factor_eval.paired_difference(scored["map"]["linear"], scored["gap"]["linear"], [0, 1])
+        self.assertGreater(diff["ci"][0, 0], 0.5)
+        self.assertEqual(diff["p_le_0"][0], 0.0)
+
+    def test_checkpoint_to_factor_report_with_parity_guards(self):
+        with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temp)
+            run = write_source_run(root)
+            first, second = root / "d2", root / "d3"
+            experiment.main(trainer_argv(run, first, 2))
+            experiment.main(trainer_argv(run, second, 3))
+            argv = ["--out-dir", str(root / "eval"), "--device", "cpu", "--bootstrap", "100", "--test-samples", "6"]
+            payload = factor_eval.main(["--bottleneck-dirs", str(first), str(second)] + argv)
+
+            names = {"map", "patch2x2x2", "gap", "pca2", "pca3", "z:d2", "z_init:d2", "z:d3", "z_init:d3"}
+            self.assertEqual(set(payload["results"]), names)
+            factors = [f["name"] for f in payload["factors"]]
+            self.assertEqual(factors[:2], ["brain_size", "ventricle_size"])
+            self.assertEqual(factors[-3:], ["gain", "bias", "noise_sigma"])
+            for record in payload["bottlenecks"]:
+                self.assertTrue(record["z_init_reproduced"])
+                self.assertTrue(all(v < 1e-5 for v in record["parity"].values()), record["parity"])
+            compared = payload["comparisons"]["d2"]["rbf"]
+            self.assertEqual(set(compared), {"map", "patch2x2x2", "gap", "pca2", "z_init:d2"})
+            self.assertEqual(set(payload["latent_dim_selection"]), {"linear", "rbf"})
+            saved = json.loads((root / "eval" / "factor_recovery.json").read_text())
+            self.assertEqual(saved["splits"]["test"], {"n": 6, "n_bottleneck": 4, "sample_seed": 44})
+            with (root / "eval" / "comparisons.csv").open() as handle:
+                self.assertEqual(len(handle.readlines()), 1 + 2 * 2 * 5 * (len(factors) + 1))
+
+            outputs = torch.load(first / "test_outputs.pt", weights_only=True)
+            outputs["codes"] = outputs["codes"].roll(1, 0)
+            torch.save(outputs, first / "test_outputs.pt")
+            with self.assertRaisesRegex(ValueError, "at least"):
+                factor_eval.main(["--bottleneck-dirs", str(first), "--out-dir", str(root / "e"), "--test-samples", "3"])
+            with self.assertRaisesRegex(ValueError, "do not reproduce"):
+                factor_eval.main(["--bottleneck-dirs", str(first), "--out-dir", str(root / "eval2"), "--device", "cpu"])
+            other = root / "other_split"
+            experiment.main(trainer_argv(run, other, train_samples=4))
+            with self.assertRaisesRegex(ValueError, "different source"):
+                factor_eval.main(["--bottleneck-dirs", str(second), str(other), "--out-dir", str(root / "eval3")])
 
 
 if __name__ == "__main__":

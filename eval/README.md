@@ -6,7 +6,7 @@ Each topic's write-ups (`*.md`) live next to its code.
 | Subpackage | What's in it |
 |---|---|
 | `metrics/` | Metric primitives other code imports: `dci`, `identifiability_metrics`, probe helpers (`evaluation`), `cross_reconstruction`, `marginal_independence`, `parent_adjusted`, `bundle_identity`, `init_baseline`. |
-| `protocol/` | Scoring entrypoints. `run_dci_compare` is the source of truth for the metric rules; `identifiability_report`, `score_checkpoint`, `run_dci_synthetic`, `compare_bundles`, `export_vq_bundle`, [normative content bundles](protocol/NORMATIVE_BUNDLE.md), `interventional_identifiability`, VAE sweep scoring. |
+| `protocol/` | Scoring entrypoints. `run_dci_compare` is the source of truth for the metric rules; `identifiability_report`, `score_checkpoint`, `run_dci_synthetic`, `compare_bundles`, `export_vq_bundle`, [normative content bundles](protocol/NORMATIVE_BUNDLE.md), `interventional_identifiability`, VAE sweep scoring; `spatial_bottleneck_eval` (per-factor recovery from a [spatial-bottleneck](../training/SPATIAL_BOTTLENECK.md) code vs the full map, GAP, patch, PCA at the same size and the untrained readout). |
 | `synthetic/` | The synthetic generator (`synthetic_dataset`, `legacy_renderer`), its checkpoint-free audits (`generator_defects`, `factor_visibility`), previews and NIfTI export. |
 | `causal/` | PC causal discovery on representations (`run_causal_recovery`, `latent_causal_discovery`) and SCM diagnostics. |
 | `dino/` | DINOv3 / 3DINO embedding and scoring, plus the DINO-vs-VQ comparison notes. |

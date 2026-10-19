@@ -84,9 +84,62 @@ Only validation selects checkpoints; test metrics are computed after selection.
 
 Inspect spatial errors as well as averages: low aggregate error can conceal a
 lost lesion. These outputs assess map compression, not individual causal-factor
-recovery. Factor probes/intervention tests remain separate evaluations, and a
-dimension small enough to represent selected scalar factors may be insufficient
-for additional shared spatial fields in the generator.
+recovery; `eval.protocol.spatial_bottleneck_eval` (below) does that. A dimension
+small enough to represent selected scalar factors may be insufficient for
+additional shared spatial fields in the generator.
+
+## Factor recovery
+
+~~~sh
+python -m eval.protocol.spatial_bottleneck_eval \
+  --bottleneck-dirs /path/to/bottleneck_d16 /path/to/bottleneck_d16_s1 /path/to/bottleneck_d32 \
+  --out-dir /path/to/new-eval-dir --test-samples 512 --device cuda
+~~~
+
+This regenerates the bottleneck's own subjects from the source run's settings,
+collects their factor labels and asks, per factor, how well each representation
+predicts it on held-out test subjects:
+
+| Representation | Role |
+|---|---|
+| `map` | full content map (the bottleneck's normalisation): what was available before compression |
+| `patch2x2x2` | channel means on a coarse grid: the existing local readout |
+| `gap` | channel means: the existing global readout |
+| `pca{d}` | top-d principal components of the map, at each bottleneck's size: linear compression |
+| `z_init:RUN` | the readout at its initialisation (same seed and normalisation): the floor |
+| `z:RUN` | the trained code |
+
+- Standardisation, PCA and probe weights are fitted on training subjects only.
+  Each factor's ridge penalty / RBF width is chosen by validation R², and test
+  labels are used once. Both a linear and an RBF kernel probe are reported;
+  the full map is probed exactly through its Gram matrix.
+- Before scoring, the regenerated test maps must reproduce the saved test codes
+  and GAP vectors, and the source checkpoint and settings must match their
+  recorded hashes; otherwise the script stops. Use `--run-dir` if the source run
+  moved.
+- `--test-samples` / `--val-samples` add further held-out subjects from the same
+  split seeds. The readout is frozen, so this only costs rendering, and with
+  64 test subjects per-factor intervals are wide. Under `fixed_reference`
+  normalisation a split trained with fewer than 64 subjects cannot be extended
+  (the parity check fails and says so).
+- Several bottleneck directories trained on the same source and splits are
+  evaluated together. Different seeds at one size show seed variability;
+  different sizes add a "latent size chosen by validation" line.
+- Outputs: `factor_recovery.json` (everything, including each factor's chosen
+  hyperparameters and the parity record), `factor_recovery.csv` (one row per
+  representation, probe and factor, with per-view R²) and `comparisons.csv`
+  (`z` minus each baseline, with a paired bootstrap interval over test subjects
+  and the share of draws at or below zero).
+
+Read `z - gap` and `z - patch` for local factors (lesion coordinates, temporal
+atrophy, sulcal widening), `z - pca{d}` for whether the learned readout beats
+linear compression at the same size, `z - map` for what compression lost, and
+`z - z_init` for what training the readout bought. Style rows (gain, bias,
+noise sigma as rendered) measure leakage into a content code, so lower is better.
+The bootstrap holds probe fits fixed; use several bottleneck seeds for training
+variability. Under `--synthetic-causal` a factor can be predicted through
+correlated anatomy, so a lesion-coordinate R² is not on its own evidence that the
+lesion's position is encoded; that needs an intervention test.
 
 ## Validation
 
@@ -98,3 +151,8 @@ Tests cover spatial sensitivity when GAP is constant, training-only normalizatio
 variance across subjects, decoder isolation, fixed and per-view learned masks,
 frozen encoder/codebook state, a learned toy spatial compression task, and a real
 small VQ-VAE checkpoint-to-report run including reload and output protection.
+The factor evaluator's tests check kernel ridge and PCA against sklearn on
+explicit features, that test labels never move a fit or a selection, that a
+GAP-invisible spatial factor is read from the map and PCA but not GAP, and a
+checkpoint-to-factor-report run with extended test subjects, a tampered test
+output and mismatched splits.
