@@ -1,0 +1,10 @@
+# Arm B of the main-generator rebuild of the feature-competition toy: conv_mlp_lesion_anatfixed with brain size varying
+# (its full generator range, shared by both views); every other anatomy factor stays at its mean. Under wm_interior the
+# lesion's admissible white matter moves with brain size, so the same latents can land the lesion elsewhere: the
+# coupling the main recipe has. Read lesion_x/y/z against conv_mlp_lesion_anatfixed at the same steps.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_lesion_brainonly_s{seed}
+conv_readout: mlp
+standardize_code: true
+synthetic_content_amp_scale: [1, 0, 1, 1, 1, 0, 0, 0, 0]
+eval_every: 1000

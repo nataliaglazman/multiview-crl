@@ -64,6 +64,8 @@ class ExperimentTests(unittest.TestCase):
                 "conv_mlp_temporal009_moments",
                 "conv_mlp_lesionpos",
                 "conv_mlp_lesionpos_moments",
+                "conv_mlp_lesion_anatfixed",
+                "conv_mlp_lesion_brainonly",
                 "conv_mlp_burden_oracle_k1",
                 "conv_mlp_burden_oracle_k10",
                 "conv_mlp_burden_oracle_k60",
@@ -109,6 +111,12 @@ class ExperimentTests(unittest.TestCase):
                 {"synthetic_lesion_intensity", "synthetic_lesion_t1_value", "standardize_code"},
             ),
             ("conv_mlp_lesionpos", "conv_mlp_lesionpos_moments", {"global_pool"}),
+            (
+                "conv_mlp",
+                "conv_mlp_lesion_anatfixed",
+                {"standardize_code", "synthetic_content_amp_scale", "eval_every"},
+            ),
+            ("conv_mlp_lesion_anatfixed", "conv_mlp_lesion_brainonly", {"synthetic_content_amp_scale"}),
             (
                 "conv_mlp",
                 "conv_mlp_burden_oracle_k1",

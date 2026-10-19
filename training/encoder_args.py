@@ -511,6 +511,17 @@ def build_parser(description=None):
     p.add_argument("--synthetic-style-scale", type=float, default=1.0)
     p.add_argument("--synthetic-content-scale", type=float, default=1.0)
     p.add_argument(
+        "--synthetic-content-amp-scale",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="SCALE",
+        help="Nine per-factor multipliers on the anatomy effect sizes, indexed like z_content (brain size, "
+        "ventricle, lesion x/y/z, thickness, temporal, asymmetry, sulcal). 0 fixes a factor at its mean anatomy "
+        "while its latent is still drawn; 1 is the default effect. Entries 2-4 are the lesion's position and are "
+        "ignored by the renderer. E.g. 1 0 1 1 1 0 0 0 0 lets only brain size and the lesion vary",
+    )
+    p.add_argument(
         "--synthetic-temporal-sigma",
         type=float,
         default=0.18,
@@ -748,6 +759,13 @@ def parse_args(argv=None, description=None):
         p.error("--deterministic-warn-only requires --deterministic")
     if not 0 < args.synthetic_lesion_radius < float("inf"):
         p.error("--synthetic-lesion-radius must be finite and positive")
+    if args.synthetic_content_amp_scale is not None:
+        if len(args.synthetic_content_amp_scale) != 9:
+            p.error("--synthetic-content-amp-scale takes nine values, one per z_content factor")
+        if any(not 0 <= s < float("inf") for s in args.synthetic_content_amp_scale):
+            p.error("--synthetic-content-amp-scale entries must be finite and nonnegative")
+        if args.n_content < 9 or args.synthetic_mode != "pseudo_mri":
+            p.error("--synthetic-content-amp-scale scales the nine pseudo_mri anatomy factors; it needs --n-content 9")
     if not 0 < args.synthetic_temporal_sigma < float("inf"):
         p.error("--synthetic-temporal-sigma must be finite and positive")
     if args.synthetic_lesion_target == "burden":

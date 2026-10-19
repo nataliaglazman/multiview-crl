@@ -1,0 +1,12 @@
+# The feature-competition toy's arm A rebuilt on the main generator and trainer: every anatomy factor is held at its
+# mean anatomy (--synthetic-content-amp-scale 0; their latents are still drawn and read ~0), so only the lesion and the
+# per-view style vary. The lesion is the encoder recipe's own: wm_interior placement from the lesion_x/y/z latents, fixed
+# intensity, T1 lesion 0.4. --standardize-code as in the toy, whose arm A never left chance without it.
+# Read per_factor["content→content"].lesion_x/y/z.ridge in dci_step*.json: the probes score the LATENTS, so even a
+# perfect localiser reads below 1 (x is mostly the hemisphere). Pair: conv_mlp_lesion_brainonly lets brain size vary.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_lesion_anatfixed_s{seed}
+conv_readout: mlp
+standardize_code: true
+synthetic_content_amp_scale: [0, 0, 1, 1, 1, 0, 0, 0, 0]
+eval_every: 1000

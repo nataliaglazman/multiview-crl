@@ -197,6 +197,7 @@ def make_dataset(cfg, num_samples, mode="val"):
         synthetic_style_scale=cfg.get("synthetic_style_scale", 1.0),
         synthetic_content_scale=cfg.get("synthetic_content_scale", 1.0),
         synthetic_temporal_sigma=cfg.get("synthetic_temporal_sigma", 0.18),
+        synthetic_content_amp_scale=cfg.get("synthetic_content_amp_scale"),
         synthetic_n_deformation_grid=cfg.get("synthetic_n_deformation_grid", 4),
         synthetic_n_fissure_grid=cfg.get("synthetic_n_fissure_grid", 8),
         synthetic_hierarchical_content=cfg.get("synthetic_hierarchical_content", False),
