@@ -81,22 +81,37 @@ class IndexedDataset(Dataset):
 
 
 def training_loader(options, dataset, run_dir):
-    """Use the recorded cluster labels, avoiding a new k-means fit or a stage-0 checkpoint."""
+    """Replay recorded clusters or neighbour pools without refitting or loading a stage-0 model."""
     labels = None
     generator = torch.Generator().manual_seed(options.loader_seed)
     if options.stratify_batches != "none":
         path = Path(run_dir) / "stratification.json"
         if not path.is_file():
-            raise ValueError(f"Missing {path}; need the actual training cluster assignments")
+            raise ValueError(f"Missing {path}; need the actual training clusters or neighbour pools")
         saved = json.loads(path.read_text())
-        labels = np.asarray(saved["labels"])
-        if labels.shape != (len(dataset),) or not np.issubdtype(labels.dtype, np.integer):
-            raise ValueError("Recorded cluster labels must be one integer per training subject")
-        if saved["mode"] != options.stratify_batches or saved["k"] != options.stratify_clusters:
+        kind = getattr(options, "stratify_sampler", "cluster")
+        if (
+            saved["mode"] != options.stratify_batches
+            or saved.get("sampler", "cluster") != kind
+            or saved.get("batch_size", options.batch_size) != options.batch_size
+            or saved.get("sampler_seed", options.loader_seed) != options.loader_seed
+        ):
             raise ValueError("stratification.json disagrees with settings.json")
-        batching = {
-            "batch_sampler": cluster_batches.ClusterBatchSampler(labels, options.batch_size, options.loader_seed)
-        }
+        if kind == "neighbourhood":
+            neighbours = np.asarray(saved["neighbour_indices"])
+            if saved["neighbours"] != options.stratify_neighbours:
+                raise ValueError("stratification.json disagrees with settings.json")
+            if neighbours.shape != (len(dataset), options.stratify_neighbours):
+                raise ValueError("Recorded neighbour pools have the wrong subject count or pool size")
+            sampler = cluster_batches.NeighbourhoodBatchSampler(neighbours, options.batch_size, options.loader_seed)
+        else:
+            labels = np.asarray(saved["labels"])
+            if labels.shape != (len(dataset),) or not np.issubdtype(labels.dtype, np.integer):
+                raise ValueError("Recorded cluster labels must be one integer per training subject")
+            if saved["k"] != options.stratify_clusters:
+                raise ValueError("stratification.json disagrees with settings.json")
+            sampler = cluster_batches.ClusterBatchSampler(labels, options.batch_size, options.loader_seed)
+        batching = {"batch_sampler": sampler}
     else:
         batching = {"batch_size": options.batch_size, "shuffle": True, "drop_last": True}
     loader = DataLoader(IndexedDataset(dataset), num_workers=0, generator=generator, **batching)

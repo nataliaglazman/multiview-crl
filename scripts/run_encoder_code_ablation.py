@@ -68,7 +68,8 @@ def main(argv=None):
     reference, planned = plan_runs(args)
     print(
         f"Saved recipe: lesion target={reference['synthetic_lesion_target']}, "
-        f"clustering={reference['stratify_batches']} K={reference['stratify_clusters']}, "
+        f"matching={reference['stratify_batches']} sampler={reference['stratify_sampler']} "
+        f"K={reference['stratify_clusters']} neighbours={reference['stratify_neighbours']}, "
         f"batch={reference['batch_size']}, steps={reference['train_steps']}, "
         f"data seed={reference['data_seed']}",
         flush=True,

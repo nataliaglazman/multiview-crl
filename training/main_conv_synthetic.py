@@ -13,7 +13,8 @@ through zero-initialized columns, so it starts as exact GAP too.
 units) with a top-k Gumbel-softmax content selector over learnable per-unit logits.
 ``--stratify-batches oracle|code`` draws every training batch from one k-means cluster of the
 training subjects (MCL's batch rule; ``data.cluster_batches``), so InfoNCE's negatives share the
-clustered anatomy.
+clustered anatomy. Add ``--stratify-sampler neighbourhood --stratify-neighbours 100`` to use
+overlapping pools around anchors instead, keeping every subject eligible.
 
 Identifiability is scored with ``eval.metrics.dci.compute_dci_synthetic`` (per-latent
 RidgeCV/GBT R² + block-MCC + content→view leakage): content latents → high,
@@ -227,7 +228,7 @@ def stage0_code(args, train_dataset, device):
         print(
             "  NOTE: the stage-0 run's data differs from this run's in "
             + ", ".join(f"{k} ({cfg.get(k)} vs {getattr(args, k)})" for k in differ)
-            + "; MCL clusters the code of the bank the stage-0 encoder was trained on",
+            + "; matching uses the frozen stage-0 encoder on this run's training bank",
             flush=True,
         )
     # build_model applies the stage-0 run's runtime settings; this run keeps its own.
@@ -250,13 +251,11 @@ def stage0_code(args, train_dataset, device):
 
 
 def stratified_batch_sampler(args, train_dataset, device, save_dir):
-    """--stratify-batches: k-means on the training subjects, then every batch from one cluster.
+    """Condition batches on oracle anatomy or a frozen stage-0 code of the training subjects.
 
-    oracle clusters the true anatomy latents, read from the generator without rendering a view;
-    code clusters a stage-0 run's content code (``stage0_code``). Prints and writes to
-    stratification.json the clusters kept and, per true content factor, the SD inside a batch's
-    cluster over the SD across the bank: the anatomy should sit near K^(-1/d), the lesion near 1.
-    The summary also rides on the sampler as ``summary``.
+    The selected sampler uses k-means clusters or overlapping nearest-neighbour pools. Writes
+    the fixed lookup and coverage/spread diagnostics to stratification.json. The summary also
+    rides on the sampler as ``summary``.
     """
     names = dci.content_factor_names(args.n_content, args.synthetic_lesion_target)
     anatomy = cluster_batches.anatomy_columns(names)
@@ -278,6 +277,10 @@ def stratified_batch_sampler(args, train_dataset, device, save_dir):
         source += ", lesion latents left out"
     else:
         features, factors, source = stage0_code(args, train_dataset, device)
+    if getattr(args, "stratify_sampler", "cluster") == "neighbourhood":
+        return neighbourhood_batch_sampler(
+            args, features, factors, names, anatomy, clustered, source, save_dir, started
+        )
     labels = cluster_batches.kmeans_labels(features, args.stratify_clusters, args.data_seed)
     sampler = cluster_batches.ClusterBatchSampler(labels, args.batch_size, args.loader_seed)
     summary = cluster_batches.summarize(
@@ -309,6 +312,8 @@ def stratified_batch_sampler(args, train_dataset, device, save_dir):
         print(line, flush=True)
     payload = {
         "mode": args.stratify_batches,
+        "sampler": "cluster",
+        "batch_size": args.batch_size,
         "k": args.stratify_clusters,
         "source": source,
         "stratify_from": args.stratify_from,
@@ -319,6 +324,66 @@ def stratified_batch_sampler(args, train_dataset, device, save_dir):
     }
     with open(os.path.join(save_dir, "stratification.json"), "w") as fp:
         json.dump(payload, fp, indent=2)
+    sampler.summary = summary
+    return sampler
+
+
+def neighbourhood_batch_sampler(args, features, factors, names, anatomy, matched, source, save_dir, started):
+    """--stratify-sampler neighbourhood: each batch is an anchor plus B-1 of its fixed nearest neighbours.
+
+    ``matched`` are the oracle's factor columns (None for a code). Prints and writes to
+    stratification.json the neighbour pools and, over the run's first anchor pass, subject coverage
+    and each factor's within-batch SD over its bank SD.
+    """
+    neighbours = cluster_batches.nearest_neighbours(features, args.stratify_neighbours)
+    sampler = cluster_batches.NeighbourhoodBatchSampler(neighbours, args.batch_size, args.loader_seed)
+    summary = cluster_batches.summarize_neighbourhood(
+        neighbours, args.batch_size, args.loader_seed, factors, names, anatomy, matched
+    )
+    preview = summary["preview"]
+    print(
+        f"stratified batches: {args.stratify_batches}, anchor + {args.batch_size - 1} sampled from its "
+        f"{args.stratify_neighbours} nearest neighbours in {source}, standardized Euclidean distance "
+        f"({time.perf_counter() - started:.0f} s)",
+        flush=True,
+    )
+    print(
+        f"  all {summary['subjects']} subjects anchor once per {summary['batches_per_anchor_pass']} batches; "
+        f"{summary['batches_per_epoch']} batches ({summary['subject_draws_per_epoch']} subject draws) per "
+        "loader epoch; neighbours can recur across batches",
+        flush=True,
+    )
+    counts = preview["subject_draw_counts"]
+    print(
+        f"  the run's first {preview['batches']} batches: {preview['unique_subjects_first_epoch']} unique subjects "
+        f"in the first loader epoch, {preview['unique_subjects']} over the anchor pass; draws per subject "
+        f"min/mean/max = {min(counts)}/{np.mean(counts):.1f}/{max(counts)}",
+        flush=True,
+    )
+    print("  RMS within-batch SD / bank SD per content factor (what a batch's negatives keep of it):", flush=True)
+    for j, name in enumerate(names):
+        value = summary["sd_ratio"][name]
+        shown = "    n/a" if value is None else f"{value:7.3f}"
+        role = "matched" if matched and j in matched else ("anatomy" if j in anatomy else "")
+        print(f"      {name:<20s}{shown}  {role}", flush=True)
+    mean = summary["sd_ratio_anatomy_mean" if matched is None else "sd_ratio_matched_mean"]
+    if mean is not None:
+        print(f"    {'anatomy' if matched is None else 'matched'} mean {mean:.3f}", flush=True)
+    payload = {
+        "mode": args.stratify_batches,
+        "sampler": "neighbourhood",
+        "batch_size": args.batch_size,
+        "neighbours": args.stratify_neighbours,
+        "source": source,
+        "stratify_from": args.stratify_from,
+        "sampler_seed": args.loader_seed,
+        "metric": "euclidean_on_standardized_features",
+        "anchor_schedule": "shuffled_full_bank_passes_carried_across_loader_epochs",
+        **summary,
+        "neighbour_indices": neighbours.tolist(),
+    }
+    with open(os.path.join(save_dir, "stratification.json"), "w") as fp:
+        json.dump(payload, fp, indent=2, allow_nan=False)
     sampler.summary = summary
     return sampler
 
@@ -1421,10 +1486,12 @@ def main():
     except Exception:
         writer = None
     if stratification is not None and writer is not None:
-        writer.add_scalar("stratify/clusters_kept", stratification["clusters_kept"], 0)
-        writer.add_scalar("stratify/subjects_per_epoch", stratification["subjects_per_epoch"], 0)
+        for key in ("clusters_kept", "subjects_per_epoch", "subjects_eligible_as_anchors", "subject_draws_per_epoch"):
+            if key in stratification:
+                writer.add_scalar(f"stratify/{key}", stratification[key], 0)
         for name, value in stratification["sd_ratio"].items():
-            writer.add_scalar(f"stratify/sd_ratio/{name}", value, 0)
+            if value is not None:
+                writer.add_scalar(f"stratify/sd_ratio/{name}", value, 0)
 
     # Step-0 eval doubles as the untrained floor: same architecture, same seed, no training.
     # Per-factor R² needs it more than the block means do -- a localised factor can read

@@ -180,11 +180,19 @@ def run(args):
         )
     source = args.clusters_from
     if source is None:
-        stratified = [r for r in runs if r["stratification"] is not None and r["stratification"]["k"] > 1]
+        stratified = [
+            r
+            for r in runs
+            if r["stratification"] is not None
+            and r["stratification"].get("sampler", "cluster") == "cluster"
+            and r["stratification"]["k"] > 1
+        ]
         if not stratified:
             raise SystemExit("No --run-dirs run has a stratification.json with K > 1; pass --clusters-from")
         source = max(stratified, key=lambda r: r["stratification"]["k"])["run_dir"]
     strat = load_json(os.path.join(source, "stratification.json"))
+    if strat.get("sampler", "cluster") != "cluster":
+        raise SystemExit(f"{source} uses neighbourhood sampling; --clusters-from needs fixed k-means clusters")
     if strat["mode"] != "oracle":
         raise SystemExit(f"{source} clustered a stage-0 code ({strat['mode']}); its centres are not in anatomy space")
     cfg = load_settings(source)
@@ -227,7 +235,7 @@ def run(args):
 
     letters = [chr(ord("A") + i) for i in range(len(runs))]
     for letter, r in zip(letters, runs):
-        k = r["stratification"]["k"] if r["stratification"] else "unstratified"
+        k = r["stratification"].get("k", "neighbourhood") if r["stratification"] else "unstratified"
         print(f"  run {letter}: {r['run_dir']} (K = {k}, step {r['step']}, {args.checkpoint})", flush=True)
     report = {
         "clusters_from": source,

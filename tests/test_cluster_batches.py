@@ -1,8 +1,9 @@
-"""--stratify-batches without torch: the one-cluster batch sampler, its diagnostics and its flag rules."""
+"""--stratify-batches without torch: the cluster and neighbourhood batch samplers, their diagnostics and flag rules."""
 
 import ast
 import contextlib
 import io
+import json
 import subprocess
 import sys
 import unittest
@@ -76,6 +77,138 @@ class SamplerTests(unittest.TestCase):
         labels = cluster_batches.kmeans_labels(features, 4, seed=0)
         self.assertEqual(sorted(set(labels.tolist())), [0, 1, 2, 3])
         np.testing.assert_array_equal(labels, cluster_batches.kmeans_labels(features, 4, seed=0))
+
+
+def pools(n=100, k=20, seed=0):
+    return cluster_batches.nearest_neighbours(np.random.default_rng(seed).normal(size=(n, 3)), k)
+
+
+def first_batches(sampler, count):
+    """The first ``count`` batches a training loop draws: ``sampler`` epoch after epoch."""
+    drawn = []
+    while len(drawn) < count:
+        drawn.extend(sampler)
+    return drawn[:count]
+
+
+class NeighbourhoodTests(unittest.TestCase):
+    def test_neighbours_are_the_closest_other_subjects_on_standardized_features(self):
+        line = np.arange(10.0)[:, None]
+        found = cluster_batches.nearest_neighbours(line, 2)
+        self.assertEqual(found.shape, (10, 2))
+        self.assertEqual(set(found[0].tolist()), {1, 2})
+        self.assertEqual(set(found[5].tolist()), {4, 6})
+        self.assertEqual(set(found[9].tolist()), {7, 8})
+        # Standardized: a column's units do not decide which subjects are near.
+        features = np.random.default_rng(0).normal(size=(200, 2))
+        np.testing.assert_array_equal(
+            cluster_batches.nearest_neighbours(features, 10),
+            cluster_batches.nearest_neighbours(features * [1.0, 1000.0], 10),
+        )
+        # Identical rows tie at distance 0; a subject is still never its own neighbour.
+        ties = cluster_batches.nearest_neighbours(np.array([[0.0], [0.0], [0.0], [5.0], [6.0]]), 2)
+        for i, row in enumerate(ties):
+            self.assertNotIn(i, row.tolist())
+            self.assertEqual(len(set(row.tolist())), 2)
+        self.assertEqual(set(ties[0].tolist()), {1, 2})
+        for bad in (0, 10):
+            with self.assertRaises(ValueError):
+                cluster_batches.nearest_neighbours(line, bad)
+        with self.assertRaises(ValueError):
+            cluster_batches.nearest_neighbours(np.array([[0.0], [np.nan], [1.0]]), 1)
+
+    def test_a_batch_is_its_anchor_then_distinct_subjects_from_the_anchor_pool(self):
+        neighbours = pools()
+        sampler = cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=3)
+        self.assertEqual(len(sampler), 100 // 8)
+        for epoch in epochs(sampler, 3):
+            self.assertEqual(len(epoch), len(sampler))
+            for batch in epoch:
+                self.assertEqual(len(batch), 8)
+                self.assertEqual(len(set(batch)), 8)
+                self.assertTrue(all(isinstance(i, int) for i in batch))
+                self.assertLessEqual(set(batch[1:]), set(neighbours[batch[0]].tolist()))
+
+    def test_every_subject_anchors_once_per_pass_and_passes_run_across_epochs(self):
+        neighbours = pools()
+        sampler = cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=3)
+        drawn = first_batches(sampler, 300)  # 25 loader epochs of 12 batches
+        for start in (0, 100, 200):
+            anchors = sorted(batch[0] for batch in drawn[start : start + 100])
+            self.assertEqual(anchors, list(range(100)))
+        self.assertNotEqual([b[0] for b in drawn[:100]], [b[0] for b in drawn[100:200]])
+        replay = cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=3)
+        self.assertEqual(first_batches(replay, 300), drawn)
+        other = cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=4)
+        self.assertNotEqual(first_batches(other, 12), drawn[:12])
+
+    def test_a_pool_of_exactly_b_minus_1_gives_the_whole_pool(self):
+        neighbours = pools(k=7)
+        for batch in cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=0):
+            self.assertEqual(set(batch[1:]), set(neighbours[batch[0]].tolist()))
+
+    def test_subjects_a_cluster_sampler_drops_still_train(self):
+        labels = labels_of(SIZES)
+        centres = np.random.default_rng(1).normal(scale=10, size=(len(SIZES), 4))
+        features = centres[labels] + np.random.default_rng(2).normal(size=(len(labels), 4))
+        dropped = set(np.flatnonzero(np.isin(labels, [0, 4])).tolist())
+        clustered = {
+            i for epoch in epochs(cluster_batches.ClusterBatchSampler(labels, 16, seed=0), 5) for b in epoch for i in b
+        }
+        self.assertFalse(clustered & dropped)
+        neighbours = cluster_batches.nearest_neighbours(features, 30)
+        drawn = first_batches(cluster_batches.NeighbourhoodBatchSampler(neighbours, 16, seed=0), len(labels))
+        self.assertEqual({i for b in drawn for i in b}, set(range(len(labels))))
+        self.assertLessEqual(dropped, {b[0] for b in drawn})
+
+    def test_bad_pools_refuse(self):
+        good = pools(n=20, k=5)
+        cluster_batches.NeighbourhoodBatchSampler(good, 6, seed=0)
+        own = good.copy()
+        own[3, 0] = 3
+        repeated = good.copy()
+        repeated[3, 1] = repeated[3, 0]
+        outside = good.copy()
+        outside[3, 0] = 20
+        for neighbours, batch in (
+            (own, 6),
+            (repeated, 6),
+            (outside, 6),
+            (good, 7),  # pool smaller than B-1
+            (good, 1),
+            (good.astype(float), 6),
+            (good[:, None], 6),
+        ):
+            with self.assertRaises(ValueError):
+                cluster_batches.NeighbourhoodBatchSampler(neighbours, batch, seed=0)
+
+    def test_summary_is_the_runs_first_anchor_pass(self):
+        rng = np.random.default_rng(0)
+        factors = np.column_stack([rng.uniform(-1, 1, size=(1000, 2)), np.ones(1000)])
+        names = ["brain_size", "ventricle_size", "lesion_burden"]
+        neighbours = cluster_batches.nearest_neighbours(factors[:, [0]], 50)
+        summary = cluster_batches.summarize_neighbourhood(neighbours, 16, 7, factors, names, [0, 1], matched=[0])
+        drawn = np.array(first_batches(cluster_batches.NeighbourhoodBatchSampler(neighbours, 16, seed=7), 1000))
+        preview = summary["preview"]
+        self.assertEqual(preview["subject_draw_counts"], np.bincount(drawn.ravel(), minlength=1000).tolist())
+        self.assertEqual(preview["anchor_counts"], [1] * 1000)
+        self.assertEqual(preview["unique_subjects"], 1000)
+        self.assertEqual(sum(preview["subject_draw_counts_first_epoch"]), 16 * (1000 // 16))
+        self.assertEqual(
+            (summary["batches_per_epoch"], summary["subject_draws_per_epoch"], summary["batches_per_anchor_pass"]),
+            (62, 62 * 16, 1000),
+        )
+        self.assertEqual(summary["matched_factors"], ["brain_size"])
+        self.assertEqual(summary["anatomy_factors"], ["brain_size", "ventricle_size"])
+        # The matched factor's spread among a batch's negatives collapses; the free one keeps it.
+        self.assertLess(summary["sd_ratio"]["brain_size"], 0.1)
+        self.assertAlmostEqual(summary["sd_ratio"]["ventricle_size"], 1.0, delta=0.05)
+        self.assertIsNone(summary["sd_ratio"]["lesion_burden"])  # constant column
+        self.assertAlmostEqual(summary["sd_ratio_matched_mean"], summary["sd_ratio"]["brain_size"])
+        json.dumps(summary, allow_nan=False)
+        code = cluster_batches.summarize_neighbourhood(neighbours, 16, 7, factors, names, [0, 1])
+        self.assertIsNone(code["matched_factors"])
+        self.assertIsNone(code["sd_ratio_matched_mean"])
 
 
 class DiagnosticTests(unittest.TestCase):
@@ -173,6 +306,28 @@ class FlagTests(unittest.TestCase):
         refused(self, "--stratify-batches", "oracle", "--stratify-clusters", "10", "--stratify-from", "runs/x")
         refused(self, "--stratify-batches", "code", "--stratify-clusters", "10")
         refused(self, "--stratify-batches", "oracle", "--stratify-clusters", "10", "--synthetic-mode", "categorical")
+
+    def test_neighbourhood_flag_rules(self):
+        oracle = ["--stratify-batches", "oracle", "--stratify-sampler", "neighbourhood"]
+        args = parse(*oracle, "--stratify-neighbours", "100")
+        self.assertEqual(
+            (args.stratify_sampler, args.stratify_neighbours, args.stratify_clusters), ("neighbourhood", 100, None)
+        )
+        self.assertEqual(parse("--stratify-batches", "oracle", "--stratify-clusters", "10").stratify_sampler, "cluster")
+        parse(*oracle, "--stratify-neighbours", "31")  # B-1
+        parse(*oracle, "--stratify-neighbours", "639")  # N-1
+        code = ["--stratify-batches", "code", "--stratify-from", "runs/x", "--stratify-sampler", "neighbourhood"]
+        self.assertEqual(parse(*code, "--stratify-neighbours", "64").stratify_from, "runs/x")
+        refused(self, *oracle)  # the pool size is required
+        refused(self, *oracle, "--stratify-neighbours", "30")  # cannot fill a batch of 32
+        refused(self, *oracle, "--stratify-neighbours", "640")  # every other subject is 639
+        refused(self, *oracle, "--stratify-neighbours", "100", "--stratify-clusters", "10")
+        refused(self, "--stratify-batches", "oracle", "--stratify-clusters", "10", "--stratify-neighbours", "100")
+        refused(self, "--stratify-sampler", "neighbourhood")  # without --stratify-batches
+        refused(self, "--stratify-neighbours", "100")
+        options = {"stratify_batches": "oracle", "stratify_sampler": "neighbourhood", "stratify_neighbours": 100}
+        roundtrip = encoder_args.parse_args([*SYNTHETIC, *encoder_args.cli_arguments(options)])
+        self.assertEqual((roundtrip.stratify_sampler, roundtrip.stratify_neighbours), ("neighbourhood", 100))
 
     def test_the_cli_module_needs_only_the_standard_library(self):
         # scripts/launch.py imports it on submit hosts that may have nothing but PyYAML.

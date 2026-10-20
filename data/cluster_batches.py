@@ -1,4 +1,4 @@
-"""Training batches drawn from one cluster of subjects at a time: the encoder-only trainer's --stratify-batches.
+"""Conditioned training batches for the encoder-only trainer's --stratify-batches.
 
 Every batch holds members of a single k-means cluster, so InfoNCE's negatives share whatever was
 clustered and a subject can only be told apart from them by the rest. This is the batch rule of
@@ -7,6 +7,10 @@ clusters, each batch taken from the untraversed members of the next cluster that
 the epoch has used them all. Here every batch is full, because InfoNCE depends on the number of
 negatives: a cluster smaller than the batch size is dropped, and each cluster's remainder sits out
 the epoch (it is reshuffled into the next one).
+
+The optional neighbourhood sampler uses overlapping nearest-neighbour pools instead. Every subject
+anchors one batch per shuffled pass through the bank, including subjects in sparse regions. A batch
+contains its anchor plus distinct neighbours; total exposure can differ because neighbours recur.
 
 Torch-free: DataLoader accepts any iterable of index lists as ``batch_sampler``.
 """
@@ -99,6 +103,112 @@ class ClusterBatchSampler:
                     yield queues[c][position[c]]
                     position[c] += 1
                     remaining -= 1
+
+
+def nearest_neighbours(features, count):
+    """Fixed Euclidean neighbours of standardized training features, excluding each subject itself."""
+    features = np.asarray(features, dtype=np.float64)
+    if features.ndim != 2 or not features.shape[1] or not np.isfinite(features).all():
+        raise ValueError("features must be a finite subject-by-feature matrix with at least one feature")
+    if not 1 <= count < len(features):
+        raise ValueError("neighbour count must be between 1 and the number of subjects minus 1")
+    from sklearn.neighbors import NearestNeighbors
+
+    features = standardize(features)
+    candidates = NearestNeighbors(n_neighbors=count + 1).fit(features).kneighbors(features, return_distance=False)
+    # Identical feature rows can tie at zero distance: the subject itself need not be first,
+    # or even occur among the returned candidates. Exclude by index, not by rank or distance.
+    return np.stack([row[row != i][:count] for i, row in enumerate(candidates)])
+
+
+class NeighbourhoodBatchSampler:
+    """Anchor plus B-1 distinct subjects sampled from its fixed nearest-neighbour pool.
+
+    Anchors follow shuffled full-bank passes, carried across loader epochs. Each epoch contains
+    floor(N/B) batches, matching the ordinary shuffled loader's step count; it is NOT a pass over
+    all subjects. Every N batches includes each subject as anchor once when counted from the start
+    of an anchor pass. Neighbours may recur across batches. The complete schedule replays from seed.
+    """
+
+    def __init__(self, neighbours, batch_size, seed):
+        neighbours = np.asarray(neighbours)
+        if neighbours.ndim != 2 or not np.issubdtype(neighbours.dtype, np.integer):
+            raise ValueError("neighbours must be an integer subject-by-neighbour matrix")
+        n, k = neighbours.shape
+        if not 2 <= batch_size <= n or not batch_size - 1 <= k < n:
+            raise ValueError("need 2 <= batch_size <= subjects and batch_size - 1 <= neighbours < subjects")
+        if np.any(neighbours < 0) or np.any(neighbours >= n):
+            raise ValueError("neighbour indices must refer to training subjects")
+        if np.any(neighbours == np.arange(n)[:, None]):
+            raise ValueError("a subject cannot be its own neighbour")
+        if np.any(np.diff(np.sort(neighbours, axis=1), axis=1) == 0):
+            raise ValueError("each neighbour pool must contain distinct subjects")
+        self.neighbours = neighbours.copy()
+        self.neighbours.flags.writeable = False
+        self.batch_size = int(batch_size)
+        self._rng = np.random.default_rng(seed)
+        self._anchors = np.empty(0, dtype=np.int64)
+        self._position = 0
+
+    def __len__(self):
+        return len(self.neighbours) // self.batch_size
+
+    def __iter__(self):
+        for _ in range(len(self)):
+            if self._position == len(self._anchors):
+                self._anchors = self._rng.permutation(len(self.neighbours))
+                self._position = 0
+            anchor = int(self._anchors[self._position])
+            self._position += 1
+            others = self._rng.choice(self.neighbours[anchor], self.batch_size - 1, replace=False)
+            yield [anchor, *others.tolist()]
+
+
+def summarize_neighbourhood(neighbours, batch_size, seed, factors, names, anatomy, matched=None):
+    """The first complete anchor pass (N batches) of a sampler built from the same ``seed``.
+
+    A fresh sampler replays the training sampler's schedule, so these are exactly the run's first N
+    batches, and the training sampler's random state is left untouched. SD ratios are the RMS
+    within-batch SD over the bank SD; draw counts include repeat exposures.
+    """
+    sampler = NeighbourhoodBatchSampler(neighbours, batch_size, seed)
+    n = len(neighbours)
+    batches = []
+    while len(batches) < n:
+        batches.extend(sampler)
+    batches = np.asarray(batches[:n])
+    factors = np.asarray(factors, dtype=np.float64)
+    bank_sd = factors.std(axis=0, ddof=1)
+    batch_sd = np.sqrt(factors[batches].var(axis=1, ddof=1).mean(axis=0))
+    ratio = np.divide(batch_sd, bank_sd, out=np.full_like(bank_sd, np.nan), where=bank_sd > 0)
+    counts = np.bincount(batches.ravel(), minlength=n)
+    first_epoch = np.bincount(batches[: len(sampler)].ravel(), minlength=n)
+
+    def finite_mean(columns):
+        values = ratio[columns]
+        values = values[np.isfinite(values)]
+        return float(values.mean()) if len(values) else None
+
+    return {
+        "subjects": n,
+        "subjects_eligible_as_anchors": n,
+        "batches_per_epoch": len(sampler),
+        "subject_draws_per_epoch": len(sampler) * batch_size,
+        "batches_per_anchor_pass": n,
+        "matched_factors": None if matched is None else [names[j] for j in matched],
+        "anatomy_factors": [names[j] for j in anatomy],
+        "sd_ratio": {name: float(r) if np.isfinite(r) else None for name, r in zip(names, ratio)},
+        "sd_ratio_anatomy_mean": finite_mean(anatomy),
+        "sd_ratio_matched_mean": None if matched is None else finite_mean(matched),
+        "preview": {
+            "batches": n,
+            "unique_subjects": int(np.count_nonzero(counts)),
+            "unique_subjects_first_epoch": int(np.count_nonzero(first_epoch)),
+            "subject_draw_counts": counts.tolist(),
+            "subject_draw_counts_first_epoch": first_epoch.tolist(),
+            "anchor_counts": np.bincount(batches[:, 0], minlength=n).tolist(),
+        },
+    }
 
 
 def loader_batching(args, build_sampler):

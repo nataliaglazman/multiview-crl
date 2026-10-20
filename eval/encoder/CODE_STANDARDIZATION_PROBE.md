@@ -22,7 +22,8 @@ use `--out-dir` for another location. Nonempty output directories require
 The dataset is restored with the trainer's factory and options. Stratified runs
 require their original `stratification.json`: the probe uses those saved labels
 and the trainer's cluster batch sampler, including its dropped small clusters
-and remainders. Unstratified runs use the trainer's seeded shuffled loader. The
+and remainders, or for `--stratify-sampler neighbourhood` the saved neighbour
+pools and the trainer's neighbourhood sampler. Unstratified runs use the trainer's seeded shuffled loader. The
 first requested batches of that schedule are replayed at each checkpoint; these
 are not claimed to be the historical batches at the checkpoint's training step.
 Subject indices and image hashes must agree between checkpoints.
