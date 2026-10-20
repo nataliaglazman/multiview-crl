@@ -17,8 +17,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from models.spatial_bottleneck import (
+    ALIGNMENT_LOSSES,
     SpatialBottleneck,
     deviation_weights,
+    infonce_alignment,
     paired_objective,
     position_weights,
     reconstruction_terms,
@@ -130,8 +132,13 @@ def evaluate(
     hard_patch_fraction=0.1,
     hard_patch_size=(4, 4, 4),
     spatial_moment_weight=0.0,
+    temperature=0.1,
 ):
-    """Unweighted map metrics; ``weigh`` (from ``loss_weighting``) adds the training-weighted error."""
+    """Unweighted map metrics; ``weigh`` (from ``loss_weighting``) adds the training-weighted error.
+
+    ``alignment_infonce`` scores all subjects at once (every other subject is a negative), so it
+    does not depend on ``batch_size`` but sits above the training term by roughly log(N / batch).
+    """
     model.eval()
     codes = []
     weighted, used = 0.0, False
@@ -150,12 +157,9 @@ def evaluate(
         target = maps[start : start + batch_size].to(device)
         code, reconstruction = model(target.flatten(0, 1))
         if model.moment_head is not None:
-            moment_error += (
-                torch.nn.functional.mse_loss(
-                    model.predict_moments(code), model.standardized_moments(target.flatten(0, 1))
-                ).item()
-                * len(target)
-            )
+            moment_error += torch.nn.functional.mse_loss(
+                model.predict_moments(code), model.standardized_moments(target.flatten(0, 1))
+            ).item() * len(target)
         residual = reconstruction.reshape_as(target) - target
         error = (residual / model.scale).square()
         weights = None if weigh is None else weigh(target)
@@ -194,6 +198,8 @@ def evaluate(
         reconstruction_over_template=rec / baseline if baseline > 1e-12 else None,
         alignment=(code[:, 0] - code[:, 1]).square().mean().item(),
         mismatched_alignment=(code[:, 0] - code[:, 1].roll(1, 0)).square().mean().item(),
+        alignment_infonce=infonce_alignment(code, temperature).item(),
+        alignment_top1=cross_view_top1(code),
         variance=torch.relu(1 - std).mean().item(),
         code_std_per_view=code.std(0, unbiased=False).tolist(),
         original_map_alignment=map_gap / len(maps),
@@ -215,13 +221,32 @@ def evaluate(
     return metrics, code, (errors / (2 * len(maps))).mean(0).float()
 
 
+def cross_view_top1(code):
+    """Fraction of subjects whose other view is their nearest code by cosine, both directions averaged."""
+    z = torch.nn.functional.normalize(code, dim=-1)
+    similarity = z[:, 0] @ z[:, 1].T
+    target = torch.arange(len(code))
+    return (
+        0.5 * ((similarity.argmax(1) == target).float().mean() + (similarity.argmax(0) == target).float().mean()).item()
+    )
+
+
+def alignment_options(args):
+    # Argument sets written before --alignment-loss existed trained with MSE.
+    return dict(
+        alignment_loss=getattr(args, "alignment_loss", "mse"), temperature=getattr(args, "infonce_temperature", 0.1)
+    )
+
+
 def objective_score(metrics, args):
     """The training objective on held-out maps, with the reconstruction weighted as in training."""
+    infonce = alignment_options(args)["alignment_loss"] == "infonce"
     terms = dict(
         metrics,
         reconstruction=metrics.get(
             "reconstruction_objective", metrics.get("weighted_reconstruction", metrics["reconstruction"])
         ),
+        alignment=metrics["alignment_infonce" if infonce else "alignment"],
     )
     score = sum(getattr(args, name + "_weight") * terms[name] for name in ("reconstruction", "alignment", "variance"))
     return score + getattr(args, "spatial_moment_weight", 0.0) * terms["spatial_moment"]
@@ -275,7 +300,11 @@ def fit_readout(training, validation, args, device, training_foreground=None, va
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     rng = torch.Generator().manual_seed(args.seed + 1)
     options = reconstruction_options(args)
-    initial, _, _ = evaluate(model, validation, args.batch_size, device, weigh, validation_foreground, **options)
+    alignment = alignment_options(args)
+    temperature = alignment["temperature"]
+    initial, _, _ = evaluate(
+        model, validation, args.batch_size, device, weigh, validation_foreground, temperature=temperature, **options
+    )
     best_score, best_step = objective_score(initial, args), 0
     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     history = []
@@ -293,6 +322,7 @@ def fit_readout(training, validation, args, device, training_foreground=None, va
             weigh(batch),
             foreground=support,
             spatial_moment_weight=args.spatial_moment_weight,
+            **alignment,
             **options,
         )
         if not torch.isfinite(loss):
@@ -310,6 +340,7 @@ def fit_readout(training, validation, args, device, training_foreground=None, va
                 weigh,
                 validation_foreground,
                 spatial_moment_weight=args.spatial_moment_weight,
+                temperature=temperature,
                 **options,
             )
             score = objective_score(metrics, args)
@@ -331,6 +362,15 @@ def fit_readout(training, validation, args, device, training_foreground=None, va
         best_validation_score=best_score,
         history=history,
         recon_weighting=weighting,
+        alignment_objective=dict(
+            **alignment,
+            formula=(
+                "symmetric cross-view InfoNCE on cosine similarity / temperature, other subjects' other views "
+                "as negatives within each training batch"
+                if alignment["alignment_loss"] == "infonce"
+                else "mean squared difference between the two views' codes"
+            ),
+        ),
         reconstruction_objective=dict(
             **options,
             foreground_only=training_foreground is not None,
@@ -364,6 +404,14 @@ def parse_args(argv=None):
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--reconstruction-weight", type=float, default=1.0)
     parser.add_argument("--alignment-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--alignment-loss",
+        choices=ALIGNMENT_LOSSES,
+        default="infonce",
+        help="infonce: symmetric cross-view InfoNCE on cosine similarity, other subjects in the batch as "
+        "negatives; mse: squared difference between the two views' codes (the original objective)",
+    )
+    parser.add_argument("--infonce-temperature", type=float, default=0.1, help="InfoNCE temperature")
     parser.add_argument("--variance-weight", type=float, default=0.1)
     parser.add_argument(
         "--spatial-moment-weight",
@@ -432,10 +480,16 @@ def parse_args(argv=None):
         parser.error("At least two subjects are required in every split and training batch")
     if args.batch_size > args.train_samples:
         parser.error("batch-size cannot exceed train-samples")
-    for name in ("lr", "reconstruction_weight", "max_map_gib"):
+    for name in ("lr", "reconstruction_weight", "max_map_gib", "infonce_temperature"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(f"{name} must be positive and finite")
-    for name in ("alignment_weight", "variance_weight", "deviation_strength", "hard_patch_weight", "spatial_moment_weight"):
+    for name in (
+        "alignment_weight",
+        "variance_weight",
+        "deviation_strength",
+        "hard_patch_weight",
+        "spatial_moment_weight",
+    ):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) < 0:
             parser.error(f"{name} must be nonnegative and finite")
     if not 0 < args.position_floor <= 1:
@@ -524,7 +578,7 @@ def main(argv=None):
     )
     # Preserve whole-map metrics used by existing factor/intervention parity
     # checks, and add the new loss and foreground metrics under separate names.
-    options = reconstruction_options(args)
+    options = dict(reconstruction_options(args), temperature=alignment_options(args)["temperature"])
     weigh = None
     if args.recon_foreground_only or args.hard_patch_weight > 0:
         weigh, _ = loss_weighting(head, banks["train"], args)

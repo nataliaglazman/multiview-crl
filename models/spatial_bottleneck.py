@@ -8,6 +8,8 @@ from torch.nn import functional as F
 
 from models.moment_pool import spatial_moments
 
+ALIGNMENT_LOSSES = ("infonce", "mse")
+
 
 class SpatialBottleneck(nn.Module):
     """Shared readout/decoder for registered, continuous content maps.
@@ -218,6 +220,22 @@ def reconstruction_terms(
     return dict(reconstruction=mean + hard_patch_weight * hard, reconstruction_mean=mean, reconstruction_hard=hard)
 
 
+def infonce_alignment(code, temperature=0.1):
+    """Symmetric cross-view InfoNCE on cosine similarity of (B,2,latent) codes.
+
+    A subject's other view is its positive; the other subjects' other views are its
+    negatives (no same-view negatives). Averaged over both retrieval directions.
+    """
+    if code.ndim != 3 or code.shape[1] != 2 or len(code) < 2:
+        raise ValueError("Expected paired codes (B>=2,2,latent)")
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError("temperature must be positive and finite")
+    z = F.normalize(code, dim=-1)
+    logits = z[:, 0] @ z[:, 1].T / temperature
+    target = torch.arange(len(code), device=code.device)
+    return 0.5 * (F.cross_entropy(logits, target) + F.cross_entropy(logits.T, target))
+
+
 def paired_objective(
     model,
     maps,
@@ -230,11 +248,15 @@ def paired_objective(
     hard_patch_fraction=0.1,
     hard_patch_size=(4, 4, 4),
     spatial_moment_weight=0.0,
+    alignment_loss="mse",
+    temperature=0.1,
 ):
     """No labels or interventions; variance is across subjects within each view.
 
     ``recon_weights`` (broadcastable to the paired maps, mean 1) re-weight the reconstruction error,
     as ``position_weights`` or ``deviation_weights`` produce; None is the plain mean.
+    ``alignment_loss`` is "mse" (squared code difference) or "infonce" (``infonce_alignment``
+    over the batch at ``temperature``).
     """
     model._check_pairs(maps)
     weights = (reconstruction_weight, alignment_weight, variance_weight)
@@ -248,7 +270,12 @@ def paired_objective(
     terms = reconstruction_terms(
         error, recon_weights, foreground, hard_patch_weight, hard_patch_fraction, hard_patch_size
     )
-    terms["alignment"] = F.mse_loss(code[:, 0], code[:, 1])
+    if alignment_loss == "infonce":
+        terms["alignment"] = infonce_alignment(code, temperature)
+    elif alignment_loss == "mse":
+        terms["alignment"] = F.mse_loss(code[:, 0], code[:, 1])
+    else:
+        raise ValueError(f"alignment_loss must be one of {ALIGNMENT_LOSSES}")
     terms["variance"] = F.relu(1 - (code.var(0, unbiased=False) + 1e-4).sqrt()).mean()
     if not math.isfinite(spatial_moment_weight) or spatial_moment_weight < 0:
         raise ValueError("spatial_moment_weight must be finite and nonnegative")

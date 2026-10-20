@@ -125,7 +125,7 @@ class LocalReconstructionTests(unittest.TestCase):
         self.assertAlmostEqual(a["reconstruction_objective"], expected["reconstruction"].item(), places=5)
         torch.testing.assert_close(codes_a, codes_b)
         args = experiment.parse_args(["--run-dir", "/tmp/s", "--out-dir", "/tmp/o"])
-        score = a["reconstruction_objective"] + a["alignment"] + 0.1 * a["variance"]
+        score = a["reconstruction_objective"] + a["alignment_infonce"] + 0.1 * a["variance"]
         self.assertAlmostEqual(experiment.objective_score(a, args), score)
         with self.assertRaisesRegex(ValueError, "must match"):
             experiment.evaluate(head, maps, 2, "cpu", foreground=foreground[:2])

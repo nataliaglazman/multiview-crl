@@ -14,7 +14,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from eval.protocol import spatial_bottleneck_eval as factor_eval
-from models.spatial_bottleneck import SpatialBottleneck, deviation_weights, paired_objective, position_weights
+from models.spatial_bottleneck import (
+    SpatialBottleneck,
+    deviation_weights,
+    infonce_alignment,
+    paired_objective,
+    position_weights,
+)
 from models.vqvae import VQVAE
 from training import spatial_bottleneck_experiment as experiment
 
@@ -110,6 +116,28 @@ class SpatialBottleneckTests(unittest.TestCase):
         experiment.evaluate(model, maps.detach() + 100, 2, "cpu")
         torch.testing.assert_close(model.template, template)
         torch.testing.assert_close(model.scale, scale)
+
+    def test_infonce_alignment_rewards_matching_views_only(self):
+        code = torch.eye(4)[:, None].repeat(1, 2, 1)
+        matched = infonce_alignment(code, 0.1)
+        swapped = infonce_alignment(torch.stack((code[:, 0], code[:, 1].roll(1, 0)), 1), 0.1)
+        self.assertLess(matched.item(), 1e-3)
+        self.assertGreater(swapped.item(), 5)
+        self.assertAlmostEqual(experiment.cross_view_top1(code), 1.0)
+        model = SpatialBottleneck((1, 2, 2, 2), 2, 2, 8)
+        maps = torch.randn(6, 2, 1, 2, 2, 2)
+        _, mse = paired_objective(model, maps)
+        _, nce = paired_objective(model, maps, alignment_loss="infonce", temperature=0.5)
+        torch.testing.assert_close(mse["reconstruction"], nce["reconstruction"])
+        with torch.no_grad():
+            code = model.encode(maps.flatten(0, 1)).reshape(6, 2, -1)
+        torch.testing.assert_close(nce["alignment"], infonce_alignment(code, 0.5))
+        with self.assertRaisesRegex(ValueError, "alignment_loss"):
+            paired_objective(model, maps, alignment_loss="cosine")
+        self.assertEqual(experiment.parse_args(["--run-dir", "/s", "--out-dir", "/o"]).alignment_loss, "infonce")
+        self.assertEqual(experiment.alignment_options(Namespace())["alignment_loss"], "mse")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            experiment.parse_args(["--run-dir", "/s", "--out-dir", "/o", "--infonce-temperature", "0"])
 
     def test_modality_offsets_cannot_satisfy_subject_variance(self):
         model = SpatialBottleneck((1, 2, 2, 2), 2, 2, 8)
@@ -285,8 +313,11 @@ class SpatialBottleneckTests(unittest.TestCase):
         self.assertNotIn("weighted_reconstruction", plain_metrics)
         self.assertEqual(plain_metrics["reconstruction"], weighted_metrics["reconstruction"])
         self.assertAlmostEqual(weighted_metrics["weighted_reconstruction"], (error * weights).mean().item(), places=5)
-        expected = weighted_metrics["weighted_reconstruction"] + weighted_metrics["alignment"]
+        expected = weighted_metrics["weighted_reconstruction"] + weighted_metrics["alignment_infonce"]
         expected += 0.1 * weighted_metrics["variance"]
+        self.assertAlmostEqual(experiment.objective_score(weighted_metrics, args), expected, places=6)
+        args.alignment_loss = "mse"
+        expected += weighted_metrics["alignment"] - weighted_metrics["alignment_infonce"]
         self.assertAlmostEqual(experiment.objective_score(weighted_metrics, args), expected, places=6)
         for bad in (["--position-floor", "0"], ["--deviation-strength", "-1"]):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

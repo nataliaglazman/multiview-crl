@@ -8,9 +8,22 @@ are optimized. No anatomical labels or interventions enter training or selection
 The objective is
 
     reconstruction_weight * mean(((R(z) - H) / scale)^2)
-  + alignment_weight      * mean((z_view1 - z_view2)^2)
+  + alignment_weight      * A(z_view1, z_view2)
   + variance_weight       * mean(relu(1 - sqrt(Var_subject(z) + 1e-4)))
   + spatial_moment_weight  * mean((g(z) - standardized_moments(H))²)
+
+`A` is chosen by `--alignment-loss`. The default, `infonce`, is symmetric
+cross-view InfoNCE on cosine similarity at `--infonce-temperature` (default 0.1):
+each subject's other view is the positive and the other subjects' other views in
+the batch are the negatives, averaged over both directions, so the batch size
+sets the number of negatives. `mse` is `mean((z_view1 - z_view2)^2)`, the
+original objective; argument sets saved before the option existed are read as
+`mse`. InfoNCE sees only the direction of `z`, so the variance hinge (and the
+reconstruction) still set its scale. Checkpoint selection scores InfoNCE on the
+whole validation split at once (`alignment_infonce`, every other subject a
+negative), which sits above the training value by about log(N / batch) but does
+not depend on how evaluation is batched. `alignment` stays the MSE in every
+report, and `alignment_top1` is cross-view retrieval accuracy.
 
 Variance is computed separately in each view. There is no decorrelation penalty
 on the code: anatomical variables can be correlated. This loss is a practical
