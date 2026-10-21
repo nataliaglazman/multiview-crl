@@ -10,11 +10,17 @@ ceiling applies.
 
 - **side**: a logistic probe for the hemisphere of the rendered lesion centre (left or right of the
   midline) from the content code. Accuracy and AUC, stratified 5-fold CV, seeds 0-2.
-- **within hemisphere**: ridge R² of lesion_x, and of the rendered centre's x, fitted and scored inside
-  each hemisphere separately, so the side cannot help; the two hemispheres are averaged by subject count.
-  Near 0 with a high side accuracy means the code holds the side only.
+- **within hemisphere**: ridge R² of lesion_x, and of the rendered centre's x / y / z, fitted and scored
+  inside each hemisphere separately, so the side cannot help; the two hemispheres are averaged by subject
+  count. Near the anatomy column with a high side accuracy means the code holds the side only.
 - **all subjects**: ridge R² of lesion_x / y / z, as ``dci_step*.json`` reports them (``cv_probe_r2``,
-  5-fold, seeds 0-2). On the run's own val subjects the T1 rows are the log's content→content numbers.
+  5-fold, seeds 0-2), and of the rendered centre's y / z in voxels. On the run's own val subjects the T1
+  lesion rows are the log's content→content numbers. The lesion latents are ranks within each subject's
+  own admissible white matter; the centre rows score where the lesion actually is in the volume.
+- **anatomy only**, a column next to the checkpoints: every probe on the true anatomy latents (every
+  content latent but lesion_x / y / z), i.e. what a code that holds anatomy and no lesion scores.
+  wm_interior places the lesion inside each brain's own white matter, so the side follows anatomy a
+  little (AUC ~0.65 on the default generator); read every row against this column, not against 0.
 - **references**, no model involved: lesion_x from the true side alone (the most a side-only code can
   score), lesion_x / y / z from the true centre (a perfect localiser), and lesion_x within each
   hemisphere from the true centre.
@@ -37,6 +43,7 @@ from eval.metrics.identifiability_metrics import cv_probe_acc, cv_probe_r2
 
 VIEWS = ("t1", "flair")
 LESION = ("lesion_x", "lesion_y", "lesion_z")
+LESION_COLUMNS = [2, 3, 4]  # lesion_x / y / z in z_content
 # Generator settings two runs must share to be scored on the same subjects.
 DATA_KEYS = ("res", "n_content", "n_style", "data_seed", "dataset_name")
 
@@ -124,7 +131,14 @@ def score_code(code, lesion, centres, side):
         "centre_all_subjects": {axis: cv_probe_r2(code, centres[:, j])["mean"] for j, axis in enumerate("xyz")},
         "lesion_x_within_hemisphere": within_hemisphere_r2(code, lesion[:, 0], side),
         "centre_x_within_hemisphere": within_hemisphere_r2(code, centres[:, 0], side),
+        "centre_y_within_hemisphere": within_hemisphere_r2(code, centres[:, 1], side),
+        "centre_z_within_hemisphere": within_hemisphere_r2(code, centres[:, 2], side),
     }
+
+
+def anatomy_latents(factors):
+    """Every z_content latent except lesion_x / y / z: the anatomy a lesion-blind code could hold."""
+    return np.delete(np.asarray(factors, dtype=np.float64), LESION_COLUMNS, axis=1)
 
 
 def references(lesion, centres, side):
@@ -226,7 +240,8 @@ def run(args):
             column["codes"] = code
         # After the encoding pass, so every subject's accepted draw is already known.
         data["centres"] = lesion_centres(dataset)
-        data["lesion"] = factors[:, 2:5]
+        data["lesion"] = factors[:, LESION_COLUMNS]
+        data["anatomy"] = anatomy_latents(factors)
     datasets = {key: data for key, data in datasets.items() if "centres" in data}
 
     report = {
@@ -240,8 +255,17 @@ def run(args):
         data["valid"] = valid
         data["side"] = hemisphere(data["centres"][valid], data["res"])
         refs = references(data["lesion"][valid], data["centres"][valid], data["side"])
+        data["anatomy_only"] = score_code(
+            data["anatomy"][valid], data["lesion"][valid], data["centres"][valid], data["side"]
+        )
         report["data_sets"].append(
-            {"runs": data["letters"], "subjects": int(valid.sum()), "without_lesion": int((~valid).sum()), **refs}
+            {
+                "runs": data["letters"],
+                "subjects": int(valid.sum()),
+                "without_lesion": int((~valid).sum()),
+                **refs,
+                "anatomy_only": data["anatomy_only"],
+            }
         )
         within = refs["lesion_x_within_hemisphere_from_centre"]
         print(
@@ -266,7 +290,11 @@ def run(args):
         ("lesion_x R², within hemisphere", lambda s: s["lesion_x_within_hemisphere"]["mean"]),
         ("centre x R², within hemisphere", lambda s: s["centre_x_within_hemisphere"]["mean"]),
         ("lesion_y R², all subjects", lambda s: s["all_subjects"]["lesion_y"]),
+        ("centre y R², all subjects", lambda s: s["centre_all_subjects"]["y"]),
+        ("centre y R², within hemisphere", lambda s: s["centre_y_within_hemisphere"]["mean"]),
         ("lesion_z R², all subjects", lambda s: s["all_subjects"]["lesion_z"]),
+        ("centre z R², all subjects", lambda s: s["centre_all_subjects"]["z"]),
+        ("centre z R², within hemisphere", lambda s: s["centre_z_within_hemisphere"]["mean"]),
     )
     scores = {view: [] for view in VIEWS}
     for column in columns:
@@ -278,17 +306,26 @@ def run(args):
             {k: column[k] for k in ("label", "run_dir", "checkpoint", "step")}
             | {"scores": {view: scores[view][-1] for view in VIEWS}}
         )
-    width = max(14, *(len(c["label"]) + 2 for c in columns))
+    # The anatomy column depends only on the subjects, so both views' tables show the same one.
+    anatomy_columns = [
+        ("anatomy only" if len(datasets) == 1 else f"anatomy, set {number}", data["anatomy_only"])
+        for number, data in enumerate(datasets.values(), start=1)
+    ]
+    labels = [label for label, _ in anatomy_columns] + [c["label"] for c in columns]
+    width = max(14, *(len(label) + 2 for label in labels))
     for view in VIEWS:
         print(f"\n{view} content code", flush=True)
-        print(f"  {'':34s}" + "".join(f"{c['label']:>{width}s}" for c in columns), flush=True)
+        print(f"  {'':34s}" + "".join(f"{label:>{width}s}" for label in labels), flush=True)
+        values = [s for _, s in anatomy_columns] + scores[view]
         for label, value in rows:
-            print(f"  {label:34s}" + "".join(f"{value(s):>{width}.3f}" for s in scores[view]), flush=True)
+            print(f"  {label:34s}" + "".join(f"{value(s):>{width}.3f}" for s in values), flush=True)
     print(
-        "\nReading: a side-only code has side accuracy near 1, lesion_x near the 'from the true side alone' "
-        "reference, and within-hemisphere R² near 0. Position shows as within-hemisphere R² and lesion_y/z "
-        "above their step-0 values; even the true centre leaves part of lesion_x unexplained within a "
-        "hemisphere, so compare with that reference, not with 1.",
+        "\nReading: compare every row with the anatomy column, what a code holding anatomy and no lesion "
+        "scores. A side-only code has side accuracy near 1, lesion_x near the 'from the true side alone' "
+        "reference, and every within-hemisphere row near the anatomy column. Position shows as "
+        "within-hemisphere, lesion_y/z and centre y/z rows above it; the centre rows score where the lesion "
+        "is in the volume, the lesion rows its rank in that subject's white matter. Even the true centre "
+        "leaves part of lesion_x unexplained within a hemisphere, so compare with that reference, not with 1.",
         flush=True,
     )
     if args.out:
@@ -299,14 +336,21 @@ def run(args):
 
 
 def self_test():
-    """A side-only code and a position code separate on the within-hemisphere score, not on lesion_x."""
+    """A side-only code and a position code separate on the within-hemisphere score, not on lesion_x;
+    the anatomy column reads the part of the rendered centre that follows anatomy, and no lesion latent."""
     rng = np.random.default_rng(0)
     n = 600
     lesion = rng.normal(size=(n, 3))
+    anatomy = np.random.default_rng(1).normal(size=(n, 2))
     side = (lesion[:, 0] > 0).astype(int)
-    # A rendered centre that jumps across a midline gap, then moves with the latent inside each hemisphere.
+    # A rendered centre that jumps across a midline gap, then moves with the latent inside each hemisphere;
+    # its z also follows the brain's anatomy, as wm_interior placement does.
     centres = np.column_stack(
-        [31.5 + np.where(side == 1, 4.0, -4.0) + 3.0 * np.tanh(lesion[:, 0]), 30 + 3 * lesion[:, 1], 30 + lesion[:, 2]]
+        [
+            31.5 + np.where(side == 1, 4.0, -4.0) + 3.0 * np.tanh(lesion[:, 0]),
+            30 + 3 * lesion[:, 1],
+            30 + lesion[:, 2] + anatomy[:, 0],
+        ]
     )
     assert (hemisphere(centres, 64) == side).all()
     noise = 0.05 * rng.normal(size=(n, 4))
@@ -317,11 +361,16 @@ def self_test():
     assert abs(s["all_subjects"]["lesion_x"] - 2 / np.pi) < 0.06, s["all_subjects"]
     assert s["lesion_x_within_hemisphere"]["mean"] < 0.05, s["lesion_x_within_hemisphere"]
     assert s["all_subjects"]["lesion_y"] < 0.05, s["all_subjects"]
+    assert s["centre_all_subjects"]["y"] < 0.05 and s["centre_y_within_hemisphere"]["mean"] < 0.05, s
+    assert s["centre_z_within_hemisphere"]["mean"] < 0.05, s["centre_z_within_hemisphere"]
 
     position = np.column_stack([lesion, rng.normal(size=n)]) + noise
     s = score_code(position, lesion, centres, side)
     assert s["lesion_x_within_hemisphere"]["mean"] > 0.9, s["lesion_x_within_hemisphere"]
     assert s["all_subjects"]["lesion_y"] > 0.9 and s["side_auc"] > 0.99, s
+    assert s["centre_all_subjects"]["y"] > 0.9 and s["centre_y_within_hemisphere"]["mean"] > 0.9, s
+    # The lesion latents alone leave the anatomy's share of centre z unexplained.
+    assert 0.35 < s["centre_all_subjects"]["z"] < 0.65, s["centre_all_subjects"]
 
     refs = references(lesion, centres, side)
     assert abs(refs["lesion_x_from_side"] - 2 / np.pi) < 0.06, refs
@@ -331,6 +380,16 @@ def self_test():
     target = np.where(side == 1, 10.0, -10.0) + rng.normal(size=n)
     w = within_hemisphere_r2(rng.normal(size=(n, 2)), target, side)
     assert w["left"] < 0.05 and w["right"] < 0.05, w
+
+    # The anatomy column: z_content with the lesion at columns 2-4 loses exactly those three.
+    assert anatomy_latents(np.arange(9.0)[None]).tolist() == [[0, 1, 5, 6, 7, 8]]
+    factors = np.column_stack([anatomy, lesion])
+    reference = score_code(anatomy_latents(factors), lesion, centres, side)
+    assert abs(reference["centre_all_subjects"]["z"] - 0.5) < 0.08, reference["centre_all_subjects"]
+    assert reference["all_subjects"]["lesion_z"] < 0.05 and reference["centre_all_subjects"]["y"] < 0.05, reference
+    both = np.column_stack([lesion, anatomy]) + 0.05 * rng.normal(size=(n, 5))
+    s = score_code(both, lesion, centres, side)
+    assert s["centre_all_subjects"]["z"] > 0.95 and s["centre_z_within_hemisphere"]["mean"] > 0.95, s
     print("self-test passed")
 
 

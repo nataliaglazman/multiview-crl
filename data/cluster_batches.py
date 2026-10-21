@@ -10,7 +10,8 @@ the epoch (it is reshuffled into the next one).
 
 The optional neighbourhood sampler uses overlapping nearest-neighbour pools instead. Every subject
 anchors one batch per shuffled pass through the bank, including subjects in sparse regions. A batch
-contains its anchor plus distinct neighbours; total exposure can differ because neighbours recur.
+contains its anchor plus distinct neighbours; total exposure can differ because neighbours recur,
+which an optional inverse-frequency weighting of the neighbour choice evens out.
 
 Torch-free: DataLoader accepts any iterable of index lists as ``batch_sampler``.
 """
@@ -128,9 +129,16 @@ class NeighbourhoodBatchSampler:
     floor(N/B) batches, matching the ordinary shuffled loader's step count; it is NOT a pass over
     all subjects. Every N batches includes each subject as anchor once when counted from the start
     of an anchor pass. Neighbours may recur across batches. The complete schedule replays from seed.
+
+    ``balance`` > 0 draws the B-1 with weights (1 + draws so far)^-balance, so pool members drawn
+    less often catch up; 0 draws them uniformly. A subject is drawn at most 1 + (the number of pools
+    holding it) times per anchor pass, a ceiling no neighbour weighting raises. ``draws`` counts
+    every subject's appearances so far, the anchor included.
     """
 
-    def __init__(self, neighbours, batch_size, seed):
+    def __init__(self, neighbours, batch_size, seed, balance=0.0):
+        if not np.isfinite(balance) or balance < 0:
+            raise ValueError("balance must be a finite non-negative exponent")
         neighbours = np.asarray(neighbours)
         if neighbours.ndim != 2 or not np.issubdtype(neighbours.dtype, np.integer):
             raise ValueError("neighbours must be an integer subject-by-neighbour matrix")
@@ -146,6 +154,8 @@ class NeighbourhoodBatchSampler:
         self.neighbours = neighbours.copy()
         self.neighbours.flags.writeable = False
         self.batch_size = int(batch_size)
+        self.balance = float(balance)
+        self.draws = np.zeros(n, dtype=np.int64)
         self._rng = np.random.default_rng(seed)
         self._anchors = np.empty(0, dtype=np.int64)
         self._position = 0
@@ -160,54 +170,106 @@ class NeighbourhoodBatchSampler:
                 self._position = 0
             anchor = int(self._anchors[self._position])
             self._position += 1
-            others = self._rng.choice(self.neighbours[anchor], self.batch_size - 1, replace=False)
-            yield [anchor, *others.tolist()]
+            pool = self.neighbours[anchor]
+            if self.balance:
+                # In log space, scaled so the least-drawn member weighs 1; the floor keeps every weight
+                # nonzero, which drawing without replacement needs.
+                log_weight = -self.balance * np.log1p(self.draws[pool])
+                weight = np.maximum(np.exp(log_weight - log_weight.max()), np.finfo(np.float64).tiny)
+                others = self._rng.choice(pool, self.batch_size - 1, replace=False, p=weight / weight.sum())
+            else:
+                others = self._rng.choice(pool, self.batch_size - 1, replace=False)
+            batch = [anchor, *others.tolist()]
+            self.draws[batch] += 1
+            yield batch
 
 
-def summarize_neighbourhood(neighbours, batch_size, seed, factors, names, anatomy, matched=None):
-    """The first complete anchor pass (N batches) of a sampler built from the same ``seed``.
+def draw_spread(counts):
+    """Per-subject draw counts summarized: quantiles, and how many subjects fall below a quarter of the mean."""
+    counts = np.asarray(counts)
+    p5, median, p95 = np.percentile(counts, [5, 50, 95])
+    return {
+        "min": int(counts.min()),
+        "p5": float(p5),
+        "median": float(median),
+        "p95": float(p95),
+        "max": int(counts.max()),
+        "mean": float(counts.mean()),
+        "below_quarter_mean": int(np.count_nonzero(counts < counts.mean() / 4)),
+    }
 
-    A fresh sampler replays the training sampler's schedule, so these are exactly the run's first N
-    batches, and the training sampler's random state is left untouched. SD ratios are the RMS
-    within-batch SD over the bank SD; draw counts include repeat exposures.
+
+def summarize_neighbourhood(
+    neighbours, batch_size, seed, factors, names, anatomy, matched=None, balance=0.0, steps=None
+):
+    """The first complete anchor pass (N batches) of a sampler built from the same ``seed``, and with
+    ``steps`` the draw counts over the run's first ``steps`` batches.
+
+    A fresh sampler replays the training sampler's schedule, so these are exactly the run's batches,
+    and the training sampler's random state is left untouched. SD ratios are the RMS within-batch SD
+    over the bank SD; draw counts include repeat exposures. ``pool_membership`` is the exposure
+    ceiling: a subject held by m pools is drawn at most 1 + m times per anchor pass, where the mean
+    is B, so balancing cannot lift a subject with 1 + m < B to the mean.
     """
-    sampler = NeighbourhoodBatchSampler(neighbours, batch_size, seed)
+    sampler = NeighbourhoodBatchSampler(neighbours, batch_size, seed, balance)
     n = len(neighbours)
-    batches = []
-    while len(batches) < n:
-        batches.extend(sampler)
-    batches = np.asarray(batches[:n])
+    total = max(n, steps or 0)
+    drawn = []
+    while len(drawn) < total:
+        drawn.extend(sampler)
+    drawn = np.asarray(drawn[:total])
+    batches = drawn[:n]
     factors = np.asarray(factors, dtype=np.float64)
     bank_sd = factors.std(axis=0, ddof=1)
     batch_sd = np.sqrt(factors[batches].var(axis=1, ddof=1).mean(axis=0))
     ratio = np.divide(batch_sd, bank_sd, out=np.full_like(bank_sd, np.nan), where=bank_sd > 0)
     counts = np.bincount(batches.ravel(), minlength=n)
     first_epoch = np.bincount(batches[: len(sampler)].ravel(), minlength=n)
+    membership = np.bincount(np.asarray(neighbours).ravel(), minlength=n)
 
     def finite_mean(columns):
         values = ratio[columns]
         values = values[np.isfinite(values)]
         return float(values.mean()) if len(values) else None
 
+    run = None
+    if steps:
+        run_counts = np.bincount(drawn[:steps].ravel(), minlength=n)
+        run = {
+            "batches": int(steps),
+            "unique_subjects": int(np.count_nonzero(run_counts)),
+            "draw_spread": draw_spread(run_counts),
+            "subject_draw_counts": run_counts.tolist(),
+        }
     return {
         "subjects": n,
         "subjects_eligible_as_anchors": n,
         "batches_per_epoch": len(sampler),
         "subject_draws_per_epoch": len(sampler) * batch_size,
         "batches_per_anchor_pass": n,
+        "balance": float(balance),
         "matched_factors": None if matched is None else [names[j] for j in matched],
         "anatomy_factors": [names[j] for j in anatomy],
         "sd_ratio": {name: float(r) if np.isfinite(r) else None for name, r in zip(names, ratio)},
         "sd_ratio_anatomy_mean": finite_mean(anatomy),
         "sd_ratio_matched_mean": None if matched is None else finite_mean(matched),
+        "pool_membership": {
+            "min": int(membership.min()),
+            "median": float(np.median(membership)),
+            "max": int(membership.max()),
+            "subjects_capped_below_mean": int(np.count_nonzero(1 + membership < batch_size)),
+            "subjects_capped_below_quarter_mean": int(np.count_nonzero(4 * (1 + membership) < batch_size)),
+        },
         "preview": {
             "batches": n,
             "unique_subjects": int(np.count_nonzero(counts)),
             "unique_subjects_first_epoch": int(np.count_nonzero(first_epoch)),
+            "draw_spread": draw_spread(counts),
             "subject_draw_counts": counts.tolist(),
             "subject_draw_counts_first_epoch": first_epoch.tolist(),
             "anchor_counts": np.bincount(batches[:, 0], minlength=n).tolist(),
         },
+        "run": run,
     }
 
 

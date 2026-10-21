@@ -99,11 +99,14 @@ def training_loader(options, dataset, run_dir):
             raise ValueError("stratification.json disagrees with settings.json")
         if kind == "neighbourhood":
             neighbours = np.asarray(saved["neighbour_indices"])
-            if saved["neighbours"] != options.stratify_neighbours:
+            balance = getattr(options, "stratify_balance", 0.0)
+            if saved["neighbours"] != options.stratify_neighbours or saved.get("balance", 0.0) != balance:
                 raise ValueError("stratification.json disagrees with settings.json")
             if neighbours.shape != (len(dataset), options.stratify_neighbours):
                 raise ValueError("Recorded neighbour pools have the wrong subject count or pool size")
-            sampler = cluster_batches.NeighbourhoodBatchSampler(neighbours, options.batch_size, options.loader_seed)
+            sampler = cluster_batches.NeighbourhoodBatchSampler(
+                neighbours, options.batch_size, options.loader_seed, balance
+            )
         else:
             labels = np.asarray(saved["labels"])
             if labels.shape != (len(dataset),) or not np.issubdtype(labels.dtype, np.integer):

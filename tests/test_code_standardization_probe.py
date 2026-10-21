@@ -227,6 +227,7 @@ class StandardizationProbeTests(unittest.TestCase):
         argv = [
             *("--res", "16", "--num-train-samples", "80", "--num-val-samples", "64", "--batch-size", "16"),
             *("--stratify-batches", "oracle", "--stratify-sampler", "neighbourhood", "--stratify-neighbours", "30"),
+            *("--stratify-balance", "2", "--train-steps", "50"),
             *("--synthetic-normalize", "fixed_reference", "--device", "cpu", "--no-cache"),
         ]
         args = trainer.parse_args(argv)
@@ -235,18 +236,19 @@ class StandardizationProbeTests(unittest.TestCase):
             dataset = trainer.make_dataset(args, "train", args.num_train_samples)
             sampler = trainer.stratified_batch_sampler(args, dataset, "cpu", root)
             saved = json.loads((root / "stratification.json").read_text())
-            self.assertEqual((saved["sampler"], saved["neighbours"]), ("neighbourhood", 30))
+            self.assertEqual((saved["sampler"], saved["neighbours"], saved["balance"]), ("neighbourhood", 30, 2.0))
             self.assertEqual(saved["preview"]["unique_subjects"], 80)
+            self.assertEqual(saved["run"]["batches"], 50)
             loader, labels = probe.training_loader(args, dataset, root)
             self.assertIsNone(labels)
             self.assertEqual(list(loader.batch_sampler), list(sampler))
             pools = np.array(saved["neighbour_indices"])
             for batch in loader.batch_sampler:
                 self.assertLessEqual(set(batch[1:]), set(pools[batch[0]].tolist()))
-            saved["neighbours"] = 31
-            (root / "stratification.json").write_text(json.dumps(saved))
-            with self.assertRaisesRegex(ValueError, "disagrees"):
-                probe.training_loader(args, dataset, root)
+            for key, stale in (("neighbours", 31), ("balance", 0.0)):
+                (root / "stratification.json").write_text(json.dumps({**saved, key: stale}))
+                with self.assertRaisesRegex(ValueError, "disagrees"):
+                    probe.training_loader(args, dataset, root)
 
 
 if __name__ == "__main__":

@@ -69,7 +69,8 @@ def main(argv=None):
     print(
         f"Saved recipe: lesion target={reference['synthetic_lesion_target']}, "
         f"matching={reference['stratify_batches']} sampler={reference['stratify_sampler']} "
-        f"K={reference['stratify_clusters']} neighbours={reference['stratify_neighbours']}, "
+        f"K={reference['stratify_clusters']} neighbours={reference['stratify_neighbours']} "
+        f"balance={reference['stratify_balance']}, "
         f"batch={reference['batch_size']}, steps={reference['train_steps']}, "
         f"data seed={reference['data_seed']}",
         flush=True,

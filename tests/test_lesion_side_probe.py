@@ -33,6 +33,15 @@ TINY += ["--synthetic-clean-content", "--synthetic-normalize", "fixed_reference"
 TINY += ["--synthetic-lesion-placement", "wm_interior", "--train-steps", "1", "--eval-every", "1"]
 
 
+def flatten(scores, prefix=""):
+    """A probe's nested score dict as (dotted key, value) pairs."""
+    for key, value in scores.items():
+        if isinstance(value, dict):
+            yield from flatten(value, f"{prefix}{key}.")
+        else:
+            yield f"{prefix}{key}", value
+
+
 def train(out_dir, model_id):
     argv = ["trainer", "--out-dir", str(out_dir), "--model-id", model_id, *TINY]
     with patch.object(sys, "argv", argv), patch.object(trainer, "evaluate", return_value=({}, {})):
@@ -75,6 +84,16 @@ class LesionSideProbeTests(unittest.TestCase):
                     self.assertAlmostEqual(trained[view]["all_subjects"][name], per_factor[j], places=10)
         np.testing.assert_allclose(centres[:3], np.array(reference), atol=1e-9)
         self.assertIn("side accuracy", output.getvalue())
+        self.assertIn("centre z R², within hemisphere", output.getvalue())
+        for key in ("centre_y_within_hemisphere", "centre_z_within_hemisphere"):
+            self.assertTrue(np.isfinite(trained["flair"][key]["mean"]), key)
+        # The anatomy column is the true anatomy latents, lesion_x/y/z removed, through the same probes.
+        side = probe.hemisphere(centres, cfg["res"])
+        expected = dict(flatten(probe.score_code(probe.anatomy_latents(factors), factors[:, 2:5], centres, side)))
+        got = dict(flatten(data["anatomy_only"]))
+        self.assertEqual(got.keys(), expected.keys())
+        np.testing.assert_allclose(list(got.values()), list(expected.values()), rtol=0, atol=1e-10, equal_nan=True)
+        self.assertIn("anatomy only", output.getvalue())
 
     def test_a_run_without_one_lesion_position_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

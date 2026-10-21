@@ -209,6 +209,59 @@ class NeighbourhoodTests(unittest.TestCase):
         code = cluster_batches.summarize_neighbourhood(neighbours, 16, 7, factors, names, [0, 1])
         self.assertIsNone(code["matched_factors"])
         self.assertIsNone(code["sd_ratio_matched_mean"])
+        self.assertIsNone(code["run"])
+
+    def test_balanced_choice_keeps_the_batch_rules_and_replays_from_the_seed(self):
+        neighbours = pools()
+        self.assertEqual(
+            first_batches(cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=3), 100),
+            first_batches(cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=3, balance=0.0), 100),
+        )
+        sampler = cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=3, balance=2.0)
+        drawn = first_batches(sampler, 300)
+        for batch in drawn:
+            self.assertEqual(len(set(batch)), 8)
+            self.assertTrue(all(isinstance(i, int) for i in batch))
+            self.assertLessEqual(set(batch[1:]), set(neighbours[batch[0]].tolist()))
+        for start in (0, 100, 200):
+            self.assertEqual(sorted(b[0] for b in drawn[start : start + 100]), list(range(100)))
+        np.testing.assert_array_equal(sampler.draws, np.bincount(np.ravel(drawn), minlength=100))
+        replay = cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=3, balance=2.0)
+        self.assertEqual(first_batches(replay, 300), drawn)
+        for bad in (-1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                cluster_batches.NeighbourhoodBatchSampler(neighbours, 8, seed=0, balance=bad)
+
+    def test_balance_narrows_the_draw_spread_up_to_the_pool_ceiling(self):
+        features = np.random.default_rng(0).normal(size=(400, 6))
+        features[0] = 100.0  # an outlier no other subject's pool holds
+        neighbours = cluster_batches.nearest_neighbours(features, 30)
+        membership = np.bincount(neighbours.ravel(), minlength=400)
+        self.assertEqual(membership[0], 0)
+        passes = 10
+        spread = {}
+        for balance in (0.0, 4.0):
+            sampler = cluster_batches.NeighbourhoodBatchSampler(neighbours, 16, seed=1, balance=balance)
+            counts = np.bincount(np.ravel(first_batches(sampler, passes * 400)), minlength=400)
+            # Per anchor pass a subject is drawn at most once as anchor and once per pool holding it.
+            self.assertTrue(np.all(counts <= passes * (1 + membership)))
+            self.assertEqual(counts[0], passes)
+            spread[balance] = np.percentile(counts, [5, 95])
+        self.assertGreater(spread[4.0][0], spread[0.0][0])
+        self.assertLess(spread[4.0][1], spread[0.0][1])
+        names = ["brain_size"] * 6
+        summary = cluster_batches.summarize_neighbourhood(
+            neighbours, 16, 1, features, names, list(range(6)), balance=4.0, steps=passes * 400
+        )
+        self.assertEqual(summary["balance"], 4.0)
+        self.assertEqual(summary["run"]["subject_draw_counts"], counts.tolist())
+        self.assertEqual(summary["run"]["draw_spread"], cluster_batches.draw_spread(counts))
+        self.assertEqual(summary["run"]["draw_spread"]["min"], passes)
+        ceiling = summary["pool_membership"]
+        self.assertEqual(ceiling["min"], 0)
+        self.assertEqual(ceiling["subjects_capped_below_mean"], int(np.count_nonzero(1 + membership < 16)))
+        self.assertGreaterEqual(ceiling["subjects_capped_below_quarter_mean"], 1)  # the outlier: 1 < 16 / 4
+        json.dumps(summary, allow_nan=False)
 
 
 class DiagnosticTests(unittest.TestCase):
@@ -328,6 +381,31 @@ class FlagTests(unittest.TestCase):
         options = {"stratify_batches": "oracle", "stratify_sampler": "neighbourhood", "stratify_neighbours": 100}
         roundtrip = encoder_args.parse_args([*SYNTHETIC, *encoder_args.cli_arguments(options)])
         self.assertEqual((roundtrip.stratify_sampler, roundtrip.stratify_neighbours), ("neighbourhood", 100))
+
+    def test_balance_flag_rules(self):
+        self.assertEqual(parse().stratify_balance, 0.0)
+        neighbourhood = [
+            "--stratify-batches",
+            "oracle",
+            "--stratify-sampler",
+            "neighbourhood",
+            "--stratify-neighbours",
+            "100",
+        ]
+        self.assertEqual(parse(*neighbourhood).stratify_balance, 0.0)
+        self.assertEqual(parse(*neighbourhood, "--stratify-balance", "2").stratify_balance, 2.0)
+        for bad in ("-1", "nan", "inf"):
+            refused(self, *neighbourhood, "--stratify-balance", bad)
+        refused(self, "--stratify-batches", "oracle", "--stratify-clusters", "10", "--stratify-balance", "2")
+        refused(self, "--stratify-balance", "2")  # without --stratify-batches
+        options = {
+            "stratify_batches": "oracle",
+            "stratify_sampler": "neighbourhood",
+            "stratify_neighbours": 100,
+            "stratify_balance": 2.0,
+        }
+        roundtrip = encoder_args.parse_args([*SYNTHETIC, *encoder_args.cli_arguments(options)])
+        self.assertEqual(roundtrip.stratify_balance, 2.0)
 
     def test_the_cli_module_needs_only_the_standard_library(self):
         # scripts/launch.py imports it on submit hosts that may have nothing but PyYAML.

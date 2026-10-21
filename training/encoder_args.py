@@ -6,6 +6,7 @@ a dict of option values into the arguments that reproduce it.
 """
 
 import argparse
+import math
 
 # Both modules import only the standard library at load time, so this stays torch-free.
 from eval.causal.latent_causal_discovery import REDUCTIONS as CAUSAL_REDUCTIONS
@@ -349,6 +350,16 @@ def build_parser(description=None):
         help="Required with --stratify-sampler neighbourhood: nearest other subjects in each anchor's pool, "
         "from which B-1 are sampled without replacement. Must be between batch_size-1 and num_train_samples-1. "
         "For example, 100 with batch size 32. Pools are fixed before training; neighbours can recur across batches",
+    )
+    p.add_argument(
+        "--stratify-balance",
+        type=float,
+        default=0.0,
+        help="With --stratify-sampler neighbourhood: draw an anchor's B-1 neighbours with weights "
+        "(1 + times drawn so far)^-balance, so subjects that pools rarely pick catch up. 0 (default) draws "
+        "uniformly. 2-4 trims most of the spread; larger approaches least-drawn-first and loosens matching a "
+        "little. A subject held by m pools still appears at most 1 + m times per anchor pass; "
+        "stratification.json reports how many subjects that ceiling holds below the mean",
     )
     p.add_argument(
         "--stratify-clusters",
@@ -878,14 +889,15 @@ def parse_args(argv=None, description=None):
             or args.stratify_from is not None
             or args.stratify_neighbours is not None
             or args.stratify_sampler != "cluster"
+            or args.stratify_balance != 0
         ):
             p.error("stratified sampler options only apply with --stratify-batches oracle or code")
     else:
         if real or args.synthetic_mode != "pseudo_mri":
             p.error(f"--stratify-batches {args.stratify_batches} matches the synthetic pseudo_mri training bank")
         if args.stratify_sampler == "cluster":
-            if args.stratify_neighbours is not None:
-                p.error("--stratify-neighbours only applies with --stratify-sampler neighbourhood")
+            if args.stratify_neighbours is not None or args.stratify_balance != 0:
+                p.error("--stratify-neighbours and --stratify-balance only apply with --stratify-sampler neighbourhood")
             if args.stratify_clusters is None or args.stratify_clusters < 1:
                 p.error(f"--stratify-batches {args.stratify_batches} needs a positive --stratify-clusters")
             if args.stratify_clusters > args.num_train_samples // args.batch_size:
@@ -905,6 +917,8 @@ def parse_args(argv=None, description=None):
                     "--stratify-sampler neighbourhood needs --stratify-neighbours between "
                     f"batch_size-1 ({args.batch_size - 1}) and num_train_samples-1 ({args.num_train_samples - 1})"
                 )
+            if not math.isfinite(args.stratify_balance) or args.stratify_balance < 0:
+                p.error("--stratify-balance is an exponent: finite and >= 0")
         if (args.stratify_batches == "code") != (args.stratify_from is not None):
             p.error(
                 "--stratify-from names the stage-0 run of --stratify-batches code; it is required there and only there"

@@ -333,16 +333,19 @@ def neighbourhood_batch_sampler(args, features, factors, names, anatomy, matched
 
     ``matched`` are the oracle's factor columns (None for a code). Prints and writes to
     stratification.json the neighbour pools and, over the run's first anchor pass, subject coverage
-    and each factor's within-batch SD over its bank SD.
+    and each factor's within-batch SD over its bank SD; over the whole run, every subject's draw count.
+    ``--stratify-balance`` weights the neighbour choice toward subjects drawn less often so far.
     """
+    balance = getattr(args, "stratify_balance", 0.0)
     neighbours = cluster_batches.nearest_neighbours(features, args.stratify_neighbours)
-    sampler = cluster_batches.NeighbourhoodBatchSampler(neighbours, args.batch_size, args.loader_seed)
+    sampler = cluster_batches.NeighbourhoodBatchSampler(neighbours, args.batch_size, args.loader_seed, balance)
     summary = cluster_batches.summarize_neighbourhood(
-        neighbours, args.batch_size, args.loader_seed, factors, names, anatomy, matched
+        neighbours, args.batch_size, args.loader_seed, factors, names, anatomy, matched, balance, args.train_steps
     )
     preview = summary["preview"]
+    choice = f"with weights (1 + draws so far)^-{balance:g}" if balance else "uniformly"
     print(
-        f"stratified batches: {args.stratify_batches}, anchor + {args.batch_size - 1} sampled from its "
+        f"stratified batches: {args.stratify_batches}, anchor + {args.batch_size - 1} sampled {choice} from its "
         f"{args.stratify_neighbours} nearest neighbours in {source}, standardized Euclidean distance "
         f"({time.perf_counter() - started:.0f} s)",
         flush=True,
@@ -353,11 +356,22 @@ def neighbourhood_batch_sampler(args, features, factors, names, anatomy, matched
         "loader epoch; neighbours can recur across batches",
         flush=True,
     )
-    counts = preview["subject_draw_counts"]
     print(
         f"  the run's first {preview['batches']} batches: {preview['unique_subjects_first_epoch']} unique subjects "
-        f"in the first loader epoch, {preview['unique_subjects']} over the anchor pass; draws per subject "
-        f"min/mean/max = {min(counts)}/{np.mean(counts):.1f}/{max(counts)}",
+        f"in the first loader epoch, {preview['unique_subjects']} over the anchor pass",
+        flush=True,
+    )
+    spread = summary["run"]["draw_spread"]
+    print(
+        f"  draws per subject over the run's {args.train_steps} batches: min/p5/median/p95/max = "
+        f"{spread['min']}/{spread['p5']:.0f}/{spread['median']:.0f}/{spread['p95']:.0f}/{spread['max']} "
+        f"(mean {spread['mean']:.1f}); {spread['below_quarter_mean']} subjects below a quarter of the mean",
+        flush=True,
+    )
+    ceiling = summary["pool_membership"]
+    print(
+        f"  ceiling: {ceiling['subjects_capped_below_mean']} subjects sit in too few pools to reach the mean draw "
+        f"rate, {ceiling['subjects_capped_below_quarter_mean']} to reach a quarter of it, whatever the balance",
         flush=True,
     )
     print("  RMS within-batch SD / bank SD per content factor (what a batch's negatives keep of it):", flush=True)
