@@ -203,23 +203,32 @@ def score(rep, targets, side=None):
     return out
 
 
+def regional_cells(model, h, grid):
+    """Content units of the spatial head on ``grid`` cells of the backbone map ``h``: (B, units, cells).
+
+    Repeats ``forward``'s pool_only + patch_grid path (a test checks the parity); cells are x-major.
+    """
+    import torch.nn.functional as F
+
+    if model.readout_type == "mlp":
+        cells = F.adaptive_avg_pool3d(h, tuple(grid)).flatten(2)
+        cells = model.patch_readout(cells.transpose(1, 2)).transpose(1, 2)
+    else:
+        cells = model._patch_pool(model.to_encoding(h), tuple(grid))
+    return cells[:, model.unit_split(cells.shape[1])[0]]
+
+
 def readouts(model, x, grid, probe_grid):
     """(code, regional, map) of a view-major batch ``x`` from one backbone pass, each (2B, features).
 
-    ``regional`` repeats ``forward``'s pool_only + patch_grid path (a test checks the parity), keeps the
-    content units and averages the cells down to ``probe_grid``.
+    ``regional`` is ``regional_cells`` averaged down to ``probe_grid``.
     """
     import torch.nn.functional as F
 
     h = model._encode(x, 2, None)
     code = model._global_code(h, x, 2, None)
     code = code[:, model.unit_split(code.shape[1])[0]]
-    if model.readout_type == "mlp":
-        cells = F.adaptive_avg_pool3d(h, tuple(grid)).flatten(2)
-        cells = model.patch_readout(cells.transpose(1, 2)).transpose(1, 2)
-    else:
-        cells = model._patch_pool(model.to_encoding(h), tuple(grid))
-    cells = cells[:, model.unit_split(cells.shape[1])[0]]
+    cells = regional_cells(model, h, grid)
     regional = F.adaptive_avg_pool3d(cells.reshape(*cells.shape[:2], *grid), tuple(probe_grid)).flatten(1)
     return code, regional, F.adaptive_avg_pool3d(h, tuple(probe_grid)).flatten(1)
 
