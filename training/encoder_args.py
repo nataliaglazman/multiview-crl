@@ -259,7 +259,8 @@ def build_parser(description=None):
         "--patch-loss-weight",
         type=float,
         default=0.0,
-        help="Add this weight times spatial InfoNCE to global InfoNCE; 0 preserves global-only training",
+        help="Add this weight times the patch loss (--patch-loss-type) to the global loss; 0 preserves "
+        "global-only training",
     )
     p.add_argument(
         "--train-patch-grid",
@@ -272,7 +273,7 @@ def build_parser(description=None):
     p.add_argument(
         "--patch-foreground-mask",
         action="store_true",
-        help="Drop always-background positions from the patch InfoNCE: each batch, the brain mask is "
+        help="Drop always-background positions from the patch loss: each batch, the brain mask is "
         "pooled to --train-patch-grid and a position is kept if any sample has at least "
         "--patch-foreground-thresh brain there. At res 64, ~77%% of an 8³ grid is background per subject",
     )
@@ -281,6 +282,51 @@ def build_parser(description=None):
         type=float,
         default=0.05,
         help="Brain fraction a patch position needs in at least one batch sample to stay in the patch loss",
+    )
+    p.add_argument(
+        "--patch-loss-type",
+        choices=("infonce", "barlow_twins", "vicreg"),
+        default="infonce",
+        help="Objective of the patch loss, whatever --contrastive-loss-type the global code uses. infonce: per "
+        "position, the other subjects at that position are the negatives, so every position must tell subjects "
+        "apart, a region alike in all of them included. barlow_twins/vicreg: no negatives. Each view's features are "
+        "centred over the batch at every position (removing the anatomy all subjects share there), and variances "
+        "and correlations are pooled over positions, so a region alike in every subject carries ~no weight; "
+        "VICReg's invariance MSE reads the uncentred features. barlow_twins uses --bt-lambda. "
+        "training/ENCODER_PATCH_TRAINING.md",
+    )
+    p.add_argument(
+        "--standardize-patch-code",
+        action="store_true",
+        help="With a patch InfoNCE: before the per-position similarity, centre each view's patch code over the "
+        "batch at every position and divide each unit by its spread pooled over positions, the patch analogue of "
+        "--standardize-code. Under the default cosine this reweights units within a position only: the cosine "
+        "rescales every subject's vector at every position to unit length, so a position alike in every subject "
+        "keeps its full say and a rarely varying cell gains none; --patch-similarity dot keeps each cell's size. "
+        "See 'Standardised patch InfoNCE' in training/ENCODER_PATCH_TRAINING.md",
+    )
+    p.add_argument(
+        "--patch-similarity",
+        choices=["cosine", "dot"],
+        default="cosine",
+        help="Similarity of the patch InfoNCE. 'dot' needs --standardize-patch-code: the dot product of the "
+        "standardised code divided by the number of content units, so --tau keeps its meaning for a cell of "
+        "typical size. Unlike the cosine it keeps each (subject, position) vector's size, so a position alike "
+        "in every subject drops out and a cell that differs from the batch at its position counts in proportion "
+        "to how much it differs",
+    )
+    p.add_argument(
+        "--vicreg-sim-coeff", type=float, default=25.0, help="With --patch-loss-type vicreg: invariance (MSE) weight"
+    )
+    p.add_argument(
+        "--vicreg-std-coeff",
+        type=float,
+        default=25.0,
+        help="With --patch-loss-type vicreg: variance-hinge weight; positive, since the MSE alone is minimised by "
+        "collapsing both views to one constant",
+    )
+    p.add_argument(
+        "--vicreg-cov-coeff", type=float, default=1.0, help="With --patch-loss-type vicreg: covariance weight"
     )
     p.add_argument(
         "--cross-view-negs-only",
@@ -839,6 +885,33 @@ def parse_args(argv=None, description=None):
         p.error("--patch-foreground-mask requires a positive --patch-loss-weight")
     if not 0 < args.patch_foreground_thresh <= 1:
         p.error("--patch-foreground-thresh must be in (0, 1]")
+    if args.patch_loss_type != "infonce" and args.patch_loss_weight <= 0:
+        p.error("--patch-loss-type only applies with a positive --patch-loss-weight")
+    if args.standardize_patch_code:
+        if args.patch_loss_weight <= 0 or args.patch_loss_type != "infonce":
+            p.error(
+                "--standardize-patch-code applies to a patch InfoNCE (a positive --patch-loss-weight and "
+                "--patch-loss-type infonce); barlow_twins and vicreg already centre and scale each unit"
+            )
+        if args.mask_mode != "fixed":
+            p.error(
+                "--standardize-patch-code needs --mask-mode fixed: standardising each unit divides a learned mask out"
+            )
+    if args.patch_similarity != "cosine" and not args.standardize_patch_code:
+        p.error(
+            "--patch-similarity dot needs --standardize-patch-code: without a fixed scale the encoder could lower "
+            "the loss by growing its patch features"
+        )
+    vicreg_coeffs = (args.vicreg_sim_coeff, args.vicreg_std_coeff, args.vicreg_cov_coeff)
+    if args.patch_loss_type == "vicreg":
+        if any(not 0 <= c < float("inf") for c in vicreg_coeffs):
+            p.error("--vicreg-*-coeff must be finite and nonnegative")
+        if args.vicreg_std_coeff <= 0:
+            p.error("--vicreg-std-coeff must be positive: the MSE alone is minimised by collapsing both views")
+    elif vicreg_coeffs != (25.0, 25.0, 1.0):
+        p.error(
+            "--vicreg-sim-coeff, --vicreg-std-coeff and --vicreg-cov-coeff only apply with --patch-loss-type vicreg"
+        )
     if not 0 <= args.mask_init_gap < float("inf"):
         p.error("--mask-init-gap must be finite and nonnegative")
     if args.mask_mode != "fixed":
@@ -931,10 +1004,19 @@ def parse_args(argv=None, description=None):
         if args.contrastive_proj_dim != 0:
             p.error("--separate-spatial-readout requires --contrastive-proj-dim 0 to avoid a shared loss projector")
     if args.patch_loss_weight > 0:
-        if args.contrastive_loss_type != "infonce":
-            p.error("Patch training currently supports global + patch InfoNCE only")
-        if not 0 < args.tau < float("inf"):
-            p.error("Patch InfoNCE requires a finite positive --tau")
+        if args.patch_loss_type == "infonce":
+            if args.contrastive_loss_type != "infonce":
+                p.error(
+                    "Patch InfoNCE needs a global InfoNCE; with --contrastive-loss-type barlow_twins use "
+                    "--patch-loss-type barlow_twins or vicreg"
+                )
+            if not 0 < args.tau < float("inf"):
+                p.error("Patch InfoNCE requires a finite positive --tau")
+        elif args.mask_mode != "fixed":
+            p.error(
+                f"--patch-loss-type {args.patch_loss_type} needs --mask-mode fixed: standardising each unit divides a "
+                "learned mask back out, and a masked-out unit would sit in the variance hinge"
+            )
         if any(g < 1 or g > size for g, size in zip(args.train_patch_grid, backbone_map)):
             p.error(f"--train-patch-grid must fit the {map_name} backbone map")
     if args.encoder_architecture == "resnet18":

@@ -9,6 +9,8 @@ This architecture option does not change the loss, data, or view-sharing policy.
 attention pooling (``models.attention_pool``), which starts as exact GAP. ``--global-pool moments``
 keeps GAP and adds each channel's first spatial moments to the readout (``models.moment_pool``),
 through zero-initialized columns, so it starts as exact GAP too.
+``--patch-loss-weight`` adds a loss on a grid of registered positions: per-position InfoNCE, or with
+``--patch-loss-type barlow_twins|vicreg`` a negative-free loss whose statistics are pooled over positions.
 ``--mask-mode learned`` replaces the fixed content block (the first ``--content-channels``
 units) with a top-k Gumbel-softmax content selector over learnable per-unit logits.
 ``--stratify-batches oracle|code`` draws every training batch from one k-means cluster of the
@@ -545,14 +547,23 @@ def foreground_positions(foreground, grid, threshold):
     return keep if bool(keep.any()) else torch.ones_like(keep)
 
 
+LOSS_NAMES = {"infonce": "InfoNCE", "barlow_twins": "Barlow Twins", "vicreg": "VICReg"}
+# The unweighted parts each patch objective logs as patch_<part>; InfoNCE has none.
+PATCH_LOSS_PARTS = {"infonce": (), "barlow_twins": ("on_diag", "off_diag"), "vicreg": ("sim", "var", "cov", "std")}
+
+
 def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground=None, mask=None):
-    """Registered positions are paired; negatives are subjects at the SAME position.
+    """Registered positions are paired; under InfoNCE, negatives are subjects at the SAME position.
 
     Only image-derived features and the input's own brain mask enter this loss; there
     is no lesion sampling or access to generator factor labels. All grid positions
     participate unless --patch-foreground-mask drops the always-background ones.
     A learned ``mask`` multiplies the shared head's units, as in ``contrastive_loss``;
     the separate spatial head has only content units, so it is read whole.
+
+    ``--patch-loss-type barlow_twins|vicreg`` replaces the InfoNCE with a negative-free loss whose
+    statistics are pooled over positions (``losses.pooled_patch_vicreg_terms`` says why); its
+    unweighted terms ride along as ``._patch_terms`` for logging.
     """
     if getattr(args, "patch_foreground_mask", False):
         if foreground is None:
@@ -567,6 +578,33 @@ def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foregrou
     hz = torch.stack((a, b), dim=0)  # views, subjects, content channels, positions
     # A configured projector acts on channels, never on the position axis.
     hz = model.project(hz.permute(0, 1, 3, 2)).permute(0, 1, 3, 2)
+    # Hand-built option namespaces may omit the parser's default.
+    kind = getattr(args, "patch_loss_type", "infonce")
+    if kind == "barlow_twins":
+        # Folding (subject, position) rows after centring each position makes every channel's variance
+        # the across-subject variance averaged over positions; patch_stat="per_position" would instead
+        # standardise each position by its own spread and amplify the flat ones.
+        loss = losses.barlow_twins_loss(
+            hz,
+            estimated_content_indices=[list(range(hz.shape[2]))],
+            subsets=[(0, 1)],
+            lambd=args.bt_lambda,
+            center_mode="position",
+            patch_stat="fold",
+        )
+        diag = loss._contrastive_diag
+        loss = loss.squeeze()
+        loss._patch_terms = {"on_diag": diag["on_diag_loss"], "off_diag": diag["off_diag_loss"]}
+        return loss
+    if kind == "vicreg":
+        terms = losses.pooled_patch_vicreg_terms(hz)
+        loss = args.vicreg_sim_coeff * terms["sim"] + args.vicreg_std_coeff * terms["var"]
+        loss = loss + args.vicreg_cov_coeff * terms["cov"]
+        loss._patch_terms = {key: float(value) for key, value in terms.items()}
+        return loss
+    # Hand-built option namespaces may omit the parser's default.
+    if getattr(args, "standardize_patch_code", False):
+        hz = standardize_patch_code(hz)
     return losses.patch_infonce_loss(
         hz,
         sim_metric=sim_metric,
@@ -575,7 +613,22 @@ def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foregrou
         estimated_content_indices=[list(range(hz.shape[2]))],
         subsets=[(0, 1)],
         cross_view_negs_only=args.cross_view_negs_only,
+        similarity=getattr(args, "patch_similarity", "cosine"),
     ).squeeze()
+
+
+def standardize_patch_code(hz):
+    """--standardize-patch-code on a (views, subjects, units, positions) patch code.
+
+    Each view's code is centred over the batch at every position, then each unit is divided by its spread
+    pooled over subjects and positions. Within a position, a unit that varies there more than it does elsewhere
+    stands out and a unit that is flat there stays near zero; dividing by each position's own spread would
+    promote that flat unit's noise to unit variance. The patch InfoNCE then L2-normalises every (subject,
+    position) vector, so this does not quiet a position alike in every subject.
+    """
+    centred = hz - hz.mean(1, keepdim=True)
+    spread = centred.square().sum((1, 3), keepdim=True) / ((hz.shape[1] - 1) * hz.shape[3])
+    return centred / (spread.sqrt() + 1e-6)
 
 
 def training_objective(model, images, args, sim_metric, criterion, masks=None):
@@ -606,6 +659,9 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
     weighted = weight * patch_loss
     total = global_loss + weighted if weight > 0 else global_loss
     terms = {"global": global_loss, "patch": patch_loss, "patch_weighted": weighted}
+    # Not loss terms: the unweighted parts of a negative-free patch loss, for the logs.
+    for key, value in getattr(patch_loss, "_patch_terms", {}).items():
+        terms[f"patch_{key}"] = global_loss.new_tensor(value)
     if getattr(args, "lesion_keypoints", 0) > 0:
         lesion_loss = lesion_contrastive_loss(pooled, model, args, sim_metric, criterion, images)
         terms["lesion"] = lesion_loss
@@ -1416,9 +1472,22 @@ def main():
             if args.patch_foreground_mask
             else "all positions"
         )
+        patch_objective = {
+            "infonce": "",
+            "barlow_twins": f" (lambda {args.bt_lambda:g})",
+            "vicreg": f" (sim {args.vicreg_sim_coeff:g}, std {args.vicreg_std_coeff:g}, cov {args.vicreg_cov_coeff:g})",
+        }[args.patch_loss_type]
+        if args.patch_loss_type != "infonce":
+            patch_objective += ", centred at each position, statistics pooled over positions"
+        elif args.standardize_patch_code:
+            patch_objective += (
+                f" ({args.patch_similarity} similarity, code centred at each position and scaled per unit over "
+                "positions)"
+            )
         print(
-            f"objective: global InfoNCE + {args.patch_loss_weight:g} * patch InfoNCE; "
-            f"grid={args.train_patch_grid}; {readout}; both losses update the backbones; {positions}; no target labels",
+            f"objective: global {LOSS_NAMES[args.contrastive_loss_type]} + {args.patch_loss_weight:g} * patch "
+            f"{LOSS_NAMES[args.patch_loss_type]}{patch_objective}; grid={args.train_patch_grid}; {readout}; "
+            f"both losses update the backbones; {positions}; no target labels",
             flush=True,
         )
 
@@ -1473,6 +1542,7 @@ def main():
             "device": str(device),
             "mps_fallback": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") if device == "mps" else None,
             "patch_loss_weight": args.patch_loss_weight,
+            "patch_loss_type": (args.patch_loss_type if args.patch_loss_weight > 0 else None),
             "train_patch_grid": (args.train_patch_grid if args.patch_loss_weight > 0 else None),
             "last_loss_terms": last_loss_terms,
             "init_from": init_from,
@@ -1530,18 +1600,24 @@ def main():
     previous_real = floor_flat if real else None
 
     step = 0
-    running = dict(
-        loss=0.0,
-        rank=0.0,
-        n=0,
-        global_loss=0.0,
-        patch=0.0,
-        patch_weighted=0.0,
-        lesion=0.0,
-        decorrelation=0.0,
-        mask_leak=0.0,
-        mask_size=0.0,
-    )
+    patch_parts = PATCH_LOSS_PARTS[args.patch_loss_type] if args.patch_loss_weight > 0 else ()
+
+    def fresh_running():
+        return dict(
+            loss=0.0,
+            rank=0.0,
+            n=0,
+            global_loss=0.0,
+            patch=0.0,
+            patch_weighted=0.0,
+            lesion=0.0,
+            decorrelation=0.0,
+            mask_leak=0.0,
+            mask_size=0.0,
+            **{f"patch_{part}": 0.0 for part in patch_parts},
+        )
+
+    running = fresh_running()
     logged_units = model.content_units()
     model.train()
     while step < args.train_steps:
@@ -1577,6 +1653,8 @@ def main():
             running["global_loss"] += last_loss_terms["global"]
             running["patch"] += last_loss_terms["patch"]
             running["patch_weighted"] += last_loss_terms["patch_weighted"]
+            for part in patch_parts:
+                running[f"patch_{part}"] += last_loss_terms[f"patch_{part}"]
             running["lesion"] += last_loss_terms.get("lesion", 0.0)
             running["decorrelation"] += last_loss_terms.get("lesion_decorrelation", 0.0)
             running["mask_leak"] += last_loss_terms.get("mask_leak", 0.0)
@@ -1594,6 +1672,11 @@ def main():
                     + (
                         f" | global {running['global_loss']/n:.4f} | patch {running['patch']/n:.4f} "
                         f"| weighted patch {running['patch_weighted']/n:.4f}"
+                        + (
+                            " (" + ", ".join(f"{part} {running[f'patch_{part}']/n:.4f}" for part in patch_parts) + ")"
+                            if patch_parts
+                            else ""
+                        )
                         if args.patch_loss_weight > 0
                         else ""
                     )
@@ -1634,24 +1717,16 @@ def main():
                     if args.lesion_decorrelation_weight > 0:
                         writer.add_scalar("train/lesion_decorrelation", running["decorrelation"] / n, step)
                     if args.patch_loss_weight > 0:
+                        # InfoNCE runs keep their old tags (global_infonce, patch_infonce, ...).
+                        kind = args.patch_loss_type
                         for tag, key in (
-                            ("global_infonce", "global_loss"),
-                            ("patch_infonce", "patch"),
-                            ("patch_infonce_weighted", "patch_weighted"),
+                            (f"global_{args.contrastive_loss_type}", "global_loss"),
+                            (f"patch_{kind}", "patch"),
+                            (f"patch_{kind}_weighted", "patch_weighted"),
+                            *((f"patch_{kind}_{part}", f"patch_{part}") for part in patch_parts),
                         ):
                             writer.add_scalar(f"train/{tag}", running[key] / n, step)
-                running = dict(
-                    loss=0.0,
-                    rank=0.0,
-                    n=0,
-                    global_loss=0.0,
-                    patch=0.0,
-                    patch_weighted=0.0,
-                    lesion=0.0,
-                    decorrelation=0.0,
-                    mask_leak=0.0,
-                    mask_size=0.0,
-                )
+                running = fresh_running()
 
             if step % args.eval_every == 0 or step == args.train_steps:
                 model.eval()

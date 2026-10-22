@@ -483,6 +483,7 @@ def patch_infonce_loss(
     cross_view_negs_only=False,
     center_mode="none",
     center_weight=False,
+    similarity="cosine",
 ):
     """
     Patch-level InfoNCE: aligns corresponding spatial patches across views.
@@ -495,7 +496,7 @@ def patch_infonce_loss(
     same anatomical location should align, providing a much richer training
     signal than global average pooling.
 
-    ``center_mode``/``center_weight`` are forwarded to ``_patch_infonce_base``.
+    ``center_mode``/``center_weight``/``similarity`` are forwarded to ``_patch_infonce_base``.
     """
     if estimated_content_indices is None:
         content_indices = list(range(hz.shape[2]))
@@ -508,6 +509,7 @@ def patch_infonce_loss(
             cross_view_negs_only=cross_view_negs_only,
             center_mode=center_mode,
             center_weight=center_weight,
+            similarity=similarity,
         )
     else:
         total_loss = torch.zeros(1).type_as(hz)
@@ -522,6 +524,7 @@ def patch_infonce_loss(
                 cross_view_negs_only=cross_view_negs_only,
                 center_mode=center_mode,
                 center_weight=center_weight,
+                similarity=similarity,
             )
             total_loss = total_loss + sub_loss
             if hasattr(sub_loss, "_contrastive_diag"):
@@ -540,6 +543,7 @@ def _patch_infonce_base(
     cross_view_negs_only=False,
     center_mode="none",
     center_weight=False,
+    similarity="cosine",
 ):
     """
     Core patch-level InfoNCE computation.
@@ -556,6 +560,13 @@ def _patch_infonce_base(
             magnitude, measured before L2 normalisation. Without it, positions
             where every sample looks alike are renormalised back to unit vectors
             and contribute full-magnitude random directions.
+        similarity: "cosine" L2-normalises every (view, sample, position) vector.
+            "dot" keeps its size: the dot product divided by the number of
+            channels, which is a cosine's scale for vectors of unit-variance
+            channels. A position where every sample looks alike then drops out,
+            and a large residual counts in proportion to its size. It needs
+            features on a fixed scale, or the encoder can lower the loss by
+            growing them.
     """
     n_view, B, C, P = hz_subset.shape
 
@@ -582,8 +593,13 @@ def _patch_infonce_base(
         per_row = F.cross_entropy(flat_scores, flat_targets, reduction="none")
         return (per_row.view(P, n_rows).mean(dim=1) * pos_w).mean()
 
-    # L2-normalize along channel dimension
-    hz_n = F.normalize(hz_c, dim=2, eps=1e-6)  # (n_views, B, C', P)
+    if similarity == "cosine":
+        # L2-normalize along channel dimension
+        hz_n = F.normalize(hz_c, dim=2, eps=1e-6)  # (n_views, B, C', P)
+    elif similarity == "dot":
+        hz_n = hz_c / hz_c.shape[2] ** 0.5
+    else:
+        raise ValueError(f"Unknown patch similarity: {similarity!r}")
 
     if cross_view_negs_only:
         total_loss = torch.zeros(1, device=hz_subset.device, dtype=hz_subset.dtype)
@@ -1623,6 +1639,41 @@ def vicreg_loss(
     if sub_diags:
         total_loss._contrastive_diag = _merge_diags(sub_diags)
     return total_loss
+
+
+def pooled_patch_vicreg_terms(hz, eps=1e-4):
+    """Unweighted VICReg terms of registered patches ``(2 views, B, C, P)``, statistics pooled over positions.
+
+    Invariance is the MSE of the RAW paired features, so a per-view offset at a position still
+    counts; ``vicreg_loss`` centres before its MSE and is blind to one. Variance and covariance first
+    subtract each view's across-subject mean at every (channel, position), removing the anatomy all
+    subjects share there, then average the across-subject (co)variances over positions.
+
+    The pooling is what keeps a region that looks the same in every subject out of the objective:
+    its centred rows are ~0, so it adds ~nothing to the pooled statistics and its gradient scales
+    with its own spread. A per-position hinge (``vicreg_local``) asks EVERY position to vary across
+    subjects, which a flat region can only do with noise or contrast. The flip side: a genuine but
+    small-variance local signal is down-weighted by the same rule.
+
+    Weighted as in the official VICReg code: the hinge on ``sqrt(var + eps)`` is averaged over the
+    two views and the squared off-diagonal covariance summed over them, over C. ``vicreg_loss``
+    sums the two hinges, so the same coefficients give it twice the variance weight. ``std`` is
+    the mean pooled standard deviation, a detached diagnostic.
+    """
+    if hz.dim() != 4 or hz.shape[0] != 2 or hz.shape[1] < 2:
+        raise ValueError(f"pooled_patch_vicreg_terms expects (2, B>=2, C, P); got {tuple(hz.shape)}")
+    x, y = hz.float()
+    B, C, P = x.shape
+    off = ~torch.eye(C, dtype=torch.bool, device=hz.device)
+    var = cov = std = 0.0
+    for z in (x, y):
+        rows = (z - z.mean(0, keepdim=True)).permute(0, 2, 1).reshape(B * P, C)
+        covariance = rows.T @ rows / (P * (B - 1))
+        sd = torch.sqrt(covariance.diagonal() + eps)
+        var = var + F.relu(1 - sd).mean() / 2
+        cov = cov + covariance[off].square().sum() / C
+        std = std + sd.detach().mean() / 2
+    return dict(sim=F.mse_loss(x, y), var=var, cov=cov, std=std)
 
 
 def style_infonce_loss(hz_v0_style, hz_v1_style, tau=0.1):

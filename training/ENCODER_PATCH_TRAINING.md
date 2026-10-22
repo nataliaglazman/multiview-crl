@@ -226,6 +226,172 @@ Compare against the unmasked
 patch run at matched seeds, batch size, steps, grid and weight. This changes
 training only, so the evaluation tools need no setting from it.
 
+## Negative-free patch loss (Barlow Twins or VICReg)
+
+Patch InfoNCE solves a separate softmax at every position: at position p, subject i's
+FLAIR vector has to pick out subject i's T1 vector from the other subjects' T1 vectors
+at p. Every position is asked to tell subjects apart, including one that looks the
+same in every subject. Cosine similarity ignores scale, so such a region is pushed as
+hard as an informative one, and the only differences it has left to amplify are
+nuisance, noise and contrast. `--patch-loss-type barlow_twins|vicreg` replaces it with
+a loss that has no negatives. The global loss keeps `--contrastive-loss-type` (InfoNCE
+or Barlow Twins).
+
+**What it computes.** The content patches form a tensor of shape
+(view, subject, channel, position). Each view's mean over the batch's subjects is
+subtracted at every (channel, position). That removes the anatomy all subjects share
+there, which both views agree on and which would otherwise satisfy the alignment for
+free. Variances, correlations and covariances then pool the (subject, position) rows.
+So a channel's variance is its across-subject variance averaged over positions:
+
+- `barlow_twins`: `barlow_twins_loss` with `center_mode="position"` and
+  `patch_stat="fold"`, using `--bt-lambda`. It pushes the 9×9 cross-view correlation
+  of the content channels towards the identity.
+- `vicreg`: `losses.pooled_patch_vicreg_terms`, weighted by `--vicreg-sim-coeff`,
+  `--vicreg-std-coeff` and `--vicreg-cov-coeff` (25/25/1). The invariance term is the
+  MSE of the uncentred paired features, so a per-view offset at a position still
+  costs. The variance hinge and the covariance use the pooled, centred statistics. The
+  term weights follow the official VICReg code, which halves the hinge;
+  `losses.vicreg_loss` does not.
+
+**Why pooling, not per-position statistics.** After centring, a region that is alike in
+every subject has rows near zero. It adds almost nothing to the pooled statistics, and
+its gradient scales with its own spread. View-specific noise in it lowers the
+cross-view correlation, so the loss shrinks that noise. The per-position alternatives
+bring the problem back:
+
+- `patch_stat="per_position"` divides each position by its own across-subject spread.
+- VICRegL's per-position hinge (`training/vicreg_local.py`) requires every position to
+  vary across subjects.
+
+`tests/test_encoder_patch_noncontrastive.py` checks this on a toy. Rich positions carry
+a shared subject signal. Flat positions carry only δ·(shared nuisance + view noise).
+The table gives each loss's push on the flat nuisance, relative to its push on the
+rich signal:
+
+| patch loss | δ = 0.1 | δ = 0.01 | push on flat view noise |
+|---|---|---|---|
+| InfoNCE | +29 | +29 | down |
+| Barlow Twins (pooled) | +0.011 | +0.0001 | down |
+| VICReg (pooled) | +0.010 | +0.0001 | down |
+
+In a scratch run of the same toy, Barlow Twins with per-position standardisation
+pushed the flat nuisance 3.3× harder than the rich signal at any δ. VICRegL's
+per-position hinge pushed the view noise up.
+
+**Costs.** The rule that protects flat regions also down-weights a genuine local signal
+of small variance, such as a lesion in 1–2 bins. So this targets regional style
+leakage, not the recovery of hard local factors. Barlow Twins' correlation cannot see
+a per-view constant offset; VICReg's MSE can. Both need `--mask-mode fixed`, and
+`--patch-foreground-mask`, `--separate-spatial-readout` and the projector work as
+for InfoNCE.
+
+**Scale at step 0.** These are means over two batches of 32 at the
+`conv_mlp_patch` recipe, seed 42:
+
+- global InfoNCE: 6.91 (chance is 2 ln 32 = 6.93)
+- patch InfoNCE: 7.40
+- patch Barlow Twins: 7.92 (`on_diag` 7.92 of a maximum of 9)
+- patch VICReg: 23.4, almost all variance hinge (pooled std 0.084)
+
+So weight 1 matches the InfoNCE arm for Barlow Twins. For VICReg, weight 1 starts at
+3.4× the global term, until the readout scales its patch outputs to unit spread.
+
+```bash
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster slurm_bio \
+  --set patch_loss_type=barlow_twins 'tag=conv_mlp_patch_bt_s{seed}'
+python scripts/launch.py experiments/encoder/conv_mlp_patch.yaml --cluster slurm_bio \
+  --set patch_loss_type=vicreg 'tag=conv_mlp_patch_vicreg_s{seed}'
+# With the untied spatial head, for the readout interaction:
+python scripts/launch.py experiments/encoder/conv_mlp_patch_separate_spatial.yaml --cluster slurm_bio \
+  --set patch_loss_type=barlow_twins 'tag=conv_mlp_patch_separate_spatial_bt_s{seed}'
+```
+
+The logs add the unweighted parts: `on_diag` and `off_diag` for Barlow Twins, and
+`sim`, `var`, `cov` and the pooled `std` for VICReg. They appear on the console line, in
+TensorBoard as `train/patch_<type>_<part>`, in `last_loss_terms` and as `val/patch_<part>`
+on real data. `training_progress.json` records `patch_loss_type`. InfoNCE runs keep
+their old tags.
+
+## Standardised patch InfoNCE
+
+`--standardize-patch-code` is the patch analogue of `--standardize-code`. Before the
+per-position similarity, each view's patch code is centred over the batch at every
+position. Each unit is then divided by its spread pooled over subjects and positions,
+not by its spread at each position. Dividing per position would promote a unit that is
+flat at a position to unit-variance noise there, and would give every position the
+same size. It needs a positive `--patch-loss-weight`, `--patch-loss-type infonce` and
+`--mask-mode fixed`.
+
+`--patch-similarity` picks the similarity that follows:
+
+- `cosine` (default) L2-normalises every (view, subject, position) vector over units,
+  as `losses._patch_infonce_base` always has. After centring, the vectors at a position
+  alike in every subject are small, and the normalisation scales them back to unit
+  length. So the standardisation then only reweights units within a position: a flat
+  position keeps its full say and a rarely varying cell gains none. The VQ trainer's
+  `--patch-center-weight` exists for the same reason.
+- `dot` takes the dot product of the standardised code divided by the number of content
+  units, so `--tau` keeps its meaning for a cell of typical size. Each cell keeps its
+  size: a position alike in every subject drops out, and a cell that differs from the
+  rest of the batch at its position counts in proportion to how much it differs. It
+  needs `--standardize-patch-code`; on an unscaled code the encoder could lower the loss
+  by growing its features.
+
+**Measured.** The share of the squared gradient on the patch code, on one batch with the
+foreground mask on. "Flattest cells" are the 10% of (subject, position) cells with the
+smallest standardised residual. The last column is the patch term's encoder gradient
+norm over the global term's.
+
+On the patch8 recipe (12 content units, the neighbourhood sampler's first batch, 149 of
+512 positions kept, untrained; lesion cells are 2.5% of the cells):
+
+| patch similarity | flattest cells | lesion cells | patch / global gradient |
+|---|---|---|---|
+| raw cosine (default) | 0.23 | 0.004 | 0.06 |
+| standardised cosine | 0.30 | 0.008 | 0.08 |
+| standardised dot | 0.009 | 0.095 | 0.15 |
+
+On the 9-unit run `conv_mlp_s42_mps_patch8x8x8_w1` (a random batch of 32, 201 positions
+kept, untrained / trained; lesion cells are 2.2%):
+
+| patch similarity | flattest cells | lesion cells | patch / global gradient |
+|---|---|---|---|
+| raw cosine (default) | 0.16 / 0.38 | 0.006 / 0.013 | 9.8 / 0.19 |
+| standardised cosine | 0.35 / 0.36 | 0.006 / 0.016 | 15 / 0.07 |
+| standardised cosine, positions weighted by mean residual size* | 0.15 / 0.14 | 0.025 / 0.043 | 16 / 0.07 |
+| standardised dot | 0.007 / 0.012 | 0.060 / 0.078 | 28 / 0.21 |
+
+\* Not a trainer option.
+
+Only the rows that keep each cell's size move gradient onto the rare cells, and the
+pooled scale is what lets them. These are first-order pushes at one point, not what
+training does over many steps.
+
+At step 0 the dot arm's patch push is 2.5× the cosine arm's in the patch8 recipe (0.15
+vs 0.06 of the global gradient); a patch weight of 0.39 matches the two at step 0. On
+the trained 9-unit run the two ratios were alike (0.21 vs 0.19). The arm matched to an
+existing patch run changes only the similarity and the standardisation it needs; the
+second command is a control for the stronger early push:
+
+```bash
+python scripts/launch.py --from-config results/encoder/runs/patch8/settings.json --cluster local \
+  --set standardize_patch_code=True patch_similarity=dot tag=patch8_patchdot
+python scripts/launch.py --from-config results/encoder/runs/patch8/settings.json --cluster local \
+  --set standardize_patch_code=True patch_similarity=dot patch_loss_weight=0.39 tag=patch8_patchdot_w039
+```
+
+The logged `patch_infonce` values are not comparable across similarities: at step 0 the
+patch8 recipe gives 8.0 under the cosine and 15.5 under the dot product (chance is
+2 ln 32 = 6.93). Compare the arms with the regional readouts instead:
+
+```bash
+python -m eval.encoder.regional_lesion_detection \
+  --run-dirs results/encoder/runs/patch8 results/encoder/runs/patch8_patchdot
+python -m eval.encoder.regional_probe \
+  --run-dirs results/encoder/runs/patch8 results/encoder/runs/patch8_patchdot --out regional_patchdot.json
+```
+
 ## Local runs (Mac MPS or a Linux PC with CUDA)
 
 From the repository root, in the local PyTorch environment, `--cluster local` runs the
