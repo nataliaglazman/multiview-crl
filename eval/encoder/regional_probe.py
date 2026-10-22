@@ -23,6 +23,12 @@ shape) from the code, regional ones (focal temporal atrophy, the corrugation-mod
 position) from the regional representation. The full tables show every readout, so a target read better
 elsewhere is visible.
 
+Style rows test the other half of identifiability, that content excludes style. Each view's representation is
+scored against that view's own gain, bias and noise sigma as the renderer applied them
+(``eval.diagnostics.style_path_audit.effective_style``: the raw draws are clipped, and the noise level uses
+only their magnitude), at every readout. Untrained features carry much of the gain, so the floor is the same
+readout at model_init.pt: excluded style sits near 0 and below it. A style summary reports every readout.
+
 Example:
     python -m eval.encoder.regional_probe --run-dirs results/encoder/runs/<plain run> results/encoder/runs/<patch run>
     python -m eval.encoder.regional_probe --self-test
@@ -142,7 +148,12 @@ def adaptive_mean(cells, grid, out_grid):
 
 
 def natural_readout(target, cfg):
-    """The readout a target is summarised at: regional for focal or positional targets, the code otherwise."""
+    """The readout a target is summarised at: regional for focal or positional targets, the code otherwise.
+
+    None for a style row: content should exclude style at every readout, so it has no natural one.
+    """
+    if target.startswith("style "):
+        return None
     if target.startswith("lesion ") or target == "temporal_atrophy":
         return "regional"
     if target == "sulcal_widening" and cfg.get("synthetic_sulcal_mode", "corrugation") == "corrugation":
@@ -172,6 +183,11 @@ def build_targets(factors, names, centres=None, side=None):
             ("lesion z within hemisphere", "within", centres[:, 2]),
         ]
     return targets
+
+
+def style_targets(effective, names):
+    """(name, kind, values) per style factor of one view: ``effective`` holds its rendered gain, bias, sigma."""
+    return [(f"style {name}", "r2", effective[:, j]) for j, name in enumerate(names[: effective.shape[1]])]
 
 
 def score(rep, targets, side=None):
@@ -221,12 +237,64 @@ def check_run(run_dir, cfg):
         raise SystemExit(f"{run_dir}: synthetic mode {cfg['synthetic_mode']!r}, not pseudo_mri")
 
 
-def run(args):
+def encode(models, grids, dataset, device, batch_size, probe_grid):
+    """One pass over ``dataset``: every model's readouts per view, the subjects' z_content, each view's style.
+
+    Returns ``(reps, factors, styles)``. ``reps[m][view][readout]`` is (subjects, features) for model ``m``;
+    ``styles[view]`` is the (subjects, n_style) gain / bias / noise sigma the renderer applied, absent when the
+    samples carry no style draws or the dataset no renderer.
+    """
     import torch
     from torch.utils.data import DataLoader
 
+    from eval.diagnostics.style_path_audit import effective_style
+
+    parts = [{view: {r: [] for r in READOUTS} for view in VIEWS} for _ in models]
+    factors, styles = [], {view: [] for view in VIEWS}
+    style_scale = getattr(getattr(getattr(dataset, "_inner", None), "renderer", None), "style_scale", None)
+    with torch.no_grad():
+        for batch in DataLoader(dataset, batch_size=batch_size):
+            x = torch.cat(batch["image"], dim=0).to(device)
+            b = x.shape[0] // 2
+            for rep, model, grid in zip(parts, models, grids):
+                for name, value in zip(READOUTS, readouts(model, x, grid, probe_grid)):
+                    value = value.double().cpu().numpy()
+                    rep["t1"][name].append(value[:b])
+                    rep["flair"][name].append(value[b:])
+            latents = batch["gt_latents"]
+            factors.append(latents["z_content"].double().numpy())
+            if style_scale is not None and "z_style_v1" in latents:
+                for v, view in enumerate(VIEWS):
+                    draws = latents[f"z_style_v{v + 1}"]
+                    styles[view].append(np.stack([effective_style(z, style_scale)[: draws.shape[1]] for z in draws]))
+    reps = [{view: {r: np.concatenate(rep[view][r]) for r in READOUTS} for view in VIEWS} for rep in parts]
+    styles = {view: np.concatenate(s) for view, s in styles.items() if s and s[0].shape[1] > 0}
+    return reps, np.concatenate(factors), styles
+
+
+def subject_targets(cfg, dataset, factors, styles):
+    """``(content targets, per-view style targets, side, centres)`` for the scored subjects.
+
+    Content targets are shared by both views; each view is scored against its own style. ``side`` and
+    ``centres`` (rendered lesion centres, voxels, x first) are None unless the run has one position lesion.
+    """
     from eval.encoder.lesion_side_probe import hemisphere, lesion_centres
-    from eval.metrics.dci import content_factor_names
+    from eval.metrics.dci import STYLE_FACTOR_NAMES, content_factor_names
+
+    names = content_factor_names(factors.shape[1], cfg.get("synthetic_lesion_target", "position"))
+    centres = side = None
+    if cfg.get("synthetic_lesion_target", "position") == "position" and factors.shape[1] >= 5:
+        centres = lesion_centres(dataset)
+        if not np.isfinite(centres).all():
+            raise SystemExit("Some subjects have no rendered lesion; the centre rows need one per subject")
+        side = hemisphere(centres, cfg["res"])
+    style = {view: style_targets(values, STYLE_FACTOR_NAMES) for view, values in styles.items()}
+    return build_targets(factors, names, centres, side), style, side, centres
+
+
+def run(args):
+    import torch
+
     from eval.protocol.score_checkpoint import build_model, load_settings, make_dataset
     from utils.encoder_runtime import select_encoder_device
 
@@ -263,39 +331,20 @@ def run(args):
         cfg = data["cfg"]
         dataset = make_dataset(cfg, data["num_samples"], mode=args.split)
         models = [build_model(c["cfg"], device, torch.load(c["checkpoint"], map_location="cpu")).eval() for c in mine]
-        for column in mine:
-            column["reps"] = {view: {r: [] for r in READOUTS} for view in VIEWS}
-        factors = []
-        with torch.no_grad():
-            for batch in DataLoader(dataset, batch_size=args.batch_size):
-                x = torch.cat(batch["image"], dim=0).to(device)
-                b = x.shape[0] // 2
-                for column, model in zip(mine, models):
-                    for name, value in zip(READOUTS, readouts(model, x, column["grid"], args.probe_grid)):
-                        value = value.double().cpu().numpy()
-                        column["reps"]["t1"][name].append(value[:b])
-                        column["reps"]["flair"][name].append(value[b:])
-                factors.append(batch["gt_latents"]["z_content"].double().numpy())
+        reps, factors, styles = encode(
+            models, [c["grid"] for c in mine], dataset, device, args.batch_size, args.probe_grid
+        )
         del models
-        factors = np.concatenate(factors)
-        names = content_factor_names(factors.shape[1], cfg.get("synthetic_lesion_target", "position"))
-        centres = side = None
-        if cfg.get("synthetic_lesion_target", "position") == "position" and factors.shape[1] >= 5:
-            centres = lesion_centres(dataset)
-            if not np.isfinite(centres).all():
-                raise SystemExit("Some subjects have no rendered lesion; the centre rows need one per subject")
-            side = hemisphere(centres, cfg["res"])
-        data["targets"] = build_targets(factors, names, centres, side)
+        data["targets"], data["style"], side, _ = subject_targets(cfg, dataset, factors, styles)
         data["side"] = side
         lesion_rows = [t for t in data["targets"] if t[0].startswith("lesion ")]
         anatomy = np.delete(factors, LESION_COLUMNS, axis=1)
         data["anatomy_only"] = score(anatomy, lesion_rows, side) if lesion_rows else {}
-        for column in mine:
+        for column, rep in zip(mine, reps):
             column["scores"] = {
-                view: {r: score(np.concatenate(column["reps"][view][r]), data["targets"], side) for r in READOUTS}
+                view: {r: score(rep[view][r], data["targets"] + data["style"].get(view, []), side) for r in READOUTS}
                 for view in VIEWS
             }
-            del column["reps"]
 
     report = {
         "split": args.split,
@@ -303,7 +352,12 @@ def run(args):
         "probe": "ridge, alphas 1e-2..1e6, 5 folds, seeds 0-2",
     }
     report["data_sets"] = [
-        {"runs": d["letters"], "subjects": d["num_samples"], "anatomy_only": d["anatomy_only"]}
+        {
+            "runs": d["letters"],
+            "subjects": d["num_samples"],
+            "anatomy_only": d["anatomy_only"],
+            "style_rows": {view: [t[0] for t in rows] for view, rows in d["style"].items()},
+        }
         for d in datasets.values()
     ]
     report["columns"] = [
@@ -324,7 +378,7 @@ def run(args):
                 f"\nrun {letter}, {view}: held-out R² (AUC for the side); * = the target's natural readout", flush=True
             )
             print(f"  {'':30s}" + "".join(f"{label:>15s}" for label in labels), flush=True)
-            for name, _, _ in data["targets"]:
+            for name, _, _ in data["targets"] + data["style"].get(view, []):
                 natural = natural_readout(name, data["cfg"])
                 cells = []
                 for label, v in zip(labels, values):
@@ -348,6 +402,28 @@ def run(args):
                     else:
                         line += f"   {letter} {trained:6.3f} ({trained - init:+.3f})"
                 print(line, flush=True)
+    if any(d["style"] for d in datasets.values()):
+        print(
+            "\nStyle exclusion: each view's own rendered gain, bias and noise sigma at every readout, trained "
+            "(Δ vs init). Content that excludes style reads near 0 here, and below its untrained floor.",
+            flush=True,
+        )
+        for view in VIEWS:
+            print(f"  {view}", flush=True)
+            for data in datasets.values():
+                for name, _, _ in data["style"].get(view, []):
+                    for letter in data["letters"]:
+                        line = f"    {name:20s} {letter}"
+                        for r in READOUTS:
+                            by_name = {c["name"]: c["scores"][view][r][name] for c in columns if c["letter"] == letter}
+                            trained, init = by_name.get("model.pt"), by_name.get("model_init.pt")
+                            if trained is None:
+                                line += f"   {r} {'n/a':>6s}"
+                            elif init is None:
+                                line += f"   {r} {trained:6.3f}"
+                            else:
+                                line += f"   {r} {trained:6.3f} ({trained - init:+.3f})"
+                        print(line, flush=True)
     if args.out:
         with open(args.out, "w") as fp:
             json.dump(report, fp, indent=2)
@@ -393,6 +469,17 @@ def self_test():
     assert natural_readout("lesion y", {}) == "regional" and natural_readout("brain_size", {}) == "code"
     assert natural_readout("sulcal_widening", {"synthetic_sulcal_mode": "atrophy"}) == "code"
     assert natural_readout("sulcal_widening", {}) == natural_readout("temporal_atrophy", {}) == "regional"
+
+    # Style rows: one per rendered style factor of the view, scored like a content factor, no natural readout.
+    effective = np.column_stack(
+        [1 + 0.3 * np.tanh(global_factor), 0.1 * np.tanh(regional_factor), 0.01 + rng.random(n)]
+    )
+    rows = style_targets(effective, ["gain", "bias", "noise_sigma"])
+    assert [r[0] for r in rows] == ["style gain", "style bias", "style noise_sigma"] and {r[1] for r in rows} == {"r2"}
+    assert style_targets(effective[:, :2], ["gain", "bias", "noise_sigma"])[-1][0] == "style bias"
+    assert natural_readout("style gain", {}) is None
+    # A code that excludes style reads ~0 on it; one that carries the gain reads it.
+    assert r2(regional, rows[0][2]) > 0.8 and r2(rng.normal(size=(n, 3)), rows[0][2]) < 0.05
     print("self-test passed")
 
 

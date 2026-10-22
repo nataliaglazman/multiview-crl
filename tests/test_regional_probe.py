@@ -20,6 +20,7 @@ if importlib.util.find_spec("lpips") is None:
     # training.losses imports LPIPS at module scope; the encoder-only trainer never builds it.
     sys.modules["lpips"] = types.ModuleType("lpips")
     sys.modules["lpips"].LPIPS = None
+from eval.diagnostics.style_path_audit import effective_style  # noqa: E402
 from eval.protocol.score_checkpoint import build_model, load_settings, make_dataset  # noqa: E402
 from training import main_conv_synthetic as trainer  # noqa: E402
 
@@ -88,6 +89,18 @@ class RegionalProbeTests(unittest.TestCase):
             torch.testing.assert_close(cells, forward_cells)
             torch.testing.assert_close(code, forward_code[:, model.unit_split(forward_code.shape[1])[0]])
             self.assertEqual(maps.shape[1], 8 * 64)
+            # Each view is scored against its own rendered style: recompute B's FLAIR gain row directly.
+            dataset = make_dataset(cfg, cfg["num_val_samples"])
+            scale = dataset._inner.renderer.style_scale
+            flair_codes, flair_gain = [], []
+            with torch.no_grad():
+                for batch in torch.utils.data.DataLoader(dataset, batch_size=8):
+                    x = torch.cat(batch["image"], dim=0)
+                    flair_codes.append(
+                        probe.readouts(model, x, [4, 4, 4], [2, 2, 2])[0][x.shape[0] // 2 :].double().numpy()
+                    )
+                    flair_gain += [effective_style(z, scale)[0] for z in batch["gt_latents"]["z_style_v2"]]
+            expected_flair_gain = probe.r2(np.concatenate(flair_codes), np.array(flair_gain))
 
         self.assertEqual(len(report["data_sets"]), 1)  # the two runs differ only in training, not in subjects
         self.assertEqual(
@@ -104,7 +117,15 @@ class RegionalProbeTests(unittest.TestCase):
             self.assertTrue(np.isfinite(trained[view]["regional"]["brain_size"]))
         anatomy = report["data_sets"][0]["anatomy_only"]
         self.assertEqual(set(anatomy), {n for n in names if n.startswith("lesion ")})
+        style = ["style gain", "style bias", "style noise_sigma"]
+        self.assertEqual(report["data_sets"][0]["style_rows"], {"t1": style, "flair": style})
+        for column in report["columns"]:
+            for view in probe.VIEWS:
+                for readout in probe.READOUTS:
+                    self.assertTrue(all(np.isfinite(column["scores"][view][readout][s]) for s in style))
+        self.assertAlmostEqual(trained["flair"]["code"]["style gain"], expected_flair_gain, places=10)
         text = output.getvalue()
+        self.assertIn("Style exclusion", text)
         self.assertIn("natural readout", text)
         self.assertIn("the trained spatial head", text)
         self.assertIn("the global head per cell", text)
