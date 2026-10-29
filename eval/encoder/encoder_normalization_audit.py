@@ -127,6 +127,8 @@ def capture(model, images, norm_layer="pre_residual", spatial_grid=0):
     elif getattr(model, "moment_pool", None) is not None:
         backbone = values["backbone"]
         features["actual_pool"] = flatten(torch.cat((backbone.mean((2, 3, 4)), model.moment_pool.moments(backbone)), 1))
+    elif model.readout_type == "dense":
+        features["actual_pool"] = flatten(model.to_encoding.features(values["backbone"]))
     return features, {
         "normalizers": descriptions,
         "backbone_shape": list(values["backbone"].shape[1:]),

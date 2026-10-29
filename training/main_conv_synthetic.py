@@ -8,7 +8,8 @@ This architecture option does not change the loss, data, or view-sharing policy.
 ``--global-pool attention`` replaces the GAP before either readout with multi-head
 attention pooling (``models.attention_pool``), which starts as exact GAP. ``--global-pool moments``
 keeps GAP and adds each channel's first spatial moments to the readout (``models.moment_pool``),
-through zero-initialized columns, so it starts as exact GAP too.
+through zero-initialized columns, so it starts as exact GAP too. ``--conv-readout dense`` does not
+pool: strided convs to a small grid, flattened into the MLP (``models.dense_readout``).
 ``--patch-loss-weight`` adds a loss on a grid of registered positions: per-position InfoNCE, or with
 ``--patch-loss-type barlow_twins|vicreg`` a negative-free loss whose statistics are pooled over positions.
 ``--mask-mode learned`` replaces the fixed content block (the first ``--content-channels``
@@ -1225,6 +1226,8 @@ def build_encoder(args):
         encoder_architecture=args.encoder_architecture,
         encoder_head_hidden=args.encoder_head_hidden,
         conv_readout=args.conv_readout,
+        dense_readout_downsample=args.dense_readout_downsample,
+        dense_readout_grid=args.dense_readout_grid,
         resnet_norm=args.resnet_norm,
         resnet_output_stride=args.resnet_output_stride,
         separate_spatial_readout=args.separate_spatial_readout,
@@ -1386,6 +1389,15 @@ def main():
         print(
             f"encoder: conv, {pool_name} -> {args.hidden_channels} -> {args.encoder_head_hidden} -> {args.latent_dim}"
         )
+    elif args.conv_readout == "dense":
+        head = model.to_encoding
+        print(
+            f"encoder: conv, dense readout: {head.downsample} stride-2 convs -> {head.channels} x {head.grid}^3 -> "
+            f"flatten {head.channels * head.grid ** 3} -> {args.encoder_head_hidden} -> {args.latent_dim}; "
+            f"{sum(p.numel() for p in head.parameters())} parameters, shared by both views. No pooling and no "
+            "patch outputs",
+            flush=True,
+        )
     if model.attention_pool is not None:
         pool = model.attention_pool
         if pool.mix is None:
@@ -1531,6 +1543,9 @@ def main():
                 sum(p.numel() for p in model.attention_pool.parameters()) if model.attention_pool is not None else 0
             ),
             "moment_pool_parameter_count": model.moment_pool.weight.numel() if model.moment_pool is not None else 0,
+            "dense_readout_parameter_count": (
+                sum(p.numel() for p in model.to_encoding.parameters()) if model.readout_type == "dense" else 0
+            ),
             "optimizer": "AdamW",
             "optimizer_defaults": optimizer.defaults,
             "elapsed_seconds_including_evaluation": time.perf_counter() - started,

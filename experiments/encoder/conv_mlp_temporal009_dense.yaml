@@ -1,0 +1,10 @@
+# Dense arm of conv_mlp_temporal009: no pooling. Two stride-2 convs take the 16^3 backbone map to 4^3, which is
+# flattened (4,096 inputs) into the same Linear -> LeakyReLU -> Linear head (models/dense_readout.py), so the
+# code can be any function of the map, the atrophy site included. GAP reads temporal atrophy at R² 0.00 / 0.07
+# (T1 / FLAIR) on the untrained backbone, against 0.53 / 0.58 for the true site's template. The backbones match the
+# GAP arm's from the same seed; the head is randomly initialised, so compare each arm with its own floor. Read
+# content->content/per_factor_test/temporal_atrophy in dci_step*.json against conv_mlp_temporal009 at the same steps.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_temporal009_dense_s{seed}
+conv_readout: dense
+synthetic_temporal_sigma: 0.09

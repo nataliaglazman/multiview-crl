@@ -1,0 +1,13 @@
+# Dense arm of conv_mlp_lesionpos: no pooling. Two stride-2 convs take the 16^3 backbone map to 4^3, which is
+# flattened (4,096 inputs) into the same Linear -> LeakyReLU -> Linear head (models/dense_readout.py). Under GAP a
+# moved lesion changes the pooled features by ~0.001-0.002 of a between-subject difference, and in a supervised
+# control with labels lesion x/y/z stayed at R² 0 through GAP while a flattened 8^3 readout reached 0.92/0.89/0.69.
+# The backbones match the GAP arm's from the same seed; the head is randomly initialised, so compare each arm with
+# its own floor. Read per_factor["content→content"].lesion_x/y/z.ridge in dci_step*.json (a perfect localiser
+# reads about 0.58/0.84/0.62 against these latent targets).
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_lesionpos_dense_s{seed}
+conv_readout: dense
+synthetic_lesion_intensity: styled
+synthetic_lesion_t1_value: 0.0
+standardize_code: true

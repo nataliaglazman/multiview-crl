@@ -37,7 +37,7 @@ channel: with 32³ inputs, use at least two subjects per separate view backbone.
 
 The architecture flag preserves the current separate-view-backbone setting.
 Add `--no-separate-encoders` to also match upstream's use of one image encoder
-for all image views. The dense readout is shared in either case. Keep
+for all image views. The readout head is shared in either case. Keep
 `--contrastive-proj-dim 0` to apply the loss directly to the scored content
 encoding, as upstream does; this optional loss-only projector is separate from
 the ResNet readout, which always runs. The content/style split, temperature,
@@ -71,9 +71,10 @@ without the new fields still load the original architecture strictly.
 python -m eval.protocol.score_checkpoint --run-dir results/infonce_resnet18_3d --no-graph
 ```
 
-Training always pools the backbone features **before** the nonlinear readout:
-by averaging, with `--global-pool attention` (below) by attention pooling, or with
-`--global-pool moments` by averaging plus each channel's first spatial moments.
+Training pools the backbone features **before** the nonlinear readout: by
+averaging, with `--global-pool attention` (below) by attention pooling, or with
+`--global-pool moments` by averaging plus each channel's first spatial moments. The
+exception is `--conv-readout dense` (below), which does not pool at all.
 For optional patch diagnostics, the readout is applied after averaging each
 spatial bin. At input resolution 64, `--pooling patch --patch-grid 2 2 2` is the
 finest available grid; larger grids raise an error rather than duplicating
@@ -178,6 +179,68 @@ exactly until training moves `W_m`, so the untrained floors match too.
   GAP and the moments together, the readout's actual input.
 - Making a factor readable does not make the loss want it. Read the learned delta
   against the GAP arm, not the floor alone.
+
+## Dense readout
+
+`--conv-readout dense` replaces pooling with ordinary layers to a dense vector,
+`models/dense_readout.py`:
+
+```text
+backbone map h (64 x 16^3 at --res 64)
+-> [Conv 4^3 stride 2 -> norm -> ReLU] x --dense-readout-downsample (2)  -> 64 x 4^3
+-> adaptive average to --dense-readout-grid^3 (4; skipped when already that size)
+-> flatten (4,096) -> Linear(4096, --encoder-head-hidden) -> LeakyReLU -> Linear -> latent_dim
+```
+
+**Why.** For the code to be an invertible function of the content latents, three
+things must hold:
+
+1. The generator must keep each latent visible in the image.
+   `eval/synthetic/generator_defects.py` bounds what any encoder could recover.
+2. The encoder must be able to compute the inverse.
+3. The loss must see enough code dimensions.
+
+GAP breaks condition 2 whatever the training. It averages a 16³ map whose cells see
+about 13 voxels each, so anything that only moves cancels and anything small is
+diluted. In a supervised control with labels, lesion x/y/z stayed at R² 0 through
+GAP, while a flattened 8³ readout reached 0.92 / 0.89 / 0.69. Flattening gives every
+position inputs of its own, so the readout can compute any function of the map.
+
+Condition 3 is separate from the readout. Cosine InfoNCE sees only the direction of
+the content block, so 9 content units carry 8 loss-facing dimensions. Use 10 units
+for 9 latents, e.g. `--set content_channels=10 latent_dim=13`.
+
+Being able to represent the inverse does not mean training finds it: feature
+suppression still applies.
+
+- **Size.** The convs downsample before flattening, so the first linear layer has
+  64 × 4³ inputs, not 64 × 16³ (26M weights at width 100). The head has 935,584
+  parameters at the defaults (convs 524k, MLP 411k), shared by both views. Each
+  backbone has 466k.
+- **Learned downsampling.** The convs can gather a small site's evidence before the
+  resolution drops, which averaging into 4³ bins cannot.
+- **Any input size.** The adaptive average makes the MLP's width independent of the
+  input size. ADNI's 22×27×22 map reaches 5×6×5 and is averaged to 4³, so a run
+  rebuilds from its settings. The parser refuses a downsampled map smaller than the
+  grid: at the parser's default `--res 32` (8³ map), use `--dense-readout-downsample 1`.
+- **Initialization.** Both backbones match the pooled models' from the same seed,
+  because the head is built after them. The head itself is randomly initialized, so
+  each arm's untrained floor is its own: compare learned deltas against each arm's
+  floor, not the dense run's numbers against the GAP run's floor.
+- **Global only.** There are no patch or per-position outputs. `forward` with a
+  `patch_grid` or `pool_only=False`, `global_and_patch_features` and `patch_readout`
+  raise. The parser refuses `--patch-loss-weight`, `--eval-pooling patch`,
+  `--spatial-recovery-eval`, a non-unit `--causal-eval-grid`, any `--global-pool`,
+  `--separate-spatial-readout` and ResNet. Per-cell diagnostics such as
+  `eval.encoder.regional_probe` do not apply.
+- **Not translation-invariant.** That is fine on the registered synthetic data. On
+  ADNI, residual misregistration shared by T1 and FLAIR becomes readable shared content.
+- **Pairings.** `conv_mlp_temporal009` / `conv_mlp_temporal009_dense` and
+  `conv_mlp_lesionpos` / `conv_mlp_lesionpos_dense` differ only in `conv_readout`.
+- **Eval.** `eval.protocol.score_checkpoint` restores the head from saved settings.
+  The generalization audit's backbone stage and the normalization audit's
+  `actual_pool` read the flattened grid, the MLP's actual input. The lesion branch,
+  learned content masks and the loss projector work unchanged.
 
 ## Lesion branch
 

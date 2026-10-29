@@ -2,6 +2,8 @@
 
 ``conv`` (default) keeps the original VQ-VAE backbone and affine readout:
     3D strided conv + GroupNorm + ResidualStack -> 1x1 conv -> GAP.
+``conv_readout="dense"`` replaces the pooled readout with strided convs to a small grid,
+flattened into an MLP (``models.dense_readout``), so no position is averaged away.
 ``resnet18`` adapts the upstream image encoder architecture to volumes:
     3D ResNet-18 -> GAP -> Linear(512, 100) -> LeakyReLU -> Linear(100, latent_dim).
 The hidden readout width is configurable. This is a 3D adaptation, not a change
@@ -31,6 +33,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from models.attention_pool import AttentionPool3d
+from models.dense_readout import DenseReadout3d
 from models.keypoint_pool import KeypointPool3d
 from models.moment_pool import MomentPool3d
 from models.normative_residual import NormativeResidual
@@ -57,6 +60,8 @@ class MultiviewConvEncoder(HelperModule):
         encoder_architecture: str = "conv",
         encoder_head_hidden: int = 100,
         conv_readout: str = "linear",
+        dense_readout_downsample: int = 2,
+        dense_readout_grid: int = 4,
         resnet_norm: str = "batch",
         resnet_output_stride: int = 32,
         separate_spatial_readout: bool = False,
@@ -107,8 +112,8 @@ class MultiviewConvEncoder(HelperModule):
         self.encoder_head_hidden = encoder_head_hidden
         if encoder_architecture not in ("conv", "resnet18"):
             raise ValueError(f"Unknown encoder_architecture: {encoder_architecture!r}")
-        if conv_readout not in ("linear", "mlp"):
-            raise ValueError("conv_readout must be linear or mlp")
+        if conv_readout not in ("linear", "mlp", "dense"):
+            raise ValueError("conv_readout must be linear, mlp or dense")
         if encoder_architecture == "resnet18" and conv_readout != "linear":
             raise ValueError("conv_readout only applies to the conv architecture")
         if encoder_architecture == "conv" and (resnet_norm != "batch" or resnet_output_stride != 32):
@@ -128,10 +133,12 @@ class MultiviewConvEncoder(HelperModule):
             raise ValueError("norm_type applies to the conv architecture; use resnet_norm for resnet18")
         self.backbone_stride = resnet_output_stride if encoder_architecture == "resnet18" else downscale_factor
         self.normalization = resnet_norm if encoder_architecture == "resnet18" else norm_type
-        if self.readout_type == "mlp" and encoder_head_hidden <= 0:
+        if self.readout_type in ("mlp", "dense") and encoder_head_hidden <= 0:
             raise ValueError("encoder_head_hidden must be positive")
         if global_pool not in ("gap", "attention", "moments"):
             raise ValueError(f"Unknown global_pool: {global_pool!r}")
+        if self.readout_type == "dense" and global_pool != "gap":
+            raise ValueError("The dense readout reads the whole map; it takes no global_pool")
         self.global_pool = global_pool
         if lesion_keypoints < 0:
             raise ValueError(f"lesion_keypoints must be nonnegative, got {lesion_keypoints}")
@@ -182,6 +189,16 @@ class MultiviewConvEncoder(HelperModule):
         if self.readout_type == "linear":
             # Preserve the original module names, initialization order and weights.
             self.to_encoding = nn.Conv3d(hidden_channels, latent_dim, 1)
+        elif self.readout_type == "dense":
+            # Built after both backbones, so they match the pooled models' from the same seed.
+            self.to_encoding = DenseReadout3d(
+                hidden_channels,
+                encoder_head_hidden,
+                latent_dim,
+                downsample=dense_readout_downsample,
+                grid=dense_readout_grid,
+                norm_type=norm_type,
+            )
         else:
             self.avgpool = nn.AdaptiveAvgPool3d(1)
             self.to_encoding = nn.Sequential(
@@ -383,6 +400,8 @@ class MultiviewConvEncoder(HelperModule):
     @property
     def patch_readout(self):
         """The active spatial head; the legacy shared head when separation is off."""
+        if self.readout_type == "dense":
+            raise ValueError("The dense readout reads the whole map; it has no spatial head")
         return self.to_encoding if self.spatial_readout is None else self.spatial_readout
 
     def _global_code(
@@ -393,7 +412,9 @@ class MultiviewConvEncoder(HelperModule):
         ``x`` is the input batch that produced ``h`` (view-major when ``n_views`` is 2); only the
         lesion branch reads it, for its brain frame and its residual input.
         """
-        if self.attention_pool is None:
+        if self.readout_type == "dense":
+            code = self.to_encoding(h)
+        elif self.attention_pool is None:
             # The original GAP expressions, so existing checkpoints replay bit-for-bit. The moment
             # term is added to the first readout layer's output, where zero weights leave it exact.
             if self.readout_type == "mlp":
@@ -594,6 +615,8 @@ class MultiviewConvEncoder(HelperModule):
         the legacy shared head has latent_dim outputs.
         Do not average patch MLP outputs to approximate the global readout.
         """
+        if self.readout_type == "dense":
+            raise ValueError("The dense readout reads the whole map; it has no patch outputs")
         h = self._encode(x, n_views, view_idx=None)
         grid = tuple(patch_grid)
         if len(grid) != 3 or any(g < 1 or g > size for g, size in zip(grid, h.shape[2:])):
@@ -636,6 +659,8 @@ class MultiviewConvEncoder(HelperModule):
         the spatial head and averages; patch_grid=None with pool_only=True always
         returns the global encoding.
         """
+        if self.readout_type == "dense" and not (pool_only and patch_grid is None):
+            raise ValueError("The dense readout reads the whole map; it has no patch or per-position outputs")
         h = self._encode(x, n_views, view_idx)
         if self.readout_type == "mlp":
             if pool_only and patch_grid is None:

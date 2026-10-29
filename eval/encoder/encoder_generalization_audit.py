@@ -92,6 +92,8 @@ def capture_batch(model, x):
         modules = {"encoder": model.encoder, "encoder_v1": model.encoder_v1}
         if model.readout_type == "mlp":
             modules["hidden"] = model.to_encoding[1]  # Actual post-LeakyReLU readout.
+        elif model.readout_type == "dense":
+            modules["hidden"] = model.to_encoding.mlp[1]
         # With attention pooling the readout's input is the pool's output, not GAP.
         modules["pooled"] = getattr(model, "attention_pool", None)
         for name, module in modules.items():
@@ -104,7 +106,8 @@ def capture_batch(model, x):
         backbone = captured["encoder"]
         if model.encoder_v1 is not None:
             backbone = torch.cat((backbone, captured["encoder_v1"]), dim=0)
-        pooled = backbone.mean((2, 3, 4))
+        # The dense readout's MLP reads its flattened grid, not GAP.
+        pooled = model.to_encoding.features(backbone) if model.readout_type == "dense" else backbone.mean((2, 3, 4))
         if getattr(model, "moment_pool", None) is not None:
             # With moment pooling the readout reads GAP and each channel's first moments.
             pooled = torch.cat((pooled, model.moment_pool.moments(backbone)), dim=1)

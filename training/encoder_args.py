@@ -47,7 +47,29 @@ def build_parser(description=None):
         default=100,
         help="MLP readout hidden width (ResNet, or conv with --conv-readout mlp)",
     )
-    p.add_argument("--conv-readout", choices=("linear", "mlp"), default="linear")
+    p.add_argument(
+        "--conv-readout",
+        choices=("linear", "mlp", "dense"),
+        default="linear",
+        help="How the conv global code reads the backbone map. linear: 1x1 conv then GAP. mlp: GAP then "
+        "Linear -> LeakyReLU -> Linear (--encoder-head-hidden). dense: no pooling; --dense-readout-downsample "
+        "stride-2 convs to a small grid, flattened into the same MLP (models/dense_readout.py), so no position is "
+        "averaged away. Dense is global-only: no patch loss, patch evaluation or global pool option",
+    )
+    p.add_argument(
+        "--dense-readout-downsample",
+        type=int,
+        default=2,
+        help="With --conv-readout dense: stride-2 conv steps (4^3 kernel, norm, ReLU) before flattening; "
+        "2 takes the 16^3 map at --res 64 to 4^3",
+    )
+    p.add_argument(
+        "--dense-readout-grid",
+        type=int,
+        default=4,
+        help="With --conv-readout dense: the grid flattened into the MLP, channels x grid^3 inputs; a larger "
+        "downsampled map (non-cubic or bigger inputs) is averaged to it",
+    )
     p.add_argument(
         "--separate-spatial-readout",
         action=argparse.BooleanOptionalAction,
@@ -1033,8 +1055,28 @@ def parse_args(argv=None, description=None):
     else:
         if args.resnet_norm != "batch" or args.resnet_output_stride != 32:
             p.error("--resnet-norm and --resnet-output-stride only apply to --encoder-architecture resnet18")
-        if args.conv_readout == "mlp" and args.encoder_head_hidden <= 0:
+        if args.conv_readout in ("mlp", "dense") and args.encoder_head_hidden <= 0:
             p.error("--encoder-head-hidden must be positive")
+    if args.conv_readout == "dense":
+        if args.dense_readout_downsample < 0 or args.dense_readout_grid < 1:
+            p.error("--dense-readout-downsample must be nonnegative and --dense-readout-grid positive")
+        reduced = [size >> args.dense_readout_downsample for size in backbone_map]
+        if any(size < args.dense_readout_grid for size in reduced):
+            p.error(
+                f"--dense-readout-downsample {args.dense_readout_downsample} takes the {map_name} backbone map to "
+                f"{'x'.join(map(str, reduced))}, smaller than --dense-readout-grid {args.dense_readout_grid}"
+            )
+        if args.global_pool != "gap":
+            p.error("--conv-readout dense reads the whole map; it takes no --global-pool")
+        if args.patch_loss_weight > 0 or args.eval_pooling != "gap" or args.spatial_recovery_eval:
+            p.error(
+                "--conv-readout dense has no patch outputs: it excludes --patch-loss-weight, --eval-pooling patch "
+                "and --spatial-recovery-eval"
+            )
+        if tuple(args.causal_eval_grid) != (1, 1, 1):
+            p.error("--conv-readout dense has no patch outputs; --causal-eval-grid must be 1 1 1")
+    elif (args.dense_readout_downsample, args.dense_readout_grid) != (2, 4):
+        p.error("--dense-readout-downsample and --dense-readout-grid only apply to --conv-readout dense")
     if args.global_pool == "attention":
         channels = 512 if args.encoder_architecture == "resnet18" else args.hidden_channels
         if args.attention_pool_heads < 1 or channels % args.attention_pool_heads:
