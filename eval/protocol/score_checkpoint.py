@@ -171,6 +171,14 @@ def build_model(cfg, device, state_dict=None):
         lesion_branch_frozen=cfg.get("lesion_branch_frozen", False),
         mask_mode=cfg.get("mask_mode", "fixed"),
         mask_init_gap=cfg.get("mask_init_gap", 4.0),
+        content_bound=cfg.get("content_bound", "none"),
+        activation=cfg.get("activation", "relu"),
+        vector_prediction_grid=(
+            tuple(cfg.get("vector_prediction_grid", [16] * 3)) if cfg.get("vector_prediction_weight", 0.0) > 0 else None
+        ),
+        vector_prediction_hidden=cfg.get("vector_prediction_hidden", 128),
+        vector_prediction_target=cfg.get("vector_prediction_target", "spatial"),
+        vector_prediction_components=cfg.get("vector_prediction_components", 8),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)

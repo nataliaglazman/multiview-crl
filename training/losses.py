@@ -1676,6 +1676,81 @@ def pooled_patch_vicreg_terms(hz, eps=1e-4):
     return dict(sim=F.mse_loss(x, y), var=var, cov=cov, std=std)
 
 
+# Curvature of the mean cos(2 pi delta) at delta = 0: 1 - 2 pi^2 delta^2. It sets the scale of both kernels and of
+# alignment, so one tau is one bandwidth whichever kernel runs.
+_TORUS_CURVATURE = 2 * np.pi**2
+
+
+def _row_distance(x, y, kernel):
+    """(M, M) distance between every row of ``x`` and ``y``, both (M, C) with values in (0, 1); 0 for equal rows.
+
+    ``"torus"`` is 1 minus the mean over channels of cos(2 pi (x_c - y_c)), a dot product of each row's point on the
+    torus, so it costs one matrix product. ``"box"`` is the same curvature times the mean squared difference.
+    """
+    if kernel == "torus":
+        angle_x, angle_y = 2 * np.pi * x, 2 * np.pi * y
+        return 1 - (angle_x.cos() @ angle_y.cos().T + angle_x.sin() @ angle_y.sin().T) / x.shape[1]
+    if kernel == "box":
+        squared = x.square().sum(1, keepdim=True) + y.square().sum(1) - 2 * x @ y.T
+        return _TORUS_CURVATURE * squared.clamp_min(0) / x.shape[1]
+    raise ValueError(f"Unknown pointwise kernel: {kernel!r}")
+
+
+def pointwise_alignment_entropy(align_pair, entropy_pair, exclude, tau, kernel="torus", cross_view_negs_only=True):
+    """Alignment and a joint entropy estimate over pooled (subject, position) rows of a bounded code.
+
+    ``split_infonce_loss``'s two terms on another population: every row is one subject at one position, so a
+    statistic pools over both, the sample a site-shared encoder should be invertible on (theory-framing.md, 9.4)::
+
+        align   = mean_i curvature * mean_c (a_ic - b_ic)^2 / tau
+        entropy = mean_i log sum_j exp(-d(a_i, b_j) / tau), the rows ``exclude`` marks left out
+
+    Alignment is the plain distance whichever kernel runs, so 0.01 in one view and 0.99 in the other is not aligned.
+    As there, the positive stays out of the entropy sum, since the two terms can read different inputs.
+
+    The entropy kernel is what keeps the code from saturating. Repulsion in a box piles mass on its faces: at
+    the same bandwidth the ``"box"`` kernel sends a toy encoder's code to the corners unless tau is small, and at
+    C = 10 recovery of the latents falls with it. ``"torus"`` identifies opposite faces, for this term alone.
+    It is a product of von Mises kernels, whose Fourier coefficients are positive, so uniform on the torus is a
+    strict local minimum at any tau, and the sigmoid's (0, 1) covers the torus but for one point: its optimum is the
+    uniform box the description asks for. Numbers in training/ENCODER_POINTWISE.md.
+
+    Args:
+        align_pair: The two views' rows for alignment, (M, C) each, paired row by row.
+        entropy_pair: The two views' rows for entropy, (M, C) each.
+        exclude: (M, M) bool, True for pairs that are not negatives; its diagonal must be True.
+        tau: Bandwidth.
+        kernel: ``"torus"`` or ``"box"``.
+        cross_view_negs_only: When True the entropy sum runs over cross-view pairs only; otherwise same-view pairs
+            join it, each row left out of its own sum.
+
+    Returns:
+        ``dict(align=..., entropy=...)``. Their sum is the loss. Both read from zero distance: identical rows give
+        align 0 and entropy log(M - 1), and the entropy term falls as the rows spread out.
+    """
+    a0, a1 = align_pair
+    e0, e1 = entropy_pair
+    if not bool(exclude.diagonal().all()):
+        raise ValueError("A row is its own positive: exclude's diagonal must be True")
+    align = _TORUS_CURVATURE * (a0 - a1).square().mean() / tau
+
+    def logits(x, y):
+        return (-_row_distance(x, y, kernel) / tau).masked_fill(exclude, float("-inf"))
+
+    cross = logits(e0, e1)
+    if cross_view_negs_only:
+        rows_0, rows_1 = cross, cross.T
+    else:
+        rows_0 = torch.cat([cross, logits(e0, e0)], dim=1)
+        rows_1 = torch.cat([cross.T, logits(e1, e1)], dim=1)
+    # A row with no negative left has an empty sum, log 0; it cannot say anything about entropy.
+    usable = ~exclude.all(dim=1)
+    if not bool(usable.any()):
+        raise ValueError("No row has a negative left: draw more rows or relax the exclusion")
+    entropy = 0.5 * (torch.logsumexp(rows_0, dim=1)[usable].mean() + torch.logsumexp(rows_1, dim=1)[usable].mean())
+    return dict(align=align, entropy=entropy)
+
+
 def style_infonce_loss(hz_v0_style, hz_v1_style, tau=0.1):
     """Cross-view repulsive loss on style channels.
 

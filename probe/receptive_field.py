@@ -106,6 +106,7 @@ def classify_module(m: nn.Module) -> tuple[str, str]:
             nn.Identity,
             nn.Dropout,
             nn.Dropout3d,
+            nn.Sequential,  # A leaf here means empty, the identity: a residual stack of zero blocks.
         ),
     ):
         return "pointwise", cls

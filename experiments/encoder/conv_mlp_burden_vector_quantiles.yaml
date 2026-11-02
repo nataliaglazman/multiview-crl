@@ -1,0 +1,47 @@
+# Third arm: the first 14 content units must predict how much of the other modality is abnormal,
+# not where: quantiles of its interior residual. Compare with the matched
+# conv_mlp_burden_nativegrid.yaml control; training/ENCODER_VECTOR_PREDICTION.md.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_burden_vector_quantiles_s{seed}
+
+# Same encoder and contrastive objectives as the supplied native-grid burden run.
+conv_readout: mlp
+norm_type: group
+latent_dim: 18
+content_channels: 14
+mask_mode: fixed
+global_pool: gap
+standardize_code: true
+patch_loss_type: infonce
+patch_similarity: cosine
+patch_loss_weight: 1.0
+train_patch_grid: [16, 16, 16]
+standardize_patch_code: true
+patch_foreground_mask: true
+patch_foreground_thresh: 0.05
+separate_spatial_readout: false
+train_steps: 20000
+
+# Retain the oracle anatomy neighbourhood sampler and the complete burden prior.
+stratify_batches: oracle
+stratify_sampler: neighbourhood
+stratify_neighbours: 50
+stratify_balance: 0.0
+synthetic_identifiable_ventricle: true
+synthetic_sulcal_mode: atrophy
+synthetic_temporal_sigma: 0.18
+synthetic_lesion_target: burden
+synthetic_lesion_count: 1
+synthetic_lesion_radius: 0.1
+synthetic_lesion_intensity: styled
+synthetic_lesion_t1_value: 0.0
+
+# Initial experimental weight, not a tuned setting. No lesion labels enter this term.
+vector_prediction_weight: 1.0
+vector_prediction_target: quantile
+vector_prediction_components: 8
+vector_prediction_grid: [16, 16, 16]
+vector_prediction_hidden: 128
+vector_prediction_template_subjects: 300
+vector_prediction_deviation_strength: 1.0
+vector_prediction_weight_cap: 4.0

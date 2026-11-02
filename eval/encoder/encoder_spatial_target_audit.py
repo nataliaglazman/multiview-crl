@@ -23,10 +23,12 @@ from eval.encoder.encoder_target_protocol import (
     dataset,
     dataset_metadata,
     digest,
+    lesion_columns,
     provenance,
     sample_targets,
     save_csv,
     save_report,
+    target_names,
 )
 from eval.lesion.checkpoint_lesion_analysis import batch_features, state_digest
 from eval.lesion.lesion_probe import block_gram
@@ -114,7 +116,7 @@ def extract(model, ds, args, device, directory):
     )
 
 
-def score_banks(banks, args, arm, directory):
+def score_banks(banks, args, arm, directory, names=TARGETS):
     val, test = banks["val"], banks["test"]
     n = len(val[1])
     order = np.random.default_rng(args.seed).permutation(n)
@@ -126,7 +128,7 @@ def score_banks(banks, args, arm, directory):
         print(f"  {arm} {view} grid={grid} {stage}: {feature.shape[1]} dimensions", flush=True)
         x = np.concatenate((feature, test[0][view, grid, stage]))
         gram, width = block_gram(x, np.arange(x.shape[1]), splits[0])
-        scores, predicted = fit_readouts(gram, width, targets, splits, args.seed, target_names=TARGETS)
+        scores, predicted = fit_readouts(gram, width, targets, splits, args.seed, target_names=names)
         rows.extend(
             {
                 "arm": arm,
@@ -168,7 +170,7 @@ def focused_summary(rows):
         summary.append(
             {
                 **dict(zip(fields, key)),
-                "lesion_latent_mean_r2": float(np.mean([values[f"lesion_{axis}"] for axis in "xyz"])),
+                "lesion_latent_mean_r2": float(np.mean([values[name] for name in lesion_columns(values)])),
                 "centroid_mean_r2": float(np.mean([values[f"centroid_{axis}"] for axis in "xyz"])),
                 "sulcal_latent_r2": values["sulcal_widening"],
                 "sulcal_amplitude_r2": values["sulcal_amplitude"],
@@ -240,7 +242,7 @@ def main(argv=None):
                         raise ValueError("Initial/trained extraction used different images")
             report["cohorts"][arm] = {split: bank[2] for split, bank in banks.items()}
             with threadpool_limits(limits=1):
-                rows, report["probe_split"] = score_banks(banks, args, arm, args.out_dir)
+                rows, report["probe_split"] = score_banks(banks, args, arm, args.out_dir, target_names(cfg))
             report["probes"].extend(rows)
             save_report(args.out_dir, report)
             del banks, model

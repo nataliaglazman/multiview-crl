@@ -1,6 +1,6 @@
 """Encoder-only multi-view contrastive learning on the 3D synthetic data or real T1/FLAIR MRI.
 
-3D encoders trained with InfoNCE or Barlow Twins, without reconstruction.
+3D encoders trained with InfoNCE or Barlow Twins; optional vector-only local cross-view prediction.
 The default ``conv`` architecture uses the VQ-VAE convolutional backbone with
 an affine readout. ``--encoder-architecture resnet18`` uses a 3D adaptation of
 the upstream image encoder: ResNet-18 -> GAP -> Linear -> LeakyReLU -> Linear.
@@ -12,6 +12,9 @@ through zero-initialized columns, so it starts as exact GAP too. ``--conv-readou
 pool: strided convs to a small grid, flattened into the MLP (``models.dense_readout``).
 ``--patch-loss-weight`` adds a loss on a grid of registered positions: per-position InfoNCE, or with
 ``--patch-loss-type barlow_twins|vicreg`` a negative-free loss whose statistics are pooled over positions.
+``--pointwise-loss-weight`` adds alignment + joint entropy of a bounded content map, every statistic pooled over
+(subject, position) rows; with ``--global-loss-weight 0 --interior-only`` it is the objective of the fully local
+encoder (training/ENCODER_POINTWISE.md).
 ``--mask-mode learned`` replaces the fixed content block (the first ``--content-channels``
 units) with a top-k Gumbel-softmax content selector over learnable per-unit logits.
 ``--stratify-batches oracle|code`` draws every training batch from one k-means cluster of the
@@ -45,7 +48,7 @@ import time
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 import data.cluster_batches as cluster_batches
 import eval.metrics.cross_reconstruction as cross_reconstruction
@@ -55,7 +58,9 @@ import training.losses as losses
 from data.datasets import MyCustomDataset, SyntheticBrainDataset
 from data.splits import split_summary, subject_level_split
 from eval.adni.encoder_alignment import print_alignment_report
+from models.conv_footprint import receptive_field_voxels
 from models.multiview_encoder import MultiviewConvEncoder
+from models.vector_prediction import vector_prediction_loss
 from utils.encoder_runtime import configure_encoder_runtime, select_encoder_device
 
 
@@ -552,14 +557,28 @@ def foreground_positions(foreground, grid, threshold):
 LOSS_NAMES = {"infonce": "InfoNCE", "barlow_twins": "Barlow Twins", "vicreg": "VICReg"}
 # The unweighted parts each patch objective logs as patch_<part>; InfoNCE has none.
 PATCH_LOSS_PARTS = {"infonce": (), "barlow_twins": ("on_diag", "off_diag"), "vicreg": ("sim", "var", "cov", "std")}
+# What the pointwise loss logs as pointwise_<part> beside its weighted total; only align and entropy are loss terms.
+POINTWISE_PARTS = ("align", "entropy", "eff_rank", "residual_rank", "view_r", "saturated", "subject_share")
+VECTOR_PREDICTION_PARTS = (
+    "mean",
+    "t1_to_flair",
+    "flair_to_t1",
+    "unweighted",
+    "unweighted_t1_to_flair",
+    "unweighted_flair_to_t1",
+    "weight_min",
+    "weight_max",
+    "foreground_fraction",
+)
 
 
-def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground=None, mask=None):
+def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground=None, mask=None, interior=None):
     """Registered positions are paired; under InfoNCE, negatives are subjects at the SAME position.
 
     Only image-derived features and the input's own brain mask enter this loss; there
     is no lesion sampling or access to generator factor labels. All grid positions
-    participate unless --patch-foreground-mask drops the always-background ones.
+    participate unless --patch-foreground-mask drops the always-background ones or
+    ``interior`` (--interior-only, (P,) bool on the CPU) those that read padding.
     A learned ``mask`` multiplies the shared head's units, as in ``contrastive_loss``;
     the separate spatial head has only content units, so it is read whole.
 
@@ -567,11 +586,16 @@ def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foregrou
     statistics are pooled over positions (``losses.pooled_patch_vicreg_terms`` says why); its
     unweighted terms ride along as ``._patch_terms`` for logging.
     """
+    keep = interior
     if getattr(args, "patch_foreground_mask", False):
         if foreground is None:
             raise ValueError("--patch-foreground-mask needs the batch's brain masks")
         # Hand-built option namespaces may omit the parser's default.
         keep = foreground_positions(foreground, args.train_patch_grid, getattr(args, "patch_foreground_thresh", 0.05))
+        if interior is not None:
+            inside = keep.cpu() & interior
+            keep = inside if bool(inside.any()) else interior
+    if keep is not None:
         patches = patches[..., keep.to(patches.device)]
     if mask is not None and model.spatial_readout is None:
         a, b = (patches * mask.unsqueeze(-1)).chunk(2, dim=0)
@@ -638,6 +662,104 @@ def standardize_patch_code(hz, double=False):
     return centred / (spread.sqrt() + 1e-6)
 
 
+def pointwise_rows(args, subjects, positions, foreground=None, interior=None):
+    """(subject, position) indices of the rows this step's pointwise loss reads, as two CPU tensors.
+
+    Up to --pointwise-rows rows, uniformly without replacement from every subject at every position, so one step
+    mixes many of both. ``interior`` (--interior-only, (P,) bool) drops the positions that read padding.
+    ``foreground``, the batch's brain masks (2B, 1, D, H, W), drops a subject's cells with under
+    --patch-foreground-thresh brain in both of its views. That is per subject, unlike the patch loss's rule: a
+    background cell is one constant for every subject, and no entropy term can spread a constant. Drawn on the CPU,
+    so the rows replay on any device.
+    """
+    with torch.no_grad():
+        candidates = torch.ones(subjects, positions, dtype=torch.bool)
+        if interior is not None:
+            candidates = candidates & interior
+        if foreground is not None:
+            pooled = torch.nn.functional.adaptive_avg_pool3d(foreground.float(), tuple(args.train_patch_grid))
+            fraction = pooled.flatten(1).cpu()
+            threshold = args.patch_foreground_thresh
+            candidates = candidates & ((fraction[:subjects] >= threshold) | (fraction[subjects:] >= threshold))
+        rows = candidates.nonzero()
+        if len(rows) < 2:
+            raise ValueError(f"The pointwise loss has {len(rows)} usable (subject, position) rows; it needs two")
+        return rows[torch.randperm(len(rows))[: args.pointwise_rows]].T
+
+
+def pointwise_exclusions(subject, position, negatives):
+    """(M, M) bool on the CPU: pairs of drawn rows that are not negatives under --pointwise-negatives.
+
+    pooled leaves out only the row itself. strict also leaves out rows sharing its subject or its position.
+    """
+    exclude = torch.eye(len(subject), dtype=torch.bool)
+    if negatives == "strict":
+        exclude = exclude | (subject[:, None] == subject[None]) | (position[:, None] == position[None])
+    return exclude
+
+
+def subject_share(maps, positions):
+    """Share of a (B, C, P) code's variance over (subject, position) rows that lies between subjects at a position.
+
+    Near 0 the code fills its box with a template: what differs is where a cell is, not who the subject is, which
+    an entropy term on raw features pooled over positions cannot tell apart (paper/feature-map-formulation.md, 6).
+    """
+    code = maps[:, :, positions]
+    pooled = code.permute(1, 0, 2).flatten(1).var(dim=1).mean()
+    return float(code.var(dim=0).mean() / pooled.clamp_min(1e-12))
+
+
+def view_agreement(first, second):
+    """Mean over units of the two views' correlation across (M, C) rows: do the views agree unit by unit."""
+    first, second = first - first.mean(0), second - second.mean(0)
+    return float(((first * second).sum(0) / (first.norm(dim=0) * second.norm(dim=0)).clamp_min(1e-12)).mean())
+
+
+def pointwise_loss(patches, args, foreground=None, interior=None):
+    """Alignment + joint entropy of the content maps over pooled rows: --pointwise-loss-weight.
+
+    ``patches`` is (2B, latent, P), the map each view's encoder gives on --train-patch-grid, before any standardisation
+    or projection. A row is one subject at one position, and every statistic reads rows drawn across both, so nothing
+    is computed per position or per subject. The residual inputs subtract each view's batch mean at every position.
+    ``losses.pointwise_alignment_entropy`` has the two terms. Its parts and the code's health ride along as
+    ``._pointwise_terms`` for logging: eff_rank and residual_rank (channels the rows use, with and without the
+    template), view_r (the views' unit-by-unit agreement on the residual), saturated (share of values outside
+    [0.01, 0.99]) and subject_share. None of those enters the loss.
+    """
+    b = patches.shape[0] // 2
+    maps = patches[:b, : args.content_channels], patches[b:, : args.content_channels]
+    subject, position = pointwise_rows(args, b, maps[0].shape[2], foreground, interior)
+    row = subject.to(patches.device), position.to(patches.device)
+
+    def rows(kind):
+        views = maps if kind == "raw" else [view - view.mean(0, keepdim=True) for view in maps]
+        return [view[row[0], :, row[1]] for view in views]
+
+    terms = losses.pointwise_alignment_entropy(
+        rows(args.pointwise_align_input),
+        rows(args.pointwise_entropy_input),
+        pointwise_exclusions(subject, position, args.pointwise_negatives).to(patches.device),
+        args.pointwise_tau,
+        args.pointwise_kernel,
+        args.cross_view_negs_only,
+    )
+    loss = terms["align"] + terms["entropy"]
+    with torch.no_grad():
+        code, residual = rows("raw"), rows("residual")
+        values = torch.cat(code)
+        kept = position.unique().to(patches.device)
+        loss._pointwise_terms = {
+            "align": float(terms["align"]),
+            "entropy": float(terms["entropy"]),
+            "eff_rank": effective_rank(code[0]),
+            "residual_rank": effective_rank(residual[0]),
+            "view_r": view_agreement(*residual),
+            "saturated": float(((values < 0.01) | (values > 0.99)).float().mean()),
+            "subject_share": sum(subject_share(view, kept) for view in maps) / 2,
+        }
+    return loss
+
+
 def training_objective(model, images, args, sim_metric, criterion, masks=None):
     """Keep the old global path exact when local training is disabled.
 
@@ -648,7 +770,10 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
     A learned content mask is drawn once here, so every term of the step uses one selection.
     """
     weight = getattr(args, "patch_loss_weight", 0.0)
-    if weight > 0:
+    # Hand-built option namespaces may omit the parser's defaults.
+    pointwise_weight = getattr(args, "pointwise_loss_weight", 0.0)
+    local = weight > 0 or pointwise_weight > 0
+    if local:
         pooled, patches = model.global_and_patch_features(images, args.train_patch_grid, n_views=2)
     else:
         pooled = model(images, pool_only=True, n_views=2)[2][0]
@@ -656,19 +781,46 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
     content_mask = model.sample_content_mask(hard=getattr(args, "mask_estimator", "relaxed") == "straight_through")
     global_loss = contrastive_loss(pooled, model, args, sim_metric, criterion, content_mask)
     foreground = None
-    if weight > 0 and getattr(args, "patch_foreground_mask", False):
+    if local and getattr(args, "patch_foreground_mask", False):
         foreground = masks if masks is not None else images != 0
+    interior = None
+    if getattr(args, "interior_only", False):
+        interior = model.interior_positions(images.shape[2:], args.train_patch_grid)
     patch_loss = (
-        patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground, content_mask)
+        patch_contrastive_loss(patches, model, args, sim_metric, criterion, foreground, content_mask, interior)
         if weight > 0
         else global_loss.new_zeros(())
     )
     weighted = weight * patch_loss
-    total = global_loss + weighted if weight > 0 else global_loss
+    global_weighted = getattr(args, "global_loss_weight", 1.0) * global_loss
+    total = global_weighted + weighted if weight > 0 else global_weighted
     terms = {"global": global_loss, "patch": patch_loss, "patch_weighted": weighted}
     # Not loss terms: the unweighted parts of a negative-free patch loss, for the logs.
     for key, value in getattr(patch_loss, "_patch_terms", {}).items():
         terms[f"patch_{key}"] = global_loss.new_tensor(value)
+    if pointwise_weight > 0:
+        terms["pointwise"] = pointwise_loss(patches, args, foreground, interior)
+        terms["pointwise_weighted"] = pointwise_weight * terms["pointwise"]
+        total = total + terms["pointwise_weighted"]
+        for key, value in terms["pointwise"]._pointwise_terms.items():
+            terms[f"pointwise_{key}"] = global_loss.new_tensor(value)
+    prediction_weight = getattr(args, "vector_prediction_weight", 0.0)
+    if prediction_weight > 0:
+        if model.vector_prediction is None:
+            raise ValueError("Vector prediction is enabled but the model has no vector decoder")
+        prediction, diagnostics = vector_prediction_loss(
+            model.vector_prediction,
+            pooled[:, : model.content_channels],
+            images,
+            masks if masks is not None else images != 0,
+            deviation_strength=args.vector_prediction_deviation_strength,
+            weight_cap=args.vector_prediction_weight_cap,
+        )
+        terms["vector_prediction"] = prediction
+        terms["vector_prediction_weighted"] = prediction_weight * prediction
+        total = total + terms["vector_prediction_weighted"]
+        for key, value in diagnostics.items():
+            terms[f"vector_prediction_{key}"] = value
     if getattr(args, "lesion_keypoints", 0) > 0:
         lesion_loss = lesion_contrastive_loss(pooled, model, args, sim_metric, criterion, images)
         terms["lesion"] = lesion_loss
@@ -1097,6 +1249,15 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
                 for name, value in values.items():
                     writer.add_scalar(f"lesion_branch/{view}/r2_{name}", value, step)
 
+    prediction = vector_prediction_report(model, val_dataset, args, device)
+    if prediction is not None:
+        print(
+            f"    vector prediction held-out MSE {prediction['mean']:.4f} "
+            f"(T1->FLAIR {prediction['t1_to_flair']:.4f}, FLAIR->T1 {prediction['flair_to_t1']:.4f})",
+            flush=True,
+        )
+        for key, value in prediction.items():
+            flat[f"vector_prediction/{key}"] = value
     if writer is not None:
         for k, v in flat.items():
             if np.isfinite(v):
@@ -1116,6 +1277,52 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
 
 
 @torch.no_grad()
+def vector_prediction_report(model, dataset, args, device):
+    """Held-out prediction errors, including a short final batch; never refit target buffers."""
+    if getattr(args, "vector_prediction_weight", 0.0) <= 0:
+        return None
+    from eval.encoder.spatial_recovery_monitor import preserve_training_state
+
+    sums, subjects = {}, 0
+    with preserve_training_state(model, device):
+        loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0,
+            generator=torch.Generator().manual_seed(args.data_seed),
+        )
+        for batch in loader:
+            images = torch.cat(batch["image"], dim=0).as_subclass(torch.Tensor).to(device)
+            masks = (
+                torch.cat(batch["mask"], dim=0).as_subclass(torch.Tensor).to(device) if "mask" in batch else images != 0
+            )
+            pooled = model(images, pool_only=True, n_views=2)[2][0]
+            _, terms = vector_prediction_loss(
+                model.vector_prediction,
+                pooled[:, : model.content_channels],
+                images,
+                masks,
+                deviation_strength=args.vector_prediction_deviation_strength,
+                weight_cap=args.vector_prediction_weight_cap,
+            )
+            count = images.shape[0] // 2
+            for key in (
+                "mean",
+                "t1_to_flair",
+                "flair_to_t1",
+                "unweighted",
+                "unweighted_t1_to_flair",
+                "unweighted_flair_to_t1",
+            ):
+                sums[key] = sums.get(key, 0.0) + float(terms[key]) * count
+            subjects += count
+    if not subjects:
+        raise ValueError("Vector prediction validation needs subjects")
+    return {key: value / subjects for key, value in sums.items()}
+
+
+@torch.no_grad()
 def held_out_objective(model, batches, device, args):
     """Average the held-out training objective over full batches only.
 
@@ -1128,7 +1335,10 @@ def held_out_objective(model, batches, device, args):
         x = torch.cat(data["image"], dim=0).as_subclass(torch.Tensor).to(device)
         b = x.shape[0] // 2
         if b == args.batch_size:
-            pooled, loss, terms = training_objective(model, x, args, sim_metric, criterion)
+            masks = None
+            if getattr(args, "vector_prediction_weight", 0.0) > 0 and "mask" in data:
+                masks = torch.cat(data["mask"], dim=0).as_subclass(torch.Tensor).to(device)
+            pooled, loss, terms = training_objective(model, x, args, sim_metric, criterion, masks)
             for key, value in {"loss": loss, **terms}.items():
                 sums[key] = sums.get(key, 0.0) + float(value)
             full += 1
@@ -1255,7 +1465,64 @@ def build_encoder(args):
         lesion_branch_frozen=args.lesion_branch_frozen,
         mask_mode=args.mask_mode,
         mask_init_gap=args.mask_init_gap,
+        content_bound=args.content_bound,
+        activation=args.activation,
+        vector_prediction_grid=(
+            tuple(args.vector_prediction_grid) if getattr(args, "vector_prediction_weight", 0.0) > 0 else None
+        ),
+        vector_prediction_hidden=getattr(args, "vector_prediction_hidden", 128),
+        vector_prediction_target=getattr(args, "vector_prediction_target", "spatial"),
+        vector_prediction_components=getattr(args, "vector_prediction_components", 8),
     )
+
+
+def fit_vector_prediction_template(model, train_dataset, args, device):
+    """Fit fixed image targets on training subjects without consuming training RNG streams."""
+    predictor = model.vector_prediction
+    if predictor is None:
+        return None
+    from eval.encoder.spatial_recovery_monitor import preserve_training_state
+
+    restored = bool(predictor.template_fitted)
+    count = min(args.vector_prediction_template_subjects, len(train_dataset))
+    if count < 1:
+        raise ValueError("Vector prediction needs at least one training subject to fit its template")
+    if not restored:
+        with preserve_training_state(model, device):
+            random.seed(args.data_seed)
+            np.random.seed(args.data_seed)
+            torch.manual_seed(args.data_seed)
+            loader = DataLoader(
+                Subset(train_dataset, range(count)),
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=0,
+                generator=torch.Generator().manual_seed(args.data_seed),
+            )
+            predictor.reset_template()
+            for batch in loader:
+                images = torch.cat(batch["image"], dim=0).as_subclass(torch.Tensor).to(device)
+                masks = (
+                    torch.cat(batch["mask"], dim=0).as_subclass(torch.Tensor).to(device)
+                    if "mask" in batch
+                    else images != 0
+                )
+                predictor.accumulate_template(images, masks)
+            predictor.finalize_template()
+    template_hash = hashlib.sha256(predictor.template.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+    quantile = predictor.target == "quantile"
+    return {
+        "target": predictor.target,
+        "components": predictor.components if quantile else None,
+        "interior_cells": predictor.target_interior.sum(1).tolist() if quantile else None,
+        "source": "checkpoint" if restored else "training_subjects",
+        "dataset_indices": None if restored else list(range(count)),
+        "subjects_per_view": predictor.template_subject_count.detach().cpu().tolist(),
+        "grid": list(predictor.grid),
+        "foreground_occupancy_threshold": 0.5,
+        "template_sha256": template_hash,
+        "template_position_coverage": (predictor.template_counts > 0).float().flatten(1).mean(1).cpu().tolist(),
+    }
 
 
 def read_init_from(args):
@@ -1369,6 +1636,16 @@ def main():
         print(
             f"init: warm start from {init_from['checkpoint']} (sha256 {init_from['sha256']}{step_note}); fresh "
             "AdamW and step counter. model_init.pt and the step-0 evaluation are this model, not an untrained floor",
+            flush=True,
+        )
+    prediction_template = fit_vector_prediction_template(model, train_dataset, args, device)
+    if prediction_template is not None:
+        with open(os.path.join(save_dir, "vector_prediction_template.json"), "w") as fp:
+            json.dump(prediction_template, fp, indent=2)
+        print(
+            f"vector prediction template: {prediction_template['subjects_per_view']} subjects per view, "
+            f"source {prediction_template['source']}, grid {args.vector_prediction_grid}; "
+            "fixed during optimization; no labels or validation images",
             flush=True,
         )
     pool_name = {"gap": "GAP", "attention": "attention pool", "moments": "GAP + moments"}[model.global_pool]
@@ -1509,6 +1786,50 @@ def main():
             f"both losses update the backbones; {positions}; no target labels",
             flush=True,
         )
+    if args.pointwise_loss_weight > 0:
+        negatives = "all but the row itself" if args.pointwise_negatives == "pooled" else "other subject and position"
+        foreground = (
+            f", cells with >= {args.patch_foreground_thresh:g} brain in that subject"
+            if args.patch_foreground_mask
+            else ""
+        )
+        print(
+            f"objective: {args.global_loss_weight:g} * global {LOSS_NAMES[args.contrastive_loss_type]} + "
+            f"{args.pointwise_loss_weight:g} * pointwise alignment ({args.pointwise_align_input}) + entropy "
+            f"({args.pointwise_entropy_input}, {args.pointwise_kernel} kernel, tau {args.pointwise_tau:g}); "
+            f"{args.pointwise_rows} (subject, position) rows per step on grid {args.train_patch_grid}{foreground}; "
+            f"negatives: {negatives}",
+            flush=True,
+        )
+    elif args.global_loss_weight != 1:
+        print(f"objective: the global loss is weighted {args.global_loss_weight:g}", flush=True)
+    if args.vector_prediction_weight > 0:
+        target = (
+            f"{args.vector_prediction_grid}, separate target-modality decoders; foreground MSE, deviation strength "
+            f"{args.vector_prediction_deviation_strength:g}, cap {args.vector_prediction_weight_cap:g}"
+            if args.vector_prediction_target == "spatial"
+            else f"quantiles of the other view's interior residual, minus {args.vector_prediction_components} "
+            "population directions, separate target-modality decoders; standardized MSE"
+        )
+        print(
+            f"objective: + {args.vector_prediction_weight:g} * vector-only cross-view residual prediction; "
+            f"{args.content_channels} exported content units -> {args.vector_prediction_hidden} -> {target}; "
+            "no spatial bypass, style units or lesion labels",
+            flush=True,
+        )
+    if args.encoder_architecture == "conv":
+        print(
+            f"receptive field: {receptive_field_voxels(args.downscale_factor, args.nb_res_layers)} voxels per axis at "
+            f"map stride {model.backbone_stride}, through the convolutions{' and residual blocks' if args.nb_res_layers else ''}; "
+            f"{args.norm_type} norm, {args.activation}, content bound {args.content_bound}",
+            flush=True,
+        )
+    if args.interior_only:
+        volume = tuple(args.spatial_size) if real else (args.res,) * 3
+        kept = int(model.interior_positions(volume, args.train_patch_grid).sum())
+        print(f"interior only: {kept}/{np.prod(args.train_patch_grid)} positions read no padding", flush=True)
+        if args.norm_type == "group":
+            print("  NOTE: GroupNorm statistics still pool over the whole volume, padding included", flush=True)
 
     if model.mask_logits is None:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -1565,7 +1886,25 @@ def main():
             "mps_fallback": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") if device == "mps" else None,
             "patch_loss_weight": args.patch_loss_weight,
             "patch_loss_type": (args.patch_loss_type if args.patch_loss_weight > 0 else None),
-            "train_patch_grid": (args.train_patch_grid if args.patch_loss_weight > 0 else None),
+            "train_patch_grid": (
+                args.train_patch_grid if args.patch_loss_weight > 0 or args.pointwise_loss_weight > 0 else None
+            ),
+            "global_loss_weight": args.global_loss_weight,
+            "pointwise_loss_weight": args.pointwise_loss_weight,
+            "vector_prediction_weight": args.vector_prediction_weight,
+            "vector_prediction_template": prediction_template,
+            "vector_prediction_parameter_count": (
+                sum(p.numel() for p in model.vector_prediction.parameters())
+                if model.vector_prediction is not None
+                else 0
+            ),
+            "activation": model.activation,
+            "content_bound": model.content_bound,
+            "receptive_field_voxels": (
+                receptive_field_voxels(args.downscale_factor, args.nb_res_layers)
+                if args.encoder_architecture == "conv"
+                else None
+            ),
             "last_loss_terms": last_loss_terms,
             "init_from": init_from,
         }
@@ -1623,6 +1962,16 @@ def main():
 
     step = 0
     patch_parts = PATCH_LOSS_PARTS[args.patch_loss_type] if args.patch_loss_weight > 0 else ()
+    pointwise_terms = ()
+    if args.pointwise_loss_weight > 0:
+        pointwise_terms = ("pointwise", "pointwise_weighted", *(f"pointwise_{part}" for part in POINTWISE_PARTS))
+    prediction_terms = ()
+    if args.vector_prediction_weight > 0:
+        prediction_terms = (
+            "vector_prediction",
+            "vector_prediction_weighted",
+            *(f"vector_prediction_{part}" for part in VECTOR_PREDICTION_PARTS),
+        )
 
     def fresh_running():
         return dict(
@@ -1637,6 +1986,8 @@ def main():
             mask_leak=0.0,
             mask_size=0.0,
             **{f"patch_{part}": 0.0 for part in patch_parts},
+            **{term: 0.0 for term in pointwise_terms},
+            **{term: 0.0 for term in prediction_terms},
         )
 
     running = fresh_running()
@@ -1654,10 +2005,10 @@ def main():
             x = images.to(device)  # (2B, 1, res, res, res)
             masks = (
                 torch.cat(batch["mask"], dim=0).as_subclass(torch.Tensor).to(device)
-                if args.patch_foreground_mask
+                if args.patch_foreground_mask or args.vector_prediction_weight > 0
                 else None
             )
-            if masks is not None and step == 0:
+            if args.patch_foreground_mask and masks is not None and step == 0:
                 kept = int(foreground_positions(masks, args.train_patch_grid, args.patch_foreground_thresh).sum())
                 print(f"  patch foreground mask: first batch keeps {kept}/{np.prod(args.train_patch_grid)} positions")
 
@@ -1677,6 +2028,10 @@ def main():
             running["patch_weighted"] += last_loss_terms["patch_weighted"]
             for part in patch_parts:
                 running[f"patch_{part}"] += last_loss_terms[f"patch_{part}"]
+            for term in pointwise_terms:
+                running[term] += last_loss_terms[term]
+            for term in prediction_terms:
+                running[term] += last_loss_terms[term]
             running["lesion"] += last_loss_terms.get("lesion", 0.0)
             running["decorrelation"] += last_loss_terms.get("lesion_decorrelation", 0.0)
             running["mask_leak"] += last_loss_terms.get("mask_leak", 0.0)
@@ -1689,7 +2044,7 @@ def main():
                 n = max(running["n"], 1)
                 mask_info = mask_state(model)
                 print(
-                    f"step {step:6d} | contrastive {running['loss']/n:.4f} "
+                    f"step {step:6d} | {'total' if prediction_terms else 'contrastive'} {running['loss']/n:.4f} "
                     f"| content eff_rank {running['rank']/n:.2f}/{len(model.content_units())}"
                     + (
                         f" | global {running['global_loss']/n:.4f} | patch {running['patch']/n:.4f} "
@@ -1702,7 +2057,25 @@ def main():
                         if args.patch_loss_weight > 0
                         else ""
                     )
+                    + (
+                        (f" | global {running['global_loss']/n:.4f}" if args.patch_loss_weight <= 0 else "")
+                        + f" | pointwise {running['pointwise']/n:.4f} (align {running['pointwise_align']/n:.4f}, entropy "
+                        f"{running['pointwise_entropy']/n:.4f}) | cell eff_rank {running['pointwise_eff_rank']/n:.2f}"
+                        f"/{args.content_channels} (residual {running['pointwise_residual_rank']/n:.2f}), view r "
+                        f"{running['pointwise_view_r']/n:.3f}, saturated {running['pointwise_saturated']/n:.3f}, subject share "
+                        f"{running['pointwise_subject_share']/n:.3f}"
+                        if pointwise_terms
+                        else ""
+                    )
                     + (f" | lesion InfoNCE {running['lesion']/n:.4f}" if args.lesion_keypoints > 0 else "")
+                    + (
+                        f" | vector prediction {running['vector_prediction']/n:.4f} "
+                        f"(T1->FLAIR {running['vector_prediction_t1_to_flair']/n:.4f}, "
+                        f"FLAIR->T1 {running['vector_prediction_flair_to_t1']/n:.4f}, "
+                        f"unweighted {running['vector_prediction_unweighted']/n:.4f})"
+                        if prediction_terms
+                        else ""
+                    )
                     + (
                         f" | lesion decorrelation {running['decorrelation']/n:.4f}"
                         if args.lesion_decorrelation_weight > 0
@@ -1724,7 +2097,9 @@ def main():
                     print(f"  content units changed: {logged_units} -> {mask_info['content_units']}", flush=True)
                     logged_units = mask_info["content_units"]
                 if writer is not None:
-                    writer.add_scalar("train/contrastive", running["loss"] / n, step)
+                    writer.add_scalar(
+                        "train/total" if prediction_terms else "train/contrastive", running["loss"] / n, step
+                    )
                     if mask_info is not None:
                         writer.add_scalar("mask/leak", running["mask_leak"] / n, step)
                         writer.add_scalar("mask/margin", mask_info["margin"], step)
@@ -1748,6 +2123,14 @@ def main():
                             *((f"patch_{kind}_{part}", f"patch_{part}") for part in patch_parts),
                         ):
                             writer.add_scalar(f"train/{tag}", running[key] / n, step)
+                    elif pointwise_terms:
+                        writer.add_scalar(
+                            f"train/global_{args.contrastive_loss_type}", running["global_loss"] / n, step
+                        )
+                    for term in pointwise_terms:
+                        writer.add_scalar(f"train/{term}", running[term] / n, step)
+                    for term in prediction_terms:
+                        writer.add_scalar(f"train/{term}", running[term] / n, step)
                 running = fresh_running()
 
             if step % args.eval_every == 0 or step == args.train_steps:

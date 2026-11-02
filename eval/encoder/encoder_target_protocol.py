@@ -9,12 +9,22 @@ import numpy as np
 import torch
 
 from eval.lesion.checkpoint_lesion_analysis import json_safe
-from eval.metrics.dci import CONTENT_FACTOR_NAMES
+from eval.metrics.dci import CONTENT_FACTOR_NAMES, content_factor_names
 from eval.protocol.score_checkpoint import make_dataset
 from eval.synthetic.synthetic_dataset import SULCAL_CLEFT_HALF_WIDTH
 
 VIEWS = ("t1", "flair")
 TARGETS = (*CONTENT_FACTOR_NAMES, "centroid_x", "centroid_y", "centroid_z", "sulcal_amplitude", "sulcal_magnitude")
+
+
+def target_names(cfg):
+    """The columns ``sample_targets`` returns for a run: z_content's factors under its lesion target, then the rest."""
+    return (*content_factor_names(9, cfg.get("synthetic_lesion_target", "position")), *TARGETS[9:])
+
+
+def lesion_columns(names):
+    """The z_content columns that carry the lesion: its burden, or its position under the legacy target."""
+    return ("lesion_burden",) if "lesion_burden" in names else ("lesion_x", "lesion_y", "lesion_z")
 
 
 def digest(path):
@@ -53,7 +63,7 @@ def provenance(cfg, args, device):
         "device": str(device),
         "torch_version": torch.__version__,
         "numpy_version": np.__version__,
-        "target_names": list(TARGETS),
+        "target_names": list(target_names(cfg)),
         "source_sha256": {str(p.relative_to(root)): digest(p) for p in sorted(paths)},
         "scope": "Synthetic encoder-only follow-up; finite-probe success/failure does not prove identifiability.",
     }
@@ -94,7 +104,14 @@ def sample_targets(inner, latents):
     z = latents["z_content"].detach().cpu()
     if z.shape != (9,):
         raise ValueError("Need exactly nine content factors")
-    _, support = r.render_structure(z, latents["z_deformation"], latents["z_fissure"], "cpu", clean=inner.clean_content)
+    _, support = r.render_structure(
+        z,
+        latents["z_deformation"],
+        latents["z_fissure"],
+        "cpu",
+        clean=inner.clean_content,
+        z_lesion=latents.get("z_lesion"),
+    )
     mass = support.sum()
     if not torch.isfinite(support).all() or mass <= 0:
         raise ValueError("Empty/non-finite lesion; refusing to silently change the evaluated cohort")

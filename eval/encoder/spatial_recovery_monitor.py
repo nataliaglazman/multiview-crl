@@ -12,7 +12,14 @@ import torch
 from threadpoolctl import threadpool_limits
 
 from eval.encoder import encoder_spatial_target_audit as audit
-from eval.encoder.encoder_target_protocol import dataset, provenance, save_csv, save_report
+from eval.encoder.encoder_target_protocol import (
+    dataset,
+    lesion_columns,
+    provenance,
+    save_csv,
+    save_report,
+    target_names,
+)
 from eval.lesion.checkpoint_lesion_analysis import state_digest
 
 
@@ -60,12 +67,15 @@ def print_recovery(rows, step, writer=None):
             if row["delta_initial"] is not None:
                 writer.add_scalar(f"spatial_recovery/{tag}/delta_initial", row["delta_initial"], step)
     print("    --- spatial recovery: held-out probe R² (not an identifiability guarantee) ---", flush=True)
+    columns = lesion_columns(next(iter(groups.values()))["observed"])
+    lesion_name = "burden" if columns == ("lesion_burden",) else "lesion_xyz"
     print(
-        "    view  grid stage       probe  lesion_xyz centroid_xyz sulcal_z signed_amp  Δamp_init amp_null", flush=True
+        f"    view  grid stage       probe  {lesion_name:>10s} centroid_xyz sulcal_z signed_amp  Δamp_init amp_null",
+        flush=True,
     )
     for (view, grid, stage, probe), conditions in groups.items():
         observed = conditions["observed"]
-        lesion = np.mean([observed[f"lesion_{axis}"]["test_r2"] for axis in "xyz"])
+        lesion = np.mean([observed[name]["test_r2"] for name in columns])
         centroid = np.mean([observed[f"centroid_{axis}"]["test_r2"] for axis in "xyz"])
         delta = observed["sulcal_amplitude"]["delta_initial"]
         delta_text = f"{delta:+.3f}" if delta is not None else "n/a"
@@ -127,7 +137,7 @@ def evaluate_spatial_recovery(model, cfg, device, save_dir, step, initial=None, 
                         if cohorts[split]["input_sha256"] != initial["cohorts"][split]["input_sha256"]:
                             raise ValueError("Spatial recovery cohorts changed since initialization")
                 with threadpool_limits(limits=1):
-                    rows, splits = audit.score_banks(banks, args, arm, directory)
+                    rows, splits = audit.score_banks(banks, args, arm, directory, target_names(cfg))
             finally:
                 # Close memmaps before TemporaryDirectory removes the large feature banks.
                 for bank in banks.values():

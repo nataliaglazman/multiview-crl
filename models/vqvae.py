@@ -62,6 +62,17 @@ def _make_norm(channels, norm_type: str = "group", split_content_channels: int |
     return get_group_norm(channels, target_groups, norm_type=norm_type)
 
 
+def make_activation(activation: str = "relu") -> nn.Module:
+    """The encoder's nonlinearity: in-place ReLU (legacy), or a smooth GELU or SiLU. None has parameters."""
+    if activation == "relu":
+        return nn.ReLU(inplace=True)
+    if activation == "gelu":
+        return nn.GELU()
+    if activation == "silu":
+        return nn.SiLU()
+    raise ValueError(f"Unknown activation: {activation!r}. Expected 'relu', 'gelu' or 'silu'.")
+
+
 class ReZero(HelperModule):
     """3D ReZero residual block with learnable scaling parameter."""
 
@@ -71,14 +82,15 @@ class ReZero(HelperModule):
         res_channels: int,
         norm_type: str = "group",
         split_content_channels: int | None = None,
+        activation: str = "relu",
     ):
         self.layers = nn.Sequential(
             nn.Conv3d(in_channels, res_channels, 3, stride=1, padding=1, bias=False),
             get_group_norm(res_channels, norm_type=norm_type),
-            nn.ReLU(inplace=True),
+            make_activation(activation),
             nn.Conv3d(res_channels, in_channels, 3, stride=1, padding=1, bias=False),
             _make_norm(in_channels, norm_type=norm_type, split_content_channels=split_content_channels),
-            nn.ReLU(inplace=True),
+            make_activation(activation),
         )
         self.alpha = nn.Parameter(torch.tensor(0.0))
 
@@ -97,6 +109,7 @@ class ResidualStack(HelperModule):
         use_checkpoint: bool = True,
         norm_type: str = "group",
         split_content_channels: int | None = None,
+        activation: str = "relu",
     ):
         self.stack = nn.Sequential(
             *[
@@ -105,6 +118,7 @@ class ResidualStack(HelperModule):
                     res_channels,
                     norm_type=norm_type,
                     split_content_channels=split_content_channels,
+                    activation=activation,
                 )
                 for _ in range(nb_layers)
             ]
@@ -132,6 +146,7 @@ class Encoder(HelperModule):
         use_checkpoint: bool = True,
         norm_type: str = "group",
         split_content_channels: int | None = None,
+        activation: str = "relu",
     ):
         assert log2(downscale_factor) % 1 == 0, "Downscale must be a power of 2"
         downscale_steps = int(log2(downscale_factor))
@@ -142,7 +157,7 @@ class Encoder(HelperModule):
                 nn.Sequential(
                     nn.Conv3d(c_channel, n_channel, 4, stride=2, padding=1),
                     get_group_norm(n_channel, norm_type=norm_type),
-                    nn.ReLU(inplace=True),
+                    make_activation(activation),
                 )
             )
             c_channel, n_channel = n_channel, hidden_channels
@@ -160,6 +175,7 @@ class Encoder(HelperModule):
                 use_checkpoint=use_checkpoint,
                 norm_type=norm_type,
                 split_content_channels=split_content_channels,
+                activation=activation,
             )
         )
 

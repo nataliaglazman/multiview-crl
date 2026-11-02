@@ -8,10 +8,11 @@ a dict of option values into the arguments that reproduce it.
 import argparse
 import math
 
-# Both modules import only the standard library at load time, so this stays torch-free.
+# These modules import only the standard library at load time, so this stays torch-free.
 from eval.causal.latent_causal_discovery import REDUCTIONS as CAUSAL_REDUCTIONS
 from eval.causal.run_causal_recovery import DEFAULT_ALPHAS as CAUSAL_ALPHAS
 from eval.causal.run_causal_recovery import INDEP_TESTS as CAUSAL_INDEP_TESTS
+from models.conv_footprint import interior_bins, receptive_field_voxels
 
 PROG = "python -m training.main_conv_synthetic"
 # The anatomy factors of the nine-factor pseudo_mri generator, which --stratify-factors chooses among.
@@ -209,6 +210,23 @@ def build_parser(description=None):
         "so they reach background cells; layer normalizes channels at each voxel independently",
     )
     p.add_argument(
+        "--activation",
+        choices=("relu", "gelu", "silu"),
+        default="relu",
+        help="Conv encoder nonlinearity. relu is the legacy ReLU in the backbone and LeakyReLU in the MLP readout; "
+        "gelu and silu use that one smooth function in both. None has parameters or draws random numbers, so "
+        "the same seed gives the same weights",
+    )
+    p.add_argument(
+        "--content-bound",
+        choices=("none", "sigmoid"),
+        default="none",
+        help="sigmoid puts the --content-channels units in (0, 1), as the readout head's last step, so the global "
+        "code, patch and per-position maps and every eval script that calls the head read the same bounded code. "
+        "Style units stay unbounded. Needs --mask-mode fixed, a linear or MLP readout, --global-pool gap and no "
+        "--separate-spatial-readout",
+    )
+    p.add_argument(
         "--resnet-output-stride",
         type=int,
         choices=(8, 16, 32),
@@ -277,6 +295,112 @@ def build_parser(description=None):
     p.add_argument("--contrastive-loss-type", type=str, default="infonce", choices=["infonce", "barlow_twins"])
     p.add_argument("--tau", type=float, default=1.0, help="InfoNCE temperature")
     p.add_argument("--bt-lambda", type=float, default=0.005, help="Barlow Twins off-diagonal weight")
+    p.add_argument(
+        "--vector-prediction-weight",
+        type=float,
+        default=0.0,
+        help="Add local cross-view image prediction decoded only from the exported global content vector. "
+        "Targets are foreground-normalized image cells minus a fixed training-only population template; "
+        "0 disables the decoder. Needs --mask-mode fixed and no lesion keypoint branch. "
+        "training/ENCODER_VECTOR_PREDICTION.md",
+    )
+    p.add_argument("--vector-prediction-grid", type=int, nargs=3, default=[16, 16, 16], metavar=("D", "H", "W"))
+    p.add_argument("--vector-prediction-hidden", type=int, default=128, help="Width of each view's vector-only decoder")
+    p.add_argument(
+        "--vector-prediction-target",
+        choices=("spatial", "quantile"),
+        default="spatial",
+        help="What the decoder predicts of the other view's residual: its --vector-prediction-grid cells, or their "
+        "quantiles over the brain's interior after removing --vector-prediction-components population directions, "
+        "which say how much is abnormal and not where",
+    )
+    p.add_argument(
+        "--vector-prediction-components",
+        type=int,
+        default=8,
+        help="Population directions a quantile target removes, fitted on the template's training subjects; no labels",
+    )
+    p.add_argument(
+        "--vector-prediction-template-subjects",
+        type=int,
+        default=300,
+        help="Fit the population template from the first min(N, training subjects), before training; no labels",
+    )
+    p.add_argument(
+        "--vector-prediction-deviation-strength",
+        type=float,
+        default=1.0,
+        help="Detached local error weight 1 + strength * abs(target deviation), capped then foreground-normalized; "
+        "0 gives ordinary foreground MSE",
+    )
+    p.add_argument(
+        "--vector-prediction-weight-cap", type=float, default=4.0, help="Cap of local weights before normalization"
+    )
+    p.add_argument(
+        "--global-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight of the global code's loss. 0 keeps it computed and logged but out of the objective, which "
+        "needs a positive patch, pointwise or vector-prediction weight to train on",
+    )
+    p.add_argument(
+        "--pointwise-loss-weight",
+        type=float,
+        default=0.0,
+        help="Add this weight times alignment + joint entropy of the content maps, every statistic pooled over "
+        "(subject, position) rows on --train-patch-grid: negatives come from other subjects and other positions, "
+        "unlike the patch losses' same-position InfoNCE. Needs --content-bound sigmoid. training/ENCODER_POINTWISE.md",
+    )
+    p.add_argument(
+        "--pointwise-rows",
+        type=int,
+        default=4096,
+        help="With --pointwise-loss-weight: (subject, position) rows drawn per step, uniformly without replacement "
+        "from every subject's kept positions. The entropy term is quadratic in this",
+    )
+    p.add_argument(
+        "--pointwise-tau",
+        type=float,
+        default=0.03,
+        help="With --pointwise-loss-weight: bandwidth of the entropy kernel, and the scale of alignment. "
+        "Not --tau, which is a cosine temperature: this one acts on a bounded code",
+    )
+    p.add_argument(
+        "--pointwise-kernel",
+        choices=("torus", "box"),
+        default="torus",
+        help="With --pointwise-loss-weight: entropy kernel on the bounded code. torus identifies opposite faces, "
+        "so uniform on the box is its optimum at any --pointwise-tau. box is a plain Gaussian: repulsion piles mass "
+        "on the faces, and a toy encoder's code saturates to the corners unless tau is small",
+    )
+    p.add_argument(
+        "--pointwise-negatives",
+        choices=("pooled", "strict"),
+        default="pooled",
+        help="With --pointwise-loss-weight: which drawn rows count as negatives. pooled: all but the row itself, so "
+        "the population is every (subject, position) pair. strict: only rows differing in both subject and position",
+    )
+    p.add_argument(
+        "--pointwise-align-input",
+        choices=("raw", "residual"),
+        default="raw",
+        help="With --pointwise-loss-weight: what alignment reads. raw: the content code. residual: the code minus "
+        "each view's batch mean at every position",
+    )
+    p.add_argument(
+        "--pointwise-entropy-input",
+        choices=("raw", "residual"),
+        default="raw",
+        help="With --pointwise-loss-weight: what the entropy term reads, as for --pointwise-align-input. On raw "
+        "codes a subject-independent template can fill the box; watch pointwise_subject_share in the log",
+    )
+    p.add_argument(
+        "--interior-only",
+        action="store_true",
+        help="Restrict the patch and pointwise losses to positions whose receptive field stays inside the volume, "
+        "so none reads padding. Each residual block costs reach: at --res 64 and stride 4, 12^3 of the 16^3 cells "
+        "are interior with --nb-res-layers 0 but only 4^3 with 2. Conv backbone only",
+    )
     p.add_argument(
         "--patch-loss-weight",
         type=float,
@@ -931,8 +1055,48 @@ def parse_args(argv=None, description=None):
         p.error("--synthetic-causal-edge-prob must be between 0 and 1")
     if not 0 <= args.patch_loss_weight < float("inf"):
         p.error("--patch-loss-weight must be finite and nonnegative")
-    if args.patch_foreground_mask and args.patch_loss_weight <= 0:
-        p.error("--patch-foreground-mask requires a positive --patch-loss-weight")
+    if not 0 <= args.vector_prediction_weight < float("inf"):
+        p.error("--vector-prediction-weight must be finite and nonnegative")
+    if args.vector_prediction_hidden < 1 or args.vector_prediction_template_subjects < 1:
+        p.error("--vector-prediction-hidden and --vector-prediction-template-subjects must be positive")
+    if any(size < 1 for size in args.vector_prediction_grid):
+        p.error("--vector-prediction-grid dimensions must be positive")
+    if args.vector_prediction_components < 1:
+        p.error("--vector-prediction-components must be positive")
+    if args.vector_prediction_target == "quantile" and (
+        args.vector_prediction_components >= args.vector_prediction_template_subjects
+    ):
+        p.error("--vector-prediction-components must be below --vector-prediction-template-subjects")
+    if not 0 <= args.vector_prediction_deviation_strength < float("inf"):
+        p.error("--vector-prediction-deviation-strength must be finite and nonnegative")
+    if not 1 <= args.vector_prediction_weight_cap < float("inf"):
+        p.error("--vector-prediction-weight-cap must be finite and at least 1")
+    if args.vector_prediction_weight > 0:
+        if args.mask_mode != "fixed" or args.lesion_keypoints > 0:
+            p.error(
+                "--vector-prediction-weight needs --mask-mode fixed and --lesion-keypoints 0: "
+                "the decoder reads exactly the exported global content units"
+            )
+        if any(size > extent for size, extent in zip(args.vector_prediction_grid, volume)):
+            p.error("--vector-prediction-grid must fit the input volume")
+        if math.prod(args.vector_prediction_grid) < 2:
+            p.error("--vector-prediction-grid needs at least two cells for foreground normalization")
+    pointwise = args.pointwise_loss_weight > 0
+    if not 0 <= args.global_loss_weight < float("inf"):
+        p.error("--global-loss-weight must be finite and nonnegative")
+    if not 0 <= args.pointwise_loss_weight < float("inf"):
+        p.error("--pointwise-loss-weight must be finite and nonnegative")
+    if (
+        args.global_loss_weight == 0
+        and args.patch_loss_weight <= 0
+        and not pointwise
+        and args.vector_prediction_weight <= 0
+    ):
+        p.error(
+            "--global-loss-weight 0 leaves no loss: it needs a positive patch, pointwise or vector-prediction weight"
+        )
+    if args.patch_foreground_mask and args.patch_loss_weight <= 0 and not pointwise:
+        p.error("--patch-foreground-mask requires a positive --patch-loss-weight or --pointwise-loss-weight")
     if not 0 < args.patch_foreground_thresh <= 1:
         p.error("--patch-foreground-thresh must be in (0, 1]")
     if args.patch_loss_type != "infonce" and args.patch_loss_weight <= 0:
@@ -1071,6 +1235,49 @@ def parse_args(argv=None, description=None):
             )
         if any(g < 1 or g > size for g, size in zip(args.train_patch_grid, backbone_map)):
             p.error(f"--train-patch-grid must fit the {map_name} backbone map")
+    if args.content_bound != "none" and (
+        args.mask_mode != "fixed"
+        or args.conv_readout == "dense"
+        or args.global_pool != "gap"
+        or args.separate_spatial_readout
+    ):
+        p.error(
+            "--content-bound needs a fixed content block read per position by one shared head: --mask-mode fixed, a "
+            "linear or MLP readout, --global-pool gap and no --separate-spatial-readout"
+        )
+    if args.activation != "relu" and (args.encoder_architecture != "conv" or args.conv_readout == "dense"):
+        p.error("--activation applies to --encoder-architecture conv with a linear or MLP readout")
+    if pointwise:
+        if args.content_bound == "none":
+            p.error(
+                "--pointwise-loss-weight needs --content-bound sigmoid: its kernels act on a bounded code, and "
+                "without one the encoder could lower the entropy term by growing its features"
+            )
+        if args.contrastive_proj_dim != 0:
+            p.error("--pointwise-loss-weight reads the content code itself: it needs --contrastive-proj-dim 0")
+        if args.pointwise_rows < 2:
+            p.error("--pointwise-rows must be at least 2: a row needs another row as its negative")
+        if not 0 < args.pointwise_tau < float("inf"):
+            p.error("--pointwise-tau must be finite and positive")
+        if any(g < 1 or g > size for g, size in zip(args.train_patch_grid, backbone_map)):
+            p.error(f"--train-patch-grid must fit the {map_name} backbone map")
+    elif any(
+        getattr(args, f"pointwise_{key}") != p.get_default(f"pointwise_{key}")
+        for key in ("rows", "tau", "kernel", "negatives", "align_input", "entropy_input")
+    ):
+        p.error("The --pointwise-* options only apply with a positive --pointwise-loss-weight")
+    if args.interior_only:
+        if args.patch_loss_weight <= 0 and not pointwise:
+            p.error("--interior-only restricts the patch and pointwise losses: it needs a positive weight on one")
+        if args.encoder_architecture != "conv":
+            p.error("--interior-only needs --encoder-architecture conv, whose receptive field is computed")
+        depth = (args.downscale_factor, args.nb_res_layers)
+        if not all(interior_bins(size, bins, *depth) for size, bins in zip(volume, args.train_patch_grid)):
+            p.error(
+                f"--interior-only leaves no position: the receptive field is {receptive_field_voxels(*depth)} voxels "
+                f"wide, so no position of --train-patch-grid {args.train_patch_grid} reads only inside the "
+                f"{'x'.join(map(str, volume))} volume. Use fewer --nb-res-layers or a finer grid"
+            )
     if args.encoder_architecture == "resnet18":
         if args.conv_readout != "linear":
             p.error("--conv-readout only applies to --encoder-architecture conv")
@@ -1207,7 +1414,7 @@ def parse_args(argv=None, description=None):
             )
         spatial = backbone_map[0]  # cubic: spatial recovery is synthetic-only
         if args.spatial_recovery_grids is None:
-            if args.patch_loss_weight > 0:
+            if args.patch_loss_weight > 0 or pointwise:
                 if len(set(args.train_patch_grid)) != 1:
                     p.error("For a non-cubic training grid, specify cubic --spatial-recovery-grids explicitly")
                 args.spatial_recovery_grids = [args.train_patch_grid[0]]

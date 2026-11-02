@@ -153,8 +153,10 @@ def run(args):
     for letter, run_dir in zip((chr(ord("A") + i) for i in range(len(args.run_dirs))), args.run_dirs):
         cfg = load_settings(run_dir)
         check_run(run_dir, cfg)
-        if cfg.get("synthetic_lesion_target", "position") != "position":
-            raise SystemExit(f"{run_dir}: lesion target {cfg['synthetic_lesion_target']!r}; this needs one lesion")
+        if cfg.get("synthetic_lesion_target", "position") != "position" and cfg.get("synthetic_lesion_count") != 1:
+            raise SystemExit(
+                f"{run_dir}: {cfg.get('synthetic_lesion_count')} {cfg['synthetic_lesion_target']} lesions; this needs one"
+            )
         grid = list(cfg.get("train_patch_grid") or [8, 8, 8])
         num_samples = args.num_samples or cfg["num_val_samples"]
         key = json.dumps([data_key(cfg, args.split, num_samples), grid])

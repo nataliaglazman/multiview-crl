@@ -4,6 +4,7 @@ import contextlib
 import csv
 import io
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -221,6 +222,24 @@ class RealTrainingTests(unittest.TestCase):
         self.assertEqual((progress["status"], progress["step"]), ("complete", 2))
         terms = progress["last_loss_terms"]
         self.assertAlmostEqual(terms["total"], terms["global"] + terms["patch_weighted"], places=5)
+
+    def test_pointwise_objective_on_a_non_cubic_volume_with_real_masks(self):
+        masks = str(self.root / "ADNI_stripped_masks")
+        argv = self.data + TINY + ["--no-cache", "--masks-dir", masks, "--model-id", "pointwise", "--no-floor-eval"]
+        argv += ["--downscale-factor", "2", "--nb-res-layers", "0", "--latent-dim", "8", "--content-channels", "6"]
+        argv += ["--norm-type", "layer", "--activation", "gelu", "--content-bound", "sigmoid", "--conv-readout", "mlp"]
+        argv += ["--global-loss-weight", "0", "--pointwise-loss-weight", "1", "--pointwise-rows", "64"]
+        argv += ["--train-patch-grid", "8", "10", "8", "--interior-only", "--patch-foreground-mask"]
+        output = run(argv)
+        # Stride 2 reads 8 voxels; along the axes of 16, 20 and 16 voxels, 4, 6 and 4 cells read no padding.
+        self.assertIn("receptive field: 8 voxels", output)
+        self.assertIn("interior only: 96/640 positions read no padding", output)
+        run_dir = self.root / "runs" / "pointwise"
+        terms = json.loads((run_dir / "training_progress.json").read_text())["last_loss_terms"]
+        self.assertAlmostEqual(terms["total"], terms["pointwise_weighted"], places=4)
+        held_out = json.loads((run_dir / "separation_step2.json").read_text())
+        self.assertTrue(math.isfinite(held_out["val/pointwise"]))
+        self.assertAlmostEqual(held_out["val/loss"], held_out["val/pointwise"], places=4)
 
     def test_augmentation_replays_from_its_seed_and_differs_per_worker(self):
         def views(seed):

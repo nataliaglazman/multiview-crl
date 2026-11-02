@@ -1,0 +1,39 @@
+"""The user's patch16_sulcal_ventricle_strat_burden_0_min recipe, parsed by the trainer's own parser."""
+
+import training.encoder_args as encoder_args
+
+FLAGS = """
+--attention-pool-frequencies 4 --attention-pool-heads 4 --attention-pool-width slice --batch-size 32 --best-metric none
+--bt-lambda 0.005 --no-cache --no-causal-eval --causal-eval-alphas 0.01 0.05 0.1 0.2 --causal-eval-grid 1 1 1
+--causal-eval-indep-test fisherz --causal-eval-null-draws 200 --causal-eval-reduce gap --no-center-code
+--content-channels 14 --contrastive-loss-type infonce --contrastive-proj-dim 0 --contrastive-proj-hidden 256
+--conv-readout mlp --cpu-threads 1 --cross-view-negs-only --data-seed 42 --dataset-name synthetic --deterministic
+--deterministic-warn-only --device auto --downscale-factor 4 --encoder-architecture conv --encoder-head-hidden 100
+--eval-every 1000 --eval-patch-grid 4 5 4 --eval-pooling gap --floor-eval --global-pool gap --grad-clip 2.0
+--hash-training-inputs --hidden-channels 64 --image-spacing 2.0 --latent-dim 18 --lesion-decorrelation-weight 0.0
+--lesion-detector shared --lesion-frame brain --lesion-head-init positive --lesion-input features --lesion-keypoints 0
+--lesion-loss-weight 1.0 --lesion-norm none --lesion-normative-components 20 --lesion-normative-subjects 300
+--lesion-pairing cross_modal --lesion-proj-dim 8 --lesion-temperature 1.0 --loader-seed 10042 --log-every 100
+--lr 0.0001 --mask-estimator relaxed --mask-init-gap 4.0 --mask-lr-scale 1.0 --mask-mode fixed --model-seed 42
+--n-content 9 --n-style 3 --nb-res-layers 2 --norm-type group --num-train-samples 2000 --num-val-samples 400
+--num-workers 0 --out-dir results/encoder/runs --patch-foreground-mask --patch-foreground-thresh 0.05
+--patch-loss-weight 1.0 --require-new-run --res 64 --res-channels 32 --resnet-norm batch --resnet-output-stride 32
+--seed 42 --no-separate-spatial-readout --spatial-recovery-batch-size 4 --no-spatial-recovery-eval
+--no-spatial-recovery-native --spatial-recovery-seed 1729 --spatial-recovery-test-samples 400 --split-seed 0
+--standardize-code --standardize-patch-code --stratify-balance 0.0 --stratify-batches oracle --stratify-neighbours 50
+--stratify-sampler neighbourhood --synthetic-causal-edge-prob 0.5 --synthetic-causal-graph chain
+--synthetic-causal-noise-scale 0.4 --synthetic-causal-nonlinearity leaky_relu --synthetic-clean-content
+--synthetic-content-scale 1.0 --synthetic-identifiable-ventricle --synthetic-lesion-count 1
+--synthetic-lesion-intensity styled --synthetic-lesion-min-radius-vox 1.9 --synthetic-lesion-placement wm_interior
+--synthetic-lesion-radius 0.1 --synthetic-lesion-t1-value 0.4 --synthetic-lesion-target burden
+--synthetic-mode pseudo_mri --synthetic-n-deformation-grid 4 --synthetic-n-fissure-grid 8
+--synthetic-normalize fixed_reference --synthetic-style-scale 1.0 --synthetic-sulcal-mode atrophy
+--synthetic-temporal-sigma 0.18 --tau 0.1 --test-frac 0.0 --train-patch-grid 16 16 16 --train-steps 20000
+--val-frac 0.0 --model-id patch16_sulcal_ventricle_strat_burden_0_min
+""".split()
+
+
+def run_args():
+    args = encoder_args.parse_args(FLAGS)
+    args.cache = False
+    return args

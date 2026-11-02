@@ -1,0 +1,45 @@
+# The fully local encoder: every content cell depends only on a small known neighbourhood of the input, and the only
+# objective is alignment + joint entropy pooled over (subject, position) rows. training/ENCODER_POINTWISE.md
+#
+# The generator is the current burden run's (patch8_sulcal_ventricle_strat_burden), on which the shared latents number
+# 10: 7 active scalars and the lesion's 3 placement numbers. Check that against the data with the channel ablation:
+#   for k in 6 10 14 20 32; do
+#     python scripts/launch.py experiments/encoder/pointwise.yaml --cluster slurm_bio \
+#       --set content_channels=$k latent_dim=$((k + 3)); done
+# and with a trained run, python -m eval.encoder.encoder_receptive_field --run-dir <run>
+#
+# Read each run's log for cell eff_rank (channels the rows really use), saturated (the code at the box's faces) and
+# subject share (near 0 the box is filled by a template, not by subjects). One-off arms go through --set:
+#   pointwise_entropy_input=residual   entropy on the template residual, against the raw default
+#   pointwise_negatives=strict         negatives differ in both subject and position
+#   pointwise_kernel=box               the plain Gaussian kernel, against the wrap-around default
+_base_: encoder/synthetic_defaults
+tag: pointwise_k{content_channels}_s{seed}
+
+# ---- Model: nothing lets a cell see the whole volume or know where it is ----
+conv_readout: linear
+norm_type: layer
+activation: gelu
+nb_res_layers: 0
+content_bound: sigmoid
+latent_dim: 13
+content_channels: 10
+
+# ---- Objective ----
+global_loss_weight: 0.0
+pointwise_loss_weight: 1.0
+train_patch_grid: [16, 16, 16]
+interior_only: true
+patch_foreground_mask: true
+train_steps: 20000
+
+# ---- Evaluation ----
+# The global code is untrained here, so read the per-position probes rather than its GAP score.
+spatial_recovery_eval: true
+
+# ---- Generator ----
+synthetic_identifiable_ventricle: true
+synthetic_sulcal_mode: atrophy
+synthetic_lesion_target: burden
+synthetic_lesion_count: 1
+synthetic_lesion_intensity: styled

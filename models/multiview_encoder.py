@@ -7,11 +7,15 @@ flattened into an MLP (``models.dense_readout``), so no position is averaged awa
 ``resnet18`` adapts the upstream image encoder architecture to volumes:
     3D ResNet-18 -> GAP -> Linear(512, 100) -> LeakyReLU -> Linear(100, latent_dim).
 The hidden readout width is configurable. This is a 3D adaptation, not a change
-to the training objective or the view-sharing policy. Both have no decoder.
+to the training objective or the view-sharing policy. An optional auxiliary decoder predicts
+the other view's local image residual from the exported global content vector alone.
 Optional ablations add a pooled MLP to conv, replace ResNet BatchNorm with
 GroupNorm, remove late ResNet strides, replace the global GAP with attention
 pooling (``models.attention_pool``), or read each channel's first spatial moments
 beside it (``models.moment_pool``). Defaults preserve existing checkpoints.
+``content_bound="sigmoid"`` puts the content units in (0, 1), and ``activation`` swaps the conv
+backbone's ReLU for a smooth one; with ``norm_type="layer"`` and few residual blocks each cell then
+depends only on a known neighbourhood of the input (training/ENCODER_POINTWISE.md).
 
 The first ``content_channels`` units are the content block, the rest are style.
 With ``mask_mode="learned"`` a top-k Gumbel-softmax mask over learnable per-unit logits
@@ -33,6 +37,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from models.attention_pool import AttentionPool3d
+from models.conv_footprint import interior_bins
 from models.dense_readout import DenseReadout3d
 from models.keypoint_pool import KeypointPool3d
 from models.moment_pool import MomentPool3d
@@ -41,8 +46,21 @@ from models.resnet3d import ResNet18Features3d
 from utils.helper import HelperModule
 
 
+class SigmoidContent(nn.Module):
+    """Squash the first ``units`` channels along ``dim`` into (0, 1); the style channels pass through."""
+
+    def __init__(self, units: int, dim: int):
+        super().__init__()
+        self.units = units
+        self.dim = dim
+
+    def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
+        content, style = x.split([self.units, x.shape[self.dim] - self.units], dim=self.dim)
+        return torch.cat([torch.sigmoid(content), style], dim=self.dim)
+
+
 class MultiviewConvEncoder(HelperModule):
-    """Two-encoder 3D conv model with a fixed or Gumbel-softmax content/style unit split. No decoder."""
+    """Two-encoder 3D conv model with content/style units and optional vector-only prediction."""
 
     def build(
         self,
@@ -83,6 +101,12 @@ class MultiviewConvEncoder(HelperModule):
         lesion_branch_frozen: bool = False,
         mask_mode: str = "fixed",
         mask_init_gap: float = 4.0,
+        content_bound: str = "none",
+        activation: str = "relu",
+        vector_prediction_grid=None,
+        vector_prediction_hidden: int = 128,
+        vector_prediction_target: str = "spatial",
+        vector_prediction_components: int = 8,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -140,6 +164,24 @@ class MultiviewConvEncoder(HelperModule):
         if self.readout_type == "dense" and global_pool != "gap":
             raise ValueError("The dense readout reads the whole map; it takes no global_pool")
         self.global_pool = global_pool
+        if content_bound not in ("none", "sigmoid"):
+            raise ValueError(f"content_bound must be none or sigmoid, got {content_bound!r}")
+        if content_bound != "none" and (
+            mask_mode != "fixed" or self.readout_type == "dense" or global_pool != "gap" or separate_spatial_readout
+        ):
+            raise ValueError(
+                "content_bound needs a fixed content block read per position by one shared head: mask_mode='fixed', "
+                "a linear or MLP readout, global_pool='gap' and no separate spatial readout"
+            )
+        self.content_bound = content_bound
+        if activation not in ("relu", "gelu", "silu"):
+            raise ValueError(f"activation must be relu, gelu or silu, got {activation!r}")
+        if activation != "relu" and (encoder_architecture != "conv" or conv_readout == "dense"):
+            raise ValueError("activation applies to the conv backbone and its linear or MLP readout")
+        self.activation = activation
+        self.nb_res_layers = nb_res_layers
+        if vector_prediction_grid is not None and (mask_mode != "fixed" or lesion_keypoints > 0):
+            raise ValueError("Vector prediction requires the fixed global content block without lesion keypoints")
         if lesion_keypoints < 0:
             raise ValueError(f"lesion_keypoints must be nonnegative, got {lesion_keypoints}")
         if lesion_keypoints > 0 and lesion_proj_dim < 1:
@@ -170,7 +212,7 @@ class MultiviewConvEncoder(HelperModule):
         # feature space (random init puts the two views in incompatible subspaces
         # and flattens the cross-view contrastive landscape — see models/vqvae.py).
         if encoder_architecture == "conv":
-            from models.vqvae import Encoder
+            from models.vqvae import Encoder, make_activation
 
             self.encoder = Encoder(
                 in_channels,
@@ -180,15 +222,20 @@ class MultiviewConvEncoder(HelperModule):
                 downscale_factor,
                 use_checkpoint,
                 norm_type=norm_type,
+                activation=activation,
             )
         else:
             self.encoder = ResNet18Features3d(in_channels, norm=resnet_norm, output_stride=resnet_output_stride)
         self.encoder_v1 = copy.deepcopy(self.encoder) if separate_encoders else None
 
         # --- Projection head to the encoding space ---
+        # The content bound is the head's last module, not a step in forward: eval scripts call
+        # to_encoding and patch_readout directly, and they must read the code the loss saw.
         if self.readout_type == "linear":
             # Preserve the original module names, initialization order and weights.
             self.to_encoding = nn.Conv3d(hidden_channels, latent_dim, 1)
+            if content_bound == "sigmoid":
+                self.to_encoding = nn.Sequential(self.to_encoding, SigmoidContent(content_channels, dim=1))
         elif self.readout_type == "dense":
             # Built after both backbones, so they match the pooled models' from the same seed.
             self.to_encoding = DenseReadout3d(
@@ -203,9 +250,11 @@ class MultiviewConvEncoder(HelperModule):
             self.avgpool = nn.AdaptiveAvgPool3d(1)
             self.to_encoding = nn.Sequential(
                 nn.Linear(512 if encoder_architecture == "resnet18" else hidden_channels, encoder_head_hidden),
-                nn.LeakyReLU(),
+                nn.LeakyReLU() if activation == "relu" else make_activation(activation),
                 nn.Linear(encoder_head_hidden, latent_dim),
             )
+            if content_bound == "sigmoid":
+                self.to_encoding.append(SigmoidContent(content_channels, dim=-1))
 
         # Untie the spatial content mapping without changing the global head or
         # consuming additional random draws. Both heads remain shared across views.
@@ -336,6 +385,21 @@ class MultiviewConvEncoder(HelperModule):
                 for part in self.lesion_modules():
                     part.requires_grad_(False)
 
+        self.vector_prediction = None
+        if vector_prediction_grid is not None:
+            from models.vector_prediction import VectorPrediction3d
+
+            # No new random draws in the legacy path, and enabling the auxiliary head leaves
+            # the backbone/readout initialization and subsequent loader RNG stream unchanged.
+            with torch.random.fork_rng(devices=[]):
+                self.vector_prediction = VectorPrediction3d(
+                    content_channels,
+                    vector_prediction_grid,
+                    hidden=vector_prediction_hidden,
+                    target=vector_prediction_target,
+                    components=vector_prediction_components,
+                )
+
     def lesion_modules(self):
         """Trainable parts of the branch, excluding the frozen normative buffers."""
         return tuple(
@@ -396,6 +460,20 @@ class MultiviewConvEncoder(HelperModule):
         if len(patch_grid) > 0 and isinstance(patch_grid[0], (list, tuple)):
             patch_grid = patch_grid[0]  # single level here
         return F.adaptive_avg_pool3d(feat, tuple(patch_grid)).flatten(2)
+
+    def interior_positions(self, volume, patch_grid) -> torch.BoolTensor:
+        """(P,) mask over a patch grid, flattened like its patches: which positions read no padding.
+
+        True where every map cell the position averages has its whole receptive field inside ``volume``. Conv
+        backbone only. GroupNorm statistics still reach every position, so this bounds only the convolutions.
+        """
+        if self.encoder_architecture != "conv":
+            raise ValueError("interior_positions needs the conv backbone, whose receptive field is computed")
+        flags = []
+        for size, bins in zip(volume, patch_grid):
+            kept = interior_bins(size, bins, self.backbone_stride, self.nb_res_layers)
+            flags.append(torch.zeros(bins, dtype=torch.bool).index_fill_(0, torch.tensor(kept, dtype=torch.long), True))
+        return (flags[0][:, None, None] & flags[1][None, :, None] & flags[2][None, None, :]).flatten()
 
     @property
     def patch_readout(self):

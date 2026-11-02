@@ -76,6 +76,10 @@ class ExperimentTests(unittest.TestCase):
                 "conv_mlp_burden_oracle_k1",
                 "conv_mlp_burden_oracle_k10",
                 "conv_mlp_burden_oracle_k60",
+                "conv_mlp_burden_nativegrid",
+                "conv_mlp_burden_vector_prediction",
+                "conv_mlp_burden_vector_quantiles",
+                "pointwise",
             },
         )
         for path in experiments:
@@ -147,11 +151,66 @@ class ExperimentTests(unittest.TestCase):
             ),
             ("conv_mlp_burden_oracle_k1", "conv_mlp_burden_oracle_k10", {"stratify_clusters"}),
             ("conv_mlp_burden_oracle_k1", "conv_mlp_burden_oracle_k60", {"stratify_clusters"}),
+            ("conv_mlp_burden_nativegrid", "conv_mlp_burden_vector_prediction", {"vector_prediction_weight"}),
+            ("conv_mlp_burden_vector_prediction", "conv_mlp_burden_vector_quantiles", {"vector_prediction_target"}),
         ):
             with self.subTest(variant=variant):
                 a, b = parsed(resolve(reference)), parsed(resolve(variant))
                 changed = {key for key in a if a[key] != b[key]} - {"model_id", "spatial_recovery_grids"}
                 self.assertEqual(changed, keys)
+
+    def test_vector_prediction_matches_the_nativegrid_burden_control_on_every_backend(self):
+        expected = {
+            "encoder_architecture": "conv",
+            "conv_readout": "mlp",
+            "norm_type": "group",
+            "latent_dim": 18,
+            "content_channels": 14,
+            "mask_mode": "fixed",
+            "global_pool": "gap",
+            "standardize_code": True,
+            "patch_loss_type": "infonce",
+            "patch_similarity": "cosine",
+            "patch_loss_weight": 1.0,
+            "train_patch_grid": [16, 16, 16],
+            "standardize_patch_code": True,
+            "patch_foreground_mask": True,
+            "patch_foreground_thresh": 0.05,
+            "separate_spatial_readout": False,
+            "stratify_batches": "oracle",
+            "stratify_sampler": "neighbourhood",
+            "stratify_neighbours": 50,
+            "stratify_balance": 0.0,
+            "synthetic_identifiable_ventricle": True,
+            "synthetic_sulcal_mode": "atrophy",
+            "synthetic_lesion_target": "burden",
+            "synthetic_lesion_count": 1,
+            "synthetic_lesion_radius": 0.1,
+            "synthetic_lesion_intensity": "styled",
+            "synthetic_lesion_t1_value": 0.0,
+            "synthetic_lesion_min_radius_vox": None,
+            "train_steps": 20000,
+            "vector_prediction_grid": [16, 16, 16],
+            "vector_prediction_hidden": 128,
+            "vector_prediction_template_subjects": 300,
+            "vector_prediction_deviation_strength": 1.0,
+            "vector_prediction_weight_cap": 4.0,
+        }
+        for cluster in (*CLUSTERS, "local"):
+            with self.subTest(cluster=cluster):
+                control = parsed(resolve("conv_mlp_burden_nativegrid", cluster, seed=142))
+                intervention = parsed(resolve("conv_mlp_burden_vector_prediction", cluster, seed=142))
+                changed = {key for key in control if control[key] != intervention[key]}
+                self.assertEqual(changed, {"model_id", "vector_prediction_weight"})
+                self.assertEqual(
+                    (control["vector_prediction_weight"], intervention["vector_prediction_weight"]), (0, 1)
+                )
+                for key, value in expected.items():
+                    self.assertEqual(intervention[key], value, key)
+                self.assertEqual(
+                    (intervention["data_seed"], intervention["model_seed"], intervention["loader_seed"]),
+                    (42, 142, 10142),
+                )
 
     def test_gumbel_uses_the_causal_lesion_recipe_with_a_learned_mask(self):
         for cluster in (*CLUSTERS, "local"):
