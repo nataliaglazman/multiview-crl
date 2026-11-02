@@ -32,7 +32,7 @@ TINY += ["--patch-loss-weight", "1", "--train-patch-grid", "4", "4", "4", "--pat
 CRITERION = torch.nn.CrossEntropyLoss()
 
 
-def patch_loss(patches, standardize, similarity="cosine"):
+def patch_loss(patches, standardize, similarity="cosine", center="position"):
     """The trainer's patch InfoNCE on (2B, units, positions) patches, with an identity head."""
     model = SimpleNamespace(project=lambda z: z, spatial_readout=None)
     args = SimpleNamespace(
@@ -42,6 +42,7 @@ def patch_loss(patches, standardize, similarity="cosine"):
         patch_loss_type="infonce",
         standardize_patch_code=standardize,
         patch_similarity=similarity,
+        patch_center_mode=center,
     )
     return trainer.patch_contrastive_loss(patches, model, args, torch.nn.CosineSimilarity(dim=-1), CRITERION)
 
@@ -98,6 +99,28 @@ class StandardizePatchCodeTests(unittest.TestCase):
                     patch_loss(moved, True, similarity), patch_loss(patches, True, similarity), rtol=1e-5, atol=1e-5
                 )
         self.assertGreater(abs(float(patch_loss(moved, False) - patch_loss(patches, False))), 1e-3)
+
+    def test_double_also_removes_each_subjects_mean_over_positions(self):
+        hz = torch.randn(2, 16, 5, 30, dtype=torch.float64) + torch.randn(2, 16, 5, 1, dtype=torch.float64)
+        out = trainer.standardize_patch_code(hz, double=True)
+        torch.testing.assert_close(out.mean(1), torch.zeros(2, 5, 30, dtype=torch.float64))
+        torch.testing.assert_close(out.mean(3), torch.zeros(2, 16, 5, dtype=torch.float64))
+        torch.testing.assert_close(out, trainer.standardize_patch_code(hz - hz.mean(3, keepdim=True), double=True))
+
+    def test_under_double_a_code_constant_across_positions_cannot_win_the_loss(self):
+        torch.manual_seed(5)
+        patches = torch.randn(16, 6, 10, dtype=torch.float64)  # 8 subjects x 2 views, 6 units, 10 positions
+        offset = 3.0 * torch.randn(8, 6, 1, dtype=torch.float64)
+        moved = patches + torch.cat([offset, offset])  # a per-subject global code, shared by both views
+        for similarity in ("cosine", "dot"):
+            with self.subTest(similarity=similarity):
+                torch.testing.assert_close(
+                    patch_loss(moved, True, similarity, "double"), patch_loss(patches, True, similarity, "double")
+                )
+                # Position centring keeps it, and it identifies the subjects at every position.
+                self.assertLess(
+                    float(patch_loss(moved, True, similarity)), float(patch_loss(patches, True, similarity))
+                )
 
 
 class PatchSimilarityTests(unittest.TestCase):
@@ -163,6 +186,7 @@ class FlagTests(unittest.TestCase):
             [*SYNTHETIC, "--patch-loss-type", "barlow_twins", "--standardize-patch-code"],
             [*SYNTHETIC, "--mask-mode", "learned", "--standardize-patch-code"],
             [*SYNTHETIC, "--patch-similarity", "dot"],
+            [*SYNTHETIC, "--patch-center-mode", "double"],
         ):
             with self.subTest(argv=refused), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
@@ -172,12 +196,16 @@ class FlagTests(unittest.TestCase):
         parsed = encoder_args.parse_args(argv)
         self.assertTrue(parsed.standardize_patch_code)
         self.assertEqual(parsed.patch_similarity, "dot")
+        self.assertEqual(encoder_args.parse_args(SYNTHETIC).patch_center_mode, "position")
+        options = {"patch_loss_weight": 1.0, "standardize_patch_code": True, "patch_center_mode": "double"}
+        argv = ["--res", "32", "--num-train-samples", "640", *encoder_args.cli_arguments(options)]
+        self.assertEqual(encoder_args.parse_args(argv).patch_center_mode, "double")
 
     def test_a_run_trains_with_either_similarity(self):
-        for similarity in ("cosine", "dot"):
-            with self.subTest(similarity=similarity), tempfile.TemporaryDirectory() as tmp:
+        for similarity, center in (("cosine", "position"), ("dot", "position"), ("cosine", "double")):
+            with self.subTest(similarity=similarity, center=center), tempfile.TemporaryDirectory() as tmp:
                 argv = ["trainer", "--out-dir", tmp, "--model-id", "std", *TINY, "--standardize-patch-code"]
-                argv += ["--patch-similarity", similarity]
+                argv += ["--patch-similarity", similarity, "--patch-center-mode", center]
                 with patch.object(sys, "argv", argv), patch.object(trainer, "evaluate", return_value=({}, {})):
                     with contextlib.redirect_stdout(io.StringIO()) as output:
                         trainer.main()
@@ -185,7 +213,11 @@ class FlagTests(unittest.TestCase):
                 settings = json.loads((run / "settings.json").read_text())
                 self.assertTrue(settings["standardize_patch_code"])
                 self.assertEqual(settings["patch_similarity"], similarity)
-                self.assertIn(f"({similarity} similarity, code centred at each position", output.getvalue())
+                self.assertEqual(settings["patch_center_mode"], center)
+                subject_mean = " and per subject over positions" if center == "double" else ""
+                self.assertIn(
+                    f"({similarity} similarity, code centred at each position{subject_mean} and", output.getvalue()
+                )
                 self.assertEqual(json.loads((run / "training_progress.json").read_text())["step"], 2)
                 state = torch.load(run / "model.pt", weights_only=True)
                 self.assertTrue(all(torch.isfinite(v).all() for v in state.values() if v.is_floating_point()))

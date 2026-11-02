@@ -44,6 +44,12 @@ def parse_args(argv=None):
     p.add_argument("--bn-samples", type=int, default=512, help="Maximum original training subjects for calibration")
     p.add_argument("--bn-batch-size", type=int, help="Calibration subjects per view; default: training batch size")
     p.add_argument("--skip-bn-recalibration", action="store_true", help="Evaluate the original checkpoint only")
+    p.add_argument(
+        "--untrained-floor",
+        action="store_true",
+        help="Also audit the untrained twin (same architecture and model seed, no training) as arm 'untrained', "
+        "on the same subjects, so each readout is read against its own floor",
+    )
     p.add_argument("--seed", type=int, default=1729, help="Audit sampling, probe split and shuffled controls")
     p.add_argument("--no-cuda", action="store_true")
     p.add_argument(
@@ -384,6 +390,25 @@ def print_summary(report):
                         score.append(float(np.mean(selected)) if selected else float("nan"))
                     values.append(f"{score[0]:+.3f}/{score[1]:+.3f}")
                 print(f"{arm:<18} {view:<6} {stage:<14} " + "   ".join(values))
+    if "content" in report["probe_stages"]:
+        print("\nContent block per factor: ridge / RBF held-out R² (refitted for each arm)")
+        for view in VIEWS:
+            print(f"{view:<6} {'factor':<20} " + " ".join(f"{arm:<18}" for arm in report["arms"]))
+            for target in report["target_names"]:
+                cells = []
+                for arm in report["arms"]:
+                    score = [
+                        next(
+                            r["test_r2"]
+                            for r in report["probes"]
+                            if (r["arm"], r["view"], r["stage"], r["probe"], r["condition"], r["target"])
+                            == (arm, view, "content", kind, "observed", target)
+                        )
+                        for kind in ("ridge", "rbf")
+                    ]
+                    score = [float("nan") if value is None else value for value in score]
+                    cells.append(f"{score[0]:+.3f}/{score[1]:+.3f}")
+                print(f"{'':<6} {target:<20} " + " ".join(f"{cell:<18}" for cell in cells))
     print("Per-factor scores, shuffled controls, stage changes and recalibration changes are in probes.csv.")
     print(f"BatchNorm: {report['batchnorm']['status']}. Original model parameters and buffers unchanged.", flush=True)
 
@@ -510,6 +535,11 @@ def run_audit(model, cfg, cli, device, directory):
     if candidate is not None:
         evaluate_arm("bn_recalibrated", candidate)
         del candidate
+    if getattr(cli, "untrained_floor", False):
+        # Last, because build_model reseeds torch's global generator.
+        floor = build_model(cfg, device)
+        evaluate_arm("untrained", floor)
+        del floor
     by_key = {(r["arm"], r["view"], r["stage"], r["probe"], r["condition"], r["target"]): r for r in report["probes"]}
     for row in report["probes"]:
         suffix = (row["probe"], row["condition"], row["target"])

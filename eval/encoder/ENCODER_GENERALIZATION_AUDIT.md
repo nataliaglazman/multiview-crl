@@ -112,6 +112,41 @@ both arms see identical images and targets. Improvement supports a contribution
 from running statistics. No improvement does not exclude other training-time
 BatchNorm effects or architectural differences.
 
+## 4. Untrained floor (`--untrained-floor`)
+
+This adds an arm named `untrained`. It is the same architecture, rebuilt from the run's
+settings with the run's model seed and no training. It is built by `score_checkpoint.build_model`
+without a state, so it equals the run's `model_init.pt` when the run saved one.
+
+The arm goes through the same cohorts, retrieval pools, probe splits and search grids as
+the trained arm, and the audit checks that it saw identical images and targets. It runs
+last, after any BatchNorm arm. In evaluation mode its BatchNorm layers keep their initial
+running statistics, and no recalibration is applied to it.
+
+Use it whenever you compare runs with different readouts. GAP and the dense readout
+(`--conv-readout dense`, a random 4,096-input head) start from different untrained codes, so
+their raw scores start in different places. Read each trained number against its own run's
+floor, then compare those gains across runs:
+
+```sh
+for run in conv_mlp_temporal009_s42 conv_mlp_temporal009_dense_s42; do
+  python -m eval.encoder.encoder_generalization_audit --run-dir "$RUNS/$run" --untrained-floor
+done
+```
+
+The summary's last table puts ridge and RBF R² for the content block side by side for each
+arm. Read it with section 1:
+
+- **Ridge at or below the floor while RBF stays above it.** The factor is still in the code,
+  behind a curved map. Linear metrics, such as the training-time ridge R² and block-MCC,
+  count it as lost. Yao et al. (ICLR 2024) prove recovery only up to an invertible map and
+  report a nonlinear regressor beside the linear one. For their claim, the RBF column is the
+  one that counts.
+- **Both near the floor.** Neither readout found the factor in the code with this many
+  subjects. That does not prove the information is absent.
+- **Training retrieval far above test retrieval.** A low training loss came from memorising
+  training subjects, not from content.
+
 ## Outputs and next decisions
 
 A new `encoder_audit_<timestamp>/` directory contains:
@@ -123,8 +158,8 @@ A new `encoder_audit_<timestamp>/` directory contains:
   changes from the original arm and from the backbone stage.
 - `ranks.csv`: evaluation-mode effective rank; high rank is not evidence for
   semantic factor recovery.
-- `original_features.npz`, `bn_recalibrated_features.npz`: all pooled feature
-  banks and targets, saved before fitting probes.
+- `original_features.npz`, `bn_recalibrated_features.npz`, and `untrained_features.npz`
+  with `--untrained-floor`: all pooled feature banks and targets, saved before fitting probes.
 - Corresponding `*_predictions.npz` files: test predictions and true targets.
 - `checkpoint_source.json`: source checkpoint and loaded snapshot hash.
 
@@ -139,6 +174,7 @@ only a finished audit says `complete`.
 | Recalibration improves held-out retrieval and recovery | Investigate BatchNorm running statistics and train/eval mismatch. |
 | Backbone recovery is good but final content recovery is poor | Isolate the nonlinear readout/compression in a controlled ablation. |
 | Final RBF recovery is good while ridge is poor | Information remains nonlinearly accessible; linear scores understate it. |
+| Trained content ridge falls below the untrained arm's, while RBF stays above it | Training folded the factor rather than dropping it; compare readouts on RBF. |
 | Test retrieval is good but both probes are weak for some factors | Investigate feature selection with matched-data ablations and factor interventions. |
 
 For a cheaper wiring check, use `--num-samples 128 --probe-samples 200

@@ -81,6 +81,87 @@ class BurdenRenderingTests(unittest.TestCase):
             )
 
 
+class MinimumRadiusTests(unittest.TestCase):
+    MINIMUM = 1.9
+
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(2)
+        options = dict(res=64, lesion_placement="wm_interior", lesion_target="burden", lesion_count=1)
+        cls.free = PseudoMRIRenderer(**options)
+        cls.floored = PseudoMRIRenderer(**options, lesion_min_radius_vox=cls.MINIMUM)
+        cls.quantiles = torch.rand(1, 3, generator=torch.Generator().manual_seed(0))
+
+    def render(self, renderer, burden):
+        z = torch.zeros(9)
+        z[2] = burden
+        return renderer.render_structure(
+            z, torch.zeros(4, 4, 4), torch.zeros(8, 8, 8), "cpu", clean=True, z_lesion=self.quantiles
+        )
+
+    def test_volume_starts_at_the_minimum_stays_linear_and_keeps_its_maximum(self):
+        fractions, totals = [], []
+        for value in torch.linspace(-3, 3, 13):
+            tissue, load = self.render(self.floored, value)
+            self.assertTrue(bool(torch.all(tissue[load > 0] == 2)))
+            fractions.append((torch.tanh(value).item() + 1) / 2)
+            totals.append(load.sum().item())
+        self.assertTrue(bool(np.all(np.diff(totals) > 0)))
+        self.assertGreater(np.corrcoef(fractions, totals)[0, 1], 0.999)
+        smallest = self.render(self.floored, torch.tensor(-1e6))[1].sum().item()
+        # The one-voxel partial-volume ramp adds r/4 to r^3, about 7% of a sphere this small.
+        self.assertAlmostEqual(smallest / (4 / 3 * np.pi * (self.MINIMUM**3 + self.MINIMUM / 4)), 1.0, delta=0.02)
+        torch.testing.assert_close(
+            self.render(self.floored, torch.tensor(1e6))[1], self.render(self.free, torch.tensor(1e6))[1]
+        )
+
+    def test_the_lesion_stays_where_the_free_lesion_would_be(self):
+        centroids = []
+        for renderer in (self.free, self.floored):
+            _, load = self.render(renderer, torch.tensor(0.5))
+            centroids.append((load[..., None] * renderer.coords).sum((0, 1, 2)) / load.sum())
+        torch.testing.assert_close(centroids[1], centroids[0], atol=1e-4, rtol=0)
+
+    def test_invalid_values_fail(self):
+        burden = dict(res=64, lesion_placement="wm_interior", lesion_target="burden")
+        with self.assertRaisesRegex(ValueError, "lesion_target='burden'"):
+            PseudoMRIRenderer(res=64, lesion_placement="wm_interior", lesion_min_radius_vox=1.9)
+        for value in (0.0, -1.0, 0.1 * 63 / 2, 4.0, float("nan")):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "between 0 and the largest"):
+                PseudoMRIRenderer(**burden, lesion_min_radius_vox=value)
+
+    def test_cli_and_every_dataset_builder_pass_it(self):
+        from eval.protocol.run_dci_synthetic import build_synthetic_test_set
+
+        recipe = BURDEN + ["--res", "64", "--synthetic-lesion-count", "1"]
+        parsed = trainer.parse_args(recipe + ["--synthetic-lesion-min-radius-vox", "1.9"])
+        self.assertEqual(parsed.synthetic_lesion_min_radius_vox, 1.9)
+        self.assertIsNone(trainer.parse_args(recipe).synthetic_lesion_min_radius_vox)
+        self.assertEqual(trainer.make_dataset(parsed, "val", 2)._inner.renderer.lesion_min_radius_vox, 1.9)
+        self.assertEqual(score_checkpoint.make_dataset(vars(parsed), 2)._inner.renderer.lesion_min_radius_vox, 1.9)
+        rebuilt = build_synthetic_test_set(
+            types.SimpleNamespace(
+                synthetic_res=64,
+                synthetic_lesion_placement="wm_interior",
+                synthetic_lesion_target="burden",
+                synthetic_lesion_count=1,
+                synthetic_lesion_min_radius_vox=1.9,
+            ),
+            num_samples=2,
+            cache=False,
+            causal=False,
+        )
+        self.assertEqual(rebuilt._inner.renderer.lesion_min_radius_vox, 1.9)
+        for argv in (
+            ["--res", "64", "--synthetic-lesion-min-radius-vox", "1.9"],
+            recipe + ["--synthetic-lesion-min-radius-vox", "0"],
+            recipe + ["--synthetic-lesion-min-radius-vox", "3.2"],
+            BURDEN + ["--res", "32", "--synthetic-lesion-min-radius-vox", "1.9"],
+        ):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                trainer.parse_args(argv)
+
+
 class BurdenPipelineTests(unittest.TestCase):
     def test_dataset_keeps_every_other_latent_and_reports_burden_names(self):
         position = trainer.make_dataset(

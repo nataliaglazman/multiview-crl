@@ -338,6 +338,16 @@ def build_parser(description=None):
         "to how much it differs",
     )
     p.add_argument(
+        "--patch-center-mode",
+        choices=["position", "double"],
+        default="position",
+        help="With --standardize-patch-code: what the centring removes before the per-unit scaling. position: each "
+        "position's batch mean (the anatomy every subject shares there). double: also each subject's mean over the "
+        "kept positions, so a code constant across the brain (overall gain, any global scalar the head writes "
+        "everywhere) cannot win the patch loss; only the subject x position interaction is left for it, and the "
+        "global term keeps the subject mean. The VQ trainer's --patch-center-mode double, on the standardised code",
+    )
+    p.add_argument(
         "--vicreg-sim-coeff", type=float, default=25.0, help="With --patch-loss-type vicreg: invariance (MSE) weight"
     )
     p.add_argument(
@@ -677,6 +687,15 @@ def build_parser(description=None):
         help="With --synthetic-lesion-target burden: lesions per subject sharing the burden",
     )
     p.add_argument(
+        "--synthetic-lesion-min-radius-vox",
+        type=float,
+        default=None,
+        help="With --synthetic-lesion-target burden: smallest lesion radius, in voxels (1.9 is about 30 voxels of "
+        "volume). The volume stays linear in the burden, now from this sphere up to --synthetic-lesion-radius's, "
+        "so subjects are rescaled rather than clamped and every burden still renders a different size. "
+        "Default: lesions shrink to nothing",
+    )
+    p.add_argument(
         "--synthetic-lesion-t1-value",
         type=float,
         default=0.4,
@@ -897,6 +916,15 @@ def parse_args(argv=None, description=None):
             p.error("The lesion branch localises one lesion; it does not apply to --synthetic-lesion-target burden")
     elif args.synthetic_lesion_count != 4:
         p.error("--synthetic-lesion-count only applies with --synthetic-lesion-target burden")
+    if args.synthetic_lesion_min_radius_vox is not None:
+        if args.synthetic_lesion_target != "burden":
+            p.error("--synthetic-lesion-min-radius-vox only applies with --synthetic-lesion-target burden")
+        largest = args.synthetic_lesion_radius * (args.res - 1) / 2
+        if not 0 < args.synthetic_lesion_min_radius_vox < largest:
+            p.error(
+                f"--synthetic-lesion-min-radius-vox must lie between 0 and the largest radius, {largest:g} voxels at "
+                f"--res {args.res} with --synthetic-lesion-radius {args.synthetic_lesion_radius:g}"
+            )
     if not 0 <= args.synthetic_lesion_t1_value < float("inf"):
         p.error("--synthetic-lesion-t1-value must be finite and nonnegative")
     if not 0.0 <= args.synthetic_causal_edge_prob <= 1.0:
@@ -919,6 +947,8 @@ def parse_args(argv=None, description=None):
             p.error(
                 "--standardize-patch-code needs --mask-mode fixed: standardising each unit divides a learned mask out"
             )
+    if args.patch_center_mode != "position" and not args.standardize_patch_code:
+        p.error("--patch-center-mode double needs --standardize-patch-code, which does the centring")
     if args.patch_similarity != "cosine" and not args.standardize_patch_code:
         p.error(
             "--patch-similarity dot needs --standardize-patch-code: without a fixed scale the encoder could lower "

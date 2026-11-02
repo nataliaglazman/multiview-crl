@@ -269,6 +269,55 @@ class EncoderGeneralizationTests(unittest.TestCase):
             self.assertTrue((out / "retrieval.csv").exists())
             self.assertTrue((out / "probes.csv").exists())
 
+    def test_untrained_floor_arm_is_the_seeded_twin_on_the_same_subjects(self):
+        cfg = config(encoder_architecture="conv", conv_readout="dense", dense_readout_downsample=0)
+        state = build_model(cfg, "cpu").state_dict()
+        # Move only the head, so the arms share a backbone and differ in the code.
+        state["to_encoding.mlp.2.bias"] = state["to_encoding.mlp.2.bias"] + 0.5
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "settings.json").write_text(json.dumps(cfg))
+            torch.save(state, run / "model.pt")
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                audit.main(
+                    [
+                        "--run-dir",
+                        str(run),
+                        "--num-samples",
+                        "10",
+                        "--probe-samples",
+                        "20",
+                        "--batch-size",
+                        "2",
+                        "--retrieval-batch-size",
+                        "4",
+                        "--retrieval-draws",
+                        "2",
+                        "--skip-bn-recalibration",
+                        "--untrained-floor",
+                        "--no-cuda",
+                    ]
+                )
+                fresh = audit.extract(build_model(cfg, "cpu"), make_dataset(cfg, 10, "test"), "cpu", 2, "fresh")
+            (out,) = run.glob("encoder_audit_*")
+            report = json.loads((out / "report.json").read_text())
+            self.assertEqual(report["status"], "complete")
+            self.assertEqual(report["arms"], ["original", "untrained"])
+            for split in ("train", "val", "test"):
+                self.assertEqual(
+                    report["state"]["original"][split]["input_sha256"],
+                    report["state"]["untrained"][split]["input_sha256"],
+                )
+            with np.load(out / "original_features.npz") as trained, np.load(out / "untrained_features.npz") as floor:
+                for view in audit.VIEWS:
+                    np.testing.assert_array_equal(floor[f"test__{view}__content"], fresh["features"][(view, "content")])
+                    np.testing.assert_array_equal(trained[f"test__{view}__backbone"], floor[f"test__{view}__backbone"])
+                    self.assertFalse(np.allclose(trained[f"test__{view}__content"], floor[f"test__{view}__content"]))
+            self.assertEqual({row["arm"] for row in report["probes"]}, {"original", "untrained"})
+            self.assertIn("Content block per factor", printed.getvalue())
+            self.assertIn("ventricle_size", printed.getvalue())
+
     def test_conv_without_bn_is_explicitly_not_applicable(self):
         model = build_model(config(encoder_architecture="conv"), "cpu")
         candidate, info = audit.recalibrate_batchnorm(model, UnlabeledImages(), "cpu", 2, 8, 9)

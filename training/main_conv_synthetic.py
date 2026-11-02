@@ -114,6 +114,7 @@ def make_dataset(args, mode, num_samples):
         synthetic_lesion_target=getattr(args, "synthetic_lesion_target", "position"),
         synthetic_lesion_count=getattr(args, "synthetic_lesion_count", 4),
         synthetic_lesion_t1_value=getattr(args, "synthetic_lesion_t1_value", 0.4),
+        synthetic_lesion_min_radius_vox=getattr(args, "synthetic_lesion_min_radius_vox", None),
     )
 
 
@@ -605,7 +606,7 @@ def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foregrou
         return loss
     # Hand-built option namespaces may omit the parser's default.
     if getattr(args, "standardize_patch_code", False):
-        hz = standardize_patch_code(hz)
+        hz = standardize_patch_code(hz, double=getattr(args, "patch_center_mode", "position") == "double")
     return losses.patch_infonce_loss(
         hz,
         sim_metric=sim_metric,
@@ -618,7 +619,7 @@ def patch_contrastive_loss(patches, model, args, sim_metric, criterion, foregrou
     ).squeeze()
 
 
-def standardize_patch_code(hz):
+def standardize_patch_code(hz, double=False):
     """--standardize-patch-code on a (views, subjects, units, positions) patch code.
 
     Each view's code is centred over the batch at every position, then each unit is divided by its spread
@@ -626,8 +627,13 @@ def standardize_patch_code(hz):
     stands out and a unit that is flat there stays near zero; dividing by each position's own spread would
     promote that flat unit's noise to unit variance. The patch InfoNCE then L2-normalises every (subject,
     position) vector, so this does not quiet a position alike in every subject.
+
+    ``double`` (--patch-center-mode double) also removes each subject's mean over positions before the
+    scaling, leaving only the subject x position interaction.
     """
     centred = hz - hz.mean(1, keepdim=True)
+    if double:
+        centred = centred - centred.mean(3, keepdim=True)
     spread = centred.square().sum((1, 3), keepdim=True) / ((hz.shape[1] - 1) * hz.shape[3])
     return centred / (spread.sqrt() + 1e-6)
 
@@ -1492,9 +1498,10 @@ def main():
         if args.patch_loss_type != "infonce":
             patch_objective += ", centred at each position, statistics pooled over positions"
         elif args.standardize_patch_code:
+            subject_mean = " and per subject over positions" if args.patch_center_mode == "double" else ""
             patch_objective += (
-                f" ({args.patch_similarity} similarity, code centred at each position and scaled per unit over "
-                "positions)"
+                f" ({args.patch_similarity} similarity, code centred at each position{subject_mean} and scaled per "
+                "unit over positions)"
             )
         print(
             f"objective: global {LOSS_NAMES[args.contrastive_loss_type]} + {args.patch_loss_weight:g} * patch "

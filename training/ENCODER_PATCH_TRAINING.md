@@ -338,6 +338,17 @@ same size. It needs a positive `--patch-loss-weight`, `--patch-loss-type infonce
   needs `--standardize-patch-code`; on an unscaled code the encoder could lower the loss
   by growing its features.
 
+`--patch-center-mode double` also removes each subject's mean over the kept positions
+before the scaling. Write a subject's code at position p as template(p) + subject mean +
+interaction. Position centring removes the template. Double centring also removes the
+subject mean, so a code the head writes everywhere (overall gain, or any global scalar)
+can no longer tell subjects apart at every position. The patch loss sees only the
+interaction, and the global term keeps the subject mean. On its own, without a global
+term, this makes the objective blind to every spatially constant factor; the VQ
+trainer's `--patch-center-mode double` showed that. A global factor that acts unevenly
+across the brain, such as brain size moving the cortical edge, still lands in the
+interaction.
+
 **Measured.** The share of the squared gradient on the patch code, on one batch with the
 foreground mask on. "Flattest cells" are the 10% of (subject, position) cells with the
 smallest standardised residual. The last column is the patch term's encoder gradient

@@ -175,6 +175,7 @@ class PseudoMRIRenderer(nn.Module):
         lesion_target="position",
         lesion_count=4,
         lesion_t1_value=0.4,
+        lesion_min_radius_vox=None,
         sulcal_mode="corrugation",
         temporal_sigma=0.18,
     ):
@@ -238,6 +239,18 @@ class PseudoMRIRenderer(nn.Module):
                 raise ValueError(f"lesion_count must be a positive integer, got {lesion_count!r}")
         self.lesion_target = lesion_target
         self.lesion_count = lesion_count
+        # Smallest burden-lesion radius, in voxels. None lets a lesion shrink to nothing; otherwise the
+        # volume stays linear in the burden, just starting from this sphere (see _burden_in_white_matter).
+        if lesion_min_radius_vox is not None:
+            if lesion_target != "burden":
+                raise ValueError("lesion_min_radius_vox needs lesion_target='burden'")
+            largest = lesion_radius * (res - 1) / 2
+            if not 0 < lesion_min_radius_vox < largest:
+                raise ValueError(
+                    f"lesion_min_radius_vox must lie between 0 and the largest radius, {largest:g} voxels at "
+                    f"res={res}, got {lesion_min_radius_vox!r}"
+                )
+        self.lesion_min_radius_vox = lesion_min_radius_vox
         # The T1 lesion's base intensity on the tissue LUT (bg 0, CSF 0.1, WM 0.8, GM 0.5). The default
         # 0.4 is darker than WM but close to GM and to WM/GM partial volume, while FLAIR's 1.0 is the
         # brightest tissue. 1.6 and 0.0 give the same |contrast| with WM (0.8), above and below every
@@ -374,7 +387,9 @@ class PseudoMRIRenderer(nn.Module):
         ``burden`` in [-1, 1] gives every sphere the radius lesion_radius * ((burden + 1) / 2) ** (1/3),
         so the summed load runs linearly from 0 to ``lesion_count`` full-size spheres. The edge is a
         one-voxel partial-volume ramp, and a sphere smaller than half a voxel fades out with its
-        radius, so the load is continuous and monotone in ``burden``.
+        radius, so the load is continuous and monotone in ``burden``. With ``lesion_min_radius_vox``
+        the line starts at spheres of that radius rather than at 0: the volume is rescaled, not
+        clamped, so every burden still renders a different size.
 
         Centres come from ``quantiles`` (lesion_count, 3) in [0, 1) by the conditional x, y|x, z|x,y
         quantiles of ``_sphere_in_white_matter``. Admissible centres hold a FULL-size sphere and its
@@ -392,6 +407,9 @@ class PseudoMRIRenderer(nn.Module):
             raise ValueError(f"burden must lie in [-1, 1], got {b}")
         fraction = min(max((b + 1.0) / 2.0, 0.0), 1.0)
         spacing = 2.0 / (self.res - 1)
+        if self.lesion_min_radius_vox is not None:
+            floor = (self.lesion_min_radius_vox * spacing / self.lesion_radius) ** 3
+            fraction = floor + fraction * (1.0 - floor)
         reach = self.lesion_radius + spacing / 2  # the full-size sphere's support, edge included
         white = tissue_map.detach().cpu().numpy() == 2
         positions = np.argwhere(white)
@@ -880,6 +898,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
         lesion_target="position",
         lesion_count=4,
         lesion_t1_value=0.4,
+        lesion_min_radius_vox=None,
         shared_gain_bias=False,
         temporal_sigma=0.18,
     ):
@@ -1037,6 +1056,7 @@ class Synthetic3DDisentanglementDataset(Dataset):
                 lesion_target=lesion_target,
                 lesion_count=lesion_count,
                 lesion_t1_value=lesion_t1_value,
+                lesion_min_radius_vox=lesion_min_radius_vox,
             )
             if lesion_mode == "field" and n_content > 2:
                 import warnings

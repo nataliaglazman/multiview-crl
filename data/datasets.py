@@ -696,6 +696,7 @@ class SyntheticBrainDataset(MultiviewDataset):
         synthetic_lesion_target="position",
         synthetic_lesion_count=4,
         synthetic_lesion_t1_value=0.4,
+        synthetic_lesion_min_radius_vox=None,
         synthetic_style_alignment_pairs=False,
         synthetic_shared_gain_bias=False,
         synthetic_temporal_sigma=0.18,
@@ -776,6 +777,7 @@ class SyntheticBrainDataset(MultiviewDataset):
             lesion_target=synthetic_lesion_target,
             lesion_count=synthetic_lesion_count,
             lesion_t1_value=synthetic_lesion_t1_value,
+            lesion_min_radius_vox=synthetic_lesion_min_radius_vox,
             shared_gain_bias=synthetic_shared_gain_bias,
         )
         if synthetic_normalize in ("per_sample", "shared") and synthetic_n_style > 0:
