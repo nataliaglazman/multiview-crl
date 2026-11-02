@@ -1,0 +1,115 @@
+#!/bin/bash
+# Burden feasibility on a CUDA machine. Run from anywhere inside the repository, on the branch that holds this folder.
+#
+#   bash out/burden_feasibility_20261102/run_pc.sh            all four stages, in order
+#   bash out/burden_feasibility_20261102/run_pc.sh 1 3        only those stages
+#
+# Stage 1 Can the encoder learn it from labels? Dense-label detectors, then the exact vector against pooling changes.
+# Stage 2 Warm starts from the detector, tail pooling at T1 0.4, labels on temporal sigma 0.09 as a positive control.
+# Stage 3 The real test: self-supervised, no labels, end to end. GAP control against tail pooling.
+# Stage 4 Is it size? The same recipes with 2x and 4x lesion volume.
+#
+# PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
+# Finished arms are skipped, so rerunning after a crash or an out-of-memory error continues where it stopped.
+# DRY=1 prints the commands without running them.
+
+set -u
+cd "$(git rev-parse --show-toplevel)" || exit 1
+D=out/burden_feasibility_20261102
+PY=${PY:-python}
+PARALLEL=${PARALLEL:-3}
+BATCH=${BATCH:-32}
+DRY=${DRY:-0}
+STAGES=${*:-1 2 3 4}
+export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
+export BANK_WORKERS=${BANK_WORKERS:-8}
+mkdir -p "$D/logs" "$D/runs"
+
+if [ "$DRY" = 0 ]; then
+    "$PY" -c "import torch, sklearn, scipy, monai; assert torch.cuda.is_available(), 'CUDA is not available'; print('GPU', torch.cuda.get_device_name(0))" || exit 1
+fi
+
+wants() { case " $STAGES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+bank() { # bank DIR [bank.py options]
+    local dir=$1; shift
+    if [ "$DRY" = 1 ]; then echo "$PY $D/bank.py $dir $*"; return; fi
+    if grep -q "BANK DONE" "$dir.log" 2>/dev/null; then return; fi
+    echo "$(date +%H:%M) render $dir"
+    "$PY" "$D/bank.py" "$dir" "$@" > "$dir.log" 2>&1 || { echo "bank failed, see $dir.log"; exit 1; }
+}
+
+arm() { # arm NAME COMMAND...
+    local name=$1; shift
+    if [ "$DRY" = 1 ]; then echo "$*"; return; fi
+    if grep -qE '^(TEST|DONE)' "$D/logs/$name.log" 2>/dev/null; then echo "skip $name"; return; fi
+    rm -rf "${D:?}/runs/$name"
+    while [ "$(jobs -rp | wc -l)" -ge "$PARALLEL" ]; do sleep 5; done
+    echo "$(date +%H:%M) start $name"
+    "$@" > "$D/logs/$name.log" 2>&1 &
+}
+
+finish() { # wait for this stage's arms, then report any that did not finish
+    [ "$DRY" = 1 ] && return
+    wait
+    for name in "$@"; do
+        grep -qE '^(TEST|DONE)' "$D/logs/$name.log" 2>/dev/null || echo "NOT FINISHED: $name (see $D/logs/$name.log)"
+    done
+    "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+    echo "$(date +%H:%M) summary updated: $D/summary.txt"
+}
+
+sup() { # sup NAME BANK ARM T1KEY STEPS [options]
+    local name=$1 where=$2 kind=$3 key=$4 steps=$5; shift 5
+    arm "$name" "$PY" "$D/sup.py" "$where" "$D/runs/$name" "$kind" "$key" "$steps" 500 --batch "$BATCH" "$@"
+}
+
+ssl() { # ssl NAME BANK POOL T1KEY STEPS
+    arm "$1" "$PY" "$D/warm.py" "$2" "$D/runs/$1" cold "$5" 1000 --pool "$3" --t1key "$4"
+}
+
+MAIN=$D/bank
+bank "$MAIN"
+
+if wants 1; then
+    sup dense_t100 "$MAIN" dense t1_00 3000
+    sup dense_t104 "$MAIN" dense t1_04 3000
+    sup vector_t100 "$MAIN" vector t1_00 6000
+    sup tail_t100 "$MAIN" tail t1_00 6000
+    sup cellsum_t100 "$MAIN" cellsum t1_00 6000
+    sup normtail_t100 "$MAIN" normtail t1_00 6000
+    finish dense_t100 dense_t104 vector_t100 tail_t100 cellsum_t100 normtail_t100
+    if [ "$DRY" = 0 ]; then
+        "$PY" "$D/dense_eval.py" "$MAIN" "$D/runs/dense_t100" t1_00 400 > "$D/logs/dense_eval_t100.log" 2>&1
+        "$PY" "$D/dense_eval.py" "$MAIN" "$D/runs/dense_t104" t1_04 400 > "$D/logs/dense_eval_t104.log" 2>&1
+        "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+    fi
+fi
+
+if wants 2; then
+    bank "$D/bank_temporal009" --t1-values 0.0 --temporal-sigma 0.09
+    sup warmvector_t100 "$MAIN" vector t1_00 2000 --init "$D/runs/dense_t100/model.pt"
+    sup warmcell_t100 "$MAIN" cellsum t1_00 2000 --init "$D/runs/dense_t100/model.pt"
+    sup tail_t104 "$MAIN" tail t1_04 6000
+    sup vector_temporal009 "$D/bank_temporal009" vector t1_00 6000 --target temporal
+    finish warmvector_t100 warmcell_t100 tail_t104 vector_temporal009
+fi
+
+if wants 3; then
+    ssl ssl_gap_t100 "$MAIN" gap t1_00 6000
+    ssl ssl_tail_t100 "$MAIN" tail t1_00 6000
+    ssl ssl_tail_t104 "$MAIN" tail t1_04 6000
+    finish ssl_gap_t100 ssl_tail_t100 ssl_tail_t104
+fi
+
+if wants 4; then
+    bank "$D/bank_r0126" --t1-values 0.0 --radius 0.126
+    bank "$D/bank_r0159" --t1-values 0.0 --radius 0.159
+    sup vector_r0126 "$D/bank_r0126" vector t1_00 6000
+    sup vector_r0159 "$D/bank_r0159" vector t1_00 6000
+    ssl ssl_gap_r0126 "$D/bank_r0126" gap t1_00 6000
+    ssl ssl_gap_r0159 "$D/bank_r0159" gap t1_00 6000
+    finish vector_r0126 vector_r0159 ssl_gap_r0126 ssl_gap_r0159
+fi
+
+echo "$(date +%H:%M) all requested stages done"

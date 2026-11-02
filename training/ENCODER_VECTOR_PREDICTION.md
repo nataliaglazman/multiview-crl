@@ -81,6 +81,27 @@ interior cell (`gradbalance3.py`, the same two states as the table further down)
 | Initialization | 0.66 | 0.030 | 0.021 |
 | Trained, decoder fitted | 0.0085 | 0.0040 | 0.085 |
 
+**Result: the quantile arm did not improve burden recovery.** Full runs on the NVIDIA PC
+showed no gain (reported 2 Nov; their numbers are not in this repository). A local
+2,000-step pilot was stopped near step 850, so it has one checkpoint. At step 500, ridge
+R² of burden from the final vector reads −0.019 for the control, −0.016 at weight 0.1
+and −0.018 at weight 1, against an untrained −0.013. The weight 1 arm's training-input
+hash differs from the other two for a reason not found (rendering 400 subjects twice was
+bit-identical), so `burden_recovery` would refuse it. So the oracle pay above says the
+target would reward a vector that already held burden, and says nothing about whether
+training can get burden there. Treat the oracle tables as a test of the destination,
+not of the route. The likely gap is that pay grows with the square of the signal: a
+decoder has no reason to use a unit that holds a trace of burden, so the encoder gets
+no pull to strengthen it. That is not measured for this term.
+
+**Full-image reconstruction with a style input was tested the same way and also pays
+nothing** (`recon_oracle2.py`; true anatomy and rendered style in, raw 32³ image out).
+Held-out pay, T1 / FLAIR: MLP decoder, burden −1.44 / −0.82%, burden and position −8.68
+/ −4.28%. Decoder with weights shared across positions, burden +1.11 / −1.42%, burden
+and position −0.11 / −5.73%. True position did not help either decoder, so neither drew
+the lesion, and this bounds these small decoders (128 units, sampled cells), not a
+strong convolutional one.
+
 ## Objective and information path
 
 Each modality has a small decoder whose **only input is its exported content vector**.
