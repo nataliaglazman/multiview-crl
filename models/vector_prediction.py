@@ -11,6 +11,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from models.patch_distribution import (
+    PATCH_QUANTILES,
+    fixed_patch_projections,
+    projected_patch_quantiles,
+    validate_patch_scales,
+)
+
 # target="quantile": where in each subject's sorted deviations the decoder reads, and which cells count.
 QUANTILES = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.98, 0.99, 0.995, 0.998, 0.999)
 INTERIOR = 0.9
@@ -92,6 +99,28 @@ def deviation_quantiles(predictor, residual):
     return torch.cat(rows)
 
 
+@torch.no_grad()
+def patch_distribution_targets(predictor, residual, valid=None):
+    """View-major flattened residuals -> fixed multiscale patch-distribution descriptors."""
+    rows = []
+    for view, part in enumerate(residual.chunk(2)):
+        interior = predictor.target_interior[view].to(part.device)
+        basis = predictor.target_components[view].to(part)
+        part = part * interior
+        part = part - part @ basis.T @ basis
+        foreground = None if valid is None else valid.chunk(2)[view].reshape(-1, 1, *predictor.grid)
+        rows.append(
+            projected_patch_quantiles(
+                part.reshape(-1, 1, *predictor.grid),
+                interior.reshape(1, 1, *predictor.grid),
+                predictor.patch_filters,
+                predictor.patch_scales,
+                valid=foreground,
+            ).flatten(1)
+        )
+    return torch.cat(rows)
+
+
 class VectorPrediction3d(nn.Module):
     """Two vector-only decoders, indexed by the input modality (T1, FLAIR).
 
@@ -103,26 +132,50 @@ class VectorPrediction3d(nn.Module):
 
     ``target`` is what they decode. "spatial" is the other view's residual on ``grid``. "quantile" is
     ``QUANTILES`` of that residual after removing ``components`` population directions, standardized over
-    the template's training subjects. A spatial target pays nothing for burden, because a lesion can sit
-    anywhere (training/ENCODER_VECTOR_PREDICTION.md); this one drops the position.
+    the template's training subjects. "patch_distribution" retains local structure through fixed 3D
+    patch projections at multiple scales and reconstructs their ordered quantiles without absolute positions.
     """
 
-    def __init__(self, content_channels, grid, hidden=128, gauge_momentum=0.01, target="spatial", components=8):
+    def __init__(
+        self,
+        content_channels,
+        grid,
+        hidden=128,
+        gauge_momentum=0.01,
+        target="spatial",
+        components=8,
+        patch_size=3,
+        patch_scales=(1, 2),
+        patch_projections=8,
+        patch_seed=1729,
+    ):
         super().__init__()
         if any(isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in (content_channels, hidden, components)):
             raise ValueError("content_channels, hidden and components must be positive integers")
         if not 0 < gauge_momentum <= 1:
             raise ValueError("gauge_momentum must be in (0,1]")
-        if target not in ("spatial", "quantile"):
-            raise ValueError(f"target must be spatial or quantile, got {target!r}")
+        if target not in ("spatial", "quantile", "patch_distribution"):
+            raise ValueError(f"target must be spatial, quantile or patch_distribution, got {target!r}")
         self.content_channels = content_channels
         self.grid = _grid_shape(grid)
         self.hidden = hidden
         self.gauge_momentum = gauge_momentum
         self.target = target
         self.components = components
+        self.patch_size = patch_size
+        self.patch_scales = tuple(patch_scales)
+        self.patch_projections = patch_projections
+        self.patch_seed = patch_seed
         cells = math.prod(self.grid)
         outputs = cells if target == "spatial" else len(QUANTILES)
+        if target == "patch_distribution":
+            filters = fixed_patch_projections(patch_size, patch_projections, patch_seed)
+            validate_patch_scales(self.grid, patch_size, self.patch_scales)
+            self.register_buffer("patch_filters", filters)
+            self.register_buffer(
+                "patch_spec", torch.tensor([patch_size, patch_projections, patch_seed, *self.patch_scales])
+            )
+            outputs = len(self.patch_scales) * patch_projections * len(PATCH_QUANTILES)
         self.decoders = nn.ModuleList(
             nn.Sequential(nn.Linear(content_channels, hidden), nn.GELU(), nn.Linear(hidden, outputs)) for _ in range(2)
         )
@@ -136,11 +189,24 @@ class VectorPrediction3d(nn.Module):
         self.register_buffer("input_variance", torch.ones(2, content_channels))
         self.register_buffer("input_gauge_fitted", torch.tensor(False))
         self._fit_rows = []
-        if target == "quantile":
+        if target in ("quantile", "patch_distribution"):
             self.register_buffer("target_interior", torch.zeros(2, cells, dtype=torch.bool))
             self.register_buffer("target_components", torch.zeros(2, components, cells))
-            self.register_buffer("target_mean", torch.zeros(2, len(QUANTILES)))
-            self.register_buffer("target_sd", torch.ones(2, len(QUANTILES)))
+            self.register_buffer("target_mean", torch.zeros(2, outputs))
+            self.register_buffer("target_sd", torch.ones(2, outputs))
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        # Equal output widths do not imply equal descriptors: reversing scales
+        # would silently assign the saved target statistics to different features.
+        spec = state_dict.get(prefix + "patch_spec")
+        if self.target == "patch_distribution" and spec is not None:
+            if not torch.equal(spec.cpu(), self.patch_spec.cpu()):
+                error_msgs.append(f"{prefix}patch descriptor settings do not match the saved checkpoint")
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
 
     @torch.no_grad()
     def _update_gauge(self, views):
@@ -170,14 +236,22 @@ class VectorPrediction3d(nn.Module):
         return ((views - mean) / variance.sqrt().clamp_min(1e-6)).flatten(0, 1)
 
     def forward(self, content):
-        """(2B,C) input-view content vectors -> (2B,1,*grid) other-view predictions."""
+        """Content-only inputs -> other-view spatial grids or flattened distribution coordinates."""
         if content.ndim != 2 or content.shape[1] != self.content_channels:
             raise ValueError(f"Decoder inputs must be only (2B,{self.content_channels}) content vectors")
         if content.shape[0] < 2 or content.shape[0] % 2:
             raise ValueError("content must contain a nonempty even, view-major batch")
         first, second = self.standardized(content).chunk(2, dim=0)
         output = torch.cat((self.decoders[0](first), self.decoders[1](second)))
-        return output if self.target == "quantile" else output.reshape(-1, 1, *self.grid)
+        if self.target == "patch_distribution":
+            # A reconstructed distribution must have ordered quantiles. Sort in
+            # physical target units, since each quantile has its own training SD.
+            n = content.shape[0] // 2
+            mean = self.target_mean.flip(0).repeat_interleave(n, 0)
+            sd = self.target_sd.flip(0).repeat_interleave(n, 0)
+            curves = ((output * sd) + mean).reshape(len(output), -1, len(PATCH_QUANTILES))
+            output = (curves.sort(dim=-1).values.flatten(1) - mean) / sd
+        return output if self.target != "spatial" else output.reshape(-1, 1, *self.grid)
 
     @torch.no_grad()
     def reset_template(self):
@@ -201,7 +275,7 @@ class VectorPrediction3d(nn.Module):
         self.template_sum.add_((targets * weights).sum(1).to(self.template_sum))
         self.template_counts.add_(weights.sum(1).to(self.template_counts))
         self.template_subject_count.add_(n)
-        if self.target == "quantile":
+        if self.target in ("quantile", "patch_distribution"):
             self._fit_rows.append((targets.flatten(2).cpu(), keep.reshape(2, n, -1).cpu()))
 
     @torch.no_grad()
@@ -210,9 +284,9 @@ class VectorPrediction3d(nn.Module):
         if (self.template_subject_count == 0).any():
             raise ValueError("Cannot fit the population template without training subjects in both views")
         self.template.copy_(self.template_sum / self.template_counts.clamp_min(1e-12))
-        self.template_fitted.fill_(True)
-        if self.target == "quantile":
+        if self.target in ("quantile", "patch_distribution"):
             self._fit_quantile_target()
+        self.template_fitted.fill_(True)
 
     def _fit_quantile_target(self):
         """Interior cells, population directions and quantile scale, from the template's own subjects only."""
@@ -232,7 +306,18 @@ class VectorPrediction3d(nn.Module):
             basis[:, interior] = torch.linalg.svd(rows, full_matrices=False).Vh[: self.components]
             self.target_components[view].copy_(basis)
             self.target_interior[view].copy_(interior)
-        quantiles = deviation_quantiles(self, residual.flatten(0, 1)).unflatten(0, (2, -1))
+        if self.target == "patch_distribution":
+            # Bound peak convolution/sort memory while fitting the population.
+            chunks = []
+            for start in range(0, residual.shape[1], 16):
+                chunks.append(
+                    patch_distribution_targets(
+                        self, residual[:, start : start + 16].flatten(0, 1), keep[:, start : start + 16].flatten(0, 1)
+                    ).unflatten(0, (2, -1))
+                )
+            quantiles = torch.cat(chunks, dim=1)
+        else:
+            quantiles = deviation_quantiles(self, residual.flatten(0, 1)).unflatten(0, (2, -1))
         self.target_mean.copy_(quantiles.mean(1))
         self.target_sd.copy_(quantiles.std(1).clamp_min(1e-6))
 
@@ -257,9 +342,14 @@ def vector_prediction_loss(
     prediction = predictor(content)
     normalized, keep = prepare_vector_targets(images, foreground, predictor.grid, occupancy_threshold)
     n = len(prediction) // 2
-    if predictor.target == "quantile":
+    if predictor.target in ("quantile", "patch_distribution"):
         template = predictor.template.detach().to(normalized).repeat_interleave(n, dim=0)
-        quantiles = deviation_quantiles(predictor, ((normalized - template) * keep).flatten(1))
+        residual = ((normalized - template) * keep).flatten(1)
+        quantiles = (
+            patch_distribution_targets(predictor, residual, keep.flatten(1))
+            if predictor.target == "patch_distribution"
+            else deviation_quantiles(predictor, residual)
+        )
         mean, sd = predictor.target_mean.repeat_interleave(n, 0), predictor.target_sd.repeat_interleave(n, 0)
         standardized = ((quantiles - mean) / sd).to(prediction)
         error = (prediction - torch.cat((standardized[n:], standardized[:n]))).square().mean(1)

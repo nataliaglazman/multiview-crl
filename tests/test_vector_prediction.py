@@ -313,7 +313,7 @@ class VectorPredictionTests(unittest.TestCase):
             predictor.finalize_template()
         with self.assertRaisesRegex(ValueError, "components need more"):
             self.quantile_predictor(components=2, subjects=2)
-        with self.assertRaisesRegex(ValueError, "spatial or quantile"):
+        with self.assertRaisesRegex(ValueError, "target must be"):
             VectorPrediction3d(3, (4, 4, 4), target="histogram")
 
     def test_invalid_or_empty_targets_fail_clearly(self):

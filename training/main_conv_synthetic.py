@@ -1294,6 +1294,10 @@ def vector_prediction_report(model, dataset, args, device):
         )
         for batch in loader:
             images = torch.cat(batch["image"], dim=0).as_subclass(torch.Tensor).to(device)
+            if model.vector_prediction.target == "patch_distribution" and "mask" not in batch:
+                raise ValueError(
+                    "Patch-distribution targets require anatomical brain masks; image != 0 excludes T1 lesions"
+                )
             masks = (
                 torch.cat(batch["mask"], dim=0).as_subclass(torch.Tensor).to(device) if "mask" in batch else images != 0
             )
@@ -1473,6 +1477,10 @@ def build_encoder(args):
         vector_prediction_hidden=getattr(args, "vector_prediction_hidden", 128),
         vector_prediction_target=getattr(args, "vector_prediction_target", "spatial"),
         vector_prediction_components=getattr(args, "vector_prediction_components", 8),
+        vector_prediction_patch_size=getattr(args, "vector_prediction_patch_size", 3),
+        vector_prediction_patch_scales=tuple(getattr(args, "vector_prediction_patch_scales", (1, 2))),
+        vector_prediction_patch_projections=getattr(args, "vector_prediction_patch_projections", 8),
+        vector_prediction_patch_seed=getattr(args, "vector_prediction_patch_seed", 1729),
     )
 
 
@@ -1502,6 +1510,10 @@ def fit_vector_prediction_template(model, train_dataset, args, device):
             predictor.reset_template()
             for batch in loader:
                 images = torch.cat(batch["image"], dim=0).as_subclass(torch.Tensor).to(device)
+                if predictor.target == "patch_distribution" and "mask" not in batch:
+                    raise ValueError(
+                        "Patch-distribution targets require anatomical brain masks; image != 0 excludes T1 lesions"
+                    )
                 masks = (
                     torch.cat(batch["mask"], dim=0).as_subclass(torch.Tensor).to(device)
                     if "mask" in batch
@@ -1510,11 +1522,31 @@ def fit_vector_prediction_template(model, train_dataset, args, device):
                 predictor.accumulate_template(images, masks)
             predictor.finalize_template()
     template_hash = hashlib.sha256(predictor.template.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
-    quantile = predictor.target == "quantile"
+    distribution = predictor.target in ("quantile", "patch_distribution")
+    patch_distribution = predictor.target == "patch_distribution"
+    descriptor = None
+    if patch_distribution:
+        from models.patch_distribution import PATCH_QUANTILES
+
+        descriptor = {
+            "patch_size": args.vector_prediction_patch_size,
+            "scales": list(args.vector_prediction_patch_scales),
+            "projections": args.vector_prediction_patch_projections,
+            "projection_seed": args.vector_prediction_patch_seed,
+            "projection_filters_sha256": hashlib.sha256(
+                predictor.patch_filters.detach().cpu().contiguous().numpy().tobytes()
+            ).hexdigest(),
+            "probabilities": list(PATCH_QUANTILES),
+            "geometry": "nonoverlapping average pooling at each scale, then valid stride-1 patch convolution",
+            "output_order": "scale, projection, quantile",
+            "objective": "standardized projected-quantile MSE; approximate sliced Wasserstein-2",
+        }
     return {
         "target": predictor.target,
-        "components": predictor.components if quantile else None,
-        "interior_cells": predictor.target_interior.sum(1).tolist() if quantile else None,
+        "components": predictor.components if distribution else None,
+        "interior_cells": predictor.target_interior.sum(1).tolist() if distribution else None,
+        "decoder_outputs": predictor.decoders[0][-1].out_features,
+        "patch_distribution": descriptor,
         "source": "checkpoint" if restored else "training_subjects",
         "dataset_indices": None if restored else list(range(count)),
         "subjects_per_view": predictor.template_subject_count.detach().cpu().tolist(),
@@ -1804,13 +1836,24 @@ def main():
     elif args.global_loss_weight != 1:
         print(f"objective: the global loss is weighted {args.global_loss_weight:g}", flush=True)
     if args.vector_prediction_weight > 0:
-        target = (
-            f"{args.vector_prediction_grid}, separate target-modality decoders; foreground MSE, deviation strength "
-            f"{args.vector_prediction_deviation_strength:g}, cap {args.vector_prediction_weight_cap:g}"
-            if args.vector_prediction_target == "spatial"
-            else f"quantiles of the other view's interior residual, minus {args.vector_prediction_components} "
-            "population directions, separate target-modality decoders; standardized MSE"
-        )
+        if args.vector_prediction_target == "spatial":
+            target = (
+                f"{args.vector_prediction_grid}, separate target-modality decoders; foreground MSE, deviation strength "
+                f"{args.vector_prediction_deviation_strength:g}, cap {args.vector_prediction_weight_cap:g}"
+            )
+        elif args.vector_prediction_target == "quantile":
+            target = (
+                f"quantiles of the other view's interior residual, minus {args.vector_prediction_components} "
+                "population directions, separate target-modality decoders; standardized MSE"
+            )
+        else:
+            target = (
+                f"projected quantiles of {args.vector_prediction_patch_size}^3 residual patches on grid "
+                f"{args.vector_prediction_grid}, scales {args.vector_prediction_patch_scales}, "
+                f"{args.vector_prediction_patch_projections} fixed directions, seed {args.vector_prediction_patch_seed}; "
+                f"minus {args.vector_prediction_components} population directions; standardized projected-quantile MSE "
+                "(approximate sliced Wasserstein-2), no absolute patch positions"
+            )
         print(
             f"objective: + {args.vector_prediction_weight:g} * vector-only cross-view residual prediction; "
             f"{args.content_channels} exported content units -> {args.vector_prediction_hidden} -> {target}; "
@@ -1892,6 +1935,7 @@ def main():
             "global_loss_weight": args.global_loss_weight,
             "pointwise_loss_weight": args.pointwise_loss_weight,
             "vector_prediction_weight": args.vector_prediction_weight,
+            "vector_prediction_target": args.vector_prediction_target,
             "vector_prediction_template": prediction_template,
             "vector_prediction_parameter_count": (
                 sum(p.numel() for p in model.vector_prediction.parameters())

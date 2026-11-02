@@ -107,6 +107,10 @@ class MultiviewConvEncoder(HelperModule):
         vector_prediction_hidden: int = 128,
         vector_prediction_target: str = "spatial",
         vector_prediction_components: int = 8,
+        vector_prediction_patch_size: int = 3,
+        vector_prediction_patch_scales=(1, 2),
+        vector_prediction_patch_projections: int = 8,
+        vector_prediction_patch_seed: int = 1729,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -398,6 +402,10 @@ class MultiviewConvEncoder(HelperModule):
                     hidden=vector_prediction_hidden,
                     target=vector_prediction_target,
                     components=vector_prediction_components,
+                    patch_size=vector_prediction_patch_size,
+                    patch_scales=vector_prediction_patch_scales,
+                    patch_projections=vector_prediction_patch_projections,
+                    patch_seed=vector_prediction_patch_seed,
                 )
 
     def lesion_modules(self):

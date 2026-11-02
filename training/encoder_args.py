@@ -308,17 +308,39 @@ def build_parser(description=None):
     p.add_argument("--vector-prediction-hidden", type=int, default=128, help="Width of each view's vector-only decoder")
     p.add_argument(
         "--vector-prediction-target",
-        choices=("spatial", "quantile"),
+        choices=("spatial", "quantile", "patch_distribution"),
         default="spatial",
         help="What the decoder predicts of the other view's residual: its --vector-prediction-grid cells, or their "
         "quantiles over the brain's interior after removing --vector-prediction-components population directions, "
-        "which say how much is abnormal and not where",
+        "or projected quantiles of small residual patches (patch_distribution), without absolute position",
     )
     p.add_argument(
         "--vector-prediction-components",
         type=int,
         default=8,
-        help="Population directions a quantile target removes, fitted on the template's training subjects; no labels",
+        help="Population directions a distribution target removes, fitted on the template's training subjects; no labels",
+    )
+    p.add_argument(
+        "--vector-prediction-patch-size", type=int, default=3, help="Odd residual patch width for patch_distribution"
+    )
+    p.add_argument(
+        "--vector-prediction-patch-scales",
+        type=int,
+        nargs="+",
+        default=[1, 2],
+        help="Positive distinct patch scales for patch_distribution; target descriptors are fixed across subjects",
+    )
+    p.add_argument(
+        "--vector-prediction-patch-projections",
+        type=int,
+        default=8,
+        help="Fixed projection directions per residual patch scale, including its central voxel",
+    )
+    p.add_argument(
+        "--vector-prediction-patch-seed",
+        type=int,
+        default=1729,
+        help="Local seed for fixed patch projections; does not alter encoder or training RNG streams",
     )
     p.add_argument(
         "--vector-prediction-template-subjects",
@@ -1063,10 +1085,30 @@ def parse_args(argv=None, description=None):
         p.error("--vector-prediction-grid dimensions must be positive")
     if args.vector_prediction_components < 1:
         p.error("--vector-prediction-components must be positive")
-    if args.vector_prediction_target == "quantile" and (
+    if args.vector_prediction_target in ("quantile", "patch_distribution") and (
         args.vector_prediction_components >= args.vector_prediction_template_subjects
     ):
         p.error("--vector-prediction-components must be below --vector-prediction-template-subjects")
+    if args.vector_prediction_patch_size < 1 or args.vector_prediction_patch_size % 2 == 0:
+        p.error("--vector-prediction-patch-size must be positive and odd")
+    if min(args.vector_prediction_patch_scales) < 1 or len(set(args.vector_prediction_patch_scales)) != len(
+        args.vector_prediction_patch_scales
+    ):
+        p.error("--vector-prediction-patch-scales must be positive and distinct")
+    if args.vector_prediction_patch_projections < 1:
+        p.error("--vector-prediction-patch-projections must be positive")
+    if (
+        args.vector_prediction_target == "patch_distribution"
+        and args.vector_prediction_patch_size == 1
+        and args.vector_prediction_patch_projections != 1
+    ):
+        p.error("A one-voxel --vector-prediction-patch-size needs --vector-prediction-patch-projections 1")
+    if not 0 <= args.vector_prediction_patch_seed < 2**63:
+        p.error("--vector-prediction-patch-seed must lie between 0 and 2**63-1")
+    if args.vector_prediction_target == "patch_distribution" and (
+        min(args.vector_prediction_grid) // max(args.vector_prediction_patch_scales) < args.vector_prediction_patch_size
+    ):
+        p.error("--vector-prediction-grid must fit --vector-prediction-patch-size after every patch scale's pooling")
     if not 0 <= args.vector_prediction_deviation_strength < float("inf"):
         p.error("--vector-prediction-deviation-strength must be finite and nonnegative")
     if not 1 <= args.vector_prediction_weight_cap < float("inf"):

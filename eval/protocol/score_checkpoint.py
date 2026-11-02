@@ -179,6 +179,10 @@ def build_model(cfg, device, state_dict=None):
         vector_prediction_hidden=cfg.get("vector_prediction_hidden", 128),
         vector_prediction_target=cfg.get("vector_prediction_target", "spatial"),
         vector_prediction_components=cfg.get("vector_prediction_components", 8),
+        vector_prediction_patch_size=cfg.get("vector_prediction_patch_size", 3),
+        vector_prediction_patch_scales=tuple(cfg.get("vector_prediction_patch_scales", (1, 2))),
+        vector_prediction_patch_projections=cfg.get("vector_prediction_patch_projections", 8),
+        vector_prediction_patch_seed=cfg.get("vector_prediction_patch_seed", 1729),
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)

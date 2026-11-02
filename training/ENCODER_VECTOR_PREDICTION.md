@@ -302,3 +302,103 @@ capped deviation weighting has not established that it focuses on lesions.
 Anatomy-conditioned residual targets are **not implemented**. Changing the minimum lesion
 radius changes the size task; keep the original small-lesion distribution for the primary
 test.
+
+## Local-patch distribution target: experimental fourth arm
+
+`experiments/encoder/conv_mlp_burden_vector_patch_distribution.yaml` adds
+`--vector-prediction-target patch_distribution`. It retains the quantile arm's
+encoder, anatomy sampler, batch size 32, 20,000-step schedule, one-lesion burden
+prior and contrastive objectives. The encoder map and contrastive patch grid stay
+at **16³**. Only the image-derived prediction target uses a **32³** grid, so this
+change does not add a high-resolution feature path into the exported vector.
+
+The target represents a distribution of local residual patches rather than their
+absolute positions. Its template, eight population PCA directions, brain-interior
+support and target standardization are fitted from the first 300 training
+subjects only, or all training subjects when fewer are available. After removing
+the fitted population directions, it extracts size-three residual patches at
+scales 1 and 2. Only patches fully inside brain support contribute. Eight fixed
+projection directions per scale, fixed with local seed 1729, summarize each patch;
+one direction retains its central voxel. Nineteen quantiles of each projection,
+including the minimum and maximum around the existing 17 quantiles, give a
+**304-coordinate target per view**. The endpoints keep a one-voxel event from
+falling beyond every sampled quantile on a fine grid, but may amplify noise. The
+existing single-voxel quantile target retains its original 17 quantiles. The
+decoder predicts the other view's
+standardized target using the same 14 exported content units and population gauge
+as the other prediction arms.
+
+The loss is **tail-weighted standardized projected-quantile MSE**. Comparing
+projected distributions is inspired by sliced Wasserstein-2 distance; finite
+projections, selected quantiles, training-based coordinate standardization and
+tail weighting make this an approximation rather than exact optimal transport.
+There are no lesion labels, lesion positions, adaptive lesion crops or spatial
+features supplied to the decoder. Foreground support and all fitted transforms
+belong to the detached target path. The inherited oracle anatomy sampler remains
+separate from this label-free auxiliary target.
+
+Scales mean nonoverlapping block averaging by 1 or 2, followed by valid 3³
+convolution with each fixed projection. Patch support intersects the fixed
+population interior and the subject's anatomical brain mask. An explicit mask is
+required: treating `image != 0` as foreground would exclude the zero-valued T1
+lesions. Decoded quantiles are sorted in the target modality's physical residual
+units before standardization, so each predicted curve is monotone. Checkpoints
+record the projection filters and descriptor settings and reject a different
+scale order or projection seed even when the output dimensions match.
+
+Local neighborhoods can distinguish patterns that a distribution of single-voxel
+intensities treats as equivalent. That is a design motivation, **not evidence of
+successful small-lesion learning**. No lesion-recovery result is established for
+this arm. Its recipe weight **0.1** is an exploratory starting value, not a
+validated choice; the trainer's general default prediction weight remains zero.
+
+Preview the new full recipe without training:
+
+```bash
+python scripts/launch.py experiments/encoder/conv_mlp_burden_vector_patch_distribution.yaml \
+  --cluster slurm_bio --dry-run
+```
+
+Start with a matched 2,000-step pilot, changing only the auxiliary weight and run
+tag. These commands launch training when deliberately run; remove nothing from
+the matched encoder, data or contrastive recipe:
+
+```bash
+python scripts/launch.py experiments/encoder/conv_mlp_burden_vector_patch_distribution.yaml \
+  --cluster slurm_bio --set train_steps=2000 vector_prediction_weight=0 \
+  'tag=conv_mlp_burden_patch_distribution_pilot_w0_s{seed}'
+
+python scripts/launch.py experiments/encoder/conv_mlp_burden_vector_patch_distribution.yaml \
+  --cluster slurm_bio --set train_steps=2000 vector_prediction_weight=0.1 \
+  'tag=conv_mlp_burden_patch_distribution_pilot_w01_s{seed}'
+```
+
+Use `--dry-run` on either command to preview it. Change the backend equally in
+both arms; for a local MPS run, add `device=mps` to each command's `--set` values.
+For another paired seed, add `seed=142` to both commands. Data seed stays 42.
+
+Compare the completed pilots on fresh test subjects:
+
+```bash
+python -m eval.encoder.burden_recovery \
+  --run-dirs results/encoder/runs/conv_mlp_burden_patch_distribution_pilot_w0_s42 \
+             results/encoder/runs/conv_mlp_burden_patch_distribution_pilot_w01_s42 \
+  --split test --num-samples 1000 --out burden_patch_distribution_pilot_s42.json
+```
+
+Judge the final content vector against the weight-zero control and each run's
+initial floor, separately by modality and lesion-size bin. Inspect paired
+uncertainty intervals, Spearman within the smallest bins, and preservation of
+other rendered factors. Improved prediction loss or backbone detection alone
+does not meet the exported-vector objective. A 2,000-step pilot is preliminary;
+repeat useful findings across seeds and the full schedule.
+
+The 32³ target and local patch extraction increase target construction, template
+and PCA fitting costs. PCA may remove lesion-related variation along with common
+anatomy, and a fit from 300 subjects may generalize imperfectly. Boundary support,
+noise, blur, finite projections and extreme quantiles can still obscure tiny
+lesions. Pooling patch distributions discards absolute location and can also
+discard distinctions between arrangements of similar patches. The higher target
+resolution does not recover information already lost by the encoder. These are
+limitations to measure with matched controls, not reasons to claim that the new
+objective succeeds or fails before it is tested.
