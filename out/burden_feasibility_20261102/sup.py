@@ -128,9 +128,12 @@ class Dense(nn.Module):
 
 
 class Bank:
-    def __init__(self, root, split, t1key, n=None, target="volume"):
+    def __init__(self, root, split, t1key, n=None, target="volume", residual=False):
         self.t1 = np.load(f"{root}/{split}_{t1key}.npy", mmap_mode="r")
         self.flair = np.load(f"{root}/{split}_flair.npy", mmap_mode="r")
+        self.residuals = (None, None)
+        if residual:
+            self.residuals = tuple(np.load(f"{root}/{split}_{k}_res.npy", mmap_mode="r") for k in (t1key, "flair"))
         self.cells = np.load(f"{root}/{split}_cells.npy", mmap_mode="r")
         self.vox = np.array(np.load(f"{root}/{split}_vox.npy"))
         self.latent = np.array(np.load(f"{root}/{split}_zc.npy")[:, 2])
@@ -141,12 +144,12 @@ class Bank:
         self.n = len(self.vox) if n is None else n
 
     def images(self, indices, device):
+        from warm import stacked_views
+
         order = np.argsort(indices)
-        back = np.argsort(order)
-        chosen = np.asarray(indices)[order]
-        t1 = np.asarray(self.t1[chosen], dtype=np.float32)[back]
-        flair = np.asarray(self.flair[chosen], dtype=np.float32)[back]
-        return torch.from_numpy(np.concatenate((t1, flair)))[:, None].to(device)
+        return stacked_views(self.t1, self.flair, self.residuals, np.asarray(indices)[order], np.argsort(order)).to(
+            device
+        )
 
     def cell_targets(self, indices, device):
         order = np.argsort(indices)
@@ -203,6 +206,7 @@ def main():
     p.add_argument("--lesion-weight", type=float, default=100.0)
     p.add_argument("--init", default=None, help="Start both backbones from this sup.py checkpoint")
     p.add_argument("--target", choices=("volume", "temporal"), default="volume")
+    p.add_argument("--residual", action="store_true", help="Add each view's normative residual as a second channel")
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=False)
     device = a.device
@@ -210,6 +214,11 @@ def main():
     cfg.update(model_seed=a.seed, deterministic=False, deterministic_warn_only=False)
     torch.manual_seed(a.seed)
     encoder = build_model(cfg, device)
+    if a.residual:
+        from warm import widen_input
+
+        widen_input(encoder)
+        encoder = encoder.to(device)
     if a.arm == "normtail":
         from warm import interior_cells
 
@@ -222,9 +231,9 @@ def main():
         state = torch.load(a.init, map_location="cpu")["model"]
         keep = {k: v for k, v in state.items() if k.startswith(("encoder.encoder.", "encoder.encoder_v1."))}
         print("backbone keys loaded", len(keep), model.load_state_dict(keep, strict=False).unexpected_keys, flush=True)
-    train = Bank(a.bank, "train", a.t1key, a.train_subjects, a.target)
-    val = Bank(a.bank, "val", a.t1key, target=a.target)
-    test = Bank(a.bank, "test", a.t1key, target=a.target)
+    train = Bank(a.bank, "train", a.t1key, a.train_subjects, a.target, a.residual)
+    val = Bank(a.bank, "val", a.t1key, target=a.target, residual=a.residual)
+    test = Bank(a.bank, "test", a.t1key, target=a.target, residual=a.residual)
     mean, sd = float(train.vox[: train.n].mean()), float(train.vox[: train.n].std())
     optimizer = torch.optim.AdamW(model.parameters(), lr=a.lr)
     rng = np.random.default_rng(a.seed)

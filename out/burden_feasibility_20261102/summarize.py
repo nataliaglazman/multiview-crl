@@ -88,6 +88,16 @@ def main():
     for name, report in reports.items():
         if name.startswith("ssl"):
             ssl(name, report)
+    report = load(f"{HERE}/bank_nuisance/residual.json")
+    if report:
+        print("\n== fixed filter on the normative residual, nuisance fields on: R2, then cross-view r with FLAIR")
+        for k in (0, 16, 64):
+            shared = report[f"t1_04_vs_flair_k{k}"]
+            best = shared["corr_with_burden_a_b"][shared["best_direction"]]
+            print(
+                f"  K {k:2d} T1 0.4 R2 {report[f't1_04_k{k}']['r2']:.3f} FLAIR {report[f'flair_k{k}']['r2']:.3f} | "
+                f"cross-view r {shared['cross_view_r']:.3f} | best label-free direction, corr with burden {best}"
+            )
 
 
 if __name__ == "__main__":

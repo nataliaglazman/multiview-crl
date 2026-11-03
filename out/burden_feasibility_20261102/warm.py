@@ -4,15 +4,17 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
 
   --pool gap    the recipe's global code: GAP -> head. Through T.training_objective, unchanged. The matched control.
   --pool tail   the global code reads GAP plus normative tail means (TailCode). The patch term is unchanged.
+  --residual    each view's input gains a second channel, its normative residual (residual_bank.py, no labels).
   INIT          cold, or start both backbones from a sup.py checkpoint.
 
 Each eval scores, on fresh test subjects, 5-fold ridge of volume and the anatomy latents from the 14-unit code, from
 the backbone GAP, and for --pool tail from the pooled vector before the head. Labels only ever score.
 
-    python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail] [--t1key t1_00] [--uniform] [--frozen-backbone]
+    python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail] [--residual] [--t1key t1_00] [--uniform]
 """
 
 import argparse
+import copy
 import json
 import sys
 import time
@@ -114,20 +116,43 @@ class TailCode(nn.Module):
         return torch.cat([self.head(part) for part in self.pooled(h)], 0)
 
 
+def widen_input(model):
+    """Two input channels, image then residual. The image weights are kept and both backbones stay identical."""
+    first = model.encoder.layers[0][0]
+    wide = nn.Conv3d(2, first.out_channels, first.kernel_size, first.stride, first.padding)
+    with torch.no_grad():
+        wide.weight[:, 0] = first.weight[:, 0]
+        wide.bias.copy_(first.bias)
+    model.encoder.layers[0][0] = wide
+    model.encoder_v1.layers[0][0] = copy.deepcopy(wide)
+
+
+def stacked_views(t1, flair, residuals, chosen, back):
+    """(2B, channels, D, H, W) view-major images, with each view's residual as a second channel when it has one."""
+    views = []
+    for view, extra in zip((t1, flair), residuals):
+        rows = [np.asarray(view[chosen], dtype=np.float32)[back]]
+        if extra is not None:
+            rows.append(np.asarray(extra[chosen], dtype=np.float32)[back])
+        views.append(np.stack(rows, 1))
+    return torch.from_numpy(np.concatenate(views))
+
+
 class Bank:
-    def __init__(self, root, split, t1key, n=None):
+    def __init__(self, root, split, t1key, n=None, residual=False):
         self.t1 = np.load(f"{root}/{split}_{t1key}.npy", mmap_mode="r")
         self.flair = np.load(f"{root}/{split}_flair.npy", mmap_mode="r")
+        self.residuals = (None, None)
+        if residual:
+            self.residuals = tuple(np.load(f"{root}/{split}_{k}_res.npy", mmap_mode="r") for k in (t1key, "flair"))
         self.vox = np.array(np.load(f"{root}/{split}_vox.npy"), dtype=np.float64)[:n]
         self.zc = np.array(np.load(f"{root}/{split}_zc.npy"), dtype=np.float64)[:n]
 
     def images(self, indices, device):
         order = np.argsort(indices)
-        back = np.argsort(order)
-        chosen = np.asarray(indices)[order]
-        t1 = np.asarray(self.t1[chosen], dtype=np.float32)[back]
-        flair = np.asarray(self.flair[chosen], dtype=np.float32)[back]
-        return torch.from_numpy(np.concatenate((t1, flair)))[:, None].to(device)
+        return stacked_views(self.t1, self.flair, self.residuals, np.asarray(indices)[order], np.argsort(order)).to(
+            device
+        )
 
 
 @torch.no_grad()
@@ -184,6 +209,7 @@ def main():
     p.add_argument("steps", type=int)
     p.add_argument("every", type=int)
     p.add_argument("--pool", choices=("gap", "tail"), default="gap")
+    p.add_argument("--residual", action="store_true", help="Add each view's normative residual as a second channel")
     p.add_argument("--t1key", default="t1_00")
     p.add_argument("--uniform", action="store_true")
     p.add_argument("--frozen-backbone", action="store_true")
@@ -198,6 +224,8 @@ def main():
     seed = args.model_seed if a.seed is None else a.seed
     torch.manual_seed(seed)
     model = T.build_encoder(args)
+    if a.residual:
+        widen_input(model)
     if a.init != "cold":
         state = torch.load(a.init, map_location="cpu")["model"]
         keep = {
@@ -216,8 +244,8 @@ def main():
         for name, parameter in model.named_parameters():
             if name.startswith("encoder."):
                 parameter.requires_grad_(False)
-    train = Bank(a.bank, "train", a.t1key)
-    test = Bank(a.bank, "test", a.t1key, a.test_subjects)
+    train = Bank(a.bank, "train", a.t1key, residual=a.residual)
+    test = Bank(a.bank, "test", a.t1key, a.test_subjects, a.residual)
     neighbours = cb.nearest_neighbours(train.zc[:, ANATOMY], args.stratify_neighbours)
     sampler = cb.NeighbourhoodBatchSampler(neighbours, args.batch_size, args.loader_seed, 0.0)
     rng = np.random.default_rng(args.seed)
@@ -261,13 +289,13 @@ def main():
         indices = np.asarray(next(source))
         x = train.images(indices, a.device)
         if pool is None:
-            _, loss, terms = T.training_objective(model, x, args, sim, crit, None)
+            _, loss, terms = T.training_objective(model, x, args, sim, crit, x[:, :1] != 0)
         else:
             h = model._encode(x, 2, None)
             patches = model.patch_readout(model._patch_pool(h, args.train_patch_grid).transpose(1, 2)).transpose(1, 2)
             terms = {
                 "global": T.contrastive_loss(pool(h), model, args, sim, crit, None),
-                "patch": T.patch_contrastive_loss(patches, model, args, sim, crit, x != 0, None, None),
+                "patch": T.patch_contrastive_loss(patches, model, args, sim, crit, x[:, :1] != 0, None, None),
             }
             loss = terms["global"] + args.patch_loss_weight * terms["patch"]
         optimizer.zero_grad(set_to_none=True)

@@ -4,6 +4,8 @@ Same subjects in every array. fixed_reference comes from the training split and 
 training.encoder_burden_control does. FLAIR does not depend on the T1 lesion value.
 
     python out/burden_feasibility_20261102/bank.py BANK_DIR [--t1-values 0.0 0.4] [--radius R] [--temporal-sigma S]
+        [--nuisance]
+--nuisance turns off --synthetic-clean-content, so the deformation and fissure fields add fine anatomy every subject has.
 Writes {split}_{t1_00,t1_04,flair}.npy (float16), {split}_{zc,vox}.npy, {split}_cells.npy (16^3 mean load).
 """
 
@@ -27,7 +29,7 @@ WORKERS = int(os.environ.get("BANK_WORKERS", 8))
 T1_KEYS = {0.0: "t1_00", 0.4: "t1_04"}
 
 
-def run_args(t1_value, radius=None, sigma=None):
+def run_args(t1_value, radius=None, sigma=None, nuisance=False):
     flags = (HERE / "reference" / "flags.txt").read_text().split()
     args = encoder_args.parse_args(flags)
     args.cache = False
@@ -36,6 +38,8 @@ def run_args(t1_value, radius=None, sigma=None):
         args.synthetic_lesion_radius = radius
     if sigma is not None:
         args.synthetic_temporal_sigma = sigma
+    if nuisance:
+        args.synthetic_clean_content = False
     return args
 
 
@@ -66,7 +70,7 @@ def chunk(job):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for first, t1_value in zip((True, False), t1_values):
-            args = run_args(t1_value, options["radius"], options["sigma"])
+            args = run_args(t1_value, options["radius"], options["sigma"], options["nuisance"])
             train = T.make_dataset(args, "train", options["sizes"]["train"])
             train[0]
             ds = T.make_dataset(args, split, n)
@@ -102,6 +106,7 @@ def main():
     p.add_argument("--t1-values", type=float, nargs="+", default=[0.0, 0.4], choices=sorted(T1_KEYS))
     p.add_argument("--radius", type=float, default=None)
     p.add_argument("--temporal-sigma", type=float, default=None)
+    p.add_argument("--nuisance", action="store_true")
     p.add_argument("--sizes", type=int, nargs=3, default=[2000, 400, 1000], metavar=("TRAIN", "VAL", "TEST"))
     a = p.parse_args()
     os.makedirs(a.root, exist_ok=True)
@@ -110,6 +115,7 @@ def main():
         "t1_values": a.t1_values,
         "radius": a.radius,
         "sigma": a.temporal_sigma,
+        "nuisance": a.nuisance,
     }
     jobs = []
     for split, n in options["sizes"].items():

@@ -1,13 +1,16 @@
 #!/bin/bash
 # Burden feasibility on a CUDA machine. Run from anywhere inside the repository, on the branch that holds this folder.
 #
-#   bash out/burden_feasibility_20261102/run_pc.sh            all four stages, in order
-#   bash out/burden_feasibility_20261102/run_pc.sh 1 3        only those stages
+#   bash out/burden_feasibility_20261102/run_pc.sh            all six stages, in order
+#   bash out/burden_feasibility_20261102/run_pc.sh 5 6        only those stages
 #
 # Stage 1 Can the encoder learn it from labels? Dense-label detectors, then the exact vector against pooling changes.
 # Stage 2 Warm starts from the detector, tail pooling at T1 0.4, labels on temporal sigma 0.09 as a positive control.
 # Stage 3 The real test: self-supervised, no labels, end to end. GAP control against tail pooling.
 # Stage 4 Is it size? The same recipes with 2x and 4x lesion volume.
+# Stage 5 T1 lesion value 0.4: each view's normative residual as a second input channel, no labels, with and without
+#         tail pooling, and with labels through the same input as a ceiling.
+# Stage 6 Realism: the same at T1 0.4 with the nuisance fields on, so anatomy is not unusually low-dimensional.
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, so rerunning after a crash or an out-of-memory error continues where it stopped.
@@ -20,7 +23,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4}
+STAGES=${*:-1 2 3 4 5 6}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
 mkdir -p "$D/logs" "$D/runs"
@@ -37,6 +40,14 @@ bank() { # bank DIR [bank.py options]
     if grep -q "BANK DONE" "$dir.log" 2>/dev/null; then return; fi
     echo "$(date +%H:%M) render $dir"
     "$PY" "$D/bank.py" "$dir" "$@" > "$dir.log" 2>&1 || { echo "bank failed, see $dir.log"; exit 1; }
+}
+
+residual_bank() { # residual_bank BANK KEY...
+    local dir=$1; shift
+    if [ "$DRY" = 1 ]; then echo "$PY $D/residual_bank.py $dir $*"; return; fi
+    if grep -q "RESIDUAL DONE" "$dir.residual.log" 2>/dev/null; then return; fi
+    echo "$(date +%H:%M) residuals for $dir"
+    "$PY" "$D/residual_bank.py" "$dir" "$@" > "$dir.residual.log" 2>&1 || { echo "residual bank failed, see $dir.residual.log"; exit 1; }
 }
 
 arm() { # arm NAME COMMAND...
@@ -64,8 +75,9 @@ sup() { # sup NAME BANK ARM T1KEY STEPS [options]
     arm "$name" "$PY" "$D/sup.py" "$where" "$D/runs/$name" "$kind" "$key" "$steps" 500 --batch "$BATCH" "$@"
 }
 
-ssl() { # ssl NAME BANK POOL T1KEY STEPS
-    arm "$1" "$PY" "$D/warm.py" "$2" "$D/runs/$1" cold "$5" 1000 --pool "$3" --t1key "$4"
+ssl() { # ssl NAME BANK POOL T1KEY STEPS [options]
+    local name=$1 where=$2 pool=$3 key=$4 steps=$5; shift 5
+    arm "$name" "$PY" "$D/warm.py" "$where" "$D/runs/$name" cold "$steps" 1000 --pool "$pool" --t1key "$key" "$@"
 }
 
 MAIN=$D/bank
@@ -110,6 +122,30 @@ if wants 4; then
     ssl ssl_gap_r0126 "$D/bank_r0126" gap t1_00 6000
     ssl ssl_gap_r0159 "$D/bank_r0159" gap t1_00 6000
     finish vector_r0126 vector_r0159 ssl_gap_r0126 ssl_gap_r0159
+fi
+
+if wants 5; then
+    residual_bank "$MAIN" t1_04 t1_00 flair
+    sup normtail_res_t104 "$MAIN" normtail t1_04 6000 --residual
+    ssl ssl_restail_t104 "$MAIN" tail t1_04 6000 --residual
+    ssl ssl_resgap_t104 "$MAIN" gap t1_04 6000 --residual
+    ssl ssl_restail_t100 "$MAIN" tail t1_00 6000 --residual
+    finish normtail_res_t104 ssl_restail_t104 ssl_resgap_t104 ssl_restail_t100
+fi
+
+if wants 6; then
+    NOISY=$D/bank_nuisance
+    bank "$NOISY" --nuisance
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/residual.py $NOISY $NOISY/residual.json"
+    elif [ ! -f "$NOISY/residual.json" ]; then
+        echo "$(date +%H:%M) fixed-filter residual read, nuisance fields on"
+        "$PY" "$D/residual.py" "$NOISY" "$NOISY/residual.json" > "$D/logs/residual_nuisance.log" 2>&1
+    fi
+    residual_bank "$NOISY" t1_04 flair
+    ssl ssl_restail_t104_nuisance "$NOISY" tail t1_04 6000 --residual
+    ssl ssl_gap_t104_nuisance "$NOISY" gap t1_04 6000
+    finish ssl_restail_t104_nuisance ssl_gap_t104_nuisance
 fi
 
 echo "$(date +%H:%M) all requested stages done"
