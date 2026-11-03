@@ -99,14 +99,16 @@ class TailPool(nn.Module):
 
 
 class NormTail(nn.Module):
-    """warm.TailCode's pool with labels: normative tails over interior cells -> 14 units -> per-view linear scalar."""
+    """warm.TailCode's pool with labels: normative tails over interior cells -> 14 units -> per-view linear scalar.
 
-    def __init__(self, encoder, keep):
+    With ``tails=False`` it keeps only TailCode's GAP, gauge and head (the gapnorm arm)."""
+
+    def __init__(self, encoder, keep, tails=True):
         super().__init__()
         from warm import TailCode
 
         self.encoder = encoder
-        self.pool = TailCode(keep, latent=14)
+        self.pool = TailCode(keep, latent=14, thresholds=TailCode.THRESHOLDS if tails else ())
         self.heads = nn.ModuleList(nn.Linear(14, 1) for _ in range(2))
 
     def forward(self, images):
@@ -194,7 +196,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("bank")
     p.add_argument("out", type=Path)
-    p.add_argument("arm", choices=("vector", "cellsum", "dense", "tail", "normtail"))
+    p.add_argument("arm", choices=("vector", "cellsum", "dense", "tail", "normtail", "gapnorm"))
     p.add_argument("t1key", choices=("t1_00", "t1_04"))
     p.add_argument("steps", type=int)
     p.add_argument("every", type=int)
@@ -219,10 +221,10 @@ def main():
 
         widen_input(encoder)
         encoder = encoder.to(device)
-    if a.arm == "normtail":
+    if a.arm in ("normtail", "gapnorm"):
         from warm import interior_cells
 
-        model = NormTail(encoder, interior_cells(a.bank)).to(device)
+        model = NormTail(encoder, interior_cells(a.bank), tails=a.arm == "normtail").to(device)
     else:
         model = {"vector": BurdenControl, "cellsum": CellSum, "dense": Dense, "tail": TailPool}[a.arm](encoder).to(
             device

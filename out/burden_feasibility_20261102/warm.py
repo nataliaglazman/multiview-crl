@@ -4,7 +4,10 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
 
   --pool gap    the recipe's global code: GAP -> head. Through T.training_objective, unchanged. The matched control.
   --pool tail   the global code reads GAP plus normative tail means (TailCode). The patch term is unchanged.
+  --pool gapnorm  GAP through TailCode's BatchNorm gauge and head, no tails: separates the tails from the gauge.
   --residual    each view's input gains a second channel, its normative residual (residual_bank.py, no labels).
+  --queue N     the global InfoNCE also takes N earlier subjects as negatives, from a momentum encoder (MoCo-style),
+                so the loss keeps paying after the batch of 32 is told apart. The patch term is unchanged.
   INIT          cold, or start both backbones from a sup.py checkpoint.
 
 Each eval scores, on fresh test subjects, 5-fold ridge of volume and the anatomy latents from the 14-unit code, from
@@ -75,11 +78,13 @@ class TailCode(nn.Module):
     pool adds the mean over interior cells of ReLU(z - t) and ReLU(-z - t) at t = 2, 3, 4, log-compressed, so a cell
     in its normal range contributes exactly nothing and the loss's gradient reaches rare cells directly. Nothing here
     knows about lesions, and every factor goes through this one route.
+
+    ``thresholds=()`` keeps only the GAP and the BatchNorm gauge: the control that separates the tails from the gauge.
     """
 
     THRESHOLDS = (2.0, 3.0, 4.0)
 
-    def __init__(self, keep, channels=64, latent=18, momentum=0.01):
+    def __init__(self, keep, channels=64, latent=18, momentum=0.01, thresholds=THRESHOLDS):
         super().__init__()
         self.register_buffer("keep", torch.from_numpy(keep))
         cells = int(keep.sum())
@@ -87,7 +92,8 @@ class TailCode(nn.Module):
         self.register_buffer("var", torch.ones(2, channels, cells))
         self.register_buffer("started", torch.zeros(2, dtype=torch.bool))
         self.momentum = momentum
-        width = channels * (1 + 2 * len(self.THRESHOLDS))
+        self.thresholds = tuple(thresholds)
+        width = channels * (1 + 2 * len(self.thresholds))
         self.gauges = nn.ModuleList(nn.BatchNorm1d(width, affine=False) for _ in range(2))
         self.head = nn.Sequential(nn.Linear(width, 100), nn.LeakyReLU(), nn.Linear(100, latent))
 
@@ -107,13 +113,82 @@ class TailCode(nn.Module):
                         self.var[view] += self.momentum * ((rows - self.mean[view]).square().mean(0) - self.var[view])
             z = (rows - self.mean[view]) / (self.var[view].sqrt() + 1e-6)
             parts = [part.mean((2, 3, 4))]
-            for t in self.THRESHOLDS:
+            for t in self.thresholds:
                 parts += [torch.log1p(100 * F.relu(z - t).mean(2)), torch.log1p(100 * F.relu(-z - t).mean(2))]
             out.append(self.gauges[view](torch.cat(parts, 1)))
         return out
 
     def forward(self, h):
         return torch.cat([self.head(part) for part in self.pooled(h)], 0)
+
+
+class CodeGauge:
+    """Running per-view mean and SD of the online content code: the queue's stand-in for per-batch standardization,
+    which cannot reach codes from earlier batches. Same spread-about-the-running-mean rule as TailCode."""
+
+    def __init__(self, units, device, momentum=0.01):
+        self.mean = torch.zeros(2, units, device=device)
+        self.var = torch.ones(2, units, device=device)
+        self.started = False
+        self.momentum = momentum
+
+    @torch.no_grad()
+    def update(self, codes):
+        if not self.started:
+            self.mean.copy_(codes.mean(1))
+            self.var.copy_(codes.var(1, unbiased=False))
+            self.started = True
+            return
+        self.mean += self.momentum * (codes.mean(1) - self.mean)
+        self.var += self.momentum * ((codes - self.mean[:, None]).square().mean(1) - self.var)
+
+    def __call__(self, codes, view):
+        return F.normalize((codes - self.mean[view]) / (self.var[view].sqrt() + 1e-6), dim=-1)
+
+
+class NegativeQueue:
+    """Earlier batches' momentum-encoder codes per view, with their bank indices, so no subject is its own negative."""
+
+    def __init__(self, size, units, device):
+        self.codes = torch.zeros(2, size, units, device=device)
+        self.ids = torch.full((size,), -1, dtype=torch.long, device=device)
+        self.pointer = 0
+
+    @torch.no_grad()
+    def push(self, keys, ids):
+        rows = (self.pointer + torch.arange(keys.shape[1], device=keys.device)) % self.codes.shape[1]
+        self.codes[:, rows] = keys
+        self.ids[rows] = ids
+        self.pointer = int((self.pointer + keys.shape[1]) % self.codes.shape[1])
+
+
+def queue_infonce(queries, keys, queue, ids, gauge, tau):
+    """Cross-view InfoNCE with many negatives, as MoCo: each online code against the other view's momentum key of the
+    same subject; negatives are the batch's other keys and every queued key of a different subject. (2, B, units) in,
+    mean of both directions out."""
+    filled = queue.ids >= 0
+    stored_ids = queue.ids[filled]
+    total = 0.0
+    for a, b in ((0, 1), (1, 0)):
+        q = gauge(queries[a], a)
+        batch = q @ gauge(keys[b], b).T / tau
+        past = q @ gauge(queue.codes[b][filled], b).T / tau
+        past = past.masked_fill(stored_ids[None, :] == ids[:, None], float("-inf"))
+        logits = torch.cat([batch, past], 1)
+        total = total + F.cross_entropy(logits, torch.arange(len(q), device=q.device))
+    return total / 2
+
+
+@torch.no_grad()
+def momentum_update(online, target, momentum):
+    for kept, live in zip(target.parameters(), online.parameters()):
+        kept.mul_(momentum).add_(live.detach(), alpha=1 - momentum)
+    for kept, live in zip(target.buffers(), online.buffers()):
+        kept.copy_(live)
+
+
+def global_code(model, pool, h, x):
+    return model._global_code(h, x, 2) if pool is None else pool(h)
 
 
 def widen_input(model):
@@ -208,8 +283,10 @@ def main():
     p.add_argument("init")
     p.add_argument("steps", type=int)
     p.add_argument("every", type=int)
-    p.add_argument("--pool", choices=("gap", "tail"), default="gap")
+    p.add_argument("--pool", choices=("gap", "tail", "gapnorm"), default="gap")
     p.add_argument("--residual", action="store_true", help="Add each view's normative residual as a second channel")
+    p.add_argument("--queue", type=int, default=0, help="Negatives from a momentum-encoder queue of this many subjects")
+    p.add_argument("--queue-momentum", type=float, default=0.99)
     p.add_argument("--t1key", default="t1_00")
     p.add_argument("--uniform", action="store_true")
     p.add_argument("--frozen-backbone", action="store_true")
@@ -237,9 +314,10 @@ def main():
         print("loaded", len(keep), "unexpected", result.unexpected_keys, flush=True)
     model = model.to(a.device)
     pool = None
-    if a.pool == "tail":
-        pool = TailCode(interior_cells(a.bank)).to(a.device)
-        print("interior cells", int(pool.keep.sum()), flush=True)
+    if a.pool != "gap":
+        pool = TailCode(interior_cells(a.bank), thresholds=() if a.pool == "gapnorm" else TailCode.THRESHOLDS)
+        pool = pool.to(a.device)
+        print("interior cells", int(pool.keep.sum()), "tail thresholds", pool.thresholds, flush=True)
     if a.frozen_backbone:
         for name, parameter in model.named_parameters():
             if name.startswith("encoder."):
@@ -263,6 +341,17 @@ def main():
         parameters += list(pool.parameters())
     optimizer = torch.optim.AdamW(parameters, lr=args.lr)
     sim, crit = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
+    queue = None
+    if a.queue > 0:
+        if a.uniform:
+            raise ValueError("--queue assumes distinct subjects in a batch, which uniform sampling does not guarantee")
+        queue = NegativeQueue(a.queue, 14, a.device)
+        gauge = CodeGauge(14, a.device)
+        momentum_model = copy.deepcopy(model).eval()
+        momentum_pool = None if pool is None else copy.deepcopy(pool).eval()
+        for frozen in (momentum_model, momentum_pool):
+            if frozen is not None:
+                frozen.requires_grad_(False)
     report = {"args": {k: str(v) for k, v in vars(a).items()}, "history": []}
 
     def record(step, terms):
@@ -288,7 +377,22 @@ def main():
     for step in range(1, a.steps + 1):
         indices = np.asarray(next(source))
         x = train.images(indices, a.device)
-        if pool is None:
+        if queue is not None:
+            h = model._encode(x, 2, None)
+            queries = torch.stack(global_code(model, pool, h, x)[:, :14].chunk(2))
+            with torch.no_grad():
+                keys = torch.stack(
+                    global_code(momentum_model, momentum_pool, momentum_model._encode(x, 2, None), x)[:, :14].chunk(2)
+                )
+            gauge.update(queries.detach())
+            ids = torch.as_tensor(indices, device=a.device)
+            patches = model.patch_readout(model._patch_pool(h, args.train_patch_grid).transpose(1, 2)).transpose(1, 2)
+            terms = {
+                "global": queue_infonce(queries, keys, queue, ids, gauge, args.tau),
+                "patch": T.patch_contrastive_loss(patches, model, args, sim, crit, x[:, :1] != 0, None, None),
+            }
+            loss = terms["global"] + args.patch_loss_weight * terms["patch"]
+        elif pool is None:
             _, loss, terms = T.training_objective(model, x, args, sim, crit, x[:, :1] != 0)
         else:
             h = model._encode(x, 2, None)
@@ -302,6 +406,11 @@ def main():
         loss.backward()
         torch.nn.utils.clip_grad_norm_(parameters, args.grad_clip)
         optimizer.step()
+        if queue is not None:
+            momentum_update(model, momentum_model, a.queue_momentum)
+            if pool is not None:
+                momentum_update(pool, momentum_pool, a.queue_momentum)
+            queue.push(keys, ids)
         keep["global"] += float(terms["global"]) / 50
         keep["patch"] += float(terms["patch"]) / 50
         if step % 50 == 0:

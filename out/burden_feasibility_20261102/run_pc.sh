@@ -11,6 +11,9 @@
 # Stage 5 T1 lesion value 0.4: each view's normative residual as a second input channel, no labels, with and without
 #         tail pooling, and with labels through the same input as a ceiling.
 # Stage 6 Realism: the same at T1 0.4 with the nuisance fields on, so anatomy is not unusually low-dimensional.
+# Stage 7 Two follow-ups. Gauge control: GAP through the tail arms' BatchNorm gauge and head with no tails, with and
+#         without labels, to separate the tails from the gauge. Queue: QUEUE earlier subjects as extra negatives from
+#         a momentum encoder, to test whether the 32-subject batch is why each arm keeps only some factors.
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, so rerunning after a crash or an out-of-memory error continues where it stopped.
@@ -23,7 +26,8 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6}
+STAGES=${*:-1 2 3 4 5 6 7}
+QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
 mkdir -p "$D/logs" "$D/runs"
@@ -146,6 +150,23 @@ if wants 6; then
     ssl ssl_restail_t104_nuisance "$NOISY" tail t1_04 6000 --residual
     ssl ssl_gap_t104_nuisance "$NOISY" gap t1_04 6000
     finish ssl_restail_t104_nuisance ssl_gap_t104_nuisance
+fi
+
+if wants 7; then
+    NOISY=$D/bank_nuisance
+    bank "$NOISY" --nuisance
+    residual_bank "$MAIN" t1_04 t1_00 flair
+    residual_bank "$NOISY" t1_04 flair
+    sup gapnorm_t100 "$MAIN" gapnorm t1_00 6000
+    sup gapnorm_res_t104 "$MAIN" gapnorm t1_04 6000 --residual
+    ssl ssl_gapnorm_t100 "$MAIN" gapnorm t1_00 6000
+    ssl ssl_resgapnorm_t104 "$MAIN" gapnorm t1_04 6000 --residual
+    ssl ssl_queue_gap_t100 "$MAIN" gap t1_00 6000 --queue "$QUEUE"
+    ssl ssl_queue_restail_t104 "$MAIN" tail t1_04 6000 --residual --queue "$QUEUE"
+    ssl ssl_queue_gap_t104_nuisance "$NOISY" gap t1_04 6000 --queue "$QUEUE"
+    ssl ssl_queue_restail_t104_nuisance "$NOISY" tail t1_04 6000 --residual --queue "$QUEUE"
+    finish gapnorm_t100 gapnorm_res_t104 ssl_gapnorm_t100 ssl_resgapnorm_t104 ssl_queue_gap_t100 \
+        ssl_queue_restail_t104 ssl_queue_gap_t104_nuisance ssl_queue_restail_t104_nuisance
 fi
 
 echo "$(date +%H:%M) all requested stages done"
