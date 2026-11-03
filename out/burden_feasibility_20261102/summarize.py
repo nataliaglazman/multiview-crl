@@ -103,7 +103,9 @@ def main():
     if os.path.exists(f"{HERE}/audit.txt"):
         print()
         with open(f"{HERE}/audit.txt") as stream:
-            print("".join(line for line in stream if not line.startswith(("auditing", "skipping"))), end="")
+            print(
+                "".join(line for line in stream if not line.startswith(("auditing", "skipping", "mode check"))), end=""
+            )
 
 
 if __name__ == "__main__":

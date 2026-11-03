@@ -19,6 +19,12 @@
 #         and how well it tells subjects apart in uniform and in anatomy-matched sets. Then the batch rule, which every
 #         arm so far shared: the oracle neighbourhoods match exactly the six anatomy factors we score. Uniform batches,
 #         uniform with the queue, and neighbourhoods rebuilt every 500 steps from the model's own code (no labels).
+# Stage 9 The tail arms' BatchNorm gauge uses batch statistics in training and running ones at test, and neighbourhood
+#         batches make the two differ. First the audit adds a mode check to every finished run (no training): test
+#         retrieval with each statistic, and retrieval on training subjects. Then --gauge running, one normalization
+#         in both: a 6,000-step control against ssl_restail_t104, and 20,000-step code-batch arms (alone, with the
+#         queue, and with the queue and the nuisance fields on), to see whether anatomy keeps returning while burden
+#         holds.
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, so rerunning after a crash or an out-of-memory error continues where it stopped.
@@ -31,7 +37,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8}
+STAGES=${*:-1 2 3 4 5 6 7 8 9}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -84,9 +90,9 @@ sup() { # sup NAME BANK ARM T1KEY STEPS [options]
     arm "$name" "$PY" "$D/sup.py" "$where" "$D/runs/$name" "$kind" "$key" "$steps" 500 --batch "$BATCH" "$@"
 }
 
-ssl() { # ssl NAME BANK POOL T1KEY STEPS [options]
+ssl() { # ssl NAME BANK POOL T1KEY STEPS [options]; EVERY=N before the call sets the eval interval (default 1000)
     local name=$1 where=$2 pool=$3 key=$4 steps=$5; shift 5
-    arm "$name" "$PY" "$D/warm.py" "$where" "$D/runs/$name" cold "$steps" 1000 --pool "$pool" --t1key "$key" "$@"
+    arm "$name" "$PY" "$D/warm.py" "$where" "$D/runs/$name" cold "$steps" "${EVERY:-1000}" --pool "$pool" --t1key "$key" "$@"
 }
 
 audit() { # audit every finished self-supervised run; runs already audited at the same step are reused from audit.json
@@ -189,6 +195,24 @@ if wants 8; then
     ssl ssl_uni_gap_t100 "$MAIN" gap t1_00 6000 --uniform
     ssl ssl_uni_tail_t100 "$MAIN" tail t1_00 6000 --uniform
     finish ssl_uni_restail_t104 ssl_uni_queue_restail_t104 ssl_code_restail_t104 ssl_uni_gap_t100 ssl_uni_tail_t100
+    audit
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 9; then
+    NOISY=$D/bank_nuisance
+    bank "$NOISY" --nuisance
+    residual_bank "$MAIN" t1_04 t1_00 flair
+    residual_bank "$NOISY" t1_04 flair
+    audit
+    ssl ssl_run_restail_t104 "$MAIN" tail t1_04 6000 --residual --gauge running
+    EVERY=2000 ssl ssl_code_run_restail_t104_20k "$MAIN" tail t1_04 20000 --residual --code-batches 500 --gauge running
+    EVERY=2000 ssl ssl_code_run_queue_restail_t104_20k "$MAIN" tail t1_04 20000 --residual --code-batches 500 \
+        --gauge running --queue "$QUEUE"
+    EVERY=2000 ssl ssl_code_run_queue_restail_t104_nuisance_20k "$NOISY" tail t1_04 20000 --residual \
+        --code-batches 500 --gauge running --queue "$QUEUE"
+    finish ssl_run_restail_t104 ssl_code_run_restail_t104_20k ssl_code_run_queue_restail_t104_20k \
+        ssl_code_run_queue_restail_t104_nuisance_20k
     audit
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi

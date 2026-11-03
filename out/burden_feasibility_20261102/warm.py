@@ -8,6 +8,9 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
   --residual    each view's input gains a second channel, its normative residual (residual_bank.py, no labels).
   --queue N     the global InfoNCE also takes N earlier subjects as negatives, from a momentum encoder (MoCo-style),
                 so the loss keeps paying after the batch of 32 is told apart. The patch term is unchanged.
+  --gauge running  TailCode's gauge standardizes with running statistics in training as at test. The default BatchNorm
+                uses each batch's own statistics in training and running ones at test, which differ when batches are
+                neighbourhoods; the momentum encoder then also differs from the online one.
   INIT          cold, or start both backbones from a sup.py checkpoint.
 
 Batches: by default an anchor and 31 of its 50 nearest training subjects on the six anatomy factors (the recipe's
@@ -18,8 +21,8 @@ logs how far its neighbourhoods match anatomy, lesion position and burden (label
 Each eval scores, on fresh test subjects, 5-fold ridge of volume and the anatomy latents from the 14-unit code, from
 the backbone GAP, and for --pool tail from the pooled vector before the head. Labels only ever score.
 
-    python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail] [--residual] [--t1key t1_00]
-        [--uniform | --code-batches K] [--queue N]
+    python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail|gapnorm] [--gauge batch|running] [--residual]
+        [--t1key t1_00] [--uniform | --code-batches K] [--queue N]
 """
 
 import argparse
@@ -77,6 +80,31 @@ def interior_cells(root, occupancy=0.9):
     return (cells >= occupancy).flatten().numpy()
 
 
+class RunningGauge(nn.Module):
+    """Per-feature standardization by a running mean and SD, updated only in training and applied the same way in
+    training and at test. The spread is about the running mean, as in TailCode, so it is the population's spread even
+    when a batch is a neighbourhood."""
+
+    def __init__(self, width, momentum=0.01):
+        super().__init__()
+        self.register_buffer("mean", torch.zeros(width))
+        self.register_buffer("var", torch.ones(width))
+        self.register_buffer("started", torch.zeros((), dtype=torch.bool))
+        self.momentum = momentum
+
+    def forward(self, x):
+        if self.training:
+            with torch.no_grad():
+                if not self.started:
+                    self.mean.copy_(x.mean(0))
+                    self.var.copy_(x.var(0, unbiased=False))
+                    self.started.fill_(True)
+                else:
+                    self.mean += self.momentum * (x.mean(0) - self.mean)
+                    self.var += self.momentum * ((x - self.mean).square().mean(0) - self.var)
+        return (x - self.mean) / (self.var + 1e-5).sqrt()
+
+
 class TailCode(nn.Module):
     """The global code from GAP plus normative tail means, through the recipe's head shape.
 
@@ -87,12 +115,16 @@ class TailCode(nn.Module):
     knows about lesions, and every factor goes through this one route.
 
     ``thresholds=()`` keeps only the GAP and the BatchNorm gauge: the control that separates the tails from the gauge.
+    ``gauge="running"`` replaces the BatchNorm gauge with RunningGauge, so the head sees one normalization in training
+    and at test.
     """
 
     THRESHOLDS = (2.0, 3.0, 4.0)
 
-    def __init__(self, keep, channels=64, latent=18, momentum=0.01, thresholds=THRESHOLDS):
+    def __init__(self, keep, channels=64, latent=18, momentum=0.01, thresholds=THRESHOLDS, gauge="batch"):
         super().__init__()
+        if gauge not in ("batch", "running"):
+            raise ValueError(f"gauge must be batch or running, got {gauge!r}")
         self.register_buffer("keep", torch.from_numpy(keep))
         cells = int(keep.sum())
         self.register_buffer("mean", torch.zeros(2, channels, cells))
@@ -101,7 +133,10 @@ class TailCode(nn.Module):
         self.momentum = momentum
         self.thresholds = tuple(thresholds)
         width = channels * (1 + 2 * len(self.thresholds))
-        self.gauges = nn.ModuleList(nn.BatchNorm1d(width, affine=False) for _ in range(2))
+        if gauge == "batch":
+            self.gauges = nn.ModuleList(nn.BatchNorm1d(width, affine=False) for _ in range(2))
+        else:
+            self.gauges = nn.ModuleList(RunningGauge(width, momentum) for _ in range(2))
         self.head = nn.Sequential(nn.Linear(width, 100), nn.LeakyReLU(), nn.Linear(100, latent))
 
     def pooled(self, h):
@@ -291,6 +326,12 @@ def main():
     p.add_argument("steps", type=int)
     p.add_argument("every", type=int)
     p.add_argument("--pool", choices=("gap", "tail", "gapnorm"), default="gap")
+    p.add_argument(
+        "--gauge",
+        choices=("batch", "running"),
+        default="batch",
+        help="TailCode's gauge: BatchNorm (batch statistics in training, running at test) or running statistics in both",
+    )
     p.add_argument("--residual", action="store_true", help="Add each view's normative residual as a second channel")
     p.add_argument("--queue", type=int, default=0, help="Negatives from a momentum-encoder queue of this many subjects")
     p.add_argument("--queue-momentum", type=float, default=0.99)
@@ -309,6 +350,8 @@ def main():
     a = p.parse_args()
     if a.uniform and a.code_batches:
         raise ValueError("--uniform and --code-batches are different batch rules")
+    if a.gauge != "batch" and a.pool == "gap":
+        raise ValueError("--gauge applies to TailCode, so to --pool tail or gapnorm")
     a.out.mkdir(parents=True, exist_ok=False)
     args = run_args()
     if a.t1key == "t1_04":
@@ -330,9 +373,9 @@ def main():
     model = model.to(a.device)
     pool = None
     if a.pool != "gap":
-        pool = TailCode(interior_cells(a.bank), thresholds=() if a.pool == "gapnorm" else TailCode.THRESHOLDS)
-        pool = pool.to(a.device)
-        print("interior cells", int(pool.keep.sum()), "tail thresholds", pool.thresholds, flush=True)
+        thresholds = () if a.pool == "gapnorm" else TailCode.THRESHOLDS
+        pool = TailCode(interior_cells(a.bank), thresholds=thresholds, gauge=a.gauge).to(a.device)
+        print("interior cells", int(pool.keep.sum()), "tail thresholds", pool.thresholds, "gauge", a.gauge, flush=True)
     if a.frozen_backbone:
         for name, parameter in model.named_parameters():
             if name.startswith("encoder."):
