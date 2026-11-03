@@ -169,6 +169,12 @@ def build_model(cfg, device, state_dict=None):
         lesion_head_init=cfg.get("lesion_head_init", "positive"),
         lesion_detector=cfg.get("lesion_detector", "shared"),
         lesion_branch_frozen=cfg.get("lesion_branch_frozen", False),
+        residual_head_units=cfg.get("residual_head_units", 0),
+        residual_head_hidden=cfg.get("residual_head_hidden", 16),
+        residual_head_components=cfg.get("residual_head_components", 16),
+        residual_head_input_size=cfg.get("res", 0),
+        residual_head_joint_dim=cfg.get("residual_head_joint_dim", 0),
+        residual_head_freeze_image=cfg.get("residual_head_freeze_image", True),
         mask_mode=cfg.get("mask_mode", "fixed"),
         mask_init_gap=cfg.get("mask_init_gap", 4.0),
         content_bound=cfg.get("content_bound", "none"),
@@ -187,6 +193,24 @@ def build_model(cfg, device, state_dict=None):
     if state_dict is not None:
         model.load_state_dict(state_dict)
     return model.to(device).eval()
+
+
+def build_floor_model(cfg, device, run_dir):
+    """Use the saved, fitted pre-training state for independent residual-head comparisons.
+
+    Its protected image path may already be trained, and its residual/PCA calibration is
+    training-data dependent. A fresh random model is therefore not the experiment's floor.
+    """
+    if cfg.get("residual_head_units", 0) <= 0:
+        return build_model(cfg, device)
+    initial = Path(run_dir) / "model_init.pt"
+    if not initial.is_file():
+        raise ValueError(
+            f"Residual-head evaluation needs the fitted initial checkpoint {initial} for its floor; "
+            "pass --no-floor to score only the trained model"
+        )
+    state = torch.load(initial, map_location="cpu", weights_only=True)
+    return build_model(cfg, device, state)
 
 
 def make_dataset(cfg, num_samples, mode="val"):
@@ -259,6 +283,8 @@ def encode_blocks(model, ds, device, batch_size, content_channels, patch_grid=No
     """
     if content_channels != model.content_channels:
         raise ValueError(f"content_channels={content_channels}, but the model has {model.content_channels}")
+    if getattr(model, "residual_units", 0) > 0 and patch_grid is not None:
+        raise ValueError("Independent residual heads export global codes; evaluate with patch_grid=None")
     blocks = {"content": ([], []), "style": ([], [])}
     gt, adj = [], None
     renderer = getattr(getattr(ds, "_inner", None), "renderer", None)
@@ -618,7 +644,7 @@ def append_lesion_analysis(report, model, ds, cfg, device, args):
         else:
             native = cfg["res"] // cfg["downscale_factor"]
         grids = [1, min(4, max(1, native))]
-    floor_factory = None if args.no_floor else lambda: build_model(cfg, device)
+    floor_factory = None if args.no_floor else lambda: build_floor_model(cfg, device, args.run_dir)
     report["lesion_analysis"] = run_analysis(
         model, floor_factory, ds, device, args.batch_size, grids, args.lesion_shuffles, args.lesion_seed
     )
@@ -693,19 +719,42 @@ def main():
     names = content_factor_names(z.shape[1], cfg.get("synthetic_lesion_target", "position"))
 
     report = {"run_dir": args.run_dir, "pooling": pooling, "num_samples": int(len(X)), "settings": cfg}
-    report["content_units"] = model.content_units()
+    report["content_units"] = (
+        model.unit_split(model.latent_dim + model.lesion_units + model.residual_units)[0]
+        if getattr(model, "residual_units", 0) > 0
+        else model.content_units()
+    )
     report["trained"] = recovery(X, X2, z, names, with_dci=not args.no_dci)
 
     floor = None
+    floor_model = None
     fX = fX2 = None
     floor_blocks = None
     if not args.no_floor:
+        floor_model = build_floor_model(cfg, device, args.run_dir)
         floor_blocks = encode_blocks(
-            build_model(cfg, device), ds, device, args.batch_size, cfg["content_channels"], patch_grid
+            floor_model,
+            ds,
+            device,
+            args.batch_size,
+            cfg["content_channels"],
+            patch_grid,
         )
         fX, fX2 = floor_blocks["content"]
         floor = recovery(fX, fX2, z, names, with_dci=not args.no_dci)
         report["floor"] = floor
+        if getattr(model, "residual_units", 0) > 0:
+            report["floor_type"] = "fitted_initial_checkpoint"
+            print(
+                "floor   : saved fitted model_init.pt, including the initial image checkpoint",
+                flush=True,
+            )
+    if getattr(model, "residual_units", 0) > 0:
+        from eval.encoder.residual_head_recovery import residual_head_recovery
+
+        report["residual_heads"] = residual_head_recovery(model, ds, device, args.batch_size)
+        if floor_model is not None:
+            report["residual_heads_initial"] = residual_head_recovery(floor_model, ds, device, args.batch_size)
     print_recovery(report["trained"], floor, names)
 
     # View 2 goes through its own encoder under --separate-encoders (the default), and the

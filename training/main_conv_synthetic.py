@@ -45,6 +45,7 @@ import json
 import os
 import random
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -793,8 +794,23 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
     )
     weighted = weight * patch_loss
     global_weighted = getattr(args, "global_loss_weight", 1.0) * global_loss
+    residual = getattr(model, "residual_heads", None)
+    if residual is not None:
+        # The legacy global contrastive value is diagnostic only for this experiment.
+        # Preservation is imposed on the joint code, with alignment on each exported block.
+        image_code, residual_code = model.split_residual_codes(pooled)
+        global_weighted, residual_terms = residual.joint_loss(
+            image_code,
+            residual_code,
+            raw_weight=args.residual_head_image_alignment_weight,
+            residual_weight=args.residual_head_alignment_weight,
+            uniform_weight=args.residual_head_uniformity_weight,
+        )
     total = global_weighted + weighted if weight > 0 else global_weighted
     terms = {"global": global_loss, "patch": patch_loss, "patch_weighted": weighted}
+    if residual is not None:
+        terms["residual_heads"] = global_weighted
+        terms.update({f"residual_heads_{key}": value for key, value in residual_terms.items()})
     # Not loss terms: the unweighted parts of a negative-free patch loss, for the logs.
     for key, value in getattr(patch_loss, "_patch_terms", {}).items():
         terms[f"patch_{key}"] = global_loss.new_tensor(value)
@@ -1021,6 +1037,11 @@ def holdout_r2(features, targets, ridge=1e-2):
 
 def clip_encoder_gradients(model, max_norm):
     """Keep the raw-residual and global paths independent during norm clipping too."""
+    if getattr(model, "residual_heads", None) is not None:
+        image = [p for p in model.image_parameters() if p.requires_grad]
+        if image:
+            torch.nn.utils.clip_grad_norm_(image, max_norm)
+        return torch.nn.utils.clip_grad_norm_(model.residual_heads.parameters(), max_norm)
     if model.normative is None:
         return torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
     branch = [p for module in model.lesion_modules() for p in module.parameters()]
@@ -1258,6 +1279,24 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
         )
         for key, value in prediction.items():
             flat[f"vector_prediction/{key}"] = value
+    residual_report = None
+    if getattr(model, "residual_heads", None) is not None:
+        from eval.encoder.residual_head_recovery import residual_head_recovery
+
+        residual_report = residual_head_recovery(model, val_dataset, device, args.batch_size)
+        if residual_report.get("status") == "complete":
+            print(
+                "    --- image / residual / combined: held-out per-factor ridge R² ---",
+                flush=True,
+            )
+            for view, blocks in residual_report["views"].items():
+                for factor in residual_report["factor_names"]:
+                    values = [blocks[name]["r2"][factor] for name in ("image", "residual", "combined")]
+                    formatted = " / ".join("n/a" if value is None else f"{value:.3f}" for value in values)
+                    print(f"      {view:<6s} {factor:<26s} {formatted}", flush=True)
+                    for name, value in zip(("image", "residual", "combined"), values):
+                        if value is not None:
+                            flat[f"residual_heads/{view}/{name}/r2_{factor}"] = value
     if writer is not None:
         for k, v in flat.items():
             if np.isfinite(v):
@@ -1271,6 +1310,8 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
         payload["attention_effective_fraction"] = spread
     if lesion is not None:
         payload["lesion_branch"] = lesion
+    if residual_report is not None:
+        payload["residual_heads"] = residual_report
     with open(os.path.join(save_dir, f"dci_step{step}.json"), "w") as fp:
         json.dump(payload, fp, indent=2)
     return flat, scores
@@ -1481,6 +1522,12 @@ def build_encoder(args):
         vector_prediction_patch_scales=tuple(getattr(args, "vector_prediction_patch_scales", (1, 2))),
         vector_prediction_patch_projections=getattr(args, "vector_prediction_patch_projections", 8),
         vector_prediction_patch_seed=getattr(args, "vector_prediction_patch_seed", 1729),
+        residual_head_units=getattr(args, "residual_head_units", 0),
+        residual_head_hidden=getattr(args, "residual_head_hidden", 16),
+        residual_head_components=getattr(args, "residual_head_components", 16),
+        residual_head_input_size=args.res,
+        residual_head_joint_dim=getattr(args, "residual_head_joint_dim", 0),
+        residual_head_freeze_image=getattr(args, "residual_head_freeze_image", True),
     )
 
 
@@ -1571,6 +1618,8 @@ def read_init_from(args):
     checkpoint = path if os.path.isfile(path) else os.path.join(path, "model.pt")
     if not os.path.isfile(checkpoint):
         raise SystemExit(f"--init-from {path}: need a checkpoint file, or a run directory with model.pt")
+    if getattr(args, "residual_head_units", 0) > 0:
+        check_residual_image_settings(args, checkpoint)
     with open(checkpoint, "rb") as fp:
         raw = fp.read()
     digest = hashlib.sha256(raw).hexdigest()
@@ -1605,6 +1654,143 @@ def read_init_from(args):
     return state, provenance
 
 
+def check_residual_image_settings(args, checkpoint):
+    """Reject behavior changes that strict tensor loading cannot detect, including activation changes."""
+    settings_path = os.path.join(os.path.dirname(checkpoint), "settings.json")
+    if not os.path.isfile(checkpoint) or not os.path.isfile(settings_path):
+        raise SystemExit("Residual-head initialization needs a checkpoint with a sibling settings.json")
+    with open(settings_path) as stream:
+        source = json.load(stream)
+    defaults = vars(encoder_args.parse_args([]))
+    architecture = (
+        "encoder_architecture",
+        "hidden_channels",
+        "res_channels",
+        "nb_res_layers",
+        "downscale_factor",
+        "latent_dim",
+        "content_channels",
+        "no_separate_encoders",
+        "conv_readout",
+        "encoder_head_hidden",
+        "norm_type",
+        "activation",
+        "global_pool",
+        "content_bound",
+        "separate_spatial_readout",
+        "contrastive_proj_dim",
+        "mask_mode",
+        "lesion_keypoints",
+        "vector_prediction_weight",
+    )
+    differences = [
+        name for name in architecture if source.get(name, defaults.get(name)) != getattr(args, name, defaults.get(name))
+    ]
+    if differences:
+        raise SystemExit("Residual-head image initialization architecture differs: " + ", ".join(differences))
+    return source, settings_path
+
+
+def read_residual_image_init(args):
+    """Validate a native image checkpoint before creating an experimental run directory."""
+    path = getattr(args, "residual_head_image_init", None)
+    if path is None:
+        return None, None
+    checkpoint = path if os.path.isfile(path) else os.path.join(path, "model.pt")
+    source, settings_path = check_residual_image_settings(args, checkpoint)
+    if source.get("residual_head_units", 0) > 0:
+        raise SystemExit("Use --init-from for a complete two-path checkpoint")
+    with open(checkpoint, "rb") as stream:
+        raw = stream.read()
+    state = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
+    if isinstance(state, dict) and "model" in state:
+        state = state["model"]
+    base_args = SimpleNamespace(**vars(args))
+    base_args.residual_head_units = 0
+    base_args.residual_head_freeze_image = False
+    base = build_encoder(base_args)
+    expected_mask = base.content_mask.clone()
+    try:
+        base.load_state_dict(state, strict=True)
+    except (RuntimeError, TypeError) as error:
+        raise SystemExit(f"--residual-head-image-init strict image load failed: {error}") from None
+    if not torch.equal(base.content_mask, expected_mask):
+        raise SystemExit("--residual-head-image-init has a different content mask")
+    provenance = {
+        "checkpoint": os.path.abspath(checkpoint),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "settings": os.path.abspath(settings_path),
+        "initialization": "image pathway only; residual pathway and joint projector initialized afresh",
+    }
+    return state, provenance
+
+
+def load_residual_image_state(model, state):
+    """Load every original parameter/buffer strictly while retaining the new branch and export mask."""
+    full = model.state_dict()
+    expected = {name for name in full if not name.startswith("residual_heads.")}
+    if set(state) != expected:
+        raise ValueError("Image initialization does not contain exactly the original image pathway")
+    for name, value in state.items():
+        if name != "content_mask":
+            full[name] = value
+    model.load_state_dict(full, strict=True)
+
+
+def fit_residual_heads(model, train_dataset, args, device):
+    """Fit residual preprocessing and initialize both code gauges using training subjects only."""
+    branch = getattr(model, "residual_heads", None)
+    if branch is None:
+        return None
+    from eval.encoder.spatial_recovery_monitor import preserve_training_state
+
+    restored = bool(branch.fitted)
+    count = int(branch.fit_subjects) if restored else args.residual_head_subjects
+    if not restored:
+        with preserve_training_state(model, device):
+            loader = DataLoader(
+                Subset(train_dataset, range(count)),
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=0,
+                generator=torch.Generator().manual_seed(args.data_seed),
+            )
+            images = torch.cat(
+                [torch.stack(batch["image"], dim=1)[:, :, 0].as_subclass(torch.Tensor) for batch in loader]
+            )
+            image_digest = hashlib.sha256(images.contiguous().numpy().tobytes()).hexdigest()
+            branch.fit(images)
+            raw, residual = ([], []), ([], [])
+            with torch.no_grad():
+                for start in range(0, count, args.batch_size):
+                    part = images[start : start + args.batch_size]
+                    paired = torch.cat([part[:, :1], part[:, 1:]]).to(device)
+                    code = model(paired, pool_only=True, n_views=2)[2][0]
+                    first, second = model.split_residual_codes(code)
+                    for view, (a, b) in enumerate(zip(first.chunk(2), second.chunk(2))):
+                        raw[view].append(a)
+                        residual[view].append(b)
+                branch.calibrate_codes(
+                    torch.cat([torch.cat(parts) for parts in raw]),
+                    torch.cat([torch.cat(parts) for parts in residual]),
+                )
+    else:
+        image_digest = None
+    digest = hashlib.sha256()
+    for name in ("brain", "mean", "basis", "residual_sd", "interior"):
+        digest.update(getattr(branch, name).detach().cpu().contiguous().numpy().tobytes())
+    return {
+        "source": "checkpoint" if restored else "training_subjects",
+        "dataset_split": "train",
+        "dataset_indices": list(range(count)),
+        "subjects": count,
+        "components": branch.components,
+        "interior_cells": int(branch.interior.sum()),
+        "training_images_sha256": image_digest,
+        "preprocessing_sha256": digest.hexdigest(),
+    }
+
+
 def main():
     args = parse_args()
     configure_encoder_runtime(vars(args))
@@ -1613,6 +1799,7 @@ def main():
     if args.init_from is not None:
         init_state, init_from = read_init_from(args)
         args.init_from_sha256 = init_from["sha256"]
+    image_init_state, image_init = read_residual_image_init(args)
     save_dir = os.path.join(args.out_dir, args.model_id)
     os.makedirs(save_dir, exist_ok=not args.require_new_run)
     with open(os.path.join(save_dir, "settings.json"), "w") as fp:
@@ -1668,6 +1855,21 @@ def main():
         print(
             f"init: warm start from {init_from['checkpoint']} (sha256 {init_from['sha256']}{step_note}); fresh "
             "AdamW and step counter. model_init.pt and the step-0 evaluation are this model, not an untrained floor",
+            flush=True,
+        )
+    if image_init_state is not None:
+        load_residual_image_state(model, image_init_state)
+        del image_init_state
+    residual_fit = fit_residual_heads(model, train_dataset, args, device)
+    if residual_fit is not None:
+        with open(os.path.join(save_dir, "residual_heads_fit.json"), "w") as stream:
+            json.dump({**residual_fit, "image_initialization": image_init}, stream, indent=2)
+        print(
+            f"residual heads: {args.content_channels} image + {model.residual_units} residual content units; "
+            f"joint uniformity in {args.residual_head_joint_dim} dimensions; "
+            f"image pathway {'frozen' if args.residual_head_freeze_image else 'trainable'}; "
+            f"PCA fitted on {residual_fit['subjects']} training subjects ({residual_fit['source']}). "
+            "Global InfoNCE is diagnostic only. Step 0 is the combined initialization, not a fresh-image floor.",
             flush=True,
         )
     prediction_template = fit_vector_prediction_template(model, train_dataset, args, device)
@@ -1896,7 +2098,7 @@ def main():
             "step": step,
             "subjects_seen_per_view": step * args.batch_size,
             "batch_order_sha256": batch_order.hexdigest(),
-            "training_input_sha256": input_images.hexdigest() if input_images is not None else None,
+            "training_input_sha256": (input_images.hexdigest() if input_images is not None else None),
             "data_seed": args.data_seed,
             "model_seed": args.model_seed,
             "loader_seed": args.loader_seed,
@@ -1913,7 +2115,7 @@ def main():
             "attention_pool_parameter_count": (
                 sum(p.numel() for p in model.attention_pool.parameters()) if model.attention_pool is not None else 0
             ),
-            "moment_pool_parameter_count": model.moment_pool.weight.numel() if model.moment_pool is not None else 0,
+            "moment_pool_parameter_count": (model.moment_pool.weight.numel() if model.moment_pool is not None else 0),
             "dense_readout_parameter_count": (
                 sum(p.numel() for p in model.to_encoding.parameters()) if model.readout_type == "dense" else 0
             ),
@@ -1926,7 +2128,7 @@ def main():
             "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
             "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
             "device": str(device),
-            "mps_fallback": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") if device == "mps" else None,
+            "mps_fallback": (os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0") if device == "mps" else None),
             "patch_loss_weight": args.patch_loss_weight,
             "patch_loss_type": (args.patch_loss_type if args.patch_loss_weight > 0 else None),
             "train_patch_grid": (
@@ -1951,6 +2153,15 @@ def main():
             ),
             "last_loss_terms": last_loss_terms,
             "init_from": init_from,
+            "residual_heads_fit": residual_fit,
+            "residual_heads_image_initialization": image_init,
+            "initialization_kind": (
+                "protected_image_checkpoint"
+                if image_init is not None
+                else "checkpoint"
+                if init_from is not None
+                else "random"
+            ),
         }
         if model.mask_logits is not None:
             payload["content_mask"] = {**mask_state(model), "lr": args.lr * args.mask_lr_scale}
@@ -2016,6 +2227,23 @@ def main():
             "vector_prediction_weighted",
             *(f"vector_prediction_{part}" for part in VECTOR_PREDICTION_PARTS),
         )
+    residual_terms = ()
+    if getattr(model, "residual_heads", None) is not None:
+        residual_terms = (
+            "residual_heads",
+            *(
+                f"residual_heads_{part}"
+                for part in (
+                    "image_alignment",
+                    "residual_alignment",
+                    "uniformity",
+                    "total",
+                    "joint_variance",
+                    "joint_effective_rank",
+                    "projected_variance",
+                )
+            ),
+        )
 
     def fresh_running():
         return dict(
@@ -2032,6 +2260,7 @@ def main():
             **{f"patch_{part}": 0.0 for part in patch_parts},
             **{term: 0.0 for term in pointwise_terms},
             **{term: 0.0 for term in prediction_terms},
+            **{term: 0.0 for term in residual_terms},
         )
 
     running = fresh_running()
@@ -2057,6 +2286,8 @@ def main():
                 print(f"  patch foreground mask: first batch keeps {kept}/{np.prod(args.train_patch_grid)} positions")
 
             pooled, loss, terms = training_objective(model, x, args, sim_metric, criterion, masks)
+            if residual_terms and not torch.isfinite(loss):
+                raise ValueError(f"Nonfinite residual-head objective at step {step + 1}")
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -2076,11 +2307,14 @@ def main():
                 running[term] += last_loss_terms[term]
             for term in prediction_terms:
                 running[term] += last_loss_terms[term]
+            for term in residual_terms:
+                running[term] += last_loss_terms[term]
             running["lesion"] += last_loss_terms.get("lesion", 0.0)
             running["decorrelation"] += last_loss_terms.get("lesion_decorrelation", 0.0)
             running["mask_leak"] += last_loss_terms.get("mask_leak", 0.0)
             running["mask_size"] += last_loss_terms.get("mask_size", 0.0)
-            running["rank"] += effective_rank(pooled[: pooled.shape[0] // 2, model.content_units()])
+            rank_units = model.unit_split(pooled.shape[1])[0] if residual_terms else model.content_units()
+            running["rank"] += effective_rank(pooled[: pooled.shape[0] // 2, rank_units])
             running["n"] += 1
             step += 1
 
@@ -2088,8 +2322,8 @@ def main():
                 n = max(running["n"], 1)
                 mask_info = mask_state(model)
                 print(
-                    f"step {step:6d} | {'total' if prediction_terms else 'contrastive'} {running['loss']/n:.4f} "
-                    f"| content eff_rank {running['rank']/n:.2f}/{len(model.content_units())}"
+                    f"step {step:6d} | {'total' if prediction_terms or residual_terms else 'contrastive'} {running['loss']/n:.4f} "
+                    f"| content eff_rank {running['rank']/n:.2f}/{len(rank_units)}"
                     + (
                         f" | global {running['global_loss']/n:.4f} | patch {running['patch']/n:.4f} "
                         f"| weighted patch {running['patch_weighted']/n:.4f}"
@@ -2112,6 +2346,14 @@ def main():
                         else ""
                     )
                     + (f" | lesion InfoNCE {running['lesion']/n:.4f}" if args.lesion_keypoints > 0 else "")
+                    + (
+                        f" | image align {running['residual_heads_image_alignment']/n:.4f} "
+                        f"| residual align {running['residual_heads_residual_alignment']/n:.4f} "
+                        f"| joint MMD {running['residual_heads_uniformity']/n:.4f} "
+                        f"| joint rank {running['residual_heads_joint_effective_rank']/n:.2f}"
+                        if residual_terms
+                        else ""
+                    )
                     + (
                         f" | vector prediction {running['vector_prediction']/n:.4f} "
                         f"(T1->FLAIR {running['vector_prediction_t1_to_flair']/n:.4f}, "
@@ -2142,7 +2384,9 @@ def main():
                     logged_units = mask_info["content_units"]
                 if writer is not None:
                     writer.add_scalar(
-                        "train/total" if prediction_terms else "train/contrastive", running["loss"] / n, step
+                        ("train/total" if prediction_terms or residual_terms else "train/contrastive"),
+                        running["loss"] / n,
+                        step,
                     )
                     if mask_info is not None:
                         writer.add_scalar("mask/leak", running["mask_leak"] / n, step)
@@ -2174,6 +2418,8 @@ def main():
                     for term in pointwise_terms:
                         writer.add_scalar(f"train/{term}", running[term] / n, step)
                     for term in prediction_terms:
+                        writer.add_scalar(f"train/{term}", running[term] / n, step)
+                    for term in residual_terms:
                         writer.add_scalar(f"train/{term}", running[term] / n, step)
                 running = fresh_running()
 

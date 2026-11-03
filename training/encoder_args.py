@@ -201,6 +201,51 @@ def build_parser(description=None):
         action="store_true",
         help="At each DCI evaluation report every head's native voxel error and hit rate (no fitted probe)",
     )
+    p.add_argument(
+        "--residual-head-units",
+        type=int,
+        default=0,
+        help="Append an independent residual/tail content block to the original image code; 0 disables",
+    )
+    p.add_argument(
+        "--residual-head-hidden",
+        type=int,
+        default=16,
+        help="Residual encoder feature channels",
+    )
+    p.add_argument(
+        "--residual-head-components",
+        type=int,
+        default=16,
+        help="Training-only residual PCA rank",
+    )
+    p.add_argument(
+        "--residual-head-subjects",
+        type=int,
+        default=300,
+        help="Training subjects to fit/calibrate residuals",
+    )
+    p.add_argument(
+        "--residual-head-joint-dim",
+        type=int,
+        default=0,
+        help="Explicit shared-content dimension of the auxiliary joint uniformity map; required when enabled",
+    )
+    p.add_argument(
+        "--residual-head-freeze-image",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Hold image parameters/buffers fixed; requires --residual-head-image-init or a full --init-from",
+    )
+    p.add_argument(
+        "--residual-head-image-init",
+        type=str,
+        default=None,
+        help="Original image checkpoint to preserve; loads the complete matching image path before fitting residuals",
+    )
+    p.add_argument("--residual-head-alignment-weight", type=float, default=1.0)
+    p.add_argument("--residual-head-image-alignment-weight", type=float, default=1.0)
+    p.add_argument("--residual-head-uniformity-weight", type=float, default=1.0)
     p.add_argument("--resnet-norm", choices=("batch", "group"), default="batch")
     p.add_argument(
         "--norm-type",
@@ -985,6 +1030,74 @@ def parse_args(argv=None, description=None):
         if len(args.init_from_sha256) != 64 or not set(args.init_from_sha256) <= set("0123456789abcdef"):
             p.error("--init-from-sha256 takes the checkpoint's SHA-256 as 64 hex digits")
     real = args.dataset_name != "synthetic"
+    if args.residual_head_units < 0:
+        p.error("--residual-head-units must be nonnegative")
+    if args.residual_head_units > 0:
+        if real or args.synthetic_mode != "pseudo_mri":
+            p.error("Independent residual heads currently require the synthetic pseudo_mri generator")
+        if args.encoder_architecture != "conv" or args.conv_readout != "mlp" or args.global_pool != "gap":
+            p.error(
+                "Independent residual heads require --encoder-architecture conv --conv-readout mlp --global-pool gap"
+            )
+        if (
+            args.mask_mode != "fixed"
+            or args.contrastive_proj_dim > 0
+            or args.lesion_keypoints > 0
+            or args.vector_prediction_weight > 0
+            or args.pointwise_loss_weight > 0
+            or args.content_bound != "none"
+        ):
+            p.error(
+                "Independent residual heads need a fixed unbounded image code without a contrastive projector, "
+                "lesion keypoints, vector prediction or pointwise loss"
+            )
+        if args.eval_pooling != "gap":
+            p.error("Independent residual heads export global codes: use --eval-pooling gap")
+        if args.spatial_recovery_eval:
+            p.error(
+                "Independent residual heads have no combined spatial map; --spatial-recovery-eval would read only "
+                "the image path. Per-block global recovery is reported automatically"
+            )
+        if args.causal_eval and tuple(args.causal_eval_grid) != (1, 1, 1):
+            p.error("Independent residual heads require --causal-eval-grid 1 1 1 to include both content blocks")
+        if args.residual_head_hidden < 1 or args.residual_head_components < 1:
+            p.error("--residual-head-hidden and --residual-head-components must be positive")
+        if args.res < 4 or args.res % 4:
+            p.error("Independent residual heads require --res to be a positive multiple of four")
+        if not 0 < args.residual_head_joint_dim <= args.content_channels + args.residual_head_units:
+            p.error("--residual-head-joint-dim must be explicit and in (0, content channels + residual units]")
+        if args.residual_head_subjects > args.num_train_samples:
+            p.error("--residual-head-subjects cannot exceed --num-train-samples")
+        if args.residual_head_subjects <= args.residual_head_components:
+            p.error("--residual-head-subjects must exceed --residual-head-components")
+        if args.residual_head_freeze_image and not (args.residual_head_image_init or args.init_from):
+            p.error("--residual-head-freeze-image requires --residual-head-image-init or a full --init-from checkpoint")
+        if args.residual_head_image_init is not None and args.init_from is not None:
+            p.error(
+                "Choose --residual-head-image-init for a base image checkpoint or --init-from for a full checkpoint"
+            )
+        for key in ("alignment_weight", "image_alignment_weight", "uniformity_weight"):
+            if not 0 <= getattr(args, f"residual_head_{key}") < float("inf"):
+                p.error("--residual-head-*-weight must be finite and nonnegative")
+        if args.residual_head_alignment_weight <= 0 or args.residual_head_uniformity_weight <= 0:
+            p.error("Independent residual heads need positive residual alignment and joint uniformity weights")
+        if not args.residual_head_freeze_image and args.residual_head_image_alignment_weight <= 0:
+            p.error("An unfrozen image path needs a positive --residual-head-image-alignment-weight")
+    elif any(
+        getattr(args, f"residual_head_{key}") != p.get_default(f"residual_head_{key}")
+        for key in (
+            "hidden",
+            "components",
+            "subjects",
+            "joint_dim",
+            "freeze_image",
+            "image_init",
+            "alignment_weight",
+            "image_alignment_weight",
+            "uniformity_weight",
+        )
+    ):
+        p.error("The --residual-head-* settings require a positive --residual-head-units")
     if args.best_metric is None:
         args.best_metric = "val_loss" if real else "block_mcc"
     if real:
@@ -1133,9 +1246,11 @@ def parse_args(argv=None, description=None):
         and args.patch_loss_weight <= 0
         and not pointwise
         and args.vector_prediction_weight <= 0
+        and args.residual_head_units <= 0
     ):
         p.error(
-            "--global-loss-weight 0 leaves no loss: it needs a positive patch, pointwise or vector-prediction weight"
+            "--global-loss-weight 0 leaves no loss: it needs a positive patch, pointwise, vector-prediction "
+            "or residual-head objective"
         )
     if args.patch_foreground_mask and args.patch_loss_weight <= 0 and not pointwise:
         p.error("--patch-foreground-mask requires a positive --patch-loss-weight or --pointwise-loss-weight")

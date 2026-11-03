@@ -77,6 +77,7 @@ class ExperimentTests(unittest.TestCase):
                 "conv_mlp_burden_oracle_k10",
                 "conv_mlp_burden_oracle_k60",
                 "conv_mlp_burden_nativegrid",
+                "conv_mlp_burden_residual_heads",
                 "conv_mlp_burden_vector_prediction",
                 "conv_mlp_burden_vector_quantiles",
                 "conv_mlp_burden_vector_patch_distribution",

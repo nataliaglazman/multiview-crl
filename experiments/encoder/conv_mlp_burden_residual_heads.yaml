@@ -1,0 +1,50 @@
+# Two independent image/residual paths, block alignment and joint uniformity.
+# This runnable default trains both paths from scratch. For the protected first
+# experiment, set residual_head_freeze_image=True and residual_head_image_init to
+# an actual compatible anatomy run; see training/ENCODER_RESIDUAL_HEADS.md.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_burden_residual_heads_s{seed}
+
+# Keep the original image architecture compatible with the native-grid burden run.
+conv_readout: mlp
+norm_type: group
+latent_dim: 18
+content_channels: 14
+mask_mode: fixed
+global_pool: gap
+standardize_code: true
+train_steps: 20000
+
+# The new objective replaces global InfoNCE; it remains a logged diagnostic.
+# No auxiliary patch/prediction loss in this first experiment.
+global_loss_weight: 0.0
+patch_loss_weight: 0.0
+
+# Draw the population rather than oracle anatomy neighbourhoods for joint MMD.
+stratify_batches: none
+
+# Same clean, shared-content burden generator as the lesion experiments.
+synthetic_identifiable_ventricle: true
+synthetic_sulcal_mode: atrophy
+synthetic_temporal_sigma: 0.18
+synthetic_lesion_target: burden
+synthetic_lesion_count: 1
+synthetic_lesion_radius: 0.1
+synthetic_lesion_intensity: styled
+synthetic_lesion_t1_value: 0.0
+
+# Residual statistics and PCA use training subjects only. Raw and residual paths
+# have distinct encoders, readouts and normalization statistics.
+residual_head_units: 8
+residual_head_hidden: 16
+residual_head_components: 16
+residual_head_subjects: 300
+residual_head_freeze_image: false
+
+# The auxiliary sigmoid projector's dimension is explicit: this clean generator
+# has 7 shared scalars and 3 lesion-placement degrees of freedom. It is not the
+# 22-dimensional exported content width (14 image + 8 residual).
+residual_head_joint_dim: 10
+residual_head_alignment_weight: 1.0
+residual_head_image_alignment_weight: 1.0
+residual_head_uniformity_weight: 1.0

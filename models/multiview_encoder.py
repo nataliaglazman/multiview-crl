@@ -25,6 +25,9 @@ learned too; ``content_channels`` is then only the starting size.
 An optional lesion branch (``models.keypoint_pool``) appends ``3 * lesion_keypoints``
 keypoint coordinates AFTER the style units of the global code; the content mask marks
 them as content, so the DCI probes score them with the content block.
+Independent residual heads instead append an image-derived residual/tail code, keeping
+the original image features and their parameters separate. Its joint auxiliary projector
+is used only by the training loss; exported codes retain both blocks.
 ``forward`` returns the same 8-tuple as ``VQVAE``/``MultiviewVAE`` so
 ``eval.metrics.dci.compute_dci_synthetic`` scores this model unchanged.
 """
@@ -111,6 +114,12 @@ class MultiviewConvEncoder(HelperModule):
         vector_prediction_patch_scales=(1, 2),
         vector_prediction_patch_projections: int = 8,
         vector_prediction_patch_seed: int = 1729,
+        residual_head_units: int = 0,
+        residual_head_hidden: int = 16,
+        residual_head_components: int = 16,
+        residual_head_input_size: int = 0,
+        residual_head_joint_dim: int = 0,
+        residual_head_freeze_image: bool = True,
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -134,6 +143,29 @@ class MultiviewConvEncoder(HelperModule):
         self.in_channels = in_channels
         self.latent_dim = latent_dim
         self.content_channels = content_channels
+        self.residual_units = residual_head_units
+        self.residual_head_freeze_image = bool(residual_head_freeze_image and residual_head_units > 0)
+        if residual_head_units < 0:
+            raise ValueError("residual_head_units must be nonnegative")
+        if residual_head_units > 0:
+            if (
+                encoder_architecture != "conv"
+                or conv_readout != "mlp"
+                or global_pool != "gap"
+                or mask_mode != "fixed"
+                or proj_dim != 0
+                or lesion_keypoints > 0
+                or content_bound != "none"
+                or vector_prediction_grid is not None
+            ):
+                raise ValueError(
+                    "Residual heads require conv MLP/GAP, fixed content, no content bound, loss projector, "
+                    "lesion keypoints or vector prediction"
+                )
+            if residual_head_hidden < 1 or residual_head_components < 1 or residual_head_input_size < 1:
+                raise ValueError("Residual heads need positive hidden width, components and input size")
+            if not 0 < residual_head_joint_dim <= content_channels + residual_head_units:
+                raise ValueError("residual_head_joint_dim must be explicit and in (0, content + residual units]")
         self.separate_encoders = separate_encoders
         self.proj_dim = proj_dim
         self.encoder_architecture = encoder_architecture
@@ -271,8 +303,8 @@ class MultiviewConvEncoder(HelperModule):
             output.out_features = content_channels
 
         # --- Fixed content/style mask over the latent units ---
-        # Lesion keypoint coordinates, if any, follow the style units and count as content.
-        fixed_mask = torch.zeros(1, latent_dim + self.lesion_units)
+        # Optional keypoint or independent residual units follow style and count as content.
+        fixed_mask = torch.zeros(1, latent_dim + self.lesion_units + self.residual_units)
         fixed_mask[0, :content_channels] = 1.0
         fixed_mask[0, latent_dim:] = 1.0
         self.register_buffer("content_mask", fixed_mask)
@@ -408,6 +440,48 @@ class MultiviewConvEncoder(HelperModule):
                     patch_seed=vector_prediction_patch_seed,
                 )
 
+        # Build last: the original image pathway keeps precisely its legacy initialization.
+        # Disabled means no module/buffers/parameters or additional RNG draws in old checkpoints.
+        self.residual_heads = None
+        if residual_head_units > 0:
+            from models.residual_heads import ResidualHeads
+
+            self.residual_heads = ResidualHeads(
+                input_size=residual_head_input_size,
+                content_units=residual_head_units,
+                hidden_channels=residual_head_hidden,
+                head_hidden=encoder_head_hidden,
+                components=residual_head_components,
+                joint_input_units=content_channels + residual_head_units,
+                joint_dim=residual_head_joint_dim,
+                frozen_image=residual_head_freeze_image,
+            )
+            if self.residual_head_freeze_image:
+                for parameter in self.image_parameters():
+                    parameter.requires_grad_(False)
+                self.train(self.training)
+
+    def image_parameters(self):
+        """Original image-path parameters, excluding the independent residual pathway."""
+        return (parameter for name, parameter in self.named_parameters() if not name.startswith("residual_heads."))
+
+    def train(self, mode=True):
+        """Hold image-path normalization and other buffers fixed in the protected experiment."""
+        super().train(mode)
+        if getattr(self, "residual_head_freeze_image", False):
+            for name, module in self.named_children():
+                if name != "residual_heads":
+                    module.eval()
+        return self
+
+    def split_residual_codes(self, pooled):
+        """Return image content and appended residual content; omit the intervening image style units."""
+        if self.residual_heads is None:
+            raise ValueError("This model has no independent residual heads")
+        if pooled.shape[-1] != self.latent_dim + self.residual_units:
+            raise ValueError("Residual codes require the complete exported global vector")
+        return pooled[..., : self.content_channels], pooled[..., -self.residual_units :]
+
     def lesion_modules(self):
         """Trainable parts of the branch, excluding the frozen normative buffers."""
         return tuple(
@@ -491,12 +565,16 @@ class MultiviewConvEncoder(HelperModule):
         return self.to_encoding if self.spatial_readout is None else self.spatial_readout
 
     def _global_code(
-        self, h: torch.FloatTensor, x: torch.FloatTensor = None, n_views: int = 1, view_idx=None
+        self,
+        h: torch.FloatTensor,
+        x: torch.FloatTensor = None,
+        n_views: int = 1,
+        view_idx=None,
     ) -> torch.FloatTensor:
-        """(B, latent_dim [+ lesion_units]) global encoding: pool the backbone map, then apply the global head.
+        """Global image encoding, followed by any keypoint or independent residual content units.
 
         ``x`` is the input batch that produced ``h`` (view-major when ``n_views`` is 2); only the
-        lesion branch reads it, for its brain frame and its residual input.
+        optional branches read it for their brain frame or independent residual input.
         """
         if self.readout_type == "dense":
             code = self.to_encoding(h)
@@ -519,7 +597,15 @@ class MultiviewConvEncoder(HelperModule):
                 code = self.to_encoding(pooled)
             else:
                 code = self.to_encoding(pooled[:, :, None, None, None]).flatten(1)
-        return self._append_lesion(code, h, x, n_views, view_idx)
+        code = self._append_lesion(code, h, x, n_views, view_idx)
+        if self.residual_heads is not None:
+            if x is None:
+                raise ValueError("The independent residual heads need the input images")
+            code = torch.cat(
+                [code, self.residual_heads(x, n_views=n_views, view_idx=view_idx)],
+                dim=1,
+            )
+        return code
 
     def _append_lesion(
         self, code: torch.FloatTensor, h: torch.FloatTensor, x: torch.FloatTensor, n_views: int = 1, view_idx=None
@@ -580,9 +666,13 @@ class MultiviewConvEncoder(HelperModule):
         the ``content_channels`` largest logits (ties go to the lower unit); with a learned size,
         the units whose logit is positive, or the single largest if none is. This is the
         selection every evaluation reads; training samples around it (``sample_content_mask``).
+        Independent residual content is appended after the image style units and is
+        included here, so vector diagnostics retain the complete exported content.
         """
         if self.mask_logits is None:
-            return list(range(self.content_channels))
+            return list(range(self.content_channels)) + list(
+                range(self.latent_dim, self.latent_dim + self.residual_units)
+            )
         logits = self.mask_logits.detach()
         if self.mask_mode == "learned_size":
             units = torch.nonzero(logits > 0).flatten().tolist()
@@ -606,7 +696,7 @@ class MultiviewConvEncoder(HelperModule):
         if self.spatial_readout is not None and width == self.content_channels:
             return list(range(width)), []
         units = self.content_units()
-        content = [u for u in units if u < width] + list(range(self.latent_dim, width))
+        content = [u for u in units if u < min(width, self.latent_dim)] + list(range(self.latent_dim, width))
         style = [u for u in range(min(width, self.latent_dim)) if u not in units]
         return content, style
 
