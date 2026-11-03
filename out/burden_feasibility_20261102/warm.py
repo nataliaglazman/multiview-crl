@@ -20,6 +20,11 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
   --jitter V, --rotate D  each training image, every subject and view separately, is shifted up to V voxels and
                 rotated up to D degrees about each axis, its residual channel with it, so the views cannot be matched
                 voxel for voxel.
+  --patch-weight W  the patch InfoNCE's weight in place of the recipe's 1.0; at 0 the patch term is not computed. The
+                patch term pairs the two views cell by cell on the 16^3 grid, so --jitter also misaligns it; this
+                separates the two.
+  --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
+                augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
 
 Batches: by default an anchor and 31 of its 50 nearest training subjects on the six anatomy factors (the recipe's
@@ -32,7 +37,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
 
     python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail|gapnorm] [--gauge batch|running] [--residual]
         [--t1key t1_00] [--uniform | --code-batches K] [--queue N] [--decorrelate W] [--group-dropout P]
-        [--jitter V] [--rotate D]
+        [--jitter V] [--rotate D] [--patch-weight W] [--seed S]
 """
 
 import argparse
@@ -386,6 +391,12 @@ def main():
     )
     p.add_argument("--jitter", type=float, default=0.0, help="Random shift of each training image, in voxels")
     p.add_argument("--rotate", type=float, default=0.0, help="Random rotation of each training image, degrees per axis")
+    p.add_argument(
+        "--patch-weight",
+        type=float,
+        default=None,
+        help="Weight of the patch InfoNCE in place of the recipe's; 0 drops it",
+    )
     p.add_argument("--queue", type=int, default=0, help="Negatives from a momentum-encoder queue of this many subjects")
     p.add_argument("--queue-momentum", type=float, default=0.99)
     p.add_argument("--t1key", default="t1_00")
@@ -399,7 +410,12 @@ def main():
     p.add_argument("--frozen-backbone", action="store_true")
     p.add_argument("--device", default=pick_device())
     p.add_argument("--test-subjects", type=int, default=1000)
-    p.add_argument("--seed", type=int, default=None)
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Replicate seed for init, batch order and augmentation, by the recipe's rule (default its 42)",
+    )
     a = p.parse_args()
     if a.uniform and a.code_batches:
         raise ValueError("--uniform and --code-batches are different batch rules")
@@ -411,12 +427,18 @@ def main():
         raise ValueError("--group-dropout needs --pool tail and no --queue")
     if not 0 <= a.group_dropout <= 0.5:
         raise ValueError("--group-dropout is a fraction of steps per group, at most 0.5")
+    if a.patch_weight is not None and a.patch_weight < 0:
+        raise ValueError("--patch-weight cannot be negative")
     a.out.mkdir(parents=True, exist_ok=False)
     args = run_args()
     if a.t1key == "t1_04":
         args.synthetic_lesion_t1_value = 0.4
-    seed = args.model_seed if a.seed is None else a.seed
-    torch.manual_seed(seed)
+    if a.seed is not None:
+        args.seed, args.model_seed, args.loader_seed = a.seed, a.seed, a.seed + 10000
+    if a.patch_weight is not None:
+        args.patch_loss_weight = a.patch_weight
+    print("seed", args.seed, "patch weight", args.patch_loss_weight, flush=True)
+    torch.manual_seed(args.model_seed)
     model = T.build_encoder(args)
     if a.residual:
         widen_input(model)
@@ -529,24 +551,21 @@ def main():
                 )
             gauge.update(queries.detach())
             ids = torch.as_tensor(indices, device=a.device)
-            patches = model.patch_readout(model._patch_pool(h, args.train_patch_grid).transpose(1, 2)).transpose(1, 2)
-            terms = {
-                "global": queue_infonce(queries, keys, queue, ids, gauge, args.tau),
-                "patch": T.patch_contrastive_loss(patches, model, args, sim, crit, x[:, :1] != 0, None, None),
-            }
-            loss = terms["global"] + args.patch_loss_weight * terms["patch"]
+            terms = {"global": queue_infonce(queries, keys, queue, ids, gauge, args.tau)}
         elif pool is None:
             _, loss, terms = T.training_objective(model, x, args, sim, crit, x[:, :1] != 0)
         else:
             h = model._encode(x, 2, None)
-            patches = model.patch_readout(model._patch_pool(h, args.train_patch_grid).transpose(1, 2)).transpose(1, 2)
             code = pool(h)
             pair = torch.stack(code[:, :14].chunk(2))
-            terms = {
-                "global": T.contrastive_loss(code, model, args, sim, crit, None),
-                "patch": T.patch_contrastive_loss(patches, model, args, sim, crit, x[:, :1] != 0, None, None),
-            }
-            loss = terms["global"] + args.patch_loss_weight * terms["patch"]
+            terms = {"global": T.contrastive_loss(code, model, args, sim, crit, None)}
+        if queue is not None or pool is not None:
+            loss = terms["global"]
+            if args.patch_loss_weight > 0:
+                pooled = model._patch_pool(h, args.train_patch_grid).transpose(1, 2)
+                patches = model.patch_readout(pooled).transpose(1, 2)
+                terms["patch"] = T.patch_contrastive_loss(patches, model, args, sim, crit, x[:, :1] != 0, None, None)
+                loss = loss + args.patch_loss_weight * terms["patch"]
         if a.decorrelate:
             terms["decor"] = cross_view_decorrelation(*pair)
             loss = loss + a.decorrelate * terms["decor"]

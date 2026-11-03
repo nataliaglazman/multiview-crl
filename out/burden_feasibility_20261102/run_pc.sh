@@ -30,6 +30,10 @@
 #         ssl_code_restail_t104: a Barlow Twins term on the code (it pays until every unit carries shared signal),
 #         group dropout before the head (the code must identify subjects from GAP alone or the tails alone), and
 #         per-view jitter (no voxel-exact match between the views to memorise).
+# Stage 11 Why jitter works. Separate shifts of the two views also misalign the 16^3 patch term, so the patch term off
+#         without jitter and with it. Then jitter with group dropout (the only lever that moved temporal) and jitter
+#         with a second seed. 6,000 steps each on the stage 10 arm, against ssl_code_restail_t104 and
+#         ssl_code_jitter_restail_t104.
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, so rerunning after a crash or an out-of-memory error continues where it stopped.
@@ -42,7 +46,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -228,6 +232,21 @@ if wants 10; then
     ssl ssl_code_drop_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --group-dropout 0.33
     ssl ssl_code_jitter_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --jitter 2 --rotate 3
     finish ssl_code_decor_restail_t104 ssl_code_drop_restail_t104 ssl_code_jitter_restail_t104
+    audit
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 11; then
+    residual_bank "$MAIN" t1_04 t1_00 flair
+    ssl ssl_code_nopatch_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --patch-weight 0
+    ssl ssl_code_jitter_nopatch_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --jitter 2 \
+        --rotate 3 --patch-weight 0
+    ssl ssl_code_jitter_drop_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --jitter 2 \
+        --rotate 3 --group-dropout 0.33
+    ssl ssl_code_jitter_restail_t104_s2 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --jitter 2 --rotate 3 \
+        --seed 2
+    finish ssl_code_nopatch_restail_t104 ssl_code_jitter_nopatch_restail_t104 ssl_code_jitter_drop_restail_t104 \
+        ssl_code_jitter_restail_t104_s2
     audit
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi

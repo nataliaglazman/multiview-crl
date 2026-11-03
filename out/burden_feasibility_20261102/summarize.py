@@ -49,15 +49,14 @@ def ssl(name, report):
         t, f = row["test"]["t1"], row["test"]["flair"]
         pooled = f" pool {t['pooled_volume_r2']:+.3f} {f['pooled_volume_r2']:+.3f} |" if "pooled_volume_r2" in t else ""
         loss = row["loss"].get("global")
-        decor = row["loss"].get("decor")
-        decor = "" if decor is None else f" decor {decor:.3f}"
+        extra = "".join(f" {k} {row['loss'][k]:.3f}" for k in ("patch", "decor") if k in row["loss"])
         spread = row.get("spread")
         spread = f" | nbhd spread anat {spread['anatomy']:.2f} pos {spread['lesion_position']:.2f}" if spread else ""
         print(
             f"  s{row['step']:5d} code {t['code_volume_r2']:+.3f} {f['code_volume_r2']:+.3f} | GAP {t['gap_volume_r2']:+.3f} "
             f"{f['gap_volume_r2']:+.3f} |{pooled} brain {t['code_brain']:.2f} vent {t['code_ventricle']:.2f} thick "
             f"{t['code_thickness']:.2f} temp {t['code_temporal']:.2f} lr {t['code_lr']:.2f} sulc {t['code_sulcal']:.2f} | "
-            f"global {'' if loss is None else format(loss, '.3f')}{decor}{spread}"
+            f"global {'' if loss is None else format(loss, '.3f')}{extra}{spread}"
         )
     return True
 
