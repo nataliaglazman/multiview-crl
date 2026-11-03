@@ -34,6 +34,9 @@
 #         without jitter and with it. Then jitter with group dropout (the only lever that moved temporal) and jitter
 #         with a second seed. 6,000 steps each on the stage 10 arm, against ssl_code_restail_t104 and
 #         ssl_code_jitter_restail_t104.
+# Stage 12 The best arm, jitter with the patch term off: 20,000 steps (does temporal arrive with training, and does
+#         memorisation creep back on a fixed set of subjects?), and the jitter dose at 6,000 steps, half (1 voxel,
+#         1.5 degrees) and double (4 voxels, 6 degrees), against ssl_code_jitter_nopatch_restail_t104.
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, so rerunning after a crash or an out-of-memory error continues where it stopped.
@@ -46,7 +49,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -247,6 +250,20 @@ if wants 11; then
         --seed 2
     finish ssl_code_nopatch_restail_t104 ssl_code_jitter_nopatch_restail_t104 ssl_code_jitter_drop_restail_t104 \
         ssl_code_jitter_restail_t104_s2
+    audit
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 12; then
+    residual_bank "$MAIN" t1_04 t1_00 flair
+    EVERY=2000 ssl ssl_code_jitter_nopatch_restail_t104_20k "$MAIN" tail t1_04 20000 --residual --code-batches 500 \
+        --jitter 2 --rotate 3 --patch-weight 0
+    ssl ssl_code_jitter1_nopatch_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --jitter 1 \
+        --rotate 1.5 --patch-weight 0
+    ssl ssl_code_jitter4_nopatch_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --jitter 4 \
+        --rotate 6 --patch-weight 0
+    finish ssl_code_jitter_nopatch_restail_t104_20k ssl_code_jitter1_nopatch_restail_t104 \
+        ssl_code_jitter4_nopatch_restail_t104
     audit
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
