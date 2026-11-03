@@ -10,10 +10,16 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 so the loss keeps paying after the batch of 32 is told apart. The patch term is unchanged.
   INIT          cold, or start both backbones from a sup.py checkpoint.
 
+Batches: by default an anchor and 31 of its 50 nearest training subjects on the six anatomy factors (the recipe's
+oracle neighbourhoods, which use anatomy labels). --uniform draws 32 distinct subjects uniformly. --code-batches K
+rebuilds the neighbourhoods every K steps on the current model's own code, both views, with no labels; each rebuild
+logs how far its neighbourhoods match anatomy, lesion position and burden (labels there only score).
+
 Each eval scores, on fresh test subjects, 5-fold ridge of volume and the anatomy latents from the 14-unit code, from
 the backbone GAP, and for --pool tail from the pooled vector before the head. Labels only ever score.
 
-    python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail] [--residual] [--t1key t1_00] [--uniform]
+    python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail] [--residual] [--t1key t1_00]
+        [--uniform | --code-batches K] [--queue N]
 """
 
 import argparse
@@ -24,6 +30,7 @@ import time
 import warnings
 from pathlib import Path
 
+import batch_price
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -288,12 +295,20 @@ def main():
     p.add_argument("--queue", type=int, default=0, help="Negatives from a momentum-encoder queue of this many subjects")
     p.add_argument("--queue-momentum", type=float, default=0.99)
     p.add_argument("--t1key", default="t1_00")
-    p.add_argument("--uniform", action="store_true")
+    p.add_argument("--uniform", action="store_true", help="32 distinct subjects drawn uniformly")
+    p.add_argument(
+        "--code-batches",
+        type=int,
+        default=0,
+        help="Rebuild the neighbourhood batches every this many steps on the model's own code (no labels)",
+    )
     p.add_argument("--frozen-backbone", action="store_true")
     p.add_argument("--device", default=pick_device())
     p.add_argument("--test-subjects", type=int, default=1000)
     p.add_argument("--seed", type=int, default=None)
     a = p.parse_args()
+    if a.uniform and a.code_batches:
+        raise ValueError("--uniform and --code-batches are different batch rules")
     a.out.mkdir(parents=True, exist_ok=False)
     args = run_args()
     if a.t1key == "t1_04":
@@ -324,16 +339,33 @@ def main():
                 parameter.requires_grad_(False)
     train = Bank(a.bank, "train", a.t1key, residual=a.residual)
     test = Bank(a.bank, "test", a.t1key, a.test_subjects, a.residual)
-    neighbours = cb.nearest_neighbours(train.zc[:, ANATOMY], args.stratify_neighbours)
-    sampler = cb.NeighbourhoodBatchSampler(neighbours, args.batch_size, args.loader_seed, 0.0)
+    scored = {
+        "anatomy": train.zc[:, ANATOMY],
+        "lesion_position": batch_price.lesion_centroid(np.load(f"{a.bank}/train_cells.npy", mmap_mode="r")),
+        "burden": train.vox[:, None],
+    }
+    batching = {"spread": None}
+
+    def rebuild(neighbours, seed):
+        """Batches from these neighbourhoods; the spread is each block's mean SD among a subject's neighbours over its
+        population SD (1 = no matching), for the log only."""
+        batching["sampler"] = cb.NeighbourhoodBatchSampler(neighbours, args.batch_size, seed, 0.0)
+        batching["spread"] = {k: round(float((v[neighbours].std(1) / v.std(0)).mean()), 3) for k, v in scored.items()}
+
+    if not a.uniform and not a.code_batches:
+        rebuild(cb.nearest_neighbours(train.zc[:, ANATOMY], args.stratify_neighbours), args.loader_seed)
     rng = np.random.default_rng(args.seed)
 
     def batches():
         while True:
             if a.uniform:
-                yield rng.integers(0, len(train.vox), args.batch_size)
-            else:
-                yield from sampler
+                yield rng.choice(len(train.vox), args.batch_size, replace=False)
+                continue
+            current = batching["sampler"]
+            for batch in current:
+                yield batch
+                if batching["sampler"] is not current:
+                    break
 
     source = batches()
     parameters = [q for q in model.parameters() if q.requires_grad]
@@ -343,8 +375,6 @@ def main():
     sim, crit = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
     queue = None
     if a.queue > 0:
-        if a.uniform:
-            raise ValueError("--queue assumes distinct subjects in a batch, which uniform sampling does not guarantee")
         queue = NegativeQueue(a.queue, 14, a.device)
         gauge = CodeGauge(14, a.device)
         momentum_model = copy.deepcopy(model).eval()
@@ -355,7 +385,7 @@ def main():
     report = {"args": {k: str(v) for k, v in vars(a).items()}, "history": []}
 
     def record(step, terms):
-        row = {"step": step, "loss": terms, "test": evaluate(model, test, a.device, pool)}
+        row = {"step": step, "loss": terms, "test": evaluate(model, test, a.device, pool), "spread": batching["spread"]}
         report["history"].append(row)
         (a.out / "report.json").write_text(json.dumps(report, indent=1))
         t = row["test"]
@@ -375,6 +405,10 @@ def main():
     keep = {"global": 0.0, "patch": 0.0}
     last = {}
     for step in range(1, a.steps + 1):
+        if a.code_batches and (step - 1) % a.code_batches == 0:
+            codes = features(model, train, a.device, pool=pool)["code"]
+            rebuild(cb.nearest_neighbours(np.concatenate(codes, 1), args.stratify_neighbours), args.loader_seed + step)
+            print(f"step {step:5d} code neighbourhoods rebuilt, spread {batching['spread']}", flush=True)
         indices = np.asarray(next(source))
         x = train.images(indices, a.device)
         if queue is not None:

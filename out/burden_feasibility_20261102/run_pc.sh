@@ -1,7 +1,7 @@
 #!/bin/bash
 # Burden feasibility on a CUDA machine. Run from anywhere inside the repository, on the branch that holds this folder.
 #
-#   bash out/burden_feasibility_20261102/run_pc.sh            all six stages, in order
+#   bash out/burden_feasibility_20261102/run_pc.sh            all stages, in order
 #   bash out/burden_feasibility_20261102/run_pc.sh 5 6        only those stages
 #
 # Stage 1 Can the encoder learn it from labels? Dense-label detectors, then the exact vector against pooling changes.
@@ -14,6 +14,11 @@
 # Stage 7 Two follow-ups. Gauge control: GAP through the tail arms' BatchNorm gauge and head with no tails, with and
 #         without labels, to separate the tails from the gauge. Queue: QUEUE earlier subjects as extra negatives from
 #         a momentum encoder, to test whether the 32-subject batch is why each arm keeps only some factors.
+# Stage 8 What else drives the trade-off. An audit of every finished self-supervised code, with no training: what it
+#         holds, the lesion centre included (never scored before), which shared directions no known factor explains,
+#         and how well it tells subjects apart in uniform and in anatomy-matched sets. Then the batch rule, which every
+#         arm so far shared: the oracle neighbourhoods match exactly the six anatomy factors we score. Uniform batches,
+#         uniform with the queue, and neighbourhoods rebuilt every 500 steps from the model's own code (no labels).
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, so rerunning after a crash or an out-of-memory error continues where it stopped.
@@ -26,7 +31,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7}
+STAGES=${*:-1 2 3 4 5 6 7 8}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -82,6 +87,12 @@ sup() { # sup NAME BANK ARM T1KEY STEPS [options]
 ssl() { # ssl NAME BANK POOL T1KEY STEPS [options]
     local name=$1 where=$2 pool=$3 key=$4 steps=$5; shift 5
     arm "$name" "$PY" "$D/warm.py" "$where" "$D/runs/$name" cold "$steps" 1000 --pool "$pool" --t1key "$key" "$@"
+}
+
+audit() { # audit every finished self-supervised run; runs already audited at the same step are reused from audit.json
+    if [ "$DRY" = 1 ]; then echo "$PY $D/code_audit.py $D/audit.json $D/runs/ssl_*"; return; fi
+    echo "$(date +%H:%M) audit of finished self-supervised codes"
+    "$PY" "$D/code_audit.py" "$D/audit.json" "$D"/runs/ssl_* > "$D/audit.txt" 2>&1 || echo "audit failed, see $D/audit.txt"
 }
 
 MAIN=$D/bank
@@ -167,6 +178,19 @@ if wants 7; then
     ssl ssl_queue_restail_t104_nuisance "$NOISY" tail t1_04 6000 --residual --queue "$QUEUE"
     finish gapnorm_t100 gapnorm_res_t104 ssl_gapnorm_t100 ssl_resgapnorm_t104 ssl_queue_gap_t100 \
         ssl_queue_restail_t104 ssl_queue_gap_t104_nuisance ssl_queue_restail_t104_nuisance
+fi
+
+if wants 8; then
+    residual_bank "$MAIN" t1_04 t1_00 flair
+    ssl ssl_uni_restail_t104 "$MAIN" tail t1_04 6000 --residual --uniform
+    ssl ssl_uni_queue_restail_t104 "$MAIN" tail t1_04 6000 --residual --uniform --queue "$QUEUE"
+    ssl ssl_code_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500
+    audit
+    ssl ssl_uni_gap_t100 "$MAIN" gap t1_00 6000 --uniform
+    ssl ssl_uni_tail_t100 "$MAIN" tail t1_00 6000 --uniform
+    finish ssl_uni_restail_t104 ssl_uni_queue_restail_t104 ssl_code_restail_t104 ssl_uni_gap_t100 ssl_uni_tail_t100
+    audit
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
 
 echo "$(date +%H:%M) all requested stages done"

@@ -49,11 +49,13 @@ def ssl(name, report):
         t, f = row["test"]["t1"], row["test"]["flair"]
         pooled = f" pool {t['pooled_volume_r2']:+.3f} {f['pooled_volume_r2']:+.3f} |" if "pooled_volume_r2" in t else ""
         loss = row["loss"].get("global")
+        spread = row.get("spread")
+        spread = f" | nbhd spread anat {spread['anatomy']:.2f} pos {spread['lesion_position']:.2f}" if spread else ""
         print(
             f"  s{row['step']:5d} code {t['code_volume_r2']:+.3f} {f['code_volume_r2']:+.3f} | GAP {t['gap_volume_r2']:+.3f} "
             f"{f['gap_volume_r2']:+.3f} |{pooled} brain {t['code_brain']:.2f} vent {t['code_ventricle']:.2f} thick "
             f"{t['code_thickness']:.2f} temp {t['code_temporal']:.2f} lr {t['code_lr']:.2f} sulc {t['code_sulcal']:.2f} | "
-            f"global {'' if loss is None else format(loss, '.3f')}"
+            f"global {'' if loss is None else format(loss, '.3f')}{spread}"
         )
     return True
 
@@ -98,6 +100,10 @@ def main():
                 f"  K {k:2d} T1 0.4 R2 {report[f't1_04_k{k}']['r2']:.3f} FLAIR {report[f'flair_k{k}']['r2']:.3f} | "
                 f"cross-view r {shared['cross_view_r']:.3f} | best label-free direction, corr with burden {best}"
             )
+    if os.path.exists(f"{HERE}/audit.txt"):
+        print()
+        with open(f"{HERE}/audit.txt") as stream:
+            print("".join(line for line in stream if not line.startswith(("auditing", "skipping"))), end="")
 
 
 if __name__ == "__main__":
