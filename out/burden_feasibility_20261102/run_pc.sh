@@ -25,6 +25,11 @@
 #         in both: a 6,000-step control against ssl_restail_t104, and 20,000-step code-batch arms (alone, with the
 #         queue, and with the queue and the nuisance fields on), to see whether anatomy keeps returning while burden
 #         holds.
+# Stage 10 Levers against feature suppression (InfoNCE stops paying once the batch is told apart), each alone on the
+#         best label-free arm so far (residual + tail, code batches, BatchNorm gauge, 6,000 steps), to compare with
+#         ssl_code_restail_t104: a Barlow Twins term on the code (it pays until every unit carries shared signal),
+#         group dropout before the head (the code must identify subjects from GAP alone or the tails alone), and
+#         per-view jitter (no voxel-exact match between the views to memorise).
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, so rerunning after a crash or an out-of-memory error continues where it stopped.
@@ -37,7 +42,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -213,6 +218,16 @@ if wants 9; then
         --code-batches 500 --gauge running --queue "$QUEUE"
     finish ssl_run_restail_t104 ssl_code_run_restail_t104_20k ssl_code_run_queue_restail_t104_20k \
         ssl_code_run_queue_restail_t104_nuisance_20k
+    audit
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 10; then
+    residual_bank "$MAIN" t1_04 t1_00 flair
+    ssl ssl_code_decor_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --decorrelate 0.1
+    ssl ssl_code_drop_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --group-dropout 0.33
+    ssl ssl_code_jitter_restail_t104 "$MAIN" tail t1_04 6000 --residual --code-batches 500 --jitter 2 --rotate 3
+    finish ssl_code_decor_restail_t104 ssl_code_drop_restail_t104 ssl_code_jitter_restail_t104
     audit
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi

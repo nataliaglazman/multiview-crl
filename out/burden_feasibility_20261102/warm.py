@@ -11,6 +11,15 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
   --gauge running  TailCode's gauge standardizes with running statistics in training as at test. The default BatchNorm
                 uses each batch's own statistics in training and running ones at test, which differ when batches are
                 neighbourhoods; the momentum encoder then also differs from the online one.
+  --decorrelate W  adds W times a Barlow Twins term on the 14-unit code: each unit should correlate fully between the
+                two views and not with the other units, so the loss keeps paying until every unit carries its own shared
+                signal, where InfoNCE stops once the batch is told apart. Needs --pool tail or gapnorm.
+  --group-dropout P  in a fraction P of steps the head sees TailCode's GAP features with the tails zeroed, in another P
+                the tails with the GAP zeroed (after the gauge, both views alike), so the code has to tell subjects apart
+                from either group alone. Needs --pool tail and no queue.
+  --jitter V, --rotate D  each training image, every subject and view separately, is shifted up to V voxels and
+                rotated up to D degrees about each axis, its residual channel with it, so the views cannot be matched
+                voxel for voxel.
   INIT          cold, or start both backbones from a sup.py checkpoint.
 
 Batches: by default an anchor and 31 of its 50 nearest training subjects on the six anatomy factors (the recipe's
@@ -22,7 +31,8 @@ Each eval scores, on fresh test subjects, 5-fold ridge of volume and the anatomy
 the backbone GAP, and for --pool tail from the pooled vector before the head. Labels only ever score.
 
     python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail|gapnorm] [--gauge batch|running] [--residual]
-        [--t1key t1_00] [--uniform | --code-batches K] [--queue N]
+        [--t1key t1_00] [--uniform | --code-batches K] [--queue N] [--decorrelate W] [--group-dropout P]
+        [--jitter V] [--rotate D]
 """
 
 import argparse
@@ -50,6 +60,7 @@ import training.main_conv_synthetic as T
 HERE = Path(__file__).resolve().parent
 ANATOMY = [0, 1, 5, 6, 7, 8]
 FACTORS = {0: "brain", 1: "ventricle", 5: "thickness", 6: "temporal", 7: "lr", 8: "sulcal"}
+OFF_DIAGONAL = 1 / 13  # 1 / (units - 1): the off-diagonal sum weighs about as much as the diagonal
 
 
 def pick_device():
@@ -116,7 +127,8 @@ class TailCode(nn.Module):
 
     ``thresholds=()`` keeps only the GAP and the BatchNorm gauge: the control that separates the tails from the gauge.
     ``gauge="running"`` replaces the BatchNorm gauge with RunningGauge, so the head sees one normalization in training
-    and at test.
+    and at test. ``drop`` ("gap" or "tails"), set per step by the training loop, zeroes that group after the gauge, in
+    training only.
     """
 
     THRESHOLDS = (2.0, 3.0, 4.0)
@@ -132,6 +144,8 @@ class TailCode(nn.Module):
         self.register_buffer("started", torch.zeros(2, dtype=torch.bool))
         self.momentum = momentum
         self.thresholds = tuple(thresholds)
+        self.channels = channels
+        self.drop = None
         width = channels * (1 + 2 * len(self.thresholds))
         if gauge == "batch":
             self.gauges = nn.ModuleList(nn.BatchNorm1d(width, affine=False) for _ in range(2))
@@ -157,7 +171,13 @@ class TailCode(nn.Module):
             parts = [part.mean((2, 3, 4))]
             for t in self.thresholds:
                 parts += [torch.log1p(100 * F.relu(z - t).mean(2)), torch.log1p(100 * F.relu(-z - t).mean(2))]
-            out.append(self.gauges[view](torch.cat(parts, 1)))
+            gauged = self.gauges[view](torch.cat(parts, 1))
+            if self.training and self.drop:
+                kept = torch.ones(gauged.shape[1], device=gauged.device)
+                kept[: self.channels] = float(self.drop != "gap")
+                kept[self.channels :] = float(self.drop != "tails")
+                gauged = gauged * kept
+            out.append(gauged)
         return out
 
     def forward(self, h):
@@ -231,6 +251,30 @@ def momentum_update(online, target, momentum):
 
 def global_code(model, pool, h, x):
     return model._global_code(h, x, 2) if pool is None else pool(h)
+
+
+def cross_view_decorrelation(z1, z2):
+    """Barlow Twins on (B, units) codes: each unit standardized over the batch per view and C their cross-view
+    correlation matrix; (1 - C_ii)^2 summed over units, plus OFF_DIAGONAL times C_ij^2 summed over i != j."""
+    z1, z2 = ((z - z.mean(0)) / (z.std(0, unbiased=False) + 1e-6) for z in (z1, z2))
+    c = z1.T @ z2 / len(z1)
+    diagonal = torch.diagonal(c)
+    return (1 - diagonal).square().sum() + OFF_DIAGONAL * (c.square().sum() - diagonal.square().sum())
+
+
+def jitter(x, shift, degrees, rng):
+    """Each row of (N, C, D, H, W) cubic volumes moved by its own random rigid transform, every channel alike: shifts
+    up to ``shift`` voxels and rotations up to ``degrees`` about each axis, trilinear, zero outside."""
+    n, size = len(x), x.shape[-1]
+    theta = np.zeros((n, 3, 4))
+    for i, (a, b, c) in enumerate(np.deg2rad(rng.uniform(-degrees, degrees, (n, 3)))):
+        rx = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+        ry = np.array([[np.cos(b), 0, np.sin(b)], [0, 1, 0], [-np.sin(b), 0, np.cos(b)]])
+        rz = np.array([[np.cos(c), -np.sin(c), 0], [np.sin(c), np.cos(c), 0], [0, 0, 1]])
+        theta[i, :, :3] = rz @ ry @ rx
+    theta[:, :, 3] = rng.uniform(-shift, shift, (n, 3)) * 2 / size
+    grid = F.affine_grid(torch.as_tensor(theta, dtype=x.dtype, device=x.device), list(x.shape), align_corners=False)
+    return F.grid_sample(x, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
 
 
 def widen_input(model):
@@ -333,6 +377,15 @@ def main():
         help="TailCode's gauge: BatchNorm (batch statistics in training, running at test) or running statistics in both",
     )
     p.add_argument("--residual", action="store_true", help="Add each view's normative residual as a second channel")
+    p.add_argument("--decorrelate", type=float, default=0.0, help="Weight of a Barlow Twins term on the 14-unit code")
+    p.add_argument(
+        "--group-dropout",
+        type=float,
+        default=0.0,
+        help="Fraction of steps in which the head sees only TailCode's GAP, and again only its tails",
+    )
+    p.add_argument("--jitter", type=float, default=0.0, help="Random shift of each training image, in voxels")
+    p.add_argument("--rotate", type=float, default=0.0, help="Random rotation of each training image, degrees per axis")
     p.add_argument("--queue", type=int, default=0, help="Negatives from a momentum-encoder queue of this many subjects")
     p.add_argument("--queue-momentum", type=float, default=0.99)
     p.add_argument("--t1key", default="t1_00")
@@ -352,6 +405,12 @@ def main():
         raise ValueError("--uniform and --code-batches are different batch rules")
     if a.gauge != "batch" and a.pool == "gap":
         raise ValueError("--gauge applies to TailCode, so to --pool tail or gapnorm")
+    if a.decorrelate and a.pool == "gap":
+        raise ValueError("--decorrelate needs --pool tail or gapnorm")
+    if a.group_dropout and (a.pool != "tail" or a.queue):
+        raise ValueError("--group-dropout needs --pool tail and no --queue")
+    if not 0 <= a.group_dropout <= 0.5:
+        raise ValueError("--group-dropout is a fraction of steps per group, at most 0.5")
     a.out.mkdir(parents=True, exist_ok=False)
     args = run_args()
     if a.t1key == "t1_04":
@@ -398,6 +457,7 @@ def main():
     if not a.uniform and not a.code_batches:
         rebuild(cb.nearest_neighbours(train.zc[:, ANATOMY], args.stratify_neighbours), args.loader_seed)
     rng = np.random.default_rng(args.seed)
+    aug = np.random.default_rng(None if args.seed is None else args.seed + 1)
 
     def batches():
         while True:
@@ -445,7 +505,7 @@ def main():
     if pool is not None:
         pool.train()
     start = time.time()
-    keep = {"global": 0.0, "patch": 0.0}
+    keep = {}
     last = {}
     for step in range(1, a.steps + 1):
         if a.code_batches and (step - 1) % a.code_batches == 0:
@@ -454,9 +514,15 @@ def main():
             print(f"step {step:5d} code neighbourhoods rebuilt, spread {batching['spread']}", flush=True)
         indices = np.asarray(next(source))
         x = train.images(indices, a.device)
+        if a.jitter or a.rotate:
+            x = jitter(x, a.jitter, a.rotate, aug)
+        if a.group_dropout:
+            u = aug.random()
+            pool.drop = "tails" if u < a.group_dropout else "gap" if u < 2 * a.group_dropout else None
         if queue is not None:
             h = model._encode(x, 2, None)
             queries = torch.stack(global_code(model, pool, h, x)[:, :14].chunk(2))
+            pair = queries
             with torch.no_grad():
                 keys = torch.stack(
                     global_code(momentum_model, momentum_pool, momentum_model._encode(x, 2, None), x)[:, :14].chunk(2)
@@ -474,11 +540,16 @@ def main():
         else:
             h = model._encode(x, 2, None)
             patches = model.patch_readout(model._patch_pool(h, args.train_patch_grid).transpose(1, 2)).transpose(1, 2)
+            code = pool(h)
+            pair = torch.stack(code[:, :14].chunk(2))
             terms = {
-                "global": T.contrastive_loss(pool(h), model, args, sim, crit, None),
+                "global": T.contrastive_loss(code, model, args, sim, crit, None),
                 "patch": T.patch_contrastive_loss(patches, model, args, sim, crit, x[:, :1] != 0, None, None),
             }
             loss = terms["global"] + args.patch_loss_weight * terms["patch"]
+        if a.decorrelate:
+            terms["decor"] = cross_view_decorrelation(*pair)
+            loss = loss + a.decorrelate * terms["decor"]
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(parameters, args.grad_clip)
@@ -488,16 +559,16 @@ def main():
             if pool is not None:
                 momentum_update(pool, momentum_pool, a.queue_momentum)
             queue.push(keys, ids)
-        keep["global"] += float(terms["global"]) / 50
-        keep["patch"] += float(terms["patch"]) / 50
+        for name, value in terms.items():
+            keep[name] = keep.get(name, 0.0) + float(value) / 50
         if step % 50 == 0:
             print(
-                f"step {step:5d} global {keep['global']:.3f} patch {keep['patch']:.3f} "
+                f"step {step:5d} " + " ".join(f"{k} {v:.3f}" for k, v in keep.items()) + " "
                 f"{(time.time() - start) / step:.2f}s/step",
                 flush=True,
             )
             last = dict(keep)
-            keep = {"global": 0.0, "patch": 0.0}
+            keep = {}
         if step % a.every == 0 or step == a.steps:
             record(step, last)
             state = {"model": model.state_dict(), "step": step}

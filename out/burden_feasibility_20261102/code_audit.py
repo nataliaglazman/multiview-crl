@@ -45,6 +45,7 @@ SHORT = ["brain", "vent", "thick", "temp", "lr", "sulc", "burden", "x", "y", "z"
 GROUPS = {"anatomy": slice(0, 6), "lesion": slice(6, 10), "all": slice(0, 10)}
 SETS = 200
 MODE_SETS = 100
+LEVERS = ("decorrelate", "group_dropout", "jitter", "rotate")
 
 
 def boosted(x, y):
@@ -177,7 +178,9 @@ def audit(run, device):
     out = {
         "step": step,
         "setting": f"{a.get('pool', 'gap')}{' residual' if residual else ''} {a['t1key']} {batches} batches"
-        + (f" queue {a['queue']}" if a.get("queue", "0") != "0" else ""),
+        + (f" queue {a['queue']}" if a.get("queue", "0") != "0" else "")
+        + (f" gauge {a['gauge']}" if a.get("gauge", "batch") != "batch" else "")
+        + "".join(f" {key.replace('_', ' ')} {a[key]}" for key in LEVERS if float(a.get(key, 0)) != 0),
         "final_global_loss": report["history"][-1]["loss"].get("global"),
         "read": {},
     }
