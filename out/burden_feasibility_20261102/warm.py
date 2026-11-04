@@ -20,6 +20,9 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
   --jitter V, --rotate D  each training image, every subject and view separately, is shifted up to V voxels and
                 rotated up to D degrees about each axis, its residual channel with it, so the views cannot be matched
                 voxel for voxel.
+  --shared-jitter  with --jitter or --rotate, one transform per subject that moves both views alike: a training subject
+                still never looks the same twice, but its two views stay matched voxel for voxel. Separates the two
+                things independent jitter does.
   --patch-weight W  the patch InfoNCE's weight in place of the recipe's 1.0; at 0 the patch term is not computed. The
                 patch term pairs the two views cell by cell on the 16^3 grid, so --jitter also misaligns it; this
                 separates the two.
@@ -37,7 +40,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
 
     python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail|gapnorm] [--gauge batch|running] [--residual]
         [--t1key t1_00] [--uniform | --code-batches K] [--queue N] [--decorrelate W] [--group-dropout P]
-        [--jitter V] [--rotate D] [--patch-weight W] [--seed S]
+        [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--seed S]
 """
 
 import argparse
@@ -267,17 +270,21 @@ def cross_view_decorrelation(z1, z2):
     return (1 - diagonal).square().sum() + OFF_DIAGONAL * (c.square().sum() - diagonal.square().sum())
 
 
-def jitter(x, shift, degrees, rng):
+def jitter(x, shift, degrees, rng, shared=False):
     """Each row of (N, C, D, H, W) cubic volumes moved by its own random rigid transform, every channel alike: shifts
-    up to ``shift`` voxels and rotations up to ``degrees`` about each axis, trilinear, zero outside."""
+    up to ``shift`` voxels and rotations up to ``degrees`` about each axis, trilinear, zero outside. ``shared`` reads
+    the rows as view-major pairs (row i and row i + N/2 are one subject) and gives each pair one transform."""
     n, size = len(x), x.shape[-1]
-    theta = np.zeros((n, 3, 4))
-    for i, (a, b, c) in enumerate(np.deg2rad(rng.uniform(-degrees, degrees, (n, 3)))):
+    draws = n // 2 if shared else n
+    theta = np.zeros((draws, 3, 4))
+    for i, (a, b, c) in enumerate(np.deg2rad(rng.uniform(-degrees, degrees, (draws, 3)))):
         rx = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
         ry = np.array([[np.cos(b), 0, np.sin(b)], [0, 1, 0], [-np.sin(b), 0, np.cos(b)]])
         rz = np.array([[np.cos(c), -np.sin(c), 0], [np.sin(c), np.cos(c), 0], [0, 0, 1]])
         theta[i, :, :3] = rz @ ry @ rx
-    theta[:, :, 3] = rng.uniform(-shift, shift, (n, 3)) * 2 / size
+    theta[:, :, 3] = rng.uniform(-shift, shift, (draws, 3)) * 2 / size
+    if shared:
+        theta = np.concatenate([theta, theta])
     grid = F.affine_grid(torch.as_tensor(theta, dtype=x.dtype, device=x.device), list(x.shape), align_corners=False)
     return F.grid_sample(x, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
 
@@ -391,6 +398,7 @@ def main():
     )
     p.add_argument("--jitter", type=float, default=0.0, help="Random shift of each training image, in voxels")
     p.add_argument("--rotate", type=float, default=0.0, help="Random rotation of each training image, degrees per axis")
+    p.add_argument("--shared-jitter", action="store_true", help="One jitter transform per subject, both views alike")
     p.add_argument(
         "--patch-weight",
         type=float,
@@ -429,6 +437,8 @@ def main():
         raise ValueError("--group-dropout is a fraction of steps per group, at most 0.5")
     if a.patch_weight is not None and a.patch_weight < 0:
         raise ValueError("--patch-weight cannot be negative")
+    if a.shared_jitter and not (a.jitter or a.rotate):
+        raise ValueError("--shared-jitter needs --jitter or --rotate")
     a.out.mkdir(parents=True, exist_ok=False)
     args = run_args()
     if a.t1key == "t1_04":
@@ -537,7 +547,7 @@ def main():
         indices = np.asarray(next(source))
         x = train.images(indices, a.device)
         if a.jitter or a.rotate:
-            x = jitter(x, a.jitter, a.rotate, aug)
+            x = jitter(x, a.jitter, a.rotate, aug, a.shared_jitter)
         if a.group_dropout:
             u = aug.random()
             pool.drop = "tails" if u < a.group_dropout else "gap" if u < 2 * a.group_dropout else None

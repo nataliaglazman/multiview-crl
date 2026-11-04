@@ -182,6 +182,7 @@ def audit(run, device):
         + (f" queue {a['queue']}" if a.get("queue", "0") != "0" else "")
         + (f" gauge {a['gauge']}" if a.get("gauge", "batch") != "batch" else "")
         + "".join(f" {key.replace('_', ' ')} {a[key]}" for key in LEVERS if float(a.get(key, 0)) != 0)
+        + (" jitter shared by both views" if a.get("shared_jitter") == "True" else "")
         + "".join(f" {key.replace('_', ' ')} {a[key]}" for key in OVERRIDES if a.get(key, "None") != "None"),
         "final_global_loss": report["history"][-1]["loss"].get("global"),
         "read": {},
