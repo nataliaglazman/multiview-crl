@@ -50,7 +50,9 @@
 #         brain -> ventricle -> burden -> temporal <- thickness <- brain, temporal -> sulcal, lr on its own), the best
 #         recipe on it at 6,000 and 20,000 steps, then each code and its untrained twin as bundles for the repo's
 #         label-free discovery (eval.causal.latent_causal_discovery) and decoded discovery (compare_bundles
-#         --with-graph), with PC on the true factors as the ceiling. Results in causal/. Needs causal-learn.
+#         --with-graph), with PC on the true factors as the ceiling. Results in causal/. Needs causal-learn. Then how
+#         much of each factor's own variation (its SCM noise, which no parent can fake) the code, TailCode's pooled
+#         features and the backbone GAP hold, against the untrained twin (own_variation.py, causal/own_variation.txt).
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -159,6 +161,16 @@ causal() { # causal NAME...: each run's code and its untrained twin as bundles, 
             --holdout-readout --graph-repeats 20 --out "$out/decoded_view$view.json" > "$out/decoded_view$view.log" 2>&1
     done
     echo "$(date +%H:%M) causal discovery done, see $out"
+}
+
+own_variation() { # own_variation NAME...: each factor's own variation (SCM noise) in the code, pooled features and GAP
+    local runs="" name
+    for name in "$@"; do runs="$runs $D/runs/$name"; done
+    if [ "$DRY" = 1 ]; then echo "$PY $D/own_variation.py $D/causal/own_variation.json$runs"; return; fi
+    mkdir -p "$D/causal"
+    echo "$(date +%H:%M) own variation of each factor in $*"
+    "$PY" "$D/own_variation.py" "$D/causal/own_variation.json" $runs > "$D/causal/own_variation.txt" 2>&1 \
+        || echo "own-variation check failed, see $D/causal/own_variation.txt"
 }
 
 MAIN=$D/bank
@@ -357,6 +369,7 @@ if wants 15; then
     finish ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_20k
     audit
     causal ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_20k
+    own_variation ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_20k
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
 
