@@ -53,6 +53,11 @@
 #         --with-graph), with PC on the true factors as the ceiling. Results in causal/. Needs causal-learn. Then how
 #         much of each factor's own variation (its SCM noise, which no parent can fake) the code, TailCode's pooled
 #         features and the backbone GAP hold, against the untrained twin (own_variation.py, causal/own_variation.txt).
+# Stage 16 Where burden's own variation is lost. On stage 15's bank the backbone holds burden's own SCM noise (~0.3)
+#         and the 14-unit code drops it as ventricle and temporal arrive. Room: the 20,000-step run with a 24-unit code
+#         (--content-units 24), then label-free and decoded discovery against the 14-unit run (causal/c24_*) and its own
+#         variation. Past the head: decoded discovery on the backbone GAP of stage 15's two runs (causal/gap_*), no
+#         training, started beside the arm. Needs stage 15's runs and causal-learn.
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -66,7 +71,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -131,16 +136,25 @@ audit() { # audit every finished self-supervised run; runs already audited at th
     "$PY" "$D/code_audit.py" "$D/audit.json" "$D"/runs/ssl_* > "$D/audit.txt" 2>&1 || echo "audit failed, see $D/audit.txt"
 }
 
-causal() { # causal NAME...: each run's code and its untrained twin as bundles, then label-free and decoded discovery
-    local out=$D/causal bundles="" floors="" name view
+causal() { # [TAG=T] [FEATURES=code|gap|pooled] causal NAME...: each run's features and its untrained twin as bundles,
+    # then decoded discovery, and label-free discovery too on the code. TAG prefixes the reports; a bundle newer than
+    # its run's checkpoint is reused.
+    local out=$D/causal features=${FEATURES:-code} prefix=${TAG:+${TAG}_} suffix="" bundles="" floors="" name view base
+    [ "$features" = code ] || suffix=.$features
     for name in "$@"; do
-        bundles="$bundles $name=$out/$name.npz"
-        floors="$floors $name=$out/$name.floor.npz"
+        bundles="$bundles $name=$out/$name$suffix.npz"
+        floors="$floors $name=$out/$name$suffix.floor.npz"
     done
     if [ "$DRY" = 1 ]; then
-        for name in "$@"; do echo "$PY $D/causal_bundle.py $D/runs/$name $out/$name.npz [--untrained]"; done
-        echo "$PY -m eval.causal.latent_causal_discovery --bundles$bundles --bundle-floors$floors --ceiling"
-        echo "$PY -m eval.protocol.compare_bundles --bundles$bundles --floors$floors --with-graph"
+        for name in "$@"; do
+            echo "$PY $D/causal_bundle.py $D/runs/$name $out/$name$suffix.npz --features $features [--untrained]"
+        done
+        if [ "$features" = code ]; then
+            echo "$PY -m eval.causal.latent_causal_discovery --bundles$bundles --bundle-floors$floors --ceiling" \
+                "--out $out/${prefix}label_free_view*.json"
+        fi
+        echo "$PY -m eval.protocol.compare_bundles --bundles$bundles --floors$floors --with-graph" \
+            "--out $out/${prefix}decoded_view*.json"
         return
     fi
     if ! "$PY" -c "import causallearn" 2> /dev/null; then
@@ -148,17 +162,26 @@ causal() { # causal NAME...: each run's code and its untrained twin as bundles, 
         return
     fi
     mkdir -p "$out"
-    echo "$(date +%H:%M) causal discovery on $*"
+    echo "$(date +%H:%M) causal discovery on the $features of $*"
     for name in "$@"; do
-        "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$out/$name.npz" > "$out/$name.log" 2>&1 \
-            && "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$out/$name.floor.npz" --untrained >> "$out/$name.log" 2>&1 \
-            || { echo "bundle failed, see $out/$name.log"; return; }
+        base=$out/$name$suffix
+        if [ "$base.npz" -nt "$D/runs/$name/model.pt" ] && [ "$base.floor.npz" -nt "$D/runs/$name/model.pt" ]; then
+            continue
+        fi
+        "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$base.npz" --features "$features" > "$base.log" 2>&1 \
+            && "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$base.floor.npz" --features "$features" --untrained \
+                >> "$base.log" 2>&1 \
+            || { echo "bundle failed, see $base.log"; return; }
     done
     for view in 1 2; do
-        "$PY" -m eval.causal.latent_causal_discovery --bundles $bundles --bundle-floors $floors --bundle-view "$view" \
-            --ceiling --mixing-null 30 --out "$out/label_free_view$view.json" > "$out/label_free_view$view.txt" 2>&1
+        if [ "$features" = code ]; then
+            "$PY" -m eval.causal.latent_causal_discovery --bundles $bundles --bundle-floors $floors \
+                --bundle-view "$view" --ceiling --mixing-null 30 --out "$out/${prefix}label_free_view$view.json" \
+                > "$out/${prefix}label_free_view$view.txt" 2>&1
+        fi
         "$PY" -m eval.protocol.compare_bundles --bundles $bundles --floors $floors --view "$view" --with-graph \
-            --holdout-readout --graph-repeats 20 --out "$out/decoded_view$view.json" > "$out/decoded_view$view.log" 2>&1
+            --holdout-readout --graph-repeats 20 --out "$out/${prefix}decoded_view$view.json" \
+            > "$out/${prefix}decoded_view$view.log" 2>&1
     done
     echo "$(date +%H:%M) causal discovery done, see $out"
 }
@@ -370,6 +393,21 @@ if wants 15; then
     audit
     causal ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_20k
     own_variation ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_20k
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 16; then
+    CAUSAL=$D/bank_causal
+    bank "$CAUSAL" --t1-values 0.4 --causal
+    residual_bank "$CAUSAL" t1_04 flair
+    EVERY=2000 ssl ssl_code_jitter_nopatch_restail_t104_causal_c24_20k "$CAUSAL" tail t1_04 20000 --residual \
+        --code-batches 500 --jitter 2 --rotate 3 --patch-weight 0 --content-units 24
+    TAG=gap FEATURES=gap causal ssl_code_jitter_nopatch_restail_t104_causal \
+        ssl_code_jitter_nopatch_restail_t104_causal_20k
+    finish ssl_code_jitter_nopatch_restail_t104_causal_c24_20k
+    audit
+    TAG=c24 causal ssl_code_jitter_nopatch_restail_t104_causal_20k ssl_code_jitter_nopatch_restail_t104_causal_c24_20k
+    own_variation ssl_code_jitter_nopatch_restail_t104_causal_c24_20k
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
 
