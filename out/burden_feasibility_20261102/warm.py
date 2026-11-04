@@ -26,6 +26,9 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
   --patch-weight W  the patch InfoNCE's weight in place of the recipe's 1.0; at 0 the patch term is not computed. The
                 patch term pairs the two views cell by cell on the 16^3 grid, so --jitter also misaligns it; this
                 separates the two.
+  --content-units N  the code is the first N outputs of TailCode's head in place of the recipe's 14, the head widened
+                to N + 4 and the backbone and its init unchanged, so the code has room for more factors. Needs --pool
+                tail or gapnorm and --patch-weight 0, since the backbone's own head is not widened.
   --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
@@ -40,7 +43,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
 
     python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail|gapnorm] [--gauge batch|running] [--residual]
         [--t1key t1_00] [--uniform | --code-batches K] [--queue N] [--decorrelate W] [--group-dropout P]
-        [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--seed S]
+        [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--content-units N] [--seed S]
 """
 
 import argparse
@@ -141,10 +144,11 @@ class TailCode(nn.Module):
 
     THRESHOLDS = (2.0, 3.0, 4.0)
 
-    def __init__(self, keep, channels=64, latent=18, momentum=0.01, thresholds=THRESHOLDS, gauge="batch"):
+    def __init__(self, keep, channels=64, latent=18, momentum=0.01, thresholds=THRESHOLDS, gauge="batch", units=14):
         super().__init__()
         if gauge not in ("batch", "running"):
             raise ValueError(f"gauge must be batch or running, got {gauge!r}")
+        self.units = units  # the code is the head's first ``units`` outputs; the rest are unused style units
         self.register_buffer("keep", torch.from_numpy(keep))
         cells = int(keep.sum())
         self.register_buffer("mean", torch.zeros(2, channels, cells))
@@ -342,7 +346,7 @@ def features(model, bank, device, batch=32, pool=None):
             code = model._global_code(h, x, 2)[:, :14].cpu().numpy()
         else:
             parts = pool.pooled(h)
-            code = torch.cat([pool.head(p) for p in parts], 0)[:, :14].cpu().numpy()
+            code = torch.cat([pool.head(p) for p in parts], 0)[:, : pool.units].cpu().numpy()
             for view in range(2):
                 rows["pooled"][view].append(parts[view].cpu().numpy())
         for view in range(2):
@@ -368,8 +372,9 @@ def evaluate(model, bank, device, pool=None):
             cell[f"code_{factor}"] = ridge(feats["code"][view], bank.zc[:, column])
         row[name] = cell
     if "pooled" in feats:
+        n = feats["code"][0].shape[1]
         row["cross_view_code_r"] = float(
-            np.mean(np.abs(np.diag(np.corrcoef(feats["code"][0].T, feats["code"][1].T)[:14, 14:])))
+            np.mean(np.abs(np.diag(np.corrcoef(feats["code"][0].T, feats["code"][1].T)[:n, n:])))
         )
     return row
 
@@ -405,6 +410,12 @@ def main():
         default=None,
         help="Weight of the patch InfoNCE in place of the recipe's; 0 drops it",
     )
+    p.add_argument(
+        "--content-units",
+        type=int,
+        default=None,
+        help="Code width: the first N of TailCode's outputs, its head widened to match (default the recipe's 14)",
+    )
     p.add_argument("--queue", type=int, default=0, help="Negatives from a momentum-encoder queue of this many subjects")
     p.add_argument("--queue-momentum", type=float, default=0.99)
     p.add_argument("--t1key", default="t1_00")
@@ -439,6 +450,10 @@ def main():
         raise ValueError("--patch-weight cannot be negative")
     if a.shared_jitter and not (a.jitter or a.rotate):
         raise ValueError("--shared-jitter needs --jitter or --rotate")
+    if a.content_units is not None and (a.pool == "gap" or a.patch_weight != 0):
+        raise ValueError("--content-units widens only TailCode's head: needs --pool tail or gapnorm, --patch-weight 0")
+    if a.content_units is not None and (a.content_units < 1 or a.decorrelate):
+        raise ValueError("--content-units must be positive, and --decorrelate's weights assume the recipe's 14 units")
     a.out.mkdir(parents=True, exist_ok=False)
     args = run_args()
     if a.t1key == "t1_04":
@@ -462,11 +477,16 @@ def main():
         result = model.load_state_dict(keep, strict=False)
         print("loaded", len(keep), "unexpected", result.unexpected_keys, flush=True)
     model = model.to(a.device)
+    units = args.content_channels if a.content_units is None else a.content_units
     pool = None
     if a.pool != "gap":
         thresholds = () if a.pool == "gapnorm" else TailCode.THRESHOLDS
-        pool = TailCode(interior_cells(a.bank), thresholds=thresholds, gauge=a.gauge).to(a.device)
+        latent = units + args.latent_dim - args.content_channels
+        pool = TailCode(interior_cells(a.bank), latent=latent, thresholds=thresholds, gauge=a.gauge, units=units)
+        pool = pool.to(a.device)
         print("interior cells", int(pool.keep.sum()), "tail thresholds", pool.thresholds, "gauge", a.gauge, flush=True)
+        print("code units", units, flush=True)
+    args.content_channels = units  # the loss's slice; --content-units widens TailCode's head, not the backbone's
     if a.frozen_backbone:
         for name, parameter in model.named_parameters():
             if name.startswith("encoder."):
@@ -510,8 +530,8 @@ def main():
     sim, crit = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
     queue = None
     if a.queue > 0:
-        queue = NegativeQueue(a.queue, 14, a.device)
-        gauge = CodeGauge(14, a.device)
+        queue = NegativeQueue(a.queue, units, a.device)
+        gauge = CodeGauge(units, a.device)
         momentum_model = copy.deepcopy(model).eval()
         momentum_pool = None if pool is None else copy.deepcopy(pool).eval()
         for frozen in (momentum_model, momentum_pool):
@@ -553,12 +573,11 @@ def main():
             pool.drop = "tails" if u < a.group_dropout else "gap" if u < 2 * a.group_dropout else None
         if queue is not None:
             h = model._encode(x, 2, None)
-            queries = torch.stack(global_code(model, pool, h, x)[:, :14].chunk(2))
+            queries = torch.stack(global_code(model, pool, h, x)[:, :units].chunk(2))
             pair = queries
             with torch.no_grad():
-                keys = torch.stack(
-                    global_code(momentum_model, momentum_pool, momentum_model._encode(x, 2, None), x)[:, :14].chunk(2)
-                )
+                momentum_code = global_code(momentum_model, momentum_pool, momentum_model._encode(x, 2, None), x)
+                keys = torch.stack(momentum_code[:, :units].chunk(2))
             gauge.update(queries.detach())
             ids = torch.as_tensor(indices, device=a.device)
             terms = {"global": queue_infonce(queries, keys, queue, ids, gauge, args.tau)}
@@ -567,7 +586,7 @@ def main():
         else:
             h = model._encode(x, 2, None)
             code = pool(h)
-            pair = torch.stack(code[:, :14].chunk(2))
+            pair = torch.stack(code[:, :units].chunk(2))
             terms = {"global": T.contrastive_loss(code, model, args, sim, crit, None)}
         if queue is not None or pool is not None:
             loss = terms["global"]

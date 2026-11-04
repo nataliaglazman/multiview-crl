@@ -4,8 +4,11 @@ Same subjects in every array. fixed_reference comes from the training split and 
 training.encoder_burden_control does. FLAIR does not depend on the T1 lesion value.
 
     python out/burden_feasibility_20261102/bank.py BANK_DIR [--t1-values 0.0 0.4] [--radius R] [--temporal-sigma S]
-        [--nuisance]
+        [--nuisance] [--causal]
 --nuisance turns off --synthetic-clean-content, so the deformation and fissure fields add fine anatomy every subject has.
+--causal draws the content latents from an SCM over the factors the renderer uses (CAUSAL_EDGES; z_content[3:5] are
+unused with the burden target, so they stay unconnected rather than act as hidden mediators) and writes
+causal_adj.npy (9 x 9, parent by child).
 Writes {split}_{t1_00,t1_04,flair}.npy (float16), {split}_{zc,vox}.npy, {split}_cells.npy (16^3 mean load).
 """
 
@@ -27,9 +30,28 @@ SPLITS = ("train", "val", "test")
 RES = 64
 WORKERS = int(os.environ.get("BANK_WORKERS", 8))
 T1_KEYS = {0.0: "t1_00", 0.4: "t1_04"}
+# --causal: brain -> ventricle -> burden -> temporal <- thickness <- brain, temporal -> sulcal, and lr on its own.
+# Indices are z_content's; every edge runs from a lower to a higher index, the order the sampler draws in.
+CAUSAL_FACTORS = {0: "brain", 1: "ventricle", 2: "burden", 5: "thickness", 6: "temporal", 7: "lr", 8: "sulcal"}
+CAUSAL_EDGES = ((0, 1), (1, 2), (0, 5), (2, 6), (5, 6), (6, 8))
 
 
-def run_args(t1_value, radius=None, sigma=None, nuisance=False):
+def causal_scm(seed):
+    """build_content_scm's structure on CAUSAL_EDGES: each child is leaky_relu of a unit-norm random weighting of its
+    parents, plus noise (eval.synthetic.synthetic_dataset.sample_content_from_scm)."""
+    adj = np.zeros((9, 9), dtype=bool)
+    for parent, child in CAUSAL_EDGES:
+        adj[parent, child] = True
+    gen = torch.Generator().manual_seed(seed)
+    parents, weights = {}, {}
+    for d in range(9):
+        parents[d] = np.flatnonzero(adj[:, d]).tolist()
+        w = torch.randn(len(parents[d]), generator=gen) if parents[d] else torch.tensor([])
+        weights[d] = w / (w.norm() + 1e-8) if parents[d] else w
+    return {"adj": adj, "parents": parents, "weights": weights, "n_dims": 9}
+
+
+def run_args(t1_value, radius=None, sigma=None, nuisance=False, causal=False):
     flags = (HERE / "reference" / "flags.txt").read_text().split()
     args = encoder_args.parse_args(flags)
     args.cache = False
@@ -40,6 +62,8 @@ def run_args(t1_value, radius=None, sigma=None, nuisance=False):
         args.synthetic_temporal_sigma = sigma
     if nuisance:
         args.synthetic_clean_content = False
+    if causal:
+        args.synthetic_causal = True
     return args
 
 
@@ -70,10 +94,14 @@ def chunk(job):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for first, t1_value in zip((True, False), t1_values):
-            args = run_args(t1_value, options["radius"], options["sigma"], options["nuisance"])
+            args = run_args(t1_value, options["radius"], options["sigma"], options["nuisance"], options["causal"])
             train = T.make_dataset(args, "train", options["sizes"]["train"])
+            if options["causal"]:
+                train._inner.scm = causal_scm(args.seed)
             train[0]
             ds = T.make_dataset(args, split, n)
+            if options["causal"]:
+                ds._inner.scm = causal_scm(args.seed)
             ds[0]
             ds._fixed_mean, ds._fixed_scale = train._fixed_mean, train._fixed_scale
             inner = ds._inner
@@ -107,6 +135,7 @@ def main():
     p.add_argument("--radius", type=float, default=None)
     p.add_argument("--temporal-sigma", type=float, default=None)
     p.add_argument("--nuisance", action="store_true")
+    p.add_argument("--causal", action="store_true")
     p.add_argument("--sizes", type=int, nargs=3, default=[2000, 400, 1000], metavar=("TRAIN", "VAL", "TEST"))
     a = p.parse_args()
     os.makedirs(a.root, exist_ok=True)
@@ -116,7 +145,10 @@ def main():
         "radius": a.radius,
         "sigma": a.temporal_sigma,
         "nuisance": a.nuisance,
+        "causal": a.causal,
     }
+    if a.causal:
+        np.save(f"{a.root}/causal_adj.npy", causal_scm(run_args(a.t1_values[0]).seed)["adj"])
     jobs = []
     for split, n in options["sizes"].items():
         arrays(a.root, split, n, a.t1_values, "w+")

@@ -218,6 +218,7 @@ def evaluate_arrays(
     indep_test="fisherz",
     max_cond_set=None,
     probe_ridge_cv=False,
+    factor_names=None,
 ):
     """Evaluate already aligned features and factors with the supplied panel's protocol.
 
@@ -250,8 +251,11 @@ def evaluate_arrays(
     ``probe_ridge_cv`` tunes the raw/partial probe's penalty instead of pinning it at 1.0
     (see :func:`fit_probe`), so those two columns stop contradicting the pinned readout when
     the block's width changes.  It does not touch the readout PC reads, which ``readout_dim``
-    already pins, so no skeleton metric moves.  All six arguments default to the original
-    behaviour.
+    already pins, so no skeleton metric moves.
+
+    ``factor_names`` labels the per-factor rows.  Without it they take the generator's
+    standard names by position, which is right only for its nine factors in their usual
+    order.  All seven arguments default to the original behaviour.
     """
     import numpy as np
     from sklearn.decomposition import PCA
@@ -279,6 +283,8 @@ def evaluate_arrays(
     n_content = z.shape[1]
     if adj.shape != (n_content, n_content):
         raise ValueError("SCM adjacency dimension does not match z_content")
+    if factor_names is not None and len(factor_names) != n_content:
+        raise ValueError("factor_names must name every column of z_content")
     if not alphas or any(not 0 < a < 1 for a in alphas):
         raise ValueError("PC alpha values must be between 0 and 1")
     if indep_test not in INDEP_TESTS:
@@ -389,7 +395,7 @@ def evaluate_arrays(
         factors.append(
             dict(
                 dim=d,
-                name=factor_name(d),
+                name=factor_name(d) if factor_names is None else factor_names[d],
                 parents=parents[d],
                 raw_r2=raw[d],
                 partial_r2=partial[d],

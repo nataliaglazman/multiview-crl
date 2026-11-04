@@ -161,7 +161,7 @@ def truth_panel(bundles, options):
     if reference["adjacency"] is None:
         return None
     Z, names, keep = scorer.usable_factors(reference["z_content"], reference["content_names"])
-    panel = scorer.graph_panel(Z, Z, reference["adjacency"][np.ix_(keep, keep)], options)
+    panel = scorer.graph_panel(Z, Z, reference["adjacency"][np.ix_(keep, keep)], options, names)
     panel["factor_names"] = names
     return panel
 

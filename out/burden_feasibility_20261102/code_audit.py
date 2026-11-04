@@ -46,7 +46,7 @@ GROUPS = {"anatomy": slice(0, 6), "lesion": slice(6, 10), "all": slice(0, 10)}
 SETS = 200
 MODE_SETS = 100
 LEVERS = ("decorrelate", "group_dropout", "jitter", "rotate")
-OVERRIDES = ("patch_weight", "seed")  # named only when a run set them; otherwise the recipe's values
+OVERRIDES = ("patch_weight", "content_units", "seed")  # named only when a run set them; otherwise the recipe's values
 
 
 def boosted(x, y):
@@ -90,23 +90,29 @@ def top1(z1, z2, sets):
     return float(np.mean(hits))
 
 
-def load_run(run, device):
+def load_run(run, device, trained=True):
+    """A run's model and TailCode, or with ``trained=False`` the same architecture at the run's own init."""
     report = json.loads((run / "report.json").read_text())
     a = report["args"]
     args = warm.run_args()
-    torch.manual_seed(args.model_seed)
+    torch.manual_seed(args.model_seed if a.get("seed", "None") == "None" else int(a["seed"]))
     model = T.build_encoder(args)
     residual = a.get("residual") == "True"
     if residual:
         warm.widen_input(model)
-    state = torch.load(run / "model.pt", map_location="cpu")
-    model.load_state_dict(state["model"])
+    state = torch.load(run / "model.pt", map_location="cpu") if trained else {"step": 0}
+    if trained:
+        model.load_state_dict(state["model"])
     pool = None
     kind = a.get("pool", "gap")
     if kind != "gap":
         thresholds = () if kind == "gapnorm" else warm.TailCode.THRESHOLDS
-        pool = warm.TailCode(warm.interior_cells(a["bank"]), thresholds=thresholds, gauge=a.get("gauge", "batch"))
-        pool.load_state_dict(state["pool"])
+        units = args.content_channels if a.get("content_units", "None") == "None" else int(a["content_units"])
+        latent = units + args.latent_dim - args.content_channels
+        cells = warm.interior_cells(a["bank"])
+        pool = warm.TailCode(cells, latent=latent, thresholds=thresholds, gauge=a.get("gauge", "batch"), units=units)
+        if trained:
+            pool.load_state_dict(state["pool"])
         pool = pool.to(device).eval()
     return report, model.to(device).eval(), pool, residual, int(state["step"])
 
@@ -138,7 +144,7 @@ def mode_sets(anatomy, codes, rng):
 def batch_codes(model, pool, bank, indices, device):
     """Both views' codes for one set, with whatever mode ``pool``'s gauges are in."""
     h = model._encode(bank.images(indices, device), 2, None)
-    code = torch.cat([pool.head(p) for p in pool.pooled(h)], 0)[:, :14].cpu().numpy()
+    code = torch.cat([pool.head(p) for p in pool.pooled(h)], 0)[:, : pool.units].cpu().numpy()
     return np.split(code, 2)
 
 

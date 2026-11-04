@@ -225,8 +225,8 @@ def score_block(bundle, floor, block, options, seed=0):
 # --------------------------------------------------------------------------- #
 
 
-def graph_panel(X, z_content, adjacency, options):
-    """The shared causal panel, unchanged, on one feature set."""
+def graph_panel(X, z_content, adjacency, options, names=None):
+    """The shared causal panel, unchanged, on one feature set; ``names`` labels its per-factor rows."""
     from eval.causal.run_causal_recovery import evaluate_arrays
 
     try:
@@ -241,6 +241,7 @@ def graph_panel(X, z_content, adjacency, options):
             holdout_readout=options.holdout_readout,
             indep_test=options.indep_test,
             max_cond_set=options.max_cond_set,
+            factor_names=names,
         )
     except Exception as exc:  # noqa: BLE001 - one panel failing must not lose the tables
         logger.exception("Graph panel failed")
@@ -272,12 +273,12 @@ def score_graphs(bundle, floor, options):
         return {}
     Z, names, keep = usable_factors(bundle["z_content"], bundle["content_names"])
     adjacency = bundle["adjacency"][np.ix_(keep, keep)]
-    panels = {"embeddings": graph_panel(graph_features(bundle["X"], options), Z, adjacency, options)}
+    panels = {"embeddings": graph_panel(graph_features(bundle["X"], options), Z, adjacency, options, names)}
     if options.pc_ceiling:
         # Never reduced: its "features" ARE the factors, so there is nothing to match to.
-        panels["truth"] = graph_panel(Z, Z, adjacency, options)
+        panels["truth"] = graph_panel(Z, Z, adjacency, options, names)
     if floor is not None:
-        panels["floor"] = graph_panel(graph_features(floor["X"], options), Z, adjacency, options)
+        panels["floor"] = graph_panel(graph_features(floor["X"], options), Z, adjacency, options, names)
     for panel in panels.values():
         panel["factor_names"] = names
     return panels

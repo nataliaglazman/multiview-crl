@@ -42,6 +42,15 @@
 #         keeps the second and removes the first. That at 4 voxels, 6 degrees, and the independent 4-voxel arm with a
 #         second seed, 6,000 steps each, against ssl_code_jitter4_nopatch_restail_t104. Also the independent 4-voxel
 #         arm at 20,000 steps, against ssl_code_jitter_nopatch_restail_t104_20k.
+# Stage 14 After the 20,000-step run, where temporal arrived but burden left the full 14-unit code. Room: the same run
+#         with a 24-unit code (TailCode's head widened, the backbone and its init unchanged), against
+#         ssl_code_jitter_nopatch_restail_t104_20k. Realism: the best recipe with the nuisance fields on, with and
+#         without jitter, 6,000 steps each; before jitter, burden all but vanished from every arm on that bank.
+# Stage 15 Causal discovery. A bank whose content latents come from an SCM over the rendered factors (bank.py --causal:
+#         brain -> ventricle -> burden -> temporal <- thickness <- brain, temporal -> sulcal, lr on its own), the best
+#         recipe on it at 6,000 and 20,000 steps, then each code and its untrained twin as bundles for the repo's
+#         label-free discovery (eval.causal.latent_causal_discovery) and decoded discovery (compare_bundles
+#         --with-graph), with PC on the true factors as the ceiling. Results in causal/. Needs causal-learn.
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -55,7 +64,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -118,6 +127,38 @@ audit() { # audit every finished self-supervised run; runs already audited at th
     if [ "$DRY" = 1 ]; then echo "$PY $D/code_audit.py $D/audit.json $D/runs/ssl_*"; return; fi
     echo "$(date +%H:%M) audit of finished self-supervised codes"
     "$PY" "$D/code_audit.py" "$D/audit.json" "$D"/runs/ssl_* > "$D/audit.txt" 2>&1 || echo "audit failed, see $D/audit.txt"
+}
+
+causal() { # causal NAME...: each run's code and its untrained twin as bundles, then label-free and decoded discovery
+    local out=$D/causal bundles="" floors="" name view
+    for name in "$@"; do
+        bundles="$bundles $name=$out/$name.npz"
+        floors="$floors $name=$out/$name.floor.npz"
+    done
+    if [ "$DRY" = 1 ]; then
+        for name in "$@"; do echo "$PY $D/causal_bundle.py $D/runs/$name $out/$name.npz [--untrained]"; done
+        echo "$PY -m eval.causal.latent_causal_discovery --bundles$bundles --bundle-floors$floors --ceiling"
+        echo "$PY -m eval.protocol.compare_bundles --bundles$bundles --floors$floors --with-graph"
+        return
+    fi
+    if ! "$PY" -c "import causallearn" 2> /dev/null; then
+        echo "causal discovery needs causal-learn: $PY -m pip install causal-learn"
+        return
+    fi
+    mkdir -p "$out"
+    echo "$(date +%H:%M) causal discovery on $*"
+    for name in "$@"; do
+        "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$out/$name.npz" > "$out/$name.log" 2>&1 \
+            && "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$out/$name.floor.npz" --untrained >> "$out/$name.log" 2>&1 \
+            || { echo "bundle failed, see $out/$name.log"; return; }
+    done
+    for view in 1 2; do
+        "$PY" -m eval.causal.latent_causal_discovery --bundles $bundles --bundle-floors $floors --bundle-view "$view" \
+            --ceiling --mixing-null 30 --out "$out/label_free_view$view.json" > "$out/label_free_view$view.txt" 2>&1
+        "$PY" -m eval.protocol.compare_bundles --bundles $bundles --floors $floors --view "$view" --with-graph \
+            --holdout-readout --graph-repeats 20 --out "$out/decoded_view$view.json" > "$out/decoded_view$view.log" 2>&1
+    done
+    echo "$(date +%H:%M) causal discovery done, see $out"
 }
 
 MAIN=$D/bank
@@ -286,6 +327,36 @@ if wants 13; then
     finish ssl_code_jitter4_nopatch_restail_t104_20k ssl_code_jitter4_shared_nopatch_restail_t104 \
         ssl_code_jitter4_nopatch_restail_t104_s2
     audit
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 14; then
+    NOISY=$D/bank_nuisance
+    bank "$NOISY" --nuisance
+    residual_bank "$MAIN" t1_04 t1_00 flair
+    residual_bank "$NOISY" t1_04 flair
+    EVERY=2000 ssl ssl_code_jitter_nopatch_restail_t104_c24_20k "$MAIN" tail t1_04 20000 --residual --code-batches 500 \
+        --jitter 2 --rotate 3 --patch-weight 0 --content-units 24
+    ssl ssl_code_jitter_nopatch_restail_t104_nuisance "$NOISY" tail t1_04 6000 --residual --code-batches 500 \
+        --jitter 2 --rotate 3 --patch-weight 0
+    ssl ssl_code_nopatch_restail_t104_nuisance "$NOISY" tail t1_04 6000 --residual --code-batches 500 --patch-weight 0
+    finish ssl_code_jitter_nopatch_restail_t104_c24_20k ssl_code_jitter_nopatch_restail_t104_nuisance \
+        ssl_code_nopatch_restail_t104_nuisance
+    audit
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 15; then
+    CAUSAL=$D/bank_causal
+    bank "$CAUSAL" --t1-values 0.4 --causal
+    residual_bank "$CAUSAL" t1_04 flair
+    ssl ssl_code_jitter_nopatch_restail_t104_causal "$CAUSAL" tail t1_04 6000 --residual --code-batches 500 --jitter 2 \
+        --rotate 3 --patch-weight 0
+    EVERY=2000 ssl ssl_code_jitter_nopatch_restail_t104_causal_20k "$CAUSAL" tail t1_04 20000 --residual \
+        --code-batches 500 --jitter 2 --rotate 3 --patch-weight 0
+    finish ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_20k
+    audit
+    causal ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_20k
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
 
