@@ -45,8 +45,8 @@ SHORT = ["brain", "vent", "thick", "temp", "lr", "sulc", "burden", "x", "y", "z"
 GROUPS = {"anatomy": slice(0, 6), "lesion": slice(6, 10), "all": slice(0, 10)}
 SETS = 200
 MODE_SETS = 100
-LEVERS = ("decorrelate", "group_dropout", "jitter", "rotate")
-OVERRIDES = ("patch_weight", "content_units", "seed")  # named only when a run set them; otherwise the recipe's values
+LEVERS = ("decorrelate", "group_dropout", "jitter", "rotate", "hard_negatives")
+OVERRIDES = ("patch_weight", "content_units", "code_neighbours", "seed")  # named only when a run set them
 
 
 def boosted(x, y):

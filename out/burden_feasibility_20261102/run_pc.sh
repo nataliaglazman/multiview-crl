@@ -58,6 +58,13 @@
 #         (--content-units 24), then label-free and decoded discovery against the 14-unit run (causal/c24_*) and its own
 #         variation. Past the head: decoded discovery on the backbone GAP of stage 15's two runs (causal/gap_*), no
 #         training, started beside the arm. Needs stage 15's runs and causal-learn.
+# Stage 17 Harder negatives on the causal bank. First remainder_price.py prices burden's remainder against temporal's
+#         under each batch rule on the bank's true latents, no training (causal/remainder_price_r*.txt): seen as well
+#         as temporal, the recipe's code batches already price it near temporal; tighter neighbourhoods and
+#         hard-negative weighting help only when it is seen less well. Then the best recipe at 6,000 steps with
+#         31-subject neighbourhoods (--code-neighbours 31), with negatives weighted by exp(5 cosine) (--hard-negatives
+#         5), and with both, against ssl_code_jitter_nopatch_restail_t104_causal: own variation of each and decoded and
+#         label-free discovery (causal/hard_*).
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -71,7 +78,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -408,6 +415,34 @@ if wants 16; then
     audit
     TAG=c24 causal ssl_code_jitter_nopatch_restail_t104_causal_20k ssl_code_jitter_nopatch_restail_t104_causal_c24_20k
     own_variation ssl_code_jitter_nopatch_restail_t104_causal_c24_20k
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 17; then
+    CAUSAL=$D/bank_causal
+    bank "$CAUSAL" --t1-values 0.4 --causal
+    residual_bank "$CAUSAL" t1_04 flair
+    RECIPE="--residual --code-batches 500 --jitter 2 --rotate 3 --patch-weight 0"
+    ssl ssl_code_jitter_nopatch_restail_t104_causal_n31 "$CAUSAL" tail t1_04 6000 $RECIPE --code-neighbours 31
+    ssl ssl_code_jitter_nopatch_restail_t104_causal_hard5 "$CAUSAL" tail t1_04 6000 $RECIPE --hard-negatives 5
+    ssl ssl_code_jitter_nopatch_restail_t104_causal_n31_hard5 "$CAUSAL" tail t1_04 6000 $RECIPE --code-neighbours 31 \
+        --hard-negatives 5
+    for r in 0.75 0.5; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/remainder_price.py $D/causal/remainder_price_r$r.json --bank $CAUSAL --r-burden $r"
+            continue
+        fi
+        mkdir -p "$D/causal"
+        "$PY" "$D/remainder_price.py" "$D/causal/remainder_price_r$r.json" --bank "$CAUSAL" --r-burden "$r" \
+            > "$D/causal/remainder_price_r$r.txt" 2>&1 || echo "pricing failed, see $D/causal/remainder_price_r$r.txt"
+    done
+    finish ssl_code_jitter_nopatch_restail_t104_causal_n31 ssl_code_jitter_nopatch_restail_t104_causal_hard5 \
+        ssl_code_jitter_nopatch_restail_t104_causal_n31_hard5
+    audit
+    own_variation ssl_code_jitter_nopatch_restail_t104_causal_n31 ssl_code_jitter_nopatch_restail_t104_causal_hard5 \
+        ssl_code_jitter_nopatch_restail_t104_causal_n31_hard5
+    TAG=hard causal ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_n31 \
+        ssl_code_jitter_nopatch_restail_t104_causal_hard5 ssl_code_jitter_nopatch_restail_t104_causal_n31_hard5
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
 

@@ -274,6 +274,23 @@ def cross_view_decorrelation(z1, z2):
     return (1 - diagonal).square().sum() + OFF_DIAGONAL * (c.square().sum() - diagonal.square().sum())
 
 
+def hard_negative_infonce(code, units, tau, concentration, sim):
+    """The recipe's global InfoNCE (each view standardized over the batch, cosine, cross-view negatives only, both
+    directions summed) with each anchor's negatives weighted by exp(concentration * cosine), rescaled to mean 1, so the
+    negatives most like the anchor carry most of the loss: Robinson et al. 2021's hard-negative InfoNCE without
+    debiasing, their beta being concentration * tau. Concentration 0 is the recipe's loss."""
+    b = code.shape[0] // 2
+    hz = T.standardize_contrastive_code(torch.stack([code[:b, :units], code[b:, :units]]))
+    off = ~torch.eye(b, dtype=torch.bool, device=code.device)
+    total = 0.0
+    for i, j in ((0, 1), (1, 0)):
+        cos = sim(hz[i].unsqueeze(-2), hz[j].unsqueeze(-3))
+        pos, neg = cos.diag() / tau, cos[off].view(b, b - 1)
+        weights = torch.softmax(concentration * neg, 1) * (b - 1)
+        total = total + (torch.logsumexp(torch.cat([pos[:, None], neg / tau + weights.log()], 1), 1) - pos).mean()
+    return total
+
+
 def jitter(x, shift, degrees, rng, shared=False):
     """Each row of (N, C, D, H, W) cubic volumes moved by its own random rigid transform, every channel alike: shifts
     up to ``shift`` voxels and rotations up to ``degrees`` about each axis, trilinear, zero outside. ``shared`` reads
@@ -426,6 +443,18 @@ def main():
         default=0,
         help="Rebuild the neighbourhood batches every this many steps on the model's own code (no labels)",
     )
+    p.add_argument(
+        "--code-neighbours",
+        type=int,
+        default=None,
+        help="Neighbourhood size for --code-batches in place of the recipe's 50; smaller makes a batch more alike",
+    )
+    p.add_argument(
+        "--hard-negatives",
+        type=float,
+        default=0.0,
+        help="Weight each negative by exp(this x cosine), mean 1 per anchor: hard-negative InfoNCE (0 = the recipe's)",
+    )
     p.add_argument("--frozen-backbone", action="store_true")
     p.add_argument("--device", default=pick_device())
     p.add_argument("--test-subjects", type=int, default=1000)
@@ -454,8 +483,12 @@ def main():
         raise ValueError("--content-units widens only TailCode's head: needs --pool tail or gapnorm, --patch-weight 0")
     if a.content_units is not None and (a.content_units < 1 or a.decorrelate):
         raise ValueError("--content-units must be positive, and --decorrelate's weights assume the recipe's 14 units")
-    a.out.mkdir(parents=True, exist_ok=False)
+    if a.hard_negatives < 0 or (a.hard_negatives and (a.pool == "gap" or a.queue)):
+        raise ValueError("--hard-negatives must be non-negative and needs --pool tail or gapnorm without --queue")
     args = run_args()
+    if a.code_neighbours is not None and (not a.code_batches or a.code_neighbours < args.batch_size - 1):
+        raise ValueError(f"--code-neighbours sizes --code-batches' neighbourhoods, at least {args.batch_size - 1}")
+    a.out.mkdir(parents=True, exist_ok=False)
     if a.t1key == "t1_04":
         args.synthetic_lesion_t1_value = 0.4
     if a.seed is not None:
@@ -463,6 +496,8 @@ def main():
     if a.patch_weight is not None:
         args.patch_loss_weight = a.patch_weight
     print("seed", args.seed, "patch weight", args.patch_loss_weight, flush=True)
+    if a.code_neighbours or a.hard_negatives:
+        print("code neighbours", a.code_neighbours, "hard negatives", a.hard_negatives, flush=True)
     torch.manual_seed(args.model_seed)
     model = T.build_encoder(args)
     if a.residual:
@@ -562,7 +597,8 @@ def main():
     for step in range(1, a.steps + 1):
         if a.code_batches and (step - 1) % a.code_batches == 0:
             codes = features(model, train, a.device, pool=pool)["code"]
-            rebuild(cb.nearest_neighbours(np.concatenate(codes, 1), args.stratify_neighbours), args.loader_seed + step)
+            size = args.stratify_neighbours if a.code_neighbours is None else a.code_neighbours
+            rebuild(cb.nearest_neighbours(np.concatenate(codes, 1), size), args.loader_seed + step)
             print(f"step {step:5d} code neighbourhoods rebuilt, spread {batching['spread']}", flush=True)
         indices = np.asarray(next(source))
         x = train.images(indices, a.device)
@@ -587,9 +623,14 @@ def main():
             h = model._encode(x, 2, None)
             code = pool(h)
             pair = torch.stack(code[:, :units].chunk(2))
-            terms = {"global": T.contrastive_loss(code, model, args, sim, crit, None)}
+            if a.hard_negatives:
+                terms = {"hard": hard_negative_infonce(code, units, args.tau, a.hard_negatives, sim)}
+                with torch.no_grad():  # the recipe's loss, for comparison with every other arm
+                    terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
+            else:
+                terms = {"global": T.contrastive_loss(code, model, args, sim, crit, None)}
         if queue is not None or pool is not None:
-            loss = terms["global"]
+            loss = terms["hard"] if a.hard_negatives else terms["global"]
             if args.patch_loss_weight > 0:
                 pooled = model._patch_pool(h, args.train_patch_grid).transpose(1, 2)
                 patches = model.patch_readout(pooled).transpose(1, 2)
