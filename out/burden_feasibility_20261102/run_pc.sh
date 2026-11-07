@@ -65,6 +65,11 @@
 #         31-subject neighbourhoods (--code-neighbours 31), with negatives weighted by exp(5 cosine) (--hard-negatives
 #         5), and with both, against ssl_code_jitter_nopatch_restail_t104_causal: own variation of each and decoded and
 #         label-free discovery (causal/hard_*).
+# Stage 18 Do 31-subject neighbourhoods hold up? In stage 17 (6,000 steps, one seed) every child's own variation in
+#         the code rose, burden's from .10/.11 to .15/.19, with the roots unchanged. The same at 20,000 steps, where
+#         the recipe's code had dropped burden's own variation to .04 (against ..._causal_20k); and a seed replicate
+#         at 6,000 steps with its own recipe control (both --seed 2). Own variation of each, and discovery on the
+#         20,000-step pair (causal/n31_*).
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -78,7 +83,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -443,6 +448,25 @@ if wants 17; then
         ssl_code_jitter_nopatch_restail_t104_causal_n31_hard5
     TAG=hard causal ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_n31 \
         ssl_code_jitter_nopatch_restail_t104_causal_hard5 ssl_code_jitter_nopatch_restail_t104_causal_n31_hard5
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 18; then
+    CAUSAL=$D/bank_causal
+    bank "$CAUSAL" --t1-values 0.4 --causal
+    residual_bank "$CAUSAL" t1_04 flair
+    RECIPE="--residual --code-batches 500 --jitter 2 --rotate 3 --patch-weight 0"
+    EVERY=2000 ssl ssl_code_jitter_nopatch_restail_t104_causal_n31_20k "$CAUSAL" tail t1_04 20000 $RECIPE \
+        --code-neighbours 31
+    ssl ssl_code_jitter_nopatch_restail_t104_causal_s2 "$CAUSAL" tail t1_04 6000 $RECIPE --seed 2
+    ssl ssl_code_jitter_nopatch_restail_t104_causal_n31_s2 "$CAUSAL" tail t1_04 6000 $RECIPE --code-neighbours 31 \
+        --seed 2
+    finish ssl_code_jitter_nopatch_restail_t104_causal_n31_20k ssl_code_jitter_nopatch_restail_t104_causal_s2 \
+        ssl_code_jitter_nopatch_restail_t104_causal_n31_s2
+    audit
+    own_variation ssl_code_jitter_nopatch_restail_t104_causal_n31_20k ssl_code_jitter_nopatch_restail_t104_causal_s2 \
+        ssl_code_jitter_nopatch_restail_t104_causal_n31_s2
+    TAG=n31 causal ssl_code_jitter_nopatch_restail_t104_causal_20k ssl_code_jitter_nopatch_restail_t104_causal_n31_20k
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
 
