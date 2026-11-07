@@ -46,7 +46,7 @@ GROUPS = {"anatomy": slice(0, 6), "lesion": slice(6, 10), "all": slice(0, 10)}
 SETS = 200
 MODE_SETS = 100
 LEVERS = ("decorrelate", "group_dropout", "jitter", "rotate", "hard_negatives")
-OVERRIDES = ("patch_weight", "content_units", "code_neighbours", "third_view", "third_units", "seed")  # when set
+OVERRIDES = ("patch_weight", "content_units", "code_neighbours", "half_views", "half_units", "seed")  # when set
 
 
 def boosted(x, y):

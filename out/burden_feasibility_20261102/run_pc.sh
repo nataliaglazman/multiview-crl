@@ -75,10 +75,12 @@
 #         whose top 14 or 24 canonical variates are the code. CCA ranks shared directions by how well the views agree,
 #         not by how much they help tell subjects apart, so it may keep the remainders the InfoNCE head drops
 #         (causal/cca.txt; decoded discovery on the 24-unit CCA codes in causal/cca_decoded_*). Partial observability
-#         (Yao et al. 2024): a third view, the bank's T1 with the lesion load zeroed (bank.py --lesion-blind), through
-#         the T1 backbone and aligned with FLAIR on the first 10 code units, so the other 4 align only T1 and FLAIR and
-#         hold what the third view lacks, which anatomy cannot crowd out. The best recipe with it at 6,000 and 20,000
-#         steps, against ssl_code_jitter_nopatch_restail_t104_causal(_20k): own variation, CCA readout, discovery.
+#         (Yao et al. 2024), with nothing built around any factor: a third view, each subject's T1 restricted to a
+#         random half of the volume along a random axis, through the T1 backbone and pooled over the half it shows, aligned
+#         with FLAIR on the first 8 code units. Those can hold only what every half shows (global content); the other 6
+#         align only the whole T1 and FLAIR, so they hold regional content, whatever it is, which global content cannot
+#         crowd out. The best recipe with it at 6,000 and 20,000 steps, against
+#         ssl_code_jitter_nopatch_restail_t104_causal(_20k): own variation, CCA readout, discovery.
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -516,36 +518,21 @@ if wants 19; then
     CAUSAL=$D/bank_causal
     bank "$CAUSAL" --t1-values 0.4 --causal
     residual_bank "$CAUSAL" t1_04 flair
-    if [ "$DRY" = 1 ]; then
-        echo "$PY $D/bank.py $CAUSAL --t1-values 0.4 --causal --lesion-blind"
-        echo "$PY $D/residual_bank.py $CAUSAL t1_blind"
-    else
-        if ! grep -q "BLIND DONE" "$CAUSAL.blind.log" 2> /dev/null; then
-            echo "$(date +%H:%M) lesion-blind T1 for $CAUSAL"
-            "$PY" "$D/bank.py" "$CAUSAL" --t1-values 0.4 --causal --lesion-blind > "$CAUSAL.blind.log" 2>&1 \
-                || { echo "lesion-blind render failed, see $CAUSAL.blind.log"; exit 1; }
-        fi
-        if ! grep -q "RESIDUAL DONE" "$CAUSAL.residual_blind.log" 2> /dev/null; then
-            echo "$(date +%H:%M) lesion-blind residuals for $CAUSAL"
-            "$PY" "$D/residual_bank.py" "$CAUSAL" t1_blind > "$CAUSAL.residual_blind.log" 2>&1 \
-                || { echo "lesion-blind residuals failed, see $CAUSAL.residual_blind.log"; exit 1; }
-        fi
-    fi
     RECIPE="--residual --code-batches 500 --jitter 2 --rotate 3 --patch-weight 0"
-    THIRD="--third-view t1_blind --third-units 10"
-    ssl ssl_code_jitter_nopatch_restail_t104_causal_blind10 "$CAUSAL" tail t1_04 6000 $RECIPE $THIRD
-    EVERY=2000 ssl ssl_code_jitter_nopatch_restail_t104_causal_blind10_20k "$CAUSAL" tail t1_04 20000 $RECIPE $THIRD
+    HALVES="--half-views xyz --half-units 8"
+    ssl ssl_code_jitter_nopatch_restail_t104_causal_halves8 "$CAUSAL" tail t1_04 6000 $RECIPE $HALVES
+    EVERY=2000 ssl ssl_code_jitter_nopatch_restail_t104_causal_halves8_20k "$CAUSAL" tail t1_04 20000 $RECIPE $HALVES
     cca_readout ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_20k
     cca_discovery ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_20k
-    finish ssl_code_jitter_nopatch_restail_t104_causal_blind10 ssl_code_jitter_nopatch_restail_t104_causal_blind10_20k
+    finish ssl_code_jitter_nopatch_restail_t104_causal_halves8 ssl_code_jitter_nopatch_restail_t104_causal_halves8_20k
     audit
-    own_variation ssl_code_jitter_nopatch_restail_t104_causal_blind10 \
-        ssl_code_jitter_nopatch_restail_t104_causal_blind10_20k
-    cca_readout ssl_code_jitter_nopatch_restail_t104_causal_blind10 \
-        ssl_code_jitter_nopatch_restail_t104_causal_blind10_20k
-    TAG=blind causal ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_blind10
-    TAG=blind20k causal ssl_code_jitter_nopatch_restail_t104_causal_20k \
-        ssl_code_jitter_nopatch_restail_t104_causal_blind10_20k
+    own_variation ssl_code_jitter_nopatch_restail_t104_causal_halves8 \
+        ssl_code_jitter_nopatch_restail_t104_causal_halves8_20k
+    cca_readout ssl_code_jitter_nopatch_restail_t104_causal_halves8 \
+        ssl_code_jitter_nopatch_restail_t104_causal_halves8_20k
+    TAG=halves causal ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_halves8
+    TAG=halves20k causal ssl_code_jitter_nopatch_restail_t104_causal_20k \
+        ssl_code_jitter_nopatch_restail_t104_causal_halves8_20k
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
 
