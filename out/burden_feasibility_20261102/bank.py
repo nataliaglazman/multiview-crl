@@ -128,6 +128,41 @@ def chunk(job):
     return split, start, stop
 
 
+def blind_chunk(job):
+    """The bank's T1 with the lesion load zeroed: the same subjects, latents, style and noise, nothing painted. Each
+    subject's latents are checked against the bank's before its image is written."""
+    root, split, start, stop, options = job
+    torch.set_num_threads(1)
+    zc = np.load(f"{root}/{split}_zc.npy", mmap_mode="r")
+    out = np.load(f"{root}/{split}_t1_blind.npy", mmap_mode="r+")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        args = run_args(options["t1_values"][0], options["radius"], options["sigma"], options["nuisance"], True)
+        train = T.make_dataset(args, "train", len(np.load(f"{root}/train_zc.npy", mmap_mode="r")))
+        train._inner.scm = causal_scm(args.seed)
+        train[0]
+        ds = T.make_dataset(args, split, len(zc))
+        ds._inner.scm = causal_scm(args.seed)
+        ds[0]
+        ds._fixed_mean, ds._fixed_scale = train._fixed_mean, train._fixed_scale
+        real = ds._inner.renderer.render_structure
+
+        def structure(*a, real=real, **k):
+            tissue, load = real(*a, **k)
+            return tissue, torch.zeros_like(load)
+
+        ds._inner.renderer.render_structure = structure
+        for i in range(start, stop):
+            item = ds[i]
+            if not np.array_equal(np.asarray(item["gt_latents"]["z_content"], dtype=np.float32)[:9], zc[i]):
+                raise RuntimeError(
+                    f"{split} subject {i}: latents differ from the bank's, so this is not the same subject"
+                )
+            out[i] = item["image"][0][0].numpy().astype(np.float16)
+    out.flush()
+    return split, start, stop
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("root")
@@ -137,7 +172,28 @@ def main():
     p.add_argument("--nuisance", action="store_true")
     p.add_argument("--causal", action="store_true")
     p.add_argument("--sizes", type=int, nargs=3, default=[2000, 400, 1000], metavar=("TRAIN", "VAL", "TEST"))
+    p.add_argument(
+        "--lesion-blind",
+        action="store_true",
+        help="Only add {split}_t1_blind.npy to an existing causal bank: its T1 with the lesion load zeroed",
+    )
     a = p.parse_args()
+    if a.lesion_blind:
+        if not a.causal:
+            raise ValueError("--lesion-blind renders a causal bank's subjects again, so it needs --causal")
+        options = {"t1_values": a.t1_values, "radius": a.radius, "sigma": a.temporal_sigma, "nuisance": a.nuisance}
+        jobs = []
+        for split in SPLITS:
+            n = len(np.load(f"{a.root}/{split}_zc.npy", mmap_mode="r"))
+            path = f"{a.root}/{split}_t1_blind.npy"
+            np.lib.format.open_memmap(path, mode="w+", dtype=np.float16, shape=(n, RES, RES, RES)).flush()
+            step = max(1, n // (WORKERS * 2))
+            jobs += [(a.root, split, s, min(s + step, n), options) for s in range(0, n, step)]
+        with ProcessPoolExecutor(WORKERS) as pool:
+            for done in pool.map(blind_chunk, jobs):
+                print("done", done, flush=True)
+        print("BLIND DONE", flush=True)
+        return
     os.makedirs(a.root, exist_ok=True)
     options = {
         "sizes": dict(zip(SPLITS, a.sizes)),

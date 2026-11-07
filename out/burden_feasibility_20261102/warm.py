@@ -167,30 +167,31 @@ class TailCode(nn.Module):
 
     def pooled(self, h):
         """Per view, the gauged pooled vector of (2B, C, D, H, W) view-major maps."""
-        out = []
-        for view, part in enumerate(h.chunk(2)):
-            rows = part.flatten(2)[:, :, self.keep]
-            if self.training:
-                with torch.no_grad():
-                    if not self.started[view]:
-                        self.mean[view] = rows.mean(0)
-                        self.var[view] = rows.var(0, unbiased=False)
-                        self.started[view] = True
-                    else:
-                        self.mean[view] += self.momentum * (rows.mean(0) - self.mean[view])
-                        self.var[view] += self.momentum * ((rows - self.mean[view]).square().mean(0) - self.var[view])
-            z = (rows - self.mean[view]) / (self.var[view].sqrt() + 1e-6)
-            parts = [part.mean((2, 3, 4))]
-            for t in self.thresholds:
-                parts += [torch.log1p(100 * F.relu(z - t).mean(2)), torch.log1p(100 * F.relu(-z - t).mean(2))]
-            gauged = self.gauges[view](torch.cat(parts, 1))
-            if self.training and self.drop:
-                kept = torch.ones(gauged.shape[1], device=gauged.device)
-                kept[: self.channels] = float(self.drop != "gap")
-                kept[self.channels :] = float(self.drop != "tails")
-                gauged = gauged * kept
-            out.append(gauged)
-        return out
+        return [self.pooled_view(part, view) for view, part in enumerate(h.chunk(2))]
+
+    def pooled_view(self, part, view):
+        """The gauged pooled vector of one view's (B, C, D, H, W) maps, with that view's statistics and gauge."""
+        rows = part.flatten(2)[:, :, self.keep]
+        if self.training:
+            with torch.no_grad():
+                if not self.started[view]:
+                    self.mean[view] = rows.mean(0)
+                    self.var[view] = rows.var(0, unbiased=False)
+                    self.started[view] = True
+                else:
+                    self.mean[view] += self.momentum * (rows.mean(0) - self.mean[view])
+                    self.var[view] += self.momentum * ((rows - self.mean[view]).square().mean(0) - self.var[view])
+        z = (rows - self.mean[view]) / (self.var[view].sqrt() + 1e-6)
+        parts = [part.mean((2, 3, 4))]
+        for t in self.thresholds:
+            parts += [torch.log1p(100 * F.relu(z - t).mean(2)), torch.log1p(100 * F.relu(-z - t).mean(2))]
+        gauged = self.gauges[view](torch.cat(parts, 1))
+        if self.training and self.drop:
+            kept = torch.ones(gauged.shape[1], device=gauged.device)
+            kept[: self.channels] = float(self.drop != "gap")
+            kept[self.channels :] = float(self.drop != "tails")
+            gauged = gauged * kept
+        return gauged
 
     def forward(self, h):
         return torch.cat([self.head(part) for part in self.pooled(h)], 0)
@@ -333,12 +334,17 @@ def stacked_views(t1, flair, residuals, chosen, back):
 
 
 class Bank:
-    def __init__(self, root, split, t1key, n=None, residual=False):
+    def __init__(self, root, split, t1key, n=None, residual=False, third=None):
         self.t1 = np.load(f"{root}/{split}_{t1key}.npy", mmap_mode="r")
         self.flair = np.load(f"{root}/{split}_flair.npy", mmap_mode="r")
         self.residuals = (None, None)
         if residual:
             self.residuals = tuple(np.load(f"{root}/{split}_{k}_res.npy", mmap_mode="r") for k in (t1key, "flair"))
+        self.third = self.third_residual = None
+        if third:
+            self.third = np.load(f"{root}/{split}_{third}.npy", mmap_mode="r")
+            if residual:
+                self.third_residual = np.load(f"{root}/{split}_{third}_res.npy", mmap_mode="r")
         self.vox = np.array(np.load(f"{root}/{split}_vox.npy"), dtype=np.float64)[:n]
         self.zc = np.array(np.load(f"{root}/{split}_zc.npy"), dtype=np.float64)[:n]
 
@@ -347,6 +353,15 @@ class Bank:
         return stacked_views(self.t1, self.flair, self.residuals, np.asarray(indices)[order], np.argsort(order)).to(
             device
         )
+
+    def third_images(self, indices, device):
+        """(B, channels, D, H, W) third-view images, with its residual as a second channel when it has one."""
+        order = np.argsort(indices)
+        chosen, back = np.asarray(indices)[order], np.argsort(order)
+        rows = [np.asarray(self.third[chosen], dtype=np.float32)[back]]
+        if self.third_residual is not None:
+            rows.append(np.asarray(self.third_residual[chosen], dtype=np.float32)[back])
+        return torch.from_numpy(np.stack(rows, 1)).to(device)
 
 
 @torch.no_grad()
@@ -455,6 +470,18 @@ def main():
         default=0.0,
         help="Weight each negative by exp(this x cosine), mean 1 per anchor: hard-negative InfoNCE (0 = the recipe's)",
     )
+    p.add_argument(
+        "--third-view",
+        default=None,
+        help="Bank key of a third view through the T1 backbone (e.g. t1_blind, bank.py --lesion-blind); FLAIR is "
+        "aligned with it on the first --third-units code units",
+    )
+    p.add_argument(
+        "--third-units",
+        type=int,
+        default=None,
+        help="Code units FLAIR shares with the third view; the rest align only T1 and FLAIR and hold what it lacks",
+    )
     p.add_argument("--frozen-backbone", action="store_true")
     p.add_argument("--device", default=pick_device())
     p.add_argument("--test-subjects", type=int, default=1000)
@@ -488,6 +515,11 @@ def main():
     args = run_args()
     if a.code_neighbours is not None and (not a.code_batches or a.code_neighbours < args.batch_size - 1):
         raise ValueError(f"--code-neighbours sizes --code-batches' neighbourhoods, at least {args.batch_size - 1}")
+    if (a.third_view is None) != (a.third_units is None):
+        raise ValueError("--third-view and --third-units go together")
+    width = args.content_channels if a.content_units is None else a.content_units
+    if a.third_view is not None and (a.pool == "gap" or a.queue or not 1 <= a.third_units < width):
+        raise ValueError(f"--third-view needs --pool tail or gapnorm without --queue, and 1 <= --third-units < {width}")
     a.out.mkdir(parents=True, exist_ok=False)
     if a.t1key == "t1_04":
         args.synthetic_lesion_t1_value = 0.4
@@ -498,6 +530,8 @@ def main():
     print("seed", args.seed, "patch weight", args.patch_loss_weight, flush=True)
     if a.code_neighbours or a.hard_negatives:
         print("code neighbours", a.code_neighbours, "hard negatives", a.hard_negatives, flush=True)
+    if a.third_view:
+        print("third view", a.third_view, "units shared with FLAIR", a.third_units, flush=True)
     torch.manual_seed(args.model_seed)
     model = T.build_encoder(args)
     if a.residual:
@@ -526,7 +560,7 @@ def main():
         for name, parameter in model.named_parameters():
             if name.startswith("encoder."):
                 parameter.requires_grad_(False)
-    train = Bank(a.bank, "train", a.t1key, residual=a.residual)
+    train = Bank(a.bank, "train", a.t1key, residual=a.residual, third=a.third_view)
     test = Bank(a.bank, "test", a.t1key, a.test_subjects, a.residual)
     scored = {
         "anatomy": train.zc[:, ANATOMY],
@@ -629,8 +663,17 @@ def main():
                     terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
             else:
                 terms = {"global": T.contrastive_loss(code, model, args, sim, crit, None)}
+            if a.third_view:
+                x3 = train.third_images(indices, a.device)
+                if a.jitter or a.rotate:
+                    x3 = jitter(x3, a.jitter, a.rotate, aug)
+                third = pool.head(pool.pooled_view(model._encode(x3, 1, 0), 0))
+                flair = code[len(indices) :]
+                terms["third"] = hard_negative_infonce(torch.cat([flair, third]), a.third_units, args.tau, 0.0, sim)
         if queue is not None or pool is not None:
             loss = terms["hard"] if a.hard_negatives else terms["global"]
+            if a.third_view:
+                loss = loss + terms["third"]
             if args.patch_loss_weight > 0:
                 pooled = model._patch_pool(h, args.train_patch_grid).transpose(1, 2)
                 patches = model.patch_readout(pooled).transpose(1, 2)

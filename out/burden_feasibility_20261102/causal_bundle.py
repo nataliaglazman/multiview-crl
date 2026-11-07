@@ -63,6 +63,14 @@ def main():
         calibrate(model, pool, warm.Bank(root, "train", t1key, residual=residual), device)
     test = warm.Bank(root, "test", t1key, int(args.get("test_subjects", 1000)), residual)
     codes = warm.features(model, test, device, pool=pool)[a.features]
+    extra = {"source_run": str(a.run), "step": step, "untrained": a.untrained, "features": a.features}
+    rows = save(a.out, test, root, t1key, codes, extra)
+    print("BUNDLE", a.out, "rows", rows, a.features, codes[0].shape[1], "step", step, "untrained", a.untrained)
+
+
+def save(out, test, root, t1key, embeddings, extra):
+    """One bundle in the shared format: the test subjects' causal factors, the bank's SCM among them, and each view's
+    (n, d) embedding; ``extra`` goes into its meta. Returns the row count."""
     columns = list(B.CAUSAL_FACTORS)
     z = np.asarray(test.zc[:, columns], dtype=np.float32)
     adj = np.load(f"{root}/causal_adj.npy")[np.ix_(columns, columns)].astype(np.float32)
@@ -70,22 +78,19 @@ def main():
     meta = {
         "content_factor_names": list(B.CAUSAL_FACTORS.values()),
         "views": ["1", "2"],
-        "source_run": str(a.run),
-        "step": step,
-        "untrained": a.untrained,
-        "features": a.features,
+        **extra,
         **identity_record({"z_content": z, "causal_adj": adj}, settings, len(z), "match"),
     }
-    a.out.parent.mkdir(parents=True, exist_ok=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
-        a.out,
+        out,
         z_content=z,
         causal_adj=adj,
-        emb_view1=codes[0].astype(np.float32),
-        emb_view2=codes[1].astype(np.float32),
+        emb_view1=np.asarray(embeddings[0], dtype=np.float32),
+        emb_view2=np.asarray(embeddings[1], dtype=np.float32),
         meta=json.dumps(meta, indent=2),
     )
-    print("BUNDLE", a.out, "rows", len(z), a.features, codes[0].shape[1], "step", step, "untrained", a.untrained)
+    return len(z)
 
 
 if __name__ == "__main__":
