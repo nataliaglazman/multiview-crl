@@ -287,9 +287,34 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
      the untrained floor, and train vs test retrieval for memorisation.
    - **Success:** burden's own part in the code well above the control's, held by the remainder units, with the main
      units' anatomy intact.
-4. **Later:** consider 48-unit InfoNCE to test whether extra capacity retains burden's own variation. Check the
-   nuisance-on runs before porting to ADNI (`training/main_conv_synthetic.py`): residual input, tail pooling,
-   per-view jitter with the patch loss off, code batches, and the CCA readout.
+   - **Caveat (10 Nov, from item 4):** the control's code reads burden beyond ventricle (partial R²) at .31 / .35,
+     about what the backbone holds, with brain at only .18 / .44. If its own-variation rows agree, "well above the
+     control" is out of reach. Read stage 23 as keeping the control's burden while anatomy returns.
+4. **48-unit InfoNCE, run by hand 10 Nov** (`ssl_uni_jitter_nopatch_restail_t104_causal_c48_20k`: stage 21's
+   InfoNCE arm with `--content-units 48`; reports `causal/stage21/{own_variation,code_audit}_c48.txt`). Width bought
+   anatomy, not burden. The backbone is within ~.02 of the 24-unit run's and is now burden's ceiling.
+   - Code, T1 / FLAIR, 24 → 48 units: brain .18 / .44 → .80 / .81, ventricle .24 / .34 → .78 / .79, thickness
+     .18 / .29 → .74 / .74, lr .52 / .56 → .73 / .74; burden beyond ventricle (partial R²) .31 / .35 → .25 / .29.
+   - Burden's own part: code .24 / .27, head input .32 / .34, backbone GAP .31 / .36, untrained twin .01 / .10.
+   - Lesion x / y / z from the code .65 / .92 / .86 (T1), floor ~0. The two most-shared directions are the lesion.
+   - Still missing: thickness's and temporal's own parts (.18 and .22, at their no-own references), which code
+     batches keep. Next arm: the same with `--code-batches 500 --code-neighbours 31` in place of `--uniform`.
+   - **Why burden's own part sits near .3 (measured on a 400-subject local causal bank):** the rendered volume is an
+     exact monotone function of the burden latent, so a perfect volume reader recovers the own part at .99. Burden's
+     own part moves the lesion by only ~20 voxels (SD) out of ~86: the other factors explain ~.58 of the volume's
+     variance (.72 of the latent's; volume grows faster than linearly with the latent). A reader with a 20-voxel
+     error gets .39, 30 voxels .22, 10 voxels .63 (own_variation's target). The backbone's .31–.36 implies ~23 voxels
+     of error, about the network's precision on the independent bank (~20–24 voxels from R² .73–.83 over a ±41-voxel
+     spread). So the graph shrinks the target; it does not stop the learning. Raising it needs a loss that pays for
+     volume precision.
+   - **Diagnostic, built 10 Nov, not yet run on the PC:** `precision_audit.py OUT_JSON RUN...` gives the volume-reading
+     error in voxels at each stage (fixed blob filter on the normative residual, the backbone map read position-free,
+     GAP, pooled features, code). Each readout is handed the volume the other true latents predict, so only the
+     lesion reading is scored, against the untrained twin. It also splits the error by lesion size (thirds of the
+     anatomy-predicted volume), measures the error the views share, and prices a sharper reading in the run's loss
+     (uniform vs code-neighbour sets). Readings with a known error of 2–30 voxels come back within ~10%.
+5. **Later:** check the nuisance-on runs before porting to ADNI (`training/main_conv_synthetic.py`): residual input,
+   tail pooling, per-view jitter with the patch loss off, code batches, and the CCA readout.
    - Score white-matter hyperintensity (WMH) burden by its own part: the residual after a flexible fit on ventricle
      volume and age.
    - Otherwise atrophy passes for WMH.
