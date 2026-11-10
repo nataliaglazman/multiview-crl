@@ -1,8 +1,9 @@
 #!/bin/bash
 # Burden feasibility on a CUDA machine. Run from anywhere inside the repository, on the branch that holds this folder.
 #
-#   bash out/burden_feasibility_20261102/run_pc.sh            all stages, in order
+#   bash out/burden_feasibility_20261102/run_pc.sh            default stages, in order
 #   bash out/burden_feasibility_20261102/run_pc.sh 5 6        only those stages
+#   bash out/burden_feasibility_20261102/run_pc.sh 22         opt-in tabular causal benchmark on stage 19 bundles
 #
 # Stage 1 Can the encoder learn it from labels? Dense-label detectors, then the exact vector against pooling changes.
 # Stage 2 Warm starts from the detector, tail pooling at T1 0.4, labels on temporal sigma 0.09 as a positive control.
@@ -88,6 +89,12 @@
 # Stage 21 Does cross-view correlation preserve more factors in the code than subject matching? Barlow Twins and
 #         InfoNCE, each with 24 units, uniform batches and 20,000 steps on the causal bank. Score each factor's own
 #         variation, agreement between matching code units, and CCA readouts from both backbones (causal/stage21/).
+# Stage 23 Can units paid only for what the main code lacks keep burden? The recipe's 14 units on uniform batches plus
+#         10 remainder units, trained only to tell apart each subject's 31 nearest neighbours on the 14 (rebuilt every
+#         500 steps): a conditional InfoNCE, so they gain only from shared content the 14 do not hold. 20,000 steps on
+#         the causal bank, seed 42. Control: stage 21's 24-unit InfoNCE arm (same width, head, init, batches and
+#         jitter); reference: the 31-neighbour code batches (stage 18). Own variation, from the whole code and from each
+#         part, and the audit (causal/stage23/).
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -101,7 +108,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 23}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -449,6 +456,42 @@ if wants 14; then
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
 
+if wants 22; then
+    NAME=${TABULAR_RUN:-ssl_code_jitter_nopatch_restail_t104_causal_halves8}
+    RUN=$D/runs/$NAME
+    OUT=$D/causal/tabular/$NAME
+    CCA=$D/causal/cca/$NAME.cca24_gap
+    if [ "$DRY" = 0 ]; then
+        if [ ! -f "$RUN/model.pt" ] || [ ! "$CCA.npz" -nt "$RUN/model.pt" ] || \
+            [ ! "$CCA.floor.npz" -nt "$RUN/model.pt" ]; then
+            echo "Stage 22 needs the finished run and current CCA bundles from stage 19 for $NAME."
+            exit 1
+        fi
+        mkdir -p "$OUT" || exit 1
+    fi
+    for feature in code gap; do
+        base=$OUT/$feature
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/causal_bundle.py $RUN $base.npz --features $feature"
+            echo "$PY $D/causal_bundle.py $RUN $base.floor.npz --features $feature --untrained"
+        elif [ ! "$base.npz" -nt "$RUN/model.pt" ] || [ ! "$base.floor.npz" -nt "$RUN/model.pt" ]; then
+            "$PY" "$D/causal_bundle.py" "$RUN" "$base.npz" --features "$feature" > "$base.log" 2>&1 && \
+                "$PY" "$D/causal_bundle.py" "$RUN" "$base.floor.npz" --features "$feature" --untrained >> "$base.log" 2>&1 || \
+                { echo "Bundle export failed, see $base.log"; exit 1; }
+        fi
+    done
+    CMD=("$PY" -m eval.causal.tabular_benchmark --view each
+        --bundles "cca24=$CCA.npz" "code=$OUT/code.npz" "gap=$OUT/gap.npz"
+        --floors "cca24=$CCA.floor.npz" "code=$OUT/code.floor.npz" "gap=$OUT/gap.floor.npz"
+        --out "$OUT/report.json" --tables-dir "$OUT/tables")
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/report.log"
+    else
+        "${CMD[@]}" > "$OUT/report.log" 2>&1 || { echo "Stage 22 failed, see $OUT/report.log"; exit 1; }
+        cat "$OUT/report.log"
+    fi
+fi
+
 if wants 15; then
     CAUSAL=$D/bank_causal
     bank "$CAUSAL" --t1-values 0.4 --causal
@@ -593,6 +636,38 @@ if wants 21; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 21 reports in $OUT"
+fi
+
+if wants 23; then
+    CAUSAL=$D/bank_causal
+    bank "$CAUSAL" --t1-values 0.4 --causal
+    residual_bank "$CAUSAL" t1_04 flair
+    REM=ssl_uni_jitter_nopatch_restail_t104_causal_rem10_20k
+    NCE=ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k
+    N31=ssl_code_jitter_nopatch_restail_t104_causal_n31_20k
+    EVERY=2000 ssl "$REM" "$CAUSAL" tail t1_04 20000 --uniform --residual --jitter 2 --rotate 3 --patch-weight 0 \
+        --seed 42 --remainder-units 10 --remainder-neighbours 31 --remainder-every 500
+    finish "$REM"
+
+    OUT=$D/causal/stage23
+    if [ "$DRY" = 0 ]; then
+        for name in "$REM" "$NCE"; do
+            if ! grep -qx DONE "$D/logs/$name.log"; then
+                echo "Stage 23 needs $name finished (stage 21 trains $NCE); rerun stage 23 after it is."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+    fi
+    for report in own_variation code_audit; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$report.py $OUT/$report.json $D/runs/$REM $D/runs/$NCE $D/runs/$N31 > $OUT/$report.txt"
+        else
+            "$PY" "$D/$report.py" "$OUT/$report.json" "$D/runs/$REM" "$D/runs/$NCE" "$D/runs/$N31" \
+                > "$OUT/$report.txt" 2>&1 || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 23 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"
