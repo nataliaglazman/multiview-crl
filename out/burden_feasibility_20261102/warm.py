@@ -31,6 +31,16 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
   --content-units N  the code is the first N outputs of TailCode's head in place of the recipe's 14, the head widened
                 to N + 4 and the backbone and its init unchanged, so the code has room for more factors. Needs --pool
                 tail or gapnorm and --patch-weight 0, since the backbone's own head is not widened.
+  --remainder-units K  K more code units after the main ones (the recipe's 14, or --content-units), trained only by a
+                second InfoNCE each step, on a batch of an anchor and its nearest training subjects on the main units'
+                current code (no labels). They gain only by telling apart subjects the main units cannot, so they are
+                paid for what the views share beyond the main code, which InfoNCE stops paying for once the batch is
+                told apart (a conditional InfoNCE, as in Sordoni et al. 2021's decomposed estimator). The main units
+                keep the uniform batches. --remainder-neighbours M (default 31, the tightest a batch of 32 allows) sizes
+                the neighbourhoods, --remainder-every N (default 500) rebuilds them, --remainder-weight W (default 1)
+                weighs the term. That batch has its own sampler and augmentation draws and leaves the running statistics
+                alone, so the main batches, their augmentation and the statistics follow a run without the option.
+                Needs --pool tail or gapnorm, --patch-weight 0, --uniform and InfoNCE.
   --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
@@ -46,6 +56,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
     python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail|gapnorm] [--gauge batch|running] [--residual]
         [--t1key t1_00] [--uniform | --code-batches K] [--queue N] [--decorrelate W] [--group-dropout P]
         [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--content-units N] [--seed S]
+        [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]]
 """
 
 import argparse
@@ -146,8 +157,20 @@ class TailCode(nn.Module):
 
     THRESHOLDS = (2.0, 3.0, 4.0)
 
-    def __init__(self, keep, channels=64, latent=18, momentum=0.01, thresholds=THRESHOLDS, gauge="batch", units=14):
+    def __init__(
+        self,
+        keep,
+        channels=64,
+        latent=18,
+        momentum=0.01,
+        thresholds=THRESHOLDS,
+        gauge="batch",
+        units=14,
+        regional=False,
+    ):
         super().__init__()
+        if regional:
+            raise NotImplementedError("regional_tail pooling is not in warm.py yet (code_audit.load_run asks for it)")
         if gauge not in ("batch", "running"):
             raise ValueError(f"gauge must be batch or running, got {gauge!r}")
         self.units = units  # the code is the head's first ``units`` outputs; the rest are unused style units
@@ -469,6 +492,22 @@ def main():
         default=None,
         help="Code width: the first N of TailCode's outputs, its head widened to match (default the recipe's 14)",
     )
+    p.add_argument(
+        "--remainder-units",
+        type=int,
+        default=None,
+        help="Code units after the main ones, trained only to tell apart nearest neighbours on the main units' code",
+    )
+    p.add_argument(
+        "--remainder-neighbours",
+        type=int,
+        default=None,
+        help="Neighbourhood size on the main units for --remainder-units (default batch size - 1, the tightest)",
+    )
+    p.add_argument(
+        "--remainder-every", type=int, default=None, help="Rebuild the remainder neighbourhoods every N steps (500)"
+    )
+    p.add_argument("--remainder-weight", type=float, default=None, help="Weight of the remainder InfoNCE (default 1)")
     p.add_argument("--queue", type=int, default=0, help="Negatives from a momentum-encoder queue of this many subjects")
     p.add_argument("--queue-momentum", type=float, default=0.99)
     p.add_argument("--t1key", default="t1_00")
@@ -541,7 +580,36 @@ def main():
         raise ValueError("--content-units must be positive, and --decorrelate's weights assume the recipe's 14 units")
     if a.hard_negatives < 0 or (a.hard_negatives and (a.pool == "gap" or a.queue)):
         raise ValueError("--hard-negatives must be non-negative and needs --pool tail or gapnorm without --queue")
+    if a.remainder_units is None and any(
+        v is not None for v in (a.remainder_neighbours, a.remainder_every, a.remainder_weight)
+    ):
+        raise ValueError("--remainder-neighbours, --remainder-every and --remainder-weight need --remainder-units")
+    if a.remainder_units is not None and (
+        a.remainder_units < 1
+        or a.pool == "gap"
+        or a.patch_weight != 0
+        or not a.uniform
+        or a.contrastive_loss_type != "infonce"
+        or a.queue
+        or a.hard_negatives
+        or a.half_views is not None
+        or a.decorrelate
+        or a.group_dropout
+    ):
+        raise ValueError(
+            "--remainder-units must be positive and needs --pool tail or gapnorm, --patch-weight 0, --uniform and "
+            "InfoNCE, without --queue, --hard-negatives, --half-views, --decorrelate or --group-dropout"
+        )
     args = run_args()
+    if a.remainder_units is not None:
+        a.remainder_neighbours = args.batch_size - 1 if a.remainder_neighbours is None else a.remainder_neighbours
+        a.remainder_every = 500 if a.remainder_every is None else a.remainder_every
+        a.remainder_weight = 1.0 if a.remainder_weight is None else a.remainder_weight
+        if a.remainder_neighbours < args.batch_size - 1 or a.remainder_every < 1 or a.remainder_weight <= 0:
+            raise ValueError(
+                f"--remainder-neighbours must be at least {args.batch_size - 1}, --remainder-every and "
+                "--remainder-weight positive"
+            )
     if a.code_neighbours is not None and (not a.code_batches or a.code_neighbours < args.batch_size - 1):
         raise ValueError(f"--code-neighbours sizes --code-batches' neighbourhoods, at least {args.batch_size - 1}")
     if (a.half_views is None) != (a.half_units is None):
@@ -592,14 +660,28 @@ def main():
         print("loaded", len(keep), "unexpected", result.unexpected_keys, flush=True)
     model = model.to(a.device)
     units = args.content_channels if a.content_units is None else a.content_units
+    rest = a.remainder_units or 0
     pool = None
     if a.pool != "gap":
         thresholds = () if a.pool == "gapnorm" else TailCode.THRESHOLDS
-        latent = units + args.latent_dim - args.content_channels
-        pool = TailCode(interior_cells(a.bank), latent=latent, thresholds=thresholds, gauge=a.gauge, units=units)
+        latent = units + rest + args.latent_dim - args.content_channels
+        pool = TailCode(interior_cells(a.bank), latent=latent, thresholds=thresholds, gauge=a.gauge, units=units + rest)
+        pool.main = units  # the main loss's slice; remainder units follow it
         pool = pool.to(a.device)
         print("interior cells", int(pool.keep.sum()), "tail thresholds", pool.thresholds, "gauge", a.gauge, flush=True)
         print("code units", units, flush=True)
+        if rest:
+            print(
+                "remainder units",
+                rest,
+                "neighbours",
+                a.remainder_neighbours,
+                "rebuilt every",
+                a.remainder_every,
+                "weight",
+                a.remainder_weight,
+                flush=True,
+            )
     args.content_channels = units  # the loss's slice; --content-units widens TailCode's head, not the backbone's
     if a.frozen_backbone:
         for name, parameter in model.named_parameters():
@@ -625,6 +707,23 @@ def main():
         rebuild(cb.nearest_neighbours(train.zc[:, ANATOMY], args.stratify_neighbours), args.loader_seed)
     rng = np.random.default_rng(args.seed)
     aug = np.random.default_rng(None if args.seed is None else args.seed + 1)
+    remainder = {"sampler": None, "spread": None}
+    aug_rest = np.random.default_rng(None if args.seed is None else args.seed + 2)
+
+    def rebuild_remainder(step):
+        """Neighbourhoods on the main units' current code, both views, for the remainder units' batches."""
+        codes = features(model, train, a.device, pool=pool)["code"]
+        neighbours = cb.nearest_neighbours(np.concatenate([c[:, :units] for c in codes], 1), a.remainder_neighbours)
+        remainder["sampler"] = cb.NeighbourhoodBatchSampler(neighbours, args.batch_size, args.loader_seed + step, 0.0)
+        remainder["spread"] = {k: round(float((v[neighbours].std(1) / v.std(0)).mean()), 3) for k, v in scored.items()}
+
+    def rest_batches():
+        while True:
+            current = remainder["sampler"]
+            for batch in current:
+                yield batch
+                if remainder["sampler"] is not current:
+                    break
 
     def batches():
         while True:
@@ -638,6 +737,7 @@ def main():
                     break
 
     source = batches()
+    rest_source = rest_batches() if rest else None
     parameters = [q for q in model.parameters() if q.requires_grad]
     if pool is not None:
         parameters += list(pool.parameters())
@@ -656,6 +756,8 @@ def main():
 
     def record(step, terms):
         row = {"step": step, "loss": terms, "test": evaluate(model, test, a.device, pool), "spread": batching["spread"]}
+        if rest:
+            row["remainder_spread"] = remainder["spread"]
         report["history"].append(row)
         (a.out / "report.json").write_text(json.dumps(report, indent=1))
         t = row["test"]
@@ -680,6 +782,9 @@ def main():
             size = args.stratify_neighbours if a.code_neighbours is None else a.code_neighbours
             rebuild(cb.nearest_neighbours(np.concatenate(codes, 1), size), args.loader_seed + step)
             print(f"step {step:5d} code neighbourhoods rebuilt, spread {batching['spread']}", flush=True)
+        if rest and (step - 1) % a.remainder_every == 0:
+            rebuild_remainder(step)
+            print(f"step {step:5d} remainder neighbourhoods rebuilt, spread {remainder['spread']}", flush=True)
         indices = np.asarray(next(source))
         x = train.images(indices, a.device)
         whole_t1 = x[: len(indices)]
@@ -720,10 +825,21 @@ def main():
                 h3 = model._encode(x3[:, :-1], 1, 0)
                 half = pool.head(pool.pooled_view(h3, 0, visible=seen, update=False))
                 terms["half"] = hard_negative_infonce(torch.cat([code[b:], half]), a.half_units, args.tau, 0.0, sim)
+            if rest:
+                xr = train.images(np.asarray(next(rest_source)), a.device)
+                if a.jitter or a.rotate:
+                    xr = jitter(xr, a.jitter, a.rotate, aug_rest, a.shared_jitter)
+                hr = model._encode(xr, 2, None)
+                coder = torch.cat(
+                    [pool.head(pool.pooled_view(part, view, update=False)) for view, part in enumerate(hr.chunk(2))]
+                )
+                terms["remainder"] = hard_negative_infonce(coder[:, units:], rest, args.tau, 0.0, sim)
         if queue is not None or pool is not None:
             loss = terms["hard"] if a.hard_negatives else terms["global"]
             if halves is not None:
                 loss = loss + terms["half"]
+            if rest:
+                loss = loss + a.remainder_weight * terms["remainder"]
             if args.patch_loss_weight > 0:
                 pooled = model._patch_pool(h, args.train_patch_grid).transpose(1, 2)
                 patches = model.patch_readout(pooled).transpose(1, 2)

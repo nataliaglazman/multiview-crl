@@ -49,9 +49,15 @@ def ssl(name, report):
         t, f = row["test"]["t1"], row["test"]["flair"]
         pooled = f" pool {t['pooled_volume_r2']:+.3f} {f['pooled_volume_r2']:+.3f} |" if "pooled_volume_r2" in t else ""
         loss = row["loss"].get("global")
-        extra = "".join(f" {k} {row['loss'][k]:.3f}" for k in ("patch", "decor") if k in row["loss"])
+        extra = "".join(f" {k} {row['loss'][k]:.3f}" for k in ("patch", "decor", "remainder") if k in row["loss"])
         spread = row.get("spread")
         spread = f" | nbhd spread anat {spread['anatomy']:.2f} pos {spread['lesion_position']:.2f}" if spread else ""
+        rest = row.get("remainder_spread")
+        if rest:
+            spread += (
+                f" | remainder nbhd anat {rest['anatomy']:.2f} pos {rest['lesion_position']:.2f}"
+                f" burden {rest['burden']:.2f}"
+            )
         print(
             f"  s{row['step']:5d} code {t['code_volume_r2']:+.3f} {f['code_volume_r2']:+.3f} | GAP {t['gap_volume_r2']:+.3f} "
             f"{f['gap_volume_r2']:+.3f} |{pooled} brain {t['code_brain']:.2f} vent {t['code_ventricle']:.2f} thick "

@@ -5,6 +5,8 @@ For each warm.py run, on its bank's test subjects, per view:
   read      5-fold R2 of the six anatomy factors, burden, and the lesion centre (x, y, z of the 16^3 lesion load) from
             the content code, by ridge and by gradient boosting (a factor held nonlinearly reads only in the second),
             and by ridge from the backbone GAP. The SSL histories never scored the lesion centre.
+  floor     the same table for the run's untrained twin: its architecture at its seed's init, TailCode's statistics and
+            gauges filled from training subjects as causal_bundle --untrained does, no training.
   shared    canonical correlations between the two views' codes, and for each shared direction the gradient-boosted
             R2 of anatomy, of the lesion (centre and burden) and of both, so shared content no known factor names shows
             as a high correlation with a low R2.
@@ -19,8 +21,8 @@ For each warm.py run, on its bank's test subjects, per view:
             points at the gauge's train/test mismatch; training subjects above test points at memorization.
 
 Only finished runs are audited (checkpoint at the run's last step), so it can run beside training. Runs already in
-OUT_JSON at the same step are not recomputed, except that an entry without the mode check gets it added. Prints a table
-for every run in OUT_JSON.
+OUT_JSON at the same step are not recomputed, except that an entry without the mode check or the floor gets it added.
+Prints a table for every run in OUT_JSON.
 
     python code_audit.py OUT_JSON RUN_DIR [RUN_DIR ...]
 """
@@ -47,7 +49,16 @@ GROUPS = {"anatomy": slice(0, 6), "lesion": slice(6, 10), "all": slice(0, 10)}
 SETS = 200
 MODE_SETS = 100
 LEVERS = ("decorrelate", "group_dropout", "jitter", "rotate", "hard_negatives")
-OVERRIDES = ("patch_weight", "content_units", "code_neighbours", "half_views", "half_units", "seed")  # when set
+OVERRIDES = (  # when set
+    "patch_weight",
+    "content_units",
+    "remainder_units",
+    "remainder_neighbours",
+    "code_neighbours",
+    "half_views",
+    "half_units",
+    "seed",
+)
 
 
 def boosted(x, y):
@@ -126,9 +137,18 @@ def load_run(run, device, trained=True):
     if kind != "gap":
         thresholds = () if kind == "gapnorm" else warm.TailCode.THRESHOLDS
         units = args.content_channels if a.get("content_units", "None") == "None" else int(a["content_units"])
-        latent = units + args.latent_dim - args.content_channels
+        rest = 0 if a.get("remainder_units", "None") == "None" else int(a["remainder_units"])
+        latent = units + rest + args.latent_dim - args.content_channels
         cells = warm.interior_cells(a["bank"])
-        pool = warm.TailCode(cells, latent=latent, thresholds=thresholds, gauge=a.get("gauge", "batch"), units=units)
+        pool = warm.TailCode(
+            cells,
+            latent=latent,
+            thresholds=thresholds,
+            gauge=a.get("gauge", "batch"),
+            units=units + rest,
+            regional=kind == "regional_tail",
+        )
+        pool.main = units
         if trained:
             pool.load_state_dict(state["pool"])
         pool = pool.to(device).eval()
@@ -191,13 +211,47 @@ def mode_check(report, model, pool, residual, device):
     return out
 
 
+def test_targets(a, residual):
+    """A run's test bank and its targets: the six anatomy factors, burden, and the lesion centre."""
+    bank = warm.Bank(a["bank"], "test", a["t1key"], int(a.get("test_subjects", 1000)), residual)
+    centre = batch_price.lesion_centroid(np.load(f"{a['bank']}/test_cells.npy", mmap_mode="r")[: len(bank.vox)])
+    return bank, np.column_stack([bank.zc[:, warm.ANATOMY], bank.vox, centre])
+
+
+def read_table(feats, targets, main=None):
+    """R2 of every target from each view's code (ridge, boosted) and GAP (ridge); for a run with remainder units
+    (``main`` below the code's width), also by ridge from the main units alone and from the remainder units alone."""
+    out = {}
+    for view, name in enumerate(("t1", "flair")):
+        code, gap = feats["code"][view], feats["gap"][view]
+        out[name] = {
+            "code_ridge": [warm.ridge(code, targets[:, j]) for j in range(len(NAMES))],
+            "code_boosted": [boosted(code, targets[:, j]) for j in range(len(NAMES))],
+            "gap_ridge": [warm.ridge(gap, targets[:, j]) for j in range(len(NAMES))],
+        }
+        if main is not None and main < code.shape[1]:
+            out[name]["main_ridge"] = [warm.ridge(code[:, :main], targets[:, j]) for j in range(len(NAMES))]
+            out[name]["rest_ridge"] = [warm.ridge(code[:, main:], targets[:, j]) for j in range(len(NAMES))]
+    return out
+
+
+def floor(run, device):
+    """``read_table`` for the run's untrained twin."""
+    import causal_bundle  # it imports this module
+
+    report, model, pool, residual, _ = load_run(run, device, trained=False)
+    a = report["args"]
+    if pool is not None:
+        causal_bundle.calibrate(model, pool, warm.Bank(a["bank"], "train", a["t1key"], residual=residual), device)
+    bank, targets = test_targets(a, residual)
+    return read_table(warm.features(model, bank, device, pool=pool), targets, getattr(pool, "main", None))
+
+
 def audit(run, device):
     report, model, pool, residual, step = load_run(run, device)
     a = report["args"]
-    bank = warm.Bank(a["bank"], "test", a["t1key"], int(a.get("test_subjects", 1000)), residual)
+    bank, targets = test_targets(a, residual)
     n = len(bank.vox)
-    centre = batch_price.lesion_centroid(np.load(f"{a['bank']}/test_cells.npy", mmap_mode="r")[:n])
-    targets = np.column_stack([bank.zc[:, warm.ANATOMY], bank.vox, centre])
     feats = warm.features(model, bank, device, pool=pool)
     batches = "uniform" if a.get("uniform") == "True" else "code" if a.get("code_batches", "0") != "0" else "neighbour"
     out = {
@@ -210,16 +264,9 @@ def audit(run, device):
         + (" jitter shared by both views" if a.get("shared_jitter") == "True" else "")
         + "".join(f" {key.replace('_', ' ')} {a[key]}" for key in OVERRIDES if a.get(key, "None") != "None"),
         "final_global_loss": report["history"][-1]["loss"].get("global"),
-        "read": {},
+        "read": read_table(feats, targets, getattr(pool, "main", None)),
         "alignment": code_alignment(*feats["code"]),
     }
-    for view, name in enumerate(("t1", "flair")):
-        code, gap = feats["code"][view], feats["gap"][view]
-        out["read"][name] = {
-            "code_ridge": [warm.ridge(code, targets[:, j]) for j in range(len(NAMES))],
-            "code_boosted": [boosted(code, targets[:, j]) for j in range(len(NAMES))],
-            "gap_ridge": [warm.ridge(gap, targets[:, j]) for j in range(len(NAMES))],
-        }
     rho, left, right = canonical(*feats["code"])
     shared = []
     for i in range(len(rho)):
@@ -240,6 +287,7 @@ def audit(run, device):
     }
     out["top1"] = {k: top1(*feats["code"], v) for k, v in sets.items()}
     out["mode_check"] = mode_check(report, model, pool, residual, device)
+    out["floor"] = floor(run, device)
     return out
 
 
@@ -247,10 +295,18 @@ def show(name, row):
     print(f"{name}  step {row['step']}, {row['setting']}, last global loss {row['final_global_loss']}")
     head = " ".join(f"{s:>6s}" for s in SHORT)
     print(f"  {'':18s} {head}")
-    for view in ("t1", "flair"):
-        for kind in ("code_ridge", "code_boosted", "gap_ridge"):
-            values = " ".join(f"{v:+6.2f}" for v in row["read"][view][kind])
-            print(f"  {view:5s} {kind:12s} {values}")
+    for label, table in (("", row["read"]), ("untrained twin (the floor):", row.get("floor"))):
+        if table is None:
+            continue
+        if label:
+            print(f"  {label}")
+        for view in ("t1", "flair"):
+            for kind in ("code_ridge", "code_boosted", "gap_ridge", "main_ridge", "rest_ridge"):
+                if kind in table[view]:
+                    values = " ".join(f"{v:+6.2f}" for v in table[view][kind])
+                    print(f"  {view:5s} {kind:12s} {values}")
+    if "main_ridge" in row["read"]["t1"]:
+        print("  main_ridge / rest_ridge: ridge from the main units alone / from the remainder units alone")
     alignment = row.get("alignment")
     if alignment:
         values = " ".join("n/a" if r is None else f"{r:+.2f}" for r in alignment["same_unit_r"])
@@ -306,15 +362,19 @@ def main():
         if step != last:
             continue
         cached = results.get(run.name, {})
-        if cached.get("step") == step:
-            if "mode_check" in cached:
-                continue
-            print("mode check", run.name, flush=True)
-            report, model, pool, residual, _ = load_run(run, device)
-            cached["mode_check"] = mode_check(report, model, pool, residual, device)
-        else:
+        if cached.get("step") != step:
             print("auditing", run.name, flush=True)
             results[run.name] = audit(run, device)
+        elif "mode_check" in cached and "floor" in cached:
+            continue
+        else:
+            if "mode_check" not in cached:
+                print("mode check", run.name, flush=True)
+                report, model, pool, residual, _ = load_run(run, device)
+                cached["mode_check"] = mode_check(report, model, pool, residual, device)
+            if "floor" not in cached:
+                print("untrained floor", run.name, flush=True)
+                cached["floor"] = floor(run, device)
         out_json.write_text(json.dumps(results, indent=1))
     print(
         "== code audit: R2 per factor (lesion x, y, z = centre of the lesion load, never scored before), test subjects"

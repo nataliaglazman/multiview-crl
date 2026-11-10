@@ -138,6 +138,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - `--content-units N`: a wider code.
   - `--contrastive-loss-type barlow_twins`: use cross-view correlation as the global loss. Set `--patch-weight 0`.
   - `--half-views xyz --half-units K`: the lesion-agnostic partial-observability arm (stage 19).
+  - `--remainder-units K` (with `--remainder-neighbours`, `--remainder-every`, `--remainder-weight`): K more code units
+    trained only by InfoNCE on batches of each subject's nearest neighbours on the main units (stage 23).
   - `--hard-negatives G`, `--seed S`.
   - Older levers: `--queue`, `--gauge running`, `--group-dropout`, `--decorrelate`, `--shared-jitter`, `--uniform`.
   - Each option refuses combinations it can't handle.
@@ -148,7 +150,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | tool | what it reports |
 |---|---|
 | `summarize.py` | each arm's training history, compact enough to paste |
-| `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
+| `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, the same rows for the untrained twin (the floor), canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
 | `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
@@ -252,8 +254,13 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - Stage 14: 24 units on the independent bank, nuisance-on arms.
   - The half-view run's audit, i.e. whether its regional units hold the lesion's position. See `summary.txt` and
     `audit.txt`.
-- **Best pipeline so far:** train with the recipe, then read the content code by CCA on the backbone GAP (24
-  directions). The backbones that read best this way are the 24-unit run and half views.
+- **Best readout so far:** CCA on the backbone GAP (24 directions); the backbones that read best this way are the
+  24-unit run and half views. The user does not want CCA after training as the method, so it stays a diagnostic of
+  what the backbone holds.
+- **Stage 21:** the user reports that Barlow Twins did not help (numbers not recorded here).
+- `code_audit.py` prints an untrained-twin floor under every factor table, lesion x/y/z included.
+- `warm.py`'s `TailCode` takes a placeholder `regional` argument that raises when true: `code_audit.load_run` already
+  asks for a `regional_tail` pool that is not implemented.
 
 ## 10. Stage 21 and next steps
 
@@ -266,7 +273,21 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
    - `causal/stage21/code_audit.txt`: check whether matching units agree across views and how many distinct
      directions the code uses.
    - `causal/stage21/cca_readout.txt`: training-fit CCA benchmark for both backbones.
-3. **Later:** consider 48-unit InfoNCE to test whether extra capacity retains burden's own variation. Check the
+3. **Stage 23: remainder units with conditional negatives.**
+   - **Why:** InfoNCE can reward at most log(batch size) ≈ 3.5 nats of shared information. At a loss of .035 the
+     24-unit code had used it up on anatomy and lesion position, so burden's own part earns nothing.
+   - **Arm:** the recipe's 14 units on uniform batches, plus 10 units trained only by InfoNCE on batches of each
+     subject's 31 nearest neighbours on the 14 (rebuilt every 500 steps). They gain only from shared content the 14
+     lack: Sordoni et al. 2021's decomposed estimator, or MCL within one model. 20,000 steps on `bank_causal`, seed 42.
+   - **Control:** stage 21's 24-unit InfoNCE arm: same width, head shape, init (the step-0 evals are identical),
+     batches and jitter. **Reference:** the 31-neighbour code batches (stage 18).
+   - `causal/stage23/own_variation.txt`: burden's own part from the whole code against the control, and from the main
+     and remainder units separately.
+   - `causal/stage23/code_audit.txt`: anatomy and lesion position from each part (`main_ridge`, `rest_ridge`) against
+     the untrained floor, and train vs test retrieval for memorisation.
+   - **Success:** burden's own part in the code well above the control's, held by the remainder units, with the main
+     units' anatomy intact.
+4. **Later:** consider 48-unit InfoNCE to test whether extra capacity retains burden's own variation. Check the
    nuisance-on runs before porting to ADNI (`training/main_conv_synthetic.py`): residual input, tail pooling,
    per-view jitter with the patch loss off, code batches, and the CCA readout.
    - Score white-matter hyperintensity (WMH) burden by its own part: the residual after a flexible fit on ventricle

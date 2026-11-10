@@ -18,6 +18,9 @@ Two references per target, from fresh SCM draws (no images, no model):
 Reading: if the pooled features hold burden's own variation and the code does not, the 14-unit head drops it; if neither
 does, the network never learned it.
 
+For a run with remainder units (warm.py --remainder-units), each factor's own variation is also read from the main units
+alone and from the remainder units alone, so it shows which part of the code holds it.
+
     python out/burden_feasibility_20261102/own_variation.py OUT_JSON RUN [RUN ...]
 
 Runs already in OUT_JSON at the same step are reused. Each run's bank needs causal_adj.npy (bank.py --causal).
@@ -44,6 +47,7 @@ from sklearn.preprocessing import FunctionTransformer, StandardScaler
 from eval.synthetic.synthetic_dataset import sample_content_from_scm
 
 KINDS = ("code", "pooled", "gap")
+SPLIT = ("main", "rest")  # a run with remainder units: the code's main units, then its remainder units
 TARGETS = {
     "own": "own variation: the factor's exogenous noise in the SCM (independent of its parents)",
     "partial": "linear-residual partial R2, compare_bundles' target (a parent read nonlinearly scores on it)",
@@ -135,6 +139,10 @@ def assess(run, device, scm, scale, nonlinearity, columns):
             causal_bundle.calibrate(model, pool, warm.Bank(root, "train", a["t1key"], residual=residual), device)
         test = warm.Bank(root, "test", a["t1key"], int(a.get("test_subjects", 1000)), residual)
         feats = warm.features(model, test, device, pool=pool)
+        main = getattr(pool, "main", pool.units)
+        if main < pool.units:
+            feats["main"] = [c[:, :main] for c in feats["code"]]
+            feats["rest"] = [c[:, main:] for c in feats["code"]]
         values = targets(test.zc, scm, scale, nonlinearity, columns)
         if trained:
             own = values["own"]
@@ -158,7 +166,8 @@ def assess(run, device, scm, scale, nonlinearity, columns):
                 kind: {
                     name: [ridge(feats[kind][v], y[:, j]) for j in range(len(columns))] for name, y in values.items()
                 }
-                for kind in KINDS
+                for kind in KINDS + SPLIT
+                if kind in feats
             }
             for v, view in enumerate(("t1", "flair"))
         }
@@ -189,6 +198,18 @@ def show(name, row, refs, scm, columns):
             )
             ref = refs[target]
             print(f"    {names[j]:10s} {parents:18s} {ref['no_own'][j]:6.2f} {ref['linear'][j]:6.2f} |{values}")
+    if "main" in row["trained"]["t1"]:
+        print("  own variation from each part of the code, main units and remainder units; trained (untrained twin)")
+        parts = [f"{view} {kind}" for view in ("T1", "FLAIR") for kind in SPLIT]
+        print(f"    {'factor':10s} {'parents':18s} {'':13s} |" + "".join(f"{c:>14s}" for c in parts))
+        for j, d in enumerate(columns):
+            parents = ",".join(B.CAUSAL_FACTORS[p] for p in scm["parents"][d]) or "-"
+            values = "".join(
+                f"{row['trained'][view][kind]['own'][j]:6.2f} ({row['untrained'][view][kind]['own'][j]:5.2f})"
+                for view in ("t1", "flair")
+                for kind in SPLIT
+            )
+            print(f"    {names[j]:10s} {parents:18s} {'':13s} |{values}")
 
 
 def main():
