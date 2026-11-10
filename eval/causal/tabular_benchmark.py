@@ -209,6 +209,7 @@ def benchmark(z, names, adjacency, arms, identity, args):
                 propensity_range=[float(scm.propensity.min()), float(scm.propensity.max())],
                 effects=effects,
                 discovery=graphs,
+                discovery_truth=scm.adjacency.astype(int).tolist() if discovery else None,
             )
         )
     return dict(
@@ -219,7 +220,6 @@ def benchmark(z, names, adjacency, arms, identity, args):
         n_subjects=len(z),
         image_factors=names,
         discovery_nodes=[*names, *scm.tabular_names, "treatment", "outcome"] if discovery else [],
-        discovery_truth=scm.adjacency.astype(int).tolist() if discovery else None,
         discovery_held_out_rows=list(map(int, held)),
         arms={key: {k: v for k, v in arm.items() if k != "X"} for key, arm in arms.items()},
         readout_r2=readout_r2,

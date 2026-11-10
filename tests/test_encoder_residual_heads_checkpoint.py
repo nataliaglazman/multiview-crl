@@ -112,6 +112,28 @@ class ResidualHeadCheckpointTests(unittest.TestCase):
             for name, expected in model.state_dict().items():
                 torch.testing.assert_close(floor.state_dict()[name], expected, rtol=0, atol=0)
 
+    def test_alignment_mode_is_checkpoint_compatible_and_cli_round_trips(self):
+        population = build_model(enabled_config(), "cpu")
+        restored = build_model(
+            enabled_config(residual_head_alignment_mode="batch"),
+            "cpu",
+            population.state_dict(),
+        )
+        self.assertEqual(restored.residual_heads.alignment_mode, "batch")
+        self.assertEqual(set(population.state_dict()), set(restored.state_dict()))
+        options = dict(
+            conv_readout="mlp",
+            residual_head_units=3,
+            residual_head_joint_dim=4,
+            residual_head_freeze_image=False,
+            residual_head_alignment_mode="batch",
+            residual_head_auxiliary_weight=0.05,
+            residual_head_gradient_every=10,
+        )
+        args = encoder_args.parse_args(encoder_args.cli_arguments(options))
+        for name, value in options.items():
+            self.assertEqual(getattr(args, name), value)
+
     def test_image_style_then_residual_layout_and_view_routing_and_global_only_eval(
         self,
     ):
@@ -229,6 +251,10 @@ class ResidualHeadCheckpointTests(unittest.TestCase):
                 "2",
             ],
             [*valid, "--residual-head-uniformity-weight", "0"],
+            [*valid, "--residual-head-auxiliary-weight", "-1"],
+            [*valid, "--residual-head-gradient-every", "-1"],
+            [*valid, "--residual-head-alignment-mode", "batch", "--batch-size", "1"],
+            [*valid, "--residual-head-auxiliary-weight", "0"],
             [
                 *valid,
                 "--residual-head-subjects",

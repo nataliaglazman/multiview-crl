@@ -246,6 +246,24 @@ def build_parser(description=None):
     p.add_argument("--residual-head-alignment-weight", type=float, default=1.0)
     p.add_argument("--residual-head-image-alignment-weight", type=float, default=1.0)
     p.add_argument("--residual-head-uniformity-weight", type=float, default=1.0)
+    p.add_argument(
+        "--residual-head-alignment-mode",
+        choices=("population", "batch"),
+        default="population",
+        help="population: legacy detached running gauges for alignment; batch: differentiable current-batch gauges",
+    )
+    p.add_argument(
+        "--residual-head-auxiliary-weight",
+        type=float,
+        default=1.0,
+        help="Weight of residual block alignment plus joint uniformity, added to the weighted image global loss",
+    )
+    p.add_argument(
+        "--residual-head-gradient-every",
+        type=int,
+        default=0,
+        help="Every N steps report separate weighted-loss parameter gradient RMS; 0 disables extra backward passes",
+    )
     p.add_argument("--resnet-norm", choices=("batch", "group"), default="batch")
     p.add_argument(
         "--norm-type",
@@ -1076,13 +1094,28 @@ def parse_args(argv=None, description=None):
             p.error(
                 "Choose --residual-head-image-init for a base image checkpoint or --init-from for a full checkpoint"
             )
-        for key in ("alignment_weight", "image_alignment_weight", "uniformity_weight"):
+        for key in (
+            "alignment_weight",
+            "image_alignment_weight",
+            "uniformity_weight",
+            "auxiliary_weight",
+        ):
             if not 0 <= getattr(args, f"residual_head_{key}") < float("inf"):
                 p.error("--residual-head-*-weight must be finite and nonnegative")
         if args.residual_head_alignment_weight <= 0 or args.residual_head_uniformity_weight <= 0:
             p.error("Independent residual heads need positive residual alignment and joint uniformity weights")
-        if not args.residual_head_freeze_image and args.residual_head_image_alignment_weight <= 0:
-            p.error("An unfrozen image path needs a positive --residual-head-image-alignment-weight")
+        if (
+            not args.residual_head_freeze_image
+            and args.residual_head_image_alignment_weight <= 0
+            and args.global_loss_weight <= 0
+        ):
+            p.error("An unfrozen image path needs image alignment or a positive --global-loss-weight")
+        if args.residual_head_auxiliary_weight == 0 and (
+            args.residual_head_freeze_image or (args.global_loss_weight <= 0 and args.patch_loss_weight <= 0)
+        ):
+            p.error("Zero residual auxiliary weight needs an unfrozen image path with a positive image objective")
+        if args.residual_head_gradient_every < 0:
+            p.error("--residual-head-gradient-every must be nonnegative")
     elif any(
         getattr(args, f"residual_head_{key}") != p.get_default(f"residual_head_{key}")
         for key in (
@@ -1095,6 +1128,9 @@ def parse_args(argv=None, description=None):
             "alignment_weight",
             "image_alignment_weight",
             "uniformity_weight",
+            "alignment_mode",
+            "auxiliary_weight",
+            "gradient_every",
         )
     ):
         p.error("The --residual-head-* settings require a positive --residual-head-units")

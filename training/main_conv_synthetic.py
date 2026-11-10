@@ -780,7 +780,11 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
         pooled = model(images, pool_only=True, n_views=2)[2][0]
     # Hand-built option namespaces may omit the parser's default.
     content_mask = model.sample_content_mask(hard=getattr(args, "mask_estimator", "relaxed") == "straight_through")
-    global_loss = contrastive_loss(pooled, model, args, sim_metric, criterion, content_mask)
+    residual = getattr(model, "residual_heads", None)
+    # The primary objective remains the original IMAGE vector's objective. Appended
+    # residual units belong only to the explicitly weighted auxiliary objective.
+    global_pooled = pooled[:, : model.latent_dim] if residual is not None else pooled
+    global_loss = contrastive_loss(global_pooled, model, args, sim_metric, criterion, content_mask)
     foreground = None
     if local and getattr(args, "patch_foreground_mask", False):
         foreground = masks if masks is not None else images != 0
@@ -794,22 +798,27 @@ def training_objective(model, images, args, sim_metric, criterion, masks=None):
     )
     weighted = weight * patch_loss
     global_weighted = getattr(args, "global_loss_weight", 1.0) * global_loss
-    residual = getattr(model, "residual_heads", None)
+    total = global_weighted + weighted if weight > 0 else global_weighted
+    terms = {"global": global_loss, "patch": patch_loss, "patch_weighted": weighted}
     if residual is not None:
-        # The legacy global contrastive value is diagnostic only for this experiment.
-        # Preservation is imposed on the joint code, with alignment on each exported block.
+        # Keep the original image objective and add a separately weighted joint objective.
+        # A zero global weight reproduces the initial residual-head experiment.
         image_code, residual_code = model.split_residual_codes(pooled)
-        global_weighted, residual_terms = residual.joint_loss(
+        auxiliary, residual_terms = residual.joint_loss(
             image_code,
             residual_code,
             raw_weight=args.residual_head_image_alignment_weight,
             residual_weight=args.residual_head_alignment_weight,
             uniform_weight=args.residual_head_uniformity_weight,
         )
-    total = global_weighted + weighted if weight > 0 else global_weighted
-    terms = {"global": global_loss, "patch": patch_loss, "patch_weighted": weighted}
-    if residual is not None:
-        terms["residual_heads"] = global_weighted
+        auxiliary_weight = getattr(args, "residual_head_auxiliary_weight", 1.0)
+        auxiliary_weighted = auxiliary_weight * auxiliary
+        if auxiliary_weight > 0:
+            total = total + auxiliary_weighted
+        terms["global_weighted"] = global_weighted
+        terms["residual_heads"] = auxiliary
+        terms["residual_heads_auxiliary_raw"] = auxiliary
+        terms["residual_heads_auxiliary_weighted"] = auxiliary_weighted
         terms.update({f"residual_heads_{key}": value for key, value in residual_terms.items()})
     # Not loss terms: the unweighted parts of a negative-free patch loss, for the logs.
     for key, value in getattr(patch_loss, "_patch_terms", {}).items():
@@ -893,12 +902,11 @@ def mask_state(model):
 
 
 def effective_rank(feat):
-    """Participation ratio of the covariance spectrum: 1 = collapsed to a line, C = isotropic.
+    """Covariance participation ratio: variance concentration, not intrinsic dimension.
 
-    The quantity InfoNCE quietly destroys when alignment is the only pressure on the
-    representation. GAP already starts this near 1 on a random encoder, so a run whose
-    rank never climbs is discarding information rather than aligning content, and every
-    identifiability number it reports will sit at the untrained floor.
+    A value near one means one direction dominates the covariance. Weak directions
+    may still carry information, so recovery probes and raw variance are needed
+    alongside this diagnostic to assess a suspected collapse.
     """
     x = feat.detach().float()
     if x.device.type == "mps":
@@ -1033,6 +1041,52 @@ def holdout_r2(features, targets, ridge=1e-2):
     residual = ((test @ weights - targets[n:]) ** 2).sum(0)
     total = ((targets[n:] - targets[n:].mean(0)) ** 2).sum(0)
     return 1 - residual / np.maximum(total, 1e-12)
+
+
+def residual_head_gradient_report(model, terms, args):
+    """Parameter-gradient RMS for each weighted objective, without changing ``.grad`` or model state.
+
+    Each RMS uses all trainable parameters in its group, including zero/unused entries.
+    Compare loss terms within one parameter group; differently sized groups are not norm ratios.
+    """
+    branch = getattr(model, "residual_heads", None)
+    if branch is None:
+        return None
+    groups = {
+        "image": tuple(p for p in model.image_parameters() if p.requires_grad),
+        "residual": tuple(p for part in (branch.encoders, branch.head) for p in part.parameters() if p.requires_grad),
+        "projector": tuple(p for p in branch.projector.parameters() if p.requires_grad),
+    }
+    parameters = tuple(p for group in groups.values() for p in group)
+    auxiliary_weight = getattr(args, "residual_head_auxiliary_weight", 1.0)
+    objectives = {
+        "image_primary": terms["global_weighted"],
+        "image_alignment": auxiliary_weight
+        * args.residual_head_image_alignment_weight
+        * terms["residual_heads_image_alignment"],
+        "residual_alignment": auxiliary_weight
+        * args.residual_head_alignment_weight
+        * terms["residual_heads_residual_alignment"],
+        "uniformity": auxiliary_weight * args.residual_head_uniformity_weight * terms["residual_heads_uniformity"],
+        "auxiliary": terms["residual_heads_auxiliary_weighted"],
+    }
+    report = {}
+    for name, objective in objectives.items():
+        gradients = (
+            torch.autograd.grad(objective, parameters, retain_graph=True, allow_unused=True)
+            if objective.requires_grad and parameters
+            else (None,) * len(parameters)
+        )
+        offset = 0
+        for group_name, group in groups.items():
+            subset = gradients[offset : offset + len(group)]
+            offset += len(group)
+            count = sum(parameter.numel() for parameter in group)
+            square_sum = sum(
+                float(gradient.detach().float().square().sum()) for gradient in subset if gradient is not None
+            )
+            report[f"{name}/{group_name}"] = (square_sum / count) ** 0.5 if count else 0.0
+    return report
 
 
 def clip_encoder_gradients(model, max_norm):
@@ -1473,7 +1527,7 @@ def evaluate_real(model, val_dataset, device, args, save_dir, step, writer=None,
 
 def build_encoder(args):
     """The run's encoder, on the CPU, initialized from the global torch RNG as it stands."""
-    return MultiviewConvEncoder(
+    model = MultiviewConvEncoder(
         in_channels=1,
         hidden_channels=args.hidden_channels,
         res_channels=args.res_channels,
@@ -1528,7 +1582,14 @@ def build_encoder(args):
         residual_head_input_size=args.res,
         residual_head_joint_dim=getattr(args, "residual_head_joint_dim", 0),
         residual_head_freeze_image=getattr(args, "residual_head_freeze_image", True),
+        residual_head_alignment_mode=getattr(args, "residual_head_alignment_mode", "population"),
     )
+    if model.residual_heads is not None and getattr(args, "residual_head_auxiliary_weight", 1.0) == 0:
+        # A zero-auxiliary control must also avoid zero-gradient AdamW decay in the
+        # residual path through the concatenated exported vector.
+        model.residual_heads.requires_grad_(False)
+        model.train(model.training)
+    return model
 
 
 def fit_vector_prediction_template(model, train_dataset, args, device):
@@ -1869,7 +1930,9 @@ def main():
             f"joint uniformity in {args.residual_head_joint_dim} dimensions; "
             f"image pathway {'frozen' if args.residual_head_freeze_image else 'trainable'}; "
             f"PCA fitted on {residual_fit['subjects']} training subjects ({residual_fit['source']}). "
-            "Global InfoNCE is diagnostic only. Step 0 is the combined initialization, not a fresh-image floor.",
+            f"Image global weight {args.global_loss_weight:g}; joint auxiliary weight "
+            f"{args.residual_head_auxiliary_weight:g}; alignment gauges {args.residual_head_alignment_mode}. "
+            "Step 0 is the combined initialization, not a fresh-image floor.",
             flush=True,
         )
     prediction_template = fit_vector_prediction_template(model, train_dataset, args, device)
@@ -2091,6 +2154,7 @@ def main():
     input_images = hashlib.sha256() if args.hash_training_inputs else None
     started = time.perf_counter()
     last_loss_terms = None
+    last_gradient_report = None
 
     def save_progress(step, status):
         payload = {
@@ -2152,6 +2216,7 @@ def main():
                 else None
             ),
             "last_loss_terms": last_loss_terms,
+            "residual_head_gradient_report": last_gradient_report,
             "init_from": init_from,
             "residual_heads_fit": residual_fit,
             "residual_heads_image_initialization": image_init,
@@ -2231,6 +2296,9 @@ def main():
     if getattr(model, "residual_heads", None) is not None:
         residual_terms = (
             "residual_heads",
+            "global_weighted",
+            "residual_heads_auxiliary_raw",
+            "residual_heads_auxiliary_weighted",
             *(
                 f"residual_heads_{part}"
                 for part in (
@@ -2241,6 +2309,15 @@ def main():
                     "joint_variance",
                     "joint_effective_rank",
                     "projected_variance",
+                    "image_variance",
+                    "residual_variance",
+                    "image_raw_variance",
+                    "residual_raw_variance",
+                    "image_effective_rank",
+                    "residual_effective_rank",
+                    "projected_effective_rank",
+                    "code_sd_min",
+                    "projector_weight_norm",
                 )
             ),
         )
@@ -2288,6 +2365,25 @@ def main():
             pooled, loss, terms = training_objective(model, x, args, sim_metric, criterion, masks)
             if residual_terms and not torch.isfinite(loss):
                 raise ValueError(f"Nonfinite residual-head objective at step {step + 1}")
+
+            gradient_every = getattr(args, "residual_head_gradient_every", 0)
+            if residual_terms and gradient_every > 0 and (step + 1) % gradient_every == 0:
+                gradients = residual_head_gradient_report(model, terms, args)
+                last_gradient_report = {
+                    "step": step + 1,
+                    "parameter_gradient_rms": gradients,
+                }
+                with open(os.path.join(save_dir, "residual_head_gradients.jsonl"), "a") as stream:
+                    stream.write(json.dumps(last_gradient_report) + "\n")
+                print(
+                    f"  gradient RMS @ {step + 1}: image primary {gradients['image_primary/image']:.3g}, "
+                    f"auxiliary {gradients['auxiliary/image']:.3g}; residual auxiliary "
+                    f"{gradients['auxiliary/residual']:.3g}; projector auxiliary {gradients['auxiliary/projector']:.3g}",
+                    flush=True,
+                )
+                if writer is not None:
+                    for name, value in gradients.items():
+                        writer.add_scalar(f"train/gradient_rms/{name}", value, step + 1)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -2347,7 +2443,11 @@ def main():
                     )
                     + (f" | lesion InfoNCE {running['lesion']/n:.4f}" if args.lesion_keypoints > 0 else "")
                     + (
-                        f" | image align {running['residual_heads_image_alignment']/n:.4f} "
+                        f" | image global {running['global_loss']/n:.4f} "
+                        f"(weighted {running['global_weighted']/n:.4f}) "
+                        f"| auxiliary {running['residual_heads_auxiliary_raw']/n:.4f} "
+                        f"(weighted {running['residual_heads_auxiliary_weighted']/n:.4f}) "
+                        f"| image align {running['residual_heads_image_alignment']/n:.4f} "
                         f"| residual align {running['residual_heads_residual_alignment']/n:.4f} "
                         f"| joint MMD {running['residual_heads_uniformity']/n:.4f} "
                         f"| joint rank {running['residual_heads_joint_effective_rank']/n:.2f}"
@@ -2379,6 +2479,16 @@ def main():
                     ),
                     flush=True,
                 )
+                if residual_terms:
+                    print(
+                        f"  within-view ranks: image {running['residual_heads_image_effective_rank']/n:.2f}, "
+                        f"residual {running['residual_heads_residual_effective_rank']/n:.2f}, "
+                        f"projected {running['residual_heads_projected_effective_rank']/n:.2f}; "
+                        f"raw variance: image {running['residual_heads_image_raw_variance']/n:.3g}, "
+                        f"residual {running['residual_heads_residual_raw_variance']/n:.3g}; "
+                        f"minimum code SD {running['residual_heads_code_sd_min']/n:.3g}",
+                        flush=True,
+                    )
                 if mask_info is not None and mask_info["content_units"] != logged_units:
                     print(f"  content units changed: {logged_units} -> {mask_info['content_units']}", flush=True)
                     logged_units = mask_info["content_units"]

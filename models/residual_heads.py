@@ -81,6 +81,8 @@ class ResidualHeads(nn.Module):
         joint_dim: int,
         frozen_image: bool = True,
         momentum: float = 0.01,
+        alignment_mode: str = "population",
+        alignment_eps: float = 1e-12,
     ):
         super().__init__()
         if input_size < 4 or input_size % 4:
@@ -91,6 +93,10 @@ class ResidualHeads(nn.Module):
             raise ValueError("joint_input_units must include nonempty image and residual blocks")
         if components < 0 or not 0 < momentum <= 1:
             raise ValueError("components must be nonnegative and momentum must be in (0, 1]")
+        if alignment_mode not in ("population", "batch"):
+            raise ValueError("alignment_mode must be 'population' or 'batch'")
+        if not 0 < alignment_eps < float("inf"):
+            raise ValueError("alignment_eps must be finite and positive")
         self.input_size = int(input_size)
         self.content_units = int(content_units)
         self.hidden_channels = int(hidden_channels)
@@ -99,6 +105,9 @@ class ResidualHeads(nn.Module):
         self.joint_dim = int(joint_dim)
         self.frozen_image = bool(frozen_image)
         self.momentum = float(momentum)
+        # Plain attributes preserve the exact legacy checkpoint buffer layout.
+        self.alignment_mode = alignment_mode
+        self.alignment_eps = float(alignment_eps)
         self.grid_size = input_size // 4
         cells = self.grid_size**3
 
@@ -340,14 +349,22 @@ class ResidualHeads(nn.Module):
     ):
         """Separate alignment plus joint MMD uniformity, with gradients to both blocks.
 
-        Gauges are detached population statistics; no batch-normalization
-        operation is on the gradient path.  In evaluation they remain fixed.
-        The stochastic reference does not make eval outputs deterministic, but
-        no fitted or running state is changed by evaluation.
+        The legacy ``population`` alignment uses detached running gauges.
+        ``batch`` alignment differentiates current-batch mean and variance,
+        removing the spurious common-scale contraction when variance is large
+        relative to ``alignment_eps``. This centered correlation objective does
+        not constrain per-view means/scales and is not a full anti-collapse
+        guarantee: constant codes are stationary and epsilon matters near zero.
+
+        The projector always uses the population gauges, so its per-subject
+        input remains independent of evaluation batch companions. Evaluation
+        changes no fitted/running state; the MMD reference remains stochastic.
         """
         if min(raw_weight, residual_weight, uniform_weight) < 0:
             raise ValueError("joint loss weights must be nonnegative")
         joined = self._joint_codes(raw_content, residual_content)
+        if self.alignment_mode == "batch" and len(joined) < 4:
+            raise ValueError("batch alignment needs at least two subjects per view")
         standardized = []
         for view, part in enumerate(joined.chunk(2)):
             if self.training:
@@ -360,7 +377,14 @@ class ResidualHeads(nn.Module):
             mean = self.code_mean[view].detach().clone()
             sd = self.code_var[view].detach().clone().clamp_min(1e-6).sqrt()
             standardized.append((part - mean) / sd)
-        first, second = standardized
+        if self.alignment_mode == "batch":
+            alignment = []
+            for part in joined.chunk(2):
+                centered = part - part.mean(0)
+                alignment.append(centered / (centered.square().mean(0) + self.alignment_eps).sqrt())
+        else:
+            alignment = standardized
+        first, second = alignment
         raw_units = self.joint_input_units - self.content_units
         image_alignment = (first[:, :raw_units] - second[:, :raw_units]).square().mean()
         residual_alignment = (first[:, raw_units:] - second[:, raw_units:]).square().mean()
@@ -369,19 +393,81 @@ class ResidualHeads(nn.Module):
         # mistaken for independent extra subjects in a pooled reference bank.
         uniformity = sum(joint_uniform_mmd(part) for part in projected.chunk(2)) / 2
         total = raw_weight * image_alignment + residual_weight * residual_alignment + uniform_weight * uniformity
-        with torch.no_grad():
-            centered = torch.cat(standardized).detach()
-            centered = centered - centered.mean(0)
-            covariance = centered.T @ centered / max(1, len(centered))
-            # Participation ratio gives a stable rank diagnostic on CPU and MPS.
-            rank = covariance.trace().square() / covariance.square().sum().clamp_min(1e-12)
+        diagnostics = self._diagnostics(joined, standardized, projected)
         terms = {
             "image_alignment": image_alignment,
             "residual_alignment": residual_alignment,
             "uniformity": uniformity,
             "total": total,
-            "joint_variance": centered.square().mean(),
-            "joint_effective_rank": rank,
-            "projected_variance": projected.detach().var(0, unbiased=False).mean(),
+            **diagnostics,
         }
         return total, terms
+
+    @staticmethod
+    def _moments(rows, legacy_floor=False):
+        centered = rows.detach() - rows.detach().mean(0)
+        covariance = centered.T @ centered / len(centered)
+        # Participation ratio is a variance-concentration diagnostic, not an
+        # estimate of intrinsic manifold dimension or information sufficiency.
+        floor = 1e-12 if legacy_floor else torch.finfo(covariance.dtype).tiny
+        rank = covariance.trace().square() / covariance.square().sum().clamp_min(floor)
+        return centered.square().mean(), rank
+
+    @torch.no_grad()
+    def _diagnostics(self, joined, standardized, projected):
+        raw_units = self.joint_input_units - self.content_units
+        values = torch.cat(standardized)
+        joint_variance, joint_rank = self._moments(values, legacy_floor=True)
+
+        def view_mean_moments(parts):
+            moments = [self._moments(part) for part in parts]
+            return tuple(torch.stack([pair[index] for pair in moments]).mean() for index in (0, 1))
+
+        image_variance, image_rank = view_mean_moments([part[:, :raw_units] for part in standardized])
+        residual_variance, residual_rank = view_mean_moments([part[:, raw_units:] for part in standardized])
+        _, projected_rank = view_mean_moments(projected.chunk(2))
+        raw_parts = joined.chunk(2)
+        image_raw_variance = torch.stack(
+            [part[:, :raw_units].var(0, unbiased=False).mean() for part in raw_parts]
+        ).mean()
+        residual_raw_variance = torch.stack(
+            [part[:, raw_units:].var(0, unbiased=False).mean() for part in raw_parts]
+        ).mean()
+        return {
+            # Retain existing joint metric definitions for old-run comparison.
+            "joint_variance": joint_variance,
+            "joint_effective_rank": joint_rank,
+            "projected_variance": projected.detach().var(0, unbiased=False).mean(),
+            # New block/rank metrics average the per-view values, so different
+            # view means or directions cannot masquerade as subject diversity.
+            "image_variance": image_variance,
+            "residual_variance": residual_variance,
+            # These two use the exported units before population standardization.
+            "image_raw_variance": image_raw_variance,
+            "residual_raw_variance": residual_raw_variance,
+            "image_effective_rank": image_rank,
+            "residual_effective_rank": residual_rank,
+            "projected_effective_rank": projected_rank,
+            # Raw exported-code SD reveals scale contraction hidden by a gauge.
+            "code_sd_min": torch.stack([part.std(0, unbiased=False).min() for part in joined.chunk(2)]).min(),
+            "projector_weight_norm": torch.stack(
+                [parameter.detach().square().sum() for parameter in self.projector.parameters() if parameter.ndim > 1]
+            )
+            .sum()
+            .sqrt(),
+        }
+
+    @torch.no_grad()
+    def diagnostics(self, raw_content: torch.Tensor, residual_content: torch.Tensor):
+        """Population-gauged moments on any supplied cohort, without state/RNG changes.
+
+        A full held-out cohort gives held-out moments; passing a training batch
+        gives batch diagnostics. Neither fits or updates the population gauge.
+        """
+        joined = self._joint_codes(raw_content, residual_content)
+        standardized = [
+            (part - self.code_mean[view]) / self.code_var[view].clamp_min(1e-6).sqrt()
+            for view, part in enumerate(joined.chunk(2))
+        ]
+        projected = self.projector(torch.cat(standardized))
+        return self._diagnostics(joined, standardized, projected)

@@ -175,6 +175,7 @@ def build_model(cfg, device, state_dict=None):
         residual_head_input_size=cfg.get("res", 0),
         residual_head_joint_dim=cfg.get("residual_head_joint_dim", 0),
         residual_head_freeze_image=cfg.get("residual_head_freeze_image", True),
+        residual_head_alignment_mode=cfg.get("residual_head_alignment_mode", "population"),
         mask_mode=cfg.get("mask_mode", "fixed"),
         mask_init_gap=cfg.get("mask_init_gap", 4.0),
         content_bound=cfg.get("content_bound", "none"),
@@ -192,6 +193,8 @@ def build_model(cfg, device, state_dict=None):
     )
     if state_dict is not None:
         model.load_state_dict(state_dict)
+    if model.residual_heads is not None and cfg.get("residual_head_auxiliary_weight", 1.0) == 0:
+        model.residual_heads.requires_grad_(False)
     return model.to(device).eval()
 
 

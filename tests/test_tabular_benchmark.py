@@ -43,6 +43,24 @@ class TabularBenchmarkTests(unittest.TestCase):
         np.testing.assert_array_equal(scm.adjacency[:3, :3], adjacency)
         self.assertTrue(scm.effect_adjacency[:3, -2:].all())
 
+    def test_discovery_edges_survive_conditioning_on_every_other_column(self):
+        z, adjacency, _, _ = cohort()
+        for seed in range(6):
+            scm = simulate_tabular(z, seed=seed, image_adjacency=adjacency)
+            truth = scm.adjacency | scm.adjacency.T
+            self.assertEqual(scm.adjacency[:3, -2].sum(), 1)
+            self.assertEqual(scm.adjacency[:3, -1].sum(), 1)
+            self.assertFalse((scm.adjacency[:-2, -2] & scm.adjacency[:-2, -1]).any())
+            values = np.column_stack((z, scm.covariates, scm.discovery_treatment, scm.discovery_outcome))
+            precision = np.linalg.inv(np.corrcoef(values.T))
+            partial = -precision / np.sqrt(np.outer(np.diag(precision), np.diag(precision)))
+            for column in (-2, -1):
+                parents = np.flatnonzero(truth[:-2, column])
+                self.assertGreater(np.abs(partial[parents, column]).min(), 0.1, (seed, column))
+        null = simulate_tabular(z, seed=0, confounding=0.0, image_adjacency=adjacency)
+        self.assertFalse(null.adjacency[:5, -2:].any())
+        self.assertTrue(null.adjacency[5, -1] and null.adjacency[-2, -1])
+
     def test_rejects_reordered_floor(self):
         z, adjacency, dense, floor = cohort()
         with tempfile.TemporaryDirectory() as scratch:
@@ -80,6 +98,8 @@ class TabularBenchmarkTests(unittest.TestCase):
             report = json.loads(out.read_text())
             self.assertEqual(report["n_subjects"], len(z))
             self.assertEqual(len(report["discovery_held_out_rows"]), len(z) // 2)
+            self.assertEqual(report["summary"]["oracle factors"]["image_tabular_f1"], 1.0)
+            self.assertEqual(np.shape(report["runs"][1]["discovery_truth"]), (8, 8))
             for view in ("T1", "FLAIR"):
                 key = f"dense / {view}"
                 self.assertLess(report["summary"][key]["mae_delta_vs_tabular"], -0.1)

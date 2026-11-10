@@ -26,7 +26,7 @@ SMALL = (
 ).split()
 HEADS = (
     "--residual-head-units 3 --residual-head-hidden 4 --residual-head-components 2 "
-    "--residual-head-subjects 6 --residual-head-joint-dim 4"
+    "--residual-head-subjects 6 --residual-head-joint-dim 4 --global-loss-weight 0"
 ).split()
 
 
@@ -126,13 +126,14 @@ class ResidualHeadTrainingTests(unittest.TestCase):
             torch.save(model.state_dict(), directory / "model.pt")
             args.init_from = str(directory)
             args.residual_head_freeze_image = True
+            args.residual_head_alignment_mode = "batch"  # Objective-only setting; checkpoint tensors stay compatible.
             state, _ = trainer.read_init_from(args)
             self.assertTrue(state["residual_heads.fitted"])
             args.activation = "gelu"
             with self.assertRaisesRegex(SystemExit, "activation"):
                 trainer.read_init_from(args)
 
-    def test_joint_objective_replaces_global_infonce_and_trains_both_unfrozen_paths(
+    def test_zero_global_weight_preserves_original_auxiliary_only_objective(
         self,
     ):
         args = self.enabled()
@@ -157,6 +158,105 @@ class ResidualHeadTrainingTests(unittest.TestCase):
         )
         trainer.clip_encoder_gradients(model, 1.0)
 
+    def test_weighted_primary_patch_and_auxiliary_terms_are_added(self):
+        args = self.enabled()
+        args.global_loss_weight = 0.7
+        args.residual_head_auxiliary_weight = 0.05
+        args.patch_loss_weight = 0.2
+        args.train_patch_grid = [2, 2, 2]
+        model = trainer.build_encoder(args)
+        subjects = Subjects(8)
+        trainer.fit_residual_heads(model, subjects, args, "cpu")
+        images = torch.cat([subjects.images[:2, :1], subjects.images[:2, 1:]])
+        _, loss, terms = trainer.training_objective(
+            model,
+            images,
+            args,
+            torch.nn.CosineSimilarity(dim=-1),
+            torch.nn.CrossEntropyLoss(),
+        )
+        torch.testing.assert_close(terms["global_weighted"], 0.7 * terms["global"])
+        torch.testing.assert_close(terms["residual_heads_auxiliary_raw"], terms["residual_heads_total"])
+        torch.testing.assert_close(
+            terms["residual_heads_auxiliary_weighted"],
+            0.05 * terms["residual_heads_auxiliary_raw"],
+        )
+        torch.testing.assert_close(
+            loss,
+            0.7 * terms["global"] + 0.2 * terms["patch"] + 0.05 * terms["residual_heads"],
+        )
+
+    def test_zero_auxiliary_weight_matches_legacy_image_parameter_gradients(self):
+        args = self.enabled()
+        args.global_loss_weight = 1.0
+        args.residual_head_auxiliary_weight = 0.0
+        model = trainer.build_encoder(args)
+        subjects = Subjects(8)
+        trainer.fit_residual_heads(model, subjects, args, "cpu")
+        baseline_args = trainer.parse_args(SMALL)
+        baseline = trainer.build_encoder(baseline_args)
+        state = {name: value for name, value in model.state_dict().items() if not name.startswith("residual_heads.")}
+        state["content_mask"] = baseline.content_mask.clone()
+        baseline.load_state_dict(state, strict=True)
+        model.train()
+        baseline.train()
+        self.assertFalse(model.residual_heads.training)
+        residual_state = {name: value.clone() for name, value in model.residual_heads.state_dict().items()}
+        images = torch.cat([subjects.images[:2, :1], subjects.images[:2, 1:]])
+        criteria = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
+        _, actual, terms = trainer.training_objective(model, images, args, *criteria)
+        _, expected, _ = trainer.training_objective(baseline, images, baseline_args, *criteria)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        gradients = trainer.residual_head_gradient_report(model, terms, args)
+        self.assertGreater(gradients["image_primary/image"], 0)
+        self.assertEqual(gradients["image_primary/residual"], 0)
+        self.assertEqual(gradients["image_primary/projector"], 0)
+        self.assertEqual(gradients["auxiliary/image"], 0)
+        self.assertTrue(all(parameter.grad is None for parameter in model.parameters()))
+        actual.backward()
+        expected.backward()
+        self.assertTrue(all(parameter.grad is None for parameter in model.residual_heads.parameters()))
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        optimizer.step()
+        for name, value in model.residual_heads.state_dict().items():
+            torch.testing.assert_close(value, residual_state[name], rtol=0, atol=0)
+        expected_parameters = dict(baseline.named_parameters())
+        for name, parameter in model.named_parameters():
+            if not name.startswith("residual_heads."):
+                torch.testing.assert_close(parameter.grad, expected_parameters[name].grad, rtol=0, atol=0)
+
+    def test_frozen_image_primary_has_no_gradients_and_diagnostics_do_not_change_backward(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            self.source(source)
+            args = self.enabled(source)
+            args.global_loss_weight = 1.0
+            model = trainer.build_encoder(args)
+            subjects = Subjects(8)
+            trainer.fit_residual_heads(model, subjects, args, "cpu")
+            images = torch.cat([subjects.images[:2, :1], subjects.images[:2, 1:]])
+            _, loss, terms = trainer.training_objective(
+                model,
+                images,
+                args,
+                torch.nn.CosineSimilarity(dim=-1),
+                torch.nn.CrossEntropyLoss(),
+            )
+            before = {name: value.clone() for name, value in model.state_dict().items()}
+            rng = torch.get_rng_state()
+            gradients = trainer.residual_head_gradient_report(model, terms, args)
+            self.assertEqual(gradients["image_primary/image"], 0)
+            self.assertEqual(gradients["auxiliary/image"], 0)
+            self.assertGreater(gradients["auxiliary/residual"], 0)
+            self.assertGreater(gradients["uniformity/projector"], 0)
+            torch.testing.assert_close(torch.get_rng_state(), rng, rtol=0, atol=0)
+            for name, value in model.state_dict().items():
+                torch.testing.assert_close(value, before[name], rtol=0, atol=0)
+            loss.backward()
+            self.assertTrue(all(parameter.grad is None for parameter in model.image_parameters()))
+
     def test_real_training_loop_saves_replayable_protected_checkpoint_and_provenance(
         self,
     ):
@@ -180,6 +280,14 @@ class ResidualHeadTrainingTests(unittest.TestCase):
                     "--log-every",
                     "1",
                     "--require-new-run",
+                    "--residual-head-gradient-every",
+                    "1",
+                    "--residual-head-alignment-mode",
+                    "batch",
+                    "--residual-head-auxiliary-weight",
+                    "0.1",
+                    "--global-loss-weight",
+                    "1",
                 ]
             )
             with patch.object(sys, "argv", ["trainer", *flags]), patch.object(
@@ -194,14 +302,27 @@ class ResidualHeadTrainingTests(unittest.TestCase):
             self.assertEqual(progress["initialization_kind"], "protected_image_checkpoint")
             self.assertIn("sha256", progress["residual_heads_image_initialization"])
             self.assertIn("residual_heads_uniformity", progress["last_loss_terms"])
+            self.assertEqual(progress["residual_head_gradient_report"]["step"], 2)
             self.assertEqual(
+                len((directory / "residual_head_gradients.jsonl").read_text().splitlines()),
+                2,
+            )
+            self.assertAlmostEqual(
                 progress["last_loss_terms"]["total"],
-                progress["last_loss_terms"]["residual_heads"],
+                progress["last_loss_terms"]["global_weighted"]
+                + progress["last_loss_terms"]["residual_heads_auxiliary_weighted"],
+                places=6,
+            )
+            self.assertAlmostEqual(
+                progress["last_loss_terms"]["residual_heads_auxiliary_weighted"],
+                0.1 * progress["last_loss_terms"]["residual_heads_auxiliary_raw"],
+                places=6,
             )
             settings = json.loads((directory / "settings.json").read_text())
             state = torch.load(directory / "model.pt", map_location="cpu", weights_only=True)
             initial = torch.load(directory / "model_init.pt", map_location="cpu", weights_only=True)
             model = build_model(settings, "cpu", state)
+            self.assertEqual(model.residual_heads.alignment_mode, "batch")
             build_model(settings, "cpu", initial)
             for name, value in source.state_dict().items():
                 if name != "content_mask":

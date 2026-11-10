@@ -1,0 +1,25 @@
+# E1: noise-free 2D baseline (spec section 6). Model kind and seed come from the command line:
+#   python -m experiments.gl_ident.train --config experiments/gl_ident/configs/e1.yaml --set model.kind=local train.seed=0
+name: e1
+generator:
+  dim: 2
+  image_size: 96
+  stride: 4
+  d_gamma: 4
+  d_c: 4
+  d_s: 3
+  snr: .inf
+  lambda_nu: 0.0
+model:
+  n_g: 2
+  window: 6
+  window_offsets: disjoint
+loss:
+  objective: infonce
+  similarity: cosine
+  tau: 0.1
+  sites_per_subject: 16
+train:
+  steps: 30000
+  batch_size: 64
+  lr: 0.001

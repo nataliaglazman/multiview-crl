@@ -71,9 +71,14 @@ def simulate_tabular(
     covariate affects outcome alone. Assignment probabilities lie between
     ``overlap`` and ``1 - overlap``. The image score can modify the effect.
 
-    The discovery companion uses continuous treatment and independent Gaussian
-    errors with the same baseline equations and a constant effect. Supply the
-    known image graph on exactly the input columns to score graph recovery.
+    The discovery companion uses continuous treatment, independent Gaussian
+    errors and a constant effect. One seeded image factor and the first tabular
+    covariate drive exposure. A different image factor, the second tabular
+    covariate and the third drive outcome. Each edge has a seeded weight. No
+    variable is a direct parent of both exposure and outcome. A shared parent's
+    edge into exposure nearly cancels once PC conditions on outcome, and with
+    the effect task's equations it cancels exactly. Supply the known image
+    graph on exactly the input columns to score graph recovery.
     """
     factors = np.asarray(image_factors, dtype=float)
     if factors.ndim != 2 or factors.shape[0] < 2 or factors.shape[1] == 0 or not np.isfinite(factors).all():
@@ -91,7 +96,8 @@ def simulate_tabular(
         np.random.default_rng(child) for child in np.random.SeedSequence(seed).spawn(4)
     ]
     signs = sign_rng.choice((-1.0, 1.0), size=width)
-    image_score = ((factors - factors.mean(axis=0)) / scale) @ signs
+    standardized = (factors - factors.mean(axis=0)) / scale
+    image_score = standardized @ signs
     score_scale = image_score.std()
     if score_scale <= np.finfo(float).eps:
         raise ValueError("image factors cancel under the seeded weights")
@@ -109,12 +115,26 @@ def simulate_tabular(
     outcome_noise = effect_rng.standard_normal(n)
     y0, y1 = mu0 + outcome_noise, mu1 + outcome_noise
 
-    discovery_treatment = index + discovery_rng.standard_normal(n)
-    discovery_outcome = mu0 + effect * discovery_treatment + discovery_rng.standard_normal(n)
-    adjacency = _base_adjacency(width, image_adjacency)
-    adjacency[: width + 2, -2:] = confounding != 0
+    exposure_parent, *outcome_parent = discovery_rng.permutation(width)[:2]
+    weights = confounding * discovery_rng.choice((-1.0, 1.0), size=(2, 2)) * discovery_rng.uniform(0.5, 1.0, (2, 2))
+    discovery_treatment = (
+        weights[0, 0] * standardized[:, exposure_parent] + weights[0, 1] * tabular_1 + discovery_rng.standard_normal(n)
+    )
+    discovery_outcome = (
+        weights[1, 0] * standardized[:, outcome_parent].sum(axis=1)
+        + weights[1, 1] * tabular_2
+        + 0.5 * tabular_3
+        + effect * discovery_treatment
+        + discovery_rng.standard_normal(n)
+    )
+    base = _base_adjacency(width, image_adjacency)
+    adjacency = base.copy()
+    adjacency[[exposure_parent, width], -2] = confounding != 0
+    adjacency[[*outcome_parent, width + 1], -1] = confounding != 0
     adjacency[-2, -1] = effect != 0
-    effect_adjacency = adjacency.copy()
+    effect_adjacency = base
+    effect_adjacency[: width + 2, -2:] = confounding != 0
+    effect_adjacency[-2, -1] = effect != 0
     if heterogeneity != 0:
         effect_adjacency[:width, -1] = True
         effect_adjacency[-2, -1] = True

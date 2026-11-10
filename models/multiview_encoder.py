@@ -120,6 +120,7 @@ class MultiviewConvEncoder(HelperModule):
         residual_head_input_size: int = 0,
         residual_head_joint_dim: int = 0,
         residual_head_freeze_image: bool = True,
+        residual_head_alignment_mode: str = "population",
     ):
         assert (
             0 < content_channels <= latent_dim
@@ -455,6 +456,7 @@ class MultiviewConvEncoder(HelperModule):
                 joint_input_units=content_channels + residual_head_units,
                 joint_dim=residual_head_joint_dim,
                 frozen_image=residual_head_freeze_image,
+                alignment_mode=residual_head_alignment_mode,
             )
             if self.residual_head_freeze_image:
                 for parameter in self.image_parameters():
@@ -472,6 +474,9 @@ class MultiviewConvEncoder(HelperModule):
             for name, module in self.named_children():
                 if name != "residual_heads":
                     module.eval()
+        branch = getattr(self, "residual_heads", None)
+        if branch is not None and not any(parameter.requires_grad for parameter in branch.parameters()):
+            branch.eval()
         return self
 
     def split_residual_codes(self, pooled):

@@ -1,0 +1,49 @@
+# Corrected short pilot: preserve the image InfoNCE objective and add a small
+# residual/joint auxiliary objective with differentiable batch alignment.
+# Architecture, generator and population sampler match the legacy residual-head
+# recipe; training/ENCODER_RESIDUAL_HEADS.md describes the comparison and limits.
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_burden_residual_heads_auxiliary_s{seed}
+
+conv_readout: mlp
+norm_type: group
+latent_dim: 18
+content_channels: 14
+mask_mode: fixed
+global_pool: gap
+standardize_code: true
+
+# Inspect this 1,000-step pilot before choosing a longer training budget.
+train_steps: 1000
+eval_every: 250
+log_every: 50
+
+# The primary image InfoNCE stays active. No patch/prediction auxiliary term.
+global_loss_weight: 1.0
+patch_loss_weight: 0.0
+stratify_batches: none
+
+synthetic_identifiable_ventricle: true
+synthetic_sulcal_mode: atrophy
+synthetic_temporal_sigma: 0.18
+synthetic_lesion_target: burden
+synthetic_lesion_count: 1
+synthetic_lesion_radius: 0.1
+synthetic_lesion_intensity: styled
+synthetic_lesion_t1_value: 0.0
+
+residual_head_units: 8
+residual_head_hidden: 16
+residual_head_components: 16
+residual_head_subjects: 300
+residual_head_freeze_image: false
+residual_head_joint_dim: 10
+residual_head_alignment_weight: 1.0
+residual_head_image_alignment_weight: 1.0
+residual_head_uniformity_weight: 1.0
+
+# Differentiate the alignment normalization instead of treating its scale as
+# fixed. The joint projector still reads a detached population gauge.
+residual_head_alignment_mode: batch
+residual_head_auxiliary_weight: 0.1
+residual_head_gradient_every: 100
