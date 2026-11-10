@@ -39,6 +39,13 @@ voxels, in uniform 32-subject sets and in sets of an anchor and its 31 nearest o
 batches build them. If going from the run's own e to ~10 voxels buys little in both, the loss does not pay for
 precision. One unit is diluted by the code's width, so compare rewards within a run.
 
+The price is taken on four codes: as trained, and with what a smooth function of the lesion's position, of the six
+anatomy factors, or of both predicts of each unit removed (out of fold; the labels are used only here). InfoNCE stops
+paying once a batch is told apart, after about log2(batch) bits (Chen et al. 2021, "Intriguing properties of
+contrastive losses", appendix B.2). So if sharpening earns much more once position is removed, the lesion's position is
+what leaves burden's precision unpaid; if removing anatomy does as much, any easy content does. The R2 of position and
+anatomy left in each code checks the removal.
+
     python out/burden_feasibility_20261102/precision_audit.py OUT_JSON RUN [RUN ...]
 
 Runs already in OUT_JSON at the same step are reused; image features are cached beside OUT_JSON per bank.
@@ -62,8 +69,8 @@ from scipy.stats import spearmanr
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import KFold, cross_val_predict
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import FunctionTransformer, SplineTransformer, StandardScaler
+from sklearn.pipeline import FeatureUnion, make_pipeline
+from sklearn.preprocessing import FunctionTransformer, PolynomialFeatures, SplineTransformer, StandardScaler
 
 import data.cluster_batches as cb
 
@@ -73,6 +80,7 @@ VIEWS = ("t1", "flair")
 TOPK = (1, 3, 10)
 CLIP = 5.0  # standardized features are clipped at this many SD, as in own_variation.py
 ERRORS = (0.0, 5.0, 10.0, 20.0, 30.0)
+VARIANTS = ("as trained", "position removed", "anatomy removed", "both removed")
 PRICE_SETS = 300
 SIM = torch.nn.CosineSimilarity(dim=-1)
 WORKERS = 6
@@ -214,25 +222,66 @@ def mean_loss(z, sets):
     )
 
 
-def price(codes, own, seed=0):
-    """The drop in the run's loss when the own part, read with error e independently in each view, joins the code."""
+def without(code, covariates):
+    """``code`` minus what a smooth function of ``covariates`` (additive splines plus a cubic polynomial, ridge)
+    predicts of each unit, out of fold, so that information goes and the rest stays."""
+    model = make_pipeline(
+        StandardScaler(),
+        FeatureUnion(
+            [("spline", SplineTransformer(n_knots=5, degree=3)), ("poly", PolynomialFeatures(3, include_bias=False))]
+        ),
+        RidgeCV(alphas=np.logspace(-3, 3, 13)),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return code - cross_val_predict(model, covariates, code, cv=KFold(5, shuffle=True, random_state=0))
+
+
+def price(codes, own, position, anatomy, seed=0):
+    """The drop in the run's loss when the own part, read with error e independently in each view, joins the code: as
+    trained, and with the lesion's position, the anatomy or both removed. Also the mean ridge R2 of position and of
+    anatomy each code still holds, per view. Every code sees the same uniform sets, anchors and reading noise."""
     rng = np.random.default_rng(seed)
     n = len(own)
-    neighbours = cb.nearest_neighbours(np.concatenate(codes, 1), 31)
-    sets = {
-        "uniform": [rng.choice(n, 32, replace=False) for _ in range(PRICE_SETS)],
-        "neighbour": [np.r_[i, neighbours[i]] for i in rng.choice(n, PRICE_SETS)],
+    noise = {e: [rng.standard_normal(n) for _ in range(2)] for e in ERRORS}
+    uniform = [rng.choice(n, 32, replace=False) for _ in range(PRICE_SETS)]
+    anchors = rng.choice(n, PRICE_SETS)
+    removed = {
+        "position removed": position,
+        "anatomy removed": anatomy,
+        "both removed": np.column_stack([position, anatomy]),
     }
-    z = [torch.from_numpy(c).float() for c in codes]
     out = {}
-    for rule, chosen in sets.items():
-        base = mean_loss(z, chosen)
-        rewards = []
-        for e in ERRORS:
-            extra = [torch.from_numpy(own + e * rng.standard_normal(n)).float()[:, None] for _ in range(2)]
-            rewards.append(base - mean_loss([torch.cat([z[v], extra[v]], 1) for v in range(2)], chosen))
-        out[rule] = {"loss": base, "reward": rewards}
+    for variant in VARIANTS:
+        code = codes if variant == "as trained" else [without(c, removed[variant]) for c in codes]
+        row = {
+            "left": {
+                kind: [float(np.mean([r2(predictions(c, y, "ridge"), y) for y in target.T])) for c in code]
+                for kind, target in (("position", position), ("anatomy", anatomy))
+            }
+        }
+        neighbours = cb.nearest_neighbours(np.concatenate(code, 1), 31)
+        z = [torch.from_numpy(c).float() for c in code]
+        for rule, chosen in (("uniform", uniform), ("neighbour", [np.r_[i, neighbours[i]] for i in anchors])):
+            base = mean_loss(z, chosen)
+            rewards = []
+            for e in ERRORS:
+                extra = [torch.from_numpy(own + e * noise[e][v]).float()[:, None] for v in range(2)]
+                rewards.append(base - mean_loss([torch.cat([z[v], extra[v]], 1) for v in range(2)], chosen))
+            row[rule] = {"loss": base, "reward": rewards}
+        out[variant] = row
     return out
+
+
+def reprice(run, device):
+    """The price table alone, for a run assessed before the price had its position- and anatomy-removed codes."""
+    report, model, pool, residual, _ = code_audit.load_run(run, device, trained=True)
+    a = report["args"]
+    test = warm.Bank(a["bank"], "test", a["t1key"], int(a.get("test_subjects", 1000)), residual)
+    expected = own_volume(a["bank"], test.vox)[0]
+    position = batch_price.lesion_centroid(np.load(f"{a['bank']}/test_cells.npy", mmap_mode="r")[: len(test.vox)])
+    codes = network_features(model, pool, test, device)["code"]
+    return price(codes, test.vox - expected, position, test.zc[:, warm.ANATOMY])
 
 
 def assess(run, device, cache):
@@ -278,7 +327,8 @@ def assess(run, device, cache):
                 for stage in STAGES
                 if (stage, "t1") in best and (stage, "flair") in best
             }
-            out["price"] = price(feats["code"], own)
+            position = batch_price.lesion_centroid(np.load(f"{root}/test_cells.npy", mmap_mode="r")[: len(vox)])
+            out["price"] = price(feats["code"], own, position, test.zc[:, warm.ANATOMY])
     return out
 
 
@@ -322,10 +372,27 @@ def show(name, row):
         "    size thirds are of the volume the other latents predict (not the volume itself, which would tie own to"
         f" it); mean lesion volume {' / '.join(f'{m:.0f}' for m in means)} voxels"
     )
-    print("  price: drop in the run's loss (nats) when one unit holding the own part read with error e joins the code")
-    print(f"    {'sets':10s} {'loss':>6s} " + " ".join(f"{'e ' + format(e, 'g'):>7s}" for e in row["errors"]))
-    for rule, cell in row["price"].items():
-        print(f"    {rule:10s} {cell['loss']:6.3f} " + " ".join(f"{r:+7.4f}" for r in cell["reward"]))
+    errors = row["errors"]
+    sharpen = errors.index(10.0), errors.index(20.0)
+    print(
+        "  price: drop in the run's loss (nats) when one unit holding the own part, read with error e, joins the code."
+        "\n  20->10: what sharpening the reading from 20 to 10 voxels earns. left: mean R2 of lesion position / of"
+        " anatomy still in the code, T1 then FLAIR"
+    )
+    print(
+        f"    {'code':16s} {'sets':9s} {'loss':>6s} "
+        + " ".join(f"{'e ' + format(e, 'g'):>7s}" for e in errors)
+        + f" {'20->10':>7s} | left: position, anatomy"
+    )
+    for variant, cell in row["price"].items():
+        for i, rule in enumerate(("uniform", "neighbour")):
+            reward = cell[rule]["reward"]
+            values = " ".join(f"{r:+7.4f}" for r in reward) + f" {reward[sharpen[0]] - reward[sharpen[1]]:+7.4f}"
+            left = ""
+            if i == 0:
+                pos, ana = cell["left"]["position"], cell["left"]["anatomy"]
+                left = f" | {pos[0]:.2f}/{pos[1]:.2f}, {ana[0]:.2f}/{ana[1]:.2f}"
+            print(f"    {variant if i == 0 else '':16s} {rule:9s} {cell[rule]['loss']:6.3f} {values}{left}")
 
 
 def main():
@@ -342,7 +409,15 @@ def main():
         except Exception as error:  # no checkpoint yet, or one being written right now
             print("skipping", run.name, "for now:", error, flush=True)
             continue
-        if step != last or results.get(run.name, {}).get("step") == step:
+        if step != last:
+            continue
+        cached = results.get(run.name, {})
+        if cached.get("step") == step:
+            if VARIANTS[0] not in cached.get("price", {}):
+                print("repricing", run.name, flush=True)
+                with torch.no_grad():
+                    cached["price"] = reprice(run, device)
+                a.out_json.write_text(json.dumps(results, indent=1))
             continue
         print("assessing", run.name, flush=True)
         try:

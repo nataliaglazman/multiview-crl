@@ -307,12 +307,32 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
      of error, about the network's precision on the independent bank (~20–24 voxels from R² .73–.83 over a ±41-voxel
      spread). So the graph shrinks the target; it does not stop the learning. Raising it needs a loss that pays for
      volume precision.
-   - **Diagnostic, built 10 Nov, not yet run on the PC:** `precision_audit.py OUT_JSON RUN...` gives the volume-reading
+   - **Precision audit result (10 Nov, PC, `causal/precision/precision.txt`, commit 28fec8e): confirmed.**
+     - The backbone (map, GAP, pooled) reads volume to ~19–22 voxels in every run on both banks, at 6k and 20k. The
+       fixed filter on the residual reads it to 8–12 voxels, so half the precision is lost inside the backbone.
+     - Same error, half the target: own R² ~.80 on the independent bank (own SD 41) vs ~.47–.52 on the causal bank (own
+       SD 20).
+     - The head keeps or loses it by batch rule. Code error: uniform c24 / c48 22–25 voxels; n31 34–37; code-50
+       recipe 46–71; independent 6k 23–25, 20k 38–42.
+     - Price on the causal bank: a 20-voxel burden unit earns ≤0 in every code and batch rule (−.04 to −.08 nats in
+       the code-batch codes; ~0 in the saturated uniform codes, loss .09–.12). It pays only at ≤10 voxels. On the
+       independent bank the same unit earned +.14 at 6k.
+     - The largest third of lesions (mean 116 voxels) is read at 27–50 voxels by every network stage, but at 8–12 by
+       the image filter: something in the network compresses big lesions. The split only separates sizes on the
+       causal bank.
+     - The code's burden errors are shared across views (r .36–.73, backbone .18–.35).
+   - **Diagnostic, built 10 Nov:** `precision_audit.py OUT_JSON RUN...` gives the volume-reading
      error in voxels at each stage (fixed blob filter on the normative residual, the backbone map read position-free,
      GAP, pooled features, code). Each readout is handed the volume the other true latents predict, so only the
      lesion reading is scored, against the untrained twin. It also splits the error by lesion size (thirds of the
      anatomy-predicted volume), measures the error the views share, and prices a sharper reading in the run's loss
      (uniform vs code-neighbour sets). Readings with a known error of 2–30 voxels come back within ~10%.
+   - **The price is also taken with lesion position, anatomy or both removed from the code** (out of fold, labels
+     only in the diagnostic). This tests feature suppression as Chen et al. 2021 describe it: InfoNCE stops paying
+     once ~log2(batch) bits tell the batch apart, and lesion position is a RandBit-like fingerprint. On a synthetic
+     told-apart code, sharpening from 20 to 10 voxels earned .06 nats as trained, .12 with position removed and .31
+     with both removed. Readings at 20–30 voxels earned a negative reward: the standardized cosine counts every unit
+     equally, so a saturated loss pushes a poorly agreeing unit out of the code.
 5. **Later:** check the nuisance-on runs before porting to ADNI (`training/main_conv_synthetic.py`): residual input,
    tail pooling, per-view jitter with the patch loss off, code batches, and the CCA readout.
    - Score white-matter hyperintensity (WMH) burden by its own part: the residual after a flexible fit on ventricle
