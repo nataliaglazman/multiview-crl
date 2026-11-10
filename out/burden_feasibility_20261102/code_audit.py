@@ -3,11 +3,12 @@
 For each warm.py run, on its bank's test subjects, per view:
 
   read      5-fold R2 of the six anatomy factors, burden, and the lesion centre (x, y, z of the 16^3 lesion load) from
-            the 14-unit code, by ridge and by gradient boosting (a factor held nonlinearly reads only in the second),
+            the content code, by ridge and by gradient boosting (a factor held nonlinearly reads only in the second),
             and by ridge from the backbone GAP. The SSL histories never scored the lesion centre.
   shared    canonical correlations between the two views' codes, and for each shared direction the gradient-boosted
             R2 of anatomy, of the lesion (centre and burden) and of both, so shared content no known factor names shows
             as a high correlation with a low R2.
+  alignment signed correlations between matching units in the exported code, plus effective rank in each view.
   retrieve  cross-view top-1 among 32 test subjects drawn uniformly, among an anchor and 31 of its 50 nearest on the
             six anatomy factors (the training sampler's rule), and among all test subjects, from the code with each
             view standardized over the test set, by cosine.
@@ -60,8 +61,25 @@ def boosted(x, y):
 def standardized(x):
     x = np.asarray(x, dtype=np.float64)
     sd = x.std(0)
-    keep = sd > 1e-8 * max(float(sd.max()), 1e-30)
-    return (x[:, keep] - x[:, keep].mean(0)) / sd[keep]
+    keep = (sd > 1e-8 * max(float(sd.max()), 1e-30)) & (np.ptp(x, axis=0) > 0)
+    return np.divide(x - x.mean(0), sd, out=np.zeros_like(x), where=keep)
+
+
+def code_alignment(a, b):
+    """Same-unit Pearson r and effective rank (participation ratio of the within-view correlation matrix)."""
+    a, b = standardized(a), standardized(b)
+    rho = np.clip((a * b).mean(0), -1, 1)
+    active = a.any(0) & b.any(0)
+    within_view = {}
+    for name, z in (("t1", a), ("flair", b)):
+        within_view[name] = {
+            "active_units": int(z.any(0).sum()),
+            "effective_rank": T.effective_rank(torch.from_numpy(z)),
+        }
+    return {
+        "same_unit_r": [round(float(r), 4) if valid else None for r, valid in zip(rho, active)],
+        "within_view": within_view,
+    }
 
 
 def canonical(a, b):
@@ -185,6 +203,7 @@ def audit(run, device):
     out = {
         "step": step,
         "setting": f"{a.get('pool', 'gap')}{' residual' if residual else ''} {a['t1key']} {batches} batches"
+        + f" {a.get('contrastive_loss_type', 'infonce')}"
         + (f" queue {a['queue']}" if a.get("queue", "0") != "0" else "")
         + (f" gauge {a['gauge']}" if a.get("gauge", "batch") != "batch" else "")
         + "".join(f" {key.replace('_', ' ')} {a[key]}" for key in LEVERS if float(a.get(key, 0)) != 0)
@@ -192,6 +211,7 @@ def audit(run, device):
         + "".join(f" {key.replace('_', ' ')} {a[key]}" for key in OVERRIDES if a.get(key, "None") != "None"),
         "final_global_loss": report["history"][-1]["loss"].get("global"),
         "read": {},
+        "alignment": code_alignment(*feats["code"]),
     }
     for view, name in enumerate(("t1", "flair")):
         code, gap = feats["code"][view], feats["gap"][view]
@@ -231,6 +251,13 @@ def show(name, row):
         for kind in ("code_ridge", "code_boosted", "gap_ridge"):
             values = " ".join(f"{v:+6.2f}" for v in row["read"][view][kind])
             print(f"  {view:5s} {kind:12s} {values}")
+    alignment = row.get("alignment")
+    if alignment:
+        values = " ".join("n/a" if r is None else f"{r:+.2f}" for r in alignment["same_unit_r"])
+        print(f"  matching-unit r (T1 vs FLAIR, code order): {values}")
+        within = alignment["within_view"]
+        ranks = " / ".join(f"{within[v]['effective_rank']:.1f} of {within[v]['active_units']}" for v in ("t1", "flair"))
+        print(f"  effective rank out of active units (T1 / FLAIR): {ranks}")
     rho = np.asarray(row["shared"]["canonical_r"])
     directions = row["shared"]["directions"]
     strong = [d for d in directions if d["rho"] >= 0.9]

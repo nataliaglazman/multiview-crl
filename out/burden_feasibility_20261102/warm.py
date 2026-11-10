@@ -26,6 +26,8 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
   --patch-weight W  the patch InfoNCE's weight in place of the recipe's 1.0; at 0 the patch term is not computed. The
                 patch term pairs the two views cell by cell on the 16^3 grid, so --jitter also misaligns it; this
                 separates the two.
+  --contrastive-loss-type barlow_twins  replace global InfoNCE with Barlow Twins on the exported code. Needs
+                --patch-weight 0.
   --content-units N  the code is the first N outputs of TailCode's head in place of the recipe's 14, the head widened
                 to N + 4 and the backbone and its init unchanged, so the code has room for more factors. Needs --pool
                 tail or gapnorm and --patch-weight 0, since the backbone's own head is not widened.
@@ -460,6 +462,7 @@ def main():
         default=None,
         help="Weight of the patch InfoNCE in place of the recipe's; 0 drops it",
     )
+    p.add_argument("--contrastive-loss-type", choices=("infonce", "barlow_twins"), default="infonce")
     p.add_argument(
         "--content-units",
         type=int,
@@ -523,6 +526,13 @@ def main():
         raise ValueError("--group-dropout is a fraction of steps per group, at most 0.5")
     if a.patch_weight is not None and a.patch_weight < 0:
         raise ValueError("--patch-weight cannot be negative")
+    if a.contrastive_loss_type == "barlow_twins" and (
+        a.patch_weight != 0 or a.queue or a.hard_negatives or a.half_views is not None or a.decorrelate
+    ):
+        raise ValueError(
+            "Barlow Twins needs --patch-weight 0 and cannot be combined with "
+            "--queue, --hard-negatives, --half-views or --decorrelate"
+        )
     if a.shared_jitter and not (a.jitter or a.rotate):
         raise ValueError("--shared-jitter needs --jitter or --rotate")
     if a.content_units is not None and (a.pool == "gap" or a.patch_weight != 0):
@@ -557,7 +567,12 @@ def main():
         args.seed, args.model_seed, args.loader_seed = a.seed, a.seed, a.seed + 10000
     if a.patch_weight is not None:
         args.patch_loss_weight = a.patch_weight
-    print("seed", args.seed, "patch weight", args.patch_loss_weight, flush=True)
+    args.contrastive_loss_type = a.contrastive_loss_type
+    if a.contrastive_loss_type == "barlow_twins":
+        args.standardize_code = False  # Barlow Twins standardizes the code internally.
+    print(
+        "seed", args.seed, "global loss", args.contrastive_loss_type, "patch weight", args.patch_loss_weight, flush=True
+    )
     if a.code_neighbours or a.hard_negatives:
         print("code neighbours", a.code_neighbours, "hard negatives", a.hard_negatives, flush=True)
     if a.half_views:

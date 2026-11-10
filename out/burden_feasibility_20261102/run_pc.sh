@@ -85,6 +85,9 @@
 #         own variation in the code at .19/.18 against the recipe's .04/.06, but at 6,000 steps the recipe's own burden
 #         varied from .10 to .26 between seeds. The recipe and 31-subject neighbourhoods at 20,000 steps, both
 #         --seed 2: own variation of each and discovery on the pair (causal/n31s2_*).
+# Stage 21 Does cross-view correlation preserve more factors in the code than subject matching? Barlow Twins and
+#         InfoNCE, each with 24 units, uniform batches and 20,000 steps on the causal bank. Score each factor's own
+#         variation, agreement between matching code units, and CCA readouts from both backbones (causal/stage21/).
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -98,7 +101,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -257,7 +260,12 @@ cca_discovery() { # cca_discovery NAME...: decoded discovery on each run's 24-un
 }
 
 MAIN=$D/bank
-bank "$MAIN"
+for stage in {1..14}; do
+    if wants "$stage"; then
+        bank "$MAIN"
+        break
+    fi
+done
 
 if wants 1; then
     sup dense_t100 "$MAIN" dense t1_00 3000
@@ -555,6 +563,36 @@ if wants 20; then
     TAG=n31s2 causal ssl_code_jitter_nopatch_restail_t104_causal_20k_s2 \
         ssl_code_jitter_nopatch_restail_t104_causal_n31_20k_s2
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 21; then
+    CAUSAL=$D/bank_causal
+    bank "$CAUSAL" --t1-values 0.4 --causal
+    residual_bank "$CAUSAL" t1_04 flair
+    NCE=ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k
+    BT=ssl_uni_jitter_nopatch_restail_t104_causal_bt_c24_20k
+    RECIPE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --content-units 24 --seed 42)
+    EVERY=2000 ssl "$NCE" "$CAUSAL" tail t1_04 20000 "${RECIPE[@]}" --contrastive-loss-type infonce
+    EVERY=2000 ssl "$BT" "$CAUSAL" tail t1_04 20000 "${RECIPE[@]}" --contrastive-loss-type barlow_twins
+    finish "$NCE" "$BT"
+
+    OUT=$D/causal/stage21
+    if [ "$DRY" = 0 ]; then
+        if ! grep -qx DONE "$D/logs/$NCE.log" || ! grep -qx DONE "$D/logs/$BT.log"; then
+            echo "Rerun stage 21 after both arms finish to generate the reports."
+            exit 1
+        fi
+        mkdir -p "$OUT" || exit 1
+    fi
+    for report in own_variation code_audit cca_readout; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$report.py $OUT/$report.json $D/runs/$NCE $D/runs/$BT > $OUT/$report.txt"
+        else
+            "$PY" "$D/$report.py" "$OUT/$report.json" "$D/runs/$NCE" "$D/runs/$BT" > "$OUT/$report.txt" 2>&1 \
+                || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 21 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

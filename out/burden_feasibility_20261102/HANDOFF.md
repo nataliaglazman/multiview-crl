@@ -136,6 +136,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Other options:**
   - `--code-neighbours N`: the neighbourhood size; N = 31 looks better (stage 18).
   - `--content-units N`: a wider code.
+  - `--contrastive-loss-type barlow_twins`: use cross-view correlation as the global loss. Set `--patch-weight 0`.
   - `--half-views xyz --half-units K`: the lesion-agnostic partial-observability arm (stage 19).
   - `--hard-negatives G`, `--seed S`.
   - Older levers: `--queue`, `--gauge running`, `--group-dropout`, `--decorrelate`, `--shared-jitter`, `--uniform`.
@@ -147,7 +148,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | tool | what it reports |
 |---|---|
 | `summarize.py` | each arm's training history, compact enough to paste |
-| `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, the code's cross-view canonical correlations (with what each direction holds), retrieval, and a memorisation check (train vs test top-1) |
+| `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
 | `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
@@ -244,12 +245,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 10 Nov
 
-- **Committed** through `4024995` (half views).
-- **Uncommitted:** stage 20 in `run_pc.sh`, a seed-2 pair at 20k, recipe vs 31 neighbours. The user may or may not
-  have committed and started it; ask.
-  ```bash
-  git add out/burden_feasibility_20261102/run_pc.sh && git commit -m "Add stage 20: 20k seed-2 pair for 31-neighbour batches"
-  ```
+- Stage 20 is in commit `c2c3f55`. Its seed-2 results have yet to be reported.
 - **Results that exist on the PC but were never reported:**
   - Stage 13: shared-jitter control, 4-voxel seed, 4-voxel 20k. The shared-jitter arm is confounded: a pose shared by
     both views becomes content InfoNCE can match on.
@@ -259,25 +255,20 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Best pipeline so far:** train with the recipe, then read the content code by CCA on the backbone GAP (24
   directions). The backbones that read best this way are the 24-unit run and half views.
 
-## 10. Next steps (proposed, not built)
+## 10. Stage 21 and next steps
 
-1. **Stage 21, both 20k on `bank_causal`, scored with `own_variation` and the audit's per-unit cross-view agreement
-   (the theory wants ≈ 1):**
-   - **A correlation-objective code at 24 units** (Lyu et al. 2022): the trained, theory-backed version of the CCA
-     readout.
-     - `warm.py` sends the global loss through `T.contrastive_loss`, which already switches to the repo's Barlow
-       Twins when `args.contrastive_loss_type == "barlow_twins"`.
-     - The batch is only 32, so per-batch correlations are noisy. Consider an EMA of the cross-correlation
-       (`training/bt_objective.py` has one for the VQ trainer) or whitening with running statistics.
-   - **InfoNCE at 48 units** (`--content-units 48`): Yao's own objective, checking whether it reaches burden's
-     remainder once everything more identifying is in.
-2. **Read stage 20:** does the 31-neighbour burden at 20k (.19 / .18) replicate with seed 2?
-3. **Run the CCA readout on any new run.** It needs no training:
-   ```bash
-   python out/burden_feasibility_20261102/cca_readout.py out/burden_feasibility_20261102/causal/cca.json RUN... --bundles out/burden_feasibility_20261102/causal/cca
-   ```
-4. **Later: port to ADNI** (`training/main_conv_synthetic.py`): residual input, tail pooling, per-view jitter with
-   the patch loss off, code batches, and the CCA readout.
+1. **Read stage 20:** does the 31-neighbour burden at 20k (.19 / .18) replicate with seed 2?
+2. **Stage 21 compares Barlow Twins with InfoNCE** at 24 units and 20,000 steps on `bank_causal`. Both use the
+   same seed (42), uniform 32-subject batches, scan and residual input, tail pooling, independent 2-voxel / 3°
+   jitter and no patch loss. Barlow Twins uses the repo's default redundancy weight of 0.005 and per-batch
+   correlations. This is a test of the loss on the fixed subject set.
+   - `causal/stage21/own_variation.txt`: compare held-out burden and anatomy from the same exported code.
+   - `causal/stage21/code_audit.txt`: check whether matching units agree across views and how many distinct
+     directions the code uses.
+   - `causal/stage21/cca_readout.txt`: training-fit CCA benchmark for both backbones.
+3. **Later:** consider 48-unit InfoNCE to test whether extra capacity retains burden's own variation. Check the
+   nuisance-on runs before porting to ADNI (`training/main_conv_synthetic.py`): residual input, tail pooling,
+   per-view jitter with the patch loss off, code batches, and the CCA readout.
    - Score white-matter hyperintensity (WMH) burden by its own part: the residual after a flexible fit on ventricle
      volume and age.
    - Otherwise atrophy passes for WMH.
