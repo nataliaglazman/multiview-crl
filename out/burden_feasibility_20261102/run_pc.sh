@@ -81,6 +81,10 @@
 #         align only the whole T1 and FLAIR, so they hold regional content, whatever it is, which global content cannot
 #         crowd out. The best recipe with it at 6,000 and 20,000 steps, against
 #         ssl_code_jitter_nopatch_restail_t104_causal(_20k): own variation, CCA readout, discovery.
+# Stage 20 Does the 20,000-step result for 31-subject neighbourhoods replicate? In stage 18 (seed 42) they kept burden's
+#         own variation in the code at .19/.18 against the recipe's .04/.06, but at 6,000 steps the recipe's own burden
+#         varied from .10 to .26 between seeds. The recipe and 31-subject neighbourhoods at 20,000 steps, both
+#         --seed 2: own variation of each and discovery on the pair (causal/n31s2_*).
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -94,7 +98,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -533,6 +537,23 @@ if wants 19; then
     TAG=halves causal ssl_code_jitter_nopatch_restail_t104_causal ssl_code_jitter_nopatch_restail_t104_causal_halves8
     TAG=halves20k causal ssl_code_jitter_nopatch_restail_t104_causal_20k \
         ssl_code_jitter_nopatch_restail_t104_causal_halves8_20k
+    [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+fi
+
+if wants 20; then
+    CAUSAL=$D/bank_causal
+    bank "$CAUSAL" --t1-values 0.4 --causal
+    residual_bank "$CAUSAL" t1_04 flair
+    RECIPE="--residual --code-batches 500 --jitter 2 --rotate 3 --patch-weight 0"
+    EVERY=2000 ssl ssl_code_jitter_nopatch_restail_t104_causal_20k_s2 "$CAUSAL" tail t1_04 20000 $RECIPE --seed 2
+    EVERY=2000 ssl ssl_code_jitter_nopatch_restail_t104_causal_n31_20k_s2 "$CAUSAL" tail t1_04 20000 $RECIPE \
+        --code-neighbours 31 --seed 2
+    finish ssl_code_jitter_nopatch_restail_t104_causal_20k_s2 ssl_code_jitter_nopatch_restail_t104_causal_n31_20k_s2
+    audit
+    own_variation ssl_code_jitter_nopatch_restail_t104_causal_20k_s2 \
+        ssl_code_jitter_nopatch_restail_t104_causal_n31_20k_s2
+    TAG=n31s2 causal ssl_code_jitter_nopatch_restail_t104_causal_20k_s2 \
+        ssl_code_jitter_nopatch_restail_t104_causal_n31_20k_s2
     [ "$DRY" = 0 ] && "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
 fi
 
