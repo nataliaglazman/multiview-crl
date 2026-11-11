@@ -153,7 +153,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `summarize.py` | each arm's training history, compact enough to paste |
 | `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, the same rows for the untrained twin (the floor), canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
 | `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns |
-| `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code |
+| `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
@@ -243,6 +243,29 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - With 14 main units on uniform batches, that was brain size, not burden.
     - The code's anatomy became the best on the causal bank, but burden's own part fell to .19 / .17. The backbone
       stayed at ~20 voxels.
+15. **Supervised ceiling (stage 26, read 11 Nov).** The recipe network trained on lesion-volume labels instead of
+    InfoNCE (`warm.py --supervise volume`, a diagnostic, 10k steps), against stage 21's 24-unit InfoNCE control.
+    Reading error in voxels, InfoNCE → labels (`causal/stage26/precision_audit.txt`):
+    - FLAIR: map 20 → 9, code 22 → 6, as sharp as the image filter (8). The FLAIR backbone can be precise; InfoNCE
+      never asks it to be.
+    - T1: map 21 → 20, code 23 → 17, against the image filter's 11. On small and middle lesions the map is unchanged;
+      labels only stop it compressing big ones (largest third 50 → 27).
+    - The loss pays only for what both views agree on, so T1 sets the ceiling. At the labelled precision the views'
+      readings agree at r .74, like a 12-voxel reading in both. On the control's price table that earns ~+.003 nats
+      on uniform sets, ~+.02 on neighbour sets, and ~+.08 only on neighbour sets with position and anatomy removed.
+    - The control code's burden errors are shared by the views (partial r .51, labelled .07), so part of its
+      agreement is common error.
+    - Ignore the supervised run's price block: its code was never trained to match the views (loss 12.3).
+    - What the scans show (example scans rendered 11 Nov from a 160-test-subject local copy of the bank): per voxel
+      the lesion stands out in both residuals, by 4.4 SD in T1 and 8.8 in FLAIR (medians). Around it the residual is
+      smooth leftover structure (neighbouring voxels correlate at .86), not voxel noise, so the training jitter's
+      resampling barely changes it (SD −7%). A raw-scan mismatch between training and the audit is unlikely.
+    - Volume goes with the cube of the radius. At the median lesion (radius 2.7 voxels), 0.1 voxel of radius is 9
+      voxels of volume, so reading burden's own part (SD 20) means placing the lesion's edge to ~0.1–0.2 voxel, on a
+      backbone that works in 4-voxel cells.
+    - Stage 27 (built 11 Nov, not run) checks two causes on the existing checkpoints, no training: test scans moved by
+      the training jitter, one move and the mean over 8 (does the reading depend on where the lesion falls on the
+      grid?), and training subjects (is the T1 reading memorised?).
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -263,6 +286,11 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 11 Nov
 
+- **Stage 26 was read on 11 Nov** (section 7, item 15). With labels the FLAIR backbone reads lesion volume to ~9
+  voxels, the T1 backbone still to ~20. T1, not the objective, caps burden in this network, so stage 24's real win
+  (the backbone below ~20 voxels) is unlikely on T1.
+- **Stage 27 (built 11 Nov, not run):** `bash out/burden_feasibility_20261102/run_pc.sh 27` after stage 26, no
+  training. Read `causal/stage27/compare.txt` (section 7, item 15).
 - **Stage 23 was read on 11 Nov.**
   - The remainder units learned brain size and anatomy, not burden.
   - The whole code has the best anatomy on the causal bank. Burden's own part is .19 / .17, and the backbone's

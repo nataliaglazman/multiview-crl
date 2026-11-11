@@ -46,9 +46,20 @@ contrastive losses", appendix B.2). So if sharpening earns much more once positi
 what leaves burden's precision unpaid; if removing anatomy does as much, any easy content does. The R2 of position and
 anatomy left in each code checks the removal.
 
-    python out/burden_feasibility_20261102/precision_audit.py OUT_JSON RUN [RUN ...]
+    python out/burden_feasibility_20261102/precision_audit.py OUT_JSON RUN [RUN ...] [--jitter-draws K] [--split train]
 
-Runs already in OUT_JSON at the same step are reused; image features are cached beside OUT_JSON per bank.
+Two checks of the network's reading, each into its own OUT_JSON, with no floor and no price (precision_compare.py puts
+them beside the default audit):
+
+  --jitter-draws K  the run's own training jitter moves the test scans before the network, and each feature is the mean
+                    over K independent moves. With K = 1, a reading sharper than on raw scans means the network reads
+                    the raw scans it never trained on worse. A larger K averages over where the lesion falls on the
+                    backbone's 4-voxel grid, so a reading that sharpens with K depends on that pose. The image stage
+                    stays on raw scans.
+  --split train     the first training subjects (as many as the run's test subjects) in place of test subjects: a
+                    reading much sharper there than on test subjects is memorised.
+
+Runs already in OUT_JSON at the same step and condition are reused; image features are cached beside OUT_JSON per bank.
 """
 
 import argparse
@@ -117,12 +128,12 @@ def partial_r(a, b, given):
     return float(np.corrcoef(ra, rb)[0, 1])
 
 
-def own_volume(root, vox):
-    """For the test subjects' volume ``vox``: the volume every other true latent predicts (an additive spline ridge
+def own_volume(root, vox, split="test"):
+    """For the ``split`` subjects' volume ``vox``: the volume every other true latent predicts (an additive spline ridge
     fitted on the training subjects), the share of the variance it explains, and the burden latent's rank correlation
     with the volume."""
     train = np.load(f"{root}/train_zc.npy").astype(np.float64)
-    test = np.load(f"{root}/test_zc.npy").astype(np.float64)[: len(vox)]
+    test = np.load(f"{root}/{split}_zc.npy").astype(np.float64)[: len(vox)]
     others = [j for j in range(train.shape[1]) if j != BURDEN]
     model = make_pipeline(
         StandardScaler(), SplineTransformer(n_knots=8, degree=3), RidgeCV(alphas=np.logspace(-4, 3, 15))
@@ -139,13 +150,14 @@ def image_job(task):
     return start, np.array(rows, dtype=np.float32)
 
 
-def image_features(root, key, n, cache):
-    """detector.py's fixed blob features of the first ``n`` test subjects' stored normative residual, read over the
+def image_features(root, key, n, cache, split="test"):
+    """detector.py's fixed blob features of the first ``n`` ``split`` subjects' stored normative residual, read over the
     interior as residual.py reads them; None when the bank has no residual for ``key``."""
-    source = Path(f"{root}/test_{key}_res.npy")
+    source = Path(f"{root}/{split}_{key}_res.npy")
     if not source.exists():
         return None
-    path = cache / f"image_{Path(root).name}_{key}_{n}.npy"
+    name = Path(root).name if split == "test" else f"{Path(root).name}_{split}"
+    path = cache / f"image_{name}_{key}_{n}.npy"
     if path.exists():
         return np.load(path)
     sample = np.asarray(np.load(f"{root}/train_flair.npy", mmap_mode="r")[:200], dtype=np.float32)
@@ -158,28 +170,41 @@ def image_features(root, key, n, cache):
     return feats
 
 
+def view_features(part, view, pool):
+    """One view's position-free map summary, GAP, pooled features and code from its backbone map ``part``."""
+    z = (part.flatten(2)[:, :, pool.keep] - pool.mean[view]) / (pool.var[view].sqrt() + 1e-6)
+    summary = []
+    for sign in (1.0, -1.0):
+        top = (sign * z).topk(max(TOPK), dim=2).values
+        summary += [top[:, :, :k].mean(2) for k in TOPK]
+    pooled = pool.pooled_view(part, view)
+    return {
+        "map": torch.cat(summary, 1),
+        "gap": part.mean((2, 3, 4)),
+        "pooled": pooled,
+        "code": pool.head(pooled)[:, : pool.units],
+    }
+
+
 @torch.no_grad()
-def network_features(model, pool, bank, device, batch=32):
-    """Per view: the position-free map summary, GAP, pooled features and code of every subject in ``bank``."""
+def network_features(model, pool, bank, device, batch=32, jitter=None, draws=1, seed=0):
+    """Per view: the position-free map summary, GAP, pooled features and code of every subject in ``bank``. With
+    ``jitter`` = (shift, degrees, shared), the run's training jitter moves the scans first, and each feature is the mean
+    over ``draws`` independent moves."""
+    rng = np.random.default_rng(seed)
+    moves = draws if jitter else 1
     rows = {k: [[], []] for k in STAGES[1:]}
     for start in range(0, len(bank.vox), batch):
         x = bank.images(np.arange(start, min(start + batch, len(bank.vox))), device)
-        h = model._encode(x, 2, None)
-        for view, part in enumerate(h.chunk(2)):
-            z = (part.flatten(2)[:, :, pool.keep] - pool.mean[view]) / (pool.var[view].sqrt() + 1e-6)
-            summary = []
-            for sign in (1.0, -1.0):
-                top = (sign * z).topk(max(TOPK), dim=2).values
-                summary += [top[:, :, :k].mean(2) for k in TOPK]
-            pooled = pool.pooled_view(part, view)
-            out = {
-                "map": torch.cat(summary, 1),
-                "gap": part.mean((2, 3, 4)),
-                "pooled": pooled,
-                "code": pool.head(pooled)[:, : pool.units],
-            }
-            for k, v in out.items():
-                rows[k][view].append(v.float().cpu().numpy())
+        total = [None, None]
+        for _ in range(moves):
+            h = model._encode(warm.jitter(x, jitter[0], jitter[1], rng, jitter[2]) if jitter else x, 2, None)
+            for view, part in enumerate(h.chunk(2)):
+                out = view_features(part, view, pool)
+                total[view] = out if total[view] is None else {k: total[view][k] + v for k, v in out.items()}
+        for view in range(2):
+            for k, v in total[view].items():
+                rows[k][view].append((v / moves).float().cpu().numpy())
     return {k: [np.concatenate(v[i]) for i in range(2)] for k, v in rows.items()}
 
 
@@ -284,20 +309,26 @@ def reprice(run, device):
     return price(codes, test.vox - expected, position, test.zc[:, warm.ANATOMY])
 
 
-def assess(run, device, cache):
-    out = {"errors": list(ERRORS)}
-    for trained in (True, False):
+def assess(run, device, cache, split="test", draws=0):
+    checks = split != "test" or draws > 0
+    out = {"errors": list(ERRORS), "split": split, "jitter_draws": draws}
+    for trained in (True,) if checks else (True, False):
         report, model, pool, residual, step = code_audit.load_run(run, device, trained=trained)
         a = report["args"]
         root = a["bank"]
         if pool is None:
             raise ValueError("the map statistics come from TailCode, so the run needs --pool tail or gapnorm")
+        jitter = None
+        if draws:
+            jitter = (float(a.get("jitter", 0)), float(a.get("rotate", 0)), a.get("shared_jitter") == "True")
+            if not (jitter[0] or jitter[1]):
+                raise ValueError("it trained without jitter, so --jitter-draws has nothing to match")
         if not trained:
             causal_bundle.calibrate(model, pool, warm.Bank(root, "train", a["t1key"], residual=residual), device)
-        test = warm.Bank(root, "test", a["t1key"], int(a.get("test_subjects", 1000)), residual)
-        vox = test.vox
+        subjects = warm.Bank(root, split, a["t1key"], int(a.get("test_subjects", 1000)), residual)
+        vox = subjects.vox
         if trained:
-            expected, explained, spearman = own_volume(root, vox)
+            expected, explained, spearman = own_volume(root, vox, split)
             out.update(
                 step=step,
                 bank=root,
@@ -307,9 +338,9 @@ def assess(run, device, cache):
                 explained=explained,
                 spearman=spearman,
             )
-        feats = network_features(model, pool, test, device)
+        feats = network_features(model, pool, subjects, device, jitter=jitter, draws=draws)
         if trained:
-            feats["image"] = [image_features(root, key, len(vox), cache) for key in (a["t1key"], "flair")]
+            feats["image"] = [image_features(root, key, len(vox), cache, split) for key in (a["t1key"], "flair")]
         scores, best = {}, {}
         for v, view in enumerate(VIEWS):
             scores[view] = {}
@@ -327,8 +358,9 @@ def assess(run, device, cache):
                 for stage in STAGES
                 if (stage, "t1") in best and (stage, "flair") in best
             }
-            position = batch_price.lesion_centroid(np.load(f"{root}/test_cells.npy", mmap_mode="r")[: len(vox)])
-            out["price"] = price(feats["code"], own, position, test.zc[:, warm.ANATOMY])
+            if not checks:
+                position = batch_price.lesion_centroid(np.load(f"{root}/test_cells.npy", mmap_mode="r")[: len(vox)])
+                out["price"] = price(feats["code"], own, position, subjects.zc[:, warm.ANATOMY])
     return out
 
 
@@ -339,7 +371,14 @@ def voxels(value, width=6):
 
 
 def show(name, row):
-    print(f"{name}  step {row['step']}, {row['rows']} test subjects, bank {Path(row['bank']).name}")
+    print(
+        f"{name}  step {row['step']}, {row['rows']} {row.get('split', 'test')} subjects, bank {Path(row['bank']).name}"
+    )
+    if row.get("jitter_draws"):
+        print(
+            f"  scans moved by the run's training jitter, each feature the mean over {row['jitter_draws']} moves"
+            " (the image stage reads raw scans)"
+        )
     print(
         f"  lesion volume SD {row['vox_sd']:.1f} vox; the other true latents explain {row['explained']:.2f} of its"
         f" variance, leaving an own part of SD {row['own_sd']:.1f} vox (burden latent vs volume: Spearman"
@@ -360,7 +399,7 @@ def show(name, row):
             cell = row["trained"][view].get(stage)
             if cell is None:
                 continue
-            floor = row["untrained"][view].get(stage)
+            floor = row.get("untrained", {}).get(view, {}).get(stage)
             sizes = " /".join(voxels(e, 5) for e in cell["error_by_size"])
             tail = f" | {agree['reading_r']:+.2f}, {agree['shared_error_r']:+.2f}" if agree and view == "t1" else ""
             print(
@@ -372,6 +411,8 @@ def show(name, row):
         "    size thirds are of the volume the other latents predict (not the volume itself, which would tie own to"
         f" it); mean lesion volume {' / '.join(f'{m:.0f}' for m in means)} voxels"
     )
+    if "price" not in row:
+        return
     errors = row["errors"]
     sharpen = errors.index(10.0), errors.index(20.0)
     print(
@@ -399,7 +440,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("out_json", type=Path)
     p.add_argument("runs", type=Path, nargs="+")
+    p.add_argument("--jitter-draws", type=int, default=0, help="Move the test scans by the run's training jitter first")
+    p.add_argument("--split", choices=("test", "train"), default="test", help="train: score training subjects instead")
     a = p.parse_args()
+    if a.jitter_draws < 0:
+        p.error("--jitter-draws must be 0 or more")
+    checks = a.split != "test" or a.jitter_draws > 0
     device = warm.pick_device()
     results = json.loads(a.out_json.read_text()) if a.out_json.exists() else {}
     for run in a.runs:
@@ -412,8 +458,9 @@ def main():
         if step != last:
             continue
         cached = results.get(run.name, {})
-        if cached.get("step") == step:
-            if VARIANTS[0] not in cached.get("price", {}):
+        condition = (cached.get("split", "test"), cached.get("jitter_draws", 0)) == (a.split, a.jitter_draws)
+        if cached.get("step") == step and condition:
+            if not checks and VARIANTS[0] not in cached.get("price", {}):
                 print("repricing", run.name, flush=True)
                 with torch.no_grad():
                     cached["price"] = reprice(run, device)
@@ -422,7 +469,7 @@ def main():
         print("assessing", run.name, flush=True)
         try:
             with torch.no_grad():
-                results[run.name] = assess(run, device, a.out_json.parent)
+                results[run.name] = assess(run, device, a.out_json.parent, a.split, a.jitter_draws)
         except ValueError as error:
             print("skipping", run.name + ":", error, flush=True)
             continue

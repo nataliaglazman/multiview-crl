@@ -111,6 +111,10 @@
 # by a regression of the code on lesion volume (warm.py --supervise volume), 10k steps. Near 10 voxels in the precision
 # audit means the architecture can read volume and InfoNCE never asks; near 20 means the architecture caps it
 # (causal/stage26/).
+# Stage 27 (opt-in) Why the T1 backbone stays near 20 voxels even with labels, on stage 26's two runs, no training: the
+# precision audit on test scans moved by each run's training jitter (1 draw: is the raw scan the problem; 8 draws
+# averaged: does the reading depend on where the lesion falls on the 4-voxel grid) and on training subjects
+# (memorisation), beside stage 26's raw-scan audit (causal/stage27/compare.txt).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -782,6 +786,43 @@ if wants 26; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 26 reports in $OUT"
+fi
+
+if wants 27; then
+    NCE=ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k
+    CEILING=ceiling_uni_jitter_nopatch_restail_t104_causal_c24_10k
+    RAW=$D/causal/stage26/precision_audit.json
+    OUT=$D/causal/stage27
+    if [ "$DRY" = 0 ]; then
+        if [ ! -f "$RAW" ]; then
+            echo "Stage 27 needs stage 26's precision audit ($RAW). Run stage 26 first."
+            exit 1
+        fi
+        mkdir -p "$OUT" || exit 1
+    fi
+    for check in jitter1 jitter8 train; do
+        case $check in
+            jitter1) option="--jitter-draws 1" ;;
+            jitter8) option="--jitter-draws 8" ;;
+            train) option="--split train" ;;
+        esac
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/precision_audit.py $OUT/precision_$check.json $D/runs/$CEILING $D/runs/$NCE $option > $OUT/precision_$check.txt"
+        else
+            # shellcheck disable=SC2086
+            "$PY" "$D/precision_audit.py" "$OUT/precision_$check.json" "$D/runs/$CEILING" "$D/runs/$NCE" $option \
+                > "$OUT/precision_$check.txt" 2>&1 || { echo "precision_audit $option failed, see $OUT/precision_$check.txt"; exit 1; }
+        fi
+    done
+    COMPARE="raw=$RAW jitter1=$OUT/precision_jitter1.json jitter8=$OUT/precision_jitter8.json train=$OUT/precision_train.json"
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/precision_compare.py $COMPARE > $OUT/compare.txt"
+    else
+        # shellcheck disable=SC2086
+        "$PY" "$D/precision_compare.py" $COMPARE > "$OUT/compare.txt" 2>&1 \
+            || { echo "precision_compare failed, see $OUT/compare.txt"; exit 1; }
+        echo "Stage 27 reports in $OUT (compare.txt has all four side by side)"
+    fi
 fi
 
 echo "$(date +%H:%M) all requested stages done"
