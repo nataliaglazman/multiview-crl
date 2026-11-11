@@ -263,9 +263,32 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - Volume goes with the cube of the radius. At the median lesion (radius 2.7 voxels), 0.1 voxel of radius is 9
       voxels of volume, so reading burden's own part (SD 20) means placing the lesion's edge to ~0.1–0.2 voxel, on a
       backbone that works in 4-voxel cells.
-    - Stage 27 (built 11 Nov, not run) checks two causes on the existing checkpoints, no training: test scans moved by
-      the training jitter, one move and the mean over 8 (does the reading depend on where the lesion falls on the
-      grid?), and training subjects (is the T1 reading memorised?).
+16. **Why T1 stays near 20 voxels (stage 27, read 11 Nov, `causal/stage27/compare.txt`).** Stage 26's two runs read
+    again, no training: on test scans moved by the training jitter (one move, and the mean over 8) and on training
+    subjects.
+    - Not jitter, not grid pose: one move reads slightly worse than the raw scans, and the mean over 8 moves gains under
+      1.5 voxels.
+    - Overfitting. With labels, training subjects are read far more sharply than test subjects: T1 map 10 vs 20, code
+      4.6 vs 17 (FLAIR code 3 vs 6). The fixed image filter reads both at ~11, so the training subjects are not easier.
+    - So stage 26's "the architecture caps T1" was wrong: the T1 backbone can hold a sharp reading, but what it learns
+      from 2,000 subjects does not transfer to new ones.
+    - InfoNCE stays at 18–19 voxels even on training subjects (code agreement .89 there, .72 on test): its first limit
+      is still that nothing pays for precision.
+17. **What makes the T1 residual patchy: the renderer's multiplicative field (11 Nov, local bank, no training).**
+    - `render_modality` multiplies each view by 1 + 0.15 × noise drawn on a 16³ grid, so the field varies every ~4
+      voxels, about a lesion's size; a real bias field varies over centimetres. It also scales the lesion's own
+      contrast. T1 pays about three times what FLAIR does: ±15% of bright white matter (0.8) against a lesion 0.4
+      darker, versus ±0.06 against 0.6 brighter in FLAIR.
+    - The same 160 test subjects re-rendered with the field off (same anatomy, lesions, styles and noise draws):
+      residual SD away from the lesion 1.08 → .71; lesion contrast / noise T1 4.4 → 8.4 (FLAIR 8.7 → 13.7); the blob
+      filter's own-part error T1 15 → 10 voxels (FLAIR 10 → 8.6; readouts fitted on 160 subjects run high). What is
+      left is thin rings at tissue boundaries, anatomy the 16 PCs miss.
+    - A smooth field of the same strength barely helps (T1 blob filter 15 → 14), because it still scales each lesion's
+      contrast; on real scans that is what N4 bias correction removes.
+    - Every burden lesion is centred on a voxel, its volume lives in the partial-volume load of ~3 boundary shells,
+      and the renderer box-blurs each scan (3³) after the noise.
+    - Stage 28 (built 11 Nov, not run) asks whether the field is what keeps T1 burden unread: `bank.py --field off`,
+      then stage 26's labelled ceiling and stage 21's 24-unit InfoNCE arm on it, unchanged.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -289,8 +312,14 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Stage 26 was read on 11 Nov** (section 7, item 15). With labels the FLAIR backbone reads lesion volume to ~9
   voxels, the T1 backbone still to ~20. T1, not the objective, caps burden in this network, so stage 24's real win
   (the backbone below ~20 voxels) is unlikely on T1.
-- **Stage 27 (built 11 Nov, not run):** `bash out/burden_feasibility_20261102/run_pc.sh 27` after stage 26, no
-  training. Read `causal/stage27/compare.txt` (section 7, item 15).
+- **Stage 27 was read on 11 Nov** (section 7, item 16). The T1 cap is overfitting, not capacity, jitter or grid pose:
+  with labels the backbone reads training subjects' T1 volume to ~10 voxels and new subjects to ~20.
+- **Stage 28 (built 11 Nov, not run):** `bash out/burden_feasibility_20261102/run_pc.sh 28` renders
+  `bank_causal_nofield` (the causal bank with the renderer's lesion-sized field off; section 7, item 17), trains the
+  labelled ceiling (10k) and the 24-unit InfoNCE arm (20k) on it, and writes `causal/stage28/`: `compare.txt` (reading
+  error on test and training subjects), `precision_audit.txt`, and `own_variation.txt` / `code_audit.txt` beside stage
+  21's field-on arm. Success: T1 behaves as FLAIR does now (labelled test error ~6–9 voxels) and the InfoNCE code holds
+  burden's own part above the field-on arm's .28 / .32.
 - **Stage 23 was read on 11 Nov.**
   - The remainder units learned brain size and anatomy, not burden.
   - The whole code has the best anatomy on the causal bank. Burden's own part is .19 / .17, and the backbone's

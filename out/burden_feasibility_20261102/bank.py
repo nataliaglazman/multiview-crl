@@ -4,8 +4,12 @@ Same subjects in every array. fixed_reference comes from the training split and 
 training.encoder_burden_control does. FLAIR does not depend on the T1 lesion value.
 
     python out/burden_feasibility_20261102/bank.py BANK_DIR [--t1-values 0.0 0.4] [--radius R] [--temporal-sigma S]
-        [--nuisance] [--causal]
+        [--nuisance] [--causal] [--field lesion|smooth|off]
 --nuisance turns off --synthetic-clean-content, so the deformation and fissure fields add fine anatomy every subject has.
+--field replaces the renderer's per-view multiplicative field (1 + 0.15 x noise drawn on a 16^3 grid, so it varies every
+~4 voxels, about a lesion's size; real scanner bias fields vary over centimetres). off: none, as after perfect bias
+correction; smooth: the same draw averaged onto a 4^3 grid at the same strength, varying over ~16 voxels. Either way the
+renderer draws the same random numbers, so the anatomy, lesion, style and noise of every subject are unchanged.
 --causal draws the content latents from an SCM over the factors the renderer uses (CAUSAL_EDGES; z_content[3:5] are
 unused with the burden target, so they stay unconnected rather than act as hidden mediators) and writes
 causal_adj.npy (9 x 9, parent by child).
@@ -49,6 +53,22 @@ def causal_scm(seed):
         w = torch.randn(len(parents[d]), generator=gen) if parents[d] else torch.tensor([])
         weights[d] = w / (w.norm() + 1e-8) if parents[d] else w
     return {"adj": adj, "parents": parents, "weights": weights, "n_dims": 9}
+
+
+def set_field(renderer, field):
+    """--field off|smooth on one renderer: its _seeded_noise draws only the multiplicative field."""
+    if field == "lesion":
+        return
+
+    def noise(scale, gen, device):
+        size = renderer.res // scale
+        grid = torch.randn(1, 1, size, size, size, generator=gen, device=device)
+        if field == "off":
+            return torch.zeros((renderer.res,) * 3, device=device)
+        grid = F.avg_pool3d(grid, 4) * 8.0
+        return F.interpolate(grid, size=(renderer.res,) * 3, mode="trilinear", align_corners=False)[0, 0]
+
+    renderer._seeded_noise = noise
 
 
 def run_args(t1_value, radius=None, sigma=None, nuisance=False, causal=False):
@@ -98,10 +118,12 @@ def chunk(job):
             train = T.make_dataset(args, "train", options["sizes"]["train"])
             if options["causal"]:
                 train._inner.scm = causal_scm(args.seed)
+            set_field(train._inner.renderer, options["field"])
             train[0]
             ds = T.make_dataset(args, split, n)
             if options["causal"]:
                 ds._inner.scm = causal_scm(args.seed)
+            set_field(ds._inner.renderer, options["field"])
             ds[0]
             ds._fixed_mean, ds._fixed_scale = train._fixed_mean, train._fixed_scale
             inner = ds._inner
@@ -136,6 +158,7 @@ def main():
     p.add_argument("--temporal-sigma", type=float, default=None)
     p.add_argument("--nuisance", action="store_true")
     p.add_argument("--causal", action="store_true")
+    p.add_argument("--field", choices=("lesion", "smooth", "off"), default="lesion")
     p.add_argument("--sizes", type=int, nargs=3, default=[2000, 400, 1000], metavar=("TRAIN", "VAL", "TEST"))
     a = p.parse_args()
     os.makedirs(a.root, exist_ok=True)
@@ -146,6 +169,7 @@ def main():
         "sigma": a.temporal_sigma,
         "nuisance": a.nuisance,
         "causal": a.causal,
+        "field": a.field,
     }
     if a.causal:
         np.save(f"{a.root}/causal_adj.npy", causal_scm(run_args(a.t1_values[0]).seed)["adj"])

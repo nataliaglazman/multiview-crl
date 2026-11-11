@@ -115,6 +115,11 @@
 # precision audit on test scans moved by each run's training jitter (1 draw: is the raw scan the problem; 8 draws
 # averaged: does the reading depend on where the lesion falls on the 4-voxel grid) and on training subjects
 # (memorisation), beside stage 26's raw-scan audit (causal/stage27/compare.txt).
+# Stage 28 (opt-in) Is the renderer's multiplicative field what keeps T1 burden unread? It varies every ~4 voxels, about
+# a lesion's size, and costs T1 about three times what it costs FLAIR. A causal bank with the field off (bank.py
+# --field off: the same subjects, lesions, styles and noise draws), then stage 26's labelled ceiling and stage 21's
+# 24-unit InfoNCE arm on it, unchanged. The precision audit on test and training subjects, own variation and the audit,
+# beside stage 21's arm on the field-on bank (causal/stage28/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -822,6 +827,53 @@ if wants 27; then
         "$PY" "$D/precision_compare.py" $COMPARE > "$OUT/compare.txt" 2>&1 \
             || { echo "precision_compare failed, see $OUT/compare.txt"; exit 1; }
         echo "Stage 27 reports in $OUT (compare.txt has all four side by side)"
+    fi
+fi
+
+if wants 28; then
+    NOFIELD=$D/bank_causal_nofield
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    NCE=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c24_20k
+    CEILING=ceiling_uni_jitter_nopatch_restail_t104_causal_nofield_c24_10k
+    WITH_FIELD=ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k
+    RECIPE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --content-units 24 --seed 42)
+    EVERY=2000 ssl "$NCE" "$NOFIELD" tail t1_04 20000 "${RECIPE[@]}" --contrastive-loss-type infonce
+    ssl "$CEILING" "$NOFIELD" tail t1_04 10000 "${RECIPE[@]}" --supervise volume
+    finish "$NCE" "$CEILING"
+
+    OUT=$D/causal/stage28
+    if [ "$DRY" = 0 ]; then
+        for name in "$CEILING" "$NCE"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 28 needs $name finished. Rerun stage 28 after it is."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+    fi
+    for report in precision_audit precision_train own_variation code_audit; do
+        script=$report option="" runs="$D/runs/$CEILING $D/runs/$NCE"
+        case $report in
+            precision_train) script=precision_audit option="--split train" ;;
+            own_variation | code_audit) runs="$runs $D/runs/$WITH_FIELD" ;;
+        esac
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$script.py $OUT/$report.json $runs $option > $OUT/$report.txt"
+        else
+            # shellcheck disable=SC2086
+            "$PY" "$D/$script.py" "$OUT/$report.json" $runs $option > "$OUT/$report.txt" 2>&1 \
+                || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    COMPARE="raw=$OUT/precision_audit.json train=$OUT/precision_train.json"
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/precision_compare.py $COMPARE > $OUT/compare.txt"
+    else
+        # shellcheck disable=SC2086
+        "$PY" "$D/precision_compare.py" $COMPARE > "$OUT/compare.txt" 2>&1 \
+            || { echo "precision_compare failed, see $OUT/compare.txt"; exit 1; }
+        echo "Stage 28 reports in $OUT"
     fi
 fi
 
