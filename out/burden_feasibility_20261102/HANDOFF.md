@@ -153,6 +153,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `summarize.py` | each arm's training history, compact enough to paste |
 | `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, the same rows for the untrained twin (the floor), canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
 | `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns |
+| `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
@@ -228,6 +229,20 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - Loss .035: the task is solved.
     - **InfoNCE ranks shared content by identification value, and burden's remainder comes last. CCA ranks by
       cross-view agreement, where it is within the top 24.**
+12. **48 units (run by hand, 10 Nov).** Width bought anatomy (brain .18 → .80 in the uniform code) and lesion position
+    (x / y / z .65 / .92 / .86), not burden's own part (.24 / .27 against the backbone's .31 / .36).
+13. **Precision (10 Nov, `precision_audit.py`).**
+    - The backbone reads lesion volume to ~20 voxels in every run on both banks; the image allows ~10. Burden's own
+      part spreads ±20 voxels on the causal bank, so the backbone recovers about half of it.
+    - At ~20 voxels the reading agrees across views at r ~.5, and the loss charges a unit that agrees less than the
+      code's others. It pays only when the negatives already match lesion position and anatomy: stage 23's set-up.
+    - Lesion position alone is not the blocker.
+    - Big lesions are read worst by the network, but not by the image filter.
+14. **Remainder units (stage 23, read 11 Nov).**
+    - Conditional negatives teach the remainder units whatever the main units lack.
+    - With 14 main units on uniform batches, that was brain size, not burden.
+    - The code's anatomy became the best on the causal bank, but burden's own part fell to .19 / .17. The backbone
+      stayed at ~20 voxels.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -246,8 +261,17 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Label-free factor-level discovery** needs views that share different subsets of factors, or interventions.
   Two views that share everything identify only the block.
 
-## 9. State on 10 Nov
+## 9. State on 11 Nov
 
+- **Stage 23 was read on 11 Nov.**
+  - The remainder units learned brain size and anatomy, not burden.
+  - The whole code has the best anatomy on the causal bank. Burden's own part is .19 / .17, and the backbone's
+    precision is unchanged.
+  - See section 10, item 3.
+- **New since 10 Nov:** the 48-unit run (section 10, item 4) and the precision audit (item 5).
+  - The backbone reads lesion volume to ~20 voxels everywhere.
+  - At that precision the loss charges a burden unit unless the negatives already match the code's anatomy and lesion
+    position.
 - Stage 20 is in commit `c2c3f55`. Its seed-2 results have yet to be reported.
 - **Results that exist on the PC but were never reported:**
   - Stage 13: shared-jitter control, 4-voxel seed, 4-voxel 20k. The shared-jitter arm is confounded: a pose shared by
@@ -265,7 +289,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   `precision_audit.txt`, burden's own part in `own_variation.txt`, and position and anatomy in `code_audit.txt`.
   The baseline is about 20 voxels of error in the backbone and 22–23 in the code.
 
-## 10. Stage 21 and next steps
+## 10. Recent stages and next steps
 
 1. **Read stage 20:** does the 31-neighbour burden at 20k (.19 / .18) replicate with seed 2?
 2. **Stage 21 compares Barlow Twins with InfoNCE** at 24 units and 20,000 steps on `bank_causal`. Both use the
@@ -276,23 +300,48 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
    - `causal/stage21/code_audit.txt`: check whether matching units agree across views and how many distinct
      directions the code uses.
    - `causal/stage21/cca_readout.txt`: training-fit CCA benchmark for both backbones.
-3. **Stage 23: remainder units with conditional negatives.**
-   - **Why:** InfoNCE can reward at most log(batch size) ≈ 3.5 nats of shared information. At a loss of .035 the
-     24-unit code had used it up on anatomy and lesion position, so burden's own part earns nothing.
+3. **Stage 23: remainder units with conditional negatives (run 10 Nov, read 11 Nov). It brought anatomy back, not
+   burden: the remainder units learned brain size, because the main units had dropped it. The success test below is
+   not met.**
+   - **Result** (`causal/stage23/`, `causal/precision/precision.txt`):
+     - The 14 main units (uniform batches) kept lesion position (y / z .83 / .78), lr and temporal, but dropped brain
+       size (own part .17), as the uniform 24-unit control did (.18).
+     - The remainder neighbourhoods are built on the main units, so they matched lesion position but not brain size.
+       The remainder units therefore learned brain size (.82), ventricle and thickness.
+     - Burden's own part: main units .08, remainder units .05, whole code .19 / .17. The control has .28 / .32 and
+       31 neighbours .19 / .18.
+     - Precision audit: code error 31 / 34 voxels (control 23 / 22). The backbone is unchanged at 19–22.
+     - Whole code: the best anatomy on the causal bank. Own parts: brain .88, ventricle .66 / .61, temporal
+       .75 / .77, lr .85 / .86 (control .18, .51, .15, .52).
+     - Little memorisation: code-32 top-1 .999 on training subjects, .972 on test subjects.
+     - This fits the pricing. With only position matched, a 20-voxel burden reading still costs (−.015 on the run's
+       own neighbour sets); with anatomy matched too, it pays (+.15).
+   - **Next: stage 24 (built 11 Nov, not run):** the same arm with the remainder neighbourhoods built on both views'
+     backbone GAP (`warm.py --remainder-space gap`) instead of the main units. Label-free.
+     - Run: `ssl_uni_jitter_nopatch_restail_t104_causal_rem10gap_20k`.
+     - Reports: own_variation, the audit and the precision audit against stage 23 and the control, in
+       `causal/stage24/`.
+     - The GAP holds anatomy and lesion position, so neighbours match on both.
+     - Risk: the GAP also holds ~.3 of burden's own part, plus the anatomy remainders, which would compete.
+     - Expected cost: brain size may leave the code, since the main units drop it and the remainder units can no
+       longer use it. If stage 24 works, add a third block: main units, then remainder units on the main units, then a
+       block on GAP neighbourhoods.
+     - Smoke check: the default path (`--remainder-space main`) repeats stage 23's 50-step smoke run exactly.
+   - **Why:** once a batch is told apart, InfoNCE stops paying for new shared information. The pricing in item 5 adds
+     that a burden reading at today's ~20-voxel precision pays only when the negatives already match the code's lesion
+     position and anatomy, and the remainder units are scored only on such negatives.
    - **Arm:** the recipe's 14 units on uniform batches, plus 10 units trained only by InfoNCE on batches of each
      subject's 31 nearest neighbours on the 14 (rebuilt every 500 steps). They gain only from shared content the 14
      lack: Sordoni et al. 2021's decomposed estimator, or MCL within one model. 20,000 steps on `bank_causal`, seed 42.
    - **Control:** stage 21's 24-unit InfoNCE arm: same width, head shape, init (the step-0 evals are identical),
      batches and jitter. **Reference:** the 31-neighbour code batches (stage 18).
-   - `causal/stage23/own_variation.txt`: burden's own part from the whole code against the control, and from the main
-     and remainder units separately.
-   - `causal/stage23/code_audit.txt`: anatomy and lesion position from each part (`main_ridge`, `rest_ridge`) against
-     the untrained floor, and train vs test retrieval for memorisation.
-   - **Success:** burden's own part in the code well above the control's, held by the remainder units, with the main
-     units' anatomy intact.
-   - **Caveat (10 Nov, from item 4):** the control's code reads burden beyond ventricle (partial R²) at .31 / .35,
-     about what the backbone holds, with brain at only .18 / .44. If its own-variation rows agree, "well above the
-     control" is out of reach. Read stage 23 as keeping the control's burden while anatomy returns.
+   - **Success (revised 11 Nov):**
+     - The remainder units hold burden's own part near the backbone's level, the main units keep the anatomy, and
+       train–test retrieval shows no new memorisation.
+     - The real win would be the backbone's reading error falling below ~20 voxels in `precision_audit.py`. No run so
+       far has.
+     - Beating the control on the whole code is not the test: the control's code already reads burden to 22–23
+       voxels, close to its backbone's ~20.
 4. **48-unit InfoNCE, run by hand 10 Nov** (`ssl_uni_jitter_nopatch_restail_t104_causal_c48_20k`: stage 21's
    InfoNCE arm with `--content-units 48`; reports `causal/stage21/{own_variation,code_audit}_c48.txt`). Width bought
    anatomy, not burden. The backbone is within ~.02 of the 24-unit run's and is now burden's ceiling.
@@ -302,41 +351,50 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
    - Lesion x / y / z from the code .65 / .92 / .86 (T1), floor ~0. The two most-shared directions are the lesion.
    - Still missing: thickness's and temporal's own parts (.18 and .22, at their no-own references), which code
      batches keep. Next arm: the same with `--code-batches 500 --code-neighbours 31` in place of `--uniform`.
-   - **Why burden's own part sits near .3 (measured on a 400-subject local causal bank):** the rendered volume is an
-     exact monotone function of the burden latent, so a perfect volume reader recovers the own part at .99. Burden's
-     own part moves the lesion by only ~20 voxels (SD) out of ~86: the other factors explain ~.58 of the volume's
-     variance (.72 of the latent's; volume grows faster than linearly with the latent). A reader with a 20-voxel
-     error gets .39, 30 voxels .22, 10 voxels .63 (own_variation's target). The backbone's .31–.36 implies ~23 voxels
-     of error, about the network's precision on the independent bank (~20–24 voxels from R² .73–.83 over a ±41-voxel
-     spread). So the graph shrinks the target; it does not stop the learning. Raising it needs a loss that pays for
-     volume precision.
-   - **Precision audit result (10 Nov, PC, `causal/precision/precision.txt`, commit 28fec8e): confirmed.**
-     - The backbone (map, GAP, pooled) reads volume to ~19–22 voxels in every run on both banks, at 6k and 20k. The
-       fixed filter on the residual reads it to 8–12 voxels, so half the precision is lost inside the backbone.
-     - Same error, half the target: own R² ~.80 on the independent bank (own SD 41) vs ~.47–.52 on the causal bank (own
-       SD 20).
-     - The head keeps or loses it by batch rule. Code error: uniform c24 / c48 22–25 voxels; n31 34–37; code-50
-       recipe 46–71; independent 6k 23–25, 20k 38–42.
-     - Price on the causal bank: a 20-voxel burden unit earns ≤0 in every code and batch rule (−.04 to −.08 nats in
-       the code-batch codes; ~0 in the saturated uniform codes, loss .09–.12). It pays only at ≤10 voxels. On the
-       independent bank the same unit earned +.14 at 6k.
-     - The largest third of lesions (mean 116 voxels) is read at 27–50 voxels by every network stage, but at 8–12 by
-       the image filter: something in the network compresses big lesions. The split only separates sizes on the
-       causal bank.
+5. **Why burden's own part stops where it does: the precision audit (10 Nov).**
+   - **Tool:** `precision_audit.py OUT_JSON RUN...` gives the lesion-volume reading error in voxels at each stage:
+     the fixed blob filter on the normative residual, the backbone's map read position-free, GAP, pooled features,
+     code.
+     - Each readout is handed the volume the other true latents predict, so only the lesion reading is scored,
+       against the untrained twin.
+     - It splits the error by lesion size (thirds of the anatomy-predicted volume) and measures the error the views
+       share.
+     - It prices a sharper reading in the run's loss, on the code as trained and with lesion position, anatomy or
+       both removed.
+     - Readings with a known error of 2–30 voxels come back within ~10%. Results are in
+       `causal/precision/precision.txt` on the PC.
+   - **The target is small.** The rendered volume is an exact function of the burden latent, so a perfect reader
+     would recover the own part. On the causal bank the other factors explain ~.58 of the volume's variance, leaving
+     an own part of ~20 voxels (SD) out of ~86. On the independent bank it is the whole ±41 voxels.
+   - **The backbone reads volume to ~19–22 voxels** in every run on both banks, at 6k and 20k. The fixed filter on the
+     residual reads it to 8–12, so half the available precision is lost inside the backbone. The same error
+     recovers ~.80 of the own part on the independent bank but ~.47–.52 on the causal bank. own_variation.py's
+     latent target, read from the features alone, gives ~.3 for the GAP.
+   - **The head keeps or loses it by batch rule.** Code error:
+     - uniform 24 / 48 units 22–25 voxels;
+     - 31 neighbours 34–37;
+     - the 50-neighbour recipe 46–71;
+     - independent bank 23–25 at 6k, 38–42 at 20k.
+   - **Pricing: the blocker is cross-view agreement, not lesion position.**
+     - On the causal bank, a burden unit read to 20 voxels earns ≤0 in every code and batch rule. It costs −.04 to
+       −.08 nats in the code-batch codes and ~0 in the saturated uniform codes.
+     - The reward crosses zero at ~12–17 voxels, where the reading's cross-view r is ~.6–.75; at 20 voxels it is .5.
+       A unit that agrees less than the code's others costs more than it adds, saturated or not. On the independent
+       bank 20 voxels gives r .81 and pays everywhere.
+     - Removing lesion position (Chen et al. 2021's "easy feature") does not help. e20 on uniform sets goes:
+       recipe −.09 → −.15, 31 neighbours −.11 → −.21, 24 units −.013 → −.027, 48 units −.002 → −.004. The removal
+       also strips ~40% of the code's anatomy, because lesion placement depends on anatomy.
+     - A 20-voxel reading pays only with position AND anatomy removed AND neighbour sets (+.13 recipe,
+       +.17 31 neighbours): stage 23's situation.
+     - The uniform 24 / 48-unit codes are indifferent (every reward within ±.03). They tell subjects apart even with
+       position and anatomy removed (loss .64 / .30), so they hold other shared content the factors don't explain.
+     - Sharpening always pays (20→10 positive in every row). But at 20 voxels no unit is paid to carry burden, so no
+       gradient reaches the backbone's precision. This fits 20k being no sharper than 6k.
+   - **Other leads:**
+     - The largest third of lesions (mean 116 voxels) is read at 27–50 voxels by every network stage but at 8–12 by
+       the image filter, so the network compresses big lesions. This is only visible on the causal bank.
      - The code's burden errors are shared across views (r .36–.73, backbone .18–.35).
-   - **Diagnostic, built 10 Nov:** `precision_audit.py OUT_JSON RUN...` gives the volume-reading
-     error in voxels at each stage (fixed blob filter on the normative residual, the backbone map read position-free,
-     GAP, pooled features, code). Each readout is handed the volume the other true latents predict, so only the
-     lesion reading is scored, against the untrained twin. It also splits the error by lesion size (thirds of the
-     anatomy-predicted volume), measures the error the views share, and prices a sharper reading in the run's loss
-     (uniform vs code-neighbour sets). Readings with a known error of 2–30 voxels come back within ~10%.
-   - **The price is also taken with lesion position, anatomy or both removed from the code** (out of fold, labels
-     only in the diagnostic). This tests feature suppression as Chen et al. 2021 describe it: InfoNCE stops paying
-     once ~log2(batch) bits tell the batch apart, and lesion position is a RandBit-like fingerprint. On a synthetic
-     told-apart code, sharpening from 20 to 10 voxels earned .06 nats as trained, .12 with position removed and .31
-     with both removed. Readings at 20–30 voxels earned a negative reward: the standardized cosine counts every unit
-     equally, so a saturated loss pushes a poorly agreeing unit out of the code.
-5. **Later:** check the nuisance-on runs before porting to ADNI (`training/main_conv_synthetic.py`): residual input,
+6. **Later:** check the nuisance-on runs before porting to ADNI (`training/main_conv_synthetic.py`): residual input,
    tail pooling, per-view jitter with the patch loss off, code batches, and the CCA readout.
    - Score white-matter hyperintensity (WMH) burden by its own part: the residual after a flexible fit on ventricle
      volume and age.

@@ -54,6 +54,7 @@ OVERRIDES = (  # when set
     "content_units",
     "remainder_units",
     "remainder_neighbours",
+    "remainder_space",
     "code_neighbours",
     "half_views",
     "half_units",

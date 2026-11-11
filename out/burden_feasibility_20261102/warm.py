@@ -41,7 +41,10 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 the neighbourhoods, --remainder-every N (default 500) rebuilds them, --remainder-weight W (default 1)
                 weighs the term. That batch has its own sampler and augmentation draws and leaves the running statistics
                 alone, so the main batches, their augmentation and the statistics follow a run without the option.
-                Needs --pool tail or gapnorm, --patch-weight 0, --uniform and InfoNCE.
+                --remainder-space gap builds the neighbourhoods on both views' backbone GAP in place of the main
+                units: everything the backbone holds is then matched, not only what the main units kept (stage 23's
+                main units dropped brain size, so its remainder units learned that). Needs --pool tail or gapnorm,
+                --patch-weight 0, --uniform and InfoNCE.
   --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
@@ -58,7 +61,8 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
         [--residual]
         [--t1key t1_00] [--uniform | --code-batches K] [--queue N] [--decorrelate W] [--group-dropout P]
         [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--content-units N] [--seed S]
-        [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]]
+        [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]
+         [--remainder-space main|gap]]
 """
 
 import argparse
@@ -515,6 +519,12 @@ def main():
         "--remainder-every", type=int, default=None, help="Rebuild the remainder neighbourhoods every N steps (500)"
     )
     p.add_argument("--remainder-weight", type=float, default=None, help="Weight of the remainder InfoNCE (default 1)")
+    p.add_argument(
+        "--remainder-space",
+        choices=("main", "gap"),
+        default=None,
+        help="What the remainder neighbourhoods are built on: the main units' code (default) or both views' GAP",
+    )
     p.add_argument("--queue", type=int, default=0, help="Negatives from a momentum-encoder queue of this many subjects")
     p.add_argument("--queue-momentum", type=float, default=0.99)
     p.add_argument("--t1key", default="t1_00")
@@ -588,9 +598,11 @@ def main():
     if a.hard_negatives < 0 or (a.hard_negatives and (a.pool == "gap" or a.queue)):
         raise ValueError("--hard-negatives must be non-negative and needs --pool tail or gapnorm without --queue")
     if a.remainder_units is None and any(
-        v is not None for v in (a.remainder_neighbours, a.remainder_every, a.remainder_weight)
+        v is not None for v in (a.remainder_neighbours, a.remainder_every, a.remainder_weight, a.remainder_space)
     ):
-        raise ValueError("--remainder-neighbours, --remainder-every and --remainder-weight need --remainder-units")
+        raise ValueError(
+            "--remainder-neighbours, --remainder-every, --remainder-weight and --remainder-space need --remainder-units"
+        )
     if a.remainder_units is not None and (
         a.remainder_units < 1
         or a.pool == "gap"
@@ -612,6 +624,7 @@ def main():
         a.remainder_neighbours = args.batch_size - 1 if a.remainder_neighbours is None else a.remainder_neighbours
         a.remainder_every = 500 if a.remainder_every is None else a.remainder_every
         a.remainder_weight = 1.0 if a.remainder_weight is None else a.remainder_weight
+        a.remainder_space = a.remainder_space or "main"
         if a.remainder_neighbours < args.batch_size - 1 or a.remainder_every < 1 or a.remainder_weight <= 0:
             raise ValueError(
                 f"--remainder-neighbours must be at least {args.batch_size - 1}, --remainder-every and "
@@ -694,6 +707,8 @@ def main():
                 a.remainder_every,
                 "weight",
                 a.remainder_weight,
+                "built on",
+                "the main units" if a.remainder_space == "main" else "both views' GAP",
                 flush=True,
             )
     args.content_channels = units  # the loss's slice; --content-units widens TailCode's head, not the backbone's
@@ -725,9 +740,13 @@ def main():
     aug_rest = np.random.default_rng(None if args.seed is None else args.seed + 2)
 
     def rebuild_remainder(step):
-        """Neighbourhoods on the main units' current code, both views, for the remainder units' batches."""
-        codes = features(model, train, a.device, pool=pool)["code"]
-        neighbours = cb.nearest_neighbours(np.concatenate([c[:, :units] for c in codes], 1), a.remainder_neighbours)
+        """Neighbourhoods for the remainder units' batches, on both views' current main-unit code or backbone GAP."""
+        feats = features(model, train, a.device, pool=pool)
+        if a.remainder_space == "gap":
+            space = np.concatenate(feats["gap"], 1)
+        else:
+            space = np.concatenate([c[:, :units] for c in feats["code"]], 1)
+        neighbours = cb.nearest_neighbours(space, a.remainder_neighbours)
         remainder["sampler"] = cb.NeighbourhoodBatchSampler(neighbours, args.batch_size, args.loader_seed + step, 0.0)
         remainder["spread"] = {k: round(float((v[neighbours].std(1) / v.std(0)).mean()), 3) for k, v in scored.items()}
 

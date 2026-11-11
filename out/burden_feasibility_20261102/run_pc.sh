@@ -95,6 +95,11 @@
 #         the causal bank, seed 42. Control: stage 21's 24-unit InfoNCE arm (same width, head, init, batches and
 #         jitter); reference: the 31-neighbour code batches (stage 18). Own variation, from the whole code and from each
 #         part, and the audit (causal/stage23/).
+# Stage 24 Stage 23 with the remainder neighbourhoods built on both views' backbone GAP (--remainder-space gap) in place
+#         of the main units. Stage 23's main units dropped brain size, so its neighbourhoods did not match on it and
+#         its remainder units learned brain size. The GAP holds the anatomy and the lesion's position, so neighbours
+#         match on both, which is where precision_audit.py's pricing found a 20-voxel burden reading pays. Against
+#         stage 23 and stage 21's 24-unit arm: own variation, the audit and the precision audit (causal/stage24/).
 #
 # PARALLEL arms share the GPU (default 3; each takes roughly 2-4 GB, check nvidia-smi). PY picks the interpreter.
 # Finished arms are skipped, and so are arms still running outside this script (started by hand), so rerunning after a
@@ -110,7 +115,7 @@ PY=${PY:-python}
 PARALLEL=${PARALLEL:-3}
 BATCH=${BATCH:-32}
 DRY=${DRY:-0}
-STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 23}
+STAGES=${*:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 23 24}
 QUEUE=${QUEUE:-1024}
 export PYTHONPATH=$D:out/regional_pilot_20261028/shim:.
 export BANK_WORKERS=${BANK_WORKERS:-8}
@@ -670,6 +675,46 @@ if wants 23; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 23 reports in $OUT"
+fi
+
+if wants 24; then
+    CAUSAL=$D/bank_causal
+    bank "$CAUSAL" --t1-values 0.4 --causal
+    residual_bank "$CAUSAL" t1_04 flair
+    GAPREM=ssl_uni_jitter_nopatch_restail_t104_causal_rem10gap_20k
+    REM=ssl_uni_jitter_nopatch_restail_t104_causal_rem10_20k
+    NCE=ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k
+    EVERY=2000 ssl "$GAPREM" "$CAUSAL" tail t1_04 20000 --uniform --residual --jitter 2 --rotate 3 --patch-weight 0 \
+        --seed 42 --remainder-units 10 --remainder-neighbours 31 --remainder-every 500 --remainder-space gap
+    finish "$GAPREM"
+
+    OUT=$D/causal/stage24
+    if [ "$DRY" = 0 ]; then
+        for name in "$GAPREM" "$REM" "$NCE"; do
+            if ! grep -qx DONE "$D/logs/$name.log"; then
+                echo "Stage 24 needs $name finished (stage 23 trains $REM, stage 21 $NCE); rerun stage 24 after it is."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" "$D/causal/precision" || exit 1
+    fi
+    for report in own_variation code_audit; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$report.py $OUT/$report.json $D/runs/$GAPREM $D/runs/$REM $D/runs/$NCE > $OUT/$report.txt"
+        else
+            "$PY" "$D/$report.py" "$OUT/$report.json" "$D/runs/$GAPREM" "$D/runs/$REM" "$D/runs/$NCE" \
+                > "$OUT/$report.txt" 2>&1 || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/precision_audit.py $D/causal/precision/precision.json $D/runs/$GAPREM $D/runs/$REM" \
+            "$D/runs/$NCE > $OUT/precision.txt"
+    else
+        "$PY" "$D/precision_audit.py" "$D/causal/precision/precision.json" "$D/runs/$GAPREM" "$D/runs/$REM" \
+            "$D/runs/$NCE" > "$OUT/precision.txt" 2>&1 \
+            || { echo "precision audit failed, see $OUT/precision.txt"; exit 1; }
+    fi
+    [ "$DRY" = 0 ] && echo "Stage 24 reports in $OUT"
 fi
 
 if wants 25; then
