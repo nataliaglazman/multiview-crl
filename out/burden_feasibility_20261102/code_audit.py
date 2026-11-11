@@ -59,6 +59,7 @@ OVERRIDES = (  # when set
     "half_views",
     "half_units",
     "seed",
+    "supervise",
 )
 
 

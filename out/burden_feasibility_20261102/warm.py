@@ -1,4 +1,4 @@
-"""The real self-supervised objective, end to end, with no labels in training.
+"""The real self-supervised objective, end to end, with no labels in training (except the --supervise diagnostic).
 
 The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood batches, recipe lr and clip), with:
 
@@ -45,6 +45,13 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 units: everything the backbone holds is then matched, not only what the main units kept (stage 23's
                 main units dropped brain size, so its remainder units learned that). Needs --pool tail or gapnorm,
                 --patch-weight 0, --uniform and InfoNCE.
+  --supervise volume  a diagnostic, never the method: in place of the global InfoNCE, each view's code units are read
+                by their own linear map and regressed (MSE) on the rendered lesion volume, standardized on the training
+                subjects, so the recipe's backbone, pool and head are trained with labels along the code's own path,
+                with the same input, jitter and batches. precision_audit.py then gives the most precise volume reading
+                this architecture reaches: the ceiling for any label-free objective. The InfoNCE is logged, not
+                trained. Needs TailCode pooling, --patch-weight 0 and InfoNCE, and none of --queue, --hard-negatives,
+                --decorrelate, --half-views or --remainder-units.
   --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
@@ -62,7 +69,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
         [--t1key t1_00] [--uniform | --code-batches K] [--queue N] [--decorrelate W] [--group-dropout P]
         [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--content-units N] [--seed S]
         [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]
-         [--remainder-space main|gap]]
+         [--remainder-space main|gap]] [--supervise volume]
 """
 
 import argparse
@@ -569,6 +576,12 @@ def main():
         default=None,
         help="Replicate seed for init, batch order and augmentation, by the recipe's rule (default its 42)",
     )
+    p.add_argument(
+        "--supervise",
+        choices=("volume",),
+        default=None,
+        help="Diagnostic only: regress the code on the rendered lesion volume (labels) in place of InfoNCE",
+    )
     a = p.parse_args()
     if a.uniform and a.code_batches:
         raise ValueError("--uniform and --code-batches are different batch rules")
@@ -648,6 +661,20 @@ def main():
             "--half-views takes distinct axes among x, y, z and needs --pool tail or gapnorm with the BatchNorm gauge,"
             f" no --queue, and 1 <= --half-units < {width}"
         )
+    if a.supervise and (
+        a.pool == "gap"
+        or a.patch_weight != 0
+        or a.contrastive_loss_type != "infonce"
+        or a.queue
+        or a.hard_negatives
+        or a.decorrelate
+        or a.half_views is not None
+        or a.remainder_units is not None
+    ):
+        raise ValueError(
+            "--supervise needs TailCode pooling, --patch-weight 0 and InfoNCE, and none of --queue, --hard-negatives,"
+            " --decorrelate, --half-views or --remainder-units"
+        )
     a.out.mkdir(parents=True, exist_ok=False)
     if a.t1key == "t1_04":
         args.synthetic_lesion_t1_value = 0.4
@@ -717,6 +744,18 @@ def main():
             if name.startswith("encoder."):
                 parameter.requires_grad_(False)
     train = Bank(a.bank, "train", a.t1key, residual=a.residual)
+    readout, volume = None, None
+    if a.supervise:
+        with torch.random.fork_rng(devices=[]):  # the readout's init leaves every later draw as in a run without it
+            readout = nn.ModuleList(nn.Linear(units, 1) for _ in range(2)).to(a.device)
+        volume = (float(train.vox.mean()), float(train.vox.std()))
+        print(
+            "supervised on the rendered lesion volume (a diagnostic, with labels): mean",
+            round(volume[0], 1),
+            "SD",
+            round(volume[1], 1),
+            flush=True,
+        )
     halves = None if a.half_views is None else half_masks(a.bank, a.half_views, train.t1.shape[-1], a.device)
     test = Bank(a.bank, "test", a.t1key, a.test_subjects, a.residual)
     scored = {
@@ -774,6 +813,8 @@ def main():
     parameters = [q for q in model.parameters() if q.requires_grad]
     if pool is not None:
         parameters += list(pool.parameters())
+    if readout is not None:
+        parameters += list(readout.parameters())
     optimizer = torch.optim.AdamW(parameters, lr=args.lr)
     sim, crit = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
     queue = None
@@ -786,6 +827,8 @@ def main():
             if frozen is not None:
                 frozen.requires_grad_(False)
     report = {"args": {k: str(v) for k, v in vars(a).items()}, "history": []}
+    if volume is not None:
+        report["volume_mean_sd"] = list(volume)
 
     def record(step, terms):
         row = {"step": step, "loss": terms, "test": evaluate(model, test, a.device, pool), "spread": batching["spread"]}
@@ -842,7 +885,14 @@ def main():
             h = model._encode(x, 2, None)
             code = pool(h)
             pair = torch.stack(code[:, :units].chunk(2))
-            if a.hard_negatives:
+            if a.supervise:
+                guess = torch.cat([head(part) for head, part in zip(readout, code[:, :units].chunk(2))])[:, 0]
+                target = (train.vox[indices] - volume[0]) / volume[1]
+                target = torch.as_tensor(target, dtype=guess.dtype, device=guess.device).repeat(2)
+                terms = {"supervised": F.mse_loss(guess, target)}
+                with torch.no_grad():  # the recipe's loss on this code, logged for comparison and not trained
+                    terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
+            elif a.hard_negatives:
                 terms = {"hard": hard_negative_infonce(code, units, args.tau, a.hard_negatives, sim)}
                 with torch.no_grad():  # the recipe's loss, for comparison with every other arm
                     terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
@@ -868,7 +918,7 @@ def main():
                 )
                 terms["remainder"] = hard_negative_infonce(coder[:, units:], rest, args.tau, 0.0, sim)
         if queue is not None or pool is not None:
-            loss = terms["hard"] if a.hard_negatives else terms["global"]
+            loss = terms["supervised"] if a.supervise else terms["hard"] if a.hard_negatives else terms["global"]
             if halves is not None:
                 loss = loss + terms["half"]
             if rest:
@@ -905,6 +955,8 @@ def main():
             state = {"model": model.state_dict(), "step": step}
             if pool is not None:
                 state["pool"] = pool.state_dict()
+            if readout is not None:
+                state["readout"] = readout.state_dict()
             torch.save(state, a.out / "model.pt")
     print("DONE", flush=True)
 

@@ -107,6 +107,10 @@
 # DRY=1 prints the commands without running them.
 # Stage 25 (opt-in) Replace stage 21's global average with 2x2x2 regional averages and keep the tails.
 # Compare volume precision and the two 24-unit InfoNCE codes (causal/stage25/).
+# Stage 26 (opt-in) The precision ceiling, a diagnostic with labels: stage 21's 24-unit arm with the InfoNCE replaced
+# by a regression of the code on lesion volume (warm.py --supervise volume), 10k steps. Near 10 voxels in the precision
+# audit means the architecture can read volume and InfoNCE never asks; near 20 means the architecture caps it
+# (causal/stage26/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -747,6 +751,37 @@ if wants 25; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 25 reports in $OUT"
+fi
+
+if wants 26; then
+    CAUSAL=$D/bank_causal
+    bank "$CAUSAL" --t1-values 0.4 --causal
+    residual_bank "$CAUSAL" t1_04 flair
+    NCE=ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k
+    CEILING=ceiling_uni_jitter_nopatch_restail_t104_causal_c24_10k
+    ssl "$CEILING" "$CAUSAL" tail t1_04 10000 --uniform --residual --jitter 2 --rotate 3 --patch-weight 0 \
+        --content-units 24 --seed 42 --supervise volume
+    finish "$CEILING"
+
+    OUT=$D/causal/stage26
+    if [ "$DRY" = 0 ]; then
+        for name in "$CEILING" "$NCE"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 26 needs $name finished (stage 21 trains $NCE). Rerun stage 26 after it is."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+    fi
+    for report in precision_audit own_variation code_audit; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$report.py $OUT/$report.json $D/runs/$CEILING $D/runs/$NCE > $OUT/$report.txt"
+        else
+            "$PY" "$D/$report.py" "$OUT/$report.json" "$D/runs/$CEILING" "$D/runs/$NCE" > "$OUT/$report.txt" 2>&1 \
+                || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 26 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"
