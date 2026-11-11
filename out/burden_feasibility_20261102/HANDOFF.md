@@ -51,7 +51,7 @@ and what to do next. Repo-wide conventions are in `CLAUDE.md` at the root. They 
 PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_feasibility_20261102/run_pc_20.log 2>&1 &
 ```
 
-- **Stages.** Pass stage numbers as arguments. With none, every stage runs.
+- **Stages.** Pass stage numbers as arguments. With none, the default stages in `run_pc.sh` run.
 - **Skipping.** Finished arms (their log ends in `TEST` or `DONE`) are skipped. So are arms still running outside the
   script. Banks and residuals with a done-marker are not rebuilt. A rerun after a crash therefore continues.
 - **Environment variables:**
@@ -136,6 +136,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Other options:**
   - `--code-neighbours N`: the neighbourhood size; N = 31 looks better (stage 18).
   - `--content-units N`: a wider code.
+  - `--pool regional_tail` replaces the global average with eight fixed regional averages and keeps the tails.
   - `--contrastive-loss-type barlow_twins`: use cross-view correlation as the global loss. Set `--patch-weight 0`.
   - `--half-views xyz --half-units K`: the lesion-agnostic partial-observability arm (stage 19).
   - `--remainder-units K` (with `--remainder-neighbours`, `--remainder-every`, `--remainder-weight`): K more code units
@@ -259,8 +260,10 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   what the backbone holds.
 - **Stage 21:** the user reports that Barlow Twins did not help (numbers not recorded here).
 - `code_audit.py` prints an untrained-twin floor under every factor table, lesion x/y/z included.
-- `warm.py`'s `TailCode` takes a placeholder `regional` argument that raises when true: `code_audit.load_run` already
-  asks for a `regional_tail` pool that is not implemented.
+- Stage 25 compares regional pooling with stage 21's 24-unit InfoNCE control on the same subjects, seed and jitter.
+  It scores the code that enters InfoNCE. In `causal/stage25/`, compare volume error and agreement between views in
+  `precision_audit.txt`, burden's own part in `own_variation.txt`, and position and anatomy in `code_audit.txt`.
+  The baseline is about 20 voxels of error in the backbone and 22–23 in the code.
 
 ## 10. Stage 21 and next steps
 

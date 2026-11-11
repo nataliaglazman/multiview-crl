@@ -4,6 +4,7 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
 
   --pool gap    the recipe's global code: GAP -> head. Through T.training_objective, unchanged. The matched control.
   --pool tail   the global code reads GAP plus normative tail means (TailCode). The patch term is unchanged.
+  --pool regional_tail  TailCode with averages over a 2x2x2 grid and the same normative tail means.
   --pool gapnorm  GAP through TailCode's BatchNorm gauge and head, no tails: separates the tails from the gauge.
   --residual    each view's input gains a second channel, its normative residual (residual_bank.py, no labels).
   --queue N     the global InfoNCE also takes N earlier subjects as negatives, from a momentum encoder (MoCo-style),
@@ -29,8 +30,8 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
   --contrastive-loss-type barlow_twins  replace global InfoNCE with Barlow Twins on the exported code. Needs
                 --patch-weight 0.
   --content-units N  the code is the first N outputs of TailCode's head in place of the recipe's 14, the head widened
-                to N + 4 and the backbone and its init unchanged, so the code has room for more factors. Needs --pool
-                tail or gapnorm and --patch-weight 0, since the backbone's own head is not widened.
+                to N + 4 and the backbone and its init unchanged, so the code has room for more factors. Needs
+                TailCode pooling and --patch-weight 0, since the backbone's own head is not widened.
   --remainder-units K  K more code units after the main ones (the recipe's 14, or --content-units), trained only by a
                 second InfoNCE each step, on a batch of an anchor and its nearest training subjects on the main units'
                 current code (no labels). They gain only by telling apart subjects the main units cannot, so they are
@@ -53,7 +54,8 @@ logs how far its neighbourhoods match anatomy, lesion position and burden (label
 Each eval scores, on fresh test subjects, 5-fold ridge of volume and the anatomy latents from the 14-unit code, from
 the backbone GAP, and for --pool tail from the pooled vector before the head. Labels only ever score.
 
-    python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail|gapnorm] [--gauge batch|running] [--residual]
+    python warm.py BANK OUT INIT|cold STEPS EVERY [--pool gap|tail|regional_tail|gapnorm] [--gauge batch|running]
+        [--residual]
         [--t1key t1_00] [--uniform | --code-batches K] [--queue N] [--decorrelate W] [--group-dropout P]
         [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--content-units N] [--seed S]
         [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]]
@@ -141,7 +143,7 @@ class RunningGauge(nn.Module):
 
 
 class TailCode(nn.Module):
-    """The global code from GAP plus normative tail means, through the recipe's head shape.
+    """The global code from whole-map or regional averages plus normative tail means.
 
     Each channel at each interior cell is z-scored by running statistics of that position and view, which need no
     labels; the spread is about the running mean, because a neighbourhood batch shares its anatomy. Per channel the
@@ -156,6 +158,7 @@ class TailCode(nn.Module):
     """
 
     THRESHOLDS = (2.0, 3.0, 4.0)
+    REGIONAL_GRID = (2, 2, 2)
 
     def __init__(
         self,
@@ -169,8 +172,6 @@ class TailCode(nn.Module):
         regional=False,
     ):
         super().__init__()
-        if regional:
-            raise NotImplementedError("regional_tail pooling is not in warm.py yet (code_audit.load_run asks for it)")
         if gauge not in ("batch", "running"):
             raise ValueError(f"gauge must be batch or running, got {gauge!r}")
         self.units = units  # the code is the head's first ``units`` outputs; the rest are unused style units
@@ -181,9 +182,10 @@ class TailCode(nn.Module):
         self.register_buffer("started", torch.zeros(2, dtype=torch.bool))
         self.momentum = momentum
         self.thresholds = tuple(thresholds)
-        self.channels = channels
+        self.regional = regional
+        self.average_width = channels * (int(np.prod(self.REGIONAL_GRID)) if regional else 1)
         self.drop = None
-        width = channels * (1 + 2 * len(self.thresholds))
+        width = self.average_width + channels * 2 * len(self.thresholds)
         if gauge == "batch":
             self.gauges = nn.ModuleList(nn.BatchNorm1d(width, affine=False) for _ in range(2))
         else:
@@ -200,6 +202,8 @@ class TailCode(nn.Module):
         ``visible`` (B, D, H, W) bool, for an image that shows part of the volume, pools over those cells only (the
         tails over those that are also interior). ``update=False`` leaves the view's running statistics alone and, in
         training, gauges with the batch's own statistics without storing them."""
+        if visible is not None and self.regional:
+            raise ValueError("Half-view pooling requires --pool tail or gapnorm")
         rows = part.flatten(2)[:, :, self.keep]
         if self.training and update:
             with torch.no_grad():
@@ -212,7 +216,10 @@ class TailCode(nn.Module):
                     self.var[view] += self.momentum * ((rows - self.mean[view]).square().mean(0) - self.var[view])
         z = (rows - self.mean[view]) / (self.var[view].sqrt() + 1e-6)
         if visible is None:
-            parts = [part.mean((2, 3, 4))]
+            average = (
+                F.adaptive_avg_pool3d(part, self.REGIONAL_GRID).flatten(1) if self.regional else part.mean((2, 3, 4))
+            )
+            parts = [average]
             for t in self.thresholds:
                 parts += [torch.log1p(100 * F.relu(z - t).mean(2)), torch.log1p(100 * F.relu(-z - t).mean(2))]
         else:
@@ -229,8 +236,8 @@ class TailCode(nn.Module):
             gauged = self.gauges[view](features)
         if self.training and self.drop:
             kept = torch.ones(gauged.shape[1], device=gauged.device)
-            kept[: self.channels] = float(self.drop != "gap")
-            kept[self.channels :] = float(self.drop != "tails")
+            kept[: self.average_width] = float(self.drop != "gap")
+            kept[self.average_width :] = float(self.drop != "tails")
             gauged = gauged * kept
         return gauged
 
@@ -461,7 +468,7 @@ def main():
     p.add_argument("init")
     p.add_argument("steps", type=int)
     p.add_argument("every", type=int)
-    p.add_argument("--pool", choices=("gap", "tail", "gapnorm"), default="gap")
+    p.add_argument("--pool", choices=("gap", "tail", "regional_tail", "gapnorm"), default="gap")
     p.add_argument(
         "--gauge",
         choices=("batch", "running"),
@@ -575,7 +582,7 @@ def main():
     if a.shared_jitter and not (a.jitter or a.rotate):
         raise ValueError("--shared-jitter needs --jitter or --rotate")
     if a.content_units is not None and (a.pool == "gap" or a.patch_weight != 0):
-        raise ValueError("--content-units widens only TailCode's head: needs --pool tail or gapnorm, --patch-weight 0")
+        raise ValueError("--content-units needs tail, regional_tail or gapnorm pooling and --patch-weight 0")
     if a.content_units is not None and (a.content_units < 1 or a.decorrelate):
         raise ValueError("--content-units must be positive, and --decorrelate's weights assume the recipe's 14 units")
     if a.hard_negatives < 0 or (a.hard_negatives and (a.pool == "gap" or a.queue)):
@@ -619,7 +626,7 @@ def main():
         not a.half_views
         or set(a.half_views) - set("xyz")
         or len(set(a.half_views)) != len(a.half_views)
-        or a.pool == "gap"
+        or a.pool not in ("tail", "gapnorm")
         or a.gauge != "batch"
         or a.queue
         or not 1 <= a.half_units < width
@@ -665,7 +672,14 @@ def main():
     if a.pool != "gap":
         thresholds = () if a.pool == "gapnorm" else TailCode.THRESHOLDS
         latent = units + rest + args.latent_dim - args.content_channels
-        pool = TailCode(interior_cells(a.bank), latent=latent, thresholds=thresholds, gauge=a.gauge, units=units + rest)
+        pool = TailCode(
+            interior_cells(a.bank),
+            latent=latent,
+            thresholds=thresholds,
+            gauge=a.gauge,
+            units=units + rest,
+            regional=a.pool == "regional_tail",
+        )
         pool.main = units  # the main loss's slice; remainder units follow it
         pool = pool.to(a.device)
         print("interior cells", int(pool.keep.sum()), "tail thresholds", pool.thresholds, "gauge", a.gauge, flush=True)
