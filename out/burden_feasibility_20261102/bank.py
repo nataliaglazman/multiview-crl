@@ -4,12 +4,14 @@ Same subjects in every array. fixed_reference comes from the training split and 
 training.encoder_burden_control does. FLAIR does not depend on the T1 lesion value.
 
     python out/burden_feasibility_20261102/bank.py BANK_DIR [--t1-values 0.0 0.4] [--radius R] [--temporal-sigma S]
-        [--nuisance] [--causal] [--field lesion|smooth|off]
+        [--nuisance] [--causal] [--field lesion|smooth|off] [--gain on|off]
 --nuisance turns off --synthetic-clean-content, so the deformation and fissure fields add fine anatomy every subject has.
 --field replaces the renderer's per-view multiplicative field (1 + 0.15 x noise drawn on a 16^3 grid, so it varies every
 ~4 voxels, about a lesion's size; real scanner bias fields vary over centimetres). off: none, as after perfect bias
 correction; smooth: the same draw averaged onto a 4^3 grid at the same strength, varying over ~16 voxels. Either way the
 renderer draws the same random numbers, so the anatomy, lesion, style and noise of every subject are unchanged.
+--gain off renders every scan at gain 1 (z_style[0] read as 0), so tissue and lesion contrast no longer vary from scan
+to scan, as after perfect intensity normalization. The bias, noise level, field and every random draw are unchanged.
 --causal draws the content latents from an SCM over the factors the renderer uses (CAUSAL_EDGES; z_content[3:5] are
 unused with the burden target, so they stay unconnected rather than act as hidden mediators) and writes
 causal_adj.npy (9 x 9, parent by child).
@@ -71,6 +73,20 @@ def set_field(renderer, field):
     renderer._seeded_noise = noise
 
 
+def set_gain(renderer, gain):
+    """--gain off on one renderer: render_modality reads each view's gain latent z_style[0] as 0, so the gain is 1."""
+    if gain == "on":
+        return
+    real = renderer.render_modality
+
+    def render_modality(tissue_map, lesion_load, z_style, *a, **k):
+        z_style = z_style.clone()
+        z_style[0] = 0.0
+        return real(tissue_map, lesion_load, z_style, *a, **k)
+
+    renderer.render_modality = render_modality
+
+
 def run_args(t1_value, radius=None, sigma=None, nuisance=False, causal=False):
     flags = (HERE / "reference" / "flags.txt").read_text().split()
     args = encoder_args.parse_args(flags)
@@ -119,11 +135,13 @@ def chunk(job):
             if options["causal"]:
                 train._inner.scm = causal_scm(args.seed)
             set_field(train._inner.renderer, options["field"])
+            set_gain(train._inner.renderer, options["gain"])
             train[0]
             ds = T.make_dataset(args, split, n)
             if options["causal"]:
                 ds._inner.scm = causal_scm(args.seed)
             set_field(ds._inner.renderer, options["field"])
+            set_gain(ds._inner.renderer, options["gain"])
             ds[0]
             ds._fixed_mean, ds._fixed_scale = train._fixed_mean, train._fixed_scale
             inner = ds._inner
@@ -159,6 +177,7 @@ def main():
     p.add_argument("--nuisance", action="store_true")
     p.add_argument("--causal", action="store_true")
     p.add_argument("--field", choices=("lesion", "smooth", "off"), default="lesion")
+    p.add_argument("--gain", choices=("on", "off"), default="on")
     p.add_argument("--sizes", type=int, nargs=3, default=[2000, 400, 1000], metavar=("TRAIN", "VAL", "TEST"))
     a = p.parse_args()
     os.makedirs(a.root, exist_ok=True)
@@ -170,6 +189,7 @@ def main():
         "nuisance": a.nuisance,
         "causal": a.causal,
         "field": a.field,
+        "gain": a.gain,
     }
     if a.causal:
         np.save(f"{a.root}/causal_adj.npy", causal_scm(run_args(a.t1_values[0]).seed)["adj"])

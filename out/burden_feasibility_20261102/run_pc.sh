@@ -120,6 +120,12 @@
 # --field off: the same subjects, lesions, styles and noise draws), then stage 26's labelled ceiling and stage 21's
 # 24-unit InfoNCE arm on it, unchanged. The precision audit on test and training subjects, own variation and the audit,
 # beside stage 21's arm on the field-on bank (causal/stage28/).
+# Stage 29 (opt-in) After stage 28 the backbone reads lesion volume to ~11 voxels but the 24-unit code only to 18-20:
+# the head is the bottleneck. Three head levers on bank_causal_nofield against stage 28's 24-unit InfoNCE arm (same
+# bank, seed, batches and jitter): 48 units (is the code full?), 10 remainder units on GAP neighbourhoods (stage 24's
+# arm, paid only for what the 14 main units lack) and Barlow Twins with 24 units (per-unit agreement, which does not
+# saturate). And gain: stage 28's arm on a bank that also renders every scan at gain 1 (bank.py --gain off: the same
+# subjects, lesions, bias, noise and field draws). The precision audit, own variation and the audit (causal/stage29/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -875,6 +881,50 @@ if wants 28; then
             || { echo "precision_compare failed, see $OUT/compare.txt"; exit 1; }
         echo "Stage 28 reports in $OUT"
     fi
+fi
+
+if wants 29; then
+    NOFIELD=$D/bank_causal_nofield
+    NOGAIN=$D/bank_causal_nofield_nogain
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    bank "$NOGAIN" --t1-values 0.4 --causal --field off --gain off
+    residual_bank "$NOGAIN" t1_04 flair
+    NCE=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c24_20k
+    C48=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c48_20k
+    GAPREM=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_20k
+    BT=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_bt_c24_20k
+    GAINLESS=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_c24_20k
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42)
+    EVERY=2000 ssl "$NCE" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --content-units 24 --contrastive-loss-type infonce
+    EVERY=2000 ssl "$C48" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --content-units 48
+    EVERY=2000 ssl "$GAPREM" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --remainder-units 10 --remainder-neighbours 31 \
+        --remainder-every 500 --remainder-space gap
+    EVERY=2000 ssl "$BT" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --content-units 24 --contrastive-loss-type barlow_twins
+    EVERY=2000 ssl "$GAINLESS" "$NOGAIN" tail t1_04 20000 "${BASE[@]}" --content-units 24 --contrastive-loss-type infonce
+    finish "$NCE" "$C48" "$GAPREM" "$BT" "$GAINLESS"
+
+    OUT=$D/causal/stage29
+    RUNS="$D/runs/$NCE $D/runs/$C48 $D/runs/$GAPREM $D/runs/$BT $D/runs/$GAINLESS"
+    if [ "$DRY" = 0 ]; then
+        for name in "$NCE" "$C48" "$GAPREM" "$BT" "$GAINLESS"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 29 needs $name finished. Rerun stage 29 after it is."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+    fi
+    for report in precision_audit own_variation code_audit; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$report.py $OUT/$report.json $RUNS > $OUT/$report.txt"
+        else
+            # shellcheck disable=SC2086
+            "$PY" "$D/$report.py" "$OUT/$report.json" $RUNS > "$OUT/$report.txt" 2>&1 \
+                || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 29 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

@@ -1,4 +1,4 @@
-# Burden feasibility: handoff (10 Nov 2026)
+# Burden feasibility: handoff (12 Nov 2026)
 
 Everything for this line of work lives in this folder. `run_pc.sh` runs it in numbered stages, and its header
 describes every stage. This file says what the work is for, how it is run, what has been found, what is still open
@@ -109,6 +109,10 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - Ventricle explains about 70% of burden's variance (corr .84), so burden's own variation has sd .43 of a
       total of .76.
     - The burden → temporal edge is weak (weight .2).
+  - `bank_causal_nofield` (`--causal --field off`, stage 28): the causal bank's subjects, lesions, styles and noise
+    draws, with the renderer's multiplicative field off (section 7, items 17–18).
+  - `bank_causal_nofield_nogain` (`--causal --field off --gain off`, stage 29): the same, with every scan rendered at
+    gain 1, so tissue and lesion contrast no longer vary from scan to scan. The bias and the noise level still vary.
 - **`residual_bank.py`** writes each view's normative residual: the scan z-scored over its brain, minus the
   training mean, minus its first 16 principal components, scaled to unit SD. Each modality uses only its own basis.
 
@@ -287,8 +291,45 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       contrast; on real scans that is what N4 bias correction removes.
     - Every burden lesion is centred on a voxel, its volume lives in the partial-volume load of ~3 boundary shells,
       and the renderer box-blurs each scan (3³) after the noise.
-    - Stage 28 (built 11 Nov, not run) asks whether the field is what keeps T1 burden unread: `bank.py --field off`,
-      then stage 26's labelled ceiling and stage 21's 24-unit InfoNCE arm on it, unchanged.
+    - Stage 28 tested whether the field is what keeps T1 burden unread (item 18).
+    - Figure: `out/field_preview_20261111/render.py` writes `1_field_on_off.png`, one subject's scans, field and
+      residual with the field on and off. Over 40 test subjects of the local independent bank, the lesion's own
+      residual barely changes (T1 3.7 → 3.9 SD) while the spread around it halves (.98 → .47).
+18. **The field was the cap (stage 28, read 12 Nov, `causal/stage28/compare.txt`).**
+    - **Set-up.** Stage 26's labelled ceiling and stage 21's 24-unit InfoNCE arm, unchanged, on `bank_causal_nofield`.
+    - **Results.** Reading error in voxels on new subjects, T1 / FLAIR, field on → off. The own part has SD 19.9 in
+      both banks.
+      - Image filter: 10.7 / 7.8 → 9.0 / 6.6.
+      - Labels: map 19.6 / 8.9 → 8.3 / 7.3, code 16.9 / 6.2 → 5.9 / 4.7. T1 now reads like FLAIR, and better than
+        the image filter.
+      - Most of item 16's overfitting came with the field. On training subjects the labelled code reads 3.6, against
+        5.9 on new ones (field on: 4.6 against 16.9).
+      - InfoNCE backbone: pooled 19.5 / 19.1 → 11.1 / 11.2, GAP 11.0 / 11.0, map 21.2 / 20.1 → 14.9 / 15.9. There is
+        no train–test gap (pooled 10.9 / 10.4 on training subjects). The views' readings agree at r .86–.87.
+      - InfoNCE code: only 23.2 / 22.3 → 18.0 / 19.7 (agreement .72 → .80).
+    - **The head is now the bottleneck.** With the field on, code and backbone were both near 20 voxels. Now the code
+      loses most of the backbone's gain.
+    - **Big lesions.** In the largest third of new subjects the InfoNCE code's error is 47 / 42 voxels (training
+      subjects 29 / 37, map 29 / 28); the labelled code reads them to 5.5 / 3.9.
+      - InfoNCE's features compress big lesions. It starts in the backbone, and the head makes it worse.
+    - **Shared error.** The InfoNCE views share about half their reading error: on training subjects, shared-error r is
+      .52 at the GAP and .58 at the code, against .14–.22 with labels. A cross-view loss pays for a shared error as it
+      pays for burden.
+    - **Not yet reported:** `own_variation.txt`, `code_audit.txt` and the price table in `precision_audit.txt`. The
+      second success test, the code's burden own part above the field-on arm's .28 / .32, needs `own_variation.txt`.
+19. **Two local checks of next-step levers (11 Nov, no training).**
+    - **Per-unit weights in the critic** (the similarity inside InfoNCE).
+      - Set-up: the run's InfoNCE on codes built from true latents (6 anatomy factors at cross-view r .9, the lesion
+        centroid at .95), plus one unit holding burden's own part (SD 20) read with 20 voxels of error.
+      - With a learned weight per unit inside the cosine, applied after the per-batch standardization, that unit stops
+        costing the loss. On 9 units, uniform sets go −.12 → +.01 nats and neighbour sets +.02 → +.09.
+      - A saturated 24-unit code pays ~0 either way. So weights help only on unsaturated terms: remainder units and
+        neighbour sets.
+    - **A repeat scan as a third view.**
+      - Set-up: 600 local test subjects re-rendered with a second T1 and a second FLAIR (fresh style, field and noise).
+      - With the fixed blob filter, agreement on a 20-voxel own part is T1–FLAIR .80, FLAIR–FLAIR .85 and T1–T1 .83.
+        Part of the filter's error repeats within a modality (error r .33–.44).
+      - Pairing T1 with FLAIR is not what blocks burden.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -307,26 +348,44 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Label-free factor-level discovery** needs views that share different subsets of factors, or interventions.
   Two views that share everything identify only the block.
 
-## 9. State on 11 Nov
+## 9. State on 12 Nov
 
+- **Stage 29 (built 12 Nov, not run).**
+  - **Arms.** Three head levers on `bank_causal_nofield`, against stage 28's 24-unit InfoNCE arm: 48 units, 10
+    remainder units on GAP neighbourhoods, and Barlow Twins with 24 units. Plus stage 28's arm on
+    `bank_causal_nofield_nogain`, which tests gain alone.
+  - **Reports** go to `causal/stage29/`: `precision_audit.txt` (with the price table), `own_variation.txt` and
+    `code_audit.txt`.
+  - **Success:**
+    - The code's error falls from 18–20 voxels toward the backbone's ~11.
+    - Burden's own part beats the 24-unit arm, and anatomy holds.
+    - The largest third of lesions is read better than now (47 / 42).
+  - **Checked locally:**
+    - The default bank recipe is bit-identical to the stored bank.
+    - `--gain off` keeps every latent and lesion, and cuts the scan-to-scan spread in contrast (CV of each scan's
+      brain SD) from .23 to .06 in T1.
+    - Two-step runs of all four arms, and the three reports, finish.
+- **Stage 28 was read on 12 Nov** (section 7, item 18). Without the renderer's field:
+  - With labels, T1 reads new subjects to 5.9 voxels (field on 16.9).
+  - The InfoNCE backbone reads to ~11 (field on ~20).
+  - The 24-unit code reads only to 18–20, so the head is now the bottleneck.
+  - The first success test (T1 behaves as FLAIR) is met. The second, the code's burden own part above .28 / .32,
+    waits on `own_variation.txt`.
+- **Stage 28 overturns parts of stages 26–27.** Those were read with the field on. The ~20-voxel backbone and the T1
+  overfitting both came mostly from the field.
 - **Stage 26 was read on 11 Nov** (section 7, item 15). With labels the FLAIR backbone reads lesion volume to ~9
   voxels, the T1 backbone still to ~20. T1, not the objective, caps burden in this network, so stage 24's real win
-  (the backbone below ~20 voxels) is unlikely on T1.
+  (the backbone below ~20 voxels) is unlikely on T1. (Field on; see stage 28.)
 - **Stage 27 was read on 11 Nov** (section 7, item 16). The T1 cap is overfitting, not capacity, jitter or grid pose:
-  with labels the backbone reads training subjects' T1 volume to ~10 voxels and new subjects to ~20.
-- **Stage 28 (built 11 Nov, not run):** `bash out/burden_feasibility_20261102/run_pc.sh 28` renders
-  `bank_causal_nofield` (the causal bank with the renderer's lesion-sized field off; section 7, item 17), trains the
-  labelled ceiling (10k) and the 24-unit InfoNCE arm (20k) on it, and writes `causal/stage28/`: `compare.txt` (reading
-  error on test and training subjects), `precision_audit.txt`, and `own_variation.txt` / `code_audit.txt` beside stage
-  21's field-on arm. Success: T1 behaves as FLAIR does now (labelled test error ~6–9 voxels) and the InfoNCE code holds
-  burden's own part above the field-on arm's .28 / .32.
+  with labels the backbone reads training subjects' T1 volume to ~10 voxels and new subjects to ~20. (Field on; most
+  of the overfitting went with the field in stage 28.)
 - **Stage 23 was read on 11 Nov.**
   - The remainder units learned brain size and anatomy, not burden.
   - The whole code has the best anatomy on the causal bank. Burden's own part is .19 / .17, and the backbone's
     precision is unchanged.
   - See section 10, item 3.
 - **New since 10 Nov:** the 48-unit run (section 10, item 4) and the precision audit (item 5).
-  - The backbone reads lesion volume to ~20 voxels everywhere.
+  - With the field on, the backbone reads lesion volume to ~20 voxels everywhere.
   - At that precision the loss charges a burden unit unless the negatives already match the code's anatomy and lesion
     position.
 - Stage 20 is in commit `c2c3f55`. Its seed-2 results have yet to be reported.
@@ -347,6 +406,24 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   The baseline is about 20 voxels of error in the backbone and 22–23 in the code.
 
 ## 10. Recent stages and next steps
+
+**First, after stage 28 (12 Nov).** The numbered items below were written with the field on.
+- **Read the three stage 28 reports not yet reported:**
+  - `causal/stage28/own_variation.txt`: burden's own part in the code, against the field-on arm's .28 / .32.
+  - `code_audit.txt`: what the 24 units hold, such as lesion position and anatomy.
+  - The price table in `precision_audit.txt`: does an ~11-voxel reading pay in this code?
+- **Decide with the user whether `bank_causal_nofield` becomes the main burden bank,** with the field-on bank kept as a
+  stress test. For: a real bias field varies over centimetres and N4 removes it, so the 16³ field has no counterpart
+  in corrected scans.
+- **Head levers come first,** since the head is now the bottleneck. Stage 29 runs three on the field-off bank, plus
+  the gain test:
+  - The 48-unit arm. On the field-on bank, width bought anatomy and position, but there the backbone held little burden.
+  - Stage 24's remainder units on GAP neighbourhoods.
+  - Barlow Twins with 24 units. It failed on the field-on bank, where burden's views agreed at only ~.5.
+- **Not built yet: per-unit critic weights** on the remainder term (section 7, item 19). They need code. Price them
+  first on stage 28's codes, no training: add a weighted row to `precision_audit.py`'s price table.
+- **Big-lesion compression** (item 18) is a separate lead. Labels remove it, so nothing in InfoNCE pays to keep big
+  lesions apart.
 
 1. **Read stage 20:** does the 31-neighbour burden at 20k (.19 / .18) replicate with seed 2?
 2. **Stage 21 compares Barlow Twins with InfoNCE** at 24 units and 20,000 steps on `bank_causal`. Both use the
