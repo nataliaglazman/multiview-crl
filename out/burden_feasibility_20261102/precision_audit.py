@@ -46,6 +46,11 @@ contrastive losses", appendix B.2). So if sharpening earns much more once positi
 what leaves burden's precision unpaid; if removing anatomy does as much, any easy content does. The R2 of position and
 anatomy left in each code checks the removal.
 
+Two more rows, "weighted", refit the critic: the same losses with one weight per unit inside the cosine (warm.py
+--critic-weights), fitted to each code with and without the new unit on other sets of the same rule (Adam, 300 steps),
+as trained and with both removed. A noisy unit that costs the run's loss but pays once weighted is charged by the
+equal-weight cosine. Under each pair of rows: the weight the fit gives the new unit, over the code's mean weight.
+
     python out/burden_feasibility_20261102/precision_audit.py OUT_JSON RUN [RUN ...] [--jitter-draws K] [--split train]
 
 Two checks of the network's reading, each into its own OUT_JSON, with no floor and no price (precision_compare.py puts
@@ -74,6 +79,7 @@ import code_audit
 import detector
 import numpy as np
 import torch
+import torch.nn.functional as F
 import warm
 from scipy.ndimage import binary_erosion
 from scipy.stats import spearmanr
@@ -92,6 +98,9 @@ TOPK = (1, 3, 10)
 CLIP = 5.0  # standardized features are clipped at this many SD, as in own_variation.py
 ERRORS = (0.0, 5.0, 10.0, 20.0, 30.0)
 VARIANTS = ("as trained", "position removed", "anatomy removed", "both removed")
+WEIGHTED = ("as trained", "both removed")  # codes also priced with the critic refitted, one weight per unit
+PRICE_ROWS = VARIANTS + tuple(f"{v}, weighted" for v in WEIGHTED)
+FIT_STEPS, FIT_LR = 300, 0.05
 PRICE_SETS = 300
 SIM = torch.nn.CosineSimilarity(dim=-1)
 WORKERS = 6
@@ -247,6 +256,49 @@ def mean_loss(z, sets):
     )
 
 
+def set_losses(z, sets, weight=None):
+    """mean_loss on (S, 32) index sets at once, every set in one batch; ``weight`` (units,) is warm.py's critic."""
+    hz = [(v - v.mean(1, keepdim=True)) / (v.std(1, keepdim=True) + 1e-6) for v in (z[0][sets], z[1][sets])]
+    if weight is not None:
+        hz = [v * weight.sqrt() for v in hz]
+    hz = [F.normalize(v, dim=-1) for v in hz]
+    labels = torch.arange(sets.shape[1]).repeat(sets.shape[0])
+    total = 0.0
+    for i, j in ((0, 1), (1, 0)):
+        logits = hz[i] @ hz[j].transpose(1, 2) / batch_price.TAU
+        total = total + F.cross_entropy(logits.reshape(-1, sets.shape[1]), labels)
+    return total
+
+
+def fitted_weight(z, sets):
+    """The critic weights (softplus, starting at 1) that minimise the loss on ``sets``."""
+    with torch.enable_grad():
+        theta = torch.full((z[0].shape[1],), float(np.log(np.expm1(1.0))), requires_grad=True)
+        optimizer = torch.optim.Adam([theta], lr=FIT_LR)
+        for _ in range(FIT_STEPS):
+            optimizer.zero_grad()
+            set_losses(z, sets, F.softplus(theta)).backward()
+            optimizer.step()
+    return F.softplus(theta).detach()
+
+
+def weighted_price(z, own, noise, left, rules):
+    """One price row with the critic refitted to each code; ``rules`` maps a set rule to (price sets, fitting sets)."""
+    row = {"left": left}
+    for rule, (chosen, fit) in rules.items():
+        sets, fit = torch.as_tensor(np.stack(chosen)), torch.as_tensor(np.stack(fit))
+        base = float(set_losses(z, sets, fitted_weight(z, fit)))
+        rewards, shares = [], []
+        for e in ERRORS:
+            extra = [torch.from_numpy(own + e * noise[e][v]).float()[:, None] for v in range(2)]
+            y = [torch.cat([z[v], extra[v]], 1) for v in range(2)]
+            weight = fitted_weight(y, fit)
+            rewards.append(base - float(set_losses(y, sets, weight)))
+            shares.append(float(weight[-1] / weight.mean()))
+        row[rule] = {"loss": base, "reward": rewards, "unit_weight": shares}
+    return row
+
+
 def without(code, covariates):
     """``code`` minus what a smooth function of ``covariates`` (additive splines plus a cubic polynomial, ridge)
     predicts of each unit, out of fold, so that information goes and the rest stays."""
@@ -271,6 +323,9 @@ def price(codes, own, position, anatomy, seed=0):
     noise = {e: [rng.standard_normal(n) for _ in range(2)] for e in ERRORS}
     uniform = [rng.choice(n, 32, replace=False) for _ in range(PRICE_SETS)]
     anchors = rng.choice(n, PRICE_SETS)
+    fit_rng = np.random.default_rng(seed + 1)  # the weighted rows' fitting sets; the draws above are unchanged
+    fit_uniform = [fit_rng.choice(n, 32, replace=False) for _ in range(PRICE_SETS)]
+    fit_anchors = fit_rng.choice(n, PRICE_SETS)
     removed = {
         "position removed": position,
         "anatomy removed": anatomy,
@@ -295,6 +350,15 @@ def price(codes, own, position, anatomy, seed=0):
                 rewards.append(base - mean_loss([torch.cat([z[v], extra[v]], 1) for v in range(2)], chosen))
             row[rule] = {"loss": base, "reward": rewards}
         out[variant] = row
+        if variant in WEIGHTED:
+            rules = {
+                "uniform": (uniform, fit_uniform),
+                "neighbour": (
+                    [np.r_[i, neighbours[i]] for i in anchors],
+                    [np.r_[i, neighbours[i]] for i in fit_anchors],
+                ),
+            }
+            out[f"{variant}, weighted"] = weighted_price(z, own, noise, row["left"], rules)
     return out
 
 
@@ -418,10 +482,11 @@ def show(name, row):
     print(
         "  price: drop in the run's loss (nats) when one unit holding the own part, read with error e, joins the code."
         "\n  20->10: what sharpening the reading from 20 to 10 voxels earns. left: mean R2 of lesion position / of"
-        " anatomy still in the code, T1 then FLAIR"
+        " anatomy still in the code, T1 then FLAIR\n  weighted: the critic refitted to each code, one weight per unit"
+        " inside the cosine (warm.py --critic-weights)"
     )
     print(
-        f"    {'code':16s} {'sets':9s} {'loss':>6s} "
+        f"    {'code':22s} {'sets':9s} {'loss':>6s} "
         + " ".join(f"{'e ' + format(e, 'g'):>7s}" for e in errors)
         + f" {'20->10':>7s} | left: position, anatomy"
     )
@@ -433,7 +498,13 @@ def show(name, row):
             if i == 0:
                 pos, ana = cell["left"]["position"], cell["left"]["anatomy"]
                 left = f" | {pos[0]:.2f}/{pos[1]:.2f}, {ana[0]:.2f}/{ana[1]:.2f}"
-            print(f"    {variant if i == 0 else '':16s} {rule:9s} {cell[rule]['loss']:6.3f} {values}{left}")
+            print(f"    {variant if i == 0 else '':22s} {rule:9s} {cell[rule]['loss']:6.3f} {values}{left}")
+        if "unit_weight" in cell["uniform"]:
+            shares = "; ".join(
+                f"{rule} " + " ".join(f"{w:.2f}" for w in cell[rule]["unit_weight"])
+                for rule in ("uniform", "neighbour")
+            )
+            print(f"    {'':22s} the new unit's weight over the mean weight, e = 0 ... 30: {shares}")
 
 
 def main():
@@ -460,7 +531,7 @@ def main():
         cached = results.get(run.name, {})
         condition = (cached.get("split", "test"), cached.get("jitter_draws", 0)) == (a.split, a.jitter_draws)
         if cached.get("step") == step and condition:
-            if not checks and VARIANTS[0] not in cached.get("price", {}):
+            if not checks and any(name not in cached.get("price", {}) for name in PRICE_ROWS):
                 print("repricing", run.name, flush=True)
                 with torch.no_grad():
                     cached["price"] = reprice(run, device)

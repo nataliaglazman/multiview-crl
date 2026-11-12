@@ -145,6 +145,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - `--half-views xyz --half-units K`: the lesion-agnostic partial-observability arm (stage 19).
   - `--remainder-units K` (with `--remainder-neighbours`, `--remainder-every`, `--remainder-weight`): K more code units
     trained only by InfoNCE on batches of each subject's nearest neighbours on the main units (stage 23).
+  - `--critic-weights main|remainder|both` (with `--critic-lr`, default 1e-3): one learnable weight per code unit
+    inside that term's InfoNCE cosine, starting at 1, so a unit whose views agree poorly can count for less (stage 31).
   - `--hard-negatives G`, `--seed S`.
   - Older levers: `--queue`, `--gauge running`, `--group-dropout`, `--decorrelate`, `--shared-jitter`, `--uniform`.
   - Each option refuses combinations it can't handle.
@@ -157,7 +159,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `summarize.py` | each arm's training history, compact enough to paste |
 | `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, the same rows for the untrained twin (the floor), canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
 | `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns |
-| `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side |
+| `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side. Two "weighted" price rows refit the critic to each code (one weight per unit inside the cosine; as trained, and with position and anatomy removed); rerunning the audit on a stored JSON adds them without redoing the rest |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
@@ -350,6 +352,21 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 12 Nov
 
+- **Stage 31 (built 12 Nov, not run).** Per-unit critic weights, `warm.py --critic-weights` (section 7, item 19).
+  - **First, no training:** stage 29's precision audit is re-priced with the critic refitted to each of its five
+    codes (`causal/stage31/price_stage29.txt`). Read it first: if the weighted rows don't make a burden unit read to
+    ~11 voxels pay, the training arms are unlikely to help.
+  - **Arms** on `bank_causal_nofield`, 20k steps, seed 42:
+    - stage 29's remainder arm with weights on the remainder term, and on both terms (control: stage 29's remainder
+      arm);
+    - stage 28's 24-unit arm with weights on its main term (control: that arm). That code is saturated, so the weights
+      should change little.
+  - **Reports** go to `causal/stage31/`: `precision_audit.txt`, `own_variation.txt` and `code_audit.txt`. Each run's
+    `report.json` history logs the weights (`critic_weights`); watch for them collapsing onto a few units.
+  - **Checked locally:** at weight 1 the loss equals the recipe's; the default arms give identical reports before and
+    after the change; two-step runs of the three arms, and the reports, finish.
+  - **Numbering:** stage 30 (frozen-backbone prediction) was built at the same time in another session, so this one
+    is 31, with its own `causal/stage31/`.
 - **Stage 29 (built 12 Nov, not run).**
   - **Arms.** Three head levers on `bank_causal_nofield`, against stage 28's 24-unit InfoNCE arm: 48 units, 10
     remainder units on GAP neighbourhoods, and Barlow Twins with 24 units. Plus stage 28's arm on
@@ -420,8 +437,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - The 48-unit arm. On the field-on bank, width bought anatomy and position, but there the backbone held little burden.
   - Stage 24's remainder units on GAP neighbourhoods.
   - Barlow Twins with 24 units. It failed on the field-on bank, where burden's views agreed at only ~.5.
-- **Not built yet: per-unit critic weights** on the remainder term (section 7, item 19). They need code. Price them
-  first on stage 28's codes, no training: add a weighted row to `precision_audit.py`'s price table.
+- **Per-unit critic weights are built as stage 31** (section 9). Its first step re-prices stage 29's codes with no
+  training; read that before the arms finish.
 - **Big-lesion compression** (item 18) is a separate lead. Labels remove it, so nothing in InfoNCE pays to keep big
   lesions apart.
 

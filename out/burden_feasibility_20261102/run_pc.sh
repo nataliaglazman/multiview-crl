@@ -126,6 +126,13 @@
 # arm, paid only for what the 14 main units lack) and Barlow Twins with 24 units (per-unit agreement, which does not
 # saturate). And gain: stage 28's arm on a bank that also renders every scan at gain 1 (bank.py --gain off: the same
 # subjects, lesions, bias, noise and field draws). The precision audit, own variation and the audit (causal/stage29/).
+# Stage 31 (opt-in) Per-unit critic weights (warm.py --critic-weights): one learnable weight per code unit inside the
+# InfoNCE cosine, so a unit whose views agree poorly can count for less instead of costing the loss. First, no
+# training: stage 29's precision audit re-priced with the critic refitted to each of its five codes
+# (causal/stage31/price_stage29.txt). Then three arms on bank_causal_nofield: stage 29's remainder arm with weights on
+# the remainder term, and on both terms (against stage 29's remainder arm), and stage 28's 24-unit arm with weights on
+# its main term (against that arm; a saturated code, where the weights should change little). The precision audit, own
+# variation and the audit of the three and their two controls (causal/stage31/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -925,6 +932,56 @@ if wants 29; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 29 reports in $OUT"
+fi
+
+if wants 31; then
+    NOFIELD=$D/bank_causal_nofield
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    NCE=${P}_c24_20k
+    GAPREM=${P}_rem10gap_20k
+    CRITMAIN=${P}_critmain_c24_20k
+    CRITREM=${P}_rem10gap_critrem_20k
+    CRITBOTH=${P}_rem10gap_critboth_20k
+    STAGE29="$D/runs/$NCE $D/runs/${P}_c48_20k $D/runs/$GAPREM $D/runs/${P}_bt_c24_20k $D/runs/${P}_nogain_c24_20k"
+    OUT=$D/causal/stage31
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/precision_audit.py $D/causal/stage29/precision_audit.json $STAGE29 > $OUT/price_stage29.txt"
+    else
+        mkdir -p "$OUT" || exit 1
+        echo "$(date +%H:%M) stage 29's codes re-priced with the critic refitted (no training)"
+        # shellcheck disable=SC2086
+        "$PY" "$D/precision_audit.py" "$D/causal/stage29/precision_audit.json" $STAGE29 > "$OUT/price_stage29.txt" 2>&1 \
+            || echo "the re-price failed, see $OUT/price_stage29.txt; training goes on"
+    fi
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42)
+    REM=(--remainder-units 10 --remainder-neighbours 31 --remainder-every 500 --remainder-space gap)
+    EVERY=2000 ssl "$CRITMAIN" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --content-units 24 --contrastive-loss-type infonce \
+        --critic-weights main
+    EVERY=2000 ssl "$CRITREM" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" "${REM[@]}" --critic-weights remainder
+    EVERY=2000 ssl "$CRITBOTH" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" "${REM[@]}" --critic-weights both
+    finish "$CRITMAIN" "$CRITREM" "$CRITBOTH"
+
+    RUNS="$D/runs/$CRITMAIN $D/runs/$NCE $D/runs/$CRITREM $D/runs/$CRITBOTH $D/runs/$GAPREM"
+    if [ "$DRY" = 0 ]; then
+        for name in "$CRITMAIN" "$NCE" "$CRITREM" "$CRITBOTH" "$GAPREM"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 31 needs $name finished (stage 28 trains $NCE, stage 29 $GAPREM). Rerun stage 31 after it is."
+                exit 1
+            fi
+        done
+    fi
+    for report in precision_audit own_variation code_audit; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$report.py $OUT/$report.json $RUNS > $OUT/$report.txt"
+        else
+            # shellcheck disable=SC2086
+            "$PY" "$D/$report.py" "$OUT/$report.json" $RUNS > "$OUT/$report.txt" 2>&1 \
+                || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 31 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

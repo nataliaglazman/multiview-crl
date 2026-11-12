@@ -45,6 +45,13 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 units: everything the backbone holds is then matched, not only what the main units kept (stage 23's
                 main units dropped brain size, so its remainder units learned that). Needs --pool tail or gapnorm,
                 --patch-weight 0, --uniform and InfoNCE.
+  --critic-weights main|remainder|both  one learnable weight per code unit inside the cosine of the main InfoNCE, of the
+                remainder term or of both, shared by the two views and starting at 1, so step 0 is the recipe's loss.
+                The equal-weight cosine makes a unit whose views agree poorly a cost; with weights it can count for
+                less. The weights' overall size cancels in the cosine, so they only move importance between units.
+                --critic-lr sets their learning rate (default 1e-3, their own AdamW group without weight decay). The
+                weights are logged at each eval. Needs TailCode pooling and InfoNCE, and none of --queue,
+                --hard-negatives, --half-views or --supervise; remainder and both need --remainder-units.
   --supervise volume  a diagnostic, never the method: in place of the global InfoNCE, each view's code units are read
                 by their own linear map and regressed (MSE) on the rendered lesion volume, standardized on the training
                 subjects, so the recipe's backbone, pool and head are trained with labels along the code's own path,
@@ -69,7 +76,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
         [--t1key t1_00] [--uniform | --code-batches K] [--queue N] [--decorrelate W] [--group-dropout P]
         [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--content-units N] [--seed S]
         [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]
-         [--remainder-space main|gap]] [--supervise volume]
+         [--remainder-space main|gap]] [--critic-weights main|remainder|both [--critic-lr LR]] [--supervise volume]
 """
 
 import argparse
@@ -256,6 +263,17 @@ class TailCode(nn.Module):
         return torch.cat([self.head(part) for part in self.pooled(h)], 0)
 
 
+class CriticWeights(nn.Module):
+    """--critic-weights: one positive weight per code unit, the softplus of a parameter that starts where it is 1."""
+
+    def __init__(self, units):
+        super().__init__()
+        self.theta = nn.Parameter(torch.full((units,), float(np.log(np.expm1(1.0)))))
+
+    def forward(self):
+        return F.softplus(self.theta)
+
+
 class CodeGauge:
     """Running per-view mean and SD of the online content code: the queue's stand-in for per-batch standardization,
     which cannot reach codes from earlier batches. Same spread-about-the-running-mean rule as TailCode."""
@@ -334,13 +352,16 @@ def cross_view_decorrelation(z1, z2):
     return (1 - diagonal).square().sum() + OFF_DIAGONAL * (c.square().sum() - diagonal.square().sum())
 
 
-def hard_negative_infonce(code, units, tau, concentration, sim):
+def hard_negative_infonce(code, units, tau, concentration, sim, weight=None):
     """The recipe's global InfoNCE (each view standardized over the batch, cosine, cross-view negatives only, both
     directions summed) with each anchor's negatives weighted by exp(concentration * cosine), rescaled to mean 1, so the
     negatives most like the anchor carry most of the loss: Robinson et al. 2021's hard-negative InfoNCE without
-    debiasing, their beta being concentration * tau. Concentration 0 is the recipe's loss."""
+    debiasing, their beta being concentration * tau. Concentration 0 is the recipe's loss. ``weight`` (units,), when
+    given, scales each standardized unit by its square root before the cosine: --critic-weights' weighted critic."""
     b = code.shape[0] // 2
     hz = T.standardize_contrastive_code(torch.stack([code[:b, :units], code[b:, :units]]))
+    if weight is not None:
+        hz = hz * weight.sqrt()
     off = ~torch.eye(b, dtype=torch.bool, device=code.device)
     total = 0.0
     for i, j in ((0, 1), (1, 0)):
@@ -532,6 +553,13 @@ def main():
         default=None,
         help="What the remainder neighbourhoods are built on: the main units' code (default) or both views' GAP",
     )
+    p.add_argument(
+        "--critic-weights",
+        choices=("main", "remainder", "both"),
+        default=None,
+        help="A learnable weight per code unit inside the cosine of the main InfoNCE, the remainder term or both",
+    )
+    p.add_argument("--critic-lr", type=float, default=None, help="Learning rate of --critic-weights (default 1e-3)")
     p.add_argument("--queue", type=int, default=0, help="Negatives from a momentum-encoder queue of this many subjects")
     p.add_argument("--queue-momentum", type=float, default=0.99)
     p.add_argument("--t1key", default="t1_00")
@@ -675,6 +703,24 @@ def main():
             "--supervise needs TailCode pooling, --patch-weight 0 and InfoNCE, and none of --queue, --hard-negatives,"
             " --decorrelate, --half-views or --remainder-units"
         )
+    if a.critic_weights is None and a.critic_lr is not None:
+        raise ValueError("--critic-lr needs --critic-weights")
+    if a.critic_weights is not None:
+        a.critic_lr = 1e-3 if a.critic_lr is None else a.critic_lr
+        if (
+            a.pool == "gap"
+            or a.contrastive_loss_type != "infonce"
+            or a.queue
+            or a.hard_negatives
+            or a.half_views is not None
+            or a.supervise
+            or (a.critic_weights != "main" and a.remainder_units is None)
+            or not a.critic_lr > 0
+        ):
+            raise ValueError(
+                "--critic-weights needs TailCode pooling and InfoNCE, none of --queue, --hard-negatives, --half-views or"
+                " --supervise, and a positive --critic-lr; remainder and both need --remainder-units"
+            )
     a.out.mkdir(parents=True, exist_ok=False)
     if a.t1key == "t1_04":
         args.synthetic_lesion_t1_value = 0.4
@@ -739,6 +785,12 @@ def main():
                 flush=True,
             )
     args.content_channels = units  # the loss's slice; --content-units widens TailCode's head, not the backbone's
+    critic = nn.ModuleDict()
+    for term, width in (("main", units), ("remainder", rest)):
+        if a.critic_weights in (term, "both"):
+            critic[term] = CriticWeights(width).to(a.device)
+    if len(critic):
+        print("critic weights on", ", ".join(critic), "learning rate", a.critic_lr, flush=True)
     if a.frozen_backbone:
         for name, parameter in model.named_parameters():
             if name.startswith("encoder."):
@@ -815,7 +867,11 @@ def main():
         parameters += list(pool.parameters())
     if readout is not None:
         parameters += list(readout.parameters())
-    optimizer = torch.optim.AdamW(parameters, lr=args.lr)
+    if len(critic):
+        groups = [{"params": parameters}, {"params": list(critic.parameters()), "lr": a.critic_lr, "weight_decay": 0.0}]
+        optimizer = torch.optim.AdamW(groups, lr=args.lr)
+    else:
+        optimizer = torch.optim.AdamW(parameters, lr=args.lr)
     sim, crit = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
     queue = None
     if a.queue > 0:
@@ -834,6 +890,8 @@ def main():
         row = {"step": step, "loss": terms, "test": evaluate(model, test, a.device, pool), "spread": batching["spread"]}
         if rest:
             row["remainder_spread"] = remainder["spread"]
+        if len(critic):
+            row["critic_weights"] = {k: [round(float(w), 4) for w in v()] for k, v in critic.items()}
         report["history"].append(row)
         (a.out / "report.json").write_text(json.dumps(report, indent=1))
         t = row["test"]
@@ -844,6 +902,12 @@ def main():
             f"temp {t['t1']['code_temporal']:.2f} | {terms}",
             flush=True,
         )
+        if len(critic):
+            print(
+                f"step {step:5d} critic weights "
+                + " ".join(f"{k} min {min(w):.2f} max {max(w):.2f}" for k, w in row["critic_weights"].items()),
+                flush=True,
+            )
 
     record(0, {})
     model.train()
@@ -896,6 +960,10 @@ def main():
                 terms = {"hard": hard_negative_infonce(code, units, args.tau, a.hard_negatives, sim)}
                 with torch.no_grad():  # the recipe's loss, for comparison with every other arm
                     terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
+            elif "main" in critic:
+                terms = {"global": hard_negative_infonce(code, units, args.tau, 0.0, sim, critic["main"]())}
+                with torch.no_grad():  # the equal-weight loss, for comparison with every other arm
+                    terms["unweighted"] = T.contrastive_loss(code, model, args, sim, crit, None)
             else:
                 terms = {"global": T.contrastive_loss(code, model, args, sim, crit, None)}
             if halves is not None:
@@ -916,7 +984,8 @@ def main():
                 coder = torch.cat(
                     [pool.head(pool.pooled_view(part, view, update=False)) for view, part in enumerate(hr.chunk(2))]
                 )
-                terms["remainder"] = hard_negative_infonce(coder[:, units:], rest, args.tau, 0.0, sim)
+                weight = critic["remainder"]() if "remainder" in critic else None
+                terms["remainder"] = hard_negative_infonce(coder[:, units:], rest, args.tau, 0.0, sim, weight)
         if queue is not None or pool is not None:
             loss = terms["supervised"] if a.supervise else terms["hard"] if a.hard_negatives else terms["global"]
             if halves is not None:
@@ -957,6 +1026,8 @@ def main():
                 state["pool"] = pool.state_dict()
             if readout is not None:
                 state["readout"] = readout.state_dict()
+            if len(critic):
+                state["critic"] = critic.state_dict()
             torch.save(state, a.out / "model.pt")
     print("DONE", flush=True)
 
