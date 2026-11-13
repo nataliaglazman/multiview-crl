@@ -1,4 +1,4 @@
-# Burden feasibility: handoff (12 Nov 2026)
+# Burden feasibility: handoff (13 Nov 2026)
 
 Everything for this line of work lives in this folder. `run_pc.sh` runs it in numbered stages, and its header
 describes every stage. This file says what the work is for, how it is run, what has been found, what is still open
@@ -350,7 +350,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Label-free factor-level discovery** needs views that share different subsets of factors, or interventions.
   Two views that share everything identify only the block.
 
-## 9. State on 12 Nov
+## 9. State on 13 Nov
 
 - **Stage 31 (built 12 Nov, not run).** Per-unit critic weights, `warm.py --critic-weights` (section 7, item 19).
   - **First, no training:** stage 29's precision audit is re-priced with the critic refitted to each of its five
@@ -367,6 +367,32 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     after the change; two-step runs of the three arms, and the reports, finish.
   - **Numbering:** stage 30 (frozen-backbone prediction) was built at the same time in another session, so this one
     is 31, with its own `causal/stage31/`.
+- **Stage 30 (built 13 Nov, not run on the PC).** Frozen-backbone feature prediction, `frozen_prediction.py`.
+  - **Source:** stage 28's finished `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c24_20k`.
+    No new bank is rendered. All arms continue its identical shared 24-unit head; the backbone, pooling statistics
+    and gauges stay frozen.
+  - **Arms:** InfoNCE alone (`head_nofield_c24_nce_10k`), plus prediction at weight 0.1
+    (`head_nofield_c24_predict01_10k`) and weight 1 (`head_nofield_c24_predict1_10k`). Each runs 10,000 head updates,
+    seed 42, with reports every 2,000.
+  - **Prediction:** the T1 code predicts the frozen FLAIR backbone's 64 global-average features, and vice versa.
+    Two linear predictors read only the exported code, with no feature bypass or factor labels. They are used only
+    during training; every factor is still read from the same code.
+  - **Scaling:** target whitening decorrelates and rescales feature directions, with ridge 0.1 to limit amplification
+    of weak directions. It and the fixed initial-code mean/SD use training subjects only. Test features are cached
+    for reporting and never fit these statistics.
+  - **Matched input:** `causal/stage30/features.pt` stores eight independent source-jitter draws per training subject
+    as frozen pooled head inputs. Targets are the unaugmented global-average features. Preparation runs once before
+    the parallel arms; all three use the same cache and batches. This is a finite set of eight augmentations per
+    subject, unlike stage 28's fresh jitter every step, so compare the prediction arms with their matched control.
+  - **Reports:** `causal/stage30/{precision_audit,own_variation,code_audit}.txt`, including the source run.
+    The precision price table measures only the InfoNCE component, not the new total loss. The reported untrained
+    twin is a fully random network; the source run is the starting point for these head continuations.
+  - **Success:** the code's equivalent volume error moves toward the frozen backbone's ~11 voxels, burden's own
+    variation improves over the matched control, and anatomy holds. A lower prediction loss alone is insufficient.
+  - **Checked locally:** six focused tests; two-step runs of all three arms on the small field-off bank with two
+    cached jitter draws; identical initial heads and batch sequences; unchanged backbone and pooling state; saved
+    codes reproduced by the existing loader; all three reports finished. Shell syntax and stage-30 dry run pass.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 30` after stage 28 has finished.
 - **Stage 29 (built 12 Nov, not run).**
   - **Arms.** Three head levers on `bank_causal_nofield`, against stage 28's 24-unit InfoNCE arm: 48 units, 10
     remainder units on GAP neighbourhoods, and Barlow Twins with 24 units. Plus stage 28's arm on
@@ -437,6 +463,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - The 48-unit arm. On the field-on bank, width bought anatomy and position, but there the backbone held little burden.
   - Stage 24's remainder units on GAP neighbourhoods.
   - Barlow Twins with 24 units. It failed on the field-on bank, where burden's views agreed at only ~.5.
+- **Stage 30 tests preserving the existing backbone signal** through the head with cross-view feature prediction
+  (section 9). Compare with its frozen-backbone InfoNCE control before considering end-to-end training.
 - **Per-unit critic weights are built as stage 31** (section 9). Its first step re-prices stage 29's codes with no
   training; read that before the arms finish.
 - **Big-lesion compression** (item 18) is a separate lead. Labels remove it, so nothing in InfoNCE pays to keep big

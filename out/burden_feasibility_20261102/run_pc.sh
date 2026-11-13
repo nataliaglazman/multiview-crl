@@ -126,6 +126,12 @@
 # arm, paid only for what the 14 main units lack) and Barlow Twins with 24 units (per-unit agreement, which does not
 # saturate). And gain: stage 28's arm on a bank that also renders every scan at gain 1 (bank.py --gain off: the same
 # subjects, lesions, bias, noise and field draws). The precision audit, own variation and the audit (causal/stage29/).
+# Stage 30 (opt-in) Preserve the field-off backbone's information through its 24-unit head. Freeze stage 28's
+# backbone and pooling statistics, continue identical source heads with InfoNCE alone or with cross-view prediction
+# of the other view's 64 global-average features (weights 0.1 and 1). Linear predictors read only the exported code.
+# Fit target whitening and initial-code scaling on training subjects only. Cache eight independent jitter draws per
+# training subject once, then share them across the three 10k-step arms. This uses a finite augmentation cache, not
+# fresh image jitter every step. Reports against the source run go to causal/stage30/; the price table is InfoNCE only.
 # Stage 31 (opt-in) Per-unit critic weights (warm.py --critic-weights): one learnable weight per code unit inside the
 # InfoNCE cosine, so a unit whose views agree poorly can count for less instead of costing the loss. First, no
 # training: stage 29's precision audit re-priced with the critic refitted to each of its five codes
@@ -932,6 +938,57 @@ if wants 29; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 29 reports in $OUT"
+fi
+
+if wants 30; then
+    SOURCE=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c24_20k
+    CONTROL=head_nofield_c24_nce_10k
+    PREDICT01=head_nofield_c24_predict01_10k
+    PREDICT1=head_nofield_c24_predict1_10k
+    OUT=$D/causal/stage30
+    CACHE=$OUT/features.pt
+    BASE=(--cache "$CACHE" --draws 8 --batch "$BATCH" --seed 42 --whiten-ridge 0.1)
+    if [ "$DRY" = 0 ]; then
+        if ! grep -qx DONE "$D/logs/$SOURCE.log" || [ ! -f "$D/runs/$SOURCE/model.pt" ] || \
+            [ ! -f "$D/runs/$SOURCE/report.json" ]; then
+            echo "Stage 30 needs stage 28's $SOURCE finished. Run stage 28 first."
+            exit 1
+        fi
+        mkdir -p "$OUT" || exit 1
+    fi
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/frozen_prediction.py $D/runs/$SOURCE $D/runs/$CONTROL 10000 2000 ${BASE[*]} --prepare-only > $OUT/features.log"
+    else
+        "$PY" "$D/frozen_prediction.py" "$D/runs/$SOURCE" "$D/runs/$CONTROL" 10000 2000 "${BASE[@]}" \
+            --prepare-only > "$OUT/features.log" 2>&1 \
+            || { echo "Feature preparation failed, see $OUT/features.log"; exit 1; }
+    fi
+    arm "$CONTROL" "$PY" "$D/frozen_prediction.py" "$D/runs/$SOURCE" "$D/runs/$CONTROL" 10000 2000 \
+        "${BASE[@]}" --prediction-weight 0
+    arm "$PREDICT01" "$PY" "$D/frozen_prediction.py" "$D/runs/$SOURCE" "$D/runs/$PREDICT01" 10000 2000 \
+        "${BASE[@]}" --prediction-weight 0.1
+    arm "$PREDICT1" "$PY" "$D/frozen_prediction.py" "$D/runs/$SOURCE" "$D/runs/$PREDICT1" 10000 2000 \
+        "${BASE[@]}" --prediction-weight 1
+    finish "$CONTROL" "$PREDICT01" "$PREDICT1"
+    RUNS=("$D/runs/$SOURCE" "$D/runs/$CONTROL" "$D/runs/$PREDICT01" "$D/runs/$PREDICT1")
+    if [ "$DRY" = 0 ]; then
+        for name in "$CONTROL" "$PREDICT01" "$PREDICT1"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ] || \
+                [ ! -f "$D/runs/$name/report.json" ]; then
+                echo "Stage 30 needs $name finished. Rerun stage 30 after it is."
+                exit 1
+            fi
+        done
+    fi
+    for report in precision_audit own_variation code_audit; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$report.py $OUT/$report.json ${RUNS[*]} > $OUT/$report.txt"
+        else
+            "$PY" "$D/$report.py" "$OUT/$report.json" "${RUNS[@]}" > "$OUT/$report.txt" 2>&1 \
+                || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 30 reports in $OUT"
 fi
 
 if wants 31; then
