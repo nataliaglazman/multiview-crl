@@ -139,6 +139,12 @@
 # the remainder term, and on both terms (against stage 29's remainder arm), and stage 28's 24-unit arm with weights on
 # its main term (against that arm; a saturated code, where the weights should change little). The precision audit, own
 # variation and the audit of the three and their two controls (causal/stage31/).
+# Stage 32 (opt-in) Stage 30's weight-1 head reads lesion volume to 14.9 voxels in both views (its InfoNCE control
+# 23.9 / 22.9, the frozen backbone's GAP 11.0) and keeps the anatomy. Two head-only follow-ups, as in stage 30. Weights
+# 3 and 10 on stage 30's cached features and batches: does the code close on the backbone? Weight 1 and its InfoNCE
+# control on stage 29's gain-off backbone (GAP 8.7 / 8.1), with its own cache of eight jitter draws: does the code
+# follow a sharper backbone? The precision audit, own variation and the audit of the four new heads, stage 30's control
+# and weight-1 head, and both source runs (causal/stage32/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1039,6 +1045,73 @@ if wants 31; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 31 reports in $OUT"
+fi
+
+if wants 32; then
+    NOFIELD=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c24_20k
+    NOGAIN=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_c24_20k
+    CONTROL=head_nofield_c24_nce_10k
+    PREDICT1=head_nofield_c24_predict1_10k
+    PREDICT3=head_nofield_c24_predict3_10k
+    PREDICT10=head_nofield_c24_predict10_10k
+    NOGAIN_CONTROL=head_nogain_c24_nce_10k
+    NOGAIN_PREDICT1=head_nogain_c24_predict1_10k
+    OUT=$D/causal/stage32
+    COMMON=(--draws 8 --batch "$BATCH" --seed 42 --whiten-ridge 0.1)
+    NOFIELD_BASE=(--cache "$D/causal/stage30/features.pt" "${COMMON[@]}")
+    NOGAIN_BASE=(--cache "$OUT/features_nogain.pt" "${COMMON[@]}")
+    if [ "$DRY" = 0 ]; then
+        for name in "$NOFIELD" "$NOGAIN" "$CONTROL" "$PREDICT1"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ] || \
+                [ ! -f "$D/runs/$name/report.json" ]; then
+                echo "Stage 32 needs $name finished (stages 28, 29 and 30 train these). Run those first."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+    fi
+    head_cache() { # head_cache SOURCE LOG ARGS...: check or build a feature cache before the parallel arms
+        local source=$1 log=$2; shift 2
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/frozen_prediction.py $D/runs/$source $OUT/unused 10000 2000 $* --prepare-only > $log"
+            return
+        fi
+        "$PY" "$D/frozen_prediction.py" "$D/runs/$source" "$OUT/unused" 10000 2000 "$@" --prepare-only > "$log" 2>&1 \
+            || { echo "Feature preparation failed, see $log"; exit 1; }
+    }
+    # Stage 30's cache is only read, and its settings must match, so the new field-off arms see stage 30's jitter draws
+    # and batches. Preparation stops before it would create the output folder it is given.
+    head_cache "$NOFIELD" "$OUT/features_nofield.log" "${NOFIELD_BASE[@]}"
+    head_cache "$NOGAIN" "$OUT/features_nogain.log" "${NOGAIN_BASE[@]}"
+    arm "$PREDICT3" "$PY" "$D/frozen_prediction.py" "$D/runs/$NOFIELD" "$D/runs/$PREDICT3" 10000 2000 \
+        "${NOFIELD_BASE[@]}" --prediction-weight 3
+    arm "$PREDICT10" "$PY" "$D/frozen_prediction.py" "$D/runs/$NOFIELD" "$D/runs/$PREDICT10" 10000 2000 \
+        "${NOFIELD_BASE[@]}" --prediction-weight 10
+    arm "$NOGAIN_CONTROL" "$PY" "$D/frozen_prediction.py" "$D/runs/$NOGAIN" "$D/runs/$NOGAIN_CONTROL" 10000 2000 \
+        "${NOGAIN_BASE[@]}" --prediction-weight 0
+    arm "$NOGAIN_PREDICT1" "$PY" "$D/frozen_prediction.py" "$D/runs/$NOGAIN" "$D/runs/$NOGAIN_PREDICT1" 10000 2000 \
+        "${NOGAIN_BASE[@]}" --prediction-weight 1
+    finish "$PREDICT3" "$PREDICT10" "$NOGAIN_CONTROL" "$NOGAIN_PREDICT1"
+    RUNS=("$D/runs/$NOFIELD" "$D/runs/$CONTROL" "$D/runs/$PREDICT1" "$D/runs/$PREDICT3" "$D/runs/$PREDICT10"
+        "$D/runs/$NOGAIN" "$D/runs/$NOGAIN_CONTROL" "$D/runs/$NOGAIN_PREDICT1")
+    if [ "$DRY" = 0 ]; then
+        for name in "$PREDICT3" "$PREDICT10" "$NOGAIN_CONTROL" "$NOGAIN_PREDICT1"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ] || \
+                [ ! -f "$D/runs/$name/report.json" ]; then
+                echo "Stage 32 needs $name finished. Rerun stage 32 after it is."
+                exit 1
+            fi
+        done
+    fi
+    for report in precision_audit own_variation code_audit; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$report.py $OUT/$report.json ${RUNS[*]} > $OUT/$report.txt"
+        else
+            "$PY" "$D/$report.py" "$OUT/$report.json" "${RUNS[@]}" > "$OUT/$report.txt" 2>&1 \
+                || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 32 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

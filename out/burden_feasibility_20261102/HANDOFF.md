@@ -317,8 +317,17 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - **Shared error.** The InfoNCE views share about half their reading error: on training subjects, shared-error r is
       .52 at the GAP and .58 at the code, against .14–.22 with labels. A cross-view loss pays for a shared error as it
       pays for burden.
-    - **Not yet reported:** `own_variation.txt`, `code_audit.txt` and the price table in `precision_audit.txt`. The
-      second success test, the code's burden own part above the field-on arm's .28 / .32, needs `own_variation.txt`.
+    - **Own variation (read 13 Nov, `own_variation.txt`).** Burden's own part, T1 / FLAIR, field on → off: code
+      .28 / .32 → .35 / .34; pooled .34 / .37 → .50 / .49; GAP .35 / .34 → .57 / .55. The second success test (code
+      above .28 / .32) is passed only marginally: the backbone gained far more than the code.
+      - The labelled code holds .41 / .48 although it reads volume to 5.9 / 4.7 voxels. Own variation also needs the
+        parent (ventricle, .17 / .21 in that code) read precisely, so it understates a code that holds volume alone.
+    - **Code audit (`code_audit.txt`).** The field-off code holds more anatomy than the field-on one. Own part, T1 /
+      FLAIR: brain .48 / .32 (field on .18 / .44), temporal .73 / .71 (.15 / .18), thickness .34 / .43 (.11 / .14).
+      Retrieval among all 1,000 test subjects is .93.
+    - **Price (`precision_audit.txt`).** A burden unit read to ~10 voxels, about the backbone's precision, earns
+      +.003 nats in uniform sets and +.017 in neighbour sets (+.024 with position and anatomy removed). At 20 voxels
+      it costs −.011. The code is saturated (loss .10 on uniform sets).
 19. **Two local checks of next-step levers (11 Nov, no training).**
     - **Per-unit weights in the critic** (the similarity inside InfoNCE).
       - Set-up: the run's InfoNCE on codes built from true latents (6 anatomy factors at cross-view r .9, the lesion
@@ -332,6 +341,30 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       - With the fixed blob filter, agreement on a 20-voxel own part is T1–FLAIR .80, FLAIR–FLAIR .85 and T1–T1 .83.
         Part of the filter's error repeats within a modality (error r .33–.44).
       - Pairing T1 with FLAIR is not what blocks burden.
+20. **Head levers on the field-off bank don't move burden (stages 29 and 31, read 13 Nov).** All 20k steps, seed 42,
+    against stage 28's 24-unit InfoNCE arm. Code error in voxels, then burden's own part in the code, T1 / FLAIR:
+    - 24 units (control): 18.0 / 19.7, .35 / .34. Backbone GAP 11.0 / 11.0, own part .57 / .55.
+    - 48 units: 17.8 / 19.1, .36 / .35. Slightly more anatomy, nothing for burden.
+    - Barlow Twins, 24 units: 15.4 / 16.1, the sharpest code (largest third 27 / 30 against 47 / 42), but .35 / .35.
+      It loses temporal (.01), thickness, lr and sulcal: the code fills with lesion position (.94–.96) and brain.
+    - 10 remainder units on GAP neighbourhoods: 19.0 / 18.7, .35 / .35, with the best code anatomy so far (own part:
+      brain .90, lr .83, temporal .76, ventricle .38). Largest third 32 / 31.
+    - Gain off (`bank_causal_nofield_nogain`): the image filter (8.0 / 6.2) and the backbone GAP (8.7 / 8.1, own part
+      .66 / .65, the best backbone so far) sharpen, but the code stays at 17.5 / 18.2, .37 / .33.
+    - Critic weights: on the main term 18.2 / 19.7, .33 / .31; on the remainder term 17.4 / 17.8, .35 / .32; on both
+      17.8 / 18.6, .37 / .34. The two remainder arms keep the remainder arm's anatomy and read the largest third to
+      26–28; the main-term arm is like the control.
+    - **Burden's own part in the code sits at .31–.37 in all eight label-free arms,** while their backbones hold
+      .51–.66. Width, Barlow Twins, remainder conditioning and critic weights don't move it.
+    - **Price (stage 31's re-price of stage 29's codes).** Weights remove the cost of a 20-voxel burden unit (−.011 →
+      .000) but add no reward. At ~10 voxels a burden unit earns +.000 to +.003 nats in uniform sets (+.015 in the
+      Barlow Twins code, which InfoNCE has not saturated). Only with position and anatomy removed exactly, in neighbour
+      sets, does it earn more (+.07 in the remainder code): a regime the remainder term's GAP neighbourhoods don't
+      reach.
+    - **What the code carries instead.** In the remainder codes the views' burden readings agree at .93, but their
+      errors correlate at .85: a shared stand-in built from anatomy and lesion position, not burden's own part.
+    - **Reading:** the blocker is the saturated InfoNCE at the head (retrieval ~.99 in sets of 32), not the backbone.
+      Stage 30 changes the head's objective.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -352,7 +385,28 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 13 Nov
 
-- **Stage 31 (built 12 Nov, not run).** Per-unit critic weights, `warm.py --critic-weights` (section 7, item 19).
+- **Stage 32 (built 13 Nov, not run): the next step.** Two head-only follow-ups to stage 30, with its script
+  (`frozen_prediction.py`) unchanged.
+  - **Why:** stage 30's weight-1 head reads lesion volume to 14.9 voxels in both views, against 23.9 / 22.9 for its
+    InfoNCE control and 11.0 for the frozen backbone's GAP, and keeps the anatomy. The error fell steadily with the
+    weight (0, 0.1, 1), so it may fall further. The gain-off backbone reads volume more precisely (GAP 8.7 / 8.1).
+  - **Arms**, 10,000 head updates each, seed 42:
+    - weights 3 and 10 on stage 30's backbone, cache and batches (`head_nofield_c24_predict3_10k`,
+      `head_nofield_c24_predict10_10k`), against stage 30's control and weight-1 head;
+    - weight 1 and its InfoNCE control on stage 29's gain-off backbone (`head_nogain_c24_predict1_10k`,
+      `head_nogain_c24_nce_10k`; source `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_c24_20k`), with
+      their own cache of eight jitter draws (`causal/stage32/features_nogain.pt`).
+  - **Reports:** `causal/stage32/{precision_audit,own_variation,code_audit}.txt`: the four new heads beside stage
+    30's control and weight-1 head and both source runs. The price table prices InfoNCE only.
+  - **Success:** the code's volume error falls toward its backbone's GAP (11.0, or 8.7 / 8.1 with gain off), and
+    burden's own variation in the code rises above stages 29 and 31's .31–.37, with anatomy holding. At weight 10
+    InfoNCE has little say, so also watch the as-trained InfoNCE loss and retrieval in the audit.
+  - **Checked locally:** shell syntax and the stage 32 dry run. The trainer is unchanged; there is no local gain-off
+    source run to smoke-test it on.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 32`. It reads stage 30's cache and needs stage 30's
+    control and weight-1 head, and stage 29's gain-off run, finished.
+- **Stage 31 was read on 13 Nov** (section 7, item 20). Critic weights change nothing for burden (code .31–.37,
+  17–20 voxels). As built: per-unit critic weights, `warm.py --critic-weights` (section 7, item 19).
   - **First, no training:** stage 29's precision audit is re-priced with the critic refitted to each of its five
     codes (`causal/stage31/price_stage29.txt`). Read it first: if the weighted rows don't make a burden unit read to
     ~11 voxels pay, the training arms are unlikely to help.
@@ -367,7 +421,20 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     after the change; two-step runs of the three arms, and the reports, finish.
   - **Numbering:** stage 30 (frozen-backbone prediction) was built at the same time in another session, so this one
     is 31, with its own `causal/stage31/`.
-- **Stage 30 (built 13 Nov, not run on the PC).** Frozen-backbone feature prediction, `frozen_prediction.py`.
+- **Stage 30 (run 13 Nov; precision audit read, own variation and audit not yet).** Frozen-backbone feature
+  prediction, `frozen_prediction.py`.
+  - **Precision audit (`causal/stage30/precision_audit.txt`).** Code volume error, T1 / FLAIR, with the frozen GAP at
+    11.0 / 11.0: start (stage 28's head) 18.0 / 19.7; InfoNCE alone 23.9 / 22.9; weight 0.1 21.0 / 20.4; weight 1
+    14.9 / 14.9 (largest third 26 / 28; lesion position .90 and anatomy .78 still in the code). More InfoNCE alone
+    sheds burden, position and anatomy while its loss halves. Barlow Twins also read ~15 voxels (section 7, item 20)
+    and held only .35 of burden's own variation, so own variation decides.
+  - **Why:** stages 29 and 31 show the head drops burden's own part because the saturated InfoNCE stops paying for it
+    (section 7, item 20). A prediction error keeps paying for any feature the code fails to reproduce. Whitening gives
+    every direction of the other view's features equal weight, including the faint one that carries burden's own
+    part. Predicting the other view, not the same one, limits the code to what both views share (style differs
+    between the scans), with no labels. Freezing the backbone isolates the head: can it keep what the backbone holds?
+  - **Loss:** InfoNCE plus weight × the mean squared error of each view's linear decoder (T1 code → whitened FLAIR GAP,
+    FLAIR code → whitened T1 GAP). Only the head and the two decoders train; the decoders are dropped after training.
   - **Source:** stage 28's finished `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c24_20k`.
     No new bank is rendered. All arms continue its identical shared 24-unit head; the backbone, pooling statistics
     and gauges stay frozen.
@@ -393,7 +460,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     cached jitter draws; identical initial heads and batch sequences; unchanged backbone and pooling state; saved
     codes reproduced by the existing loader; all three reports finished. Shell syntax and stage-30 dry run pass.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 30` after stage 28 has finished.
-- **Stage 29 (built 12 Nov, not run).**
+- **Stage 29 was read on 13 Nov** (section 7, item 20). No head lever moves burden's own part in the code; remainder
+  units give the best code anatomy, and gain off the best backbone. As built:
   - **Arms.** Three head levers on `bank_causal_nofield`, against stage 28's 24-unit InfoNCE arm: 48 units, 10
     remainder units on GAP neighbourhoods, and Barlow Twins with 24 units. Plus stage 28's arm on
     `bank_causal_nofield_nogain`, which tests gain alone.
@@ -412,8 +480,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - With labels, T1 reads new subjects to 5.9 voxels (field on 16.9).
   - The InfoNCE backbone reads to ~11 (field on ~20).
   - The 24-unit code reads only to 18–20, so the head is now the bottleneck.
-  - The first success test (T1 behaves as FLAIR) is met. The second, the code's burden own part above .28 / .32,
-    waits on `own_variation.txt`.
+  - The first success test (T1 behaves as FLAIR) is met. The second, the code's burden own part above .28 / .32, is
+    met only marginally (.35 / .34, against .57 / .55 in the backbone; read 13 Nov).
 - **Stage 28 overturns parts of stages 26–27.** Those were read with the field on. The ~20-voxel backbone and the T1
   overfitting both came mostly from the field.
 - **Stage 26 was read on 11 Nov** (section 7, item 15). With labels the FLAIR backbone reads lesion volume to ~9
@@ -450,25 +518,22 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 10. Recent stages and next steps
 
-**First, after stage 28 (12 Nov).** The numbered items below were written with the field on.
-- **Read the three stage 28 reports not yet reported:**
-  - `causal/stage28/own_variation.txt`: burden's own part in the code, against the field-on arm's .28 / .32.
-  - `code_audit.txt`: what the 24 units hold, such as lesion position and anatomy.
-  - The price table in `precision_audit.txt`: does an ~11-voxel reading pay in this code?
+**Next, after stage 30's precision audit (13 Nov).** The numbered items below were written with the field on.
+- **Read stage 30's own variation and audit** (`causal/stage30/own_variation.txt`, `code_audit.txt`). Its precision
+  audit is promising (section 9): does weight 1 also lift burden's own part in the code above stages 29 and 31's
+  .31–.37, with anatomy holding?
+- **Run stage 32** (`run_pc.sh 32`, section 9): weights 3 and 10, and weight 1 on the gain-off backbone. If the
+  prediction term holds up, move it into end-to-end training on the strongest base: the gain-off bank (best backbone)
+  with remainder units (best anatomy). The targets then need a slowly updated copy of the backbone that gets no
+  gradient, or the backbone can make its own targets easy to predict.
 - **Decide with the user whether `bank_causal_nofield` becomes the main burden bank,** with the field-on bank kept as a
   stress test. For: a real bias field varies over centimetres and N4 removes it, so the 16³ field has no counterpart
-  in corrected scans.
-- **Head levers come first,** since the head is now the bottleneck. Stage 29 runs three on the field-off bank, plus
-  the gain test:
-  - The 48-unit arm. On the field-on bank, width bought anatomy and position, but there the backbone held little burden.
-  - Stage 24's remainder units on GAP neighbourhoods.
-  - Barlow Twins with 24 units. It failed on the field-on bank, where burden's views agreed at only ~.5.
-- **Stage 30 tests preserving the existing backbone signal** through the head with cross-view feature prediction
-  (section 9). Compare with its frozen-backbone InfoNCE control before considering end-to-end training.
-- **Per-unit critic weights are built as stage 31** (section 9). Its first step re-prices stage 29's codes with no
-  training; read that before the arms finish.
+  in corrected scans. The same question for gain off, whose real counterpart is intensity normalisation (WhiteStripe).
+- **Done on 13 Nov:** stage 28's remaining reports (item 18) and the head levers of stages 29 and 31 (item 20: width,
+  remainder units, Barlow Twins, gain off, critic weights). None moved burden's own part in the code. Stage 30 ran and
+  its precision audit is read (section 9).
 - **Big-lesion compression** (item 18) is a separate lead. Labels remove it, so nothing in InfoNCE pays to keep big
-  lesions apart.
+  lesions apart. Remainder units and critic weights cut the code's error on the largest third from 47 / 42 to 26–33.
 
 1. **Read stage 20:** does the 31-neighbour burden at 20k (.19 / .18) replicate with seed 2?
 2. **Stage 21 compares Barlow Twins with InfoNCE** at 24 units and 20,000 steps on `bank_causal`. Both use the
@@ -591,3 +656,4 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | patch loss under jitter | can't train once the views are misaligned; off is better |
 | lesion-blind third view | lesion-specific; rejected by the user |
 | more subjects | not available on ADNI |
+| head levers for burden on the field-off bank: 48 units, Barlow Twins, remainder units, critic weights (stages 29, 31) | burden's own part in the code unchanged (.31–.37); remainder units stay for anatomy |
