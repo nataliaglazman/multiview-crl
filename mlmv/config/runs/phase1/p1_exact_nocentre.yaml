@@ -1,0 +1,4 @@
+# Phase 1: crowding-out test: context centring off
+run: {name: p1_exact_nocentre}
+synth: {variant: exact}
+loss: {centring: false}

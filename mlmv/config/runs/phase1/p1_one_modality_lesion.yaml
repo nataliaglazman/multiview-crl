@@ -1,0 +1,3 @@
+# Phase 1: lesions in FLAIR only (S should not recover them)
+run: {name: p1_one_modality_lesion}
+synth: {variant: one_modality_lesion}

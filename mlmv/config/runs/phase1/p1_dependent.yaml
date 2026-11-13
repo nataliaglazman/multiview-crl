@@ -1,0 +1,3 @@
+# Phase 1: r_R depends on g
+run: {name: p1_dependent}
+synth: {variant: dependent}

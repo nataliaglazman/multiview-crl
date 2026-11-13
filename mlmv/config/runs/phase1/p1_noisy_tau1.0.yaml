@@ -1,0 +1,3 @@
+# Phase 1: noisy sharing, tau^2 = 1.0
+run: {name: p1_noisy_tau1.0}
+synth: {variant: noisy, noise_tau2: 1.0}

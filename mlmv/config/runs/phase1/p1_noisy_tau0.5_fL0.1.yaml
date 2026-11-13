@@ -1,0 +1,4 @@
+# Phase 1: f_L curve on noisy tau^2 = 0.5 (f_L = 1.0 is p1_noisy_tau0.5)
+run: {name: p1_noisy_tau0.5_fL0.1}
+synth: {variant: noisy, noise_tau2: 0.5}
+sampler: {L: {fraction: 0.1}}

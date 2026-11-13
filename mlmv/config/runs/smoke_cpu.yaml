@@ -1,0 +1,20 @@
+# CPU integration run: 32^3 synthetic, small model, ridge-only leakage. Used by tests/test_mlmv_integration.py.
+# The small model has no 3^3 trunk conv (rho 1.5), so the 16^3 feature grid keeps enough eligible regions.
+run: {name: smoke_cpu, device: cpu, amp: none, log_every: 50, eval_every: 100000, ckpt_every: 100000}
+model:
+  stem_channels: 8
+  trunk_channels: 16
+  norm_groups: 2
+  trunk_blocks: 1
+  trunk_spatial_convs: 0
+  dims: {G: 8, L: 8, S: 16}
+  expander: [64, 64]
+  checkpoint: false
+sampler:
+  batch_subjects: 4
+  S: {positions: 128}
+  L: {regions: 8, fraction: 1.0}
+  G: {splits_per_subject: 4}
+optim: {steps: 200, warmup_steps: 20, rho_measure_step: 100, rho_positions: 8}
+synth: {image: 32, lattice: 8, n_train: 200, n_val: 40, n_test: 60}
+eval: {probes: [ridge], max_subjects: 60, positions_per_subject: 16, cv_folds: 3}

@@ -1,0 +1,4 @@
+# Phase 1: objective ablation: InfoNCE with context negatives
+run: {name: p1_exact_infonce}
+synth: {variant: exact}
+loss: {objective: infonce}

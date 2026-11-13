@@ -1,0 +1,3 @@
+# Phase 1: exact variant, main recipe
+run: {name: p1_exact}
+synth: {variant: exact}

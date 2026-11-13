@@ -1,0 +1,3 @@
+# Phase 1: site depends on g
+run: {name: p1_site_confounded}
+synth: {variant: site_confounded}

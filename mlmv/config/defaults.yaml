@@ -1,0 +1,134 @@
+# mlmv defaults. Each run overrides these with a small YAML file (and --set a.b=value);
+# the resolved config is saved next to the run's outputs. Paths marked "set per machine"
+# must be confirmed before Phase 0.
+#
+# Changes from the spec's defaults, approved 13 Nov 2026:
+#   model.norm: channel        per-position group norm over channels (no spatial statistics),
+#                              replacing GroupNorm(8), which reads the whole volume.
+#   model.trunk_spatial_convs  only the first N trunk convs are 3^3, the rest 1^3, so the
+#                              theoretical radius (2.5 feature voxels) fits max_rf_radius: 3.
+# Additions: geometry.metric, geometry.eligibility_normals, sampler.G.splits_per_subject,
+# loss.corr_ema, loss.standardise, synth.noise_tau2 is one value per run (sweep in the job).
+
+seed: 0
+run:
+  name: run
+  out_dir: results/mlmv
+  device: auto                           # auto | cpu | cuda | mps
+  amp: bf16                              # bf16 | none (bf16 is used on CUDA only)
+  log_every: 100
+  eval_every: 5000
+  ckpt_every: 10000
+  source: synthetic                      # synthetic | adni
+data:
+  spacing_mm: 2.0
+  grid: [96, 112, 96]
+  intensity_clip_pct: [0.5, 99.5]
+  metadata: PATH/metadata.parquet        # set per machine
+  splits: PATH/splits.json
+geometry:
+  atlas: PATH/template_synthseg_parc.nii.gz        # set per machine
+  region_map: PATH/region_map.csv        # atlas label -> region id (12-16 compact regions)
+  rho: auto                              # theoretical until measured; or a number (feature voxels)
+  min_positions_per_half: 8
+  metric: chebyshev                      # chebyshev | euclidean (see mlmv/data/geometry.py)
+  eligibility_normals: 256               # random normals a region must split well under
+model:
+  stem_channels: 32
+  trunk_channels: 128
+  trunk_blocks: 4
+  trunk_spatial_convs: 1                 # 3^3 convs at the start of the trunk; the rest are 1^3
+  down_kernel: 3
+  stride: 2
+  norm: channel                          # trunk norm: channel (per position) | none
+  norm_groups: 8                         # >= 4 channels per group (fewer erase the signal per position)
+  stem_norm: none                        # none | channel; a per-position norm after the first conv drops local scale
+  dims: {G: 16, L: 32, S: 64}
+  max_rf_radius: 3                       # feature voxels
+  template_subtraction: true
+  template_momentum: 0.999
+  expander: [512, 512]
+  variance_floor: false
+  variance_floor_weight: 1.0
+  checkpoint: true                       # gradient checkpointing on the trunk
+sampler:
+  batch_subjects: 4
+  S: {positions: 512}
+  L: {regions: 8, fraction: 1.0}
+  G: {volume_ratio: [0.4, 0.6], splits_per_subject: 8}
+loss:
+  objective: barlow                      # barlow | infonce
+  centring: true
+  standardise: running                   # running | batch
+  lambda_off: 0.005
+  corr_ema: 0.0                          # 0 = off; running cross-correlation (scales gradients by 1-m)
+  weights: {S: 1.0, L: 1.0, G: 1.0}
+  balance: none                          # none | gradnorm
+  infonce: {temperature: 0.1, queue: 4096}
+  buffer: {size: 4096, momentum: 0.99}
+optim:
+  lr: 3.0e-4
+  weight_decay: 0.05
+  warmup_steps: 2000
+  steps: 100000
+  grad_clip: 1.0
+  rho_measure_step: 5000
+  rho_positions: 64
+  rho_mass: 0.95
+phase3a:
+  enabled: false
+  pairs_per_batch: 1
+  lambda_x: 1.0
+  min_pair_dice: 0.95
+flow:
+  layers: 6
+  hidden: 256
+  site_embedding: 16
+  condition_on_g: false
+  lambda_id: 1.0e-4
+  kernel_scales: [0.5, 1, 2, 4]
+  strata: {diagnosis: [CN, MCI, AD], age_bins: [70, 80]}
+  min_samples_per_cell: 32
+  cache_positions_per_region: 256
+  buffer_per_cell: 512
+  lr: 1.0e-4
+  steps: 20000
+synth:
+  variant: exact                         # exact | noisy | one_modality_lesion | dependent | site_confounded
+  regions: voronoi                       # voronoi (atlas: needs Phase 0 data)
+  n_regions: 8
+  lattice: 16
+  image: 64
+  dims: {g: 4, r: 4, s: 4, w: 1, site: 2, style: 2}
+  n_sites: 6
+  decoder_hidden: 64
+  s_width: 1.0                           # Gaussian width of s, w and eta, in lattice cells
+  w_variance: 0.05
+  lesion_blobs: [0, 3]
+  lesion_radius: [1, 2]                  # lattice cells
+  noise_tau2: 0.5                        # noisy variant; the Phase 1 job sweeps 0.1, 0.5, 1.0
+  dependent_scale: 1.0                   # dependent variant: r_R ~ N(A g, I) with ||A rows|| = this
+  confound_strength: 2.0                 # site_confounded: logits = strength * V g
+  n_train: 4000
+  n_val: 256
+  n_test: 1000
+  weights_seed: 0
+eval:
+  probes: [ridge, mlp]
+  cv_folds: 5
+  ridge_alpha: 1.0
+  mlp_hidden: [128, 128]
+  mlp_epochs: 60
+  positions_per_subject: 64              # per-position probes subsample cells
+  max_subjects: 1000
+  permutations: 200
+  fdr_q: 0.05
+  thresholds:
+    g_r2_min: 0.9
+    r_r2_min: 0.8
+    s_r2_min: 0.8
+    leak_r2_max: 0.1
+    g_cka_min: 0.9
+    pair_ratio_min: 0.9
+    seed_r2_min: 0.8
+    eff_rank_frac_min: 0.25
