@@ -151,6 +151,12 @@
 # recipe: weights 1 and 3 on bank_causal_nofield (against stage 28's 24-unit InfoNCE arm) and weight 1 on the gain-off
 # bank (against stage 29's gain-off arm). The precision audit, own variation and the audit, beside the two controls
 # and stage 32's best frozen-backbone heads when they are there (causal/stage33/).
+# Stage 34 (opt-in) Two checks before stage 33's prediction term joins the recipe. Style: does any code carry its own
+# view's gain, bias or noise level (style_audit.py, no training)? Banks don't store those latents, so they are redrawn
+# from the generator's seeds and checked against the stored content latents. It runs first, on stage 33's runs, its
+# controls and stage 32's two heads, while the seed check trains. Seed: stage 33's two weight-1 arms again with seed 2.
+# Then the precision audit, own variation and the audit of both seeds and both InfoNCE controls, and the style audit
+# with the seed-2 runs added (causal/stage34/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1164,6 +1170,64 @@ if wants 33; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 33 reports in $OUT"
+fi
+
+stage_report() { # stage_report OUT REPORT RUN...: REPORT.py's table for the runs into OUT/REPORT.txt
+    local out=$1 report=$2; shift 2
+    if [ "$DRY" = 1 ]; then echo "$PY $D/$report.py $out/$report.json $* > $out/$report.txt"; return; fi
+    echo "$(date +%H:%M) $report into $out"
+    "$PY" "$D/$report.py" "$out/$report.json" "$@" > "$out/$report.txt" 2>&1 \
+        || { echo "$report failed, see $out/$report.txt"; exit 1; }
+}
+
+if wants 34; then
+    NOFIELD=$D/bank_causal_nofield
+    NOGAIN=$D/bank_causal_nofield_nogain
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    bank "$NOGAIN" --t1-values 0.4 --causal --field off --gain off
+    residual_bank "$NOGAIN" t1_04 flair
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    NCE=${P}_c24_20k
+    GAINLESS=${P}_nogain_c24_20k
+    PREDICT1=${P}_predict1_c24_20k
+    PREDICT3=${P}_predict3_c24_20k
+    GAINLESS_PREDICT1=${P}_nogain_predict1_c24_20k
+    OUT=$D/causal/stage34
+    if [ "$DRY" = 0 ]; then
+        for name in "$NCE" "$GAINLESS" "$PREDICT1" "$PREDICT3" "$GAINLESS_PREDICT1"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 34 needs $name finished (stages 28, 29 and 33 train it). Rerun stage 34 after it is."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+        # Start from stage 33's assessments, so the reports score only the seed-2 runs (reused at the same step).
+        for file in "$D"/causal/stage33/{precision_audit,own_variation,code_audit}.json "$D"/causal/stage33/image_*; do
+            if [ -e "$file" ] && [ ! -e "$OUT/${file##*/}" ]; then cp "$file" "$OUT/"; fi
+        done
+    fi
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 2 --content-units 24
+        --contrastive-loss-type infonce)
+    EVERY=2000 ssl "${PREDICT1}_s2" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --predict-weight 1
+    EVERY=2000 ssl "${GAINLESS_PREDICT1}_s2" "$NOGAIN" tail t1_04 20000 "${BASE[@]}" --predict-weight 1
+
+    STYLED=("$D/runs/$PREDICT1" "$D/runs/$PREDICT3" "$D/runs/$NCE" "$D/runs/$GAINLESS_PREDICT1" "$D/runs/$GAINLESS")
+    for name in head_nofield_c24_predict3_10k head_nogain_c24_predict1_10k; do  # stage 32's heads
+        if [ "$DRY" = 1 ] || grep -qx DONE "$D/logs/$name.log" 2>/dev/null; then STYLED+=("$D/runs/$name"); fi
+    done
+    stage_report "$OUT" style_audit "${STYLED[@]}"  # while the seed-2 arms train
+    finish "${PREDICT1}_s2" "${GAINLESS_PREDICT1}_s2"
+    if [ "$DRY" = 0 ]; then
+        for name in "${PREDICT1}_s2" "${GAINLESS_PREDICT1}_s2"; do
+            grep -qx DONE "$D/logs/$name.log" || { echo "Stage 34's style audit is in $OUT; rerun for $name."; exit 1; }
+        done
+    fi
+    SEEDS=("$D/runs/$PREDICT1" "$D/runs/${PREDICT1}_s2" "$D/runs/$NCE"
+        "$D/runs/$GAINLESS_PREDICT1" "$D/runs/${GAINLESS_PREDICT1}_s2" "$D/runs/$GAINLESS")
+    for report in precision_audit own_variation code_audit; do stage_report "$OUT" "$report" "${SEEDS[@]}"; done
+    stage_report "$OUT" style_audit "${STYLED[@]}" "$D/runs/${PREDICT1}_s2" "$D/runs/${GAINLESS_PREDICT1}_s2"
+    [ "$DRY" = 0 ] && echo "Stage 34 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

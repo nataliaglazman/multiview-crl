@@ -159,6 +159,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `summarize.py` | each arm's training history, compact enough to paste |
 | `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, the same rows for the untrained twin (the floor), canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
 | `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns |
+| `style_audit.py` | each view's gain, bias and noise level read from the code, pooled features and GAP, trained vs untrained twin, against the other view's (drawn independently: the null). Banks don't store style, so it is redrawn from the generator's seeds and must reproduce the stored content latents. `code_audit.py` scores no style |
 | `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side. Two "weighted" price rows refit the critic to each code (one weight per unit inside the cosine; as trained, and with position and anatomy removed); rerunning the audit on a stored JSON adds them without redoing the rest |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
@@ -385,6 +386,49 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       with one fixed reference (only the residual channel is z-scored per scan). Per-scan white-matter normalisation
       (WhiteStripe) is the real-data counterpart but can't undo the change in contrast-to-noise, so test it before
       treating gain off as deployable.
+22. **Training the prediction term end to end lifts burden's own part in the code (stage 33, read 15 Nov).** 20k
+    steps from scratch, seed 42: InfoNCE plus weight × each view's code predicting the other view's whitened GAP,
+    taken from a momentum copy of the backbone (section 9). Code volume error, T1 / FLAIR, against each bank's
+    InfoNCE control and stage 32's frozen-backbone head:
+    - Field off: control 18.0 / 19.7, head (weight 3) 14.0 / 14.6, weight 1 12.7 / 13.2, weight 3 12.8 / 12.8. The
+      backbone GAP goes from 11.0 / 11.0 to 10.1 / 10.9 at weight 1 and 10.9 / 12.2 at weight 3.
+    - Gain off: control 17.5 / 18.2, head (weight 1) 10.9 / 10.9, weight 1 8.9 / 9.2, the best label-free code so
+      far. The backbone GAP goes from 8.7 / 8.1 to 7.6 / 7.2.
+    - The weight-1 codes lose 1.3–2.6 voxels against their own backbone's GAP (heads 2.2–3.6, controls 7–10).
+    - Big lesions: the largest third reads 18 / 20 (field off) and 10 / 11 (gain off), against 47 / 42 and 35 / 34 in
+      the controls and 27 / 29 and 15 / 17 in the heads. The gain-off code reads small, middle and large lesions
+      about equally (8.8 / 8.8 / 9.9 in T1).
+    - The weight-1 codes keep the most anatomy of any code so far (mean R² .87–.91; controls .37–.52, heads
+      .78–.82) and lesion position (.89–.91; controls .36–.45).
+    - "Alone": field off .61 / .61 at weight 1 (control .40 / .38, head .53 / .52); gain off .76 / .75 (control
+      .53 / .52, head .75 / .75). With gain off the end-to-end code beats the head on e but not alone.
+    - Weight 3 reads burden as weight 1 does, here and in own variation. It trades lesion position (mean R² .76 /
+      .77 against .89) and the FLAIR backbone (12.2 voxels) for a little ventricle and sulcal (own part .76 / .74 and
+      .65 / .68, against .71 / .68 and .52 / .60).
+    - Price: a 10-voxel burden unit earns InfoNCE −.006 to +.004 nats as trained (either set rule, with or without
+      critic weights). Only with position and anatomy removed exactly does it earn more (up to +.08, field off), as
+      before. The prediction term is what holds burden, and the table doesn't price it.
+    - Gain costs the image filter 1.0 / 0.4 voxels (9.0 / 6.6 on, 8.0 / 6.2 off), the backbone GAP 2.3–3.7 and the
+      weight-1 code 3.8 / 4.0. The residual keeps most of the information under gain; the network loses it.
+    - **Own variation: burden's own part in the code, T1 / FLAIR.** Field off: .48 / .47 at weight 1, .49 / .47 at
+      weight 3 (control .35 / .34, frozen head .41 / .40, backbone GAP .60 / .59). Gain off: .60 / .58 (control
+      .37 / .33, frozen head .58 / .57, GAP .69 / .67). The first label-free codes above the .31–.37 band. On the
+      field-off bank the weight-1 code matches the volume-supervised code (.41 / .48, item 18), which loses
+      ventricle. Reference: "no own" .01; a linear readout of the true factors .89.
+    - Every other factor rises too. Weight 1, field off, code: brain .48 / .32 → .95 / .94, ventricle .24 / .24 →
+      .71 / .68, thickness .34 / .43 → .63 / .64, sulcal .12 / .15 → .52 / .60, lr .59 / .57 → .89 / .90. The
+      backbone GAP gains as well (T1: ventricle .65 → .80, thickness .66 → .74, sulcal .44 → .66). With gain off the
+      code reaches ventricle .82 / .79, thickness .74 / .75, sulcal .71 / .75.
+    - With gain off the frozen head already held burden (.58 / .57). Training end to end adds anatomy there (T1:
+      thickness .50 → .74, sulcal .32 → .71, ventricle .66 → .82), not burden.
+    - **Code audit.** The weight-1 codes read every factor and the lesion centre within .05 of their own GAP by
+      ridge (sulcal .10 on the field-off bank), and better by ridge than by gradient boosting, the reverse of the
+      InfoNCE controls: the linear maps make the code linear in the factors. Cross-view top-1 among all 1,000 test
+      subjects rises (.932 → .966 field off, .982 → .998 gain off), with train and test retrieval equal.
+    - **Not settled.** Style leak is unmeasured: the code audit scores the content factors and the lesion centre, not
+      gain, bias or noise, and the bank doesn't store the style latents. Each view draws its own gain, bias and
+      noise (the generator's shared gain-bias option is off), so neither term rewards them. One seed (seed noise was
+      ~.10 on one factor's own variation at 6k).
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -405,8 +449,40 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 15 Nov
 
-- **Stage 33 (built 15 Nov, not run): the next step.** Stages 30 and 32's prediction term trained end to end,
-  `warm.py --predict-weight W`.
+- **Stage 34 (built 15 Nov, not run): the next step.** Two checks before stage 33's prediction term joins the
+  recipe.
+  - **Style** (`style_audit.py`, no training): does a code carry its own view's gain, bias or noise level? Each view
+    draws its own (the generator's shared gain-bias option is off), so neither loss term rewards them, but nothing
+    has measured them: `code_audit.py` scores only the content factors and the lesion centre.
+    - Banks don't store the style latents. The script redraws them per test subject from the generator's own seeds,
+      with the generator set up as `bank.py` sets it up, and refuses to score unless the redrawn content latents
+      equal the stored ones. `bank.py` records none of its options, so it tries those that change the draw
+      (`--causal`, `--nuisance`) and names the one that reproduces the bank.
+    - Targets, as the renderer applies them: clamp(z0) for gain, clamp(z1) for bias, |z2| for the noise level.
+      Read by own_variation's ridge (and by gradient boosting on the code) from the code, pooled features and GAP,
+      against the other view's style (drawn independently: the null) and against the untrained twin.
+    - On the gain-off bank, gain is drawn but never rendered, so its column is a null too.
+  - **Seed:** stage 33's two weight-1 arms again with seed 2
+    (`ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_20k_s2` and
+    `..._nofield_nogain_predict1_c24_20k_s2`). The InfoNCE controls stay single-seed: eight InfoNCE arms sit at
+    .31–.37.
+  - **Order:** the style audit runs first, on stage 33's five runs and stage 32's two heads, while the seed-2 arms
+    train. Then come the precision audit, own variation and the audit of both seeds and both controls, and the style
+    audit again with the seed-2 runs added. The three reports start from copies of stage 33's caches, so only the
+    seed-2 runs are scored anew; they also print stage 33's other runs. Reports in `causal/stage34/`.
+  - **Pass:** each prediction code reads its own view's gain and bias no better than its InfoNCE control's code
+    does, and near the null; seed 2 within ~.10 of seed 42 on burden's own part in the code (.48 / .47, .60 / .58),
+    and above .31–.37. If even the GAP can't read the noise level, its column says nothing.
+  - **Checked locally:** six unit tests (`tests/test_style_audit.py`): the targets; the redraw keeps the setting that
+    reproduces the bank and refuses a bank no setting reproduces, or any subject that differs; the cache; the
+    own-view reading against the null. On stage 33's two-step smoke runs, the redraw reproduces the repo's `bank`
+    (no options) and the small causal field-off bank (`--causal`). At init, gain reads at ~.7 from the GAP and
+    pooled features and ~.5 from the code, bias at ~.3 and ~.1, and the noise level not at all (≤ 0), with nulls
+    at or below 0. Locally, gradient boosting can hang with torch loaded (OpenMP), so the unit test stands ridge in
+    for it; on the PC, `code_audit.py` has always run it.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 34`. It needs stages 28, 29 and 33 finished.
+- **Stage 33 (run and read 15 Nov, section 7, item 22: passes all four success tests at weight 1).** Stages 30 and
+  32's prediction term trained end to end, `warm.py --predict-weight W`.
   - **Why:** the frozen-backbone heads keep all but ~2–4 voxels of what their backbone holds (section 7, item 21), so
     the backbone is now the limit. Training it with the term may sharpen it, and one training run keeps the method a
     training objective. Section 8 names latent correlation maximisation trained end to end as the theory-backed
@@ -572,23 +648,27 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 10. Recent stages and next steps
 
-**Next, after stage 32's precision audit (13 Nov).** The numbered items below were written with the field on.
-- **Read stage 32's `own_variation.txt` and `code_audit.txt`** (they cover stage 30's heads too). The precision audit
-  is promising (section 7, item 21): does the prediction head also lift burden's own part in the code above stages 29
-  and 31's .31–.37, with anatomy holding?
-- **Run stage 33** (`run_pc.sh 33`, built 15 Nov, section 9): the prediction term trained end to end, backbone
-  included, with targets from a slowly updated copy of the backbone that gets no gradient. Weights 1 and 3 on
-  `bank_causal_nofield`, weight 1 on the gain-off bank, 20k steps from scratch, against stages 28 and 29's InfoNCE
-  arms. Freezing the backbone and retraining the head (stages 30, 32) stays the fallback.
-- **Then test white-matter normalisation** on the gain-on bank, the real-data version of gain off (item 21).
+**Next, after stage 33 (15 Nov).** The numbered items below were written with the field on.
+- **Run stage 34** (`run_pc.sh 34`, built 15 Nov, section 9) before stage 33's prediction term becomes the recipe.
+  Stage 33 passed all four success tests at weight 1 (section 7, item 22): burden's own part in the code is .48 / .47
+  with gain on and .60 / .58 with gain off, against .31–.37 before, and every other factor rises. Stage 34 checks
+  what it left open: style in the code (its report comes first, while the seed-2 arms train) and a second seed.
+- **Then test white-matter normalisation** of the scan channel on the gain-on bank with prediction weight 1, the
+  real-data version of gain off. Gain costs burden's own part in the code .60 → .48, and costs the code ~4 voxels
+  against ≤1 for the image filter (item 22).
+- Stage 32's `own_variation.txt` and `code_audit.txt` are unread, but stage 33's reports cover its two heads that
+  matter (field-off weight 3, gain-off weight 1); the rest are stage 30's weaker heads.
 - **Decide with the user whether `bank_causal_nofield` becomes the main burden bank,** with the field-on bank kept as a
   stress test. For: a real bias field varies over centimetres and N4 removes it, so the 16³ field has no counterpart
   in corrected scans. The same question for gain off, whose real counterpart is intensity normalisation (WhiteStripe).
+- **Done on 15 Nov:** stage 33 ran and its three reports are read (item 22). Weight 3 reads burden no better than
+  weight 1 and gives up lesion position for a little ventricle and sulcal.
 - **Done on 13 Nov:** stage 28's remaining reports (item 18) and the head levers of stages 29 and 31 (item 20: width,
   remainder units, Barlow Twins, gain off, critic weights). None moved burden's own part in the code. Stages 30 and 32
   ran and their precision audits are read (item 21).
-- **Big-lesion compression** (item 18) is a separate lead. Labels remove it, so nothing in InfoNCE pays to keep big
-  lesions apart. Remainder units and critic weights cut the code's error on the largest third from 47 / 42 to 26–33.
+- **Big-lesion compression** (item 18). Labels remove it, so nothing in InfoNCE pays to keep big lesions apart.
+  Remainder units and critic weights cut the code's error on the largest third from 47 / 42 to 26–33; prediction
+  trained end to end cuts it to 18 / 20, and 10 / 11 with gain off (item 22).
 
 1. **Read stage 20:** does the 31-neighbour burden at 20k (.19 / .18) replicate with seed 2?
 2. **Stage 21 compares Barlow Twins with InfoNCE** at 24 units and 20,000 steps on `bank_causal`. Both use the
