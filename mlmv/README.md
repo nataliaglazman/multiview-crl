@@ -1,9 +1,29 @@
 # mlmv: multi-level multiview encoder (G / L / S)
 
 Implements the spec "Multi-level multiview encoder for T1/FLAIR" (12 Nov 2026). Status: the synthetic path
-(Phase 1 with the Phase 2 model, sampler and losses) is built and tested on CPU; nothing has run at full
-scale yet. Phase 0 (ADNI metadata, splits, atlas regions), Phase 3 (scanner removal), Phase 4 (evaluation
-suite) and the Phase 5 export are not built.
+(Phase 1 with the Phase 2 model, sampler and losses) is built and tested on CPU, with two renderers (below);
+nothing has run at full scale yet. Phase 0 (ADNI metadata, splits, atlas regions), Phase 3 (scanner removal),
+Phase 4 (evaluation suite) and the Phase 5 export are not built.
+
+## Two synthetic renderers
+
+The same latents (g, r_R, s, w, site, style, lesions) can be rendered two ways (`synth.renderer`):
+
+- `lattice` (default, `config/runs/phase1/`): a 64^3 cube of Voronoi regions; a fixed random network fills
+  each 4^3 cell with its own pattern. Injective by design, so the theory's assumptions hold, but the images are
+  a voxel-level texture. This is the first rung: a failure here is a failure of the method.
+- `brain` (`config/runs/phase1_brain/`): a fixed procedural brain (`synth/brain_template.py`: tissue classes,
+  13 regions on the spec's ADNI scheme) on the ADNI grid, 96 x 112 x 96 at 2 mm. The latents are upsampled
+  smoothly and change each tissue's T1 and FLAIR intensity; lesions are white-matter spheres, bright in FLAIR
+  and dark in T1; each site adds a smooth bias field shared by both modalities and its own Rician noise; the
+  background is zero. Ground truth stays exact, but smoothing, partial volume and noise hide part of each
+  factor, so read the leakage matrix against its raw-image reference row as well as the thresholds. A real
+  template (the ADNI template's SynthSeg map) can replace the phantom through the same arrays.
+
+At rho = 2.5 on the ADNI grid, erosion and the split band are wide compared with small lobes: in the brain
+template the temporal lobes, deep grey and brainstem cannot be split and merge into neighbours, leaving 7
+regions (frontal, parietal and occipital on each side, one cerebellum) and 39% of brain positions for L and G.
+ADNI's lobes are of the same size, so the same will happen there; see `geometry/eligibility.csv` of a run.
 
 ## Run
 
@@ -28,14 +48,16 @@ Each run writes `results/mlmv/<run.name>/`: `config.yaml` (resolved, with the co
 |---|---|
 | `config/defaults.yaml`, `config/__init__.py` | every default; YAML -> dataclasses, strict keys, `--set a.b=v` |
 | `config/runs/phase1/*.yaml` | the 12 Phase 1 runs (variants, f_L curve, centring and objective ablations) |
+| `config/runs/phase1_brain/*.yaml` | 5 Phase 1 runs on the brain renderer (exact, centring off, noisy, FLAIR-only lesion, site confounded) |
 | `data/geometry.py` | erosion, eligibility and merging, half-splits, G region sets, majority downsampling |
 | `data/sampler.py` | per-step S positions, L half-splits, G region sets (explicit `torch.Generator`) |
-| `synth/three_level.py` | the three-level generator (extends `experiments/gl_ident/generator.py`) |
+| `synth/three_level.py` | the three-level generator and both renderers (extends `experiments/gl_ident/generator.py`) |
+| `synth/brain_template.py` | the fixed procedural brain: tissue classes and 13 regions, built in millimetres |
 | `models/encoder.py` | stems, shared trunk, block head, per-position norm, template |
 | `models/heads.py`, `models/receptive_field.py` | expanders; theoretical and effective rho |
 | `losses/barlow.py`, `losses/infonce.py`, `losses/levels.py` | BT with context centring; InfoNCE with context negatives; per-level pairs |
 | `train/train_levels.py` | training loop, logging, rho measurement, checkpoints, final leakage eval |
-| `eval/leakage.py`, `eval/phase1_summary.py` | leakage matrix and counterfactual; Gate 1 tables |
+| `eval/leakage.py`, `eval/phase1_summary.py` | leakage matrix, raw-image reference row, counterfactual; Gate 1 tables |
 | `eval/site_probe.py`, `eval/consistency.py`, `eval/metrics.py` | training-time site probe and G CKA; probes |
 
 ## Decisions that differ from the spec
@@ -51,6 +73,9 @@ Each run writes `results/mlmv/<run.name>/`: `config.yaml` (resolved, with the co
   a cube and the half-split band is scaled by `||n||_1`; `euclidean` is available.
 - **Erosion is against other regions, not background.** Unlabelled voxels take the nearest region's label first,
   so the brain surface is not eroded away (it would remove the cortex from every lobe at 4 mm).
+- **Eligibility is a share of split planes** (`geometry.eligible_fraction: 0.5`). A region is eligible when half
+  of 256 random planes leave 8 positions a side; the sampler redraws a plane that does not. Requiring every
+  plane loses elongated regions (in the brain template, both occipital lobes) to planes across their short axis.
 - **Running standardisation** is an EMA (momentum 0.99, bias-corrected) of each step's centred statistics;
   `loss.buffer.size` sets the FIFO used for the effective-rank log.
 - **G batch size.** `sampler.G.splits_per_subject: 8` region-set splits per subject per step (64 rows), since one
@@ -62,3 +87,6 @@ Each run writes `results/mlmv/<run.name>/`: `config.yaml` (resolved, with the co
 - **InfoNCE** uses its context negatives in place of centring (`loss.centring` acts on Barlow Twins).
 - **Site in the leakage matrix** is R^2 on the 2-d site embedding (what enters the renderer), plus balanced
   accuracy.
+- **Raw-image reference.** Each leakage matrix has an extra row (block `raw`, modality `t1+flair`): the same
+  probes on simple summaries of both images at each readout (cell: sub-cell and neighbouring cell means; region:
+  mean, sd and percentiles; subject: all regions). A reference, not a bound: a trained block can beat it.

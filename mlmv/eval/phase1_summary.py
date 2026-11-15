@@ -49,12 +49,16 @@ def summarise(runs, thresholds=None) -> str:
     for name, res in sorted(runs.items()):
         parts += [
             f"## {name}",
-            f"variant {res['variant']}, objective {res['objective']}, centring {res['centring']}, "
-            f"f_L {res['fraction']}, tau^2 {res['noise_tau2']}, {res['n_subjects']} test subjects",
+            f"renderer {renderer_of(res)}, variant {res['variant']}, objective {res['objective']}, "
+            f"centring {res['centring']}, f_L {res['fraction']}, tau^2 {res['noise_tau2']}, "
+            f"{res['n_subjects']} test subjects",
             "",
         ]
+        has_raw = any(r["block"] == "raw" for r in res["rows"])
         for m in MODALITIES:
             rows = [[lvl] + [f3(best(res, m, lvl, f)) for f in FACTORS] for lvl in LEVELS]
+            if has_raw:  # the same reference row in both tables: summaries of both images, no training
+                rows.append(["raw image"] + [f3(best(res, "t1+flair", "raw", f)) for f in FACTORS])
             parts += [f"Leakage matrix ({m}, best R^2)", "", table(["block", *FACTORS], rows), ""]
         checks = res["checks"]
         failed = [c for c in checks if not c["passed"]]
@@ -88,7 +92,19 @@ def summarise(runs, thresholds=None) -> str:
             table(["modality", "block", "relative L2 change"], cf),
             "",
         ]
+    for renderer in sorted({renderer_of(r) for r in runs.values()}):
+        group = {n: r for n, r in runs.items() if renderer_of(r) == renderer}
+        parts += comparisons(group, renderer)
+    return "\n".join(parts)
 
+
+def renderer_of(res) -> str:
+    return res.get("renderer", "lattice")  # runs before the brain renderer existed were all lattice
+
+
+def comparisons(runs, renderer: str) -> list:
+    """The cross-run Gate 1 tables, within one renderer."""
+    parts = []
     noisy = {n: r for n, r in runs.items() if r["variant"] == "noisy" and r["objective"] == "barlow" and r["centring"]}
     curve = sorted((r["fraction"], n, r) for n, r in noisy.items() if abs(r["noise_tau2"] - 0.5) < 1e-9)
     if curve:
@@ -96,7 +112,7 @@ def summarise(runs, thresholds=None) -> str:
         vals = [best(r, "t1", "L", "r") for _, _, r in curve]
         rising = all(b >= a for a, b in zip(vals, vals[1:]))
         parts += [
-            "## f_L curve (noisy, tau^2 = 0.5): R^2 of r from L",
+            f"## f_L curve ({renderer} renderer, noisy, tau^2 = 0.5): R^2 of r from L",
             "",
             table(["f_L", "run", "t1", "flair"], rows),
             "",
@@ -109,7 +125,7 @@ def summarise(runs, thresholds=None) -> str:
             [t, n] + [f3(best(r, m, "L", "r")) for m in MODALITIES] + [f3(best(r, "t1", "G", "g"))] for t, n, r in trend
         ]
         parts += [
-            "## Noisy sharing: R^2 of r from L and g from G against tau^2 (f_L = 1)",
+            f"## Noisy sharing ({renderer} renderer): R^2 of r from L and g from G against tau^2 (f_L = 1)",
             "",
             table(["tau^2", "run", "L<-r t1", "L<-r flair", "G<-g t1"], rows),
             "",
@@ -127,7 +143,7 @@ def summarise(runs, thresholds=None) -> str:
             gaps.append(a - b)
             rows.append([m, f3(a), f3(b), f3(a - b)])
         parts += [
-            "## Crowding out: R^2 of w from S",
+            f"## Crowding out ({renderer} renderer): R^2 of w from S",
             "",
             table(["modality", "centring on", "centring off", "difference"], rows),
             "",
@@ -143,7 +159,7 @@ def summarise(runs, thresholds=None) -> str:
             table(["modality", "R^2"], rows),
             "",
         ]
-    return "\n".join(parts)
+    return parts
 
 
 def main(argv=None):

@@ -1,0 +1,14 @@
+# First run on the cluster: the brain renderer at full size (96 x 112 x 96, default model and batch) for 300 steps.
+# Checks CUDA, bf16, the rho measurement, the validation monitor and the final leakage eval end to end, and logs
+# p1/total/sec_per_step and p1/total/peak_memory_mb (scalars.jsonl and stdout) to size the 100k-step Phase 1 jobs.
+# Learns nothing worth reading; the leakage matrix only proves the pipeline runs.
+run: {name: cluster_check_brain, log_every: 20, eval_every: 250, ckpt_every: 100000}
+optim: {steps: 300, warmup_steps: 50, rho_measure_step: 200}
+synth:
+  renderer: brain
+  image: [96, 112, 96]
+  lattice: [24, 28, 24]
+  lesion_radius: [0.5, 1.0]
+  variant: exact
+  n_val: 64
+eval: {max_subjects: 120}

@@ -23,7 +23,7 @@ class TestIntegration(unittest.TestCase):
             self.assertLess(time.time() - t0, 300)
             with open(run_dir / "eval" / "leakage.csv") as fp:
                 rows = list(csv.DictReader(fp))
-            self.assertEqual(len(rows), 2 * 3 * 6)  # modalities x blocks x factors
+            self.assertEqual(len(rows), 2 * 3 * 6 + 6)  # modalities x blocks x factors, plus the image reference
             rho = json.loads((run_dir / "geometry" / "rho.json").read_text())
             self.assertEqual(rho["theoretical"], 1.5)
             self.assertIsNotNone(rho["effective"])

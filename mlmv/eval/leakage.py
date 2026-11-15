@@ -9,7 +9,17 @@ Readouts (per modality, from the template-subtracted blocks of a frozen model):
 * s, w and the lesion indicator per position, from the block averaged over each lattice cell
   (``positions_per_subject`` random cells per subject).
 
+With the brain renderer, subject pooling covers the brain only, cells are drawn only where the generator has a
+region, and the lesion target is the rendered lesion fraction of each cell.
+
 Each R^2 is the mean over subject-grouped folds of ridge and of a 2-layer MLP; ``best`` is the larger.
+
+A reference row (block ``raw``, modality ``t1+flair``) runs the same probes on simple summaries of the images
+themselves, at the same readouts: per cell, the eight sub-cell means and the 3^3 neighbourhood of cell means;
+per region, the mean, sd and 10/50/90th percentiles inside the region; per subject, all regions' summaries.
+It shows how readable each factor is from the image without any training. It is a reference, not a bound: a
+trained block can beat it.
+
 Also the counterfactual: the same latents re-rendered with a different site, and the relative L2 change of each
 block's code.
 """
@@ -31,9 +41,54 @@ MODALITIES = ("t1", "flair")
 CELL_FACTORS = ("s", "w", "lesion")
 
 
+def _gather_cells(x, pick):
+    """``x [n, c, *L]``, ``pick [n, k]`` flat cell indices -> ``[n, k, c]``."""
+    flat = x.flatten(2)
+    return torch.gather(flat, 2, pick[:, None].expand(-1, flat.shape[1], -1)).permute(0, 2, 1)
+
+
+def raw_image_features(images, pick, gen, region_masks):
+    """Reference features from the images themselves (both modalities concatenated).
+
+    ``images`` [(t1, flair)] each ``[n, 1, X, Y, Z]``; returns cell ``[n, k, f]``, region ``[n, R, f]`` and
+    subject ``[n, R * f]`` arrays (see the module docstring).
+    """
+    m = gen.m
+    cell_parts, region_parts = [], []
+    for img in images:
+        img = img.float()
+        cells = F.avg_pool3d(img, m)  # [n, 1, *L]
+        if m % 2 == 0:
+            sub = F.avg_pool3d(img, m // 2)[:, 0]  # [n, 2Lx, 2Ly, 2Lz]
+            n, X, Y, Z = sub.shape
+            sub = (
+                sub.reshape(n, X // 2, 2, Y // 2, 2, Z // 2, 2)
+                .permute(0, 2, 4, 6, 1, 3, 5)
+                .reshape(n, 8, *cells.shape[2:])
+            )
+            cell_parts.append(_gather_cells(sub, pick))
+        padded = F.pad(cells, (1, 1, 1, 1, 1, 1), mode="replicate")
+        Lx, Ly, Lz = cells.shape[2:]
+        neigh = torch.cat(
+            [padded[:, :, i : i + Lx, j : j + Ly, k : k + Lz] for i in range(3) for j in range(3) for k in range(3)], 1
+        )
+        cell_parts.append(_gather_cells(neigh, pick))
+        stats = []
+        for mask in region_masks:
+            vals = img[:, 0][:, mask]  # [n, voxels]
+            q = torch.quantile(vals, torch.tensor([0.1, 0.5, 0.9], device=vals.device), dim=1).T
+            stats.append(torch.cat([vals.mean(1, keepdim=True), vals.std(1, keepdim=True), q], 1))
+        region_parts.append(torch.stack(stats, 1))  # [n, R, 5]
+    region = torch.cat(region_parts, 2)
+    return torch.cat(cell_parts, 2), region, region.flatten(1)
+
+
 @torch.no_grad()
 def collect_codes(model, source, split: str, indices, positions_per_subject: int, batch: int = 8, seed: int = 0):
-    """Pooled codes and matching ground truth for subjects ``indices`` of ``split``."""
+    """Pooled codes and matching ground truth for subjects ``indices`` of ``split``.
+
+    Returns ``codes[modality][level][readout]``, plus ``codes["raw"][readout]`` for the image reference.
+    """
     model.eval()
     gen_model = source.gen
     labels = torch.from_numpy(source.feature_labels).flatten()
@@ -41,68 +96,84 @@ def collect_codes(model, source, split: str, indices, positions_per_subject: int
     dev = gen_model.device
     onehot = torch.stack([(labels == r).float() for r in regions]).to(dev)
     onehot = onehot / onehot.sum(1, keepdim=True)  # [R, P]
-    L = gen_model.L
-    cells = L**3
+    mask = source.feature_mask
+    pool = None if mask is None else torch.from_numpy(np.asarray(mask, np.float32)).flatten().to(dev)
+    image_regions = torch.from_numpy(gen_model.image_regions_np).to(dev)
+    region_masks = [image_regions == r for r in regions]
+    candidates = torch.nonzero(gen_model.regions.flatten() > 0)[:, 0].to(dev)  # cells inside a region
     rng = torch.Generator().manual_seed(seed)
     codes = {m: {lvl: {"subject": [], "region": [], "cell": []} for lvl in LEVELS} for m in MODALITIES}
+    codes["raw"] = {"subject": [], "region": [], "cell": []}
     truth = {k: [] for k in ("g", "site", "site_emb", "r", *CELL_FACTORS)}
     for start in range(0, len(indices), batch):
         chunk = list(indices[start : start + batch])
         data = source.batch(split, chunk)
         lat = data["latents"]
         n = len(chunk)
-        pick = torch.stack([torch.randperm(cells, generator=rng)[:positions_per_subject] for _ in range(n)]).to(dev)
+        draws = [torch.randperm(len(candidates), generator=rng)[:positions_per_subject] for _ in range(n)]
+        pick = candidates[torch.stack(draws).to(dev)]
         for m in MODALITIES:
             blocks = model.blocks(data[m].to(next(model.parameters()).device), m)
             for lvl, f in blocks.items():
                 f = f.float().to(dev)
-                codes[m][lvl]["subject"].append(f.mean((2, 3, 4)).cpu())
-                codes[m][lvl]["region"].append((f.flatten(2) @ onehot.T).permute(0, 2, 1).cpu())
-                pooled = F.adaptive_avg_pool3d(f, L).flatten(2)  # [n, d, L^3]
-                codes[m][lvl]["cell"].append(
-                    torch.gather(pooled, 2, pick[:, None].expand(-1, f.shape[1], -1)).permute(0, 2, 1).cpu()
-                )
+                flat = f.flatten(2)
+                subject = flat.mean(2) if pool is None else (flat * pool).sum(2) / pool.sum()
+                codes[m][lvl]["subject"].append(subject.cpu())
+                codes[m][lvl]["region"].append((flat @ onehot.T).permute(0, 2, 1).cpu())
+                codes[m][lvl]["cell"].append(_gather_cells(F.adaptive_avg_pool3d(f, gen_model.L), pick).cpu())
+        raw_cell, raw_region, raw_subject = raw_image_features(
+            [data["t1"].to(dev), data["flair"].to(dev)], pick, gen_model, region_masks
+        )
+        codes["raw"]["cell"].append(raw_cell.cpu())
+        codes["raw"]["region"].append(raw_region.cpu())
+        codes["raw"]["subject"].append(raw_subject.cpu())
         truth["g"].append(lat["g"].cpu())
         truth["site"].append(lat["site"].cpu())
         truth["site_emb"].append(lat["site_emb"].cpu())
         truth["r"].append(lat["r"][:, [r - 1 for r in regions]].cpu())
         for k in CELL_FACTORS:
-            v = lat[k].flatten(2)
-            truth[k].append(torch.gather(v, 2, pick[:, None].expand(-1, v.shape[1], -1)).permute(0, 2, 1).cpu())
+            truth[k].append(_gather_cells(lat[k], pick).cpu())
     cat = lambda xs: torch.cat(xs).numpy()  # noqa: E731
-    codes = {m: {lvl: {k: cat(v) for k, v in d.items()} for lvl, d in md.items()} for m, md in codes.items()}
-    return codes, {k: cat(v) for k, v in truth.items()}, regions
+    out = {m: {lvl: {k: cat(v) for k, v in codes[m][lvl].items()} for lvl in LEVELS} for m in MODALITIES}
+    out["raw"] = {k: cat(v) for k, v in codes["raw"].items()}
+    return out, {k: cat(v) for k, v in truth.items()}, regions
 
 
-def leakage_rows(codes, truth, eval_cfg, device="cpu"):
-    rows = []
+def readout_rows(modality, block, c, truth, eval_cfg, device="cpu"):
+    """One block's (or the image reference's) row per factor."""
     n = truth["g"].shape[0]
     subj = np.arange(n)
+    rows = []
+
+    def row(factor, res, **extra):
+        rows.append(dict(modality=modality, block=block, factor=factor, **res, **extra))
+
+    row("g", cv_r2(c["subject"], truth["g"], subj, eval_cfg, device=device))
+    row(
+        "site",
+        cv_r2(c["subject"], truth["site_emb"], subj, eval_cfg, device=device),
+        site_balanced_accuracy=cv_balanced_accuracy(c["subject"], truth["site"], subj, eval_cfg.cv_folds),
+    )
+    per_region = [
+        cv_r2(c["region"][:, j], truth["r"][:, j], subj, eval_cfg, device=device) for j in range(truth["r"].shape[1])
+    ]
+    res = {k: float(np.mean([p[k] for p in per_region])) for k in ("ridge", "mlp", "best")}
+    row("r", res, r_best_min_region=float(np.min([p["best"] for p in per_region])))
+    k = c["cell"].shape[1]
+    groups = np.repeat(subj, k)
+    x = c["cell"].reshape(n * k, -1)
+    for factor in CELL_FACTORS:
+        row(factor, cv_r2(x, truth[factor].reshape(n * k, -1), groups, eval_cfg, device=device))
+    return rows
+
+
+def leakage_rows(codes, truth, eval_cfg, device="cpu", reference: bool = True):
+    rows = []
     for m in MODALITIES:
         for lvl in LEVELS:
-            c = codes[m][lvl]
-            row = lambda factor, res, **extra: rows.append(
-                dict(modality=m, block=lvl, factor=factor, **res, **extra)
-            )  # noqa: E731
-            row("g", cv_r2(c["subject"], truth["g"], subj, eval_cfg, device=device))
-            site_r2 = cv_r2(c["subject"], truth["site_emb"], subj, eval_cfg, device=device)
-            row(
-                "site",
-                site_r2,
-                site_balanced_accuracy=cv_balanced_accuracy(c["subject"], truth["site"], subj, eval_cfg.cv_folds),
-            )
-            per_region = [
-                cv_r2(c["region"][:, j], truth["r"][:, j], subj, eval_cfg, device=device)
-                for j in range(truth["r"].shape[1])
-            ]
-            res = {k: float(np.mean([p[k] for p in per_region])) for k in ("ridge", "mlp", "best")}
-            row("r", res, r_best_min_region=float(np.min([p["best"] for p in per_region])))
-            k = c["cell"].shape[1]
-            groups = np.repeat(subj, k)
-            x = c["cell"].reshape(n * k, -1)
-            for factor in CELL_FACTORS:
-                y = truth[factor].reshape(n * k, -1)
-                row(factor, cv_r2(x, y, groups, eval_cfg, device=device))
+            rows += readout_rows(m, lvl, codes[m][lvl], truth, eval_cfg, device)
+    if reference and "raw" in codes:
+        rows += readout_rows("t1+flair", "raw", codes["raw"], truth, eval_cfg, device)
     return rows
 
 
@@ -170,6 +241,7 @@ def evaluate_leakage(model, source, cfg, out_dir, split: str = "test", device="c
             writer.writerows(table)
     result = dict(
         variant=cfg.synth.variant,
+        renderer=cfg.synth.renderer,
         split=split,
         n_subjects=n,
         regions=regions,
@@ -186,10 +258,11 @@ def evaluate_leakage(model, source, cfg, out_dir, split: str = "test", device="c
 
 
 def format_matrix(rows, modality: str = "t1") -> str:
-    """Plain-text matrix: blocks as rows, factors as columns, ``best`` R^2."""
+    """Plain-text matrix: blocks as rows (plus the raw-image reference when present), factors as columns."""
     factors = ("g", "site", "r", *CELL_FACTORS)
     lines = ["block " + " ".join(f"{f:>7}" for f in factors)]
-    for lvl in LEVELS:
-        vals = {r["factor"]: r["best"] for r in rows if r["modality"] == modality and r["block"] == lvl}
-        lines.append(f"{lvl:5} " + " ".join(f"{vals[f]:7.3f}" for f in factors))
+    for lvl, mod in [(lvl, modality) for lvl in LEVELS] + [("raw", "t1+flair")]:
+        vals = {r["factor"]: r["best"] for r in rows if r["modality"] == mod and r["block"] == lvl}
+        if vals:
+            lines.append(f"{lvl:5} " + " ".join(f"{vals[f]:7.3f}" for f in factors))
     return "\n".join(lines)

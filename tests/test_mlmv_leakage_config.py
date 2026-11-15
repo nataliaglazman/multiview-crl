@@ -63,7 +63,7 @@ class TestConfig(unittest.TestCase):
         self.assertGreaterEqual(len(paths), 13)
         for path in paths:
             cfg = load_config(path)
-            if path.parent.name == "phase1":
+            if path.parent.name.startswith("phase1"):
                 self.assertEqual(cfg.run.name, path.stem)  # the job names its output directory after the file
 
 

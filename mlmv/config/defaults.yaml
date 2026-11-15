@@ -32,7 +32,8 @@ geometry:
   rho: auto                              # theoretical until measured; or a number (feature voxels)
   min_positions_per_half: 8
   metric: chebyshev                      # chebyshev | euclidean (see mlmv/data/geometry.py)
-  eligibility_normals: 256               # random normals a region must split well under
+  eligibility_normals: 256               # random split planes tested per region
+  eligible_fraction: 0.5                 # share of those planes that must keep min_positions_per_half a side
 model:
   stem_channels: 32
   trunk_channels: 128
@@ -95,9 +96,10 @@ flow:
   steps: 20000
 synth:
   variant: exact                         # exact | noisy | one_modality_lesion | dependent | site_confounded
+  renderer: lattice                      # lattice (checkerboard decoder, Voronoi regions) | brain (template, smooth)
   regions: voronoi                       # voronoi (atlas: needs Phase 0 data)
-  n_regions: 8
-  lattice: 16
+  n_regions: 8                           # lattice renderer only; the brain template has 13 regions
+  lattice: 16                            # an int (cube) or [x, y, z]; image / lattice must be one factor per axis
   image: 64
   dims: {g: 4, r: 4, s: 4, w: 1, site: 2, style: 2}
   n_sites: 6
@@ -113,6 +115,20 @@ synth:
   n_val: 256
   n_test: 1000
   weights_seed: 0
+  brain:                                 # synth.renderer: brain only
+    voxel_mm: 2.0                        # template millimetres per image voxel
+    modulation: 0.12                     # intensity change per unit of decoded latent, relative to the tissue
+    decoder_hidden: 32
+    partial_volume: 0.6                  # Gaussian sigma (voxels) on the tissue maps
+    t1: {csf: 0.15, gm: 0.5, deep_gm: 0.62, wm: 0.82, lesion: 0.42}
+    flair: {csf: 0.06, gm: 0.62, deep_gm: 0.55, wm: 0.48, lesion: 0.95}
+    bias_strength: 0.06                  # log-amplitude of each site's smooth bias field (shared by T1 and FLAIR).
+                                         # Measured mean |change| in the brain: site swap 8% at 0.06 (15% at 0.12);
+                                         # another subject's latents at the same site, 11%
+    bias_width_mm: 40
+    noise: [0.01, 0.03]                  # Rician sd per site, as a fraction of the reference scale
+    lesion_wm_fraction: 0.8              # lesion centres sit on lattice cells at least this white
+    lesion_edge: 0.5                     # voxels; softness of lesion borders
 eval:
   probes: [ridge, mlp]
   cv_folds: 5

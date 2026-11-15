@@ -8,13 +8,17 @@
 # The only argument is the config path (relative to the repo root). The run writes TensorBoard logs, the
 # scalars log, checkpoints and the leakage matrix under results/mlmv/<run.name>/ in the cluster checkout.
 # Image, project, resources and mounts copy experiments/generated/encoder/*.runai.sh.
+#
+# MLMV_REPO overrides the checkout the job runs from (default: the shared one below). Use a separate clone on
+# the mlmv branch if other jobs run from the shared checkout, so switching its branch cannot change their code:
+#   MLMV_REPO=/nfs/home/nglazman/crl-2/mlmv bash mlmv/scripts/runai/phase1.sh mlmv/config/runs/cluster_check_brain.yaml
 set -euo pipefail
 
 DRY=0
 if [[ "${1:-}" == "--dry-run" ]]; then DRY=1; shift; fi
 if [[ "$#" -ne 1 ]]; then echo "Usage: $0 [--dry-run] <config.yaml>" >&2; exit 2; fi
 CONFIG=$1
-REPO=/nfs/home/nglazman/crl-2/multiview-crl
+REPO=${MLMV_REPO:-/nfs/home/nglazman/crl-2/multiview-crl}
 # Run:ai job names: lowercase letters, digits and '-', at most 40 characters.
 JOB=$(basename "$CONFIG" .yaml | tr '[:upper:]_.' '[:lower:]--' | cut -c1-35)
 JOB="mlmv-${JOB}"

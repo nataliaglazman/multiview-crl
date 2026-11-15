@@ -48,6 +48,7 @@ class GeometryConfig:
     min_positions_per_half: int
     metric: str
     eligibility_normals: int
+    eligible_fraction: float
 
 
 @dataclass
@@ -160,10 +161,11 @@ class FlowConfig:
 @dataclass
 class SynthConfig:
     variant: str
+    renderer: str
     regions: str
     n_regions: int
-    lattice: int
-    image: int
+    lattice: typing.Any  # int or [x, y, z]
+    image: typing.Any  # int or [x, y, z]
     dims: dict
     n_sites: int
     decoder_hidden: int
@@ -178,6 +180,7 @@ class SynthConfig:
     n_val: int
     n_test: int
     weights_seed: int
+    brain: dict
 
 
 @dataclass

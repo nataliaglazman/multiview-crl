@@ -141,6 +141,7 @@ def build_run_geometry(cfg, source, rho, log):
         cfg.geometry.eligibility_normals,
         seed=cfg.seed,
         log=log,
+        eligible_fraction=cfg.geometry.eligible_fraction,
     )
 
 
@@ -148,7 +149,7 @@ def monitor(model, source, geometry, cfg, device, P):
     """Validation probes: site balanced accuracy per block, and G cross-split CKA."""
     n = min(source.sizes["val"], cfg.eval.max_subjects)
     codes, truth, _ = collect_codes(model, source, "val", range(n), positions_per_subject=1, seed=cfg.seed)
-    acc = site_accuracy_per_block(codes, truth["site"], cfg.eval.cv_folds)
+    acc = site_accuracy_per_block({m: codes[m] for m in MODALITIES}, truth["site"], cfg.eval.cv_folds)
     sums, counts = g_region_sums(model, source, "val", range(n), geometry)
     cka = g_cross_split_cka(sums, counts, geometry, cfg.sampler.G.volume_ratio, n_splits=5, seed=cfg.seed)
     out = {}

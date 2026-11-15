@@ -185,13 +185,15 @@ class Geometry:
         )
 
 
-def _worst_split(coords: np.ndarray, normals: np.ndarray, rho: float, metric: str) -> int:
+def _split_stats(coords: np.ndarray, normals: np.ndarray, rho: float, metric: str, min_per_half: int):
+    """(smallest half over all normals, fraction of normals whose split keeps ``min_per_half`` a side)."""
     if len(coords) == 0:
-        return 0
+        return 0, 0.0
     centred = coords - coords.mean(0)
     scale = np.abs(normals).sum(1) if metric == "chebyshev" else np.ones(len(normals))
     signed = centred @ normals.T / scale[None]  # [n, k]
-    return int(np.minimum((signed > rho).sum(0), (signed < -rho).sum(0)).min())
+    halves = np.minimum((signed > rho).sum(0), (signed < -rho).sum(0))
+    return int(halves.min()), float((halves >= min_per_half).mean())
 
 
 def _neighbour_counts(labels: np.ndarray, region: int) -> dict:
@@ -218,9 +220,13 @@ def build_geometry(
     n_normals: int = 256,
     seed: int = 0,
     log=print,
+    eligible_fraction: float = 1.0,
 ) -> Geometry:
     """Erode, test eligibility, and merge ineligible regions into their largest-contact neighbour.
 
+    A region is eligible when at least ``eligible_fraction`` of ``n_normals`` random split planes leave
+    ``min_positions_per_half`` positions on each side (1.0: every plane must). The sampler redraws a plane that
+    fails, so below 1.0 an elongated region is split only along directions it is long enough for.
     Merging repeats until every remaining region is eligible; a region with no neighbour left is dropped
     (kept in ``labels`` for S, excluded from L and G). Each merge or drop is logged and recorded.
     """
@@ -231,12 +237,13 @@ def build_geometry(
     merges, dropped = [], set()
     while True:
         eroded = erode_regions(labels, rho, metric)
-        worst = {
-            r: _worst_split(np.argwhere(eroded == r), normals, rho, metric)
+        stats = {
+            r: _split_stats(np.argwhere(eroded == r), normals, rho, metric, min_positions_per_half)
             for r in np.unique(labels[labels > 0])
             if r not in dropped
         }
-        failing = sorted((int((labels == r).sum()), r) for r, w in worst.items() if w < min_positions_per_half)
+        worst = {r: s[0] for r, s in stats.items()}
+        failing = sorted((int((labels == r).sum()), r) for r, s in stats.items() if s[1] < eligible_fraction)
         if not failing:
             break
         _, region = failing[0]  # smallest failing region first
@@ -245,7 +252,10 @@ def build_geometry(
             target = max(contacts, key=contacts.get)
             labels[labels == region] = target
             merges.append(dict(region=int(region), merged_into=int(target)))
-            log(f"geometry: region {region} is ineligible (worst half {worst[region]}); merged into {target}")
+            log(
+                f"geometry: region {region} is ineligible ({stats[region][1]:.0%} of split planes keep "
+                f"{min_positions_per_half} a side); merged into {target}"
+            )
         else:
             dropped.add(region)
             merges.append(dict(region=int(region), merged_into=None))
@@ -264,6 +274,7 @@ def build_geometry(
                 size_merged=final_labels.get(r, 0),
                 size_eroded=final_eroded.get(r, 0) if alive else 0,
                 worst_half=worst.get(r, 0) if alive else 0,
+                split_ok_fraction=round(stats[r][1], 3) if alive and r in stats else 0.0,
                 eligible=r in eligible,
                 merged_into="" if merged_into.get(r) is None else merged_into[r],
             )

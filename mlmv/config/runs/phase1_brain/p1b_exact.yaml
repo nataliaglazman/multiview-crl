@@ -1,0 +1,3 @@
+# Phase 1 (brain-shaped rung): brain renderer, exact variant. ADNI grid: 96 x 112 x 96 voxels, 48 x 56 x 48 features.
+run: {name: p1b_exact}
+synth: {renderer: brain, image: [96, 112, 96], lattice: [24, 28, 24], lesion_radius: [0.5, 1.0], variant: exact}

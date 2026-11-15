@@ -113,6 +113,19 @@ class TestBuildGeometry(unittest.TestCase):
         for a, b in itertools.combinations(geo.eligible, 2):
             self.assertGreater(pairwise_min_distance(geo.coords(a), geo.coords(b), "chebyshev"), 3.0)
 
+    def test_eligible_fraction_keeps_elongated_regions(self):
+        # two small compact regions (6 x 5 x 5 after erosion): axis-aligned planes split them, but the band of an
+        # oblique plane is wider (rho * ||n||_1), so some planes leave fewer than 8 positions on one side
+        labels = np.zeros((16, 5, 5), dtype=np.int64)
+        labels[:8] = 1
+        labels[8:] = 2
+        strict = build_geometry(labels, 1.5, "chebyshev", 8, 128, log=lambda s: None, eligible_fraction=1.0)
+        loose = build_geometry(labels, 1.5, "chebyshev", 8, 128, log=lambda s: None, eligible_fraction=0.3)
+        self.assertLess(len(strict.eligible), len(loose.eligible))
+        for row in loose.table:
+            if row["eligible"]:
+                self.assertGreaterEqual(row["split_ok_fraction"], 0.3)
+
     def test_default_synthetic_regions_all_eligible(self):
         labels = np.repeat(np.repeat(np.repeat(voronoi_regions(16, 8, seed=0), 2, 0), 2, 1), 2, 2)
         geo = build_geometry(labels, 2.5, "chebyshev", 8, 64, log=lambda s: None)

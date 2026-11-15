@@ -1,0 +1,28 @@
+# CPU integration run for the brain renderer: the template at half resolution (4 mm voxels), small model.
+# Used by tests/test_mlmv_brain.py; plumbing only, far too short to learn anything.
+run: {name: smoke_brain_cpu, device: cpu, amp: none, log_every: 10, eval_every: 100000, ckpt_every: 100000}
+model:
+  stem_channels: 8
+  trunk_channels: 16
+  norm_groups: 2
+  trunk_blocks: 1
+  trunk_spatial_convs: 0
+  dims: {G: 8, L: 8, S: 16}
+  expander: [64, 64]
+  checkpoint: false
+sampler:
+  batch_subjects: 2
+  S: {positions: 64}
+  L: {regions: 4, fraction: 1.0}
+  G: {splits_per_subject: 2}
+optim: {steps: 20, warmup_steps: 5, rho_measure_step: 10, rho_positions: 4}
+synth:
+  renderer: brain
+  image: [48, 56, 48]
+  lattice: [12, 14, 12]
+  lesion_radius: [0.5, 1.0]
+  n_train: 32
+  n_val: 12
+  n_test: 24
+  brain: {voxel_mm: 4.0}
+eval: {probes: [ridge], max_subjects: 24, positions_per_subject: 8, cv_folds: 3}
