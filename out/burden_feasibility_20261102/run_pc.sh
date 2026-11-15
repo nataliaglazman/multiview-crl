@@ -145,6 +145,12 @@
 # control on stage 29's gain-off backbone (GAP 8.7 / 8.1), with its own cache of eight jitter draws: does the code
 # follow a sharper backbone? The precision audit, own variation and the audit of the four new heads, stage 30's control
 # and weight-1 head, and both source runs (causal/stage32/).
+# Stage 33 (opt-in) Stages 30 and 32's cross-view prediction trained end to end (warm.py --predict-weight): InfoNCE plus
+# each view's code predicting the other view's whitened backbone GAP, taken with no gradient from a momentum copy of the
+# backbone on the unjittered scans, so the backbone learns from the term too. 20,000 steps from scratch with stage 28's
+# recipe: weights 1 and 3 on bank_causal_nofield (against stage 28's 24-unit InfoNCE arm) and weight 1 on the gain-off
+# bank (against stage 29's gain-off arm). The precision audit, own variation and the audit, beside the two controls
+# and stage 32's best frozen-backbone heads when they are there (causal/stage33/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1112,6 +1118,52 @@ if wants 32; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 32 reports in $OUT"
+fi
+
+if wants 33; then
+    NOFIELD=$D/bank_causal_nofield
+    NOGAIN=$D/bank_causal_nofield_nogain
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    bank "$NOGAIN" --t1-values 0.4 --causal --field off --gain off
+    residual_bank "$NOGAIN" t1_04 flair
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    NCE=${P}_c24_20k
+    GAINLESS=${P}_nogain_c24_20k
+    PREDICT1=${P}_predict1_c24_20k
+    PREDICT3=${P}_predict3_c24_20k
+    GAINLESS_PREDICT1=${P}_nogain_predict1_c24_20k
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42 --content-units 24
+        --contrastive-loss-type infonce)
+    EVERY=2000 ssl "$PREDICT1" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --predict-weight 1
+    EVERY=2000 ssl "$PREDICT3" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --predict-weight 3
+    EVERY=2000 ssl "$GAINLESS_PREDICT1" "$NOGAIN" tail t1_04 20000 "${BASE[@]}" --predict-weight 1
+    finish "$PREDICT1" "$PREDICT3" "$GAINLESS_PREDICT1"
+
+    OUT=$D/causal/stage33
+    RUNS=("$D/runs/$PREDICT1" "$D/runs/$PREDICT3" "$D/runs/$NCE" "$D/runs/$GAINLESS_PREDICT1" "$D/runs/$GAINLESS")
+    if [ "$DRY" = 0 ]; then
+        for name in "$PREDICT1" "$PREDICT3" "$NCE" "$GAINLESS_PREDICT1" "$GAINLESS"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 33 needs $name finished (stage 28 trains $NCE, stage 29 $GAINLESS)." \
+                    "Rerun stage 33 after it is."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+    fi
+    for name in head_nofield_c24_predict3_10k head_nogain_c24_predict1_10k; do  # stage 32's heads, for reference
+        if [ "$DRY" = 1 ] || grep -qx DONE "$D/logs/$name.log" 2>/dev/null; then RUNS+=("$D/runs/$name"); fi
+    done
+    for report in precision_audit own_variation code_audit; do
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/$report.py $OUT/$report.json ${RUNS[*]} > $OUT/$report.txt"
+        else
+            "$PY" "$D/$report.py" "$OUT/$report.json" "${RUNS[@]}" > "$OUT/$report.txt" 2>&1 \
+                || { echo "$report failed, see $OUT/$report.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 33 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

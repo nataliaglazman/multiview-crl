@@ -59,6 +59,16 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 this architecture reaches: the ceiling for any label-free objective. The InfoNCE is logged, not
                 trained. Needs TailCode pooling, --patch-weight 0 and InfoNCE, and none of --queue, --hard-negatives,
                 --decorrelate, --half-views or --remainder-units.
+  --predict-weight W  adds W times a cross-view prediction term, stages 30 and 32's frozen-backbone term trained end to
+                end: each view's code units, standardized over the batch as for the InfoNCE, predict through their own
+                linear map the other view's backbone GAP. The targets come with no gradient from a momentum copy of the
+                backbone on the unjittered images, whitened by running statistics (each feature standardized, then the
+                inverse square root of the correlation matrix plus a ridge), so every shared direction counts alike.
+                Unlike the InfoNCE, an error the code leaves keeps costing after the batch is told apart. The copy keeps
+                the backbone from making its own targets easy to predict. --predict-momentum M (default 0.996) is the
+                copy's momentum, --predict-ridge R (default 0.1) the whitening's ridge; the maps are used only in
+                training. Each eval logs how many directions the targets spread over. Needs TailCode pooling and InfoNCE,
+                and neither --queue nor --supervise.
   --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
@@ -77,6 +87,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
         [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--content-units N] [--seed S]
         [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]
          [--remainder-space main|gap]] [--critic-weights main|remainder|both [--critic-lr LR]] [--supervise volume]
+        [--predict-weight W [--predict-momentum M] [--predict-ridge R]]
 """
 
 import argparse
@@ -352,6 +363,62 @@ def cross_view_decorrelation(z1, z2):
     return (1 - diagonal).square().sum() + OFF_DIAGONAL * (c.square().sum() - diagonal.square().sum())
 
 
+class TargetWhitening:
+    """--predict-weight's whitening of the target GAP, per view, from a running mean and the covariance about it
+    (TailCode's spread-about-the-running-mean rule): each feature standardized, then the inverse square root of the
+    correlation matrix plus ``ridge``. frozen_prediction.fit_whitening fits the same transform once on frozen features;
+    here the backbone moves, so the statistics follow it. Kept on the CPU in double precision."""
+
+    def __init__(self, sample, ridge, momentum=0.01):
+        x = sample.detach().double().cpu()
+        self.mean = x.mean(1, keepdim=True)
+        self.cov = (x - self.mean).transpose(1, 2) @ (x - self.mean) / x.shape[1]
+        self.ridge, self.momentum = ridge, momentum
+        self.refresh()
+
+    def refresh(self):
+        self.scale = self.cov.diagonal(dim1=1, dim2=2).clamp_min(0).sqrt().clamp_min(1e-6)[:, None]
+        correlation = self.cov / (self.scale.transpose(1, 2) * self.scale)
+        self.values, vectors = torch.linalg.eigh(correlation)
+        root = (self.values.clamp_min(0) + self.ridge).rsqrt().unsqueeze(1)
+        self.matrix = (vectors * root) @ vectors.transpose(1, 2)
+
+    @torch.no_grad()
+    def update(self, batch):
+        x = batch.detach().double().cpu()
+        self.mean += self.momentum * (x.mean(1, keepdim=True) - self.mean)
+        centred = x - self.mean
+        self.cov += self.momentum * (centred.transpose(1, 2) @ centred / x.shape[1] - self.cov)
+        self.refresh()
+
+    def __call__(self, batch):
+        z = (batch.detach().double().cpu() - self.mean) / self.scale
+        return (z @ self.matrix).to(device=batch.device, dtype=batch.dtype)
+
+    def spread(self):
+        """Per view, the participation ratio of the correlation eigenvalues: about how many directions the targets
+        spread over (the feature count when they are uncorrelated, 1 when one direction carries them all)."""
+        values = self.values.clamp_min(0)
+        return [round(float(v), 2) for v in values.sum(1).square() / values.square().sum(1)]
+
+    def state(self):
+        return {"mean": self.mean.float(), "cov": self.cov.float(), "ridge": self.ridge, "momentum": self.momentum}
+
+
+@torch.no_grad()
+def target_gap(target_model, x):
+    """Each view's backbone GAP from --predict-weight's momentum copy: (2, B, channels), no gradient."""
+    return torch.stack(target_model._encode(x, 2, None).mean((2, 3, 4)).chunk(2))
+
+
+def cross_view_prediction(pair, targets, decoders):
+    """--predict-weight's term on (2, B, units) codes and (2, B, channels) whitened targets: decoder 0 reads the T1 code
+    to predict FLAIR's target, decoder 1 the reverse, each code standardized over the batch as the InfoNCE sees it; the
+    mean squared error, averaged over both directions."""
+    code = T.standardize_contrastive_code(pair)
+    return sum(F.mse_loss(decoders[v](code[v]), targets[1 - v].detach()) for v in range(2)) / 2
+
+
 def hard_negative_infonce(code, units, tau, concentration, sim, weight=None):
     """The recipe's global InfoNCE (each view standardized over the batch, cosine, cross-view negatives only, both
     directions summed) with each anchor's negatives weighted by exp(concentration * cosine), rescaled to mean 1, so the
@@ -610,6 +677,16 @@ def main():
         default=None,
         help="Diagnostic only: regress the code on the rendered lesion volume (labels) in place of InfoNCE",
     )
+    p.add_argument(
+        "--predict-weight",
+        type=float,
+        default=0.0,
+        help="Weight of a term in which each view's code predicts the other view's whitened GAP from a momentum copy",
+    )
+    p.add_argument(
+        "--predict-momentum", type=float, default=None, help="Momentum of --predict-weight's target copy (0.996)"
+    )
+    p.add_argument("--predict-ridge", type=float, default=None, help="Ridge of --predict-weight's whitening (0.1)")
     a = p.parse_args()
     if a.uniform and a.code_batches:
         raise ValueError("--uniform and --code-batches are different batch rules")
@@ -721,6 +798,25 @@ def main():
                 "--critic-weights needs TailCode pooling and InfoNCE, none of --queue, --hard-negatives, --half-views or"
                 " --supervise, and a positive --critic-lr; remainder and both need --remainder-units"
             )
+    if not (np.isfinite(a.predict_weight) and a.predict_weight >= 0):
+        raise ValueError("--predict-weight must be finite and non-negative")
+    if not a.predict_weight and (a.predict_momentum is not None or a.predict_ridge is not None):
+        raise ValueError("--predict-momentum and --predict-ridge need --predict-weight")
+    if a.predict_weight:
+        a.predict_momentum = 0.996 if a.predict_momentum is None else a.predict_momentum
+        a.predict_ridge = 0.1 if a.predict_ridge is None else a.predict_ridge
+        if (
+            a.pool == "gap"
+            or a.contrastive_loss_type != "infonce"
+            or a.queue
+            or a.supervise
+            or not 0 <= a.predict_momentum < 1
+            or not (np.isfinite(a.predict_ridge) and a.predict_ridge > 0)
+        ):
+            raise ValueError(
+                "--predict-weight needs TailCode pooling and InfoNCE, neither --queue nor --supervise, a momentum in"
+                " [0, 1) and a positive ridge"
+            )
     a.out.mkdir(parents=True, exist_ok=False)
     if a.t1key == "t1_04":
         args.synthetic_lesion_t1_value = 0.4
@@ -808,6 +904,28 @@ def main():
             round(volume[1], 1),
             flush=True,
         )
+    decoders, target_model, whitening = None, None, None
+    if a.predict_weight:
+        target_model = copy.deepcopy(model).eval().requires_grad_(False)
+        first = np.arange(min(256, len(train.vox)))
+        sample = [
+            target_gap(target_model, train.images(first[s : s + args.batch_size], a.device))
+            for s in range(0, len(first), args.batch_size)
+        ]
+        whitening = TargetWhitening(torch.cat(sample, 1), a.predict_ridge)
+        with torch.random.fork_rng(devices=[]):  # the maps' init leaves every later draw as in a run without them
+            decoders = nn.ModuleList(nn.Linear(units, sample[0].shape[-1]) for _ in range(2)).to(a.device)
+        print(
+            "cross-view prediction weight",
+            a.predict_weight,
+            "target momentum",
+            a.predict_momentum,
+            "whitening ridge",
+            a.predict_ridge,
+            "initial target spread",
+            whitening.spread(),
+            flush=True,
+        )
     halves = None if a.half_views is None else half_masks(a.bank, a.half_views, train.t1.shape[-1], a.device)
     test = Bank(a.bank, "test", a.t1key, a.test_subjects, a.residual)
     scored = {
@@ -867,6 +985,8 @@ def main():
         parameters += list(pool.parameters())
     if readout is not None:
         parameters += list(readout.parameters())
+    if decoders is not None:
+        parameters += list(decoders.parameters())
     if len(critic):
         groups = [{"params": parameters}, {"params": list(critic.parameters()), "lr": a.critic_lr, "weight_decay": 0.0}]
         optimizer = torch.optim.AdamW(groups, lr=args.lr)
@@ -892,6 +1012,8 @@ def main():
             row["remainder_spread"] = remainder["spread"]
         if len(critic):
             row["critic_weights"] = {k: [round(float(w), 4) for w in v()] for k, v in critic.items()}
+        if whitening is not None:
+            row["target_spread"] = whitening.spread()
         report["history"].append(row)
         (a.out / "report.json").write_text(json.dumps(report, indent=1))
         t = row["test"]
@@ -928,6 +1050,7 @@ def main():
         indices = np.asarray(next(source))
         x = train.images(indices, a.device)
         whole_t1 = x[: len(indices)]
+        clean = x
         if a.jitter or a.rotate:
             x = jitter(x, a.jitter, a.rotate, aug, a.shared_jitter)
         if a.group_dropout:
@@ -1000,10 +1123,17 @@ def main():
         if a.decorrelate:
             terms["decor"] = cross_view_decorrelation(*pair)
             loss = loss + a.decorrelate * terms["decor"]
+        if decoders is not None:
+            gap = target_gap(target_model, clean)
+            whitening.update(gap)
+            terms["predict"] = cross_view_prediction(pair, whitening(gap), decoders)
+            loss = loss + a.predict_weight * terms["predict"]
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(parameters, args.grad_clip)
         optimizer.step()
+        if target_model is not None:
+            momentum_update(model, target_model, a.predict_momentum)
         if queue is not None:
             momentum_update(model, momentum_model, a.queue_momentum)
             if pool is not None:
@@ -1028,6 +1158,8 @@ def main():
                 state["readout"] = readout.state_dict()
             if len(critic):
                 state["critic"] = critic.state_dict()
+            if decoders is not None:
+                state["predict"] = {"decoders": decoders.state_dict(), "whitening": whitening.state()}
             torch.save(state, a.out / "model.pt")
     print("DONE", flush=True)
 

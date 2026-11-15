@@ -365,6 +365,26 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       errors correlate at .85: a shared stand-in built from anatomy and lesion position, not burden's own part.
     - **Reading:** the blocker is the saturated InfoNCE at the head (retrieval ~.99 in sets of 32), not the backbone.
       Stage 30 changes the head's objective.
+21. **Cross-view prediction at the head keeps what the backbone holds (stages 30 and 32; precision audit read 13 Nov,
+    own variation and the audit not yet).** Backbone frozen; the head continued 10k updates with InfoNCE alone, or
+    plus weight × each view's code predicting the other view's whitened GAP. Code volume error, T1 / FLAIR:
+    - Field-off backbone (GAP 11.0 / 11.0): InfoNCE alone 23.9 / 22.9 (worse than its 18.0 / 19.7 start); weight 0.1
+      21.0 / 20.4; weight 1 14.9 / 14.9; weight 3 14.0 / 14.6; weight 10 14.1 / 14.5. The weight saturates by 3, and
+      the largest third stays at 27–29 (GAP 16).
+    - Gain-off backbone (GAP 8.7 / 8.1): InfoNCE alone 17.8 / 17.6; weight 1 10.9 / 10.9, the best label-free code so
+      far (largest third 15 / 17). Burden's own part read from the code with no help from the other factors ("alone")
+      is .75 / .75, against the backbone's .82 / .83; every earlier code sat at .38–.53.
+    - Every prediction head keeps the anatomy (mean R² .78–.82) and lesion position (.90–.91), as well as the
+      remainder arms (.75–.76). The InfoNCE loss rises with the weight (.05 → .10). The head loses ~2–4 voxels against
+      its backbone either way, so the gain-off code is better mainly because its backbone is.
+    - InfoNCE alone sheds burden, position and anatomy as it keeps training while its loss halves: a saturated InfoNCE
+      discards what it doesn't need.
+    - **Not settled.** Barlow Twins also read ~15 voxels and held only .35 of burden's own variation, so
+      `causal/stage32/own_variation.txt` (it covers stage 30's heads too) decides. Gain off is generator-side: gain
+      scales tissue and lesion contrast by up to ±30% under a fixed noise level, and the scan channel is normalised
+      with one fixed reference (only the residual channel is z-scored per scan). Per-scan white-matter normalisation
+      (WhiteStripe) is the real-data counterpart but can't undo the change in contrast-to-noise, so test it before
+      treating gain off as deployable.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -383,10 +403,44 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Label-free factor-level discovery** needs views that share different subsets of factors, or interventions.
   Two views that share everything identify only the block.
 
-## 9. State on 13 Nov
+## 9. State on 15 Nov
 
-- **Stage 32 (built 13 Nov, not run): the next step.** Two head-only follow-ups to stage 30, with its script
-  (`frozen_prediction.py`) unchanged.
+- **Stage 33 (built 15 Nov, not run): the next step.** Stages 30 and 32's prediction term trained end to end,
+  `warm.py --predict-weight W`.
+  - **Why:** the frozen-backbone heads keep all but ~2–4 voxels of what their backbone holds (section 7, item 21), so
+    the backbone is now the limit. Training it with the term may sharpen it, and one training run keeps the method a
+    training objective. Section 8 names latent correlation maximisation trained end to end as the theory-backed
+    counterpart of the CCA readout; this term is close to it.
+  - **Term:** InfoNCE plus W × the mean squared error of each view's linear map from its code units (standardized over
+    the batch, as the InfoNCE sees them) to the other view's backbone GAP. The targets come with no gradient from a
+    momentum copy of the backbone (momentum 0.996) on the unjittered scans, whitened by running statistics (momentum
+    0.01; ridge 0.1 on the correlation matrix, as in stage 30). The copy keeps the backbone from making its own
+    targets easy to predict. The maps are dropped after training; the checkpoint keeps them and the whitening under
+    `predict`. Each step costs one extra backbone pass without gradient.
+  - **Arms**, 20k steps from scratch, seed 42, stage 28's recipe (`--uniform --residual --jitter 2 --rotate 3
+    --patch-weight 0 --content-units 24`): weights 1 and 3 on `bank_causal_nofield`
+    (`ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_20k` and `..._predict3_c24_20k`, against stage
+    28's `..._nofield_c24_20k`), and weight 1 on the gain-off bank (`..._nofield_nogain_predict1_c24_20k`, against
+    stage 29's `..._nofield_nogain_c24_20k`). No remainder units: the prediction heads already hold anatomy as well.
+  - **Reports:** `causal/stage33/{precision_audit,own_variation,code_audit}.txt`: the three arms, both controls, and
+    stage 32's `head_nofield_c24_predict3_10k` and `head_nogain_c24_predict1_10k` for reference. Each eval in a run's
+    `report.json` also logs `target_spread`, about how many directions the targets spread over (the participation
+    ratio of their correlation eigenvalues; ~2.5 of 64 at init). A fall toward 1 would mean the backbone's GAP is
+    collapsing onto a few directions.
+  - **Success:** the backbone GAP at least as sharp as its InfoNCE control (11.0, or 8.7 / 8.1 with gain off); the
+    code sharper than the frozen-backbone heads (14.0 / 14.6, or 10.9); burden's own variation in the code above
+    .31–.37; anatomy holding. If the backbone gets worse, keep the two-step version (stages 30, 32).
+  - **Checked locally** (200-subject field-off bank, two steps on the CPU): weight 0 reproduces the control's weights
+    exactly; weight 1 trains, logs the term and saves the maps; own variation reads the run. The precision audit and
+    the code audit need more test subjects than that bank has (they fail there for the control too), so they were
+    run on two-step runs on the repo's full-size `bank`, where both read the control and weight 1. Six unit tests
+    (`tests/test_warm_prediction.py`): the running whitening starts equal to stage 30's fit and follows new batches by
+    its momentum, each code predicts the other view, the target gets no gradient, the momentum copy moves toward the
+    online backbone, and the options are checked.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 33`. It needs stages 28 and 29's controls finished and
+    renders nothing new.
+- **Stage 32 (run 13 Nov; precision audit read in section 7, item 21; own variation and audit not yet).** Two
+  head-only follow-ups to stage 30, with its script (`frozen_prediction.py`) unchanged.
   - **Why:** stage 30's weight-1 head reads lesion volume to 14.9 voxels in both views, against 23.9 / 22.9 for its
     InfoNCE control and 11.0 for the frozen backbone's GAP, and keeps the anatomy. The error fell steadily with the
     weight (0, 0.1, 1), so it may fall further. The gain-off backbone reads volume more precisely (GAP 8.7 / 8.1).
@@ -518,20 +572,21 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 10. Recent stages and next steps
 
-**Next, after stage 30's precision audit (13 Nov).** The numbered items below were written with the field on.
-- **Read stage 30's own variation and audit** (`causal/stage30/own_variation.txt`, `code_audit.txt`). Its precision
-  audit is promising (section 9): does weight 1 also lift burden's own part in the code above stages 29 and 31's
-  .31–.37, with anatomy holding?
-- **Run stage 32** (`run_pc.sh 32`, section 9): weights 3 and 10, and weight 1 on the gain-off backbone. If the
-  prediction term holds up, move it into end-to-end training on the strongest base: the gain-off bank (best backbone)
-  with remainder units (best anatomy). The targets then need a slowly updated copy of the backbone that gets no
-  gradient, or the backbone can make its own targets easy to predict.
+**Next, after stage 32's precision audit (13 Nov).** The numbered items below were written with the field on.
+- **Read stage 32's `own_variation.txt` and `code_audit.txt`** (they cover stage 30's heads too). The precision audit
+  is promising (section 7, item 21): does the prediction head also lift burden's own part in the code above stages 29
+  and 31's .31–.37, with anatomy holding?
+- **Run stage 33** (`run_pc.sh 33`, built 15 Nov, section 9): the prediction term trained end to end, backbone
+  included, with targets from a slowly updated copy of the backbone that gets no gradient. Weights 1 and 3 on
+  `bank_causal_nofield`, weight 1 on the gain-off bank, 20k steps from scratch, against stages 28 and 29's InfoNCE
+  arms. Freezing the backbone and retraining the head (stages 30, 32) stays the fallback.
+- **Then test white-matter normalisation** on the gain-on bank, the real-data version of gain off (item 21).
 - **Decide with the user whether `bank_causal_nofield` becomes the main burden bank,** with the field-on bank kept as a
   stress test. For: a real bias field varies over centimetres and N4 removes it, so the 16³ field has no counterpart
   in corrected scans. The same question for gain off, whose real counterpart is intensity normalisation (WhiteStripe).
 - **Done on 13 Nov:** stage 28's remaining reports (item 18) and the head levers of stages 29 and 31 (item 20: width,
-  remainder units, Barlow Twins, gain off, critic weights). None moved burden's own part in the code. Stage 30 ran and
-  its precision audit is read (section 9).
+  remainder units, Barlow Twins, gain off, critic weights). None moved burden's own part in the code. Stages 30 and 32
+  ran and their precision audits are read (item 21).
 - **Big-lesion compression** (item 18) is a separate lead. Labels remove it, so nothing in InfoNCE pays to keep big
   lesions apart. Remainder units and critic weights cut the code's error on the largest third from 47 / 42 to 26–33.
 
