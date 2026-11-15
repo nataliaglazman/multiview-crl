@@ -31,7 +31,7 @@ def load_arms(paths, floors, view, discovery):
         raise ValueError("Each untrained floor must name a trained bundle")
     views = ("1", "2") if view == "each" else (view,)
     arms, records = {}, {}
-    reference = None
+    reference, own, own_source = None, None, None
     for label, path in paths.items():
         for v in views:
             trained_width = None
@@ -54,6 +54,15 @@ def load_arms(paths, floors, view, discovery):
                     raise ValueError(f"{source} has different content factor names or order")
                 if x.ndim != 2 or len(x) != len(z) or not x.shape[1] or not np.isfinite(x).all():
                     raise ValueError(f"{source} needs one finite, nonempty feature vector per subject")
+                with np.load(source, allow_pickle=False) as data:
+                    bundle_own = data["z_own"].astype(np.float64) if "z_own" in data.files else None
+                if bundle_own is not None:
+                    if bundle_own.shape != z.shape or not np.isfinite(bundle_own).all():
+                        raise ValueError(f"{source} needs finite own noise matching its image factors")
+                    if own is None:
+                        own, own_source = bundle_own, source
+                    elif not np.array_equal(bundle_own, own):
+                        raise ValueError(f"{source} and {own_source} disagree on the image factors' own noise")
                 if kind == "trained":
                     trained_width = x.shape[1]
                 elif x.shape[1] != trained_width:
@@ -80,7 +89,9 @@ def load_arms(paths, floors, view, discovery):
         raise ValueError("Bundle needs at least one varying image factor")
     if adjacency is not None:
         adjacency = adjacency[np.ix_(keep, keep)]
-    return z, names, adjacency, arms, reference["identity"]
+    if own is not None:
+        own = own[:, keep]
+    return z, names, adjacency, arms, reference["identity"], own
 
 
 def decode_factors(x, z, fit, held):
@@ -114,6 +125,9 @@ def write_tables(root, seed, scm, z, names, identity):
         discovery_adjacency=scm.adjacency,
         discovery_treatment=scm.discovery_treatment,
         discovery_outcome=scm.discovery_outcome,
+        tabular_causes=scm.causes,
+        tabular_cause_names=scm.cause_names,
+        tabular_cause_targets=np.asarray(scm.cause_targets, dtype=int),
         identity=json.dumps(identity),
     )
 
@@ -145,17 +159,24 @@ def summarize(runs, arms):
             result["image_tabular_f1"] = float(
                 np.mean([graph["edge_groups"]["image_tabular"]["f1"] for graph in scored])
             )
+            for group, label in (("out_of_image", "image_out"), ("into_image", "image_in")):
+                if group in scored[0]["edge_groups"]:
+                    result[f"{label}_f1"] = float(np.mean([graph["edge_groups"][group]["f1"] for graph in scored]))
+                    counts = [graph["orientation"][group] for graph in scored]
+                    true = sum(count["true"] for count in counts)
+                    result[f"{label}_oriented"] = sum(count["oriented"] for count in counts) / true if true else 0.0
         summary[key] = result
     return summary
 
 
-def benchmark(z, names, adjacency, arms, identity, args):
+def benchmark(z, names, adjacency, arms, identity, own, args):
     discovery = not args.effects_only
+    own = None if args.no_tabular_causes else own
     readout_r2, decoded, held = {}, {}, []
     if discovery:
         validate_discovery_options(args.alpha, "fisherz", None)
         fit, held = train_test_split(np.arange(len(z)), test_size=args.graph_fraction, random_state=args.split_seed)
-        if len(held) < z.shape[1] + 7:
+        if len(held) < z.shape[1] + 7 + (0 if own is None else 2):
             raise ValueError("Too few held-out rows for discovery at this graph width. Increase --graph-fraction.")
         decoded["oracle factors"] = z[held]
         for key, arm in arms.items():
@@ -172,6 +193,7 @@ def benchmark(z, names, adjacency, arms, identity, args):
             confounding=args.confounding,
             overlap=args.overlap,
             image_adjacency=adjacency,
+            own_noise=own,
         )
         w, a, y = scm.covariates, scm.treatment, scm.outcome
         folds = make_folds(a, args.folds, args.split_seed)
@@ -187,7 +209,8 @@ def benchmark(z, names, adjacency, arms, identity, args):
 
         graphs = {}
         if discovery:
-            continuous = np.column_stack((w, scm.discovery_treatment, scm.discovery_outcome))[held]
+            continuous = np.column_stack((w, scm.causes, scm.discovery_treatment, scm.discovery_outcome))[held]
+            first_cause = z.shape[1] + w.shape[1]
             for key, factors in decoded.items():
                 try:
                     graphs[key] = score_discovery(
@@ -195,6 +218,7 @@ def benchmark(z, names, adjacency, arms, identity, args):
                         scm.adjacency,
                         alpha=args.alpha,
                         n_image_factors=z.shape[1],
+                        tabular_causes=range(first_cause, first_cause + scm.causes.shape[1]),
                     )
                 except np.linalg.LinAlgError as error:
                     graphs[key] = {"error": str(error)}
@@ -210,6 +234,10 @@ def benchmark(z, names, adjacency, arms, identity, args):
                 effects=effects,
                 discovery=graphs,
                 discovery_truth=scm.adjacency.astype(int).tolist() if discovery else None,
+                tabular_causes=[
+                    dict(name=name, factor=names[target], strength=strength)
+                    for name, target, strength in zip(scm.cause_names, scm.cause_targets, scm.cause_strengths)
+                ],
             )
         )
     return dict(
@@ -219,7 +247,7 @@ def benchmark(z, names, adjacency, arms, identity, args):
         identity=identity,
         n_subjects=len(z),
         image_factors=names,
-        discovery_nodes=[*names, *scm.tabular_names, "treatment", "outcome"] if discovery else [],
+        discovery_nodes=[*names, *scm.tabular_names, *scm.cause_names, "treatment", "outcome"] if discovery else [],
         discovery_held_out_rows=list(map(int, held)),
         arms={key: {k: v for k, v in arm.items() if k != "X"} for key, arm in arms.items()},
         readout_r2=readout_r2,
@@ -251,6 +279,11 @@ def main(argv=None):
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--split-seed", type=int, default=0)
     parser.add_argument("--effects-only", action="store_true")
+    parser.add_argument(
+        "--no-tabular-causes",
+        action="store_true",
+        help="Leave out the tabular causes of image factors that bundles with own noise (z_own) otherwise add",
+    )
     parser.add_argument("--alpha", type=float, default=0.05, help="Fixed significance threshold for the graph test")
     parser.add_argument(
         "--graph-fraction", type=float, default=0.5, help="Fraction held out from the discovery readout fit"
@@ -274,11 +307,21 @@ def main(argv=None):
     print(
         f"{report['n_subjects']} subjects, {len(report['runs'])} tasks. Average treatment effect target: {args.effect:g}"
     )
-    print(f"{'Arm':36} {'ATE':>8} {'Bias':>8} {'MAE':>8} {'PC F1':>8} {'MRI–tab F1':>10}")
+    causes = any("image_in_f1" in row for row in report["summary"].values())
+    header = f"{'Arm':36} {'ATE':>8} {'Bias':>8} {'MAE':>8} {'PC F1':>8} {'MRI–tab F1':>10}"
+    print(header + (f" {'MRI→tab F1':>10} {'tab→MRI F1':>10} {'oriented':>8}" if causes else ""))
+
+    def cell(row, key, width):
+        return f"{row[key]:{width}.3f}" if key in row else f"{'-':>{width}}"
+
     for key, row in report["summary"].items():
-        graph = f"{row['skeleton_f1']:.3f}" if "skeleton_f1" in row else "-"
-        cross = f"{row['image_tabular_f1']:.3f}" if "image_tabular_f1" in row else "-"
-        print(f"{key:36} {row['mean_ate']:8.3f} {row['bias']:8.3f} {row['mae']:8.3f} {graph:>8} {cross:>10}")
+        line = f"{key:36} {row['mean_ate']:8.3f} {row['bias']:8.3f} {row['mae']:8.3f} "
+        line += f"{cell(row, 'skeleton_f1', 8)} {cell(row, 'image_tabular_f1', 10)}"
+        if causes:
+            line += (
+                f" {cell(row, 'image_out_f1', 10)} {cell(row, 'image_in_f1', 10)} {cell(row, 'image_in_oriented', 8)}"
+            )
+        print(line)
     print(f"Report: {args.out}")
 
 

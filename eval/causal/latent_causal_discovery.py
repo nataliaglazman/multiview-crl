@@ -131,6 +131,21 @@ def discover(values, alphas=DEFAULT_ALPHAS, indep_test="fisherz", max_cond_set=N
     """``{alpha: boolean skeleton}`` over the columns of ``values``. No labels involved."""
     import numpy as np
 
+    out = {}
+    for alpha, graph in discover_endpoints(values, alphas, indep_test, max_cond_set).items():
+        adjacency = (graph != 0) | (graph.T != 0)
+        np.fill_diagonal(adjacency, False)
+        out[alpha] = adjacency
+    return out
+
+
+def discover_endpoints(values, alphas=DEFAULT_ALPHAS, indep_test="fisherz", max_cond_set=None):
+    """``{alpha: PC's CPDAG}`` as causal-learn endpoints over the columns of ``values``.
+
+    ``graph[i, j] == -1 and graph[j, i] == 1`` is ``i -> j``. A dropped constant column has no edges.
+    """
+    import numpy as np
+
     try:
         from causallearn.search.ConstraintBased.PC import pc
     except ImportError as exc:
@@ -149,11 +164,9 @@ def discover(values, alphas=DEFAULT_ALPHAS, indep_test="fisherz", max_cond_set=N
     out = {}
     for alpha in alphas:
         graph = pc(values[:, keep], alpha=alpha, indep_test=indep_test, show_progress=False, max_k=max_cond_set).G.graph
-        adjacency = (np.asarray(graph) != 0) | (np.asarray(graph).T != 0)
-        np.fill_diagonal(adjacency, False)
-        full = np.zeros((values.shape[1], values.shape[1]), dtype=bool)
+        full = np.zeros((values.shape[1], values.shape[1]), dtype=int)
         idx = np.flatnonzero(keep)
-        full[np.ix_(idx, idx)] = adjacency
+        full[np.ix_(idx, idx)] = np.asarray(graph)
         out[alpha] = full
     return out
 

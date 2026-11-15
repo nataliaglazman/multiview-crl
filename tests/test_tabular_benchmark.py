@@ -25,8 +25,13 @@ def cohort():
     return z, adjacency, z @ rotation, rng.normal(size=z.shape)
 
 
-def bundle(path, z, adjacency, features):
-    np.savez(path, z_content=z, causal_adj=adjacency, emb_view1=features, emb_view2=features[:, ::-1])
+def own_noise():
+    return np.random.default_rng(12).normal(size=(1500, 3))
+
+
+def bundle(path, z, adjacency, features, own=None):
+    extra = {} if own is None else {"z_own": own}
+    np.savez(path, z_content=z, causal_adj=adjacency, emb_view1=features, emb_view2=features[:, ::-1], **extra)
 
 
 class TabularBenchmarkTests(unittest.TestCase):
@@ -60,6 +65,44 @@ class TabularBenchmarkTests(unittest.TestCase):
         null = simulate_tabular(z, seed=0, confounding=0.0, image_adjacency=adjacency)
         self.assertFalse(null.adjacency[:5, -2:].any())
         self.assertTrue(null.adjacency[5, -1] and null.adjacency[-2, -1])
+
+    def test_tabular_causes_enter_through_own_noise_alone(self):
+        z, adjacency, _, _ = cohort()
+        own = own_noise()
+        descendants = {0: {0, 1, 2}, 1: {1, 2}, 2: {2}}
+        for seed in range(6):
+            plain = simulate_tabular(z, seed=seed, image_adjacency=adjacency)
+            scm = simulate_tabular(z, seed=seed, image_adjacency=adjacency, own_noise=own)
+            for field in (
+                "outcome",
+                "propensity",
+                "y1",
+                "discovery_treatment",
+                "discovery_outcome",
+                "effect_adjacency",
+            ):
+                np.testing.assert_array_equal(getattr(scm, field), getattr(plain, field))
+            self.assertEqual(plain.causes.shape, (len(z), 0))
+            self.assertEqual(scm.causes.shape, (len(z), 2))
+            self.assertEqual(len(set(scm.cause_targets)), 2)
+            self.assertEqual(scm.adjacency.shape, (10, 10))
+            np.testing.assert_array_equal(scm.adjacency[np.ix_([*range(6), 8, 9], [*range(6), 8, 9])], plain.adjacency)
+            values = np.column_stack((z, scm.covariates, scm.causes, scm.discovery_treatment, scm.discovery_outcome))
+            precision = np.linalg.inv(np.corrcoef(values.T))
+            partial = -precision / np.sqrt(np.outer(np.diag(precision), np.diag(precision)))
+            for i, (target, strength) in enumerate(zip(scm.cause_targets, scm.cause_strengths)):
+                cause = 6 + i
+                self.assertEqual(np.flatnonzero(scm.adjacency[cause]).tolist(), [target])
+                self.assertFalse(scm.adjacency[:, cause].any())
+                self.assertTrue(0.5 <= abs(strength) <= 0.8)
+                self.assertGreater(abs(partial[cause, target]), 0.1, (seed, i))
+                self.assertGreater(abs(np.corrcoef(scm.causes[:, i], own[:, target])[0, 1]), 0.45)
+                for other in set(range(3)) - descendants[target]:
+                    self.assertLess(abs(np.corrcoef(scm.causes[:, i], z[:, other])[0, 1]), 0.1, (seed, i, other))
+        null = simulate_tabular(z, seed=0, confounding=0.0, image_adjacency=adjacency, own_noise=own)
+        self.assertFalse(null.adjacency[6:8].any())
+        with self.assertRaisesRegex(ValueError, "own_noise"):
+            simulate_tabular(z, own_noise=own[:, :2])
 
     def test_rejects_reordered_floor(self):
         z, adjacency, dense, floor = cohort()
@@ -117,6 +160,33 @@ class TabularBenchmarkTests(unittest.TestCase):
                     [float(row["outcome"]) for row in observed],
                     np.where([int(row["treatment"]) for row in observed], truth["y1"], truth["y0"]),
                 )
+
+    @unittest.skipUnless(importlib.util.find_spec("causallearn"), "causal-learn is needed for the graph panel")
+    def test_cli_scores_edges_into_and_out_of_the_image(self):
+        z, adjacency, dense, floor = cohort()
+        with tempfile.TemporaryDirectory() as scratch, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(scratch)
+            a, b, out = root / "dense.npz", root / "floor.npz", root / "report.json"
+            bundle(a, z, adjacency, dense, own_noise())
+            bundle(b, z, adjacency, floor)
+            args = ["--bundles", f"dense={a}", "--floors", f"dense={b}", "--seeds", "0", "1", "2", "--out", str(out)]
+            tabular_benchmark.main(args)
+            report = json.loads(out.read_text())
+            self.assertEqual(report["discovery_nodes"][6:8], ["tabular_cause_1", "tabular_cause_2"])
+            oracle = report["summary"]["oracle factors"]
+            self.assertGreater(oracle["image_in_f1"], 0.9)
+            self.assertGreater(oracle["image_out_f1"], 0.8)
+            self.assertGreater(oracle["image_in_oriented"], 0.5)
+            for run in report["runs"]:
+                self.assertEqual(np.shape(run["discovery_truth"]), (10, 10))
+                self.assertEqual(len(run["tabular_causes"]), 2)
+                counts = run["discovery"]["oracle factors"]["orientation"]["into_image"]
+                self.assertEqual((counts["true"], counts["found"]), (2, 2))
+                self.assertEqual(counts["reversed"], 0)
+            untrained = report["summary"]["dense / T1 (untrained)"]
+            self.assertLess(untrained["image_in_f1"], 0.5)
+            tabular_benchmark.main([*args, "--no-tabular-causes"])
+            self.assertNotIn("image_in_f1", json.loads(out.read_text())["summary"]["oracle factors"])
 
 
 if __name__ == "__main__":

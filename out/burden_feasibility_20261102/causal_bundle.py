@@ -5,7 +5,8 @@ eval.protocol.compare_bundles --with-graph (PC on factors decoded from the code)
     python out/burden_feasibility_20261102/causal_bundle.py RUN OUT.npz [--untrained] [--features code|gap|pooled]
 
 The factors are the seven the renderer draws (bank.CAUSAL_FACTORS; z_content[3:5] are unused with the burden target)
-and causal_adj is the bank's SCM restricted to them. emb_view1 is the T1 code, emb_view2 the FLAIR code.
+and causal_adj is the bank's SCM restricted to them. z_own is each factor's exogenous noise, inverted from the SCM as
+own_variation.py does, for the tabular benchmark's tabular causes. emb_view1 is the T1 code, emb_view2 the FLAIR code.
 --untrained keeps the run's architecture and its init but none of its training: the floor. Its TailCode statistics and
 gauges are first filled from training subjects, so the floor is a calibrated random code rather than an unscaled one.
 --features gap or pooled exports the backbone GAP (64) or TailCode's pooled features (the head's input) in place of
@@ -68,11 +69,29 @@ def main():
     print("BUNDLE", a.out, "rows", rows, a.features, codes[0].shape[1], "step", step, "untrained", a.untrained)
 
 
+def own_noise(zc, root, columns):
+    """Each factor's exogenous noise, checked: unit SD and uncorrelated with every parent, or the SCM does not invert."""
+    import own_variation  # it imports this module
+
+    scm, scale, nonlinearity = own_variation.scm_settings()
+    if not np.array_equal(scm["adj"], np.load(f"{root}/causal_adj.npy")):
+        raise ValueError(f"{root}'s causal_adj.npy is not bank.causal_scm's graph: own noise cannot be inverted")
+    own = own_variation.targets(zc, scm, scale, nonlinearity, columns)["own"]
+    for j, d in enumerate(columns):
+        corr = [abs(np.corrcoef(own[:, j], zc[:, p])[0, 1]) for p in scm["parents"][d]]
+        if not 0.8 < own[:, j].std() < 1.2 or max(corr, default=0) > 0.15:
+            raise ValueError(
+                f"Factor {d}'s own noise has SD {own[:, j].std():.2f} and parent |corr| {max(corr, default=0):.2f}"
+            )
+    return own
+
+
 def save(out, test, root, t1key, embeddings, extra):
-    """One bundle in the shared format: the test subjects' causal factors, the bank's SCM among them, and each view's
-    (n, d) embedding; ``extra`` goes into its meta. Returns the row count."""
+    """One bundle in the shared format: the test subjects' causal factors, their own noise, the bank's SCM among them,
+    and each view's (n, d) embedding; ``extra`` goes into its meta. Returns the row count."""
     columns = list(B.CAUSAL_FACTORS)
     z = np.asarray(test.zc[:, columns], dtype=np.float32)
+    own = np.asarray(own_noise(np.asarray(test.zc, dtype=np.float64), root, columns), dtype=np.float32)
     adj = np.load(f"{root}/causal_adj.npy")[np.ix_(columns, columns)].astype(np.float32)
     settings = {"bank": root, "t1key": t1key, "causal_edges": B.CAUSAL_EDGES, "test_subjects": len(z)}
     meta = {
@@ -85,6 +104,7 @@ def save(out, test, root, t1key, embeddings, extra):
     np.savez_compressed(
         out,
         z_content=z,
+        z_own=own,
         causal_adj=adj,
         emb_view1=np.asarray(embeddings[0], dtype=np.float32),
         emb_view2=np.asarray(embeddings[1], dtype=np.float32),
