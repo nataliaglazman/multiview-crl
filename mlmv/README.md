@@ -87,6 +87,10 @@ Each run writes `results/mlmv/<run.name>/`: `config.yaml` (resolved, with the co
 - **InfoNCE** uses its context negatives in place of centring (`loss.centring` acts on Barlow Twins).
 - **Site in the leakage matrix** is R^2 on the 2-d site embedding (what enters the renderer), plus balanced
   accuracy.
+- **Data generation runs on the training device.** Only each subject's random draws happen on the CPU, in a
+  fixed order; smoothing, lesion maps, rendering and the brain renderer's Rician noise run on the GPU (0.012 s
+  of CPU work per 4-subject step, down from 0.19 s on one thread). The noise comes from a device generator, so
+  a subject's noise differs between CPU and GPU runs; latents and noise-free images match to float rounding.
 - **Raw-image reference.** Each leakage matrix has an extra row (block `raw`, modality `t1+flair`): the same
   probes on simple summaries of both images at each readout (cell: sub-cell and neighbouring cell means; region:
   mean, sd and percentiles; subject: all regions). A reference, not a bound: a trained block can beat it.

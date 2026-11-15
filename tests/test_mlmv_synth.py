@@ -30,6 +30,15 @@ class TestGenerator(unittest.TestCase):
         self.assertFalse(torch.equal(g.latents("test", [3])["g"], lat["g"][:1]))
         self.assertTrue(torch.equal(g.render(again)[0], t1))
 
+    def test_latents_do_not_depend_on_the_batch(self):
+        # the smooth fields are convolved for the whole batch at once; each subject must come out the same
+        g = gen()
+        together = g.latents("train", [3, 9, 4])
+        for j, i in enumerate([3, 9, 4]):
+            alone = g.latents("train", [i])
+            for k in together:
+                self.assertTrue(torch.allclose(together[k][j : j + 1].float(), alone[k].float(), atol=1e-6), k)
+
     def test_variants_share_draws(self):
         a, b = gen("exact").latents("train", [7]), gen("noisy").latents("train", [7])
         for k in ("g", "r", "s", "w", "site", "style", "lesion"):

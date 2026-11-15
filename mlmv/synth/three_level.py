@@ -28,6 +28,11 @@ the variant or renderer, so variants share the same draws (common random numbers
 
     g, r noise, s, w, site (uniform), site (Gumbel), style, lesion blobs, eta_r, eta_g, noise seed
 
+Only those draws run on the CPU. Smoothing the fields, the lesion maps and all rendering run on the generator's
+device, so a GPU run spends almost no time on data. The brain renderer's Rician noise is drawn on the device
+too, from a generator seeded by the subject's noise seed: reproducible per device type, but a subject's noise on
+the GPU differs from its noise on the CPU (everything else matches to float rounding).
+
 Variants (``synth.variant``):
     exact                 as above.
     noisy                 cell u receives r_R + eta_r(u) and g + eta_g(u); eta has variance noise_tau2.
@@ -66,18 +71,30 @@ def gaussian_kernel_1d(sigma: float) -> torch.Tensor:
     return torch.exp(-(x**2) / (2 * sigma**2))
 
 
+def smoothing_kernel(sigma: float) -> torch.Tensor:
+    """Gaussian ``[2r+1]^3`` with unit L2 norm, so smoothed unit white noise keeps unit variance."""
+    k1 = gaussian_kernel_1d(sigma)
+    k = k1[:, None, None] * k1[None, :, None] * k1[None, None, :]
+    return (k / k.square().sum().sqrt()).float()
+
+
+def white_noise(n: int, channels: int, size, sigma: float, gen: torch.Generator) -> torch.Tensor:
+    """The white noise ``smooth`` turns into a field: ``[n * c, 1, *(size + 2r)]``, padded by the kernel radius."""
+    r = (len(gaussian_kernel_1d(sigma)) - 1) // 2
+    return torch.randn(n * channels, 1, *(s + 2 * r for s in as_shape(size)), generator=gen)
+
+
+def smooth(white: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Valid convolution of padded white noise with ``smoothing_kernel``: ``[m, 1, *size]``, on white's device."""
+    return F.conv3d(white, smoothing_kernel(sigma).to(white)[None, None])
+
+
 def smooth_noise(n: int, channels: int, size, sigma: float, gen: torch.Generator) -> torch.Tensor:
     """Stationary unit-variance Gaussian field ``[n, c, *size]``: white noise * normalised Gaussian.
 
     The noise is drawn on a padded lattice and convolved without padding, so every cell sees a full kernel.
     """
-    size = as_shape(size)
-    k1 = gaussian_kernel_1d(sigma)
-    r = (len(k1) - 1) // 2
-    k = k1[:, None, None] * k1[None, :, None] * k1[None, None, :]
-    k = (k / k.square().sum().sqrt()).float()
-    white = torch.randn(n * channels, 1, *(s + 2 * r for s in size), generator=gen)
-    return F.conv3d(white, k[None, None]).reshape(n, channels, *size)
+    return smooth(white_noise(n, channels, size, sigma, gen), sigma).reshape(n, channels, *as_shape(size))
 
 
 def voronoi_regions(lattice, n_regions: int, seed: int) -> np.ndarray:
@@ -111,13 +128,21 @@ def voronoi_regions(lattice, n_regions: int, seed: int) -> np.ndarray:
     return dist.argmin(-1).astype(np.int64) + 1
 
 
-def soft_spheres(centres, radii, count: int, shape, edge: float = 0.5) -> torch.Tensor:
-    """``[*shape]`` union of soft spheres (voxel units; voxel i has centre i + 0.5); 0 where count is 0."""
+def voxel_grid(shape, device=None) -> torch.Tensor:
+    """``[*shape, 3]`` voxel centres in voxel units (voxel i has centre i + 0.5)."""
+    axes = [torch.arange(s, device=device, dtype=torch.float32) + 0.5 for s in shape]
+    return torch.stack(torch.meshgrid(*axes, indexing="ij"), -1)
+
+
+def soft_spheres(centres, radii, count: int, shape, edge: float = 0.5, grid=None) -> torch.Tensor:
+    """``[*shape]`` union of soft spheres (voxel units; voxel i has centre i + 0.5); 0 where count is 0.
+
+    ``grid`` is ``voxel_grid(shape)`` on the centres' device; pass it to avoid rebuilding it on every call.
+    """
     out = torch.zeros(shape, device=centres.device)
     if count == 0:
         return out
-    axes = [torch.arange(s, device=centres.device, dtype=torch.float32) + 0.5 for s in shape]
-    grid = torch.stack(torch.meshgrid(*axes, indexing="ij"), -1)
+    grid = voxel_grid(shape, centres.device) if grid is None else grid
     for c, r in zip(centres[:count], radii[:count]):
         out = torch.maximum(out, torch.sigmoid((r - (grid - c).norm(dim=-1)) / edge))
     return out
@@ -151,6 +176,7 @@ class ThreeLevelGenerator(nn.Module):
         a = torch.randn(d["r"], d["g"], generator=gen)
         self.register_buffer("A", cfg.dependent_scale * a / a.norm(dim=1, keepdim=True))
         self.register_buffer("V", torch.randn(cfg.n_sites, d["g"], generator=gen))
+        self._A_cpu, self._V_cpu = self.A.clone(), self.V.clone()  # latents are drawn on the CPU
         if cfg.renderer == "lattice":
             self._init_lattice(cfg)
         else:
@@ -200,7 +226,7 @@ class ThreeLevelGenerator(nn.Module):
         )
         frac /= frac.sum(0, keepdims=True)
         self.register_buffer("tissue_frac", torch.from_numpy(frac))
-        self._wm_cpu = torch.from_numpy(frac[4].copy())  # latents are drawn on the CPU
+        self.register_buffer("grid", voxel_grid(self.image_shape))  # [X, Y, Z, 3] voxel centres, for lesions
         wm_cells = F.avg_pool3d(torch.from_numpy(frac[4])[None, None], self.m)[0, 0]
         cand = torch.nonzero(wm_cells >= b["lesion_wm_fraction"]).float()
         if len(cand) == 0:
@@ -253,13 +279,18 @@ class ThreeLevelGenerator(nn.Module):
         return self.feature_labels(stride) > 0 if self.brain else None
 
     # ------------------------------------------------------------------ latents
+    SMOOTH_FIELDS = (("s", "s"), ("w", "w"), ("eta_r", "r"), ("eta_g", "g"))  # (latent, width key in self.d)
+
     def _one(self, split: str, index: int) -> dict:
+        """One subject's random draws, on the CPU, in the fixed order. The smooth fields come back as their
+        padded white noise (``_white_<name>``); ``latents`` smooths them, and the brain renderer's lesion maps,
+        on the generator's device."""
         cfg, L, d = self.cfg, self.L, self.d
         gen = torch.Generator().manual_seed(derive_seed("subject", split, int(index)))
         g = torch.randn(d["g"], generator=gen)
         r_noise = torch.randn(self.n_regions_for_draw, d["r"], generator=gen)
-        s = smooth_noise(1, d["s"], L, cfg.s_width, gen)[0]
-        w = smooth_noise(1, d["w"], L, cfg.s_width, gen)[0] * math.sqrt(cfg.w_variance)
+        white_s = white_noise(1, d["s"], L, cfg.s_width, gen)
+        white_w = white_noise(1, d["w"], L, cfg.s_width, gen)
         site_uniform = int(torch.randint(cfg.n_sites, (1,), generator=gen))
         gumbel = -torch.log(-torch.log(torch.rand(cfg.n_sites, generator=gen).clamp(1e-12, 1 - 1e-12)))
         style = torch.randn(2, d["style"], generator=gen)
@@ -267,26 +298,24 @@ class ThreeLevelGenerator(nn.Module):
         n_blobs = int(torch.randint(lo, hi + 1, (1,), generator=gen))
         u_centres = torch.rand(hi, 3, generator=gen)
         radii = cfg.lesion_radius[0] + torch.rand(hi, generator=gen) * (cfg.lesion_radius[1] - cfg.lesion_radius[0])
-        eta_r = smooth_noise(1, d["r"], L, cfg.s_width, gen)[0]
-        eta_g = smooth_noise(1, d["g"], L, cfg.s_width, gen)[0]
+        white_eta_r = white_noise(1, d["r"], L, cfg.s_width, gen)
+        white_eta_g = white_noise(1, d["g"], L, cfg.s_width, gen)
         noise_seed = int(torch.randint(2**31 - 1, (1,), generator=gen))
 
-        r = r_noise + (g @ self.A.cpu().T if cfg.variant == "dependent" else 0)
+        r = r_noise + (g @ self._A_cpu.T if cfg.variant == "dependent" else 0)
         if cfg.variant == "site_confounded":
-            site = int(torch.argmax(cfg.confound_strength * (self.V.cpu() @ g) + gumbel))
+            site = int(torch.argmax(cfg.confound_strength * (self._V_cpu @ g) + gumbel))
         else:
             site = site_uniform
         if self.brain:
-            # lesion centres on white-matter cells, radii in voxels; ground truth = lesion fraction per cell
+            # lesion centres on white-matter cells, radii in voxels; ``latents`` renders the per-cell ground truth
             cand = self.lesion_candidates
             idx = (u_centres[:, 0] * len(cand)).long().clamp(max=len(cand) - 1)
             centres = (
                 cand[idx] + torch.stack([u_centres[:, 1] - 0.5, u_centres[:, 2] - 0.5, torch.zeros(hi)], 1) * self.m
             )
             radii = radii * self.m
-            vol = soft_spheres(centres, radii, n_blobs, self.image_shape, self.cfg.brain["lesion_edge"])
-            vol = vol * self._wm_cpu
-            lesion = F.avg_pool3d(vol[None, None], self.m)[0]
+            lesion = torch.zeros(1, *L)
         else:
             centres = u_centres * torch.tensor(L, dtype=torch.float32)
             cell = torch.stack(torch.meshgrid(*[torch.arange(n) + 0.5 for n in L], indexing="ij"), -1)
@@ -297,13 +326,13 @@ class ThreeLevelGenerator(nn.Module):
         return dict(
             g=g,
             r=r,
-            s=s,
-            w=w,
+            _white_s=white_s,
+            _white_w=white_w,
             site=torch.tensor(site),
             style=style,
             lesion=lesion,
-            eta_r=eta_r,
-            eta_g=eta_g,
+            _white_eta_r=white_eta_r,
+            _white_eta_g=white_eta_g,
             lesion_count=torch.tensor(n_blobs),
             lesion_centres=centres,
             lesion_radii=radii,
@@ -320,8 +349,43 @@ class ThreeLevelGenerator(nn.Module):
         site_emb [n,2], style [n,2,2], plus the eta fields, the blob parameters and the noise seed."""
         items = [self._one(split, i) for i in indices]
         lat = {k: torch.stack([it[k] for it in items]).to(self.device) for k in items[0]}
+        n = len(items)
+        # one convolution on the device smooths every subject's s, w, eta_r and eta_g
+        whites = [lat.pop(f"_white_{name}") for name, _ in self.SMOOTH_FIELDS]
+        flat = smooth(torch.cat([w.reshape(-1, 1, *w.shape[-3:]) for w in whites]), self.cfg.s_width)
+        for (name, key), part in zip(self.SMOOTH_FIELDS, flat.split([n * self.d[k] for _, k in self.SMOOTH_FIELDS])):
+            lat[name] = part.reshape(n, self.d[key], *self.L)
+        lat["w"] = lat["w"] * math.sqrt(self.cfg.w_variance)
+        if self.brain:
+            vols = torch.stack([self._lesion_volume(lat, i) for i in range(n)])
+            lat["lesion"] = F.avg_pool3d(vols[:, None], self.m)  # rendered lesion fraction of each cell
         lat["site_emb"] = self.site_emb[lat["site"]]
         return lat
+
+    def _lesion_volume(self, lat, i: int) -> torch.Tensor:
+        """Subject i's lesion fraction per voxel ``[X, Y, Z]``: soft spheres inside white matter."""
+        spheres = soft_spheres(
+            lat["lesion_centres"][i],
+            lat["lesion_radii"][i],
+            int(lat["lesion_count"][i]),
+            self.image_shape,
+            self.cfg.brain["lesion_edge"],
+            grid=self.grid,
+        )
+        return spheres * self.tissue_frac[4]
+
+    def _noise(self, seed: int, device) -> torch.Tensor:
+        """Two standard normal volumes ``[2, X, Y, Z]`` for Rician noise, drawn on ``device``.
+
+        Seeded per subject and modality, so a subject's noise is reproducible on a device type; CPU and CUDA
+        generators produce different numbers, so the same subject's noise differs between the two.
+        """
+        try:
+            gen = torch.Generator(device=device).manual_seed(seed)
+            return torch.randn(2, *self.image_shape, generator=gen, device=device)
+        except (RuntimeError, TypeError):  # a device without its own generator: draw on the CPU and move
+            gen = torch.Generator().manual_seed(seed)
+            return torch.randn(2, *self.image_shape, generator=gen).to(device)
 
     # ------------------------------------------------------------------ rendering
     def field(self, lat: dict, modality: str, site=None) -> torch.Tensor:
@@ -369,24 +433,14 @@ class ThreeLevelGenerator(nn.Module):
         base = mu[:4, None, None, None] * (1 + b["modulation"] * mod)
         img = (frac * base).sum(0, keepdim=True)
         if not (self.cfg.variant == "one_modality_lesion" and modality == "t1"):
-            les = (
-                soft_spheres(
-                    sub["lesion_centres"][0],
-                    sub["lesion_radii"][0],
-                    int(sub["lesion_count"][0]),
-                    self.image_shape,
-                    b["lesion_edge"],
-                )
-                * self.tissue_frac[4]
-            )
+            les = self._lesion_volume(lat, i)
             img = img + les[None] * (mu[4] - mu[3]) * (1 + b["modulation"] * mod[3:4])
         sid = int((lat["site"] if site is None else site)[i])
         img = img * torch.exp(self.log_bias[sid])[None]
         if scale:
             img = img / self.out_scale[k]
         if noise:
-            gen = torch.Generator().manual_seed(int(sub["noise_seed"][0]) * 2 + k)
-            n1, n2 = torch.randn(2, *self.image_shape, generator=gen).to(img.device)
+            n1, n2 = self._noise(int(sub["noise_seed"][0]) * 2 + k, img.device)
             sd = self.noise_sd[sid]
             img = torch.sqrt((img + sd * n1) ** 2 + (sd * n2) ** 2)
         return img * (1 - self.tissue_frac[0])

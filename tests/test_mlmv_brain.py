@@ -70,6 +70,19 @@ class TestBrainRenderer(unittest.TestCase):
         self.assertEqual(float(t1[:, 0][:, outside].abs().max()), 0.0)  # skull-stripped: background is zero
         self.assertTrue(torch.equal(g.render(g.latents("test", [0, 1]))[1], fl))
 
+    def test_batching_and_lesion_ground_truth(self):
+        g = gen(lesion_blobs=[2, 3])
+        together = g.latents("test", [4, 8])
+        for j, i in enumerate([4, 8]):
+            alone = g.latents("test", [i])
+            for k in together:
+                self.assertTrue(torch.allclose(together[k][j : j + 1].float(), alone[k].float(), atol=1e-6), k)
+        # the lesion target is the cell average of the lesion actually drawn into the image
+        vol = g._lesion_volume(together, 0)
+        cells = torch.nn.functional.avg_pool3d(vol[None, None], g.m)[0]
+        self.assertTrue(torch.allclose(together["lesion"][0], cells))
+        self.assertGreater(float(together["lesion"][0].sum()), 0)
+
     def test_tissue_contrast(self):
         g = gen()
         lat = g.latents("test", range(4))
