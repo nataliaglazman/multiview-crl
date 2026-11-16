@@ -157,6 +157,11 @@
 # controls and stage 32's two heads, while the seed check trains. Seed: stage 33's two weight-1 arms again with seed 2.
 # Then the precision audit, own variation and the audit of both seeds and both InfoNCE controls, and the style audit
 # with the seed-2 runs added (causal/stage34/).
+# Stage 35 (opt-in) Stage 33's recipe at the width of the ground truth: 10 content units, one per latent the causal
+# bank renders into both views (brain, ventricle, burden, thickness, temporal, lr, sulcal, and the lesion's x, y, z;
+# z_content[3:5] are unused with the burden target, and clean content draws no deformation or fissure field).
+# Prediction weight 1 and its InfoNCE control on bank_causal_nofield, and weight 1 on the gain-off bank, 20,000 steps,
+# seed 42. The four reports, beside the 24-unit counterparts whose scores are reused from stage 34 (causal/stage35/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1228,6 +1233,62 @@ if wants 34; then
     for report in precision_audit own_variation code_audit; do stage_report "$OUT" "$report" "${SEEDS[@]}"; done
     stage_report "$OUT" style_audit "${STYLED[@]}" "$D/runs/${PREDICT1}_s2" "$D/runs/${GAINLESS_PREDICT1}_s2"
     [ "$DRY" = 0 ] && echo "Stage 34 reports in $OUT"
+fi
+
+reuse_reports() { # reuse_reports FROM OUT NAME...: FROM's four report entries for these runs, and its feature caches
+    local from=$1 out=$2; shift 2
+    [ "$DRY" = 1 ] && return
+    "$PY" - "$from" "$out" "$@" <<'EOF'
+import json
+import shutil
+import sys
+from pathlib import Path
+
+src, dst, names = Path(sys.argv[1]), Path(sys.argv[2]), set(sys.argv[3:])
+for report in ("precision_audit", "own_variation", "code_audit", "style_audit"):
+    source, target = src / f"{report}.json", dst / f"{report}.json"
+    if source.exists() and not target.exists():
+        kept = {name: row for name, row in json.loads(source.read_text()).items() if name in names}
+        target.write_text(json.dumps(kept, indent=1))
+for cache in [*src.glob("image_*.npy"), *src.glob("style_*.npz")]:
+    if not (dst / cache.name).exists():
+        shutil.copy(cache, dst)
+EOF
+}
+
+if wants 35; then
+    NOFIELD=$D/bank_causal_nofield
+    NOGAIN=$D/bank_causal_nofield_nogain
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    bank "$NOGAIN" --t1-values 0.4 --causal --field off --gain off
+    residual_bank "$NOGAIN" t1_04 flair
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    MATCHED=("${P}_predict1_c10_20k" "${P}_c10_20k" "${P}_nogain_predict1_c10_20k")
+    WIDE=("${P}_predict1_c24_20k" "${P}_c24_20k" "${P}_nogain_predict1_c24_20k")  # stages 33 and 28, 24 units
+    OUT=$D/causal/stage35
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage34" "$OUT" "${WIDE[@]}"
+    fi
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42 --content-units 10
+        --contrastive-loss-type infonce)
+    EVERY=2000 ssl "${MATCHED[0]}" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --predict-weight 1
+    EVERY=2000 ssl "${MATCHED[1]}" "$NOFIELD" tail t1_04 20000 "${BASE[@]}"
+    EVERY=2000 ssl "${MATCHED[2]}" "$NOGAIN" tail t1_04 20000 "${BASE[@]}" --predict-weight 1
+    finish "${MATCHED[@]}"
+    RUNS=()
+    for name in "${MATCHED[@]}"; do
+        if [ "$DRY" = 0 ] && ! grep -qx DONE "$D/logs/$name.log"; then echo "Rerun stage 35 for $name."; exit 1; fi
+        RUNS+=("$D/runs/$name")
+    done
+    for name in "${WIDE[@]}"; do
+        if [ "$DRY" = 1 ] || grep -qx DONE "$D/logs/$name.log" 2>/dev/null; then RUNS+=("$D/runs/$name"); fi
+    done
+    for report in precision_audit own_variation code_audit style_audit; do
+        stage_report "$OUT" "$report" "${RUNS[@]}"
+    done
+    [ "$DRY" = 0 ] && echo "Stage 35 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

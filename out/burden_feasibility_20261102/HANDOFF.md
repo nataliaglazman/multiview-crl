@@ -425,10 +425,25 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       ridge (sulcal .10 on the field-off bank), and better by ridge than by gradient boosting, the reverse of the
       InfoNCE controls: the linear maps make the code linear in the factors. Cross-view top-1 among all 1,000 test
       subjects rises (.932 → .966 field off, .982 → .998 gain off), with train and test retrieval equal.
-    - **Not settled.** Style leak is unmeasured: the code audit scores the content factors and the lesion centre, not
-      gain, bias or noise, and the bank doesn't store the style latents. Each view draws its own gain, bias and
-      noise (the generator's shared gain-bias option is off), so neither term rewards them. One seed (seed noise was
-      ~.10 on one factor's own variation at 6k).
+    - **Style and a second seed:** item 23. No code carries style. A second seed reads burden as sharply; its own
+      variation is not read yet.
+23. **No code carries style, and a second seed reads burden as sharply (stage 34; style and precision audits read
+    16 Nov, own variation and the audit not yet).**
+    - **Style** (`causal/stage34/style_audit.txt`): no code reads its own view's gain, bias or noise level. Ridge R²
+      runs from −.01 to +.04 in every run, against −.01 to .00 for the other view's style (the null), and gradient
+      boosting reads below 0. The most is a trace of gain in the FLAIR code of the gain-on weight-1 arms (.04 with
+      seed 42, .03 with seed 2; InfoNCE control .00).
+    - The head strips style; the backbone keeps it. The untrained twin's code reads gain at .39–.44 (bias at .44–.60
+      on the gain-off bank), while every trained backbone's GAP still reads gain at .55–.75, bias at .25–.87 and the
+      noise level at .26–.49.
+    - On the gain-off bank, gain reads −.01 everywhere: the built-in null. The redraw reproduced both banks' stored
+      content latents (`--causal`).
+    - **Seed 2, code volume error T1 / FLAIR:** field off 13.1 / 12.6 (seed 42: 12.7 / 13.2), gain off 9.5 / 10.0
+      (8.9 / 9.2). GAP 10.8 / 10.5 and 8.3 / 7.7, still at least as sharp as the InfoNCE controls (11.0 / 11.0,
+      8.7 / 8.1). "Alone" .60 / .62 and .77 / .76 (seed 42: .61 / .61, .76 / .75). Largest third 19.7 / 18.2 and
+      10.4 / 12.0. Anatomy .85–.89, lesion position .90–.91. Seeds differ by 0.4–0.8 voxels; the lead over the
+      frozen heads holds at 0.9–2.0 voxels.
+    - **Not settled:** seed 2's own variation (`causal/stage34/own_variation.txt`).
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -447,10 +462,35 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Label-free factor-level discovery** needs views that share different subsets of factors, or interventions.
   Two views that share everything identify only the block.
 
-## 9. State on 15 Nov
+## 9. State on 16 Nov
 
-- **Stage 34 (built 15 Nov, not run): the next step.** Two checks before stage 33's prediction term joins the
-  recipe.
+- **Stage 35 (built 16 Nov, not run): the next step.** Stage 33's recipe at the width of the ground truth.
+  - **Why:** the theory identifies the shared block when the code is as wide as the content the views share (Yao et
+    al. 2024). The 24-unit code is wider, a case the theory is silent on (section 8).
+  - **The count is 10:** the causal bank renders seven SCM factors into both views (brain, ventricle, burden,
+    thickness, temporal, lr, sulcal) and the lesion's centre (x, y, z, drawn by `z_lesion`). `z_content` has nine
+    slots, but slots 3 and 4 are unused with the burden target, and clean content draws no deformation or fissure
+    field. Gain, bias, noise and jitter are per view, so they are style, not content.
+  - **Two caveats:**
+    - The cosine InfoNCE sees only the code's direction: 9 degrees of freedom in 10 units. The prediction term reads
+      the standardized code, all 10. If 10 units fall short, an 11-unit arm separates that one lost dimension.
+    - Ten latents need not fit ten linear directions. Linear CCA put the shared block above 24 directions at the GAP
+      (item 9, section 8), so read the code audit's boosted rows beside its ridge rows.
+  - **Arms:** 20k steps, seed 42, stage 33's recipe with `--content-units 10`. Prediction weight 1 and its InfoNCE
+    control on `bank_causal_nofield`, and prediction weight 1 on the gain-off bank:
+    `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_{predict1_c10,c10,nogain_predict1_c10}_20k`.
+  - **Reports** in `causal/stage35/`: the precision audit, own variation, code audit and style audit of the three,
+    beside their 24-unit counterparts (stage 33's two weight-1 arms, stage 28's control). The counterparts' scores
+    are copied from stage 34's reports, so only the new runs are scored.
+  - **Reading:**
+    - Does the 10-unit code still hold every factor (code audit, ridge and boosted) and burden's own part (.48 / .47
+      with gain on, .60 / .58 with gain off, at 24 units)?
+    - Is every shared code direction a function of the 10 latents (the code audit's "both" column near 1)?
+    - Does InfoNCE alone, the theory's own setting, do better at the matched width than at 24 units (.35 / .34)?
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 35`. It needs stages 28 and 33 finished for the
+    counterparts.
+- **Stage 34 (run 16 Nov; style and precision audits read in section 7, item 23; own variation and audit not
+  yet).** Two checks before stage 33's prediction term joins the recipe.
   - **Style** (`style_audit.py`, no training): does a code carry its own view's gain, bias or noise level? Each view
     draws its own (the generator's shared gain-bias option is off), so neither loss term rewards them, but nothing
     has measured them: `code_audit.py` scores only the content factors and the lesion centre.
@@ -648,11 +688,14 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 10. Recent stages and next steps
 
-**Next, after stage 33 (15 Nov).** The numbered items below were written with the field on.
-- **Run stage 34** (`run_pc.sh 34`, built 15 Nov, section 9) before stage 33's prediction term becomes the recipe.
-  Stage 33 passed all four success tests at weight 1 (section 7, item 22): burden's own part in the code is .48 / .47
-  with gain on and .60 / .58 with gain off, against .31–.37 before, and every other factor rises. Stage 34 checks
-  what it left open: style in the code (its report comes first, while the seed-2 arms train) and a second seed.
+**Next, after stage 34's style and precision audits (16 Nov).** The numbered items below were written with the field
+on.
+- **Read `causal/stage34/own_variation.txt` and `code_audit.txt`.** Stage 33 passed all four success tests at weight
+  1 (section 7, item 22): burden's own part in the code .48 / .47 with gain on and .60 / .58 with gain off, against
+  .31–.37 before. Stage 34 found no style in any code and seed 2 as sharp as seed 42 (item 23). If seed 2's own part
+  also holds, the prediction term at weight 1 is ready to join the recipe.
+- **Run stage 35** (`run_pc.sh 35`, built 16 Nov, section 9): the recipe at 10 content units, one per ground-truth
+  latent, with prediction weight 1 and without.
 - **Then test white-matter normalisation** of the scan channel on the gain-on bank with prediction weight 1, the
   real-data version of gain off. Gain costs burden's own part in the code .60 → .48, and costs the code ~4 voxels
   against ≤1 for the image filter (item 22).
@@ -661,6 +704,10 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Decide with the user whether `bank_causal_nofield` becomes the main burden bank,** with the field-on bank kept as a
   stress test. For: a real bias field varies over centimetres and N4 removes it, so the 16³ field has no counterpart
   in corrected scans. The same question for gain off, whose real counterpart is intensity normalisation (WhiteStripe).
+- **Tabular benchmark (read 16 Nov, item 24).** The end-to-end weight-1 codes match their own GAP on confounding
+  and graph recovery in both seeds; with gain off they remove 87–90% of the confounding. That is one more reason for
+  prediction weight 1 to join the recipe. Score the white-matter-normalisation run the same way.
+- **Done on 16 Nov:** stage 34 ran; its style and precision audits are read (item 23).
 - **Done on 15 Nov:** stage 33 ran and its three reports are read (item 22). Weight 3 reads burden no better than
   weight 1 and gives up lesion position for a little ventricle and sulcal.
 - **Done on 13 Nov:** stage 28's remaining reports (item 18) and the head levers of stages 29 and 31 (item 20: width,
