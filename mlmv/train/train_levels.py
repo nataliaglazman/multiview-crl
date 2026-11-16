@@ -148,7 +148,9 @@ def build_run_geometry(cfg, source, rho, log):
 def monitor(model, source, geometry, cfg, device, P):
     """Validation probes: site balanced accuracy per block, and G cross-split CKA."""
     n = min(source.sizes["val"], cfg.eval.max_subjects)
-    codes, truth, _ = collect_codes(model, source, "val", range(n), positions_per_subject=1, seed=cfg.seed)
+    codes, truth, _ = collect_codes(
+        model, source, "val", range(n), positions_per_subject=1, seed=cfg.seed, geometry=geometry
+    )
     acc = site_accuracy_per_block({m: codes[m] for m in MODALITIES}, truth["site"], cfg.eval.cv_folds)
     sums, counts = g_region_sums(model, source, "val", range(n), geometry)
     cka = g_cross_split_cka(sums, counts, geometry, cfg.sampler.G.volume_ratio, n_splits=5, seed=cfg.seed)
@@ -338,7 +340,9 @@ def run(cfg, log=print) -> Path:
     save_checkpoint(last, cfg.optim.steps, model, objective, optim, sched, gen, rho)
     torch.save(dict(model=model.state_dict(), rho_used=rho, config=cfg.to_dict()), run_dir / "checkpoints" / "final.pt")
     if cfg.run.source == "synthetic":
-        result = evaluate_leakage(model, source, cfg, run_dir / "eval", split="test", device=str(device))
+        result = evaluate_leakage(
+            model, source, cfg, run_dir / "eval", split="test", device=str(device), geometry=geometry
+        )
         for m in MODALITIES:
             log(f"leakage matrix ({m}, best R^2):\n{format_matrix(result['rows'], m)}")
         failed = [c for c in result["checks"] if not c["passed"]]

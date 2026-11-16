@@ -4,13 +4,16 @@ Readouts (per modality, from the template-subtracted blocks of a frozen model):
 
 * g and site per subject, from the block pooled over every position (site: R^2 on its 2-d embedding, which is
   what enters the renderer, plus logistic balanced accuracy);
-* r_R per region, from the block pooled over R (the generator's region, unmerged and uneroded); one probe per
-  region, averaged;
+* r_R per region, from the block pooled over R (the generator's region, unmerged; its eroded part when the run's
+  geometry is given); one probe per region, averaged;
 * s, w and the lesion indicator per position, from the block averaged over each lattice cell
   (``positions_per_subject`` random cells per subject).
 
-With the brain renderer, subject pooling covers the brain only, cells are drawn only where the generator has a
-region, and the lesion target is the rendered lesion fraction of each cell.
+With the run's geometry (as training passes it), every readout stays inside the eroded regions the L and G
+losses are trained on: subject codes pool over their union, region codes over each region's eroded part, and
+cells are drawn only where the whole cell is inside (see ``readout_masks``). Without it, readouts cover whole
+regions (and only the brain, for the brain renderer). The brain renderer's lesion target is the rendered lesion
+fraction of each cell.
 
 Each R^2 is the mean over subject-grouped folds of ridge and of a 2-layer MLP; ``best`` is the larger.
 
@@ -83,24 +86,79 @@ def raw_image_features(images, pick, gen, region_masks):
     return torch.cat(cell_parts, 2), region, region.flatten(1)
 
 
+def readout_masks(source, geometry=None, min_positions: int = 8) -> dict:
+    """Where each readout pools, on the feature grid (and the image grid for the raw reference).
+
+    With a ``geometry`` (the run's eroded training regions) every readout stays inside the positions the L and
+    G losses are trained on: subject codes pool over the union of the eroded eligible regions, region codes over
+    the eroded part of each generator region, and cells are drawn only where all of the cell's feature voxels
+    are inside it. Outside those positions L and G are never trained, so reading them there measures something
+    the training never shaped. A generator region with fewer than ``min_positions`` eroded positions (merged or
+    eroded away) falls back to its full extent; those regions are listed in ``fallback``. Without a geometry,
+    the readouts cover whole regions (and the brain, for the brain renderer).
+    """
+    gen = source.gen
+    dev = gen.device
+    labels = np.asarray(source.feature_labels)
+    regions = sorted(int(r) for r in np.unique(labels) if r > 0)
+    if geometry is None:
+        train = np.ones_like(labels, bool) if source.feature_mask is None else np.asarray(source.feature_mask, bool)
+    else:
+        train = np.asarray(geometry.eroded) > 0
+    fallback, weights, image_masks = [], [], []
+    stride = source.stride
+    for r in regions:
+        region = labels == r
+        mask = region & train if geometry is not None else region
+        if geometry is not None and mask.sum() < min_positions:
+            mask = region
+            fallback.append(r)
+        weights.append(torch.from_numpy(mask.astype(np.float32)).flatten())
+        image_masks.append(
+            torch.from_numpy(mask.repeat(stride, 0).repeat(stride, 1).repeat(stride, 2)).to(dev)
+            if geometry is not None
+            else torch.from_numpy(gen.image_regions_np == r).to(dev)
+        )
+    region_w = torch.stack(weights)
+    region_w = (region_w / region_w.sum(1, keepdim=True)).to(dev)  # [R, P]
+    subject_w = torch.from_numpy(train.astype(np.float32)).flatten()
+    subject_w = (subject_w / subject_w.sum()).to(dev)  # [P]
+    if geometry is None:
+        cells_in = gen.regions_np.reshape(-1) > 0  # every cell inside a generator region
+    else:
+        L = gen.L
+        f = labels.shape[0] // L[0]  # feature voxels per lattice cell along each axis
+        cells_in = train.reshape(L[0], f, L[1], f, L[2], f).all(axis=(1, 3, 5)).reshape(-1)
+    candidates = torch.from_numpy(np.flatnonzero(cells_in)).to(dev)
+    if len(candidates) == 0:
+        raise ValueError("no lattice cell lies inside the readout region")
+    return dict(
+        regions=regions,
+        region_weights=region_w,
+        subject_weights=subject_w,
+        image_region_masks=image_masks,
+        cell_candidates=candidates,
+        position_mask=torch.from_numpy(train.reshape(-1)).to(dev),
+        fallback=fallback,
+        readout="eroded" if geometry is not None else "full",
+    )
+
+
 @torch.no_grad()
-def collect_codes(model, source, split: str, indices, positions_per_subject: int, batch: int = 8, seed: int = 0):
+def collect_codes(
+    model, source, split: str, indices, positions_per_subject: int, batch: int = 8, seed: int = 0, geometry=None
+):
     """Pooled codes and matching ground truth for subjects ``indices`` of ``split``.
 
-    Returns ``codes[modality][level][readout]``, plus ``codes["raw"][readout]`` for the image reference.
+    Returns ``codes[modality][level][readout]``, plus ``codes["raw"][readout]`` for the image reference. With a
+    ``geometry``, readouts stay inside its eroded regions (see ``readout_masks``).
     """
     model.eval()
     gen_model = source.gen
-    labels = torch.from_numpy(source.feature_labels).flatten()
-    regions = sorted(int(r) for r in labels.unique() if r > 0)
     dev = gen_model.device
-    onehot = torch.stack([(labels == r).float() for r in regions]).to(dev)
-    onehot = onehot / onehot.sum(1, keepdim=True)  # [R, P]
-    mask = source.feature_mask
-    pool = None if mask is None else torch.from_numpy(np.asarray(mask, np.float32)).flatten().to(dev)
-    image_regions = torch.from_numpy(gen_model.image_regions_np).to(dev)
-    region_masks = [image_regions == r for r in regions]
-    candidates = torch.nonzero(gen_model.regions.flatten() > 0)[:, 0].to(dev)  # cells inside a region
+    masks = readout_masks(source, geometry)
+    regions, onehot, pool = masks["regions"], masks["region_weights"], masks["subject_weights"]
+    region_masks, candidates = masks["image_region_masks"], masks["cell_candidates"]
     rng = torch.Generator().manual_seed(seed)
     codes = {m: {lvl: {"subject": [], "region": [], "cell": []} for lvl in LEVELS} for m in MODALITIES}
     codes["raw"] = {"subject": [], "region": [], "cell": []}
@@ -117,8 +175,7 @@ def collect_codes(model, source, split: str, indices, positions_per_subject: int
             for lvl, f in blocks.items():
                 f = f.float().to(dev)
                 flat = f.flatten(2)
-                subject = flat.mean(2) if pool is None else (flat * pool).sum(2) / pool.sum()
-                codes[m][lvl]["subject"].append(subject.cpu())
+                codes[m][lvl]["subject"].append((flat @ pool).cpu())
                 codes[m][lvl]["region"].append((flat @ onehot.T).permute(0, 2, 1).cpu())
                 codes[m][lvl]["cell"].append(_gather_cells(F.adaptive_avg_pool3d(f, gen_model.L), pick).cpu())
         raw_cell, raw_region, raw_subject = raw_image_features(
@@ -136,6 +193,7 @@ def collect_codes(model, source, split: str, indices, positions_per_subject: int
     cat = lambda xs: torch.cat(xs).numpy()  # noqa: E731
     out = {m: {lvl: {k: cat(v) for k, v in codes[m][lvl].items()} for lvl in LEVELS} for m in MODALITIES}
     out["raw"] = {k: cat(v) for k, v in codes["raw"].items()}
+    out["_readout"] = dict(readout=masks["readout"], fallback=masks["fallback"], cells=int(len(candidates)))
     return out, {k: cat(v) for k, v in truth.items()}, regions
 
 
@@ -202,8 +260,12 @@ def pass_checks(rows, thresholds, variant: str):
 
 
 @torch.no_grad()
-def counterfactual_change(model, source, split: str, indices, seed: int = 0):
-    """Relative L2 change of each block's code when only the site is changed (mean over subjects)."""
+def counterfactual_change(model, source, split: str, indices, seed: int = 0, position_mask=None):
+    """Relative L2 change of each block's code when only the site is changed (mean over subjects).
+
+    ``position_mask`` (bool over feature positions) restricts the norm to those positions, e.g. the eroded
+    regions L and G are trained on.
+    """
     model.eval()
     g = source.gen
     lat = g.latents(split, list(indices))
@@ -216,21 +278,33 @@ def counterfactual_change(model, source, split: str, indices, seed: int = 0):
     for k, m in enumerate(MODALITIES):
         b0, b1 = model.blocks(before[k].to(dev), m), model.blocks(after[k].to(dev), m)
         for lvl in LEVELS:
-            num = (b1[lvl] - b0[lvl]).float().flatten(1).norm(dim=1)
-            den = b0[lvl].float().flatten(1).norm(dim=1).clamp_min(1e-12)
+            x0, x1 = b0[lvl].float().flatten(2), b1[lvl].float().flatten(2)  # [n, d, P]
+            if position_mask is not None:
+                keep = position_mask.to(x0.device)
+                x0, x1 = x0[:, :, keep], x1[:, :, keep]
+            num = (x1 - x0).flatten(1).norm(dim=1)
+            den = x0.flatten(1).norm(dim=1).clamp_min(1e-12)
             out.append(dict(modality=m, block=lvl, relative_l2_change=float((num / den).mean()), n=len(indices)))
     return out
 
 
-def evaluate_leakage(model, source, cfg, out_dir, split: str = "test", device="cpu", n_counterfactual: int = 64):
-    """Write ``leakage.csv``, ``counterfactual.csv`` and ``leakage.json`` under ``out_dir``; return the json dict."""
+def evaluate_leakage(
+    model, source, cfg, out_dir, split: str = "test", device="cpu", n_counterfactual: int = 64, geometry=None
+):
+    """Write ``leakage.csv``, ``counterfactual.csv`` and ``leakage.json`` under ``out_dir``; return the json dict.
+
+    Pass the run's ``geometry`` to keep every readout inside the eroded regions L and G are trained on.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     n = min(source.sizes[split], cfg.eval.max_subjects)
-    codes, truth, regions = collect_codes(model, source, split, range(n), cfg.eval.positions_per_subject, seed=cfg.seed)
+    codes, truth, regions = collect_codes(
+        model, source, split, range(n), cfg.eval.positions_per_subject, seed=cfg.seed, geometry=geometry
+    )
     rows = leakage_rows(codes, truth, cfg.eval, device=device)
     checks = pass_checks(rows, cfg.eval.thresholds, cfg.synth.variant)
-    cf = counterfactual_change(model, source, split, range(min(n, n_counterfactual)), seed=cfg.seed)
+    keep = readout_masks(source, geometry)["position_mask"] if geometry is not None else None
+    cf = counterfactual_change(model, source, split, range(min(n, n_counterfactual)), seed=cfg.seed, position_mask=keep)
     for name, table in (("leakage.csv", rows), ("counterfactual.csv", cf), ("checks.csv", checks)):
         with open(out_dir / name, "w", newline="") as fp:
             fields = sorted(
@@ -252,6 +326,7 @@ def evaluate_leakage(model, source, cfg, out_dir, split: str = "test", device="c
         centring=cfg.loss.centring,
         objective=cfg.loss.objective,
         noise_tau2=cfg.synth.noise_tau2,
+        readout=codes["_readout"],
     )
     (out_dir / "leakage.json").write_text(json.dumps(result, indent=2))
     return result

@@ -32,6 +32,9 @@ ADNI's lobes are of the same size, so the same will happen there; see `geometry/
 bash mlmv/scripts/runai/phase1.sh mlmv/config/runs/phase1/p1_exact.yaml
 # locally, with overrides
 PYTHONPATH=. python -m mlmv.train.train_levels --config mlmv/config/runs/phase1/p1_exact.yaml --set run.device=mps
+# re-score a saved checkpoint (final.pt, last.pt or a kept step_<N>.pt) into <run-dir>/eval/<checkpoint>/
+bash mlmv/scripts/runai/evaluate.sh results/mlmv/p1_exact_batchstd step_050000.pt
+PYTHONPATH=. python -m mlmv.eval.evaluate_run --run-dir results/mlmv/p1_exact --checkpoint final.pt
 # Gate 1 tables from finished runs
 PYTHONPATH=. python -m mlmv.eval.phase1_summary --runs results/mlmv/p1_* --out results/mlmv/phase1_summary.md
 # tests (CPU, about a minute; the repo's tests/ is shadowed in some envs, so run files by path)
@@ -100,6 +103,13 @@ Each run writes `results/mlmv/<run.name>/`: `config.yaml` (resolved, with the co
   fixed order; smoothing, lesion maps, rendering and the brain renderer's Rician noise run on the GPU (0.012 s
   of CPU work per 4-subject step, down from 0.19 s on one thread). The noise comes from a device generator, so
   a subject's noise differs between CPU and GPU runs; latents and noise-free images match to float rounding.
+- **Leakage readouts stay where L and G are trained.** L and G are only trained on the eroded region interiors,
+  so their values elsewhere are never shaped by a loss (the masks rebuilt at step 5,000 add such a border shell,
+  and L's match dips for one step). With the run's geometry, subject codes pool over the union of the eroded
+  regions, region codes over each generator region's eroded part (regions with nothing left fall back to their
+  full extent and are listed in `leakage.json`), and per-cell probes use only cells fully inside; every block,
+  the raw-image reference and the counterfactual use the same readout. Runs scored before this change used
+  whole regions; re-score them with `mlmv.eval.evaluate_run`.
 - **Raw-image reference.** Each leakage matrix has an extra row (block `raw`, modality `t1+flair`): the same
   probes on simple summaries of both images at each readout (cell: sub-cell and neighbouring cell means; region:
   mean, sd and percentiles; subject: all regions). A reference, not a bound: a trained block can beat it.

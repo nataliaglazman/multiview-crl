@@ -37,6 +37,39 @@ class TestProbes(unittest.TestCase):
         self.assertLess(effective_rank(low), 1.1)
 
 
+class TestReadoutMasks(unittest.TestCase):
+    def test_readouts_stay_inside_the_eroded_regions(self):
+        from mlmv.data.geometry import build_geometry
+        from mlmv.eval.leakage import readout_masks
+        from mlmv.synth.three_level import SyntheticSource
+
+        cfg = load_config(overrides={"synth": {"image": 32, "lattice": 8, "decoder_hidden": 32}})
+        src = SyntheticSource(cfg.synth, stride=2)
+        geo = build_geometry(src.feature_labels, 1.5, "chebyshev", 8, 64, log=lambda s: None, eligible_fraction=0.5)
+        eroded = geo.eroded > 0
+        m = readout_masks(src, geo)
+        self.assertEqual(m["readout"], "eroded")
+        # every candidate cell's 2x2x2 feature voxels are inside the eroded regions
+        L, f = src.gen.L, 2
+        for c in m["cell_candidates"].tolist():
+            x, y, z = np.unravel_index(c, L)
+            self.assertTrue(eroded[f * x : f * x + f, f * y : f * y + f, f * z : f * z + f].all())
+        labels = src.feature_labels.reshape(-1)
+        for j, r in enumerate(m["regions"]):
+            w = m["region_weights"][j].numpy() > 0
+            if r in m["fallback"]:
+                self.assertTrue((w == (labels == r)).all())
+            else:
+                self.assertTrue((w <= ((labels == r) & eroded.reshape(-1))).all())
+        self.assertTrue((m["subject_weights"].numpy() > 0).sum() == eroded.sum())
+        # a region with nothing left after erosion falls back to its full extent
+        geo.eroded = np.where(src.feature_labels == m["regions"][0], 0, geo.eroded)
+        self.assertIn(m["regions"][0], readout_masks(src, geo)["fallback"])
+        full = readout_masks(src, None)
+        self.assertEqual(full["readout"], "full")
+        self.assertEqual(len(full["cell_candidates"]), int(np.prod(L)))
+
+
 class TestConfig(unittest.TestCase):
     def test_overrides_and_strictness(self):
         cfg = load_config(overrides=["optim.steps=10", "sampler.L.fraction=0.25", "loss.weights={G: 2.0}"])

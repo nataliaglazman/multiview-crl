@@ -56,6 +56,13 @@ class TestIntegration(unittest.TestCase):
             for key in ("p1/S/deviation_rms_t1", "p1/G/template_rms_flair", "p1/L/min_var", "p1/G/mean_var"):
                 self.assertIn(key, last)
             self.assertTrue((run_dir / "eval" / "leakage.csv").exists())
+            # re-score a kept checkpoint from the run's own files
+            from mlmv.eval.evaluate_run import evaluate_run
+
+            evaluate_run(run_dir, "step_000010.pt", log=lambda s: None)
+            result = json.loads((run_dir / "eval" / "step_000010" / "leakage.json").read_text())
+            self.assertEqual(result["readout"]["readout"], "eroded")
+            self.assertEqual(len(result["rows"]), 2 * 3 * 6 + 6)
 
 
 if __name__ == "__main__":
