@@ -160,6 +160,24 @@ def monitor(model, source, geometry, cfg, device, P):
     return out
 
 
+@torch.no_grad()
+def feature_scale(feats, template, encoder, P) -> dict:
+    """RMS of each block's subject-specific part (after template subtraction) and of its template.
+
+    Their ratio shows how much of a feature is a per-position constant: when the template dwarfs the
+    subject-specific part, bf16 cannot hold the difference after subtraction.
+    """
+    out = {}
+    for m in MODALITIES:
+        tmpl = encoder.split(getattr(template, m)[None])
+        for lvl in LEVELS:
+            dev = float(feats[m][lvl].float().pow(2).mean().sqrt())
+            tm = float(tmpl[lvl].float().pow(2).mean().sqrt())
+            out[f"{P}/{lvl}/deviation_rms_{m}"] = dev
+            out[f"{P}/{lvl}/template_rms_{m}"] = tm
+    return out
+
+
 def save_checkpoint(path, step, model, objective, optim, sched, gen, rho_used):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -278,6 +296,7 @@ def run(cfg, log=print) -> Path:
                 rows = fifo.get(lvl)
                 scalars[f"{P}/{lvl}/effective_rank"] = effective_rank(rows)
                 scalars[f"{P}/{lvl}/effective_rank_frac"] = effective_rank(rows) / dims[lvl]
+            scalars.update(feature_scale(feats, template, encoder, P))
             logger.scalars(step, scalars)
             log(
                 f"step {step}: total {scalars[P + '/total/loss']:.4f} "
@@ -309,6 +328,12 @@ def run(cfg, log=print) -> Path:
             logger.scalars(step, monitor(model, source, geometry, cfg, device, P))
         if (step + 1) % cfg.run.ckpt_every == 0:
             save_checkpoint(last, step + 1, model, objective, optim, sched, gen, rho)
+        if cfg.run.keep_every and (step + 1) % cfg.run.keep_every == 0:
+            (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+            torch.save(
+                dict(step=step + 1, model=model.state_dict(), rho_used=rho, config=cfg.to_dict()),
+                run_dir / "checkpoints" / f"step_{step + 1:06d}.pt",
+            )
 
     save_checkpoint(last, cfg.optim.steps, model, objective, optim, sched, gen, rho)
     torch.save(dict(model=model.state_dict(), rho_used=rho, config=cfg.to_dict()), run_dir / "checkpoints" / "final.pt")

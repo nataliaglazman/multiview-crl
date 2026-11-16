@@ -28,6 +28,27 @@ class TestBarlow(unittest.TestCase):
         self.assertLess(float(loss), 1e-4)
         self.assertAlmostEqual(info["mean_cii"], 1.0, places=3)
 
+    def test_batch_standardisation_and_logged_variances(self):
+        z = whitened(2048, 8)
+        for mode in ("running", "batch"):
+            loss_fn = BarlowLoss(8, centring=False, standardise=mode)
+            loss, info = loss_fn(z, z)
+            self.assertLess(float(loss), 1e-3, mode)
+            self.assertAlmostEqual(info["mean_var"], 1.0, places=2)
+            self.assertLessEqual(info["min_var"], info["mean_var"])
+
+    def test_no_expander_matches_blocks_directly(self):
+        from mlmv.config import load_config
+        from mlmv.losses.levels import LevelObjective
+
+        cfg = load_config(overrides={"model": {"expander": []}})
+        dims = cfg.model.dims
+        obj = LevelObjective(cfg, dims, torch.ones(10, 2), 2.5, "chebyshev")
+        for lvl, d in dims.items():
+            x = torch.randn(5, d)
+            self.assertTrue(torch.equal(obj.expanders[lvl](x), x))  # identity
+            self.assertEqual(obj.losses[lvl].std_a.m1.shape[0], d)  # Barlow Twins at the block's width
+
     def test_context_constant_feature_contributes_nothing(self):
         torch.manual_seed(0)
         n, p = 512, 8

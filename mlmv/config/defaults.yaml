@@ -18,7 +18,8 @@ run:
   amp: bf16                              # bf16 | none (bf16 is used on CUDA only)
   log_every: 100
   eval_every: 5000
-  ckpt_every: 10000
+  ckpt_every: 10000                      # rolling last.pt (model, optimiser, state) for resuming
+  keep_every: 10000                      # also keep checkpoints/step_<N>.pt (model only); 0 = off
   source: synthetic                      # synthetic | adni
 data:
   spacing_mm: 2.0
@@ -48,7 +49,7 @@ model:
   max_rf_radius: 3                       # feature voxels
   template_subtraction: true
   template_momentum: 0.999
-  expander: [512, 512]
+  expander: [512, 512]                   # [] = no expander: the loss acts on the blocks themselves
   variance_floor: false
   variance_floor_weight: 1.0
   checkpoint: true                       # gradient checkpointing on the trunk

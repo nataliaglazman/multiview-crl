@@ -49,6 +49,7 @@ Each run writes `results/mlmv/<run.name>/`: `config.yaml` (resolved, with the co
 | `config/defaults.yaml`, `config/__init__.py` | every default; YAML -> dataclasses, strict keys, `--set a.b=v` |
 | `config/runs/phase1/*.yaml` | the 12 Phase 1 runs (variants, f_L curve, centring and objective ablations) |
 | `config/runs/phase1_brain/*.yaml` | 5 Phase 1 runs on the brain renderer (exact, centring off, noisy, FLAIR-only lesion, site confounded) |
+| `config/runs/phase1_fixes/*.yaml` | 3 cube runs testing fixes for the late collapse and G's set dependence (batch statistics, no expander, both) |
 | `data/geometry.py` | erosion, eligibility and merging, half-splits, G region sets, majority downsampling |
 | `data/sampler.py` | per-step S positions, L half-splits, G region sets (explicit `torch.Generator`) |
 | `synth/three_level.py` | the three-level generator and both renderers (extends `experiments/gl_ident/generator.py`) |
@@ -87,6 +88,14 @@ Each run writes `results/mlmv/<run.name>/`: `config.yaml` (resolved, with the co
 - **InfoNCE** uses its context negatives in place of centring (`loss.centring` acts on Barlow Twins).
 - **Site in the leakage matrix** is R^2 on the 2-d site embedding (what enters the renderer), plus balanced
   accuracy.
+- **Under test: the first full runs degraded late.** In p1_exact (cube) and p1b_exact (brain) the gradient norm
+  grew 10–150x as the learning rate decayed and every level's match fell in the last part of training; G's
+  cross-split CKA fell to 0.54 (cube, from 55k) and to about 0.2 (brain, from 10k) while G's match stayed high.
+  Suspects: the running standardisation (a dimension whose running variance collapses makes the loss steep) and
+  the expander (the loss never sees block variance the expander gives little weight). `loss.standardise: batch`
+  and `model.expander: []` test them (`config/runs/phase1_fixes/`); both depart from the spec. Runs now log each
+  block's template and deviation RMS and the loss's smallest and mean variance, and keep `step_<N>.pt` model
+  checkpoints every 10k steps (`run.keep_every`).
 - **Data generation runs on the training device.** Only each subject's random draws happen on the CPU, in a
   fixed order; smoothing, lesion maps, rendering and the brain renderer's Rician noise run on the GPU (0.012 s
   of CPU work per 4-subject step, down from 0.19 s on one thread). The noise comes from a device generator, so

@@ -93,8 +93,12 @@ class BarlowLoss(nn.Module):
                 za, zb = context_centre(za, context), context_centre(zb, context)
             if self.standardise == "running":
                 za, zb = self.std_a(za), self.std_b(zb)
+                var = torch.cat([self.std_a.stats()[1], self.std_b.stats()[1]])
             else:
+                var = torch.cat([za.detach().var(0, unbiased=False), zb.detach().var(0, unbiased=False)])
                 za, zb = batch_standardise(za), batch_standardise(zb)
+            # the variances C divides by: a dimension whose variance collapses makes the loss steep there
+            self.last_var = (float(var.min()), float(var.mean()))
             c = za.T @ zb / za.shape[0]
             if self.corr_ema > 0:
                 m, t = self.corr_ema, int(self.c_steps) + 1
@@ -112,4 +116,6 @@ class BarlowLoss(nn.Module):
         on = ((1 - diag) ** 2).sum()
         off = (c**2).sum() - (diag**2).sum()
         loss = on + self.lambda_off * off
-        return loss, {"mean_cii": float(diag.mean().detach()), "on": float(on.detach()), "off": float(off.detach())}
+        info = {"mean_cii": float(diag.mean().detach()), "on": float(on.detach()), "off": float(off.detach())}
+        info["min_var"], info["mean_var"] = self.last_var
+        return loss, info

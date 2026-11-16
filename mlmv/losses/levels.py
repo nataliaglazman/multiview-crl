@@ -116,14 +116,15 @@ class LevelObjective(nn.Module):
     def __init__(self, cfg, dims: dict, membership, rho: float, metric: str):
         super().__init__()
         self.cfg, self.rho, self.metric = cfg, rho, metric
-        width = cfg.model.expander[-1]
+        # ``model.expander: []`` applies the loss to each block itself (identity expander, block width)
+        width = {lvl: cfg.model.expander[-1] if cfg.model.expander else dims[lvl] for lvl in LEVELS}
         self.expanders = nn.ModuleDict({lvl: Expander(dims[lvl], cfg.model.expander) for lvl in LEVELS})
         self.objective = cfg.loss.objective
         if self.objective == "barlow":
             self.losses = nn.ModuleDict(
                 {
                     lvl: BarlowLoss(
-                        width,
+                        width[lvl],
                         cfg.loss.lambda_off,
                         cfg.loss.centring,
                         cfg.loss.standardise,
@@ -134,7 +135,7 @@ class LevelObjective(nn.Module):
                 }
             )
         elif self.objective == "infonce":
-            self.queue = Queue(cfg.loss.infonce.queue, width)
+            self.queue = Queue(cfg.loss.infonce.queue, width["G"])
         else:
             raise ValueError(f"loss.objective must be barlow or infonce, got {self.objective!r}")
         self.register_buffer("membership", torch.as_tensor(membership, dtype=torch.float32))

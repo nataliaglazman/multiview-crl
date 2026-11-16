@@ -6,7 +6,9 @@ import torch.nn as nn
 
 
 class Expander(nn.Module):
-    """``[N, d] -> [N, widths[-1]]``. With the default widths [512, 512]: Linear, BatchNorm, ReLU, Linear."""
+    """``[N, d] -> [N, widths[-1]]``. With the default widths [512, 512]: Linear, BatchNorm, ReLU, Linear.
+
+    Empty ``widths`` is the identity, so the loss acts on the block itself."""
 
     def __init__(self, d_in: int, widths=(512, 512)):
         super().__init__()

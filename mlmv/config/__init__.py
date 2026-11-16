@@ -28,6 +28,7 @@ class RunSection:
     log_every: int
     eval_every: int
     ckpt_every: int
+    keep_every: int
     source: str
 
 

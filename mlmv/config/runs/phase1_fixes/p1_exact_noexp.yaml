@@ -1,0 +1,4 @@
+# Phase 1 fix test on the cube, exact variant: no expander: Barlow Twins on the G, L and S blocks themselves. Tests whether the expander lets G carry variance that changes with the region set (G CKA falling in p1_exact and p1b_exact). Departs from the spec (running statistics, expanders).
+run: {name: p1_exact_noexp}
+synth: {variant: exact}
+model: {expander: []}

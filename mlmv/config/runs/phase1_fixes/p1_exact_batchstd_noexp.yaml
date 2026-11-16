@@ -1,0 +1,5 @@
+# Phase 1 fix test on the cube, exact variant: both changes together. Departs from the spec (running statistics, expanders).
+run: {name: p1_exact_batchstd_noexp}
+synth: {variant: exact}
+loss: {standardise: batch}
+model: {expander: []}

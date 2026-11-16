@@ -1,0 +1,4 @@
+# Phase 1 fix test on the cube, exact variant: standard Barlow Twins standardisation (statistics of the current batch, with gradient). Tests whether the running statistics cause the late gradient blow-up seen in p1_exact. Departs from the spec (running statistics, expanders).
+run: {name: p1_exact_batchstd}
+synth: {variant: exact}
+loss: {standardise: batch}
