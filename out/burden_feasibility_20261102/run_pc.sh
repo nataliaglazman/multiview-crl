@@ -170,6 +170,15 @@
 # with no InfoNCE. Arms on bank_causal_nofield, 20,000 steps, seed 42: 10 units with the MLP map, the same with critic
 # weights on the InfoNCE (a 10-unit cosine charges a less-agreeing unit more), and 24 units with the MLP map (the map
 # alone). The four reports, own variation also by boosting, beside the linear-map arms (causal/stage36/).
+# Stage 37 (opt-in) Sharper views for the 10-unit code. No change to the objective kept burden in 10 units; what moved
+# it was how exactly each view determines burden (gain off: 17.3 / 17.6 -> 14.9 / 14.3 voxels). With the field off, a
+# normative residual with 32 PCA directions removed instead of 16 lets the fixed image filter read burden's own part to
+# 7.4 / 5.2 voxels instead of 9.0 / 6.6 (normative_components.py, read on a local copy of the bank). The residuals go
+# into banks of their own, bank_causal_nofield_k32 and bank_causal_nofield_nogain_k32, whose other arrays are links
+# (residual_bank.py --components 32 --source). Arms, 20,000 steps, seed 42, prediction weight 1: stage 35's 10-unit
+# arm on each of the two, and stage 33's 24-unit arm on the first. While they train, no training:
+# normative_components.py on both source banks. The four reports, beside the 16-component arms whose scores are
+# reused from stage 35 (causal/stage37/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1351,6 +1360,55 @@ if wants 36; then
     stage_report "$OUT" code_audit "${RUNS[@]}"
     stage_report "$OUT" style_audit "${RUNS[@]}"
     [ "$DRY" = 0 ] && echo "Stage 36 reports in $OUT"
+fi
+
+if wants 37; then
+    NOFIELD=$D/bank_causal_nofield
+    NOGAIN=$D/bank_causal_nofield_nogain
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    bank "$NOGAIN" --t1-values 0.4 --causal --field off --gain off
+    residual_bank "$NOGAIN" t1_04 flair
+    K32=${NOFIELD}_k32
+    K32_NOGAIN=${NOGAIN}_k32
+    residual_bank "$K32" t1_04 flair --components 32 --source "$NOFIELD"
+    residual_bank "$K32_NOGAIN" t1_04 flair --components 32 --source "$NOGAIN"
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    SHARP=("${P}_k32_predict1_c10_20k" "${P}_nogain_k32_predict1_c10_20k" "${P}_k32_predict1_c24_20k")
+    BEFORE=("${P}_predict1_c10_20k" "${P}_nogain_predict1_c10_20k" "${P}_predict1_c24_20k")  # 16 components
+    OUT=$D/causal/stage37
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage35" "$OUT" "${BEFORE[@]}"
+    fi
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42 --contrastive-loss-type infonce
+        --predict-weight 1)
+    EVERY=2000 ssl "${SHARP[0]}" "$K32" tail t1_04 20000 "${BASE[@]}" --content-units 10
+    EVERY=2000 ssl "${SHARP[1]}" "$K32_NOGAIN" tail t1_04 20000 "${BASE[@]}" --content-units 10
+    EVERY=2000 ssl "${SHARP[2]}" "$K32" tail t1_04 20000 "${BASE[@]}" --content-units 24
+    for source in "$NOFIELD" "$NOGAIN"; do  # no training, while the arms train
+        report=$OUT/normative_components_${source##*/}
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/normative_components.py $source $report.json > $report.txt"
+        elif [ ! -f "$report.json" ]; then
+            echo "$(date +%H:%M) normative components of ${source##*/} into $OUT, while the arms train"
+            "$PY" "$D/normative_components.py" "$source" "$report.json" > "$report.txt" 2>&1 \
+                || echo "the normative-components check failed, see $report.txt; training goes on"
+        fi
+    done
+    finish "${SHARP[@]}"
+    RUNS=()
+    for name in "${SHARP[@]}"; do
+        if [ "$DRY" = 0 ] && ! grep -qx DONE "$D/logs/$name.log"; then echo "Rerun stage 37 for $name."; exit 1; fi
+        RUNS+=("$D/runs/$name")
+    done
+    for name in "${BEFORE[@]}"; do
+        if [ "$DRY" = 1 ] || grep -qx DONE "$D/logs/$name.log" 2>/dev/null; then RUNS+=("$D/runs/$name"); fi
+    done
+    for report in precision_audit own_variation code_audit style_audit; do
+        stage_report "$OUT" "$report" "${RUNS[@]}"
+    done
+    [ "$DRY" = 0 ] && echo "Stage 37 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

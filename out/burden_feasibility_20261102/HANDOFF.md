@@ -20,6 +20,8 @@ and what to do next. Repo-wide conventions are in `CLAUDE.md` at the root. They 
   - **One shared route.** Every factor is read through one shared pooling route, never per-factor heads.
   - **Real-data levers only.** The work has to transfer to ADNI, where the subject count is fixed. "More subjects"
     is a diagnostic, never the proposal. Augmentation-type levers are fine.
+  - **Matched width (16 Nov).** The code has 10 units, one per latent the views share (section 9, stage 35), to fit
+    Yao's theory. "Keep 24 units" is a diagnostic or a stress-case finding, not the answer.
 
 ## 2. How we work with the user
 
@@ -113,8 +115,13 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     draws, with the renderer's multiplicative field off (section 7, items 17–18).
   - `bank_causal_nofield_nogain` (`--causal --field off --gain off`, stage 29): the same, with every scan rendered at
     gain 1, so tissue and lesion contrast no longer vary from scan to scan. The bias and the noise level still vary.
+  - `bank_causal_nofield_k32`, `bank_causal_nofield_nogain_k32` (stage 37): the two banks above with 32 principal
+    components removed from the residual instead of 16. Only the residuals are new; every other array is a link.
 - **`residual_bank.py`** writes each view's normative residual: the scan z-scored over its brain, minus the
   training mean, minus its first 16 principal components, scaled to unit SD. Each modality uses only its own basis.
+  - `--components K` removes K components (at most 64, what the stored basis holds).
+  - `--source OTHER_BANK` first links OTHER_BANK's arrays and basis into the bank, so a residual with another K is a
+    bank of its own and the source is left as it is.
 
 ## 5. The model and the current recipe
 
@@ -167,6 +174,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
+| `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
 | `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). Section 7, item 24 |
 
 **Reading rules learned the hard way:**
@@ -503,11 +511,13 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - Largest third: control 47 / 42 → 61 / 40, weight 1 18 / 20 → 29 / 32, gain off 10 / 11 → 26 / 26.
     - Anatomy and lesion position left in the weight-1 codes (mean ridge R²) fall from .87–.91 to .61–.74. The
       end-to-end backbone gain is gone: GAP 11.1 / 11.9 (24 units 10.1 / 10.9, control 11.0 / 11.0); gain off
-      8.9 / 8.0 (24 units 7.6 / 7.2, control 8.7 / 8.1).
-    - Likely why: the width matches the code, not the target. Each code predicts the other view's 64 whitened GAP
+      8.9 / 8.0 (24 units 7.6 / 7.2, control 8.7 / 8.1). Yet a fresh 24-unit bottleneck reads burden from the 10-unit
+      backbones nearly as well as from the 24-unit ones (item 26): the head drops it.
+    - Proposed why: the width matches the code, not the target. Each code predicts the other view's 64 whitened GAP
       features linearly, and the GAP spreads the 10 latents over more than 10 linear directions (CCA lost burden at
       14, item 9). Ten units predict only a 10-direction slice, and burden's own part is not in it. The precision
       readout takes the better of ridge and boosting, so the 10 units don't hold burden non-linearly either.
+      **Stage 36's check rules this out (item 26): a non-linear map does not help.**
     - Price: within each run, a burden unit pays only below ~6–8 voxels at 10 units (cross-view r ~.86–.92), against
       ~8–12 at 24. One unit is a bigger share of a narrow cosine. Critic weights remove the cost, as before.
     - With a smooth function of position and anatomy removed, the 10-unit codes tell 32 subjects apart far less well
@@ -517,14 +527,93 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - **Reading:** keep 24 units with prediction weight 1. An 11-unit arm (the cosine's lost degree of freedom,
       section 9) would only close the theory's formal case: the 24-unit InfoNCE code had far more room and read burden
       the same.
+26. **A non-linear map does not let 10 units hold burden (stage 36's no-training check, read 16 Nov,
+    `causal/stage36/bottleneck_check.txt`).** Fresh bottlenecks shaped like TailCode's head, trained only to predict
+    the other view's whitened GAP from the frozen features of stage 33's and 35's weight-1 runs, three seeds each, read
+    on test subjects. Volume error, T1 / FLAIR: the run's own code; linear map at 10 units; MLP map at 10; linear at
+    24; MLP at 24.
+    - Field off, 24-unit backbone: 12.7 / 13.2; 24.7 / 31.2; 22.0 / 26.4; 13.6 / 13.6; 14.4 / 14.6.
+    - Field off, 10-unit backbone: 17.3 / 17.6; 16.7 / 16.3; 18.1 / 18.7; 13.6 / 13.8; 14.8 / 15.4.
+    - Gain off, 24-unit backbone: 8.9 / 9.2; 18.0 / 25.2; 20.0 / 22.9; 9.3 / 9.4; 10.7 / 10.7.
+    - Gain off, 10-unit backbone: 14.9 / 14.3; 16.3 / 15.0; 15.9 / 16.3; 10.6 / 11.1; 10.6 / 11.0.
+    - The linear 24-unit bottleneck reads like each run's own 24-unit code, so the fit is sound.
+    - At 10 units the MLP map reads burden no better than the linear one (within 5 voxels either way, no consistent
+      sign) and 5–13 voxels worse than 24 units, on every backbone. What it buys is lesion position (boosted R²
+      .92–.94 against .74–.89) and a lower prediction loss on validation subjects, lower even than the linear map at 24
+      units (.14–.25 against .17–.28). The prediction loss values the non-linear structure of position and anatomy
+      above burden's own part, and spends a narrow code on it: the width binds, not the map.
+    - At 24 units the MLP map reads burden 0–1.6 voxels worse than the linear one.
+    - The 10-unit backbones still hold burden: a fresh 24-unit bottleneck reads them about as well as the 24-unit
+      backbones (field off 13.6 / 13.8 against 13.6 / 13.6; gain off 10.6 / 11.1 against 9.3 / 9.4). The 10-unit head
+      drops it.
+    - The check has no InfoNCE, and the runs' own 10-unit codes read about as the linear 10-unit bottleneck does. So
+      InfoNCE's charge (the critic-weight arm's target) is not what keeps burden out of 10 units either.
+    - **Reading:** the gate fails, so stage 36's arms are unlikely to help: stop them (section 9). Keep 24 units.
+      Every objective tried ranks burden's own part last, so it needs spare width; no change to the map will fit it
+      into 10 units. One cheap lever is left, the target's weighting (section 10), and the theory note is in
+      section 8.
+
+27. **At 10 units the lever is how sharply the views show burden, not the objective (16 Nov; a simulation and one
+    local no-training check).** The user wants 10 units, the matched width (section 1).
+    - **Simulation.** `bottleneck_check.py`'s fit on made-up features: nine sharp shared latents, one faint one (58%
+      explained by a parent and read with noise in each view), and harmonics of the sharp ones in the targets. A
+      harmonic is a non-linear function of a sharp latent, such as a place field over position. Tuned until it showed
+      item 26's pattern: 10 units drop the faint latent through either map, 24 linear units keep it. Two seeds. The
+      score is the R² of the faint latent's own part read from the code; the full features give ~.67. The scripts
+      were one-offs in a session scratchpad and are not in the repo.
+      - **Fails at 10 units (≤ .02 unless said):** whitening ridge .001, section 10's lever; a bigger map; a penalty
+        on units that the other units predict; InfoNCE alone with 31 or 1,999 negatives, cosine or distance
+        similarity, one weight per unit, or 11 cosine units; training-only extra units tied to the 10 (the faint
+        latent leaks into them); a wide code narrowed to 10 by rebuilding it (kept in 1 of 4 runs).
+      - **Why.** The faint latent is worth ~3% of the prediction loss. A hand-built code of the ten true latents
+        scores a worse loss (.175) than the learned code without the faint one (.170): the map cannot rebuild every
+        harmonic from 2,000 subjects, so the tenth unit carries harmonics. Ten times the subjects bring part of it
+        back (.21–.32).
+      - **Width.** The MLP map needs 11–12 units there, the linear map more than 18. The real check (item 26) ran
+        only 10 and 24.
+      - **What moves it at 10 units:** how exactly each view determines the latent. Own part 0 as above; .38 when it
+        is read as sharply as the anatomy; .65 of a possible .98 when it is also independent of its parent.
+      - **Partial observability** (Yao's theorem 3.8: a residual-only pair of views with a 4–5-unit block of its own
+        inside the 10): .04–.18 only. Position's harmonics outbid the faint latent even in the small block.
+    - **Burden is not unrecoverable.** The labelled code reads its own part to 5.9 / 4.7 voxels (item 18), 91% / 94%
+      of an SD of 19.9; the fixed image filter is not the ideal reader. The theory assumes each view determines the
+      content exactly. Burden's own part meets that less well than any other latent, so it is the one dropped at the
+      matched width.
+    - **A richer normative model sharpens the residual** (`normative_components.py` on a Mac copy of
+      `bank_causal_nofield`, rendered with the same options, 1,000 test subjects, exact PCA). Image-filter error in
+      voxels, T1 / FLAIR, by principal components removed:
+      - 0: 10.2 / 8.0. 16, the residual so far: 9.0 / 6.6, the PC's numbers. 32: 7.4 / 5.2. 64: 6.7 / 5.9.
+        128: 7.4 / 7.2. 512: 9.3 / 9.3.
+      - The views' readings agree at r .93 with 32 or 64, against .91 with 16.
+      - Past ~64 the components remove the lesion itself: its contrast over the leftover falls.
+      - With the field on it does not help: on the independent `bank`, T1 reads 14.8 at 16 and worse past 64 (300
+        test subjects). The field, not leftover anatomy, limits that bank.
+      - The filter gains 1.6 / 1.4 voxels at 32. Gain off gave it 1.0 / 0.4 and moved the 10-unit code by ~2.5–3
+        (item 25). Whether the network follows is stage 37's question.
+    - **Reading:** stage 37 (section 9). Benchmark-side alternatives if it falls short: a bank where burden's own
+      part is larger (the SCM's own-noise weight is 0.4 for every child; on an independent field-off bank an
+      11-voxel reading recovers ~93% of ±41 voxels), or several lesions per subject, which adds three position
+      latents per lesion to the matched width.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
   latent), patch loss off, the InfoNCE objective.
 - **Not covered:** code batches (any neighbourhood rule), hard negatives.
-- **Silent:** finite subjects (memorisation), and code width versus the size of the shared block. The block is wider
-  than 24 here once the lesion's position is counted.
+- **Silent:** finite subjects (memorisation), and code width versus the size of the shared block.
+- **Matched width fails at finite data (stages 35–36).** The shared block is 10 latents (seven SCM factors and the
+  lesion's x, y, z; section 9, stage 35), spread over more than 24 linear directions of the features (linear CCA,
+  item 9). A 10-unit code loses burden's own part under every objective tried: InfoNCE, and cross-view prediction
+  through a linear or an MLP map (items 25–26). 24 units keep it.
+  - The theory's matched-width result is for the ideal, infinite-data objective. With finite data these objectives
+    drop the faintest shared factor first, so the code needs spare width.
+  - Worth a sentence in the paper.
+  - **Which factor is dropped follows from an assumption (item 27).** The theory takes each view to determine the
+    content exactly. Burden's own part meets that least well (the labelled code recovers 91% / 94%, the label-free
+    backbone ~70%). A testable form: at the matched width, a latent is kept in proportion to how exactly the views
+    determine it. Stages 35 and 37 give four 10-unit points for that curve.
+  - **Inside the theory:** any fixed, label-free transform of one view from its own modality, so a residual with
+    more components removed is covered, as the 16-component one is.
 - **The CCA readout is not covered as used.**
   - It is fitted after training, it is linear, and it keeps weakly shared directions. Directions 15–24 agree at only
     r .45–.72, so part of each is view-specific (style or noise, unmeasured).
@@ -537,8 +626,46 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 16 Nov
 
-- **Stage 36 (built 16 Nov, not run): the next step.** Can a 10-unit code match the 24-unit one when its map to the
-  other view is non-linear?
+- **Stage 37 (built 16 Nov, not run): the next step.** Does a sharper residual let the 10-unit code keep burden?
+  - **Why:** item 27. No change to the objective kept a faint latent in 10 units; sharper views did. With 32
+    components removed instead of 16, the image filter reads burden's own part to 7.4 / 5.2 voxels instead of
+    9.0 / 6.6.
+  - **Banks:** `bank_causal_nofield_k32` and `bank_causal_nofield_nogain_k32`, built by
+    `residual_bank.py --components 32 --source BANK`. It reuses the source's stored basis, so the 16-component banks
+    and every finished run are untouched. The links are relative, so the folders can move together.
+  - **Arms**, 20k steps, seed 42, prediction weight 1, the recipes of stages 35 and 33 on the new banks:
+    - 10 units, field off: `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_k32_predict1_c10_20k`;
+    - 10 units, gain off: `..._nofield_nogain_k32_predict1_c10_20k`;
+    - 24 units, field off: `..._nofield_k32_predict1_c24_20k`.
+  - **Controls** with 16 components: stage 35's two 10-unit weight-1 arms and stage 33's 24-unit arm. Their scores
+    are reused from stage 35's reports.
+  - **While the arms train, no training:** `normative_components.py` on both source banks, into
+    `causal/stage37/normative_components_<bank>.txt`. The field-off table should repeat item 27's. The gain-off one
+    is new: check that 32 is a good choice there too.
+  - **Reports** in `causal/stage37/`: the precision audit, own variation, the code audit and the style audit.
+  - **Success:**
+    - The image-filter row of the field-off k32 arms near 7.4 / 5.2.
+    - The backbone GAP sharper than the 10-unit controls' (11.1 / 11.9; gain off 8.9 / 8.0).
+    - The 10-unit code below 17.3 / 17.6 (gain off 14.9 / 14.3), "alone" above .42 / .39 (.56 / .60), with anatomy
+      and lesion position holding (.61–.74).
+    - Read the four 10-unit arms as a curve: the code's error against the image-filter row of its bank.
+  - **Checked locally:**
+    - Unit tests (`tests/test_residual_bank.py`): a linked bank gets its own residuals through relative links and
+      leaves the source alone; more components leave less of the scan; more components than the basis holds, or a
+      bank as its own source, are refused.
+    - The default is unchanged: the repo `bank`'s FLAIR residual, rebuilt through a linked copy with 16 components,
+      equals the stored one bit for bit on all 3,400 subjects.
+    - On a Mac render of `bank_causal_nofield` (2,000 / 32 / 1,000), the image filter reads the stored residuals to
+      9.0 / 6.6 with 16 components, the PC's numbers, and to 7.4 / 5.2 with 32 through the linked bank.
+    - Two-step runs of the 10- and 24-unit arms finish on the linked bank, and own variation reads the 10-unit one.
+      `normative_components.py` runs on 200 test subjects. Shell syntax and the stage 37 dry run pass.
+    - Not run locally: the gain-off bank, and the precision, code and style audits on a linked bank. They take a
+      bank folder like any other.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 37`. Stop stage 36's arms first (below). It reuses
+    stage 35's report caches, so start it after stage 35's reports are written.
+- **Stage 36 (started 16 Nov; its no-training check read in section 7, item 26: an MLP map does not let 10 units hold
+  burden, so the arms are unlikely to help).** Can a 10-unit code match the 24-unit one when its map to the other view
+  is non-linear?
   - **Why:** stage 35's 10-unit prediction code read volume ~5 voxels worse than at 24 units (section 7, item 25).
     Its linear map predicts at most 10 directions of the other view's whitened GAP, which spreads the shared latents
     over more than 10 (CCA lost burden at 14, item 9). Through a non-linear map, a code that holds the 10 latents in
@@ -565,7 +692,11 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     burden's own part by boosting near the 24-unit arm's, and anatomy and lesion position ≳ .85 by boosting in the
     code audit. Read ridge beside boosting: the linear maps made the 24-unit code linear in the factors (item 22),
     which the tabular benchmark's ridge readout and PC's Fisher-Z rely on, and an MLP map may not.
-  - **Gain off** follows if the field-off arm works.
+  - **Gain off** would have followed if the field-off arm worked; dropped with the arms.
+  - **Stop the arms** (recommended 16 Nov, after the check): the 10-unit arms are very unlikely to reach the 24-unit
+    level, and at 24 units the MLP map read burden 0–1.6 voxels worse than the linear one. On the PC,
+    `pgrep -af predict1_mlp128` lists them and `pkill -f predict1_mlp128` stops them. Stage 36 then exits by itself,
+    without its four reports.
   - **Checked locally:**
     - Unit tests: `tests/test_warm_prediction.py` (the default maps are the old linear maps; the MLP map starts as its
       linear map; one unit predicts two directions only through it; the options) and `tests/test_bottleneck_check.py`
@@ -810,8 +941,13 @@ on.
 - **Read the rest of stage 35** (`causal/stage35/`; precision audit read, item 25): `own_variation.txt`, and
   `code_audit.txt`'s boosted rows and "both" column (do the 10 units hold anatomy and position non-linearly, and
   nothing else?). 10 units read burden worse than 24, so the recipe keeps 24.
-- **Run stage 36** (`run_pc.sh 36`, built 16 Nov, section 9): a non-linear prediction map at 10 units. Read
-  `causal/stage36/bottleneck_check.txt` first; it is ready while the arms train.
+- **Run stage 37** (`run_pc.sh 37`, built 16 Nov, section 9): the 10-unit arm on residuals with 32 components
+  removed. The user wants 10 units (section 1), so "keep 24" below is superseded as the goal.
+- **Stage 36's check is read (item 26):** a non-linear map does not let 10 units hold burden, so the recipe keeps 24
+  units. Stop the stage's arms (section 9).
+  - The whitening-ridge lever (rerun `bottleneck_check.py` at ridge 0.01 and 0.001) fails in the simulation of
+    item 27 and costs position and anatomy there. It has not been run on real features; the expectation is low.
+  - Untested on real features: the width the MLP map needs. The simulation says 11–12 units; the check ran 10 and 24.
 - **Then test white-matter normalisation** of the scan channel on the gain-on bank with prediction weight 1 at 24
   units, the real-data version of gain off. Gain costs burden's own part in the code .60 → .48, and costs the code ~4
   voxels against ≤1 for the image filter (item 22).
@@ -956,3 +1092,4 @@ on.
 | lesion-blind third view | lesion-specific; rejected by the user |
 | more subjects | not available on ADNI |
 | head levers for burden on the field-off bank: 48 units, Barlow Twins, remainder units, critic weights (stages 29, 31) | burden's own part in the code unchanged (.31–.37); remainder units stay for anatomy |
+| a non-linear prediction map as the way to 10 units (stage 36) | 10 units read burden 5–13 voxels worse than 24, under InfoNCE and under prediction through either map. 10 units stays the goal; stage 37 sharpens the views instead |
