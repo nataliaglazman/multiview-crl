@@ -58,6 +58,34 @@ class WarmPredictionTests(unittest.TestCase):
         self.assertGreater(float(pair.grad.abs().sum()), 0.0)
         self.assertTrue(all(decoder.weight.grad is not None for decoder in decoders))
 
+    def test_default_maps_are_the_linear_maps(self):
+        maps = warm.prediction_decoders(10, 64)
+        self.assertEqual([type(m) for m in maps], [nn.Linear, nn.Linear])
+        self.assertEqual(sorted(maps.state_dict()), ["0.bias", "0.weight", "1.bias", "1.weight"])
+
+    def test_hidden_map_starts_as_its_linear_map(self):
+        maps = warm.prediction_decoders(3, 5, hidden=8)
+        code = torch.randn(7, 3)
+        for m in maps:
+            self.assertIsInstance(m, warm.HiddenDecoder)
+            torch.testing.assert_close(m(code), m.linear(code))
+
+    def test_hidden_map_lets_one_unit_predict_two_directions(self):
+        code = torch.linspace(-2, 2, 200)[:, None]
+        target = torch.cat([code, code.square() - code.square().mean()], 1)
+        errors = {}
+        for hidden in (0, 32):
+            decoder = warm.prediction_decoders(1, 2, hidden)[0]
+            optimizer = torch.optim.Adam(decoder.parameters(), lr=0.01)
+            for _ in range(1500):
+                optimizer.zero_grad()
+                loss = torch.nn.functional.mse_loss(decoder(code), target)
+                loss.backward()
+                optimizer.step()
+            errors[hidden] = float(loss)
+        self.assertGreater(errors[0], 0.3)  # the square's variance is ~1.4: a line misses it
+        self.assertLess(errors[32], 0.05)
+
     def test_momentum_copy_moves_toward_the_online_backbone(self):
         online, kept = nn.Linear(4, 4), nn.Linear(4, 4)
         before = kept.weight.detach().clone()
@@ -74,6 +102,8 @@ class WarmPredictionTests(unittest.TestCase):
             ["--pool", "tail", "--predict-weight", "-1"],
             ["--pool", "tail", "--predict-weight", "1", "--predict-momentum", "1"],
             ["--pool", "tail", "--predict-weight", "1", "--predict-ridge", "0"],
+            ["--pool", "tail", "--predict-hidden", "64"],
+            ["--pool", "tail", "--predict-weight", "1", "--predict-hidden", "-1"],
         ]
         for extra in cases:
             with self.subTest(extra=extra), mock.patch.object(sys, "argv", base + extra):

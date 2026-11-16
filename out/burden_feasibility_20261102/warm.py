@@ -69,6 +69,11 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 copy's momentum, --predict-ridge R (default 0.1) the whitening's ridge; the maps are used only in
                 training. Each eval logs how many directions the targets spread over. Needs TailCode pooling and InfoNCE,
                 and neither --queue nor --supervise.
+  --predict-hidden H  each view's map becomes the linear map plus a one-hidden-layer MLP of width H (GELU) on the same
+                code, its output layer starting at zero, so the first step equals the linear map's. A linear map from N
+                units predicts at most N directions of the other view's GAP, which spreads the shared latents over more
+                than that; through the MLP a code that holds the latents in any invertible form predicts all of them.
+                Needs --predict-weight. Default 0: the linear map alone.
   --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
@@ -87,7 +92,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
         [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--content-units N] [--seed S]
         [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]
          [--remainder-space main|gap]] [--critic-weights main|remainder|both [--critic-lr LR]] [--supervise volume]
-        [--predict-weight W [--predict-momentum M] [--predict-ridge R]]
+        [--predict-weight W [--predict-momentum M] [--predict-ridge R] [--predict-hidden H]]
 """
 
 import argparse
@@ -411,6 +416,28 @@ def target_gap(target_model, x):
     return torch.stack(target_model._encode(x, 2, None).mean((2, 3, 4)).chunk(2))
 
 
+class HiddenDecoder(nn.Module):
+    """--predict-hidden's map: the linear map plus a one-hidden-layer MLP on the same code, whose output layer starts at
+    zero so the first step equals the linear map's."""
+
+    def __init__(self, units, channels, hidden):
+        super().__init__()
+        self.linear = nn.Linear(units, channels)
+        self.mlp = nn.Sequential(nn.Linear(units, hidden), nn.GELU(), nn.Linear(hidden, channels))
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, code):
+        return self.linear(code) + self.mlp(code)
+
+
+def prediction_decoders(units, channels, hidden=0):
+    """--predict-weight's two maps (T1 code -> FLAIR target, FLAIR code -> T1 target), linear unless ``hidden``."""
+    return nn.ModuleList(
+        nn.Linear(units, channels) if not hidden else HiddenDecoder(units, channels, hidden) for _ in range(2)
+    )
+
+
 def cross_view_prediction(pair, targets, decoders):
     """--predict-weight's term on (2, B, units) codes and (2, B, channels) whitened targets: decoder 0 reads the T1 code
     to predict FLAIR's target, decoder 1 the reverse, each code standardized over the batch as the InfoNCE sees it; the
@@ -687,6 +714,9 @@ def main():
         "--predict-momentum", type=float, default=None, help="Momentum of --predict-weight's target copy (0.996)"
     )
     p.add_argument("--predict-ridge", type=float, default=None, help="Ridge of --predict-weight's whitening (0.1)")
+    p.add_argument(
+        "--predict-hidden", type=int, default=0, help="Hidden width of an MLP added to each prediction map (0: linear)"
+    )
     a = p.parse_args()
     if a.uniform and a.code_batches:
         raise ValueError("--uniform and --code-batches are different batch rules")
@@ -800,8 +830,10 @@ def main():
             )
     if not (np.isfinite(a.predict_weight) and a.predict_weight >= 0):
         raise ValueError("--predict-weight must be finite and non-negative")
-    if not a.predict_weight and (a.predict_momentum is not None or a.predict_ridge is not None):
-        raise ValueError("--predict-momentum and --predict-ridge need --predict-weight")
+    if not a.predict_weight and (a.predict_momentum is not None or a.predict_ridge is not None or a.predict_hidden):
+        raise ValueError("--predict-momentum, --predict-ridge and --predict-hidden need --predict-weight")
+    if a.predict_hidden < 0:
+        raise ValueError("--predict-hidden is a hidden width, 0 for the linear map alone")
     if a.predict_weight:
         a.predict_momentum = 0.996 if a.predict_momentum is None else a.predict_momentum
         a.predict_ridge = 0.1 if a.predict_ridge is None else a.predict_ridge
@@ -914,10 +946,12 @@ def main():
         ]
         whitening = TargetWhitening(torch.cat(sample, 1), a.predict_ridge)
         with torch.random.fork_rng(devices=[]):  # the maps' init leaves every later draw as in a run without them
-            decoders = nn.ModuleList(nn.Linear(units, sample[0].shape[-1]) for _ in range(2)).to(a.device)
+            decoders = prediction_decoders(units, sample[0].shape[-1], a.predict_hidden).to(a.device)
         print(
             "cross-view prediction weight",
             a.predict_weight,
+            "maps",
+            f"linear + MLP {a.predict_hidden}" if a.predict_hidden else "linear",
             "target momentum",
             a.predict_momentum,
             "whitening ridge",
@@ -1159,7 +1193,11 @@ def main():
             if len(critic):
                 state["critic"] = critic.state_dict()
             if decoders is not None:
-                state["predict"] = {"decoders": decoders.state_dict(), "whitening": whitening.state()}
+                state["predict"] = {
+                    "decoders": decoders.state_dict(),
+                    "whitening": whitening.state(),
+                    "hidden": a.predict_hidden,
+                }
             torch.save(state, a.out / "model.pt")
     print("DONE", flush=True)
 

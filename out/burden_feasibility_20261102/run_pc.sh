@@ -162,6 +162,14 @@
 # z_content[3:5] are unused with the burden target, and clean content draws no deformation or fissure field).
 # Prediction weight 1 and its InfoNCE control on bank_causal_nofield, and weight 1 on the gain-off bank, 20,000 steps,
 # seed 42. The four reports, beside the 24-unit counterparts whose scores are reused from stage 34 (causal/stage35/).
+# Stage 36 (opt-in) Stage 35's 10-unit prediction code read volume ~5 voxels worse than 24 units: its linear map
+# predicts only 10 directions of the other view's whitened GAP, which spreads the shared latents over more. Each map
+# becomes the linear map plus a one-hidden-layer MLP of width 128 (warm.py --predict-hidden), through which a 10-unit
+# code holding the latents in any invertible form can predict all of them. First, no training (while the arms train):
+# bottleneck_check.py fits fresh 10- and 24-unit bottlenecks to stages 33 and 35's frozen features through either map,
+# with no InfoNCE. Arms on bank_causal_nofield, 20,000 steps, seed 42: 10 units with the MLP map, the same with critic
+# weights on the InfoNCE (a 10-unit cosine charges a less-agreeing unit more), and 24 units with the MLP map (the map
+# alone). The four reports, own variation also by boosting, beside the linear-map arms (causal/stage36/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -536,7 +544,8 @@ if wants 22; then
         if [ "$DRY" = 1 ]; then
             echo "$PY $D/causal_bundle.py $RUN $base.npz --features $feature"
             echo "$PY $D/causal_bundle.py $RUN $base.floor.npz --features $feature --untrained"
-        elif [ ! "$base.npz" -nt "$RUN/model.pt" ] || [ ! "$base.floor.npz" -nt "$RUN/model.pt" ]; then
+        elif [ ! "$base.npz" -nt "$RUN/model.pt" ] || [ ! "$base.floor.npz" -nt "$RUN/model.pt" ] || \
+            ! "$PY" -c "import sys, numpy; sys.exit('z_own' not in numpy.load(sys.argv[1]).files)" "$base.npz"; then
             "$PY" "$D/causal_bundle.py" "$RUN" "$base.npz" --features "$feature" > "$base.log" 2>&1 && \
                 "$PY" "$D/causal_bundle.py" "$RUN" "$base.floor.npz" --features "$feature" --untrained >> "$base.log" 2>&1 || \
                 { echo "Bundle export failed, see $base.log"; exit 1; }
@@ -1289,6 +1298,59 @@ if wants 35; then
         stage_report "$OUT" "$report" "${RUNS[@]}"
     done
     [ "$DRY" = 0 ] && echo "Stage 35 reports in $OUT"
+fi
+
+if wants 36; then
+    NOFIELD=$D/bank_causal_nofield
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    MLP=("${P}_predict1_mlp128_c10_20k" "${P}_predict1_mlp128_critmain_c10_20k" "${P}_predict1_mlp128_c24_20k")
+    LINEAR=("${P}_predict1_c10_20k" "${P}_predict1_c24_20k" "${P}_c10_20k")  # stages 35 and 33, linear maps
+    CHECKED=("${P}_predict1_c24_20k" "${P}_predict1_c10_20k" "${P}_nogain_predict1_c24_20k"
+        "${P}_nogain_predict1_c10_20k")  # the no-training check's runs (stages 33 and 35)
+    OUT=$D/causal/stage36
+    if [ "$DRY" = 0 ]; then
+        for name in "${LINEAR[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 36 needs $name finished (stages 33 and 35 train it). Rerun stage 36 after it is."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage35" "$OUT" "${LINEAR[@]}"
+    fi
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42 --contrastive-loss-type infonce
+        --predict-weight 1 --predict-hidden 128)
+    EVERY=2000 ssl "${MLP[0]}" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --content-units 10
+    EVERY=2000 ssl "${MLP[1]}" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --content-units 10 --critic-weights main
+    EVERY=2000 ssl "${MLP[2]}" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --content-units 24
+    RUNS=()
+    for name in "${CHECKED[@]}"; do
+        if [ "$DRY" = 1 ] || grep -qx DONE "$D/logs/$name.log" 2>/dev/null; then RUNS+=("$D/runs/$name"); fi
+    done
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/bottleneck_check.py $OUT/bottleneck_check.json ${RUNS[*]} > $OUT/bottleneck_check.txt"
+    else
+        echo "$(date +%H:%M) no-training bottleneck check into $OUT, while the arms train"
+        "$PY" "$D/bottleneck_check.py" "$OUT/bottleneck_check.json" "${RUNS[@]}" > "$OUT/bottleneck_check.txt" 2>&1 \
+            || echo "the bottleneck check failed, see $OUT/bottleneck_check.txt; training goes on"
+    fi
+    finish "${MLP[@]}"
+    RUNS=()
+    for name in "${MLP[@]}"; do
+        if [ "$DRY" = 0 ] && ! grep -qx DONE "$D/logs/$name.log"; then
+            echo "Stage 36's check is in $OUT; rerun stage 36 for $name."
+            exit 1
+        fi
+        RUNS+=("$D/runs/$name")
+    done
+    for name in "${LINEAR[@]}"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    [ "$DRY" = 0 ] && echo "Stage 36 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

@@ -21,9 +21,14 @@ does, the network never learned it.
 For a run with remainder units (warm.py --remainder-units), each factor's own variation is also read from the main units
 alone and from the remainder units alone, so it shows which part of the code holds it.
 
-    python out/burden_feasibility_20261102/own_variation.py OUT_JSON RUN [RUN ...]
+--boosted also reads each factor's own variation from the code by gradient boosting (code_audit.py's settings), beside
+the seven true factors read the same way on the same subjects. Ridge reads only what the code holds linearly, so a code
+trained through a non-linear map (warm.py --predict-hidden) needs this column.
 
-Runs already in OUT_JSON at the same step are reused. Each run's bank needs causal_adj.npy (bank.py --causal).
+    python out/burden_feasibility_20261102/own_variation.py OUT_JSON RUN [RUN ...] [--boosted]
+
+Runs already in OUT_JSON at the same step are reused (with --boosted, if they have its column). Each run's bank needs
+causal_adj.npy (bank.py --causal).
 """
 
 import argparse
@@ -48,6 +53,7 @@ from eval.synthetic.synthetic_dataset import sample_content_from_scm
 
 KINDS = ("code", "pooled", "gap")
 SPLIT = ("main", "rest")  # a run with remainder units: the code's main units, then its remainder units
+BOOSTED_CELLS = ("T1 code", "FLAIR code")
 TARGETS = {
     "own": "own variation: the factor's exogenous noise in the SCM (independent of its parents)",
     "partial": "linear-residual partial R2, compare_bundles' target (a parent read nonlinearly scores on it)",
@@ -121,7 +127,7 @@ def references(scm, scale, nonlinearity, columns):
     return out
 
 
-def assess(run, device, scm, scale, nonlinearity, columns):
+def assess(run, device, scm, scale, nonlinearity, columns, boosted=False):
     out = {}
     for trained in (True, False):
         report, model, pool, residual, step = code_audit.load_run(run, device, trained=trained)
@@ -161,6 +167,8 @@ def assess(run, device, scm, scale, nonlinearity, columns):
                     default=0.0,
                 ),
             )
+            if boosted:
+                out["true_boosted"] = [code_audit.boosted(values["raw"], own[:, j]) for j in range(len(columns))]
         out["trained" if trained else "untrained"] = {
             view: {
                 kind: {
@@ -171,6 +179,11 @@ def assess(run, device, scm, scale, nonlinearity, columns):
             }
             for v, view in enumerate(("t1", "flair"))
         }
+        if boosted:
+            for v, view in enumerate(("t1", "flair")):
+                out["trained" if trained else "untrained"][view]["code_boosted"] = {
+                    "own": [code_audit.boosted(feats["code"][v], values["own"][:, j]) for j in range(len(columns))]
+                }
     return out
 
 
@@ -210,12 +223,29 @@ def show(name, row, refs, scm, columns):
                 for kind in SPLIT
             )
             print(f"    {names[j]:10s} {parents:18s} {'':13s} |{values}")
+    if "true_boosted" in row:
+        print(
+            "  own variation from the code by gradient boosting; trained (untrained twin); 'true' = the seven true"
+            " factors read the same way, the most a code that holds them can reach here"
+        )
+        print(
+            f"    {'factor':10s} {'parents':18s} {'true':>6s} {'':6s} |" + "".join(f"{c:>14s}" for c in BOOSTED_CELLS)
+        )
+        for j, d in enumerate(columns):
+            parents = ",".join(B.CAUSAL_FACTORS[p] for p in scm["parents"][d]) or "-"
+            values = "".join(
+                f"{row['trained'][view]['code_boosted']['own'][j]:6.2f}"
+                f" ({row['untrained'][view]['code_boosted']['own'][j]:5.2f})"
+                for view in ("t1", "flair")
+            )
+            print(f"    {names[j]:10s} {parents:18s} {row['true_boosted'][j]:6.2f} {'':6s} |{values}")
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("out_json", type=Path)
     p.add_argument("runs", type=Path, nargs="+")
+    p.add_argument("--boosted", action="store_true", help="also read each own variation from the code by boosting")
     a = p.parse_args()
     device = warm.pick_device()
     scm, scale, nonlinearity = scm_settings()
@@ -228,11 +258,12 @@ def main():
         except Exception as error:  # no checkpoint yet, or one being written right now
             print("skipping", run.name, "for now:", error, flush=True)
             continue
-        if step != last or results.get(run.name, {}).get("step") == step:
+        cached = results.get(run.name, {})
+        if step != last or (cached.get("step") == step and (not a.boosted or "true_boosted" in cached)):
             continue
         print("assessing", run.name, flush=True)
         with torch.no_grad():
-            results[run.name] = assess(run, device, scm, scale, nonlinearity, columns)
+            results[run.name] = assess(run, device, scm, scale, nonlinearity, columns, a.boosted)
         a.out_json.write_text(json.dumps(results, indent=1))
     refs = references(scm, scale, nonlinearity, columns)
     print(

@@ -147,6 +147,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     trained only by InfoNCE on batches of each subject's nearest neighbours on the main units (stage 23).
   - `--critic-weights main|remainder|both` (with `--critic-lr`, default 1e-3): one learnable weight per code unit
     inside that term's InfoNCE cosine, starting at 1, so a unit whose views agree poorly can count for less (stage 31).
+  - `--predict-weight W`: each view's code predicts the other view's whitened GAP from a momentum copy (stage 33).
+    `--predict-hidden H` adds a one-hidden-layer MLP of width H to each linear map, starting at zero (stage 36).
   - `--hard-negatives G`, `--seed S`.
   - Older levers: `--queue`, `--gauge running`, `--group-dropout`, `--decorrelate`, `--shared-jitter`, `--uniform`.
   - Each option refuses combinations it can't handle.
@@ -158,12 +160,14 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 |---|---|
 | `summarize.py` | each arm's training history, compact enough to paste |
 | `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, the same rows for the untrained twin (the floor), canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
-| `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns |
+| `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns. `--boosted` adds the code read by gradient boosting beside the true factors read the same way: ridge reads only what a code holds linearly |
+| `bottleneck_check.py` | no training: fresh 10- and 24-unit bottlenecks fitted on a run's frozen features to predict the other view's whitened GAP through a linear or an MLP map, read like a code (volume error, alone, anatomy and position by ridge and boosting). Stage 36 |
 | `style_audit.py` | each view's gain, bias and noise level read from the code, pooled features and GAP, trained vs untrained twin, against the other view's (drawn independently: the null). Banks don't store style, so it is redrawn from the generator's seeds and must reproduce the stored content latents. `code_audit.py` scores no style |
 | `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side. Two "weighted" price rows refit the critic to each code (one weight per unit inside the cosine; as trained, and with position and anatomy removed); rerunning the audit on a stored JSON adds them without redoing the rest |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
+| `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). Section 7, item 24 |
 
 **Reading rules learned the hard way:**
 - **Raw burden R² is uninformative on the causal bank.** A code that knows every other factor but not the lesion
@@ -444,6 +448,75 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       10.4 / 12.0. Anatomy .85–.89, lesion position .90–.91. Seeds differ by 0.4–0.8 voxels; the lead over the
       frozen heads holds at 0.9–2.0 voxels.
     - **Not settled:** seed 2's own variation (`causal/stage34/own_variation.txt`).
+24. **Tabular causal benchmark: the end-to-end prediction code matches its own backbone (read 15–16 Nov,
+    `causal/tabular/<run>/`).**
+    - **What it is** (`eval/causal/TABULAR_BENCHMARK.md`). Synthetic tabular columns added to the 1,000 causal-bank
+      test subjects from their true factors, over 10 task seeds.
+      - Effect task: a hidden image score (all 7 factors, equal ± weights) and two tabular covariates confound a
+        binary treatment. Read the share of the tabular-only bias (0.597) that adding the vector removes
+        (cross-fitted AIPW).
+      - Discovery task: one factor drives a continuous exposure and another the outcome (20 MRI→tab edges). Two
+        tabular causes each drive one factor (20 tab→MRI edges). Each cause is a noisy copy of its target's own noise
+        (`z_own`), so it reaches the image only through the target's own variation. A ridge readout fitted on the
+        true labels decodes the factors; PC (Fisher-Z, α .05) runs on 500 held-out subjects.
+      - One edge moves an F1 by ~.03–.07. PC can orient at most 15 of the 20 causes (5 target roots), so the
+        oracle's orientation of .70 is the ceiling.
+    - **Results, code, T1 / FLAIR** (confounding removed; MRI→tab F1; tab→MRI F1):
+      - halves8 (field on, InfoNCE, 6k): 50 / 50%; .13 / .20; .37 / .50.
+      - Field off, InfoNCE 24 units: 47 / 43%; .52 / .45; .51 / .66. + remainder units: 67 / 66%; .75 / .77; .51 /
+        .65.
+      - Frozen-backbone prediction heads: field off weight 3, 69 / 72%; .73 / .77; .72 / .77. Gain off weight 1,
+        74 / 77%; .83 / .93; .83 / .88.
+      - **End to end, weight 1 (stages 33–34), seed 42 · seed 2:** gain on 79 / 83% · 80 / 80%; .85 / .87 both;
+        .93 / .91 · .89 / .88. Gain off 90 / 89% · 88 / 87%; .88 / .83 · .90 / .90; .93 / .96 · .94 / .96.
+        Orientation .60–.70.
+      - Their backbone GAPs: gain on 85 / 90% · 82 / 81%, gain off 89 / 94% · 91 / 91%; MRI→tab .85–.92, tab→MRI
+        .88–.96. Oracle: ~100%, .95, 1.00.
+    - **Reading.**
+      - Discovery follows own variation, not readout R²: a factor's edges are mostly found at own variation ≳.3 and
+        mostly missed at ≲.15.
+      - The effect task needs every factor, so it punishes heads that drop anatomy. The InfoNCE heads lose brain size
+        (R² .41 / .27 field off, ~0 in the frozen-backbone InfoNCE controls), and the prediction term restores it.
+      - Before training end to end, the false incoming edges came almost all from sulcal, the least-read factor (48
+        of 52 in the field-off InfoNCE codes). Its decoded value was built from its ancestors and inherited their
+        dependencies.
+      - The end-to-end codes now match their own GAP on every panel (within ±.05, sometimes above) in both seeds.
+        The remaining distance to the oracle sits in the backbone. Gain costs 8–10 points of confounding removed.
+    - **Caveats.** The readout uses labels, so this measures what the vector holds, not label-free discovery. Only
+      the bank's 7 factors count, and the 10 tasks share one cohort.
+    - **Running it** on any warm.py run with a TailCode head: `causal_bundle.py RUN OUT/code.npz --features code`,
+      and the same for `gap` and for each `--untrained` floor. Then run
+      `python -m eval.causal.tabular_benchmark --view each --bundles code=… gap=… --floors code=… gap=…
+      --out OUT/report.json`. `run_pc.sh 22` does this with a CCA arm, but only for runs with stage 19 CCA bundles
+      (`TABULAR_RUN`). The one-table summary, per-factor breakdown and false-edge scripts are kept in `~/` on the PC
+      (`tabular_summary.py`, `tabular_breakdown.py`, `tabular_spurious.py`). halves8's `report_11nov.json` predates
+      the tabular causes.
+25. **Ten content units read burden worse than 24 (stage 35; precision audit read 16 Nov, own variation, the audit and
+    the style audit not yet).** Stage 33's recipe with `--content-units 10`, one unit per shared latent (section 9),
+    20k steps, seed 42. Code volume error, T1 / FLAIR, 24 → 10 units:
+    - InfoNCE control: 18.0 / 19.7 → 18.1 / 18.4; "alone" .40 / .38 → .36 / .35. The theory's own setting at the
+      matched width changes nothing for burden. The narrower code is less saturated (uniform loss .10 → .16), and the
+      extra pressure went to lesion position (mean R² .39 / .37 → .47 / .44), not burden. A burden unit read to 10
+      voxels still costs it (−.008 nats in uniform sets).
+    - Prediction weight 1, field off: 12.7 / 13.2 → 17.3 / 17.6, within a voxel of the 10-unit control; "alone"
+      .61 / .61 → .42 / .39. Gain off: 8.9 / 9.2 → 14.9 / 14.3; "alone" .76 / .75 → .56 / .60.
+    - Largest third: control 47 / 42 → 61 / 40, weight 1 18 / 20 → 29 / 32, gain off 10 / 11 → 26 / 26.
+    - Anatomy and lesion position left in the weight-1 codes (mean ridge R²) fall from .87–.91 to .61–.74. The
+      end-to-end backbone gain is gone: GAP 11.1 / 11.9 (24 units 10.1 / 10.9, control 11.0 / 11.0); gain off
+      8.9 / 8.0 (24 units 7.6 / 7.2, control 8.7 / 8.1).
+    - Likely why: the width matches the code, not the target. Each code predicts the other view's 64 whitened GAP
+      features linearly, and the GAP spreads the 10 latents over more than 10 linear directions (CCA lost burden at
+      14, item 9). Ten units predict only a 10-direction slice, and burden's own part is not in it. The precision
+      readout takes the better of ridge and boosting, so the 10 units don't hold burden non-linearly either.
+    - Price: within each run, a burden unit pays only below ~6–8 voxels at 10 units (cross-view r ~.86–.92), against
+      ~8–12 at 24. One unit is a bigger share of a narrow cosine. Critic weights remove the cost, as before.
+    - With a smooth function of position and anatomy removed, the 10-unit codes tell 32 subjects apart far less well
+      (uniform loss 1.2 / 2.3 / 1.6 against .37 / .98 / .35; control, weight 1, gain off). They hold less beyond the
+      latents, as a matched width should, but burden went too. The views share more of the code's burden error
+      (r .64–.75 against .57–.68).
+    - **Reading:** keep 24 units with prediction weight 1. An 11-unit arm (the cosine's lost degree of freedom,
+      section 9) would only close the theory's formal case: the 24-unit InfoNCE code had far more room and read burden
+      the same.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -464,7 +537,47 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 16 Nov
 
-- **Stage 35 (built 16 Nov, not run): the next step.** Stage 33's recipe at the width of the ground truth.
+- **Stage 36 (built 16 Nov, not run): the next step.** Can a 10-unit code match the 24-unit one when its map to the
+  other view is non-linear?
+  - **Why:** stage 35's 10-unit prediction code read volume ~5 voxels worse than at 24 units (section 7, item 25).
+    Its linear map predicts at most 10 directions of the other view's whitened GAP, which spreads the shared latents
+    over more than 10 (CCA lost burden at 14, item 9). Through a non-linear map, a code that holds the 10 latents in
+    any invertible form can predict all of them, and at the optimum it must hold every latent the other view's GAP
+    varies with: the theory's matched-width claim, reached through prediction rather than InfoNCE's entropy term.
+  - **Option:** `warm.py --predict-hidden H`. Each map becomes the linear map plus a one-hidden-layer MLP of width H
+    (GELU), its output layer starting at zero, so the first step equals the linear map's. The default, 0, leaves runs
+    unchanged.
+  - **First, no training** (`bottleneck_check.py`, run while the arms train): on the frozen features of stage 33's and
+    35's weight-1 runs (both banks), fresh bottlenecks shaped like TailCode's head are fitted on the training subjects
+    to predict the other view's whitened GAP, through the linear or the MLP map, at 10 and 24 units, three seeds each,
+    with no InfoNCE. Each is read on the test subjects like a code. Read it first: if the MLP bottleneck at 10 units
+    does not read volume near the linear one at 24, the arms are unlikely to help. The linear one at 24 should read
+    about as the run's own 24-unit code does; if not, the fit sets the numbers, not the map.
+  - **Arms** on `bank_causal_nofield`, 20k steps, seed 42, stage 33's recipe with `--predict-hidden 128`:
+    - 10 units (`ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c10_20k`);
+    - the same with `--critic-weights main` (`..._predict1_mlp128_critmain_c10_20k`): a 10-unit cosine charges a
+      less-agreeing unit more (item 25), and refitted weights removed that charge in the price table;
+    - 24 units (`..._predict1_mlp128_c24_20k`): the map's effect alone.
+  - **Reports** in `causal/stage36/`: the precision audit, own variation with `--boosted`, the code audit and the
+    style audit, beside stage 35's 10-unit weight-1 arm and InfoNCE control and stage 33's 24-unit weight-1 arm. Their
+    entries are reused from stage 35, except own variation, which rescores them for the boosted column.
+  - **Success:** the 10-unit MLP code within ~1 voxel of the 24-unit linear arm (12.7 / 13.2), "alone" ≳ .55,
+    burden's own part by boosting near the 24-unit arm's, and anatomy and lesion position ≳ .85 by boosting in the
+    code audit. Read ridge beside boosting: the linear maps made the 24-unit code linear in the factors (item 22),
+    which the tabular benchmark's ridge readout and PC's Fisher-Z rely on, and an MLP map may not.
+  - **Gain off** follows if the field-off arm works.
+  - **Checked locally:**
+    - Unit tests: `tests/test_warm_prediction.py` (the default maps are the old linear maps; the MLP map starts as its
+      linear map; one unit predicts two directions only through it; the options) and `tests/test_bottleneck_check.py`
+      (two units drop a weak shared latent through a linear map and keep it through the MLP map).
+    - A two-step default run is bit-identical before and after the change: history, weights and maps.
+    - Two-step runs of the three arms on a 208 / 32 / 160 field-off causal bank finish and save their maps (and critic
+      weights). `own_variation.py --boosted` and `bottleneck_check.py` run on such a run; the check took ~10 minutes
+      on the Mac's CPU. Shell syntax and the stage 36 dry run pass.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 36`. It needs stages 33 and 35 finished, and reuses stage
+    35's report caches, so start it after stage 35's reports are written.
+- **Stage 35 (run 16 Nov; precision audit read in section 7, item 25: 10 units read burden worse than 24; own
+  variation, the audit and the style audit not yet).** Stage 33's recipe at the width of the ground truth.
   - **Why:** the theory identifies the shared block when the code is as wide as the content the views share (Yao et
     al. 2024). The 24-unit code is wider, a case the theory is silent on (section 8).
   - **The count is 10:** the causal bank renders seven SCM factors into both views (brain, ventricle, burden,
@@ -694,11 +807,14 @@ on.
   1 (section 7, item 22): burden's own part in the code .48 / .47 with gain on and .60 / .58 with gain off, against
   .31–.37 before. Stage 34 found no style in any code and seed 2 as sharp as seed 42 (item 23). If seed 2's own part
   also holds, the prediction term at weight 1 is ready to join the recipe.
-- **Run stage 35** (`run_pc.sh 35`, built 16 Nov, section 9): the recipe at 10 content units, one per ground-truth
-  latent, with prediction weight 1 and without.
-- **Then test white-matter normalisation** of the scan channel on the gain-on bank with prediction weight 1, the
-  real-data version of gain off. Gain costs burden's own part in the code .60 → .48, and costs the code ~4 voxels
-  against ≤1 for the image filter (item 22).
+- **Read the rest of stage 35** (`causal/stage35/`; precision audit read, item 25): `own_variation.txt`, and
+  `code_audit.txt`'s boosted rows and "both" column (do the 10 units hold anatomy and position non-linearly, and
+  nothing else?). 10 units read burden worse than 24, so the recipe keeps 24.
+- **Run stage 36** (`run_pc.sh 36`, built 16 Nov, section 9): a non-linear prediction map at 10 units. Read
+  `causal/stage36/bottleneck_check.txt` first; it is ready while the arms train.
+- **Then test white-matter normalisation** of the scan channel on the gain-on bank with prediction weight 1 at 24
+  units, the real-data version of gain off. Gain costs burden's own part in the code .60 → .48, and costs the code ~4
+  voxels against ≤1 for the image filter (item 22).
 - Stage 32's `own_variation.txt` and `code_audit.txt` are unread, but stage 33's reports cover its two heads that
   matter (field-off weight 3, gain-off weight 1); the rest are stage 30's weaker heads.
 - **Decide with the user whether `bank_causal_nofield` becomes the main burden bank,** with the field-on bank kept as a
@@ -707,7 +823,8 @@ on.
 - **Tabular benchmark (read 16 Nov, item 24).** The end-to-end weight-1 codes match their own GAP on confounding
   and graph recovery in both seeds; with gain off they remove 87–90% of the confounding. That is one more reason for
   prediction weight 1 to join the recipe. Score the white-matter-normalisation run the same way.
-- **Done on 16 Nov:** stage 34 ran; its style and precision audits are read (item 23).
+- **Done on 16 Nov:** stage 34 ran; its style and precision audits are read (item 23). Stage 35 ran; its precision
+  audit is read (item 25).
 - **Done on 15 Nov:** stage 33 ran and its three reports are read (item 22). Weight 3 reads burden no better than
   weight 1 and gives up lesion position for a little ventricle and sulcal.
 - **Done on 13 Nov:** stage 28's remaining reports (item 18) and the head levers of stages 29 and 31 (item 20: width,
