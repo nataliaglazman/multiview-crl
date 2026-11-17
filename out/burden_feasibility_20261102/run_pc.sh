@@ -202,6 +202,11 @@
 # prediction weight 1 (InfoNCE then has to tell apart subjects the code already matches on position and the strong
 # factors). The four reports beside the 10-unit codes of stages 35 and 38 (seeds 42 and 2) and stage 33's 24-unit code
 # (causal/stage43/).
+# Stage 44 (opt-in, no training) Why stage 42's count lost the weak own parts. factoriser.py on the same two codes and
+# anchor splits, subtracting the anchors' measured values (observed for every subject, as FreeSurfer measures are on
+# ADNI) instead of the code's readouts of them; then stage 42's readouts again. Both with a trace: each direction the
+# count examined, its correlation with each concealed target, and each target's R2 from the dropped directions
+# (causal/stage44/measured_default.txt, measured_burden.txt, readouts_default.txt, readouts_burden.txt).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1597,6 +1602,42 @@ if wants 43; then
     stage_report "$OUT" code_audit "${RUNS[@]}"
     stage_report "$OUT" style_audit "${RUNS[@]}"
     [ "$DRY" = 0 ] && echo "Stage 43 reports in $OUT"
+fi
+
+if wants 44; then
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    NAMES=("${P}_predict1_c24_20k" "${P}_predict1_c10_20k")
+    OUT=$D/causal/stage44
+    if [ "$DRY" = 0 ]; then
+        for name in "${NAMES[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 44 needs $name finished (stages 33 and 35 train it)."
+                exit 1
+            fi
+        done
+        if ! "$PY" -c "import causallearn" 2> /dev/null; then
+            echo "Stage 44 needs causal-learn: $PY -m pip install causal-learn"
+            exit 1
+        fi
+        mkdir -p "$OUT" || exit 1
+    fi
+    RUNS=()
+    for name in "${NAMES[@]}"; do RUNS+=("$D/runs/$name"); done
+    for source in measured readouts; do
+        for split in "default brain ventricle thickness temporal" "burden brain ventricle burden temporal"; do
+            read -r label anchors <<< "$split"
+            report=$OUT/${source}_$label
+            # shellcheck disable=SC2086  # the anchors are four words
+            CMD=("$PY" "$D/factoriser.py" "$report.json" "${RUNS[@]}" --anchor-source "$source" --anchors $anchors)
+            if [ "$DRY" = 1 ]; then
+                echo "${CMD[*]} > $report.txt"
+            else
+                echo "$(date +%H:%M) factoriser, anchors $anchors as $source, into $report.txt"
+                "${CMD[@]}" > "$report.txt" 2>&1 || { echo "Stage 44's factoriser failed, see $report.txt"; exit 1; }
+            fi
+        done
+    done
+    [ "$DRY" = 0 ] && echo "Stage 44 reports in $OUT: measured_default.txt, measured_burden.txt, readouts_*.txt"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

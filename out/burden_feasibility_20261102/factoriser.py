@@ -1,38 +1,45 @@
-"""Stage 42: the concealed-factor benchmark of paper/factor-discovery-framework.tex on a frozen code. No training.
+"""Stages 42 and 44: the concealed-factor benchmark of paper/factor-discovery-framework.tex on a frozen code. No
+training.
 
-Some causal factors are supplied as anchors, observed variables with labels on training subjects only (by default the
-ones FreeSurfer measures: brain, ventricle, thickness, temporal). The rest are concealed (burden, lr, sulcal), and so
-is the lesion centre, shared content outside the causal graph. Per run, on its trained code and on its untrained twin
-(calibrated as causal_bundle.py does):
+Some causal factors are supplied as anchors, observed variables (by default the ones FreeSurfer measures: brain,
+ventricle, thickness, temporal). The rest are concealed (burden, lr, sulcal), and so is the lesion centre, shared
+content outside the causal graph. Per run, on its trained code and on its untrained twin (calibrated as
+causal_bundle.py does):
 
-  1. Anchored slots: a ridge readout of each anchor from each view's code (--anchor-noise adds measurement noise to
-     the training labels, as a fraction of each anchor's SD).
-  2. The novel block, label-free: each view's code minus its least-squares fit on the anchored slots and their squares
-     and products, and the two views' residuals compared by CCA, both on training subjects. Factors are counted by
+  1. Anchored slots: a ridge readout of each anchor from each view's code, fitted on training subjects' labels
+     (--anchor-noise adds measurement noise to the anchors, as a fraction of each anchor's SD).
+     --anchor-source picks what steps 2 and 4 use as the anchors: the code's readouts of them (stage 42), or their
+     measured values for every subject (stage 44; ADNI has FreeSurfer measures for every scan).
+  2. The novel block, label-free: each view's code minus its least-squares fit on the anchors and their squares and
+     products, and the two views' residuals compared by CCA, both on training subjects. Factors are counted by
      greedy deflation: take the top canonical pair while its agreement on validation subjects beats both
      --min-agreement and the 95th percentile of a null that shuffles the pairing of validation subjects between the
-     views; count it unless it is redundant (below); subtract from the code its fit on the slots and every direction
-     taken so far, with their squares and products; repeat.
+     views; count it unless it is redundant (below); subtract from the code its fit on the anchors and every
+     direction taken so far, with their squares and products; repeat.
      - The fit is exact. It leaves the code no variance along a taken direction, where a ridge fit, at any penalty,
        leaves a remnant that is all that is left there. CCA ignores scale, so it finds the remnant again as shared as
        the direction itself, and dropping it as redundant drags real factors out with it.
      - Squares and products are taken of the inputs clipped to their training range. Unclipped, a held-out subject
        beyond that range is extrapolated quadratically and the error compounds over the steps.
      - Higher powers (a cube of brain size, say) and the SCM's kinks survive a degree-2 subtraction and are shared
-       too. So a direction is counted only if a degree-3 polynomial ridge of the OTHER view's slots and counted factors
-       predicts it with held-out R2 below --max-redundancy; otherwise it is subtracted uncounted. Dropped directions
-       are left out of that prediction: one that carried part of a real factor would make the factor look redundant.
+       too. So a direction is counted only if a degree-3 polynomial ridge of the OTHER view's anchors and counted
+       factors predicts it with held-out R2 below --max-redundancy; otherwise it is subtracted uncounted. Dropped
+       directions are left out of that prediction: one that carried part of a real factor would make the factor look
+       redundant.
      - Unpredictable leftovers still agree up to .50 on the controls (tests/test_factoriser.py), where real factors
        agree at .56 and above. Hence --min-agreement .5.
      - Known limit: canonical pairs of near-equal agreement can mix a factor with a leftover. Then a leftover is
        counted as one more factor (2 of 30 toy controls), or a factor loses part of itself to a dropped mixture (a
        code like the bank's with burden read at error .35: burden's own part .31 and .40 in the block on 2 of 15
        seeds, .56-.61 from the whole code). The report prints both readings for every concealed target.
+     - The trace (scoring only): every direction examined, counted, dropped or the one the count stopped at, with its
+       |r| with each concealed target, and each target's R2 from the dropped directions, which is what of it the count
+       subtracted as redundant.
   3. Coordinates inside the block: the CCA order, and FastICA (item 33: separates non-Gaussian sources only). Each
      component is named after one concealed target (the concealed factors' own parts, their exogenous noise inverted
      from the SCM, and the lesion centre) by one Hungarian match on |corr|, against random rotations of the block.
      Labels are used for scoring only.
-  4. The graph: PC (Fisher-Z) on the anchored slots and the block's components, --rows test subjects per resampling,
+  4. The graph: PC (Fisher-Z) on the anchors and the block's components, --rows test subjects per resampling,
      --resamples resamplings. The components are residuals of the anchors, so they are uncorrelated with the anchors
      and with each other by construction, and PC cannot connect them to anything: the graph is the anchors' graph
      with the concealed factors latent. Its truth is what PC finds among the anchors with infinite data, which has
@@ -44,7 +51,8 @@ scored the same way, and PC on all seven true factors against the SCM's skeleton
 recovering the concealed factors whole, not as residuals of the anchors, would make reachable.
 
     python out/burden_feasibility_20261102/factoriser.py OUT_JSON RUN [RUN ...]
-        [--anchors brain ventricle thickness temporal] [--anchor-noise 0] [--train-subjects N]
+        [--anchors brain ventricle thickness temporal] [--anchor-source readouts|measured] [--anchor-noise 0]
+        [--train-subjects N]
 
 Runs already in OUT_JSON at the same step and with the same settings are reused; use one OUT_JSON per anchor set.
 """
@@ -78,7 +86,17 @@ ANCHORS = ("brain", "ventricle", "thickness", "temporal")
 SPLITS = ("train", "val", "test")
 ALPHAS = np.logspace(-3, 3, 13)
 NULL_DRAWS, ROTATIONS, PC_ALPHA = 200, 10, 0.05
-SETTINGS = ("anchors", "anchor_noise", "max_factors", "min_agreement", "max_redundancy", "rows", "resamples")
+SETTINGS = (
+    "anchors",
+    "anchor_source",
+    "anchor_noise",
+    "max_factors",
+    "min_agreement",
+    "max_redundancy",
+    "rows",
+    "resamples",
+)
+SOURCES = {"readouts": "the code's readouts", "measured": "their measured values"}
 
 
 def load(run, device, trained, train_subjects=None):
@@ -156,6 +174,19 @@ def anchored_slots(data, anchors, noise, rng):
     return slots, scores
 
 
+def measured_anchors(data, anchors, noise, rng):
+    """The anchors' measured values for every subject, the same for both views: (2, N, L) per split, with ``noise``
+    (a fraction of each anchor's SD) as measurement error."""
+    index = [FACTORS.index(name) for name in anchors]
+    sd = data["train"]["factors"][:, index].std(0)
+    out = {}
+    for split in SPLITS:
+        values = data[split]["factors"][:, index]
+        values = values + noise * sd * rng.standard_normal(values.shape)
+        out[split] = np.stack([values, values])
+    return out
+
+
 def quadratic(x, reference):
     """``x`` standardized by ``reference`` (the training inputs), then the squares and products of its columns clipped
     to the reference's range."""
@@ -212,17 +243,18 @@ def redundancy(inputs, projections):
     return float(np.mean(scores))
 
 
-def novel_block(data, slots, max_factors, min_agreement, rng, max_redundancy=0.2):
+def novel_block(data, anchors, max_factors, min_agreement, rng, max_redundancy=0.2, trace=None):
     """Step 2: greedy deflation. Each step takes the top canonical pair of the two views' residuals while it agrees on
-    validation subjects. It is counted unless the other view's anchored slots and counted factors predict it at
-    ``max_redundancy`` or above; either way it is subtracted. Returns the factors' components per split (2, N, K) and
-    every step's record."""
-    taken = {split: np.zeros((2, len(slots[split][0]), 0)) for split in SPLITS}
-    factors = {split: np.zeros((2, len(slots[split][0]), 0)) for split in SPLITS}
+    validation subjects. It is counted unless the other view's anchors (per split (2, N, L): the code's readouts of
+    them, or their measured values) and counted factors predict it at ``max_redundancy`` or above; either way it is
+    subtracted. Returns the factors' components per split (2, N, K) and every step's record. With ``trace``, a list,
+    each examined pair's test projections (2, N) are appended to it, one per record with an agreement."""
+    taken = {split: np.zeros((2, len(anchors[split][0]), 0)) for split in SPLITS}
+    factors = {split: np.zeros((2, len(anchors[split][0]), 0)) for split in SPLITS}
     total = min(data["train"]["code"][v].var(0).sum() for v in range(2))
     records = []
     for _ in range(3 * max_factors):
-        left = residuals(data, {split: np.concatenate([slots[split], taken[split]], 2) for split in SPLITS})
+        left = residuals(data, {split: np.concatenate([anchors[split], taken[split]], 2) for split in SPLITS})
         if min(left["train"][v].var(0).sum() for v in range(2)) < 1e-9 * total:
             records.append({"shared": False, "kept": False, "empty": True})
             break
@@ -232,9 +264,11 @@ def novel_block(data, slots, max_factors, min_agreement, rng, max_redundancy=0.2
         record = {"train_rho": float(rho[0]), "val_agreement": agreement, "val_null95": null, "kept": False}
         record["shared"] = agreement > max(null, min_agreement)
         records.append(record)
+        if trace is not None:
+            trace.append(top["test"])
         if not record["shared"]:
             break
-        counted = {split: np.concatenate([slots[split], factors[split]], 2) for split in SPLITS}
+        counted = {split: np.concatenate([anchors[split], factors[split]], 2) for split in SPLITS}
         record["redundancy"] = redundancy(counted, top)
         record["kept"] = record["redundancy"] < max_redundancy
         for split in SPLITS:
@@ -372,8 +406,18 @@ def assess_codes(data, a, seed=0):
     rng = np.random.default_rng(seed)
     truth, induced, hidden = anchor_truth(a.anchors, load_adj(data["bank"]))
     slots, anchor_r2 = anchored_slots(data, a.anchors, a.anchor_noise, rng)
-    block, records = novel_block(data, slots, a.max_factors, a.min_agreement, rng, a.max_redundancy)
+    anchors = slots
+    if a.anchor_source == "measured":
+        anchors = measured_anchors(data, a.anchors, a.anchor_noise, np.random.default_rng(seed + 1))
+    trace = []
+    block, records = novel_block(data, anchors, a.max_factors, a.min_agreement, rng, a.max_redundancy, trace)
     targets, target_names = concealed_targets(data["test"], a.anchors)
+    examined = [record for record in records if not record.get("empty")]
+    for record, direction in zip(examined, trace):
+        record["target_r"] = [
+            [abs(float(np.corrcoef(direction[v], target)[0, 1])) for target in targets.T] for v in range(2)
+        ]
+    dropped = [direction for record, direction in zip(examined, trace) if record["shared"] and not record["kept"]]
     k = block["test"].shape[2]
     labels = [f"c{i + 1}" for i in range(k)]
     versions = {"cca": block, "ica": ica_block(block, seed)}
@@ -389,9 +433,11 @@ def assess_codes(data, a, seed=0):
     }
     for v in range(2):
         code, comps = data["test"]["code"][v], block["test"][v]
+        gone = np.stack([direction[v] for direction in dropped], 1) if dropped else None
         view = {
             "full_code_r2": [r2(cv_predict(code, y), y) for y in targets.T],
             "block_r2": [r2(cv_predict(comps, y), y) if k else 0.0 for y in targets.T],
+            "dropped_r2": [r2(cv_predict(gone, y), y) if dropped else 0.0 for y in targets.T],
             "names": {},
         }
         for version, x in versions.items():
@@ -407,7 +453,7 @@ def assess_codes(data, a, seed=0):
         ]
         view["rotation_null_r"] = float(np.mean(null)) if null else None
         view["graph"] = graph_scores(
-            np.column_stack([slots["test"][v], comps]),
+            np.column_stack([anchors["test"][v], comps]),
             list(a.anchors) + labels,
             truth,
             set(labels),
@@ -465,7 +511,7 @@ def show(name, row):
     anchors, induced = s["anchors"], row["trained"]["induced"]
     print(
         f"{name}  step {row['step']}, {row['units']} units, bank {Path(row['bank']).name}; anchors {', '.join(anchors)}"
-        f" (label noise {s['anchor_noise']})"
+        f" as {SOURCES[s.get('anchor_source', 'readouts')]} (label noise {s['anchor_noise']})"
     )
     truth = row["trained"]["truth"]
     print(
@@ -508,7 +554,7 @@ def show(name, row):
             end = "reached --max-factors" if k == s["max_factors"] else "reached the step limit"
         print(
             f"    step 2, novel block: {k} components. Each shared direction taken: held-out agreement (null95), and R2"
-            f" from the other view's slots and counted factors (dropped at {s['max_redundancy']} or above): "
+            f" from the other view's anchors and counted factors (dropped at {s['max_redundancy']} or above): "
             + (", ".join(steps) or "none")
             + f"; {end}"
         )
@@ -516,7 +562,22 @@ def show(name, row):
         for i, target in enumerate(r["target_names"]):
             full = " / ".join(f"{view['full_code_r2'][i]:.2f}" for view in r["views"])
             part = " / ".join(f"{view['block_r2'][i]:.2f}" for view in r["views"])
-            print(f"      {target:12s} full code {full}, block {part}")
+            gone = " / ".join(f"{view['dropped_r2'][i]:.2f}" for view in r["views"] if "dropped_r2" in view)
+            print(
+                f"      {target:12s} full code {full}, block {part}" + (f", dropped directions {gone}" if gone else "")
+            )
+        examined = [d for d in r["deflation"] if "target_r" in d]
+        if examined:
+            print("    step 2 trace, each direction examined, with the targets it correlates with at |r| .3 or more:")
+        for j, d in enumerate(examined):
+            outcome = "stop" if not d["shared"] else "counted" if d["kept"] else "dropped"
+            mean = np.mean(d["target_r"], 0)
+            order = [i for i in np.argsort(-mean) if max(d["target_r"][0][i], d["target_r"][1][i]) >= 0.3][:3]
+            named = ", ".join(
+                f"{r['target_names'][i]} {d['target_r'][0][i]:.2f} / {d['target_r'][1][i]:.2f}" for i in order
+            )
+            score = f" R2 {d['redundancy']:.2f}" if d["shared"] else ""
+            print(f"      {j + 1:2d} {d['val_agreement']:.2f}{score} {outcome}: {named or '-'}")
         nulls = [view["rotation_null_r"] for view in r["views"]]
         print(
             "    step 3, each component named after a concealed target, |r| (random rotations of the block: mean |r| "
@@ -530,12 +591,12 @@ def show(name, row):
         g = [view["graph"] for view in r["views"]]
         pairs = k * len(anchors) + k * (k - 1) // 2
         print(
-            "    step 4, PC on the slots and the components, T1 / FLAIR: F1 against the anchors' truth "
+            "    step 4, PC on the anchors and the components, T1 / FLAIR: F1 against the anchors' truth "
             + " / ".join(f"{x['f1_mean']:.2f} ± {x['f1_sd']:.2f}" for x in g)
         )
         print(f"      truth edges held {held(g, truth, induced)}")
         print(
-            f"      false edges among the slots per graph {g[0]['false_edges_mean']:.1f} / {g[1]['false_edges_mean']:.1f};"
+            f"      false edges among the anchors per graph {g[0]['false_edges_mean']:.1f} / {g[1]['false_edges_mean']:.1f};"
             f" edges touching a component per graph {g[0]['block_edges_mean']:.1f} / {g[1]['block_edges_mean']:.1f}"
             f" (all false; chance at most about {PC_ALPHA * pairs:.1f})"
         )
@@ -546,7 +607,13 @@ def main():
     p.add_argument("out_json", type=Path)
     p.add_argument("runs", type=Path, nargs="+")
     p.add_argument("--anchors", nargs="+", default=list(ANCHORS), choices=FACTORS)
-    p.add_argument("--anchor-noise", type=float, default=0.0, help="training-label noise, a fraction of each SD")
+    p.add_argument(
+        "--anchor-source",
+        choices=list(SOURCES),
+        default="readouts",
+        help="what step 2 subtracts and PC uses as the anchors: the code's readouts of them, or their measured values",
+    )
+    p.add_argument("--anchor-noise", type=float, default=0.0, help="anchor measurement noise, a fraction of each SD")
     p.add_argument("--max-factors", type=int, default=12)
     p.add_argument("--min-agreement", type=float, default=0.5, help="lowest held-out agreement a component may have")
     p.add_argument("--max-redundancy", type=float, default=0.2, help="highest cross-view redundancy a factor may have")

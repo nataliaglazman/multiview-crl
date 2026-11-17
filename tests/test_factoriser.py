@@ -232,36 +232,67 @@ class BankLikeTests(unittest.TestCase):
             self.assertGreater(held.pop("burden own"), 0.5)
             self.assertGreater(min(held.values()), 0.8, held)
 
+    def test_measured_anchors_count_the_same_six(self):
+        data = bank_like(1)
+        anchors = F.measured_anchors(data, F.ANCHORS, 0.0, np.random.default_rng(0))
+        np.testing.assert_array_equal(anchors["test"][0], anchors["test"][1])
+        block, records = F.novel_block(data, anchors, 12, 0.5, np.random.default_rng(1))
+        self.assertEqual(block["test"].shape[2], 6, records)
+        targets, names = F.concealed_targets(data["test"], F.ANCHORS)
+        held = dict(zip(names, (F.r2(F.cv_predict(block["test"][0], y), y) for y in targets.T)))
+        self.assertGreater(min(held.values()), 0.5, held)
+
+    def test_the_trace_follows_every_examined_direction(self):
+        data = bank_like(1)
+        slots, _ = F.anchored_slots(data, F.ANCHORS, 0.0, np.random.default_rng(0))
+        trace = []
+        _, records = F.novel_block(data, slots, 12, 0.5, np.random.default_rng(1), 0.2, trace)
+        self.assertEqual(len(trace), sum(1 for r in records if not r.get("empty")))
+        self.assertFalse(records[-1]["shared"])  # the last direction examined is the one the count stopped at
+        targets, names = F.concealed_targets(data["test"], F.ANCHORS)
+        best = {
+            names[int(np.argmax([abs(np.corrcoef(d[0], t)[0, 1]) for t in targets.T]))]
+            for r, d in zip(records, trace)
+            if r["kept"]
+        }
+        self.assertTrue({"lesion x", "lesion y", "lesion z", "lr own"} <= best, best)
+
     @unittest.skipUnless(importlib.util.find_spec("causallearn"), "needs causal-learn")
     def test_the_benchmark_runs_end_to_end(self):
-        a = argparse.Namespace(
-            anchors=list(F.ANCHORS),
-            anchor_noise=0.0,
-            max_factors=12,
-            min_agreement=0.5,
-            max_redundancy=0.2,
-            rows=300,
-            resamples=2,
-            train_subjects=None,
-        )
-        with tempfile.TemporaryDirectory() as root:
-            data = bank_like(3, root)
-            row = {"settings": F.settings(a), "step": 0, "bank": root, "units": 24}
-            row["trained"] = row["floor"] = F.assess_codes(data, a)
-            row["ceilings"] = F.ceilings(data, a)
-        report = io.StringIO()
-        with contextlib.redirect_stdout(report):
-            F.show("bank-like", row)
-        r = row["trained"]
-        self.assertEqual(r["count"], 6)
-        self.assertGreater(np.min(r["anchor_r2"]), 0.9)
-        self.assertIn("novel block: 6 components", report.getvalue())
-        self.assertEqual(r["induced"], ["temporal - ventricle"])
-        for view in r["views"]:
-            # the lesion centre is uniform, so ICA can name its coordinates; the own parts are Gaussian and stay mixed
-            named = dict(zip(view["names"]["ica"]["names"], view["names"]["ica"]["matched_r"]))
-            self.assertGreater(min(named.get(f"lesion {c}", 0) for c in "xyz"), 0.9, named)
-            self.assertLess(view["graph"]["block_edges_mean"], 0.05 * (6 * 4 + 15) + 1)
+        for source in F.SOURCES:
+            a = argparse.Namespace(
+                anchors=list(F.ANCHORS),
+                anchor_source=source,
+                anchor_noise=0.0,
+                max_factors=12,
+                min_agreement=0.5,
+                max_redundancy=0.2,
+                rows=300,
+                resamples=2,
+                train_subjects=None,
+            )
+            with tempfile.TemporaryDirectory() as root:
+                data = bank_like(3, root)
+                row = {"settings": F.settings(a), "step": 0, "bank": root, "units": 24}
+                row["trained"] = row["floor"] = F.assess_codes(data, a)
+                row["ceilings"] = F.ceilings(data, a)
+            report = io.StringIO()
+            with contextlib.redirect_stdout(report):
+                F.show("bank-like", row)
+            r = row["trained"]
+            self.assertEqual(r["count"], 6, source)
+            self.assertGreater(np.min(r["anchor_r2"]), 0.9)
+            self.assertIn("novel block: 6 components", report.getvalue())
+            self.assertIn(f"as {F.SOURCES[source]}", report.getvalue())
+            self.assertIn("step 2 trace", report.getvalue())
+            self.assertEqual(r["induced"], ["temporal - ventricle"])
+            for view in r["views"]:
+                # the lesion centre is uniform, so ICA can name its coordinates; the own parts are Gaussian and stay
+                # mixed
+                named = dict(zip(view["names"]["ica"]["names"], view["names"]["ica"]["matched_r"]))
+                self.assertGreater(min(named.get(f"lesion {c}", 0) for c in "xyz"), 0.9, named)
+                self.assertLess(view["graph"]["block_edges_mean"], 0.05 * (6 * 4 + 15) + 1)
+                self.assertEqual(len(view["dropped_r2"]), len(r["target_names"]))
 
 
 if __name__ == "__main__":
