@@ -594,6 +594,59 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       part is larger (the SCM's own-noise weight is 0.4 for every child; on an independent field-off bank an
       11-voxel reading recovers ~93% of ±41 voxels), or several lesions per subject, which adds three position
       latents per lesion to the matched width.
+28. **A sharper residual reaches the backbone and the 24-unit code, not the 10-unit code (stage 37; precision audit
+    read 17 Nov, the other reports not yet).** 32 principal components removed instead of 16, prediction weight 1,
+    20k steps, seed 42. Volume error in voxels, T1 / FLAIR, 16 → 32 components:
+    - **Field off, 10 units.** Image filter 9.0 / 6.6 → 7.4 / 5.2 (as item 27 predicted). Backbone GAP 11.1 / 11.9 →
+      9.7 / 9.4, pooled 11.4 / 11.4 → 9.9 / 10.0. Code 17.3 / 17.6 → 17.0 / 17.3: unchanged. "Alone" .42 / .39 →
+      .52 / .52. Largest third 29 / 32 → 33 / 41. Position and anatomy left in the code (mean ridge R²) .70 / .62 →
+      .60 / .54.
+    - **Gain off, 10 units.** Image 8.0 / 6.2 → 6.5 / 4.8. GAP 8.9 / 8.0 → 9.1 / 7.9: no gain. Code 14.9 / 14.3 →
+      16.6 / 16.7: worse. "Alone" .56 / .60 → .52 / .53. Position and anatomy .74 / .61 → .65 / .55. The 10-unit seed
+      spread is unmeasured (24 units: 0.4–0.8 voxels, item 23), so part of this may be seed.
+    - **Field off, 24 units.** GAP 10.1 / 10.9 → 9.5 / 9.4. Code 12.7 / 13.2 → 12.4 / 10.8, the best field-off code
+      so far. "Alone" .61 / .61 → .72 / .76. Largest third 18 / 20 → 16 / 14. Position held (.89 → .90); anatomy fell
+      (.87 → .72).
+    - **The 10-unit code stays 6–9 voxels behind its own GAP in all four 10-unit runs** (code minus GAP: field off
+      +6.2 / +5.7 → +7.3 / +7.9, gain off +6.0 / +6.3 → +7.5 / +8.8). The 24-unit codes stay 1.4–2.9 behind. Against
+      the image filter the four 10-unit codes give no curve: image T1 9.0, 8.0, 7.4, 6.5 → code 17.3, 14.9, 17.0,
+      16.6.
+    - **Price.** A burden unit read to 10 voxels still costs the 10-unit codes' InfoNCE (−.010 to −.012 nats on uniform
+      sets), as before; +.002 in the 24-unit code.
+    - **Reading.** Item 27's lever fails at 10 units: within the sharpness reachable here (image 6.5–9, GAP 8–12
+      voxels) the 10-unit code keeps a coarse reading of ~15–17 voxels, own R² ~.57–.66, whatever its backbone holds.
+      The simulation needed far sharper views (the latent as sharp as the anatomy) before 10 units kept it. At 24
+      units the sharper residual helps burden and costs anatomy; own variation will say which factors.
+29. **The 32-component residual removes focal anatomy, and a 10-unit code spends half its directions on the lesion's
+    position (stage 37's own variation and code audit, read 17 Nov; the 16-component 10-unit arms of stage 35 are read
+    here for the first time).** T1 / FLAIR.
+    - **Burden's own part in the code**, 16 → 32 components (backbone GAP in brackets): field off, 10 units .33 / .34
+      (.54 / .53) → .40 / .39 (.64 / .62); gain off, 10 units .44 / .46 → .43 / .44 (GAP .64 both); field off, 24
+      units .48 / .47 (.60 / .59) → .54 / .57 (.64 / .62).
+    - **What the 32 components cost.** Temporal atrophy's own part: 24 units .84 / .81 → .38 / .39 (GAP .85 / .83 →
+      .66 / .65); 10 units, field off .78 / .78 → .08 / .07, gain off .80 / .79 → .07 / .07. Thickness at 24 units
+      .63 / .64 → .25 / .27; sulcal .52 / .60 → .11 / .11. Temporal atrophy is a compact regional change, so the
+      larger normative model absorbs it and the residual stops showing it. The 32 components sharpen the lesion by
+      removing other focal factors: the opposite of a generic lever. The residual stays at 16.
+    - **10 units drop more than burden.** Own parts in stage 35's 16-component 10-unit code, field off: brain
+      .66 / .64, ventricle .29 / .30, burden .33 / .34, thickness .20 / .19, temporal .78 / .78, lr .79 / .80, sulcal
+      .07 / .07. At 24 units (stage 33): .95 / .94, .71 / .68, .48 / .47, .63 / .64, .84 / .81, .89 / .90, .52 / .60.
+      With gain off, 10 units: ventricle .42 / .40, burden .44 / .46, thickness .12 / .14, sulcal .12 / .11.
+    - **Code audit of the four 10-unit codes.**
+      - Every unit is shared: matching units agree at r .94–.99, the effective rank is 9.3–9.8 of 10, and all 10
+        directions have cross-view r ≥ .9.
+      - Each direction is mostly a function of the true latents (boosted R² from anatomy and lesion together .70–.96,
+        mean .88–.89).
+      - The lesion block (centre and burden, 4 latents) dominates. A direction's mean boosted R² is .53–.61 from the
+        lesion latents and .26–.34 from the anatomy; 4–6 of the 10 have anatomy R² ≤ .13.
+      - The codes are non-linear in the factors: boosting reads more than ridge (field off, 16 components: lesion x
+        .61 → .79, brain .66 → .82; 32 components: x .36 → .71). The 24-unit codes are the reverse.
+      - Cross-view top-1 among all 1,000 test subjects: 10 units .974–.993, 24 units .937–.966. The narrower code tells
+        subjects apart better while holding less.
+    - **Reading.** The matched-width code is full of shared, latent-determined content, as the theory asks. But about
+      half of it goes to the lesion's position, a near-unique fingerprint, and the rest cannot hold the anatomy
+      children's own parts and burden's. Linear readouts (ridge own variation, the tabular benchmark, PC's Fisher-Z)
+      under-read these codes; stage 38's own variation adds boosting.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -608,12 +661,29 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - The theory's matched-width result is for the ideal, infinite-data objective. With finite data these objectives
     drop the faintest shared factor first, so the code needs spare width.
   - Worth a sentence in the paper.
+  - **When an added term keeps the theory's result** (my argument, 17 Nov). If one encoder minimises both Yao's
+    objective and an added term, the minimisers of the sum are the encoders that minimise both, so they stay
+    block-identifying. Cross-view prediction qualifies when its map is flexible: the other view's features depend on
+    the first view only through the content, so a code holding the content invertibly predicts them as well as any
+    code can. With a linear map it does not qualify: a 10-unit code predicts more of the target linearly by holding
+    harmonics of the sharp latents, as stage 35 showed. The argument holds at a fixed target; warm.py's target is a
+    momentum copy that moves.
   - **Which factor is dropped follows from an assumption (item 27).** The theory takes each view to determine the
     content exactly. Burden's own part meets that least well (the labelled code recovers 91% / 94%, the label-free
     backbone ~70%). A testable form: at the matched width, a latent is kept in proportion to how exactly the views
     determine it. Stages 35 and 37 give four 10-unit points for that curve.
   - **Inside the theory:** any fixed, label-free transform of one view from its own modality, so a residual with
     more components removed is covered, as the 16-component one is.
+  - **The 10-unit arms are one dimension short for InfoNCE.** warm.py's global InfoNCE is cosine (hard-coded), which
+    sees only the code's direction: 9 degrees of freedom in 10 units. The prediction term reads all 10. Under a
+    cosine, the theory's matched width for 10 latents is 11 units, or 10 with a distance similarity (Zimmermann et al.
+    2021 identify sphere-valued latents with the cosine). No 11-unit arm has run, so "matched width fails" is shown
+    for 10 cosine units, not yet for the theory's formal case.
+  - **The generator's shared block is exactly the 10 latents** (checked 17 Nov in
+    `eval/synthetic/synthetic_dataset.py`). With clean content the deformation and fissure fields are zeroed and the
+    structure is a deterministic function of `z_content` and `z_lesion`. Gain, bias, noise and the field are drawn
+    per view. So the 10-unit code is not short of hidden shared content. The error the views' burden readings share
+    (.29–.40 at the image filter) must then be a function of the latents, likely leftover anatomy in the residual.
 - **The CCA readout is not covered as used.**
   - It is fitted after training, it is linear, and it keeps weakly shared directions. Directions 15–24 agree at only
     r .45–.72, so part of each is view-specific (style or noise, unmeasured).
@@ -624,9 +694,40 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Label-free factor-level discovery** needs views that share different subsets of factors, or interventions.
   Two views that share everything identify only the block.
 
-## 9. State on 16 Nov
+## 9. State on 17 Nov
 
-- **Stage 37 (built 16 Nov, not run): the next step.** Does a sharper residual let the 10-unit code keep burden?
+- **Stage 38 (built 17 Nov, not run): the next step.** The theory's own matched width, and where matched width holds.
+  - **Why** (section 8, item 29):
+    - warm.py's InfoNCE is cosine, so 10 units give it 9 degrees of freedom. The formal matched width for 10 latents
+      is 11 cosine units.
+    - On the causal bank, burden's own part is the latent the views determine least well (item 27). The independent
+      bank tests a 10-unit code when burden is a whole factor.
+  - **Arms**, stage 35's recipe (prediction weight 1, 16 components, 20k steps):
+    - 11 units, field off, seed 42: `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c11_20k`;
+    - 10 units, field off, seed 2: `..._causal_nofield_predict1_c10_20k_s2`, the 10-unit seed spread, unmeasured so
+      far. It starts when a slot frees, so the stage takes about one arm longer;
+    - 10 and 24 units on `bank_nofield` (the independent bank with the field off, `bank.py --t1-values 0.4 --field
+      off`, rendered while the first arm trains): `ssl_uni_jitter_nopatch_restail_t104_nofield_predict1_{c10,c24}_20k`.
+      Burden's own part there is its whole ±41-voxel spread, against ±20 on the causal bank.
+  - **Controls:** stage 35's 10-unit arm (17.3 / 17.6) and stage 33's 24-unit arm (12.7 / 13.2), reused from stage
+    37's reports.
+  - **Reports** in `causal/stage38/`: the precision audit, the code audit and the style audit of all six, and own
+    variation with `--boosted` of the four causal-bank runs (it needs the causal graph).
+  - **Reading:**
+    - Does 11 units beat 10 by more than the two 10-unit seeds differ?
+    - On the independent bank, 10 against 24 units in voxels. Both near their backbone: matched width works when the
+      factor is large, and the causal bank's failure is about how faint burden's own part is. 10 units near 17
+      voxels again: the limit is the precision of the lesion reading itself. Compare voxels within a bank: the same
+      error is own R² .85 there and .58 here.
+    - Does boosting read more of each own part from the 10- and 11-unit codes?
+  - **Checked locally:** shell syntax and the dry run. A small independent field-off bank (208 / 32 / 160) renders with
+    no causal graph. Two-step runs of the 10- and 24-unit arms on it, and of the 11-unit arm on a Mac copy of
+    `bank_causal_nofield`, finish. Own variation with `--boosted` reads the 11-unit run. The style audit reproduces the
+    independent bank with no options and scores its 10-unit run.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 38`. The new bank needs about 7 GB.
+- **Stage 37 (run 16–17 Nov; read in section 7, items 28–29: the sharper backbone does not reach the 10-unit code,
+  and the 32 components remove temporal atrophy, thickness and sulcal).** Does a sharper residual let the 10-unit code
+  keep burden?
   - **Why:** item 27. No change to the objective kept a faint latent in 10 units; sharper views did. With 32
     components removed instead of 16, the image filter reads burden's own part to 7.4 / 5.2 voxels instead of
     9.0 / 6.6.
@@ -945,8 +1046,23 @@ on.
 - **Read the rest of stage 35** (`causal/stage35/`; precision audit read, item 25): `own_variation.txt`, and
   `code_audit.txt`'s boosted rows and "both" column (do the 10 units hold anatomy and position non-linearly, and
   nothing else?). 10 units read burden worse than 24, so the recipe keeps 24.
-- **Run stage 37** (`run_pc.sh 37`, built 16 Nov, section 9): the 10-unit arm on residuals with 32 components
-  removed. The user wants 10 units (section 1), so "keep 24" below is superseded as the goal.
+- **Run stage 38** (`run_pc.sh 38`, built 17 Nov, section 9): 11 cosine units, a second 10-unit seed, and 10 against
+  24 units on the independent field-off bank. The user wants 10 units (section 1), so "keep 24" below is superseded
+  as the goal.
+- **Stage 37 is read** (items 28–29). Its `normative_components_*.txt` (the gain-off table) is unread; the
+  32-component residual is dropped either way.
+- **Candidates beyond stage 38 (17 Nov, not built).** Item 29: a 10-unit code spends about half its directions on the
+  lesion's position. Ways to change what the scarce units hold without changing the theory's target:
+  - The prediction term predicts the other view's tail features instead of its GAP. The tails are averages over the
+    interior, so they carry burden and focal anatomy and little position. With a flexible map the argument in section
+    8 still holds. Gate it with no training first: `bottleneck_check.py` with the target switched, on stages 35 and
+    37's frozen features.
+  - A second InfoNCE term on the same 10 units, on batches of code neighbours (subjects close in the model's own code,
+    so mostly matched on position). Stage 37's price tables: a 10-voxel burden unit earns +.30 nats in neighbour sets
+    once position and anatomy are matched, against −.01 as trained. Not covered by the theory (section 8), and
+    neighbour batches hurt burden before, when the code held it noisily (item 5 below).
+  - Benchmark side: several lesions per subject. Burden's range grows with the count, but each lesion adds three
+    position latents to the block.
 - **Stage 36's check is read (item 26):** a non-linear map does not let 10 units hold burden, so the recipe keeps 24
   units. Stop the stage's arms (section 9).
   - The whitening-ridge lever (rerun `bottleneck_check.py` at ridge 0.01 and 0.001) fails in the simulation of
@@ -1096,4 +1212,5 @@ on.
 | lesion-blind third view | lesion-specific; rejected by the user |
 | more subjects | not available on ADNI |
 | head levers for burden on the field-off bank: 48 units, Barlow Twins, remainder units, critic weights (stages 29, 31) | burden's own part in the code unchanged (.31–.37); remainder units stay for anatomy |
+| a sharper residual (32 components) for the 10-unit code (stage 37) | the backbone sharpens with the field off, but the 10-unit code does not (17.0 / 17.3; gain off 16.6 / 16.7, worse), and every code loses temporal atrophy, thickness and sulcal (item 29): the extra components absorb focal anatomy, so it is not generic. At 24 units it helps burden (12.4 / 10.8, own part .54 / .57) at that cost |
 | a non-linear prediction map as the way to 10 units (stage 36) | 10 units read burden 5–13 voxels worse than 24, under InfoNCE and under prediction through either map. 10 units stays the goal; stage 37 sharpens the views instead |

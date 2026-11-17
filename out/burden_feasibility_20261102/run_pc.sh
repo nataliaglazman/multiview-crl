@@ -179,6 +179,13 @@
 # arm on each of the two, and stage 33's 24-unit arm on the first. The four reports, beside the 16-component arms
 # whose scores are reused from stage 35 (causal/stage37/). Then, no training: normative_components.py on both source
 # banks.
+# Stage 38 (opt-in) The theory's own matched width, and where it holds. warm.py's InfoNCE is cosine, which sees 9
+# degrees of freedom in 10 units, so the theory's matched width for 10 latents is 11 cosine units: stage 35's 10-unit
+# prediction arm with --content-units 11, and the same 10-unit arm with seed 2 (the 10-unit seed spread, unmeasured so
+# far). Then a bank where burden is a whole factor: bank_nofield, the independent bank with the field off (burden's own
+# part is its whole +-41-voxel spread, against +-20 on the causal bank), with 10- and 24-unit prediction arms. 16
+# components, prediction weight 1, 20,000 steps. The precision audit, the code audit and the style audit of all four,
+# and own variation (by boosting too) of the causal-bank ones, beside stages 35 and 33's arms (causal/stage38/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1409,6 +1416,49 @@ if wants 37; then
                 || echo "the normative-components check failed, see $report.txt"
         fi
     done
+fi
+
+if wants 38; then
+    NOFIELD=$D/bank_causal_nofield
+    INDEPENDENT=$D/bank_nofield
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    Q=ssl_uni_jitter_nopatch_restail_t104_nofield
+    ELEVEN=${P}_predict1_c11_20k
+    TEN_S2=${P}_predict1_c10_20k_s2
+    WHOLE=("${Q}_predict1_c10_20k" "${Q}_predict1_c24_20k")  # burden a whole factor
+    REFS=("${P}_predict1_c10_20k" "${P}_predict1_c24_20k")  # stages 35 and 33
+    OUT=$D/causal/stage38
+    if [ "$DRY" = 0 ]; then
+        for name in "${REFS[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 38 needs $name finished (stages 33 and 35 train it). Rerun stage 38 after it is."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage37" "$OUT" "${REFS[@]}"
+    fi
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --contrastive-loss-type infonce
+        --predict-weight 1)
+    EVERY=2000 ssl "$ELEVEN" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --seed 42 --content-units 11
+    bank "$INDEPENDENT" --t1-values 0.4 --field off  # rendered while the first arm trains
+    residual_bank "$INDEPENDENT" t1_04 flair
+    EVERY=2000 ssl "${WHOLE[0]}" "$INDEPENDENT" tail t1_04 20000 "${BASE[@]}" --seed 42 --content-units 10
+    EVERY=2000 ssl "${WHOLE[1]}" "$INDEPENDENT" tail t1_04 20000 "${BASE[@]}" --seed 42 --content-units 24
+    EVERY=2000 ssl "$TEN_S2" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --seed 2 --content-units 10  # waits for a slot
+    finish "$ELEVEN" "${WHOLE[@]}" "$TEN_S2"
+    for name in "$ELEVEN" "$TEN_S2" "${WHOLE[@]}"; do
+        if [ "$DRY" = 0 ] && ! grep -qx DONE "$D/logs/$name.log"; then echo "Rerun stage 38 for $name."; exit 1; fi
+    done
+    CAUSAL=("$D/runs/$ELEVEN" "$D/runs/$TEN_S2" "$D/runs/${REFS[0]}" "$D/runs/${REFS[1]}")
+    ALL=("${CAUSAL[@]}" "$D/runs/${WHOLE[0]}" "$D/runs/${WHOLE[1]}")
+    stage_report "$OUT" precision_audit "${ALL[@]}"
+    stage_report "$OUT" own_variation "${CAUSAL[@]}" --boosted  # needs the causal bank's graph
+    stage_report "$OUT" code_audit "${ALL[@]}"
+    stage_report "$OUT" style_audit "${ALL[@]}"
+    [ "$DRY" = 0 ] && echo "Stage 38 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"
