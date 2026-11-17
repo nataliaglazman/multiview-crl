@@ -176,9 +176,9 @@
 # 7.4 / 5.2 voxels instead of 9.0 / 6.6 (normative_components.py, read on a local copy of the bank). The residuals go
 # into banks of their own, bank_causal_nofield_k32 and bank_causal_nofield_nogain_k32, whose other arrays are links
 # (residual_bank.py --components 32 --source). Arms, 20,000 steps, seed 42, prediction weight 1: stage 35's 10-unit
-# arm on each of the two, and stage 33's 24-unit arm on the first. While they train, no training:
-# normative_components.py on both source banks. The four reports, beside the 16-component arms whose scores are
-# reused from stage 35 (causal/stage37/).
+# arm on each of the two, and stage 33's 24-unit arm on the first. The four reports, beside the 16-component arms
+# whose scores are reused from stage 35 (causal/stage37/). Then, no training: normative_components.py on both source
+# banks.
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1386,16 +1386,6 @@ if wants 37; then
     EVERY=2000 ssl "${SHARP[0]}" "$K32" tail t1_04 20000 "${BASE[@]}" --content-units 10
     EVERY=2000 ssl "${SHARP[1]}" "$K32_NOGAIN" tail t1_04 20000 "${BASE[@]}" --content-units 10
     EVERY=2000 ssl "${SHARP[2]}" "$K32" tail t1_04 20000 "${BASE[@]}" --content-units 24
-    for source in "$NOFIELD" "$NOGAIN"; do  # no training, while the arms train
-        report=$OUT/normative_components_${source##*/}
-        if [ "$DRY" = 1 ]; then
-            echo "$PY $D/normative_components.py $source $report.json > $report.txt"
-        elif [ ! -f "$report.json" ]; then
-            echo "$(date +%H:%M) normative components of ${source##*/} into $OUT, while the arms train"
-            "$PY" "$D/normative_components.py" "$source" "$report.json" > "$report.txt" 2>&1 \
-                || echo "the normative-components check failed, see $report.txt; training goes on"
-        fi
-    done
     finish "${SHARP[@]}"
     RUNS=()
     for name in "${SHARP[@]}"; do
@@ -1409,6 +1399,16 @@ if wants 37; then
         stage_report "$OUT" "$report" "${RUNS[@]}"
     done
     [ "$DRY" = 0 ] && echo "Stage 37 reports in $OUT"
+    for source in "$NOFIELD" "$NOGAIN"; do  # no training; after the reports, so it can never hold them up
+        report=$OUT/normative_components_${source##*/}
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/normative_components.py $source $report.json > $report.txt"
+        elif [ ! -f "$report.json" ]; then
+            echo "$(date +%H:%M) normative components of ${source##*/} into $OUT"
+            "$PY" "$D/normative_components.py" "$source" "$report.json" > "$report.txt" 2>&1 \
+                || echo "the normative-components check failed, see $report.txt"
+        fi
+    done
 fi
 
 echo "$(date +%H:%M) all requested stages done"

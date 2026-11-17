@@ -639,9 +639,13 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - 24 units, field off: `..._nofield_k32_predict1_c24_20k`.
   - **Controls** with 16 components: stage 35's two 10-unit weight-1 arms and stage 33's 24-unit arm. Their scores
     are reused from stage 35's reports.
-  - **While the arms train, no training:** `normative_components.py` on both source banks, into
+  - **After the reports, no training:** `normative_components.py` on both source banks, into
     `causal/stage37/normative_components_<bank>.txt`. The field-off table should repeat item 27's. The gain-off one
     is new: check that 32 is a good choice there too.
+    - The first PC run (16 Nov) stalled in this check, which then ran while the arms trained and before the reports:
+      the arms finished, but the reports never started. Its workers were forked after the parent's PCA. They are now
+      started fresh (spawn), each with one BLAS thread, and the check runs last. Rerunning stage 37 skips the
+      finished arms and banks.
   - **Reports** in `causal/stage37/`: the precision audit, own variation, the code audit and the style audit.
   - **Success:**
     - The image-filter row of the field-off k32 arms near 7.4 / 5.2.

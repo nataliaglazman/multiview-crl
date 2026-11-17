@@ -16,11 +16,13 @@ should reproduce the bank's own image-filter row.
 
     python out/burden_feasibility_20261102/normative_components.py BANK OUT_JSON [--test N] [--t1key t1_04]
 
-The exact basis is cached beside OUT_JSON as pca_{bank}_{key}.npy (about 60 MB each).
+The exact basis is cached beside OUT_JSON as pca_{bank}_{key}.npy (about 60 MB each). Workers are started fresh
+(spawn), each with one BLAS thread: forked after the parent's PCA, they hung on the PC (stage 37, 16 Nov).
 """
 
 import argparse
 import json
+import multiprocessing
 import os
 import sys
 import warnings
@@ -34,6 +36,7 @@ from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import KFold, cross_val_predict
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer, SplineTransformer, StandardScaler
+from threadpoolctl import threadpool_limits
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import detector  # noqa: E402
@@ -66,6 +69,11 @@ def fit_basis(bank, key, mask, stem):
     np.save(f"{stem}_{key}_spectrum.npy", np.sort(values)[::-1] / values.sum())
     np.save(path, basis.astype(np.float32))
     return path
+
+
+def one_thread():
+    """Each worker's BLAS on one thread: the workers already fill the cores."""
+    threadpool_limits(1)
 
 
 def job(task):
@@ -175,10 +183,11 @@ def main():
     report = {"bank": a.bank, "rows": len(vox), "own_sd": float(own.std()), "explained": explained, "views": {}}
     guesses = {}
     keys = (a.t1key, "flair")
-    with ProcessPoolExecutor(WORKERS) as pool:
+    with ProcessPoolExecutor(WORKERS, mp_context=multiprocessing.get_context("spawn"), initializer=one_thread) as pool:
         for key in keys:
             fit_basis(a.bank, key, mask, stem)
             spectrum = np.load(f"{stem}_{key}_spectrum.npy")
+            print(f"  {key}: basis ready, reading {len(vox)} test subjects", flush=True)
             tasks = [(a.bank, key, s, min(s + 25, len(vox)), mask, interior, stem) for s in range(0, len(vox), 25)]
             done = sorted(pool.map(job, tasks), key=lambda r: r[0])
             report["views"][key] = {}
