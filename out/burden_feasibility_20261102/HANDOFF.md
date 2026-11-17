@@ -760,6 +760,48 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       linearly; the narrow codes hold harmonics). The bank's Gaussian noise cannot test it on images; a non-Gaussian
       noise option in the generator would. The graph among the factors still needs anchors or another constraint on
       the mixing (the partial anchors of `paper/factor-discovery-framework.tex`).
+34. **Matched width does not make the units causal variables, and every causal task is worse at matched width
+    (stage 41, read 17 Nov).** Causal bank, field off, prediction weight 1. View 1 (T1) unless said.
+    - **Label-free discovery** (PC on each code's own units, named by one Hungarian match; F1 at each row's best
+      alpha, optimistic). 10 units, seed 42: .33, seed 2: .20; 11 units: .40; 24 units: .00. Random mixtures of the
+      same units: .33–.39 (± .12–.19). Truth: .83. Every code sits at or below the random-mixture baseline, and below
+      its own untrained floor (.20–.56). No unit is a factor: the mean matched |r| is .40–.46 at every width
+      (10 units, seed 42: brain .47, ventricle .38, burden .26, thickness .39).
+    - **Decoded discovery** (PC on the seven factors read from each code by a held-out supervised readout).
+      - Skeleton F1 over 20 resamplings: 10 units .69 ± .08 (seed 42) and .87 ± .07 (seed 2); 11 units .75 ± .07;
+        24 units .84 ± .04; truth .85 ± .03. Orientation against the true CPDAG, SHD: 10 units 5 and 5, 11 units 7,
+        24 units 3, truth 3.
+      - Mean factor R² over the permutation null: .63, .67, .68 and .87.
+      - The signal each edge rests on (linear-residual partial R²), 10 units / 11 / 24: ventricle .37–.38 / .44 /
+        .76, burden .28–.32 / .35 / .58, thickness .19–.25 / .13 / .72, sulcal .06–.07 / .10 / .58. Brain, temporal
+        and lr are .68–.96 everywhere.
+      - The skeleton differences between widths are within the resampling noise (6 true edges); the partial R² is
+        the sensitive measure.
+    - **View 2 (FLAIR)** repeats this. Decoded skeleton F1 over resamplings: 10 units .69 ± .08 and .80 ± .06, 11 units
+      .80 ± .07, 24 units .85 ± .05 (truth .85 ± .03); CPDAG SHD 5 and 7, 6, and 3 (truth 3); the same weak partial R²
+      at 10 and 11 units (ventricle .36–.48, burden .30–.37, thickness .14–.27, sulcal .05–.08). Label-free, the
+      narrow codes are again at or below their random-mixture baseline (.29–.40 against .35–.40). The 24-unit code
+      scores .75 against .34 ± .20, but .00 in view 1. Only 7 of its 24 channels are named, most recovered edges fall
+      outside the score, and the best channel for each factor still correlates only .34–.54 with it. So its
+      label-free F1 is too unstable to read, and no channel is a factor at any width.
+    - **Tabular benchmark** (10 tasks, item 24's measures), T1 / FLAIR:
+      - Confounding removed (of the tabular-only bias .597): 10 units 58 / 57% (seed 42) and 57 / 56% (seed 2); 11
+        units 58 / 60%; 24 units 79 / 83%. The backbone GAP of the 10-unit run 78 / 74%, of the 24-unit run 85 / 90%.
+        Oracle 100%.
+      - MRI–tab F1: 10 units .51 / .53 and .43 / .46; 11 units .55 / .50; 24 units .90 / .89; the backbone GAPs
+        .81–.90; oracle .98.
+      - tab→MRI F1 (a tabular cause reaches the image only through a factor's own part): 10 units .45 / .53 and
+        .46 / .43; 11 units .51 / .37; 24 units .93 / .91; oracle 1.00. Oriented: 10 units .10–.35, 11 units
+        .05–.25, 24 units .65–.70 (the oracle's ceiling .70).
+      - The 24-unit numbers repeat item 24's for the same run. The 10-unit runs' own backbones remove 74–78% of the
+        confounding and find the MRI–tab edges at .81–.89, so the narrow head, not the backbone, loses them.
+    - **Reading.** Matched width does not do what the causal argument needs. The narrow code's units are mixtures,
+      like the wide code's, and label-free discovery on them is at chance at every width, as two full views predict
+      (section 8). With a supervised readout, the 24-unit code matches the ground truth's skeleton and orientation;
+      the 10-unit codes depend on the seed (.69 or .87) and carry weak signals for four of the seven factors. Every
+      causal task is markedly worse at 10 or 11 units than at 24: confounding removed 56–60% against 79–83%, tabular
+      edges found at .43–.55 against .89–.90, orientation .05–.35 against .65–.70. The number of causal variables
+      belongs in the factoriser, not in the encoder width (section 10).
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -777,6 +819,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     (items 28–29), other prediction targets (item 31) and a larger head (item 32). 11 cosine units recover 1–2 voxels
     and some of ventricle (item 30).
   - Which weaker factors a matched-width code keeps is close to a tie that the seed decides (item 30, code audit).
+  - Matched width does not make the units the causal variables: label-free discovery on the code's own units is at
+    the random-mixture baseline at 10, 11 and 24 units (item 34), as block identifiability predicts.
   - The theory's matched-width result is for the ideal, infinite-data objective. With 2,000 subjects these objectives
     keep the strongest factors and the coarse readings, and the weaker own parts need spare width.
   - Worth a sentence in the paper.
@@ -815,7 +859,57 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 17 Nov
 
-- **Stage 41 (built 17 Nov, not run; no training): does the causal analysis need a code as wide as the shared block?**
+- **Stage 42 (designed 17 Nov, not built): the concealed-factor benchmark on the frozen 24-unit code.** The
+  factoriser of `paper/factor-discovery-framework.tex` on our synthetic bank, in the order its "Controlled discovery of
+  omitted factors" section describes. No training of the network.
+  - **Why:** stage 41 (item 34). The causal variables have to be made from the code by a factoriser with anchors; the
+    code's own units are mixtures at every width.
+  - **Input:** stage 33's 24-unit prediction code on `bank_causal_nofield` (field off, weight 1), both views, on the
+    2,000 / 400 / 1,000 split. Its untrained twin is the floor.
+  - **Anchors** (observed variables, labels on training subjects only): brain, ventricle, thickness and temporal, the
+    factors FreeSurfer measures (brain volume, ventricular volume, cortical thickness, hippocampal volume).
+    - **Concealed:** burden, lr and sulcal, and the lesion centre (shared content outside the causal graph).
+    - **Sensitivity split:** burden as an anchor (ADNI has WMH volumes), thickness concealed.
+    - Optional anchor measurement noise, to mimic FreeSurfer's error.
+  - **Step 1, anchored slots:** a ridge readout of each anchor from the code.
+  - **Step 2, the novel block, label-free:** each view's code residualized on a flexible function (polynomial ridge) of
+    the anchored slots; the two views' residuals compared by cross-view agreement, so only shared content counts.
+    Factors are counted by greedy non-linear deflation: take the most agreeing direction, residualize on a
+    polynomial of everything taken so far, repeat until the top agreement falls inside a null that breaks the
+    subject pairing between views. Deflating through a polynomial removes squares and products of directions already
+    taken, so they are not counted as factors. Expected: about 6 (burden's, sulcal's and lr's own parts and the lesion
+    centre's three coordinates).
+  - **Step 3, coordinates inside the block:**
+    - 3a, ICA. Expected (item 33) to separate the uniform lesion-centre coordinates but not the Gaussian own parts.
+    - 3b, spatial footprints (not built in the first pass): each candidate direction's input-gradient footprint (the
+      squared gradient through the frozen network, per 16³ cell), with the rotation chosen to make the footprints
+      sparse and non-overlapping (varimax on footprints). This is the structural-sparsity principle (Zheng et al. 2022):
+      burden's footprint is the white matter, sulcal's the cortical rim, lr's the hemispheres. Generic: nothing is
+      lesion-specific.
+  - **Step 4, the graph:** PC on the anchored slots plus the block's components (Fisher-Z, 300 rows, 20 resamplings,
+    as stage 41's decoded discovery). Components are named by one Hungarian match, for scoring only.
+    - Scored against the SCM: edges among the anchors (the reference graph: brain→ventricle, brain→thickness,
+      thickness→temporal), and edges between the block and the anchors.
+    - Ceilings: stage 41's decoded discovery (all seven factors supervised) and the true factors. Nulls: random
+      rotations inside the block, and the untrained floor.
+  - **What it can identify:**
+    - Step 2's components are residuals of the anchors, so an edge from an anchor into a concealed factor is absorbed
+      (ventricle→burden, temporal→sulcal). Edges out of a concealed factor stay testable, but on this SCM the only one
+      is burden→temporal, which is weak (weight .2).
+    - Recovering the absorbed edges needs step 3b's directions, taken in the whole code rather than the residual.
+    - On this bank the own parts are Gaussian, so without 3b they stay a block, which the framework reports as an
+      unresolved vector block.
+  - **Success:**
+    - Anchors read at R² ≳ .9.
+    - The count close to 6, and stable under the pairing null.
+    - The block holds each concealed factor's own part near the supervised ceiling (the code's own variation:
+      burden .48, sulcal .52–.60, lr .89).
+    - PC recovers the reference graph and finds no spurious block–anchor edges.
+  - **Decisions open:** the anchor split; anchor noise; whether cross-view agreement may count factors inside the
+    factoriser (the user rejected post-hoc CCA as a readout of the code, section 11 and memory); building 3b now or
+    after 3a.
+- **Stage 41 (run and read 17 Nov, section 7, item 34; no training): does the causal analysis need a code as wide
+  as the shared block?**
   - **Why:** two full views identify the content block, not its coordinates. So even a 10-unit code's units are
     mixtures of the latents (item 6; item 30's code audit), and the narrow code drops the own parts PC needs (items
     24, 30). This stage measures what width does to the causal analysis.
@@ -1254,10 +1348,9 @@ on.
 - **Read the rest of stage 35** (`causal/stage35/`; precision audit read, item 25): `own_variation.txt`, and
   `code_audit.txt`'s boosted rows and "both" column (do the 10 units hold anatomy and position non-linearly, and
   nothing else?). 10 units read burden worse than 24, so the recipe keeps 24.
-- **Run stage 41** (section 9; no training): causal discovery and the tabular benchmark on the 10-, 11- and 24-unit
-  codes.
-- **Implementation proposal (17 Nov), pending stage 41.** Set the number of units at the causal variables, not at the
-  encoder, as `paper/factor-discovery-framework.tex` already separates them:
+- **Stage 41 is read** (item 34).
+- **Implementation proposal (17 Nov; stage 41's discovery supports it, item 34).** Set the number of units at the
+  causal variables, not at the encoder, as `paper/factor-discovery-framework.tex` already separates them:
   - representation: the 24-unit prediction code, claimed as an embedding of the content block;
   - a factoriser from the frozen code to K slots, one per causal variable, with K and slot sizes chosen on validation
     data and identifying information from anchors (synthetic: supplied factors with others concealed; ADNI:
