@@ -168,7 +168,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `summarize.py` | each arm's training history, compact enough to paste |
 | `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, the same rows for the untrained twin (the floor), canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
 | `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns. `--boosted` adds the code read by gradient boosting beside the true factors read the same way: ridge reads only what a code holds linearly |
-| `bottleneck_check.py` | no training: fresh 10- and 24-unit bottlenecks fitted on a run's frozen features to predict the other view's whitened GAP through a linear or an MLP map, read like a code (volume error, alone, anatomy and position by ridge and boosting). Stage 36 |
+| `bottleneck_check.py` | no training: fresh 10- and 24-unit bottlenecks fitted on a run's frozen features to predict the other view's whitened GAP through a linear or an MLP map, read like a code (volume error, alone, anatomy and position by ridge and boosting, each factor too). `--targets gap tails pooled` also predicts the other view's tail features or its whole pooled vector. Stages 36 and 39 |
 | `style_audit.py` | each view's gain, bias and noise level read from the code, pooled features and GAP, trained vs untrained twin, against the other view's (drawn independently: the null). Banks don't store style, so it is redrawn from the generator's seeds and must reproduce the stored content latents. `code_audit.py` scores no style |
 | `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side. Two "weighted" price rows refit the critic to each code (one weight per unit inside the cosine; as trained, and with position and anatomy removed); rerunning the audit on a stored JSON adds them without redoing the rest |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
@@ -696,7 +696,43 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 17 Nov
 
-- **Stage 38 (built 17 Nov, not run): the next step.** The theory's own matched width, and where matched width holds.
+- **Stage 39 (built 17 Nov, not run; no training): what if the 10-unit code predicted the other view's tail
+  features?**
+  - **Why:** item 29. A 10-unit code spends about half its directions on the lesion's position. The GAP the
+    prediction term targets is full of position structure. TailCode's tail features are means over the interior
+    cells, so they carry the lesion's volume and focal anatomy and little of its position. With a flexible map the
+    argument in section 8 still holds for any target that depends on the other view only through the content.
+  - **Check:** `bottleneck_check.py --targets gap tails pooled` on the four runs of stage 36's check: stage 33's two
+    24-unit weight-1 arms and stage 35's two 10-unit ones, field off and gain off. Fresh bottlenecks at 10 and 24
+    units predict the other view's GAP (64 features), its tails (384) or its whole pooled vector (448, the GAP and
+    the tails), through the linear or the MLP map, three seeds each, with no InfoNCE. Each is read like a code, with
+    each anatomy factor and lesion coordinate by boosting too.
+  - **Reuse:** the JSON starts as a copy of stage 36's, so its GAP rows and each run's own code are reused and only
+    the tails and pooled rows are fitted (96 bottlenecks). The reused rows have no per-factor values. On the same
+    features the new script's GAP rows equal the old script's exactly (checked locally).
+  - **Reading:**
+    - A target works if its 10-unit bottleneck reads volume near the 24-unit GAP bottleneck (field off 13.6 / 13.6
+      on the 24-unit backbone, 13.6 / 13.8 on the 10-unit one; gain off 9.3 / 9.4 and 10.6 / 11.1) while keeping the
+      lesion position (boosted ≳ .85) and each anatomy factor at least as well as the GAP target's 10-unit rows.
+    - The tails alone may drop the global anatomy (brain size, lr) that the GAP carries; the pooled target says
+      whether adding the GAP back keeps both.
+    - If a target passes, the next step is a training arm with that target (`warm.py` would need a
+      `--predict-target` option; not built).
+  - **Run:** not in `run_pc.sh`, so it can start while stage 38 trains: the commit changes neither `run_pc.sh` nor
+    any script stage 38 calls. From the repo root:
+    ```bash
+    D=out/burden_feasibility_20261102; P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield; mkdir -p $D/causal/stage39 && { [ -f $D/causal/stage39/bottleneck_check.json ] || cp $D/causal/stage36/bottleneck_check.json $D/causal/stage39/; } && PYTHONPATH=$D:out/regional_pilot_20261028/shim:. OMP_NUM_THREADS=4 nohup python $D/bottleneck_check.py $D/causal/stage39/bottleneck_check.json $D/runs/${P}_predict1_c24_20k $D/runs/${P}_predict1_c10_20k $D/runs/${P}_nogain_predict1_c24_20k $D/runs/${P}_nogain_predict1_c10_20k --targets gap tails pooled > $D/causal/stage39/bottleneck_check.txt 2>&1 &
+    ```
+    `OMP_NUM_THREADS=4` keeps the boosted readouts from crowding stage 38's arms. Expect several hours. The JSON is
+    saved after every bottleneck, so the same command resumes after a crash; the table prints at the end.
+  - **Checked locally:**
+    - Ten unit tests (`tests/test_bottleneck_check.py`): the targets slice the pooled vector; the GAP keys keep stage
+      36's names; a row at the same step keeps its bottlenecks, fits only the missing ones and saves after each; a row
+      from another step is refitted; a run without tails is refused; stage 36's rows and the new ones both print.
+    - On a two-step run on a Mac copy of `bank_causal_nofield`, the new script's GAP rows equal the old script's
+      exactly (428 numbers), and the tails and pooled targets fit, save, resume from the saved rows and print.
+    - No script stage 38 runs imports `bottleneck_check.py`.
+- **Stage 38 (built 17 Nov, handed over to run).** The theory's own matched width, and where matched width holds.
   - **Why** (section 8, item 29):
     - warm.py's InfoNCE is cosine, so 10 units give it 9 degrees of freedom. The formal matched width for 10 latents
       is 11 cosine units.
@@ -1046,6 +1082,7 @@ on.
 - **Read the rest of stage 35** (`causal/stage35/`; precision audit read, item 25): `own_variation.txt`, and
   `code_audit.txt`'s boosted rows and "both" column (do the 10 units hold anatomy and position non-linearly, and
   nothing else?). 10 units read burden worse than 24, so the recipe keeps 24.
+- **Run stage 39's check** (section 9; no training, a one-off command that can run while stage 38 trains).
 - **Run stage 38** (`run_pc.sh 38`, built 17 Nov, section 9): 11 cosine units, a second 10-unit seed, and 10 against
   24 units on the independent field-off bank. The user wants 10 units (section 1), so "keep 24" below is superseded
   as the goal.
@@ -1053,10 +1090,8 @@ on.
   32-component residual is dropped either way.
 - **Candidates beyond stage 38 (17 Nov, not built).** Item 29: a 10-unit code spends about half its directions on the
   lesion's position. Ways to change what the scarce units hold without changing the theory's target:
-  - The prediction term predicts the other view's tail features instead of its GAP. The tails are averages over the
-    interior, so they carry burden and focal anatomy and little position. With a flexible map the argument in section
-    8 still holds. Gate it with no training first: `bottleneck_check.py` with the target switched, on stages 35 and
-    37's frozen features.
+  - The prediction term predicts the other view's tail features instead of its GAP: stage 39 (section 9) is its
+    no-training gate.
   - A second InfoNCE term on the same 10 units, on batches of code neighbours (subjects close in the model's own code,
     so mostly matched on position). Stage 37's price tables: a 10-voxel burden unit earns +.30 nats in neighbour sets
     once position and anatomy are matched, against −.01 as trained. Not covered by the theory (section 8), and
