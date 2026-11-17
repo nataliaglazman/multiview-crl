@@ -190,6 +190,11 @@
 # bank's 10-unit codes (seeds 42 and 2), the 11-unit code and the 24-unit code: label-free discovery (PC on each code's
 # own units, against random mixtures of them) and decoded discovery (PC on factors read from each code), then the
 # tabular benchmark on all four codes and the backbone GAP of the 10- and 24-unit runs (causal/stage41/).
+# Stage 42 (opt-in, no training) The concealed-factor benchmark of paper/factor-discovery-framework.tex: factoriser.py
+# on stage 33's 24-unit code and stage 35's 10-unit code (field off, prediction weight 1) and their untrained twins.
+# Anchored slots for the factors FreeSurfer measures, a label-free count of the novel shared factors, their naming
+# against the concealed factors' own parts and the lesion centre, and PC on the slots and the components; then the
+# same with burden as an anchor and thickness concealed (causal/stage42/default.txt and burden.txt).
 # Stage 43 (opt-in) What a 10-unit code keeps beyond the lesion's position. At 10 units the code drops the own parts
 # of ventricle, thickness and sulcal as well as burden's, and about half its directions go to lesion position (items
 # 29-30). Two 10-unit arms on bank_causal_nofield, 20,000 steps, seed 42, stage 35's recipe otherwise: prediction
@@ -1521,6 +1526,40 @@ if wants 41; then
             || { echo "Stage 41's tabular benchmark failed, see $OUT/tabular.log"; exit 1; }
         echo "Stage 41 reports in $OUT: discovery_label_free_view*.txt, discovery_decoded_view*.log, tabular.log"
     fi
+fi
+
+if wants 42; then
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    NAMES=("${P}_predict1_c24_20k" "${P}_predict1_c10_20k")
+    OUT=$D/causal/stage42
+    if [ "$DRY" = 0 ]; then
+        for name in "${NAMES[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 42 needs $name finished (stages 33 and 35 train it)."
+                exit 1
+            fi
+        done
+        if ! "$PY" -c "import causallearn" 2> /dev/null; then
+            echo "Stage 42 needs causal-learn: $PY -m pip install causal-learn"
+            exit 1
+        fi
+        mkdir -p "$OUT" || exit 1
+    fi
+    RUNS=()
+    for name in "${NAMES[@]}"; do RUNS+=("$D/runs/$name"); done
+    for split in "default brain ventricle thickness temporal" "burden brain ventricle burden temporal"; do
+        read -r label anchors <<< "$split"
+        # shellcheck disable=SC2086  # the anchors are four words
+        CMD=("$PY" "$D/factoriser.py" "$OUT/$label.json" "${RUNS[@]}" --anchors $anchors)
+        if [ "$DRY" = 1 ]; then
+            echo "${CMD[*]} > $OUT/$label.txt"
+        else
+            echo "$(date +%H:%M) factoriser, anchors $anchors, into $OUT/$label.txt"
+            "${CMD[@]}" > "$OUT/$label.txt" 2>&1 \
+                || { echo "Stage 42's factoriser failed, see $OUT/$label.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 42 reports in $OUT: default.txt and burden.txt (burden an anchor, thickness concealed)"
 fi
 
 if wants 43; then

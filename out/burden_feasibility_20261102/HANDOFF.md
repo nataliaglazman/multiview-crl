@@ -178,6 +178,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
 | `ica_simulation.py` | no images, no training: the bank's SCM mixed into a 24-unit code; whether FastICA recovers the own parts (by noise distribution, link and harmonic strength) and whether DirectLiNGAM finds the order from the factors and from a mixed code. Item 33 |
+| `factoriser.py` | no training: the concealed-factor benchmark of `paper/factor-discovery-framework.tex` on a run's frozen code and its untrained twin. Anchored slots (ridge readouts of the `--anchors`), a label-free count of the novel shared factors (cross-view agreement of the code's residuals, greedy non-linear deflation, a redundancy check), their naming against the concealed factors' own parts and the lesion centre (CCA order, ICA, random rotations), and PC on the slots and the components against what PC can find among the anchors. Stage 42 |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
 | `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
 | `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). Section 7, item 24 |
@@ -859,6 +860,13 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     relative.
 - **Label-free factor-level discovery** needs views that share different subsets of factors, or interventions.
   Two views that share everything identify only the block.
+- **Anchors identify a concealed factor's information, not its place in the graph** (found building stage 42, 17
+  Nov). A new shared direction found beside the anchors is identified only up to adding a function of the anchors:
+  the code reads P and P + h(anchors) equally well, and both agree across views. The label-free choice, the residual
+  of the anchors, is uncorrelated with every anchor, so PC connects it to nothing, whether the true edge runs into P
+  or out of it. A concealed mediator then shows only as an anchor–anchor edge the reference graph lacks (ventricle –
+  temporal through burden). Placing P needs directions taken in the whole code under some further structure (the
+  design's step 3b: spatial footprints), or labels.
 
 ## 9. State on 17 Nov
 
@@ -895,55 +903,84 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 43` prints both arms and the four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 43`, in section 3's `nohup` form (two 20k-step arms). It
     needs the runs of stages 33, 35 and 38 finished.
-- **Stage 42 (designed 17 Nov, not built): the concealed-factor benchmark on the frozen 24-unit code.** The
-  factoriser of `paper/factor-discovery-framework.tex` on our synthetic bank, in the order its "Controlled discovery of
-  omitted factors" section describes. No training of the network.
+- **Stage 42 (built and checked locally 17 Nov, not yet run on the PC; no training): the concealed-factor benchmark on
+  the frozen 24- and 10-unit codes.** `factoriser.py` runs the factoriser of `paper/factor-discovery-framework.tex` on
+  our synthetic bank, in the order of its "Controlled discovery of omitted factors" section.
   - **Why:** stage 41 (item 34). The causal variables have to be made from the code by a factoriser with anchors; the
     code's own units are mixtures at every width.
-  - **Input:** stage 33's 24-unit prediction code on `bank_causal_nofield` (field off, weight 1), both views, on the
-    2,000 / 400 / 1,000 split. Its untrained twin is the floor.
+  - **Input:** stage 33's 24-unit and stage 35's 10-unit prediction codes on `bank_causal_nofield` (field off, weight
+    1), both views, on the 2,000 / 400 / 1,000 split. Each run's untrained twin is its floor.
   - **Anchors** (observed variables, labels on training subjects only): brain, ventricle, thickness and temporal, the
     factors FreeSurfer measures (brain volume, ventricular volume, cortical thickness, hippocampal volume).
     - **Concealed:** burden, lr and sulcal, and the lesion centre (shared content outside the causal graph).
-    - **Sensitivity split:** burden as an anchor (ADNI has WMH volumes), thickness concealed.
-    - Optional anchor measurement noise, to mimic FreeSurfer's error.
-  - **Step 1, anchored slots:** a ridge readout of each anchor from the code.
-  - **Step 2, the novel block, label-free:** each view's code residualized on a flexible function (polynomial ridge) of
-    the anchored slots; the two views' residuals compared by cross-view agreement, so only shared content counts.
-    Factors are counted by greedy non-linear deflation: take the most agreeing direction, residualize on a
-    polynomial of everything taken so far, repeat until the top agreement falls inside a null that breaks the
-    subject pairing between views. Deflating through a polynomial removes squares and products of directions already
-    taken, so they are not counted as factors. Expected: about 6 (burden's, sulcal's and lr's own parts and the lesion
-    centre's three coordinates).
-  - **Step 3, coordinates inside the block:**
-    - 3a, ICA. Expected (item 33) to separate the uniform lesion-centre coordinates but not the Gaussian own parts.
-    - 3b, spatial footprints (not built in the first pass): each candidate direction's input-gradient footprint (the
-      squared gradient through the frozen network, per 16³ cell), with the rotation chosen to make the footprints
-      sparse and non-overlapping (varimax on footprints). This is the structural-sparsity principle (Zheng et al. 2022):
-      burden's footprint is the white matter, sulcal's the cortical rim, lr's the hemispheres. Generic: nothing is
-      lesion-specific.
-  - **Step 4, the graph:** PC on the anchored slots plus the block's components (Fisher-Z, 300 rows, 20 resamplings,
-    as stage 41's decoded discovery). Components are named by one Hungarian match, for scoring only.
-    - Scored against the SCM: edges among the anchors (the reference graph: brain→ventricle, brain→thickness,
-      thickness→temporal), and edges between the block and the anchors.
-    - Ceilings: stage 41's decoded discovery (all seven factors supervised) and the true factors. Nulls: random
-      rotations inside the block, and the untrained floor.
-  - **What it can identify:**
-    - Step 2's components are residuals of the anchors, so an edge from an anchor into a concealed factor is absorbed
-      (ventricle→burden, temporal→sulcal). Edges out of a concealed factor stay testable, but on this SCM the only one
-      is burden→temporal, which is weak (weight .2).
-    - Recovering the absorbed edges needs step 3b's directions, taken in the whole code rather than the residual.
-    - On this bank the own parts are Gaussian, so without 3b they stay a block, which the framework reports as an
-      unresolved vector block.
+    - **Second split** (`burden.txt`): burden as an anchor (ADNI has WMH volumes), thickness concealed.
+    - `--anchor-noise F` adds noise to the training labels (F times each anchor's SD), to mimic FreeSurfer's error.
+      Off in the stage.
+  - **Step 1, anchored slots:** a ridge readout of each anchor from each view's code.
+  - **Step 2, the novel block, a label-free count.** Each view's code minus its least-squares fit on the slots and
+    their squares and products. The two views' residuals are compared by CCA (canonical correlation analysis: the
+    pairs of directions, one per view, that correlate most). Greedy deflation: take the top pair while its agreement
+    (the correlation of the two views' projections on validation subjects) beats .5 and a null that shuffles the
+    pairing. Count it unless it is redundant: a degree-3 polynomial of the other view's slots and counted factors
+    predicts it at R² ≥ .2. Either way, subtract it with its squares and products, and repeat. Expected: 6 (burden's,
+    lr's and sulcal's own parts and the lesion centre's x, y and z).
+    - **The subtraction must be exact** (found building the stage). After a ridge fit, at any penalty, a remnant of
+      each taken direction stays in the code, and nothing else is left along it. CCA ignores scale, so it finds the
+      remnant again, as shared as the direction itself: a linear readout of the next residual recovers the taken
+      direction at R² .96, at penalty 1e-8 as at 10. Dropping the remnant as redundant dragged real factors out with
+      it: burden's own part on one synthetic code, a latent on a toy. Least squares leaves nothing.
+    - **Squares are clipped.** With exact fits, a few held-out subjects beyond the training range were extrapolated
+      quadratically, and the error compounded over steps: the test residual grew a thousandfold in four steps. Squares
+      and products now use the inputs clipped to their training range; the linear terms stay exact.
+    - A direction dropped as redundant is left out of later redundancy tests, so it cannot make a real factor look
+      redundant.
+  - **Step 3, coordinates inside the block:** the CCA order and FastICA (3a), each component named after one concealed
+    target by one Hungarian match on |corr| (labels only score), against random rotations of the block. ICA should
+    separate the uniform lesion-centre coordinates but not the Gaussian own parts (item 33). 3b (spatial footprints:
+    each direction's input-gradient footprint per 16³ cell, rotated to make the footprints sparse; Zheng et al. 2022) is
+    not built.
+  - **Step 4, the graph:** PC on the slots and the components (Fisher-Z, 300 rows × 20 resamplings). It is scored
+    against what PC can find among the anchors with the concealed factors latent, not against the SCM. The components
+    are residuals of the anchors, so they connect to nothing (section 8). Default anchors: brain–thickness,
+    brain–ventricle, temporal–thickness, and temporal–ventricle, induced through the concealed burden. Ceilings: PC on
+    the true anchors, and on all seven true factors against the SCM.
+  - **Checked locally:**
+    - `tests/test_factoriser.py`, 15 tests in about 9 s. They cover the count on toy codes (squares not counted, an
+      anchor's cube flagged, a weak factor counted, nothing counted without shared content), the exact subtraction, the
+      clipped squares, the graph truth, and the whole benchmark end to end, report included, on a code built like the
+      bank's with a known answer.
+    - The counting rule on 60 synthetic codes. 30 are built like the bank's (its SCM, the lesion centre with the
+      squares and product of its x and y, six novel latents), at burden reading error .25 and .35, 15 seeds each. 30
+      are toys.
+      - Count right on all 30 bank-like codes and on 28 of 30 toys; 2 leftovers were counted, at agreement .52 and .73.
+      - Burden's own part in the block: .59–.73 at error .25, against .67–.73 from the whole code. At error .35:
+        .50–.60 against .56–.63, except on two seeds (.31 and .40), where burden shared a canonical pair with a
+        dropped leftover. The report prints both readings for every concealed target, so a loss shows.
+      - Not kept: the first rule (top pair, ridge subtraction) lost burden on 1 of 5 seeds. Testing the shared
+        subspace's most redundant direction first overcounted bank-like codes (7 or 8) before the fixes. After them it
+        keeps a weakly read burden better (.57–.64 at error .35, where this rule has its two losses), but loses
+        sulcal's own part on 6 of 17 bank-like codes (.61–.71 against .91–.93) and overcounts 2 of 17 bank-like codes
+        and 2 of 15 toys. A rule that separates a factor from a leftover of equal agreement is still open.
+    - The 2-step 10- and 24-unit runs of stage 41's smoke test (a local copy of `bank_causal_nofield` with a small
+      validation split), both anchor splits: loading, calibration, slots, the count, PC and the report all run, in
+      4–6 min each on the Mac. A 2-step code holds no novel shared factor: 0 components, trained and floor.
+    - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 42` prints both factoriser commands.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 42`. It needs stages 33 and 35's runs finished and
+    causal-learn (`python -m pip install causal-learn`).
+  - **Reports:** `causal/stage42/default.txt` (default anchors) and `burden.txt` (burden an anchor, thickness
+    concealed), with JSONs beside them. A rerun reuses a run already in the JSON at the same step and settings.
   - **Success:**
     - Anchors read at R² ≳ .9.
-    - The count close to 6, and stable under the pairing null.
-    - The block holds each concealed factor's own part near the supervised ceiling (the code's own variation:
-      burden .48, sulcal .52–.60, lr .89).
-    - PC recovers the reference graph and finds no spurious block–anchor edges.
-  - **Decisions open:** the anchor split; anchor noise; whether cross-view agreement may count factors inside the
-    factoriser (the user rejected post-hoc CCA as a readout of the code, section 11 and memory); building 3b now or
-    after 3a.
+    - The count close to 6 on the trained code (the floor's count is printed beside it).
+    - The block holds each concealed factor's own part about as well as the whole code does (the code's own
+      variation: burden .48, sulcal .52–.60, lr .89).
+    - PC recovers the anchors' graph and adds no more edges to the components than chance (printed beside them).
+  - **What it cannot identify** (section 8): where a concealed factor sits in the graph. Its component is a residual
+    of the anchors, so every edge between it and an anchor is absorbed, into it or out of it. A concealed mediator
+    shows only as an induced anchor–anchor edge. Placing it needs 3b's directions, taken in the whole code, or labels.
+  - **Decisions open:** step 2 counts with cross-view CCA on the frozen code. The user rejected CCA fitted after
+    training as the burden readout (section 11 and memory); whether it may count factors inside the factoriser is
+    theirs to say. Also open: anchor noise, and building 3b.
 - **Stage 41 (run and read 17 Nov, section 7, item 34; no training): does the causal analysis need a code as wide
   as the shared block?**
   - **Why:** two full views identify the content block, not its coordinates. So even a 10-unit code's units are
@@ -1385,6 +1422,11 @@ on.
   `code_audit.txt`'s boosted rows and "both" column (do the 10 units hold anatomy and position non-linearly, and
   nothing else?). 10 units read burden worse than 24, so the recipe keeps 24.
 - **Stage 41 is read** (item 34).
+- **Run stage 42** (section 9; built and checked locally 17 Nov): `bash out/burden_feasibility_20261102/run_pc.sh 42`,
+  then paste `causal/stage42/default.txt` and `burden.txt`. Read, per code and against its floor: the anchors' R²; the
+  count against 6; each concealed target's R² from the block against the whole code (a gap means the count dropped
+  part of a factor); and PC's edges against the anchors' truth. Then decide on step 3b (spatial footprints), the only
+  route here to placing a concealed factor in the graph.
 - **Implementation proposal (17 Nov; stage 41's discovery supports it, item 34).** Set the number of units at the
   causal variables, not at the encoder, as `paper/factor-discovery-framework.tex` already separates them:
   - representation: the 24-unit prediction code, claimed as an embedding of the content block;
