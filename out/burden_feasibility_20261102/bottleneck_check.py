@@ -4,13 +4,16 @@ Stage 36 (HANDOFF section 7, item 26) asked whether the map was the reason: each
 whitened GAP through a linear map, so N units predict at most N of its directions. A non-linear map did not help.
 Stage 39 asks whether the target is the reason. The 10-unit codes spend about half their directions on the lesion's
 position (item 29), and the GAP they predict is full of position structure. TailCode's tail features are means over
-the interior cells, so they carry the lesion's volume and focal anatomy and little of its position.
+the interior cells, so they carry the lesion's volume and focal anatomy and little of its position. Stage 40 asks
+whether the head is the reason: every check so far kept TailCode's head (features -> 100 -> K). --heads tries wider or
+deeper ones ("512": one hidden layer of 512 units; "512x2": two), with the same maps.
 
 For each finished warm.py run, on its frozen TailCode features (the head's input, per view, from the unjittered scans):
-fresh bottlenecks shaped like TailCode's head (features -> 100 -> K, LeakyReLU, shared by the views) are fitted on the
-training subjects to predict the other view's target, whitened as warm.py --predict-weight whitens the GAP (ridge 0.1),
-through the linear map or through the linear map plus a one-hidden-layer MLP of width 128 (warm.py --predict-hidden),
-at K = 10 and 24, from three seeds each, stopped early on the validation subjects. There is no InfoNCE. --targets:
+fresh bottlenecks shaped like TailCode's head (features -> 100 -> K, LeakyReLU, shared by the views; --heads changes
+its hidden layers) are fitted on the training subjects to predict the other view's target, whitened as warm.py
+--predict-weight whitens the GAP (ridge 0.1), through the linear map or through the linear map plus a one-hidden-layer
+MLP of width 128 (warm.py --predict-hidden), at K = 10 and 24, from three seeds each, stopped early on the validation
+subjects. There is no InfoNCE. --targets:
 
   gap     the other view's backbone GAP (64): what warm.py --predict-weight predicts (the default)
   tails   the other view's tail features (384): the pooled vector without its GAP
@@ -22,14 +25,16 @@ e in the largest third of lesions; and the R2 of each anatomy factor and lesion-
 boosting. The run's own code is read the same way.
 
 Reading: a target that lets the 10-unit bottleneck read volume about as well as the 24-unit one, while keeping the
-lesion position and the anatomy, is what a 10-unit training arm should predict. The GAP rows use stage 36's seeds, so
-they repeat its check.
+lesion position and the anatomy, is what a 10-unit training arm should predict. A head that does so means the narrow
+code is limited by the head's capacity, not by what the objective ranks first. The GAP rows of TailCode's head use
+stage 36's seeds, so they repeat its check.
 
     python out/burden_feasibility_20261102/bottleneck_check.py OUT_JSON RUN [RUN ...] [--targets gap tails pooled]
-        [--train-subjects N]
+        [--heads 100 512 512x2] [--train-subjects N]
 
 Bottlenecks already in OUT_JSON for a run at the same step are reused, so a rerun fits only what is missing. The GAP
-target's entries keep stage 36's names ("MLP 10"); the others carry the target's ("MLP 10 tails").
+target's entries with TailCode's head keep stage 36's names ("MLP 10"); the others carry their target ("MLP 10 tails")
+and their head ("MLP 10 head512x2").
 --train-subjects caps the training subjects (local smoke tests).
 """
 
@@ -51,29 +56,43 @@ WIDTHS = (10, 24)
 MAPS = {"linear": 0, "MLP": 128}
 SEEDS = (0, 1, 2)
 TARGETS = ("gap", "tails", "pooled")
+HEAD = "100"  # TailCode's head: one hidden layer of 100 units
 RIDGE = 0.1  # warm.py --predict-ridge's default
 CLIP = 5.0  # standardized features are clipped at this many SD, as in own_variation.py
 EPOCHS, BATCH, LR, DECAY, PATIENCE = 400, 128, 1e-3, 1e-4, 40
 FACTOR_NAMES = [warm.FACTORS[i] for i in warm.ANATOMY] + ["lesion x", "lesion y", "lesion z"]
 
 
-class Bottleneck(nn.Module):
-    """TailCode's head shape, shared by the views, and warm.py's two prediction maps."""
+def head_layers(name):
+    """A head's hidden widths from its name: "512" is one hidden layer of 512 units, "512x2" two of them."""
+    width, cross, depth = name.partition("x")
+    if not width.isdigit() or int(width) < 1 or (cross and (not depth.isdigit() or int(depth) < 1)):
+        raise ValueError(f"a head is WIDTH or WIDTHxDEPTH, got {name!r}")
+    return (int(width),) * (int(depth) if cross else 1)
 
-    def __init__(self, width, units, channels, hidden):
+
+class Bottleneck(nn.Module):
+    """A head shaped like TailCode's, with hidden widths ``layers`` (TailCode's: one of 100), shared by the views, and
+    warm.py's two prediction maps."""
+
+    def __init__(self, width, units, channels, hidden, layers=(100,)):
         super().__init__()
-        self.head = nn.Sequential(nn.Linear(width, 100), nn.LeakyReLU(), nn.Linear(100, units))
+        parts, last = [], width
+        for size in layers:
+            parts += [nn.Linear(last, size), nn.LeakyReLU()]
+            last = size
+        self.head = nn.Sequential(*parts, nn.Linear(last, units))
         self.maps = warm.prediction_decoders(units, channels, hidden)
 
     def loss(self, x, targets):
         return warm.cross_view_prediction(self.head(x), targets, self.maps)
 
 
-def fit(x, t, held_x, held_t, units, hidden, seed, epochs=EPOCHS, patience=PATIENCE):
+def fit(x, t, held_x, held_t, units, hidden, seed, epochs=EPOCHS, patience=PATIENCE, layers=(100,)):
     """A bottleneck fitted on (2, N, width) features ``x`` to predict the other view's (2, N, channels) targets ``t``,
     stopped at its best loss on the held-out pair; returns it and that loss."""
     torch.manual_seed(seed)
-    model = Bottleneck(x.shape[-1], units, t.shape[-1], hidden)
+    model = Bottleneck(x.shape[-1], units, t.shape[-1], hidden, layers)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=DECAY)
     order = torch.Generator().manual_seed(seed)
     best, best_state, waited = float("inf"), copy.deepcopy(model.state_dict()), 0
@@ -128,14 +147,17 @@ def target_of(split, target, tail_start):
     return split["pooled"][..., tail_start:] if target == "tails" else split["pooled"]
 
 
-def key_of(label, units, target):
-    """A bottleneck's name in OUT_JSON; the GAP target keeps stage 36's."""
-    return f"{label} {units}" if target == "gap" else f"{label} {units} {target}"
+def key_of(label, units, target, head=HEAD):
+    """A bottleneck's name in OUT_JSON: stage 36's ("MLP 10") for the GAP target and TailCode's head, with the target
+    ("MLP 10 tails") and the head ("MLP 10 head512x2") added otherwise."""
+    return " ".join([label, str(units)] + [target] * (target != "gap") + [f"head{head}"] * (head != HEAD))
 
 
 def parse_key(key):
     label, units, *rest = key.split()
-    return label, int(units), rest[0] if rest else "gap"
+    target = next((part for part in rest if part in TARGETS), "gap")
+    head = next((part[4:] for part in rest if part.startswith("head")), HEAD)
+    return label, int(units), target, head
 
 
 def spread(target):
@@ -173,9 +195,9 @@ def labels(root, vox):
     return expected, explained, position
 
 
-def assess(run, device, targets, done=None, train_subjects=None, save=None):
-    """The run's own code and its bottlenecks for each of ``targets``. ``done`` (the run's row at the same step) keeps
-    the bottlenecks it already has; ``save`` is called with the row after each new one."""
+def assess(run, device, targets, done=None, train_subjects=None, save=None, heads=(HEAD,)):
+    """The run's own code and its bottlenecks for each of ``targets`` and ``heads``. ``done`` (the run's row at the same
+    step) keeps the bottlenecks it already has; ``save`` is called with the row after each new one."""
     f = run_features(run, device, train_subjects)
     if not f["tails"] and set(targets) & {"tails", "pooled"}:
         raise SystemExit(f"{run.name}: --pool gapnorm has no tail features")
@@ -212,21 +234,22 @@ def assess(run, device, targets, done=None, train_subjects=None, save=None):
             for split in ("train", "val")
         )
         out["targets"][target] = {"width": int(train_target.shape[-1]), "spread": spread(train_target)}
-        for units in WIDTHS:
-            for label, hidden in MAPS.items():
-                key = key_of(label, units, target)
-                if key in out["bottlenecks"]:
-                    continue
-                fits = []
-                for seed in SEEDS:
-                    model, held = fit(x, t, held_x, held_t, units, hidden, seed)
-                    with torch.no_grad():
-                        code = model.head(test_x).numpy()
-                    fits.append({"held_out": held, **read(code, vox, expected, position, anatomy)})
-                out["bottlenecks"][key] = fits
-                if save is not None:
-                    save(out)
-                print(f"  {target}: {label} map, {units} units done", flush=True)
+        for head in heads:
+            for units in WIDTHS:
+                for label, hidden in MAPS.items():
+                    key = key_of(label, units, target, head)
+                    if key in out["bottlenecks"]:
+                        continue
+                    fits = []
+                    for seed in SEEDS:
+                        model, held = fit(x, t, held_x, held_t, units, hidden, seed, layers=head_layers(head))
+                        with torch.no_grad():
+                            code = model.head(test_x).numpy()
+                        fits.append({"held_out": held, **read(code, vox, expected, position, anatomy)})
+                    out["bottlenecks"][key] = fits
+                    if save is not None:
+                        save(out)
+                    print(f"  {target}, head {head}: {label} map, {units} units done", flush=True)
     return out
 
 
@@ -240,8 +263,16 @@ def voxels(value):
 
 
 def order(key):
-    label, units, target = parse_key(key)
-    return TARGETS.index(target) if target in TARGETS else len(TARGETS), units, label != "linear", label
+    label, units, target, head = parse_key(key)
+    layers = head_layers(head)
+    return (
+        TARGETS.index(target) if target in TARGETS else len(TARGETS),
+        units,
+        label != "linear",
+        label,
+        len(layers),
+        layers,
+    )
 
 
 def show(name, row):
@@ -260,15 +291,16 @@ def show(name, row):
             )
         )
     print(
-        f"    {'code':10s} {'target':>6s} {'units':>5s} {'held-out':>8s} | {'e T1 / FLAIR':>13s} | {'seeds':>11s} |"
-        f" {'alone':>11s} | {'largest':>11s} | {'anatomy r/b, T1  FLAIR':>25s} | {'position r/b, T1  FLAIR':>25s}"
+        f"    {'code':10s} {'target':>6s} {'head':>6s} {'units':>5s} {'held-out':>8s} | {'e T1 / FLAIR':>13s} |"
+        f" {'seeds':>11s} | {'alone':>11s} | {'largest':>11s} | {'anatomy r/b, T1  FLAIR':>25s} |"
+        f" {'position r/b, T1  FLAIR':>25s}"
     )
-    entries = [("run's own", "-", row["own_code"]["units"], "-", [row["own_code"]])]
+    entries = [("run's own", "-", "-", row["own_code"]["units"], "-", [row["own_code"]])]
     for key in sorted(row["bottlenecks"], key=order):
-        label, units, target = parse_key(key)
+        label, units, target, head = parse_key(key)
         fits = row["bottlenecks"][key]
-        entries.append((f"{label} map", target, units, f"{np.mean([f['held_out'] for f in fits]):.3f}", fits))
-    for label, target, units, held, fits in entries:
+        entries.append((f"{label} map", target, head, units, f"{np.mean([f['held_out'] for f in fits]):.3f}", fits))
+    for label, target, head, units, held, fits in entries:
 
         def both(get, show_value):
             return " / ".join(show_value(mean_over(fits, v, get)) for v in PA.VIEWS)
@@ -286,24 +318,24 @@ def show(name, row):
             for name in ("anatomy", "position")
         }
         print(
-            f"    {label:10s} {target:>6s} {units:5d} {held:>8s} | {both(lambda c: c['error'], voxels):>13s} |"
+            f"    {label:10s} {target:>6s} {head:>6s} {units:5d} {held:>8s} |"
+            f" {both(lambda c: c['error'], voxels):>13s} |"
             f" {seeds:>11s} | {both(lambda c: c['alone_r2'], lambda x: f'{x:.2f}'):>11s} |"
             f" {both(lambda c: c['error_by_size'][2], voxels):>11s} | {factors['anatomy']:>25s} |"
             f" {factors['position']:>25s}"
         )
-    each = [entry for entry in entries if "anatomy_boosted_each" in entry[4][0][PA.VIEWS[0]]]
+    each = [entry for entry in entries if "anatomy_boosted_each" in entry[5][0][PA.VIEWS[0]]]
     if each:
-        print(
-            f"    boosted R2 of each factor, mean of the views and seeds: {'':12s}"
-            + " ".join(f"{n.split()[-1][:5]:>5s}" for n in FACTOR_NAMES)
-        )
-        for label, target, units, _, fits in each:
+        left = "    boosted R2 of each factor, mean of the views and seeds:"
+        print(f"{left:<64s} " + " ".join(f"{n.split()[-1][:5]:>5s}" for n in FACTOR_NAMES))
+        for label, target, head, units, _, fits in each:
             values = [
                 np.mean([f[v][f"{name}_boosted_each"][i] for f in fits for v in PA.VIEWS])
                 for name, count in (("anatomy", len(warm.ANATOMY)), ("position", 3))
                 for i in range(count)
             ]
-            print(f"    {label:10s} {target:>6s} {units:5d} {'':40s}" + " ".join(f"{x:5.2f}" for x in values))
+            left = f"    {label:10s} {target:>6s} {head:>6s} {units:5d}"
+            print(f"{left:<64s} " + " ".join(f"{x:5.2f}" for x in values))
     print(
         "    e: lesion-volume reading error in voxels, the anatomy part handed to the readout; alone: own R2 from the"
         " code only;\n    largest: e in the largest third of lesions; anatomy and position: mean R2 of the six anatomy"
@@ -317,8 +349,14 @@ def main():
     p.add_argument("out_json", type=Path)
     p.add_argument("runs", type=Path, nargs="+")
     p.add_argument("--targets", nargs="+", choices=TARGETS, default=["gap"], help="what the bottlenecks predict (gap)")
+    p.add_argument("--heads", nargs="+", default=[HEAD], help="the heads' hidden layers, WIDTH or WIDTHxDEPTH (100)")
     p.add_argument("--train-subjects", type=int, default=None, help="cap on the training subjects (smoke tests)")
     a = p.parse_args()
+    for head in a.heads:
+        try:
+            head_layers(head)
+        except ValueError as error:
+            p.error(str(error))
     device = warm.pick_device()
     results = json.loads(a.out_json.read_text()) if a.out_json.exists() else {}
 
@@ -329,7 +367,13 @@ def main():
 
         return save
 
-    wanted = [key_of(label, units, target) for target in a.targets for units in WIDTHS for label in MAPS]
+    wanted = [
+        key_of(label, units, target, head)
+        for target in a.targets
+        for head in a.heads
+        for units in WIDTHS
+        for label in MAPS
+    ]
     for run in a.runs:
         try:
             step = int(torch.load(run / "model.pt", map_location="cpu")["step"])
@@ -341,7 +385,7 @@ def main():
         if step != last or (cached.get("step") == step and all(k in cached["bottlenecks"] for k in wanted)):
             continue
         print("assessing", run.name, flush=True)
-        results[run.name] = assess(run, device, a.targets, cached, a.train_subjects, saver(run.name))
+        results[run.name] = assess(run, device, a.targets, cached, a.train_subjects, saver(run.name), a.heads)
         a.out_json.write_text(json.dumps(results, indent=1))
     for name in sorted(results):
         show(name, results[name])

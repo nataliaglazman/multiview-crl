@@ -168,7 +168,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `summarize.py` | each arm's training history, compact enough to paste |
 | `code_audit.py` | factor R² from the code and backbone GAP (ridge, boosted), lesion centre x/y/z, the same rows for the untrained twin (the floor), canonical correlations, direct correlations between matching code units, effective rank (how many distinct directions the code uses), and retrieval on train and test subjects |
 | `own_variation.py` | causal bank only: each factor's **own variation** (its SCM noise) read from the code, the pooled features and the GAP, trained vs untrained twin, with reference columns. `--boosted` adds the code read by gradient boosting beside the true factors read the same way: ridge reads only what a code holds linearly |
-| `bottleneck_check.py` | no training: fresh 10- and 24-unit bottlenecks fitted on a run's frozen features to predict the other view's whitened GAP through a linear or an MLP map, read like a code (volume error, alone, anatomy and position by ridge and boosting, each factor too). `--targets gap tails pooled` also predicts the other view's tail features or its whole pooled vector. Stages 36 and 39 |
+| `bottleneck_check.py` | no training: fresh 10- and 24-unit bottlenecks fitted on a run's frozen features to predict the other view's whitened GAP through a linear or an MLP map, read like a code (volume error, alone, anatomy and position by ridge and boosting, each factor too). `--targets gap tails pooled` also predicts the other view's tail features or its whole pooled vector; `--heads 512 512x2` tries wider or deeper heads than TailCode's (one hidden layer of 100). Stages 36, 39 and 40 |
 | `style_audit.py` | each view's gain, bias and noise level read from the code, pooled features and GAP, trained vs untrained twin, against the other view's (drawn independently: the null). Banks don't store style, so it is redrawn from the generator's seeds and must reproduce the stored content latents. `code_audit.py` scores no style |
 | `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side. Two "weighted" price rows refit the critic to each code (one weight per unit inside the cosine; as trained, and with position and anatomy removed); rerunning the audit on a stored JSON adds them without redoing the rest |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
@@ -647,6 +647,47 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       half of it goes to the lesion's position, a near-unique fingerprint, and the rest cannot hold the anatomy
       children's own parts and burden's. Linear readouts (ridge own variation, the tabular benchmark, PC's Fisher-Z)
       under-read these codes; stage 38's own variation adds boosting.
+30. **A 10-unit code reads the lesion's volume to 16–19 voxels on both banks; 11 cosine units gain a little (stage 38;
+    early precision audit of its three seed-42 arms, read 17 Nov; the seed-2 10-unit arm, own variation, the code
+    audit and the style audit not yet).** Volume error in voxels, T1 / FLAIR; the code's loss against the run's own
+    pooled features in brackets.
+    - **Causal bank, field off.** 10 units (stage 35): 17.3 / 17.6 (+5.9 / +6.2), "alone" .42 / .39, largest third
+      29 / 32. 11 units: 16.4 / 15.1 (+5.6 / +4.2), "alone" .48 / .50, largest third 24 / 25. 24 units (stage 33):
+      12.7 / 13.2 (+2.5 / +3.0). At 11 units the code keeps a little more anatomy (mean ridge R² .62 → .67) and a
+      little less lesion position (.70 → .67). The seed-2 10-unit arm will say whether 11 beats 10 by more than the
+      seeds differ.
+    - **Independent bank, field off.** Burden's own part is its whole spread (SD 41.3); the other latents explain none
+      of it. Image filter 11.0 / 8.2 and pooled features 11.0 / 10.0 in both runs. 10 units: 19.5 / 18.9
+      (+8.5 / +8.9), own R² .82 / .83. 24 units: 12.5 / 11.9 (+1.5 / +1.4), own R² .92 / .92. Lesion position and
+      anatomy left in the code (mean ridge R²): .56 and .69 at 10 units, .78 and .85 at 24.
+    - **Reading.** Stage 38's second question is answered: the 10-unit limit is the precision of the lesion reading,
+      not how faint burden's own part is. On both banks a 10-unit code reads the volume to 16–19 voxels and a 24-unit
+      code to 12–13, while their backbones read 10–11. The causal bank's small own part (SD 20) makes that limit
+      costly: the same error is own R² ~.57 there and .82 on the independent bank.
+    - My interpretation: on the independent bank the narrow code loses more against its backbone (+8.5 voxels
+      against +6), though burden is larger there. Its ten latents are independent, so none can be read partly from
+      another, and the narrow code has less to share.
+31. **Predicting the other view's tail features does not help a 10-unit code (stage 39's no-training check, read 17
+    Nov).** Fresh bottlenecks on the frozen features of stage 33's and 35's weight-1 runs, three seeds each, read on
+    test subjects. Volume error in voxels, T1 / FLAIR, with the GAP / tails / pooled target:
+    - Field off, 10-unit backbone. MLP map at 10 units: 18.1 / 18.7, 23.2 / 22.3, 23.1 / 20.8. Linear map at 24
+      units: 13.6 / 13.8, 20.0 / 21.6, 16.9 / 18.0.
+    - Field off, 24-unit backbone. MLP 10: 22.0 / 26.4, 26.0 / 23.2, 22.4 / 25.6. Linear 24: 13.6 / 13.6,
+      20.0 / 19.8, 17.2 / 18.6.
+    - Gain off, 10-unit backbone. MLP 10: 15.9 / 16.3, 17.5 / 19.5, 18.4 / 18.7. Linear 24: 10.6 / 11.1,
+      17.0 / 17.0, 14.6 / 14.1.
+    - Gain off, 24-unit backbone. MLP 10: 20.0 / 22.9, 20.5 / 21.3, 19.9 / 22.7. Linear 24: 9.3 / 9.4,
+      18.6 / 19.5, 15.9 / 17.9.
+    - The tails read burden worse than the GAP at both widths and lose the anatomy: mean boosted R² .23–.52 against
+      .70–.85 with the GAP; temporal −.04 to .36, lr .19–.64, sulcal below 0. The pooled target sits between them.
+      Lesion position stays: the MLP map at 10 units reads it at boosted .91–.95 with the tails, as with the GAP.
+    - The targets' spread: the 10-unit runs' GAP spreads over ~7 directions, the 24-unit runs' over ~12, and the
+      tails over 6–7 in every run. Training end to end at 10 units narrows the backbone's GAP (item 25's lost backbone
+      gain).
+    - My interpretation: the tails are not position-free. TailCode z-scores each cell with that cell's own running
+      statistics, so how far a lesion's cells exceed a threshold depends on where it sits, and the tails carry
+      position as much as volume. The same per-cell normalization removes the global anatomy the GAP carries.
+    - **Reading:** the gate fails; the tails target is dropped.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -696,8 +737,36 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 17 Nov
 
-- **Stage 39 (built 17 Nov, not run; no training): what if the 10-unit code predicted the other view's tail
-  features?**
+- **Stage 40 (built 17 Nov, not run; no training): is the head's capacity what limits a 10-unit code?**
+  - **Why:** every check so far kept TailCode's head at features → 100 → K and varied only the map to the target
+    (items 26, 31). A 10-unit code has to turn the pooled features into about one direction per latent, a harder
+    non-linear job than a 24-unit code, which can keep position's harmonics in separate units. One hidden layer of
+    100 may not manage it.
+  - **Check:** `bottleneck_check.py --heads 100 512 512x2` on the four runs of stages 36 and 39, GAP target, linear
+    and MLP maps, 10 and 24 units, three seeds each. "512" is one hidden layer of 512 units, "512x2" two. TailCode's
+    own head ("100") is reused from stage 36's JSON, so 96 bottlenecks are new.
+  - **Reading:**
+    - A larger head works if its 10-unit bottleneck reads volume near the 24-unit one with TailCode's head (field off
+      13.6 / 13.6 and 13.6 / 13.8; gain off 9.3 / 9.4 and 10.6 / 11.1) while keeping lesion position and anatomy.
+      Then the narrow code is limited by the head, and a training arm with that head at 10 or 11 units follows
+      (`warm.py` would need a head-width option; not built).
+    - If the 24-unit bottleneck gains as much, the head limits both widths and the gap between them stays.
+    - If nothing moves, the objective's ranking limits the narrow code, and item 30's precision result stands as the
+      finite-sample cost of matched width.
+  - **Run:** a one-off, like stage 39 (`run_pc.sh` unchanged). From the repo root:
+    ```bash
+    D=out/burden_feasibility_20261102; P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield; mkdir -p $D/causal/stage40 && { [ -f $D/causal/stage40/bottleneck_check.json ] || cp $D/causal/stage36/bottleneck_check.json $D/causal/stage40/; } && PYTHONPATH=$D:out/regional_pilot_20261028/shim:. OMP_NUM_THREADS=4 nohup python $D/bottleneck_check.py $D/causal/stage40/bottleneck_check.json $D/runs/${P}_predict1_c24_20k $D/runs/${P}_predict1_c10_20k $D/runs/${P}_nogain_predict1_c24_20k $D/runs/${P}_nogain_predict1_c10_20k --heads 100 512 512x2 > $D/causal/stage40/bottleneck_check.txt 2>&1 &
+    ```
+    Drop `OMP_NUM_THREADS=4` once stage 38 has finished.
+  - **Checked locally:**
+    - Fourteen unit tests (`tests/test_bottleneck_check.py`). Head names parse ("100", "512x2") and bad ones are
+      refused. TailCode's head is built exactly as stage 36 built it (the same weights from the same seed), so the
+      reused rows stay comparable. A deeper head has the right layers. A new head fits only its own bottlenecks and
+      keeps the rest. Keys and the table carry the head.
+    - On a two-step run on a Mac copy of `bank_causal_nofield`, the 512 and 512x2 heads fit, save, reuse the saved
+      rows of TailCode's head and print.
+- **Stage 39 (run and read 17 Nov, section 7, item 31: the gate fails, the tails target is dropped; no training):
+  what if the 10-unit code predicted the other view's tail features?**
   - **Why:** item 29. A 10-unit code spends about half its directions on the lesion's position. The GAP the
     prediction term targets is full of position structure. TailCode's tail features are means over the interior
     cells, so they carry the lesion's volume and focal anatomy and little of its position. With a flexible map the
@@ -732,7 +801,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - On a two-step run on a Mac copy of `bank_causal_nofield`, the new script's GAP rows equal the old script's
       exactly (428 numbers), and the tails and pooled targets fit, save, resume from the saved rows and print.
     - No script stage 38 runs imports `bottleneck_check.py`.
-- **Stage 38 (built 17 Nov, handed over to run).** The theory's own matched width, and where matched width holds.
+- **Stage 38 (run 17 Nov; early precision audit of the three seed-42 arms read in section 7, item 30; the seed-2
+  arm and the other reports not yet).** The theory's own matched width, and where matched width holds.
   - **Why** (section 8, item 29):
     - warm.py's InfoNCE is cosine, so 10 units give it 9 degrees of freedom. The formal matched width for 10 latents
       is 11 cosine units.
@@ -1082,20 +1152,25 @@ on.
 - **Read the rest of stage 35** (`causal/stage35/`; precision audit read, item 25): `own_variation.txt`, and
   `code_audit.txt`'s boosted rows and "both" column (do the 10 units hold anatomy and position non-linearly, and
   nothing else?). 10 units read burden worse than 24, so the recipe keeps 24.
-- **Run stage 39's check** (section 9; no training, a one-off command that can run while stage 38 trains).
-- **Run stage 38** (`run_pc.sh 38`, built 17 Nov, section 9): 11 cosine units, a second 10-unit seed, and 10 against
-  24 units on the independent field-off bank. The user wants 10 units (section 1), so "keep 24" below is superseded
-  as the goal.
+- **Run stage 40's check** (section 9; no training, a one-off command): does a larger head let 10 units keep the
+  lesion's volume?
+- **Read the rest of stage 38** (`causal/stage38/`; early precision audit read, item 30). The user wants 10 units
+  (section 1), so "keep 24" below is superseded as the goal.
+  - The seed-2 10-unit arm's precision audit: does 11 units (16.4 / 15.1) beat 10 by more than the seeds differ?
+  - `own_variation.txt` (with boosting) for the 11-unit arm.
+  - `code_audit.txt`: on the independent bank, does the 10-unit code still spend about half its directions on the
+    lesion's position?
 - **Stage 37 is read** (items 28–29). Its `normative_components_*.txt` (the gain-off table) is unread; the
   32-component residual is dropped either way.
 - **Candidates beyond stage 38 (17 Nov, not built).** Item 29: a 10-unit code spends about half its directions on the
   lesion's position. Ways to change what the scarce units hold without changing the theory's target:
-  - The prediction term predicts the other view's tail features instead of its GAP: stage 39 (section 9) is its
-    no-training gate.
+  - The prediction term predicts the other view's tail features instead of its GAP: failed (stage 39, item 31).
   - A second InfoNCE term on the same 10 units, on batches of code neighbours (subjects close in the model's own code,
-    so mostly matched on position). Stage 37's price tables: a 10-voxel burden unit earns +.30 nats in neighbour sets
-    once position and anatomy are matched, against −.01 as trained. Not covered by the theory (section 8), and
-    neighbour batches hurt burden before, when the code held it noisily (item 5 below).
+    so mostly matched on position). Weak: in neighbour sets as the code builds them (the price tables' "as trained,
+    neighbour" rows) a 10-voxel burden unit still costs −.03 nats. It earns +.30 only with position and anatomy
+    removed exactly, which finite neighbourhoods in a 10-unit code don't do. Not covered by the theory (section 8),
+    and neighbour batches hurt burden before (item 5 below).
+  - A larger head (encoder side): stage 40 (section 9) is its no-training check.
   - Benchmark side: several lesions per subject. Burden's range grows with the count, but each lesion adds three
     position latents to the block.
 - **Stage 36's check is read (item 26):** a non-linear map does not let 10 units hold burden, so the recipe keeps 24
@@ -1248,4 +1323,5 @@ on.
 | more subjects | not available on ADNI |
 | head levers for burden on the field-off bank: 48 units, Barlow Twins, remainder units, critic weights (stages 29, 31) | burden's own part in the code unchanged (.31–.37); remainder units stay for anatomy |
 | a sharper residual (32 components) for the 10-unit code (stage 37) | the backbone sharpens with the field off, but the 10-unit code does not (17.0 / 17.3; gain off 16.6 / 16.7, worse), and every code loses temporal atrophy, thickness and sulcal (item 29): the extra components absorb focal anatomy, so it is not generic. At 24 units it helps burden (12.4 / 10.8, own part .54 / .57) at that cost |
+| predicting the other view's tail features or whole pooled vector (stage 39, no training) | burden worse than with the GAP target at 10 and 24 units, and the anatomy lost; the tails carry position through TailCode's per-cell statistics |
 | a non-linear prediction map as the way to 10 units (stage 36) | 10 units read burden 5–13 voxels worse than 24, under InfoNCE and under prediction through either map. 10 units stays the goal; stage 37 sharpens the views instead |

@@ -1,5 +1,6 @@
 """bottleneck_check.py: a narrow code drops a weak shared latent through a linear map and keeps it through the MLP map,
-the account stage 36 tests; and stage 39's prediction targets, the reuse of finished bottlenecks and the table."""
+the account stage 36 tests; stage 39's prediction targets, stage 40's heads, the reuse of finished bottlenecks and the
+table."""
 
 import contextlib
 import io
@@ -15,6 +16,7 @@ from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import cross_val_predict
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "out/burden_feasibility_20261102"))
 import bottleneck_check as C
@@ -79,8 +81,11 @@ class TargetTests(unittest.TestCase):
     def test_gap_keys_keep_stage_36_names(self):
         self.assertEqual(C.key_of("MLP", 10, "gap"), "MLP 10")
         self.assertEqual(C.key_of("linear", 24, "tails"), "linear 24 tails")
+        self.assertEqual(C.key_of("MLP", 10, "gap", "512x2"), "MLP 10 head512x2")
+        self.assertEqual(C.key_of("MLP", 10, "tails", "512"), "MLP 10 tails head512")
         for target in C.TARGETS:
-            self.assertEqual(C.parse_key(C.key_of("MLP", 10, target)), ("MLP", 10, target))
+            for head in (C.HEAD, "512", "512x2"):
+                self.assertEqual(C.parse_key(C.key_of("MLP", 10, target, head)), ("MLP", 10, target, head))
 
     def test_spread_counts_the_directions_a_target_uses(self):
         rng = np.random.default_rng(0)
@@ -90,6 +95,33 @@ class TargetTests(unittest.TestCase):
         self.assertAlmostEqual(C.spread(shared), 1, delta=0.05)
         constant = np.concatenate([independent, np.zeros((2, 4000, 1))], 2)
         self.assertAlmostEqual(C.spread(constant), C.spread(independent), places=6)
+
+
+class HeadTests(unittest.TestCase):
+    """Stage 40's --heads: the head's hidden layers, with TailCode's own unchanged."""
+
+    def test_head_names(self):
+        self.assertEqual(C.head_layers("100"), (100,))
+        self.assertEqual(C.head_layers("512x2"), (512, 512))
+        for bad in ("x2", "512x", "0", "512x0", "abc", "-5"):
+            with self.assertRaises(ValueError):
+                C.head_layers(bad)
+
+    def test_the_default_head_is_built_as_stage_36_built_it(self):
+        torch.manual_seed(0)
+        new = C.Bottleneck(12, 3, 4, 0)
+        torch.manual_seed(0)
+        head = nn.Sequential(nn.Linear(12, 100), nn.LeakyReLU(), nn.Linear(100, 3))
+        maps = C.warm.prediction_decoders(3, 4, 0)
+        for mine, theirs in ((new.head, head), (new.maps, maps)):
+            for (name, a), (_, b) in zip(mine.state_dict().items(), theirs.state_dict().items()):
+                self.assertTrue(torch.equal(a, b), name)
+
+    def test_a_deeper_head(self):
+        model = C.Bottleneck(12, 3, 4, 128, (512, 512))
+        widths = [layer.out_features for layer in model.head if isinstance(layer, nn.Linear)]
+        self.assertEqual(widths, [512, 512, 3])
+        self.assertEqual(model.head(torch.zeros(2, 5, 12)).shape, (2, 5, 3))
 
 
 def fake_features(step=7, tails=True):
@@ -117,11 +149,11 @@ def fake_features(step=7, tails=True):
 class ReuseTests(unittest.TestCase):
     """A rerun fits only the bottlenecks a run's row lacks, and saves after each new one."""
 
-    def assess(self, targets, done, features=None):
+    def assess(self, targets, done, features=None, heads=(C.HEAD,)):
         fitted = []
 
-        def fit(x, t, held_x, held_t, units, hidden, seed):
-            fitted.append((t.shape[-1], units, hidden, seed))
+        def fit(x, t, held_x, held_t, units, hidden, seed, layers=(100,)):
+            fitted.append((t.shape[-1], units, hidden, seed, layers))
             return SimpleNamespace(head=lambda z: torch.zeros(*z.shape[:2], units)), 0.5
 
         labels = (np.full(20, 50.0), 0.0, np.zeros((20, 3)))
@@ -131,7 +163,12 @@ class ReuseTests(unittest.TestCase):
         ), mock.patch.object(C, "fit", side_effect=fit), mock.patch.object(C, "read", return_value={"t1": {}}):
             with contextlib.redirect_stdout(io.StringIO()):
                 out = C.assess(
-                    Path("runs/run"), "cpu", targets, done, save=lambda row: saved.append(len(row["bottlenecks"]))
+                    Path("runs/run"),
+                    "cpu",
+                    targets,
+                    done,
+                    save=lambda row: saved.append(len(row["bottlenecks"])),
+                    heads=heads,
                 )
         return out, fitted, saved
 
@@ -154,6 +191,16 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(out["bottlenecks"]["MLP 10"], [{"held_out": 0.5, "t1": {}}] * len(C.SEEDS))
         self.assertEqual(sorted({width for width, *_ in fitted}), [4, 12])
         self.assertEqual(len(fitted), 2 * len(C.WIDTHS) * len(C.MAPS) * len(C.SEEDS))
+
+    def test_a_new_head_fits_only_its_own_bottlenecks(self):
+        kept = {C.key_of(label, units, "gap"): ["kept"] for units in C.WIDTHS for label in C.MAPS}
+        done = {"step": 7, "train_rows": 40, "own_code": "kept", "bottlenecks": dict(kept)}
+        out, fitted, _ = self.assess(["gap"], done, heads=(C.HEAD, "512x2"))
+        self.assertEqual({layers for *_, layers in fitted}, {(512, 512)})
+        self.assertEqual(len(fitted), len(C.WIDTHS) * len(C.MAPS) * len(C.SEEDS))
+        for key in kept:
+            self.assertEqual(out["bottlenecks"][key], ["kept"])
+            self.assertIn(key + " head512x2", out["bottlenecks"])
 
     def test_no_tails_without_tail_pooling(self):
         with self.assertRaises(SystemExit):
