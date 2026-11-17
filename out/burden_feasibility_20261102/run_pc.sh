@@ -190,6 +190,13 @@
 # bank's 10-unit codes (seeds 42 and 2), the 11-unit code and the 24-unit code: label-free discovery (PC on each code's
 # own units, against random mixtures of them) and decoded discovery (PC on factors read from each code), then the
 # tabular benchmark on all four codes and the backbone GAP of the 10- and 24-unit runs (causal/stage41/).
+# Stage 43 (opt-in) What a 10-unit code keeps beyond the lesion's position. At 10 units the code drops the own parts
+# of ventricle, thickness and sulcal as well as burden's, and about half its directions go to lesion position (items
+# 29-30). Two 10-unit arms on bank_causal_nofield, 20,000 steps, seed 42, stage 35's recipe otherwise: prediction
+# weight 3 (at 24 units it traded lesion position for ventricle and sulcal, item 22), and code-neighbour batches with
+# prediction weight 1 (InfoNCE then has to tell apart subjects the code already matches on position and the strong
+# factors). The four reports beside the 10-unit codes of stages 35 and 38 (seeds 42 and 2) and stage 33's 24-unit code
+# (causal/stage43/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1514,6 +1521,43 @@ if wants 41; then
             || { echo "Stage 41's tabular benchmark failed, see $OUT/tabular.log"; exit 1; }
         echo "Stage 41 reports in $OUT: discovery_label_free_view*.txt, discovery_decoded_view*.log, tabular.log"
     fi
+fi
+
+if wants 43; then
+    NOFIELD=$D/bank_causal_nofield
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    WEIGHT3=${P}_predict3_c10_20k
+    NEIGHBOURS=ssl_code_jitter_nopatch_restail_t104_causal_nofield_n31_predict1_c10_20k
+    REFS=("${P}_predict1_c10_20k" "${P}_predict1_c10_20k_s2" "${P}_predict1_c24_20k")  # stages 35, 38 and 33
+    OUT=$D/causal/stage43
+    if [ "$DRY" = 0 ]; then
+        for name in "${REFS[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 43 needs $name finished (stages 33, 35 and 38 train it)."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage38" "$OUT" "${REFS[@]}"
+    fi
+    BASE=(--residual --jitter 2 --rotate 3 --patch-weight 0 --contrastive-loss-type infonce --seed 42
+        --content-units 10)
+    EVERY=2000 ssl "$WEIGHT3" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --uniform --predict-weight 3
+    EVERY=2000 ssl "$NEIGHBOURS" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --code-batches 500 --code-neighbours 31 \
+        --predict-weight 1
+    finish "$WEIGHT3" "$NEIGHBOURS"
+    RUNS=()
+    for name in "$WEIGHT3" "$NEIGHBOURS" "${REFS[@]}"; do
+        if [ "$DRY" = 0 ] && ! grep -qx DONE "$D/logs/$name.log"; then echo "Rerun stage 43 for $name."; exit 1; fi
+        RUNS+=("$D/runs/$name")
+    done
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    [ "$DRY" = 0 ] && echo "Stage 43 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

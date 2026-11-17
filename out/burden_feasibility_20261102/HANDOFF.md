@@ -23,6 +23,9 @@ and what to do next. Repo-wide conventions are in `CLAUDE.md` at the root. They 
   - **Matched width (16 Nov).** The code has 10 units, one per latent the views share (section 9, stage 35), to fit
     Yao's theory. "Keep 24 units" is a diagnostic or a stress-case finding, not the answer. The user's reason (17 Nov):
     the paper's causal reasoning needs the right number of units. Stage 41 tests whether it does.
+  - **Judge a 10-unit lever on every weak factor (17 Nov).** The narrow code drops the own parts of ventricle,
+    thickness and sulcal as well as burden's (item 30). The user declined white-matter normalisation because it
+    targets the lesion.
 
 ## 2. How we work with the user
 
@@ -859,6 +862,39 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 17 Nov
 
+- **Stage 43 (built 17 Nov, not run): what a 10-unit code keeps beyond the lesion's position.**
+  - **Why:** at 10 units the code keeps brain, temporal and lr but drops the own parts of ventricle, thickness and
+    sulcal as well as burden's (item 30, T1: .29, .20, .07 and .33, against .71, .63, .52 and .48 at 24 units). About
+    half its directions go to the lesion's position (item 29). Both arms change what competes with those factors for
+    the ten units; neither is aimed at the lesion.
+  - **Arms**, both 10 units on `bank_causal_nofield`, 20,000 steps, seed 42, stage 35's recipe otherwise:
+    - `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict3_c10_20k`: prediction weight 3. At 24 units weight 3
+      traded lesion position (mean R² .89 → .76 / .77) for the own parts of ventricle (.71 / .68 → .76 / .74) and
+      sulcal (.52 / .60 → .65 / .68) (item 22). At 10 units position is what crowds those factors out.
+    - `ssl_code_jitter_nopatch_restail_t104_causal_nofield_n31_predict1_c10_20k`: code-neighbour batches with
+      prediction weight 1. Every 500 steps each batch is rebuilt as a subject and its 31 nearest neighbours in the
+      model's own 10-unit code, both views, no labels (`--code-batches 500 --code-neighbours 31`). Every prediction arm
+      so far drew uniform batches. Neighbours in the code already match on what it holds (lesion position and the
+      strong factors), so InfoNCE has to tell them apart by what it lacks. Before the prediction term, code batches
+      kept thickness's and temporal's own parts that uniform batches lost (section 10, item 4), and conditional
+      negatives taught stage 23's remainder units the anatomy the main units lacked. Not covered by the theory
+      (section 8).
+  - **References** (report entries reused from stage 38): the 10-unit weight-1 codes, seeds 42 (stage 35) and 2
+    (stage 38), and the 24-unit weight-1 code (stage 33).
+  - **Reports** in `causal/stage43/`: `own_variation.txt` (with boosting; the main readout), `code_audit.txt` (how the
+    directions split between the lesion and the anatomy), `precision_audit.txt` and `style_audit.txt`.
+  - **Success**, in both views: an arm lifts at least two of the own parts of ventricle, thickness and sulcal by .05 or
+    more over the better 10-unit seed (the seeds agree within .02 on these: ventricle .28–.30, thickness .19–.20,
+    sulcal .06–.07), keeps burden's own part at .27 or above (the lower seed), and keeps brain, temporal and lr at or
+    above the lower seed (.64, .71 and .65).
+  - **Prediction:** weight 3 lifts ventricle and sulcal and gives up lesion position, perhaps with a weaker FLAIR
+    backbone (12.2 voxels at 24 units). Code batches lift thickness and ventricle and may cost burden's precision, as
+    they did in the InfoNCE-only codes (section 10, item 5). If both help, the next arm combines them.
+  - **Checked locally:** two-step runs of both arms on the Mac copy of `bank_causal_nofield` (1,000 test subjects)
+    train, evaluate and save; the code-batch arm rebuilds its neighbourhoods on the 10-unit code. `bash -n` passes, and
+    `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 43` prints both arms and the four reports.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 43`, in section 3's `nohup` form (two 20k-step arms). It
+    needs the runs of stages 33, 35 and 38 finished.
 - **Stage 42 (designed 17 Nov, not built): the concealed-factor benchmark on the frozen 24-unit code.** The
   factoriser of `paper/factor-discovery-framework.tex` on our synthetic bank, in the order its "Controlled discovery of
   omitted factors" section describes. No training of the network.
@@ -1364,6 +1400,8 @@ on.
   latent coarsely and needs spare width for the burden's precision and the weaker own parts. Open, if wanted:
   - a second 11-unit seed, so the claim that 11 cosine units beat 10 rests on two seeds each;
   - a write-up of stages 35–40 for the paper (section 8's matched-width note).
+  - Reopened for the anatomy children (17 Nov): stage 43 (section 9) tests two levers judged on every factor the
+    narrow code drops, not on burden alone.
 - **Stage 38 is read** (item 30) but for `style_audit.txt` (do the new codes carry style?). The user wants 10 units
   (section 1), so "keep 24" below is superseded as the goal.
 - **Stage 37 is read** (items 28–29). Its `normative_components_*.txt` (the gain-off table) is unread; the
@@ -1384,9 +1422,9 @@ on.
   - The whitening-ridge lever (rerun `bottleneck_check.py` at ridge 0.01 and 0.001) fails in the simulation of
     item 27 and costs position and anatomy there. It has not been run on real features; the expectation is low.
   - Untested on real features: the width the MLP map needs. The simulation says 11–12 units; the check ran 10 and 24.
-- **Then test white-matter normalisation** of the scan channel on the gain-on bank with prediction weight 1 at 24
-  units, the real-data version of gain off. Gain costs burden's own part in the code .60 → .48, and costs the code ~4
-  voxels against ≤1 for the image filter (item 22).
+- **White-matter normalisation is dropped (17 Nov):** the user declined it because it targets the lesion (section 1).
+  It was planned as the real-data version of gain off, which also raised the anatomy children's own parts at 24 units
+  (item 22).
 - Stage 32's `own_variation.txt` and `code_audit.txt` are unread, but stage 33's reports cover its two heads that
   matter (field-off weight 3, gain-off weight 1); the rest are stage 30's weaker heads.
 - **Decide with the user whether `bank_causal_nofield` becomes the main burden bank,** with the field-on bank kept as a
@@ -1394,7 +1432,7 @@ on.
   in corrected scans. The same question for gain off, whose real counterpart is intensity normalisation (WhiteStripe).
 - **Tabular benchmark (read 16 Nov, item 24).** The end-to-end weight-1 codes match their own GAP on confounding
   and graph recovery in both seeds; with gain off they remove 87–90% of the confounding. That is one more reason for
-  prediction weight 1 to join the recipe. Score the white-matter-normalisation run the same way.
+  prediction weight 1 to join the recipe.
 - **Done on 16 Nov:** stage 34 ran; its style and precision audits are read (item 23). Stage 35 ran; its precision
   audit is read (item 25).
 - **Done on 15 Nov:** stage 33 ran and its three reports are read (item 22). Weight 3 reads burden no better than
