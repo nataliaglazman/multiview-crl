@@ -21,7 +21,8 @@ and what to do next. Repo-wide conventions are in `CLAUDE.md` at the root. They 
   - **Real-data levers only.** The work has to transfer to ADNI, where the subject count is fixed. "More subjects"
     is a diagnostic, never the proposal. Augmentation-type levers are fine.
   - **Matched width (16 Nov).** The code has 10 units, one per latent the views share (section 9, stage 35), to fit
-    Yao's theory. "Keep 24 units" is a diagnostic or a stress-case finding, not the answer.
+    Yao's theory. "Keep 24 units" is a diagnostic or a stress-case finding, not the answer. The user's reason (17 Nov):
+    the paper's causal reasoning needs the right number of units. Stage 41 tests whether it does.
 
 ## 2. How we work with the user
 
@@ -173,6 +174,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side. Two "weighted" price rows refit the critic to each code (one weight per unit inside the cosine; as trained, and with position and anatomy removed); rerunning the audit on a stored JSON adds them without redoing the rest |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
+| `ica_simulation.py` | no images, no training: the bank's SCM mixed into a 24-unit code; whether FastICA recovers the own parts (by noise distribution, link and harmonic strength) and whether DirectLiNGAM finds the order from the factors and from a mixed code. Item 33 |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
 | `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
 | `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). Section 7, item 24 |
@@ -645,17 +647,19 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
         subjects apart better while holding less.
     - **Reading.** The matched-width code is full of shared, latent-determined content, as the theory asks. But about
       half of it goes to the lesion's position, a near-unique fingerprint, and the rest cannot hold the anatomy
-      children's own parts and burden's. Linear readouts (ridge own variation, the tabular benchmark, PC's Fisher-Z)
-      under-read these codes; stage 38's own variation adds boosting.
-30. **A 10-unit code reads the lesion's volume to 16–19 voxels on both banks; 11 cosine units gain a little (stage 38;
-    early precision audit of its three seed-42 arms, read 17 Nov; the seed-2 10-unit arm, own variation, the code
-    audit and the style audit not yet).** Volume error in voxels, T1 / FLAIR; the code's loss against the run's own
-    pooled features in brackets.
+      children's own parts and burden's. Linear readouts (the tabular benchmark, PC's Fisher-Z) under-read these codes'
+      position and raw factors; the own parts are not hidden non-linearly (item 30, own variation by boosting).
+30. **A 10-unit code reads the lesion's volume to 16–19 voxels on both banks; 11 cosine units gain a little (stage 38's
+    precision audit, own variation and code audit, read 17 Nov; the style audit not yet).** Volume error in
+    voxels, T1 / FLAIR; the code's loss against the run's own pooled features in brackets.
     - **Causal bank, field off.** 10 units (stage 35): 17.3 / 17.6 (+5.9 / +6.2), "alone" .42 / .39, largest third
       29 / 32. 11 units: 16.4 / 15.1 (+5.6 / +4.2), "alone" .48 / .50, largest third 24 / 25. 24 units (stage 33):
       12.7 / 13.2 (+2.5 / +3.0). At 11 units the code keeps a little more anatomy (mean ridge R² .62 → .67) and a
-      little less lesion position (.70 → .67). The seed-2 10-unit arm will say whether 11 beats 10 by more than the
-      seeds differ.
+      little less lesion position (.70 → .67).
+    - **Seeds.** A second 10-unit seed reads 16.8 / 16.7, "alone" .39 / .39, largest third 36 / 33: the 10-unit seeds
+      differ by 0.5 / 0.9 voxels. 11 units beats both 10-unit seeds in FLAIR (by 1.6–2.5 voxels), in "alone"
+      (.48 / .50 against .39–.42) and on the largest lesions (24 / 25 against 29–36 / 32–33). In T1 it is 0.4–0.9
+      better, about the seed spread. One 11-unit seed only.
     - **Independent bank, field off.** Burden's own part is its whole spread (SD 41.3); the other latents explain none
       of it. Image filter 11.0 / 8.2 and pooled features 11.0 / 10.0 in both runs. 10 units: 19.5 / 18.9
       (+8.5 / +8.9), own R² .82 / .83. 24 units: 12.5 / 11.9 (+1.5 / +1.4), own R² .92 / .92. Lesion position and
@@ -664,6 +668,35 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       not how faint burden's own part is. On both banks a 10-unit code reads the volume to 16–19 voxels and a 24-unit
       code to 12–13, while their backbones read 10–11. The causal bank's small own part (SD 20) makes that limit
       costly: the same error is own R² ~.57 there and .82 on the independent bank.
+    - **Reading, 11 units.** The cosine's lost dimension (section 8) costs a little. 11 cosine units, the theory's
+      formal matched width, read burden 1–2 voxels better than 10 and stay ~3 behind 24.
+    - **Own variation, causal bank** (each factor's own part in the code by ridge, T1 / FLAIR; 10 units seed 42,
+      seed 2, 11 units, 24 units):
+      - brain .66 / .64, .78 / .79, .78 / .80, .95 / .94;
+      - ventricle .29 / .30, .30 / .28, .38 / .38, .71 / .68;
+      - burden .33 / .34, .27 / .27, .38 / .38, .48 / .47;
+      - thickness .20 / .19, .20 / .20, .18 / .16, .63 / .64;
+      - temporal .78 / .78, .71 / .72, .79 / .78, .84 / .81;
+      - lr .79 / .80, .68 / .65, .79 / .82, .89 / .90;
+      - sulcal .07 / .07, .07 / .06, .11 / .10, .52 / .60.
+    - Boosting reads the own parts no better than ridge (burden .29–.31 at 10 units, .36–.37 at 11, .41–.43 at 24;
+      the true factors read the same way reach .95–1.00). The narrow codes do not hide the own parts non-linearly.
+    - **Reading, own variation.** At 10 and 11 units the code keeps brain, lr and temporal atrophy and drops the own
+      parts of ventricle, thickness and sulcal as well as burden's; 24 units keeps them all at .47–.95. The 11th unit
+      lifts ventricle (.29 → .38, boosted .20–.24 → .36–.39, beyond the 10-unit seeds' spread) and burden a little
+      (.27–.34 → .38), not thickness. Matched width at this sample size keeps the strongest factors and drops the
+      weaker own parts, not burden's alone.
+    - **Code audit.** Every 10- and 11-unit code is fully used (effective rank 9.3–10.5), every direction is shared
+      (cross-view r ≥ .93), and each is mostly a function of the true latents (mean boosted R² .87–.89).
+      - On the independent bank the 10-unit code's directions split about evenly between the lesion (mean boosted R²
+        .42) and the anatomy (.45); on the causal bank .54–.56 and .32–.34. The 24-unit code there splits .39 / .36.
+        The lesion block there includes a large burden factor, and position reads lower than on the causal bank
+        (T1 ridge x / y / z .54 / .50 / .64, boosted .72 / .65 / .73).
+      - 11 units keeps the causal bank's split (.56 / .32). The extra unit raises ventricle (T1 ridge .57–.70 →
+        .74) and identification (top-1 among 1,000 test subjects .978 → .990), not the anatomy's share.
+      - The two 10-unit seeds keep different details: brain .66 against .78, ventricle .57 against .70, lr .79
+        against .68, lesion x .61 against .35 (T1 ridge). At matched width the choice among competing factors is
+        close to a tie, and the seed decides it.
     - My interpretation: on the independent bank the narrow code loses more against its backbone (+8.5 voxels
       against +6), though burden is larger there. Its ten latents are independent, so none can be read partly from
       another, and the narrow code has less to share.
@@ -688,6 +721,45 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       statistics, so how far a lesion's cells exceed a threshold depends on where it sits, and the tails carry
       position as much as volume. The same per-cell normalization removes the global anatomy the GAP carries.
     - **Reading:** the gate fails; the tails target is dropped.
+32. **A larger head does not let 10 units match 24 (stage 40's no-training check, read 17 Nov).** Fresh bottlenecks
+    on the same four runs, GAP target, three seeds each, with TailCode's head (one hidden layer of 100) or a larger
+    one (one or two hidden layers of 512). Volume error in voxels, T1 / FLAIR, heads 100 / 512 / 512x2:
+    - Field off, 10-unit backbone. Linear map at 10 units: 16.7 / 16.3, 16.4 / 16.0, 16.0 / 16.0. MLP map at 10:
+      18.1 / 18.7, 17.8 / 18.1, 19.1 / 18.3. Linear map at 24: 13.6 / 13.8, 13.5 / 13.4, 14.5 / 14.4.
+    - Gain off, 10-unit backbone. Linear 10: 16.3 / 15.0, 13.1 / 15.0, 13.1 / 14.1. MLP 10: 15.9 / 16.3,
+      15.6 / 17.2, 17.3 / 17.9. Linear 24: 10.6 / 11.1, 10.4 / 11.1, 11.0 / 11.9.
+    - Field off, 24-unit backbone. Linear 10: 24.7 / 31.2, 20.0 / 19.2, 19.8 / 18.8. Linear 24: 13.6 / 13.6,
+      13.4 / 14.1, 13.6 / 14.9.
+    - Gain off, 24-unit backbone. Linear 10: 18.0 / 25.2, 24.8 / 20.5, 19.1 / 19.2. Linear 24: 9.3 / 9.4,
+      9.2 / 9.6, 10.2 / 10.4.
+    - On the 10-unit backbones a larger head gains 0.3–0.7 voxels with the field off, and up to 3.2 in T1 with gain
+      off, through the linear map only; the MLP map gains nothing, and at 24 units nothing changes. On the same
+      features 10 units stays 2.5–3 voxels behind 24 (field off 16.0 / 16.0 against 13.5 / 13.4; gain off
+      13.1 / 14.1 against 10.4 / 11.1).
+    - On the 24-unit backbones the larger heads mostly remove failed seeds (TailCode's head at 10 units had seed
+      spreads up to 16–19 voxels there) and stay at 19–25 voxels.
+    - **Reading:** the gate fails; the head's capacity is not what limits the narrow code. With stages 35–39 this
+      ends the search for a 10-unit lever (section 8).
+33. **ICA recovers the own parts from a near-linear code only under non-Gaussian noise, and does not give the causal
+    order (`ica_simulation.py`, no images, run 17 Nov).** The bank's SCM sampled directly (graph, weights, noise scale
+    0.4); the seven factors and the lesion centre standardized and mixed into a 24-unit code with reading noise .3;
+    five seeds. FastICA to ten components, matched to the true sources by one Hungarian match. Mean R² of the seven own
+    parts, as ICA / PCA / random-rotation null (95th percentile) / supervised ceiling:
+    - Gaussian noise, as the bank draws it: .35–.36 / .38–.41 / .28–.29 (.46–.48) / .78–.80. No better than PCA.
+    - Non-Gaussian noise with the bank's leaky-ReLU link: Laplace .61, uniform .80, skewed .69, against a ceiling of
+      .78–.81. With a linear link: .69–.72 against .74. The lesion centre (uniform, so non-Gaussian in every
+      condition): .94–.95.
+    - Harmonic directions in the code break it: six squares and products at weight .3 give .30–.64; at weight 1, about
+      the null (.17–.26).
+    - DirectLiNGAM finds the causal order from the factors themselves (non-Gaussian, linear link: skeleton and
+      directed F1 .98–1.00; leaky ReLU .78–.87 and .55–.87; Gaussian .71–.79 and .16–.31) but not from a random
+      orthogonal mix of them (.36–.46 and .16–.26 for every noise). A code identified only up to its block leaves the
+      factors' coordinates unknown: ICA returns the own parts, not the variables LiNGAM needs.
+    - **Reading:** an ICA factoriser could give label-free own parts if the exogenous variation is non-Gaussian (real
+      lesion load is skewed) and the code is near-linear in the factors (the 24-unit prediction code reads them
+      linearly; the narrow codes hold harmonics). The bank's Gaussian noise cannot test it on images; a non-Gaussian
+      noise option in the generator would. The graph among the factors still needs anchors or another constraint on
+      the mixing (the partial anchors of `paper/factor-discovery-framework.tex`).
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -695,12 +767,18 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   latent), patch loss off, the InfoNCE objective.
 - **Not covered:** code batches (any neighbourhood rule), hard negatives.
 - **Silent:** finite subjects (memorisation), and code width versus the size of the shared block.
-- **Matched width fails at finite data (stages 35–36).** The shared block is 10 latents (seven SCM factors and the
-  lesion's x, y, z; section 9, stage 35), spread over more than 24 linear directions of the features (linear CCA,
-  item 9). A 10-unit code loses burden's own part under every objective tried: InfoNCE, and cross-view prediction
-  through a linear or an MLP map (items 25–26). 24 units keep it.
-  - The theory's matched-width result is for the ideal, infinite-data objective. With finite data these objectives
-    drop the faintest shared factor first, so the code needs spare width.
+- **Matched width costs precision at finite data (stages 35–40).** The shared block is 10 latents (seven SCM factors
+  and the lesion's x, y, z; checked in the generator, items 28–30), spread over more than 24 linear directions of the
+  features (linear CCA, item 9).
+  - A code as wide as the block (10 units, or 11 under the cosine) holds every latent, coarsely. It reads the
+    lesion's volume to 15–19 voxels against 12–13 at 24 units on both banks, and drops the own parts of ventricle,
+    thickness and sulcal as well as burden's (items 30, 32).
+  - Nothing tried closes the gap: InfoNCE variants (simulation), a linear or an MLP map (item 26), sharper inputs
+    (items 28–29), other prediction targets (item 31) and a larger head (item 32). 11 cosine units recover 1–2 voxels
+    and some of ventricle (item 30).
+  - Which weaker factors a matched-width code keeps is close to a tie that the seed decides (item 30, code audit).
+  - The theory's matched-width result is for the ideal, infinite-data objective. With 2,000 subjects these objectives
+    keep the strongest factors and the coarse readings, and the weaker own parts need spare width.
   - Worth a sentence in the paper.
   - **When an added term keeps the theory's result** (my argument, 17 Nov). If one encoder minimises both Yao's
     objective and an added term, the minimisers of the sum are the encoders that minimise both, so they stay
@@ -737,7 +815,31 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 17 Nov
 
-- **Stage 40 (built 17 Nov, not run; no training): is the head's capacity what limits a 10-unit code?**
+- **Stage 41 (built 17 Nov, not run; no training): does the causal analysis need a code as wide as the shared block?**
+  - **Why:** two full views identify the content block, not its coordinates. So even a 10-unit code's units are
+    mixtures of the latents (item 6; item 30's code audit), and the narrow code drops the own parts PC needs (items
+    24, 30). This stage measures what width does to the causal analysis.
+  - **Codes:** the causal bank's 10-unit codes (stage 35, seed 42; stage 38, seed 2), the 11-unit code (stage 38) and
+    the 24-unit code (stage 33); field off, prediction weight 1.
+  - **Label-free discovery** (`eval.causal.latent_causal_discovery`): PC on each code's own units, named by one
+    Hungarian match, scored against the true graph and against 30 random mixtures of the units. This is the test of
+    whether matched width makes the units the causal variables.
+  - **Decoded discovery** (`eval.protocol.compare_bundles --with-graph`): PC on the seven factors read from each code
+    with labels, 20 resampling repeats.
+  - **Tabular benchmark** (item 24) on the four codes and on the backbone GAP of the 10- and 24-unit runs: the
+    confounding removed, and the MRI→tab and tab→MRI F1.
+  - **Reports** in `causal/stage41/`: `discovery_label_free_view{1,2}.txt`, `discovery_decoded_view{1,2}.log` and
+    `tabular.log`. The code bundles go to `causal/<run>.npz` and are reused when newer than the run's checkpoint.
+  - **Prediction:** label-free F1 at the mixing null at every width; decoded discovery and the tabular benchmark
+    better at 24 units, with thickness's and sulcal's edges missed at 10 and 11. If the 10-unit codes come out
+    better, matched width is worth its precision cost for the causal analysis.
+  - **Checked locally:** on two-step 10- and 24-unit runs on a Mac copy of `bank_causal_nofield` (1,000 test
+    subjects) every step runs: code and GAP bundles with their untrained floors, label-free discovery with the mixing
+    null, decoded discovery and the tabular benchmark on four bundles. Shell syntax and the dry run pass.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 41`. It needs causal-learn
+    (`python -m pip install causal-learn`).
+- **Stage 40 (run and read 17 Nov, section 7, item 32: the gate fails; no training): is the head's capacity what
+  limits a 10-unit code?**
   - **Why:** every check so far kept TailCode's head at features → 100 → K and varied only the map to the target
     (items 26, 31). A 10-unit code has to turn the pooled features into about one direction per latent, a harder
     non-linear job than a 24-unit code, which can keep position's harmonics in separate units. One hidden layer of
@@ -801,8 +903,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - On a two-step run on a Mac copy of `bank_causal_nofield`, the new script's GAP rows equal the old script's
       exactly (428 numbers), and the tails and pooled targets fit, save, resume from the saved rows and print.
     - No script stage 38 runs imports `bottleneck_check.py`.
-- **Stage 38 (run 17 Nov; early precision audit of the three seed-42 arms read in section 7, item 30; the seed-2
-  arm and the other reports not yet).** The theory's own matched width, and where matched width holds.
+- **Stage 38 (run 17 Nov; precision audit, own variation and code audit read in section 7, item 30; the style audit
+  not yet).** The theory's own matched width, and where matched width holds.
   - **Why** (section 8, item 29):
     - warm.py's InfoNCE is cosine, so 10 units give it 9 degrees of freedom. The formal matched width for 10 latents
       is 11 cosine units.
@@ -1152,14 +1254,25 @@ on.
 - **Read the rest of stage 35** (`causal/stage35/`; precision audit read, item 25): `own_variation.txt`, and
   `code_audit.txt`'s boosted rows and "both" column (do the 10 units hold anatomy and position non-linearly, and
   nothing else?). 10 units read burden worse than 24, so the recipe keeps 24.
-- **Run stage 40's check** (section 9; no training, a one-off command): does a larger head let 10 units keep the
-  lesion's volume?
-- **Read the rest of stage 38** (`causal/stage38/`; early precision audit read, item 30). The user wants 10 units
+- **Run stage 41** (section 9; no training): causal discovery and the tabular benchmark on the 10-, 11- and 24-unit
+  codes.
+- **Implementation proposal (17 Nov), pending stage 41.** Set the number of units at the causal variables, not at the
+  encoder, as `paper/factor-discovery-framework.tex` already separates them:
+  - representation: the 24-unit prediction code, claimed as an embedding of the content block;
+  - a factoriser from the frozen code to K slots, one per causal variable, with K and slot sizes chosen on validation
+    data and identifying information from anchors (synthetic: supplied factors with others concealed; ADNI:
+    FreeSurfer regional volumes). ICA can supply the own parts label-free when the noise is non-Gaussian and the
+    code near-linear (item 33), but not the graph: that still needs the anchors;
+  - graph estimation on the slots and the observed variables.
+  - Optional theory bridge (derived in another session, not a published result): InfoNCE on a learned K-unit
+    projection, alignment and prediction on all 24 units. At the optimum the projection is a bijection of the content
+    (Yao's argument) and the 24-unit code an embedding.
+- **The search for a 10-unit lever is over (17 Nov, items 26–32; section 8).** A matched-width code holds every
+  latent coarsely and needs spare width for the burden's precision and the weaker own parts. Open, if wanted:
+  - a second 11-unit seed, so the claim that 11 cosine units beat 10 rests on two seeds each;
+  - a write-up of stages 35–40 for the paper (section 8's matched-width note).
+- **Stage 38 is read** (item 30) but for `style_audit.txt` (do the new codes carry style?). The user wants 10 units
   (section 1), so "keep 24" below is superseded as the goal.
-  - The seed-2 10-unit arm's precision audit: does 11 units (16.4 / 15.1) beat 10 by more than the seeds differ?
-  - `own_variation.txt` (with boosting) for the 11-unit arm.
-  - `code_audit.txt`: on the independent bank, does the 10-unit code still spend about half its directions on the
-    lesion's position?
 - **Stage 37 is read** (items 28–29). Its `normative_components_*.txt` (the gain-off table) is unread; the
   32-component residual is dropped either way.
 - **Candidates beyond stage 38 (17 Nov, not built).** Item 29: a 10-unit code spends about half its directions on the
@@ -1323,5 +1436,6 @@ on.
 | more subjects | not available on ADNI |
 | head levers for burden on the field-off bank: 48 units, Barlow Twins, remainder units, critic weights (stages 29, 31) | burden's own part in the code unchanged (.31–.37); remainder units stay for anatomy |
 | a sharper residual (32 components) for the 10-unit code (stage 37) | the backbone sharpens with the field off, but the 10-unit code does not (17.0 / 17.3; gain off 16.6 / 16.7, worse), and every code loses temporal atrophy, thickness and sulcal (item 29): the extra components absorb focal anatomy, so it is not generic. At 24 units it helps burden (12.4 / 10.8, own part .54 / .57) at that cost |
+| a larger head, one or two hidden layers of 512 (stage 40, no training) | at 10 units 0.3–3.2 voxels better through the linear map, nothing through the MLP map; 10 units stays 2.5–3 voxels behind 24 on the same features |
 | predicting the other view's tail features or whole pooled vector (stage 39, no training) | burden worse than with the GAP target at 10 and 24 units, and the anatomy lost; the tails carry position through TailCode's per-cell statistics |
 | a non-linear prediction map as the way to 10 units (stage 36) | 10 units read burden 5–13 voxels worse than 24, under InfoNCE and under prediction through either map. 10 units stays the goal; stage 37 sharpens the views instead |

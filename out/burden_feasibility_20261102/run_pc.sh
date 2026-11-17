@@ -186,6 +186,10 @@
 # part is its whole +-41-voxel spread, against +-20 on the causal bank), with 10- and 24-unit prediction arms. 16
 # components, prediction weight 1, 20,000 steps. The precision audit, the code audit and the style audit of all four,
 # and own variation (by boosting too) of the causal-bank ones, beside stages 35 and 33's arms (causal/stage38/).
+# Stage 41 (opt-in, no training) Does the causal analysis need a code as wide as the shared block? On the causal
+# bank's 10-unit codes (seeds 42 and 2), the 11-unit code and the 24-unit code: label-free discovery (PC on each code's
+# own units, against random mixtures of them) and decoded discovery (PC on factors read from each code), then the
+# tabular benchmark on all four codes and the backbone GAP of the 10- and 24-unit runs (causal/stage41/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1459,6 +1463,57 @@ if wants 38; then
     stage_report "$OUT" code_audit "${ALL[@]}"
     stage_report "$OUT" style_audit "${ALL[@]}"
     [ "$DRY" = 0 ] && echo "Stage 38 reports in $OUT"
+fi
+
+if wants 41; then
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    NAMES=("${P}_predict1_c10_20k" "${P}_predict1_c10_20k_s2" "${P}_predict1_c11_20k" "${P}_predict1_c24_20k")
+    LABELS=(c10 c10_s2 c11 c24)
+    OUT=$D/causal/stage41
+    if [ "$DRY" = 0 ]; then
+        for name in "${NAMES[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 41 needs $name finished (stages 33, 35 and 38 train it)."
+                exit 1
+            fi
+        done
+        if ! "$PY" -c "import causallearn" 2> /dev/null; then
+            echo "Stage 41 needs causal-learn: $PY -m pip install causal-learn"
+            exit 1
+        fi
+        mkdir -p "$OUT" || exit 1
+    fi
+    TAG=stage41/discovery causal "${NAMES[@]}"  # bundles into $D/causal/<run>.npz, reports into $OUT
+    for i in 0 3; do  # the backbone GAP of the 10- and 24-unit runs, as references for the tabular benchmark
+        run=$D/runs/${NAMES[$i]}
+        base=$OUT/gap_${LABELS[$i]}
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/causal_bundle.py $run $base.npz --features gap [--untrained]"
+        elif [ ! "$base.npz" -nt "$run/model.pt" ] || [ ! "$base.floor.npz" -nt "$run/model.pt" ]; then
+            "$PY" "$D/causal_bundle.py" "$run" "$base.npz" --features gap > "$base.log" 2>&1 \
+                && "$PY" "$D/causal_bundle.py" "$run" "$base.floor.npz" --features gap --untrained >> "$base.log" 2>&1 \
+                || { echo "Bundle export failed, see $base.log"; exit 1; }
+        fi
+    done
+    BUNDLES=() FLOORS=()
+    for i in 0 1 2 3; do
+        BUNDLES+=("${LABELS[$i]}=$D/causal/${NAMES[$i]}.npz")
+        FLOORS+=("${LABELS[$i]}=$D/causal/${NAMES[$i]}.floor.npz")
+    done
+    for i in 0 3; do
+        BUNDLES+=("gap_${LABELS[$i]}=$OUT/gap_${LABELS[$i]}.npz")
+        FLOORS+=("gap_${LABELS[$i]}=$OUT/gap_${LABELS[$i]}.floor.npz")
+    done
+    CMD=("$PY" -m eval.causal.tabular_benchmark --view each --bundles "${BUNDLES[@]}" --floors "${FLOORS[@]}"
+        --out "$OUT/tabular.json" --tables-dir "$OUT/tables")
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/tabular.log"
+    else
+        echo "$(date +%H:%M) tabular benchmark into $OUT"
+        "${CMD[@]}" > "$OUT/tabular.log" 2>&1 \
+            || { echo "Stage 41's tabular benchmark failed, see $OUT/tabular.log"; exit 1; }
+        echo "Stage 41 reports in $OUT: discovery_label_free_view*.txt, discovery_decoded_view*.log, tabular.log"
+    fi
 fi
 
 echo "$(date +%H:%M) all requested stages done"
