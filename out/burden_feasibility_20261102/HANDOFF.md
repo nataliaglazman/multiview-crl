@@ -131,6 +131,11 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     gain 1, so tissue and lesion contrast no longer vary from scan to scan. The bias and the noise level still vary.
   - `bank_causal_nofield_k32`, `bank_causal_nofield_nogain_k32` (stage 37): the two banks above with 32 principal
     components removed from the residual instead of 16. Only the residuals are new; every other array is a link.
+  - `bank_causal_nofield_fixedpos` (`--causal --field off --lesion-position fixed`, stage 47; a diagnostic): every
+    lesion at the white-matter voxel nearest `bank.FIXED_CENTRE` that can hold the full-size sphere, in place of its
+    drawn position. The drawn position is still drawn, so the subjects, anatomy, lesion sizes and style match
+    `bank_causal_nofield` (checked bit for bit on small banks). The centre moves only with the anatomy: total SD 2.7
+    voxels against 12.1, and 56% of subjects get the voxel itself. The shared block is then the 7 SCM factors.
 - **`residual_bank.py`** writes each view's normative residual: the scan z-scored over its brain, minus the
   training mean, minus its first 16 principal components, scaled to unit SD. Each modality uses only its own basis.
   - `--components K` removes K components (at most 64, what the stored basis holds).
@@ -1064,8 +1069,45 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
-- **Stage 46b (built and checked on the PC 18 Nov, not yet run): the bridge as the theory states it.** Section 8 (the
-  10 / 24 discrepancy) gives the reasons.
+- **Stage 47 (built and checked on the PC 18 Nov, not yet run): does the lesion's position crowd the weak factors
+  out of a narrow code?** About half of a 10-unit code goes to the position, a near-unique fingerprint (item 29).
+  Stage 43's code-neighbour batches, whose negatives already share it, moved the code from position to anatomy (T1,
+  boosted: x / y / z .79 / .84 / .84 → .74 / .62 / .69; brain .82 → .94, ventricle .68 → .81, thickness .75 → .88;
+  per direction, lesion / anatomy .54 / .34 → .48 / .40). But those batches change more than position. This removes
+  only the position.
+  - **Bank:** `bank_causal_nofield_fixedpos` (section 4).
+  - **Arms** (prediction weight 1, uniform batches, 20,000 steps, seed 42): 10 units (stage 35's recipe) and 8 units
+    (the matched width for the 7 latents under the cosine), as
+    `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c{8,10}_20k`. No 24-unit arm (the user
+    dropped it, 18 Nov): stage 33's 24-unit code on the drawn-position bank is the reference. The subjects and their
+    anatomy are the same, so the own parts are on one scale, but a 24-unit code on the fixed bank might read the weak
+    factors a little better still, so that reference is a slightly low bar.
+  - **Reports** (`causal/stage47/`): the four reports on the two arms and, on the drawn-position bank, stages 35, 38
+    and 33's 10-, 11- and 24-unit codes (reused from stage 38).
+  - **Reading:**
+    - The own parts to watch are ventricle, thickness and sulcal, and burden's (drawn-position bank, T1: 10 units
+      .29, .20, .07, .33; 24 units .71, .63, .52, .48).
+    - If the 10-unit code on the fixed bank comes close to the 24-unit code, the position was crowding them out. The
+      matched-width finding is then partly the benchmark's: ADNI has no randomly placed sphere. Phrase it as "a
+      near-unique shared feature crowds weak factors out of a narrow code"; real scans have their own such features
+      (head size and shape, positioning, scanner).
+    - The 8-unit arm asks whether matched width drops the weak own parts without such a feature. If it does, the
+      claim is general.
+    - Lesion x, y, z in the code audit are near-constant on this bank, so their R² means little.
+  - **Checked on the PC:**
+    - `tests/test_bank_position.py` (4 tests): the lesion lands at the voxel nearest the target that fits, found by an
+      independent brute-force search; the drawn placement is ignored; the default leaves the renderer alone.
+    - Small banks (64 / 16 / 48 subjects): the default path reproduces `bank_causal_nofield`'s first subjects bit
+      for bit (images, latents, volumes, lesion cells). The fixed bank keeps every content latent and lesion volume
+      (within 0.0002 voxels); every image difference lies within 8 voxels of a lesion. The centre's SD falls from
+      2.0 / 1.5 / 1.5 to 0.3–0.7 / 0.1–0.5 / 0.2–0.3 (16³ cells).
+    - On a 200 / 16 / 120 fixed bank: the residual, a 2-step 8-unit arm and all four audits run.
+    - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 47` prints the bank, the residual,
+      the two arms and the four reports.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 47`. The bank takes about half an hour, then the two
+    arms train together.
+- **Stage 46b (built and checked on the PC 18 Nov; running since 11:07): the bridge as the theory states it.**
+  Section 8 (the 10 / 24 discrepancy) gives the reasons.
   - **Arm:** stage 36's 24-unit MLP-map arm (uniform batches, prediction weight 1, `--predict-hidden 128`, seed 42,
     20,000 steps, `bank_causal_nofield`) with `--entropy-units 11`, in the fixed form (item 37): InfoNCE on the first
     11 units, alignment alone on the other 13:

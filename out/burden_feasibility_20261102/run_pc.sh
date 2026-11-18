@@ -229,6 +229,14 @@
 # first 11 units with stage 36's 24-unit MLP-map code (the same arm with the entropy on all 24 units), stage 33's
 # 24-unit code, stage 38's 11-unit code and stage 36's 10-unit MLP-map code, and with stage 46's bridge and its first
 # 10 units once stage 46 is done; rerun 46b then to add them (causal/stage46b/).
+# Stage 47 (opt-in) Does the lesion's position crowd the weak factors out of a narrow code? About half of a 10-unit
+# code goes to the position, a near-unique fingerprint (HANDOFF item 29). A diagnostic bank,
+# bank_causal_nofield_fixedpos: bank_causal_nofield with every lesion at the white-matter voxel nearest bank.py's
+# FIXED_CENTRE that can hold it (bank.py --lesion-position fixed). The same subjects, anatomy, lesion sizes and style;
+# the centre then moves only with the anatomy (total SD 2.7 voxels against 12.1), so the shared block is the 7 SCM
+# factors. Prediction arms, weight 1, 20,000 steps, seed 42: 10 units (stage 35's recipe) and 8 units (the matched
+# width for 7 latents under the cosine). The four reports beside stages 35, 38 and 33's 10-, 11- and 24-unit codes on
+# the drawn-position bank (causal/stage47/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1791,6 +1799,38 @@ if wants 46b; then
     stage_report "$OUT" code_audit "${RUNS[@]}"
     stage_report "$OUT" style_audit "${RUNS[@]}"
     [ "$DRY" = 0 ] && echo "Stage 46b reports in $OUT"
+fi
+
+if wants 47; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    ARMS=("${P}_fixedpos_predict1_c8_20k" "${P}_fixedpos_predict1_c10_20k")
+    REFS=("${P}_predict1_c10_20k" "${P}_predict1_c11_20k" "${P}_predict1_c24_20k")  # stages 35, 38 and 33
+    OUT=$D/causal/stage47
+    if [ "$DRY" = 0 ]; then
+        for name in "${REFS[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 47 needs $name finished (stages 33, 35 and 38 train it)."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage38" "$OUT" "${REFS[@]}"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42 --contrastive-loss-type infonce
+        --predict-weight 1)
+    EVERY=2000 ssl "${ARMS[0]}" "$FIXED" tail t1_04 20000 "${BASE[@]}" --content-units 8
+    EVERY=2000 ssl "${ARMS[1]}" "$FIXED" tail t1_04 20000 "${BASE[@]}" --content-units 10
+    finish "${ARMS[@]}"
+    RUNS=()
+    for name in "${ARMS[@]}" "${REFS[@]}"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    [ "$DRY" = 0 ] && echo "Stage 47 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"
