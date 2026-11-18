@@ -207,6 +207,17 @@
 # ADNI) instead of the code's readouts of them; then stage 42's readouts again. Both with a trace: each direction the
 # count examined, its correlation with each concealed target, and each target's R2 from the dropped directions
 # (causal/stage44/measured_default.txt, measured_burden.txt, readouts_default.txt, readouts_burden.txt).
+# Stage 45 (opt-in) Replicate stage 43's 10-unit neighbour arm with seed 2, and keep its neighbour InfoNCE while
+# drawing a separate uniform batch for prediction (seed 42). Both use prediction weight 1 and 20,000 steps on
+# bank_causal_nofield. Same head and normalization; the extra prediction pass leaves pooling buffers alone. Four
+# reports compare both arms with stage 43's neighbour seed 42, the two uniform 10-unit seeds and the 24-unit reference
+# (causal/stage45/). The separate-batch arm costs one additional online backbone pass per step.
+# Stage 46 (opt-in) The bridge (HANDOFF section 10, the plan's step 1): stage 33's 24-unit prediction arm with
+# InfoNCE's entropy on the first 10 code units only and its alignment on all 24 (warm.py --entropy-units 10). At the
+# theory's optimum those 10 units are a bijection of the shared latents and the whole code an embedding. Seed 42,
+# 20,000 steps, bank_causal_nofield. bridge_view.py writes the first 10 units out as a run of their own. The four
+# reports compare the 24-unit code and its first 10 units with stage 33's 24-unit code and the 10-unit codes of stages
+# 35 and 38 (causal/stage46/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1638,6 +1649,84 @@ if wants 44; then
         done
     done
     [ "$DRY" = 0 ] && echo "Stage 44 reports in $OUT: measured_default.txt, measured_burden.txt, readouts_*.txt"
+fi
+
+if wants 45; then
+    NOFIELD=$D/bank_causal_nofield
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    N=ssl_code_jitter_nopatch_restail_t104_causal_nofield_n31_predict1
+    NEIGHBOURS=${N}_c10_20k
+    REPEAT=${NEIGHBOURS}_s2
+    UNIFORM_PREDICT=${N}_uniformpred_c10_20k
+    REFS=("$NEIGHBOURS" "${P}_predict1_c10_20k" "${P}_predict1_c10_20k_s2" "${P}_predict1_c24_20k")
+    OUT=$D/causal/stage45
+    if [ "$DRY" = 0 ]; then
+        for name in "${REFS[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 45 needs $name finished (stages 33, 35, 38 and 43 train it)."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage43" "$OUT" "${REFS[@]}"
+    fi
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    BASE=(--residual --jitter 2 --rotate 3 --patch-weight 0 --contrastive-loss-type infonce
+        --content-units 10 --code-batches 500 --code-neighbours 31 --predict-weight 1)
+    EVERY=2000 ssl "$REPEAT" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --seed 2
+    EVERY=2000 ssl "$UNIFORM_PREDICT" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --seed 42 --predict-batches uniform
+    finish "$REPEAT" "$UNIFORM_PREDICT"
+    RUNS=()
+    for name in "$REPEAT" "$UNIFORM_PREDICT" "${REFS[@]}"; do
+        if [ "$DRY" = 0 ] && ! grep -qx DONE "$D/logs/$name.log"; then echo "Rerun stage 45 for $name."; exit 1; fi
+        RUNS+=("$D/runs/$name")
+    done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    [ "$DRY" = 0 ] && echo "Stage 45 reports in $OUT"
+fi
+
+if wants 46; then
+    NOFIELD=$D/bank_causal_nofield
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    BRIDGE=${P}_predict1_c24_entropy10_20k
+    VIEW=${BRIDGE}_first10
+    REFS=("${P}_predict1_c24_20k" "${P}_predict1_c10_20k" "${P}_predict1_c10_20k_s2")  # stages 33, 35 and 38
+    OUT=$D/causal/stage46
+    if [ "$DRY" = 0 ]; then
+        for name in "${REFS[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 46 needs $name finished (stages 33, 35 and 38 train it)."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage43" "$OUT" "${REFS[@]}"
+    fi
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42 --content-units 24
+        --contrastive-loss-type infonce --predict-weight 1)
+    EVERY=2000 ssl "$BRIDGE" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --entropy-units 10
+    finish "$BRIDGE"
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/bridge_view.py $D/runs/$BRIDGE"
+    else
+        grep -qx DONE "$D/logs/$BRIDGE.log" || { echo "Rerun stage 46 for $BRIDGE."; exit 1; }
+        if [ ! "$D/runs/$VIEW/model.pt" -nt "$D/runs/$BRIDGE/model.pt" ]; then
+            "$PY" "$D/bridge_view.py" "$D/runs/$BRIDGE" || exit 1
+        fi
+    fi
+    RUNS=()
+    for name in "$BRIDGE" "$VIEW" "${REFS[@]}"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    [ "$DRY" = 0 ] && echo "Stage 46 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

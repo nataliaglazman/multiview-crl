@@ -1,16 +1,38 @@
 """Stage 33's end-to-end cross-view prediction term in warm.py: running whitening, view pairing, the momentum copy."""
 
+import copy
 import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import torch
 from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "out/burden_feasibility_20261102"))
 import frozen_prediction as P
 import warm
+
+
+class PredictionBank:
+    def __init__(self, subjects=40):
+        self.vox = np.zeros(subjects)
+        self.images_by_view = torch.randn(2, subjects, 1, 4, 4, 4)
+
+    def images(self, indices, device):
+        return torch.cat([view[indices] for view in self.images_by_view]).to(device)
+
+
+class PredictionEncoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.views = nn.ModuleList(nn.Conv3d(1, 3, 1) for _ in range(2))
+        self.inputs = []
+
+    def _encode(self, images, views, view_idx):
+        self.inputs.append(images.detach().clone())
+        return torch.cat([layer(part).tanh() for layer, part in zip(self.views, images.chunk(2))])
 
 
 class WarmPredictionTests(unittest.TestCase):
@@ -92,6 +114,87 @@ class WarmPredictionTests(unittest.TestCase):
         warm.momentum_update(online, kept, 0.996)
         torch.testing.assert_close(kept.weight.detach(), 0.996 * before + 0.004 * online.weight.detach())
 
+    def prediction_fixture(self):
+        bank = PredictionBank()
+        model = PredictionEncoder()
+        teacher = copy.deepcopy(model).eval()
+        pool = warm.TailCode(np.ones(64, dtype=bool), channels=3, latent=14, units=10)
+        pool(model._encode(bank.images(np.arange(8), "cpu"), 2, None))
+        return bank, model, teacher, pool
+
+    def test_uniform_prediction_pairs_clean_teacher_with_jittered_online_views(self):
+        bank, model, teacher, pool = self.prediction_fixture()
+        indices, clean, moved = warm.draw_prediction_batch(
+            bank, 8, "cpu", np.random.default_rng(45), np.random.default_rng(46), 1, 3
+        )
+        self.assertEqual(len(np.unique(indices)), 8)
+        for view in range(2):
+            torch.testing.assert_close(clean.chunk(2)[view], bank.images_by_view[view, indices])
+        self.assertFalse(torch.equal(clean, moved))
+        pair = warm.prediction_code(model, pool, moved, 10)
+        gap = warm.target_gap(teacher, clean)
+        torch.testing.assert_close(model.inputs[-1], moved)
+        torch.testing.assert_close(teacher.inputs[-1], clean)
+        self.assertEqual(tuple(pair.shape), (2, 8, 10))
+        self.assertFalse(gap.requires_grad)
+        decoders = warm.prediction_decoders(10, 3)
+        warm.cross_view_prediction(pair, gap, decoders).backward()
+        for layer in model.views:
+            self.assertGreater(float(layer.weight.grad.abs().sum()), 0)
+        self.assertGreater(float(pool.head[-1].weight.grad[:10].abs().sum()), 0)
+        self.assertEqual(float(pool.head[-1].weight.grad[10:].abs().sum()), 0)
+        self.assertTrue(all(p.grad is None for p in teacher.parameters()))
+        self.assertTrue(all(p.grad is not None for p in decoders.parameters()))
+
+    def test_uniform_extra_pass_keeps_running_buffers_and_batch_normalization(self):
+        bank, model, _, pool = self.prediction_fixture()
+        buffers = {name: value.clone() for name, value in pool.named_buffers()}
+        inputs, outputs = [], []
+
+        def capture(_, args, output):
+            inputs.append(args[0])
+            outputs.append(output)
+
+        handle = pool.head.register_forward_hook(capture)
+        try:
+            pair = warm.prediction_code(model, pool, bank.images(np.arange(8, 16), "cpu") + 3, 10)
+        finally:
+            handle.remove()
+        for name, value in pool.named_buffers():
+            self.assertTrue(torch.equal(value, buffers[name]), name)
+        for view in range(2):
+            torch.testing.assert_close(inputs[view].mean(0), torch.zeros_like(inputs[view][0]), atol=2e-5, rtol=0)
+            torch.testing.assert_close(pair[view], outputs[view][:, :10])
+        self.assertTrue(pool.training)
+        self.assertTrue(all(gauge.training for gauge in pool.gauges))
+
+    def test_uniform_subject_draws_do_not_depend_on_augmentation_draws(self):
+        bank = PredictionBank()
+        first, second = np.random.default_rng(45), np.random.default_rng(45)
+        aug_first, aug_second = np.random.default_rng(46), np.random.default_rng(99)
+        for _ in range(4):
+            expected = warm.draw_prediction_batch(bank, 8, "cpu", first, aug_first, 0, 0)
+            actual = warm.draw_prediction_batch(bank, 8, "cpu", second, aug_second, 1, 3)
+            np.testing.assert_array_equal(actual[0], expected[0])
+            torch.testing.assert_close(actual[1], expected[1])
+            self.assertEqual(len(np.unique(actual[0])), 8)
+        repeated = [np.random.default_rng(45), np.random.default_rng(46)]
+        again = [np.random.default_rng(45), np.random.default_rng(46)]
+        for _ in range(3):
+            left = warm.draw_prediction_batch(bank, 8, "cpu", *repeated, 1, 3)
+            right = warm.draw_prediction_batch(bank, 8, "cpu", *again, 1, 3)
+            np.testing.assert_array_equal(left[0], right[0])
+            torch.testing.assert_close(left[2], right[2], rtol=0, atol=0)
+
+    def test_prediction_jitter_is_independent_between_views(self):
+        bank = PredictionBank()
+        bank.images_by_view[1].copy_(bank.images_by_view[0])
+        _, clean, moved = warm.draw_prediction_batch(
+            bank, 8, "cpu", np.random.default_rng(45), np.random.default_rng(46), 1, 3
+        )
+        torch.testing.assert_close(*clean.chunk(2))
+        self.assertFalse(torch.equal(*moved.chunk(2)))
+
     def test_options_need_a_weight_tailcode_and_infonce(self):
         base = ["warm.py", "bank", "/nonexistent/stage33_out", "cold", "2", "1", "--patch-weight", "0"]
         cases = [
@@ -110,6 +213,38 @@ class WarmPredictionTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "--predict"):
                     warm.main()
         self.assertFalse(Path("/nonexistent/stage33_out").exists())
+
+    def test_uniform_prediction_rejects_unsupported_options_before_writing(self):
+        base = [
+            "warm.py",
+            "bank",
+            "/nonexistent/stage45_out",
+            "cold",
+            "2",
+            "1",
+            "--pool",
+            "tail",
+            "--patch-weight",
+            "0",
+            "--predict-weight",
+            "1",
+            "--predict-batches",
+            "uniform",
+        ]
+        cases = [
+            ["--predict-weight", "0"],
+            ["--gauge", "running"],
+            ["--patch-weight", "1"],
+            ["--uniform", "--remainder-units", "2"],
+            ["--half-views", "x", "--half-units", "4"],
+            ["--group-dropout", "0.1"],
+            ["--jitter", "1", "--shared-jitter"],
+        ]
+        for extra in cases:
+            with self.subTest(extra=extra), mock.patch.object(sys, "argv", base + extra):
+                with self.assertRaisesRegex(ValueError, "--predict"):
+                    warm.main()
+        self.assertFalse(Path("/nonexistent/stage45_out").exists())
 
 
 if __name__ == "__main__":

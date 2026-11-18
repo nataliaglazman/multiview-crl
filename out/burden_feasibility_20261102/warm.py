@@ -74,6 +74,12 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 units predicts at most N directions of the other view's GAP, which spreads the shared latents over more
                 than that; through the MLP a code that holds the latents in any invertible form predicts all of them.
                 Needs --predict-weight. Default 0: the linear map alone.
+  --predict-batches uniform  draw a separate uniform subject batch for prediction, through the same backbone, pool
+                and content units. Its online inputs get independent jitter; its targets use the unjittered images.
+                The contrastive batches alone update the pool's running statistics. Both passes still use their own
+                batch normalization, with one optimizer and teacher update per step. Default same: reuse the
+                contrastive batch. Needs prediction, the batch gauge and no patch loss, half views, remainder units,
+                group dropout or shared jitter.
   --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
@@ -92,7 +98,8 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
         [--jitter V] [--rotate D] [--shared-jitter] [--patch-weight W] [--content-units N] [--seed S]
         [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]
          [--remainder-space main|gap]] [--critic-weights main|remainder|both [--critic-lr LR]] [--supervise volume]
-        [--predict-weight W [--predict-momentum M] [--predict-ridge R] [--predict-hidden H]]
+        [--predict-weight W [--predict-momentum M] [--predict-ridge R] [--predict-hidden H]
+         [--predict-batches same|uniform]]
 """
 
 import argparse
@@ -466,6 +473,23 @@ def hard_negative_infonce(code, units, tau, concentration, sim, weight=None):
     return total
 
 
+def bridge_infonce(code, units, entropy_units, tau, sim):
+    """--entropy-units, the bridge: the recipe's InfoNCE with its alignment on all ``units`` and its entropy on the first
+    ``entropy_units`` alone. Per direction, the positive is the cosine of the two views' whole standardized codes, and
+    the log-sum-exp runs over the cosines of their first ``entropy_units`` with every subject of the other view; both
+    directions summed. Alignment makes every unit content-only at any width; the entropy on a block as wide as the
+    shared latents makes that block a bijection of them, so the whole code is an embedding. ``entropy_units == units``
+    gives the recipe's loss."""
+    b = code.shape[0] // 2
+    hz = T.standardize_contrastive_code(torch.stack([code[:b, :units], code[b:, :units]]))
+    total = 0.0
+    for i, j in ((0, 1), (1, 0)):
+        pos = sim(hz[i], hz[j]) / tau
+        cos = sim(hz[i, :, None, :entropy_units], hz[j, None, :, :entropy_units]) / tau
+        total = total + (torch.logsumexp(cos, 1) - pos).mean()
+    return total
+
+
 def jitter(x, shift, degrees, rng, shared=False):
     """Each row of (N, C, D, H, W) cubic volumes moved by its own random rigid transform, every channel alike: shifts
     up to ``shift`` voxels and rotations up to ``degrees`` about each axis, trilinear, zero outside. ``shared`` reads
@@ -483,6 +507,22 @@ def jitter(x, shift, degrees, rng, shared=False):
         theta = np.concatenate([theta, theta])
     grid = F.affine_grid(torch.as_tensor(theta, dtype=x.dtype, device=x.device), list(x.shape), align_corners=False)
     return F.grid_sample(x, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+
+
+def draw_prediction_batch(bank, batch_size, device, subject_rng, jitter_rng, shift, degrees):
+    """One uniform subject set in both views, clean for the teacher and independently jittered for the online code."""
+    indices = subject_rng.choice(len(bank.vox), batch_size, replace=False)
+    clean = bank.images(indices, device)
+    augmented = jitter(clean, shift, degrees, jitter_rng) if shift or degrees else clean
+    return indices, clean, augmented
+
+
+def prediction_code(model, pool, images, units):
+    """The same exported units, with each view's batch gauge but without updating the pool's running statistics."""
+    maps = model._encode(images, 2, None)
+    return torch.stack(
+        [pool.head(pool.pooled_view(part, view, update=False))[:, :units] for view, part in enumerate(maps.chunk(2))]
+    )
 
 
 def widen_input(model):
@@ -717,6 +757,18 @@ def main():
     p.add_argument(
         "--predict-hidden", type=int, default=0, help="Hidden width of an MLP added to each prediction map (0: linear)"
     )
+    p.add_argument(
+        "--predict-batches",
+        choices=("same", "uniform"),
+        default="same",
+        help="Prediction subjects: reuse the contrastive batch or draw a separate uniform batch through the same code",
+    )
+    p.add_argument(
+        "--entropy-units",
+        type=int,
+        default=None,
+        help="The bridge: InfoNCE's entropy on the code's first N units only, its alignment on all of them",
+    )
     a = p.parse_args()
     if a.uniform and a.code_batches:
         raise ValueError("--uniform and --code-batches are different batch rules")
@@ -849,6 +901,37 @@ def main():
                 "--predict-weight needs TailCode pooling and InfoNCE, neither --queue nor --supervise, a momentum in"
                 " [0, 1) and a positive ridge"
             )
+    if a.predict_batches == "uniform" and (
+        not a.predict_weight
+        or a.gauge != "batch"
+        or a.patch_weight != 0
+        or a.half_views is not None
+        or a.remainder_units is not None
+        or a.group_dropout
+        or a.shared_jitter
+    ):
+        raise ValueError(
+            "--predict-batches uniform needs a positive --predict-weight, --gauge batch and --patch-weight 0,"
+            " without --half-views, --remainder-units, --group-dropout or --shared-jitter"
+        )
+    if a.entropy_units is not None and (
+        a.pool == "gap"
+        or a.patch_weight != 0
+        or a.contrastive_loss_type != "infonce"
+        or not 1 <= a.entropy_units < width
+        or a.queue
+        or a.hard_negatives
+        or a.critic_weights is not None
+        or a.half_views is not None
+        or a.remainder_units is not None
+        or a.supervise
+        or a.decorrelate
+    ):
+        raise ValueError(
+            f"--entropy-units needs TailCode pooling, --patch-weight 0, InfoNCE and 1 <= N < the code's {width} units,"
+            " and none of --queue, --hard-negatives, --critic-weights, --half-views, --remainder-units, --supervise"
+            " or --decorrelate"
+        )
     a.out.mkdir(parents=True, exist_ok=False)
     if a.t1key == "t1_04":
         args.synthetic_lesion_t1_value = 0.4
@@ -868,6 +951,10 @@ def main():
         print("half views along", a.half_views, "units shared with FLAIR", a.half_units, flush=True)
     torch.manual_seed(args.model_seed)
     model = T.build_encoder(args)
+    if a.predict_batches == "uniform" and any(
+        isinstance(module, nn.modules.batchnorm._BatchNorm) and module.track_running_stats for module in model.modules()
+    ):
+        raise ValueError("--predict-batches uniform does not support backbone BatchNorm running statistics")
     if a.residual:
         widen_input(model)
     if a.init != "cold":
@@ -898,6 +985,8 @@ def main():
         pool = pool.to(a.device)
         print("interior cells", int(pool.keep.sum()), "tail thresholds", pool.thresholds, "gauge", a.gauge, flush=True)
         print("code units", units, flush=True)
+        if a.entropy_units:
+            print("bridge: alignment on all", units, "units, entropy on the first", a.entropy_units, flush=True)
         if rest:
             print(
                 "remainder units",
@@ -956,6 +1045,8 @@ def main():
             a.predict_momentum,
             "whitening ridge",
             a.predict_ridge,
+            "batches",
+            a.predict_batches,
             "initial target spread",
             whitening.spread(),
             flush=True,
@@ -981,6 +1072,10 @@ def main():
     aug = np.random.default_rng(None if args.seed is None else args.seed + 1)
     remainder = {"sampler": None, "spread": None}
     aug_rest = np.random.default_rng(None if args.seed is None else args.seed + 2)
+    predict_subjects, predict_aug = None, None
+    if a.predict_batches == "uniform":
+        predict_subjects = np.random.default_rng(None if args.seed is None else args.seed + 3)
+        predict_aug = np.random.default_rng(None if args.seed is None else args.seed + 4)
 
     def rebuild_remainder(step):
         """Neighbourhoods for the remainder units' batches, on both views' current main-unit code or backbone GAP."""
@@ -1037,6 +1132,13 @@ def main():
             if frozen is not None:
                 frozen.requires_grad_(False)
     report = {"args": {k: str(v) for k, v in vars(a).items()}, "history": []}
+    if a.predict_batches == "uniform":
+        report["prediction_batch_note"] = (
+            "Separate uniform subjects and independent jitter; same shared head and exported units. "
+            "Contrastive batches alone update pool statistics; both codes remain batch-standardized. "
+            "Gradients accumulate for one optimizer step; whitening and teacher each update once per step."
+        )
+        print(report["prediction_batch_note"], flush=True)
     if volume is not None:
         report["volume_mean_sd"] = list(volume)
 
@@ -1121,6 +1223,10 @@ def main():
                 terms = {"global": hard_negative_infonce(code, units, args.tau, 0.0, sim, critic["main"]())}
                 with torch.no_grad():  # the equal-weight loss, for comparison with every other arm
                     terms["unweighted"] = T.contrastive_loss(code, model, args, sim, crit, None)
+            elif a.entropy_units:
+                terms = {"bridge": bridge_infonce(code, units, a.entropy_units, args.tau, sim)}
+                with torch.no_grad():  # the recipe's loss on this code, for comparison with every other arm
+                    terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
             else:
                 terms = {"global": T.contrastive_loss(code, model, args, sim, crit, None)}
             if halves is not None:
@@ -1144,7 +1250,10 @@ def main():
                 weight = critic["remainder"]() if "remainder" in critic else None
                 terms["remainder"] = hard_negative_infonce(coder[:, units:], rest, args.tau, 0.0, sim, weight)
         if queue is not None or pool is not None:
-            loss = terms["supervised"] if a.supervise else terms["hard"] if a.hard_negatives else terms["global"]
+            if a.supervise:
+                loss = terms["supervised"]
+            else:
+                loss = terms["hard"] if a.hard_negatives else terms["bridge"] if a.entropy_units else terms["global"]
             if halves is not None:
                 loss = loss + terms["half"]
             if rest:
@@ -1157,13 +1266,28 @@ def main():
         if a.decorrelate:
             terms["decor"] = cross_view_decorrelation(*pair)
             loss = loss + a.decorrelate * terms["decor"]
-        if decoders is not None:
-            gap = target_gap(target_model, clean)
+        if a.predict_batches == "uniform":
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            terms = {name: value.detach() for name, value in terms.items()}
+            del h, code, pair, loss, x, clean, whole_t1
+            _, predict_clean, predict_images = draw_prediction_batch(
+                train, args.batch_size, a.device, predict_subjects, predict_aug, a.jitter, a.rotate
+            )
+            predict_pair = prediction_code(model, pool, predict_images, units)
+            gap = target_gap(target_model, predict_clean)
             whitening.update(gap)
-            terms["predict"] = cross_view_prediction(pair, whitening(gap), decoders)
-            loss = loss + a.predict_weight * terms["predict"]
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+            terms["predict"] = cross_view_prediction(predict_pair, whitening(gap), decoders)
+            (a.predict_weight * terms["predict"]).backward()
+            del predict_pair, predict_clean, predict_images, gap
+        else:
+            if decoders is not None:
+                gap = target_gap(target_model, clean)
+                whitening.update(gap)
+                terms["predict"] = cross_view_prediction(pair, whitening(gap), decoders)
+                loss = loss + a.predict_weight * terms["predict"]
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
         torch.nn.utils.clip_grad_norm_(parameters, args.grad_clip)
         optimizer.step()
         if target_model is not None:
@@ -1197,6 +1321,7 @@ def main():
                     "decoders": decoders.state_dict(),
                     "whitening": whitening.state(),
                     "hidden": a.predict_hidden,
+                    "batches": a.predict_batches,
                 }
             torch.save(state, a.out / "model.pt")
     print("DONE", flush=True)

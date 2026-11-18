@@ -8,10 +8,13 @@ and what to do next. Repo-wide conventions are in `CLAUDE.md` at the root. They 
 
 - **The model.** The encoder-only multiview contrastive model on paired synthetic T1/FLAIR brain MRI.
   - Each view has its own backbone.
-  - A shared head turns the pooled features into a 14-unit content code.
+  - A shared head turns the pooled features into the content code: 14 units at first, 24 in the plan adopted on 18
+    Nov (section 10).
   - InfoNCE aligns the two views' codes.
 - **The target.** Get the burden (total volume) of one small white-matter lesion into the code, with no labels and
   without losing the anatomy factors.
+  - Under the 18 Nov plan this tests whether a label-free code is complete: whether it holds a weak, focal factor at
+    all. The causal variables come from anchors, not from the code's units.
 - **The hard case.** T1 lesion contrast 0.4: faint in T1, bright in FLAIR.
 - **Constraints set by the user.** These are not negotiable:
   - **Generic levers only.** A method must find any hard feature, not just the lesion. Lesion-specific tools (blob
@@ -20,9 +23,13 @@ and what to do next. Repo-wide conventions are in `CLAUDE.md` at the root. They 
   - **One shared route.** Every factor is read through one shared pooling route, never per-factor heads.
   - **Real-data levers only.** The work has to transfer to ADNI, where the subject count is fixed. "More subjects"
     is a diagnostic, never the proposal. Augmentation-type levers are fine.
-  - **Matched width (16 Nov).** The code has 10 units, one per latent the views share (section 9, stage 35), to fit
-    Yao's theory. "Keep 24 units" is a diagnostic or a stress-case finding, not the answer. The user's reason (17 Nov):
-    the paper's causal reasoning needs the right number of units. Stage 41 tests whether it does.
+  - **Width and causal variables (18 Nov; replaces matched width).** The code is a 24-unit embedding of the shared
+    anatomy, its width set by a label-free agreement rule. The causal variables come from anchors (measurements), not
+    from the code's units (section 10, the plan).
+    - Matched width (16 Nov: 10 units, one per shared latent, to fit Yao's theory) is dropped. The user's reason was
+      that the causal reasoning needs the right number of units. Stages 41–44 showed the units are mixtures at every
+      width, so the number belongs to the causal variables; matched width costs every causal task; and ADNI has no
+      finite shared block to match. The 10-unit results stay as a finite-sample finding.
   - **Judge a 10-unit lever on every weak factor (17 Nov).** The narrow code drops the own parts of ventricle,
     thickness and sulcal as well as burden's (item 30). The user declined white-matter normalisation because it
     targets the lesion.
@@ -160,6 +167,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     inside that term's InfoNCE cosine, starting at 1, so a unit whose views agree poorly can count for less (stage 31).
   - `--predict-weight W`: each view's code predicts the other view's whitened GAP from a momentum copy (stage 33).
     `--predict-hidden H` adds a one-hidden-layer MLP of width H to each linear map, starting at zero (stage 36).
+  - `--entropy-units N`, the bridge (stage 46): InfoNCE's alignment on all code units and its entropy (the log-sum-exp
+    over negatives) on the first N only. `bridge_view.py` writes those N units out as a run of their own.
   - `--hard-negatives G`, `--seed S`.
   - Older levers: `--queue`, `--gauge running`, `--group-dropout`, `--decorrelate`, `--shared-jitter`, `--uniform`.
   - Each option refuses combinations it can't handle.
@@ -179,6 +188,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
 | `ica_simulation.py` | no images, no training: the bank's SCM mixed into a 24-unit code; whether FastICA recovers the own parts (by noise distribution, link and harmonic strength) and whether DirectLiNGAM finds the order from the factors and from a mixed code. Item 33 |
 | `factoriser.py` | no training: the concealed-factor benchmark of `paper/factor-discovery-framework.tex` on a run's frozen code and its untrained twin. Anchored slots (ridge readouts of the `--anchors`), a label-free count of the novel shared factors (cross-view agreement of the code's residuals, greedy non-linear deflation, a redundancy check), their naming against the concealed factors' own parts and the lesion centre (CCA order, ICA, random rotations), and PC on the anchors and the components against what PC can find among the anchors. `--anchor-source measured` subtracts the anchors' measured values instead of the readouts. A trace shows each direction the count examined with its correlation to each concealed target, and each target's R² from the dropped directions. Stages 42 and 44 |
+| `bridge_view.py` | no training: the first N code units of a `--entropy-units` run (the bridge) written out as a run of their own, with TailCode's head cut to those outputs and `--content-units N` in its report, so every audit reads them unchanged. Stage 46 |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
 | `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
 | `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). Section 7, item 24 |
@@ -560,7 +570,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       section 8.
 
 27. **At 10 units the lever is how sharply the views show burden, not the objective (16 Nov; a simulation and one
-    local no-training check).** The user wants 10 units, the matched width (section 1).
+    local no-training check).** The user then wanted 10 units, the matched width (dropped 18 Nov, section 1).
     - **Simulation.** `bottleneck_check.py`'s fit on made-up features: nine sharp shared latents, one faint one (58%
       explained by a parent and read with noise in each view), and harmonics of the sharp ones in the targets. A
       harmonic is a non-linear function of a sharp latent, such as a place field over position. Tuned until it showed
@@ -842,6 +852,50 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       (lr, the lesion centre) at 70–90% of the full code and loses or dilutes the weak own parts, burden's among them.
       Untested: residualizing on the anchors' measured values (ADNI has them for every subject) instead of the code's
       readouts of them (section 10).
+36. **The weak own parts are lost at the redundancy cut, not through the anchors' readouts (stage 44, read 18 Nov).**
+    Stage 42's codes and anchor splits again, with the anchors' measured values in place of the code's readouts, and
+    both arms traced: each direction's |r| with each target, and each target's R² from the dropped directions. T1 /
+    FLAIR.
+    - **The readouts arm reproduces stage 42 exactly.** Where the own parts went, 24 units:
+      - Default anchors: burden's own part is .04 / .03 in the block and .21 / .23 in the dropped directions (full
+        code .48 / .47). Its clearest direction agreed at .79 and was dropped at R² .34 (|r| .33 / .35). Sulcal's is
+        .10 / .10 in the block and .39 / .45 dropped (full .52 / .60), mostly in one direction at .86, dropped at R² .26
+        (|r| .53 / .55).
+      - Burden an anchor: thickness's own part was counted, in one direction at .92 with R² .10 (|r| .48 / .50; block
+        .33 / .36 of .63 / .64).
+    - **Measured anchors do not keep them.**
+      - 24 units, default: 7 components. Burden .03 / .03 in the block and .26 / .28 dropped (its direction at .78,
+        dropped at R² .24); sulcal .18 / .17 and .31 / .36. lr and the lesion centre come out a little better than with
+        readouts (lr .84 / .86, centre .69–.82).
+      - 24 units, burden an anchor: 10 components, four unmatched. Thickness's own part is now dropped (its direction
+        at .94, R² .21, |r| .51 / .54; block .02 / .04, dropped .34 / .34).
+      - 10 units, default: burden's own part sits in one direction at .91 with |r| .50 / .52, dropped at R² .22 (block
+        .04 / .05, dropped .31 / .38).
+      - 10 units, burden an anchor: the one arm where every target comes out. 8 components, two unmatched; thickness's
+        own part .25 / .24 and sulcal's .19 / .16, above the code's own linear readout (.20 / .19 and .07 / .07).
+        Subtracting the exact parents uncovers own parts a linear readout cannot reach. The measured values supply
+        that gain, so it is supervised, not label-free.
+    - **Floors.** Readouts: 0 components in all four. Measured: 1 in all four (agreement .51–.63, R² .08–.12). In the
+      24-unit floor that component correlates with burden's own part (.26 / .35): an untrained network sees the lesion,
+      and once ventricle is subtracted exactly, burden's own part shows.
+    - **Graph.** With measured anchors the edges among the anchors are the true anchors' own; the components add only
+      chance edges (F1 .55–.69).
+    - **Reading.**
+      - The readouts are not the cause: measured anchors lose the same own parts, and thickness's as well.
+      - Agreement is not the cause either: the lost own parts sit in directions agreeing at .78–.94, and the count
+        stopped at directions that carry no target.
+      - The cause is the redundancy cut acting on mixed directions. Each weak own part shares its direction with
+        content the other view's anchors and counted factors partly predict (R² .20–.34 when dropped). The own part
+        explains only 10–30% of that direction (|r| .33–.55), so the whole direction goes. Sharper anchors predict the
+        other share better, which is why measured anchors drop thickness too.
+      - The 24-unit code holds much shared content that is none of the targets: 10 of the 12 directions dropped in
+        the default readouts arm correlate with no target at |r| ≥ .3, yet agree at .55–.94. Subtracting only the
+        predictable part of a dropped direction would keep that content too and inflate the count.
+      - Even all the shared directions together hold only about half of burden's own part at 24 units (block plus
+        dropped, .25–.31 of .48); the rest lies in directions agreeing below .5. Sulcal's is mostly there (.49–.55).
+      - So the label-free count cannot split the weak own parts out of this code's novel block, as section 8 expects
+        (two views identify the block). A factor-level split needs more structure (step 3b) or anchors for those
+        factors.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -849,6 +903,15 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   latent), patch loss off, the InfoNCE objective.
 - **Not covered:** code batches (any neighbourhood rule), hard negatives.
 - **Silent:** finite subjects (memorisation), and code width versus the size of the shared block.
+- **The claim adopted on 18 Nov (section 10's plan).**
+  - The code is an embedding of the shared anatomy: it depends on the shared content only, and the content can be
+    recovered from it. This is what `paper/factor-discovery-framework.tex` targets (its identification section).
+  - Alignment makes a code content-only at any width. At 24 units the content is recoverable in practice: every
+    factor is readable, and stage 34 found no style.
+  - A formal version on the synthetic bank is the bridge (section 10): align all units and put the entropy term on a
+    learned 10-unit projection. At the optimum the projection is Yao's bijection, and the whole code an embedding.
+  - Factors and their graph need identifying information from outside the two views. The framework says so (a block
+    does not determine its internal factors), and stages 41–44 show it. Here that information comes from anchors.
 - **Matched width costs precision at finite data (stages 35–40).** The shared block is 10 latents (seven SCM factors
   and the lesion's x, y, z; checked in the generator, items 28–30), spread over more than 24 linear directions of the
   features (linear CCA, item 9).
@@ -895,7 +958,9 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     the two views' codes under a whitening constraint, which identifies the shared block. Barlow Twins is a close
     relative.
 - **Label-free factor-level discovery** needs views that share different subsets of factors, or interventions.
-  Two views that share everything identify only the block.
+  Two views that share everything identify only the block. Stages 42 and 44 show it on the trained codes (item 36):
+  a label-free count beside the anchors keeps the strong novel factors and loses the weak own parts in directions
+  mixed with other shared content.
 - **Anchors identify a concealed factor's information, not its place in the graph** (found building stage 42, 17
   Nov). A new shared direction found beside the anchors is identified only up to adding a function of the anchors:
   the code reads P and P + h(anchors) equally well, and both agree across views. The label-free choice, the residual
@@ -906,8 +971,46 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 17 Nov
 
-- **Stage 44 (built and checked locally 17 Nov, not yet run on the PC; no training): why stage 42's count lost the
-  weak own parts.** `factoriser.py` on stage 42's two codes (24 and 10 units) and both anchor splits.
+- **Stage 46 (built and checked locally 18 Nov, not yet run on the PC): the bridge.** The plan's step 1 (section 10):
+  does a 24-unit code trained the theory's way hold what stage 33's code holds?
+  - **Arm:** stage 33's 24-unit prediction arm (uniform batches, prediction weight 1, seed 42, 20,000 steps,
+    `bank_causal_nofield`) with `--entropy-units 10`: InfoNCE's alignment on all 24 units, its entropy only on the
+    first 10.
+  - **Why this is the theory's version** (section 8). Alignment makes every unit content-only at any width. The
+    entropy on a block as wide as the shared latents (10) makes that block a bijection of them, so the whole code is
+    an embedding. With the entropy on all 24 aligned units, as in the recipe, the theory's argument does not apply: an
+    aligned 24-unit code of 10 latents has no finite entropy.
+  - **Reports** (`causal/stage46/`): own variation (with boosting), the precision audit, the code audit and the style
+    audit on the bridge's 24-unit code, its first 10 units (`bridge_view.py`), stage 33's 24-unit code, and the
+    10-unit codes of stages 35 and 38 (seeds 42 and 2; their entries reused from stage 43).
+  - **Reading:**
+    - The bridge passes if its 24-unit code holds the factors as stage 33's does (own parts within seed noise, about
+      .10; volume precision within a voxel or two) and carries no style. The paper can then state the formal claim
+      with the recipe's numbers.
+    - Its first 10 units are a matched-width code trained with the 24-unit code's support. If they hold the weak own
+      parts better than the standalone 10-unit codes (T1: ventricle .29, thickness .20, sulcal .07, burden .33), the
+      bridge also answers the 10-unit question in a form the theory covers (stage 45).
+  - **Checked locally:**
+    - `tests/test_warm_bridge.py`, 4 tests: with the entropy on every unit the loss is the recipe's; it equals
+      alignment on all units plus the entropy on the block; units past the block get only the alignment's gradient;
+      the view exports exactly the first units. Stage 45's 14 tests (`tests/test_warm_prediction.py`) still pass.
+    - A 2-step bridge arm on the Mac's copy of `bank_causal_nofield` trains and saves, and its log states the split.
+      `bridge_view.py` writes its first 10 units, and `code_audit.py` reads both runs (24 and 10 units) in about 12 min.
+      A disallowed combination (`--entropy-units 24` on a 24-unit code) stops with its message.
+    - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
+      four reports.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 45 (built by Codex 18 Nov, not yet run): two more 10-unit arms on neighbour batches.** Codex's reading of
+  stage 43 (not yet recorded in section 7): the neighbour arm raised thickness's own part from .20 / .19 to .48 / .49
+  and its backbone reading from .50 / .50 to .68 / .67. Sulcal stays low (.16 / .16 against .52 / .60 at 24 units),
+  ventricle rises only modestly, burden's volume precision worsens, and temporal and lr fall against the matching seed.
+  - **Arms:** the neighbour arm again with seed 2; and neighbour batches for InfoNCE with a separate uniform batch for
+    prediction (`--predict-batches uniform`, seed 42). Prediction weight 1, 20,000 steps, field-off bank. The second
+    tests whether the anatomy gain survives without the burden-precision cost.
+  - The plan (section 10) stops the 10-unit search; Codex argues stage 43 reopens it. The user decides.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 45`.
+- **Stage 44 (run and read 18 Nov, section 7, item 36; no training): why stage 42's count lost the weak own parts.**
+  `factoriser.py` on stage 42's two codes (24 and 10 units) and both anchor splits.
   - **Why:** item 35. The suspected fault is the anchors' readouts. The code holds the anchors more fully than a ridge
     readout captures (R² .79–.95), and the shared anatomy the readouts miss may carry the weak own parts away.
   - **Arms:**
@@ -1483,6 +1586,41 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 10. Recent stages and next steps
 
+**The plan (adopted by the user on 18 Nov).** It replaces matched width and the 10-unit lever search. Theory and
+stages 41–44 say two views identify the shared anatomy as a block, not its factors (section 8). Measurements are the
+identifying information available here.
+1. **Representation.** Stage 33's 24-unit prediction code, claimed as an embedding of the shared anatomy.
+   - The width comes from a label-free rule, the same on ADNI: count the frozen backbone's cross-view canonical
+     directions that agree above about .5. On stage 19's CCA that is just under 24.
+   - For a formal guarantee on the synthetic bank, train one arm of the bridge (align all units, the entropy term on a
+     10-unit block) and show it matches the current recipe. Built as stage 46 (section 9). The block is the code's
+     first 10 units; with the head learned, that is the same as a learned 10-unit projection.
+2. **Causal variables from anchors.**
+   - Synthetic: all seven factors anchored, as in stage 41's decoded discovery (24 units: skeleton F1 .84 against the
+     truth's .85, the same 3 orientation errors).
+   - ADNI: the measured values are the nodes (FreeSurfer whole brain, ventricles, cortical thickness and hippocampus;
+     the UC Davis WMH volume for burden). The code's readout of each serves as a second, independent measurement,
+     because error in a single noisy measurement creates false edges (the 10-unit readouts in stage 42).
+3. **One block node for the rest:** the code minus its fit on the anchors. Use it to adjust for confounding and to test
+   links to outside variables such as cognition and diagnosis. Do not split it, and expect no edges between it and the
+   anchors: those are absorbed (section 8).
+4. **Discovery at the block level.** Stages 42 and 44 are the controlled evidence. Trained codes find shared content
+   beyond the anchors and their untrained twins do not (readout anchors); strong omitted factors come out as
+   directions; weak ones stay in the block. The framework names this an informative outcome.
+5. **Graph:** FCI (partial ancestral graphs) wherever hidden confounding is plausible, as it is once anything is
+   concealed.
+- **Stopped:** the 10-unit lever search (stage 43 may finish; the 10-unit result becomes a finite-sample finding for
+  the paper: matched width keeps the strong factors and drops the weak ones) and tuning the label-free count (the loss
+  is mixing, item 36).
+- **Burden's role:** the completeness test of the representation. At 24 units its own part is .48 / .47, and .60 / .58
+  with gain off (item 22).
+- **Later, if individual factors are wanted without labels:** treat scans from different ADNI visits as extra views.
+  Pairs across visits share the stable factors (head size, asymmetry) but not the changing ones (atrophy, WMH growth),
+  so Yao's partial-observability result splits the block into stable and changing parts. Check protocol changes
+  between ADNI phases first.
+- **Benchmark realism:** the sphere lesion's position takes about half of a narrow code (item 29) and has no ADNI
+  counterpart. A diffuse WMH-like burden would bring the bank closer to ADNI. This checks the benchmark, not the method.
+
 **Next, after stage 34's style and precision audits (16 Nov).** The numbered items below were written with the field
 on.
 - **Read `causal/stage34/own_variation.txt` and `code_audit.txt`.** Stage 33 passed all four success tests at weight
@@ -1497,10 +1635,11 @@ on.
   dilutes the weak own parts (burden .04 / .03 in the block against .48 / .47 in the full code). At 10 units the
   width fixes the count. Step 3b (spatial footprints) stays the only route here to placing a concealed factor in the
   graph.
-- **Run stage 44** (section 9; built 17 Nov): `bash out/burden_feasibility_20261102/run_pc.sh 44`, then paste the four
-  reports in `causal/stage44/`. It tests whether the anchors' readouts caused stage 42's loss, and traces where each
-  concealed target went.
-- **Implementation proposal (17 Nov; stage 41's discovery supports it, item 34).** Set the number of units at the
+- **Stage 44 is read** (item 36). The anchors' readouts did not cause stage 42's loss: the weak own parts go out with
+  dropped directions they share with other, partly predictable content, whichever anchors are used. Decided 18 Nov:
+  stop the label-free split at the block (the plan above). Step 3b (spatial footprints) is not built; if it is ever
+  taken up, burden and the lesion centre both act where the lesion is, so their footprints overlap.
+- **Implementation proposal (17 Nov; adopted 18 Nov as the plan above).** Set the number of units at the
   causal variables, not at the encoder, as `paper/factor-discovery-framework.tex` already separates them:
   - representation: the 24-unit prediction code, claimed as an embedding of the content block;
   - a factoriser from the frozen code to K slots, one per causal variable, with K and slot sizes chosen on validation
@@ -1517,8 +1656,8 @@ on.
   - a write-up of stages 35–40 for the paper (section 8's matched-width note).
   - Reopened for the anatomy children (17 Nov): stage 43 (section 9) tests two levers judged on every factor the
     narrow code drops, not on burden alone.
-- **Stage 38 is read** (item 30) but for `style_audit.txt` (do the new codes carry style?). The user wants 10 units
-  (section 1), so "keep 24" below is superseded as the goal.
+- **Stage 38 is read** (item 30) but for `style_audit.txt` (do the new codes carry style?). The plan above (18 Nov)
+  adopts 24 units, so the 10-unit goal in the bullets below is history.
 - **Stage 37 is read** (items 28–29). Its `normative_components_*.txt` (the gain-off table) is unread; the
   32-component residual is dropped either way.
 - **Candidates beyond stage 38 (17 Nov, not built).** Item 29: a 10-unit code spends about half its directions on the
