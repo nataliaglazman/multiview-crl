@@ -977,6 +977,57 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       R² .71 / .69.
     - Stage 46's run keeps its name and its old loss; `--entropy-units` now means the fixed form.
 
+38. **The theory's bridge holds the weak factors no better than a matched-width code (stage 46b, read 18 Nov,
+    `causal/stage46b/`).** One seed. T1 / FLAIR.
+    - **Own parts in the code.** The bridge's 24 units (InfoNCE on the first 11, alignment alone on the other 13,
+      MLP map), then stage 36's 24-unit MLP arm (the same with InfoNCE on all 24), then stage 38's 11-unit code:
+      ventricle .37 / .35, .74 / .73, .38 / .38; burden .38 / .37, .48 / .47, .38 / .38; thickness .34 / .37,
+      .61 / .61, .18 / .16; temporal .64 / .64, .84 / .83, .79 / .78; sulcal .15 / .13, .56 / .55, .11 / .10. Brain
+      .92 / .92 and lr .81 / .80 stay.
+    - Volume error 17.3 / 17.1 voxels (largest third 37.5 / 38.0) against 11.9 / 12.2 (17.5 / 20.0) for stage 36's
+      arm and 16.4 / 15.1 for the 11-unit code. The recipe's InfoNCE on the code ends at 0.50 (stage 36's arm 0.04);
+      top-1 among 1,000 test subjects .950 (.986).
+    - **The first 11 units** hold less than a standalone 11-unit code (ventricle .28, burden .25, temporal .55, brain
+      .24 against .38, .38, .79, .78): brain size moved into the other 13 units. Effective rank 10.6 of 11.
+    - **The 13 aligned-only units collapse.** The whole code's effective rank is 3.5 / 3.3 of 24 (stage 36's arm
+      20.1 / 20.3): those units hold a few copied directions. Neither code carries style.
+    - **The map is not the cause:** stage 36's MLP arm and stage 33's linear arm match at 24 units.
+    - **Reading.** Alignment keeps the extra units content-only, as the theory says, but nothing pays them to hold
+      anything new, so they collapse onto the easiest shared directions. At the theory's optimum they are redundant,
+      and here they are. What buys the recipe's weak factors at 24 units is the entropy term acting on every unit,
+      the part the theory does not cover (an aligned 24-unit code of 10 latents has no finite entropy). The formal
+      bridge cannot carry the recipe's numbers (section 8).
+
+39. **The lesion's position crowded the weak factors out of the narrow code (stage 47, read 18 Nov,
+    `causal/stage47/`).** One seed per arm. The fixed-position bank holds the same subjects and anatomy as the
+    drawn-position one, so the own parts are on one scale. T1 / FLAIR.
+    - **Own parts in the code** (ridge): 10 units on the fixed bank, 8 units on the fixed bank, 10 units on the drawn
+      bank (stage 35), 24 units on the drawn bank (stage 33). Ventricle .49 / .45, .49 / .48, .29 / .30, .71 / .68;
+      burden .46 / .45, .41 / .40, .33 / .34, .48 / .47; thickness .59 / .65, .51 / .50, .20 / .19, .63 / .64;
+      sulcal .50 / .54, .33 / .36, .07 / .07, .52 / .60; temporal .75 / .78, .72 / .73, .78 / .78, .84 / .81; lr
+      .76 / .77, .74 / .76, .79 / .80, .89 / .90. Brain reads .44 / .49 and .57 / .56 by ridge in the fixed-bank
+      codes but .83 and .86 by boosting (drawn: .82 at 10 units, .85 at 24): narrow codes hold it non-linearly.
+    - **What the code holds** (code audit). Per direction, anatomy / lesion .81 / .19 at 10 units and .82 / .22 at 8,
+      against .34 / .54 for 10 units on the drawn bank. Effective rank 9.3–9.4 of 10 and 7.5–7.7 of 8. Cross-view
+      top-1 among 1,000 test subjects .71–.72 against .978: the drawn-bank code's near-perfect identification came
+      from the lesion's position. Neither code carries style.
+    - **The backbone moves too.** GAP own parts in the fixed-bank 10-unit run: thickness .75 / .76, sulcal .69 / .74,
+      ventricle .81 / .73. Drawn bank, 10 units: .50 / .50, .36 / .56, .63 / .62; 24 units: .74 / .72, .66 / .75,
+      .80 / .78. Narrow training on the drawn bank cost the backbone the weak factors as well as the head.
+    - **Volume precision** (code): 11.6 / 11.7 voxels at 10 units and 12.3 / 12.4 at 8 (largest third 11.6 / 10.6
+      and 13.3 / 12.4), against 17.3 / 17.6 (29.4 / 32.0) for 10 units and 12.7 / 13.2 for 24 on the drawn bank.
+    - **Caveat on burden.** With the lesion always in about one place, the backbone reads it more easily (GAP 8–9.5
+      voxels against 10–12), and the normative residual learns it as normal variation: the fixed image filter reads
+      21.4 / 15.3 voxels against 9.0 / 6.6, so it is no ceiling on this bank. Burden's gain is partly easier reading.
+      The anatomy gains are not: the images differ only within 8 voxels of a lesion, and the untrained floors are
+      close.
+    - **Reading.** A narrow code is fragile: one distinctive shared feature, here the randomly placed sphere's
+      position, takes about half of it and crowds out the weaker factors, in the backbone too. Without it the theory's
+      matched width (8 cosine units for 7 latents) keeps every factor's own part at .33–.51, and 10 units reach
+      24 units' levels on thickness, sulcal and burden; ventricle stays below (.49 against .71). Spare width still
+      helps (8 → 10 units: sulcal .33 → .50, thickness .51 → .59 / .65). The matched-width finding of items 26–32 is
+      mostly this benchmark's fingerprint; ADNI has no randomly placed sphere.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -992,11 +1043,16 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     learned projection as wide as the shared block. At the optimum the projection is Yao's bijection, and the whole
     code an embedding. Under warm.py's cosine that block is 11 units, and the prediction map must be flexible: stage
     46b. Stage 46 (10 units, linear map) is outside the theory on both counts (the 10 / 24 discrepancy, below).
+    Stage 46b ran: the formal version holds the weak factors no better than matched width (item 38). It backs the
+    claim's form, not the recipe's numbers.
   - Factors and their graph need identifying information from outside the two views. The framework says so (a block
     does not determine its internal factors), and stages 41–44 show it. Here that information comes from anchors.
 - **Matched width costs precision at finite data (stages 35–40).** The shared block is 10 latents (seven SCM factors
   and the lesion's x, y, z; checked in the generator, items 28–30), spread over more than 24 linear directions of the
   features (linear CCA, item 9).
+  - **Stage 47 qualifies this (item 39).** Most of the loss below is the lesion's position, a near-unique
+    fingerprint that takes about half a narrow code. With the position fixed, 8 cosine units (the matched width for
+    7 latents) keep every factor's own part at .33–.51, and 10 units approach 24 units' levels.
   - A code as wide as the block (10 units, or 11 under the cosine) holds every latent, coarsely. It reads the
     lesion's volume to 15–19 voxels against 12–13 at 24 units on both banks, and drops the own parts of ventricle,
     thickness and sulcal as well as burden's (items 30, 32).
@@ -1044,14 +1100,17 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - **How the paper states it.**
     1. Theorem (Yao): with 11 cosine units, alignment plus entropy gives a bijection (a one-to-one map) of the 10
        shared latents.
-    2. Bridge (stage 46b): alignment on all 24 units, the entropy on the first 11, a flexible prediction map. The
-       code is content-only and contains that bijection, so it is an embedding. Everything the plan uses at the block
-       level (the block node, adjustment for confounding, independence tests) depends only on what the code
-       determines, which is the same for both. Linear tools at finite data (Fisher-Z, ridge) can tell them apart:
-       they favour the wider code, which is easier to read linearly.
-    3. Finding: at matched width the code keeps the strong factors and drops the weak own parts (items 26–32); a
-       latent is kept in proportion to how exactly the views determine it (item 27). At the theory's optimum the
-       extra 13 units are redundant, so their value is finite-sample only. Say so.
+    2. The recipe's 24-unit code: alignment makes it content-only at any width; that it holds the content is
+       measured, not proven. The theory-covered bridge (alignment on all 24, the entropy on 11, a flexible map) is an
+       embedding at the optimum but holds the weak factors no better than matched width (stage 46b, item 38).
+       Everything the plan uses at the block level (the block node, adjustment for confounding, independence tests)
+       depends only on what the code determines. Linear tools at finite data (Fisher-Z, ridge) favour the wider
+       code, which is easier to read linearly.
+    3. Finding: a narrow code is fragile. One distinctive shared feature (here the lesion's position) can take most
+       of it and crowd out the weaker factors (items 29, 39); without such a feature, matched width keeps every
+       factor (item 39). Spare width protects against it, but only when InfoNCE's entropy acts on the extra units
+       (item 38). At the theory's optimum those units are redundant, so their value is finite-sample only. Say so,
+       and do not claim that matched width fails in general.
   - **What 24 measures.** The label-free count is the number of linear canonical directions the views share above
     r .5. A curved 10-dimensional block spans more than 10 linear directions, so 24 is the code's width rule, not an
     estimate of the block's size. On ADNI there is no finite block, so the bridge (which needs its size) is
@@ -1119,7 +1178,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
-- **Stage 47 (built and checked on the PC 18 Nov, not yet run): does the lesion's position crowd the weak factors
+- **Stage 47 (ran 18 Nov; read, item 39: yes, it does): does the lesion's position crowd the weak factors
   out of a narrow code?** About half of a 10-unit code goes to the position, a near-unique fingerprint (item 29).
   Stage 43's code-neighbour batches, whose negatives already share it, moved the code from position to anatomy (T1,
   boosted: x / y / z .79 / .84 / .84 → .74 / .62 / .69; brain .82 → .94, ventricle .68 → .81, thickness .75 → .88;
@@ -1156,7 +1215,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       the two arms and the four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 47`. The bank takes about half an hour, then the two
     arms train together.
-- **Stage 46b (built and checked on the PC 18 Nov; running since 11:07): the bridge as the theory states it.**
+- **Stage 46b (ran 18 Nov; read, item 38: no better than matched width): the bridge as the theory states it.**
   Section 8 (the 10 / 24 discrepancy) gives the reasons.
   - **Arm:** stage 36's 24-unit MLP-map arm (uniform batches, prediction weight 1, `--predict-hidden 128`, seed 42,
     20,000 steps, `bank_causal_nofield`) with `--entropy-units 11`, in the fixed form (item 37): InfoNCE on the first
@@ -1782,8 +1841,9 @@ identifying information available here.
    - For a formal guarantee on the synthetic bank, train one arm of the bridge (align all units, the entropy term on a
      block as wide as the shared latents) and show it matches the current recipe. Under the cosine the block is 11
      units and the prediction map must be flexible: stage 46b (section 9). Stage 46 (10 units, linear map) was not
-     the formal case and collapsed under an earlier, degenerate form of the loss (item 37). The block is the code's
-     first units; with the head learned, that is the same as a learned projection.
+     the formal case and collapsed under an earlier, degenerate form of the loss (item 37). Stage 46b holds the weak
+     factors no better than matched width (item 38), so the recipe's 24-unit numbers rest on measurement, not on the
+     bridge.
 2. **Causal variables from anchors.**
    - Synthetic: all seven factors anchored, as in stage 41's decoded discovery (24 units: skeleton F1 .84 against the
      truth's .85, the same 3 orientation errors).
@@ -1815,7 +1875,8 @@ identifying information available here.
   so Yao's partial-observability result splits the block into stable and changing parts. Check protocol changes
   between ADNI phases first.
 - **Benchmark realism:** the sphere lesion's position takes about half of a narrow code (item 29) and has no ADNI
-  counterpart. A diffuse WMH-like burden would bring the bank closer to ADNI. This checks the benchmark, not the method.
+  counterpart. Stage 47 confirmed that it crowds the weak factors out (item 39). A diffuse WMH-like burden would
+  bring the bank closer to ADNI. This checks the benchmark, not the method.
 
 **Next, after stage 34's style and precision audits (16 Nov).** The numbered items below were written with the field
 on.

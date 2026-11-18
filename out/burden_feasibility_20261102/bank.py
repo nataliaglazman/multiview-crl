@@ -15,6 +15,9 @@ to scan, as after perfect intensity normalization. The bias, noise level, field 
 --causal draws the content latents from an SCM over the factors the renderer uses (CAUSAL_EDGES; z_content[3:5] are
 unused with the burden target, so they stay unconnected rather than act as hidden mediators) and writes
 causal_adj.npy (9 x 9, parent by child).
+--lesion-position fixed (a diagnostic) puts the lesion at the white-matter voxel nearest FIXED_CENTRE that can hold it,
+instead of at its drawn position, so the lesion's position is no longer a latent of its own: it moves only with the
+anatomy. The position is still drawn, so every other latent, the lesion's size and every image's style are unchanged.
 Writes {split}_{t1_00,t1_04,flair}.npy (float16), {split}_{zc,vox}.npy, {split}_cells.npy (16^3 mean load).
 """
 
@@ -27,6 +30,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import distance_transform_edt
 
 import training.encoder_args as encoder_args
 import training.main_conv_synthetic as T
@@ -40,6 +44,10 @@ T1_KEYS = {0.0: "t1_00", 0.4: "t1_04"}
 # Indices are z_content's; every edge runs from a lower to a higher index, the order the sampler draws in.
 CAUSAL_FACTORS = {0: "brain", 1: "ventricle", 2: "burden", 5: "thickness", 6: "temporal", 7: "lr", 8: "sulcal"}
 CAUSAL_EDGES = ((0, 1), (1, 2), (0, 5), (2, 6), (5, 6), (6, 8))
+# --lesion-position fixed: the 64^3 voxel that leaves the lesion centre least spread under set_position's rule, chosen
+# on 200 training subjects of the causal bank: total SD 2.7 voxels against 12.1 with drawn positions; 56% of subjects
+# get exactly this voxel.
+FIXED_CENTRE = (27, 22, 37)
 
 
 def causal_scm(seed):
@@ -85,6 +93,48 @@ def set_gain(renderer, gain):
         return real(tissue_map, lesion_load, z_style, *a, **k)
 
     renderer.render_modality = render_modality
+
+
+def fixed_quantiles(white, spacing, reach, target):
+    """The placement quantiles at which the renderer's _burden_in_white_matter puts one lesion at the voxel nearest
+    ``target`` (64^3 indices) whose full-size sphere fits inside the white matter ``white``, with the renderer's own
+    admissible set and its x, y|x, z|x,y choice. None if no voxel fits (the renderer then raises its own error)."""
+    positions = np.argwhere(white)
+    if not len(positions):
+        return None
+    lower, upper = positions.min(0), positions.max(0) + 1
+    box = white[tuple(slice(int(a), int(c)) for a, c in zip(lower, upper))]
+    admissible = distance_transform_edt(np.pad(box, 1), sampling=spacing)[1:-1, 1:-1, 1:-1] > reach + 1e-7
+    if not admissible.any():
+        return None
+    cells = np.argwhere(admissible)
+    ix, iy, iz = cells[np.argmin(np.linalg.norm(cells + lower - np.asarray(target), axis=1))]
+
+    def quantile(counts, i):
+        cumulative = np.cumsum(counts, dtype=np.int64)
+        return ((cumulative[i - 1] if i else 0) + 0.5) / cumulative[-1]
+
+    return [
+        [quantile(admissible.sum((1, 2)), ix), quantile(admissible[ix].sum(1), iy), quantile(admissible[ix, iy], iz)]
+    ]
+
+
+def set_position(renderer, position):
+    """--lesion-position fixed on one renderer: its one lesion goes to the admissible voxel nearest FIXED_CENTRE in
+    place of the drawn placement quantiles. The sphere, its size and its containment stay the renderer's own."""
+    if position == "random":
+        return
+    if renderer.lesion_count != 1:
+        raise ValueError("--lesion-position fixed places one lesion")
+    real = renderer._burden_in_white_matter
+    spacing = 2.0 / (renderer.res - 1)
+    reach = renderer.lesion_radius + spacing / 2
+
+    def place(tissue_map, burden, quantiles):
+        q = fixed_quantiles(tissue_map.detach().cpu().numpy() == 2, spacing, reach, FIXED_CENTRE)
+        return real(tissue_map, burden, quantiles if q is None else torch.tensor(q, dtype=torch.float64))
+
+    renderer._burden_in_white_matter = place
 
 
 def run_args(t1_value, radius=None, sigma=None, nuisance=False, causal=False):
@@ -136,12 +186,14 @@ def chunk(job):
                 train._inner.scm = causal_scm(args.seed)
             set_field(train._inner.renderer, options["field"])
             set_gain(train._inner.renderer, options["gain"])
+            set_position(train._inner.renderer, options.get("position", "random"))
             train[0]
             ds = T.make_dataset(args, split, n)
             if options["causal"]:
                 ds._inner.scm = causal_scm(args.seed)
             set_field(ds._inner.renderer, options["field"])
             set_gain(ds._inner.renderer, options["gain"])
+            set_position(ds._inner.renderer, options.get("position", "random"))
             ds[0]
             ds._fixed_mean, ds._fixed_scale = train._fixed_mean, train._fixed_scale
             inner = ds._inner
@@ -178,6 +230,7 @@ def main():
     p.add_argument("--causal", action="store_true")
     p.add_argument("--field", choices=("lesion", "smooth", "off"), default="lesion")
     p.add_argument("--gain", choices=("on", "off"), default="on")
+    p.add_argument("--lesion-position", choices=("random", "fixed"), default="random")
     p.add_argument("--sizes", type=int, nargs=3, default=[2000, 400, 1000], metavar=("TRAIN", "VAL", "TEST"))
     a = p.parse_args()
     os.makedirs(a.root, exist_ok=True)
@@ -190,6 +243,7 @@ def main():
         "causal": a.causal,
         "field": a.field,
         "gain": a.gain,
+        "position": a.lesion_position,
     }
     if a.causal:
         np.save(f"{a.root}/causal_adj.npy", causal_scm(run_args(a.t1_values[0]).seed)["adj"])
