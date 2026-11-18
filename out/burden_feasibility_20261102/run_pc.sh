@@ -213,11 +213,22 @@
 # reports compare both arms with stage 43's neighbour seed 42, the two uniform 10-unit seeds and the 24-unit reference
 # (causal/stage45/). The separate-batch arm costs one additional online backbone pass per step.
 # Stage 46 (opt-in) The bridge (HANDOFF section 10, the plan's step 1): stage 33's 24-unit prediction arm with
-# InfoNCE's entropy on the first 10 code units only and its alignment on all 24 (warm.py --entropy-units 10). At the
-# theory's optimum those 10 units are a bijection of the shared latents and the whole code an embedding. Seed 42,
-# 20,000 steps, bank_causal_nofield. bridge_view.py writes the first 10 units out as a run of their own. The four
-# reports compare the 24-unit code and its first 10 units with stage 33's 24-unit code and the 10-unit codes of stages
-# 35 and 38 (causal/stage46/).
+# InfoNCE's entropy on the first 10 code units only and its alignment on all 24 (warm.py --entropy-units 10). Its block
+# matches the 10-unit codes' width but is not the theory's case: under the cosine 10 units hold 9 degrees of freedom,
+# and the linear map can move the optimum (stage 46b is the formal arm). It ran on 18 Nov under an earlier form of the
+# loss that had a degenerate minimum, and collapsed (HANDOFF item 37); --entropy-units now means the fixed form, so a
+# rerun needs a new run name. Seed 42, 20,000 steps, bank_causal_nofield.
+# bridge_view.py writes the first 10 units out as a run of their own. The four reports compare the 24-unit code and its
+# first 10 units with stage 33's 24-unit code and the 10-unit codes of stages 35 and 38 (causal/stage46/).
+# Stage 46b (opt-in) The bridge as the theory states it (HANDOFF section 8). warm.py's InfoNCE is cosine, so an entropy
+# block for the 10 shared latents is 11 units wide (stage 38), and an added prediction term keeps the theory's optimum
+# only through a flexible map. Stage 36's 24-unit MLP-map arm (prediction weight 1, --predict-hidden 128) with
+# the recipe's InfoNCE on the first 11 units and alignment alone on the other 13 (--entropy-units 11, the form fixed
+# after stage 46, HANDOFF item 37). Seed 42, 20,000 steps,
+# bank_causal_nofield; bridge_view.py writes the first 11 units out. The four reports compare the 24-unit code and its
+# first 11 units with stage 36's 24-unit MLP-map code (the same arm with the entropy on all 24 units), stage 33's
+# 24-unit code, stage 38's 11-unit code and stage 36's 10-unit MLP-map code, and with stage 46's bridge and its first
+# 10 units once stage 46 is done; rerun 46b then to add them (causal/stage46b/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1292,7 +1303,8 @@ if wants 34; then
     [ "$DRY" = 0 ] && echo "Stage 34 reports in $OUT"
 fi
 
-reuse_reports() { # reuse_reports FROM OUT NAME...: FROM's four report entries for these runs, and its feature caches
+reuse_reports() { # reuse_reports FROM OUT NAME...: FROM's four report entries for these runs, added to any OUT
+    # already has (OUT's own entries win), and its feature caches
     local from=$1 out=$2; shift 2
     [ "$DRY" = 1 ] && return
     "$PY" - "$from" "$out" "$@" <<'EOF'
@@ -1304,9 +1316,11 @@ from pathlib import Path
 src, dst, names = Path(sys.argv[1]), Path(sys.argv[2]), set(sys.argv[3:])
 for report in ("precision_audit", "own_variation", "code_audit", "style_audit"):
     source, target = src / f"{report}.json", dst / f"{report}.json"
-    if source.exists() and not target.exists():
-        kept = {name: row for name, row in json.loads(source.read_text()).items() if name in names}
-        target.write_text(json.dumps(kept, indent=1))
+    if source.exists():
+        kept = json.loads(target.read_text()) if target.exists() else {}
+        new = {name: row for name, row in json.loads(source.read_text()).items() if name in names and name not in kept}
+        if new or not target.exists():
+            target.write_text(json.dumps({**kept, **new}, indent=1))
 for cache in [*src.glob("image_*.npy"), *src.glob("style_*.npz")]:
     if not (dst / cache.name).exists():
         shutil.copy(cache, dst)
@@ -1727,6 +1741,56 @@ if wants 46; then
     stage_report "$OUT" code_audit "${RUNS[@]}"
     stage_report "$OUT" style_audit "${RUNS[@]}"
     [ "$DRY" = 0 ] && echo "Stage 46 reports in $OUT"
+fi
+
+if wants 46b; then
+    NOFIELD=$D/bank_causal_nofield
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    BRIDGE=${P}_predict1_mlp128_c24_entropy11_20k
+    VIEW=${BRIDGE}_first11
+    # stages 36, 33, 38 and 36
+    REFS=("${P}_predict1_mlp128_c24_20k" "${P}_predict1_c24_20k" "${P}_predict1_c11_20k" "${P}_predict1_mlp128_c10_20k")
+    OLD=("${P}_predict1_c24_entropy10_20k" "${P}_predict1_c24_entropy10_20k_first10")  # stage 46
+    OUT=$D/causal/stage46b
+    if [ "$DRY" = 0 ]; then
+        for name in "${REFS[@]}"; do
+            if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+                echo "Stage 46b needs $name finished (stages 33, 36 and 38 train it)."
+                exit 1
+            fi
+        done
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage36" "$OUT" "${REFS[@]}"
+        reuse_reports "$D/causal/stage38" "$OUT" "${REFS[@]}"
+        reuse_reports "$D/causal/stage46" "$OUT" "${OLD[@]}"
+    fi
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42 --content-units 24
+        --contrastive-loss-type infonce --predict-weight 1 --predict-hidden 128)
+    EVERY=2000 ssl "$BRIDGE" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --entropy-units 11
+    finish "$BRIDGE"
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/bridge_view.py $D/runs/$BRIDGE"
+    else
+        grep -qx DONE "$D/logs/$BRIDGE.log" || { echo "Rerun stage 46b for $BRIDGE."; exit 1; }
+        if [ ! "$D/runs/$VIEW/model.pt" -nt "$D/runs/$BRIDGE/model.pt" ]; then
+            "$PY" "$D/bridge_view.py" "$D/runs/$BRIDGE" || exit 1
+        fi
+    fi
+    RUNS=()
+    for name in "$BRIDGE" "$VIEW" "${REFS[@]}"; do RUNS+=("$D/runs/$name"); done
+    if [ "$DRY" = 1 ] || { grep -qx DONE "$D/logs/${OLD[0]}.log" 2>/dev/null \
+        && [ -f "$D/runs/${OLD[1]}/model.pt" ]; }; then
+        for name in "${OLD[@]}"; do RUNS+=("$D/runs/$name"); done
+    else
+        echo "Stage 46's bridge is not finished, so it is left out; rerun stage 46b after stage 46 to add it."
+    fi
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    [ "$DRY" = 0 ] && echo "Stage 46b reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

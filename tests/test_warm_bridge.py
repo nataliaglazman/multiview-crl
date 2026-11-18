@@ -1,4 +1,4 @@
-"""warm.py --entropy-units (the bridge: InfoNCE's alignment on all code units, its entropy on the first N) and
+"""warm.py --entropy-units (the bridge: InfoNCE on the first N code units, alignment alone on the rest) and
 bridge_view.py, which writes those N units out as a run of their own."""
 
 import sys
@@ -30,25 +30,48 @@ class BridgeLossTests(unittest.TestCase):
         recipe = warm.hard_negative_infonce(code, 24, TAU, 0.0, SIM)
         self.assertAlmostEqual(float(bridge), float(recipe), places=10)
 
-    def test_alignment_on_all_units_entropy_on_the_block(self):
+    def test_infonce_on_the_block_alignment_on_the_rest(self):
         code, b, k = codes(1), 32, 10
         hz = warm.T.standardize_contrastive_code(torch.stack([code[:b], code[b:]]))
+        block = hz[..., :k] / hz[..., :k].norm(dim=-1, keepdim=True)
+        rest = hz[..., k:] / hz[..., k:].norm(dim=-1, keepdim=True)
         expected = 0.0
         for i, j in ((0, 1), (1, 0)):
-            unit = hz / hz.norm(dim=-1, keepdim=True)
-            block = hz[..., :k] / hz[..., :k].norm(dim=-1, keepdim=True)
-            pos = (unit[i] * unit[j]).sum(-1) / TAU
-            expected = expected + (torch.logsumexp(block[i] @ block[j].T / TAU, 1) - pos).mean()
+            logits = block[i] @ block[j].T / TAU
+            expected = expected + (torch.logsumexp(logits, 1) - logits.diag()).mean()
+            expected = expected + (1 - (rest[i] * rest[j]).sum(-1)).mean() / TAU
         self.assertAlmostEqual(float(warm.bridge_infonce(code, 24, k, TAU, SIM)), float(expected), places=8)
 
     def test_units_past_the_block_feel_only_the_alignment(self):
         code, b, k = codes(2).requires_grad_(True), 32, 10
         (bridge,) = torch.autograd.grad(warm.bridge_infonce(code, 24, k, TAU, SIM), code)
         hz = warm.T.standardize_contrastive_code(torch.stack([code[:b], code[b:]]))
-        alignment = -sum((SIM(hz[i], hz[j]) / TAU).mean() for i, j in ((0, 1), (1, 0)))
+        alignment = -2 * (SIM(hz[0, :, k:], hz[1, :, k:]) / TAU).mean()
         (aligned,) = torch.autograd.grad(alignment, code)
+        (recipe,) = torch.autograd.grad(warm.hard_negative_infonce(code, k, TAU, 0.0, SIM), code)
         torch.testing.assert_close(bridge[:, k:], aligned[:, k:])
-        self.assertGreater(float((bridge[:, :k] - aligned[:, :k]).abs().max()), 1e-6)  # the block feels the entropy
+        torch.testing.assert_close(bridge[:, :k], recipe[:, :k])
+
+    def test_minimising_it_makes_the_block_agree(self):
+        """Stage 46's form had a degenerate minimum (about -15 here): the block's two views disagreed and shrank to a
+        small share of each code, a few outliers carrying its batch spread. Free codes that minimise this form keep
+        the block's views together and the block a full share of the code."""
+        b, k = 32, 10
+        torch.manual_seed(0)
+        code = torch.randn(2 * b, 24, dtype=torch.double, requires_grad=True)
+        opt = torch.optim.Adam([code], lr=0.01)
+        for _ in range(1500):
+            opt.zero_grad()
+            loss = warm.bridge_infonce(code, 24, k, TAU, SIM)
+            loss.backward()
+            opt.step()
+        with torch.no_grad():
+            hz = warm.T.standardize_contrastive_code(torch.stack([code[:b], code[b:]]))
+            agreement = float(SIM(hz[0, :, :k], hz[1, :, :k]).mean())
+            share = float((hz[..., :k].norm(dim=-1) / hz.norm(dim=-1)).median())
+        self.assertGreaterEqual(float(loss), 0.0)
+        self.assertGreater(agreement, 0.9)
+        self.assertGreater(share, 0.3)
 
 
 class ViewTests(unittest.TestCase):

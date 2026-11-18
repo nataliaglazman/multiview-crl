@@ -474,19 +474,18 @@ def hard_negative_infonce(code, units, tau, concentration, sim, weight=None):
 
 
 def bridge_infonce(code, units, entropy_units, tau, sim):
-    """--entropy-units, the bridge: the recipe's InfoNCE with its alignment on all ``units`` and its entropy on the first
-    ``entropy_units`` alone. Per direction, the positive is the cosine of the two views' whole standardized codes, and
-    the log-sum-exp runs over the cosines of their first ``entropy_units`` with every subject of the other view; both
-    directions summed. Alignment makes every unit content-only at any width; the entropy on a block as wide as the
-    shared latents makes that block a bijection of them, so the whole code is an embedding. ``entropy_units == units``
-    gives the recipe's loss."""
-    b = code.shape[0] // 2
-    hz = T.standardize_contrastive_code(torch.stack([code[:b, :units], code[b:, :units]]))
-    total = 0.0
-    for i, j in ((0, 1), (1, 0)):
-        pos = sim(hz[i], hz[j]) / tau
-        cos = sim(hz[i, :, None, :entropy_units], hz[j, None, :, :entropy_units]) / tau
-        total = total + (torch.logsumexp(cos, 1) - pos).mean()
+    """--entropy-units, the bridge: the recipe's InfoNCE on the first ``entropy_units`` (its alignment and its entropy,
+    on the same cosine) plus alignment alone on the units after them, (1 - their cosine) / tau per direction, both
+    directions summed. Every term rewards the views' agreement and the loss is never negative. Alignment makes every
+    unit content-only at any width; the entropy on a block as wide as the shared latents makes that block a bijection
+    of them, so the whole code is an embedding. ``entropy_units == units`` gives the recipe's loss. (Stage 46's form
+    put the whole code's cosine over a log-sum-exp of the block's that included the positive, which paid the block for
+    disagreeing across views.)"""
+    total = hard_negative_infonce(code, entropy_units, tau, 0.0, sim)
+    if entropy_units < units:
+        b = code.shape[0] // 2
+        hz = T.standardize_contrastive_code(torch.stack([code[:b, entropy_units:units], code[b:, entropy_units:units]]))
+        total = total + 2 * (1 - sim(hz[0], hz[1])).mean() / tau
     return total
 
 
@@ -986,7 +985,11 @@ def main():
         print("interior cells", int(pool.keep.sum()), "tail thresholds", pool.thresholds, "gauge", a.gauge, flush=True)
         print("code units", units, flush=True)
         if a.entropy_units:
-            print("bridge: alignment on all", units, "units, entropy on the first", a.entropy_units, flush=True)
+            other = units - a.entropy_units
+            print(
+                f"bridge: InfoNCE on the first {a.entropy_units} units, alignment alone on the other {other}",
+                flush=True,
+            )
         if rest:
             print(
                 "remainder units",

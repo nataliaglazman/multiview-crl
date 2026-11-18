@@ -50,6 +50,9 @@ and what to do next. Repo-wide conventions are in `CLAUDE.md` at the root. They 
   - End commit messages with `Co-Authored-By:` your attribution line.
 - **Never `git pull` on the PC while `run_pc.sh` is running.** Bash reads the script as it goes, so changing it under
   a running stage breaks that stage.
+  - Working on the PC itself (as on 18 Nov): edit a copy of `run_pc.sh` and `mv` it over the original. The running
+    bash keeps the old file open (`ls -l /proc/PID/fd/255` then shows it as deleted), so the stage is unaffected.
+    Never edit `run_pc.sh` in place while a stage runs.
 - **Writing style.**
   - Define every term at first use.
   - Plain words, short sentences.
@@ -167,8 +170,9 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     inside that term's InfoNCE cosine, starting at 1, so a unit whose views agree poorly can count for less (stage 31).
   - `--predict-weight W`: each view's code predicts the other view's whitened GAP from a momentum copy (stage 33).
     `--predict-hidden H` adds a one-hidden-layer MLP of width H to each linear map, starting at zero (stage 36).
-  - `--entropy-units N`, the bridge (stage 46): InfoNCE's alignment on all code units and its entropy (the log-sum-exp
-    over negatives) on the first N only. `bridge_view.py` writes those N units out as a run of their own.
+  - `--entropy-units N`, the bridge (stage 46b): the recipe's InfoNCE on the first N code units and alignment alone,
+    (1 − cosine) / τ, on the rest. Stage 46 ran an earlier, degenerate form (item 37). `bridge_view.py` writes those
+    N units out as a run of their own.
   - `--hard-negatives G`, `--seed S`.
   - Older levers: `--queue`, `--gauge running`, `--group-dropout`, `--decorrelate`, `--shared-jitter`, `--uniform`.
   - Each option refuses combinations it can't handle.
@@ -947,6 +951,27 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       couples the sources. Dropped unless a variable with a real, larger variance change turns up; check any candidate
       with `adni_heterogeneity.py` first.
 
+37. **Stage 46's bridge collapsed: its loss had a degenerate minimum (stage 46, read 18 Nov,
+    `causal/stage46/`).** The loss, not the bridge idea, failed.
+    - **Result.** Own parts from the 24-unit code, T1 / FLAIR: ventricle −.01 / .00, burden −.01 / −.03, thickness
+      −.16 / .04, temporal −.12 / −.01, lr .00 / .01, sulcal −.02 / −.02 (stage 33: .71 / .68, .48 / .47, .63 / .64,
+      .84 / .81, .89 / .90, .52 / .60). Only brain size stays (.79 / .90). Its first 10 units hold nothing. Volume
+      error >99 voxels (stage 33: 12.7 / 13.2). Style came in: gain by boosting .41 / .59, against about 0 in every
+      other trained code. The backbone suffered too (GAP: lr .81 / .71, ventricle .41 / .18). The recipe's InfoNCE on
+      the code ended at 4.21 (chance 6.93; stage 33: 0.04), and the bridge term at −11.9.
+    - **Why.** Stage 46's form put the whole code's cosine over a log-sum-exp of the block's cosines that included the
+      positive pair. The two do not cancel as in InfoNCE, so the loss has no floor at zero. Minimised over free codes
+      (32 subjects, τ 0.1) it reaches about −15: the block's two views disagree (cosine −.33), the block shrinks to 5%
+      of each subject's code, and a few outlier subjects carry its batch spread. Nothing then pays the code to tell
+      subjects apart.
+    - **Fix (18 Nov).** `bridge_infonce` is now the recipe's InfoNCE on the block plus alignment alone,
+      (1 − cosine) / τ, on the other units. Every term rewards agreement and the loss is never negative. Over free
+      codes it settles at 0 with the block's views agreeing (cosine 1.00). Alignment on the block plus alignment on
+      the rest is alignment on everything, so section 8's argument holds. In a 400-step check of stage 46b's arm the
+      recipe's InfoNCE on the code fell to 2.43 (stage 36's MLP arm 1.88, stage 46 4.76) and the code read volume at
+      R² .71 / .69.
+    - Stage 46's run keeps its name and its old loss; `--entropy-units` now means the fixed form.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -959,7 +984,9 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - Alignment makes a code content-only at any width. At 24 units the content is recoverable in practice: every
     factor is readable, and stage 34 found no style.
   - A formal version on the synthetic bank is the bridge (section 10): align all units and put the entropy term on a
-    learned 10-unit projection. At the optimum the projection is Yao's bijection, and the whole code an embedding.
+    learned projection as wide as the shared block. At the optimum the projection is Yao's bijection, and the whole
+    code an embedding. Under warm.py's cosine that block is 11 units, and the prediction map must be flexible: stage
+    46b. Stage 46 (10 units, linear map) is outside the theory on both counts (the 10 / 24 discrepancy, below).
   - Factors and their graph need identifying information from outside the two views. The framework says so (a block
     does not determine its internal factors), and stages 41–44 show it. Here that information comes from anchors.
 - **Matched width costs precision at finite data (stages 35–40).** The shared block is 10 latents (seven SCM factors
@@ -993,13 +1020,48 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - **The 10-unit arms are one dimension short for InfoNCE.** warm.py's global InfoNCE is cosine (hard-coded), which
     sees only the code's direction: 9 degrees of freedom in 10 units. The prediction term reads all 10. Under a
     cosine, the theory's matched width for 10 latents is 11 units, or 10 with a distance similarity (Zimmermann et al.
-    2021 identify sphere-valued latents with the cosine). No 11-unit arm has run, so "matched width fails" is shown
-    for 10 cosine units, not yet for the theory's formal case.
+    2021 identify sphere-valued latents with the cosine). Stage 38's 11-unit arm is that formal case: it recovers 1–2
+    voxels and some of ventricle (item 30), so matched width falls short there too.
   - **The generator's shared block is exactly the 10 latents** (checked 17 Nov in
     `eval/synthetic/synthetic_dataset.py`). With clean content the deformation and fissure fields are zeroed and the
     structure is a deterministic function of `z_content` and `z_lesion`. Gain, bias, noise and the field are drawn
     per view. So the 10-unit code is not short of hidden shared content. The error the views' burden readings share
     (.29–.40 at the image filter) must then be a function of the latents, likely leftover anatomy in the residual.
+- **The 10 / 24 discrepancy (18 Nov).** Yao's theorem fixes the block it identifies (the 10 latents) and, for its
+  entropy step, the width of the code that holds it. It says nothing about extra units, and at no width are the units
+  the variables (item 34). So the paper states the gap rather than removing it.
+  - **Stage 46 is not the formal case.** It differs from the theory twice: 10 cosine units hold 9 degrees of freedom
+    (the bullet above), and its prediction map is linear, which the added-term argument excludes. Stage 46b (section
+    9) fixes both: the entropy on 11 units, and the MLP map. Both keep the moving momentum target.
+  - **Stage 46's loss was also degenerate and the run collapsed (item 37).** The theory's split into alignment plus
+    entropy holds only in the large-batch limit, and that finite-batch form did not approximate it. The bridge is now
+    InfoNCE on the block plus alignment alone on the rest, which keeps Yao's objective exactly on the block.
+  - **How the paper states it.**
+    1. Theorem (Yao): with 11 cosine units, alignment plus entropy gives a bijection (a one-to-one map) of the 10
+       shared latents.
+    2. Bridge (stage 46b): alignment on all 24 units, the entropy on the first 11, a flexible prediction map. The
+       code is content-only and contains that bijection, so it is an embedding. Everything the plan uses at the block
+       level (the block node, adjustment for confounding, independence tests) depends only on what the code
+       determines, which is the same for both. Linear tools at finite data (Fisher-Z, ridge) can tell them apart:
+       they favour the wider code, which is easier to read linearly.
+    3. Finding: at matched width the code keeps the strong factors and drops the weak own parts (items 26–32); a
+       latent is kept in proportion to how exactly the views determine it (item 27). At the theory's optimum the
+       extra 13 units are redundant, so their value is finite-sample only. Say so.
+  - **What 24 measures.** The label-free count is the number of linear canonical directions the views share above
+    r .5. A curved 10-dimensional block spans more than 10 linear directions, so 24 is the code's width rule, not an
+    estimate of the block's size. On ADNI there is no finite block, so the bridge (which needs its size) is
+    synthetic-only. There the claim is alignment (content-only at any width) plus measured recoverability: the
+    anchors read from the code, and no style.
+  - **A width rule for the prediction term (my argument, 18 Nov, unchecked).** Assume the views are independent given
+    the content and the target is fixed. At width d, the linear prediction term is minimised by the d directions of
+    the other view's whitened GAP that this view predicts best (reduced-rank regression). These are a function of the
+    content only. The code is an embedding once those directions separate the content. That number is at least 10,
+    and it grows with curvature (the harmonics of item 27) and with how noisily a factor is read. It explains why 10
+    units drop burden and what the label-free count approximates, and it needs no block size, so it carries to ADNI.
+    It explains the recipe but does not guarantee it, because InfoNCE's optimum and this one differ.
+  - **Optional check, no training:** the intrinsic dimension of the 24-unit code (for example TwoNN), calibrated on
+    the true latents passed through a random non-linear embedding at 1,000 subjects. An embedding of the block should
+    read about 10. Weak factors look like noise at small scales, so this supports the claim and does not decide it.
 - **The CCA readout is not covered as used.**
   - It is fitted after training, it is linear, and it keeps weakly shared directions. Directions 15–24 agree at only
     r .45–.72, so part of each is view-specific (style or noise, unmeasured).
@@ -1021,8 +1083,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 9. State on 17 Nov
 
-- **Stage 46 (built and checked locally 18 Nov, not yet run on the PC): the bridge.** The plan's step 1 (section 10):
-  does a 24-unit code trained the theory's way hold what stage 33's code holds?
+- **Stage 46 (ran 18 Nov; collapsed, item 37: its loss was degenerate): the bridge.** The plan's step
+  1 (section 10): does a 24-unit code trained the theory's way hold what stage 33's code holds?
   - **Arm:** stage 33's 24-unit prediction arm (uniform batches, prediction weight 1, seed 42, 20,000 steps,
     `bank_causal_nofield`) with `--entropy-units 10`: InfoNCE's alignment on all 24 units, its entropy only on the
     first 10.
@@ -1030,6 +1092,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     entropy on a block as wide as the shared latents (10) makes that block a bijection of them, so the whole code is
     an embedding. With the entropy on all 24 aligned units, as in the recipe, the theory's argument does not apply: an
     aligned 24-unit code of 10 latents has no finite entropy.
+    - Correction (18 Nov): stage 46 is not quite that version. Under the cosine its 10 units hold 9 degrees of
+      freedom, and its prediction map is linear (section 8, the 10 / 24 discrepancy). Stage 46b is the formal arm.
   - **Reports** (`causal/stage46/`): own variation (with boosting), the precision audit, the code audit and the style
     audit on the bridge's 24-unit code, its first 10 units (`bridge_view.py`), stage 33's 24-unit code, and the
     10-unit codes of stages 35 and 38 (seeds 42 and 2; their entries reused from stage 43).
@@ -1050,6 +1114,37 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 46b (built and checked on the PC 18 Nov, not yet run): the bridge as the theory states it.** Section 8 (the
+  10 / 24 discrepancy) gives the reasons.
+  - **Arm:** stage 36's 24-unit MLP-map arm (uniform batches, prediction weight 1, `--predict-hidden 128`, seed 42,
+    20,000 steps, `bank_causal_nofield`) with `--entropy-units 11`, in the fixed form (item 37): InfoNCE on the first
+    11 units, alignment alone on the other 13:
+    `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c24_entropy11_20k`, and its first 11 units
+    as `…_first11`.
+  - **Reports** (`causal/stage46b/`): the four reports on the bridge's 24-unit code and its first 11 units, stage 36's
+    24-unit MLP-map code (the same arm with the entropy on all 24 units), stage 33's 24-unit code, stage 38's 11-unit
+    code and stage 36's 10-unit MLP-map code. Stage 46's bridge and its first 10 units join once stage 46 is done:
+    rerun 46b then. Finished arms and scored runs are reused, so the rerun only scores what is new.
+  - **Reading:**
+    - The bridge passes if its 24-unit code holds the factors as stage 36's 24-unit MLP-map code does (the one
+      difference is the entropy block) and close to stage 33's (own parts within about .10, volume within a voxel or
+      two), with no style. The paper can then state the formal claim. Item 26 expects this: at 24 units the MLP map
+      reads burden only 0–1.6 voxels worse than the linear one.
+    - Its first 11 units against stage 38's 11-unit code: does a block the theory covers hold the weak own parts
+      better with 24 units' support? Item 27's simulation expects not (the faint latent leaks into the extra units).
+      That would not affect the claim.
+  - **Checked on the PC:**
+    - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46b` prints the arm, the view and
+      the four reports.
+    - A 2-step arm in a scratch directory trains and saves; its log states "maps linear + MLP 128".
+      `bridge_view.py` writes its first 11 units as an 11-unit run.
+    - With the fixed loss: `tests/test_warm_bridge.py` (5 tests, one minimising the loss over free codes) and
+      `tests/test_warm_prediction.py` pass; a 400-step arm states "InfoNCE on the first 11 units, alignment alone on
+      the other 13" and trains like stage 36's MLP arm (item 37).
+    - `reuse_reports` now adds entries to an existing report file instead of skipping it (an entry already there
+      wins), so 46b draws on stages 36, 38 and 46. Checked into a scratch directory.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46b`. It can run beside stage 46: the GPU had 3 of 24 GB
+    in use.
 - **Stage 45 (built by Codex 18 Nov, not yet run): two more 10-unit arms on neighbour batches.** Codex's reading of
   stage 43 (not yet recorded in section 7): the neighbour arm raised thickness's own part from .20 / .19 to .48 / .49
   and its backbone reading from .50 / .50 to .68 / .67. Sulcal stays low (.16 / .16 against .52 / .60 at 24 units),
@@ -1643,8 +1738,10 @@ identifying information available here.
    - The width comes from a label-free rule, the same on ADNI: count the frozen backbone's cross-view canonical
      directions that agree above about .5. On stage 19's CCA that is just under 24.
    - For a formal guarantee on the synthetic bank, train one arm of the bridge (align all units, the entropy term on a
-     10-unit block) and show it matches the current recipe. Built as stage 46 (section 9). The block is the code's
-     first 10 units; with the head learned, that is the same as a learned 10-unit projection.
+     block as wide as the shared latents) and show it matches the current recipe. Under the cosine the block is 11
+     units and the prediction map must be flexible: stage 46b (section 9). Stage 46 (10 units, linear map) was not
+     the formal case and collapsed under an earlier, degenerate form of the loss (item 37). The block is the code's
+     first units; with the head learned, that is the same as a learned projection.
 2. **Causal variables from anchors.**
    - Synthetic: all seven factors anchored, as in stage 41's decoded discovery (24 units: skeleton F1 .84 against the
      truth's .85, the same 3 orientation errors).
