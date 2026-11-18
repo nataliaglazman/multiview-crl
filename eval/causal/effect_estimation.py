@@ -150,3 +150,86 @@ def estimate_ate(treatment, outcome, covariates, folds, *, learner="linear", cli
         "outcome_rmse": float(np.sqrt(np.mean((outcome - factual) ** 2))),
         "propensity_brier": float(np.mean((treatment - propensity) ** 2)),
     }
+
+
+def _matrix(values, n, name):
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 2 or values.shape[0] != n or not np.isfinite(values).all():
+        raise ValueError(f"{name} must be a finite subject-by-feature matrix")
+    scale = values.std(axis=0)
+    scale[scale == 0] = 1.0
+    return (values - values.mean(axis=0)) / scale
+
+
+def canonical_pairs(z, w, ridge=1e-6):
+    """Canonical correlation analysis of two standardized subject-by-feature matrices: each side's weights (one
+    column per pair) and the canonical correlations, largest first."""
+
+    def whitener(x):
+        covariance = x.T @ x / len(x)
+        values, vectors = np.linalg.eigh(covariance + ridge * np.eye(len(covariance)))
+        return (vectors / np.sqrt(np.clip(values, ridge, None))) @ vectors.T
+
+    left, right = whitener(z), whitener(w)
+    u, s, vt = np.linalg.svd(left @ (z.T @ w / len(z)) @ right)
+    k = len(s)
+    return left @ u[:, :k], right @ vt[:k].T, s
+
+
+def shared_directions(z, w, draws=50, seed=0):
+    """How many canonical pairs of the proxies agree beyond chance: those whose correlation exceeds the 95th
+    percentile of the largest canonical correlation with the subjects' pairing shuffled."""
+    z, w = _matrix(z, len(z), "treatment_proxy"), _matrix(w, len(z), "outcome_proxy")
+    _, _, observed = canonical_pairs(z, w)
+    rng = np.random.default_rng(seed)
+    null = [canonical_pairs(z, w[rng.permutation(len(w))])[2][0] for _ in range(draws)]
+    return int((observed > np.percentile(null, 95)).sum())
+
+
+@threadpool_limits.wrap(limits=1)
+def proximal_ate(
+    treatment, outcome, covariates, treatment_proxy, outcome_proxy, *, interactions=False, components=None
+):
+    """Estimate the average treatment effect when the confounder is seen only through two proxies.
+
+    Proximal two-stage least squares (Miao et al. 2018; Tchetgen Tchetgen et al. 2020). Both proxies measure the
+    unmeasured confounder and are independent of each other given it, so their measurement errors are independent.
+    The outcome bridge is linear in the outcome-side proxy W and the covariates, and the treatment-side proxy Z
+    instruments W: stage 1 fits W on the treatment, the covariates and Z; stage 2 fits the outcome on the treatment,
+    the covariates and the fitted W. Adjusting for W directly would leave the confounding that W's measurement error
+    hides.
+
+    Proxies wider than the confounder leave the bridge underidentified, so both are first reduced to their shared
+    directions: the leading `components` canonical pairs, or by default the pairs that agree beyond a shuffled-pairing
+    null. Neither the treatment nor the outcome enters that choice. `interactions` adds treatment-by-W terms,
+    instrumented by treatment-by-Z, for an effect that varies with the confounder. Standard errors are
+    heteroskedasticity-robust (HC0), from the structural residuals, and ignore the choice of directions.
+    """
+    treatment, outcome = _observations(treatment, outcome)
+    n = len(outcome)
+    covariates = _matrix(covariates, n, "covariates")
+    z = _matrix(treatment_proxy, n, "treatment_proxy")
+    w = _matrix(outcome_proxy, n, "outcome_proxy")
+    if not z.shape[1] or not w.shape[1]:
+        raise ValueError("each proxy needs at least one feature")
+    left, right, correlations = canonical_pairs(z, w)
+    k = shared_directions(z, w) if components is None else components
+    if not isinstance(k, (int, np.integer)) or not 0 <= k <= len(correlations):
+        raise ValueError(f"components must be an integer between zero and {len(correlations)}")
+    z, w = z @ left[:, :k], w @ right[:, :k]
+    a = treatment[:, None].astype(float)
+    exogenous = np.column_stack((np.ones(n), a, covariates))
+    endogenous, instruments = (np.column_stack((w, a * w)), np.column_stack((z, a * z))) if interactions else (w, z)
+    first = np.column_stack((exogenous, instruments))
+    regressors = np.column_stack((exogenous, endogenous))
+    fitted = first @ np.linalg.lstsq(first, regressors, rcond=None)[0]
+    beta = np.linalg.lstsq(fitted, outcome, rcond=None)[0]
+    residual = outcome - regressors @ beta
+    bread = np.linalg.pinv(fitted.T @ fitted)
+    covariance = bread @ ((fitted * residual[:, None] ** 2).T @ fitted) @ bread
+    # W is centred, so the treatment coefficient is the effect averaged over subjects, with or without interactions.
+    return {
+        **_effect_summary(beta[1], np.sqrt(covariance[1, 1])),
+        "components": int(k),
+        "canonical_r": [float(r) for r in correlations[:k]],
+    }

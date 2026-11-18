@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from eval.causal import tabular_benchmark
+from eval.causal.effect_estimation import proximal_ate
 from eval.causal.tabular_scm import simulate_tabular
 
 
@@ -187,6 +188,56 @@ class TabularBenchmarkTests(unittest.TestCase):
             self.assertLess(untrained["image_in_f1"], 0.5)
             tabular_benchmark.main([*args, "--no-tabular-causes"])
             self.assertNotIn("image_in_f1", json.loads(out.read_text())["summary"]["oracle factors"])
+
+    def test_proximal_ate_corrects_what_one_noisy_proxy_misses(self):
+        rng = np.random.default_rng(3)
+        n = 20000
+        u = rng.normal(size=(n, 3))
+        score = u @ np.array([0.6, -0.5, 0.4])
+        score = (score - score.mean()) / score.std()
+        x = rng.normal(size=(n, 2))
+        a = (rng.random(n) < 1 / (1 + np.exp(-(score + 0.5 * x[:, 0])))).astype(int)
+        y = a * (1.0 + 0.5 * score) + score + 0.5 * x[:, 0] + rng.normal(size=n)
+        z, w = (u @ rng.normal(size=(3, 6)) + 0.8 * rng.normal(size=(n, 6)) for _ in range(2))
+        naive = np.linalg.lstsq(np.column_stack((np.ones(n), a, x, w)), y, rcond=None)[0][1]
+        self.assertGreater(naive - 1.0, 0.15)  # W's measurement error hides part of the confounder
+        for interactions in (False, True):
+            result = proximal_ate(a, y, x, z, w, interactions=interactions)
+            self.assertEqual(result["components"], 3)
+            self.assertLess(abs(result["ate"] - 1.0), 0.05)
+            self.assertLess(result["ci_low"], 1.0)
+            self.assertGreater(result["ci_high"], 1.0)
+        unrelated = proximal_ate(a, y, x, rng.normal(size=(n, 6)), rng.normal(size=(n, 6)))
+        self.assertEqual(unrelated["components"], 0)
+
+    def test_cli_proximal_arms_remove_what_one_noisy_view_leaves(self):
+        z, adjacency, _, _ = cohort()
+        rng = np.random.default_rng(5)
+        views = [z @ rng.normal(size=(3, 6)) + rng.normal(size=(len(z), 6)) for _ in range(2)]
+        with tempfile.TemporaryDirectory() as scratch, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(scratch)
+            a, b, out = root / "noisy.npz", root / "floor.npz", root / "report.json"
+            np.savez(a, z_content=z, causal_adj=adjacency, emb_view1=views[0], emb_view2=views[1])
+            np.savez(
+                b,
+                z_content=z,
+                causal_adj=adjacency,
+                emb_view1=rng.normal(size=(len(z), 6)),
+                emb_view2=rng.normal(size=(len(z), 6)),
+            )
+            args = ["--bundles", f"noisy={a}", "--floors", f"noisy={b}", "--effects-only", "--proximal"]
+            args += ["--out", str(out)]
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                tabular_benchmark.main(args)  # one view only
+            tabular_benchmark.main([*args, "--view", "each"])
+            summary = json.loads(out.read_text())["summary"]
+            proximal = [summary[f"noisy / proximal {name}"] for name in ("T1→FLAIR", "FLAIR→T1")]
+            self.assertEqual([arm["components"] for arm in proximal], [3, 3])
+            self.assertEqual(summary["noisy / proximal T1→FLAIR (untrained)"]["components"], 0)
+            # Over the ten tasks each view alone leaves confounding its noise hides; the proxies remove it.
+            self.assertGreater(min(summary[f"noisy / {view}"]["bias"] for view in ("T1", "FLAIR")), 0.08)
+            self.assertLess(max(abs(arm["bias"]) for arm in proximal), 0.04)
+            self.assertLess(proximal[0]["mae_delta_vs_untrained"], -0.3)
 
 
 if __name__ == "__main__":

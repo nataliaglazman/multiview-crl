@@ -13,7 +13,14 @@ from sklearn.metrics import r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
-from eval.causal.effect_estimation import LEARNERS, estimate_ate, make_folds, unadjusted_ate
+from eval.causal.effect_estimation import (
+    LEARNERS,
+    estimate_ate,
+    make_folds,
+    proximal_ate,
+    shared_directions,
+    unadjusted_ate,
+)
 from eval.causal.tabular_discovery import score_discovery, validate_discovery_options
 from eval.causal.tabular_scm import simulate_tabular
 from eval.dino.dinov3_identifiability import load_bundle, usable_factors
@@ -146,8 +153,10 @@ def summarize(runs, arms):
             coverage=float(np.mean([score["covers_truth"] for score in scores])),
             mae_delta_vs_tabular=float(np.mean(np.abs(error) - tabular_error)),
         )
+        if "components" in scores[0]:
+            result["components"] = scores[0]["components"]
         floor = key + " (untrained)"
-        if floor in arms:
+        if floor in runs[0]["effects"]:
             floor_error = [abs(run["effects"][floor]["error"]) for run in runs]
             result["mae_delta_vs_untrained"] = float(np.mean(np.abs(error) - floor_error))
         graphs = [run["discovery"].get(key, {}) for run in runs]
@@ -169,6 +178,17 @@ def summarize(runs, arms):
     return summary
 
 
+def proxy_pairs(arms):
+    """Each bundle's T1 and FLAIR vectors, trained and untrained: (label, name suffix, T1, FLAIR)."""
+    pairs = []
+    for label in dict.fromkeys(arm["label"] for arm in arms.values()):
+        for suffix in ("", " (untrained)"):
+            t1, flair = (arms.get(f"{label} / {VIEW_NAMES[v]}{suffix}") for v in ("1", "2"))
+            if t1 is not None and flair is not None:
+                pairs.append((label, suffix, t1["X"], flair["X"]))
+    return pairs
+
+
 def benchmark(z, names, adjacency, arms, identity, own, args):
     discovery = not args.effects_only
     own = None if args.no_tabular_causes else own
@@ -183,6 +203,8 @@ def benchmark(z, names, adjacency, arms, identity, own, args):
             decoded[key] = decode_factors(arm["X"], z, fit, held)
             readout_r2[key] = dict(zip(names, r2_score(z[held], decoded[key], multioutput="raw_values").tolist()))
 
+    # The proxies' shared directions depend on the vectors alone, not on the task, so they are counted once.
+    proxies = [(*pair, shared_directions(pair[2], pair[3])) for pair in proxy_pairs(arms)] if args.proximal else []
     runs = []
     for seed in args.seeds:
         scm = simulate_tabular(
@@ -204,6 +226,21 @@ def benchmark(z, names, adjacency, arms, identity, own, args):
             effects[key] = estimate_ate(
                 a, y, x, folds, learner=args.learner, clip=args.clip, seed=args.split_seed, tabular_width=w.shape[1]
             )
+        for label, suffix, t1, flair, shared in proxies:
+            effects[f"{label} / paired{suffix}"] = estimate_ate(
+                a,
+                y,
+                np.column_stack((w, t1, flair)),
+                folds,
+                learner=args.learner,
+                clip=args.clip,
+                seed=args.split_seed,
+                tabular_width=w.shape[1],
+            )
+            for name, z_proxy, w_proxy in (("T1→FLAIR", t1, flair), ("FLAIR→T1", flair, t1)):
+                effects[f"{label} / proximal {name}{suffix}"] = proximal_ate(
+                    a, y, w, z_proxy, w_proxy, interactions=args.heterogeneity != 0, components=shared
+                )
         for score in effects.values():
             score.update(error=score["ate"] - scm.ate, covers_truth=score["ci_low"] <= scm.ate <= score["ci_high"])
 
@@ -280,6 +317,12 @@ def main(argv=None):
     parser.add_argument("--split-seed", type=int, default=0)
     parser.add_argument("--effects-only", action="store_true")
     parser.add_argument(
+        "--proximal",
+        action="store_true",
+        help="Also adjust for both views at once, and estimate the effect by proximal two-stage least squares with one"
+        " view's vector instrumenting the other's (needs --view each)",
+    )
+    parser.add_argument(
         "--no-tabular-causes",
         action="store_true",
         help="Leave out the tabular causes of image factors that bundles with own noise (z_own) otherwise add",
@@ -295,6 +338,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if len(set(args.seeds)) != len(args.seeds) or any(seed < 0 for seed in args.seeds):
         parser.error("--seeds must be distinct nonnegative integers")
+    if args.proximal and args.view != "each":
+        parser.error("--proximal needs --view each, which loads both views")
     try:
         paths = parse_named(args.bundles, "--bundles")
         floors = parse_named(args.floors, "--floors")
@@ -308,20 +353,26 @@ def main(argv=None):
         f"{report['n_subjects']} subjects, {len(report['runs'])} tasks. Average treatment effect target: {args.effect:g}"
     )
     causes = any("image_in_f1" in row for row in report["summary"].values())
-    header = f"{'Arm':36} {'ATE':>8} {'Bias':>8} {'MAE':>8} {'PC F1':>8} {'MRI–tab F1':>10}"
+    header = f"{'Arm':42} {'ATE':>8} {'Bias':>8} {'MAE':>8} {'PC F1':>8} {'MRI–tab F1':>10}"
     print(header + (f" {'MRI→tab F1':>10} {'tab→MRI F1':>10} {'oriented':>8}" if causes else ""))
 
     def cell(row, key, width):
         return f"{row[key]:{width}.3f}" if key in row else f"{'-':>{width}}"
 
     for key, row in report["summary"].items():
-        line = f"{key:36} {row['mean_ate']:8.3f} {row['bias']:8.3f} {row['mae']:8.3f} "
+        line = f"{key:42} {row['mean_ate']:8.3f} {row['bias']:8.3f} {row['mae']:8.3f} "
         line += f"{cell(row, 'skeleton_f1', 8)} {cell(row, 'image_tabular_f1', 10)}"
         if causes:
             line += (
                 f" {cell(row, 'image_out_f1', 10)} {cell(row, 'image_in_f1', 10)} {cell(row, 'image_in_oriented', 8)}"
             )
         print(line)
+    shared = {key: row["components"] for key, row in report["summary"].items() if "components" in row}
+    if shared:
+        print(
+            "Proximal arms, canonical pairs the two views share beyond chance: "
+            + ", ".join(f"{k} {v}" for k, v in shared.items())
+        )
     print(f"Report: {args.out}")
 
 
