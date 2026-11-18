@@ -187,11 +187,13 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
 | `ica_simulation.py` | no images, no training: the bank's SCM mixed into a 24-unit code; whether FastICA recovers the own parts (by noise distribution, link and harmonic strength) and whether DirectLiNGAM finds the order from the factors and from a mixed code. Item 33 |
+| `heterogeneity_ica.py` | no images, no training: item 33's set-up with each own part's variance changing across the levels of an observed variable; separation by joint diagonalisation of the levels' covariances, against FastICA, PCA, random rotations and a supervised ceiling, and whether the anchors' loadings on the separated components place each own part. Item 38 |
+| `adni_heterogeneity.py` | no images: on ADNIMERGE's FreeSurfer volumes (baseline visits, per FreeSurfer version), how much their variances change across age bins or sex and how stably that separates components, against shuffled labels. Item 38 |
 | `factoriser.py` | no training: the concealed-factor benchmark of `paper/factor-discovery-framework.tex` on a run's frozen code and its untrained twin. Anchored slots (ridge readouts of the `--anchors`), a label-free count of the novel shared factors (cross-view agreement of the code's residuals, greedy non-linear deflation, a redundancy check), their naming against the concealed factors' own parts and the lesion centre (CCA order, ICA, random rotations), and PC on the anchors and the components against what PC can find among the anchors. `--anchor-source measured` subtracts the anchors' measured values instead of the readouts. A trace shows each direction the count examined with its correlation to each concealed target, and each target's R² from the dropped directions. Stages 42 and 44 |
 | `bridge_view.py` | no training: the first N code units of a `--entropy-units` run (the bridge) written out as a run of their own, with TailCode's head cut to those outputs and `--content-units N` in its report, so every audit reads them unchanged. Stage 46 |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
 | `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
-| `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). Section 7, item 24 |
+| `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). `--proximal` (with `--view each`) adds both views in one AIPW and proximal two-stage least squares with one view instrumenting the other. Section 7, items 24 and 37 |
 
 **Reading rules learned the hard way:**
 - **Raw burden R² is uninformative on the causal bank.** A code that knows every other factor but not the lesion
@@ -896,6 +898,54 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       - So the label-free count cannot split the weak own parts out of this code's novel block, as section 8 expects
         (two views identify the block). A factor-level split needs more structure (step 3b) or anchors for those
         factors.
+37. **A second view cannot close the code's adjustment shortfall: the confounding the code leaves, both views leave
+    (proximal check, run 18 Nov, `causal/proximal/report.txt`; no training).** The tabular benchmark's effect task (item
+    24) on stage 41's bundles with `--proximal`. Besides each view's vector, it adjusts for both views' vectors in one
+    AIPW ("both"), and estimates the effect by proximal two-stage least squares (P2SLS; Miao et al. 2018, Tchetgen
+    Tchetgen et al. 2020): one view's vector instruments the other's in a linear outcome model. Proximal inference
+    treats the two views as two measurements of the anatomy whose errors are independent given it, so it removes the
+    confounding that one view's reading error hides. Both vectors are first cut to the canonical pairs the views share
+    beyond a shuffled-pairing null.
+    - **Known answer** (no images): three latents, each view a noisy 6-unit mixture of them, true effect 1. One view
+      leaves a bias of +.12 to +.19, both views in one AIPW +.01 to +.05, P2SLS −.01 to −.03; it finds the 3 shared
+      directions every time (`tests/test_tabular_benchmark.py`).
+    - **Confounding removed** (share of the tabular-only bias .597, 10 tasks). One view T1 / FLAIR; both views;
+      proximal T1→FLAIR / FLAIR→T1:
+      - 10 units, seed 42: 58% / 57%; 61%; 58% / 58%. Seed 2: 57% / 56%; 60%; 59% / 59%.
+      - 11 units: 58% / 60%; 63%; 61% / 60%.
+      - 24 units: 79% / 83%; 83%; 86% / 84%.
+      - Backbone GAP of the 10-unit run: 78% / 74%; 77%; 80% / 80%. Of the 24-unit run: 85% / 90%; 93%; 92% / 87%.
+      - True factors: bias −.001.
+    - Every trained code unit is a shared direction beyond the null (10 of 10, 11 of 11, 24 of 24), so the cut removed
+      nothing from the codes; the GAP keeps 33–35 of 64. Untrained floors share 4–11.
+    - **Reading.** P2SLS gains at most 3 points over both views in one AIPW, and loses up to 6 on the GAP, where on the
+      known answer it removed the whole leftover. So the leftover is not reading error independent between the views.
+      Both views' codes omit the same content: they are trained to agree, and both drop the weak own parts (item 30).
+      Proxies cannot restore what neither holds, so the adjustment ceiling is what the representation holds.
+    - The 24-unit head drops about 10 points the backbone keeps (83% against 93% with both views' GAP). For adjustment
+      (the plan's block node, section 10), both views' backbone GAP removes the most.
+    - Proxies stay right for two measurements with independent errors, such as ADNI's FreeSurfer anchors against the
+      code's readouts, if their errors are independent (both start from T1).
+38. **Own parts separate by variance heterogeneity in simulation, but ADNI's age and sex do not supply it (run 18
+    Nov; no images, no training).** ICA fails on the bank's Gaussian own parts (item 33). Gaussian sources become
+    separable when their variances change, each differently, across the levels of an observed variable that does not
+    descend from them: joint diagonalisation of the levels' covariances (second-order nonstationary separation, the
+    linear case of time-contrastive learning and iVAE).
+    - **Simulation** (`heterogeneity_ica.py`): item 33's set-up, with each own part's SD changing across 5 levels by
+      exp(strength × a standard normal draw); the lesion centre does not change. Own parts' mean R², against a
+      supervised ceiling of .80: strength 0, .27 (random rotations .29); .25, .72; .5, .76; 1, .77. FastICA .42–.61.
+      - With harmonics in the code (weight .3): .57–.64, ventricle and thickness lowest (.24–.39).
+      - Half the own parts varying: .46–.49. Two levels: .48–.54.
+    - **Placement:** with the four anchors regressed on the separated components, burden's component loads on temporal,
+      its only descendant among them, in every seed, but also on ventricle in 2 of 5. Imperfect separation leaves
+      spurious loadings: precision .51–.64 (.47–.53 with harmonics) against 1.00 with the true noises.
+    - **ADNI** (`adni_heterogeneity.py` on ADNIMERGE; baseline visits with all seven FreeSurfer volumes, one FreeSurfer
+      version at a time, 565–716 subjects each): strength across 5 age bins .09–.15, against .08–.15 with age shuffled;
+      by sex .06–.11 against .04–.07. No component is more stable under bootstrap than with the labels shuffled.
+    - **Reading.** The method is sound, but ADNI's age and sex change the anatomy's variances about as much as chance,
+      and the simulation needs ≳ .25. Diagnosis would be stronger, but it descends from the anatomy, so splitting on it
+      couples the sources. Dropped unless a variable with a real, larger variance change turns up; check any candidate
+      with `adni_heterogeneity.py` first.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -1614,6 +1664,13 @@ identifying information available here.
   is mixing, item 36).
 - **Burden's role:** the completeness test of the representation. At 24 units its own part is .48 / .47, and .60 / .58
   with gain off (item 22).
+- **Two different routes checked 18 Nov (items 37–38); neither changes the plan.**
+  - Treating the two views as proxies (proximal causal inference) leaves the confounding where one view or both views
+    leave it: the code's shortfall is content both views omit, so only a more complete representation reduces it.
+  - For the block node's adjustment (item 3 above), both views' backbone GAP removes 93% of the image-driven
+    confounding against the 24-unit code's 83%. Worth weighing against the code's smaller width.
+  - Separating own parts by variance heterogeneity works in simulation, but ADNI's age and sex give no usable variance
+    change.
 - **Later, if individual factors are wanted without labels:** treat scans from different ADNI visits as extra views.
   Pairs across visits share the stable factors (head size, asymmetry) but not the changing ones (atrophy, WMH growth),
   so Yao's partial-observability result splits the block into stable and changing parts. Check protocol changes
@@ -1824,3 +1881,5 @@ on.
 | a larger head, one or two hidden layers of 512 (stage 40, no training) | at 10 units 0.3–3.2 voxels better through the linear map, nothing through the MLP map; 10 units stays 2.5–3 voxels behind 24 on the same features |
 | predicting the other view's tail features or whole pooled vector (stage 39, no training) | burden worse than with the GAP target at 10 and 24 units, and the anatomy lost; the tails carry position through TailCode's per-cell statistics |
 | a non-linear prediction map as the way to 10 units (stage 36) | 10 units read burden 5–13 voxels worse than 24, under InfoNCE and under prediction through either map. 10 units stays the goal; stage 37 sharpens the views instead |
+| the two views as proxies: proximal two-stage least squares, one view instrumenting the other (item 37, no training) | removes no more confounding than adjusting for both views at once (24 units 84–86% against 83%; 10 units 58–59% against 60–61%): what one code misses, the other misses too |
+| separating own parts by variance heterogeneity across age or sex (item 38, no training) | works in simulation from strength .25 (own parts .72–.77 of a .80 ceiling), but ADNI's age and sex give .06–.15, the same as shuffled labels |
