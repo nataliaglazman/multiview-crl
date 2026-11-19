@@ -200,6 +200,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `adni_heterogeneity.py` | no images: on ADNIMERGE's FreeSurfer volumes (baseline visits, per FreeSurfer version), how much their variances change across age bins or sex and how stably that separates components, against shuffled labels. Item 38 |
 | `factoriser.py` | no training: the concealed-factor benchmark of `paper/factor-discovery-framework.tex` on a run's frozen code and its untrained twin. Anchored slots (ridge readouts of the `--anchors`), a label-free count of the novel shared factors (cross-view agreement of the code's residuals, greedy non-linear deflation, a redundancy check), their naming against the concealed factors' own parts and the lesion centre (CCA order, ICA, random rotations), and PC on the anchors and the components against what PC can find among the anchors. `--anchor-source measured` subtracts the anchors' measured values instead of the readouts. A trace shows each direction the count examined with its correlation to each concealed target, and each target's R² from the dropped directions. Stages 42 and 44 |
 | `bridge_view.py` | no training: the first N code units of a `--entropy-units` run (the bridge) written out as a run of their own, with TailCode's head cut to those outputs and `--content-units N` in its report, so every audit reads them unchanged. Stage 46 |
+| `rotated_bundle.py` | no training, no labels: a causal bundle's codes rotated into their cross-view canonical directions (CCA between the views, the pairs beyond a shuffled-pairing null kept), written as a bundle of its own for label-free discovery. Tests: `tests/test_rotated_bundle.py`. Stage 51 |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
 | `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
 | `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). `--proximal` (with `--view each`) adds both views in one AIPW and proximal two-stage least squares with one view instrumenting the other. Section 7, items 24 and 37 |
@@ -1028,6 +1029,100 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       helps (8 → 10 units: sulcal .33 → .50, thickness .51 → .59 / .65). The matched-width finding of items 26–32 is
       mostly this benchmark's fingerprint; ADNI has no randomly placed sphere.
 
+40. **Without the position, a narrow code is a good block for discovery beyond the anchors, and needs a non-linear
+    adjustment for confounding (stage 48, read 18 Nov, `causal/stage48/`).** One seed per code. T1 / FLAIR. Codes: 8
+    and 10 units on the fixed bank; 10, 11 and 24 units on the drawn bank.
+    - **Effect estimation, bias** (tabular-only .60, oracle .00), linear learner then `--learner rbf`
+      (`tabular_rbf.log`, effects only): fixed 8 units .24 / .24 → .17 / .16; fixed 10 units .25 / .22 → .16 / .14;
+      drawn 10 units .25 / .26 → .22 / .23; 11 units .25 / .24 → .22 / .21; 24 units .12 / .10 → .12 / .10. The
+      fixed-bank codes hold most of the confounding content, but non-linearly (brain .44 by ridge, .83 by boosting);
+      the drawn narrow codes lack content (crowded out), so a flexible learner barely helps them.
+    - **Discovery with tabular variables.** Image–tabular edges F1: fixed 10 units .78 / .79, fixed 8 .76 / .64,
+      drawn 10 .51 / .53, 24 units .90 / .89 (oracle .98). Tabular causes of image factors, which need the own parts:
+      .87 / .87, .75 / .68, .45 / .53, .93 / .91.
+    - **Discovery among the image factors** (decoded, resampled): every narrow code .69–.81, 24 units .84 / .85
+      (truth .85); no narrow-code difference is resolved. Label-free PC on the units stays at the random-mixture
+      baseline at every width (fixed 8 units .27 against .44).
+    - **Concealed-factor benchmark, measured anchors.** Default split (burden, lr, sulcal concealed): the block keeps
+      burden's own part .57 / .56 (fixed 10) and .54 / .55 (fixed 8), sulcal's .54 / .54 and .59 / .58; drawn 10 units
+      .04 / .05 and .00, 24 units .03 / .03 and .18 / .17, their blocks taken by the lesion's position. Single
+      directions match single concealed factors (fixed 10: lr .85, burden .73, sulcal .45–.52), named well above
+      random rotations (.41). Burden split (thickness, lr, sulcal concealed): thickness .42 / .46 and sulcal
+      .54 / .56 in the fixed 10-unit block; the 8-unit block keeps thickness (.37) but drops a sulcal direction at
+      the cut (.17); drawn 10 units .25 and .19, 24 units .02 / .04 (thickness dropped at the cut) and .25. PC still
+      places the components nowhere (their edges at chance), as section 8 expects.
+    - **Reading.** Stage 44's loss of the weak own parts at the redundancy cut was mostly the lesion's position: with
+      it fixed, the plan's block discovery (steps 3–4) finds the concealed weak factors as separate, nameable
+      directions, even at matched width. Linear confounding adjustment still favours the wide code; with a flexible
+      learner the fixed-bank narrow codes close most of the gap (.15 against .11). Burden's numbers carry stage 47's
+      caveat (easier reading at a fixed place); sulcal's and thickness's do not.
+
+41. **On the fixed-position bank the 10-unit code needs the residual, jitter and prediction, not the tails, and is
+    best with code batches (stage 50, read 19 Nov, `causal/stage50/`).** Leave-one-out from stage 47's 10-unit arm;
+    one seed per ablation. T1 / FLAIR unless one number.
+    - **Seed spread** (the reference at seeds 42 and 2), own parts by ridge: brain .44 / .68, ventricle .49 / .63,
+      sulcal .50 / .64; burden, thickness, temporal and lr within .09. Novel-block burden .57 against .30. Narrow codes
+      are seed-sensitive; the rule's thresholds were brain .24, ventricle .16, sulcal .14, the rest .10.
+    - **Residual: needed.** Without it burden's own part is 0 in code and backbone alike, temporal .75 → .34, sulcal
+      .50 → .32 (ventricle rises .49 → .71). ATE bias .34 / .35 (rbf .23 / .22) against .25 / .22 (.16 / .14). The
+      novel block loses burden (0) and most of sulcal (.21).
+    - **Jitter: needed.** Without it the code memorises (cross-view top-1 among 1,000 test subjects .39): burden 0,
+      ventricle .13, sulcal .31 (brain rises to .83); the backbone loses burden and ventricle too.
+    - **Prediction: needed.** Without it burden .25, thickness .43, sulcal .26, lr .58; volume error 18.3 / 16.6
+      against 11.6 / 11.7; decoded image-graph F1 .49 / .53 against .70 / .74 (seed 2 .81 / .79). Its novel-block
+      burden (.29) sits at seed 2's level, so that one measure does not separate it.
+    - **Tails: not needed on this bank,** every change within the seed spread except burden .46 → .58. Confounded:
+      a lesion at one place is readable by a plain average, and the tails were added for a randomly placed one
+      (item 1). Stage 49 tests them on the drawn bank.
+    - **Code batches instead of uniform: better on everything.** Own parts brain .95, ventricle .85 / .81, burden
+      .60 / .58, thickness .75 / .76, temporal .85, lr .91 / .93, sulcal .72 / .77, all beyond the seed spread
+      (temporal at its edge); volume error 11.3 / 11.5 (unchanged). ATE bias .09 / .07 (rbf .07 / .06), below the
+      drawn 24-unit code's .12 / .10; image–tabular edges F1 .94 / .92 (oracle .98); decoded image-graph F1 .84 / .83
+      (truth .85). The label-free count beside measured anchors keeps exactly three components, one per concealed
+      factor (lr .86, burden .72–.73, sulcal .73). No style; cross-view top-1 .74 among 1,000; mild memorisation
+      (code32 sets: train .97, test .91). Variance concentrates in a few directions (effective rank 2.2 of 10),
+      which linear readouts do not mind.
+    - **Why code batches now help when they hurt before** (item 5; stage 43, section 9): code neighbourhoods match on
+      whatever dominates the code. On the drawn bank that was the lesion's position, so negatives shared position
+      but not anatomy; here they share the anatomy, so InfoNCE must use the weak factors. Item 5's pricing predicted
+      this: a weak reading pays only when the negatives already match on the strong content.
+    - **Label-free discovery on the units** stays at the random-mixture baseline (one view of the code-batch arm
+      above it, the other below).
+    - **Reading.** Residual, jitter and prediction carry the recipe; the tails are untested here. Code batches turn
+      the narrow code into the best causal block so far, but on one seed and on a bank without a fingerprint; a second
+      seed is the first check (stage 52), and stage 49 shows what they do where the fingerprint exists.
+
+42. **The 24-unit recipe needs the residual, jitter and prediction, and neither the tails nor uniform batches
+    (stage 49, read 19 Nov, `causal/stage49/`).** Leave-one-out from stage 33's recipe on the drawn-position bank; one
+    seed per ablation; T1 / FLAIR. The reference seeds agree closely (own parts within .08 except ventricle .71 /
+    .57; volume 12.7 / 13.1 voxels; ATE bias .12 / .10 and .12 / .12).
+    - **Prediction: needed, most of all.** Without it (stage 28's arm) ventricle .24, thickness .34 / .43, sulcal
+      .12 / .15, lr .59 / .57, brain .48 / .32, burden .35 / .34; volume error 18.0 / 19.7; ATE bias .32 / .34;
+      image–tabular edges F1 .51 / .59; decoded image-graph F1 .56 / .71 (recipe .84 / .85).
+    - **Residual: needed.** Without it burden 0 in code and backbone, temporal .50 / .48 (thickness and ventricle
+      rise to .77 and .85); ATE bias .15 / .16; image–tabular F1 .73 / .68; image graph .67 / .71.
+    - **Jitter: needed.** Without it burden .22 / .20, ventricle .41, thickness .39, lr .68, temporal .63 / .66;
+      volume error 27.7 / 28.7; ATE bias .20 / .21.
+    - **Tails: not needed.** Without them (`gapnorm`) burden .54 / .50, sulcal .67 / .69 (+.15), the rest unchanged;
+      volume error 10.9 / 12.2; ATE bias .10 / .11; image–tabular F1 .90 / .93; image graph .85 / .85. With the
+      residual input and the prediction term, a plain average through the same gauge and head reads the randomly
+      placed lesion as well as the tails do; item 1's need for them predates both.
+    - **Code batches: no difference at 24 units here** (every measure within the seed spread: ATE bias .11 / .10,
+      image graph .84 / .84, volume 13.3 / 12.2), against their large gain at 10 units on the fixed bank (item 41).
+    - **Reading.** The recipe's load-bearing parts are the residual input, jitter and the prediction term. The tails
+      can go, which simplifies the model. Code batches neither help nor hurt a wide code with the fingerprint present.
+
+43. **Label-free PC on canonical directions is empty by construction (stage 51, read 19 Nov, `causal/stage51/`).**
+    Every CCA-rotated code, the fixed 8-unit code reduced to 7 directions included, gave PC no edges (F1 0, SHD 6,
+    every true edge missed), in both views. CCA whitens each view, so its canonical variates are mutually
+    uncorrelated, and PC's Fisher-Z tests then find every pair independent. The graph lives in the factors'
+    correlations, which any whitening rotation (CCA, ICA, PCA-whitened) removes; the components that match the
+    concealed factors are their own parts, which are independent by definition (item 33's point for ICA). The
+    rotation did align components with factors a little better than random rotations on the fixed bank (MCC .49 /
+    .51 against the rotations' .39–.43 and the raw units' .40 / .46) and not on the drawn bank (c10 .44, c24 .45 to
+    .46). Label-free graph discovery from two views stays out of reach, as section 8 says; the graph needs anchors.
+    The test's design was at fault (no one checked that the rotation decorrelates), not the data.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -1178,6 +1273,66 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 52 (built 19 Nov; running since 09:52): a second seed of the code-batch arm.** Stage 50's code-batch arm
+  (10 units, fixed bank) at seed 2, then the four reports, discovery, the tabular benchmark (linear and rbf) and the
+  concealed-factor benchmark on both code-batch seeds beside the reference at seeds 42 and 2 (`causal/stage52/`).
+  Item 41's code-batch gain stands if seed 2 also clears the reference's seed spread.
+- **Stage 51 (ran 18 Nov; read, item 43: empty by construction): label-free discovery on the codes' cross-view
+  canonical directions.** The user's choice among three label-free options (the others: the heterogeneity separation,
+  which needs an observed variable that changes the factors' variances, absent from the bank; and ADNI's
+  heterogeneity check).
+  - **Why it might work:** canonical directions are unique where their correlations differ, and stage 48's trace on
+    the fixed-bank 10-unit code showed single directions matching single concealed factors.
+  - **Why it might not:** the trained codes' canonical correlations are bunched near 1 (fixed 10 units .98, .97,
+    .97, .97, .96, .95, .94, .92, .90, .81; drawn 10 units .99–.94), so the top directions are near-ties and may
+    stay mixed. The untrained twins keep 3–6 pairs beyond chance.
+  - **Set-up:** `rotated_bundle.py --all-pairs` (a pure rotation; the untrained twins keep only 3–6 pairs beyond
+    chance, fewer than the 7 factors PC names, which stopped the first launch) on stage 48's bundles and floors
+    (fixed 10 and 8 units, drawn 10 and 24), then `latent_causal_discovery` on raw and rotated codes in one table per
+    view, with 30 random rotations of each block (`causal/stage51/`).
+  - **The fixed 8-unit code reduced to 7 components** (the user's request): its 7 most-agreeing canonical directions
+    (`--components 7`, dropping r .84), one per latent of the fixed bank, so every component is named and every edge
+    scored. Read against the raw 8-unit code, its 8-pair rotation and random rotations of the 7.
+  - **Reading rule, fixed before the results:** the rotation helps if a rotated code's F1 beats both its raw code's
+    and the random-rotation mean by more than the rotations' SD, with the per-factor match |r| higher too.
+  - **Checked:** `tests/test_rotated_bundle.py` (2 tests: factors shared at different strengths come out as
+    separate components, each at its reading ceiling; the rotated bundle keeps its rows and identity); dry run.
+- **Stage 50 (ran 18–19 Nov; read, item 41): which of the recipe's parts the 10-unit code needs on the
+  fixed-position bank.** Stage 49 ablates the 24-unit recipe; the user
+  wanted the 10-unit code's version. Stage 47's 10-unit improvement itself came from one change, the fixed position.
+  - **Arms** (`bank_causal_nofield_fixedpos`, 10 units, 20,000 steps): stage 47's 10-unit arm with seed 2, then, at
+    seed 42, no residual, no jitter, code batches, no tails (`gapnorm`) and no prediction.
+  - **Reports** (`causal/stage50/`): the four reports beside stage 47's 8- and 10-unit codes; discovery and the
+    tabular benchmark, now with the rbf learner as well (`causal_tables` runs both, item 40); the concealed-factor
+    benchmark with measured anchors, default split.
+  - **Reading rule, fixed before the results:** removing a part matters if an own part moves by more than the two
+    reference seeds differ on that factor and by at least .10, the volume error by more than 2 voxels, or burden's or
+    sulcal's share of the novel block by more than .10. Narrow codes split close ties by seed (item 30), so the seed
+    spread decides.
+  - **Checked:** `bash -n`; the dry run lists the six arms and every report. The arm configurations match stage 49's,
+    smoke-tested there, at 10 units.
+- **Stage 49 (ran 18–19 Nov; read, item 42): which of the recipe's parts carry it.** Leave-one-out arms from stage
+  33's recipe (24 units, prediction weight 1, uniform batches, residual input, tail pooling, 2-voxel / 3° jitter,
+  `bank_causal_nofield`, 20,000 steps, seed 42), one part removed each:
+  - no residual (the scan alone), no jitter, code batches (31 of 50 neighbours, rebuilt every 500 steps) in place of
+    uniform ones, and no tails (`--pool gapnorm`: the average through the same gauge and head; prediction stays on);
+  - already trained: no prediction (stage 28), 10 units (stage 35), and the recipe's second seed (stage 34);
+  - known, not rerun: the linear and MLP maps match at 24 units (item 38); the field and gain are bank changes
+    (items 18, 20–22), and the lesion's position is stage 47's (item 39).
+  - **Reports** (`causal/stage49/`): the four reports on all eight codes, then stage 48's discovery and tabular
+    benchmark on them.
+  - **Reading rule, fixed before the results** (from the recipe's two seeds: own parts within .04 except ventricle
+    .71 / .57 and sulcal .52 / .60; volume 12.7 / 13.1 voxels): removing a part matters if an own part moves by more
+    than .10 (.15 for ventricle) or the volume error by more than 2 voxels. One seed per arm.
+  - **Checked:** a 2-step arm of each new configuration trains and saves on a small bank; `--pool gap` refuses
+    `--content-units`, so the tails are removed with `gapnorm`, which keeps the gauge and head; dry run as expected.
+- **Stage 48 (ran 18 Nov, no training; read, item 40): stage 47's codes as causal blocks.** Stage 41's discovery
+  (label-free PC on the units against random mixtures; PC on factors decoded from the code) and tabular benchmark
+  (effect estimation and discovery with tabular variables), then stage 44's concealed-factor benchmark with
+  measured anchors (both splits), on 8 and 10 units on the fixed bank and 10, 11 and 24 units on the drawn bank. Both
+  banks hold the same test subjects and factors, so the bundles pass the identity check and share one table
+  (`causal/stage48/`). New helpers in `run_pc.sh`: `causal_tables` (discovery plus the tabular benchmark for
+  labelled runs) and `needs_done`.
 - **Stage 47 (ran 18 Nov; read, item 39: yes, it does): does the lesion's position crowd the weak factors
   out of a narrow code?** About half of a 10-unit code goes to the position, a near-unique fingerprint (item 29).
   Stage 43's code-neighbour batches, whose negatives already share it, moved the code from position to anatomy (T1,
