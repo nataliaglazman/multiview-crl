@@ -1021,9 +1021,14 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - **Prediction: needed.** Without it burden .25, thickness .43, sulcal .26, lr .58; volume error 18.3 / 16.6
       against 11.6 / 11.7; decoded image-graph F1 .49 / .53 against .70 / .74 (seed 2 .81 / .79). Its novel-block
       burden (.29) sits at seed 2's level, so that one measure does not separate it.
-    - **Tails: not needed on this bank,** every change within the seed spread except burden .46 → .58. Confounded:
-      a lesion at one place is readable by a plain average, and the tails were added for a randomly placed one
-      (item 1). Stage 49 tests them on the drawn bank.
+    - **Tails: they keep the narrow code linear** (corrected 19 Nov; first read as "not needed"). Own parts, volume
+      error and the block stay within the seed spread (burden .46 → .58), and boosting reads the factors as before
+      (brain .82, thickness .80, temporal .82, lr .84). But the factors themselves read far worse by ridge: ventricle
+      .21 / .24 against .47 / .55 and .61 / .60 (seeds 42 and 2), thickness .34 / .40 against .45 / .63 and .64 /
+      .59, brain .34 / .32 against .44 / .49 and .68 / .64, the lesion volume .48 / .47 against .70 / .72 and .76 /
+      .79. Linear tools pay: ATE bias .28 / .28 against .25 / .22 and .20 / .20 (rbf .19 / .18 against .16 / .14 and
+      .14 / .14). The rule fixed beforehand covered own parts, volume error and the block, not raw linear
+      readability, so it missed this. At 24 units the tails make no such difference (item 42).
     - **Code batches instead of uniform: better on everything.** Own parts brain .95, ventricle .85 / .81, burden
       .60 / .58, thickness .75 / .76, temporal .85, lr .91 / .93, sulcal .72 / .77, all beyond the seed spread
       (temporal at its edge); volume error 11.3 / 11.5 (unchanged). ATE bias .09 / .07 (rbf .07 / .06), below the
@@ -1053,14 +1058,16 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       rise to .77 and .85); ATE bias .15 / .16; image–tabular F1 .73 / .68; image graph .67 / .71.
     - **Jitter: needed.** Without it burden .22 / .20, ventricle .41, thickness .39, lr .68, temporal .63 / .66;
       volume error 27.7 / 28.7; ATE bias .20 / .21.
-    - **Tails: not needed.** Without them (`gapnorm`) burden .54 / .50, sulcal .67 / .69 (+.15), the rest unchanged;
-      volume error 10.9 / 12.2; ATE bias .10 / .11; image–tabular F1 .90 / .93; image graph .85 / .85. With the
-      residual input and the prediction term, a plain average through the same gauge and head reads the randomly
-      placed lesion as well as the tails do; item 1's need for them predates both.
+    - **Tails: not needed at 24 units.** Without them (`gapnorm`) burden .54 / .50, sulcal .67 / .69 (+.15), the
+      rest unchanged; the factors read by ridge as before (lesion volume .90 / .88 against .88 / .87); volume error
+      10.9 / 12.2; ATE bias .10 / .11; image–tabular F1 .90 / .93; image graph .85 / .85. With the residual input
+      and the prediction term, a plain average through the same gauge and head reads the randomly placed lesion as
+      well as the tails do; item 1's need for them predates both.
     - **Code batches: no difference at 24 units here** (every measure within the seed spread: ATE bias .11 / .10,
       image graph .84 / .84, volume 13.3 / 12.2), against their large gain at 10 units on the fixed bank (item 41).
-    - **Reading.** The recipe's load-bearing parts are the residual input, jitter and the prediction term. The tails
-      can go, which simplifies the model. Code batches neither help nor hurt a wide code with the fingerprint present.
+    - **Reading.** The recipe's load-bearing parts are the residual input, jitter and the prediction term. At 24
+      units the tails can go; at 10 units they keep the factors linearly readable (item 41), so keep them for a narrow
+      code. Code batches neither help nor hurt a wide code with the fingerprint present.
 
 43. **Label-free PC on canonical directions is empty by construction (stage 51, read 19 Nov, `causal/stage51/`).**
     Every CCA-rotated code, the fixed 8-unit code reduced to 7 directions included, gave PC no edges (F1 0, SHD 6,
