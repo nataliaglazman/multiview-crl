@@ -278,6 +278,12 @@
 # footprint rotations, with floors, as stage 51. Codes: on the drawn bank the 24-unit recipe at seeds 42 and 2 (stages
 # 33-34) and the 10-unit code (stage 35); on the fixed bank the 10-unit code at seeds 42 and 2 (stages 47, 50), its
 # code-batch arm at seeds 42 and 2 (stages 50, 52) and the 8-unit code (stage 47) (causal/stage54/).
+# Stage 55 (opt-in, no training) Individual effects and counterfactual outcomes in the tabular benchmark
+# (eval.causal.tabular_benchmark --counterfactual): tasks whose effect is 1 + the standardized hidden image score, and
+# one task per factor whose effect varies with that factor's own part; each code's per-subject effects (DR- and
+# T-learner, cross-fitted) scored by the share of the effect's variation recovered, PEHE, policy regret and the
+# counterfactual outcome's error, with the linear and the rbf learner. Stage 54's codes, the backbone GAP of the 24-unit
+# recipe and of the fixed bank's code-batch arm, and stage 53's grid and quantile arms once trained (causal/stage55/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2186,6 +2192,67 @@ if wants 54; then
     done
     [ "$DRY" = 0 ] && echo "Stage 54 reports in $OUT: intrinsic_dimension.txt, footprints.txt (figures in" \
         "footprints/), label_free_view1.txt and label_free_view2.txt"
+fi
+
+if wants 55; then
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    FX=${P}_fixedpos
+    NAMES=("${P}_predict1_c24_20k" "${P}_predict1_c24_20k_s2" "${P}_predict1_c10_20k" "${FX}_predict1_c10_20k"
+        "${FX}_predict1_c10_20k_s2" "${FX}_abl_codebatch_predict1_c10_20k" "${FX}_abl_codebatch_predict1_c10_20k_s2"
+        "${FX}_predict1_c8_20k")
+    LABELS=(c24 c24_s2 c10 fixed_c10 fixed_c10_s2 fixed_codebatch fixed_codebatch_s2 fixed_c8)
+    OUT=$D/causal/stage55
+    needs_done 55 "${NAMES[@]}"
+    for target in grid quantile; do  # stage 53's arms, once trained
+        name=${P}_predict1${target}_c24_20k
+        if [ "$DRY" = 1 ] || { grep -qx DONE "$D/logs/$name.log" 2> /dev/null && [ -f "$D/runs/$name/model.pt" ]; }; then
+            NAMES+=("$name")
+            LABELS+=("c24_$target")
+        else
+            echo "Stage 55 leaves out $name until stage 53 has trained it."
+        fi
+    done
+    [ "$DRY" = 0 ] && { mkdir -p "$OUT" || exit 1; }
+    export_bundle() { # export_bundle NAME FEATURES SUFFIX: a run's bundle and floor, reused while newer than its run
+        local name=$1 features=$2 base=$D/causal/$1$3
+        if [ "$DRY" = 1 ]; then
+            echo "$PY $D/causal_bundle.py $D/runs/$name $base.npz --features $features [--untrained]"
+            return
+        fi
+        if [ "$base.npz" -nt "$D/runs/$name/model.pt" ] && [ "$base.floor.npz" -nt "$D/runs/$name/model.pt" ]; then
+            return
+        fi
+        "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$base.npz" --features "$features" > "$base.log" 2>&1 \
+            && "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$base.floor.npz" --features "$features" --untrained \
+                >> "$base.log" 2>&1 \
+            || { echo "Stage 55's bundle failed, see $base.log"; exit 1; }
+    }
+    BUNDLES=() FLOORS=()
+    for i in "${!NAMES[@]}"; do
+        export_bundle "${NAMES[$i]}" code ""
+        BUNDLES+=("${LABELS[$i]}=$D/causal/${NAMES[$i]}.npz")
+        FLOORS+=("${LABELS[$i]}=$D/causal/${NAMES[$i]}.floor.npz")
+    done
+    for i in 0 5; do  # the backbone GAP of the 24-unit recipe and of the fixed bank's code-batch arm
+        export_bundle "${NAMES[$i]}" gap .gap
+        BUNDLES+=("${LABELS[$i]}_gap=$D/causal/${NAMES[$i]}.gap.npz")
+        FLOORS+=("${LABELS[$i]}_gap=$D/causal/${NAMES[$i]}.gap.floor.npz")
+    done
+    for learner in linear rbf; do
+        suffix=""
+        [ "$learner" = rbf ] && suffix=_rbf
+        CMD=("$PY" -m eval.causal.tabular_benchmark --view each --effects-only --learner "$learner" --counterfactual
+            --counterfactual-modifiers score own --bundles "${BUNDLES[@]}" --floors "${FLOORS[@]}"
+            --out "$OUT/counterfactual$suffix.json")
+        if [ "$DRY" = 1 ]; then
+            echo "${CMD[*]} > $OUT/counterfactual$suffix.log"
+        else
+            echo "$(date +%H:%M) counterfactual panel, $learner learner, into $OUT/counterfactual$suffix.log"
+            "${CMD[@]}" > "$OUT/counterfactual$suffix.log" 2>&1 \
+                || { echo "Stage 55's benchmark failed, see $OUT/counterfactual$suffix.log"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 55 reports in $OUT: counterfactual.log and counterfactual_rbf.log"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

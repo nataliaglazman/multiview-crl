@@ -208,7 +208,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `intrinsic_dimension.py` | no training, and no labels in the estimate: TwoNN (with decimation to N/2, N/4, N/8) and Levina–Bickel on each code, the code on the unit sphere, the backbone GAP and the twin's, beside the true latents, random non-linear embeddings of them with reading noise, and Gaussian noise of each width. Tests: `tests/test_intrinsic_dimension.py`. Stage 54 |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
 | `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
-| `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). `--proximal` (with `--view each`) adds both views in one AIPW and proximal two-stage least squares with one view instrumenting the other. Section 7, items 24 and 37 |
+| `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). `--proximal` (with `--view each`) adds both views in one AIPW and proximal two-stage least squares with one view instrumenting the other. `--counterfactual` adds tasks whose effect varies with the hidden image score (and, with `--counterfactual-modifiers score own`, one task per factor whose effect varies with its own part), and scores each arm's per-subject effects (DR- and T-learner): R² of the individual effects, PEHE, policy regret and the counterfactual outcome's error. Section 7, items 24 and 37; stage 55 |
 
 **Reading rules learned the hard way:**
 - **Raw burden R² is uninformative on the causal bank.** A code that knows every other factor but not the lesion
@@ -1304,6 +1304,43 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 55 (built 19 Nov; not run; no training): individual effects and counterfactual outcomes.** The user asked
+  for counterfactuals with the tabular data.
+  - **Why.** The ATE (item 24) is an average. A counterfactual asks what one subject's outcome would have been under
+    the treatment they did not get, so it needs the subject's own effect. The simulator stores both potential outcomes,
+    so individual effects can be scored exactly. It is the completeness test in causal terms: a code that drops a
+    factor's own part cannot personalize an effect that depends on it.
+  - **Tasks** (`eval.causal.tabular_benchmark --counterfactual --counterfactual-modifiers score own`). Per task seed,
+    the effect is 1 + a standardized modifier: the hidden image score (all seven factors), or one factor's own part
+    (one task per factor). The tasks of a seed share treatment and the outcome under control (`simulate_tabular`'s new
+    `modifier`), so they differ only in who benefits.
+  - **Estimators**, cross-fitted, each subject's effect from models that never saw it. T-learner: the difference of
+    the AIPW's two outcome models. DR-learner (Kennedy 2023): each subject's AIPW score regressed on the covariates,
+    with the ridge penalty chosen by leave-one-out (with ridge 1 the noisy scores were overfitted: R² −28 for a noisy
+    24-unit code at 160 subjects).
+  - **Scores.** R² of the individual effects (1 − PEHE² / their variance; tabular-only near 0 or below); PEHE; policy
+    regret (the effect lost by treating exactly those with a positive estimate); and the counterfactual outcome's
+    error. Both potential outcomes share their noise here, so the counterfactual that keeps the subject's own noise
+    (observed outcome minus or plus the estimated effect) has the PEHE as its error; the other arm's model alone
+    leaves that noise in (`cf mean`). Rows: tabular only, the true factors, the true own parts, each code and its
+    untrained floor, T1 and FLAIR.
+  - **Codes:** stage 54's eight, the backbone GAP of the 24-unit recipe and of the fixed bank's code-batch arm, and
+    stage 53's grid and quantile arms once trained. Linear and rbf learners.
+  - **Reading rule, fixed before the results.** In a simulation at 1,000 subjects the true factors read about .92 by
+    the DR-learner and a 24-unit linear code holding the factors with reading noise about .55. A code holds what
+    individual effects need if its R² beats its floor by more than .1 in both views. A factor's own part is usable for
+    personalization if its task's R² clears .1 above the floor. Compare each code's own-part R² with its own variation
+    (`own_variation.py`): this panel reads the same content through a noisier, confounded estimator, so expect it
+    lower.
+  - **Checked locally.** The refactored `estimate_ate` and `simulate_tabular` give bit-identical outputs to before (a
+    saved fixed-input check). `tests/test_tabular_benchmark.py`: the 8 existing tests and 3 new ones (a modifier
+    changes only the effect; the true factors recover individual effects at R² > .9 by both learners and the tabular
+    columns at < .1; the CLI panel on a toy cohort, including the abducted counterfactual's error equalling the PEHE
+    and the errors for a missing `z_own` or zero heterogeneity). The panel ran end to end on the stage 54 smoke
+    bundles (160 subjects, so its numbers are noise there). `bash -n` passes; the dry run lists the bundle exports
+    (reused when newer than the run) and both benchmark calls.
+  - **Run** after stage 53 finishes: `bash out/burden_feasibility_20261102/run_pc.sh 55` (or `54 55`). Reports:
+    `causal/stage55/counterfactual.log` and `counterfactual_rbf.log`, with JSONs beside them.
 - **Stage 54 (built 19 Nov; not run; no training): where each code reads in the image, and how many dimensions it
   fills.** Section 10's label-free options at the user's request: step 3b (spatial footprints) and section 8's optional
   intrinsic-dimension check.
@@ -1359,8 +1396,10 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - The rotation helps graph discovery if its F1 beats the raw code's and the mixing null's mean by more than the
       null's SD, in both views (stage 51's rule).
     - The code supports the embedding claim if its TwoNN holds roughly flat under decimation, reads near the
-      calibration row of its width at a matching noise level (about 10 on the drawn bank, 7 on the fixed), and sits
-      clearly below Gaussian noise of that width and away from the twin.
+      calibration row of its width at a matching noise level, and sits clearly below Gaussian noise of that width and
+      away from the twin. (Corrected after the results; the verdicts do not change. The reference is the calibration
+      row, not the block's size: at 1,000 subjects the estimators read the drawn bank's 10 latents as about 8 and the
+      fixed bank's 7 factors as about 5.5–6. Noise and directions of small spread make the estimate fall as N falls.)
   - **Checked locally.**
     - `tests/test_footprints.py`, 8 tests: the Jacobi angles recover a planted basis and never lower the objective;
       the Jacobian of a toy linear code; both rotations unmix factors read from disjoint cells; the per-subject count;
@@ -2130,6 +2169,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Built, not run:** stage 54, no training: where each code reads in the image (spatial footprints and the rotation
   whose directions read from the fewest places, step 3b) and how many dimensions it fills (intrinsic dimension), on
   the recent codes (section 9). Run it after stage 53.
+- **Built, not run:** stage 55, no training: individual effects and counterfactual outcomes in the tabular benchmark
+  (`--counterfactual`), on the same codes (section 9). Run it after stage 53, with stage 54 or alone.
 - **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
   fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
   needs.

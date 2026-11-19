@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from eval.causal import tabular_benchmark
-from eval.causal.effect_estimation import proximal_ate
+from eval.causal.effect_estimation import estimate_cate, make_folds, proximal_ate
 from eval.causal.tabular_scm import simulate_tabular
 
 
@@ -209,6 +209,76 @@ class TabularBenchmarkTests(unittest.TestCase):
             self.assertGreater(result["ci_high"], 1.0)
         unrelated = proximal_ate(a, y, x, rng.normal(size=(n, 6)), rng.normal(size=(n, 6)))
         self.assertEqual(unrelated["components"], 0)
+
+    def test_a_modifier_changes_only_the_effect(self):
+        z, adjacency, _, _ = cohort()
+        modifier = own_noise()[:, 1]
+        plain = simulate_tabular(z, seed=4, heterogeneity=0.8, image_adjacency=adjacency)
+        scm = simulate_tabular(z, seed=4, heterogeneity=0.8, image_adjacency=adjacency, modifier=modifier)
+        np.testing.assert_array_equal(scm.treatment, plain.treatment)
+        np.testing.assert_array_equal(scm.y0, plain.y0)
+        standard = (modifier - modifier.mean()) / modifier.std()
+        np.testing.assert_allclose(scm.y1 - scm.y0, 1.0 + 0.8 * standard)
+        with self.assertRaisesRegex(ValueError, "modifier"):
+            simulate_tabular(z, modifier=np.zeros(len(z)))
+
+    def test_individual_effects_from_the_factors_not_from_the_tabular_columns(self):
+        z, adjacency, _, _ = cohort()
+        scm = simulate_tabular(z, seed=1, heterogeneity=1.0, image_adjacency=adjacency)
+        effect = scm.y1 - scm.y0
+        folds = make_folds(scm.treatment, 5, 0)
+        w = scm.covariates
+
+        def r2(estimated):
+            return 1 - np.mean((estimated - effect) ** 2) / effect.var()
+
+        oracle = estimate_cate(scm.treatment, scm.outcome, np.column_stack((w, z)), folds, tabular_width=3)
+        tabular = estimate_cate(scm.treatment, scm.outcome, w, folds, tabular_width=3)
+        self.assertGreater(r2(oracle["dr_learner"]), 0.9)
+        self.assertGreater(r2(oracle["t_learner"]), 0.9)
+        self.assertLess(r2(tabular["dr_learner"]), 0.1)  # the effect varies with the image alone
+        both = np.column_stack((scm.outcome, scm.outcome + effect))  # several outcomes share one fit
+        joint = estimate_cate(scm.treatment, both, np.column_stack((w, z)), folds, tabular_width=3)
+        np.testing.assert_allclose(joint["dr_learner"][:, 0], oracle["dr_learner"], atol=1e-10)
+        np.testing.assert_allclose(joint["mu1"][:, 0], oracle["mu1"], atol=1e-10)
+
+    def test_cli_counterfactual_panel(self):
+        z, adjacency, dense, floor = cohort()
+        with tempfile.TemporaryDirectory() as scratch, contextlib.redirect_stdout(io.StringIO()) as printed:
+            root = Path(scratch)
+            a, b, out = root / "dense.npz", root / "floor.npz", root / "report.json"
+            bundle(a, z, adjacency, dense, own_noise())
+            bundle(b, z, adjacency, floor)
+            args = ["--bundles", f"dense={a}", "--floors", f"dense={b}", "--effects-only", "--seeds", "0", "1"]
+            args += ["--counterfactual", "--counterfactual-modifiers", "score", "own", "--out", str(out)]
+            tabular_benchmark.main(args)
+            report = json.loads(out.read_text())
+            panel = report["counterfactual"]
+            names = report["image_factors"]
+            self.assertEqual(panel["modifiers"], ["image score"] + [f"{name} own part" for name in names])
+            summary = panel["summary"]
+            score = {key: rows["image score"]["dr_learner_r2"] for key, rows in summary.items()}
+            self.assertGreater(score["oracle factors"], 0.9)
+            self.assertGreater(score["dense / T1"], 0.9)  # a rotation of the factors holds the image score
+            self.assertLess(score["dense / T1 (untrained)"], 0.2)
+            self.assertLess(score["tabular"], 0.1)
+            self.assertGreater(summary["dense / T1"]["image score"]["dr_learner_r2_delta_vs_untrained"], 0.6)
+            for label in panel["modifiers"][1:]:
+                # The toy SCM is linear and own_noise() is its exogenous noise, so a rotation of the factors holds
+                # each own part linearly; the untrained floor holds none.
+                self.assertGreater(summary["oracle own parts"][label]["dr_learner_r2"], 0.9)
+                self.assertGreater(summary["dense / T1"][label]["dr_learner_r2"], 0.85)
+                self.assertLess(summary["dense / T1 (untrained)"][label]["dr_learner_r2"], 0.1)
+            for run in report["runs"]:
+                row = run["counterfactual"]["oracle factors"]["image score"]
+                self.assertAlmostEqual(row["counterfactual_rmse"]["abducted"], row["dr_learner"]["pehe"], 10)
+                self.assertGreater(row["counterfactual_rmse"]["mean_prediction"], 0.9)  # the subject's noise stays
+            self.assertIn("own-part R²", printed.getvalue())
+            no_own = ["--bundles", f"floor={b}", "--effects-only", "--counterfactual", "--out", str(out)]
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                tabular_benchmark.main([*no_own, "--counterfactual-modifiers", "own"])  # no bundle stores z_own
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                tabular_benchmark.main([*args, "--counterfactual-heterogeneity", "0"])
 
     def test_cli_proximal_arms_remove_what_one_noisy_view_leaves(self):
         z, adjacency, _, _ = cohort()

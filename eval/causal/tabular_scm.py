@@ -71,6 +71,7 @@ def simulate_tabular(
     overlap=0.1,
     image_adjacency=None,
     own_noise=None,
+    modifier=None,
 ):
     """Attach synthetic variables without changing the order or number of subjects.
 
@@ -99,6 +100,11 @@ def simulate_tabular(
     not descend from its target. The images stay fixed, so a tabular cause can
     reach an image only through its target's own variation. The effect task
     never uses these columns, and they leave every other output unchanged.
+
+    ``modifier``, one value per subject, replaces the image score as what the
+    effect varies with: the effect is ``effect + heterogeneity * m``, with
+    ``m`` the modifier standardized. Treatment and the outcome under control
+    do not depend on it, so tasks that differ only in the modifier share them.
     """
     factors = np.asarray(image_factors, dtype=float)
     if factors.ndim != 2 or factors.shape[0] < 2 or factors.shape[1] == 0 or not np.isfinite(factors).all():
@@ -115,6 +121,11 @@ def simulate_tabular(
             raise ValueError("own_noise must be a finite matrix matching the image factors")
         if np.any(own_noise.std(axis=0) == 0):
             raise ValueError("own_noise must vary in each column")
+    if modifier is not None:
+        modifier = np.asarray(modifier, dtype=float)
+        if modifier.shape != (n,) or not np.isfinite(modifier).all() or modifier.std() == 0:
+            raise ValueError("modifier must hold one finite value per subject and vary")
+        modifier = (modifier - modifier.mean()) / modifier.std()
     scale = factors.std(axis=0)
     if np.any(scale == 0):
         raise ValueError("image_factors must vary in each column")
@@ -137,7 +148,7 @@ def simulate_tabular(
     propensity = overlap + (1 - 2 * overlap) / (1 + np.exp(-np.clip(index, -700, 700)))
     treatment = (effect_rng.random(n) < propensity).astype(int)
     mu0 = index + 0.5 * tabular_3
-    mu1 = mu0 + effect + heterogeneity * image_score
+    mu1 = mu0 + effect + heterogeneity * (image_score if modifier is None else modifier)
     outcome_noise = effect_rng.standard_normal(n)
     y0, y1 = mu0 + outcome_noise, mu1 + outcome_noise
 

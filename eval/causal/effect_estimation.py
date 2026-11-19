@@ -2,12 +2,13 @@
 
 import numpy as np
 from sklearn.kernel_approximation import Nystroem
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.linear_model import LogisticRegression, Ridge, RidgeCV
 from sklearn.model_selection import StratifiedKFold
 from threadpoolctl import threadpool_limits
 
 LEARNERS = ("linear", "rbf")
 _NORMAL_975 = 1.959963984540054
+_SECOND_STAGE_ALPHAS = np.logspace(-2, 4, 13)
 
 
 def _binary_treatment(treatment):
@@ -100,6 +101,37 @@ def _effective_n(weights):
     return float(weights.sum() ** 2 / np.square(weights).sum())
 
 
+def _checked_covariates(covariates, n, tabular_width, learner, clip):
+    covariates = np.asarray(covariates, dtype=float)
+    if covariates.ndim != 2 or covariates.shape[0] != n or not covariates.shape[1] or not np.isfinite(covariates).all():
+        raise ValueError("covariates must be a finite subject-by-feature matrix")
+    if not isinstance(tabular_width, (int, np.integer)) or not 0 <= tabular_width <= covariates.shape[1]:
+        raise ValueError("tabular_width must be an integer between zero and the number of features")
+    if learner not in LEARNERS:
+        raise ValueError(f"learner must be one of {LEARNERS}")
+    if not 0 < clip < 0.5:
+        raise ValueError("clip must lie between zero and one half")
+    return covariates
+
+
+def _cross_fit(treatment, outcome, covariates, folds, tabular_width, learner, seed):
+    """Held-out treatment probabilities, (n,), and each arm's outcome predictions, (2,) + outcome's shape, each fold's
+    models fitted on the other folds; and each fold's rows and features, for a second stage."""
+    propensity = np.empty(len(treatment))
+    means = np.empty((2,) + outcome.shape)
+    fitted = []
+    for fold, (train, test) in enumerate(_fold_indices(treatment, folds)):
+        x_train, x_test = _fold_features(covariates, train, test, tabular_width, learner, seed + fold)
+        a_train, y_train = treatment[train], outcome[train]
+        propensity[test] = LogisticRegression(max_iter=1000).fit(x_train, a_train).predict_proba(x_test)[:, 1]
+        for arm in (0, 1):
+            mask = a_train == arm
+            predicted = Ridge(alpha=1.0).fit(x_train[mask], y_train[mask]).predict(x_test)
+            means[arm, test] = predicted.reshape((len(test),) + outcome.shape[1:])
+        fitted.append((train, test, x_train, x_test))
+    return propensity, means, fitted
+
+
 @threadpool_limits.wrap(limits=1)
 def estimate_ate(treatment, outcome, covariates, folds, *, learner="linear", clip=0.025, seed=0, tabular_width=0):
     """Estimate the average treatment effect using held-out nuisance predictions.
@@ -109,30 +141,8 @@ def estimate_ate(treatment, outcome, covariates, folds, *, learner="linear", cli
     probability and arm-specific outcome means on its training subjects.
     """
     treatment, outcome = _observations(treatment, outcome)
-    covariates = np.asarray(covariates, dtype=float)
-    if (
-        covariates.ndim != 2
-        or covariates.shape[0] != len(outcome)
-        or not covariates.shape[1]
-        or not np.isfinite(covariates).all()
-    ):
-        raise ValueError("covariates must be a finite subject-by-feature matrix")
-    if not isinstance(tabular_width, (int, np.integer)) or not 0 <= tabular_width <= covariates.shape[1]:
-        raise ValueError("tabular_width must be an integer between zero and the number of features")
-    if learner not in LEARNERS:
-        raise ValueError(f"learner must be one of {LEARNERS}")
-    if not 0 < clip < 0.5:
-        raise ValueError("clip must lie between zero and one half")
-
-    propensity = np.empty_like(outcome)
-    means = np.empty((2, len(outcome)))
-    for fold, (train, test) in enumerate(_fold_indices(treatment, folds)):
-        x_train, x_test = _fold_features(covariates, train, test, tabular_width, learner, seed + fold)
-        a_train, y_train = treatment[train], outcome[train]
-        propensity[test] = LogisticRegression(max_iter=1000).fit(x_train, a_train).predict_proba(x_test)[:, 1]
-        for arm in (0, 1):
-            mask = a_train == arm
-            means[arm, test] = Ridge(alpha=1.0).fit(x_train[mask], y_train[mask]).predict(x_test)
+    covariates = _checked_covariates(covariates, len(outcome), tabular_width, learner, clip)
+    propensity, means, _ = _cross_fit(treatment, outcome, covariates, folds, tabular_width, learner, seed)
 
     clipped = np.clip(propensity, clip, 1.0 - clip)
     treated, control = treatment == 1, treatment == 0
@@ -149,6 +159,43 @@ def estimate_ate(treatment, outcome, covariates, folds, *, learner="linear", cli
         "ess_control": _effective_n(1.0 / (1.0 - clipped[control])),
         "outcome_rmse": float(np.sqrt(np.mean((outcome - factual) ** 2))),
         "propensity_brier": float(np.mean((treatment - propensity) ** 2)),
+    }
+
+
+@threadpool_limits.wrap(limits=1)
+def estimate_cate(treatment, outcomes, covariates, folds, *, learner="linear", clip=0.025, seed=0, tabular_width=0):
+    """Each subject's treatment effect, from models that never saw that subject.
+
+    ``outcomes`` is (n,) or (n, m): outcomes that share one treatment, estimated together. The T-learner is the
+    difference of the two arms' held-out outcome models, the same models ``estimate_ate`` uses. The DR-learner
+    (Kennedy 2023) regresses each subject's AIPW score, the doubly robust pseudo-outcome, on the covariates,
+    cross-fitted over the same folds with the outcome models' features; it stays consistent when either the treatment
+    or the outcome model is right. Inverse-probability weights make those scores noisy, so the second stage's ridge
+    penalty is chosen per outcome by leave-one-out on each fold's training subjects. Returns both effects and both
+    arms' predicted outcomes, each shaped like ``outcomes``, and the treatment probabilities.
+    """
+    treatment = _binary_treatment(treatment)
+    outcomes = np.asarray(outcomes, dtype=float)
+    if outcomes.ndim not in (1, 2) or outcomes.shape[0] != len(treatment) or not np.isfinite(outcomes).all():
+        raise ValueError("outcomes must hold one finite value per subject in each column")
+    covariates = _checked_covariates(covariates, len(treatment), tabular_width, learner, clip)
+    columns = outcomes.reshape(len(treatment), -1)
+    propensity, means, fitted = _cross_fit(treatment, columns, covariates, folds, tabular_width, learner, seed)
+    clipped = np.clip(propensity, clip, 1.0 - clip)[:, None]
+    treated = (treatment == 1)[:, None]
+    factual = np.where(treated, means[1], means[0])
+    pseudo = means[1] - means[0] + np.where(treated, 1.0 / clipped, -1.0 / (1.0 - clipped)) * (columns - factual)
+    dr = np.empty_like(pseudo)
+    for train, test, x_train, x_test in fitted:
+        second = RidgeCV(alphas=_SECOND_STAGE_ALPHAS, alpha_per_target=True).fit(x_train, pseudo[train])
+        dr[test] = second.predict(x_test).reshape(len(test), -1)
+    shape = outcomes.shape
+    return {
+        "t_learner": (means[1] - means[0]).reshape(shape),
+        "dr_learner": dr.reshape(shape),
+        "mu0": means[0].reshape(shape),
+        "mu1": means[1].reshape(shape),
+        "propensity": propensity,
     }
 
 
