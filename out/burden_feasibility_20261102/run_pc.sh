@@ -267,6 +267,17 @@
 # other view's backbone map as its eight octant averages (warm.py --predict-target grid, a coarse map) and as each
 # channel's quantiles over the interior cells (--predict-target quantile, position-free), against the recipe's GAP
 # target at seeds 42 and 2. The four reports, then discovery and the tabular benchmark (causal/stage53/).
+# Stage 54 (opt-in, no training) Where each code reads in the image, and how many dimensions it fills (HANDOFF
+# section 10's label-free options). intrinsic_dimension.py: TwoNN (with decimation) and Levina-Bickel on each code, the
+# code on the sphere, the backbone GAP and the untrained twin's, calibrated per bank on the true latents, on random
+# non-linear embeddings of them and on Gaussian noise. footprints.py: each code direction's spatial footprint (its
+# input gradient weighted by the subject's deviation from the mean image, per 16^3 cell, on 300 training subjects), and
+# the rotation of the code whose directions read from the fewest places (joint diagonalisation of the whitened cell
+# Grams, pooled and per subject). Scored against the factors, the lesion centre, readout footprints and model-free image
+# maps, beside random rotations and the untrained twin, with figures. Then label-free discovery on each code and its two
+# footprint rotations, with floors, as stage 51. Codes: on the drawn bank the 24-unit recipe at seeds 42 and 2 (stages
+# 33-34) and the 10-unit code (stage 35); on the fixed bank the 10-unit code at seeds 42 and 2 (stages 47, 50), its
+# code-batch arm at seeds 42 and 2 (stages 50, 52) and the 8-unit code (stage 47) (causal/stage54/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2139,6 +2150,42 @@ if wants 53; then
     stage_report "$OUT" style_audit "${RUNS[@]}"
     causal_tables "$OUT" gap="$RECIPE" gap_s2="${RECIPE}_s2" grid="$GRID" quantile="$QUANT"
     [ "$DRY" = 0 ] && echo "Stage 53 reports in $OUT"
+fi
+
+if wants 54; then
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    FX=${P}_fixedpos
+    NAMES=("${P}_predict1_c24_20k" "${P}_predict1_c24_20k_s2" "${P}_predict1_c10_20k" "${FX}_predict1_c10_20k"
+        "${FX}_predict1_c10_20k_s2" "${FX}_abl_codebatch_predict1_c10_20k" "${FX}_abl_codebatch_predict1_c10_20k_s2"
+        "${FX}_predict1_c8_20k")
+    LABELS=(c24 c24_s2 c10 fixed_c10 fixed_c10_s2 fixed_codebatch fixed_codebatch_s2 fixed_c8)
+    OUT=$D/causal/stage54
+    needs_done 54 "${NAMES[@]}"
+    [ "$DRY" = 0 ] && { mkdir -p "$OUT" || exit 1; }
+    RUNS=()
+    for name in "${NAMES[@]}"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" intrinsic_dimension "${RUNS[@]}"
+    stage_report "$OUT" footprints "${RUNS[@]}" --bundles "$OUT/bundles"
+    BUNDLES=() FLOORS=()
+    for i in "${!NAMES[@]}"; do
+        for kind in raw pooled subject; do
+            BUNDLES+=("${LABELS[$i]}_$kind=$OUT/bundles/${NAMES[$i]}.fp_$kind.npz")
+            FLOORS+=("${LABELS[$i]}_$kind=$OUT/bundles/${NAMES[$i]}.fp_$kind.floor.npz")
+        done
+    done
+    for view in 1 2; do
+        CMD=("$PY" -m eval.causal.latent_causal_discovery --bundles "${BUNDLES[@]}" --bundle-floors "${FLOORS[@]}"
+            --bundle-view "$view" --ceiling --mixing-null 30 --out "$OUT/label_free_view$view.json")
+        if [ "$DRY" = 1 ]; then
+            echo "${CMD[*]} > $OUT/label_free_view$view.txt"
+        else
+            echo "$(date +%H:%M) label-free discovery on the codes and their footprint rotations, view $view"
+            "${CMD[@]}" > "$OUT/label_free_view$view.txt" 2>&1 \
+                || { echo "Stage 54's discovery failed, see $OUT/label_free_view$view.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 54 reports in $OUT: intrinsic_dimension.txt, footprints.txt (figures in" \
+        "footprints/), label_free_view1.txt and label_free_view2.txt"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

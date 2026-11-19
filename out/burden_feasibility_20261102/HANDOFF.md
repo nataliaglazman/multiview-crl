@@ -204,6 +204,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `factoriser.py` | no training: the concealed-factor benchmark of `paper/factor-discovery-framework.tex` on a run's frozen code and its untrained twin. Anchored slots (ridge readouts of the `--anchors`), a label-free count of the novel shared factors (cross-view agreement of the code's residuals, greedy non-linear deflation, a redundancy check), their naming against the concealed factors' own parts and the lesion centre (CCA order, ICA, random rotations), and PC on the anchors and the components against what PC can find among the anchors. `--anchor-source measured` subtracts the anchors' measured values instead of the readouts. A trace shows each direction the count examined with its correlation to each concealed target, and each target's R² from the dropped directions. Stages 42 and 44 |
 | `bridge_view.py` | no training: the first N code units of a `--entropy-units` run (the bridge) written out as a run of their own, with TailCode's head cut to those outputs and `--content-units N` in its report, so every audit reads them unchanged. Stage 46 |
 | `rotated_bundle.py` | no training, no labels: a causal bundle's codes rotated into their cross-view canonical directions (CCA between the views, the pairs beyond a shuffled-pairing null kept), written as a bundle of its own for label-free discovery. Tests: `tests/test_rotated_bundle.py`. Stage 51 |
+| `footprints.py` | no training, and no labels in the footprints or the rotation: where in the image each direction of a run's code reads. Per 16³ cell, the units × units Gram (summed products) of the code's input gradient, each voxel weighted by the subject's deviation from the mean image (`--weight sensitivity`: the plain gradient), on 300 training subjects. Then the rotation of the code whose directions read from the fewest places: the joint diagonalisation (Jacobi angles) of the cell Grams whitened by their sum, pooled over subjects and per subject. Labels only score: names (one Hungarian match on absolute correlation with the factors and the lesion centre; MCC against the code's units, random rotations and the twin), readout footprints, model-free image maps (each factor's own part against the scan's intensity), the divergence from the code's mean footprint, and brain-interior and residual-channel shares. Figures, maps, and bundles of the code and each rotation for label-free discovery. Tests: `tests/test_footprints.py`. Stage 54 |
+| `intrinsic_dimension.py` | no training, and no labels in the estimate: TwoNN (with decimation to N/2, N/4, N/8) and Levina–Bickel on each code, the code on the unit sphere, the backbone GAP and the twin's, beside the true latents, random non-linear embeddings of them with reading noise, and Gaussian noise of each width. Tests: `tests/test_intrinsic_dimension.py`. Stage 54 |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
 | `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
 | `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). `--proximal` (with `--view each`) adds both views in one AIPW and proximal two-stage least squares with one view instrumenting the other. Section 7, items 24 and 37 |
@@ -1060,9 +1062,9 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       learner the fixed-bank narrow codes close most of the gap (.15 against .11). Burden's numbers carry stage 47's
       caveat (easier reading at a fixed place); sulcal's and thickness's do not.
 
-41. **On the fixed-position bank the 10-unit code needs the residual, jitter and prediction, not the tails, and is
-    best with code batches (stage 50, read 19 Nov, `causal/stage50/`).** Leave-one-out from stage 47's 10-unit arm;
-    one seed per ablation. T1 / FLAIR unless one number.
+41. **On the fixed-position bank the 10-unit code needs the residual, jitter and prediction, keeps its factors
+    linearly readable with the tails, and is best with code batches (stage 50, read 19 Nov, `causal/stage50/`).**
+    Leave-one-out from stage 47's 10-unit arm; one seed per ablation. T1 / FLAIR unless one number.
     - **Seed spread** (the reference at seeds 42 and 2), own parts by ridge: brain .44 / .68, ventricle .49 / .63,
       sulcal .50 / .64; burden, thickness, temporal and lr within .09. Novel-block burden .57 against .30. Narrow codes
       are seed-sensitive; the rule's thresholds were brain .24, ventricle .16, sulcal .14, the rest .10.
@@ -1096,9 +1098,10 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       this: a weak reading pays only when the negatives already match on the strong content.
     - **Label-free discovery on the units** stays at the random-mixture baseline (one view of the code-batch arm
       above it, the other below).
-    - **Reading.** Residual, jitter and prediction carry the recipe; the tails are untested here. Code batches turn
-      the narrow code into the best causal block so far, but on one seed and on a bank without a fingerprint; a second
-      seed is the first check (stage 52), and stage 49 shows what they do where the fingerprint exists.
+    - **Reading.** Residual, jitter and prediction carry the recipe; the tails keep the factors linearly readable, so
+      a narrow code keeps them. Code batches turn the narrow code into the best causal block so far, but on one seed
+      and on a bank without a fingerprint; a second seed is the first check (stage 52), and stage 49 shows what they
+      do where the fingerprint exists.
 
 42. **The 24-unit recipe needs the residual, jitter and prediction, and neither the tails nor uniform batches
     (stage 49, read 19 Nov, `causal/stage49/`).** Leave-one-out from stage 33's recipe on the drawn-position bank; one
@@ -1301,6 +1304,82 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 54 (built 19 Nov; not run; no training): where each code reads in the image, and how many dimensions it
+  fills.** Section 10's label-free options at the user's request: step 3b (spatial footprints) and section 8's optional
+  intrinsic-dimension check.
+  - **Why.** Two views identify the shared anatomy only as a block (section 8). Locality is structure that can pick
+    one remix of it. If each factor is read from its own region, the directions that read single factors read from few
+    places, and mixtures from the union of those places (the structural sparsity of Zheng et al. 2022, in a linear
+    form). The intrinsic dimension tests the embedding claim without labels: an embedding of the block fills a manifold
+    of about 10 dimensions on the drawn bank and 7 on the fixed bank, whatever the code's width.
+  - **Footprints** (`footprints.py`). Per 16³ cell and input channel, the units × units Gram (summed products) of each
+    code unit's input gradient, averaged over 300 training subjects. Each voxel's gradient is weighted by that
+    subject's deviation from the mean image, so a direction w's footprint w'G_c w is, to first order, how much of its
+    subject-to-subject variation comes from cell c.
+    - The weighting is needed. With the plain gradient (`--weight sensitivity`), a code pooled over the whole brain
+      gives every direction nearly the same brain-wide map: in the smoke test every pair of footprints had cosine .99,
+      while the image maps were distinct.
+    - Each direction is also read against the code's mean footprint (the average over whitened directions, the same
+      for every rotation): its specific footprint (where it reads more than the code as a whole) and its KL divergence
+      from the mean (0 for a direction that reads like the whole code).
+  - **The rotation.** Whitened by the total Gram, every unit direction's footprint sums to 1. Summed footprint sparsity
+    over an orthonormal set of directions then equals the diagonal energy of the rotated cell Grams. So the sparsest
+    rotation is the cell Grams' joint diagonalisation (Jacobi angles, the identity and 5 random starts).
+    - Footprints from disjoint voxels and a linear code make the Grams exactly jointly diagonal; the tests recover the
+      factors then.
+    - Unlike stage 51's CCA, the whitening is by gradient energy, not the code's covariance, so the components stay
+      correlated across subjects and PC is not empty by construction.
+    - Two versions. Pooled: the Grams averaged over subjects. Subject: each subject's own Grams, through their fourth
+      moment, which also counts as local a direction that reads one place per subject at a place that moves (the
+      drawn lesion).
+  - **Scoring; labels only score.**
+    - Names: one Hungarian match on absolute correlation with the seven factors and the lesion centre. MCC is the
+      mean matched |r| of the seven factors, against the code's units, 30 random rotations in the same frame, and the
+      untrained twin's rotation.
+    - Readout footprints: each target's ridge readout, taken as a direction of the code.
+    - Image maps, model-free: per cell, the squared correlation across training subjects between the scan's intensity
+      and each factor's own part (so its parents' regions drop out), or each lesion coordinate.
+    - Each footprint's correlation with its target's image map and cosine with its readout footprint (both on specific
+      footprints), and its shares in the brain interior, on the boundary, outside, and through the residual channel.
+    - Figures per run, model and view in `causal/stage54/footprints/`.
+  - **Intrinsic dimension** (`intrinsic_dimension.py`). TwoNN at N, N/2, N/4 and N/8 subjects, and Levina–Bickel at
+    10 and 20 neighbours, on each code, the code on the unit sphere (as the cosine sees it), the backbone GAP and the
+    twin's. Calibrated per bank on the true latents (7, and 7 plus the lesion centre), on those 10 latents through
+    random leaky-ReLU maps into each code width with reading noise 0, .1 and .3, and on Gaussian noise of each width.
+  - **Discovery:** each code, its two footprint rotations and their floors through `latent_causal_discovery` with the
+    mixing null, as in stage 51.
+  - **Codes.** Drawn bank: the 24-unit recipe at seeds 42 and 2 (stages 33–34) and the 10-unit code (stage 35). Fixed
+    bank: the 10-unit code at seeds 42 and 2 (stages 47 and 50), the code-batch arm at seeds 42 and 2 (stages 50 and
+    52), and the 8-unit code (stage 47).
+  - **Reading rules, fixed before the results:**
+    - The rotation separates factors if, in both views, its MCC beats the code's units and the random rotations' mean
+      by more than the rotations' SD, and beats the twin's rotation by that much too.
+    - A component reads its factor where the image shows it if its correlation with the factor's image map is
+      positive in both views and above the twin's matching component's. Read the figures with the numbers.
+    - The rotation helps graph discovery if its F1 beats the raw code's and the mixing null's mean by more than the
+      null's SD, in both views (stage 51's rule).
+    - The code supports the embedding claim if its TwoNN holds roughly flat under decimation, reads near the
+      calibration row of its width at a matching noise level (about 10 on the drawn bank, 7 on the fixed), and sits
+      clearly below Gaussian noise of that width and away from the twin.
+  - **Checked locally.**
+    - `tests/test_footprints.py`, 8 tests: the Jacobi angles recover a planted basis and never lower the objective;
+      the Jacobian of a toy linear code; both rotations unmix factors read from disjoint cells; the per-subject count;
+      a footprint every direction shares has KL 0 and a rotation-free mean.
+    - `tests/test_intrinsic_dimension.py`, 8 tests: TwoNN and Levina–Bickel on subspaces of known dimension, a swiss
+      roll, decimation, duplicates, the calibration embedding, and noise raising the small-scale estimate.
+    - Both tools ran end to end on 2-step 24- and 10-unit codes of a 160-test-subject bank (16 Jacobian subjects;
+      footprints about 4.5 min for both runs on the Mac), and a rerun reused both. TwoNN underreads at 160 subjects
+      (the 7 true factors read 6.2), which is what the calibration rows are for.
+    - Writing the bundles there needed `causal_bundle.own_noise`'s parent check relaxed: sulcal's own noise
+      correlated .23 with its parent at 160 subjects, and the check is sized for 1,000. The stage uses the check
+      unchanged. The bundles read in `latent_causal_discovery`.
+    - `bash -n` passes; the dry run lists both reports and both discovery calls.
+  - **Cost on the PC (estimate):** Jacobians on 300 subjects, both views, up to 24 backward passes per batch, for each
+    run and its twin; the joint diagonalisation about 20 s per call at 24 units (8 calls per run); discovery on 24
+    bundles and 24 floors per view with a 30-draw mixing null.
+  - **Run** after stage 53 finishes (never pull while `run_pc.sh` runs): `bash out/burden_feasibility_20261102/run_pc.sh
+    54`. Reports in `causal/stage54/`: `intrinsic_dimension.txt`, `footprints.txt` (figures in `footprints/`),
+    `label_free_view1.txt` and `label_free_view2.txt`.
 - **Stage 53 (built 19 Nov; running since 10:58): other prediction targets for the 24-unit recipe.** The user asked
   whether predicting the other view's map does better than predicting its GAP.
   - **Arms** (stage 33's recipe, `bank_causal_nofield`, seed 42, 20,000 steps): `--predict-target grid`, the other
@@ -2048,6 +2127,9 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Label-free graph discovery from two views** stays out of reach; rotating the code into canonical directions gives
   PC no edges by construction (item 43). The graph needs anchors.
 - **Running:** stage 53, the map (`grid`) and position-free (`quantile`) prediction targets at 24 units (section 9).
+- **Built, not run:** stage 54, no training: where each code reads in the image (spatial footprints and the rotation
+  whose directions read from the fewest places, step 3b) and how many dimensions it fills (intrinsic dimension), on
+  the recent codes (section 9). Run it after stage 53.
 - **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
   fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
   needs.
@@ -2114,8 +2196,9 @@ on.
   graph.
 - **Stage 44 is read** (item 36). The anchors' readouts did not cause stage 42's loss: the weak own parts go out with
   dropped directions they share with other, partly predictable content, whichever anchors are used. Decided 18 Nov:
-  stop the label-free split at the block (the plan above). Step 3b (spatial footprints) is not built; if it is ever
-  taken up, burden and the lesion centre both act where the lesion is, so their footprints overlap.
+  stop the label-free split at the block (the plan above). Step 3b (spatial footprints) was built on 19 Nov as stage
+  54 (section 9), at the user's request, with the intrinsic-dimension check; not run yet. Burden and the lesion centre
+  both act where the lesion is, so their footprints overlap.
 - **Implementation proposal (17 Nov; adopted 18 Nov as the plan above).** Set the number of units at the
   causal variables, not at the encoder, as `paper/factor-discovery-framework.tex` already separates them:
   - representation: the 24-unit prediction code, claimed as an embedding of the content block;
