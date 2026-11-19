@@ -175,6 +175,9 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     inside that term's InfoNCE cosine, starting at 1, so a unit whose views agree poorly can count for less (stage 31).
   - `--predict-weight W`: each view's code predicts the other view's whitened GAP from a momentum copy (stage 33).
     `--predict-hidden H` adds a one-hidden-layer MLP of width H to each linear map, starting at zero (stage 36).
+    `--predict-target grid|quantile` replaces the GAP target with the other view's map as eight octant averages, or
+    as each channel's quantiles (`PREDICT_QUANTILES`) over the interior cells (stage 53; tests:
+    `tests/test_warm_prediction_target.py`).
   - `--entropy-units N`, the bridge (stage 46b): the recipe's InfoNCE on the first N code units and alignment alone,
     (1 − cosine) / τ, on the rest. Stage 46 ran an earlier, degenerate form (item 37). `bridge_view.py` writes those
     N units out as a run of their own.
@@ -1130,6 +1133,24 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     .46). Label-free graph discovery from two views stays out of reach, as section 8 says; the graph needs anchors.
     The test's design was at fault (no one checked that the rotation decorrelates), not the data.
 
+44. **Code batches replicate at seed 2 (stage 52, read 19 Nov, `causal/stage52/`).** 10 units, fixed-position bank.
+    T1 / FLAIR; code batches at seed 42, then seed 2.
+    - **Own parts:** brain .95 / .95, .94 / .94; ventricle .85 / .81, .78 / .77; burden .60 / .58, .60 / .62;
+      thickness .75 / .76, .76 / .77; temporal .85 / .84, .86 / .85; lr .91 / .93, .92 / .92; sulcal .72 / .77,
+      .72 / .77. The code-batch seeds agree within .07; the uniform-batch seeds differ by up to .24 (brain .44 / .68).
+    - **Precision:** volume error 11.3 / 11.5 and 10.4 / 10.0 voxels; the volume reads linearly at .88 and .90.
+    - **Causal tables:** ATE bias .09 / .07 and .09 / .07 (rbf .07 / .06 and .07 / .05; uniform seeds .25 / .22 and
+      .20 / .20, rbf .16 / .14 and .14 / .14). Image–tabular edges F1 .94 / .92 and .95 / .93; tabular causes of image
+      factors .94 / .94 and .96 / .92. Decoded image graph .84 / .83 and .85 / .84 (truth .85).
+    - **The block beyond measured anchors does not replicate for burden.** Seed 42 keeps three components (lr, burden,
+      sulcal; burden .58); seed 2 keeps two (lr .94, sulcal .69–.71) and drops burden's directions at the redundancy
+      cut (block .24 / .23): they carry R² .23–.30 from the other view's anchors and counted factors, above the .2
+      threshold. The uniform seeds split the same way (.57 against .30): item 36's mechanism, seed-fragile either way.
+    - **Reading.** On a bank without a fingerprint, code batches make the 10-unit code a strong and stable causal block
+      on every measure except the label-free count's burden. They are label-free and generic. Whether they help on
+      ADNI depends on what dominates the code there: with the lesion's position present they were neutral at 24 units
+      (item 42) and mixed at 10 (stage 43, section 9).
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -1280,9 +1301,27 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
-- **Stage 52 (built 19 Nov; running since 09:52): a second seed of the code-batch arm.** Stage 50's code-batch arm
-  (10 units, fixed bank) at seed 2, then the four reports, discovery, the tabular benchmark (linear and rbf) and the
-  concealed-factor benchmark on both code-batch seeds beside the reference at seeds 42 and 2 (`causal/stage52/`).
+- **Stage 53 (built 19 Nov; running since 10:58): other prediction targets for the 24-unit recipe.** The user asked
+  whether predicting the other view's map does better than predicting its GAP.
+  - **Arms** (stage 33's recipe, `bank_causal_nofield`, seed 42, 20,000 steps): `--predict-target grid`, the other
+    view's backbone map as its eight octant averages (a coarse map, 512 features); `--predict-target quantile`, each
+    channel's quantiles .5, .75, .9, .97, .99 over the interior cells (position-free, 320 features). Against the
+    GAP recipe at seeds 42 and 2.
+  - **Expectation, written before the results:** the vector-prediction study (`training/ENCODER_VECTOR_PREDICTION.md`)
+    found a spatial target pays for knowing where the lesion is, not its size, while a position-free distribution
+    of the other view's map pays for burden. So the grid target should reward anatomy and position, and the quantile
+    target is the one that might sharpen burden.
+  - **Reading rule, fixed before the results** (the GAP recipe's seeds agree closely: own parts within .08 except
+    ventricle .71 / .57; volume 12.7 / 13.1 voxels; ATE bias .10–.12; image graph .84–.86): a target does better if
+    an own part rises by more than .10 (.15 for ventricle) or the volume error falls by more than 2 voxels without
+    another factor falling as much, or the ATE bias falls by more than .03 or the image-graph F1 rises by more than
+    .03. Raw linear readability of the factors is read too (item 41's lesson).
+  - **Checked:** 3 tests (the GAP target unchanged; the grid target is the octant averages; the quantile target is
+    unchanged when a lesion moves and the grid target is not); all 22 `warm.py` tests pass; a 2-step arm of each
+    target trains and saves (initial target spread: grid about 7 directions, quantile about 4); dry run.
+- **Stage 52 (ran 19 Nov; read, item 44: replicates): a second seed of the code-batch arm.** Stage 50's code-batch
+  arm (10 units, fixed bank) at seed 2, then the four reports, discovery, the tabular benchmark (linear and rbf) and
+  the concealed-factor benchmark on both code-batch seeds beside the reference at seeds 42 and 2 (`causal/stage52/`).
   Item 41's code-batch gain stands if seed 2 also clears the reference's seed spread.
 - **Stage 51 (ran 18 Nov; read, item 43: empty by construction): label-free discovery on the codes' cross-view
   canonical directions.** The user's choice among three label-free options (the others: the heterogeneity separation,
@@ -1993,6 +2032,25 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   The baseline is about 20 voxels of error in the backbone and 22–23 in the code.
 
 ## 10. Recent stages and next steps
+
+**Status on 19 Nov (stages 46–53; read this first).**
+- **The bridge:** its first loss collapsed (item 37); the fixed form, the theory's own version, holds the weak factors
+  no better than matched width (item 38). The recipe's 24-unit advantage lies outside Yao's theorem.
+- **The lesion's position was the benchmark's fingerprint:** it took about half a narrow code and crowded out the weak
+  factors (item 39). Without it a narrow code is a good causal block, and the label-free count beside measured anchors
+  finds the concealed factors as separate directions (item 40), though burden's is seed-fragile (item 44).
+- **What carries the recipe** (items 41–42): the residual input, jitter and the prediction term, at both widths. The
+  tails are optional at 24 units and keep a 10-unit code linearly readable.
+- **Code batches:** a large gain at 10 units on the fixed bank, replicated at seed 2 (items 41, 44); neutral at 24 units
+  with the position present (item 42).
+- **Effect estimation:** narrow codes hold strong factors non-linearly, so the tabular benchmark now also runs the rbf
+  learner by default (`causal_tables`, item 40).
+- **Label-free graph discovery from two views** stays out of reach; rotating the code into canonical directions gives
+  PC no edges by construction (item 43). The graph needs anchors.
+- **Running:** stage 53, the map (`grid`) and position-free (`quantile`) prediction targets at 24 units (section 9).
+- **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
+  fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
+  needs.
 
 **The plan (adopted by the user on 18 Nov).** It replaces matched width and the 10-unit lever search. Theory and
 stages 41–44 say two views identify the shared anatomy as a block, not its factors (section 8). Measurements are the

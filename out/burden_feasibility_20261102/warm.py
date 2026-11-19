@@ -74,6 +74,10 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 units predicts at most N directions of the other view's GAP, which spreads the shared latents over more
                 than that; through the MLP a code that holds the latents in any invertible form predicts all of them.
                 Needs --predict-weight. Default 0: the linear map alone.
+  --predict-target grid|quantile  what the momentum copy's backbone map is summarized into for prediction, in place of
+                its GAP (the default, gap): grid, its averages over the eight octants (a coarse map, 8 x channels);
+                quantile, each channel's PREDICT_QUANTILES over the interior cells (how much is abnormal and not where,
+                5 x channels). Needs --predict-weight.
   --predict-batches uniform  draw a separate uniform subject batch for prediction, through the same backbone, pool
                 and content units. Its online inputs get independent jitter; its targets use the unjittered images.
                 The contrastive batches alone update the pool's running statistics. Both passes still use their own
@@ -423,6 +427,27 @@ def target_gap(target_model, x):
     return torch.stack(target_model._encode(x, 2, None).mean((2, 3, 4)).chunk(2))
 
 
+PREDICT_QUANTILES = (0.5, 0.75, 0.9, 0.97, 0.99)
+
+
+@torch.no_grad()
+def prediction_target(target_model, x, kind="gap", keep=None):
+    """Each view's --predict-target from the momentum copy's backbone map, (2, B, features), no gradient: gap, the
+    map's average (channels); grid, its averages over the eight octants (8 x channels); quantile, each channel's
+    PREDICT_QUANTILES over the cells ``keep`` selects (5 x channels), which say how much and not where."""
+    if kind == "gap":
+        return target_gap(target_model, x)
+    h = target_model._encode(x, 2, None)
+    if kind == "grid":
+        out = F.adaptive_avg_pool3d(h, 2).flatten(1)
+    elif kind == "quantile":
+        levels = torch.tensor(PREDICT_QUANTILES, device=h.device, dtype=h.dtype)
+        out = torch.quantile(h.flatten(2)[:, :, keep], levels, dim=2).permute(1, 2, 0).flatten(1)
+    else:
+        raise ValueError(f"unknown --predict-target {kind!r}")
+    return torch.stack(out.chunk(2))
+
+
 class HiddenDecoder(nn.Module):
     """--predict-hidden's map: the linear map plus a one-hidden-layer MLP on the same code, whose output layer starts at
     zero so the first step equals the linear map's."""
@@ -757,6 +782,13 @@ def main():
         "--predict-hidden", type=int, default=0, help="Hidden width of an MLP added to each prediction map (0: linear)"
     )
     p.add_argument(
+        "--predict-target",
+        choices=("gap", "grid", "quantile"),
+        default="gap",
+        help="What the other view's backbone map is summarized into for prediction: its GAP, its eight octant "
+        "averages, or each channel's quantiles over the interior cells",
+    )
+    p.add_argument(
         "--predict-batches",
         choices=("same", "uniform"),
         default="same",
@@ -881,8 +913,12 @@ def main():
             )
     if not (np.isfinite(a.predict_weight) and a.predict_weight >= 0):
         raise ValueError("--predict-weight must be finite and non-negative")
-    if not a.predict_weight and (a.predict_momentum is not None or a.predict_ridge is not None or a.predict_hidden):
-        raise ValueError("--predict-momentum, --predict-ridge and --predict-hidden need --predict-weight")
+    if not a.predict_weight and (
+        a.predict_momentum is not None or a.predict_ridge is not None or a.predict_hidden or a.predict_target != "gap"
+    ):
+        raise ValueError(
+            "--predict-momentum, --predict-ridge, --predict-hidden and --predict-target need --predict-weight"
+        )
     if a.predict_hidden < 0:
         raise ValueError("--predict-hidden is a hidden width, 0 for the linear map alone")
     if a.predict_weight:
@@ -1033,7 +1069,9 @@ def main():
         target_model = copy.deepcopy(model).eval().requires_grad_(False)
         first = np.arange(min(256, len(train.vox)))
         sample = [
-            target_gap(target_model, train.images(first[s : s + args.batch_size], a.device))
+            prediction_target(
+                target_model, train.images(first[s : s + args.batch_size], a.device), a.predict_target, pool.keep
+            )
             for s in range(0, len(first), args.batch_size)
         ]
         whitening = TargetWhitening(torch.cat(sample, 1), a.predict_ridge)
@@ -1044,7 +1082,9 @@ def main():
             a.predict_weight,
             "maps",
             f"linear + MLP {a.predict_hidden}" if a.predict_hidden else "linear",
-            "target momentum",
+            "target",
+            a.predict_target,
+            "momentum",
             a.predict_momentum,
             "whitening ridge",
             a.predict_ridge,
@@ -1278,14 +1318,14 @@ def main():
                 train, args.batch_size, a.device, predict_subjects, predict_aug, a.jitter, a.rotate
             )
             predict_pair = prediction_code(model, pool, predict_images, units)
-            gap = target_gap(target_model, predict_clean)
+            gap = prediction_target(target_model, predict_clean, a.predict_target, pool.keep)
             whitening.update(gap)
             terms["predict"] = cross_view_prediction(predict_pair, whitening(gap), decoders)
             (a.predict_weight * terms["predict"]).backward()
             del predict_pair, predict_clean, predict_images, gap
         else:
             if decoders is not None:
-                gap = target_gap(target_model, clean)
+                gap = prediction_target(target_model, clean, a.predict_target, pool.keep)
                 whitening.update(gap)
                 terms["predict"] = cross_view_prediction(pair, whitening(gap), decoders)
                 loss = loss + a.predict_weight * terms["predict"]

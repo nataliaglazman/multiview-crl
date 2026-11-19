@@ -263,6 +263,10 @@
 # Stage 52 (opt-in) A second seed of stage 50's code-batch arm (10 units, fixed bank, seed 2), then the four reports,
 # discovery and the tabular benchmark (linear and rbf), and the concealed-factor benchmark with measured anchors on
 # both code-batch seeds beside stage 47's 10-unit arm at seeds 42 and 2 (causal/stage52/).
+# Stage 53 (opt-in) Other prediction targets for the 24-unit recipe (bank_causal_nofield, seed 42, 20,000 steps): the
+# other view's backbone map as its eight octant averages (warm.py --predict-target grid, a coarse map) and as each
+# channel's quantiles over the interior cells (--predict-target quantile, position-free), against the recipe's GAP
+# target at seeds 42 and 2. The four reports, then discovery and the tabular benchmark (causal/stage53/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2105,6 +2109,36 @@ if wants 52; then
             || { echo "Stage 52's factoriser failed, see $OUT/measured_default.txt"; exit 1; }
     fi
     [ "$DRY" = 0 ] && echo "Stage 52 reports in $OUT"
+fi
+
+if wants 53; then
+    NOFIELD=$D/bank_causal_nofield
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    RECIPE=${P}_predict1_c24_20k  # stage 33; its seed 2 is stage 34's
+    GRID=${P}_predict1grid_c24_20k
+    QUANT=${P}_predict1quantile_c24_20k
+    OUT=$D/causal/stage53
+    needs_done 53 "$RECIPE" "${RECIPE}_s2"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage49" "$OUT" "$RECIPE" "${RECIPE}_s2"
+    fi
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    BASE=(--uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42 --content-units 24
+        --contrastive-loss-type infonce --predict-weight 1)
+    EVERY=2000 ssl "$GRID" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --predict-target grid
+    EVERY=2000 ssl "$QUANT" "$NOFIELD" tail t1_04 20000 "${BASE[@]}" --predict-target quantile
+    finish "$GRID" "$QUANT"
+    needs_done 53 "$GRID" "$QUANT"
+    RUNS=()
+    for name in "$RECIPE" "${RECIPE}_s2" "$GRID" "$QUANT"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" gap="$RECIPE" gap_s2="${RECIPE}_s2" grid="$GRID" quantile="$QUANT"
+    [ "$DRY" = 0 ] && echo "Stage 53 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"
