@@ -237,6 +237,32 @@
 # factors. Prediction arms, weight 1, 20,000 steps, seed 42: 10 units (stage 35's recipe) and 8 units (the matched
 # width for 7 latents under the cosine). The four reports beside stages 35, 38 and 33's 10-, 11- and 24-unit codes on
 # the drawn-position bank (causal/stage47/).
+# Stage 48 (opt-in, no training) Stage 47's codes as causal blocks, against the drawn-position codes. Stage 41's
+# discovery (label-free PC on each code's units against random mixtures, and PC on factors decoded from each code) and
+# its tabular benchmark (effect estimation and discovery with tabular variables), then stage 44's concealed-factor
+# benchmark with measured anchors (both splits). Codes: 8 and 10 units on the fixed bank (stage 47); 10, 11 and 24
+# units on the drawn bank (stages 35, 38 and 33). Both banks hold the same test subjects and factors, so every code
+# shares one table (causal/stage48/).
+# Stage 49 (opt-in) Which of the recipe's parts carry it: leave-one-out arms from stage 33's recipe (24 units,
+# prediction weight 1, uniform batches, residual input, tail pooling, 2-voxel / 3-degree jitter, bank_causal_nofield,
+# 20,000 steps, seed 42), one part removed each: no residual (the scan alone), no jitter, code batches (31 of 50
+# neighbours, rebuilt every 500 steps) in place of uniform ones, and no tails (--pool gapnorm: the average through the
+# same gauge and head). Already trained: no prediction (stage 28), 10 units (stage 35) and the recipe's second seed
+# (stage 34). The four reports, then stage 48's discovery and tabular benchmark on every arm (causal/stage49/).
+# Stage 50 (opt-in) Which of the recipe's parts the 10-unit code needs on the fixed-position bank: stage 49's
+# leave-one-out at 10 units on bank_causal_nofield_fixedpos, from stage 47's 10-unit arm. Arms: that arm with seed 2
+# (narrow codes split close ties by seed, item 30), then no residual, no jitter, code batches, no tails (gapnorm) and
+# no prediction, seed 42; 20,000 steps each. The four reports beside stage 47's 8- and 10-unit codes, discovery and the
+# tabular benchmark (linear and rbf learner), and the concealed-factor benchmark with measured anchors, default split
+# (causal/stage50/).
+# Stage 51 (opt-in, no training) Label-free discovery on each code's cross-view canonical directions instead of its
+# units: rotated_bundle.py rotates stage 48's bundles (and their untrained twins) by CCA between the views, keeping
+# every pair (a pure rotation), and latent_causal_discovery runs PC on raw and rotated codes side by side against
+# random rotations of the same block. Codes: 10 and 8 units on the fixed bank; 10 and 24 units on the drawn bank; and
+# the fixed 8-unit code reduced to its 7 most-agreeing canonical directions, one per latent (causal/stage51/).
+# Stage 52 (opt-in) A second seed of stage 50's code-batch arm (10 units, fixed bank, seed 2), then the four reports,
+# discovery and the tabular benchmark (linear and rbf), and the concealed-factor benchmark with measured anchors on
+# both code-batch seeds beside stage 47's 10-unit arm at seeds 42 and 2 (causal/stage52/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -1831,6 +1857,254 @@ if wants 47; then
     stage_report "$OUT" code_audit "${RUNS[@]}"
     stage_report "$OUT" style_audit "${RUNS[@]}"
     [ "$DRY" = 0 ] && echo "Stage 47 reports in $OUT"
+fi
+
+causal_tables() { # causal_tables OUT LABEL=NAME...: stage 41's discovery on the runs' codes, then the tabular benchmark
+    # with the linear learner and, effects only, the rbf one (narrow codes hold factors non-linearly, item 40)
+    local out=$1; shift
+    local pair names=() bundles=() floors=()
+    for pair in "$@"; do
+        names+=("${pair#*=}")
+        bundles+=("${pair%%=*}=$D/causal/${pair#*=}.npz")
+        floors+=("${pair%%=*}=$D/causal/${pair#*=}.floor.npz")
+    done
+    TAG=${out#"$D/causal/"}/discovery causal "${names[@]}"  # bundles into $D/causal/<run>.npz
+    local cmd=("$PY" -m eval.causal.tabular_benchmark --view each --bundles "${bundles[@]}" --floors "${floors[@]}"
+        --out "$out/tabular.json" --tables-dir "$out/tables")
+    local rbf=("$PY" -m eval.causal.tabular_benchmark --view each --learner rbf --effects-only --bundles "${bundles[@]}"
+        --floors "${floors[@]}" --out "$out/tabular_rbf.json")
+    if [ "$DRY" = 1 ]; then
+        echo "${cmd[*]} > $out/tabular.log"
+        echo "${rbf[*]} > $out/tabular_rbf.log"
+        return
+    fi
+    echo "$(date +%H:%M) tabular benchmark into $out"
+    "${cmd[@]}" > "$out/tabular.log" 2>&1 || { echo "tabular benchmark failed, see $out/tabular.log"; exit 1; }
+    "${rbf[@]}" > "$out/tabular_rbf.log" 2>&1 \
+        || { echo "rbf tabular benchmark failed, see $out/tabular_rbf.log"; exit 1; }
+}
+
+needs_done() { # needs_done STAGE NAME...: stop unless every run finished
+    local stage=$1 name; shift
+    [ "$DRY" = 1 ] && return
+    for name in "$@"; do
+        if ! grep -qx DONE "$D/logs/$name.log" || [ ! -f "$D/runs/$name/model.pt" ]; then
+            echo "Stage $stage needs $name finished."
+            exit 1
+        fi
+    done
+    if ! "$PY" -c "import causallearn" 2> /dev/null; then
+        echo "Stage $stage needs causal-learn: $PY -m pip install causal-learn"
+        exit 1
+    fi
+}
+
+if wants 48; then
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    FIXED_C8=${P}_fixedpos_predict1_c8_20k
+    FIXED_C10=${P}_fixedpos_predict1_c10_20k
+    OUT=$D/causal/stage48
+    needs_done 48 "$FIXED_C8" "$FIXED_C10" "${P}_predict1_c10_20k" "${P}_predict1_c11_20k" "${P}_predict1_c24_20k"
+    [ "$DRY" = 0 ] && { mkdir -p "$OUT" || exit 1; }
+    causal_tables "$OUT" fixed_c8="$FIXED_C8" fixed_c10="$FIXED_C10" c10="${P}_predict1_c10_20k" \
+        c11="${P}_predict1_c11_20k" c24="${P}_predict1_c24_20k"
+    RUNS=()
+    for name in "$FIXED_C8" "$FIXED_C10" "${P}_predict1_c10_20k" "${P}_predict1_c24_20k"; do
+        RUNS+=("$D/runs/$name")
+    done
+    for split in "default brain ventricle thickness temporal" "burden brain ventricle burden temporal"; do
+        read -r label anchors <<< "$split"
+        # shellcheck disable=SC2086  # the anchors are four words
+        CMD=("$PY" "$D/factoriser.py" "$OUT/measured_$label.json" "${RUNS[@]}" --anchor-source measured
+            --anchors $anchors)
+        if [ "$DRY" = 1 ]; then
+            echo "${CMD[*]} > $OUT/measured_$label.txt"
+        else
+            echo "$(date +%H:%M) factoriser, anchors $anchors as measured, into $OUT/measured_$label.txt"
+            "${CMD[@]}" > "$OUT/measured_$label.txt" 2>&1 \
+                || { echo "Stage 48's factoriser failed, see $OUT/measured_$label.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 48 reports in $OUT: discovery_*, tabular.log, measured_{default,burden}.txt"
+fi
+
+if wants 49; then
+    NOFIELD=$D/bank_causal_nofield
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    RECIPE=${P}_predict1_c24_20k
+    NORES=${P}_abl_nores_predict1_c24_20k
+    NOJIT=${P}_abl_nojitter_predict1_c24_20k
+    CODEB=${P}_abl_codebatch_predict1_c24_20k
+    NOTAIL=${P}_abl_gapnorm_predict1_c24_20k
+    OLD=("$RECIPE" "${RECIPE}_s2" "${P}_c24_20k" "${P}_predict1_c10_20k")  # stages 33, 34, 28 and 35
+    OUT=$D/causal/stage49
+    needs_done 49 "${OLD[@]}"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage34" "$OUT" "${OLD[@]}"
+        reuse_reports "$D/causal/stage38" "$OUT" "${OLD[@]}"
+    fi
+    bank "$NOFIELD" --t1-values 0.4 --causal --field off
+    residual_bank "$NOFIELD" t1_04 flair
+    COMMON=(--patch-weight 0 --seed 42 --content-units 24 --contrastive-loss-type infonce)
+    EVERY=2000 ssl "$NORES" "$NOFIELD" tail t1_04 20000 --uniform --jitter 2 --rotate 3 "${COMMON[@]}" \
+        --predict-weight 1
+    EVERY=2000 ssl "$NOJIT" "$NOFIELD" tail t1_04 20000 --uniform --residual "${COMMON[@]}" --predict-weight 1
+    EVERY=2000 ssl "$CODEB" "$NOFIELD" tail t1_04 20000 --code-batches 500 --code-neighbours 31 --residual --jitter 2 \
+        --rotate 3 "${COMMON[@]}" --predict-weight 1
+    EVERY=2000 ssl "$NOTAIL" "$NOFIELD" gapnorm t1_04 20000 --uniform --residual --jitter 2 --rotate 3 "${COMMON[@]}" \
+        --predict-weight 1
+    finish "$NORES" "$NOJIT" "$CODEB" "$NOTAIL"
+    needs_done 49 "$NORES" "$NOJIT" "$CODEB" "$NOTAIL"
+    RUNS=()
+    for name in "$RECIPE" "${RECIPE}_s2" "$NORES" "$NOJIT" "$CODEB" "$NOTAIL" "${P}_c24_20k" "${P}_predict1_c10_20k"; do
+        RUNS+=("$D/runs/$name")
+    done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" recipe="$RECIPE" recipe_s2="${RECIPE}_s2" no_residual="$NORES" no_jitter="$NOJIT" \
+        code_batches="$CODEB" no_tails="$NOTAIL" no_prediction="${P}_c24_20k" c10="${P}_predict1_c10_20k"
+    [ "$DRY" = 0 ] && echo "Stage 49 reports in $OUT"
+fi
+
+if wants 50; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    REF=${P}_predict1_c10_20k  # stage 47
+    C8=${P}_predict1_c8_20k  # stage 47
+    SEED2=${REF}_s2
+    NORES=${P}_abl_nores_predict1_c10_20k
+    NOJIT=${P}_abl_nojitter_predict1_c10_20k
+    CODEB=${P}_abl_codebatch_predict1_c10_20k
+    NOTAIL=${P}_abl_gapnorm_predict1_c10_20k
+    NOPRED=${P}_abl_nopredict_c10_20k
+    OUT=$D/causal/stage50
+    needs_done 50 "$REF" "$C8"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage47" "$OUT" "$REF" "$C8"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    COMMON=(--patch-weight 0 --content-units 10 --contrastive-loss-type infonce)
+    EVERY=2000 ssl "$SEED2" "$FIXED" tail t1_04 20000 --uniform --residual --jitter 2 --rotate 3 --seed 2 \
+        "${COMMON[@]}" --predict-weight 1
+    EVERY=2000 ssl "$NORES" "$FIXED" tail t1_04 20000 --uniform --jitter 2 --rotate 3 --seed 42 "${COMMON[@]}" \
+        --predict-weight 1
+    EVERY=2000 ssl "$NOJIT" "$FIXED" tail t1_04 20000 --uniform --residual --seed 42 "${COMMON[@]}" --predict-weight 1
+    EVERY=2000 ssl "$CODEB" "$FIXED" tail t1_04 20000 --code-batches 500 --code-neighbours 31 --residual --jitter 2 \
+        --rotate 3 --seed 42 "${COMMON[@]}" --predict-weight 1
+    EVERY=2000 ssl "$NOTAIL" "$FIXED" gapnorm t1_04 20000 --uniform --residual --jitter 2 --rotate 3 --seed 42 \
+        "${COMMON[@]}" --predict-weight 1
+    EVERY=2000 ssl "$NOPRED" "$FIXED" tail t1_04 20000 --uniform --residual --jitter 2 --rotate 3 --seed 42 \
+        "${COMMON[@]}"
+    finish "$SEED2" "$NORES" "$NOJIT" "$CODEB" "$NOTAIL" "$NOPRED"
+    needs_done 50 "$SEED2" "$NORES" "$NOJIT" "$CODEB" "$NOTAIL" "$NOPRED"
+    RUNS=()
+    for name in "$REF" "$SEED2" "$NORES" "$NOJIT" "$CODEB" "$NOTAIL" "$NOPRED" "$C8"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" recipe="$REF" recipe_s2="$SEED2" no_residual="$NORES" no_jitter="$NOJIT" \
+        code_batches="$CODEB" no_tails="$NOTAIL" no_prediction="$NOPRED" c8="$C8"
+    CMD=("$PY" "$D/factoriser.py" "$OUT/measured_default.json" "${RUNS[@]:0:7}" --anchor-source measured
+        --anchors brain ventricle thickness temporal)
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/measured_default.txt"
+    else
+        echo "$(date +%H:%M) factoriser, anchors measured, into $OUT/measured_default.txt"
+        "${CMD[@]}" > "$OUT/measured_default.txt" 2>&1 \
+            || { echo "Stage 50's factoriser failed, see $OUT/measured_default.txt"; exit 1; }
+    fi
+    [ "$DRY" = 0 ] && echo "Stage 50 reports in $OUT"
+fi
+
+if wants 51; then
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    NAMES=("${P}_fixedpos_predict1_c10_20k" "${P}_fixedpos_predict1_c8_20k" "${P}_predict1_c10_20k"
+        "${P}_predict1_c24_20k")
+    LABELS=(fixed_c10 fixed_c8 c10 c24)
+    OUT=$D/causal/stage51
+    needs_done 51 "${NAMES[@]}"
+    [ "$DRY" = 0 ] && { mkdir -p "$OUT" || exit 1; }
+    rotate_pair() { # rotate_pair BASE SUFFIX OPTION...: BASE.npz and its floor rotated into BASE.SUFFIX[.floor].npz
+        local base=$1 suffix=$2 kind; shift 2
+        for kind in "" .floor; do
+            local cmd=("$PY" "$D/rotated_bundle.py" "$base$kind.npz" "$base.$suffix$kind.npz" "$@")
+            if [ "$DRY" = 1 ]; then
+                echo "${cmd[*]}"
+            elif [ ! -f "$base$kind.npz" ]; then
+                echo "Stage 51 needs $base$kind.npz (stage 48 exports it)."
+                exit 1
+            elif [ ! "$base.$suffix$kind.npz" -nt "$base$kind.npz" ]; then
+                "${cmd[@]}" >> "$OUT/rotation.log" 2>&1 || { echo "Rotation failed, see $OUT/rotation.log"; exit 1; }
+            fi
+        done
+    }
+    BUNDLES=() FLOORS=()
+    for i in "${!NAMES[@]}"; do
+        base=$D/causal/${NAMES[$i]}
+        rotate_pair "$base" cca --all-pairs
+        BUNDLES+=("${LABELS[$i]}=$base.npz" "${LABELS[$i]}_cca=$base.cca.npz")
+        FLOORS+=("${LABELS[$i]}=$base.floor.npz" "${LABELS[$i]}_cca=$base.cca.floor.npz")
+    done
+    # The fixed 8-unit code reduced to its 7 most-agreeing canonical directions, one per latent of the fixed bank
+    base=$D/causal/${NAMES[1]}
+    rotate_pair "$base" cca7 --components 7
+    BUNDLES+=("fixed_c8_cca7=$base.cca7.npz")
+    FLOORS+=("fixed_c8_cca7=$base.cca7.floor.npz")
+    for view in 1 2; do
+        CMD=("$PY" -m eval.causal.latent_causal_discovery --bundles "${BUNDLES[@]}" --bundle-floors "${FLOORS[@]}"
+            --bundle-view "$view" --ceiling --mixing-null 30 --out "$OUT/label_free_view$view.json")
+        if [ "$DRY" = 1 ]; then
+            echo "${CMD[*]} > $OUT/label_free_view$view.txt"
+        else
+            echo "$(date +%H:%M) label-free discovery, view $view, into $OUT"
+            "${CMD[@]}" > "$OUT/label_free_view$view.txt" 2>&1 \
+                || { echo "Stage 51's discovery failed, see $OUT/label_free_view$view.txt"; exit 1; }
+        fi
+    done
+    [ "$DRY" = 0 ] && echo "Stage 51 reports in $OUT: label_free_view1.txt, label_free_view2.txt, rotation.log"
+fi
+
+if wants 52; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    CODEB=${P}_abl_codebatch_predict1_c10_20k  # stage 50
+    CODEB2=${CODEB}_s2
+    REF=${P}_predict1_c10_20k  # stage 47; its seed 2 is stage 50's
+    OUT=$D/causal/stage52
+    needs_done 52 "$CODEB" "$REF" "${REF}_s2"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage50" "$OUT" "$CODEB" "$REF" "${REF}_s2"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    EVERY=2000 ssl "$CODEB2" "$FIXED" tail t1_04 20000 --code-batches 500 --code-neighbours 31 --residual --jitter 2 \
+        --rotate 3 --seed 2 --patch-weight 0 --content-units 10 --contrastive-loss-type infonce --predict-weight 1
+    finish "$CODEB2"
+    needs_done 52 "$CODEB2"
+    RUNS=()
+    for name in "$CODEB" "$CODEB2" "$REF" "${REF}_s2"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" code_batches="$CODEB" code_batches_s2="$CODEB2" recipe="$REF" recipe_s2="${REF}_s2"
+    CMD=("$PY" "$D/factoriser.py" "$OUT/measured_default.json" "${RUNS[@]}" --anchor-source measured
+        --anchors brain ventricle thickness temporal)
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/measured_default.txt"
+    else
+        echo "$(date +%H:%M) factoriser, anchors measured, into $OUT/measured_default.txt"
+        "${CMD[@]}" > "$OUT/measured_default.txt" 2>&1 \
+            || { echo "Stage 52's factoriser failed, see $OUT/measured_default.txt"; exit 1; }
+    fi
+    [ "$DRY" = 0 ] && echo "Stage 52 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"
