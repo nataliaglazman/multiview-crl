@@ -307,6 +307,18 @@
 # seven own parts. Stage 56's arm at 9 units (seed 42, 20,000 steps): with 2 on curves all seven fit, with 3 one still
 # goes. The four reports, both discoveries and the tabular benchmarks, and own_directions.py (with where each code's
 # directions go), beside the 8-unit code and the 10-unit codes at seeds 42 and 2 (causal/stage59/).
+# Stage 60 (opt-in) Does a non-linear redundancy penalty stop the 8-unit code spending directions on harmonics (bent
+# copies of factors it already holds, item 46), and does the code then hold all seven own parts? Stage 56's arm (code
+# batches, 8 units, seed 42, 20,000 steps) with warm.py --harmonic-weight 1: each view's code whitened and read in
+# eight fixed bases, a critic charging what an MLP predicts of each coordinate beyond a linear map, on a separate
+# uniform batch (about twice the step time). The four reports, both discoveries and the tabular benchmarks, and
+# own_directions.py, beside stage 56's 8-unit code and stage 50's 10-unit code (causal/stage60/).
+# Stage 61 (opt-in, no encoder training) Counterfactual images from tabular data: counterfactual_images.py on stage
+# 50's 10-unit code-batch code. A tabular cause of ventricle, temporal atrophy or thickness (the tabular benchmark's
+# rule, rho .7) is raised by 3 SD; the code moves by its estimated total effect (the code's slope on the cause, training
+# subjects) and a decoder rebuilds the image. Scored on 200 test subjects against the generator's own counterfactual
+# render of each, beside the decoder fed the true counterfactual's code and an oracle decoder fed the true counterfactual
+# latents; PC on the cause beside the decoded factors names its direct effects (causal/stage61/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2419,6 +2431,60 @@ if wants 59; then
         "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
             || { echo "Stage 59's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
         echo "Stage 59 reports in $OUT: own_directions.txt first"
+    fi
+fi
+
+if wants 60; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    HARM8=${P}_abl_codebatch_predict1_harm1_c8_20k
+    CODEB8=${P}_abl_codebatch_predict1_c8_20k  # stage 56
+    CODEB=${P}_abl_codebatch_predict1_c10_20k  # stage 50
+    OUT=$D/causal/stage60
+    needs_done 60 "$CODEB8" "$CODEB"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage56" "$OUT" "$CODEB8" "$CODEB"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    EVERY=2000 ssl "$HARM8" "$FIXED" tail t1_04 20000 --code-batches 500 --code-neighbours 31 --residual --jitter 2 \
+        --rotate 3 --seed 42 --patch-weight 0 --content-units 8 --contrastive-loss-type infonce --predict-weight 1 \
+        --harmonic-weight 1
+    finish "$HARM8"
+    needs_done 60 "$HARM8"
+    RUNS=()
+    for name in "$HARM8" "$CODEB8" "$CODEB"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" harmonic_c8="$HARM8" code_batches_c8="$CODEB8" code_batches="$CODEB"
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json" harmonic_c8="$D/causal/$HARM8.npz"
+        c8="$D/causal/$CODEB8.npz" c10="$D/causal/$CODEB.npz")
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 60's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        echo "Stage 60 reports in $OUT: own_directions.txt first"
+    fi
+fi
+
+if wants 61; then
+    CODEB=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k  # stage 50
+    OUT=$D/causal/stage61
+    needs_done 61 "$CODEB"
+    CMD=("$PY" "$D/counterfactual_images.py" "$D/runs/$CODEB" "$OUT" --targets ventricle temporal thickness --delta 3
+        --subjects 200)
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/counterfactual.txt"
+    else
+        mkdir -p "$OUT" || exit 1
+        echo "$(date +%H:%M) counterfactual images into $OUT"
+        "${CMD[@]}" > "$OUT/counterfactual.txt" 2>&1 || { echo "Stage 61 failed, see $OUT/counterfactual.txt"; exit 1; }
+        echo "Stage 61 reports in $OUT: counterfactual.txt and counterfactual_*.png"
     fi
 fi
 

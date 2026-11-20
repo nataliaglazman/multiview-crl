@@ -1459,6 +1459,78 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 60 (built 20 Nov; not run): a non-linear redundancy penalty at 8 units.** The user asked how to stop the
+  curves of item 46, then for this arm.
+  - **Why.** The 8-unit code spends 2 of its 8 directions on harmonics, curved copies of factors it already holds,
+    leaving 6 for the seven own parts (item 46). Item 27's levers all failed in simulation, and none charged harmonics
+    directly; its "penalty on units the other units predict" is not recorded as non-linear. Charging only what a
+    non-linear predictor gets beyond a linear one leaves linear dependence between factors alone.
+  - **Penalty** (`warm.py --harmonic-weight W`, new). Each view's code is whitened by running statistics, so nothing
+    is linearly predictable, and read in eight fixed orthonormal bases (the units and seven random rotations), so a
+    bent copy cannot hide by rotating. In each basis a critic predicts every coordinate from the others through a
+    linear map and through that map plus a one-hidden-layer MLP of 64, trained on the detached code by its own
+    optimizer. The penalty is the MLP's gain over the linear map, floored at zero and averaged over coordinates, bases
+    and views. It runs on a separate uniform batch, since a neighbourhood batch barely varies in brain size, so a step
+    takes about twice as long.
+  - **Arm:** stage 56's flags plus `--harmonic-weight 1`, the prediction term's weight (the penalty is at most 1),
+    fixed before the results. Run name: `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_`
+    `predict1_harm1_c8_20k`.
+  - **Reports** (`causal/stage60/`): the four reports, both discoveries, both tabular benchmarks and
+    `own_directions.py`, beside stage 56's 8-unit code and stage 50's 10-unit code.
+  - **Reading rule, fixed before the results** (`own_directions.txt`, both views; stage 56's code spends 2 directions
+    on curves, its spectrum's last value is .01 / .01 and the ventricle–burden pair's worst direction .05 / .06):
+    - The penalty works if the code spends at most 1 direction on curves and holds all seven own parts as directions
+      (the spectrum's last value .40 or more, and the pair's worst direction .40 or more).
+    - It removes curves without helping if the curves go (at most 1) but the spectrum's last value stays below .15:
+      then the curves were not what crowded the pair out.
+    - It fails if 2 directions stay on curves.
+    - Costs, read beside: every other own part within .10 of stage 56's 8-unit code, the volume error, and no style.
+      The penalty also charges the SCM's own bends (each child is a leaky ReLU of its parents), so the code may move
+      toward the own parts themselves; that is a change of basis, not a loss.
+  - **Expectation, written before the results:** uncertain. In item 27's simulation every lever that changed what the
+    loss values failed at matched width; this one charges the curves directly. If the loss needs them to tell
+    subjects apart, the code may keep them and pay the penalty, or lose discrimination (cross-view top-1).
+  - **Checked locally:** `tests/test_warm_harmonic.py`, 7 tests. The critic starts as its linear map, no coordinate
+    predicts itself, and whitening leaves no linear correlation. Trained on planted codes, the penalty reads .002 for
+    independent units, .002 for linear dependence, .53 for a bent copy and .54 for a bent copy rotated across two
+    units (.03 with the units alone, which is why the eight bases). Its gradient reaches the code and never the
+    critic, and unsupported options are refused. A 12-step run on a tiny local bank trains end to end (the critic
+    trains and is saved, and the reports load the run), and a run without the penalty still does. `bash -n`; the dry
+    run lists stage 56's flags plus `--harmonic-weight 1`.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 60` (one training arm, about 3 hours, then the reports).
+- **Stage 61 (built 20 Nov; not run): counterfactual images from tabular data.** The user asked to find the causal
+  relationships from tabular data to the image latents, change the tabular data and see how the decoding does.
+  - **Setup** (`counterfactual_images.py`). A tabular cause of one image factor, by the tabular benchmark's rule (T =
+    rho u + sqrt(1 - rho^2) e, u the factor's own noise, rho .7), is raised by 3 SD for every subject. Read as T -> u,
+    that raises u by rho x 3 and keeps each subject's e. The true counterfactual latents are the bank's SCM run
+    forward from the subject's own noise, so the target and its descendants move: for ventricle, ventricle +1.09 SD,
+    burden +.95, temporal +.16 and sulcal -.07. The true counterfactual images are the generator's render of those
+    latents with every other draw the subject's own, normalized and given a residual as the bank's were. The factual
+    re-render must reproduce the bank's stored images, or the script stops.
+  - **Learned** on the training subjects: PC on the cause beside the factors read from the code names its direct
+    effects; the code's slope on the cause is its total effect (the cause is exogenous), so each test subject's
+    counterfactual code is its code plus slope x 3; per view, a decoder from the code to both channels, and the same
+    decoder from the seven true factors. Decoders are saved in the stage folder and reused.
+  - **Arms**, on 200 test subjects, per view and channel, each scored as the share of the true image change it
+    reproduces over the brain, with the per-subject cosine and the size ratio: the code moved by the estimated effect;
+    the decoder fed the codes of the true factual and counterfactual images (the decoder alone); the true-factor
+    decoder fed the true latents (the oracle). Also the code's own change against the true counterfactual's code, and
+    each factor's change read from the counterfactual code against its true change.
+  - **Targets:** ventricle (burden, temporal and sulcal follow), temporal atrophy (focal; sulcal follows), thickness
+    (brain-wide; temporal and sulcal follow). Stage 50's 10-unit code-batch code.
+  - **Reading rule, fixed before the results** (scan channel, both views):
+    - The code supports counterfactual images for a target if its estimated arm reproduces at least half the change
+      the oracle reproduces, and the factors read from the counterfactual code move the target and each descendant the
+      true way by at least half the true size, and no other factor by more than .2 SD.
+    - The effect estimate is the bottleneck if the true-codes arm beats the estimated arm by .2 or more; the decoder
+      is, if the oracle beats the true-codes arm by .2 or more.
+    - PC should name the target, not its descendants, as the cause's direct effect.
+  - **Expectation, written before the results:** one shift of the code for everyone gets the average change but not
+    each subject's own (a change in ventricle moves the lesion differently in each brain), so the estimated arm falls
+    below the true-codes arm, most for ventricle.
+  - **Checked locally:** `bash -n`; the dry run; the SCM's inverse reproduces the bundles' own noise exactly and runs
+    forward to the stored latents; the factual re-render matched a 290-subject local bank to 0.0000.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 61` (no encoder training; four decoders, about 1.5 h).
 - **Stage 59 (built 20 Nov; not run): the code-batch recipe at 9 units.** The user asked for it as a new stage, with
   stage 58 already running.
   - **Why.** Counting every direction alike, the 8-unit code spends 6 of its 8 directions on the own parts and 2 on
@@ -2417,7 +2489,12 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   ventricle's and burden's own parts (.43 and .30 against .78 and .60) and 4 voxels of volume precision; the other
   five factors and the ATE hold. The two units past the matched width are not spare. The new
   `latent_causal_discovery --sphere` removes a code's length before PC; the units' graph stays at the mixing baseline.
-- **Running (started 20 Nov 13:40, user's request):** stage 57, no network training: a fresh 3D decoder learned from
+- **Stopped after T1 (20 Nov 16:19, user's request; started 13:40):** stage 57, no network training. Saved in
+  `causal/stage57/recon_{drawn,fixed}.json`: T1 for truth, truth + style, the 10-unit code and its twin on both banks
+  (the drawn bank's 24-unit rows and every FLAIR row never ran), and the fixed bank's T1 figures. A rerun redoes every
+  decoder. The first figures drew every value at or below 0 as black, which is most of a centred brain; scan rows now
+  use each true brain's 1st-99th percentile, and `recon_check.py --redraw NPZ` redraws a saved figure without
+  training. The stage as built: a fresh 3D decoder learned from
   each frozen code to its view's scan and residual (`recon_check.py`). The 10-unit code (stage 35), the 24-unit code
   (stage 33) and the fixed bank's 10-unit code-batch code (stage 50), each against its untrained twin (floor), the
   bank's 10 rendered shared latents, and those plus the view's own style redrawn as `style_audit.py` does (the
@@ -2431,6 +2508,12 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   (section 9).
 - **Built, not run:** stage 59, one training arm: the code-batch recipe at 9 units, to test the direction count (item
   46): whether a code that spends 2 directions on curves holds all seven own parts at 9 units (section 9).
+- **Built, not run:** stage 60, one training arm: stage 56's 8-unit arm with `warm.py --harmonic-weight 1`, a new
+  penalty on harmonics (curved copies of factors the code already holds), to test whether 8 units then hold all seven
+  own parts (section 9).
+- **Built, not run:** stage 61, no encoder training: counterfactual images from tabular data. A tabular cause of an
+  image factor is raised, the code moves by its estimated effect, a decoder rebuilds the image, and the result is
+  scored against the generator's own counterfactual render of each subject (section 9).
 - **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
   fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
   needs.
