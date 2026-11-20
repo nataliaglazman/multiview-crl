@@ -1,0 +1,29 @@
+# Encoding-size sweep for choosing the number of content units (Daunhawer et al., ICLR 2023,
+# App. B.2 / Fig. 7): one run per fixed content size k, then the elbow of the held-out InfoNCE
+# (val/loss) against k, read beside per-factor R² (scripts/analyze_content_size.py). The conv_mlp
+# reference model on conv_mlp_gumbel's causal pseudo-MRI generator, with a fixed mask and no lesion
+# branch, so k is the only capacity knob; latent_dim 16 keeps the head the same width for every k.
+#   for k in 2 4 6 8 9 10 12 16; do for s in 42 142 242; do
+#     python scripts/launch.py experiments/encoder/conv_mlp_content_size.yaml --cluster slurm_bio \
+#       --set content_channels=$k seed=$s; done; done
+_base_: encoder/synthetic_defaults
+tag: conv_mlp_csize_k{content_channels}_s{seed}
+conv_readout: mlp
+mask_mode: fixed
+latent_dim: 16
+content_channels: 9
+eval_every: 2000
+
+# ---- conv_mlp_gumbel's causal generator ----
+synthetic_identifiable_ventricle: true
+synthetic_sulcal_mode: atrophy
+synthetic_lesion_radius: 0.1
+synthetic_lesion_intensity: styled
+synthetic_lesion_target: position
+synthetic_lesion_count: 4
+synthetic_lesion_t1_value: 0.4
+synthetic_causal: true
+synthetic_causal_graph: random
+synthetic_causal_edge_prob: 0.5
+synthetic_causal_noise_scale: 0.4
+synthetic_causal_nonlinearity: leaky_relu

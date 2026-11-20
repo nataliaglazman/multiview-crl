@@ -347,6 +347,7 @@ class RunTests(unittest.TestCase):
             self.assertIn("| mask leak ", text)
             floor = json.loads((run / "dci_step0.json").read_text())["content_mask"]
             trained = json.loads((run / "dci_step2.json").read_text())["content_mask"]
+            self.assertIn("val/loss", json.loads((run / "dci_step2.json").read_text()))
             self.assertEqual((floor["content_units"], floor["logits"]), (list(range(9)), [0.5] * 9 + [-0.5] * 3))
             self.assertNotEqual(trained["logits"], floor["logits"])
             progress = json.loads((run / "training_progress.json").read_text())

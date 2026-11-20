@@ -1258,6 +1258,9 @@ def evaluate(model, val_dataset, device, args, save_dir, step, writer=None, floo
         per_encoder=not args.no_separate_encoders,
     )
     flat = dci.flatten_dci_results(results)
+    with torch.no_grad():
+        loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        flat.update(held_out_objective(model, loader, device, args))
 
     def show(key):
         for k in flat:
