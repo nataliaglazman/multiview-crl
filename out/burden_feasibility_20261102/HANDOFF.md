@@ -1205,6 +1205,55 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       FLAIR. The plan stands: anchors supply the factors' identity. Discovery on the rotations
       (`label_free_view{1,2}.txt`) and the intrinsic dimension are not in this item.
 
+46. **Eight units give up ventricle's and burden's own parts (stage 56, read 20 Nov, `causal/stage56/`).** The
+    code-batch recipe at 8 units, seed 42, fixed-position bank, against the 10-unit code-batch seeds 42 and 2 (items
+    41, 44) and stage 47's uniform-batch 8-unit code (item 39). T1 / FLAIR.
+    - **Own parts** (ridge), 8 units against the lower 10-unit seed: brain .94 / .94 (.94 / .94); ventricle .43 / .41
+      (.78 / .77); burden .30 / .32 (.60 / .58); thickness .71 / .73 (.75 / .76); temporal .85 / .85 (.85 / .84); lr
+      .84 / .84 (.91 / .92); sulcal .68 / .73 (.72 / .77). Boosting agrees: ventricle .45 / .42 against .73 / .67,
+      burden .23 / .27 against .51 / .45. Summed over the seven factors the own parts come to 4.8 / 4.8 at 8 units,
+      5.6 / 5.6 at 10 and 3.8 / 3.8 for the uniform 8-unit code.
+    - **Precision:** volume error 15.5 / 14.7 voxels, against 11.3 / 11.5 at 10 units and 12.3 / 12.4 for the uniform
+      8-unit code. The backbone still reads it (pooled 11.4 / 11.1, GAP 10.2 / 8.5), so the head drops it.
+    - **Causal tables:** ATE bias .12 / .12 against .09 / .07 (rbf .11 / .10 against .07 / .06); the uniform 8-unit
+      code .24 / .24 (rbf .17 / .16). Image–tabular edges F1 .86 / .83 against .94 / .92 and .95 / .93. Decoded image
+      graph .76 / .77 against .84 / .83 and .85 / .84 (truth .85), about one more false edge.
+    - **Concealed-factor benchmark** (measured anchors): F1 against the anchors' truth .67 / .70 against .73 / .73
+      and .73 / .75; four novel components against three and two, with 1.0 / .6 false edges to them per graph
+      against at most .2.
+    - **Intrinsic dimension:** TwoNN 5.6 / 5.6 against 5.5 for its width's noise-free calibration row; at N/8 it falls
+      .8 / .5, the calibration .6.
+    - **Against the rule fixed before the results:**
+      - Eight units do not keep what ten hold. Ventricle's own part falls .35 / .36 (allowed .15), burden's .30 / .26
+        (allowed .10), and the volume error rises 4.2 / 3.2 voxels (allowed 2). The decoded graph falls .08 / .07
+        (allowed .05), not resolved by resampling (± .06 / .05). Brain, thickness, temporal, lr and sulcal stay within
+        .08, and the ATE bias within .05 (.03–.04 with both learners).
+      - Code batches help at 8 units on four factors, past stage 50's thresholds: brain +.37 / +.38, thickness +.20 /
+        +.23, temporal +.13 / +.12 and sulcal +.35 / +.37 over the uniform 8-unit code (ridge; by boosting brain gains
+        only .10 / .11, as the uniform code holds brain non-linearly, item 39). Not lr (+.10 / +.08), and they lose
+        ventricle (−.06 / −.07), burden (−.11 / −.08) and volume precision (3.2 / 2.3 voxels). The ATE bias halves.
+      - The intrinsic dimension passes by the rule's letter, yet two own parts read .3–.4: at this N the estimator
+        does not tell a weakly held direction from a full one. It cannot judge this question.
+    - **Expectation, written before:** half right. Burden went and sulcal held, but the ventricle, strong at 10
+      units, went too. The arm beats the uniform 8-unit code on four factors, not all seven.
+    - **Label-free discovery without the code's length** (`latent_causal_discovery --sphere`, added 20 Nov, run
+      locally on the stage's bundles): each unit standardized and each code divided by its length, the code as the
+      cosine sees it. No unit can be dropped instead: once standardized, every unit takes both signs.
+      - With uniform batches the length holds almost nothing: removing it costs any own part at most .03. With code
+        batches it holds brain size: brain's own part falls from .94–.95 to .79–.84, lr's by .05–.10. Each batch is
+        standardized around its own neighbourhood, so the population length is not the loss's blind number there.
+      - Removing it moves single rows' F1 by up to .40 either way (uniform 8 units, T1: .27 → .67; 10 units seed 42,
+        FLAIR: .71 → .57), and the untrained twins move as much. With the length, one row cleared its mixing null by
+        two SDs (that FLAIR row, .71 against .41 ± .12), while seed 2's twin read .75 in the same view; without it
+        none does (largest 1.6 SD). Item 41 stands: the units' graph sits at the mixing baseline, and width is not
+        the reason.
+    - **Reading.** At the matched width the code gave up a parent–child pair, ventricle → burden, not just the
+      weakest factor. The two units 10 has past the matched width are not spare. Summed over the factors they hold
+      about .8 of one factor's own variation, nearly all of it ventricle and burden, plus 4 voxels of volume
+      precision. Code batches change which factors a narrow code keeps; they do not replace width. This backs the
+      18 Nov width decision (section 1) and section 8's point that weaker own parts need spare width. One seed, but
+      the own-part losses (.26–.36) are four to five times the code-batch seed spread (.07).
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -1355,8 +1404,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
-- **Stage 56 (built 20 Nov; not run): the best 10-unit recipe at 8 units.** The user asked for the code-batch recipe
-  with 8 units instead of 10.
+- **Stage 56 (built 20 Nov; read 20 Nov, item 46): the best 10-unit recipe at 8 units.** The user asked for the
+  code-batch recipe with 8 units instead of 10.
   - **Why.** Under the cosine, 8 units are the matched width for the fixed bank's 7 latents (section 8): the
     contrastive term sees the code's direction only, 7 free numbers, one per latent, with none spare. Code batches
     made the 10-unit code the best causal block so far (items 41, 44). Stage 47's 8-unit code, with uniform batches,
@@ -2252,8 +2301,17 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   intrinsic dimension are not recorded here yet.
 - **Built, not run:** stage 55, no training: individual effects and counterfactual outcomes in the tabular benchmark
   (`--counterfactual`), on the same codes (section 9). Run it after stage 53, with stage 54 or alone.
-- **Built, not run:** stage 56, one training arm: the code-batch recipe at 8 units, the cosine's matched width for
-  the fixed bank's 7 latents, against the 10-unit code-batch seeds and stage 47's uniform 8-unit code (section 9).
+- **Stage 56 is read (item 46):** at 8 units, the cosine's matched width, the code-batch recipe gives up most of
+  ventricle's and burden's own parts (.43 and .30 against .78 and .60) and 4 voxels of volume precision; the other
+  five factors and the ATE hold. The two units past the matched width are not spare. The new
+  `latent_causal_discovery --sphere` removes a code's length before PC; the units' graph stays at the mixing baseline.
+- **Built, not run (20 Nov, user's request):** stage 57, no network training: a fresh 3D decoder learned from each
+  frozen code to its view's scan and residual (`recon_check.py`). The 10-unit code (stage 35), the 24-unit code (stage
+  33) and the fixed bank's 10-unit code-batch code (stage 50), each against its untrained twin (floor), the bank's 10
+  rendered shared latents, and those plus the view's own style redrawn as `style_audit.py` does (the ceiling: style is
+  most of the scan's variation, ridge R2 .16 -> .67 for T1 on a small local bank, and untrained twins carry gain).
+  Read R2 of scan and residual, the residual's R2 over the lesion cells, and the lesion volume read off the rebuilt
+  residual (e, voxels). The residual is the column that tests content; the scan mostly tests style.
 - **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
   fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
   needs.

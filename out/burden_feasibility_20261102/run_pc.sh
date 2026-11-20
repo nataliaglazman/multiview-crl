@@ -289,6 +289,13 @@
 # 42, 20,000 steps) with --content-units 8. The four reports and the intrinsic dimension, discovery and the tabular
 # benchmark (linear and rbf), and the concealed-factor benchmark with measured anchors, beside the 10-unit code-batch
 # arm at seeds 42 and 2 (stages 50, 52) and stage 47's uniform-batch 8-unit code (causal/stage56/).
+# Stage 57 (opt-in, no network training) How much of each view's image a frozen code holds: recon_check.py trains a
+# fresh 3D decoder from each run's frozen code to that view's scan and normative residual (training subjects, early
+# stopping on validation), the same decoder for every input. Inputs: the 10-unit code (stage 35) and the 24-unit code
+# (stage 33) on the drawn bank, the 10-unit code-batch code (stage 50) on the fixed bank, each run's untrained twin
+# (floor), and the bank's 10 rendered shared latents (ceiling). Scores: R2 of the scan and residual over the brain and
+# over the lesion cells, and the lesion volume read by the fixed blob filter on the rebuilt residual; figures of
+# rebuilt test subjects and per-voxel R2 maps (causal/stage57/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2297,6 +2304,31 @@ if wants 56; then
             || { echo "Stage 56's factoriser failed, see $OUT/measured_default.txt"; exit 1; }
     fi
     [ "$DRY" = 0 ] && echo "Stage 56 reports in $OUT"
+fi
+
+if wants 57; then
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield
+    C10=${P}_predict1_c10_20k  # stage 35
+    C24=${P}_predict1_c24_20k  # stage 33
+    CODEB=${P}_fixedpos_abl_codebatch_predict1_c10_20k  # stage 50
+    OUT=$D/causal/stage57
+    needs_done 57 "$C10" "$C24" "$CODEB"
+    [ "$DRY" = 0 ] && { mkdir -p "$OUT" || exit 1; }
+    DRAWN=("$PY" "$D/recon_check.py" "$OUT/recon_drawn.json" c10="$D/runs/$C10" c24="$D/runs/$C24")
+    FIXED=("$PY" "$D/recon_check.py" "$OUT/recon_fixed.json" fixed_codebatch_c10="$D/runs/$CODEB")
+    if [ "$DRY" = 1 ]; then
+        echo "${DRAWN[*]} > $OUT/recon_drawn.txt"
+        echo "${FIXED[*]} > $OUT/recon_fixed.txt"
+    else
+        echo "$(date +%H:%M) recon_check on both banks, into $OUT/recon_{drawn,fixed}.txt"
+        "${DRAWN[@]}" > "$OUT/recon_drawn.txt" 2>&1 &
+        DRAWN_PID=$!
+        "${FIXED[@]}" > "$OUT/recon_fixed.txt" 2>&1 &
+        FIXED_PID=$!
+        wait $DRAWN_PID || { echo "Stage 57's drawn-bank check failed, see $OUT/recon_drawn.txt"; exit 1; }
+        wait $FIXED_PID || { echo "Stage 57's fixed-bank check failed, see $OUT/recon_fixed.txt"; exit 1; }
+        echo "Stage 57 reports in $OUT: recon_drawn.txt, recon_fixed.txt and the recon_*.png figures"
+    fi
 fi
 
 echo "$(date +%H:%M) all requested stages done"

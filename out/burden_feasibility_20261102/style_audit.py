@@ -56,10 +56,10 @@ def style_targets(z_style):
     return np.column_stack([np.clip(z[:, 0], -1, 1), np.clip(z[:, 1], -1, 1), np.abs(z[:, 2])])
 
 
-def generator(setting, total):
-    """The test split's generator as bank.py builds it for a bank of ``total`` test subjects."""
+def generator(setting, total, split="test"):
+    """A split's generator as bank.py builds it for a bank of ``total`` subjects in that split."""
     args = bank_py.run_args(0.4, nuisance=setting["nuisance"], causal=setting["causal"])
-    inner = T.make_dataset(args, "test", total)._inner
+    inner = T.make_dataset(args, split, total)._inner
     if setting["causal"]:
         inner.scm = bank_py.causal_scm(args.seed)
     return inner
@@ -78,9 +78,9 @@ def draw(inner, i):
 
 
 def draw_chunk(job):
-    setting, total, start, stop = job
+    setting, total, start, stop, split = job
     torch.set_num_threads(1)
-    inner = generator(setting, total)
+    inner = generator(setting, total, split)
     return start, [draw(inner, i) for i in range(start, stop)]
 
 
@@ -88,13 +88,13 @@ def matches(content, stored):
     return np.isclose(content, stored, rtol=0, atol=1e-6).all(axis=-1)
 
 
-def redraw(root, n, workers=bank_py.WORKERS, check=4):
-    """The bank.py setting that reproduces ``root``'s stored content latents, and the first ``n`` test subjects' style
-    latents (T1, FLAIR). Raises if no setting reproduces them, or if any redrawn subject differs."""
-    stored = np.load(f"{root}/test_zc.npy")
+def redraw(root, n, workers=bank_py.WORKERS, check=4, split="test"):
+    """The bank.py setting that reproduces ``root``'s stored content latents, and the first ``n`` ``split`` subjects'
+    style latents (T1, FLAIR). Raises if no setting reproduces them, or if any redrawn subject differs."""
+    stored = np.load(f"{root}/{split}_zc.npy")
     total = len(stored)
     for setting in SETTINGS:
-        inner = generator(setting, total)
+        inner = generator(setting, total, split)
         if all(matches(draw(inner, i)[0], stored[i]) for i in range(min(check, n))):
             break
     else:
@@ -103,7 +103,7 @@ def redraw(root, n, workers=bank_py.WORKERS, check=4):
         rows = [draw(inner, i) for i in range(n)]
     else:
         step = max(1, n // (workers * 2))
-        jobs = [(setting, total, s, min(s + step, n)) for s in range(0, n, step)]
+        jobs = [(setting, total, s, min(s + step, n), split) for s in range(0, n, step)]
         with ProcessPoolExecutor(workers) as pool:
             rows = [row for _, chunk in sorted(pool.map(draw_chunk, jobs), key=lambda c: c[0]) for row in chunk]
     bad = int((~matches(np.stack([r[0] for r in rows]), stored[:n])).sum())
