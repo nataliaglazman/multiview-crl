@@ -1154,6 +1154,57 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       ADNI depends on what dominates the code there: with the lesion's position present they were neutral at 24 units
       (item 42) and mixed at 10 (stage 43, section 9).
 
+45. **Footprints separate the factors that have a place, not the brain-wide ones (stage 54's footprints, read 19
+    Nov, `causal/stage54/footprints.txt`).** Eight codes; Jacobians on 300 training subjects, weighted by variation;
+    T1 / FLAIR. The image maps (per 16³ cell, how closely the scan's intensity tracks a factor's own part) are focal
+    for the ventricle (66–76 effective cells), temporal atrophy (396–406 / 650–661) and, on the fixed bank only,
+    burden (272 / 809). Brain size, thickness, asymmetry (lr) and sulcal widening cover 600–1,000 cells, nearly the
+    whole brain.
+    - **The rotation's rule** (its MCC above the units' and the random rotations' mean by more than their SD, and
+      above the twin's, in both views):
+      - Passes on the 24-unit codes at both seeds, with both rotations (pooled .65 / .68 and .72 / .66 against
+        random .59 / .59 and .57 / .58, SD at most .02).
+      - Passes on the fixed bank's uniform-batch 10-unit codes with the pooled rotation only (.44 / .50 and .51 /
+        .51 against .38 / .43 and .46 / .47).
+      - Fails on the code-batch arm in FLAIR at both seeds (.65 against .65; .65 against .63 with SD .04; T1
+        passes, .69 and .67 against .63), on the drawn bank's 10-unit code, and on the 8-unit code.
+      - Every trained code beats its twin (.20–.39) by far, so the twin is not the binding comparison. In the
+        whitened frame random rotations already beat the 24-unit codes' units (.57–.59 against .40–.44): there the
+        whitening by gradient energy does most of the aligning. The code-batch arm's units are the best aligned of
+        any code (.57–.62).
+    - **What the rotation finds,** by the second rule's first half (a component's specific footprint correlates
+      positively with its factor's image map in both views):
+      - Temporal atrophy, .37–.49 / .21–.34, in 7 of 8 codes, with a footprint like the temporal readout's (cosine
+        .77–.98, except .45 in one view). The exception is the code-batch arm at seed 42, .02 / .14 (its readout
+        .36 / .19).
+      - Burden at the lesion's fixed site, in every fixed-bank code: .44–.81 / .45–.47, cosine with burden's
+        readout .85–1.00. The component tracks burden itself only .27–.75 / .33–.67 (code batches .75 / .54 and
+        .44 / .33): the site's directions also carry the lesion centre, and footprints cannot choose among
+        directions read from one place.
+      - Not the ventricle. The readouts read it at the ventricles (code batches .84 / .69 and .83 / .68; the
+        24-unit code at seed 42 .54 / .66), but the component named after it is positive in both views only once
+        (.66 / .08, the fixed 10-unit code at seed 42, its T1 footprint unlike the readout's). Names come from the
+        raw factor, which shares variance with its parents, so a component that reads those elsewhere can take the
+        name. Whether a ventricle-local component carries another name is for the `components` figures.
+      - Not the brain-wide factors: their components' correlation with the image map is at most .25, mostly under
+        .15.
+      - The rule's other half (above the twin's matching component) needs `footprints.json`; the printout lacks the
+        twin's image correlations. Not checked yet, so the small positives prove nothing.
+    - **Code batches widen where the code reads.** The arm's mean footprint covers 391–437 cells against 271–292
+      for uniform batches on the same bank; its interior share is .51–.57 against .60–.65 (the rest on the brain's
+      boundary), and its residual-channel share .43–.53 against .63–.68. It reads more of the scan, where the
+      brain-wide factors show, and reads those factors far better (R² .79–.95 against .43–.77).
+    - **The per-subject rotation adds nothing.** It beats the pooled one in 2 of 16 views (by .06 and .01) and reads
+      the drawn lesion's coordinates no better. On the drawn bank every direction's per-subject footprint, random
+      ones included, covers 3–7 cells (19–71 on the fixed bank): the variation weighting lets each subject's most
+      unusual cells dominate, most likely its own lesion.
+    - **Reading.** Step 3b gives identity only to a factor with a place of its own. Without labels it finds a
+      temporal component in most codes and a lesion-site component on the fixed bank, each reading where the image
+      shows its factor. It cannot split factors that act across the whole brain, or several read from one place,
+      and those are most of the block. On the best 10-unit code the rotation is no better than random rotations in
+      FLAIR. The plan stands: anchors supply the factors' identity. Discovery on the rotations
+      (`label_free_view{1,2}.txt`) and the intrinsic dimension are not in this item.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -1304,6 +1355,35 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 56 (built 20 Nov; not run): the best 10-unit recipe at 8 units.** The user asked for the code-batch recipe
+  with 8 units instead of 10.
+  - **Why.** Under the cosine, 8 units are the matched width for the fixed bank's 7 latents (section 8): the
+    contrastive term sees the code's direction only, 7 free numbers, one per latent, with none spare. Code batches
+    made the 10-unit code the best causal block so far (items 41, 44). Stage 47's 8-unit code, with uniform batches,
+    held the weak factors less well than its 10-unit code (sulcal .33 / .36 against .50 / .54, thickness .51 / .50
+    against .59 / .65; item 39). Do code batches carry to the matched width, and what did the two spare units buy?
+  - **Arm:** stage 50's code-batch arm with `--content-units 8`: fixed bank, residual input, jitter, prediction
+    weight 1, tails, and batches of an anchor and its 31 nearest neighbours in the model's own code, rebuilt every
+    500 steps; seed 42, 20,000 steps. Run name:
+    `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k`.
+  - **Reports** (`causal/stage56/`): the four reports, the intrinsic dimension, discovery (decoded and label-free),
+    the tabular benchmark (linear and rbf) and the concealed-factor benchmark with measured anchors, beside the
+    10-unit code-batch arm at seeds 42 and 2 and stage 47's uniform 8-unit code (their report entries reused).
+  - **Reading rule, fixed before the results** (the 10-unit code-batch seeds agree within .07, item 44):
+    - Eight units keep what ten hold if every own part stays within .10 of the lower 10-unit seed (.15 for
+      ventricle), the volume error within 2 voxels of the worse seed, and the ATE bias (linear and rbf) and the
+      decoded image graph's F1 within .05. Otherwise, name what is lost.
+    - Code batches help at 8 units if the arm beats stage 47's uniform 8-unit code by more than stage 50's
+      thresholds on own parts (brain .24, ventricle .16, sulcal .14, the rest .10).
+    - The code fills the 7-latent block if its TwoNN reads near the calibration row of its width and holds flat
+      under decimation (in stage 54 the 10-unit code-batch arms fell by about 1 at N/8).
+  - **Expectation, written before the results:** with no spare direction, the weakest own parts go first (items 36,
+    39), so sulcal or burden falls below the 10-unit code while the strong factors hold, and the arm still beats the
+    uniform 8-unit code.
+  - **Checked locally:** `bash -n` passes; the dry run lists the arm (stage 52's flags with `--content-units 8` and
+    seed 42), the four reports, the intrinsic dimension, the bundle exports, both discoveries, both tabular
+    benchmarks and the factoriser.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 56` (one training arm, then the reports).
 - **Stage 55 (built 19 Nov; not run; no training): individual effects and counterfactual outcomes.** The user asked
   for counterfactuals with the tabular data.
   - **Why.** The ATE (item 24) is an average. A counterfactual asks what one subject's outcome would have been under
@@ -1341,9 +1421,9 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     (reused when newer than the run) and both benchmark calls.
   - **Run** after stage 53 finishes: `bash out/burden_feasibility_20261102/run_pc.sh 55` (or `54 55`). Reports:
     `causal/stage55/counterfactual.log` and `counterfactual_rbf.log`, with JSONs beside them.
-- **Stage 54 (built 19 Nov; not run; no training): where each code reads in the image, and how many dimensions it
-  fills.** Section 10's label-free options at the user's request: step 3b (spatial footprints) and section 8's optional
-  intrinsic-dimension check.
+- **Stage 54 (built 19 Nov; footprints read 19 Nov, item 45; no training): where each code reads in the image, and
+  how many dimensions it fills.** Section 10's label-free options at the user's request: step 3b (spatial footprints)
+  and section 8's optional intrinsic-dimension check.
   - **Why.** Two views identify the shared anatomy only as a block (section 8). Locality is structure that can pick
     one remix of it. If each factor is read from its own region, the directions that read single factors read from few
     places, and mixtures from the union of those places (the structural sparsity of Zheng et al. 2022, in a linear
@@ -2166,11 +2246,14 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Label-free graph discovery from two views** stays out of reach; rotating the code into canonical directions gives
   PC no edges by construction (item 43). The graph needs anchors.
 - **Running:** stage 53, the map (`grid`) and position-free (`quantile`) prediction targets at 24 units (section 9).
-- **Built, not run:** stage 54, no training: where each code reads in the image (spatial footprints and the rotation
-  whose directions read from the fewest places, step 3b) and how many dimensions it fills (intrinsic dimension), on
-  the recent codes (section 9). Run it after stage 53.
+- **Stage 54's footprints are read (item 45):** without labels, locality finds the factors that have a place
+  (temporal atrophy in most codes, burden at the fixed lesion site) and none of the brain-wide ones. The rotation
+  passes its rule on the 24-unit codes and fails on the code-batch arm in FLAIR. Its discovery reports and the
+  intrinsic dimension are not recorded here yet.
 - **Built, not run:** stage 55, no training: individual effects and counterfactual outcomes in the tabular benchmark
   (`--counterfactual`), on the same codes (section 9). Run it after stage 53, with stage 54 or alone.
+- **Built, not run:** stage 56, one training arm: the code-batch recipe at 8 units, the cosine's matched width for
+  the fixed bank's 7 latents, against the 10-unit code-batch seeds and stage 47's uniform 8-unit code (section 9).
 - **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
   fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
   needs.
@@ -2238,8 +2321,9 @@ on.
 - **Stage 44 is read** (item 36). The anchors' readouts did not cause stage 42's loss: the weak own parts go out with
   dropped directions they share with other, partly predictable content, whichever anchors are used. Decided 18 Nov:
   stop the label-free split at the block (the plan above). Step 3b (spatial footprints) was built on 19 Nov as stage
-  54 (section 9), at the user's request, with the intrinsic-dimension check; not run yet. Burden and the lesion centre
-  both act where the lesion is, so their footprints overlap.
+  54 (section 9), at the user's request, with the intrinsic-dimension check. Its footprints, read 19 Nov (item 45),
+  separate only the factors that have a place. Burden and the lesion centre both act where the lesion is, so their
+  footprints overlap, as the item confirms.
 - **Implementation proposal (17 Nov; adopted 18 Nov as the plan above).** Set the number of units at the
   causal variables, not at the encoder, as `paper/factor-discovery-framework.tex` already separates them:
   - representation: the 24-unit prediction code, claimed as an embedding of the content block;

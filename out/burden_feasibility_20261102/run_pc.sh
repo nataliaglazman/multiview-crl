@@ -284,6 +284,11 @@
 # T-learner, cross-fitted) scored by the share of the effect's variation recovered, PEHE, policy regret and the
 # counterfactual outcome's error, with the linear and the rbf learner. Stage 54's codes, the backbone GAP of the 24-unit
 # recipe and of the fixed bank's code-batch arm, and stage 53's grid and quantile arms once trained (causal/stage55/).
+# Stage 56 (opt-in) The best 10-unit recipe at 8 units, the cosine's matched width for the fixed bank's 7 latents:
+# stage 50's code-batch arm (fixed bank, residual, jitter, prediction weight 1, tails, batches of code neighbours; seed
+# 42, 20,000 steps) with --content-units 8. The four reports and the intrinsic dimension, discovery and the tabular
+# benchmark (linear and rbf), and the concealed-factor benchmark with measured anchors, beside the 10-unit code-batch
+# arm at seeds 42 and 2 (stages 50, 52) and stage 47's uniform-batch 8-unit code (causal/stage56/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2253,6 +2258,45 @@ if wants 55; then
         fi
     done
     [ "$DRY" = 0 ] && echo "Stage 55 reports in $OUT: counterfactual.log and counterfactual_rbf.log"
+fi
+
+if wants 56; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    CODEB8=${P}_abl_codebatch_predict1_c8_20k
+    CODEB=${P}_abl_codebatch_predict1_c10_20k  # stage 50; its seed 2 is stage 52's
+    C8=${P}_predict1_c8_20k  # stage 47
+    OUT=$D/causal/stage56
+    needs_done 56 "$CODEB" "${CODEB}_s2" "$C8"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage52" "$OUT" "$CODEB" "${CODEB}_s2"
+        reuse_reports "$D/causal/stage50" "$OUT" "$C8"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    EVERY=2000 ssl "$CODEB8" "$FIXED" tail t1_04 20000 --code-batches 500 --code-neighbours 31 --residual --jitter 2 \
+        --rotate 3 --seed 42 --patch-weight 0 --content-units 8 --contrastive-loss-type infonce --predict-weight 1
+    finish "$CODEB8"
+    needs_done 56 "$CODEB8"
+    RUNS=()
+    for name in "$CODEB8" "$CODEB" "${CODEB}_s2" "$C8"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    stage_report "$OUT" intrinsic_dimension "${RUNS[@]}"
+    causal_tables "$OUT" code_batches_c8="$CODEB8" code_batches="$CODEB" code_batches_s2="${CODEB}_s2" c8="$C8"
+    CMD=("$PY" "$D/factoriser.py" "$OUT/measured_default.json" "${RUNS[@]}" --anchor-source measured
+        --anchors brain ventricle thickness temporal)
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/measured_default.txt"
+    else
+        echo "$(date +%H:%M) factoriser, anchors measured, into $OUT/measured_default.txt"
+        "${CMD[@]}" > "$OUT/measured_default.txt" 2>&1 \
+            || { echo "Stage 56's factoriser failed, see $OUT/measured_default.txt"; exit 1; }
+    fi
+    [ "$DRY" = 0 ] && echo "Stage 56 reports in $OUT"
 fi
 
 echo "$(date +%H:%M) all requested stages done"
