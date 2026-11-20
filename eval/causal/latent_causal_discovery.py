@@ -66,6 +66,24 @@ columns are mixed and the rest stay as they are. That matters when every candida
 some channels: the naming null cannot see a basis choice at all, and channels that are
 right in every candidate, like the normative block's lesion coordinates, lift every row
 above it.
+
+Length removal
+--------------
+``--sphere`` is for codes trained with the cosine InfoNCE, which standardizes each unit over
+the batch and then reads only the code's direction: a K-unit code has K-1 numbers the loss
+trains and one, its length, that it never sees. Before PC, each unit is standardized over the
+subjects and each subject's code divided by its length, the code as the loss sees it. This
+happens before ``--top-var-channels`` and the mixing null, so the floor row and every mixing
+draw lose their length too; the ceiling row is the true factors as they are. The unit count
+does not change. Every standardized unit is centred, so each takes both signs, and no unit can
+be dropped and rebuilt from the others; no single chart of the sphere gives K-1 coordinates
+without bending the correlations PC tests. A length independent of the direction only adds
+sampling noise to those correlations, and the step removes it. A length that tracks the
+direction bends them; the step undoes that only where the length leaves each unit's mean in
+place, because standardizing moves with the means, as it does in the loss's own batches.
+The loss is blind to the length only when its batches are drawn uniformly. Batches of a
+subject's code neighbours are standardized around that neighbourhood, and such codes can keep
+content in their length, which this step then removes.
 """
 
 from __future__ import annotations
@@ -125,6 +143,23 @@ def top_variance_channels(reduced, k):
         raise ValueError(f"--top-var-channels must be in [1, {reduced.shape[1]}], got {k}")
     kept = np.argsort(-reduced.var(axis=0), kind="stable")[:k]
     return reduced[:, kept], kept
+
+
+def on_sphere(reduced):
+    """Each unit standardized over the subjects, then each subject's code divided by its length. No labels.
+
+    The cosine InfoNCE's view of a code: per-unit offsets and scales and the code's length are gone, its direction
+    stays. A constant unit stays zero. The width stays: every unit is now centred, so none keeps one sign.
+    """
+    import numpy as np
+
+    reduced = np.asarray(reduced, dtype=np.float64)
+    sd = reduced.std(axis=0)
+    centred = (reduced - reduced.mean(axis=0)) / np.where(sd > 0, sd, 1.0)
+    length = np.linalg.norm(centred, axis=1, keepdims=True)
+    if np.any(length == 0):
+        raise ValueError("A subject's standardized code is all zeros, so it has no direction")
+    return centred / length
 
 
 def discover(values, alphas=DEFAULT_ALPHAS, indep_test="fisherz", max_cond_set=None):
@@ -361,7 +396,7 @@ def format_report(results):
         q = r["match_quality"]
         row = [
             r["label"],
-            r["reduce"],
+            r["reduce"] + ("+sphere" if r.get("sphere") else ""),
             str(r["n_channels"]),
             f"{b['f1']:.3f}",
             f"{b['null']['f1_mean']:.3f}",
@@ -400,6 +435,9 @@ def format_report(results):
         out.append("'mix' reruns the panel on random mixings of the row's channels (mean±sd over draws): what the")
         out.append("same block gives with no rule for choosing its channels, with the same best-alpha selection.")
         out.append("Only the recorded columns are mixed; the other channels stay fixed. Read F1 and MCC against it.")
+    if any(r.get("sphere") for r in results):
+        out.append("'+sphere': each unit standardized over the subjects, then each code divided by its length, before")
+        out.append("PC and before any mixing: the code as the cosine sees it. The unit count is unchanged.")
     for r in results:
         if r.get("status") in ("skipped", "error"):
             out.append(f"  {r['label']}: {r['status']} -- {r.get('reason', '')}")
@@ -495,6 +533,26 @@ def _self_test():
         check("fewer channels than factors is rejected", False)
     except ValueError:
         check("fewer channels than factors is rejected", True)
+
+    # --sphere: the cosine's view of a code. Lengths are the one thing it removes.
+    code = rng.standard_normal((N, 6)) @ rng.standard_normal((6, 6))
+    sphere = on_sphere(code)
+    check("--sphere puts every code at length 1", np.allclose(np.linalg.norm(sphere, axis=1), 1.0))
+    affine = code * np.array([2.0, 0.5, 3.0, 1.0, 7.0, 0.1]) + np.array([5.0, -1.0, 0.0, 2.0, -3.0, 10.0])
+    check("--sphere ignores each unit's offset and scale", np.allclose(on_sphere(affine), sphere))
+    signs = ((sphere > 0).any(axis=0) & (sphere < 0).any(axis=0)).all()
+    check("after --sphere every unit takes both signs, so no unit can be dropped and rebuilt", bool(signs))
+    centred = (code - code.mean(0)) / code.std(0)
+    independent = on_sphere(centred * np.exp(0.5 * rng.standard_normal((N, 1))))
+    cosine = float((independent * sphere).sum(axis=1).mean())
+    check(f"--sphere removes a length unrelated to the direction (mean cosine {cosine:.4f})", cosine > 0.99)
+    tracking = np.exp(2.4 * np.abs(sphere[:, :1]))
+    raw_shift = np.abs(np.corrcoef((centred * tracking).T) - np.corrcoef(centred.T)).max()
+    kept_shift = np.abs(np.corrcoef(on_sphere(centred * tracking).T) - np.corrcoef(sphere.T)).max()
+    check(
+        f"a length tracking the direction bends correlations by {raw_shift:.2f}; after --sphere {kept_shift:.2f}",
+        raw_shift > 0.1 and kept_shift < 0.06,
+    )
 
     print("\n" + ("FAILED: " + ", ".join(failures) if failures else "All checks passed."))
     return 1 if failures else 0
@@ -612,6 +670,10 @@ def score_row(reduced, z, adj, cli, label, mixable=None, mixing=0, **extra):
     """One table row: the panel on ``reduced``, plus the mixing null when ``mixing`` draws are asked for."""
     if mixing:
         mixable = mixing_columns(mixable, reduced.shape[1])
+    if getattr(cli, "sphere", False):
+        # Before selection and mixing, so the selected channels and every mixing draw carry no length either.
+        reduced = on_sphere(reduced)
+        extra.update(sphere=True)
     if cli.top_var_channels:
         # Per row, so a floor keeps ITS loudest channels rather than the trained run's.
         before = reduced.shape[1]
@@ -664,6 +726,12 @@ def main(argv=None):
         "--top-var-channels",
         type=int,
         help="After --reduce, run PC on only the K highest-variance channels (label-free subset, no rotation)",
+    )
+    parser.add_argument(
+        "--sphere",
+        action="store_true",
+        help="Standardize each unit, then divide each code by its length, before selection, mixing and PC: "
+        "the code as the cosine InfoNCE sees it (cosine codes from uniform batches; the unit count is unchanged)",
     )
     parser.add_argument("--alphas", type=float, nargs="+", default=list(DEFAULT_ALPHAS))
     parser.add_argument("--indep-test", default="fisherz", choices=list(INDEP_TESTS))
@@ -769,7 +837,9 @@ def main(argv=None):
     print("\n" + format_report([r for r in results if r.get("best") or r.get("status")]))
     if cli.out:
         cli.out.parent.mkdir(parents=True, exist_ok=True)
-        protocol = dict(readout="none", naming="hungarian_abs_corr", mixing_null_draws=cli.mixing_null)
+        protocol = dict(
+            readout="none", naming="hungarian_abs_corr", mixing_null_draws=cli.mixing_null, sphere=cli.sphere
+        )
         cli.out.write_text(json.dumps(dict(protocol=protocol, runs=results), indent=2) + "\n")
         print(f"Saved JSON to {cli.out.resolve()}")
     return int(any(r.get("status") == "error" for r in results))

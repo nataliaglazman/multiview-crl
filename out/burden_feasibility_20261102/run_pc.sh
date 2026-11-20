@@ -296,6 +296,12 @@
 # (floor), and the bank's 10 rendered shared latents (ceiling). Scores: R2 of the scan and residual over the brain and
 # over the lesion cells, and the lesion volume read by the fixed blob filter on the rebuilt residual; figures of
 # rebuilt test subjects and per-voxel R2 maps (causal/stage57/).
+# Stage 58 (opt-in) Do the causal edges or the image make the 8-unit code blend ventricle and burden (item 46)? Stage
+# 56's arm (code batches, 8 units, seed 42, 20,000 steps) on bank_nofield_fixedpos: the fixed-position bank rendered
+# without --causal, so the seven factors are independent (ventricle-burden r .83 -> 0) while the lesion's site and
+# every image setting stay. The precision, code and style audits, and own_directions.py (which directions of the own
+# parts each code holds, and which pairs of factors it blends), beside stage 56's causal 8-unit code and stage 50's
+# 10-unit code (causal/stage58/). Own variation needs the SCM; on the independent bank the own parts are the factors.
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2328,6 +2334,48 @@ if wants 57; then
         wait $DRAWN_PID || { echo "Stage 57's drawn-bank check failed, see $OUT/recon_drawn.txt"; exit 1; }
         wait $FIXED_PID || { echo "Stage 57's fixed-bank check failed, see $OUT/recon_fixed.txt"; exit 1; }
         echo "Stage 57 reports in $OUT: recon_drawn.txt, recon_fixed.txt and the recon_*.png figures"
+    fi
+fi
+
+if wants 58; then
+    INDEPENDENT=$D/bank_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104
+    IND8=${P}_nofield_fixedpos_abl_codebatch_predict1_c8_20k
+    CAU8=${P}_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k  # stage 56
+    CAU10=${P}_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k  # stage 50
+    OUT=$D/causal/stage58
+    needs_done 58 "$CAU8" "$CAU10"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage56" "$OUT" "$CAU8" "$CAU10"
+    fi
+    bank "$INDEPENDENT" --t1-values 0.4 --field off --lesion-position fixed
+    residual_bank "$INDEPENDENT" t1_04 flair
+    EVERY=2000 ssl "$IND8" "$INDEPENDENT" tail t1_04 20000 --code-batches 500 --code-neighbours 31 --residual \
+        --jitter 2 --rotate 3 --seed 42 --patch-weight 0 --content-units 8 --contrastive-loss-type infonce \
+        --predict-weight 1
+    finish "$IND8"
+    needs_done 58 "$IND8"
+    RUNS=("$D/runs/$IND8" "$D/runs/$CAU8" "$D/runs/$CAU10")
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    for name in "$IND8" "$CAU8" "$CAU10"; do  # code bundles; stages 50 and 56 made the causal ones
+        base=$D/causal/$name
+        if [ "$DRY" = 1 ]; then echo "$PY $D/causal_bundle.py $D/runs/$name $base.npz"; continue; fi
+        [ "$base.npz" -nt "$D/runs/$name/model.pt" ] && continue
+        "$PY" "$D/causal_bundle.py" "$D/runs/$name" "$base.npz" > "$base.log" 2>&1 \
+            || { echo "Stage 58's bundle failed, see $base.log"; exit 1; }
+    done
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json" independent_c8="$D/causal/$IND8.npz"
+        causal_c8="$D/causal/$CAU8.npz" causal_c10="$D/causal/$CAU10.npz")
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 58's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        echo "Stage 58 reports in $OUT: own_directions.txt and the precision, code and style audits"
     fi
 fi
 

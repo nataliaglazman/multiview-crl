@@ -11,6 +11,8 @@ own_variation.py does, for the tabular benchmark's tabular causes. emb_view1 is 
 gauges are first filled from training subjects, so the floor is a calibrated random code rather than an unscaled one.
 --features gap or pooled exports the backbone GAP (64) or TailCode's pooled features (the head's input) in place of
 the code, for decoded discovery past the head; label-free discovery is meant for the code's units only.
+On a bank rendered without --causal the seven factors are drawn independently, so each is its own exogenous part
+(z_own is the factors) and the bundle has no causal_adj: graph scoring skips it, as for any i.i.d. bundle.
 """
 
 import argparse
@@ -57,7 +59,7 @@ def main():
     args = report["args"]
     root, t1key = args["bank"], args["t1key"]
     if not Path(f"{root}/causal_adj.npy").exists():
-        raise SystemExit(f"{root} has no causal_adj.npy: render it with bank.py --causal")
+        print(f"{root} has no causal_adj.npy: independent factors, so z_own is the factors and there is no graph")
     if pool is None:
         raise SystemExit("The code comes from TailCode's head: the run needs --pool tail or gapnorm")
     if a.untrained:
@@ -91,21 +93,27 @@ def save(out, test, root, t1key, embeddings, extra):
     and each view's (n, d) embedding; ``extra`` goes into its meta. Returns the row count."""
     columns = list(B.CAUSAL_FACTORS)
     z = np.asarray(test.zc[:, columns], dtype=np.float32)
-    own = np.asarray(own_noise(np.asarray(test.zc, dtype=np.float64), root, columns), dtype=np.float32)
-    adj = np.load(f"{root}/causal_adj.npy")[np.ix_(columns, columns)].astype(np.float32)
-    settings = {"bank": root, "t1key": t1key, "causal_edges": B.CAUSAL_EDGES, "test_subjects": len(z)}
+    causal = Path(f"{root}/causal_adj.npy").exists()
+    latents = {"z_content": z}
+    if causal:
+        own = np.asarray(own_noise(np.asarray(test.zc, dtype=np.float64), root, columns), dtype=np.float32)
+        latents["causal_adj"] = np.load(f"{root}/causal_adj.npy")[np.ix_(columns, columns)].astype(np.float32)
+    else:
+        own = z.copy()
+    edges = B.CAUSAL_EDGES if causal else ()
+    settings = {"bank": root, "t1key": t1key, "causal_edges": edges, "test_subjects": len(z)}
     meta = {
         "content_factor_names": list(B.CAUSAL_FACTORS.values()),
         "views": ["1", "2"],
+        "causal": causal,
         **extra,
-        **identity_record({"z_content": z, "causal_adj": adj}, settings, len(z), "match"),
+        **identity_record(latents, settings, len(z), "match"),
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         out,
-        z_content=z,
+        **latents,
         z_own=own,
-        causal_adj=adj,
         emb_view1=np.asarray(embeddings[0], dtype=np.float32),
         emb_view2=np.asarray(embeddings[1], dtype=np.float32),
         meta=json.dumps(meta, indent=2),

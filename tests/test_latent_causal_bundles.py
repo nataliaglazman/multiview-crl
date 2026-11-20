@@ -96,6 +96,20 @@ class MixingNullTests(unittest.TestCase):
         self.assertEqual(mixed.call_args.args[4], [1, 2])
         np.testing.assert_array_equal(mixed.call_args.args[0][:, 0], x[:, 3])
 
+    def test_sphere_comes_before_selection_and_mixing(self):
+        x = self.x * [4, 1, 0.01, 10] + [1, -2, 3, 0]
+        with patch.object(causal, "evaluate_reduced", wraps=causal.evaluate_reduced) as evaluate:
+            row = causal.score_row(x, self.z, self.adj, options(sphere=True), "m")
+        np.testing.assert_allclose(evaluate.call_args.args[0], causal.on_sphere(x))
+        self.assertTrue(row["sphere"])
+        self.assertEqual(row["n_channels"], 4)
+        with patch.object(causal, "mixing_null", return_value=None) as mixed:
+            row = causal.score_row(
+                x, self.z, self.adj, options(sphere=True, top_var_channels=3), "m", [0, 1, 2], mixing=2
+            )
+        np.testing.assert_allclose(mixed.call_args.args[0], causal.on_sphere(x)[:, row["top_var_channels"]])
+        self.assertNotIn("sphere", causal.score_row(x, self.z, self.adj, self.cli, "m"))
+
     def test_zero_or_one_mixable_channel_has_no_basis_null(self):
         for columns in ([], [0]):
             self.assertIsNone(causal.mixing_null(self.x, self.z, self.adj, self.cli, columns, draws=2))
@@ -146,6 +160,19 @@ class BundleCliTests(unittest.TestCase):
         self.assertEqual(report["protocol"]["readout"], "none")
         for phrase in ("mix F1", "mix MCC", "best-F1 alpha", "lesion 1.00"):
             self.assertIn(phrase, text)
+
+    def test_sphere_reaches_the_floor_and_the_report_but_not_the_ceiling(self):
+        floor = self.root / "floor.npz"
+        bundle(floor, np.random.default_rng(1).normal(size=self.x.shape), self.z, self.adj)
+        report, text = self.run_cli("--bundle-floors", f"m={floor}", "--ceiling", "--mixing-null", "2", "--sphere")
+        rows = {r["label"]: r for r in report["runs"]}
+        self.assertTrue(rows["m"]["sphere"])
+        self.assertTrue(rows["m-floor"]["sphere"])
+        self.assertNotIn("sphere", rows["truth-ceiling"])
+        self.assertEqual(rows["truth-ceiling"]["channel_mcc"], 1.0)
+        self.assertTrue(report["protocol"]["sphere"])
+        self.assertIn("none+sphere", text)
+        self.assertIn("divided by its length", text)
 
     def test_bundle_view_two_reaches_pc(self):
         report, _ = self.run_cli("--bundle-view", "2")

@@ -1247,12 +1247,50 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
         two SDs (that FLAIR row, .71 against .41 ± .12), while seed 2's twin read .75 in the same view; without it
         none does (largest 1.6 SD). Item 41 stands: the units' graph sits at the mixing baseline, and width is not
         the reason.
-    - **Reading.** At the matched width the code gave up a parent–child pair, ventricle → burden, not just the
-      weakest factor. The two units 10 has past the matched width are not spare. Summed over the factors they hold
-      about .8 of one factor's own variation, nearly all of it ventricle and burden, plus 4 voxels of volume
-      precision. Code batches change which factors a narrow code keeps; they do not replace width. This backs the
-      18 Nov width decision (section 1) and section 8's point that weaker own parts need spare width. One seed, but
-      the own-part losses (.26–.36) are four to five times the code-batch seed spread (.07).
+    - **Why these two** (checked 20 Nov on the stage's bundles). The 8-unit codes keep one blend of ventricle's and
+      burden's own parts, in about equal weights, and almost none of their difference: R² .68 and .05 with code
+      batches, .71 and .18–.20 with uniform batches. The 10-unit codes keep both (.80–.85 and .58–.60). The two own
+      parts are uncorrelated (r −.02), so the blend comes from the image: the fixed lesion sits at the ventricle's
+      edge. Its centre is 12 voxels from the middle of the volume and its edge 2–5 voxels from the ventricle wall
+      (`FIXED_CENTRE` in `bank.py`; the ventricle is a sphere of radius .12–.28 about the middle). At the largest
+      ventricles the spot can no longer hold the lesion, and it moves to the nearest spot that can. Ventricle growth
+      and lesion growth change the same patch, and a narrow code reads it as one number. The two are also the most
+      correlated pair of raw factors (r .83, through the edge ventricle → burden), so the edge is the other suspect;
+      a far site does not exist on this generator (below).
+    - **What 10 units add** (20 Nov, same bundles, T1). Reading all seven own parts at once, the 10-unit codes hold
+      every direction of that space (R² .96 down to .58–.59); both 8-unit codes miss exactly one (.01 with code
+      batches, −.01 with uniform), the ventricle–burden difference. For that pair neither lever works alone: own
+      parts ventricle / burden .49 / .41 at 8 uniform units, .49 / .46 at 10 (item 39), .43 / .30 at 8 with code
+      batches, .78–.85 / .60 at 10 with them. Code batches create the demand: neighbours already agree on what the
+      code holds, so only finer detail tells them apart (top-1 in the training sets .95–.96, against .99 with uniform
+      batches, where the strong factors already settle the task). Width gives the room.
+    - **No far site exists** (20 Nov, `lesion_site.py`, 100 training subjects). At the fixed site the lesion's edge is
+      1.7 voxels from the ventricle wall (median; 10th–90th percentile 0.6–3.0) and 0.8 from the midline fissure or
+      the cortex on its other side. The white matter between the ventricle (radius .12–.28) and the cortex (.40–.60)
+      is 4–15 voxels thick and the lesion 6.3 across: of the 9,270 voxels that hold it in at least 10% of subjects,
+      none keeps its edge 2 voxels clear of the ventricle in 90% of them. A far-site arm needs a smaller lesion or
+      ventricle, which changes what is compared.
+    - **The lesion's shift** (20 Nov, `lesion_shift.py`, the 1,000 test subjects re-rendered, rows checked against
+      the bundles). 54% of lesions sit within half a voxel of the site; the rest slide sideways (SD 2.4 voxels left–
+      right, 0.9 and 0.6 on the other axes). Brain size drives it, not the ventricle: one factor at a time, boosted R²
+      of the shift's length .36 for brain, −.04 for ventricle (small brains have too little white matter there). The
+      10-unit codes read the length at R² .59–.65 linearly (twins .22–.36) and .70–.73 boosted (seven true factors
+      .77), and linearly better than the true factors (+.12 to +.18), so they hold it along directions of their own.
+      The 8-unit codes do not (+.00 and −.01; uniform −.04 to .00): the shift did not take the direction the
+      ventricle–burden pair lost, and holding it is one of the things the spare width does.
+    - **The shift is not a latent of its own.** Placement is deterministic, so the anatomy fixes the shift: it is a
+      switch at about the median brain size (smallest fifth of brains 2% on site, mean shift 4.0 voxels; fourth
+      fifth 99% on site, 0.0). It adds no dimension (fixed-bank calibration, TwoNN: seven factors 6.4, with the
+      lesion centre 5.8), and boosting reads it as well from the seven factors as from the code (.77 against .70;
+      both .81). It still costs a direction: a switch is not a straight-line function of brain size, so a code that
+      reads it linearly needs a direction for it, as it would for an extra latent.
+    - **Reading.** At the matched width the code merged the two factors the image shows in one place, ventricle and
+      the fixed lesion, keeping their sum and losing their difference. The two units 10 has past the matched width
+      are not spare: summed over the factors they hold about .8 of one factor's own variation, nearly all of it
+      ventricle and burden, plus 4 voxels of volume precision. Code batches change which factors a narrow code keeps;
+      they do not replace width. This backs the 18 Nov width decision (section 1) and section 8's point that weaker
+      own parts need spare width. One seed, but the own-part losses (.26–.36) are four to five times the code-batch
+      seed spread (.07).
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -1404,6 +1442,37 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 58 (built 20 Nov; not run): the 8-unit code on an independent bank.** The user asked for a non-causal
+  variant of the 8-unit model.
+  - **Why.** At 8 units the code keeps one blend of ventricle's and burden's own parts and drops the other (item 46).
+    Two causes fit. The two change one patch of image (the fixed lesion sits at the ventricle's edge), or the edge
+    ventricle → burden makes them the most correlated raw factors (r .83), so a narrow code keeps their shared axis.
+    Without the SCM the factors are independent, while the lesion's site and the image stay.
+  - **Arm:** stage 56's (code batches, 8 units, residual input, jitter, prediction weight 1, tails, seed 42, 20,000
+    steps) on `bank_nofield_fixedpos`, the fixed-position bank rendered without `--causal`. Run name:
+    `ssl_uni_jitter_nopatch_restail_t104_nofield_fixedpos_abl_codebatch_predict1_c8_20k`.
+  - **Reports** (`causal/stage58/`): the precision, code and style audits, and the new `own_directions.py`. Per code
+    and view it gives R² along each direction of the seven own parts' space, the weakest direction's mix, and every
+    pair's best and worst directions, beside stage 56's causal 8-unit code and stage 50's 10-unit code. On the
+    independent bank the own parts are the factors; own variation needs the SCM and is not run there.
+    `causal_bundle.py` now exports an independent bank's codes, with no graph.
+  - **Reading rule, fixed before the results** (stage 56's code: the pair's worst direction .05 / .06, blend .24 /
+    .27, T1 / FLAIR):
+    - The edges made the blend if, on the independent bank, the pair's worst direction reaches .40 and its blend falls
+      to .10 or less in both views.
+    - The image made it if the worst direction stays below .15 and the blend at .20 or more in both views.
+    - Anything else is mixed. Either way, name the spectrum's weakest direction: if the code still misses one (last
+      value below .15), its mix says what 8 units drop when the pair is free.
+    - Caveat: without the SCM each factor's whole spread is its own part, so burden's own signal is twice as wide
+      (±41 voxels against ±20) and the other children's own parts grow too. A pair held apart there may owe it to the
+      larger signals, so "held apart" is weaker evidence for the edges than "still blended" is for the image.
+  - **Expectation, written before the results:** no firm one. A pair as correlated (brain–thickness, r .80) was not
+    blended, which points to the image; the blend's equal weights fit either.
+  - **Checked locally:** `bash -n`; the dry run lists the bank (no `--causal`), the residuals, the arm with stage 56's
+    flags, the audits, the bundles and the report. `causal_bundle.save` reproduces stage 56's bundle exactly (arrays
+    and both identity digests) on the causal path and writes no graph on the independent one. `own_directions.py`
+    reproduces item 46's numbers on stage 56's bundles.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 58` (renders a bank, then one training arm).
 - **Stage 56 (built 20 Nov; read 20 Nov, item 46): the best 10-unit recipe at 8 units.** The user asked for the
   code-batch recipe with 8 units instead of 10.
   - **Why.** Under the cosine, 8 units are the matched width for the fixed bank's 7 latents (section 8): the
@@ -2312,6 +2381,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   most of the scan's variation, ridge R2 .16 -> .67 for T1 on a small local bank, and untrained twins carry gain).
   Read R2 of scan and residual, the residual's R2 over the lesion cells, and the lesion volume read off the rebuilt
   residual (e, voxels). The residual is the column that tests content; the scan mostly tests style.
+- **Built, not run:** stage 58, one training arm: stage 56's 8-unit code-batch arm on the fixed-position bank rendered
+  without the SCM, to tell whether the causal edges or the image make 8 units blend ventricle and burden (section 9).
 - **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
   fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
   needs.
