@@ -302,6 +302,11 @@
 # every image setting stay. The precision, code and style audits, and own_directions.py (which directions of the own
 # parts each code holds, and which pairs of factors it blends), beside stage 56's causal 8-unit code and stage 50's
 # 10-unit code (causal/stage58/). Own variation needs the SCM; on the independent bank the own parts are the factors.
+# Stage 59 (opt-in) Does the direction count (item 46) set the width? Counted alike, the 8-unit code spends 2 of its 8
+# directions on curved copies of factors it already holds and the 10-unit codes 3 of 10, leaving 6 and 7 for the
+# seven own parts. Stage 56's arm at 9 units (seed 42, 20,000 steps): with 2 on curves all seven fit, with 3 one still
+# goes. The four reports, both discoveries and the tabular benchmarks, and own_directions.py (with where each code's
+# directions go), beside the 8-unit code and the 10-unit codes at seeds 42 and 2 (causal/stage59/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2376,6 +2381,44 @@ if wants 58; then
         "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
             || { echo "Stage 58's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
         echo "Stage 58 reports in $OUT: own_directions.txt and the precision, code and style audits"
+    fi
+fi
+
+if wants 59; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    CODEB9=${P}_abl_codebatch_predict1_c9_20k
+    CODEB8=${P}_abl_codebatch_predict1_c8_20k  # stage 56
+    CODEB=${P}_abl_codebatch_predict1_c10_20k  # stage 50; its seed 2 is stage 52's
+    OUT=$D/causal/stage59
+    needs_done 59 "$CODEB8" "$CODEB" "${CODEB}_s2"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage56" "$OUT" "$CODEB8" "$CODEB" "${CODEB}_s2"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    EVERY=2000 ssl "$CODEB9" "$FIXED" tail t1_04 20000 --code-batches 500 --code-neighbours 31 --residual --jitter 2 \
+        --rotate 3 --seed 42 --patch-weight 0 --content-units 9 --contrastive-loss-type infonce --predict-weight 1
+    finish "$CODEB9"
+    needs_done 59 "$CODEB9"
+    RUNS=()
+    for name in "$CODEB9" "$CODEB8" "$CODEB" "${CODEB}_s2"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" code_batches_c9="$CODEB9" code_batches_c8="$CODEB8" code_batches="$CODEB" \
+        code_batches_s2="${CODEB}_s2"
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json" c9="$D/causal/$CODEB9.npz" c8="$D/causal/$CODEB8.npz"
+        c10="$D/causal/$CODEB.npz" c10_s2="$D/causal/${CODEB}_s2.npz")
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 59's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        echo "Stage 59 reports in $OUT: own_directions.txt first"
     fi
 fi
 

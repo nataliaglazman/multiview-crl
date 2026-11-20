@@ -1284,6 +1284,23 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       lesion centre 5.8), and boosting reads it as well from the seven factors as from the code (.77 against .70;
       both .81). It still costs a direction: a switch is not a straight-line function of brain size, so a code that
       reads it linearly needs a direction for it, as it would for an extra latent.
+    - **Ruled out, and what is left** (20 Nov). Not style: no trained code holds gain, bias or noise (R² at most .05).
+      Not the encoder: the 8-unit run's backbone GAP holds both own parts (ventricle plus burden R² 1.41 / 1.24, above
+      the 1 a single direction allows), so the 8-unit head drops one. Not curvature: ridge and boosting agree on the
+      code. In raw terms the code keeps the pair's sum (R² .88) and drops its difference (.19), the minor axis: at
+      raw r .83 the difference carries 9% of the sum's variance, the cheapest direction to lose for a loss that tells
+      subjects apart. The prediction term whitens its targets, so it values that direction like any other, but a
+      linear map from 8 units predicts at most 8. Left: the correlation and the shared patch (stage 58 separates
+      them, with its caveat), and the training path: both 8-unit arms ran seed 42, so they started from the same
+      weights.
+    - **Where the directions go** (20 Nov; every direction of the code counted alike, T1). The 8-unit code-batch code
+      spends 6 of its 8 directions on the own parts (R² .94–.62) and 2 on curved functions of factors it already
+      holds (straight-line R² from the own parts .03 and .00; boosted from the seven factors .77 and .97). One bends
+      brain size into a second direction (brain alone, boosted .78), the other is a joint function involving temporal
+      atrophy. The 10-unit codes spend 7 of 10 on the own parts and 3 on curves (both seeds); the uniform 8-unit code
+      6 and 2. So the correlation and the shared patch decide which own direction goes; the curves decide that one
+      must. The likely reason the loss pays for a second direction of brain size first: the cosine InfoNCE pushes
+      subjects to spread over the sphere (Wang and Isola 2020), and bending the strongest factor spreads them most.
     - **Reading.** At the matched width the code merged the two factors the image shows in one place, ventricle and
       the fixed lesion, keeping their sum and losing their difference. The two units 10 has past the matched width
       are not spare: summed over the factors they hold about .8 of one factor's own variation, nearly all of it
@@ -1442,7 +1459,33 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
-- **Stage 58 (built 20 Nov; not run): the 8-unit code on an independent bank.** The user asked for a non-causal
+- **Stage 59 (built 20 Nov; not run): the code-batch recipe at 9 units.** The user asked for it as a new stage, with
+  stage 58 already running.
+  - **Why.** Counting every direction alike, the 8-unit code spends 6 of its 8 directions on the own parts and 2 on
+    curved copies of factors it already holds; the 10-unit codes spend 7 of 10 and 3 (item 46). If the curves take a
+    fixed 2, nine units leave 7 directions for the seven own parts.
+  - **Arm:** stage 56's arm with `--content-units 9` (code batches, residual input, jitter, prediction weight 1,
+    tails, seed 42, 20,000 steps, fixed-position causal bank). Run name:
+    `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k`.
+  - **Reports** (`causal/stage59/`): the four reports, both discoveries and both tabular benchmarks, and
+    `own_directions.py`, which now also counts where each code's directions go. Beside the 8-unit code (stage 56) and
+    the 10-unit codes at seeds 42 and 2 (stages 50, 52).
+  - **Reading rule, fixed before the results** (`own_directions.txt`, both views):
+    - The count sets the width if the 9-unit code holds all seven own parts as directions (the spectrum's last value
+      .40 or more, and the ventricle–burden pair's worst direction .40 or more) while still spending 2 directions on
+      curves (2 directions under .5).
+    - The curves grow with room if the 9-unit code spends 3 directions on them and still misses one own direction (the
+      spectrum's last value below .15). Then extra width goes to curves first, and no fixed margin over the matched
+      width is safe.
+    - Anything else: name it, with the own parts and the precision audit beside the 8- and 10-unit codes.
+  - **Expectation, written before the results:** the curves went from 2 directions at 8 units to 3 at 10, so they may
+    grow with room, and then 9 units still miss one own direction. If they stay at 2, all seven fit.
+  - **Checked locally:** `bash -n`; the dry run lists the arm (stage 56's flags with 9 units), the reports, the
+    bundles, both discoveries, both tabular benchmarks and `own_directions.py`. The report's new count reproduces item
+    46 on stage 56's bundles (8 units 6 and 2, 10 units 7 and 3, both views).
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 59` after stage 58 has finished (one training arm, then
+    the reports).
+- **Stage 58 (built 20 Nov; running): the 8-unit code on an independent bank.** The user asked for a non-causal
   variant of the 8-unit model.
   - **Why.** At 8 units the code keeps one blend of ventricle's and burden's own parts and drops the other (item 46).
     Two causes fit. The two change one patch of image (the fixed lesion sits at the ventricle's edge), or the edge
@@ -2374,15 +2417,20 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   ventricle's and burden's own parts (.43 and .30 against .78 and .60) and 4 voxels of volume precision; the other
   five factors and the ATE hold. The two units past the matched width are not spare. The new
   `latent_causal_discovery --sphere` removes a code's length before PC; the units' graph stays at the mixing baseline.
-- **Built, not run (20 Nov, user's request):** stage 57, no network training: a fresh 3D decoder learned from each
-  frozen code to its view's scan and residual (`recon_check.py`). The 10-unit code (stage 35), the 24-unit code (stage
-  33) and the fixed bank's 10-unit code-batch code (stage 50), each against its untrained twin (floor), the bank's 10
-  rendered shared latents, and those plus the view's own style redrawn as `style_audit.py` does (the ceiling: style is
-  most of the scan's variation, ridge R2 .16 -> .67 for T1 on a small local bank, and untrained twins carry gain).
-  Read R2 of scan and residual, the residual's R2 over the lesion cells, and the lesion volume read off the rebuilt
-  residual (e, voxels). The residual is the column that tests content; the scan mostly tests style.
-- **Built, not run:** stage 58, one training arm: stage 56's 8-unit code-batch arm on the fixed-position bank rendered
-  without the SCM, to tell whether the causal edges or the image make 8 units blend ventricle and burden (section 9).
+- **Running (started 20 Nov 13:40, user's request):** stage 57, no network training: a fresh 3D decoder learned from
+  each frozen code to its view's scan and residual (`recon_check.py`). The 10-unit code (stage 35), the 24-unit code
+  (stage 33) and the fixed bank's 10-unit code-batch code (stage 50), each against its untrained twin (floor), the
+  bank's 10 rendered shared latents, and those plus the view's own style redrawn as `style_audit.py` does (the
+  ceiling: style is most of the scan's variation, ridge R2 .16 -> .67 for T1 on a small local bank, and untrained
+  twins carry gain). Read R2 of scan and residual, the residual's R2 over the lesion cells, and the lesion volume read
+  off the rebuilt residual (e, voxels). The residual is the column that tests content; the scan mostly tests style.
+  Twenty decoders in all (twelve on the drawn bank, eight on the fixed), up to 150 epochs each at about 30 s an epoch
+  on a shared GPU, so it takes most of a working day.
+- **Running (started 20 Nov):** stage 58, one training arm: stage 56's 8-unit code-batch arm on the fixed-position
+  bank rendered without the SCM, to tell whether the causal edges or the image make 8 units blend ventricle and burden
+  (section 9).
+- **Built, not run:** stage 59, one training arm: the code-batch recipe at 9 units, to test the direction count (item
+  46): whether a code that spends 2 directions on curves holds all seven own parts at 9 units (section 9).
 - **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
   fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
   needs.
