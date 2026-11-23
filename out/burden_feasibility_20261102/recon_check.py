@@ -29,6 +29,7 @@ Figures beside OUT_JSON: per bank and view, test subjects at four lesion sizes (
 image and each row's rebuild, scan and residual; and each row's per-voxel R2 map of the residual.
 
     python recon_check.py OUT_JSON [LABEL=]RUN [[LABEL=]RUN ...] [--no-twin] [--train-subjects N] [--epochs E]
+    python recon_check.py --redraw FIGURE.npz ...   (redraw saved figures, training nothing)
 
 Rows for other banks already in OUT_JSON are kept; rows for the given runs are recomputed. --train-subjects caps the
 training subjects and --epochs the decoder's epochs (local smoke tests).
@@ -255,23 +256,38 @@ def figure(path, bank_name, view, true, rows, chosen, centres, maps, mask):
     import matplotlib.pyplot as plt
 
     labels = ["true"] + list(rows)
+    grey = plt.get_cmap("gray").copy()
+    grey.set_bad("black")
     fig, axes = plt.subplots(2 * len(chosen), len(labels), figsize=(1.9 * len(labels), 3.8 * len(chosen)))
     axes = np.atleast_2d(axes)
     for r, (i, z) in enumerate(zip(chosen, centres)):
+        # Scans are stored centred on the bank's reference intensity, so most of a brain sits at or below 0 and the
+        # head's outside is exactly 0. Each row's grey scale spans its true brain's 1st-99th percentile, shared by
+        # every panel so brightness differences show, and the outside of the true head is drawn black.
+        scan = true[r, 0].astype(np.float32)
+        head = scan != 0
+        window = np.percentile(scan[head], (1, 99)) if head.any() else (0.0, 1.0)
         for c, label in enumerate(labels):
             vol = true[r].astype(np.float32) if label == "true" else rows[label][r]
             for ch in range(2):
                 ax = axes[2 * r + ch, c]
-                img = (vol[ch] * mask)[:, :, z].T
-                lim = (0, float(true[r, 0].max())) if ch == 0 else (-4, 4)
-                ax.imshow(img, origin="lower", cmap="gray" if ch == 0 else "RdBu_r", vmin=lim[0], vmax=lim[1])
+                if ch == 0:
+                    img = np.where(head, vol[0], np.nan)[:, :, z].T
+                    ax.imshow(img, origin="lower", cmap=grey, vmin=window[0], vmax=window[1])
+                else:
+                    img = (vol[1] * mask)[:, :, z].T
+                    ax.imshow(img, origin="lower", cmap="RdBu_r", vmin=-4, vmax=4)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 if r == 0 and ch == 0:
                     ax.set_title(label, fontsize=8)
                 if c == 0:
                     ax.set_ylabel(f"#{i} {CHANNELS[ch]}\nz={z}", fontsize=7)
-    fig.suptitle(f"{bank_name} {view}: test subjects at lesion-volume quantiles {FIGURE_QUANTILES}", fontsize=9)
+    fig.suptitle(
+        f"{bank_name} {view}: test subjects at lesion-volume quantiles {FIGURE_QUANTILES}\n"
+        "scan rows: grey scale from each true brain's 1st to 99th percentile, shared across the row",
+        fontsize=9,
+    )
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
@@ -321,14 +337,36 @@ def show(results):
                 )
 
 
+def redraw(paths):
+    """Redraw saved figures from their .npz, training nothing. The bank and view come from the file name, the brain
+    mask from the .npz, or, for a file saved before the mask was stored, from the shown subjects' heads."""
+    for path in paths:
+        d = np.load(path)
+        stem = path.stem
+        bank_name, view = stem[stem.index("bank_") : stem.rindex("_")], stem[stem.rindex("_") + 1 :]
+        labels = [str(label) for label in d["labels"]]
+        mask = d["mask"] if "mask" in d.files else (d["true"][:, 0] != 0).any(0)
+        rows, maps = dict(zip(labels, d["rebuilt"])), dict(zip(labels, d["r2map"]))
+        figure(path.with_suffix(".png"), bank_name, view, d["true"], rows, d["chosen"], d["slices"], maps, mask)
+        print(f"redrew {path.with_suffix('.png')}")
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("out", type=Path)
-    p.add_argument("runs", nargs="+")
+    p.add_argument("out", type=Path, nargs="?")
+    p.add_argument("runs", nargs="*")
     p.add_argument("--no-twin", action="store_true", help="Skip the untrained twins' rows")
     p.add_argument("--train-subjects", type=int, default=None)
     p.add_argument("--epochs", type=int, default=EPOCHS)
+    p.add_argument(
+        "--redraw", nargs="+", type=Path, metavar="NPZ", help="Redraw saved figures from their .npz, then exit"
+    )
     a = p.parse_args()
+    if a.redraw:
+        redraw(a.redraw)
+        return
+    if a.out is None or not a.runs:
+        p.error("give OUT_JSON and at least one RUN, or --redraw NPZ...")
     device = warm.pick_device()
     results = json.loads(a.out.read_text()) if a.out.exists() else {}
     log = lambda s: print(s, flush=True)  # noqa: E731
@@ -407,6 +445,7 @@ def main():
                 labels=np.array(list(shown)),
                 rebuilt=np.stack(list(shown.values())),
                 r2map=np.stack(list(maps.values())),
+                mask=mask,
             )
     show(results)
 
