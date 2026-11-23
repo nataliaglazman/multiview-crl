@@ -319,12 +319,12 @@
 # subjects) and a decoder rebuilds the image. Scored on 200 test subjects against the generator's own counterfactual
 # render of each, beside the decoder fed the true counterfactual's code and an oracle decoder fed the true counterfactual
 # latents; PC on the cause beside the decoded factors names its direct effects (causal/stage61/).
-# Stage 62 (opt-in, no training) Can a run be chosen without labels? criterion_check.py on every finished warm.py run
+# Stage 66 (opt-in, no training) Can a run be chosen without labels? criterion_check.py on every finished warm.py run
 # (supervised ones skipped): label-free signals (held-out cross-view canonical correlations and their Gaussian mutual
 # information, its gain over the untrained twin, retrieval, memorisation, neighbour agreement, RankMe, effective rank,
 # alpha-ReQ, TwoNN, the backbone GAP's, the final loss) on training and validation subjects, against each run's own
 # parts on test subjects. Within each bank (and bank and width), the Spearman correlation and the share of a random
-# pick's regret each signal removes; the pass rule is in the script's docstring (causal/stage62/). About a minute a run.
+# pick's regret each signal removes; the pass rule is in the script's docstring (causal/stage66/). About a minute a run.
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2494,8 +2494,8 @@ if wants 61; then
     fi
 fi
 
-if wants 62; then
-    OUT=$D/causal/stage62
+if wants 66; then
+    OUT=$D/causal/stage66
     RUNS=()
     for log in "$D"/logs/*.log; do
         [ -e "$log" ] || continue
@@ -2510,8 +2510,8 @@ if wants 62; then
     else
         mkdir -p "$OUT" || exit 1
         echo "$(date +%H:%M) criterion check of ${#RUNS[@]} finished runs into $OUT"
-        "${CMD[@]}" > "$OUT/criterion.txt" 2>&1 || { echo "Stage 62 failed, see $OUT/criterion.txt"; exit 1; }
-        echo "Stage 62 reports in $OUT: criterion.txt"
+        "${CMD[@]}" > "$OUT/criterion.txt" 2>&1 || { echo "Stage 66 failed, see $OUT/criterion.txt"; exit 1; }
+        echo "Stage 66 reports in $OUT: criterion.txt"
     fi
 fi
 
