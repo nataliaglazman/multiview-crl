@@ -84,6 +84,19 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 batch normalization, with one optimizer and teacher update per step. Default same: reuse the
                 contrastive batch. Needs prediction, the batch gauge and no patch loss, half views, remainder units,
                 group dropout or shared jitter.
+  --harmonic-weight W  adds W times a non-linear redundancy penalty on the content units, aimed at harmonics: bent
+                copies of factors the code already holds, which narrow codes keep in place of weak factors (HANDOFF
+                items 26-27 and 46). Predictability minimisation (Schmidhuber 1992) restricted to what a linear map
+                misses. Each view's code is whitened by its running mean and covariance, so no direction is linearly
+                predictable from the others, and read in eight fixed orthonormal bases (the units and seven random
+                rotations), so a bent copy cannot escape by rotating away from the units. In each basis a critic
+                predicts every coordinate from the others through a linear map and through that map plus a one-
+                hidden-layer MLP (--harmonic-hidden H, default 64), trained alongside on the detached code by its own
+                optimizer (--harmonic-lr, default 1e-3). The penalty is how much the MLP beats the linear map, per
+                coordinate, basis and view, floored at zero. It is computed on a separate uniform batch, as
+                --predict-batches uniform draws one (the same batch when both are on): a neighbourhood batch hardly
+                varies in the factors a harmonic bends. Needs TailCode pooling, the batch gauge, InfoNCE and no patch
+                loss, queue, supervision, half views, remainder units, group dropout or shared jitter.
   --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
@@ -103,7 +116,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
         [--remainder-units K [--remainder-neighbours M] [--remainder-every N] [--remainder-weight W]
          [--remainder-space main|gap]] [--critic-weights main|remainder|both [--critic-lr LR]] [--supervise volume]
         [--predict-weight W [--predict-momentum M] [--predict-ridge R] [--predict-hidden H]
-         [--predict-batches same|uniform]]
+         [--predict-batches same|uniform]] [--harmonic-weight W [--harmonic-hidden H] [--harmonic-lr LR]]
 """
 
 import argparse
@@ -377,6 +390,95 @@ def cross_view_decorrelation(z1, z2):
     c = z1.T @ z2 / len(z1)
     diagonal = torch.diagonal(c)
     return (1 - diagonal).square().sum() + OFF_DIAGONAL * (c.square().sum() - diagonal.square().sum())
+
+
+class HarmonicCritic(nn.Module):
+    """--harmonic-weight's critic: each view's code whitened by running statistics and read in fixed orthonormal
+    bases (the units themselves and BASES - 1 random rotations, so a bent copy cannot hide by rotating), then every
+    coordinate predicted from the basis's other coordinates through a linear map and through that map plus a
+    one-hidden-layer MLP whose output layer starts at zero, so the two begin equal."""
+
+    def __init__(self, units, hidden, bases=8, momentum=0.01, ridge=1e-3, seed=0):
+        super().__init__()
+        self.momentum, self.ridge = momentum, ridge
+        generator = torch.Generator().manual_seed(seed)
+        rotations = [torch.eye(units)]
+        for _ in range(bases - 1):
+            q, r = torch.linalg.qr(torch.randn(units, units, generator=generator))
+            rotations.append(q * torch.sign(torch.diagonal(r)))
+        self.register_buffer("rotations", torch.stack(rotations))
+        self.register_buffer("others", 1.0 - torch.eye(units))
+        self.register_buffer("mean", torch.zeros(2, units))
+        self.register_buffer("cov", torch.eye(units).repeat(2, 1, 1))
+        self.register_buffer("started", torch.zeros((), dtype=torch.bool))
+        self.linear = nn.Parameter(torch.zeros(bases, units, units))
+        self.linear_bias = nn.Parameter(torch.zeros(bases, units))
+        self.inner = nn.Parameter(torch.randn(bases, units, units, hidden, generator=generator) / units**0.5)
+        self.inner_bias = nn.Parameter(torch.zeros(bases, units, hidden))
+        self.outer = nn.Parameter(torch.zeros(bases, units, hidden))
+        self.outer_bias = nn.Parameter(torch.zeros(bases, units))
+
+    @torch.no_grad()
+    def track(self, pair):
+        """Each view's running mean and covariance, from a detached (2, B, units) code."""
+        mean = pair.mean(1)
+        centred = pair - mean[:, None]
+        cov = centred.transpose(1, 2) @ centred / pair.shape[1]
+        if not bool(self.started):
+            self.mean.copy_(mean)
+            self.cov.copy_(cov)
+            self.started.fill_(True)
+            return
+        self.mean += self.momentum * (mean - self.mean)
+        self.cov += self.momentum * (cov - self.cov)
+
+    def whiten(self, pair):
+        """(2, B, units) codes, ZCA-whitened by each view's running statistics (so units keep their order). The
+        gradient reaches the code and not the statistics."""
+        with torch.no_grad():
+            cov = self.cov.double().cpu()
+            units = cov.shape[-1]
+            cov = cov + self.ridge * cov.diagonal(dim1=1, dim2=2).mean(1)[:, None, None] * torch.eye(units).double()
+            values, vectors = torch.linalg.eigh(cov)
+            root = vectors @ torch.diag_embed(values.clamp_min(1e-12).rsqrt()) @ vectors.transpose(1, 2)
+            root = root.to(pair.device, pair.dtype)
+        return (pair - self.mean[:, None]) @ root
+
+    def forward(self, whitened, frozen=False):
+        """A whitened (N, units) code's coordinates in each basis, and each coordinate's prediction from the basis's
+        other coordinates: (target, linear, full), each (N, bases, units). ``frozen`` reads detached weights, so a
+        penalty's gradient reaches the code and never the critic. Unfrozen, the full prediction builds on the detached
+        linear one, so the linear map stays the best linear predictor."""
+        weights = (self.linear, self.linear_bias, self.inner, self.inner_bias, self.outer, self.outer_bias)
+        linear_w, linear_b, inner_w, inner_b, outer_w, outer_b = (w.detach() if frozen else w for w in weights)
+        target = torch.einsum("nj,mjk->nmk", whitened, self.rotations)
+        rest = target[:, :, None, :] * self.others  # [n, m, k]: basis m's coordinates with coordinate k removed
+        linear = torch.einsum("nmkj,mkj->nmk", rest, linear_w) + linear_b
+        hidden = F.gelu(torch.einsum("nmkj,mkjh->nmkh", rest, inner_w) + inner_b)
+        bend = torch.einsum("nmkh,mkh->nmk", hidden, outer_w) + outer_b
+        return target, linear, (linear if frozen else linear.detach()) + bend
+
+
+def harmonic_term(pair, critic, optimizer):
+    """--harmonic-weight's penalty on a (2, B, units) uniform-batch code, after one critic step on its detached copy.
+    Per view, basis and coordinate, the critic's linear squared error minus its full one, floored at zero and
+    averaged: a coordinate that the others determine only non-linearly is charged, and nothing a linear map explains
+    is. Also returns the critic's linear and full R2 over all coordinates, for the log."""
+    critic.track(pair.detach())
+    whitened = critic.whiten(pair)
+    target, linear, full = critic(whitened.detach().reshape(-1, whitened.shape[-1]))
+    optimizer.zero_grad(set_to_none=True)
+    (F.mse_loss(linear, target) + F.mse_loss(full, target)).backward()
+    optimizer.step()
+    excess, fit = [], []
+    for view in whitened:
+        target, linear, full = critic(view, frozen=True)
+        linear_error, full_error = (target - linear).square().mean(0), (target - full).square().mean(0)
+        excess.append(F.relu(linear_error - full_error))
+        spread = target.detach().var(0, unbiased=False).mean()
+        fit.append(torch.stack([1 - linear_error.detach().mean() / spread, 1 - full_error.detach().mean() / spread]))
+    fit = torch.stack(fit).mean(0)
+    return torch.stack(excess).mean(), {"harmonic_linear_r2": fit[0], "harmonic_full_r2": fit[1]}
 
 
 class TargetWhitening:
@@ -795,6 +897,14 @@ def main():
         help="Prediction subjects: reuse the contrastive batch or draw a separate uniform batch through the same code",
     )
     p.add_argument(
+        "--harmonic-weight",
+        type=float,
+        default=0.0,
+        help="Weight of the non-linear redundancy penalty on the content units, on a uniform batch (0: off)",
+    )
+    p.add_argument("--harmonic-hidden", type=int, default=64, help="Hidden width of the penalty critic's MLP")
+    p.add_argument("--harmonic-lr", type=float, default=1e-3, help="Learning rate of the penalty critic")
+    p.add_argument(
         "--entropy-units",
         type=int,
         default=None,
@@ -949,6 +1059,24 @@ def main():
             "--predict-batches uniform needs a positive --predict-weight, --gauge batch and --patch-weight 0,"
             " without --half-views, --remainder-units, --group-dropout or --shared-jitter"
         )
+    if a.harmonic_weight < 0 or a.harmonic_hidden < 1 or not a.harmonic_lr > 0:
+        raise ValueError("--harmonic-weight must be nonnegative, and --harmonic-hidden and --harmonic-lr positive")
+    if a.harmonic_weight and (
+        a.pool == "gap"
+        or a.gauge != "batch"
+        or a.contrastive_loss_type != "infonce"
+        or a.patch_weight != 0
+        or a.queue
+        or a.supervise
+        or a.half_views is not None
+        or a.remainder_units is not None
+        or a.group_dropout
+        or a.shared_jitter
+    ):
+        raise ValueError(
+            "--harmonic-weight needs TailCode pooling, --gauge batch, InfoNCE and --patch-weight 0, without --queue,"
+            " --supervise, --half-views, --remainder-units, --group-dropout or --shared-jitter"
+        )
     if a.entropy_units is not None and (
         a.pool == "gap"
         or a.patch_weight != 0
@@ -986,10 +1114,12 @@ def main():
         print("half views along", a.half_views, "units shared with FLAIR", a.half_units, flush=True)
     torch.manual_seed(args.model_seed)
     model = T.build_encoder(args)
-    if a.predict_batches == "uniform" and any(
+    if (a.predict_batches == "uniform" or a.harmonic_weight) and any(
         isinstance(module, nn.modules.batchnorm._BatchNorm) and module.track_running_stats for module in model.modules()
     ):
-        raise ValueError("--predict-batches uniform does not support backbone BatchNorm running statistics")
+        raise ValueError(
+            "--predict-batches uniform and --harmonic-weight do not support backbone BatchNorm running statistics"
+        )
     if a.residual:
         widen_input(model)
     if a.init != "cold":
@@ -1094,6 +1224,21 @@ def main():
             whitening.spread(),
             flush=True,
         )
+    harmonic, harmonic_optimizer = None, None
+    if a.harmonic_weight:
+        with torch.random.fork_rng(devices=[]):  # the critic's init leaves every later draw as in a run without it
+            harmonic = HarmonicCritic(units, a.harmonic_hidden).to(a.device)
+        harmonic_optimizer = torch.optim.Adam(harmonic.parameters(), lr=a.harmonic_lr)
+        print(
+            "harmonic penalty weight",
+            a.harmonic_weight,
+            "critic hidden",
+            a.harmonic_hidden,
+            "learning rate",
+            a.harmonic_lr,
+            "on a separate uniform batch",
+            flush=True,
+        )
     halves = None if a.half_views is None else half_masks(a.bank, a.half_views, train.t1.shape[-1], a.device)
     test = Bank(a.bank, "test", a.t1key, a.test_subjects, a.residual)
     scored = {
@@ -1116,7 +1261,7 @@ def main():
     remainder = {"sampler": None, "spread": None}
     aug_rest = np.random.default_rng(None if args.seed is None else args.seed + 2)
     predict_subjects, predict_aug = None, None
-    if a.predict_batches == "uniform":
+    if a.predict_batches == "uniform" or harmonic is not None:
         predict_subjects = np.random.default_rng(None if args.seed is None else args.seed + 3)
         predict_aug = np.random.default_rng(None if args.seed is None else args.seed + 4)
 
@@ -1309,28 +1454,33 @@ def main():
         if a.decorrelate:
             terms["decor"] = cross_view_decorrelation(*pair)
             loss = loss + a.decorrelate * terms["decor"]
-        if a.predict_batches == "uniform":
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+        if a.predict_batches == "same" and decoders is not None:
+            gap = prediction_target(target_model, clean, a.predict_target, pool.keep)
+            whitening.update(gap)
+            terms["predict"] = cross_view_prediction(pair, whitening(gap), decoders)
+            loss = loss + a.predict_weight * terms["predict"]
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        if a.predict_batches == "uniform" or harmonic is not None:
             terms = {name: value.detach() for name, value in terms.items()}
             del h, code, pair, loss, x, clean, whole_t1
-            _, predict_clean, predict_images = draw_prediction_batch(
+            _, uniform_clean, uniform_images = draw_prediction_batch(
                 train, args.batch_size, a.device, predict_subjects, predict_aug, a.jitter, a.rotate
             )
-            predict_pair = prediction_code(model, pool, predict_images, units)
-            gap = prediction_target(target_model, predict_clean, a.predict_target, pool.keep)
-            whitening.update(gap)
-            terms["predict"] = cross_view_prediction(predict_pair, whitening(gap), decoders)
-            (a.predict_weight * terms["predict"]).backward()
-            del predict_pair, predict_clean, predict_images, gap
-        else:
-            if decoders is not None:
-                gap = prediction_target(target_model, clean, a.predict_target, pool.keep)
+            uniform_pair = prediction_code(model, pool, uniform_images, units)
+            extra = 0.0
+            if a.predict_batches == "uniform":
+                gap = prediction_target(target_model, uniform_clean, a.predict_target, pool.keep)
                 whitening.update(gap)
-                terms["predict"] = cross_view_prediction(pair, whitening(gap), decoders)
-                loss = loss + a.predict_weight * terms["predict"]
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+                terms["predict"] = cross_view_prediction(uniform_pair, whitening(gap), decoders)
+                extra = extra + a.predict_weight * terms["predict"]
+                del gap
+            if harmonic is not None:
+                terms["harmonic"], fit = harmonic_term(uniform_pair, harmonic, harmonic_optimizer)
+                terms.update(fit)
+                extra = extra + a.harmonic_weight * terms["harmonic"]
+            extra.backward()
+            del uniform_pair, uniform_clean, uniform_images, extra
         torch.nn.utils.clip_grad_norm_(parameters, args.grad_clip)
         optimizer.step()
         if target_model is not None:
@@ -1366,6 +1516,8 @@ def main():
                     "hidden": a.predict_hidden,
                     "batches": a.predict_batches,
                 }
+            if harmonic is not None:
+                state["harmonic"] = harmonic.state_dict()
             torch.save(state, a.out / "model.pt")
     print("DONE", flush=True)
 
