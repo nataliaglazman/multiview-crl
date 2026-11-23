@@ -1,4 +1,4 @@
-"""Stage 62's label-free criterion check (out/burden_feasibility_20261102/criterion_check.py): the signals on data with
+"""Stage 66's label-free criterion check (out/burden_feasibility_20261102/criterion_check.py): the signals on data with
 known shared structure, and the ranking analysis on runs whose truth a signal does or does not follow."""
 
 import sys
