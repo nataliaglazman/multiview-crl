@@ -1729,6 +1729,10 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     with `--init-run`, the reports over 20 codes and `holds.py` with the four comparisons. The stage was added below
     stage 64's block while stage 64 ran: inserting text above a running block shifts bash's read offset (it happened
     for a minute on 23 Nov and was moved before stage 64's block ended).
+  - **Compression logs, recorded 23 Nov 21:20, before any stage 65 result** (`compressed/*_redundancy8.log`, held-out
+    R² of each removed direction, first / second): seed 42 .999 / .997, seed 2 .999 / .990, seed 3 .999 / .848,
+    seed 4 .999 / .650, seed 5 .999 / .986. At seeds 3 and 4 the second removed direction is not a clean curve; the
+    cut may take part of an own part. Read those two seeds' red arms with that in mind; the rules stay as written.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 65` under `monai_env`, chained to start when stage 64's
     process exits. About 7–8 hours of training (three 20,000-step parents and fifteen 10,000-step arms, five at a
     time), then about 3 hours of reports.
