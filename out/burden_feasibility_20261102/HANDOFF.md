@@ -1309,6 +1309,217 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       own parts need spare width. One seed, but the own-part losses (.26–.36) are four to five times the code-batch
       seed spread (.07).
 
+47. **Without the edges, 8 units hold ventricle and burden apart and drop lr instead (stage 58, read 21 Nov,
+    `causal/stage58/`).** Stage 56's 8-unit code-batch arm on `bank_nofield_fixedpos` (same image, lesion site and
+    generator, no SCM), seed 42, against stage 56's causal 8-unit code and stage 50's 10-unit code. On the independent
+    bank the own parts are the factors themselves. T1 / FLAIR.
+    - **Ventricle–burden plane:** worst direction .75 / .75 (causal 8 units .05 / .06), blend .00 / .00 (.24 / .27).
+      Ventricle .86 / .86, burden .75 / .75.
+    - **The spectrum still misses one direction:** .94 .88 .86 .78 .75 .55 .22 (T1; FLAIR last .18). The weakest
+      direction is lr alone (+.96 / +.95), and lr's own R² is .26 / .24 (.84 / .84 on the causal bank). Temporal .65 /
+      .65, the next weakest (.85 there). Brain .93, thickness .88–.89, sulcal .70–.73.
+    - **Where the directions go:** 8, with 6 on the factors and 2 on curves, as on the causal bank. One curve is
+      partly lr (factor R² .23 / .20; boosted from the seven factors .90, from lr alone .14), the other bends brain size
+      (boosted from the seven .94, brain alone .34–.36).
+    - **Precision:** volume error 20.3 / 19.8 voxels on an SD of 41.3 (own R² .80 / .81). Not comparable in voxels with
+      the causal bank (SD 19.9 for burden's own part). No style in the code (R² at most .04).
+    - **Against the rule fixed before the results:** the edges made the blend. Worst direction .40 or more and blend
+      .10 or less in both views (.75 and .00). The rule's caveat applies: without the SCM burden's own signal is about
+      twice as wide (±41 against ±20 voxels), so the larger signal could hold the pair apart. "Held apart" is weaker
+      evidence for the edges than "still blended" would have been for the image.
+    - **Expectation, written before:** none firm. The result fits the brain–thickness case (r .80, not blended).
+    - **Reading.** 8 units miss one direction on either bank. Which one goes follows from what is cheapest for the
+      loss. On the causal bank it is the minor axis of the most correlated pair (ventricle–burden, r .83: their
+      difference carries 9% of the sum's variance, item 46). On the independent bank it is lr, the faintest factor.
+      The shared patch at the ventricle's edge was not enough to blend the pair without the correlation. The curves
+      take 2 directions on both banks, so the image, not the edges, decides how many directions curves cost.
+
+48. **At 9 units the curves take the extra unit (stage 59, read 21 Nov, `causal/stage59/`).** Stage 56's code-batch
+    arm with `--content-units 9`, seed 42, fixed-position causal bank, against the 8-unit code (stage 56) and the
+    10-unit codes at seeds 42 and 2 (stages 50, 52). Trained 20,000 steps cleanly (final loss .255). T1 / FLAIR.
+    - **Where the directions go:** 9, with 6 on the own parts and 3 on curves (8 units: 6 and 2; 10 units: 7 and 3).
+      Spectrum .95 .90 .82 .74 .64 .60 .04 (FLAIR last .02). The curves: one partly lr (own R² .05 / .04; boosted from
+      the seven factors .80 / .82, lr alone .52 / .55), one bends brain size (brain alone .65 / .57), one a joint
+      function (boosted .91 / .92, no single factor above .17).
+    - **The missing direction now blends three factors:** ventricle +.61, burden −.56, lr +.47 (FLAIR +.70, −.48,
+      +.47). The ventricle–burden worst direction rises .05 → .25 / .06 → .23 (blend .19 / .21), and lr falls.
+    - **Own parts** (ridge), 9 units against 8: brain .94 / .94 (.94 / .94); ventricle .55 / .44 (.43 / .41); burden
+      .45 / .49 (.30 / .32); thickness .69 / .70 (.71 / .73); temporal .76 / .80 (.85 / .85); lr .68 / .69 (.84 /
+      .84); sulcal .67 / .74 (.68 / .73). The 10-unit codes: ventricle .78–.85, burden .58–.62, lr .91–.93.
+    - **Precision:** volume error 11.9 / 11.5 voxels, near the 10-unit codes (11.3 / 11.5 and 10.4 / 10.0) and well
+      under the 8-unit code (15.5 / 14.7). No style (R² at most .00).
+    - **Causal tables:** ATE bias .16 / .15 (rbf .14 / .14), worse than 8 units (.12 / .12) and 10 (.09 / .07,
+      .09 / .07). Image–tabular edges F1 .90 / .92 (8 units .86 / .83; 10 units .94 / .92, .95 / .93). Decoded image
+      graph (20 resamples of 800 rows) .70 / .70 against .76 / .77 at 8 units (difference not resolved) and .84 / .83,
+      .85 / .84 at 10 (resolved; truth .85).
+    - **Label-free discovery** (PC on the channels, view 1): F1 .59 (null .35, learned +.24, SHD 7, MCC .61), the same
+      as 8 units (.59, +.24); both 10-unit codes sit at or below their nulls (learned −.05 and −.01).
+    - **Against the rule fixed before the results:** the curves grow with room. 3 directions on curves and the
+      spectrum's last value below .15 (.04 / .02) in both views. The count does not set the width (that needed .40 on
+      the last value and on the pair's worst direction; .04 and .25).
+    - **Expectation, written before:** right. The curves went from 2 to 3 and 9 units still miss one own direction.
+    - **Reading.** Extra width goes to curves first, so no fixed margin over the matched width is safe: 8 → 9 units
+      bought a curve, and only 9 → 10 bought the seventh own direction. The 9-unit code spreads its loss over three
+      factors where the 8-unit code lost one pair, which helps volume precision but not the causal outputs (ATE bias
+      and the decoded graph are no better than at 8 units). This motivates stage 60's penalty on curves at 8 units, not
+      more width. One seed.
+
+49. **Rebuilding the code neighbourhoods every 100 steps nearly closes the 8-unit gap; prediction weight 3 does not
+    (stage 62, read 21 Nov, `causal/stage62/`).** Stage 56's 8-unit code-batch arm with one change each, seed 42,
+    fixed-position causal bank, against stage 56's 8-unit code and stage 50's 10-unit code. T1 / FLAIR.
+    - **Rebuild every 100 steps** (`..._abl_codebatch100_predict1_c8_20k`):
+      - Spectrum .95 .91 .87 .76 .74 .58 .45 (FLAIR last .36; stage 56 .01 / .01, 10 units .59 / .56). Ventricle–
+        burden worst direction .50 / .42 (.05 / .06; 10 units .59 / .57), blend .04 / .09 (.24 / .27). The weakest
+        direction mixes ventricle +.65, burden −.60, sulcal +.42.
+      - Directions: 6 above .5, one at .46 / .37 (the seventh own direction, partly held), one curve bending brain size
+        (brain alone .83). Stage 56 had two curves at .03 and .00.
+      - Own parts (ridge) against stage 56 and the 10-unit code: ventricle .62 / .57 (.43 / .41; .85 / .81), burden
+        .54 / .50 (.30 / .32; .60 / .58), brain .94, thickness .76 / .76, temporal .85 / .86, lr .90 / .90, sulcal
+        .67 / .66 (.68 / .73).
+      - Volume error 12.6 / 13.0 voxels (15.5 / 14.7; 10 units 11.3 / 11.5). No style (R² at most .00). Cross-view
+        top-1 .981 / .890 / .770 for uniform 32 / neighbour 32 / all 1,000 (stage 56 .981 / .896 / .794).
+      - Causal tables: ATE bias .10 / .10, rbf .08 / .08 (.12 / .12; 10 units .09 / .07). Image–tabular edges F1 .92
+        / .89 (.86 / .83; .94 / .92). Decoded image graph .86 / .85 (.76 / .77; .84 / .83; truth .85).
+      - Label-free discovery (view 1): F1 .71 (null .33, learned +.39, SHD 4, MCC .67), the best of any code so far
+        (stage 56 .59, +.24; 10 units .29, −.05).
+      - Final neighbourhood spread anatomy .48, burden .55 (stage 56 .51, .60): rebuilt neighbourhoods stay more
+        alike in the current code.
+    - **Prediction weight 3** (`..._abl_codebatch_predict3_c8_20k`):
+      - Spectrum's last value −.02 / −.01, two curves at .00 (one bends brain size, .59 / .39). The missing direction
+        moves: ventricle +.68, sulcal +.59, burden −.40. Ventricle–sulcal worst .10 / .11.
+      - Own parts: burden .51 / .52 (+.21), lr .91 / .91, but sulcal .41 / .42 (−.27 / −.31) and ventricle .36 /
+        .34. Volume error 11.6 / 10.7.
+      - Cross-view top-1 falls to .930 / .724 / .478. ATE bias .14 / .12 (rbf .11 / .10), decoded graph .74 / .75,
+        label-free F1 .46 (learned +.15).
+    - **Against the rule fixed before the results:**
+      - Prediction weight 3 does nothing: 2 curves and the last value below .15 in both views. It trades which own
+        direction goes (sulcal for burden) and costs discrimination.
+      - Rebuild every 100 is "anything else", nearest to closing the gap. T1 passes both thresholds (last value .45,
+        pair's worst .50); FLAIR passes the pair (.42) and misses the last value (.36 against .40). By the .5 cut-off
+        the code still counts 2 directions under .5, but one of them is the seventh own direction at .46 / .37, so
+        only one is a curve. Every other own part stays within .10 of stage 56's (sulcal FLAIR −.07).
+    - **Expectation, written before:** wrong for the rebuild. It predicted little change, because the spread settles by
+      the first rebuild. The spread does settle, but the fresher neighbourhoods still freed a direction.
+    - **Reading.** How closely the negatives track the current code matters, not only that they are neighbours. With
+      neighbourhoods 500 steps stale, a batch's subjects are alike in a code the network has since changed. Rebuilt
+      every 100 steps, they are alike in what the code already holds, so the loss pays only for what it lacks. At 8
+      units this cut one curve and gave the seventh own direction .45 / .36. The causal outputs reach the 10-unit
+      code's, and label-free discovery beats it, while ventricle (.62 against .85) and volume error (1.3–1.5 voxels)
+      still trail. One seed, and the gains on ventricle and burden (.16–.24) are two to three times the 10-unit
+      seed spread (.07). Next: replicate at seed 2, and try rebuilding more often (every 20–50 steps), at 8 and at 9
+      units.
+
+50. **Stage 62's rebuild gain does not replicate; at 8 units the seed decides whether the seventh direction is held,
+    and the 9-unit code rebuilt every 100 steps matches the 10-unit code (stage 63, read 22 Nov, `causal/stage63/`).**
+    Stage 56's 8-unit code-batch recipe, four arms, fixed-position causal bank, against stage 62's rebuild-100 code,
+    stages 56 and 59's codes and the 10-unit codes (stage 50 seed 42, stage 52 seed 2). T1 / FLAIR.
+    - **Seed-2 control, 8 units rebuilt every 500** (`..._abl_codebatch_predict1_c8_20k_s2`):
+      - Spectrum .95 .91 .89 .84 .74 .66 .56 (FLAIR last .56): all seven own directions held, no curve among them
+        (the eighth direction bends brain size, own R² .00). Weakest direction is burden alone (+.99). Ventricle–burden
+        worst .56 / .56, blend .00 / .01.
+      - Own parts: brain .94, ventricle .82 / .79, burden .56 / .57, thickness .80 / .80, temporal .85 / .86, lr .90
+        / .91, sulcal .67 / .71. Every one within .07 of the 10-unit code.
+      - Volume error 12.6 / 11.9 voxels (10 units 11.3 / 11.5). ATE bias .079 / .072, rbf .070 / .061. Decoded
+        graph .835 / .838. Image–tabular F1 .95 / .96. Cross-view top-1 .991 / .919 / .834 (10 units .972 / .875 /
+        .740). Label-free F1 .40 (learned +.06).
+    - **Seed 2 rebuilt every 100** (`..._abl_codebatch100_predict1_c8_20k_s2`):
+      - Spectrum's last value .12 / .11: the seventh direction is lost, as in stage 56. It mixes burden +.82,
+        ventricle −.40, lr −.35. Ventricle–burden worst .21 / .22. One curve at .13 (lr alone .28), one bends brain
+        size.
+      - Own parts: ventricle .69 / .64, burden .29 / .33, lr .66 / .72, thickness .69 / .72, sulcal .64 / .75.
+      - Volume error 17.9 / 15.7. ATE bias .148 / .126 (rbf .128 / .114). Decoded graph .841 / .811. Top-1 .967 /
+        .825 / .653. Effective rank 2.3. Label-free F1 .35 (learned −.01).
+    - **8 units rebuilt every 25, seed 42** (`..._abl_codebatch25_predict1_c8_20k`):
+      - Spectrum's last value −.02 / −.02 (stage 62's every 100: .45 / .36). Two curves at .00; the missing
+        direction mixes burden +.78, lr −.54. Burden–lr worst .06 / .06.
+      - Own parts: ventricle .81 / .77, burden .24 / .27, lr .52 / .49. Volume error 22.1 / 19.6, the worst of the
+        fixed-bank code-batch codes. ATE bias .164 / .160. Decoded graph .785 / .799. Top-1 .968 / .824 / .671
+        (every 100: .770).
+    - **9 units rebuilt every 100, seed 42** (`..._abl_codebatch100_predict1_c9_20k`):
+      - Spectrum .95 .89 .86 .83 .74 .67 .62 (FLAIR last .62): all seven held. Weakest direction burden (+.92 /
+        +.97). Ventricle–burden worst .63 / .63, blend .00. Two directions at own R² .00: one bends brain size, one
+        a curve the boosted factors read at .76 / .73 (stage 59's 9-unit code: last .04 / .02, 3 curves).
+      - Own parts: brain .94, ventricle .80 / .78, burden .63 / .63, thickness .78 / .80, temporal .86 / .87, lr .84
+        / .87, sulcal .73 / .77.
+      - Volume error 10.7 / 10.3 voxels, better than the 10-unit code's 11.3 / 11.5. ATE bias .086 / .078, rbf
+        .075 / .073. Decoded graph .828 / .821. Image–tabular F1 .96 / .99. Top-1 .990 / .924 / .840. Label-free F1
+        .33 (learned +.00).
+    - No arm holds style (code R² of gain, bias and noise at most .02).
+    - **Against the rules fixed before the results:**
+      - **Replication: void.** The seed-2 control's last value is .56 / .56, above the .40 at which the rule voids
+        the comparison: stage 62's gain was seed 42's luck. The seed-2 rebuild-100 arm also falls well below its
+        own control (last value −.44, ventricle −.13 / −.15, burden −.27 / −.24), so the lever does not even help
+        at seed 2.
+      - **Every 25 against every 100: hurts.** The last value falls .47 / .38; top-1 over all 1,000 falls .770 to
+        .671.
+      - **9 units rebuilt every 100: holds all seven** (last value .62 / .62, pair's worst .63 / .63).
+      - **The goal, matching the 10-unit code:** the 9-unit rebuild-100 code matches on every criterion: own parts
+        within .07 (lr −.07 / −.06 the largest gap), volume error 0.6 / 1.2 voxels better, ATE bias .000 / +.009,
+        decoded graph −.007 / −.013. The seed-2 8-unit control misses by one: own parts within .07, ATE bias and
+        decoded graph match, but T1 volume error is 1.3 voxels worse (limit 1; FLAIR 0.4). The other two arms miss
+        by much (burden .24–.33). The closest arm is the 9-unit rebuild-100 code.
+    - **Expectation, written before:** wrong on replication (the control held the direction, the lever lost it) and
+      on every 25 (hurts, not saturates). Right that the 9-unit arm holds all seven and comes closest; wrong that
+      ventricle trails most (lr does, at .84 / .87).
+    - **Reading.** At 8 units, whether the code holds the seventh own direction varies by seed: seed 42 loses it at
+      every 500 and at every 25, keeps it partly at every 100; seed 2 keeps it at every 500 and loses it at every
+      100. A rebuild interval changes the training trajectory the way a new seed does, so one seed per cell cannot
+      separate the interval from luck, and the four 8-unit codes give no sign that one interval is better. The
+      seed-2 control shows that 8 units can hold all seven own parts with this recipe at full precision except
+      1.3 voxels of T1 volume, so the matched width suffices in practice, as Yao's theory says, but the optimiser
+      finds that solution only sometimes. The 9-unit result is one seed too, and stage 59's 9-unit code at every 500
+      missed the direction, so whether 9 units reach it more reliably needs seeds. The codes that hold all seven also
+      have the highest cross-view top-1 over all 1,000 subjects (.834, .840), above both 10-unit codes; top-1 may
+      flag a held seventh direction without labels. Label-free discovery does not follow: stage 62's F1 .71 is not
+      repeated by any code that holds all seven (.33–.40). Next: count how often each width holds all seven, over
+      more seeds (8 and 9 units at every 500 and every 100), before calling any lever.
+
+51. **Seed count: about half of 8- and 9-unit codes hold all seven own parts; the extra unit buys no reliability,
+    rebuilding every 100 steps costs it, and top-1 does not flag a held code (stage 64, read 23 Nov,
+    `causal/stage64/holds.txt`).** Stage 56's code-batch recipe at 8 and 9 units, rebuilt every 500 and every 100,
+    seeds 3, 4 and 5, scored beside the earlier codes of each cell: 5 codes per 8-unit cell, 4 per 9-unit cell,
+    and the 10-unit codes at seeds 42 and 2. T1 / FLAIR.
+    - **Per cell, holds / matches the 10-unit code (stage 50, seed 42):**
+      - 8 units, every 500: holds 3/5 (seeds 2, 3, 5), matches 2/5 (3, 5; seed 2 misses T1 volume, 12.6).
+      - 8 units, every 100: holds 2/5 (3, 4), matches 0/5 (both holders miss on ventricle, .74 / .67 and .70 FLAIR;
+        seed 42 holds T1 only, last .45 / .36).
+      - 9 units, every 500: holds 3/4 (3, 4, 5), matches 2/4 (4, 5; seed 3 misses sulcal FLAIR, .67).
+      - 9 units, every 100: holds 1/4 (seed 42, stage 63's code), matches 1/4.
+      - 10 units: holds 2/2, matches 2/2.
+    - **How codes fail.** Every failing code keeps 6 directions on the own parts and loses the seventh (last value
+      .01–.45). In 7 of 9 the lost direction blends ventricle and burden (often with lr): the familiar failure. In
+      two (8 units every 100 seed 5, 9 units every 100 seed 5) it blends sulcal, thickness and temporal instead, and
+      ventricle–burden holds (.54–.58). The 9-unit codes spend both spare units on directions with own R² .00 (curves
+      and a bent copy of brain size), whether they hold or not: the ninth unit goes to curves, not to the seventh
+      own part. Holders are good codes: 4 of 6 holders at every 500 match the 10-unit code; the misses are single
+      criteria near the limit (T1 volume 12.6, sulcal FLAIR .67). Failures miss on many (ATE bias .12–.16, decoded
+      graph .70–.78 in most).
+    - **Against the rules fixed before the results:**
+      - **Width: the same.** Pooled hold rate 9 units 4/8 against 8 units 5/10, difference .00 (Fisher p 1.00).
+        Match rate 3/8 against 2/10, +.17: unresolved (p .61).
+      - **Rebuild interval: every 500 more reliable.** Holds 6/9 against 3/9, matches 4/9 against 1/9, both −.33
+        for every 100 (p .35, .29: the threshold is met, significance is not claimed).
+      - **Cells:** 9 units every 500 is reliable by the rule (3 of 4). 8 units every 500 (3/5), 8 units every 100
+        (2/5) and 9 units every 100 (1/4) are seed lotteries. No cell is a failure.
+      - **Top-1 as a flag: no.** Holders and the rest overlap at both widths (6 codes on the wrong side each; 8
+        units: holders .698–.854, the rest .653–.794; 9 units: holders .746–.858, the rest .762–.835). Item 50's
+        hint does not survive the count.
+      - **Highest top-1 per width holds at both widths** (8 units every 500 seed 3, .854, holds and matches; 9
+        units every 500 seed 3, .858, holds, misses sulcal FLAIR). So "train several seeds, keep the highest top-1"
+        passes its rule here. Given that top-1 does not separate holders from the rest, this rests on the top code
+        of each width and is weak evidence for a recipe.
+    - **Expectation, written before:** 8 units held in 5 of 10, above the 2–4 expected; 9 units in 4 of 8, in the
+      expected range, but width reads "the same", not "unresolved or more reliable". Wrong that the interval makes
+      no difference (every 100 is worse) and that top-1 flags holding. Right that the highest-top-1 code holds at
+      both widths.
+    - **Reading.** At the matched width the recipe holds all seven own parts in about half of seeds, and a code
+      that holds mostly matches the 10-unit code: Yao's matched width is enough in practice when the optimiser
+      finds the solution, and it finds it about one time in two. One extra unit does not change that, because the
+      ninth unit goes to curves. Stage 62's and stage 63's rebuild-100 gains were seed luck (every 100 holds in 3 of
+      9 codes, every 500 in 6 of 9). The interval to use is every 500. Top-1 cannot tell a held code from a failed
+      one without labels. Label-free fixes have to act in training or in the start, not in selection: stage 65
+      (8 units started from a 10-unit code compressed without labels) tests the start.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -1459,7 +1670,174 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
-- **Stage 60 (built 20 Nov; not run): a non-linear redundancy penalty at 8 units.** The user asked how to stop the
+- **Stage 65 (built 23 Nov; running, started 23 Nov 12:24): an 8-unit code started from a compressed 10-unit
+  code.** The user asked for a way to stop 8-unit seeds failing. Stage 64's early own parts (23 Nov, before its
+  verdicts) suggested that about half of from-scratch 8-unit seeds hold. Failing codes spend the eighth unit on a
+  curve, and the seventh own part has no unit left. The recipe can reach the 10-unit solution at 8 units (seeds 2,
+  3, 5), so this is an optimisation problem. Both scored 10-unit codes hold all seven, so start from one.
+  - **Compression, without labels** (`compress_code.py RUN OUT.pt --units 8 --method redundancy|pca`):
+    - The run's code on its 2,000 training subjects, both views stacked, is standardized per unit (as the loss does)
+      and whitened, so no direction predicts another linearly.
+    - `redundancy` removes, one at a time, the direction an MLP predicts best from everything orthogonal to it (R² on
+      held-out subjects). That is a curve; an own part, independent of the rest, is unpredictable.
+    - `pca` drops the lowest-variance directions: the naive control.
+    - The kept directions, orthonormal in the whitened space, become the new head's last layer. Network and TailCode
+      are otherwise the run's. `warm.py --init-run OUT.pt` (new) starts a run from it with a fresh optimizer and
+      fresh prediction maps.
+  - **Pre-flight, 23 Nov, no training** (compression fitted label-free on each 10-unit code's test codes; own parts
+    then read with labels only as a check, ridge, T1 / FLAIR):
+    - Seed 42: the two directions removed are predicted at held-out R² .999 and .996. Redundancy keeps every own part
+      within .02 except lr (.91 / .93 -> .83 / .87). PCA loses thickness (.75 -> .35), burden (.60 -> .48 / .42),
+      ventricle (.85 -> .75) and others.
+    - Seed 2: removed at .999 and .986. Redundancy keeps every own part within .04. PCA loses ventricle (.78 -> .49 /
+      .37), thickness (.76 -> .44 / .54) and others.
+    - Smoke test (fitted on the seed-42 run's training codes, R² .999 / .997): `--init-run` loads it, the run's GAP
+      readout is unchanged (.924 / .930), and the 8-unit code reads lesion volume at R² .80 / .86 at step 0 and .86 /
+      .88 by step 100.
+  - **Arms**, all with stage 56's recipe (code batches of 31 neighbours rebuilt every 500 steps, residual input,
+    jitter, prediction weight 1, tails, fixed-position causal bank), seeds 42, 2, 3, 4 and 5:
+    - `..._abl_codebatch_predict1_c10_20k_s{3,4,5}`: the three missing 10-unit parents, 20,000 steps.
+    - `..._abl_from10red_predict1_c8_10k[_sN]`: each parent compressed by redundancy, then 10,000 steps at 8 units.
+    - `..._abl_from10pca_predict1_c8_10k[_sN]`: the same from the PCA compression.
+    - `..._abl_codebatch_predict1_c8_20k_plus10k[_sN]`: stage 64's from-scratch 8-unit codes (every 500) continued
+      10,000 steps through `--init-run` with their own checkpoints. The compressed arms see 30,000 steps in all; this
+      separates the extra training from the start.
+    - Compressions go to `compressed/`. `PARALLEL=5`; the parents start first; each later parent's children wait for
+      it (`await`).
+  - **Scored** (`causal/stage65/`, `holds.txt` first) beside stage 64's from-scratch 8-unit codes (every 500, the same
+    five seeds) and the 10-unit codes at seeds 42 and 2: the four reports, both discoveries, both tabular benchmarks,
+    `own_directions.py` and `holds.py --compare c8_red:c8_e500 c8_red:c8_pca c8_red:c8_cont c8_cont:c8_e500`. Labels
+    are `c8_{red,pca,cont,e500}_sN` and `c10_e500_sN`. `holds.py` now takes named arms and `--compare` with paired-by-
+    seed counts; stage 64's output is unchanged apart from wording and a line for the 10-unit cell.
+  - **Reading rules, fixed before the results** (holds and matches as in stage 64; reference stage 50, seed 42):
+    - **Compression makes 8 units reliable** if the redundancy arm holds in at least 4 of 5 codes and in at least 2
+      more than the from-scratch arm. It is no better if they differ by at most 1. Between: unresolved. The same
+      thresholds apply to the match count.
+    - **The selection matters** if redundancy holds in at least 2 more of 5 than PCA. If they are within 1, the warm
+      start carries it, not the choice of directions.
+    - **Extra training alone** repairs failing seeds if the continued arm holds in at least 2 more than from-scratch.
+      Then read the redundancy arm against the continued arm, not against from-scratch.
+    - **Parents:** a parent that does not hold is named, and the redundancy arm's rate is also given over the parents
+      that hold. Secondary: each redundancy code's own parts against its parent's (from `own_directions.txt`), within
+      .10 in both views or named.
+  - **Expectation, written before the results:**
+    - The parents hold (5 of 5, perhaps 4).
+    - Redundancy holds in 4 or 5 of 5 and matches in at least 3: the fine-tune keeps what the start already holds.
+    - PCA holds in 1 to 3: its start loses own parts, and fine-tuning recovers some, as from scratch.
+    - The continued arm is no better than from-scratch (within 1): a seed that lost the direction stays lost.
+  - **Checked locally:** `bash -n`; the dry run lists the three parents, ten compressions, fifteen 10,000-step arms
+    with `--init-run`, the reports over 20 codes and `holds.py` with the four comparisons. The stage was added below
+    stage 64's block while stage 64 ran: inserting text above a running block shifts bash's read offset (it happened
+    for a minute on 23 Nov and was moved before stage 64's block ended).
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 65` under `monai_env`, chained to start when stage 64's
+    process exits. About 7–8 hours of training (three 20,000-step parents and fifteen 10,000-step arms, five at a
+    time), then about 3 hours of reports.
+- **Stage 64 (built 22 Nov; read 23 Nov, item 51): how often each width holds all seven own parts.** Item 50 found that at 8
+  units the seed decides, so one seed per cell names no lever. The user asked for the seed count.
+  - **Arms** (stage 56's recipe: code batches of 31 neighbours, residual input, jitter, prediction weight 1, tails,
+    20,000 steps, fixed-position causal bank): 8 and 9 units, neighbourhoods rebuilt every 500 and every 100 steps,
+    seeds 3, 4 and 5. Twelve arms, four at a time (`PARALLEL=4`), one seed's four cells per batch, so a stage stopped
+    early leaves whole seeds. Names `..._abl_codebatch{,100}_predict1_c{8,9}_20k_s{3,4,5}`.
+  - **Scored beside** the earlier codes of the four cells (8 units every 500: seeds 42 and 2; every 100: 42 and 2;
+    9 units every 500 and every 100: seed 42) and the 10-unit codes at seeds 42 and 2. So 5 codes per 8-unit cell, 4
+    per 9-unit cell. The four reports, both discoveries, both tabular benchmarks, `own_directions.py`, and the new
+    `holds.py` (`causal/stage64/holds.txt`, read it first): per-code verdicts, per-cell and pooled counts, and top-1
+    against holding. Labels `c{units}_e{every}_s{seed}`. Checked on stage 63's reports relabelled: it reproduces
+    item 50's readings.
+  - **Reading rules, fixed before the results:**
+    - **Holds** all seven own parts: last spectrum value and ventricle–burden worst direction each .40 or more, in both
+      views (stage 63's 9-unit rule). **Matches** the 10-unit code (stage 50, seed 42): every own part at least its
+      value less .10, volume error at most its value plus 1 voxel, |ATE bias| at most its value plus .03, decoded
+      graph at least its value less .05, in both views. One-sided: beating the reference never fails (as item 50
+      read it).
+    - **Width.** 9 units hold more reliably than 8 if the pooled hold rate (8 codes) beats 8 units' (10 codes) by .30
+      or more; the same if the rates differ by less than .15; between, unresolved. The same thresholds for the match
+      rate. No significance claim at these counts; give Fisher's exact p beside.
+    - **Rebuild interval.** Every 100 against every 500, pooled over both widths (9 codes each), the same thresholds.
+    - **A cell is reliable** if it holds in at least 4 of its 5 (or 3 of 4) codes; a seed lottery if 1 to 3 of 5 (1
+      to 2 of 4); a failure if none.
+    - **Top-1 as a label-free flag** (cross-view top-1 over all 1,000, per width): it flags holding if at most one
+      code sits on the wrong side of the holders/rest split; otherwise not. Separately, if the highest-top-1 code of
+      each width holds, "train several seeds, keep the highest top-1" is a label-free way to get the matched-width
+      code; read whether it also matches.
+  - **Expectation, written before the results:** 8 units hold in 2 to 4 of 10 codes (a seed lottery in both cells);
+    9 units in 4 to 6 of 8, so width reads as unresolved or more reliable; the interval makes no difference (within
+    .15). Top-1 flags holding with at most one exception, and the highest-top-1 code holds in both widths.
+  - **Checked locally:** `bash -n`; the dry run lists the twelve arms (seed, width and interval as above, recipe
+    flags unchanged), the reports, 20 bundles, both discoveries, both tabular benchmarks, `own_directions.py` and
+    `holds.py`.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 64` under `monai_env` (started 22 Nov 23:22; three
+    batches of about 3.3 hours, then about 2 hours of reports).
+- **Stage 63 (built 21 Nov; read 22 Nov, item 50): stage 62's fresher neighbourhoods, replicated and pushed.** The user asked for
+  all three follow-ups to item 49, with matching the 10-unit code at the matched width (Yao's theory) as the goal.
+  - **Arms** (stage 56's recipe: code batches of 31 neighbours, residual input, jitter, prediction weight 1, tails,
+    20,000 steps, fixed-position causal bank; four arms share the GPU, `PARALLEL=4`):
+    - `..._abl_codebatch100_predict1_c8_20k_s2`: 8 units rebuilt every 100 steps, seed 2 (stage 62's arm, new seed).
+    - `..._abl_codebatch_predict1_c8_20k_s2`: its control, 8 units rebuilt every 500 steps, seed 2. Added because no
+      seed-2 8-unit code exists; without it a seed-2 result cannot be told from seed variation.
+    - `..._abl_codebatch25_predict1_c8_20k`: 8 units rebuilt every 25 steps, seed 42.
+    - `..._abl_codebatch100_predict1_c9_20k`: 9 units rebuilt every 100 steps, seed 42.
+  - **Reports** (`causal/stage63/`): the four reports, both discoveries, both tabular benchmarks and
+    `own_directions.py`, beside stage 62's rebuild-100 code, stages 56 and 59's codes and the 10-unit codes at seeds
+    42 and 2.
+  - **Reading rules, fixed before the results** (`own_directions.txt` and the reports, both views):
+    - **Replication (seed 2, against its own control).** The lever replicates if the rebuild-100 code's last spectrum
+      value and ventricle–burden worst direction each beat the seed-2 control's by .25 or more (stage 62: +.44 / +.35
+      and +.45 / +.36), and ventricle's and burden's own parts each by .15 or more. It fails if either gain is under
+      .10. Between: partial, named. If the seed-2 control already holds the seventh direction (last value .40 or
+      more), stage 62's gain was seed 42's luck, and the comparison is void.
+    - **Rebuilding every 25 steps (against stage 62's every 100, seed 42).** More often helps if the last value rises
+      .10 or more in both views; it saturates if it moves less than .10 either way; it hurts if it falls .10 or more.
+      Read cross-view top-1 beside it: neighbourhoods rebuilt this often could turn the batches into near-duplicates.
+    - **9 units rebuilt every 100 (against stage 59's 9-unit code and the 10-unit codes).** It holds all seven own
+      parts if the last value and the pair's worst direction are each .40 or more in both views.
+    - **The goal, applied to every arm: matches the 10-unit code** (stage 50, seed 42) if every own part is within .10
+      of it in both views, the volume error within 1 voxel, the ATE bias within .03 and the decoded image graph within
+      .05. Also name the arm closest to it.
+  - **Expectation, written before the results:** the seed-2 arm replicates, perhaps with a smaller gain. Every 25 steps
+    saturates: the gain in stage 62 came from removing staleness, and 100 steps already removes most of it. The 9-unit
+    arm holds all seven own parts, since stage 59's 9-unit code had 3 curves and fresher neighbourhoods cut one in
+    stage 62; it comes closest to matching the 10-unit code, with ventricle still the factor most likely to trail.
+  - **Checked locally:** `bash -n`; the dry run lists the four arms with the recipe's flags and one change each, the
+    reports, the bundles, both discoveries, both tabular benchmarks and `own_directions.py`.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 63` under `monai_env` (four training arms at once, then the
+    reports; about 5–6 hours).
+- **Stage 62 (built 21 Nov; read 21 Nov, item 49): the curve-cutting levers pushed further at 8 units.** The user asked to try
+  them, after the matched width (8 or 9 units) failed to match 10 (items 46, 48), with Yao's theory as the reason to
+  want it.
+  - **Why** (checked 21 Nov, `own_directions.py` on existing fixed-bank 10-unit bundles, no training; cut-off .5). The
+    curves come mostly from InfoNCE and the other terms cut them: InfoNCE alone (`abl_nopredict_c10`) spends 4 of 10
+    directions on the own parts and 6 on curves; with the prediction term (`predict1_c10`) 5 and 5; with code batches
+    as well (stage 50) 7 and 3. The uniform 8-unit code (`predict1_c8`) is 5 and 3 at this cut-off (item 46 counts 6
+    and 2; one direction sits at .29 / .34). If those levers cut curves, pushing them may free the 8-unit code's
+    missing direction. Stronger entropy pressure was set aside for the same reason: InfoNCE alone makes the most curves.
+  - **Arms** (stage 56's: code batches, 8 units, residual input, jitter, tails, seed 42, 20,000 steps, fixed-position
+    causal bank), one lever each:
+    - `..._abl_codebatch_predict3_c8_20k`: prediction weight 3 in place of 1.
+    - `..._abl_codebatch100_predict1_c8_20k`: code neighbourhoods rebuilt every 100 steps in place of 500.
+    - A tighter neighbourhood is not available: `--code-neighbours` must be at least the batch less one (31, the
+      recipe's), so each batch is already one anchor's whole neighbourhood. A smaller one needs a smaller batch, which
+      also halves the negatives.
+  - **Reports** (`causal/stage62/`): the four reports, both discoveries, both tabular benchmarks and
+    `own_directions.py`, beside stage 56's 8-unit code and stage 50's 10-unit code.
+  - **Reading rule, fixed before the results** (per arm, `own_directions.txt`, both views; stage 56's code: 6 own
+    directions and 2 curves, spectrum's last value .01 / .01, ventricle–burden worst direction .05 / .06):
+    - The lever closes the gap if the code holds all seven own parts as directions (the spectrum's last value .40 or
+      more, and the pair's worst direction .40 or more) with at most 1 direction on curves.
+    - It cuts curves without helping if the curves fall to 1 or none but the last value stays below .15.
+    - It does nothing if 2 directions stay on curves and the last value stays below .15.
+    - Anything else: name it. Costs, read beside: every other own part within .10 of stage 56's 8-unit code, the
+      volume error, no style, cross-view top-1.
+  - **Expectation, written before the results:** a small effect at best. Prediction weight 0 → 1 removed one curve at
+    10 units, but at width d the prediction term keeps the d target directions best predicted, which can be harmonics
+    of sharp factors (section 8's width rule), so weight 3 may not remove another. The neighbourhoods' spread settles by
+    the first rebuild (anatomy .78 → .65–.67 in stage 59's log), so rebuilding five times as often should change
+    little. If neither closes the gap, stage 60's penalty and the label-free compression of a 10-unit code remain.
+  - **Checked locally:** `bash -n`; the dry run lists both arms with stage 56's flags and one change each, the
+    reports, the bundles, both discoveries, both tabular benchmarks and `own_directions.py`.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 62` under `monai_env` (two training arms in parallel,
+    then the reports; about 2–2.5 hours).
+- **Stage 60 (built 20 Nov; not run, its code missing on the GPU host): a non-linear redundancy penalty at 8 units.** The user asked how to stop the
   curves of item 46, then for this arm.
   - **Why.** The 8-unit code spends 2 of its 8 directions on harmonics, curved copies of factors it already holds,
     leaving 6 for the seven own parts (item 46). Item 27's levers all failed in simulation, and none charged harmonics
@@ -1531,7 +1909,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - **Checked locally:** `bash -n`; the dry run; the SCM's inverse reproduces the bundles' own noise exactly and runs
     forward to the stored latents; the factual re-render matched a 290-subject local bank to 0.0000.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 61` (no encoder training; four decoders, about 1.5 h).
-- **Stage 59 (built 20 Nov; not run): the code-batch recipe at 9 units.** The user asked for it as a new stage, with
+- **Stage 59 (built 20 Nov; read 21 Nov, item 48): the code-batch recipe at 9 units.** The user asked for it as a new stage, with
   stage 58 already running.
   - **Why.** Counting every direction alike, the 8-unit code spends 6 of its 8 directions on the own parts and 2 on
     curved copies of factors it already holds; the 10-unit codes spend 7 of 10 and 3 (item 46). If the curves take a
@@ -1557,7 +1935,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     46 on stage 56's bundles (8 units 6 and 2, 10 units 7 and 3, both views).
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 59` after stage 58 has finished (one training arm, then
     the reports).
-- **Stage 58 (built 20 Nov; running): the 8-unit code on an independent bank.** The user asked for a non-causal
+- **Stage 58 (built 20 Nov; read 21 Nov, item 47): the 8-unit code on an independent bank.** The user asked for a non-causal
   variant of the 8-unit model.
   - **Why.** At 8 units the code keeps one blend of ventricle's and burden's own parts and drops the other (item 46).
     Two causes fit. The two change one patch of image (the fixed lesion sits at the ventricle's edge), or the edge
@@ -2464,7 +2842,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 10. Recent stages and next steps
 
-**Status on 19 Nov (stages 46–53; read this first).**
+**Status on 23 Nov (stages 46–65; read this first).**
 - **The bridge:** its first loss collapsed (item 37); the fixed form, the theory's own version, holds the weak factors
   no better than matched width (item 38). The recipe's 24-unit advantage lies outside Yao's theorem.
 - **The lesion's position was the benchmark's fingerprint:** it took about half a narrow code and crowded out the weak
@@ -2503,14 +2881,33 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   off the rebuilt residual (e, voxels). The residual is the column that tests content; the scan mostly tests style.
   Twenty decoders in all (twelve on the drawn bank, eight on the fixed), up to 150 epochs each at about 30 s an epoch
   on a shared GPU, so it takes most of a working day.
-- **Running (started 20 Nov):** stage 58, one training arm: stage 56's 8-unit code-batch arm on the fixed-position
-  bank rendered without the SCM, to tell whether the causal edges or the image make 8 units blend ventricle and burden
-  (section 9).
-- **Built, not run:** stage 59, one training arm: the code-batch recipe at 9 units, to test the direction count (item
-  46): whether a code that spends 2 directions on curves holds all seven own parts at 9 units (section 9).
-- **Built, not run:** stage 60, one training arm: stage 56's 8-unit arm with `warm.py --harmonic-weight 1`, a new
-  penalty on harmonics (curved copies of factors the code already holds), to test whether 8 units then hold all seven
-  own parts (section 9).
+- **Stage 58 is read (item 47):** on the independent bank 8 units hold ventricle and burden apart (worst direction
+  .75, blend .00) and drop lr instead (own R² .26). The edges made the blend, with the rule's caveat. 8 units miss one
+  direction on either bank; curves take 2 on both.
+- **Stage 59 is read (item 48):** at 9 units the curves take the extra unit (6 own directions, 3 curves, last spectrum
+  value .04 / .02), as expected. The missing direction blends ventricle, burden and lr. Volume precision nears the
+  10-unit codes; ATE bias and the decoded graph are no better than at 8 units.
+- **Stage 63 is read (item 50):** stage 62's rebuild-100 gain does not replicate: the seed-2 8-unit control
+  (every 500) holds all seven own parts (last value .56) and the seed-2 rebuild-100 arm loses the seventh (.12). At
+  8 units the seed decides. Rebuilding every 25 steps hurts. 9 units rebuilt every 100 (seed 42) hold all seven and
+  match the 10-unit code on every criterion of the goal; the seed-2 8-unit control misses only T1 volume error, by
+  0.3 voxels. One seed each; count hold rates over seeds next.
+- **Stage 64 is read (item 51):** about half of codes hold all seven own parts at 8 units (5/10) and at 9 units
+  (4/8): the extra unit goes to curves and buys no reliability. Rebuilding every 100 steps costs it (3/9 against 6/9
+  at every 500). Codes that hold mostly match the 10-unit code. Top-1 does not flag a held code (6 on the wrong side
+  per width), though the highest-top-1 code of each width holds.
+- **Running (started 23 Nov 12:24):** stage 65, 8-unit codes started from a 10-unit code compressed without labels
+  (`compress_code.py`, `warm.py --init-run`), against PCA compression and longer from-scratch training (section 9).
+- **Stage 62 is read (item 49):** at 8 units, code neighbourhoods rebuilt every 100 steps instead of 500 give the
+  seventh own direction .45 / .36 (stage 56 .01) and leave one curve. Ventricle .62, burden .54. The causal outputs
+  match the 10-unit code (decoded graph .86 / .85), and label-free discovery is the best yet (F1 .71). Prediction
+  weight 3 does nothing and costs discrimination. One seed; replicate next.
+- **Built, not run, code missing:** stage 60, one training arm: stage 56's 8-unit arm with `warm.py --harmonic-weight
+  1`, a new penalty on harmonics (curved copies of factors the code already holds), to test whether 8 units then hold
+  all seven own parts (section 9). A launch on 21 Nov stopped with `warm.py: error: unrecognized arguments:
+  --harmonic-weight 1`: commit `bbd679e` added the stage to `run_pc.sh` and this file only. The penalty in `warm.py`
+  and `tests/test_warm_harmonic.py` are in no local or fork ref; they need pushing from the machine that ran the
+  checks. Run it under `monai_env` (the shell's default Python has no torch).
 - **Built, not run:** stage 61, no encoder training: counterfactual images from tabular data. A tabular cause of an
   image factor is raised, the code moves by its estimated effect, a decoder rebuilds the image, and the result is
   scored against the generator's own counterfactual render of each subject (section 9).

@@ -319,6 +319,25 @@
 # subjects) and a decoder rebuilds the image. Scored on 200 test subjects against the generator's own counterfactual
 # render of each, beside the decoder fed the true counterfactual's code and an oracle decoder fed the true counterfactual
 # latents; PC on the cause beside the decoded factors names its direct effects (causal/stage61/).
+# Stage 62 (opt-in) Do the levers that cut curves at 10 units (the prediction term, code batches) free the 8-unit code's
+# missing own direction when pushed further? Stage 56's arm (code batches, 8 units, seed 42, 20,000 steps) twice, one
+# lever each: prediction weight 3 in place of 1, and code neighbourhoods rebuilt every 100 steps in place of 500 (the
+# neighbourhood cannot shrink: --code-neighbours is at least the batch less one, 31, the recipe's). The four reports,
+# both discoveries and the tabular benchmarks, and own_directions.py, beside stage 56's 8-unit code and stage 50's
+# 10-unit code (causal/stage62/).
+# Stage 63 (opt-in) Does stage 62's fresher-neighbourhood lever hold up, and how far does it go? Four arms on stage
+# 56's recipe (code batches, residual input, jitter, prediction weight 1, tails, 20,000 steps, fixed-position causal
+# bank): 8 units rebuilt every 100 steps at seed 2, with its seed-2 control rebuilt every 500; 8 units rebuilt every 25
+# steps (seed 42); 9 units rebuilt every 100 steps (seed 42). Four arms share the GPU (PARALLEL=4). The four reports,
+# both discoveries and the tabular benchmarks, and own_directions.py, beside stages 56, 59 and 62's codes and the
+# 10-unit codes at seeds 42 and 2 (causal/stage63/).
+# Stage 64 (opt-in) How often does each width hold all seven own parts? Stage 63 found that at 8 units the seed decides,
+# so one seed per cell cannot name a lever. Stage 56's recipe (code batches, residual input, jitter, prediction weight
+# 1, tails, 20,000 steps, fixed-position causal bank) at 8 and 9 units, neighbourhoods rebuilt every 500 and every 100
+# steps, seeds 3, 4 and 5: twelve arms, four at a time (PARALLEL=4), one seed's four cells per batch. Scored beside the
+# six earlier 8- and 9-unit codes of these cells (seeds 42 and 2) and the 10-unit codes at seeds 42 and 2: the four
+# reports, both discoveries, the tabular benchmarks, own_directions.py, and holds.txt, a per-cell count of the codes
+# that hold all seven own parts (causal/stage64/).
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2485,6 +2504,279 @@ if wants 61; then
         echo "$(date +%H:%M) counterfactual images into $OUT"
         "${CMD[@]}" > "$OUT/counterfactual.txt" 2>&1 || { echo "Stage 61 failed, see $OUT/counterfactual.txt"; exit 1; }
         echo "Stage 61 reports in $OUT: counterfactual.txt and counterfactual_*.png"
+    fi
+fi
+
+if wants 62; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    PRED3=${P}_abl_codebatch_predict3_c8_20k
+    REB100=${P}_abl_codebatch100_predict1_c8_20k
+    CODEB8=${P}_abl_codebatch_predict1_c8_20k  # stage 56
+    CODEB=${P}_abl_codebatch_predict1_c10_20k  # stage 50
+    OUT=$D/causal/stage62
+    needs_done 62 "$CODEB8" "$CODEB"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage56" "$OUT" "$CODEB8" "$CODEB"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    EVERY=2000 ssl "$PRED3" "$FIXED" tail t1_04 20000 --code-batches 500 --code-neighbours 31 --residual --jitter 2 \
+        --rotate 3 --seed 42 --patch-weight 0 --content-units 8 --contrastive-loss-type infonce --predict-weight 3
+    EVERY=2000 ssl "$REB100" "$FIXED" tail t1_04 20000 --code-batches 100 --code-neighbours 31 --residual --jitter 2 \
+        --rotate 3 --seed 42 --patch-weight 0 --content-units 8 --contrastive-loss-type infonce --predict-weight 1
+    finish "$PRED3" "$REB100"
+    needs_done 62 "$PRED3" "$REB100"
+    RUNS=()
+    for name in "$PRED3" "$REB100" "$CODEB8" "$CODEB"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" predict3_c8="$PRED3" rebuild100_c8="$REB100" code_batches_c8="$CODEB8" code_batches="$CODEB"
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json" predict3_c8="$D/causal/$PRED3.npz"
+        rebuild100_c8="$D/causal/$REB100.npz" c8="$D/causal/$CODEB8.npz" c10="$D/causal/$CODEB.npz")
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 62's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        echo "Stage 62 reports in $OUT: own_directions.txt first"
+    fi
+fi
+
+if wants 63; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    REB100S2=${P}_abl_codebatch100_predict1_c8_20k_s2
+    CTRL8S2=${P}_abl_codebatch_predict1_c8_20k_s2
+    REB25=${P}_abl_codebatch25_predict1_c8_20k
+    REB100C9=${P}_abl_codebatch100_predict1_c9_20k
+    REB100=${P}_abl_codebatch100_predict1_c8_20k  # stage 62
+    CODEB8=${P}_abl_codebatch_predict1_c8_20k  # stage 56
+    CODEB9=${P}_abl_codebatch_predict1_c9_20k  # stage 59
+    CODEB=${P}_abl_codebatch_predict1_c10_20k  # stage 50; its seed 2 is stage 52's
+    OUT=$D/causal/stage63
+    needs_done 63 "$REB100" "$CODEB8" "$CODEB9" "$CODEB" "${CODEB}_s2"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage62" "$OUT" "$REB100" "$CODEB8" "$CODEB"
+        reuse_reports "$D/causal/stage59" "$OUT" "$CODEB9" "${CODEB}_s2"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    COMMON=(--code-neighbours 31 --residual --jitter 2 --rotate 3 --patch-weight 0 --contrastive-loss-type infonce
+        --predict-weight 1)
+    PARALLEL=4
+    EVERY=2000 ssl "$REB100S2" "$FIXED" tail t1_04 20000 --code-batches 100 --seed 2 --content-units 8 "${COMMON[@]}"
+    EVERY=2000 ssl "$CTRL8S2" "$FIXED" tail t1_04 20000 --code-batches 500 --seed 2 --content-units 8 "${COMMON[@]}"
+    EVERY=2000 ssl "$REB25" "$FIXED" tail t1_04 20000 --code-batches 25 --seed 42 --content-units 8 "${COMMON[@]}"
+    EVERY=2000 ssl "$REB100C9" "$FIXED" tail t1_04 20000 --code-batches 100 --seed 42 --content-units 9 "${COMMON[@]}"
+    finish "$REB100S2" "$CTRL8S2" "$REB25" "$REB100C9"
+    needs_done 63 "$REB100S2" "$CTRL8S2" "$REB25" "$REB100C9"
+    RUNS=()
+    for name in "$REB100S2" "$CTRL8S2" "$REB25" "$REB100C9" "$REB100" "$CODEB8" "$CODEB9" "$CODEB" "${CODEB}_s2"; do
+        RUNS+=("$D/runs/$name")
+    done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" rebuild100_c8_s2="$REB100S2" control_c8_s2="$CTRL8S2" rebuild25_c8="$REB25" \
+        rebuild100_c9="$REB100C9" rebuild100_c8="$REB100" code_batches_c8="$CODEB8" code_batches_c9="$CODEB9" \
+        code_batches="$CODEB" code_batches_s2="${CODEB}_s2"
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json" rebuild100_c8_s2="$D/causal/$REB100S2.npz"
+        control_c8_s2="$D/causal/$CTRL8S2.npz" rebuild25_c8="$D/causal/$REB25.npz" rebuild100_c9="$D/causal/$REB100C9.npz"
+        rebuild100_c8="$D/causal/$REB100.npz" c8="$D/causal/$CODEB8.npz" c9="$D/causal/$CODEB9.npz"
+        c10="$D/causal/$CODEB.npz" c10_s2="$D/causal/${CODEB}_s2.npz")
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 63's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        echo "Stage 63 reports in $OUT: own_directions.txt first"
+    fi
+fi
+
+if wants 64; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    CODEB=${P}_abl_codebatch_predict1_c10_20k  # stage 50; its seed 2 is stage 52's
+    OUT=$D/causal/stage64
+    # earlier codes of the four cells: label=name (seed 42 has no suffix)
+    OLD=(c8_e500_s42=${P}_abl_codebatch_predict1_c8_20k c8_e500_s2=${P}_abl_codebatch_predict1_c8_20k_s2
+        c8_e100_s42=${P}_abl_codebatch100_predict1_c8_20k c8_e100_s2=${P}_abl_codebatch100_predict1_c8_20k_s2
+        c9_e500_s42=${P}_abl_codebatch_predict1_c9_20k c9_e100_s42=${P}_abl_codebatch100_predict1_c9_20k)
+    NEW=()
+    for seed in 3 4 5; do
+        for units in 8 9; do
+            NEW+=(c${units}_e500_s$seed=${P}_abl_codebatch_predict1_c${units}_20k_s$seed)
+            NEW+=(c${units}_e100_s$seed=${P}_abl_codebatch100_predict1_c${units}_20k_s$seed)
+        done
+    done
+    REF=(c10_e500_s42=$CODEB c10_e500_s2=${CODEB}_s2)
+    names() { local pair; for pair in "$@"; do echo "${pair#*=}"; done; }
+    mapfile -t OLDN < <(names "${OLD[@]}")
+    mapfile -t NEWN < <(names "${NEW[@]}")
+    needs_done 64 "${OLDN[@]}" "$CODEB" "${CODEB}_s2"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage63" "$OUT" "${OLDN[@]}" "$CODEB" "${CODEB}_s2"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    COMMON=(--code-neighbours 31 --residual --jitter 2 --rotate 3 --patch-weight 0 --contrastive-loss-type infonce
+        --predict-weight 1)
+    PARALLEL=4
+    for seed in 3 4 5; do
+        for units in 8 9; do
+            for every in 500 100; do
+                tag=codebatch; [ "$every" = 500 ] || tag=codebatch$every
+                EVERY=2000 ssl "${P}_abl_${tag}_predict1_c${units}_20k_s$seed" "$FIXED" tail t1_04 20000 \
+                    --code-batches "$every" --seed "$seed" --content-units "$units" "${COMMON[@]}"
+            done
+        done
+    done
+    finish "${NEWN[@]}"
+    needs_done 64 "${NEWN[@]}"
+    RUNS=()
+    for name in "${NEWN[@]}" "${OLDN[@]}" "$CODEB" "${CODEB}_s2"; do
+        RUNS+=("$D/runs/$name")
+    done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" "${NEW[@]}" "${OLD[@]}" "${REF[@]}"
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json")
+    for pair in "${NEW[@]}" "${OLD[@]}" "${REF[@]}"; do
+        CMD+=("${pair%%=*}=$D/causal/${pair#*=}.npz")
+    done
+    HOLDS=("$PY" "$D/holds.py" "$OUT" "${NEW[@]}" "${OLD[@]}" "${REF[@]}")
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+        echo "${HOLDS[*]} > $OUT/holds.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 64's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        "${HOLDS[@]}" > "$OUT/holds.txt" 2>&1 || { echo "Stage 64's holds.py failed, see $OUT/holds.txt"; exit 1; }
+        echo "Stage 64 reports in $OUT: holds.txt first, then own_directions.txt"
+    fi
+fi
+
+# Stage 65 (opt-in) Does starting from a compressed 10-unit code make 8 units hold all seven own parts reliably? The
+# 10-unit code-batch code at seeds 42, 2, 3, 4 and 5 (3, 4 and 5 trained here) is cut to 8 units without labels by
+# compress_code.py: redundancy (drop the directions an MLP predicts from the rest, curves) or pca (drop the lowest-variance
+# directions, the naive control). Each 8-unit start is fine-tuned 10,000 steps with stage 56's recipe (warm.py
+# --init-run). A third control continues stage 64's from-scratch 8-unit codes (every 500) 10,000 steps, for the extra
+# training alone. Scored beside the from-scratch codes and the 10-unit parents with holds.py (causal/stage65/).
+compress() { # compress PARENT METHOD OUT: compress_code.py's 8-unit start from a finished run; reused if newer
+    local parent=$1 method=$2 out=$3
+    if [ "$DRY" = 1 ]; then echo "$PY $D/compress_code.py $D/runs/$parent $out --units 8 --method $method"; return; fi
+    if [ -f "$out" ] && [ "$out" -nt "$D/runs/$parent/model.pt" ]; then echo "reuse $out"; return; fi
+    mkdir -p "$(dirname "$out")" || exit 1
+    echo "$(date +%H:%M) compress $parent ($method)"
+    "$PY" "$D/compress_code.py" "$D/runs/$parent" "$out" --units 8 --method "$method" > "${out%.pt}.log" 2>&1 \
+        || { echo "compress_code failed, see ${out%.pt}.log"; exit 1; }
+}
+
+await() { # await NAME: block until arm NAME finished; stop the stage if it ended any other way
+    local name=$1
+    [ "$DRY" = 1 ] && return
+    until grep -qx DONE "$D/logs/$name.log" 2>/dev/null; do
+        if ! pgrep -f -- "$D/runs/$name " > /dev/null; then
+            sleep 5
+            grep -qx DONE "$D/logs/$name.log" 2>/dev/null && break
+            echo "$name ended without DONE, see $D/logs/$name.log"
+            exit 1
+        fi
+        sleep 60
+    done
+}
+
+if wants 65; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    OUT=$D/causal/stage65
+    START=$D/compressed
+    sfx() { [ "$1" = 42 ] && echo "" || echo "_s$1"; }  # seed 42's runs carry no suffix
+    SEEDS=(42 2 3 4 5)
+    NEW=() REF=() NEWN=() REFN=()
+    for seed in "${SEEDS[@]}"; do
+        x=$(sfx "$seed")
+        REF+=(c8_e500_s$seed=${P}_abl_codebatch_predict1_c8_20k$x)
+        for arm in red pca; do NEW+=(c8_${arm}_s$seed=${P}_abl_from10${arm}_predict1_c8_10k$x); done
+        NEW+=(c8_cont_s$seed=${P}_abl_codebatch_predict1_c8_20k_plus10k$x)
+        case $seed in
+            42 | 2) REF+=(c10_e500_s$seed=${P}_abl_codebatch_predict1_c10_20k$x) ;;
+            *) NEW+=(c10_e500_s$seed=${P}_abl_codebatch_predict1_c10_20k$x) ;;
+        esac
+    done
+    for pair in "${NEW[@]}"; do NEWN+=("${pair#*=}"); done
+    for pair in "${REF[@]}"; do REFN+=("${pair#*=}"); done
+    needs_done 65 "${REFN[@]}"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" "$START" || exit 1
+        reuse_reports "$D/causal/stage64" "$OUT" "${REFN[@]}"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    COMMON=(--code-neighbours 31 --residual --jitter 2 --rotate 3 --patch-weight 0 --contrastive-loss-type infonce
+        --predict-weight 1)
+    PARALLEL=5
+    fine() { # fine NAME SEED START: 10,000 steps of the recipe at 8 units from START
+        EVERY=2000 ssl "$1" "$FIXED" tail t1_04 10000 --code-batches 500 --seed "$2" --content-units 8 "${COMMON[@]}" \
+            --init-run "$3"
+    }
+    for seed in 3 4 5; do  # the 10-unit parents first: the longest path
+        EVERY=2000 ssl "${P}_abl_codebatch_predict1_c10_20k_s$seed" "$FIXED" tail t1_04 20000 --code-batches 500 \
+            --seed "$seed" --content-units 10 "${COMMON[@]}"
+    done
+    for seed in "${SEEDS[@]}"; do
+        x=$(sfx "$seed")
+        if [ "$seed" = 42 ] || [ "$seed" = 2 ]; then
+            parent=${P}_abl_codebatch_predict1_c10_20k$x
+            compress "$parent" redundancy "$START/${parent}_redundancy8.pt"
+            compress "$parent" pca "$START/${parent}_pca8.pt"
+            fine "${P}_abl_from10red_predict1_c8_10k$x" "$seed" "$START/${parent}_redundancy8.pt"
+            fine "${P}_abl_from10pca_predict1_c8_10k$x" "$seed" "$START/${parent}_pca8.pt"
+        fi
+        fine "${P}_abl_codebatch_predict1_c8_20k_plus10k$x" "$seed" "$D/runs/${P}_abl_codebatch_predict1_c8_20k$x/model.pt"
+    done
+    for seed in 3 4 5; do
+        parent=${P}_abl_codebatch_predict1_c10_20k_s$seed
+        await "$parent"
+        compress "$parent" redundancy "$START/${parent}_redundancy8.pt"
+        compress "$parent" pca "$START/${parent}_pca8.pt"
+        fine "${P}_abl_from10red_predict1_c8_10k_s$seed" "$seed" "$START/${parent}_redundancy8.pt"
+        fine "${P}_abl_from10pca_predict1_c8_10k_s$seed" "$seed" "$START/${parent}_pca8.pt"
+    done
+    finish "${NEWN[@]}"
+    needs_done 65 "${NEWN[@]}"
+    RUNS=()
+    for name in "${NEWN[@]}" "${REFN[@]}"; do RUNS+=("$D/runs/$name"); done
+    stage_report "$OUT" own_variation "${RUNS[@]}" --boosted
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" "${NEW[@]}" "${REF[@]}"
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json")
+    for pair in "${NEW[@]}" "${REF[@]}"; do CMD+=("${pair%%=*}=$D/causal/${pair#*=}.npz"); done
+    HOLDS=("$PY" "$D/holds.py" "$OUT" "${NEW[@]}" "${REF[@]}" --compare c8_red:c8_e500 c8_red:c8_pca c8_red:c8_cont
+        c8_cont:c8_e500)
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+        echo "${HOLDS[*]} > $OUT/holds.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 65's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        "${HOLDS[@]}" > "$OUT/holds.txt" 2>&1 || { echo "Stage 65's holds.py failed, see $OUT/holds.txt"; exit 1; }
+        echo "Stage 65 reports in $OUT: holds.txt first, then own_directions.txt"
     fi
 fi
 

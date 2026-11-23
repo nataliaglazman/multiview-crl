@@ -1,0 +1,74 @@
+
+Row                                                                                                    reduce  chan     F1  null F1  learned  SHD  null SHD    MCC  match |r|       mix F1      mix MCC
+-----------------------------------------------------------------------------------------------------  ------  ----  -----  -------  -------  ---  --------  -----  ---------  -----------  -----------
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s2        none       8  0.353    0.364   -0.011   11      10.0  0.640  0.15-0.86  0.458±0.142  0.596±0.040
+truth-ceiling                                                                                          none       7  0.833    0.267   +0.567    2       8.8  1.000  1.00-1.00            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s2-floor  none       8  0.444    0.386   +0.059   10      11.1  0.232  0.06-0.41            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s2           none       8  0.400    0.338   +0.062    9       9.4  0.650  0.31-0.91  0.427±0.138  0.611±0.048
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s2-floor     none       8  0.444    0.386   +0.059   10      11.1  0.232  0.06-0.41            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch25_predict1_c8_20k            none       8  0.444    0.368   +0.077   10      10.3  0.640  0.29-0.92  0.448±0.138  0.614±0.033
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch25_predict1_c8_20k-floor      none       8  0.526    0.398   +0.128    9      11.3  0.283  0.08-0.57            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k           none       9  0.333    0.330   +0.003    8       9.8  0.554  0.21-0.94  0.390±0.147  0.564±0.054
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k-floor     none       9  0.526    0.373   +0.153    9      11.1  0.283  0.08-0.57            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k           none       8  0.714    0.325   +0.390    4       9.6  0.671  0.49-0.86  0.431±0.138  0.605±0.039
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k-floor     none       8  0.526    0.398   +0.128    9      11.3  0.283  0.08-0.57            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k              none       8  0.588    0.344   +0.244    7      10.4  0.621  0.24-0.90  0.449±0.119  0.597±0.044
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k-floor        none       8  0.526    0.398   +0.128    9      11.3  0.283  0.08-0.57            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k              none       9  0.588    0.349   +0.239    7      10.1  0.612  0.28-0.89  0.431±0.146  0.601±0.034
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k-floor        none       9  0.526    0.373   +0.153    9      11.1  0.283  0.08-0.57            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k             none      10  0.286    0.339   -0.053   10       9.4  0.620  0.29-0.83  0.422±0.132  0.613±0.038
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k-floor       none      10  0.353    0.347   +0.006   11       9.9  0.288  0.08-0.57            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2          none      10  0.308    0.321   -0.014    9       8.9  0.621  0.37-0.82  0.420±0.168  0.593±0.061
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2-floor    none      10  0.400    0.343   +0.057    9       9.4  0.245  0.06-0.47            —            —
+
+No label built the graph: PC ran on the channels. Labels only NAMED the nodes afterwards,
+by one Hungarian match on |corr|. 'null' holds that graph fixed and randomises the naming,
+so a 'learned' at or below 0 means the recovered structure is not aligned to the truth.
+'match |r|' is the range of matched correlations: a low one means the node a factor was
+scored at barely tracks it, whatever the F1 says. 'MCC' is their mean, the channel-wise MCC.
+With multiple alphas, F1 and SHD use each row's best-F1 alpha, selected against the truth (optimistic).
+The JSON alpha_sweep retains every alpha for comparisons at a prespecified threshold.
+'mix' reruns the panel on random mixings of the row's channels (mean±sd over draws): what the
+same block gives with no rule for choosing its channels, with the same best-alpha selection.
+Only the recorded columns are mixed; the other channels stay fixed. Read F1 and MCC against it.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s2: 2 of 13 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s2-floor: 4 of 16 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s2: 2 of 11 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s2-floor: 4 of 16 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch25_predict1_c8_20k: 2 of 14 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch25_predict1_c8_20k-floor: 4 of 17 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k: 9 of 15 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k-floor: 7 of 20 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k: 3 of 11 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k-floor: 4 of 17 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k: 2 of 13 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k-floor: 4 of 17 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k: 5 of 16 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k-floor: 7 of 20 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k: 10 of 18 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k-floor: 9 of 20 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2: 8 of 15 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2-floor: 9 of 18 recovered edges touch an unmatched channel and are outside the score.
+
+Per-factor match quality (best channel for each factor, |corr|):
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s2: brain 0.86, ventricle 0.82, burden 0.68, thickness 0.86, temporal 0.78, lr 0.15, sulcal 0.32
+  truth-ceiling: brain 1.00, ventricle 1.00, burden 1.00, thickness 1.00, temporal 1.00, lr 1.00, sulcal 1.00
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s2-floor: brain 0.41, ventricle 0.20, burden 0.25, thickness 0.23, temporal 0.34, lr 0.06, sulcal 0.13
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s2: brain 0.91, ventricle 0.74, burden 0.77, thickness 0.89, temporal 0.59, lr 0.34, sulcal 0.31
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s2-floor: brain 0.41, ventricle 0.20, burden 0.25, thickness 0.23, temporal 0.34, lr 0.06, sulcal 0.13
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch25_predict1_c8_20k: brain 0.92, ventricle 0.81, burden 0.61, thickness 0.85, temporal 0.53, lr 0.29, sulcal 0.46
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch25_predict1_c8_20k-floor: brain 0.57, ventricle 0.30, burden 0.22, thickness 0.30, temporal 0.37, lr 0.08, sulcal 0.14
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k: brain 0.94, ventricle 0.64, burden 0.44, thickness 0.44, temporal 0.68, lr 0.53, sulcal 0.21
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k-floor: brain 0.57, ventricle 0.30, burden 0.22, thickness 0.30, temporal 0.37, lr 0.08, sulcal 0.14
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k: brain 0.86, ventricle 0.81, burden 0.65, thickness 0.71, temporal 0.66, lr 0.49, sulcal 0.54
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k-floor: brain 0.57, ventricle 0.30, burden 0.22, thickness 0.30, temporal 0.37, lr 0.08, sulcal 0.14
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k: brain 0.89, ventricle 0.76, burden 0.75, thickness 0.90, temporal 0.53, lr 0.24, sulcal 0.29
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k-floor: brain 0.57, ventricle 0.30, burden 0.22, thickness 0.30, temporal 0.37, lr 0.08, sulcal 0.14
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k: brain 0.89, ventricle 0.78, burden 0.70, thickness 0.81, temporal 0.50, lr 0.32, sulcal 0.28
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k-floor: brain 0.57, ventricle 0.30, burden 0.22, thickness 0.30, temporal 0.37, lr 0.08, sulcal 0.14
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k: brain 0.82, ventricle 0.77, burden 0.75, thickness 0.83, temporal 0.54, lr 0.29, sulcal 0.33
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k-floor: brain 0.57, ventricle 0.30, burden 0.22, thickness 0.40, temporal 0.30, lr 0.08, sulcal 0.14
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2: brain 0.72, ventricle 0.64, burden 0.69, thickness 0.82, temporal 0.37, lr 0.65, sulcal 0.46
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2-floor: brain 0.47, ventricle 0.20, burden 0.25, thickness 0.33, temporal 0.25, lr 0.06, sulcal 0.14
+
+Saved JSON to /home/ng24/projects/multiview-crl/out/burden_feasibility_20261102/causal/stage63/discovery_label_free_view1.json

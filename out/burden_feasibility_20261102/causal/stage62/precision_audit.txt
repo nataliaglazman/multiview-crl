@@ -1,0 +1,138 @@
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k  step 20000, 1000 test subjects, bank bank_causal_nofield_fixedpos
+  lesion volume SD 31.0 vox; the other true latents explain 0.59 of its variance, leaving an own part of SD 19.9 vox (burden latent vs volume: Spearman 1.000)
+  e: volume-reading error in voxels, from own R2 (features + the volume the other latents predict), own R2 = SD^2 / (SD^2 + e^2)
+  alone: own R2 from the features only; floor e: the untrained twin's; by size: e in the smallest / middle / largest third of lesions
+    stage   view       e own R2  alone | floor e | raw R2 |            e by size | views: reading r, shared error r
+    image   t1      21.4   0.46   0.46 |       - |   0.35 |   20.6 / 21.7 / 24.1 | +0.69, +0.33
+    image   flair   15.3   0.63   0.59 |       - |   0.54 |   14.8 / 17.5 / 14.9
+    map     t1      26.9   0.35   0.35 |       - |   0.65 |   24.3 / 29.7 / 35.7 | +0.56, +0.19
+    map     flair   16.5   0.59   0.59 |     >99 |   0.75 |   16.3 / 16.7 / 18.9
+    gap     t1       9.9   0.80   0.79 |       - |   0.91 |    9.5 / 10.5 / 10.0 | +0.89, +0.33
+    gap     flair    8.0   0.86   0.85 |     >99 |   0.92 |    8.1 /  8.4 /  7.8
+    pooled  t1       9.9   0.80   0.79 |     >99 |   0.91 |   10.3 /  9.9 /  9.7 | +0.87, +0.29
+    pooled  flair    9.3   0.82   0.81 |     >99 |   0.92 |    9.3 /  9.8 /  8.8
+    code    t1      12.6   0.71   0.68 |     >99 |   0.86 |   12.8 / 12.3 / 13.2 | +0.81, +0.34
+    code    flair   13.0   0.70   0.66 |       - |   0.85 |   12.0 / 14.3 / 14.6
+    size thirds are of the volume the other latents predict (not the volume itself, which would tie own to it); mean lesion volume 64 / 80 / 116 voxels
+  price: drop in the run's loss (nats) when one unit holding the own part, read with error e, joins the code.
+  20->10: what sharpening the reading from 20 to 10 voxels earns. left: mean R2 of lesion position / of anatomy still in the code, T1 then FLAIR
+  weighted: the critic refitted to each code, one weight per unit inside the cosine (warm.py --critic-weights)
+    code                   sets        loss     e 0     e 5    e 10    e 20    e 30  20->10 | left: position, anatomy
+    as trained             uniform    1.231 +0.2545 +0.2079 +0.0341 -0.3381 -0.5043 +0.3722 | 0.46/0.46, 0.88/0.88
+                           neighbour  0.917 +0.1566 +0.0410 -0.1259 -0.3543 -0.4840 +0.2284
+    as trained, weighted   uniform    1.154 +0.2942 +0.2200 +0.0863 +0.0131 +0.0008 +0.0732 | 0.46/0.46, 0.88/0.88
+                           neighbour  0.889 +0.1753 +0.0543 +0.0111 +0.0020 -0.0020 +0.0092
+                           the new unit's weight over the mean weight, e = 0 ... 30: uniform 1.89 1.29 0.50 0.13 0.05; neighbour 1.75 0.71 0.18 0.06 0.04
+    position removed       uniform    0.860 +0.2096 +0.1590 -0.0564 -0.4561 -0.5953 +0.3996 | -0.00/-0.01, 0.54/0.53
+                           neighbour  0.993 +0.2034 +0.1399 -0.0461 -0.2532 -0.4323 +0.2070
+    anatomy removed        uniform    4.329 +0.6240 +0.5215 +0.2577 -0.2401 -0.3709 +0.4978 | 0.03/0.03, -0.00/-0.00
+                           neighbour  7.942 +1.4469 +1.1346 +0.6111 +0.2020 +0.0765 +0.4091
+    both removed           uniform    5.279 +1.1382 +0.9654 +0.6255 -0.0817 -0.3119 +0.7072 | -0.00/-0.00, -0.00/-0.01
+                           neighbour  8.047 +1.5168 +1.2874 +0.8684 +0.3262 +0.2914 +0.5422
+    both removed, weighted uniform    5.038 +1.6779 +1.0852 +0.5515 +0.1301 +0.1014 +0.4213 | -0.00/-0.00, -0.00/-0.01
+                           neighbour  7.717 +3.2647 +1.8856 +0.8785 +0.3151 +0.3110 +0.5634
+                           the new unit's weight over the mean weight, e = 0 ... 30: uniform 4.60 2.47 0.98 0.26 0.20; neighbour 7.33 3.55 1.48 0.59 0.56
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k  step 20000, 1000 test subjects, bank bank_causal_nofield_fixedpos
+  lesion volume SD 31.0 vox; the other true latents explain 0.59 of its variance, leaving an own part of SD 19.9 vox (burden latent vs volume: Spearman 1.000)
+  e: volume-reading error in voxels, from own R2 (features + the volume the other latents predict), own R2 = SD^2 / (SD^2 + e^2)
+  alone: own R2 from the features only; floor e: the untrained twin's; by size: e in the smallest / middle / largest third of lesions
+    stage   view       e own R2  alone | floor e | raw R2 |            e by size | views: reading r, shared error r
+    image   t1      21.4   0.46   0.46 |       - |   0.35 |   20.6 / 21.7 / 24.1 | +0.69, +0.33
+    image   flair   15.3   0.63   0.59 |       - |   0.54 |   14.8 / 17.5 / 14.9
+    map     t1      20.3   0.49   0.48 |       - |   0.74 |   20.9 / 19.6 / 26.1 | +0.61, +0.16
+    map     flair   16.2   0.60   0.57 |     >99 |   0.79 |   15.1 / 17.3 / 18.8
+    gap     t1       8.9   0.83   0.82 |       - |   0.92 |    8.9 /  9.2 /  8.2 | +0.90, +0.31
+    gap     flair    7.9   0.86   0.85 |     >99 |   0.93 |    7.9 /  7.8 /  8.1
+    pooled  t1      10.5   0.78   0.77 |     >99 |   0.90 |   10.7 / 11.1 /  9.6 | +0.86, +0.30
+    pooled  flair    9.3   0.82   0.80 |     >99 |   0.92 |    9.5 /  9.2 /  9.7
+    code    t1      11.3   0.75   0.75 |     >99 |   0.88 |   10.5 / 12.5 / 11.8 | +0.91, +0.63
+    code    flair   11.5   0.75   0.73 |     >99 |   0.88 |   10.1 / 11.5 / 13.5
+    size thirds are of the volume the other latents predict (not the volume itself, which would tie own to it); mean lesion volume 64 / 80 / 116 voxels
+  price: drop in the run's loss (nats) when one unit holding the own part, read with error e, joins the code.
+  20->10: what sharpening the reading from 20 to 10 voxels earns. left: mean R2 of lesion position / of anatomy still in the code, T1 then FLAIR
+  weighted: the critic refitted to each code, one weight per unit inside the cosine (warm.py --critic-weights)
+    code                   sets        loss     e 0     e 5    e 10    e 20    e 30  20->10 | left: position, anatomy
+    as trained             uniform    1.790 +0.3594 +0.3072 +0.1173 -0.2841 -0.4270 +0.4014 | 0.53/0.54, 0.90/0.91
+                           neighbour  1.004 +0.1620 +0.0466 -0.0890 -0.2502 -0.3433 +0.1611
+    as trained, weighted   uniform    1.660 +0.4342 +0.3256 +0.1306 +0.0146 +0.0043 +0.1160 | 0.53/0.54, 0.90/0.91
+                           neighbour  0.994 +0.2002 +0.0519 +0.0099 +0.0035 -0.0009 +0.0064
+                           the new unit's weight over the mean weight, e = 0 ... 30: uniform 2.69 1.76 0.67 0.14 0.07; neighbour 2.21 0.78 0.20 0.08 0.04
+    position removed       uniform    1.432 +0.3265 +0.2634 +0.0100 -0.4499 -0.6549 +0.4598 | -0.00/-0.01, 0.54/0.55
+                           neighbour  0.882 +0.1384 +0.1040 -0.0167 -0.2086 -0.3313 +0.1919
+    anatomy removed        uniform    3.306 +0.4732 +0.4039 +0.1507 -0.2223 -0.3960 +0.3729 | 0.02/0.02, -0.00/-0.00
+                           neighbour  6.044 +0.9757 +0.7586 +0.3624 +0.0671 -0.0906 +0.2953
+    both removed           uniform    3.398 +0.6861 +0.5751 +0.2655 -0.3144 -0.5057 +0.5800 | -0.00/-0.00, -0.00/-0.00
+                           neighbour  5.603 +0.9350 +0.7389 +0.4416 +0.0263 -0.0365 +0.4153
+    both removed, weighted uniform    3.269 +0.9932 +0.6312 +0.2510 +0.0353 +0.0184 +0.2157 | -0.00/-0.00, -0.00/-0.00
+                           neighbour  5.357 +1.8939 +0.9599 +0.4118 +0.1179 +0.0906 +0.2938
+                           the new unit's weight over the mean weight, e = 0 ... 30: uniform 4.01 2.20 0.79 0.16 0.08; neighbour 6.67 2.68 1.08 0.41 0.38
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k  step 20000, 1000 test subjects, bank bank_causal_nofield_fixedpos
+  lesion volume SD 31.0 vox; the other true latents explain 0.59 of its variance, leaving an own part of SD 19.9 vox (burden latent vs volume: Spearman 1.000)
+  e: volume-reading error in voxels, from own R2 (features + the volume the other latents predict), own R2 = SD^2 / (SD^2 + e^2)
+  alone: own R2 from the features only; floor e: the untrained twin's; by size: e in the smallest / middle / largest third of lesions
+    stage   view       e own R2  alone | floor e | raw R2 |            e by size | views: reading r, shared error r
+    image   t1      21.4   0.46   0.46 |       - |   0.35 |   20.6 / 21.7 / 24.1 | +0.69, +0.33
+    image   flair   15.3   0.63   0.59 |       - |   0.54 |   14.8 / 17.5 / 14.9
+    map     t1      18.9   0.52   0.51 |       - |   0.76 |   19.5 / 19.5 / 19.4 | +0.62, +0.20
+    map     flair   18.8   0.53   0.51 |     >99 |   0.73 |   17.6 / 20.7 / 22.0
+    gap     t1      10.2   0.79   0.75 |       - |   0.91 |    8.9 / 10.8 / 11.5 | +0.86, +0.26
+    gap     flair    8.5   0.84   0.75 |     >99 |   0.93 |    8.5 /  8.9 /  8.5
+    pooled  t1      11.4   0.75   0.65 |     >99 |   0.90 |   10.8 / 12.1 / 11.5 | +0.83, +0.29
+    pooled  flair   11.1   0.76   0.63 |     >99 |   0.91 |   11.1 / 11.3 / 11.1
+    code    t1      15.5   0.62   0.36 |     >99 |   0.85 |   14.4 / 17.5 / 14.9 | +0.89, +0.71
+    code    flair   14.7   0.65   0.39 |       - |   0.86 |   14.7 / 15.4 / 14.7
+    size thirds are of the volume the other latents predict (not the volume itself, which would tie own to it); mean lesion volume 64 / 80 / 116 voxels
+  price: drop in the run's loss (nats) when one unit holding the own part, read with error e, joins the code.
+  20->10: what sharpening the reading from 20 to 10 voxels earns. left: mean R2 of lesion position / of anatomy still in the code, T1 then FLAIR
+  weighted: the critic refitted to each code, one weight per unit inside the cosine (warm.py --critic-weights)
+    code                   sets        loss     e 0     e 5    e 10    e 20    e 30  20->10 | left: position, anatomy
+    as trained             uniform    2.242 +0.5135 +0.4367 +0.1700 -0.4043 -0.5762 +0.5744 | 0.45/0.46, 0.85/0.86
+                           neighbour  0.962 +0.2443 +0.0794 -0.0540 -0.2982 -0.4585 +0.2442
+    as trained, weighted   uniform    2.158 +0.6408 +0.4779 +0.2034 +0.0284 +0.0136 +0.1749 | 0.45/0.46, 0.85/0.86
+                           neighbour  0.953 +0.2781 +0.0923 +0.0427 +0.0103 +0.0000 +0.0324
+                           the new unit's weight over the mean weight, e = 0 ... 30: uniform 2.78 1.71 0.65 0.15 0.09; neighbour 1.92 0.75 0.33 0.14 0.04
+    position removed       uniform    1.467 +0.3769 +0.2834 -0.0527 -0.6824 -0.8916 +0.6297 | -0.00/-0.00, 0.52/0.53
+                           neighbour  0.932 +0.2401 +0.1623 -0.0093 -0.2541 -0.4513 +0.2448
+    anatomy removed        uniform    4.160 +0.6774 +0.5651 +0.2899 -0.2026 -0.3757 +0.4925 | 0.02/0.03, -0.00/-0.00
+                           neighbour  7.311 +1.4348 +1.1380 +0.6700 +0.2396 +0.0373 +0.4304
+    both removed           uniform    4.775 +1.1864 +0.9963 +0.5507 -0.3289 -0.5509 +0.8797 | -0.01/-0.00, -0.00/-0.00
+                           neighbour  7.345 +1.4326 +1.2450 +0.9075 +0.3450 +0.1567 +0.5625
+    both removed, weighted uniform    4.587 +1.6334 +1.0939 +0.5130 +0.1041 +0.0664 +0.4089 | -0.01/-0.00, -0.00/-0.00
+                           neighbour  7.045 +2.8988 +1.7979 +0.9419 +0.3389 +0.2334 +0.6030
+                           the new unit's weight over the mean weight, e = 0 ... 30: uniform 3.96 2.11 0.82 0.19 0.11; neighbour 6.63 3.46 1.58 0.61 0.45
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k  step 20000, 1000 test subjects, bank bank_causal_nofield_fixedpos
+  lesion volume SD 31.0 vox; the other true latents explain 0.59 of its variance, leaving an own part of SD 19.9 vox (burden latent vs volume: Spearman 1.000)
+  e: volume-reading error in voxels, from own R2 (features + the volume the other latents predict), own R2 = SD^2 / (SD^2 + e^2)
+  alone: own R2 from the features only; floor e: the untrained twin's; by size: e in the smallest / middle / largest third of lesions
+    stage   view       e own R2  alone | floor e | raw R2 |            e by size | views: reading r, shared error r
+    image   t1      21.4   0.46   0.46 |       - |   0.35 |   20.6 / 21.7 / 24.1 | +0.69, +0.33
+    image   flair   15.3   0.63   0.59 |       - |   0.54 |   14.8 / 17.5 / 14.9
+    map     t1      23.3   0.42   0.42 |       - |   0.71 |   22.4 / 22.8 / 31.7 | +0.58, +0.20
+    map     flair   18.7   0.53   0.51 |     >99 |   0.74 |   16.6 / 19.3 / 29.8
+    gap     t1       9.3   0.82   0.80 |       - |   0.92 |    9.2 / 10.0 /  8.7 | +0.89, +0.31
+    gap     flair    7.7   0.87   0.82 |     >99 |   0.93 |    7.5 /  8.1 /  7.7
+    pooled  t1      11.4   0.75   0.71 |     >99 |   0.89 |   11.3 / 12.3 / 11.0 | +0.84, +0.26
+    pooled  flair    9.4   0.82   0.77 |     >99 |   0.90 |    9.2 /  9.4 / 10.7
+    code    t1      11.6   0.75   0.65 |     >99 |   0.87 |   11.1 / 11.3 / 13.3 | +0.90, +0.60
+    code    flair   10.7   0.77   0.67 |       - |   0.89 |    9.8 /  9.9 / 13.9
+    size thirds are of the volume the other latents predict (not the volume itself, which would tie own to it); mean lesion volume 64 / 80 / 116 voxels
+  price: drop in the run's loss (nats) when one unit holding the own part, read with error e, joins the code.
+  20->10: what sharpening the reading from 20 to 10 voxels earns. left: mean R2 of lesion position / of anatomy still in the code, T1 then FLAIR
+  weighted: the critic refitted to each code, one weight per unit inside the cosine (warm.py --critic-weights)
+    code                   sets        loss     e 0     e 5    e 10    e 20    e 30  20->10 | left: position, anatomy
+    as trained             uniform    1.709 +0.4280 +0.3659 +0.1424 -0.3229 -0.4965 +0.4653 | 0.48/0.48, 0.83/0.84
+                           neighbour  1.311 +0.2505 +0.1263 -0.0818 -0.3315 -0.5018 +0.2497
+    as trained, weighted   uniform    1.652 +0.5168 +0.3914 +0.1681 +0.0241 +0.0090 +0.1440 | 0.48/0.48, 0.83/0.84
+                           neighbour  1.291 +0.3010 +0.1254 +0.0310 +0.0091 -0.0005 +0.0218
+                           the new unit's weight over the mean weight, e = 0 ... 30: uniform 2.48 1.64 0.64 0.16 0.09; neighbour 2.15 0.91 0.28 0.10 0.04
+    position removed       uniform    1.266 +0.3415 +0.2575 -0.0400 -0.5707 -0.7948 +0.5306 | -0.00/-0.00, 0.49/0.49
+                           neighbour  1.223 +0.2553 +0.1921 -0.0242 -0.2934 -0.4942 +0.2691
+    anatomy removed        uniform    4.116 +0.6854 +0.5824 +0.2465 -0.2201 -0.4080 +0.4666 | 0.02/0.02, -0.00/-0.00
+                           neighbour  7.484 +1.2762 +1.0499 +0.5986 +0.2096 -0.0132 +0.3890
+    both removed           uniform    5.360 +1.2033 +1.0495 +0.6018 -0.1451 -0.4065 +0.7469 | -0.01/-0.01, -0.01/-0.01
+                           neighbour  7.777 +1.3346 +1.1524 +0.8274 +0.2887 +0.0330 +0.5387
+    both removed, weighted uniform    5.093 +1.7795 +1.1876 +0.5033 +0.1229 +0.0833 +0.3805 | -0.01/-0.01, -0.01/-0.01
+                           neighbour  7.497 +2.9509 +1.7106 +0.8208 +0.2903 +0.1716 +0.5305
+                           the new unit's weight over the mean weight, e = 0 ... 30: uniform 4.74 2.56 0.90 0.23 0.14; neighbour 7.43 3.86 1.57 0.60 0.45

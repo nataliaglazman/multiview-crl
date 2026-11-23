@@ -1,0 +1,214 @@
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2
+assessing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c8_20k
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k  step 20000, 10 units, bank bank_causal_nofield_fixedpos; anchors brain, ventricle, thickness, temporal as their measured values (label noise 0.0)
+  truth among the anchors, concealed factors latent: brain - thickness, brain - ventricle, temporal - thickness, temporal - ventricle (induced); the SCM's edges touching a concealed factor: burden -> temporal, temporal -> sulcal, ventricle -> burden
+  ceilings, PC on the test subjects' true variables (300 rows x 20):
+    the anchors: F1 0.75 ± 0.00; truth edges held brain - thickness 1.00, brain - ventricle 1.00, temporal - thickness 1.00, temporal - ventricle (induced) 0.00; false edges per graph 1.0
+    all seven factors, against the SCM: F1 0.83 ± 0.02; edges held brain - thickness 1.00, brain - ventricle 1.00, burden - temporal 0.00, burden - ventricle 1.00, sulcal - temporal 1.00, temporal - thickness 1.00; temporal - ventricle (induced) 0.00; false edges per graph 1.1
+  trained code:
+    step 1, anchored slots, test R2 T1 / FLAIR: brain 0.95 / 0.95, ventricle 0.93 / 0.92, thickness 0.91 / 0.92, temporal 0.91 / 0.91
+    step 2, novel block: 3 components. Each shared direction taken: held-out agreement (null95), and R2 from the other view's anchors and counted factors (dropped at 0.2 or above): 0.99 (0.10) R2 0.41 dropped, 0.99 (0.09) R2 0.10, 0.96 (0.11) R2 0.66 dropped, 0.92 (0.10) R2 0.01, 0.89 (0.11) R2 0.21 dropped, 0.87 (0.09) R2 0.05, 0.71 (0.09) R2 0.23 dropped, 0.63 (0.11) R2 0.29 dropped; stopped at 0.48 (0.09)
+    block content, R2 of supervised readouts (scoring only), T1 / FLAIR:
+      burden own   full code 0.60 / 0.58, block 0.58 / 0.58, dropped directions 0.03 / 0.03
+      lr own       full code 0.91 / 0.93, block 0.73 / 0.74, dropped directions 0.14 / 0.14
+      sulcal own   full code 0.72 / 0.77, block 0.60 / 0.60, dropped directions 0.03 / 0.05
+      lesion x     full code 0.39 / 0.41, block 0.07 / 0.07, dropped directions 0.04 / 0.03
+      lesion y     full code 0.73 / 0.74, block 0.05 / 0.06, dropped directions 0.04 / 0.04
+      lesion z     full code 0.48 / 0.46, block 0.03 / 0.03, dropped directions 0.04 / 0.03
+    step 2 trace, each direction examined, with the targets it correlates with at |r| .3 or more:
+       1 0.99 R2 0.41 dropped: lr own 0.37 / 0.37
+       2 0.99 R2 0.10 counted: lr own 0.86 / 0.86
+       3 0.96 R2 0.66 dropped: -
+       4 0.92 R2 0.01 counted: burden own 0.72 / 0.73
+       5 0.89 R2 0.21 dropped: -
+       6 0.87 R2 0.05 counted: sulcal own 0.73 / 0.73, burden own 0.30 / 0.25
+       7 0.71 R2 0.23 dropped: -
+       8 0.63 R2 0.29 dropped: -
+       9 0.48 stop: -
+    step 3, each component named after a concealed target, |r| (random rotations of the block: mean |r| 0.66 / 0.67, T1 / FLAIR):
+      T1    cca: lr own 0.86, burden own 0.72, sulcal own 0.73
+      T1    ica: lr own 0.85, sulcal own 0.62, burden own 0.61
+      FLAIR cca: lr own 0.86, burden own 0.73, sulcal own 0.73
+      FLAIR ica: lr own 0.85, sulcal own 0.74, burden own 0.72
+    step 4, PC on the anchors and the components, T1 / FLAIR: F1 against the anchors' truth 0.73 ± 0.04 / 0.73 ± 0.03
+      truth edges held brain - thickness 1.00 / 1.00, brain - ventricle 1.00 / 1.00, temporal - thickness 1.00 / 1.00, temporal - ventricle (induced) 0.00 / 0.00
+      false edges among the anchors per graph 1.0 / 1.0; edges touching a component per graph 0.2 / 0.2 (all false; chance at most about 0.8)
+  untrained twin (floor):
+    step 1, anchored slots, test R2 T1 / FLAIR: brain 0.48 / 0.56, ventricle 0.23 / 0.32, thickness 0.33 / 0.38, temporal 0.18 / 0.15
+    step 2, novel block: 0 components. Each shared direction taken: held-out agreement (null95), and R2 from the other view's anchors and counted factors (dropped at 0.2 or above): none; stopped at 0.26 (0.10)
+    block content, R2 of supervised readouts (scoring only), T1 / FLAIR:
+      burden own   full code 0.00 / 0.00, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lr own       full code -0.01 / -0.00, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      sulcal own   full code 0.00 / -0.00, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion x     full code 0.07 / 0.16, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion y     full code 0.38 / 0.37, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion z     full code 0.20 / 0.27, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+    step 2 trace, each direction examined, with the targets it correlates with at |r| .3 or more:
+       1 0.26 stop: -
+    step 3, each component named after a concealed target, |r| (random rotations of the block: mean |r| -, T1 / FLAIR):
+      T1    cca: none
+      T1    ica: none
+      FLAIR cca: none
+      FLAIR ica: none
+    step 4, PC on the anchors and the components, T1 / FLAIR: F1 against the anchors' truth 0.75 ± 0.00 / 0.75 ± 0.00
+      truth edges held brain - thickness 1.00 / 1.00, brain - ventricle 1.00 / 1.00, temporal - thickness 1.00 / 1.00, temporal - ventricle (induced) 0.00 / 0.00
+      false edges among the anchors per graph 1.0 / 1.0; edges touching a component per graph 0.0 / 0.0 (all false; chance at most about 0.0)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2  step 20000, 10 units, bank bank_causal_nofield_fixedpos; anchors brain, ventricle, thickness, temporal as their measured values (label noise 0.0)
+  truth among the anchors, concealed factors latent: brain - thickness, brain - ventricle, temporal - thickness, temporal - ventricle (induced); the SCM's edges touching a concealed factor: burden -> temporal, temporal -> sulcal, ventricle -> burden
+  ceilings, PC on the test subjects' true variables (300 rows x 20):
+    the anchors: F1 0.75 ± 0.00; truth edges held brain - thickness 1.00, brain - ventricle 1.00, temporal - thickness 1.00, temporal - ventricle (induced) 0.00; false edges per graph 1.0
+    all seven factors, against the SCM: F1 0.83 ± 0.02; edges held brain - thickness 1.00, brain - ventricle 1.00, burden - temporal 0.00, burden - ventricle 1.00, sulcal - temporal 1.00, temporal - thickness 1.00; temporal - ventricle (induced) 0.00; false edges per graph 1.1
+  trained code:
+    step 1, anchored slots, test R2 T1 / FLAIR: brain 0.94 / 0.94, ventricle 0.90 / 0.90, thickness 0.91 / 0.92, temporal 0.89 / 0.89
+    step 2, novel block: 2 components. Each shared direction taken: held-out agreement (null95), and R2 from the other view's anchors and counted factors (dropped at 0.2 or above): 0.99 (0.10) R2 0.01, 0.98 (0.10) R2 0.45 dropped, 0.96 (0.10) R2 0.26 dropped, 0.92 (0.10) R2 0.00, 0.92 (0.09) R2 0.23 dropped, 0.89 (0.09) R2 0.30 dropped, 0.83 (0.10) R2 0.35 dropped, 0.73 (0.09) R2 0.29 dropped; stopped at 0.38 (0.10)
+    block content, R2 of supervised readouts (scoring only), T1 / FLAIR:
+      burden own   full code 0.60 / 0.62, block 0.24 / 0.23, dropped directions 0.40 / 0.42
+      lr own       full code 0.92 / 0.92, block 0.88 / 0.88, dropped directions 0.03 / 0.03
+      sulcal own   full code 0.72 / 0.77, block 0.48 / 0.51, dropped directions 0.25 / 0.25
+      lesion x     full code 0.32 / 0.32, block 0.10 / 0.09, dropped directions 0.01 / 0.02
+      lesion y     full code 0.70 / 0.70, block 0.05 / 0.05, dropped directions 0.05 / 0.05
+      lesion z     full code 0.47 / 0.46, block 0.04 / 0.03, dropped directions 0.04 / 0.03
+    step 2 trace, each direction examined, with the targets it correlates with at |r| .3 or more:
+       1 0.99 R2 0.01 counted: lr own 0.94 / 0.94, lesion x 0.31 / 0.31
+       2 0.98 R2 0.45 dropped: -
+       3 0.96 R2 0.26 dropped: -
+       4 0.92 R2 0.00 counted: sulcal own 0.69 / 0.71, burden own 0.50 / 0.49
+       5 0.92 R2 0.23 dropped: burden own 0.53 / 0.54, sulcal own 0.44 / 0.45
+       6 0.89 R2 0.30 dropped: burden own 0.35 / 0.40
+       7 0.83 R2 0.35 dropped: -
+       8 0.73 R2 0.29 dropped: -
+       9 0.38 stop: -
+    step 3, each component named after a concealed target, |r| (random rotations of the block: mean |r| 0.78 / 0.79, T1 / FLAIR):
+      T1    cca: lr own 0.94, sulcal own 0.69
+      T1    ica: sulcal own 0.69, lr own 0.94
+      FLAIR cca: lr own 0.94, sulcal own 0.71
+      FLAIR ica: sulcal own 0.71, lr own 0.93
+    step 4, PC on the anchors and the components, T1 / FLAIR: F1 against the anchors' truth 0.73 ± 0.03 / 0.75 ± 0.02
+      truth edges held brain - thickness 1.00 / 1.00, brain - ventricle 1.00 / 1.00, temporal - thickness 1.00 / 1.00, temporal - ventricle (induced) 0.00 / 0.00
+      false edges among the anchors per graph 1.0 / 1.0; edges touching a component per graph 0.2 / 0.1 (all false; chance at most about 0.5)
+  untrained twin (floor):
+    step 1, anchored slots, test R2 T1 / FLAIR: brain 0.43 / 0.60, ventricle 0.23 / 0.40, thickness 0.30 / 0.48, temporal 0.18 / 0.14
+    step 2, novel block: 0 components. Each shared direction taken: held-out agreement (null95), and R2 from the other view's anchors and counted factors (dropped at 0.2 or above): none; stopped at 0.17 (0.10)
+    block content, R2 of supervised readouts (scoring only), T1 / FLAIR:
+      burden own   full code -0.00 / -0.00, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lr own       full code 0.00 / 0.01, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      sulcal own   full code 0.00 / -0.00, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion x     full code 0.07 / 0.20, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion y     full code 0.30 / 0.39, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion z     full code 0.16 / 0.24, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+    step 2 trace, each direction examined, with the targets it correlates with at |r| .3 or more:
+       1 0.17 stop: -
+    step 3, each component named after a concealed target, |r| (random rotations of the block: mean |r| -, T1 / FLAIR):
+      T1    cca: none
+      T1    ica: none
+      FLAIR cca: none
+      FLAIR ica: none
+    step 4, PC on the anchors and the components, T1 / FLAIR: F1 against the anchors' truth 0.75 ± 0.00 / 0.75 ± 0.00
+      truth edges held brain - thickness 1.00 / 1.00, brain - ventricle 1.00 / 1.00, temporal - thickness 1.00 / 1.00, temporal - ventricle (induced) 0.00 / 0.00
+      false edges among the anchors per graph 1.0 / 1.0; edges touching a component per graph 0.0 / 0.0 (all false; chance at most about 0.0)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k  step 20000, 8 units, bank bank_causal_nofield_fixedpos; anchors brain, ventricle, thickness, temporal as their measured values (label noise 0.0)
+  truth among the anchors, concealed factors latent: brain - thickness, brain - ventricle, temporal - thickness, temporal - ventricle (induced); the SCM's edges touching a concealed factor: burden -> temporal, temporal -> sulcal, ventricle -> burden
+  ceilings, PC on the test subjects' true variables (300 rows x 20):
+    the anchors: F1 0.75 ± 0.00; truth edges held brain - thickness 1.00, brain - ventricle 1.00, temporal - thickness 1.00, temporal - ventricle (induced) 0.00; false edges per graph 1.0
+    all seven factors, against the SCM: F1 0.83 ± 0.02; edges held brain - thickness 1.00, brain - ventricle 1.00, burden - temporal 0.00, burden - ventricle 1.00, sulcal - temporal 1.00, temporal - thickness 1.00; temporal - ventricle (induced) 0.00; false edges per graph 1.1
+  trained code:
+    step 1, anchored slots, test R2 T1 / FLAIR: brain 0.93 / 0.94, ventricle 0.82 / 0.81, thickness 0.91 / 0.92, temporal 0.89 / 0.88
+    step 2, novel block: 4 components. Each shared direction taken: held-out agreement (null95), and R2 from the other view's anchors and counted factors (dropped at 0.2 or above): 0.99 (0.09) R2 0.50 dropped, 0.98 (0.09) R2 0.03, 0.96 (0.10) R2 0.37 dropped, 0.90 (0.10) R2 0.01, 0.88 (0.09) R2 0.09, 0.75 (0.11) R2 0.13, 0.71 (0.09) R2 0.39 dropped; stopped at 0.48 (0.10)
+    block content, R2 of supervised readouts (scoring only), T1 / FLAIR:
+      burden own   full code 0.30 / 0.32, block 0.48 / 0.51, dropped directions 0.05 / 0.06
+      lr own       full code 0.84 / 0.84, block 0.73 / 0.73, dropped directions 0.12 / 0.10
+      sulcal own   full code 0.68 / 0.73, block 0.70 / 0.74, dropped directions 0.02 / 0.02
+      lesion x     full code 0.22 / 0.25, block 0.13 / 0.15, dropped directions 0.00 / 0.01
+      lesion y     full code 0.69 / 0.69, block 0.01 / 0.02, dropped directions 0.08 / 0.11
+      lesion z     full code 0.45 / 0.46, block 0.01 / 0.01, dropped directions 0.05 / 0.06
+    step 2 trace, each direction examined, with the targets it correlates with at |r| .3 or more:
+       1 0.99 R2 0.50 dropped: -
+       2 0.98 R2 0.03 counted: lr own 0.85 / 0.85
+       3 0.96 R2 0.37 dropped: lr own 0.34 / 0.32
+       4 0.90 R2 0.01 counted: sulcal own 0.82 / 0.85
+       5 0.88 R2 0.09 counted: burden own 0.68 / 0.71
+       6 0.75 R2 0.13 counted: -
+       7 0.71 R2 0.39 dropped: -
+       8 0.48 stop: -
+    step 3, each component named after a concealed target, |r| (random rotations of the block: mean |r| 0.53 / 0.55, T1 / FLAIR):
+      T1    cca: lr own 0.85, sulcal own 0.82, burden own 0.68, lesion x 0.19
+      T1    ica: burden own 0.68, sulcal own 0.80, lr own 0.81, lesion x 0.16
+      FLAIR cca: lr own 0.85, sulcal own 0.85, burden own 0.71, lesion x 0.22
+      FLAIR ica: lr own 0.67, burden own 0.70, sulcal own 0.68, lesion x 0.19
+    step 4, PC on the anchors and the components, T1 / FLAIR: F1 against the anchors' truth 0.67 ± 0.07 / 0.70 ± 0.06
+      truth edges held brain - thickness 1.00 / 1.00, brain - ventricle 1.00 / 1.00, temporal - thickness 1.00 / 1.00, temporal - ventricle (induced) 0.00 / 0.00
+      false edges among the anchors per graph 1.0 / 1.0; edges touching a component per graph 1.0 / 0.6 (all false; chance at most about 1.1)
+  untrained twin (floor):
+    step 1, anchored slots, test R2 T1 / FLAIR: brain 0.45 / 0.48, ventricle 0.20 / 0.22, thickness 0.29 / 0.30, temporal 0.19 / 0.15
+    step 2, novel block: 0 components. Each shared direction taken: held-out agreement (null95), and R2 from the other view's anchors and counted factors (dropped at 0.2 or above): none; stopped at 0.21 (0.09)
+    block content, R2 of supervised readouts (scoring only), T1 / FLAIR:
+      burden own   full code 0.00 / -0.01, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lr own       full code -0.00 / -0.00, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      sulcal own   full code 0.00 / -0.00, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion x     full code 0.08 / 0.14, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion y     full code 0.38 / 0.39, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion z     full code 0.20 / 0.26, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+    step 2 trace, each direction examined, with the targets it correlates with at |r| .3 or more:
+       1 0.21 stop: -
+    step 3, each component named after a concealed target, |r| (random rotations of the block: mean |r| -, T1 / FLAIR):
+      T1    cca: none
+      T1    ica: none
+      FLAIR cca: none
+      FLAIR ica: none
+    step 4, PC on the anchors and the components, T1 / FLAIR: F1 against the anchors' truth 0.75 ± 0.00 / 0.75 ± 0.00
+      truth edges held brain - thickness 1.00 / 1.00, brain - ventricle 1.00 / 1.00, temporal - thickness 1.00 / 1.00, temporal - ventricle (induced) 0.00 / 0.00
+      false edges among the anchors per graph 1.0 / 1.0; edges touching a component per graph 0.0 / 0.0 (all false; chance at most about 0.0)
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c8_20k  step 20000, 8 units, bank bank_causal_nofield_fixedpos; anchors brain, ventricle, thickness, temporal as their measured values (label noise 0.0)
+  truth among the anchors, concealed factors latent: brain - thickness, brain - ventricle, temporal - thickness, temporal - ventricle (induced); the SCM's edges touching a concealed factor: burden -> temporal, temporal -> sulcal, ventricle -> burden
+  ceilings, PC on the test subjects' true variables (300 rows x 20):
+    the anchors: F1 0.75 ± 0.00; truth edges held brain - thickness 1.00, brain - ventricle 1.00, temporal - thickness 1.00, temporal - ventricle (induced) 0.00; false edges per graph 1.0
+    all seven factors, against the SCM: F1 0.83 ± 0.02; edges held brain - thickness 1.00, brain - ventricle 1.00, burden - temporal 0.00, burden - ventricle 1.00, sulcal - temporal 1.00, temporal - thickness 1.00; temporal - ventricle (induced) 0.00; false edges per graph 1.1
+  trained code:
+    step 1, anchored slots, test R2 T1 / FLAIR: brain 0.57 / 0.56, ventricle 0.64 / 0.59, thickness 0.60 / 0.58, temporal 0.73 / 0.76
+    step 2, novel block: 6 components. Each shared direction taken: held-out agreement (null95), and R2 from the other view's anchors and counted factors (dropped at 0.2 or above): 0.98 (0.09) R2 0.00, 0.94 (0.11) R2 0.05, 0.92 (0.11) R2 0.14, 0.92 (0.09) R2 0.49 dropped, 0.84 (0.10) R2 0.05, 0.80 (0.10) R2 0.44 dropped, 0.62 (0.11) R2 0.17, 0.58 (0.10) R2 -0.02; stopped: the code has no variance left
+    block content, R2 of supervised readouts (scoring only), T1 / FLAIR:
+      burden own   full code 0.41 / 0.40, block 0.54 / 0.55, dropped directions 0.05 / 0.04
+      lr own       full code 0.74 / 0.76, block 0.78 / 0.78, dropped directions 0.01 / 0.01
+      sulcal own   full code 0.33 / 0.36, block 0.59 / 0.58, dropped directions 0.01 / -0.00
+      lesion x     full code 0.23 / 0.30, block 0.12 / 0.14, dropped directions 0.00 / -0.00
+      lesion y     full code 0.62 / 0.60, block 0.05 / 0.05, dropped directions 0.05 / 0.07
+      lesion z     full code 0.40 / 0.39, block 0.03 / 0.03, dropped directions 0.03 / 0.03
+    step 2 trace, each direction examined, with the targets it correlates with at |r| .3 or more:
+       1 0.98 R2 0.00 counted: lr own 0.83 / 0.84
+       2 0.94 R2 0.05 counted: burden own 0.68 / 0.69
+       3 0.92 R2 0.14 counted: -
+       4 0.92 R2 0.49 dropped: -
+       5 0.84 R2 0.05 counted: sulcal own 0.66 / 0.65
+       6 0.80 R2 0.44 dropped: -
+       7 0.62 R2 0.17 counted: -
+       8 0.58 R2 -0.02 counted: -
+    step 3, each component named after a concealed target, |r| (random rotations of the block: mean |r| 0.33 / 0.33, T1 / FLAIR):
+      T1    cca: lr own 0.83, burden own 0.68, lesion x 0.15, sulcal own 0.66, lesion z 0.02, lesion y 0.06
+      T1    ica: sulcal own 0.70, burden own 0.67, lr own 0.87, lesion z 0.06, lesion x 0.07, lesion y 0.05
+      FLAIR cca: lr own 0.84, burden own 0.69, lesion y 0.10, sulcal own 0.65, lesion x 0.11, lesion z 0.06
+      FLAIR ica: lesion z 0.06, burden own 0.69, lesion y 0.04, sulcal own 0.71, lesion x 0.16, lr own 0.88
+    step 4, PC on the anchors and the components, T1 / FLAIR: F1 against the anchors' truth 0.60 ± 0.06 / 0.66 ± 0.08
+      truth edges held brain - thickness 1.00 / 1.00, brain - ventricle 1.00 / 1.00, temporal - thickness 1.00 / 1.00, temporal - ventricle (induced) 0.00 / 0.00
+      false edges among the anchors per graph 1.0 / 1.0; edges touching a component per graph 2.1 / 1.3 (all false; chance at most about 2.0)
+  untrained twin (floor):
+    step 1, anchored slots, test R2 T1 / FLAIR: brain 0.45 / 0.48, ventricle 0.20 / 0.22, thickness 0.29 / 0.30, temporal 0.19 / 0.15
+    step 2, novel block: 0 components. Each shared direction taken: held-out agreement (null95), and R2 from the other view's anchors and counted factors (dropped at 0.2 or above): none; stopped at 0.21 (0.09)
+    block content, R2 of supervised readouts (scoring only), T1 / FLAIR:
+      burden own   full code 0.00 / -0.01, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lr own       full code -0.00 / -0.00, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      sulcal own   full code 0.00 / -0.00, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion x     full code 0.08 / 0.14, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion y     full code 0.38 / 0.39, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+      lesion z     full code 0.20 / 0.26, block 0.00 / 0.00, dropped directions 0.00 / 0.00
+    step 2 trace, each direction examined, with the targets it correlates with at |r| .3 or more:
+       1 0.21 stop: -
+    step 3, each component named after a concealed target, |r| (random rotations of the block: mean |r| -, T1 / FLAIR):
+      T1    cca: none
+      T1    ica: none
+      FLAIR cca: none
+      FLAIR ica: none
+    step 4, PC on the anchors and the components, T1 / FLAIR: F1 against the anchors' truth 0.75 ± 0.00 / 0.75 ± 0.00
+      truth edges held brain - thickness 1.00 / 1.00, brain - ventricle 1.00 / 1.00, temporal - thickness 1.00 / 1.00, temporal - ventricle (induced) 0.00 / 0.00
+      false edges among the anchors per graph 1.0 / 1.0; edges touching a component per graph 0.0 / 0.0 (all false; chance at most about 0.0)

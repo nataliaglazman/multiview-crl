@@ -1,0 +1,44 @@
+
+Row                                                                                                 reduce  chan     F1  null F1  learned  SHD  null SHD    MCC  match |r|       mix F1      mix MCC
+--------------------------------------------------------------------------------------------------  ------  ----  -----  -------  -------  ---  --------  -----  ---------  -----------  -----------
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k           none       8  0.400    0.334   +0.066    9       9.5  0.618  0.38-0.85  0.465±0.156  0.550±0.052
+truth-ceiling                                                                                       none       7  0.833    0.267   +0.567    2       8.8  1.000  1.00-1.00            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k-floor     none       8  0.421    0.366   +0.055   11      10.5  0.282  0.04-0.55            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k        none       8  0.714    0.330   +0.385    4       9.1  0.663  0.50-0.87  0.464±0.158  0.598±0.041
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k-floor  none       8  0.421    0.366   +0.055   11      10.5  0.282  0.04-0.55            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k           none       8  0.500    0.335   +0.165    8      10.0  0.618  0.23-0.90  0.419±0.107  0.590±0.044
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k-floor     none       8  0.421    0.366   +0.055   11      10.5  0.282  0.04-0.55            —            —
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k          none      10  0.706    0.337   +0.369    5       9.5  0.628  0.34-0.85  0.407±0.116  0.608±0.039
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k-floor    none      10  0.353    0.331   +0.021   11       9.6  0.313  0.04-0.55            —            —
+
+No label built the graph: PC ran on the channels. Labels only NAMED the nodes afterwards,
+by one Hungarian match on |corr|. 'null' holds that graph fixed and randomises the naming,
+so a 'learned' at or below 0 means the recovered structure is not aligned to the truth.
+'match |r|' is the range of matched correlations: a low one means the node a factor was
+scored at barely tracks it, whatever the F1 says. 'MCC' is their mean, the channel-wise MCC.
+With multiple alphas, F1 and SHD use each row's best-F1 alpha, selected against the truth (optimistic).
+The JSON alpha_sweep retains every alpha for comparisons at a prespecified threshold.
+'mix' reruns the panel on random mixings of the row's channels (mean±sd over draws): what the
+same block gives with no rule for choosing its channels, with the same best-alpha selection.
+Only the recorded columns are mixed; the other channels stay fixed. Read F1 and MCC against it.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k: 2 of 11 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k-floor: 1 of 14 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k: 2 of 10 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k-floor: 1 of 14 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k: 2 of 12 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k-floor: 1 of 14 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k: 7 of 18 recovered edges touch an unmatched channel and are outside the score.
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k-floor: 7 of 18 recovered edges touch an unmatched channel and are outside the score.
+
+Per-factor match quality (best channel for each factor, |corr|):
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k: brain 0.85, ventricle 0.76, burden 0.67, thickness 0.78, temporal 0.38, lr 0.49, sulcal 0.40
+  truth-ceiling: brain 1.00, ventricle 1.00, burden 1.00, thickness 1.00, temporal 1.00, lr 1.00, sulcal 1.00
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k-floor: brain 0.55, ventricle 0.31, burden 0.27, thickness 0.42, temporal 0.32, lr 0.04, sulcal 0.07
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k: brain 0.87, ventricle 0.79, burden 0.57, thickness 0.74, temporal 0.67, lr 0.50, sulcal 0.50
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k-floor: brain 0.55, ventricle 0.31, burden 0.27, thickness 0.42, temporal 0.32, lr 0.04, sulcal 0.07
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k: brain 0.87, ventricle 0.76, burden 0.73, thickness 0.90, temporal 0.54, lr 0.23, sulcal 0.29
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k-floor: brain 0.55, ventricle 0.31, burden 0.27, thickness 0.42, temporal 0.32, lr 0.04, sulcal 0.07
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k: brain 0.79, ventricle 0.76, burden 0.73, thickness 0.85, temporal 0.57, lr 0.36, sulcal 0.34
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k-floor: brain 0.55, ventricle 0.31, burden 0.42, thickness 0.42, temporal 0.32, lr 0.04, sulcal 0.14
+
+Saved JSON to /home/ng24/projects/multiview-crl/out/burden_feasibility_20261102/causal/stage62/discovery_label_free_view2.json
