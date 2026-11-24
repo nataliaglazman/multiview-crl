@@ -1,0 +1,44 @@
+#!/bin/bash -l
+# Fixed/styled training x three readout seeds; all arms reuse each job's frozen bank.
+#SBATCH --job-name=local-scalar
+#SBATCH --output=/scratch/users/%u/%x-%A_%a.out
+#SBATCH --error=/scratch/users/%u/%x-%A_%a.err
+#SBATCH --array=0-5
+#SBATCH --partition=biomed_a100_gpu
+#SBATCH --gres=gpu:1
+#SBATCH --constraint=a100_80g
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --mem=32G
+#SBATCH --cpus-per-task=8
+#SBATCH --time=24:00:00
+set -euo pipefail
+REPO="${ENCODER_REPO:-${SLURM_SUBMIT_DIR:-$PWD}}"
+RUN="${ENCODER_REFERENCE_RUN:-$REPO/results/encoder_ablations_slurm_bio/runs/conv_mlp_s42}"
+PY="${ENCODER_PYTHON:-$HOME/.conda/envs/multiview-env/bin/python}"
+OUTPUT="${LOCAL_SCALAR_RESULTS:-/scratch/users/k24058220/local_scalar}"
+CACHE="${LOCAL_SCALAR_CACHE:-/scratch/users/k24058220/cache/local_scalar}"
+TASK="${SLURM_ARRAY_TASK_ID:-${LOCAL_SCALAR_TASK_ID:-0}}"
+if [[ ! "$TASK" =~ ^[0-5]$ ]]; then echo "Task index must be 0..5" >&2; exit 2; fi
+SEEDS=(42 142 242 42 142 242)
+INTENSITIES=(fixed fixed fixed styled styled styled)
+STAMP="${SLURM_ARRAY_JOB_ID:-preview}_${TASK}"
+COMMAND=("$PY" -m training.local_scalar_experiment --run-dir "$RUN"
+  --out-dir "$OUTPUT/${INTENSITIES[$TASK]}_s${SEEDS[$TASK]}_$STAMP"
+  --seed "${SEEDS[$TASK]}" --train-intensity "${INTENSITIES[$TASK]}"
+  --eval-intensities fixed styled --device cuda --cache-dir "$CACHE")
+if [[ "${1:-}" == "--dry-run" ]]; then
+  shift
+  printf '%q ' "${COMMAND[@]}" "$@"
+  printf '\n'
+  exit 0
+fi
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then echo "Submit with sbatch, or use --dry-run." >&2; exit 2; fi
+cd "$REPO"
+module load anaconda3/2022.10-gcc-13.2.0
+test -x "$PY"
+mkdir -p "$OUTPUT" "$CACHE"
+export PYTHONPATH="$REPO" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 CUBLAS_WORKSPACE_CONFIG=:4096:8
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+export MPLCONFIGDIR="$CACHE/matplotlib" XDG_CACHE_HOME="$CACHE/xdg"
+exec "${COMMAND[@]}" "$@"

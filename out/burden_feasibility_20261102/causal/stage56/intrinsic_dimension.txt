@@ -1,0 +1,71 @@
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c8_20k
+calibration for out/burden_feasibility_20261102/bank_causal_nofield_fixedpos
+out/burden_feasibility_20261102/bank_causal_nofield_fixedpos: calibration on 1000 test subjects
+                                         TwoNN N TwoNN N/2 TwoNN N/4 TwoNN N/8   MLE k10   MLE k20
+    latents (7 factors)                     6.37      6.57      6.61      6.05      6.10      5.83
+    latents (7 + lesion centre)             5.84      5.89      5.73      5.28      5.54      5.39
+    10 latents -> 8 units, noise 0.0        5.54      5.33      5.10      4.98      5.04      4.85
+    10 latents -> 8 units, noise 0.1        6.08      5.68      5.46      5.30      5.33      5.09
+    10 latents -> 8 units, noise 0.3        6.85      6.70      6.41      6.22      6.30      6.01
+    Gaussian, 8 units                       7.64      8.04      7.62      7.55      7.56      7.31
+    10 latents -> 10 units, noise 0.0       5.45      5.39      5.10      5.05      5.19      5.01
+    10 latents -> 10 units, noise 0.1       5.98      5.85      5.53      5.30      5.57      5.29
+    10 latents -> 10 units, noise 0.3       7.94      7.58      7.05      6.74      7.06      6.54
+    Gaussian, 10 units                     10.05     10.08      9.26      8.68      9.10      8.79
+
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k  step 20000, 8 units
+   T1
+    code                                    5.63      5.42      5.12      4.85      5.20      4.95
+    code on the sphere                      5.57      5.42      5.31      4.81      5.32      5.05
+    backbone GAP                            7.08      7.59      6.71      6.43      6.48      6.21
+    twin code                               7.52      7.60      7.45      7.40      7.47      7.17
+    twin GAP                                9.92      9.06      8.10      7.29      7.85      6.90
+   FLAIR
+    code                                    5.58      5.17      5.38      5.06      5.32      5.01
+    code on the sphere                      5.40      5.17      5.49      5.08      5.29      5.08
+    backbone GAP                            6.70      6.56      6.67      6.30      6.45      6.22
+    twin code                               7.69      7.66      7.64      7.19      7.29      6.96
+    twin GAP                                9.51      9.41      8.42      7.13      7.94      6.84
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k  step 20000, 10 units
+   T1
+    code                                    6.23      6.13      5.80      5.07      5.20      4.85
+    code on the sphere                      6.34      6.02      5.82      5.40      5.30      4.99
+    backbone GAP                            7.60      7.52      6.92      6.40      6.68      6.47
+    twin code                               9.28      9.42      9.20      8.59      8.77      8.36
+    twin GAP                                9.92      9.06      8.10      7.29      7.85      6.90
+   FLAIR
+    code                                    5.97      5.71      5.62      5.06      5.29      4.97
+    code on the sphere                      6.31      6.24      5.95      5.40      5.43      5.08
+    backbone GAP                            7.29      7.25      6.99      6.69      6.73      6.47
+    twin code                               8.58      8.90      8.37      8.24      8.40      7.94
+    twin GAP                                9.51      9.41      8.42      7.13      7.94      6.84
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2  step 20000, 10 units
+   T1
+    code                                    6.30      5.94      5.78      5.50      5.53      5.17
+    code on the sphere                      6.47      6.06      5.83      5.42      5.58      5.21
+    backbone GAP                            7.60      7.53      7.04      6.79      6.64      6.33
+    twin code                               9.34      9.53      9.17      9.33      8.94      8.54
+    twin GAP                                9.50      8.88      7.48      7.00      7.78      6.74
+   FLAIR
+    code                                    5.75      5.83      5.69      5.21      5.36      5.15
+    code on the sphere                      5.94      5.79      5.72      5.20      5.42      5.11
+    backbone GAP                            7.57      7.17      7.13      6.62      6.71      6.37
+    twin code                               9.18      8.50      8.23      8.07      8.21      7.94
+    twin GAP                               10.13      8.56      8.00      7.14      7.88      6.89
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c8_20k  step 20000, 8 units
+   T1
+    code                                    5.00      5.07      5.24      5.33      5.27      5.29
+    code on the sphere                      4.79      4.91      5.04      5.17      5.14      5.13
+    backbone GAP                            6.85      7.00      6.65      6.38      6.44      6.18
+    twin code                               7.52      7.60      7.45      7.40      7.47      7.17
+    twin GAP                                9.92      9.06      8.10      7.29      7.85      6.90
+   FLAIR
+    code                                    5.65      5.39      5.42      5.56      5.38      5.38
+    code on the sphere                      5.58      5.21      5.06      5.29      5.12      5.14
+    backbone GAP                            6.78      6.72      6.58      6.50      6.54      6.20
+    twin code                               7.69      7.66      7.64      7.19      7.29      6.96
+    twin GAP                                9.51      9.41      8.42      7.13      7.94      6.84
+

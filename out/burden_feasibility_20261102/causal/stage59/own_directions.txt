@@ -1,0 +1,75 @@
+c9 (causal bank, own parts; 1000 test subjects)
+  T1    spectrum 0.95 0.90 0.82 0.74 0.64 0.60 0.04
+        weakest direction mixes ventricle +0.61, burden -0.56, lr +0.47, temporal +0.26
+        own R2 brain 0.94, ventricle 0.55, burden 0.45, thickness 0.69, temporal 0.76, lr 0.68, sulcal 0.67
+        ventricle-burden plane: best 0.75, worst 0.25, blend +0.19
+        most blended pairs: ventricle-lr +0.21 (worst 0.33); ventricle-burden +0.19 (worst 0.25); temporal-lr +0.10 (worst 0.57)
+        directions: 9, 6 on the own parts (R2 from them 0.93 0.88 0.81 0.73 0.64 0.59 0.05 0.00 0.00)
+          one at own R2 0.05: from the seven factors by boosting 0.80, from lr alone 0.52, from brain alone -0.12
+          one at own R2 0.00: from the seven factors by boosting 0.94, from brain alone 0.65
+          one at own R2 0.00: from the seven factors by boosting 0.91, from thickness alone 0.12, from brain alone 0.08
+  FLAIR spectrum 0.96 0.89 0.82 0.77 0.70 0.62 0.02
+        weakest direction mixes ventricle +0.70, burden -0.48, lr +0.47
+        own R2 brain 0.94, ventricle 0.44, burden 0.49, thickness 0.70, temporal 0.80, lr 0.69, sulcal 0.74
+        ventricle-burden plane: best 0.71, worst 0.23, blend +0.21
+        most blended pairs: ventricle-burden +0.21 (worst 0.23); ventricle-lr +0.20 (worst 0.24); temporal-lr +0.07 (worst 0.61)
+        directions: 9, 6 on the own parts (R2 from them 0.93 0.88 0.81 0.76 0.70 0.61 0.04 0.00 0.00)
+          one at own R2 0.04: from the seven factors by boosting 0.82, from lr alone 0.55, from brain alone -0.13
+          one at own R2 0.00: from the seven factors by boosting 0.94, from brain alone 0.57
+          one at own R2 0.00: from the seven factors by boosting 0.92, from brain alone 0.17
+c8 (causal bank, own parts; 1000 test subjects)
+  T1    spectrum 0.95 0.86 0.85 0.75 0.70 0.61 0.01
+        weakest direction mixes burden +0.74, ventricle -0.63
+        own R2 brain 0.94, ventricle 0.43, burden 0.30, thickness 0.71, temporal 0.85, lr 0.84, sulcal 0.68
+        ventricle-burden plane: best 0.68, worst 0.05, blend +0.24
+        most blended pairs: ventricle-burden +0.24 (worst 0.05); ventricle-sulcal +0.04 (worst 0.39); ventricle-lr +0.03 (worst 0.40)
+        directions: 8, 6 on the own parts (R2 from them 0.94 0.86 0.85 0.76 0.70 0.62 0.03 0.00)
+          one at own R2 0.03: from the seven factors by boosting 0.76, from temporal alone 0.33, from brain alone -0.03
+          one at own R2 0.00: from the seven factors by boosting 0.97, from brain alone 0.78
+  FLAIR spectrum 0.95 0.88 0.85 0.79 0.74 0.62 0.01
+        weakest direction mixes burden +0.72, ventricle -0.65
+        own R2 brain 0.94, ventricle 0.41, burden 0.32, thickness 0.73, temporal 0.85, lr 0.84, sulcal 0.73
+        ventricle-burden plane: best 0.68, worst 0.06, blend +0.27
+        most blended pairs: ventricle-burden +0.27 (worst 0.06); thickness-sulcal +0.04 (worst 0.70); ventricle-sulcal +0.03 (worst 0.38)
+        directions: 8, 6 on the own parts (R2 from them 0.94 0.88 0.85 0.79 0.73 0.62 0.03 0.00)
+          one at own R2 0.03: from the seven factors by boosting 0.73, from temporal alone 0.31, from brain alone -0.09
+          one at own R2 0.00: from the seven factors by boosting 0.98, from brain alone 0.79
+c10 (causal bank, own parts; 1000 test subjects)
+  T1    spectrum 0.96 0.91 0.87 0.84 0.74 0.69 0.59
+        weakest direction mixes burden +0.99
+        own R2 brain 0.95, ventricle 0.85, burden 0.60, thickness 0.75, temporal 0.85, lr 0.91, sulcal 0.72
+        ventricle-burden plane: best 0.85, worst 0.59, blend +0.00
+        most blended pairs: ventricle-thickness +0.02 (worst 0.73); thickness-sulcal +0.02 (worst 0.70); brain-ventricle +0.01 (worst 0.84)
+        directions: 10, 7 on the own parts (R2 from them 0.94 0.90 0.85 0.83 0.73 0.68 0.58 0.00 0.00 0.00)
+          one at own R2 0.00: from the seven factors by boosting 0.79, from brain alone 0.35
+          one at own R2 0.00: from the seven factors by boosting 0.81, from brain alone 0.35
+          one at own R2 0.00: from the seven factors by boosting 0.93, from thickness alone 0.07, from brain alone -0.01
+  FLAIR spectrum 0.96 0.93 0.87 0.82 0.76 0.72 0.56
+        weakest direction mixes burden +0.97
+        own R2 brain 0.95, ventricle 0.81, burden 0.58, thickness 0.76, temporal 0.84, lr 0.93, sulcal 0.77
+        ventricle-burden plane: best 0.82, worst 0.57, blend +0.01
+        most blended pairs: thickness-temporal +0.02 (worst 0.74); ventricle-thickness +0.02 (worst 0.74); temporal-sulcal +0.01 (worst 0.76)
+        directions: 10, 7 on the own parts (R2 from them 0.94 0.91 0.85 0.81 0.75 0.71 0.56 0.00 0.00 0.00)
+          one at own R2 0.00: from the seven factors by boosting 0.90, from brain alone 0.51
+          one at own R2 0.00: from the seven factors by boosting 0.81, from brain alone 0.26
+          one at own R2 0.00: from the seven factors by boosting 0.82, from temporal alone -0.06, from brain alone -0.08
+c10_s2 (causal bank, own parts; 1000 test subjects)
+  T1    spectrum 0.95 0.92 0.87 0.85 0.71 0.70 0.57
+        weakest direction mixes burden +0.92, ventricle -0.34
+        own R2 brain 0.94, ventricle 0.78, burden 0.60, thickness 0.76, temporal 0.86, lr 0.92, sulcal 0.72
+        ventricle-burden plane: best 0.80, worst 0.58, blend +0.02
+        most blended pairs: ventricle-thickness +0.06 (worst 0.70); ventricle-burden +0.02 (worst 0.58); temporal-sulcal +0.01 (worst 0.71)
+        directions: 10, 7 on the own parts (R2 from them 0.93 0.90 0.85 0.83 0.70 0.69 0.57 0.00 0.00 0.00)
+          one at own R2 0.00: from the seven factors by boosting 0.88, from brain alone 0.29
+          one at own R2 0.00: from the seven factors by boosting 0.91, from brain alone 0.36
+          one at own R2 0.00: from the seven factors by boosting 0.93, from brain alone -0.00
+  FLAIR spectrum 0.95 0.92 0.87 0.81 0.76 0.72 0.58
+        weakest direction mixes burden +0.93, ventricle -0.34
+        own R2 brain 0.94, ventricle 0.77, burden 0.62, thickness 0.77, temporal 0.85, lr 0.92, sulcal 0.77
+        ventricle-burden plane: best 0.80, worst 0.59, blend +0.03
+        most blended pairs: ventricle-burden +0.03 (worst 0.59); ventricle-thickness +0.02 (worst 0.75); temporal-sulcal +0.02 (worst 0.75)
+        directions: 10, 7 on the own parts (R2 from them 0.93 0.90 0.86 0.80 0.75 0.72 0.58 0.00 0.00 0.00)
+          one at own R2 0.00: from the seven factors by boosting 0.85, from brain alone 0.17
+          one at own R2 0.00: from the seven factors by boosting 0.95, from brain alone 0.26
+          one at own R2 0.00: from the seven factors by boosting 0.90, from brain alone 0.21
+Saved out/burden_feasibility_20261102/causal/stage59/own_directions.json

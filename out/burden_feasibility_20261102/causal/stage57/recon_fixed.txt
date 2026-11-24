@@ -1,0 +1,170 @@
+bank_causal_nofield_fixedpos t1: truth (10 latents) (10 units)
+    epoch   0 val 0.9303  best
+    epoch   2 val 0.8953  best
+    epoch   3 val 0.8812  best
+    epoch   4 val 0.8738  best
+    epoch   5 val 0.8679  best
+    epoch   6 val 0.8654  best
+    epoch   7 val 0.8564  best
+    epoch   8 val 0.8532  best
+    epoch   9 val 0.8524  best
+    epoch  10 val 0.8439  best
+    epoch  11 val 0.8424  best
+    epoch  12 val 0.8311  best
+    epoch  14 val 0.8236  best
+    epoch  15 val 0.8183  best
+    epoch  17 val 0.8099  best
+    epoch  19 val 0.8012  best
+    epoch  20 val 0.8040
+    epoch  23 val 0.7967  best
+    epoch  24 val 0.7884  best
+    epoch  27 val 0.7725  best
+    epoch  29 val 0.7645  best
+    epoch  30 val 0.7703
+    epoch  32 val 0.7626  best
+    epoch  33 val 0.7574  best
+    epoch  34 val 0.7457  best
+    epoch  40 val 0.7483
+    scan R2 0.342  residual R2 0.232  lesion 0.365  burden e 27.8
+bank_causal_nofield_fixedpos t1: truth + style (13) (13 units)
+    epoch   0 val 0.6703  best
+    epoch   1 val 0.6262  best
+    epoch   2 val 0.6002  best
+    epoch   3 val 0.5884  best
+    epoch   4 val 0.5820  best
+    epoch   5 val 0.5701  best
+    epoch   6 val 0.5607  best
+    epoch   8 val 0.5496  best
+    epoch   9 val 0.5344  best
+    epoch  10 val 0.5383
+    epoch  11 val 0.5263  best
+    epoch  12 val 0.5173  best
+    epoch  13 val 0.5106  best
+    epoch  14 val 0.5050  best
+    epoch  15 val 0.4804  best
+    epoch  17 val 0.4745  best
+    epoch  19 val 0.4600  best
+    epoch  20 val 0.4549  best
+    epoch  22 val 0.4470  best
+    epoch  23 val 0.4316  best
+    epoch  24 val 0.4216  best
+    epoch  27 val 0.4030  best
+    epoch  28 val 0.4025  best
+    epoch  30 val 0.4061
+    epoch  32 val 0.3827  best
+    epoch  33 val 0.3693  best
+    epoch  36 val 0.3612  best
+    epoch  38 val 0.3597  best
+    epoch  39 val 0.3531  best
+    epoch  40 val 0.3599
+    epoch  41 val 0.3471  best
+    epoch  43 val 0.3377  best
+    epoch  45 val 0.3249  best
+    epoch  50 val 0.3336
+    epoch  51 val 0.3162  best
+    epoch  54 val 0.3118  best
+    epoch  56 val 0.3031  best
+    epoch  60 val 0.3117
+    epoch  62 val 0.3006  best
+    epoch  64 val 0.3002  best
+    epoch  67 val 0.2940  best
+    epoch  69 val 0.2842  best
+    epoch  70 val 0.2925
+    epoch  72 val 0.2806  best
+    epoch  76 val 0.2782  best
+    epoch  78 val 0.2719  best
+    epoch  80 val 0.3019
+    epoch  82 val 0.2700  best
+    epoch  86 val 0.2669  best
+    epoch  88 val 0.2585  best
+    epoch  90 val 0.2645
+    epoch  95 val 0.2431  best
+    epoch  96 val 0.2391  best
+    epoch  97 val 0.2386  best
+    epoch 100 val 0.2365  best
+    epoch 107 val 0.2295  best
+    epoch 108 val 0.2288  best
+    epoch 109 val 0.2284  best
+    epoch 110 val 0.2296
+    epoch 111 val 0.2275  best
+    epoch 113 val 0.2270  best
+    epoch 116 val 0.2257  best
+    epoch 120 val 0.2258
+    epoch 121 val 0.2240  best
+    epoch 125 val 0.2237  best
+    epoch 126 val 0.2233  best
+    epoch 128 val 0.2217  best
+    epoch 130 val 0.2233
+    epoch 134 val 0.2201  best
+    epoch 135 val 0.2194  best
+    epoch 139 val 0.2190  best
+    epoch 140 val 0.2187  best
+    epoch 141 val 0.2187  best
+    epoch 142 val 0.2183  best
+    epoch 143 val 0.2183  best
+    epoch 149 val 0.2156  best
+    scan R2 0.958  residual R2 0.628  lesion 0.489  burden e 27.3
+bank_causal_nofield_fixedpos t1: fixed_codebatch_c10 (10 units)
+    epoch   0 val 0.9165  best
+    epoch   2 val 0.8926  best
+    epoch   3 val 0.8761  best
+    epoch   5 val 0.8678  best
+    epoch   7 val 0.8631  best
+    epoch   8 val 0.8573  best
+    epoch  10 val 0.8539  best
+    epoch  12 val 0.8530  best
+    epoch  14 val 0.8471  best
+    epoch  16 val 0.8388  best
+    epoch  17 val 0.8282  best
+    epoch  19 val 0.8198  best
+    epoch  20 val 0.8212
+    epoch  21 val 0.8190  best
+    epoch  22 val 0.8116  best
+    epoch  23 val 0.8055  best
+    epoch  24 val 0.8045  best
+    epoch  25 val 0.7981  best
+    epoch  27 val 0.7864  best
+    epoch  29 val 0.7833  best
+    epoch  30 val 0.7798  best
+    epoch  31 val 0.7740  best
+    epoch  32 val 0.7602  best
+    epoch  36 val 0.7586  best
+    epoch  37 val 0.7529  best
+    epoch  38 val 0.7407  best
+    epoch  39 val 0.7325  best
+    epoch  40 val 0.7397
+    epoch  42 val 0.7287  best
+    epoch  44 val 0.7257  best
+    epoch  45 val 0.7243  best
+    epoch  47 val 0.7123  best
+    epoch  50 val 0.7191
+    epoch  52 val 0.7060  best
+    epoch  54 val 0.7004  best
+    epoch  58 val 0.6952  best
+    epoch  60 val 0.7004
+    epoch  67 val 0.6852  best
+    epoch  70 val 0.7066
+    epoch  71 val 0.6828  best
+    epoch  72 val 0.6811  best
+    epoch  76 val 0.6784  best
+    epoch  80 val 0.6866
+    epoch  90 val 0.7037
+    scan R2 0.411  residual R2 0.321  lesion 0.274  burden e 35.3
+bank_causal_nofield_fixedpos t1: fixed_codebatch_c10 twin (10 units)
+    epoch   0 val 0.8548  best
+    epoch   1 val 0.8325  best
+    epoch   2 val 0.8232  best
+    epoch   3 val 0.8185  best
+    epoch   4 val 0.8136  best
+    epoch   5 val 0.8128  best
+    epoch   6 val 0.8110  best
+    epoch   7 val 0.8063  best
+    epoch   9 val 0.8057  best
+    epoch  10 val 0.8087
+    epoch  11 val 0.8042  best
+    epoch  15 val 0.8029  best
+    epoch  17 val 0.8011  best
+    epoch  20 val 0.8054
+    epoch  30 val 0.8111
+    scan R2 0.455  residual R2 0.004  lesion 0.002  burden e -
+bank_causal_nofield_fixedpos flair: truth (10 latents) (10 units)

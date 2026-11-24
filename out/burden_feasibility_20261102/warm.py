@@ -910,7 +910,16 @@ def main():
         default=None,
         help="The bridge: InfoNCE's entropy on the code's first N units only, its alignment on all of them",
     )
+    p.add_argument(
+        "--init-run",
+        type=Path,
+        default=None,
+        help="Start from compress_code.py's checkpoint: a trained run's network and TailCode, its head cut to"
+        " --content-units (init must be cold)",
+    )
     a = p.parse_args()
+    if a.init_run is not None and (a.init != "cold" or a.pool == "gap" or a.content_units is None or a.remainder_units):
+        raise ValueError("--init-run needs init cold, TailCode pooling and --content-units, without --remainder-units")
     if a.uniform and a.code_batches:
         raise ValueError("--uniform and --code-batches are different batch rules")
     if a.gauge != "batch" and a.pool == "gap":
@@ -1147,6 +1156,11 @@ def main():
             regional=a.pool == "regional_tail",
         )
         pool.main = units  # the main loss's slice; remainder units follow it
+        if a.init_run is not None:
+            start = torch.load(a.init_run, map_location="cpu")
+            model.load_state_dict(start["model"])
+            pool.load_state_dict(start["pool"])
+            print("started from", a.init_run, json.dumps(start.get("compression", {}).get("units")), flush=True)
         pool = pool.to(a.device)
         print("interior cells", int(pool.keep.sum()), "tail thresholds", pool.thresholds, "gauge", a.gauge, flush=True)
         print("code units", units, flush=True)

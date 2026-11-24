@@ -1,0 +1,272 @@
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k (step 20000): codes of 2000 train, 400 val, 1000 test subjects
+Subject 14: no room for a complete lesion of radius 0.1 in its original anatomy; redrew it (candidate 1). Lesion size and containment are unchanged; the subject's latents come from the redrawn candidate.
+Subject 28: no room for a complete lesion of radius 0.1 in its original anatomy; redrew it (candidate 1). Lesion size and containment are unchanged; the subject's latents come from the redrawn candidate.
+Subject 49: no room for a complete lesion of radius 0.1 in its original anatomy; redrew it (candidate 1). Lesion size and containment are unchanged; the subject's latents come from the redrawn candidate.
+Subject 103: no room for a complete lesion of radius 0.1 in its original anatomy; redrew it (candidate 1). Lesion size and containment are unchanged; the subject's latents come from the redrawn candidate.
+Subject 136: no room for a complete lesion of radius 0.1 in its original anatomy; redrew it (candidate 2). Lesion size and containment are unchanged; the subject's latents come from the redrawn candidate.
+factual re-render of 200 test subjects: largest difference from the bank 0.0127
+  t1 decoder from code:
+    epoch   0 val 0.9263  best
+    epoch   2 val 0.9013  best
+    epoch   3 val 0.8924  best
+    epoch   4 val 0.8877  best
+    epoch   5 val 0.8836  best
+    epoch   7 val 0.8742  best
+    epoch   8 val 0.8724  best
+    epoch  10 val 0.8692  best
+    epoch  11 val 0.8690  best
+    epoch  14 val 0.8628  best
+    epoch  16 val 0.8587  best
+    epoch  17 val 0.8470  best
+    epoch  19 val 0.8431  best
+    epoch  20 val 0.8401  best
+    epoch  22 val 0.8367  best
+    epoch  23 val 0.8328  best
+    epoch  24 val 0.8316  best
+    epoch  25 val 0.8276  best
+    epoch  27 val 0.8204  best
+    epoch  29 val 0.8164  best
+    epoch  30 val 0.8104  best
+    epoch  31 val 0.8034  best
+    epoch  32 val 0.7936  best
+    epoch  35 val 0.7902  best
+    epoch  36 val 0.7839  best
+    epoch  37 val 0.7758  best
+    epoch  38 val 0.7736  best
+    epoch  39 val 0.7622  best
+    epoch  40 val 0.7741
+    epoch  42 val 0.7592  best
+    epoch  44 val 0.7571  best
+    epoch  45 val 0.7430  best
+    epoch  47 val 0.7378  best
+    epoch  48 val 0.7362  best
+    epoch  50 val 0.7390
+    epoch  54 val 0.7329  best
+    epoch  58 val 0.7224  best
+    epoch  60 val 0.7209  best
+    epoch  66 val 0.7171  best
+    epoch  70 val 0.7150  best
+    epoch  71 val 0.7113  best
+    epoch  78 val 0.7001  best
+    epoch  80 val 0.7021
+    epoch  85 val 0.6986  best
+    epoch  90 val 0.7049
+    epoch 100 val 0.7004
+    101 epochs, saved decoder_t1_code.pt
+  t1 decoder from truth:
+    epoch   0 val 0.9420  best
+    epoch   2 val 0.9140  best
+    epoch   3 val 0.8961  best
+    epoch   4 val 0.8861  best
+    epoch   5 val 0.8743  best
+    epoch   6 val 0.8718  best
+    epoch   7 val 0.8532  best
+    epoch   8 val 0.8472  best
+    epoch   9 val 0.8419  best
+    epoch  10 val 0.8334  best
+    epoch  11 val 0.8281  best
+    epoch  12 val 0.8218  best
+    epoch  14 val 0.8147  best
+    epoch  15 val 0.8132  best
+    epoch  16 val 0.8068  best
+    epoch  17 val 0.7970  best
+    epoch  18 val 0.7933  best
+    epoch  19 val 0.7868  best
+    epoch  20 val 0.7861  best
+    epoch  21 val 0.7733  best
+    epoch  23 val 0.7633  best
+    epoch  25 val 0.7425  best
+    epoch  27 val 0.7222  best
+    epoch  29 val 0.7060  best
+    epoch  30 val 0.7015  best
+    epoch  32 val 0.7002  best
+    epoch  33 val 0.7001  best
+    epoch  36 val 0.6872  best
+    epoch  38 val 0.6859  best
+    epoch  39 val 0.6780  best
+    epoch  40 val 0.6817
+    epoch  42 val 0.6733  best
+    epoch  45 val 0.6569  best
+    epoch  48 val 0.6556  best
+    epoch  50 val 0.6827
+    epoch  54 val 0.6518  best
+    epoch  60 val 0.6643
+    70 epochs, saved decoder_t1_truth.pt
+  flair decoder from code:
+    epoch   0 val 0.9201  best
+    epoch   1 val 0.9001  best
+    epoch   2 val 0.8937  best
+    epoch   3 val 0.8902  best
+    epoch   4 val 0.8869  best
+    epoch   5 val 0.8832  best
+    epoch   6 val 0.8774  best
+    epoch   7 val 0.8770  best
+    epoch   8 val 0.8757  best
+    epoch   9 val 0.8719  best
+    epoch  10 val 0.8690  best
+    epoch  11 val 0.8629  best
+    epoch  12 val 0.8572  best
+    epoch  13 val 0.8490  best
+    epoch  14 val 0.8466  best
+    epoch  16 val 0.8406  best
+    epoch  17 val 0.8396  best
+    epoch  18 val 0.8360  best
+    epoch  20 val 0.8287  best
+    epoch  23 val 0.8237  best
+    epoch  24 val 0.8231  best
+    epoch  25 val 0.8189  best
+    epoch  26 val 0.8151  best
+    epoch  28 val 0.8099  best
+    epoch  29 val 0.8075  best
+    epoch  30 val 0.8071  best
+    epoch  31 val 0.8013  best
+    epoch  32 val 0.7985  best
+    epoch  33 val 0.7932  best
+    epoch  35 val 0.7908  best
+    epoch  38 val 0.7858  best
+    epoch  39 val 0.7845  best
+    epoch  40 val 0.7837  best
+    epoch  43 val 0.7833  best
+    epoch  44 val 0.7791  best
+    epoch  45 val 0.7775  best
+    epoch  48 val 0.7704  best
+    epoch  49 val 0.7669  best
+    epoch  50 val 0.7711
+    epoch  51 val 0.7634  best
+    epoch  55 val 0.7568  best
+    epoch  56 val 0.7536  best
+    epoch  57 val 0.7533  best
+    epoch  59 val 0.7508  best
+    epoch  60 val 0.7640
+    epoch  62 val 0.7466  best
+    epoch  69 val 0.7392  best
+    epoch  70 val 0.7426
+    epoch  71 val 0.7361  best
+    epoch  72 val 0.7327  best
+    epoch  73 val 0.7316  best
+    epoch  79 val 0.7302  best
+    epoch  80 val 0.7369
+    epoch  82 val 0.7290  best
+    epoch  90 val 0.7350
+    epoch  91 val 0.7274  best
+    epoch  92 val 0.7272  best
+    epoch  96 val 0.7249  best
+    epoch 100 val 0.7318
+    epoch 110 val 0.7339
+    112 epochs, saved decoder_flair_code.pt
+  flair decoder from truth:
+    epoch   0 val 0.9448  best
+    epoch   1 val 0.9289  best
+    epoch   2 val 0.9165  best
+    epoch   3 val 0.9107  best
+    epoch   4 val 0.9086  best
+    epoch   5 val 0.8905  best
+    epoch   6 val 0.8679  best
+    epoch   7 val 0.8507  best
+    epoch   8 val 0.8348  best
+    epoch   9 val 0.8305  best
+    epoch  10 val 0.8224  best
+    epoch  11 val 0.8164  best
+    epoch  12 val 0.8117  best
+    epoch  13 val 0.8025  best
+    epoch  15 val 0.8010  best
+    epoch  16 val 0.7976  best
+    epoch  17 val 0.7962  best
+    epoch  18 val 0.7908  best
+    epoch  19 val 0.7805  best
+    epoch  20 val 0.7749  best
+    epoch  23 val 0.7690  best
+    epoch  25 val 0.7561  best
+    epoch  27 val 0.7557  best
+    epoch  28 val 0.7517  best
+    epoch  29 val 0.7494  best
+    epoch  30 val 0.7433  best
+    epoch  32 val 0.7404  best
+    epoch  37 val 0.7370  best
+    epoch  40 val 0.7393
+    epoch  41 val 0.7316  best
+    epoch  45 val 0.7277  best
+    epoch  50 val 0.7282
+    epoch  53 val 0.7263  best
+    epoch  54 val 0.7263  best
+    epoch  55 val 0.7194  best
+    epoch  60 val 0.7223
+    epoch  70 val 0.7364
+    71 epochs, saved decoder_flair_truth.pt
+
+ventricle: tabular cause raised by 3 SD; 186 counterfactual subjects (14 left out)
+  t1: PC finds the cause's direct effects on ['burden'] (true: ventricle)
+    the code's change, estimated against the true counterfactual's code: share 0.30, cosine 0.69, size 0.61
+    mean change of each factor, in its SDs: true / read from the counterfactual code / from the true counterfactual's code
+      ventricle  +1.09 / +0.55 / +0.49
+      burden     +0.96 / +0.77 / +0.73
+      thickness  -0.00 / +0.09 / +0.11
+      temporal   +0.15 / +0.01 / +0.15
+      lr         +0.00 / -0.11 / -0.24
+      sulcal     -0.07 / -0.15 / -0.18
+    code, estimated effect   scan -1.90 (cos 0.29, size 1.57)  residual -0.24 (cos 0.08, size 0.52)
+    code, true codes         scan -3.38 (cos 0.16, size 1.92)  residual -0.38 (cos 0.16, size 0.75)
+    truth (oracle)           scan +0.07 (cos 0.58, size 1.07)  residual +0.00 (cos 0.23, size 0.45)
+  flair: PC finds the cause's direct effects on ['burden'] (true: ventricle)
+    the code's change, estimated against the true counterfactual's code: share 0.23, cosine 0.69, size 0.55
+    mean change of each factor, in its SDs: true / read from the counterfactual code / from the true counterfactual's code
+      brain      +0.00 / +0.06 / +0.03
+      ventricle  +1.09 / +0.55 / +0.48
+      burden     +0.96 / +0.79 / +0.72
+      thickness  -0.00 / +0.08 / +0.11
+      temporal   +0.15 / +0.02 / +0.12
+      lr         +0.00 / -0.10 / -0.21
+      sulcal     -0.07 / -0.17 / -0.14
+    code, estimated effect   scan -2.54 (cos 0.14, size 1.70)  residual -0.20 (cos 0.11, size 0.50)
+    code, true codes         scan -4.30 (cos 0.16, size 2.19)  residual -0.13 (cos 0.25, size 0.65)
+    truth (oracle)           scan -2.56 (cos 0.28, size 1.83)  residual +0.02 (cos 0.25, size 0.39)
+
+temporal: tabular cause raised by 3 SD; 200 counterfactual subjects (0 left out)
+  t1: PC finds the cause's direct effects on ['temporal'] (true: temporal)
+    the code's change, estimated against the true counterfactual's code: share 0.36, cosine 0.61, size 0.82
+    mean change of each factor, in its SDs: true / read from the counterfactual code / from the true counterfactual's code
+      burden     +0.00 / +0.07 / +0.11
+      temporal   +1.67 / +1.44 / +1.27
+      lr         +0.00 / -0.04 / +0.06
+      sulcal     -0.59 / -0.85 / -0.69
+    code, estimated effect   scan -7.21 (cos 0.18, size 2.78)  residual +0.08 (cos 0.43, size 0.69)
+    code, true codes         scan -3.69 (cos 0.28, size 2.16)  residual +0.31 (cos 0.55, size 0.61)
+    truth (oracle)           scan -0.30 (cos 0.54, size 1.25)  residual +0.45 (cos 0.67, size 0.66)
+  flair: PC finds the cause's direct effects on ['temporal'] (true: temporal)
+    the code's change, estimated against the true counterfactual's code: share 0.45, cosine 0.68, size 0.79
+    mean change of each factor, in its SDs: true / read from the counterfactual code / from the true counterfactual's code
+      burden     +0.00 / +0.07 / +0.07
+      temporal   +1.67 / +1.40 / +1.28
+      lr         +0.00 / -0.06 / +0.10
+      sulcal     -0.59 / -0.83 / -0.75
+    code, estimated effect   scan -3.22 (cos 0.29, size 2.03)  residual +0.10 (cos 0.44, size 0.62)
+    code, true codes         scan -0.92 (cos 0.40, size 1.40)  residual +0.34 (cos 0.59, size 0.64)
+    truth (oracle)           scan -0.47 (cos 0.46, size 1.24)  residual +0.42 (cos 0.65, size 0.69)
+
+thickness: tabular cause raised by 3 SD; 200 counterfactual subjects (0 left out)
+  t1: PC finds the cause's direct effects on ['thickness', 'temporal'] (true: thickness)
+    the code's change, estimated against the true counterfactual's code: share 0.42, cosine 0.65, size 0.60
+    mean change of each factor, in its SDs: true / read from the counterfactual code / from the true counterfactual's code
+      brain      +0.00 / -0.08 / +0.05
+      burden     +0.00 / -0.11 / +0.01
+      thickness  +1.09 / +0.69 / +0.69
+      temporal   -0.55 / -0.69 / -0.46
+      sulcal     +0.31 / +0.22 / +0.30
+    code, estimated effect   scan -1.66 (cos 0.20, size 1.47)  residual +0.15 (cos 0.34, size 0.50)
+    code, true codes         scan -0.32 (cos 0.40, size 1.08)  residual +0.30 (cos 0.51, size 0.54)
+    truth (oracle)           scan +0.29 (cos 0.54, size 0.80)  residual +0.39 (cos 0.56, size 0.61)
+  flair: PC finds the cause's direct effects on ['thickness'] (true: thickness)
+    the code's change, estimated against the true counterfactual's code: share 0.41, cosine 0.64, size 0.60
+    mean change of each factor, in its SDs: true / read from the counterfactual code / from the true counterfactual's code
+      brain      +0.00 / -0.06 / +0.04
+      ventricle  +0.00 / -0.01 / +0.05
+      burden     +0.00 / -0.10 / +0.00
+      thickness  +1.09 / +0.71 / +0.72
+      temporal   -0.55 / -0.67 / -0.49
+      lr         +0.00 / +0.08 / +0.09
+      sulcal     +0.31 / +0.28 / +0.31
+    code, estimated effect   scan -0.28 (cos 0.28, size 0.84)  residual +0.12 (cos 0.30, size 0.43)
+    code, true codes         scan -0.09 (cos 0.40, size 0.94)  residual +0.23 (cos 0.43, size 0.48)
+    truth (oracle)           scan -0.12 (cos 0.38, size 0.91)  residual +0.33 (cos 0.48, size 0.59)
+
+Saved out/burden_feasibility_20261102/causal/stage61_c8/counterfactual.json and the counterfactual_*.png figures
