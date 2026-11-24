@@ -207,6 +207,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `footprints.py` | no training, and no labels in the footprints or the rotation: where in the image each direction of a run's code reads. Per 16³ cell, the units × units Gram (summed products) of the code's input gradient, each voxel weighted by the subject's deviation from the mean image (`--weight sensitivity`: the plain gradient), on 300 training subjects. Then the rotation of the code whose directions read from the fewest places: the joint diagonalisation (Jacobi angles) of the cell Grams whitened by their sum, pooled over subjects and per subject. Labels only score: names (one Hungarian match on absolute correlation with the factors and the lesion centre; MCC against the code's units, random rotations and the twin), readout footprints, model-free image maps (each factor's own part against the scan's intensity), the divergence from the code's mean footprint, and brain-interior and residual-channel shares. Figures, maps, and bundles of the code and each rotation for label-free discovery. Tests: `tests/test_footprints.py`. Stage 54 |
 | `intrinsic_dimension.py` | no training, and no labels in the estimate: TwoNN (with decimation to N/2, N/4, N/8) and Levina–Bickel on each code, the code on the unit sphere, the backbone GAP and the twin's, beside the true latents, random non-linear embeddings of them with reading noise, and Gaussian noise of each width. Tests: `tests/test_intrinsic_dimension.py`. Stage 54 |
 | `criterion_check.py` | no training: label-free signals of every finished run (canonical correlations held out, their mutual information and gain over the twin, retrieval, memorisation, neighbour agreement, spectrum, TwoNN, the GAP's, final loss) against its own parts; per bank, Spearman with a bootstrap interval and the share of a random pick's regret removed, with a pass rule fixed beforehand. `--self-test`. Stage 66 |
+| `anchor_check.py` | no training: `export` writes each run's test codes, latents, lesion volumes and own parts to `causal/codes/<run>.npz` (GPU, once); `score` (no torch) picks runs within each bank by how well their codes read noisy measured anchors (raw, or adjusted for the other anchors) and judges the pick on the hidden factors' own parts, beside the exact own parts and stage 66's label-free signals. `--self-test`. Stage 67 |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
 | `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
 | `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). `--proximal` (with `--view each`) adds both views in one AIPW and proximal two-stage least squares with one view instrumenting the other. `--counterfactual` adds tasks whose effect varies with the hidden image score (and, with `--counterfactual-modifiers score own`, one task per factor whose effect varies with its own part), and scores each arm's per-subject effects (DR- and T-learner): R² of the individual effects, PEHE, policy regret and the counterfactual outcome's error. Section 7, items 24 and 37; stage 55 |
@@ -1590,6 +1591,8 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       fail (16 codes on the wrong side in stage 65). Across recipes in a bank it ranks runs better than chance. It
       can choose a recipe, but not a seed within one, and it says nothing about burden.
     - No expectation was written before this stage.
+    - More breakdowns (per bank, per factor, seed spread, and choosing by the measured factors' exact own
+      parts) are in the status section's stage 66 entry, from the other session's reading.
 
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
@@ -2945,7 +2948,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 10. Recent stages and next steps
 
-**Status on 24 Nov (stages 46–66; read this first).**
+**Status on 24 Nov (stages 46–67; read this first).**
 - **The bridge:** its first loss collapsed (item 37); the fixed form, the theory's own version, holds the weak factors
   no better than matched width (item 38). The recipe's 24-unit advantage lies outside Yao's theorem.
 - **The lesion's position was the benchmark's fingerprint:** it took about half a narrow code and crowded out the weak
@@ -3003,9 +3006,6 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   holds in 3/5, the same as from scratch; PCA 2/5; 10,000 more from-scratch steps repair no seed. Where the parent
   holds and both removed directions are clean curves (held-out R² ≥ .98; seeds 42, 2, 5), the 8-unit code matches
   the 10-unit reference. That label-free accept rule was seen after the results and is untested.
-- **Stage 66 is read (item 53):** of the label-free signals, only cross-view top-1 over all validation subjects
-  passes the rule for choosing runs, by .01–.03 of regret. It ranks recipes within a bank, not seeds within a cell, and
-  no signal tracks burden.
 - **Stage 62 is read (item 49):** at 8 units, code neighbourhoods rebuilt every 100 steps instead of 500 give the
   seventh own direction .45 / .36 (stage 56 .01) and leave one curve. Ventricle .62, burden .54. The causal outputs
   match the 10-unit code (decoded graph .86 / .85), and label-free discovery is the best yet (F1 .71). Prediction
@@ -3017,14 +3017,27 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Built, not run:** stage 61, no encoder training: counterfactual images from tabular data. A tabular cause of an
   image factor is raised, the code moves by its estimated effect, a decoder rebuilds the image, and the result is
   scored against the generator's own counterfactual render of each subject (section 9).
-- **Read (item 53; built 23 Nov, run 24 Nov 01:55–04:00):** stage 66, no training: can a run be chosen without labels? `criterion_check.py` on
-  every finished warm.py run. About a dozen label-free signals (held-out cross-view canonical correlations and their
-  Gaussian mutual information, its gain over the untrained twin, retrieval, memorisation, neighbour agreement, RankMe,
-  effective rank, alpha-ReQ, TwoNN, the backbone GAP's, the final loss), from training and validation subjects only,
-  against each run's own parts on test subjects. Within each bank: Spearman with a bootstrap interval, and the share of
-  a random pick's regret that picking by the signal removes. The pass rule was fixed before any result (docstring).
-  Why: on ADNI every choice between recipes must rest on a label-free signal, so first learn which ones track the
-  truth here. Tests: `tests/test_criterion_check.py`.
+- **Stage 66 is read (24 Nov; item 53):** can a run be chosen without labels? `criterion_check.py` on 149 finished runs:
+  label-free signals from training and validation subjects against each run's own parts on test subjects
+  (`causal/stage66/`; tests: `tests/test_criterion_check.py`).
+  - Only cross-view retrieval passed the rule fixed beforehand, narrowly: top-1 among all validation subjects, rho .41
+    (mean own part) / .31 (weakest factor), removing 53% / 51% of a random pick's shortfall against a 50% bar.
+  - In the current recipe's bank (field-off causal, 24 units) retrieval removes 96% / 92%. It fails where an ablation
+    keeps the easy anatomy (fixed-position 10 units: no residual, top-1 .91, own parts .43) or holds the factors
+    non-linearly (no tails: ridge .57, boosting .69). The mutual-information signals pick the Barlow Twins arms
+    (own parts .26-.27): that loss maximises cross-view correlation itself.
+  - The signals follow ventricle, thickness, temporal, sulcal and lr (rho .3-.58). Burden follows the other six own
+    parts in the prediction-recipe banks (rho .46-.90) but traded against them in the older banks (-.54 to -.80).
+  - Seed spread: SD .04 on the mean own part, .07 on the weakest; recipe means differ by SD .16 / .20.
+  - Choosing by the measured factors' exact own parts carries over to hidden factors (hide 1-3: rho .64-.74, 70-81%
+    of the shortfall removed; lr and sulcal hidden: .78, 79%), far better than retrieval (.38-.48, 46-57%). Hiding
+    burden alone: .27, 12%. Stage 67 repeats this with noisy measurements, as ADNI gives them.
+- **Built, not run (24 Nov):** stage 67, no training: can measured anchors choose runs? `anchor_check.py` exports
+  every finished run's test codes once (`causal/codes/`), then, with no torch, picks runs by how well their codes read
+  the anchors as ADNI would measure them: latent values, burden as the lesion volume, plus measurement noise at
+  reliability 1, .9, .75 and .5, raw or adjusted for the other anchors (the stand-in for an own part). Judged on the
+  hidden factors' own parts beside the exact own parts and stage 66's retrieval. The pass rule was fixed before any
+  result (docstring). Tests: `tests/test_anchor_check.py`.
 - **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
   fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
   needs.

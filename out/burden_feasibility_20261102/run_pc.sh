@@ -339,6 +339,13 @@
 # six earlier 8- and 9-unit codes of these cells (seeds 42 and 2) and the 10-unit codes at seeds 42 and 2: the four
 # reports, both discoveries, the tabular benchmarks, own_directions.py, and holds.txt, a per-cell count of the codes
 # that hold all seven own parts (causal/stage64/).
+# Stage 67 (opt-in, no training) Can measured anchors choose runs where stage 66's label-free signals could not?
+# anchor_check.py exports every finished warm.py run's test codes once (causal/codes/, reused while newer than the
+# checkpoint), then, with no torch, picks runs within each bank by how well their codes read the anchors as ADNI would
+# measure them (latent values and the lesion volume, plus measurement noise at reliability 1, .9, .75 and .5, raw or
+# adjusted for the other anchors), judged on the hidden factors' own parts, beside the exact own parts and stage 66's
+# retrieval (causal/stage67/). Splits: lr and sulcal hidden (as on ADNI), burden hidden, and every split hiding one to
+# three. The pass rule is in the script's docstring. About 20 s a run to export, then minutes to score.
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2818,6 +2825,38 @@ if wants 66; then
         echo "$(date +%H:%M) criterion check of ${#RUNS[@]} finished runs into $OUT"
         "${CMD[@]}" > "$OUT/criterion.txt" 2>&1 || { echo "Stage 66 failed, see $OUT/criterion.txt"; exit 1; }
         echo "Stage 66 reports in $OUT: criterion.txt"
+    fi
+fi
+
+if wants 67; then
+    OUT=$D/causal/stage67
+    CODES=$D/causal/codes
+    RUNS=()
+    for log in "$D"/logs/*.log; do
+        [ -e "$log" ] || continue
+        name=$(basename "$log" .log)
+        if grep -qE '^(TEST|DONE)' "$log" && [ -f "$D/runs/$name/model.pt" ] && [ -f "$D/runs/$name/report.json" ]; then
+            RUNS+=("$D/runs/$name")
+        fi
+    done
+    SIGNALS=()
+    if [ -f "$D/causal/stage66/criterion.json" ]; then
+        SIGNALS=(--signals "$D/causal/stage66/criterion.json")
+    else
+        echo "Stage 67: no stage 66 criterion.json, so no retrieval rows and no rule comparison with retrieval"
+    fi
+    EXPORT=("$PY" "$D/anchor_check.py" export "$CODES" ${RUNS[@]+"${RUNS[@]}"})
+    SCORE=("$PY" "$D/anchor_check.py" score "$CODES" --out "$OUT/anchor.json" ${SIGNALS[@]+"${SIGNALS[@]}"})
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/anchor_check.py export $CODES <${#RUNS[@]} finished runs> > $OUT/export.log"
+        echo "${SCORE[*]} > $OUT/anchor.txt"
+    else
+        mkdir -p "$OUT" || exit 1
+        echo "$(date +%H:%M) exporting the test codes of ${#RUNS[@]} finished runs into $CODES"
+        "${EXPORT[@]}" > "$OUT/export.log" 2>&1 || { echo "Stage 67's export failed, see $OUT/export.log"; exit 1; }
+        echo "$(date +%H:%M) anchor check into $OUT"
+        "${SCORE[@]}" > "$OUT/anchor.txt" 2>&1 || { echo "Stage 67 failed, see $OUT/anchor.txt"; exit 1; }
+        echo "Stage 67 reports in $OUT: anchor.txt"
     fi
 fi
 
