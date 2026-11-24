@@ -83,11 +83,11 @@ def main(argv=None):
                     f"--components must be 0 to {data['basis'].shape[1]}, the directions basis_{key} holds"
                 )
             mean, basis = data["mean"], data["basis"][:, :components]
-            scale = float(np.std([remove_anatomy(images[i], mask, mean, basis) for i in range(200)]))
+            scale = float(np.std([remove_anatomy(images[i], mask, mean, basis) for i in range(min(200, len(images)))]))
             print(key, "components", components, "residual SD", round(scale, 4), flush=True)
             jobs = []
             for split in SPLITS:
-                n = len(np.load(f"{root}/{split}_vox.npy"))
+                n = len(np.load(f"{root}/{split}_{key}.npy", mmap_mode="r"))  # ADNI banks (adni_bank.py) have no vox
                 np.lib.format.open_memmap(
                     f"{root}/{split}_{key}_res.npy", mode="w+", dtype=np.float16, shape=(n, *mask.shape)
                 ).flush()

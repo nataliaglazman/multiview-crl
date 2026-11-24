@@ -99,6 +99,12 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 loss, queue, supervision, half views, remainder units, group dropout or shared jitter.
   --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
+  --real        a bank with no latents (adni_bank.py: ADNI, --t1key t1). Training is unchanged; each eval reads only
+                images, on the validation subjects (the test split stays unread) and as many training subjects:
+                cross-view top-1 among all of them and in random sets of 32, the train - validation top-1 gap
+                (memorisation), the held-out loss in batches of 32, each view's effective rank, the matching units'
+                cross-view r, the backbone GAP's top-1, and eval.adni.encoder_modality_gap's modality probes. The step-0
+                eval is the untrained floor. Needs --uniform or --code-batches, and not --supervise.
   INIT          cold, or start both backbones from a sup.py checkpoint.
 
 Batches: by default an anchor and 31 of its 50 nearest training subjects on the six anatomy factors (the recipe's
@@ -637,7 +643,7 @@ def jitter(x, shift, degrees, rng, shared=False):
 
 def draw_prediction_batch(bank, batch_size, device, subject_rng, jitter_rng, shift, degrees):
     """One uniform subject set in both views, clean for the teacher and independently jittered for the online code."""
-    indices = subject_rng.choice(len(bank.vox), batch_size, replace=False)
+    indices = subject_rng.choice(len(bank), batch_size, replace=False)
     clean = bank.images(indices, device)
     augmented = jitter(clean, shift, degrees, jitter_rng) if shift or degrees else clean
     return indices, clean, augmented
@@ -674,14 +680,24 @@ def stacked_views(t1, flair, residuals, chosen, back):
 
 
 class Bank:
-    def __init__(self, root, split, t1key, n=None, residual=False):
+    def __init__(self, root, split, t1key, n=None, residual=False, real=False):
         self.t1 = np.load(f"{root}/{split}_{t1key}.npy", mmap_mode="r")
         self.flair = np.load(f"{root}/{split}_flair.npy", mmap_mode="r")
         self.residuals = (None, None)
         if residual:
             self.residuals = tuple(np.load(f"{root}/{split}_{k}_res.npy", mmap_mode="r") for k in (t1key, "flair"))
+        if real:  # no latents: subjects are counted from the images
+            self.vox = self.zc = None
+            self.n = len(self.t1) if n is None else min(n, len(self.t1))
+            return
+        if not Path(f"{root}/{split}_vox.npy").exists():
+            raise SystemExit(f"{root} has no latents ({split}_vox.npy); pass --real for an adni_bank.py bank")
         self.vox = np.array(np.load(f"{root}/{split}_vox.npy"), dtype=np.float64)[:n]
         self.zc = np.array(np.load(f"{root}/{split}_zc.npy"), dtype=np.float64)[:n]
+        self.n = len(self.vox)
+
+    def __len__(self):
+        return self.n
 
     def images(self, indices, device):
         order = np.argsort(indices)
@@ -712,8 +728,8 @@ def features(model, bank, device, batch=32, pool=None):
     for m, _ in states:
         m.eval()
     rows = {"code": [[], []], "gap": [[], []], "pooled": [[], []]}
-    for start in range(0, len(bank.vox), batch):
-        x = bank.images(np.arange(start, min(start + batch, len(bank.vox))), device)
+    for start in range(0, len(bank), batch):
+        x = bank.images(np.arange(start, min(start + batch, len(bank))), device)
         h = model._encode(x, 2, None)
         gap = h.mean((2, 3, 4)).cpu().numpy()
         if pool is None:
@@ -751,6 +767,68 @@ def evaluate(model, bank, device, pool=None):
             np.mean(np.abs(np.diag(np.corrcoef(feats["code"][0].T, feats["code"][1].T)[:n, n:])))
         )
     return row
+
+
+REAL_SETS = 50  # --real: random batch-sized subject sets for top-1 at the training batch size
+
+
+def cross_view_top1(z1, z2):
+    """Cross-view top-1 among all rows by cosine, each view standardized over them as the loss standardizes a batch:
+    T1 -> FLAIR, FLAIR -> T1 and their mean (chance 1 / rows)."""
+    z1, z2 = ((z - z.mean(0)) / (z.std(0) + 1e-8) for z in (z1, z2))
+    z1 = z1 / (np.linalg.norm(z1, axis=1, keepdims=True) + 1e-12)
+    z2 = z2 / (np.linalg.norm(z2, axis=1, keepdims=True) + 1e-12)
+    sim = z1 @ z2.T
+    truth = np.arange(len(sim))
+    forward, backward = float(np.mean(sim.argmax(1) == truth)), float(np.mean(sim.argmax(0) == truth))
+    return {"t1_to_flair": forward, "flair_to_t1": backward, "mean": (forward + backward) / 2}
+
+
+@torch.no_grad()
+def evaluate_real(model, held, seen, device, pool, args):
+    """--real: label-free readouts of the exported code on held-out subjects ``held`` and as many training subjects
+    ``seen``. The held-out loss is the training objective on consecutive batches of the held-out codes."""
+    import eval.adni.encoder_modality_gap as modality_gap
+
+    feats, train = features(model, held, device, pool=pool), features(model, seen, device, pool=pool)
+    t1, flair = feats["code"]
+    n, size = len(t1), min(args.batch_size, len(t1))
+    top1, train_top1 = cross_view_top1(t1, flair), cross_view_top1(*train["code"])
+    rng = np.random.default_rng(0)
+    sets = [rng.choice(n, size, replace=False) for _ in range(REAL_SETS)]
+    sim, crit = torch.nn.CosineSimilarity(dim=-1), torch.nn.CrossEntropyLoss()
+    held_loss = [
+        float(
+            T.contrastive_loss(
+                torch.from_numpy(np.concatenate([t1[s : s + size], flair[s : s + size]])).to(device),
+                model,
+                args,
+                sim,
+                crit,
+                None,
+            )
+        )
+        for s in range(0, n - size + 1, size)
+    ]
+    width = t1.shape[1]
+    probe, _ = modality_gap.diagnose(t1, flair, np.arange(n).astype(str))
+    return {
+        "subjects": n,
+        "top1": top1,
+        "top1_32": float(np.mean([cross_view_top1(t1[s], flair[s])["mean"] for s in sets])),
+        "train_top1": train_top1,
+        "memorisation": train_top1["mean"] - top1["mean"],
+        "heldout_loss": float(np.mean(held_loss)),
+        "effective_rank": {
+            name: float(T.effective_rank(torch.from_numpy(((z - z.mean(0)) / (z.std(0) + 1e-8)).astype(np.float32))))
+            for name, z in (("t1", t1), ("flair", flair))
+        },
+        "cross_view_code_r": float(np.nanmean(np.abs(np.diag(np.corrcoef(t1.T, flair.T)[:width, width:])))),
+        "gap_top1": cross_view_top1(*feats["gap"])["mean"],
+        "modality_probe": {
+            k: probe["probes"][k]["accuracy"] for k in ("normalized_linear", "normalized_rbf", "mean_centered_rbf")
+        },
+    }
 
 
 def main():
@@ -856,6 +934,11 @@ def main():
         "aligned only between the whole T1 and FLAIR, hold what some half lacks",
     )
     p.add_argument("--frozen-backbone", action="store_true")
+    p.add_argument(
+        "--real",
+        action="store_true",
+        help="A bank with no latents (adni_bank.py); evals read only images, on validation subjects",
+    )
     p.add_argument("--device", default=pick_device())
     p.add_argument("--test-subjects", type=int, default=1000)
     p.add_argument(
@@ -922,6 +1005,10 @@ def main():
         raise ValueError("--init-run needs init cold, TailCode pooling and --content-units, without --remainder-units")
     if a.uniform and a.code_batches:
         raise ValueError("--uniform and --code-batches are different batch rules")
+    if a.real and (a.supervise or not (a.uniform or a.code_batches)):
+        raise ValueError(
+            "--real needs --uniform or --code-batches (the default batches match anatomy labels) and not --supervise"
+        )
     if a.gauge != "batch" and a.pool == "gap":
         raise ValueError("--gauge applies to TailCode, so to --pool tail or gapnorm")
     if a.decorrelate and a.pool == "gap":
@@ -1195,7 +1282,7 @@ def main():
         for name, parameter in model.named_parameters():
             if name.startswith("encoder."):
                 parameter.requires_grad_(False)
-    train = Bank(a.bank, "train", a.t1key, residual=a.residual)
+    train = Bank(a.bank, "train", a.t1key, residual=a.residual, real=a.real)
     readout, volume = None, None
     if a.supervise:
         with torch.random.fork_rng(devices=[]):  # the readout's init leaves every later draw as in a run without it
@@ -1211,7 +1298,7 @@ def main():
     decoders, target_model, whitening = None, None, None
     if a.predict_weight:
         target_model = copy.deepcopy(model).eval().requires_grad_(False)
-        first = np.arange(min(256, len(train.vox)))
+        first = np.arange(min(256, len(train)))
         sample = [
             prediction_target(
                 target_model, train.images(first[s : s + args.batch_size], a.device), a.predict_target, pool.keep
@@ -1254,12 +1341,15 @@ def main():
             flush=True,
         )
     halves = None if a.half_views is None else half_masks(a.bank, a.half_views, train.t1.shape[-1], a.device)
-    test = Bank(a.bank, "test", a.t1key, a.test_subjects, a.residual)
-    scored = {
-        "anatomy": train.zc[:, ANATOMY],
-        "lesion_position": batch_price.lesion_centroid(np.load(f"{a.bank}/train_cells.npy", mmap_mode="r")),
-        "burden": train.vox[:, None],
-    }
+    test = Bank(a.bank, "val" if a.real else "test", a.t1key, a.test_subjects, a.residual, a.real)
+    seen = Bank(a.bank, "train", a.t1key, len(test), a.residual, a.real) if a.real else None
+    scored = {}  # --real: no labels, so the neighbourhood spreads go unlogged
+    if not a.real:
+        scored = {
+            "anatomy": train.zc[:, ANATOMY],
+            "lesion_position": batch_price.lesion_centroid(np.load(f"{a.bank}/train_cells.npy", mmap_mode="r")),
+            "burden": train.vox[:, None],
+        }
     batching = {"spread": None}
 
     def rebuild(neighbours, seed):
@@ -1301,7 +1391,7 @@ def main():
     def batches():
         while True:
             if a.uniform:
-                yield rng.choice(len(train.vox), args.batch_size, replace=False)
+                yield rng.choice(len(train), args.batch_size, replace=False)
                 continue
             current = batching["sampler"]
             for batch in current:
@@ -1345,7 +1435,12 @@ def main():
         report["volume_mean_sd"] = list(volume)
 
     def record(step, terms):
-        row = {"step": step, "loss": terms, "test": evaluate(model, test, a.device, pool), "spread": batching["spread"]}
+        row = {"step": step, "loss": terms}
+        if a.real:
+            row["heldout"] = evaluate_real(model, test, seen, a.device, pool, args)
+        else:
+            row["test"] = evaluate(model, test, a.device, pool)
+        row["spread"] = batching["spread"]
         if rest:
             row["remainder_spread"] = remainder["spread"]
         if len(critic):
@@ -1354,14 +1449,25 @@ def main():
             row["target_spread"] = whitening.spread()
         report["history"].append(row)
         (a.out / "report.json").write_text(json.dumps(report, indent=1))
-        t = row["test"]
-        print(
-            f"step {step:5d} code volume R2 T1 {t['t1']['code_volume_r2']:+.3f} FLAIR {t['flair']['code_volume_r2']:+.3f} | "
-            f"GAP {t['t1']['gap_volume_r2']:+.3f} {t['flair']['gap_volume_r2']:+.3f} | "
-            f"T1 brain {t['t1']['code_brain']:.2f} vent {t['t1']['code_ventricle']:.2f} thick {t['t1']['code_thickness']:.2f} "
-            f"temp {t['t1']['code_temporal']:.2f} | {terms}",
-            flush=True,
-        )
+        if a.real:
+            h = row["heldout"]
+            print(
+                f"step {step:5d} val top-1 {h['top1']['mean']:.3f} (train {h['train_top1']['mean']:.3f}) "
+                f"top-1@{args.batch_size} {h['top1_32']:.3f} | GAP top-1 {h['gap_top1']:.3f} | held-out loss "
+                f"{h['heldout_loss']:.3f} | rank T1 {h['effective_rank']['t1']:.1f} FLAIR "
+                f"{h['effective_rank']['flair']:.1f} | unit r {h['cross_view_code_r']:.2f} | modality linear "
+                f"{h['modality_probe']['normalized_linear']:.2f} rbf {h['modality_probe']['normalized_rbf']:.2f} | {terms}",
+                flush=True,
+            )
+        else:
+            t = row["test"]
+            print(
+                f"step {step:5d} code volume R2 T1 {t['t1']['code_volume_r2']:+.3f} FLAIR {t['flair']['code_volume_r2']:+.3f} | "
+                f"GAP {t['t1']['gap_volume_r2']:+.3f} {t['flair']['gap_volume_r2']:+.3f} | "
+                f"T1 brain {t['t1']['code_brain']:.2f} vent {t['t1']['code_ventricle']:.2f} thick {t['t1']['code_thickness']:.2f} "
+                f"temp {t['t1']['code_temporal']:.2f} | {terms}",
+                flush=True,
+            )
         if len(critic):
             print(
                 f"step {step:5d} critic weights "
