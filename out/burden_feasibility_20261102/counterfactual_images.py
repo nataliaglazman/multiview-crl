@@ -30,7 +30,10 @@ the mean cosine between each subject's predicted and true change, and the predic
   code, true codes         decode(code of the true counterfactual) - decode(code of the true factual): the decoder alone
   truth (oracle)           the true-factor decoder's change between the true factual and counterfactual latents
 Also the code's own change (estimated against the code of the true counterfactual image), and each factor's mean change
-read by the ridge readout from the counterfactual codes, against the factor's true mean change in its own SDs.
+read by the ridge readout from the counterfactual codes, against the factor's true mean change in its own SDs. And, for
+the true change and each arm, where its squared size lies over the whole volume: inside both the subject's factual and
+counterfactual brain, in the outline (one brain only), outside both but inside the scoring mask, or outside the mask,
+where the decoders are never trained. The figures draw the change maps inside the scoring mask only.
 """
 
 import argparse
@@ -229,9 +232,26 @@ def change_scores(predicted, true, mask):
     )
 
 
-def figure(path, title, factual, counterfactual, changes, subjects, ids):
+REGIONS = ("both brains", "outline", "outside, scored", "outside, unscored")
+
+
+def region_shares(change, factual_brain, counter_brain, mask):
+    """Where a change's squared size lies, summed over subjects, as shares of its total over the whole volume: inside
+    both the subject's factual and counterfactual brain; in exactly one of them (the outline moved); outside both but
+    inside the scoring ``mask`` (the decoder is trained there); outside both and outside the mask (never trained, never
+    scored). The true change is zero outside both brains, so any share there is spurious."""
+    either = factual_brain | counter_brain
+    regions = (factual_brain & counter_brain, factual_brain ^ counter_brain, ~either & mask, ~either & ~mask)
+    sq = np.square(change, dtype=np.float32)
+    total = max(float(sq.sum(dtype=np.float64)), 1e-12)
+    return {name: float(sq[region].sum(dtype=np.float64)) / total for name, region in zip(REGIONS, regions)}
+
+
+def figure(path, title, factual, counterfactual, decoded, changes, subjects, ids, mask):
     """Rows: subjects (the axial slice where the true scan change is largest), labelled by their test index ``ids``;
-    columns: factual and counterfactual scans, then the true and each arm's predicted scan change."""
+    columns: factual and counterfactual scans, the scan decoded from the code moved by the estimated effect
+    (``decoded``), then the true and each arm's predicted scan change, drawn only inside the scoring ``mask`` (black
+    outside), since the decoders are neither trained nor scored beyond it."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -239,7 +259,10 @@ def figure(path, title, factual, counterfactual, changes, subjects, ids):
 
     grey = plt.get_cmap("gray").copy()
     grey.set_bad("black")
-    labels = ["factual", "counterfactual", "true change", *changes]
+    diverging = plt.get_cmap("RdBu_r").copy()
+    diverging.set_bad("black")
+    labels = ["factual", "counterfactual", "decoded counterfactual\n(code, estimated effect)", "true change", *changes]
+    scans = 3  # leading columns drawn as images on the factual brain's grey scale; the rest are changes
     fig, axes = plt.subplots(
         len(subjects), len(labels), figsize=(1.9 * len(labels), 2.0 * len(subjects)), squeeze=False
     )
@@ -249,14 +272,21 @@ def figure(path, title, factual, counterfactual, changes, subjects, ids):
         head = factual[i, 0] != 0
         lo, hi = np.percentile(factual[i, 0][head].astype(np.float32), (1, 99))
         lim = float(np.percentile(np.abs(true_change[head]), 99.5)) or 1.0
-        panels = [factual[i, 0], counterfactual[i, 0], true_change, *[c[i, 0] for c in changes.values()]]
+        panels = [
+            factual[i, 0],
+            counterfactual[i, 0],
+            decoded[i, 0],
+            true_change,
+            *[c[i, 0] for c in changes.values()],
+        ]
         for c, (label, vol) in enumerate(zip(labels, panels)):
             ax = axes[r, c]
-            if c < 2:
+            if c < scans:
                 img = np.where(head, vol.astype(np.float32), np.nan)[:, :, z].T
                 ax.imshow(img, origin="lower", cmap=grey, vmin=lo, vmax=hi)
             else:
-                ax.imshow(vol[:, :, z].T, origin="lower", cmap="RdBu_r", vmin=-lim, vmax=lim)
+                img = np.where(mask, vol.astype(np.float32), np.nan)[:, :, z].T
+                ax.imshow(img, origin="lower", cmap=diverging, vmin=-lim, vmax=lim)
             ax.set_xticks([])
             ax.set_yticks([])
             if r == 0:
@@ -400,8 +430,9 @@ def main():
             key = keys[v]
             true_change = counter[key].astype(np.float32) - factual[key][ok].astype(np.float32)
             truth_inputs = [(factors["test"][kept] / sd), ((zc["test"] + shift)[kept][:, COLUMNS] / sd)]
+            decoded_counterfactual = dec["code"](estimated)
             changes = {
-                ARMS[0]: dec["code"](estimated) - dec["code"](codes["test"][v][kept]),
+                ARMS[0]: decoded_counterfactual - dec["code"](codes["test"][v][kept]),
                 ARMS[1]: dec["code"](true_codes[v]) - dec["code"](factual_codes[v][ok]),
                 ARMS[2]: dec["truth"](truth_inputs[1]) - dec["truth"](truth_inputs[0]),
             }
@@ -409,11 +440,17 @@ def main():
                 arm: {ch: change_scores(c[:, k], true_change[:, k], mask) for k, ch in enumerate(R.CHANNELS)}
                 for arm, c in changes.items()
             }
+            brains = (factual[key][ok][:, 0] != 0, counter[key][:, 0] != 0)
+            regions = {
+                arm: {ch: region_shares(c[:, k], *brains, mask) for k, ch in enumerate(R.CHANNELS)}
+                for arm, c in {"true change": true_change, **changes}.items()
+            }
             entry[view] = dict(
                 direct_effects_found=direct,
                 code_change=code_change,
                 factor_change={k: dict(zip(NAMES, v_.tolist())) for k, v_ in factor_change.items()},
                 images=scores,
+                regions=regions,
             )
             log(f"  {view}: PC finds the cause's direct effects on {direct or 'nothing'} (true: {target})")
             log(
@@ -434,15 +471,22 @@ def main():
                     for ch in R.CHANNELS
                 )
                 log(f"    {arm:24s} {cells}")
+            log("    where each change's squared size lies (shares of its total; true change is 0 outside both brains)")
+            for ch in R.CHANNELS:
+                log(f"      {ch:8s} {'':24s} " + "  ".join(f"{name:>17s}" for name in REGIONS))
+                for arm, shares in regions.items():
+                    log(f"      {'':8s} {arm:24s} " + "  ".join(f"{shares[ch][name]:17.2f}" for name in REGIONS))
             order = np.argsort(-np.abs(true_change[:, 0][:, mask]).sum(1))[:4]
             figure(
                 a.out / f"counterfactual_{target}_{view}.png",
                 f"{view}: tabular cause of {target} raised by {a.delta:g} SD (rows: the four largest true changes)",
                 factual[key][ok],
                 counter[key],
+                decoded_counterfactual,
                 changes,
                 order,
                 kept[order],
+                mask,
             )
         results["targets"][target] = entry
     (a.out / "counterfactual.json").write_text(json.dumps(results, indent=1))
