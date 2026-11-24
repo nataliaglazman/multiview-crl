@@ -1521,6 +1521,76 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       one without labels. Label-free fixes have to act in training or in the start, not in selection: stage 65
       (8 units started from a 10-unit code compressed without labels) tests the start.
 
+52. **A compressed 10-unit start does not make 8 units reliable: it holds as often as from scratch (3/5), and longer
+    training repairs no seed (stage 65, read 24 Nov, `causal/stage65/holds.txt`).** Each 10-unit parent (stage 56's
+    recipe, 20,000 steps, seeds 42, 2, 3, 4, 5) compressed to 8 units without labels, by redundancy (`red`) or by
+    PCA (`pca`), then 10,000 steps at 8 units; stage 64's from-scratch 8-unit codes (every 500) continued 10,000
+    steps (`cont`); beside the from-scratch codes (`e500`) and the parents. T1 / FLAIR.
+    - **Per arm, holds / matches the 10-unit code (stage 50, seed 42):**
+      - 10-unit parents: holds 4/5 (seed 4 fails, last .04 / .07), matches 3/5 (seed 3 misses lr .66 / .70 and
+        FLAIR ATE bias .103).
+      - red: holds 3/5 (42, 2, 5), matches 3/5 (the same three).
+      - from scratch (e500): holds 3/5 (2, 3, 5), matches 2/5 (3, 5; seed 2 misses T1 volume, 12.6).
+      - cont: holds 3/5 (2, 3, 5: the same seeds as from scratch), matches 2/5 (3, 5; seed 2 misses sulcal .60 /
+        .65).
+      - pca: holds 2/5 (5, 42), matches 1/5 (42; seed 5 misses ventricle, temporal and ATE bias .14 / .15).
+    - **Against the rules fixed before the results:**
+      - **Compression makes 8 units reliable: no.** Red holds 3/5 against from scratch 3/5 (difference 0, Fisher
+        p 1.00); matches 3/5 against 2/5 (+1). Both differences are at most 1: no better. Paired by seed, each arm
+        alone holds in one seed (red at 42, from scratch at 3).
+      - **The selection matters: no, by the rule.** Red 3/5 against PCA 2/5 holds, within 1: the warm start carries
+        it, not the choice of directions. Matches differ by 2 (3/5 against 1/5). The rule is on holds, so this is
+        not a verdict.
+      - **Extra training alone: no.** Cont holds in exactly the seeds from scratch holds (3/5 against 3/5; paired,
+        0 and 0). Seed 42's last value rises from .01 to .23 / .17 but stays below .40. A seed that lost the
+        direction stays lost.
+      - **Parents:** seed 4's parent does not hold. Over the four parents that hold, red holds 3/4 and matches 3/4.
+      - **Secondary, red's own parts against its parent's (within .10, both views):** within at seeds 42, 2 and 5.
+        Seed 3 loses lr (.66 -> .26, .70 -> .30): the parent's weakest lr of the five, cut by the compression and not
+        regained. Seed 4 drops temporal T1 (.78 -> .67) from a parent that already fails.
+    - **The pre-recorded compression caveat lines up with the failures.** The compression logs (written 23 Nov 21:20,
+      before any result) gave the second removed direction held-out R² .997, .990 and .986 at seeds 42, 2 and 5,
+      and .848 and .650 at seeds 3 and 4. The three clean cuts held and matched (3/3). Seed 3's unclean cut took lr.
+      Seed 4's came from a parent that does not hold. This pattern was seen after the results, on 5 seeds: it is a
+      hypothesis, not a finding.
+    - **How codes fail.** Seed 4 fails in all five arms here, the 10-unit parent included, each time with the
+      ventricle–burden blend (worst .14–.34). Red seed 3 and PCA seeds 2 and 3 keep ventricle–burden (worst
+      .47–.64) and lose lr instead (last .10–.18). PCA's start drops low-variance own parts (brain, thickness,
+      temporal at seed 2), as the pre-flight showed, and fine-tuning does not get them all back.
+    - **Top-1 as a flag: still no.** Holders .792–.900 against the rest .700–.879 at 8 units (16 codes on the wrong
+      side). The highest top-1 code (cont seed 3, .900) holds and matches, as in item 51.
+    - **Expectation, written before:** right that the parents hold (4 of 5, the stated fallback), that PCA holds in
+      1–3 (2), that the continued arm is within 1 of from scratch (identical), and that red matches in at least 3
+      (3). Wrong that red holds in 4 or 5 (3).
+    - **Reading.** A compressed start keeps what its parent holds, provided the cut is clean, and fine-tuning does
+      not repair what the start lacks. So the lottery moves; it does not go away. An 8-unit code now depends on a
+      10-unit seed that holds (4/5 here) and on a compression that removes only curves. Where both happen (seeds 42,
+      2, 5) the 8-unit code matches the 10-unit reference on every criterion. The open question is whether
+      "every removed direction has held-out R² near 1" is a label-free accept rule. The compression log already
+      records it, so the rule costs no labels. It has to be fixed before being tested on new seeds; five seeds
+      chosen after the fact do not establish it. Longer training is not a lever (cont).
+
+53. **One label-free signal passes the rule for choosing runs: cross-view top-1 over all validation subjects, and
+    only narrowly (stage 66, read 24 Nov, `causal/stage66/criterion.txt`).** `criterion_check.py` on every
+    finished warm.py run: 149 scored, 17 supervised runs skipped. Truth is each run's own parts on test subjects; the
+    signals use training and validation subjects only. Grouping "bank" (7 banks of at least 4 runs) is the rule's;
+    "bank_width" (11 groups) is shown beside it.
+    - **Pass rule (docstring, fixed before any result):** under "bank", for both own_mean and own_weakest, the
+      Spearman interval lies above 0 and picking the signal's best run removes at least half of a random pick's
+      regret.
+    - **top1_all passes, just:** own_mean rho +.41 [.22, .56], regret .53, right sign in 7/7 banks; own_weakest +.31
+      [.14, .47], regret .51, 5/7. Both regrets are within .03 of the .5 threshold. Under "bank_width" its own_weakest
+      regret falls to .44.
+    - **Close but failing:** gauss_mi_gain (rho +.48 / +.35, regret .47 / .31), gap_gauss_mi_gain (.43 / .33),
+      top1_32 (+.47 / +.37 but regret .30 / .16; it passes under "bank_width", which is not the rule's grouping).
+      The spectrum signals (RankMe, effective rank) run the wrong way on own_mean (rho -.18, -.24). Final loss,
+      memorisation, neighbour agreement and alpha-ReQ fail.
+    - **Burden:** no signal tracks burden's own part (every rho .19 or below, most intervals include 0).
+    - **Against items 51 and 52:** within one 8-unit cell, top-1 does not separate codes that hold from those that
+      fail (16 codes on the wrong side in stage 65). Across recipes in a bank it ranks runs better than chance. It
+      can choose a recipe, but not a seed within one, and it says nothing about burden.
+    - No expectation was written before this stage.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -1671,7 +1741,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
-- **Stage 65 (built 23 Nov; running, started 23 Nov 12:24): an 8-unit code started from a compressed 10-unit
+- **Stage 65 (built 23 Nov; read 24 Nov, item 52): an 8-unit code started from a compressed 10-unit
   code.** The user asked for a way to stop 8-unit seeds failing. Stage 64's early own parts (23 Nov, before its
   verdicts) suggested that about half of from-scratch 8-unit seeds hold. Failing codes spend the eighth unit on a
   curve, and the seventh own part has no unit left. The recipe can reach the 10-unit solution at 8 units (seeds 2,
@@ -1842,8 +1912,9 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     reports, the bundles, both discoveries, both tabular benchmarks and `own_directions.py`.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 62` under `monai_env` (two training arms in parallel,
     then the reports; about 2–2.5 hours).
-- **Stage 60 (built 20 Nov; not run, its code missing on the GPU host): a non-linear redundancy penalty at 8 units.** The user asked how to stop the
-  curves of item 46, then for this arm.
+- **Stage 60 (built 20 Nov as one seed, five seeds since 24 Nov; running, started 24 Nov 09:46): a non-linear
+  redundancy penalty at 8 units.** The user asked how to stop the curves of item 46, then for this arm. On 24 Nov,
+  after items 51–53, the user agreed to run it over five seeds.
   - **Why.** The 8-unit code spends 2 of its 8 directions on harmonics, curved copies of factors it already holds,
     leaving 6 for the seven own parts (item 46). Item 27's levers all failed in simulation, and none charged harmonics
     directly; its "penalty on units the other units predict" is not recorded as non-linear. Charging only what a
@@ -1855,24 +1926,46 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     optimizer. The penalty is the MLP's gain over the linear map, floored at zero and averaged over coordinates, bases
     and views. It runs on a separate uniform batch, since a neighbourhood batch barely varies in brain size, so a step
     takes about twice as long.
-  - **Arm:** stage 56's flags plus `--harmonic-weight 1`, the prediction term's weight (the penalty is at most 1),
-    fixed before the results. Run name: `ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_`
-    `predict1_harm1_c8_20k`.
-  - **Reports** (`causal/stage60/`): the four reports, both discoveries, both tabular benchmarks and
-    `own_directions.py`, beside stage 56's 8-unit code and stage 50's 10-unit code.
-  - **Reading rule, fixed before the results** (`own_directions.txt`, both views; stage 56's code spends 2 directions
-    on curves, its spectrum's last value is .01 / .01 and the ventricle–burden pair's worst direction .05 / .06):
-    - The penalty works if the code spends at most 1 direction on curves and holds all seven own parts as directions
-      (the spectrum's last value .40 or more, and the pair's worst direction .40 or more).
-    - It removes curves without helping if the curves go (at most 1) but the spectrum's last value stays below .15:
-      then the curves were not what crowded the pair out.
-    - It fails if 2 directions stay on curves.
-    - Costs, read beside: every other own part within .10 of stage 56's 8-unit code, the volume error, and no style.
-      The penalty also charges the SCM's own bends (each child is a leaky ReLU of its parents), so the code may move
-      toward the own parts themselves; that is a change of basis, not a loss.
-  - **Expectation, written before the results:** uncertain. In item 27's simulation every lever that changed what the
-    loss values failed at matched width; this one charges the curves directly. If the loss needs them to tell
-    subjects apart, the code may keep them and pay the penalty, or lose discrimination (cross-view top-1).
+  - **Arms (24 Nov; they replace the single seed-42 arm, since items 51–52 showed one 8-unit seed cannot be read):**
+    the from-scratch 8-unit arm of stages 56 and 64 (code batches of 31 neighbours rebuilt every 500 steps, residual
+    input, jitter, prediction weight 1, tails, 20,000 steps, fixed-position causal bank) plus `--harmonic-weight 1`
+    (the prediction term's weight; the penalty is at most 1), at seeds 42, 2, 3, 4 and 5. Every other flag matches the
+    from-scratch codes of the same seeds (checked against their `report.json`). Names
+    `..._abl_codebatch_predict1_harm1_c8_20k[_sN]`. `PARALLEL=5`.
+  - **Scored** (`causal/stage60/`, `holds.txt` first) beside the from-scratch 8-unit codes and the 10-unit codes of the
+    same five seeds (their report entries reused from stage 65): the four reports, both discoveries, both tabular
+    benchmarks, `own_directions.py` and `holds.py --compare c8_harm:c8_e500`. Labels `c8_harm_sN`, `c8_e500_sN` and
+    `c10_e500_sN`.
+  - **Baseline, recorded 24 Nov before any stage 60 result** (`causal/stage65/own_directions.json`): every from-scratch
+    8-unit code spends its spare directions on curves (own R² under .5, predicted from the seven factors by boosting
+    at .73–.99), in both views: 1 in the three codes that hold (seeds 2, 3, 5), 2 in the two that fail (4, 42). The
+    10-unit codes spend 3 (seeds 42, 2) or 4 (seed 4, which fails with units to spare).
+  - **Reading rules, fixed before the results** (holds and matches as in stage 64; reference stage 50, seed 42). They
+    replace the single arm's rule of 20 Nov, whose curve outcomes carry over as the mechanism rule:
+    - **The penalty makes 8 units reliable** if the harmonic arm holds in at least 4 of 5 codes and in at least 2 more
+      than from scratch (3 of 5 at these seeds), so 5 of 5. It is no better if they differ by at most 1. The same
+      thresholds apply to the match count (from scratch 2 of 5, so at least 4 of 5).
+    - **Paired by seed:** name the from-scratch failures it rescues (seeds 4, 42) and the holders it loses (2, 3, 5).
+    - **Against 10 units** (4 of 5 hold, 3 of 5 match at these seeds): described only; five seeds cannot rank them.
+    - **Mechanism** (`own_directions.txt`; a curve is a direction with own R² under .5 that boosting from the seven
+      factors predicts at .5 or more, counted in each view):
+      - The penalty removes curves if at least 4 of 5 codes have none in either view; then name what the eighth
+        direction holds.
+      - It removes curves without helping if they go but the hold count stays within 1 of from scratch: the curves
+        were not what crowded the seventh own part out.
+      - It fails if at least 4 of 5 codes keep a curve: the loss keeps them and pays the penalty.
+    - **Costs:** cross-view top-1 over all 1,000 subjects, paired by seed, is a cost if the mean drop exceeds .05.
+      Style in the code (style audit) is read beside. The penalty also charges the SCM's own bends (each child is a
+      leaky ReLU of its parents), so the code may move toward the own parts themselves; that is a change of basis,
+      not a loss.
+  - **Expectation, written 20 Nov before the results:** uncertain. In item 27's simulation every lever that changed
+    what the loss values failed at matched width; this one charges the curves directly. If the loss needs them to
+    tell subjects apart, the code may keep them and pay the penalty, or lose discrimination (cross-view top-1).
+  - **Expectation for five seeds, written 24 Nov before the results:** the penalty removes most curves. Seed 42, the
+    crowding case of item 46, is the likeliest rescue. Seed 4 is the hard case: its 10-unit code fails with four
+    units on curves, so its failure is not a shortage of units, and the penalty rescues it only if charging the
+    curves turns the loss toward the missing direction. Most likely 3 or 4 of 5 hold, which reads "no better"; 5 of
+    5 needs both failures rescued and no holder lost. Top-1 falls by up to about .05.
   - **Checked locally:** `tests/test_warm_harmonic.py`, 7 tests. The critic starts as its linear map, no coordinate
     predicts itself, and whitening leaves no linear correlation. Trained on planted codes, the penalty reads .002 for
     independent units, .002 for linear dependence, .53 for a bent copy and .54 for a bent copy rotated across two
@@ -1880,7 +1973,12 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     critic, and unsupported options are refused. A 12-step run on a tiny local bank trains end to end (the critic
     trains and is saved, and the reports load the run), and a run without the penalty still does. `bash -n`; the dry
     run lists stage 56's flags plus `--harmonic-weight 1`.
-  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 60` (one training arm, about 3 hours, then the reports).
+    On 24 Nov: the 7 tests pass here; a 200-step smoke run on the fixed bank trains end to end, at about 3 GB of GPU
+    memory and 1.15 s a step alone, against 0.28 late in stage 56's from-scratch run: about 4 times slower, not twice.
+    The five-seed dry run lists five arms whose flags differ from the from-scratch codes' only by the penalty.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 60` under `monai_env`: five 20,000-step arms at once,
+    then about 1.5 hours of reports (the reference codes' entries are reused). Started 24 Nov 09:46; with all five
+    running each takes 1.13–1.15 s a step (GPU at 99%, 15 GB), so about 6.5 hours of training.
 - **Stage 61 (built 20 Nov; not run): counterfactual images from tabular data.** The user asked to find the causal
   relationships from tabular data to the image latents, change the tabular data and see how the decoding does.
   - **Setup** (`counterfactual_images.py`). A tabular cause of one image factor, by the tabular benchmark's rule (T =
@@ -2847,7 +2945,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 10. Recent stages and next steps
 
-**Status on 23 Nov (stages 46–65; read this first).**
+**Status on 24 Nov (stages 46–66; read this first).**
 - **The bridge:** its first loss collapsed (item 37); the fixed form, the theory's own version, holds the weak factors
   no better than matched width (item 38). The recipe's 24-unit advantage lies outside Yao's theorem.
 - **The lesion's position was the benchmark's fingerprint:** it took about half a narrow code and crowded out the weak
@@ -2901,22 +2999,25 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   (4/8): the extra unit goes to curves and buys no reliability. Rebuilding every 100 steps costs it (3/9 against 6/9
   at every 500). Codes that hold mostly match the 10-unit code. Top-1 does not flag a held code (6 on the wrong side
   per width), though the highest-top-1 code of each width holds.
-- **Running (started 23 Nov 12:24):** stage 65, 8-unit codes started from a 10-unit code compressed without labels
-  (`compress_code.py`, `warm.py --init-run`), against PCA compression and longer from-scratch training (section 9).
+- **Stage 65 is read (item 52):** a 10-unit code compressed to 8 units without labels (redundancy) and fine-tuned
+  holds in 3/5, the same as from scratch; PCA 2/5; 10,000 more from-scratch steps repair no seed. Where the parent
+  holds and both removed directions are clean curves (held-out R² ≥ .98; seeds 42, 2, 5), the 8-unit code matches
+  the 10-unit reference. That label-free accept rule was seen after the results and is untested.
+- **Stage 66 is read (item 53):** of the label-free signals, only cross-view top-1 over all validation subjects
+  passes the rule for choosing runs, by .01–.03 of regret. It ranks recipes within a bank, not seeds within a cell, and
+  no signal tracks burden.
 - **Stage 62 is read (item 49):** at 8 units, code neighbourhoods rebuilt every 100 steps instead of 500 give the
   seventh own direction .45 / .36 (stage 56 .01) and leave one curve. Ventricle .62, burden .54. The causal outputs
   match the 10-unit code (decoded graph .86 / .85), and label-free discovery is the best yet (F1 .71). Prediction
   weight 3 does nothing and costs discrimination. One seed; replicate next.
-- **Built, not run, code missing:** stage 60, one training arm: stage 56's 8-unit arm with `warm.py --harmonic-weight
-  1`, a new penalty on harmonics (curved copies of factors the code already holds), to test whether 8 units then hold
-  all seven own parts (section 9). A launch on 21 Nov stopped with `warm.py: error: unrecognized arguments:
-  --harmonic-weight 1`: commit `bbd679e` added the stage to `run_pc.sh` and this file only. The penalty in `warm.py`
-  and `tests/test_warm_harmonic.py` are in no local or fork ref; they need pushing from the machine that ran the
-  checks. Run it under `monai_env` (the shell's default Python has no torch).
+- **Running (started 24 Nov 09:46):** stage 60, the harmonic penalty (`warm.py --harmonic-weight 1`, a critic
+  charging units the others predict non-linearly, i.e. curves) on the from-scratch 8-unit arm at seeds 42, 2, 3, 4
+  and 5, paired with the from-scratch codes of those seeds. Rules fixed 24 Nov before the results (section 9).
+  Training until about 16:15, then about 1.5 hours of reports.
 - **Built, not run:** stage 61, no encoder training: counterfactual images from tabular data. A tabular cause of an
   image factor is raised, the code moves by its estimated effect, a decoder rebuilds the image, and the result is
   scored against the generator's own counterfactual render of each subject (section 9).
-- **Built, not run (23 Nov):** stage 66, no training: can a run be chosen without labels? `criterion_check.py` on
+- **Read (item 53; built 23 Nov, run 24 Nov 01:55–04:00):** stage 66, no training: can a run be chosen without labels? `criterion_check.py` on
   every finished warm.py run. About a dozen label-free signals (held-out cross-view canonical correlations and their
   Gaussian mutual information, its gain over the untrained twin, retrieval, memorisation, neighbour agreement, RankMe,
   effective rank, alpha-ReQ, TwoNN, the backbone GAP's, the final loss), from training and validation subjects only,

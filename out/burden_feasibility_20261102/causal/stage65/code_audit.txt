@@ -1,0 +1,669 @@
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s2
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s2
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s2
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s3
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s3
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s3
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s3
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s4
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s4
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s4
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s4
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s5
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s5
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s5
+auditing ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s5
+== code audit: R2 per factor (lesion x, y, z = centre of the lesion load, never scored before), test subjects
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 10 code neighbours 31 seed 42, last global loss 0.22558106869459155
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.95  +0.93  +0.91  +0.91  +0.91  +0.79  +0.88  +0.39  +0.73  +0.48
+  t1    code_boosted  +0.97  +0.93  +0.92  +0.83  +0.87  +0.70  +0.85  +0.59  +0.75  +0.42
+  t1    gap_ridge     +0.96  +0.96  +0.95  +0.93  +0.93  +0.85  +0.92  +0.72  +0.76  +0.54
+  flair code_ridge    +0.95  +0.92  +0.92  +0.90  +0.93  +0.83  +0.88  +0.41  +0.74  +0.46
+  flair code_boosted  +0.97  +0.92  +0.93  +0.83  +0.89  +0.73  +0.84  +0.59  +0.75  +0.44
+  flair gap_ridge     +0.96  +0.95  +0.95  +0.93  +0.94  +0.88  +0.93  +0.74  +0.75  +0.52
+  untrained twin (the floor):
+  t1    code_ridge    +0.48  +0.22  +0.33  +0.18  -0.01  +0.05  +0.15  +0.07  +0.38  +0.20
+  t1    code_boosted  +0.56  +0.30  +0.44  +0.13  -0.04  -0.01  +0.14  -0.03  +0.32  +0.16
+  t1    gap_ridge     +0.86  +0.64  +0.82  +0.35  +0.15  +0.27  +0.39  +0.13  +0.52  +0.29
+  flair code_ridge    +0.58  +0.31  +0.38  +0.15  -0.00  +0.02  +0.24  +0.16  +0.37  +0.27
+  flair code_boosted  +0.67  +0.44  +0.50  +0.16  -0.09  -0.08  +0.26  +0.03  +0.43  +0.28
+  flair gap_ridge     +0.89  +0.64  +0.79  +0.47  +0.20  +0.25  +0.41  +0.14  +0.49  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.97 +0.99 +0.99 +0.98 +0.98 +0.98 +0.99 +0.96 +0.99 +0.98
+  effective rank out of active units (T1 / FLAIR): 2.2 of 10 / 2.2 of 10
+  shared: 8 directions with r >= 0.9, 10 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.76/1.00  r 0.993: 0.98/0.36/0.98  r 0.987: 0.98/0.12/0.98  r 0.973: 0.92/0.18/0.92  r 0.954: 0.95/-0.07/0.95  r 0.938: 0.90/-0.03/0.91  r 0.934: 0.58/0.56/0.90  r 0.902: 0.67/-0.01/0.87  r 0.889: 0.56/0.10/0.83  r 0.829: 0.57/0.16/0.73
+   mean over r >= 0.9: anatomy 0.87 lesion 0.24 both 0.94
+  cross-view top-1: uniform32 0.972  neighbour32 0.875  all1000 0.740
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.973       0.911       0.914
+    test, batch statistics (as trained)          0.980       0.959       0.954
+    train subjects, running statistics           0.988       0.941       0.968
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 10 code neighbours 31 seed 2, last global loss 0.19872930213809012
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.90  +0.91  +0.89  +0.92  +0.83  +0.90  +0.32  +0.70  +0.47
+  t1    code_boosted  +0.96  +0.90  +0.94  +0.86  +0.91  +0.77  +0.87  +0.56  +0.73  +0.43
+  t1    gap_ridge     +0.96  +0.94  +0.94  +0.95  +0.93  +0.86  +0.93  +0.79  +0.77  +0.51
+  flair code_ridge    +0.94  +0.90  +0.92  +0.89  +0.92  +0.86  +0.90  +0.32  +0.70  +0.46
+  flair code_boosted  +0.97  +0.88  +0.94  +0.87  +0.92  +0.82  +0.87  +0.59  +0.75  +0.41
+  flair gap_ridge     +0.96  +0.94  +0.95  +0.94  +0.94  +0.90  +0.94  +0.77  +0.78  +0.54
+  untrained twin (the floor):
+  t1    code_ridge    +0.42  +0.21  +0.28  +0.17  +0.00  +0.06  +0.14  +0.07  +0.30  +0.16
+  t1    code_boosted  +0.52  +0.26  +0.37  +0.11  -0.02  -0.02  +0.11  -0.03  +0.28  +0.12
+  t1    gap_ridge     +0.86  +0.61  +0.80  +0.43  +0.12  +0.25  +0.36  +0.11  +0.50  +0.30
+  flair code_ridge    +0.60  +0.39  +0.46  +0.14  +0.01  +0.00  +0.23  +0.20  +0.39  +0.24
+  flair code_boosted  +0.64  +0.44  +0.47  +0.09  -0.00  -0.10  +0.24  +0.11  +0.40  +0.24
+  flair gap_ridge     +0.88  +0.63  +0.81  +0.56  +0.16  +0.26  +0.41  +0.19  +0.52  +0.34
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.97 +0.99 +0.97 +0.98 +0.97 +0.95 +0.99 +0.98
+  effective rank out of active units (T1 / FLAIR): 4.3 of 10 / 4.3 of 10
+  shared: 9 directions with r >= 0.9, 10 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.77/1.00  r 0.995: 0.98/0.42/0.97  r 0.991: 0.98/0.13/0.99  r 0.983: 0.95/0.02/0.95  r 0.974: 0.96/-0.08/0.96  r 0.948: 0.88/-0.03/0.89  r 0.933: 0.39/0.55/0.89  r 0.923: 0.80/-0.00/0.89  r 0.907: 0.71/0.04/0.81  r 0.882: 0.67/0.03/0.83
+   mean over r >= 0.9: anatomy 0.85 lesion 0.20 both 0.93
+  cross-view top-1: uniform32 0.990  neighbour32 0.921  all1000 0.851
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.993       0.945       0.944
+    test, batch statistics (as trained)          0.981       0.958       0.960
+    train subjects, running statistics           0.997       0.982       0.985
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s3  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 10 code neighbours 31 seed 3, last global loss 0.18059254080057144
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.91  +0.92  +0.94  +0.66  +0.75  +0.88  +0.17  +0.72  +0.47
+  t1    code_boosted  +0.97  +0.91  +0.95  +0.84  +0.71  +0.71  +0.85  +0.30  +0.77  +0.49
+  t1    gap_ridge     +0.96  +0.95  +0.94  +0.95  +0.86  +0.82  +0.91  +0.78  +0.79  +0.52
+  flair code_ridge    +0.94  +0.91  +0.91  +0.93  +0.70  +0.75  +0.89  +0.19  +0.73  +0.48
+  flair code_boosted  +0.97  +0.90  +0.95  +0.85  +0.76  +0.74  +0.87  +0.32  +0.79  +0.45
+  flair gap_ridge     +0.96  +0.94  +0.93  +0.95  +0.88  +0.86  +0.94  +0.69  +0.75  +0.56
+  untrained twin (the floor):
+  t1    code_ridge    +0.32  +0.13  +0.20  +0.14  -0.01  +0.04  +0.09  +0.04  +0.32  +0.17
+  t1    code_boosted  +0.45  +0.21  +0.35  +0.15  -0.04  +0.02  +0.09  +0.04  +0.26  +0.13
+  t1    gap_ridge     +0.88  +0.64  +0.79  +0.37  +0.19  +0.21  +0.40  +0.15  +0.52  +0.32
+  flair code_ridge    +0.48  +0.30  +0.39  +0.18  -0.00  +0.01  +0.20  +0.19  +0.29  +0.17
+  flair code_boosted  +0.64  +0.38  +0.47  +0.15  -0.06  -0.07  +0.18  -0.00  +0.39  +0.16
+  flair gap_ridge     +0.88  +0.62  +0.79  +0.46  +0.12  +0.25  +0.41  +0.14  +0.51  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.97 +0.98 +0.97 +0.97 +0.99 +0.97 +0.99 +0.98 +0.99 +0.98
+  effective rank out of active units (T1 / FLAIR): 2.7 of 10 / 2.6 of 10
+  shared: 8 directions with r >= 0.9, 10 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.76/1.00  r 0.991: 0.98/0.39/0.97  r 0.973: 0.94/0.01/0.95  r 0.962: 0.93/-0.01/0.94  r 0.956: 0.92/-0.03/0.93  r 0.951: 0.82/0.13/0.87  r 0.936: 0.77/0.12/0.88  r 0.920: 0.46/0.29/0.83  r 0.899: 0.69/0.01/0.81  r 0.866: 0.57/0.01/0.80
+   mean over r >= 0.9: anatomy 0.85 lesion 0.21 both 0.92
+  cross-view top-1: uniform32 0.981  neighbour32 0.889  all1000 0.782
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.982       0.907       0.927
+    test, batch statistics (as trained)          0.980       0.953       0.952
+    train subjects, running statistics           0.994       0.974       0.984
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s4  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 10 code neighbours 31 seed 4, last global loss 0.19824498206377028
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.93  +0.83  +0.90  +0.81  +0.67  +0.67  +0.88  +0.16  +0.67  +0.46
+  t1    code_boosted  +0.97  +0.85  +0.94  +0.80  +0.72  +0.62  +0.83  +0.49  +0.75  +0.45
+  t1    gap_ridge     +0.96  +0.93  +0.93  +0.90  +0.88  +0.80  +0.91  +0.62  +0.77  +0.52
+  flair code_ridge    +0.94  +0.81  +0.90  +0.79  +0.70  +0.69  +0.89  +0.16  +0.68  +0.45
+  flair code_boosted  +0.97  +0.84  +0.94  +0.79  +0.75  +0.62  +0.86  +0.54  +0.77  +0.49
+  flair gap_ridge     +0.96  +0.90  +0.94  +0.89  +0.86  +0.83  +0.93  +0.64  +0.70  +0.57
+  untrained twin (the floor):
+  t1    code_ridge    +0.39  +0.16  +0.29  +0.14  +0.00  +0.04  +0.14  +0.09  +0.37  +0.19
+  t1    code_boosted  +0.41  +0.15  +0.30  +0.06  -0.05  +0.00  +0.08  +0.07  +0.30  +0.11
+  t1    gap_ridge     +0.86  +0.62  +0.80  +0.41  +0.12  +0.24  +0.42  +0.11  +0.46  +0.28
+  flair code_ridge    +0.67  +0.43  +0.48  +0.18  -0.00  +0.02  +0.32  +0.14  +0.44  +0.28
+  flair code_boosted  +0.68  +0.45  +0.49  +0.16  -0.06  -0.06  +0.29  -0.00  +0.39  +0.19
+  flair gap_ridge     +0.87  +0.64  +0.82  +0.52  +0.13  +0.14  +0.42  +0.14  +0.54  +0.32
+  matching-unit r (T1 vs FLAIR, code order): +0.96 +0.99 +0.98 +0.96 +0.98 +0.99 +0.98 +0.99 +0.95 +0.98
+  effective rank out of active units (T1 / FLAIR): 2.2 of 10 / 2.4 of 10
+  shared: 8 directions with r >= 0.9, 10 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.76/1.00  r 0.990: 0.98/0.43/0.98  r 0.969: 0.90/0.08/0.95  r 0.944: 0.89/-0.10/0.89  r 0.936: 0.84/0.05/0.88  r 0.925: 0.73/0.23/0.87  r 0.913: 0.79/0.00/0.87  r 0.901: 0.54/0.20/0.86  r 0.867: 0.81/-0.07/0.83  r 0.801: 0.49/0.13/0.66
+   mean over r >= 0.9: anatomy 0.83 lesion 0.21 both 0.91
+  cross-view top-1: uniform32 0.967  neighbour32 0.811  all1000 0.611
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.969       0.883       0.906
+    test, batch statistics (as trained)          0.968       0.938       0.948
+    train subjects, running statistics           0.982       0.949       0.981
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s5  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 10 code neighbours 31 seed 5, last global loss 0.18375051200389875
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.92  +0.92  +0.92  +0.88  +0.80  +0.89  +0.23  +0.70  +0.48
+  t1    code_boosted  +0.97  +0.90  +0.95  +0.80  +0.89  +0.73  +0.81  +0.58  +0.76  +0.44
+  t1    gap_ridge     +0.96  +0.96  +0.95  +0.95  +0.92  +0.85  +0.93  +0.77  +0.76  +0.54
+  flair code_ridge    +0.93  +0.90  +0.93  +0.91  +0.88  +0.80  +0.88  +0.23  +0.71  +0.48
+  flair code_boosted  +0.97  +0.88  +0.95  +0.80  +0.89  +0.72  +0.82  +0.50  +0.77  +0.43
+  flair gap_ridge     +0.96  +0.93  +0.95  +0.95  +0.92  +0.87  +0.93  +0.76  +0.75  +0.61
+  untrained twin (the floor):
+  t1    code_ridge    +0.33  +0.22  +0.33  +0.16  +0.00  +0.05  +0.12  +0.02  +0.23  +0.12
+  t1    code_boosted  +0.55  +0.38  +0.51  +0.16  -0.06  +0.02  +0.21  -0.06  +0.31  +0.12
+  t1    gap_ridge     +0.86  +0.64  +0.83  +0.43  +0.10  +0.29  +0.40  +0.10  +0.51  +0.34
+  flair code_ridge    +0.53  +0.29  +0.38  +0.13  -0.00  +0.04  +0.21  +0.13  +0.34  +0.22
+  flair code_boosted  +0.66  +0.45  +0.52  +0.12  -0.12  -0.03  +0.26  +0.11  +0.36  +0.16
+  flair gap_ridge     +0.88  +0.65  +0.79  +0.49  +0.12  +0.29  +0.43  +0.19  +0.49  +0.29
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.99 +0.99 +1.00 +0.99 +0.99 +0.99 +0.97 +0.99
+  effective rank out of active units (T1 / FLAIR): 2.6 of 10 / 2.5 of 10
+  shared: 8 directions with r >= 0.9, 10 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.73/1.00  r 0.997: 0.98/0.38/0.97  r 0.989: 0.97/-0.03/0.98  r 0.983: 0.92/0.14/0.94  r 0.965: 0.93/-0.05/0.95  r 0.954: 0.90/-0.05/0.90  r 0.927: 0.40/0.62/0.90  r 0.912: 0.78/0.08/0.82  r 0.897: 0.75/0.02/0.82  r 0.892: 0.50/0.06/0.83
+   mean over r >= 0.9: anatomy 0.86 lesion 0.23 both 0.93
+  cross-view top-1: uniform32 0.993  neighbour32 0.940  all1000 0.877
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.995       0.941       0.952
+    test, batch statistics (as trained)          0.976       0.961       0.969
+    train subjects, running statistics           0.998       0.986       0.991
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 42, last global loss 0.29187342882156364
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.82  +0.91  +0.89  +0.84  +0.74  +0.85  +0.22  +0.69  +0.45
+  t1    code_boosted  +0.96  +0.84  +0.95  +0.87  +0.75  +0.69  +0.82  +0.44  +0.74  +0.42
+  t1    gap_ridge     +0.96  +0.93  +0.94  +0.95  +0.92  +0.83  +0.91  +0.75  +0.77  +0.49
+  flair code_ridge    +0.94  +0.82  +0.92  +0.88  +0.84  +0.78  +0.86  +0.25  +0.69  +0.46
+  flair code_boosted  +0.97  +0.83  +0.95  +0.86  +0.76  +0.72  +0.85  +0.50  +0.76  +0.42
+  flair gap_ridge     +0.97  +0.91  +0.95  +0.94  +0.93  +0.87  +0.93  +0.79  +0.79  +0.60
+  untrained twin (the floor):
+  t1    code_ridge    +0.44  +0.19  +0.28  +0.18  -0.00  +0.05  +0.13  +0.08  +0.38  +0.20
+  t1    code_boosted  +0.51  +0.22  +0.33  +0.11  -0.04  +0.00  +0.10  -0.06  +0.32  +0.14
+  t1    gap_ridge     +0.86  +0.64  +0.82  +0.35  +0.15  +0.27  +0.39  +0.13  +0.52  +0.29
+  flair code_ridge    +0.50  +0.23  +0.31  +0.15  -0.00  +0.01  +0.15  +0.14  +0.39  +0.26
+  flair code_boosted  +0.63  +0.40  +0.46  +0.15  -0.09  -0.09  +0.20  +0.05  +0.45  +0.22
+  flair gap_ridge     +0.89  +0.64  +0.79  +0.47  +0.20  +0.25  +0.41  +0.14  +0.49  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.99 +0.99 +0.99 +0.99 +1.00 +0.98
+  effective rank out of active units (T1 / FLAIR): 2.0 of 8 / 2.1 of 8
+  shared: 7 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.75/1.00  r 0.996: 0.98/0.40/0.98  r 0.978: 0.96/0.08/0.97  r 0.972: 0.94/-0.04/0.96  r 0.951: 0.89/-0.04/0.93  r 0.940: 0.49/0.62/0.91  r 0.911: 0.84/-0.11/0.88  r 0.872: 0.76/-0.01/0.81
+   mean over r >= 0.9: anatomy 0.87 lesion 0.24 both 0.94
+  cross-view top-1: uniform32 0.981  neighbour32 0.896  all1000 0.794
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.985       0.890       0.918
+    test, batch statistics (as trained)          0.960       0.933       0.949
+    train subjects, running statistics           0.992       0.954       0.976
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 42, last global loss 0.18907757520675664
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.93  +0.83  +0.93  +0.87  +0.83  +0.77  +0.86  +0.23  +0.69  +0.46
+  t1    code_boosted  +0.96  +0.87  +0.95  +0.88  +0.79  +0.73  +0.84  +0.37  +0.76  +0.43
+  t1    gap_ridge     +0.96  +0.94  +0.94  +0.95  +0.92  +0.85  +0.93  +0.79  +0.76  +0.53
+  flair code_ridge    +0.94  +0.83  +0.92  +0.89  +0.83  +0.81  +0.86  +0.26  +0.70  +0.47
+  flair code_boosted  +0.97  +0.85  +0.96  +0.88  +0.79  +0.74  +0.87  +0.47  +0.76  +0.43
+  flair gap_ridge     +0.96  +0.93  +0.95  +0.95  +0.92  +0.88  +0.93  +0.76  +0.75  +0.58
+  untrained twin (the floor):
+  t1    code_ridge    +0.44  +0.19  +0.28  +0.18  -0.00  +0.05  +0.13  +0.08  +0.38  +0.20
+  t1    code_boosted  +0.51  +0.22  +0.33  +0.11  -0.04  +0.00  +0.10  -0.06  +0.32  +0.14
+  t1    gap_ridge     +0.86  +0.64  +0.82  +0.35  +0.15  +0.27  +0.39  +0.13  +0.52  +0.29
+  flair code_ridge    +0.50  +0.23  +0.31  +0.15  -0.00  +0.01  +0.15  +0.14  +0.39  +0.26
+  flair code_boosted  +0.63  +0.40  +0.46  +0.15  -0.09  -0.09  +0.20  +0.05  +0.45  +0.22
+  flair gap_ridge     +0.89  +0.64  +0.79  +0.47  +0.20  +0.25  +0.41  +0.14  +0.49  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.98 +0.98 +0.98 +0.98 +0.98 +0.98 +0.99 +0.96
+  effective rank out of active units (T1 / FLAIR): 2.2 of 8 / 2.3 of 8
+  shared: 7 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.75/1.00  r 0.985: 0.96/0.24/0.97  r 0.982: 0.94/0.29/0.96  r 0.966: 0.94/-0.10/0.94  r 0.959: 0.90/-0.07/0.91  r 0.937: 0.61/0.48/0.89  r 0.916: 0.58/0.11/0.86  r 0.893: 0.77/-0.02/0.84
+   mean over r >= 0.9: anatomy 0.85 lesion 0.24 both 0.93
+  cross-view top-1: uniform32 0.975  neighbour32 0.850  all1000 0.700
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.975       0.884       0.917
+    test, batch statistics (as trained)          0.979       0.960       0.954
+    train subjects, running statistics           0.990       0.959       0.981
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s2  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 2, last global loss 0.1749902820587158
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.95  +0.92  +0.92  +0.94  +0.88  +0.73  +0.87  +0.24  +0.69  +0.47
+  t1    code_boosted  +0.97  +0.93  +0.96  +0.88  +0.84  +0.74  +0.86  +0.44  +0.75  +0.39
+  t1    gap_ridge     +0.97  +0.95  +0.95  +0.95  +0.93  +0.84  +0.92  +0.62  +0.76  +0.52
+  flair code_ridge    +0.94  +0.91  +0.93  +0.92  +0.89  +0.77  +0.87  +0.22  +0.69  +0.46
+  flair code_boosted  +0.97  +0.92  +0.96  +0.87  +0.83  +0.78  +0.87  +0.46  +0.76  +0.41
+  flair gap_ridge     +0.97  +0.95  +0.95  +0.94  +0.93  +0.88  +0.94  +0.69  +0.78  +0.59
+  untrained twin (the floor):
+  t1    code_ridge    +0.42  +0.21  +0.28  +0.15  -0.00  +0.03  +0.14  +0.07  +0.29  +0.16
+  t1    code_boosted  +0.51  +0.28  +0.37  +0.10  -0.05  -0.10  +0.14  -0.03  +0.26  +0.12
+  t1    gap_ridge     +0.86  +0.61  +0.80  +0.43  +0.12  +0.25  +0.36  +0.11  +0.50  +0.30
+  flair code_ridge    +0.60  +0.37  +0.46  +0.13  -0.00  +0.00  +0.23  +0.16  +0.37  +0.24
+  flair code_boosted  +0.63  +0.44  +0.47  +0.05  -0.08  -0.08  +0.22  +0.05  +0.40  +0.25
+  flair gap_ridge     +0.88  +0.63  +0.81  +0.56  +0.16  +0.26  +0.41  +0.19  +0.52  +0.34
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.98 +0.97 +0.98 +0.99 +0.98 +0.99
+  effective rank out of active units (T1 / FLAIR): 2.3 of 8 / 2.2 of 8
+  shared: 7 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.75/1.00  r 0.991: 0.97/0.42/0.97  r 0.984: 0.96/0.05/0.98  r 0.967: 0.94/0.01/0.95  r 0.962: 0.91/-0.06/0.92  r 0.944: 0.70/0.33/0.88  r 0.914: 0.64/0.14/0.87  r 0.893: 0.39/0.12/0.83
+   mean over r >= 0.9: anatomy 0.88 lesion 0.23 both 0.94
+  cross-view top-1: uniform32 0.986  neighbour32 0.916  all1000 0.817
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.989       0.924       0.937
+    test, batch statistics (as trained)          0.982       0.966       0.964
+    train subjects, running statistics           0.997       0.982       0.990
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s3  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 3, last global loss 0.163223584741354
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.92  +0.91  +0.93  +0.91  +0.79  +0.89  +0.33  +0.68  +0.45
+  t1    code_boosted  +0.97  +0.93  +0.95  +0.88  +0.86  +0.81  +0.90  +0.58  +0.76  +0.46
+  t1    gap_ridge     +0.96  +0.96  +0.94  +0.94  +0.93  +0.87  +0.92  +0.69  +0.77  +0.51
+  flair code_ridge    +0.94  +0.93  +0.92  +0.91  +0.92  +0.81  +0.89  +0.30  +0.68  +0.46
+  flair code_boosted  +0.98  +0.93  +0.95  +0.89  +0.86  +0.82  +0.90  +0.63  +0.76  +0.49
+  flair gap_ridge     +0.96  +0.95  +0.95  +0.95  +0.93  +0.89  +0.94  +0.71  +0.77  +0.55
+  untrained twin (the floor):
+  t1    code_ridge    +0.23  +0.08  +0.13  +0.11  -0.01  +0.02  +0.05  +0.01  +0.26  +0.14
+  t1    code_boosted  +0.40  +0.16  +0.28  +0.14  -0.05  -0.02  +0.05  -0.01  +0.27  +0.14
+  t1    gap_ridge     +0.88  +0.64  +0.79  +0.37  +0.19  +0.21  +0.40  +0.15  +0.52  +0.32
+  flair code_ridge    +0.33  +0.17  +0.28  +0.16  +0.00  +0.01  +0.09  +0.13  +0.22  +0.13
+  flair code_boosted  +0.52  +0.31  +0.41  +0.16  -0.07  -0.06  +0.12  +0.01  +0.34  +0.11
+  flair gap_ridge     +0.88  +0.62  +0.79  +0.46  +0.12  +0.25  +0.41  +0.14  +0.51  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.99 +0.98 +0.99 +0.98 +0.98 +1.00
+  effective rank out of active units (T1 / FLAIR): 2.6 of 8 / 2.6 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.76/1.00  r 0.994: 0.98/0.46/0.97  r 0.986: 0.98/0.07/0.98  r 0.973: 0.95/-0.06/0.96  r 0.960: 0.85/0.24/0.92  r 0.944: 0.83/0.16/0.89  r 0.919: 0.62/0.06/0.88  r 0.904: 0.41/0.17/0.82
+   mean over r >= 0.9: anatomy 0.83 lesion 0.23 both 0.93
+  cross-view top-1: uniform32 0.995  neighbour32 0.953  all1000 0.900
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.994       0.951       0.949
+    test, batch statistics (as trained)          0.990       0.973       0.970
+    train subjects, running statistics           0.999       0.990       0.994
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s4  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 4, last global loss 0.17291854411363605
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.87  +0.92  +0.90  +0.54  +0.79  +0.88  +0.15  +0.67  +0.44
+  t1    code_boosted  +0.97  +0.88  +0.95  +0.87  +0.67  +0.74  +0.87  +0.50  +0.76  +0.41
+  t1    gap_ridge     +0.96  +0.93  +0.93  +0.95  +0.83  +0.82  +0.91  +0.66  +0.71  +0.49
+  flair code_ridge    +0.93  +0.87  +0.92  +0.88  +0.55  +0.78  +0.85  +0.16  +0.66  +0.44
+  flair code_boosted  +0.97  +0.87  +0.95  +0.88  +0.69  +0.73  +0.86  +0.49  +0.74  +0.40
+  flair gap_ridge     +0.96  +0.94  +0.94  +0.94  +0.86  +0.87  +0.92  +0.70  +0.75  +0.52
+  untrained twin (the floor):
+  t1    code_ridge    +0.37  +0.15  +0.27  +0.13  -0.00  +0.05  +0.14  +0.08  +0.37  +0.19
+  t1    code_boosted  +0.39  +0.12  +0.26  +0.04  -0.03  +0.01  +0.06  +0.04  +0.27  +0.12
+  t1    gap_ridge     +0.86  +0.62  +0.80  +0.41  +0.12  +0.24  +0.42  +0.11  +0.46  +0.28
+  flair code_ridge    +0.61  +0.37  +0.40  +0.17  -0.00  +0.02  +0.28  +0.14  +0.44  +0.28
+  flair code_boosted  +0.64  +0.40  +0.43  +0.12  -0.04  -0.05  +0.24  +0.02  +0.39  +0.20
+  flair gap_ridge     +0.87  +0.64  +0.82  +0.52  +0.13  +0.14  +0.42  +0.14  +0.54  +0.32
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.98 +0.99 +0.97 +0.96 +0.98 +0.99 +0.99
+  effective rank out of active units (T1 / FLAIR): 2.5 of 8 / 2.5 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.77/1.00  r 0.993: 0.98/0.36/0.97  r 0.969: 0.92/0.05/0.93  r 0.958: 0.92/-0.09/0.92  r 0.953: 0.89/0.01/0.89  r 0.940: 0.75/0.16/0.89  r 0.918: 0.87/0.01/0.87  r 0.903: 0.39/0.35/0.86
+   mean over r >= 0.9: anatomy 0.84 lesion 0.20 both 0.92
+  cross-view top-1: uniform32 0.981  neighbour32 0.870  all1000 0.755
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.982       0.914       0.929
+    test, batch statistics (as trained)          0.981       0.947       0.958
+    train subjects, running statistics           0.997       0.984       0.992
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s5  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 5, last global loss 0.16015392407774928
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.93  +0.92  +0.89  +0.88  +0.74  +0.88  +0.34  +0.66  +0.44
+  t1    code_boosted  +0.97  +0.94  +0.96  +0.85  +0.85  +0.76  +0.91  +0.66  +0.78  +0.45
+  t1    gap_ridge     +0.96  +0.95  +0.94  +0.94  +0.93  +0.84  +0.93  +0.62  +0.77  +0.51
+  flair code_ridge    +0.94  +0.92  +0.93  +0.89  +0.90  +0.80  +0.88  +0.32  +0.66  +0.43
+  flair code_boosted  +0.97  +0.92  +0.96  +0.84  +0.86  +0.81  +0.91  +0.67  +0.76  +0.41
+  flair gap_ridge     +0.96  +0.94  +0.95  +0.94  +0.94  +0.89  +0.93  +0.70  +0.75  +0.53
+  untrained twin (the floor):
+  t1    code_ridge    +0.28  +0.16  +0.21  +0.14  -0.00  +0.03  +0.08  +0.03  +0.21  +0.10
+  t1    code_boosted  +0.46  +0.29  +0.39  +0.12  -0.07  +0.01  +0.16  -0.11  +0.24  +0.05
+  t1    gap_ridge     +0.86  +0.64  +0.83  +0.43  +0.10  +0.29  +0.40  +0.10  +0.51  +0.34
+  flair code_ridge    +0.37  +0.17  +0.25  +0.11  -0.00  +0.03  +0.13  +0.10  +0.28  +0.19
+  flair code_boosted  +0.54  +0.33  +0.40  +0.08  -0.14  -0.04  +0.19  +0.09  +0.30  +0.14
+  flair gap_ridge     +0.88  +0.65  +0.79  +0.49  +0.12  +0.29  +0.43  +0.19  +0.49  +0.29
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.98 +0.98 +0.98 +0.97 +0.96 +0.99 +0.99
+  effective rank out of active units (T1 / FLAIR): 2.2 of 8 / 2.4 of 8
+  shared: 7 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.77/1.00  r 0.985: 0.96/0.47/0.95  r 0.976: 0.97/0.11/0.97  r 0.962: 0.89/-0.08/0.94  r 0.955: 0.88/-0.02/0.88  r 0.932: 0.58/0.61/0.90  r 0.913: 0.60/0.04/0.84  r 0.869: 0.62/0.00/0.82
+   mean over r >= 0.9: anatomy 0.84 lesion 0.27 both 0.93
+  cross-view top-1: uniform32 0.983  neighbour32 0.897  all1000 0.792
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.985       0.912       0.921
+    test, batch statistics (as trained)          0.983       0.953       0.954
+    train subjects, running statistics           0.993       0.980       0.994
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s2  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 2, last global loss 0.25603096634149547
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.92  +0.93  +0.94  +0.90  +0.77  +0.87  +0.27  +0.68  +0.46
+  t1    code_boosted  +0.97  +0.93  +0.95  +0.86  +0.86  +0.71  +0.83  +0.47  +0.73  +0.44
+  t1    gap_ridge     +0.97  +0.96  +0.95  +0.95  +0.92  +0.85  +0.93  +0.67  +0.77  +0.55
+  flair code_ridge    +0.94  +0.92  +0.94  +0.93  +0.91  +0.79  +0.87  +0.28  +0.68  +0.45
+  flair code_boosted  +0.97  +0.91  +0.96  +0.87  +0.86  +0.77  +0.84  +0.57  +0.76  +0.40
+  flair gap_ridge     +0.96  +0.95  +0.95  +0.95  +0.93  +0.89  +0.94  +0.73  +0.77  +0.55
+  untrained twin (the floor):
+  t1    code_ridge    +0.42  +0.21  +0.28  +0.15  -0.00  +0.03  +0.14  +0.07  +0.29  +0.16
+  t1    code_boosted  +0.51  +0.28  +0.37  +0.10  -0.05  -0.10  +0.14  -0.03  +0.26  +0.12
+  t1    gap_ridge     +0.86  +0.61  +0.80  +0.43  +0.12  +0.25  +0.36  +0.11  +0.50  +0.30
+  flair code_ridge    +0.60  +0.37  +0.46  +0.13  -0.00  +0.00  +0.23  +0.16  +0.37  +0.24
+  flair code_boosted  +0.63  +0.44  +0.47  +0.05  -0.08  -0.08  +0.22  +0.05  +0.40  +0.25
+  flair gap_ridge     +0.88  +0.63  +0.81  +0.56  +0.16  +0.26  +0.41  +0.19  +0.52  +0.34
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.99 +0.99 +0.99 +0.99 +0.99 +1.00
+  effective rank out of active units (T1 / FLAIR): 2.1 of 8 / 2.1 of 8
+  shared: 7 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.77/1.00  r 0.994: 0.98/0.40/0.98  r 0.983: 0.97/0.08/0.98  r 0.966: 0.94/0.01/0.95  r 0.958: 0.93/-0.01/0.93  r 0.937: 0.68/0.38/0.88  r 0.913: 0.63/0.10/0.87  r 0.880: 0.49/0.12/0.83
+   mean over r >= 0.9: anatomy 0.88 lesion 0.25 both 0.94
+  cross-view top-1: uniform32 0.991  neighbour32 0.919  all1000 0.834
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.991       0.924       0.935
+    test, batch statistics (as trained)          0.959       0.961       0.965
+    train subjects, running statistics           0.996       0.960       0.976
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s3  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 3, last global loss 0.2316834622621536
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.92  +0.92  +0.93  +0.92  +0.79  +0.89  +0.33  +0.69  +0.46
+  t1    code_boosted  +0.98  +0.93  +0.95  +0.89  +0.88  +0.78  +0.89  +0.62  +0.77  +0.47
+  t1    gap_ridge     +0.96  +0.96  +0.94  +0.95  +0.94  +0.86  +0.92  +0.72  +0.76  +0.48
+  flair code_ridge    +0.94  +0.92  +0.92  +0.92  +0.92  +0.81  +0.89  +0.28  +0.68  +0.45
+  flair code_boosted  +0.98  +0.93  +0.96  +0.89  +0.88  +0.78  +0.90  +0.59  +0.76  +0.46
+  flair gap_ridge     +0.96  +0.95  +0.95  +0.94  +0.94  +0.87  +0.95  +0.76  +0.80  +0.52
+  untrained twin (the floor):
+  t1    code_ridge    +0.23  +0.08  +0.13  +0.11  -0.01  +0.02  +0.05  +0.01  +0.26  +0.14
+  t1    code_boosted  +0.40  +0.16  +0.28  +0.14  -0.05  -0.02  +0.05  -0.01  +0.27  +0.14
+  t1    gap_ridge     +0.88  +0.64  +0.79  +0.37  +0.19  +0.21  +0.40  +0.15  +0.52  +0.32
+  flair code_ridge    +0.33  +0.17  +0.28  +0.16  +0.00  +0.01  +0.09  +0.13  +0.22  +0.13
+  flair code_boosted  +0.52  +0.31  +0.41  +0.16  -0.07  -0.06  +0.12  +0.01  +0.34  +0.11
+  flair gap_ridge     +0.88  +0.62  +0.79  +0.46  +0.12  +0.25  +0.41  +0.14  +0.51  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.98 +0.98 +0.98 +0.99 +0.98 +0.96 +0.97 +1.00
+  effective rank out of active units (T1 / FLAIR): 3.0 of 8 / 3.2 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.76/1.00  r 0.996: 0.98/0.40/0.98  r 0.986: 0.98/0.09/0.98  r 0.965: 0.96/-0.06/0.96  r 0.950: 0.73/0.32/0.91  r 0.940: 0.83/0.16/0.89  r 0.913: 0.31/0.27/0.86  r 0.900: 0.87/-0.06/0.89
+   mean over r >= 0.9: anatomy 0.83 lesion 0.23 both 0.93
+  cross-view top-1: uniform32 0.990  neighbour32 0.926  all1000 0.854
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.990       0.928       0.940
+    test, batch statistics (as trained)          0.968       0.962       0.963
+    train subjects, running statistics           0.995       0.968       0.974
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s4  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 4, last global loss 0.24509029954671857
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.86  +0.90  +0.90  +0.56  +0.76  +0.86  +0.15  +0.67  +0.44
+  t1    code_boosted  +0.97  +0.87  +0.95  +0.87  +0.66  +0.73  +0.85  +0.52  +0.75  +0.43
+  t1    gap_ridge     +0.97  +0.94  +0.94  +0.95  +0.85  +0.82  +0.92  +0.68  +0.74  +0.51
+  flair code_ridge    +0.94  +0.85  +0.91  +0.90  +0.56  +0.78  +0.86  +0.14  +0.68  +0.44
+  flair code_boosted  +0.97  +0.85  +0.95  +0.88  +0.69  +0.73  +0.84  +0.54  +0.75  +0.38
+  flair gap_ridge     +0.96  +0.94  +0.94  +0.93  +0.86  +0.87  +0.92  +0.70  +0.75  +0.51
+  untrained twin (the floor):
+  t1    code_ridge    +0.37  +0.15  +0.27  +0.13  -0.00  +0.05  +0.14  +0.08  +0.37  +0.19
+  t1    code_boosted  +0.39  +0.12  +0.26  +0.04  -0.03  +0.01  +0.06  +0.04  +0.27  +0.12
+  t1    gap_ridge     +0.86  +0.62  +0.80  +0.41  +0.12  +0.24  +0.42  +0.11  +0.46  +0.28
+  flair code_ridge    +0.61  +0.37  +0.40  +0.17  -0.00  +0.02  +0.28  +0.14  +0.44  +0.28
+  flair code_boosted  +0.64  +0.40  +0.43  +0.12  -0.04  -0.05  +0.24  +0.02  +0.39  +0.20
+  flair gap_ridge     +0.87  +0.64  +0.82  +0.52  +0.13  +0.14  +0.42  +0.14  +0.54  +0.32
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.99 +0.98 +0.99 +0.99 +1.00 +1.00
+  effective rank out of active units (T1 / FLAIR): 1.7 of 8 / 1.8 of 8
+  shared: 7 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.75/1.00  r 0.995: 0.98/0.37/0.98  r 0.968: 0.88/0.08/0.93  r 0.950: 0.88/-0.06/0.91  r 0.944: 0.85/0.10/0.89  r 0.944: 0.87/-0.02/0.90  r 0.908: 0.83/-0.03/0.87  r 0.891: 0.50/0.35/0.85
+   mean over r >= 0.9: anatomy 0.90 lesion 0.17 both 0.92
+  cross-view top-1: uniform32 0.985  neighbour32 0.899  all1000 0.790
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.987       0.896       0.923
+    test, batch statistics (as trained)          0.957       0.940       0.956
+    train subjects, running statistics           0.993       0.961       0.980
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s5  step 20000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 5, last global loss 0.24600841492414474
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.93  +0.92  +0.92  +0.92  +0.89  +0.72  +0.88  +0.33  +0.69  +0.46
+  t1    code_boosted  +0.97  +0.92  +0.95  +0.88  +0.83  +0.73  +0.90  +0.60  +0.77  +0.48
+  t1    gap_ridge     +0.96  +0.95  +0.94  +0.94  +0.92  +0.83  +0.94  +0.69  +0.76  +0.54
+  flair code_ridge    +0.94  +0.90  +0.92  +0.91  +0.91  +0.79  +0.91  +0.32  +0.68  +0.44
+  flair code_boosted  +0.97  +0.91  +0.95  +0.87  +0.84  +0.76  +0.92  +0.66  +0.76  +0.45
+  flair gap_ridge     +0.96  +0.95  +0.95  +0.94  +0.94  +0.87  +0.93  +0.71  +0.77  +0.57
+  untrained twin (the floor):
+  t1    code_ridge    +0.28  +0.16  +0.21  +0.14  -0.00  +0.03  +0.08  +0.03  +0.21  +0.10
+  t1    code_boosted  +0.46  +0.29  +0.39  +0.12  -0.07  +0.01  +0.16  -0.11  +0.24  +0.05
+  t1    gap_ridge     +0.86  +0.64  +0.83  +0.43  +0.10  +0.29  +0.40  +0.10  +0.51  +0.34
+  flair code_ridge    +0.37  +0.17  +0.25  +0.11  -0.00  +0.03  +0.13  +0.10  +0.28  +0.19
+  flair code_boosted  +0.54  +0.33  +0.40  +0.08  -0.14  -0.04  +0.19  +0.09  +0.30  +0.14
+  flair gap_ridge     +0.88  +0.65  +0.79  +0.49  +0.12  +0.29  +0.43  +0.19  +0.49  +0.29
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.98 +0.99 +1.00 +0.99 +0.98 +0.99
+  effective rank out of active units (T1 / FLAIR): 1.9 of 8 / 2.0 of 8
+  shared: 7 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.76/1.00  r 0.992: 0.98/0.46/0.97  r 0.975: 0.98/0.10/0.98  r 0.967: 0.94/-0.08/0.95  r 0.940: 0.89/-0.05/0.89  r 0.924: 0.72/0.47/0.90  r 0.910: 0.56/0.14/0.88  r 0.870: 0.48/0.16/0.82
+   mean over r >= 0.9: anatomy 0.87 lesion 0.26 both 0.94
+  cross-view top-1: uniform32 0.987  neighbour32 0.915  all1000 0.827
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.987       0.894       0.924
+    test, batch statistics (as trained)          0.972       0.950       0.957
+    train subjects, running statistics           0.995       0.955       0.978
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 42, last global loss 0.20047975748777389
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.95  +0.90  +0.89  +0.81  +0.83  +0.87  +0.22  +0.65  +0.45
+  t1    code_boosted  +0.97  +0.95  +0.94  +0.84  +0.86  +0.82  +0.91  +0.62  +0.74  +0.47
+  t1    gap_ridge     +0.96  +0.96  +0.95  +0.95  +0.93  +0.87  +0.93  +0.72  +0.76  +0.52
+  flair code_ridge    +0.94  +0.94  +0.91  +0.89  +0.85  +0.85  +0.86  +0.20  +0.63  +0.42
+  flair code_boosted  +0.97  +0.95  +0.95  +0.84  +0.87  +0.84  +0.90  +0.60  +0.74  +0.43
+  flair gap_ridge     +0.96  +0.96  +0.95  +0.94  +0.94  +0.89  +0.93  +0.72  +0.74  +0.53
+  untrained twin (the floor):
+  t1    code_ridge    +0.44  +0.19  +0.28  +0.18  -0.00  +0.05  +0.13  +0.08  +0.38  +0.20
+  t1    code_boosted  +0.51  +0.22  +0.33  +0.11  -0.04  +0.00  +0.10  -0.06  +0.32  +0.14
+  t1    gap_ridge     +0.86  +0.64  +0.82  +0.35  +0.15  +0.27  +0.39  +0.13  +0.52  +0.29
+  flair code_ridge    +0.50  +0.23  +0.31  +0.15  -0.00  +0.01  +0.15  +0.14  +0.39  +0.26
+  flair code_boosted  +0.63  +0.40  +0.46  +0.15  -0.09  -0.09  +0.20  +0.05  +0.45  +0.22
+  flair gap_ridge     +0.89  +0.64  +0.79  +0.47  +0.20  +0.25  +0.41  +0.14  +0.49  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.97 +0.98 +0.98 +0.99 +0.96 +0.97 +0.98
+  effective rank out of active units (T1 / FLAIR): 3.0 of 8 / 3.0 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.72/1.00  r 0.990: 0.97/0.41/0.97  r 0.976: 0.94/0.04/0.95  r 0.966: 0.91/0.02/0.94  r 0.958: 0.90/0.00/0.90  r 0.945: 0.69/0.46/0.90  r 0.930: 0.61/0.05/0.87  r 0.902: 0.58/0.06/0.83
+   mean over r >= 0.9: anatomy 0.82 lesion 0.22 both 0.92
+  cross-view top-1: uniform32 0.989  neighbour32 0.922  all1000 0.841
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.989       0.943       0.948
+    test, batch statistics (as trained)          0.990       0.963       0.966
+    train subjects, running statistics           0.997       0.987       0.994
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s2  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 2, last global loss 0.21320243000984188
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.80  +0.86  +0.83  +0.77  +0.61  +0.77  +0.83  +0.31  +0.57  +0.38
+  t1    code_boosted  +0.96  +0.92  +0.92  +0.85  +0.87  +0.80  +0.89  +0.61  +0.75  +0.44
+  t1    gap_ridge     +0.96  +0.95  +0.95  +0.96  +0.93  +0.87  +0.93  +0.73  +0.78  +0.57
+  flair code_ridge    +0.81  +0.83  +0.85  +0.77  +0.63  +0.80  +0.78  +0.32  +0.59  +0.38
+  flair code_boosted  +0.97  +0.91  +0.93  +0.84  +0.86  +0.85  +0.87  +0.63  +0.76  +0.37
+  flair gap_ridge     +0.96  +0.95  +0.95  +0.95  +0.94  +0.90  +0.94  +0.77  +0.76  +0.55
+  untrained twin (the floor):
+  t1    code_ridge    +0.42  +0.21  +0.28  +0.15  -0.00  +0.03  +0.14  +0.07  +0.29  +0.16
+  t1    code_boosted  +0.51  +0.28  +0.37  +0.10  -0.05  -0.10  +0.14  -0.03  +0.26  +0.12
+  t1    gap_ridge     +0.86  +0.61  +0.80  +0.43  +0.12  +0.25  +0.36  +0.11  +0.50  +0.30
+  flair code_ridge    +0.60  +0.37  +0.46  +0.13  -0.00  +0.00  +0.23  +0.16  +0.37  +0.24
+  flair code_boosted  +0.63  +0.44  +0.47  +0.05  -0.08  -0.08  +0.22  +0.05  +0.40  +0.25
+  flair gap_ridge     +0.88  +0.63  +0.81  +0.56  +0.16  +0.26  +0.41  +0.19  +0.52  +0.34
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.98 +0.97 +0.95 +0.94 +0.95 +0.96
+  effective rank out of active units (T1 / FLAIR): 6.9 of 8 / 6.5 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.996: 0.98/0.58/0.98  r 0.992: 0.96/0.45/0.96  r 0.986: 0.95/0.18/0.95  r 0.983: 0.95/-0.06/0.96  r 0.968: 0.91/-0.03/0.92  r 0.943: 0.90/0.20/0.90  r 0.939: 0.74/-0.01/0.90  r 0.920: 0.30/0.35/0.86
+   mean over r >= 0.9: anatomy 0.84 lesion 0.21 both 0.93
+  cross-view top-1: uniform32 0.992  neighbour32 0.942  all1000 0.877
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.993       0.966       0.959
+    test, batch statistics (as trained)          0.992       0.975       0.970
+    train subjects, running statistics           0.998       0.994       0.996
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s3  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 3, last global loss 0.19440942704677586
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.92  +0.83  +0.87  +0.91  +0.23  +0.77  +0.85  +0.12  +0.64  +0.44
+  t1    code_boosted  +0.96  +0.92  +0.94  +0.87  +0.79  +0.76  +0.86  +0.45  +0.77  +0.40
+  t1    gap_ridge     +0.96  +0.95  +0.94  +0.95  +0.85  +0.85  +0.92  +0.76  +0.79  +0.54
+  flair code_ridge    +0.92  +0.82  +0.88  +0.90  +0.27  +0.75  +0.88  +0.13  +0.66  +0.44
+  flair code_boosted  +0.96  +0.91  +0.95  +0.88  +0.78  +0.78  +0.90  +0.35  +0.76  +0.42
+  flair gap_ridge     +0.97  +0.94  +0.94  +0.94  +0.88  +0.88  +0.94  +0.74  +0.78  +0.58
+  untrained twin (the floor):
+  t1    code_ridge    +0.23  +0.08  +0.13  +0.11  -0.01  +0.02  +0.05  +0.01  +0.26  +0.14
+  t1    code_boosted  +0.40  +0.16  +0.28  +0.14  -0.05  -0.02  +0.05  -0.01  +0.27  +0.14
+  t1    gap_ridge     +0.88  +0.64  +0.79  +0.37  +0.19  +0.21  +0.40  +0.15  +0.52  +0.32
+  flair code_ridge    +0.33  +0.17  +0.28  +0.16  +0.00  +0.01  +0.09  +0.13  +0.22  +0.13
+  flair code_boosted  +0.52  +0.31  +0.41  +0.16  -0.07  -0.06  +0.12  +0.01  +0.34  +0.11
+  flair gap_ridge     +0.88  +0.62  +0.79  +0.46  +0.12  +0.25  +0.41  +0.14  +0.51  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.98 +0.96 +0.94 +0.97 +0.95 +0.96 +0.97
+  effective rank out of active units (T1 / FLAIR): 5.3 of 8 / 5.8 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.998: 0.99/0.72/0.99  r 0.985: 0.95/0.47/0.96  r 0.974: 0.96/-0.05/0.96  r 0.967: 0.87/0.11/0.92  r 0.965: 0.92/-0.02/0.91  r 0.938: 0.71/0.22/0.87  r 0.921: 0.29/0.18/0.84  r 0.909: 0.63/0.05/0.84
+   mean over r >= 0.9: anatomy 0.79 lesion 0.21 both 0.91
+  cross-view top-1: uniform32 0.994  neighbour32 0.944  all1000 0.879
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.994       0.959       0.957
+    test, batch statistics (as trained)          0.993       0.963       0.958
+    train subjects, running statistics           0.999       0.998       0.996
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s4  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 4, last global loss 0.2186521914601326
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.86  +0.71  +0.90  +0.52  +0.58  +0.49  +0.82  +0.21  +0.57  +0.37
+  t1    code_boosted  +0.95  +0.82  +0.93  +0.73  +0.71  +0.59  +0.86  +0.55  +0.72  +0.45
+  t1    gap_ridge     +0.96  +0.92  +0.94  +0.91  +0.87  +0.79  +0.90  +0.62  +0.76  +0.55
+  flair code_ridge    +0.86  +0.73  +0.91  +0.52  +0.58  +0.54  +0.85  +0.18  +0.57  +0.36
+  flair code_boosted  +0.95  +0.82  +0.94  +0.72  +0.74  +0.63  +0.88  +0.56  +0.73  +0.42
+  flair gap_ridge     +0.96  +0.91  +0.93  +0.90  +0.86  +0.83  +0.93  +0.63  +0.74  +0.56
+  untrained twin (the floor):
+  t1    code_ridge    +0.37  +0.15  +0.27  +0.13  -0.00  +0.05  +0.14  +0.08  +0.37  +0.19
+  t1    code_boosted  +0.39  +0.12  +0.26  +0.04  -0.03  +0.01  +0.06  +0.04  +0.27  +0.12
+  t1    gap_ridge     +0.86  +0.62  +0.80  +0.41  +0.12  +0.24  +0.42  +0.11  +0.46  +0.28
+  flair code_ridge    +0.61  +0.37  +0.40  +0.17  -0.00  +0.02  +0.28  +0.14  +0.44  +0.28
+  flair code_boosted  +0.64  +0.40  +0.43  +0.12  -0.04  -0.05  +0.24  +0.02  +0.39  +0.20
+  flair gap_ridge     +0.87  +0.64  +0.82  +0.52  +0.13  +0.14  +0.42  +0.14  +0.54  +0.32
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.99 +0.94 +0.97 +0.94 +0.94 +0.94 +0.92
+  effective rank out of active units (T1 / FLAIR): 6.3 of 8 / 6.1 of 8
+  shared: 7 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.997: 0.99/0.67/0.99  r 0.990: 0.97/0.47/0.97  r 0.976: 0.94/0.05/0.96  r 0.956: 0.85/0.01/0.87  r 0.942: 0.66/0.21/0.87  r 0.934: 0.79/0.07/0.84  r 0.916: 0.46/0.22/0.86  r 0.892: 0.83/-0.10/0.83
+   mean over r >= 0.9: anatomy 0.81 lesion 0.24 both 0.91
+  cross-view top-1: uniform32 0.984  neighbour32 0.901  all1000 0.796
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.986       0.929       0.913
+    test, batch statistics (as trained)          0.985       0.942       0.925
+    train subjects, running statistics           0.998       0.993       0.994
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s5  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 5, last global loss 0.19413987100124358
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.90  +0.77  +0.82  +0.72  +0.84  +0.63  +0.78  +0.19  +0.65  +0.46
+  t1    code_boosted  +0.96  +0.91  +0.92  +0.86  +0.88  +0.77  +0.86  +0.49  +0.76  +0.47
+  t1    gap_ridge     +0.97  +0.96  +0.95  +0.95  +0.93  +0.87  +0.94  +0.79  +0.75  +0.59
+  flair code_ridge    +0.90  +0.76  +0.81  +0.70  +0.84  +0.63  +0.79  +0.19  +0.63  +0.46
+  flair code_boosted  +0.97  +0.91  +0.93  +0.86  +0.89  +0.79  +0.88  +0.55  +0.76  +0.48
+  flair gap_ridge     +0.96  +0.94  +0.95  +0.94  +0.93  +0.89  +0.93  +0.78  +0.77  +0.60
+  untrained twin (the floor):
+  t1    code_ridge    +0.28  +0.16  +0.21  +0.14  -0.00  +0.03  +0.08  +0.03  +0.21  +0.10
+  t1    code_boosted  +0.46  +0.29  +0.39  +0.12  -0.07  +0.01  +0.16  -0.11  +0.24  +0.05
+  t1    gap_ridge     +0.86  +0.64  +0.83  +0.43  +0.10  +0.29  +0.40  +0.10  +0.51  +0.34
+  flair code_ridge    +0.37  +0.17  +0.25  +0.11  -0.00  +0.03  +0.13  +0.10  +0.28  +0.19
+  flair code_boosted  +0.54  +0.33  +0.40  +0.08  -0.14  -0.04  +0.19  +0.09  +0.30  +0.14
+  flair gap_ridge     +0.88  +0.65  +0.79  +0.49  +0.12  +0.29  +0.43  +0.19  +0.49  +0.29
+  matching-unit r (T1 vs FLAIR, code order): +0.98 +1.00 +0.98 +0.94 +0.97 +0.95 +0.94 +0.96
+  effective rank out of active units (T1 / FLAIR): 5.9 of 8 / 5.5 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.996: 0.99/0.73/0.99  r 0.989: 0.96/0.27/0.96  r 0.982: 0.92/0.09/0.95  r 0.975: 0.95/-0.06/0.95  r 0.956: 0.90/-0.02/0.90  r 0.947: 0.63/0.36/0.85  r 0.925: 0.46/0.19/0.87  r 0.905: 0.60/0.03/0.82
+   mean over r >= 0.9: anatomy 0.80 lesion 0.20 both 0.91
+  cross-view top-1: uniform32 0.989  neighbour32 0.930  all1000 0.863
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.990       0.956       0.950
+    test, batch statistics (as trained)          0.994       0.969       0.963
+    train subjects, running statistics           0.997       0.994       0.994
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 42, last global loss 0.20091243922710422
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.94  +0.93  +0.91  +0.90  +0.89  +0.78  +0.89  +0.20  +0.65  +0.45
+  t1    code_boosted  +0.97  +0.95  +0.95  +0.88  +0.86  +0.81  +0.89  +0.56  +0.73  +0.47
+  t1    gap_ridge     +0.97  +0.96  +0.95  +0.95  +0.93  +0.86  +0.93  +0.71  +0.75  +0.56
+  flair code_ridge    +0.94  +0.93  +0.92  +0.88  +0.90  +0.83  +0.90  +0.19  +0.65  +0.45
+  flair code_boosted  +0.97  +0.94  +0.95  +0.88  +0.87  +0.83  +0.90  +0.54  +0.71  +0.43
+  flair gap_ridge     +0.97  +0.95  +0.95  +0.94  +0.94  +0.88  +0.93  +0.71  +0.74  +0.54
+  untrained twin (the floor):
+  t1    code_ridge    +0.44  +0.19  +0.28  +0.18  -0.00  +0.05  +0.13  +0.08  +0.38  +0.20
+  t1    code_boosted  +0.51  +0.22  +0.33  +0.11  -0.04  +0.00  +0.10  -0.06  +0.32  +0.14
+  t1    gap_ridge     +0.86  +0.64  +0.82  +0.35  +0.15  +0.27  +0.39  +0.13  +0.52  +0.29
+  flair code_ridge    +0.50  +0.23  +0.31  +0.15  -0.00  +0.01  +0.15  +0.14  +0.39  +0.26
+  flair code_boosted  +0.63  +0.40  +0.46  +0.15  -0.09  -0.09  +0.20  +0.05  +0.45  +0.22
+  flair gap_ridge     +0.89  +0.64  +0.79  +0.47  +0.20  +0.25  +0.41  +0.14  +0.49  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.97 +0.96 +0.98 +0.97 +0.99 +0.98 +0.96
+  effective rank out of active units (T1 / FLAIR): 3.5 of 8 / 3.5 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.999: 1.00/0.77/1.00  r 0.988: 0.96/0.36/0.96  r 0.983: 0.93/0.00/0.96  r 0.969: 0.93/-0.01/0.93  r 0.959: 0.90/0.07/0.91  r 0.950: 0.87/0.15/0.88  r 0.929: 0.49/0.16/0.88  r 0.913: 0.49/0.17/0.85
+   mean over r >= 0.9: anatomy 0.82 lesion 0.21 both 0.92
+  cross-view top-1: uniform32 0.992  neighbour32 0.944  all1000 0.869
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.992       0.954       0.947
+    test, batch statistics (as trained)          0.990       0.967       0.961
+    train subjects, running statistics           0.998       0.991       0.994
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s2  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 2, last global loss 0.1784962090849877
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.92  +0.92  +0.92  +0.93  +0.89  +0.81  +0.89  +0.18  +0.65  +0.46
+  t1    code_boosted  +0.96  +0.94  +0.95  +0.93  +0.89  +0.80  +0.89  +0.55  +0.72  +0.45
+  t1    gap_ridge     +0.97  +0.95  +0.95  +0.96  +0.93  +0.87  +0.94  +0.82  +0.75  +0.56
+  flair code_ridge    +0.93  +0.92  +0.92  +0.92  +0.90  +0.84  +0.89  +0.17  +0.66  +0.44
+  flair code_boosted  +0.96  +0.93  +0.95  +0.93  +0.89  +0.84  +0.90  +0.51  +0.73  +0.41
+  flair gap_ridge     +0.97  +0.95  +0.95  +0.95  +0.93  +0.90  +0.94  +0.77  +0.77  +0.57
+  untrained twin (the floor):
+  t1    code_ridge    +0.42  +0.21  +0.28  +0.15  -0.00  +0.03  +0.14  +0.07  +0.29  +0.16
+  t1    code_boosted  +0.51  +0.28  +0.37  +0.10  -0.05  -0.10  +0.14  -0.03  +0.26  +0.12
+  t1    gap_ridge     +0.86  +0.61  +0.80  +0.43  +0.12  +0.25  +0.36  +0.11  +0.50  +0.30
+  flair code_ridge    +0.60  +0.37  +0.46  +0.13  -0.00  +0.00  +0.23  +0.16  +0.37  +0.24
+  flair code_boosted  +0.63  +0.44  +0.47  +0.05  -0.08  -0.08  +0.22  +0.05  +0.40  +0.25
+  flair gap_ridge     +0.88  +0.63  +0.81  +0.56  +0.16  +0.26  +0.41  +0.19  +0.52  +0.34
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.97 +0.97 +0.96 +0.94 +0.95 +0.96 +0.95
+  effective rank out of active units (T1 / FLAIR): 5.6 of 8 / 5.8 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.998: 0.99/0.74/0.99  r 0.987: 0.97/0.10/0.98  r 0.986: 0.96/0.26/0.97  r 0.975: 0.96/-0.00/0.96  r 0.966: 0.92/-0.08/0.92  r 0.947: 0.86/0.25/0.88  r 0.931: 0.62/0.15/0.91  r 0.913: 0.26/0.28/0.86
+   mean over r >= 0.9: anatomy 0.82 lesion 0.21 both 0.93
+  cross-view top-1: uniform32 0.991  neighbour32 0.922  all1000 0.849
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.991       0.950       0.950
+    test, batch statistics (as trained)          0.995       0.970       0.966
+    train subjects, running statistics           0.999       0.992       0.995
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s3  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 3, last global loss 0.19140847727656363
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.92  +0.87  +0.88  +0.91  +0.26  +0.69  +0.87  +0.12  +0.68  +0.47
+  t1    code_boosted  +0.96  +0.93  +0.94  +0.90  +0.73  +0.77  +0.90  +0.38  +0.74  +0.50
+  t1    gap_ridge     +0.97  +0.95  +0.94  +0.95  +0.86  +0.83  +0.92  +0.80  +0.80  +0.53
+  flair code_ridge    +0.93  +0.87  +0.87  +0.90  +0.30  +0.68  +0.87  +0.12  +0.69  +0.47
+  flair code_boosted  +0.97  +0.93  +0.95  +0.91  +0.76  +0.78  +0.91  +0.33  +0.77  +0.47
+  flair gap_ridge     +0.96  +0.95  +0.94  +0.95  +0.87  +0.87  +0.94  +0.72  +0.78  +0.57
+  untrained twin (the floor):
+  t1    code_ridge    +0.23  +0.08  +0.13  +0.11  -0.01  +0.02  +0.05  +0.01  +0.26  +0.14
+  t1    code_boosted  +0.40  +0.16  +0.28  +0.14  -0.05  -0.02  +0.05  -0.01  +0.27  +0.14
+  t1    gap_ridge     +0.88  +0.64  +0.79  +0.37  +0.19  +0.21  +0.40  +0.15  +0.52  +0.32
+  flair code_ridge    +0.33  +0.17  +0.28  +0.16  +0.00  +0.01  +0.09  +0.13  +0.22  +0.13
+  flair code_boosted  +0.52  +0.31  +0.41  +0.16  -0.07  -0.06  +0.12  +0.01  +0.34  +0.11
+  flair gap_ridge     +0.88  +0.62  +0.79  +0.46  +0.12  +0.25  +0.41  +0.14  +0.51  +0.30
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.96 +0.97 +0.95 +0.93 +0.97 +0.92 +0.97
+  effective rank out of active units (T1 / FLAIR): 5.8 of 8 / 5.7 of 8
+  shared: 7 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.997: 0.99/0.76/0.99  r 0.985: 0.96/0.37/0.96  r 0.979: 0.95/-0.05/0.96  r 0.961: 0.88/0.17/0.91  r 0.957: 0.89/0.01/0.89  r 0.946: 0.88/0.01/0.87  r 0.912: 0.12/0.44/0.87  r 0.899: 0.66/-0.03/0.83
+   mean over r >= 0.9: anatomy 0.81 lesion 0.24 both 0.92
+  cross-view top-1: uniform32 0.986  neighbour32 0.928  all1000 0.829
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.987       0.955       0.942
+    test, batch statistics (as trained)          0.989       0.958       0.942
+    train subjects, running statistics           0.997       0.997       0.995
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s4  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 4, last global loss 0.19712740361690528
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.93  +0.82  +0.87  +0.71  +0.65  +0.65  +0.85  +0.13  +0.59  +0.39
+  t1    code_boosted  +0.95  +0.88  +0.94  +0.86  +0.74  +0.74  +0.87  +0.48  +0.73  +0.47
+  t1    gap_ridge     +0.96  +0.92  +0.93  +0.90  +0.86  +0.79  +0.92  +0.68  +0.74  +0.61
+  flair code_ridge    +0.93  +0.82  +0.88  +0.71  +0.65  +0.64  +0.87  +0.15  +0.61  +0.41
+  flair code_boosted  +0.96  +0.88  +0.94  +0.86  +0.77  +0.76  +0.88  +0.46  +0.75  +0.45
+  flair gap_ridge     +0.96  +0.92  +0.94  +0.91  +0.86  +0.84  +0.92  +0.69  +0.70  +0.57
+  untrained twin (the floor):
+  t1    code_ridge    +0.37  +0.15  +0.27  +0.13  -0.00  +0.05  +0.14  +0.08  +0.37  +0.19
+  t1    code_boosted  +0.39  +0.12  +0.26  +0.04  -0.03  +0.01  +0.06  +0.04  +0.27  +0.12
+  t1    gap_ridge     +0.86  +0.62  +0.80  +0.41  +0.12  +0.24  +0.42  +0.11  +0.46  +0.28
+  flair code_ridge    +0.61  +0.37  +0.40  +0.17  -0.00  +0.02  +0.28  +0.14  +0.44  +0.28
+  flair code_boosted  +0.64  +0.40  +0.43  +0.12  -0.04  -0.05  +0.24  +0.02  +0.39  +0.20
+  flair gap_ridge     +0.87  +0.64  +0.82  +0.52  +0.13  +0.14  +0.42  +0.14  +0.54  +0.32
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.94 +0.93 +0.97 +0.95 +0.94 +0.95 +0.97
+  effective rank out of active units (T1 / FLAIR): 5.4 of 8 / 5.3 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.997: 0.99/0.76/0.99  r 0.976: 0.92/0.09/0.94  r 0.971: 0.94/0.03/0.94  r 0.951: 0.89/-0.08/0.89  r 0.940: 0.83/0.10/0.88  r 0.935: 0.80/-0.01/0.85  r 0.924: 0.52/0.44/0.85  r 0.919: 0.54/0.15/0.89
+   mean over r >= 0.9: anatomy 0.80 lesion 0.19 both 0.90
+  cross-view top-1: uniform32 0.985  neighbour32 0.909  all1000 0.806
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.987       0.933       0.927
+    test, batch statistics (as trained)          0.986       0.943       0.935
+    train subjects, running statistics           0.999       0.994       0.994
+ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s5  step 10000, tail residual t1_04 code batches infonce jitter 2.0 rotate 3.0 patch weight 0.0 content units 8 code neighbours 31 seed 5, last global loss 0.1885875877737999
+                      brain   vent  thick   temp     lr   sulc burden      x      y      z
+  t1    code_ridge    +0.91  +0.91  +0.91  +0.93  +0.86  +0.82  +0.90  +0.13  +0.64  +0.45
+  t1    code_boosted  +0.96  +0.94  +0.94  +0.90  +0.88  +0.80  +0.89  +0.71  +0.78  +0.45
+  t1    gap_ridge     +0.97  +0.96  +0.95  +0.95  +0.93  +0.86  +0.94  +0.82  +0.76  +0.57
+  flair code_ridge    +0.92  +0.91  +0.91  +0.93  +0.87  +0.83  +0.90  +0.14  +0.64  +0.46
+  flair code_boosted  +0.96  +0.93  +0.94  +0.91  +0.89  +0.84  +0.89  +0.61  +0.80  +0.48
+  flair gap_ridge     +0.96  +0.95  +0.95  +0.95  +0.93  +0.89  +0.94  +0.81  +0.77  +0.63
+  untrained twin (the floor):
+  t1    code_ridge    +0.28  +0.16  +0.21  +0.14  -0.00  +0.03  +0.08  +0.03  +0.21  +0.10
+  t1    code_boosted  +0.46  +0.29  +0.39  +0.12  -0.07  +0.01  +0.16  -0.11  +0.24  +0.05
+  t1    gap_ridge     +0.86  +0.64  +0.83  +0.43  +0.10  +0.29  +0.40  +0.10  +0.51  +0.34
+  flair code_ridge    +0.37  +0.17  +0.25  +0.11  -0.00  +0.03  +0.13  +0.10  +0.28  +0.19
+  flair code_boosted  +0.54  +0.33  +0.40  +0.08  -0.14  -0.04  +0.19  +0.09  +0.30  +0.14
+  flair gap_ridge     +0.88  +0.65  +0.79  +0.49  +0.12  +0.29  +0.43  +0.19  +0.49  +0.29
+  matching-unit r (T1 vs FLAIR, code order): +0.99 +0.96 +0.98 +0.94 +0.96 +0.96 +0.93 +0.95
+  effective rank out of active units (T1 / FLAIR): 7.0 of 8 / 7.1 of 8
+  shared: 8 directions with r >= 0.9, 8 with r >= 0.7; boosted R2 of each from anatomy / lesion / both:
+   r 0.997: 0.99/0.69/0.99  r 0.985: 0.95/0.18/0.96  r 0.979: 0.94/-0.05/0.96  r 0.968: 0.87/0.19/0.91  r 0.958: 0.91/-0.02/0.91  r 0.947: 0.76/0.46/0.88  r 0.926: 0.55/0.09/0.87  r 0.905: 0.43/0.13/0.84
+   mean over r >= 0.9: anatomy 0.80 lesion 0.21 both 0.92
+  cross-view top-1: uniform32 0.993  neighbour32 0.945  all1000 0.879
+  mode check, top-1 within sets of 32, each set standardized over itself as in training:
+                                             uniform32 neighbour32      code32
+    test, running statistics (as scored)         0.993       0.956       0.949
+    test, batch statistics (as trained)          0.995       0.972       0.964
+    train subjects, running statistics           0.997       0.994       0.996

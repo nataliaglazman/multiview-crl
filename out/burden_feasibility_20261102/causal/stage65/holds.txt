@@ -1,0 +1,58 @@
+holds: last spectrum value and ventricle-burden worst each >= 0.40 in both views
+matches: against c10_e500_s42, own parts -.10, volume error +1 voxel, |ATE bias| +.03, decoded graph -.05
+
+code             last T1/FL  worst T1/FL      volume      |bias|       graph  top-1  holds  matches
+c8_e500_s2       0.56/0.56    0.56/0.56   12.6/11.9  0.079/0.072 0.835/0.838  0.834  yes    no: volume T1 12.6
+c8_e500_s3       0.50/0.51    0.53/0.53   11.2/10.2  0.075/0.070 0.850/0.835  0.854  yes    yes
+c8_e500_s4       0.01/-0.01   0.22/0.19   14.0/14.4  0.157/0.161 0.775/0.778  0.790  no     no: ventricle T1 0.59, burden T1 0.38, lr T1 0.56, volume T1 14.0, ATE bias T1 0.157, graph T1 0.775, ventricle FLAIR 0.52, burden FLAIR 0.39, lr FLAIR 0.56, volume FLAIR 14.4, ATE bias FLAIR 0.161, graph FLAIR 0.778
+c8_e500_s5       0.52/0.57    0.54/0.58   11.0/9.5   0.080/0.076 0.838/0.834  0.827  yes    yes
+c8_e500_s42      0.01/0.01    0.05/0.06   15.5/14.7  0.120/0.116 0.760/0.769  0.794  no     no: ventricle T1 0.43, burden T1 0.30, volume T1 15.5, ATE bias T1 0.120, graph T1 0.760, ventricle FLAIR 0.41, burden FLAIR 0.32, volume FLAIR 14.7, ATE bias FLAIR 0.116, graph FLAIR 0.769
+c8_cont_s2       0.57/0.58    0.60/0.59   11.8/10.9  0.091/0.083 0.828/0.834  0.817  yes    no: sulcal T1 0.60, sulcal FLAIR 0.65
+c8_cont_s3       0.54/0.58    0.57/0.61   10.5/9.7   0.077/0.074 0.839/0.839  0.900  yes    yes
+c8_cont_s4       0.01/0.02    0.25/0.27   13.0/14.4  0.151/0.157 0.777/0.786  0.755  no     no: ventricle T1 0.57, burden T1 0.43, lr T1 0.54, volume T1 13.0, ATE bias T1 0.151, graph T1 0.777, ventricle FLAIR 0.55, burden FLAIR 0.43, lr FLAIR 0.55, volume FLAIR 14.4, ATE bias FLAIR 0.157
+c8_cont_s5       0.60/0.58    0.61/0.58   11.2/10.0  0.084/0.076 0.849/0.841  0.792  yes    yes
+c8_cont_s42      0.23/0.17    0.24/0.19   14.2/12.5  0.105/0.098 0.832/0.811  0.700  no     no: ventricle T1 0.48, burden T1 0.42, volume T1 14.2, ventricle FLAIR 0.47, burden FLAIR 0.40, volume FLAIR 12.5
+c8_pca_s2        0.11/0.10    0.51/0.47   11.2/10.9  0.171/0.173 0.757/0.727  0.877  no     no: brain T1 0.80, thickness T1 0.65, temporal T1 0.74, lr T1 0.61, ATE bias T1 0.171, graph T1 0.757, brain FLAIR 0.81, temporal FLAIR 0.73, lr FLAIR 0.63, ATE bias FLAIR 0.173, graph FLAIR 0.727
+c8_pca_s3        0.18/0.17    0.61/0.62   10.5/8.8   0.173/0.157 0.737/0.720  0.879  no     no: lr T1 0.23, ATE bias T1 0.173, graph T1 0.737, lr FLAIR 0.27, ATE bias FLAIR 0.157, graph FLAIR 0.720
+c8_pca_s4       -0.02/-0.02   0.14/0.19   12.7/12.1  0.212/0.211 0.354/0.474  0.796  no     no: ventricle T1 0.45, burden T1 0.41, thickness T1 0.59, temporal T1 0.40, lr T1 0.58, volume T1 12.7, ATE bias T1 0.212, graph T1 0.354, ventricle FLAIR 0.49, burden FLAIR 0.44, thickness FLAIR 0.63, temporal FLAIR 0.37, lr FLAIR 0.58, sulcal FLAIR 0.67, ATE bias FLAIR 0.211, graph FLAIR 0.474
+c8_pca_s5        0.50/0.46    0.62/0.59   10.4/10.0  0.141/0.149 0.824/0.828  0.863  yes    no: ventricle T1 0.63, temporal T1 0.69, ATE bias T1 0.141, ventricle FLAIR 0.59, temporal FLAIR 0.68, ATE bias FLAIR 0.149
+c8_pca_s42       0.53/0.54    0.56/0.56   10.7/9.8   0.090/0.080 0.871/0.852  0.841  yes    yes
+c8_red_s2        0.63/0.62    0.64/0.63   10.1/9.5   0.073/0.075 0.823/0.831  0.849  yes    yes
+c8_red_s3        0.18/0.15    0.62/0.64   10.4/8.9   0.177/0.175 0.765/0.746  0.829  no     no: lr T1 0.26, ATE bias T1 0.177, graph T1 0.765, lr FLAIR 0.30, ATE bias FLAIR 0.175, graph FLAIR 0.746
+c8_red_s4        0.06/0.08    0.29/0.34   12.5/11.5  0.172/0.172 0.749/0.750  0.806  no     no: ventricle T1 0.56, burden T1 0.47, temporal T1 0.67, lr T1 0.65, volume T1 12.5, ATE bias T1 0.172, graph T1 0.749, ventricle FLAIR 0.54, temporal FLAIR 0.66, lr FLAIR 0.65, sulcal FLAIR 0.66, ATE bias FLAIR 0.172, graph FLAIR 0.750
+c8_red_s5        0.65/0.63    0.66/0.64    9.6/9.2   0.074/0.078 0.839/0.835  0.879  yes    yes
+c8_red_s42       0.60/0.63    0.61/0.64   10.8/10.2  0.087/0.072 0.832/0.838  0.869  yes    yes
+c10_e500_s2      0.57/0.58    0.58/0.59   10.4/10.0  0.085/0.074 0.845/0.838  0.851  yes    yes
+c10_e500_s3      0.57/0.59    0.59/0.61   11.4/10.7  0.116/0.103 0.795/0.795  0.782  yes    no: lr T1 0.66, lr FLAIR 0.70, ATE bias FLAIR 0.103
+c10_e500_s4      0.04/0.07    0.17/0.19   13.1/11.6  0.159/0.155 0.793/0.787  0.611  no     no: ventricle T1 0.51, burden T1 0.40, lr T1 0.67, volume T1 13.1, ATE bias T1 0.159, ventricle FLAIR 0.44, burden FLAIR 0.46, lr FLAIR 0.70, ATE bias FLAIR 0.155
+c10_e500_s5      0.63/0.62    0.64/0.63    9.9/9.7   0.078/0.082 0.845/0.841  0.877  yes    yes
+c10_e500_s42     0.59/0.56    0.59/0.57   11.3/11.5  0.086/0.069 0.835/0.834  0.740  yes    yes
+
+per cell (units, arm):
+  8 units, every 500: holds 3/5, matches 2/5  (seeds 2, 3, 4, 5, 42)
+  8 units, cont: holds 3/5, matches 2/5  (seeds 2, 3, 4, 5, 42)
+  8 units, pca: holds 2/5, matches 1/5  (seeds 2, 3, 4, 5, 42)
+  8 units, red: holds 3/5, matches 3/5  (seeds 2, 3, 4, 5, 42)
+  10 units, every 500: holds 4/5, matches 3/5  (seeds 2, 3, 4, 5, 42)
+pooled:
+  8 units, every arm: holds 11/20, matches 8/20
+  every 500, every width: holds 3/5, matches 2/5
+  cont, every width: holds 3/5, matches 2/5
+  pca, every width: holds 2/5, matches 1/5
+  red, every width: holds 3/5, matches 3/5
+  c8_red against c8_e500, holds: 3/5 against 3/5, rate difference +0.00, Fisher p 1.00
+  c8_red against c8_e500, matches: 3/5 against 2/5, rate difference +0.20, Fisher p 1.00
+    paired by seed (5 seeds): c8_red alone holds in 1, c8_e500 alone in 1
+  c8_red against c8_pca, holds: 3/5 against 2/5, rate difference +0.20, Fisher p 1.00
+  c8_red against c8_pca, matches: 3/5 against 1/5, rate difference +0.40, Fisher p 0.52
+    paired by seed (5 seeds): c8_red alone holds in 1, c8_pca alone in 0
+  c8_red against c8_cont, holds: 3/5 against 3/5, rate difference +0.00, Fisher p 1.00
+  c8_red against c8_cont, matches: 3/5 against 2/5, rate difference +0.20, Fisher p 1.00
+    paired by seed (5 seeds): c8_red alone holds in 1, c8_cont alone in 1
+  c8_cont against c8_e500, holds: 3/5 against 3/5, rate difference +0.00, Fisher p 1.00
+  c8_cont against c8_e500, matches: 2/5 against 2/5, rate difference +0.00, Fisher p 1.00
+    paired by seed (5 seeds): c8_cont alone holds in 0, c8_e500 alone in 0
+
+cross-view top-1 over all 1,000 subjects, holders against the rest, per width:
+  8 units: holders 0.792-0.900, the rest 0.700-0.879: overlaps (16 codes on the wrong side)
+    highest top-1 is c8_cont_s3 (0.900): holds yes, matches yes

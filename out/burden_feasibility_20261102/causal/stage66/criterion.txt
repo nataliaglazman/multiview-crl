@@ -1,0 +1,380 @@
+skip ceiling_uni_jitter_nopatch_restail_t104_causal_c24_10k: trained with labels
+skip ceiling_uni_jitter_nopatch_restail_t104_causal_nofield_c24_10k: trained with labels
+skip cellsum_t100: trained with labels
+skip dense_t100: trained with labels
+skip dense_t104: trained with labels
+skip gapnorm_res_t104: trained with labels
+skip gapnorm_t100: trained with labels
+done head_nofield_c24_nce_10k
+done head_nofield_c24_predict01_10k
+done head_nofield_c24_predict10_10k
+done head_nofield_c24_predict1_10k
+done head_nofield_c24_predict3_10k
+done head_nogain_c24_nce_10k
+done head_nogain_c24_predict1_10k
+skip normtail_res_t104: trained with labels
+skip normtail_t100: trained with labels
+done ssl_code_decor_restail_t104
+done ssl_code_drop_restail_t104
+done ssl_code_jitter1_nopatch_restail_t104
+done ssl_code_jitter4_nopatch_restail_t104_20k
+done ssl_code_jitter4_nopatch_restail_t104
+done ssl_code_jitter4_nopatch_restail_t104_s2
+done ssl_code_jitter4_shared_nopatch_restail_t104
+done ssl_code_jitter_drop_restail_t104
+done ssl_code_jitter_nopatch_restail_t104_20k
+done ssl_code_jitter_nopatch_restail_t104_causal_20k
+done ssl_code_jitter_nopatch_restail_t104_causal_c24_20k
+done ssl_code_jitter_nopatch_restail_t104_causal_c24_20k_s2
+done ssl_code_jitter_nopatch_restail_t104_causal_halves8_20k
+done ssl_code_jitter_nopatch_restail_t104_causal_halves8
+done ssl_code_jitter_nopatch_restail_t104_causal_hard5
+done ssl_code_jitter_nopatch_restail_t104_causal
+done ssl_code_jitter_nopatch_restail_t104_causal_n31_20k
+done ssl_code_jitter_nopatch_restail_t104_causal_n31_hard5
+done ssl_code_jitter_nopatch_restail_t104_causal_n31
+done ssl_code_jitter_nopatch_restail_t104_causal_n31_s2
+done ssl_code_jitter_nopatch_restail_t104_causal_nofield_n31_predict1_c10_20k
+done ssl_code_jitter_nopatch_restail_t104_causal_s2
+done ssl_code_jitter_nopatch_restail_t104
+done ssl_code_jitter_restail_t104
+done ssl_code_jitter_restail_t104_s2
+done ssl_code_nopatch_restail_t104
+done ssl_code_restail_t104
+done ssl_code_run_restail_t104_20k
+done ssl_gapnorm_t100
+done ssl_gap_r0126
+done ssl_gap_r0159
+done ssl_gap_t100_20k
+done ssl_gap_t100
+done ssl_gap_t104_nuisance
+done ssl_queue_gap_t100
+done ssl_queue_gap_t104_nuisance
+done ssl_queue_restail_t104
+done ssl_queue_restail_t104_nuisance
+done ssl_resgapnorm_t104
+done ssl_resgap_t104
+done ssl_restail_t100
+done ssl_restail_t104
+done ssl_restail_t104_nuisance
+done ssl_run_restail_t104
+done ssl_tail_t100_20k
+done ssl_tail_t100
+done ssl_tail_t104
+done ssl_uni_gap_t100
+done ssl_uni_jitter_nopatch_regionaltail_t104_causal_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_bt_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_c48_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_codebatch_predict1_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_gapnorm_predict1_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_nojitter_predict1_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_nores_predict1_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_bt_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c48_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_critmain_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s3
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s4
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s5
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s3
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s4
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s5
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch25_predict1_c8_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s3
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s4
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s5
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s3
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s4
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s5
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s3
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s4
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s5
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k_s3
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k_s4
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k_s5
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s3
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s4
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s5
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s3
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s4
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s5
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_gapnorm_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_nojitter_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_nopredict_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_nores_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c10_20k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c8_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_k32_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_k32_predict1_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_k32_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_predict1_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_predict1_c24_20k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c11_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_20k_s2
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_entropy10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1grid_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c24_entropy11_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_critmain_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1quantile_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict3_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict3_c24_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_critboth_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_critrem_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_rem10_20k
+done ssl_uni_jitter_nopatch_restail_t104_causal_rem10gap_20k
+done ssl_uni_jitter_nopatch_restail_t104_nofield_fixedpos_abl_codebatch_predict1_c8_20k
+done ssl_uni_jitter_nopatch_restail_t104_nofield_predict1_c10_20k
+done ssl_uni_jitter_nopatch_restail_t104_nofield_predict1_c24_20k
+done ssl_uni_queue_restail_t104
+done ssl_uni_restail_t104_20k
+done ssl_uni_restail_t104
+done ssl_uni_tail_t100
+skip tail_t100: trained with labels
+skip tail_t104: trained with labels
+skip vector_r0126: trained with labels
+skip vector_r0159: trained with labels
+skip vector_t100: trained with labels
+skip vector_temporal009: trained with labels
+skip warmcell_t100: trained with labels
+skip warmvector_t100: trained with labels
+149 runs. Truth: own-part R2 by ridge on test subjects, mean of the views.
+
+  run                                                                    group                          own  weak  burd     MI cca50  top1
+  ssl_uni_gap_t100                                                       bank t1_00 c14                0.75 -0.01 -0.01  19.44    13  0.99
+  ssl_gap_t100                                                           bank t1_00 c14                0.72  0.08  0.08  15.68    14  0.99
+  ssl_gap_t100_20k                                                       bank t1_00 c14                0.68  0.04  0.04  14.54    14  0.98
+  ssl_gapnorm_t100                                                       bank t1_00 c14                0.65  0.00  0.00  17.58    14  0.92
+  ssl_uni_tail_t100                                                      bank t1_00 c14                0.55  0.20  0.27  11.46    14  0.82
+  ssl_queue_gap_t100                                                     bank t1_00 c14                0.54 -0.00 -0.00  14.24    12  0.82
+  ssl_tail_t100_20k                                                      bank t1_00 c14                0.53  0.17  0.25   9.73    14  0.71
+  ssl_tail_t100                                                          bank t1_00 c14                0.42  0.04  0.43   8.89    12  0.26
+  ssl_restail_t100                                                       bank t1_00 c14                0.20 -0.00  0.26   9.30    14  0.72
+  ssl_code_jitter4_nopatch_restail_t104_20k                              bank t1_04 c14                0.80  0.52  0.52  18.60    14  0.96
+  ssl_code_jitter_nopatch_restail_t104_20k                               bank t1_04 c14                0.76  0.43  0.43  17.29    14  0.95
+  ssl_code_jitter4_nopatch_restail_t104                                  bank t1_04 c14                0.70  0.27  0.69  12.08    11  0.83
+  ssl_code_jitter4_nopatch_restail_t104_s2                               bank t1_04 c14                0.70  0.37  0.66  10.85    12  0.70
+  ssl_code_jitter_nopatch_restail_t104                                   bank t1_04 c14                0.69  0.21  0.67  11.16    14  0.78
+  ssl_code_jitter_restail_t104_s2                                        bank t1_04 c14                0.67  0.32  0.62  10.57    12  0.59
+  ssl_code_jitter_restail_t104                                           bank t1_04 c14                0.67  0.21  0.66  10.32    12  0.46
+  ssl_code_jitter1_nopatch_restail_t104                                  bank t1_04 c14                0.66  0.22  0.58  10.82    13  0.67
+  ssl_tail_t104                                                          bank t1_04 c14                0.49 -0.01 -0.01  11.27    13  0.39
+  ssl_code_jitter_drop_restail_t104                                      bank t1_04 c14                0.49  0.04  0.54   5.71     8  0.20
+  ssl_code_run_restail_t104_20k                                          bank t1_04 c14                0.45  0.14  0.56   6.16    12  0.62
+  ssl_code_drop_restail_t104                                             bank t1_04 c14                0.44  0.18  0.28   6.59    13  0.51
+  ssl_code_restail_t104                                                  bank t1_04 c14                0.40  0.18  0.51   7.74    14  0.58
+  ssl_code_decor_restail_t104                                            bank t1_04 c14                0.39  0.18  0.49   7.18    13  0.46
+  ssl_uni_restail_t104_20k                                               bank t1_04 c14                0.39  0.18  0.26  10.27    14  0.88
+  ssl_code_nopatch_restail_t104                                          bank t1_04 c14                0.38  0.01  0.57   7.43    12  0.43
+  ssl_code_jitter4_shared_nopatch_restail_t104                           bank t1_04 c14                0.36 -0.01  0.66   9.39    11  0.54
+  ssl_uni_queue_restail_t104                                             bank t1_04 c14                0.35  0.01  0.64   9.55    14  0.44
+  ssl_uni_restail_t104                                                   bank t1_04 c14                0.34  0.07  0.44   7.57    14  0.62
+  ssl_resgapnorm_t104                                                    bank t1_04 c14                0.32  0.01  0.23   9.32    14  0.59
+  ssl_resgap_t104                                                        bank t1_04 c14                0.31  0.06  0.24   9.24    14  0.83
+  ssl_run_restail_t104                                                   bank t1_04 c14                0.28 -0.01  0.55   4.30     8  0.29
+  ssl_queue_restail_t104                                                 bank t1_04 c14                0.27 -0.00  0.64   5.30    11  0.27
+  ssl_restail_t104                                                       bank t1_04 c14                0.24 -0.00  0.48   6.50    14  0.43
+  ssl_code_jitter_nopatch_restail_t104_causal_c24_20k                    bank_causal t1_04 c24         0.57  0.10  0.10  25.13    24  0.96
+  ssl_uni_jitter_nopatch_restail_t104_causal_rem10_20k                   bank_causal t1_04 c24         0.53  0.16  0.18  23.04    24  0.95
+  ssl_code_jitter_nopatch_restail_t104_causal_n31_20k                    bank_causal t1_04 c14         0.52  0.12  0.18  16.90    14  0.93
+  ssl_code_jitter_nopatch_restail_t104_causal_c24_20k_s2                 bank_causal t1_04 c24         0.51  0.09  0.09  27.11    24  0.96
+  ssl_code_jitter_nopatch_restail_t104_causal_halves8_20k                bank_causal t1_04 c14         0.50 -0.02 -0.02  16.81    14  0.90
+  ssl_code_jitter_nopatch_restail_t104_causal_n31_s2                     bank_causal t1_04 c14         0.46  0.11  0.20  11.33    13  0.72
+  ssl_code_jitter_nopatch_restail_t104_causal_20k                        bank_causal t1_04 c14         0.45  0.05  0.05  16.57    14  0.87
+  ssl_uni_jitter_nopatch_restail_t104_causal_rem10gap_20k                bank_causal t1_04 c24         0.43  0.09  0.09  23.29    24  0.91
+  ssl_code_jitter_nopatch_restail_t104_causal_n31                        bank_causal t1_04 c14         0.41  0.10  0.17   9.80    12  0.60
+  ssl_uni_jitter_nopatch_restail_t104_causal_c48_20k                     bank_causal t1_04 c48         0.41  0.10  0.25  40.57    48  0.94
+  ssl_code_jitter_nopatch_restail_t104_causal_s2                         bank_causal t1_04 c14         0.38  0.11  0.24  11.92    13  0.76
+  ssl_code_jitter_nopatch_restail_t104_causal                            bank_causal t1_04 c14         0.36  0.04  0.10  12.75    13  0.65
+  ssl_code_jitter_nopatch_restail_t104_causal_halves8                    bank_causal t1_04 c14         0.33  0.01  0.14   8.85     8  0.42
+  ssl_uni_jitter_nopatch_regionaltail_t104_causal_c24_20k                bank_causal t1_04 c24         0.30  0.06  0.10  27.95    24  0.97
+  ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k                     bank_causal t1_04 c24         0.29  0.09  0.30  24.01    24  0.95
+  ssl_code_jitter_nopatch_restail_t104_causal_hard5                      bank_causal t1_04 c14         0.28 -0.01  0.20   5.49     7  0.04
+  ssl_uni_jitter_nopatch_restail_t104_causal_bt_c24_20k                  bank_causal t1_04 c24         0.27 -0.01  0.14  29.51    24  0.62
+  ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k_s2                  bank_causal t1_04 c24         0.26  0.07  0.22  23.36    24  0.92
+  ssl_code_jitter_nopatch_restail_t104_causal_n31_hard5                  bank_causal t1_04 c14         0.25 -0.00  0.20   5.46     7  0.03
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_gapnorm_predict bank_causal_nofield t1_04 c2  0.75  0.52  0.52  32.56    24  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_codebatch_predi bank_causal_nofield t1_04 c2  0.75  0.50  0.50  31.50    24  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict3_c24_20k    bank_causal_nofield t1_04 c2  0.74  0.48  0.48  28.78    24  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_20k    bank_causal_nofield t1_04 c2  0.72  0.48  0.48  30.48    24  0.97
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c24 bank_causal_nofield t1_04 c2  0.72  0.48  0.48  31.84    24  0.98
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_20k_s2 bank_causal_nofield t1_04 c2  0.69  0.47  0.47  30.80    24  0.98
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_nores_predict1_ bank_causal_nofield t1_04 c2  0.63 -0.00 -0.00  25.88    22  0.42
+  head_nofield_c24_predict3_10k                                          bank_causal_nofield t1_04 c2  0.60  0.26  0.41  29.20    24  0.99
+  head_nofield_c24_predict10_10k                                         bank_causal_nofield t1_04 c2  0.60  0.26  0.42  26.14    22  0.99
+  head_nofield_c24_predict1_10k                                          bank_causal_nofield t1_04 c2  0.58  0.23  0.38  31.98    24  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_critboth_2 bank_causal_nofield t1_04 c2  0.54  0.15  0.36  27.72    24  0.98
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_critrem_20 bank_causal_nofield t1_04 c2  0.53  0.15  0.34  30.30    24  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_nojitter_predic bank_causal_nofield t1_04 c2  0.53  0.21  0.21  15.40    24  0.95
+  ssl_code_jitter_nopatch_restail_t104_causal_nofield_n31_predict1_c10_2 bank_causal_nofield t1_04 c1  0.53  0.16  0.32  15.37    10  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_20k        bank_causal_nofield t1_04 c2  0.53  0.17  0.35  27.86    24  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1quantile_c2 bank_causal_nofield t1_04 c2  0.52  0.13  0.35  32.51    24  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c24 bank_causal_nofield t1_04 c2  0.51  0.14  0.37  29.43    24  0.97
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1grid_c24_20 bank_causal_nofield t1_04 c2  0.49  0.15  0.36  28.07    24  0.96
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c11_20k    bank_causal_nofield t1_04 c1  0.49  0.10  0.38  16.55    11  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict3_c10_20k    bank_causal_nofield t1_04 c1  0.48  0.11  0.34  15.49    10  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c10 bank_causal_nofield t1_04 c1  0.47  0.05  0.34  15.22    10  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k    bank_causal_nofield t1_04 c1  0.45  0.07  0.33  14.77    10  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_cri bank_causal_nofield t1_04 c1  0.45  0.09  0.35  15.64    10  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c48_20k             bank_causal_nofield t1_04 c4  0.44  0.12  0.36  42.36    48  0.95
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k_s2 bank_causal_nofield t1_04 c1  0.43  0.07  0.27  14.94    10  0.98
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_critmain_c24_20k    bank_causal_nofield t1_04 c2  0.41  0.20  0.32  25.98    24  0.97
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c24_20k             bank_causal_nofield t1_04 c2  0.40  0.13  0.35  25.25    24  0.95
+  head_nofield_c24_predict01_10k                                         bank_causal_nofield t1_04 c2  0.39  0.16  0.35  28.72    24  0.99
+  head_nofield_c24_nce_10k                                               bank_causal_nofield t1_04 c2  0.34  0.11  0.27  27.45    24  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c10_20k             bank_causal_nofield t1_04 c1  0.29  0.02  0.26  14.78    10  0.99
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_bt_c24_20k          bank_causal_nofield t1_04 c2  0.26 -0.01  0.35  41.91    24  0.92
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_entrop bank_causal_nofield t1_04 c2  0.10 -0.06 -0.02   4.48     3  0.03
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.82  0.64  0.64  11.84     8  0.89
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.82  0.62  0.62  11.94     8  0.94
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.81  0.60  0.60  12.39     8  0.94
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.81  0.66  0.66  10.95     8  0.91
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.80  0.63  0.63  12.94     9  0.89
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.80  0.59  0.59  13.84    10  0.84
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.80  0.64  0.64  13.28     9  0.83
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.80  0.61  0.61  14.97    10  0.92
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.80  0.60  0.60  13.77     9  0.83
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.80  0.55  0.55  12.01     8  0.90
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.80  0.64  0.64  14.76    10  0.91
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.80  0.60  0.60  11.18     8  0.86
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.80  0.57  0.57  12.14     8  0.91
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.79  0.60  0.60  11.93     8  0.88
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.79  0.56  0.56  11.60     8  0.89
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.79  0.58  0.58  11.46     8  0.89
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.78  0.55  0.55  11.45     8  0.82
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.78  0.61  0.61  13.29     9  0.90
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.77  0.57  0.57  10.96     8  0.84
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.77  0.61  0.61  13.38    10  0.87
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.76  0.53  0.53  13.54     9  0.88
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.75  0.52  0.52  11.97     8  0.86
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.73  0.61  0.62  11.06     8  0.89
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.71  0.41  0.41  11.65     8  0.80
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.71  0.28  0.63  11.12     8  0.89
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.70  0.56  0.58  12.73     9  0.85
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.70  0.51  0.51  12.44     8  0.93
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.70  0.25  0.63  11.20     8  0.92
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.69  0.49  0.52  12.07     9  0.90
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.69  0.28  0.62  11.86     8  0.84
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.69  0.31  0.31  11.21     8  0.76
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.69  0.26  0.26  11.33     8  0.78
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.68  0.31  0.31  12.17     8  0.86
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.68  0.47  0.47  13.27     9  0.86
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.68  0.43  0.43  11.69     8  0.85
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.68  0.35  0.52  12.46     8  0.62
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.67  0.38  0.38  11.56     8  0.88
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.67  0.49  0.49  10.65     8  0.87
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codeba bank_causal_nofield_fixedpos  0.66  0.43  0.43  12.34    10  0.76
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c bank_causal_nofield_fixedpos  0.62  0.37  0.37  11.63    10  0.89
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c bank_causal_nofield_fixedpos  0.58  0.45  0.45  11.27    10  0.82
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_gapnor bank_causal_nofield_fixedpos  0.57  0.33  0.59  11.61    10  0.94
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10 bank_causal_nofield_fixedpos  0.57  0.38  0.42  11.14     8  0.91
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c bank_causal_nofield_fixedpos  0.54  0.34  0.41   9.36     8  0.85
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_nopred bank_causal_nofield_fixedpos  0.49  0.26  0.26  10.84    10  0.82
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_nojitt bank_causal_nofield_fixedpos  0.44 -0.00 -0.00   6.53    10  0.53
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_nores_ bank_causal_nofield_fixedpos  0.43 -0.00 -0.00  15.39    10  0.91
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_k32_predict1_c24_20 bank_causal_nofield_k32 t1_0  0.53  0.11  0.55  32.07    24  0.97
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_k32_predict1_c10_20 bank_causal_nofield_k32 t1_0  0.36  0.04  0.39  14.97    10  0.98
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_predict1_c24 bank_causal_nofield_nogain t  0.79  0.59  0.59  36.75    24  1.00
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_predict1_c24 bank_causal_nofield_nogain t  0.79  0.60  0.60  35.77    24  1.00
+  head_nogain_c24_predict1_10k                                           bank_causal_nofield_nogain t  0.67  0.36  0.58  36.90    24  1.00
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_predict1_c10 bank_causal_nofield_nogain t  0.48  0.12  0.45  17.01    10  1.00
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_c24_20k      bank_causal_nofield_nogain t  0.43  0.20  0.35  29.92    24  0.99
+  head_nogain_c24_nce_10k                                                bank_causal_nofield_nogain t  0.37  0.14  0.35  30.61    24  1.00
+  ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_k32_predict1 bank_causal_nofield_nogain_k  0.38  0.07  0.43  16.75    10  0.98
+  ssl_uni_jitter_nopatch_restail_t104_nofield_predict1_c24_20k           bank_nofield t1_04 c24        0.85  0.75  0.84  30.60    24  0.99
+  ssl_uni_jitter_nopatch_restail_t104_nofield_predict1_c10_20k           bank_nofield t1_04 c10        0.68  0.22  0.65  15.08    10  0.99
+  ssl_uni_jitter_nopatch_restail_t104_nofield_fixedpos_abl_codebatch_pre bank_nofield_fixedpos t1_04   0.72  0.25  0.75  12.25     8  0.94
+  ssl_queue_gap_t104_nuisance                                            bank_nuisance t1_04 c14       0.40 -0.00 -0.00  14.41    13  0.84
+  ssl_gap_t104_nuisance                                                  bank_nuisance t1_04 c14       0.30 -0.01 -0.01  24.63    14  1.00
+  ssl_restail_t104_nuisance                                              bank_nuisance t1_04 c14       0.24 -0.00 -0.00   9.68    14  0.71
+  ssl_queue_restail_t104_nuisance                                        bank_nuisance t1_04 c14       0.21 -0.00  0.21   2.59     5  0.06
+  ssl_gap_r0126                                                          bank_r0126 t1_00 c14          0.63  0.08  0.08  15.31    14  0.98
+  ssl_gap_r0159                                                          bank_r0159 t1_00 c14          0.60  0.24  0.24  15.41    14  0.98
+
+Grouping 'bank': 7 groups of at least 4 runs
+   32  bank_causal_nofield t1_04
+    6  bank_causal_nofield_nogain t1_04
+   24  bank t1_04
+   19  bank_causal t1_04
+    9  bank t1_00
+    4  bank_nuisance t1_04
+   47  bank_causal_nofield_fixedpos t1_04
+
+  signal             dir                     own_mean                  own_weakest                   burden_own             own_mean_boosted   usable
+                              rho [95%]  regret  sign      rho [95%]  regret  sign      rho [95%]  regret  sign      rho [95%]  regret  sign
+  cca_sum             +1 +0.26 [+0.08,+0.42]  +0.13 7/7 +0.28 [+0.10,+0.44]  -0.12 5/7 +0.10 [-0.05,+0.24]  -0.40 3/7 +0.26 [+0.07,+0.40]  +0.13 6/7   no
+  cca_count50         +1 +0.05 [-0.15,+0.23]  +0.18 5/7 +0.26 [+0.07,+0.42]  +0.15 6/7 -0.01 [-0.18,+0.15]  -0.10 3/7 +0.03 [-0.15,+0.18]  +0.17 6/7   no
+  gauss_mi            +1 +0.48 [+0.30,+0.60]  +0.20 7/7 +0.35 [+0.17,+0.50]  -0.13 5/7 +0.18 [+0.02,+0.34]  -0.41 4/7 +0.38 [+0.20,+0.52]  +0.18 7/7   no
+  gauss_mi_gain       +1 +0.48 [+0.32,+0.61]  +0.47 7/7 +0.35 [+0.18,+0.50]  +0.31 5/7 +0.19 [+0.02,+0.32]  +0.09 4/7 +0.39 [+0.20,+0.52]  +0.38 7/7   no
+  top1_all            +1 +0.41 [+0.22,+0.56]  +0.53 7/7 +0.31 [+0.14,+0.47]  +0.51 5/7 +0.10 [-0.07,+0.26]  +0.08 3/7 +0.50 [+0.33,+0.61]  +0.63 7/7   YES
+  top1_32             +1 +0.47 [+0.30,+0.61]  +0.30 7/7 +0.37 [+0.20,+0.52]  +0.16 5/7 +0.16 [+0.01,+0.31]  -0.05 3/7 +0.56 [+0.40,+0.67]  +0.47 7/7   no
+  memorisation        -1 -0.26 [-0.41,-0.08]  +0.20 5/7 -0.04 [-0.20,+0.13]  -0.03 3/7 +0.00 [-0.16,+0.18]  -0.21 4/7 -0.22 [-0.37,-0.06]  +0.01 6/7   no
+  knn_agreement       +1 +0.37 [+0.18,+0.51]  -0.33 6/7 +0.07 [-0.12,+0.26]  -0.47 2/7 -0.05 [-0.23,+0.12]  -0.60 3/7 +0.27 [+0.09,+0.42]  -0.46 6/7   no
+  rankme              +1 -0.18 [-0.35,+0.01]  -0.41 3/7 +0.07 [-0.12,+0.24]  -0.13 4/7 -0.03 [-0.21,+0.16]  -0.09 3/7 -0.05 [-0.22,+0.14]  -0.19 4/7   no
+  eff_rank            +1 -0.24 [-0.40,-0.05]  -0.41 2/7 -0.03 [-0.19,+0.15]  -0.13 4/7 -0.06 [-0.23,+0.10]  -0.09 4/7 -0.07 [-0.25,+0.11]  -0.19 3/7   no
+  alpha_dev           -1 -0.06 [-0.21,+0.11]  +0.05 4/7 -0.17 [-0.32,-0.01]  +0.25 5/7 -0.08 [-0.25,+0.09]  +0.26 3/7 -0.25 [-0.39,-0.09]  +0.08 5/7   no
+  twonn               +0 +0.14 [-0.02,+0.30]    -   5/7 +0.26 [+0.11,+0.42]    -   5/7 +0.09 [-0.08,+0.27]    -   3/7 +0.27 [+0.10,+0.43]    -   5/7   no
+  gap_cca_sum         +1 +0.04 [-0.14,+0.22]  +0.02 5/7 +0.12 [-0.06,+0.28]  -0.01 3/7 +0.04 [-0.12,+0.20]  -0.41 3/7 +0.19 [+0.00,+0.35]  +0.03 6/7   no
+  gap_gauss_mi_gain   +1 +0.30 [+0.11,+0.46]  +0.43 7/7 +0.20 [+0.01,+0.37]  +0.33 5/7 +0.11 [-0.06,+0.26]  -0.21 4/7 +0.44 [+0.24,+0.60]  +0.48 7/7   no
+  gap_rankme          +1 +0.03 [-0.14,+0.20]  +0.40 4/7 +0.26 [+0.10,+0.40]  +0.60 6/7 +0.10 [-0.08,+0.27]  +0.10 5/7 +0.21 [+0.03,+0.36]  +0.51 4/7   no
+  final_loss          -1 -0.05 [-0.23,+0.12]  -0.31 4/7 -0.23 [-0.38,-0.04]  -0.43 6/7 +0.02 [-0.17,+0.18]  -0.89 3/7 -0.15 [-0.32,+0.02]  -0.33 5/7   no
+
+Grouping 'bank_width': 11 groups of at least 4 runs
+   23  bank_causal_nofield t1_04 c24
+    5  bank_causal_nofield_nogain t1_04 c24
+   24  bank t1_04 c14
+   10  bank_causal t1_04 c14
+    8  bank_causal t1_04 c24
+    7  bank_causal_nofield t1_04 c10
+    9  bank t1_00 c14
+    4  bank_nuisance t1_04 c14
+   28  bank_causal_nofield_fixedpos t1_04 c8
+    8  bank_causal_nofield_fixedpos t1_04 c9
+   11  bank_causal_nofield_fixedpos t1_04 c10
+
+  signal             dir                     own_mean                  own_weakest                   burden_own             own_mean_boosted   usable
+                              rho [95%]  regret  sign      rho [95%]  regret  sign      rho [95%]  regret  sign      rho [95%]  regret  sign
+  cca_sum             +1 +0.36 [+0.15,+0.52]  -0.01 9/11 +0.22 [+0.04,+0.38]  -0.16 7/11 +0.13 [-0.04,+0.28]  -0.38 6/11 +0.43 [+0.23,+0.56]  +0.09 10/11   no
+  cca_count50         +1 +0.17 [-0.12,+0.39]  +0.33 4/11 +0.29 [-0.01,+0.52]  +0.20 4/11 -0.16 [-0.43,+0.07]  -0.20 2/11 +0.21 [-0.05,+0.47]  +0.39 5/11   no
+  gauss_mi            +1 +0.48 [+0.30,+0.63]  +0.06 10/11 +0.22 [+0.04,+0.38]  -0.25 8/11 +0.08 [-0.09,+0.24]  -0.28 6/11 +0.43 [+0.25,+0.56]  -0.11 9/11   no
+  gauss_mi_gain       +1 +0.48 [+0.30,+0.61]  +0.28 10/11 +0.22 [+0.04,+0.38]  +0.18 8/11 +0.08 [-0.10,+0.22]  +0.10 6/11 +0.43 [+0.24,+0.55]  +0.17 10/11   no
+  top1_all            +1 +0.46 [+0.27,+0.60]  +0.54 10/11 +0.30 [+0.13,+0.47]  +0.44 8/11 +0.11 [-0.06,+0.25]  +0.16 5/11 +0.52 [+0.35,+0.65]  +0.60 10/11   no
+  top1_32             +1 +0.53 [+0.35,+0.64]  +0.60 11/11 +0.40 [+0.21,+0.53]  +0.51 8/11 +0.16 [-0.00,+0.30]  +0.22 5/11 +0.59 [+0.43,+0.68]  +0.69 11/11   YES
+  memorisation        -1 -0.31 [-0.45,-0.13]  +0.20 10/11 -0.08 [-0.26,+0.09]  +0.05 6/11 -0.04 [-0.21,+0.12]  -0.06 6/11 -0.28 [-0.41,-0.10]  +0.09 9/11   no
+  knn_agreement       +1 +0.39 [+0.19,+0.54]  -0.09 11/11 +0.15 [-0.06,+0.32]  -0.29 7/11 -0.01 [-0.20,+0.16]  -0.31 6/11 +0.31 [+0.12,+0.45]  -0.29 9/11   no
+  rankme              +1 -0.18 [-0.33,+0.01]  -0.51 4/11 -0.08 [-0.23,+0.10]  -0.27 6/11 -0.07 [-0.24,+0.11]  -0.19 5/11 -0.05 [-0.20,+0.13]  -0.26 4/11   no
+  eff_rank            +1 -0.24 [-0.38,-0.06]  -0.49 3/11 -0.15 [-0.29,+0.04]  -0.30 5/11 -0.04 [-0.21,+0.13]  -0.23 5/11 -0.11 [-0.27,+0.07]  -0.24 4/11   no
+  alpha_dev           -1 -0.14 [-0.29,+0.03]  -0.00 8/11 -0.23 [-0.39,-0.06]  +0.01 8/11 -0.08 [-0.24,+0.07]  -0.10 4/11 -0.27 [-0.40,-0.12]  +0.07 8/11   no
+  twonn               +0 +0.19 [+0.02,+0.35]    -   7/11 +0.25 [+0.08,+0.43]    -   7/11 +0.06 [-0.12,+0.26]    -   5/11 +0.28 [+0.11,+0.43]    -   8/11   no
+  gap_cca_sum         +1 +0.06 [-0.14,+0.22]  +0.01 6/11 +0.07 [-0.10,+0.24]  -0.08 6/11 +0.01 [-0.14,+0.16]  -0.34 5/11 +0.17 [-0.02,+0.33]  +0.08 7/11   no
+  gap_gauss_mi_gain   +1 +0.31 [+0.15,+0.46]  +0.39 8/11 +0.19 [+0.00,+0.37]  +0.34 6/11 +0.07 [-0.08,+0.21]  -0.09 5/11 +0.41 [+0.25,+0.53]  +0.47 8/11   no
+  gap_rankme          +1 +0.06 [-0.10,+0.24]  +0.32 4/11 +0.28 [+0.12,+0.41]  +0.41 8/11 +0.12 [-0.06,+0.27]  +0.03 7/11 +0.16 [-0.01,+0.34]  +0.46 5/11   no
+  final_loss          -1 -0.12 [-0.29,+0.06]  +0.04 7/11 -0.18 [-0.35,+0.01]  -0.17 8/11 +0.10 [-0.08,+0.26]  -0.62 4/11 -0.17 [-0.33,+0.02]  +0.00 7/11   no
+
+rho: Spearman within groups, size-weighted, bootstrap 95% interval. regret: share of a random pick's shortfall removed by picking the signal's best run. sign: groups with the expected sign. usable: under 'bank', for own_mean and own_weakest, interval excludes 0 in the expected direction and regret >= 0.5.
