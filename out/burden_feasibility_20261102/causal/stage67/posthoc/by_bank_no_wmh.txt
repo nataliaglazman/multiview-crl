@@ -1,0 +1,13 @@
+149 runs
+
+pooled rho +0.2715 (anchor.json +0.2715), removed +0.1120 (anchor.json +0.1120)
+
+group                                    n          adjusted r=.9        exact own parts                top1_32               top1_all
+                                                     rho  removed           rho  removed           rho  removed           rho  removed
+bank_causal_nofield_fixedpos t1_04      47           +0.57  +0.65           +0.63  +0.91           +0.42  +0.55           +0.43  +0.55   hidden own parts -0.00-0.66
+bank_causal_nofield t1_04               32           +0.66  +1.00           +0.65  +1.00           +0.41  +0.77           +0.23  +0.87   hidden own parts -0.02-0.52
+bank t1_04                              24           +0.20  +0.13           +0.20  +0.13           -0.07  +0.13           -0.02  +0.13   hidden own parts -0.01-0.69
+bank_causal t1_04                       19           -0.55  -0.40           -0.56  -0.40           -0.17  -0.39           -0.17  -0.39   hidden own parts -0.02-0.30
+bank t1_00                               9           -0.75  -0.54           -0.75  -0.54           -0.69  -0.54           -0.77  -0.54   hidden own parts -0.01-0.43
+bank_causal_nofield_nogain t1_04         6           +0.93  +0.88           +0.94  +0.88           +0.76  -0.31           +0.21  +0.88   hidden own parts 0.35-0.60
+bank_nuisance t1_04                      4           -0.80  -0.32           -0.80  -0.32           -1.00  -0.38           -1.00  -0.38   hidden own parts -0.01-0.21

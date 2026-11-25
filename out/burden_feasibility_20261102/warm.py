@@ -97,7 +97,27 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 --predict-batches uniform draws one (the same batch when both are on): a neighbourhood batch hardly
                 varies in the factors a harmonic bends. Needs TailCode pooling, the batch gauge, InfoNCE and no patch
                 loss, queue, supervision, half views, remainder units, group dropout or shared jitter.
-  --seed S      replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
+  --tau T       the global InfoNCE's temperature in place of the recipe's (0.1, reference/flags.txt), the term multiplied
+                by T over the recipe's so its gradient keeps the recipe's scale against the other terms (SupCon's
+                convention): the loss changes its shape, not its weight. Expanded in 1/T, the InfoNCE is alignment, a
+                centring term and an isotropy term on the code's second moment. Full uniformity on the sphere, which
+                pays a code to bend its strongest factor into a second direction (HANDOFF item 46), enters only at
+                higher orders, so a higher T leaves mostly the terms a straight code meets. The logged global term is
+                the InfoNCE at T, unscaled. Needs TailCode pooling, InfoNCE and --patch-weight 0, and none of --queue,
+                --supervise, --hard-negatives, --entropy-units, --critic-weights, --half-views or --remainder-units.
+  --projector H the global InfoNCE reads the content units through one head shared by both views instead of directly:
+                each view's code in its own running population gauge (mean and second moment over training batches,
+                momentum .01), then a linear map that starts as the identity plus a one-hidden-layer MLP of width H
+                (GELU) whose output layer starts at zero, at the code's width; the loss standardizes that output over
+                the batch and takes cosines as it does the code's, so at the first step it equals the recipe's. The head
+                can bend factors and weight units after the code, so the code need not spend units on curves for the
+                InfoNCE (HANDOFF item 56); at the code's width, code and head are one matched-width encoder. Evals and
+                exports read the code, never the head; each eval logs how linearly the code determines the head's
+                output. The trained term is logged as "projected"; "global" is the recipe's InfoNCE on the code itself,
+                not trained. Needs TailCode pooling, InfoNCE and --patch-weight 0, and none of --queue, --supervise,
+                --hard-negatives, --entropy-units, --critic-weights, --half-views, --remainder-units, --tau or
+                --harmonic-weight.
+  --seed S     replicate seed, by the recipe's rule: model init S, batch order S + 10000, uniform batches S and
                 augmentation S + 1. The default is the recipe's 42, so --seed 42 repeats the default run.
   INIT          cold, or start both backbones from a sup.py checkpoint.
 
@@ -117,6 +137,7 @@ the backbone GAP, and for --pool tail from the pooled vector before the head. La
          [--remainder-space main|gap]] [--critic-weights main|remainder|both [--critic-lr LR]] [--supervise volume]
         [--predict-weight W [--predict-momentum M] [--predict-ridge R] [--predict-hidden H]
          [--predict-batches same|uniform]] [--harmonic-weight W [--harmonic-hidden H] [--harmonic-lr LR]]
+        [--tau T] [--projector H]
 """
 
 import argparse
@@ -580,6 +601,57 @@ def cross_view_prediction(pair, targets, decoders):
     return sum(F.mse_loss(decoders[v](code[v]), targets[1 - v].detach()) for v in range(2)) / 2
 
 
+class Projector(nn.Module):
+    """--projector's head, shared by both views, on (2, B, units) codes: each view's code in its own running population
+    gauge, then a linear map that starts as the identity plus a one-hidden-layer MLP whose output layer starts at zero,
+    at the code's width. The gauge keeps each subject's absolute place (a batch gauge would not, under neighbourhood
+    batches), so the head can bend what the code holds as the code's own curves do. In training mode the gauge takes
+    the batch's mean and second moment first: the first batch sets them, later ones move them by ``momentum``."""
+
+    def __init__(self, units, hidden, momentum=0.01):
+        super().__init__()
+        self.momentum = momentum
+        self.linear = nn.Linear(units, units)
+        nn.init.eye_(self.linear.weight)
+        nn.init.zeros_(self.linear.bias)
+        self.mlp = nn.Sequential(nn.Linear(units, hidden), nn.GELU(), nn.Linear(hidden, units))
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+        self.register_buffer("mean", torch.zeros(2, units))
+        self.register_buffer("square", torch.ones(2, units))
+        self.register_buffer("seen", torch.zeros((), dtype=torch.bool))
+
+    def gauged(self, pair):
+        if self.training:
+            with torch.no_grad():
+                moments = pair.mean(1), pair.square().mean(1)
+                if not bool(self.seen):
+                    self.mean.copy_(moments[0])
+                    self.square.copy_(moments[1])
+                    self.seen.fill_(True)
+                else:
+                    self.mean.lerp_(moments[0], self.momentum)
+                    self.square.lerp_(moments[1], self.momentum)
+        sd = (self.square - self.mean.square()).clamp_min(0).sqrt()
+        return (pair - self.mean[:, None]) / (sd[:, None] + 1e-6)
+
+    def forward(self, pair):
+        z = self.gauged(pair)
+        return self.linear(z) + self.mlp(z)
+
+
+def projector_linearity(projector, codes, device):
+    """Per view, the mean over the head's output units of the 5-fold ridge R2 of --projector's output from the code: 1
+    while the head stays linear, lower as it bends. The gauge is read, not updated."""
+    flag = projector.training
+    projector.eval()
+    with torch.no_grad():
+        pair = torch.stack([torch.as_tensor(c, dtype=torch.float32, device=device) for c in codes])
+        out = projector(pair).cpu().numpy()
+    projector.train(flag)
+    return [round(float(np.mean([ridge(codes[v], out[v][:, j]) for j in range(out.shape[-1])])), 4) for v in range(2)]
+
+
 def hard_negative_infonce(code, units, tau, concentration, sim, weight=None):
     """The recipe's global InfoNCE (each view standardized over the batch, cosine, cross-view negatives only, both
     directions summed) with each anchor's negatives weighted by exp(concentration * cosine), rescaled to mean 1, so the
@@ -905,6 +977,18 @@ def main():
     p.add_argument("--harmonic-hidden", type=int, default=64, help="Hidden width of the penalty critic's MLP")
     p.add_argument("--harmonic-lr", type=float, default=1e-3, help="Learning rate of the penalty critic")
     p.add_argument(
+        "--tau",
+        type=float,
+        default=None,
+        help="Global InfoNCE temperature in place of the recipe's, the term scaled by tau over the recipe's (off)",
+    )
+    p.add_argument(
+        "--projector",
+        type=int,
+        default=None,
+        help="Hidden width of a head shared by both views between the content units and the global InfoNCE (off)",
+    )
+    p.add_argument(
         "--entropy-units",
         type=int,
         default=None,
@@ -1086,6 +1170,43 @@ def main():
             "--harmonic-weight needs TailCode pooling, --gauge batch, InfoNCE and --patch-weight 0, without --queue,"
             " --supervise, --half-views, --remainder-units, --group-dropout or --shared-jitter"
         )
+    if a.tau is not None and (
+        not (np.isfinite(a.tau) and a.tau > 0)
+        or a.pool == "gap"
+        or a.contrastive_loss_type != "infonce"
+        or a.patch_weight != 0
+        or a.queue
+        or a.supervise
+        or a.hard_negatives
+        or a.entropy_units is not None
+        or a.critic_weights is not None
+        or a.half_views is not None
+        or a.remainder_units is not None
+    ):
+        raise ValueError(
+            "--tau must be positive and needs TailCode pooling, InfoNCE and --patch-weight 0, without --queue,"
+            " --supervise, --hard-negatives, --entropy-units, --critic-weights, --half-views or --remainder-units"
+        )
+    if a.projector is not None and (
+        a.projector < 1
+        or a.pool == "gap"
+        or a.contrastive_loss_type != "infonce"
+        or a.patch_weight != 0
+        or a.queue
+        or a.supervise
+        or a.hard_negatives
+        or a.entropy_units is not None
+        or a.critic_weights is not None
+        or a.half_views is not None
+        or a.remainder_units is not None
+        or a.tau is not None
+        or a.harmonic_weight
+    ):
+        raise ValueError(
+            "--projector must be positive and needs TailCode pooling, InfoNCE and --patch-weight 0, without --queue,"
+            " --supervise, --hard-negatives, --entropy-units, --critic-weights, --half-views, --remainder-units, --tau"
+            " or --harmonic-weight"
+        )
     if a.entropy_units is not None and (
         a.pool == "gap"
         or a.patch_weight != 0
@@ -1114,6 +1235,12 @@ def main():
     args.contrastive_loss_type = a.contrastive_loss_type
     if a.contrastive_loss_type == "barlow_twins":
         args.standardize_code = False  # Barlow Twins standardizes the code internally.
+    tau_scale = 1.0
+    if a.tau is not None:  # SupCon's convention: the term keeps the recipe's gradient scale at any temperature
+        tau_scale, args.tau = a.tau / args.tau, a.tau
+        print("global InfoNCE temperature", args.tau, "scaled by", tau_scale, flush=True)
+    if a.projector:
+        print("projector head between the content units and the global InfoNCE, hidden", a.projector, flush=True)
     print(
         "seed", args.seed, "global loss", args.contrastive_loss_type, "patch weight", args.patch_loss_weight, flush=True
     )
@@ -1253,6 +1380,11 @@ def main():
             "on a separate uniform batch",
             flush=True,
         )
+    projector = None
+    if a.projector:
+        with torch.random.fork_rng(devices=[]):  # the head's init leaves every later draw as in a run without it
+            projector = Projector(units, a.projector).to(a.device)
+        print(f"projector head {units} -> {a.projector} -> {units}, shared by both views, identity at the start", flush=True)
     halves = None if a.half_views is None else half_masks(a.bank, a.half_views, train.t1.shape[-1], a.device)
     test = Bank(a.bank, "test", a.t1key, a.test_subjects, a.residual)
     scored = {
@@ -1318,6 +1450,8 @@ def main():
         parameters += list(readout.parameters())
     if decoders is not None:
         parameters += list(decoders.parameters())
+    if projector is not None:
+        parameters += list(projector.parameters())
     if len(critic):
         groups = [{"params": parameters}, {"params": list(critic.parameters()), "lr": a.critic_lr, "weight_decay": 0.0}]
         optimizer = torch.optim.AdamW(groups, lr=args.lr)
@@ -1352,6 +1486,10 @@ def main():
             row["critic_weights"] = {k: [round(float(w), 4) for w in v()] for k, v in critic.items()}
         if whitening is not None:
             row["target_spread"] = whitening.spread()
+        if projector is not None:
+            row["projector_linear_r2"] = projector_linearity(
+                projector, features(model, test, a.device, pool=pool)["code"], a.device
+            )
         report["history"].append(row)
         (a.out / "report.json").write_text(json.dumps(report, indent=1))
         t = row["test"]
@@ -1362,6 +1500,9 @@ def main():
             f"temp {t['t1']['code_temporal']:.2f} | {terms}",
             flush=True,
         )
+        if projector is not None:
+            linear = row["projector_linear_r2"]
+            print(f"step {step:5d} head output from the code, linear R2 T1 {linear[0]:.3f} FLAIR {linear[1]:.3f}", flush=True)
         if len(critic):
             print(
                 f"step {step:5d} critic weights "
@@ -1429,6 +1570,10 @@ def main():
                 terms = {"bridge": bridge_infonce(code, units, a.entropy_units, args.tau, sim)}
                 with torch.no_grad():  # the recipe's loss on this code, for comparison with every other arm
                     terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
+            elif projector is not None:
+                terms = {"projected": T.contrastive_loss(torch.cat(list(projector(pair))), model, args, sim, crit, None)}
+                with torch.no_grad():  # the recipe's loss on the code itself, for comparison with every other arm
+                    terms["global"] = T.contrastive_loss(code, model, args, sim, crit, None)
             else:
                 terms = {"global": T.contrastive_loss(code, model, args, sim, crit, None)}
             if halves is not None:
@@ -1456,6 +1601,10 @@ def main():
                 loss = terms["supervised"]
             else:
                 loss = terms["hard"] if a.hard_negatives else terms["bridge"] if a.entropy_units else terms["global"]
+                if projector is not None:
+                    loss = terms["projected"]
+                if tau_scale != 1.0:
+                    loss = tau_scale * loss
             if halves is not None:
                 loss = loss + terms["half"]
             if rest:
@@ -1532,6 +1681,8 @@ def main():
                 }
             if harmonic is not None:
                 state["harmonic"] = harmonic.state_dict()
+            if projector is not None:
+                state["projector"] = {"head": projector.state_dict(), "hidden": a.projector}
             torch.save(state, a.out / "model.pt")
     print("DONE", flush=True)
 

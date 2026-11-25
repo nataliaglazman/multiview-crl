@@ -346,6 +346,19 @@
 # adjusted for the other anchors), judged on the hidden factors' own parts, beside the exact own parts and stage 66's
 # retrieval (causal/stage67/). Splits: lr and sulcal hidden (as on ADNI), burden hidden, and every split hiding one to
 # three. The pass rule is in the script's docstring. About 20 s a run to export, then minutes to score.
+# Stage 70 (opt-in) Does a higher InfoNCE temperature make 8 units reliable? The from-scratch 8-unit arm (code batches
+# rebuilt every 500, 20,000 steps) with warm.py --tau 1 in place of the recipe's 0.1, the term scaled by 10 so it keeps
+# its weight against the prediction term, at seeds 42, 2, 3, 4 and 5, paired with the from-scratch codes of the same
+# seeds (they hold at 2, 3, 5 and fail at 4, 42, which spend a second direction on curves). Precision, code and style
+# audits, both discoveries, the tabular benchmarks, own_directions.py and holds.py, beside the five seeds' 8-unit and
+# 10-unit codes, whose reports come from stage 60 (causal/stage70/). Reading rules: HANDOFF section 9.
+# Stage 71 (opt-in) Does a projector head make 8 units reliable? The from-scratch 8-unit arm (code batches rebuilt every
+# 500, 20,000 steps) with warm.py --projector 64: the global InfoNCE reads the code through a head shared by both views
+# (running gauge, a linear map starting as the identity plus a zero-started MLP of width 64, output at the code's 8
+# units), so bending happens after the code; evals and exports read the code. Seeds 42, 2, 3, 4 and 5, paired with the
+# from-scratch codes of the same seeds (they hold at 2, 3, 5 and fail at 4, 42). Precision, code and style audits, both
+# discoveries, the tabular benchmarks, own_directions.py and holds.py, beside the five seeds' 8-unit and 10-unit codes,
+# whose reports come from stage 70 (causal/stage71/). Reading rules: HANDOFF section 9.
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
@@ -2857,6 +2870,108 @@ if wants 67; then
         echo "$(date +%H:%M) anchor check into $OUT"
         "${SCORE[@]}" > "$OUT/anchor.txt" 2>&1 || { echo "Stage 67 failed, see $OUT/anchor.txt"; exit 1; }
         echo "Stage 67 reports in $OUT: anchor.txt"
+    fi
+fi
+
+if wants 70; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    OUT=$D/causal/stage70
+    sfx() { [ "$1" = 42 ] && echo "" || echo "_s$1"; }  # seed 42's runs carry no suffix
+    SEEDS=(42 2 3 4 5)
+    NEW=() REF=() NEWN=() REFN=()
+    for seed in "${SEEDS[@]}"; do
+        x=$(sfx "$seed")
+        NEW+=(c8_tau1_s$seed=${P}_abl_codebatch_predict1_tau1_c8_20k$x)
+        REF+=(c8_e500_s$seed=${P}_abl_codebatch_predict1_c8_20k$x c10_e500_s$seed=${P}_abl_codebatch_predict1_c10_20k$x)
+    done
+    for pair in "${NEW[@]}"; do NEWN+=("${pair#*=}"); done
+    for pair in "${REF[@]}"; do REFN+=("${pair#*=}"); done
+    needs_done 70 "${REFN[@]}"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage60" "$OUT" "${REFN[@]}"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    PARALLEL=5
+    for seed in "${SEEDS[@]}"; do
+        EVERY=2000 ssl "${P}_abl_codebatch_predict1_tau1_c8_20k$(sfx "$seed")" "$FIXED" tail t1_04 20000 \
+            --code-batches 500 --code-neighbours 31 --residual --jitter 2 --rotate 3 --seed "$seed" --patch-weight 0 \
+            --content-units 8 --contrastive-loss-type infonce --predict-weight 1 --tau 1
+    done
+    finish "${NEWN[@]}"
+    needs_done 70 "${NEWN[@]}"
+    RUNS=()
+    for name in "${NEWN[@]}" "${REFN[@]}"; do RUNS+=("$D/runs/$name"); done
+    # one report at a time: side by side they thrash the CPUs (stage 60)
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" "${NEW[@]}" "${REF[@]}"
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json")
+    for pair in "${NEW[@]}" "${REF[@]}"; do CMD+=("${pair%%=*}=$D/causal/${pair#*=}.npz"); done
+    HOLDS=("$PY" "$D/holds.py" "$OUT" "${NEW[@]}" "${REF[@]}" --compare c8_tau1:c8_e500)
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+        echo "${HOLDS[*]} > $OUT/holds.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 70's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        "${HOLDS[@]}" > "$OUT/holds.txt" 2>&1 || { echo "Stage 70's holds.py failed, see $OUT/holds.txt"; exit 1; }
+        echo "Stage 70 reports in $OUT: holds.txt first, then own_directions.txt"
+    fi
+fi
+
+if wants 71; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    OUT=$D/causal/stage71
+    sfx() { [ "$1" = 42 ] && echo "" || echo "_s$1"; }  # seed 42's runs carry no suffix
+    SEEDS=(42 2 3 4 5)
+    NEW=() REF=() NEWN=() REFN=()
+    for seed in "${SEEDS[@]}"; do
+        x=$(sfx "$seed")
+        NEW+=(c8_proj64_s$seed=${P}_abl_codebatch_predict1_proj64_c8_20k$x)
+        REF+=(c8_e500_s$seed=${P}_abl_codebatch_predict1_c8_20k$x c10_e500_s$seed=${P}_abl_codebatch_predict1_c10_20k$x)
+    done
+    for pair in "${NEW[@]}"; do NEWN+=("${pair#*=}"); done
+    for pair in "${REF[@]}"; do REFN+=("${pair#*=}"); done
+    needs_done 71 "${REFN[@]}"
+    if [ "$DRY" = 0 ]; then
+        mkdir -p "$OUT" || exit 1
+        reuse_reports "$D/causal/stage70" "$OUT" "${REFN[@]}"
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    PARALLEL=5
+    for seed in "${SEEDS[@]}"; do
+        EVERY=2000 ssl "${P}_abl_codebatch_predict1_proj64_c8_20k$(sfx "$seed")" "$FIXED" tail t1_04 20000 \
+            --code-batches 500 --code-neighbours 31 --residual --jitter 2 --rotate 3 --seed "$seed" --patch-weight 0 \
+            --content-units 8 --contrastive-loss-type infonce --predict-weight 1 --projector 64
+    done
+    finish "${NEWN[@]}"
+    needs_done 71 "${NEWN[@]}"
+    RUNS=()
+    for name in "${NEWN[@]}" "${REFN[@]}"; do RUNS+=("$D/runs/$name"); done
+    # one report at a time: side by side they thrash the CPUs (stage 60)
+    stage_report "$OUT" precision_audit "${RUNS[@]}"
+    stage_report "$OUT" code_audit "${RUNS[@]}"
+    stage_report "$OUT" style_audit "${RUNS[@]}"
+    causal_tables "$OUT" "${NEW[@]}" "${REF[@]}"
+    CMD=("$PY" "$D/own_directions.py" "$OUT/own_directions.json")
+    for pair in "${NEW[@]}" "${REF[@]}"; do CMD+=("${pair%%=*}=$D/causal/${pair#*=}.npz"); done
+    HOLDS=("$PY" "$D/holds.py" "$OUT" "${NEW[@]}" "${REF[@]}" --compare c8_proj64:c8_e500)
+    if [ "$DRY" = 1 ]; then
+        echo "${CMD[*]} > $OUT/own_directions.txt"
+        echo "${HOLDS[*]} > $OUT/holds.txt"
+    else
+        echo "$(date +%H:%M) own_directions into $OUT"
+        "${CMD[@]}" > "$OUT/own_directions.txt" 2>&1 \
+            || { echo "Stage 71's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
+        "${HOLDS[@]}" > "$OUT/holds.txt" 2>&1 || { echo "Stage 71's holds.py failed, see $OUT/holds.txt"; exit 1; }
+        echo "Stage 71 reports in $OUT: holds.txt first, then own_directions.txt"
     fi
 fi
 

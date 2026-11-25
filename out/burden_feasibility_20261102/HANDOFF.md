@@ -1756,6 +1756,44 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
         the matched width (8 cosine units), the theory applies to the whole encoder, and its guarantee, an output
         that is a bijection of the content, needs the 8-unit code to carry all of it. Stage 71 tests it.
 
+57. **A seventh shared local direction does not mark holding, so the suggested local loss would not target the
+    missing factor (stage 72, read 25 Nov, `causal/stage72/local_directions.txt`).** `local_directions.py` on the 48
+    fixed-bank codes with hold verdicts, no training.
+    - **Against the rule fixed before the results: fail.**
+      - Own neighbourhoods: AUC of s7 for the 35 8-unit codes, holders against failures, .718 at k = 32 and .667 at
+        k = 64. The pass needs .80 at both. It is .656 at k = 128 (described only).
+      - The signal is real shared variation: every holder's s7 exceeds all 5 of its shuffled values (14 of 14). The
+        nulls are at most .007, against s7 of .10–.25.
+      - Fixed neighbourhoods (labels) fail the same way: .680, .673, and .670 at 128.
+      - So the outcome is "both fail". The weakest local shared direction does not mark holding at these sizes, and
+        the loss is not to be built in this form.
+    - **Why it fails.** In trained codes the seventh local direction is weak whether the code holds or not.
+      - Profiles at k = 32: holder c8_e500_s2 .68 .62 .56 .49 .44 .35, then .10 .02; failure c8_e500_s42 .80 .64 .53
+        .45 .38 .27, then .10 .03.
+      - A holder's seventh own part is readable across the population (ridge R² .5–.6), but it adds little shared
+        variation among neighbours: about what a failure's curve leaves.
+      - The calibration's 7 + 1 code has a seventh direction like its others (.21 at k = 32, .34 at 128). No trained
+        code looks like that.
+    - **What it rewards instead.**
+      - The compressed starts (pca, red) read high s7 whether they hold or not (.20–.25; pca's holder–failure pairs
+        are all on the wrong side, 6 of 6). So do all five 10-unit codes, seed 4's failure included (.25–.32).
+      - Those failures keep a strong seventh shared direction that is not an own part. The likeliest candidate is the
+        lesion's shift, which the 10-unit parents hold along directions of their own (item 46); not checked.
+      - That is the shared artifact the suggestion itself warned about.
+    - **What it does track.**
+      - Spearman over the 8-unit codes: +.72 with top-1 over 1,000 and +.59 with the spectrum's last value. It
+        measures how well neighbours are told apart, as top-1 does, more than whether the seventh own part is held.
+      - The temperature-1 codes, which keep 4 own directions, read s7 near 0 (.002–.006). So the measure does see a
+        code that has lost several local directions, and curves do add almost no local shared direction there.
+    - **Within cells** (k = 32, holder–failure pairs on the wrong side): e500 2/6, e100 0/6, cont 2/6, pca 6/6, red
+      2/6, harm 1/4; 9 units e500 0/3, e100 1/3. Pooled at 9 units the AUC is .75. As a label-free way to recognize
+      holders it is no better than top-1.
+    - **Expectation, written before:** a pass, narrowly at k = 32. Wrong. It failed at both sizes and with labels
+      too; the synthetic tests had already made k = 32 look harder.
+    - **Reading.** Half of the premise holds: curves add almost no local shared direction. But a held weak factor
+      adds little more, and a shared artifact adds more. Rewarding the seventh local direction would therefore not
+      pick out the missing factor. Not a training target in this form.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -1906,6 +1944,69 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 72 (no training; built 25 Nov, the user asked for it): can a seventh shared local direction be measured
+  without labels?** A suggestion from another assistant (Codex), passed on by the user on 25 Nov: train the 8 units to
+  keep seven local changes that both scans agree on, in place of InfoNCE. It proposed checking first that the signal
+  is measurable, on the saved codes. Stage 72 is that check, with three changes from item 56's discussion: each
+  code's own neighbourhoods at the batch's size, held-out scoring within each neighbourhood, and no pooling across
+  neighbourhoods.
+  - **Why.** Among similar subjects a curve moves with the factor it bends, so it adds no local direction. An
+    independent factor that both views see does add one. A code that holds all seven own parts should then show seven
+    local directions the views share, and a code that lost one should show six plus a curve's leftover. Pooling
+    across neighbourhoods would undo this, since a curve's local slope changes from one neighbourhood to the next.
+  - **Codes:** the 48 fixed-position causal-bank codes with a hold verdict (stages 64, 65, 60, 70): 35 at 8 units
+    (14 hold; cells e500, e100, cont, pca, red, harm, tau1), 8 at 9 units (4 hold), 5 at 10 units (4 hold). Each
+    bundle's 1,000 test subjects, both views.
+  - **Statistic** (`local_directions.py`, new):
+    - Each code is whitened by the covariance of its two views' mean code. Around each of the 1,000 subjects, a
+      neighbourhood of k subjects (the subject and its k − 1 nearest).
+    - Each neighbourhood is split in two at random, one draw per subject, the same for every code. On one half, the
+      shared directions: eigenvectors of the symmetrized T1–FLAIR cross-covariance of the deviations from that half's
+      mean, ranked by eigenvalue. Independent view noise does not enter a cross-covariance. On the other half, the
+      shared covariance along each direction (the mean product of the two views' deviations) and its correlation.
+    - Both ways round, averaged over neighbourhoods. **s7** is the seventh direction's held-out shared covariance (7
+      content factors, at every width); r7 its correlation.
+    - Neighbourhoods: **own**, the code's own (both views' codes side by side, each unit standardized, by
+      `data.cluster_batches.nearest_neighbours`, training's rule); **fixed**, the seven true factors standardized,
+      the same for every code. Fixed is a diagnostic: it uses labels.
+    - Sizes: k = 32, the training batch (an anchor and 31 neighbours), and k = 64.
+    - Null: the same with the T1–FLAIR pairs shuffled within each neighbourhood, 5 shuffles per code.
+    - Calibration rows, described only: the bank's true own parts plus independent view noise (reliability .8 per
+      unit), as a 7 + 1 code (the seven parts and brain's own part squared) and a 6 + 2 code (ventricle and burden
+      replaced by their sum, plus temporal's own part squared).
+  - **Pass rule, fixed before the results** (own neighbourhoods, the measure a training loss could use):
+    1. Over the 35 8-unit codes, the AUC of s7 for holders against failures is at least .80 at k = 32.
+    2. It is at least .80 at k = 64 as well.
+    3. The signal is real shared variation: in at least 13 of the 14 holding 8-unit codes, s7 at k = 32 exceeds the
+       largest of its 5 shuffled values.
+  - **What each outcome means:**
+    - All three pass: the seventh direction is measurable without labels at the batch's size. Building the loss is
+      worth it, as a term added beside InfoNCE, after stage 71 reads. A pass does not show that training on it adds
+      the missing factor: holders are defined by holding seven parts, so some separation is built in.
+    - Own fails but fixed passes (the same rule on fixed neighbourhoods): the signal exists, but the code's own
+      neighbourhoods cannot see it, so a loss on code batches would not either.
+    - Both fail: the weakest local shared direction does not mark holding at these sizes. The proposed loss would
+      reward something else, such as curves or shared artifacts. Do not build it.
+  - **Described:** per cell, holder–failure pairs on the wrong side (as item 51's top-1 check); the 9- and 10-unit
+    codes; s7's Spearman with the spectrum's last value and with top-1 over 1,000; the whole profile s1–s8 for one
+    holder and one failure; the calibration rows.
+  - **Expectation, written before the results:** a pass, but not by much at k = 32. My estimate is that a weak factor's
+    local shared variance is about 2–3 times a curve's leftover, which noise at 16 subjects a half could blur. Most
+    likely AUC .80–.90 with own neighbourhoods at both sizes, higher with fixed ones. The calibration separates
+    clearly. The shuffle null sits near 0 for every code.
+  - **Cost:** CPU only, minutes; it does not touch the GPU, which stage 71 is using.
+  - **Checked on synthetic codes, before any trained code was scored (25 Nov):**
+    - `tests/test_local_directions.py`, 7 tests. The synthetic codes are seven factors plus one curve against six plus
+      two, at reliability .8 per unit and N 1,000.
+    - At k = 32 the held-out profile flattens, with 16 subjects a half for 8 directions: s7 .21 against .15, only 1.4
+      times. At k = 128 it is .34 against .17, and with reliability .96 at k = 32 it is .29 against .11 (own
+      neighbourhoods).
+    - The shuffle null and pure view noise read near 0.
+    - Fixed neighbourhoods separate less than the code's own (1.7–1.9 times where own reach 2.0–2.7): they leave the
+      curve's coordinates free inside each neighbourhood.
+    - Added after these tests: k = 128, described only. The pass rule is unchanged (k = 32 and 64). The tests also
+      make k = 32 look harder than the expectation above assumed, and a loss on 32-subject batches would meet the
+      same noise.
 - **Stage 71 (built 25 Nov after item 56; the user asked to try it): does a projector head make 8 units
   reliable?**
   - **Why.**
@@ -1986,7 +2087,13 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
       checkpoint; the head is saved under its own key, which the audits ignore.
     - `bash -n` passes. The dry run lists stage 70's flags with `--projector 64` in place of `--tau 1` for the five
       arms, then the reports.
-  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 71` under `monai_env` (log `run_pc_71.log`).
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 71` under `monai_env` (log `run_pc_71.log`). Started 25
+    Nov 10:53, all five arms at once. Each logs "projector head 8 -> 64 -> 8". At step 50 the trained term is within
+    .015 of the recipe's InfoNCE on the code at every seed (12.16–13.27), as the identity start requires.
+  - **Interim, step 2,000** (25 Nov 11:17; not the verdict): the trained term is .11–.30 below the recipe's InfoNCE
+    on the code at every seed, but the head's linearity is still 1.000 in both views. So far it reweights or mixes
+    units through its linear part and does not bend. If it stays linear, the arm tests a learned reweighting, not
+    bending after the code.
 - **Stage 70 (built 25 Nov; rules and the factor of 10 agreed by the user; started 25 Nov 05:48; read 25 Nov, item
   56: worse, holds 0/5): does a higher
   InfoNCE temperature make 8 units reliable?** On 25 Nov the user declined the anchors as a seed rule, asked for
@@ -3458,6 +3565,9 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - Item 56's synthesis answers the user's question (25 Nov) of why 8 units fail. InfoNCE prefers bending strong
     factors to holding weak ones, and at 8 units the recipe's counter-pressure only about evens it. Its proposed fix,
     a matched-width projector head, is stage 71 (below).
+- **Stage 72 is read (item 57): fail.** The suggested local loss (seven local changes both scans agree on, from
+  another assistant via the user) would not target the missing factor. A held weak factor adds no more local shared
+  variation than a failure's curve leaves, and a shared artifact adds more. Do not build it in this form.
 - **Running:** stage 71, the from-scratch 8-unit arm with a projector head shared by both views (`warm.py
   --projector 64`, output at the code's 8 units), seeds 42, 2, 3, 4, 5, then the reports one at a time (section 9;
   rules fixed there before the run). The user asked to try it after item 56. A matched-width head keeps Yao's setup;

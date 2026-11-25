@@ -1,0 +1,64 @@
+cell      seed  anchors  hidden  own mean  own min   last holds
+c8_e500      2    0.510    0.80      0.80     0.57   0.56 yes
+c8_e500      3    0.506    0.83      0.80     0.55   0.50 yes
+c8_e500      5    0.504    0.82      0.79     0.58   0.52 yes
+c8_e500      4    0.436    0.62      0.67     0.38  -0.01 no
+c8_e500     42    0.405    0.77      0.68     0.31   0.01 no
+  c8_e500: Spearman(anchors, last) +0.80; top pick holds: yes; cell holds 3/5
+
+c8_e100      3    0.492    0.82      0.78     0.55   0.49 yes
+c8_e100      4    0.486    0.78      0.77     0.57   0.48 yes
+c8_e100     42    0.473    0.78      0.75     0.52   0.36 no
+c8_e100      5    0.467    0.59      0.69     0.28   0.03 no
+c8_e100      2    0.424    0.69      0.69     0.31   0.11 no
+  c8_e100: Spearman(anchors, last) +0.90; top pick holds: yes; cell holds 2/5
+
+c9_e500      3    0.510    0.77      0.78     0.61   0.56 yes
+c9_e500      5    0.510    0.82      0.80     0.64   0.60 yes
+c9_e500      4    0.505    0.84      0.80     0.60   0.55 yes
+c9_e500     42    0.426    0.69      0.68     0.47   0.02 no
+  c9_e500: Spearman(anchors, last) +0.80; top pick holds: yes; cell holds 3/4
+
+c9_e100     42    0.517    0.80      0.80     0.63   0.62 yes
+c9_e100      4    0.477    0.78      0.76     0.53   0.40 no
+c9_e100      3    0.445    0.66      0.69     0.49   0.16 no
+c9_e100      5    0.442    0.70      0.70     0.56   0.14 no
+  c9_e100: Spearman(anchors, last) +1.00; top pick holds: yes; cell holds 1/4
+
+c10_e500     3    0.510    0.69      0.77     0.61   0.57 yes
+c10_e500     5    0.508    0.82      0.80     0.64   0.62 yes
+c10_e500    42    0.506    0.83      0.80     0.59   0.56 yes
+c10_e500     2    0.502    0.83      0.80     0.61   0.57 yes
+c10_e500     4    0.410    0.67      0.66     0.43   0.04 no
+  c10_e500: Spearman(anchors, last) +0.67; top pick holds: yes; cell holds 4/5
+
+c8_cont      3    0.518    0.84      0.81     0.60   0.54 yes
+c8_cont      2    0.516    0.76      0.79     0.60   0.57 yes
+c8_cont      5    0.505    0.82      0.80     0.60   0.58 yes
+c8_cont      4    0.441    0.61      0.68     0.43   0.01 no
+c8_cont     42    0.430    0.79      0.71     0.41   0.17 no
+  c8_cont: Spearman(anchors, last) +0.50; top pick holds: yes; cell holds 3/5
+
+c8_pca      42    0.503    0.80      0.79     0.56   0.53 yes
+c8_pca       3    0.495    0.48      0.70     0.25   0.17 no
+c8_pca       2    0.451    0.67      0.70     0.51   0.10 no
+c8_pca       5    0.446    0.79      0.73     0.61   0.46 yes
+c8_pca       4    0.330    0.62      0.57     0.38  -0.02 no
+  c8_pca: Spearman(anchors, last) +0.70; top pick holds: yes; cell holds 2/5
+
+c8_red       2    0.524    0.83      0.82     0.64   0.62 yes
+c8_red       5    0.523    0.82      0.81     0.66   0.63 yes
+c8_red      42    0.522    0.82      0.82     0.62   0.60 yes
+c8_red       3    0.512    0.48      0.71     0.28   0.15 no
+c8_red       4    0.406    0.66      0.67     0.49   0.06 no
+  c8_red: Spearman(anchors, last) +0.90; top pick holds: yes; cell holds 3/5
+
+c8_harm      2    0.494    0.82      0.79     0.51   0.47 yes
+c8_harm      5    0.461    0.63      0.70     0.48   0.35 no
+c8_harm      3    0.445    0.60      0.66     0.29  -0.01 no
+c8_harm      4    0.418    0.77      0.70     0.29  -0.02 no
+c8_harm     42    0.412    0.78      0.70     0.29  -0.01 no
+  c8_harm: Spearman(anchors, last) +0.82; top pick holds: yes; cell holds 1/5
+
+holder above non-holder in the same cell: 42/44 pairs
+anchors' top pick holds in 9/9 cells; codes hold in 22/43

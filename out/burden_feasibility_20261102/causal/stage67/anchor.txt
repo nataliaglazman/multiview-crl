@@ -1,0 +1,295 @@
+149 of 154 runs are in out/burden_feasibility_20261102/causal/stage66/criterion.json at the same step; scoring those
+read ssl_code_decor_restail_t104
+read ssl_code_drop_restail_t104
+read ssl_code_jitter1_nopatch_restail_t104
+read ssl_code_jitter4_nopatch_restail_t104
+read ssl_code_jitter4_nopatch_restail_t104_20k
+read ssl_code_jitter4_nopatch_restail_t104_s2
+read ssl_code_jitter4_shared_nopatch_restail_t104
+read ssl_code_jitter_drop_restail_t104
+read ssl_code_jitter_nopatch_restail_t104
+read ssl_code_jitter_nopatch_restail_t104_20k
+read ssl_code_jitter_restail_t104
+read ssl_code_jitter_restail_t104_s2
+read ssl_code_nopatch_restail_t104
+read ssl_code_restail_t104
+read ssl_code_run_restail_t104_20k
+read ssl_gap_t100
+read ssl_gap_t100_20k
+read ssl_gapnorm_t100
+read ssl_queue_gap_t100
+read ssl_queue_restail_t104
+read ssl_resgap_t104
+read ssl_resgapnorm_t104
+read ssl_restail_t100
+read ssl_restail_t104
+read ssl_run_restail_t104
+read ssl_tail_t100
+read ssl_tail_t100_20k
+read ssl_tail_t104
+read ssl_uni_gap_t100
+read ssl_uni_queue_restail_t104
+read ssl_uni_restail_t104
+read ssl_uni_restail_t104_20k
+read ssl_uni_tail_t100
+read ssl_code_jitter_nopatch_restail_t104_causal
+read ssl_code_jitter_nopatch_restail_t104_causal_20k
+read ssl_code_jitter_nopatch_restail_t104_causal_c24_20k
+read ssl_code_jitter_nopatch_restail_t104_causal_c24_20k_s2
+read ssl_code_jitter_nopatch_restail_t104_causal_halves8
+read ssl_code_jitter_nopatch_restail_t104_causal_halves8_20k
+read ssl_code_jitter_nopatch_restail_t104_causal_hard5
+read ssl_code_jitter_nopatch_restail_t104_causal_n31
+read ssl_code_jitter_nopatch_restail_t104_causal_n31_20k
+read ssl_code_jitter_nopatch_restail_t104_causal_n31_hard5
+read ssl_code_jitter_nopatch_restail_t104_causal_n31_s2
+read ssl_code_jitter_nopatch_restail_t104_causal_s2
+read ssl_uni_jitter_nopatch_regionaltail_t104_causal_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_bt_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_c24_20k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_c48_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_rem10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_rem10gap_20k
+read head_nofield_c24_nce_10k
+read head_nofield_c24_predict01_10k
+read head_nofield_c24_predict10_10k
+read head_nofield_c24_predict1_10k
+read head_nofield_c24_predict3_10k
+read ssl_code_jitter_nopatch_restail_t104_causal_nofield_n31_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_codebatch_predict1_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_gapnorm_predict1_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_nojitter_predict1_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_abl_nores_predict1_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_bt_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_c48_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_critmain_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c10_20k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c11_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_20k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_c24_entropy10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_c24_entropy11_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1_mlp128_critmain_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1grid_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict1quantile_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict3_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_predict3_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_critboth_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_rem10gap_critrem_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s3
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s4
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c8_20k_s5
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s3
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s4
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch100_predict1_c9_20k_s5
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch25_predict1_c8_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s3
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s4
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c10_20k_s5
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s3
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s4
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_plus10k_s5
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s3
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s4
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s5
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k_s3
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k_s4
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c9_20k_s5
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict3_c8_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s3
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s4
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10pca_predict1_c8_10k_s5
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s3
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s4
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_from10red_predict1_c8_10k_s5
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_gapnorm_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_nojitter_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_nopredict_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_nores_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c10_20k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_predict1_c8_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_k32_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_k32_predict1_c24_20k
+read head_nogain_c24_nce_10k
+read head_nogain_c24_predict1_10k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_predict1_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_predict1_c24_20k_s2
+read ssl_uni_jitter_nopatch_restail_t104_causal_nofield_nogain_k32_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_nofield_predict1_c10_20k
+read ssl_uni_jitter_nopatch_restail_t104_nofield_predict1_c24_20k
+read ssl_uni_jitter_nopatch_restail_t104_nofield_fixedpos_abl_codebatch_predict1_c8_20k
+read ssl_gap_t104_nuisance
+read ssl_queue_gap_t104_nuisance
+read ssl_queue_restail_t104_nuisance
+read ssl_restail_t104_nuisance
+read ssl_gap_r0126
+read ssl_gap_r0159
+
+149 runs. Truth: the hidden factors' own parts (ridge, test subjects, mean of the views).
+Own-part R2 against stage 66 on the same runs: largest difference 4.9e-05, a match (stage 66 stored 4 decimals)
+
+Rule (fixed beforehand): split 'adni', adjusted anchors, r = 0.9, grouping 'bank'
+  rho +0.77 [+0.64, +0.84], shortfall removed +0.89 -> usable: YES
+  top1_32 removes +0.40 on the same runs -> preferred over retrieval: YES
+
+Grouping 'bank': 7 groups of at least 4 runs
+   32  bank_causal_nofield t1_04
+    6  bank_causal_nofield_nogain t1_04
+   24  bank t1_04
+   19  bank_causal t1_04
+    9  bank t1_00
+    4  bank_nuisance t1_04
+   47  bank_causal_nofield_fixedpos t1_04
+
+  adni: hidden lr, sulcal
+    score                   rho           range  removed           range
+    raw r=1.00            +0.82   [+0.82,+0.82]    +0.85   [+0.85,+0.85]
+    raw r=0.90            +0.80   [+0.80,+0.82]    +0.86   [+0.85,+0.88]
+    raw r=0.75            +0.81   [+0.79,+0.82]    +0.85   [+0.81,+0.88]
+    raw r=0.50            +0.81   [+0.80,+0.82]    +0.85   [+0.80,+0.88]
+    adjusted r=1.00       +0.75   [+0.75,+0.75]    +0.89   [+0.89,+0.89]
+    adjusted r=0.90       +0.77   [+0.76,+0.78]    +0.89   [+0.88,+0.89]
+    adjusted r=0.75       +0.76   [+0.74,+0.79]    +0.87   [+0.83,+0.89]
+    adjusted r=0.50       +0.77   [+0.74,+0.79]    +0.85   [+0.80,+0.89]
+    exact own parts       +0.80   [+0.80,+0.80]    +0.89   [+0.89,+0.89]
+    top1_32               +0.42   [+0.42,+0.42]    +0.40   [+0.40,+0.40]
+    top1_all              +0.35   [+0.35,+0.35]    +0.66   [+0.66,+0.66]
+    gap_gauss_mi_gain     +0.25   [+0.25,+0.25]    +0.62   [+0.62,+0.62]
+
+  no_wmh: hidden burden
+    score                   rho           range  removed           range
+    raw r=1.00            +0.26   [+0.26,+0.26]    +0.07   [+0.07,+0.07]
+    raw r=0.90            +0.26   [+0.25,+0.26]    +0.08   [+0.07,+0.14]
+    raw r=0.75            +0.26   [+0.25,+0.27]    +0.12   [+0.07,+0.18]
+    raw r=0.50            +0.25   [+0.25,+0.26]    +0.11   [+0.07,+0.17]
+    adjusted r=1.00       +0.27   [+0.27,+0.27]    +0.13   [+0.13,+0.13]
+    adjusted r=0.90       +0.27   [+0.26,+0.28]    +0.11   [+0.11,+0.13]
+    adjusted r=0.75       +0.28   [+0.27,+0.29]    +0.11   [+0.07,+0.14]
+    adjusted r=0.50       +0.27   [+0.26,+0.28]    +0.13   [+0.08,+0.21]
+    exact own parts       +0.29   [+0.29,+0.29]    +0.14   [+0.14,+0.14]
+    top1_32               +0.16   [+0.16,+0.16]    -0.05   [-0.05,-0.05]
+    top1_all              +0.10   [+0.10,+0.10]    +0.08   [+0.08,+0.08]
+    gap_gauss_mi_gain     +0.11   [+0.11,+0.11]    -0.21   [-0.21,-0.21]
+
+  hide1: every split hiding 1, averaged over 7 splits
+    score                   rho           range  removed           range
+    raw r=0.90            +0.64                    +0.70                
+    adjusted r=0.90       +0.64                    +0.73                
+    exact own parts       +0.64                    +0.71                
+    top1_32               +0.34                    +0.19                
+    top1_all              +0.29                    +0.37                
+    gap_gauss_mi_gain     +0.24                    +0.29                
+
+  hide2: every split hiding 2, averaged over 21 splits
+    score                   rho           range  removed           range
+    raw r=0.90            +0.73                    +0.77                
+    adjusted r=0.90       +0.71                    +0.79                
+    exact own parts       +0.72                    +0.81                
+    top1_32               +0.41                    +0.25                
+    top1_all              +0.35                    +0.46                
+    gap_gauss_mi_gain     +0.27                    +0.36                
+
+  hide3: every split hiding 3, averaged over 35 splits
+    score                   rho           range  removed           range
+    raw r=0.90            +0.77                    +0.78                
+    adjusted r=0.90       +0.75                    +0.80                
+    exact own parts       +0.75                    +0.84                
+    top1_32               +0.44                    +0.27                
+    top1_all              +0.37                    +0.50                
+    gap_gauss_mi_gain     +0.28                    +0.39                
+
+Grouping 'bank_width': 11 groups of at least 4 runs
+   23  bank_causal_nofield t1_04 c24
+    5  bank_causal_nofield_nogain t1_04 c24
+   24  bank t1_04 c14
+   10  bank_causal t1_04 c14
+    8  bank_causal t1_04 c24
+    7  bank_causal_nofield t1_04 c10
+    9  bank t1_00 c14
+    4  bank_nuisance t1_04 c14
+   28  bank_causal_nofield_fixedpos t1_04 c8
+    8  bank_causal_nofield_fixedpos t1_04 c9
+   11  bank_causal_nofield_fixedpos t1_04 c10
+
+  adni: hidden lr, sulcal
+    score                   rho           range  removed           range
+    raw r=1.00            +0.76   [+0.76,+0.76]    +0.76   [+0.76,+0.76]
+    raw r=0.90            +0.75   [+0.74,+0.77]    +0.78   [+0.76,+0.84]
+    raw r=0.75            +0.75   [+0.74,+0.77]    +0.78   [+0.73,+0.84]
+    raw r=0.50            +0.76   [+0.74,+0.78]    +0.82   [+0.75,+0.86]
+    adjusted r=1.00       +0.77   [+0.77,+0.77]    +0.86   [+0.86,+0.86]
+    adjusted r=0.90       +0.76   [+0.75,+0.77]    +0.81   [+0.79,+0.87]
+    adjusted r=0.75       +0.75   [+0.73,+0.76]    +0.79   [+0.75,+0.82]
+    adjusted r=0.50       +0.74   [+0.72,+0.76]    +0.77   [+0.73,+0.85]
+    exact own parts       +0.78   [+0.78,+0.78]    +0.79   [+0.79,+0.79]
+    top1_32               +0.48   [+0.48,+0.48]    +0.69   [+0.69,+0.69]
+    top1_all              +0.43   [+0.43,+0.43]    +0.61   [+0.61,+0.61]
+    gap_gauss_mi_gain     +0.27   [+0.27,+0.27]    +0.52   [+0.52,+0.52]
+
+  no_wmh: hidden burden
+    score                   rho           range  removed           range
+    raw r=1.00            +0.24   [+0.24,+0.24]    +0.12   [+0.12,+0.12]
+    raw r=0.90            +0.23   [+0.23,+0.24]    +0.12   [+0.12,+0.17]
+    raw r=0.75            +0.24   [+0.23,+0.24]    +0.15   [+0.10,+0.20]
+    raw r=0.50            +0.24   [+0.23,+0.25]    +0.15   [+0.12,+0.19]
+    adjusted r=1.00       +0.27   [+0.27,+0.27]    +0.10   [+0.10,+0.10]
+    adjusted r=0.90       +0.26   [+0.26,+0.27]    +0.10   [+0.09,+0.21]
+    adjusted r=0.75       +0.27   [+0.26,+0.28]    +0.19   [+0.06,+0.25]
+    adjusted r=0.50       +0.26   [+0.25,+0.29]    +0.22   [+0.12,+0.27]
+    exact own parts       +0.27   [+0.27,+0.27]    +0.12   [+0.12,+0.12]
+    top1_32               +0.16   [+0.16,+0.16]    +0.22   [+0.22,+0.22]
+    top1_all              +0.11   [+0.11,+0.11]    +0.16   [+0.16,+0.16]
+    gap_gauss_mi_gain     +0.07   [+0.07,+0.07]    -0.09   [-0.09,-0.09]
+
+  hide1: every split hiding 1, averaged over 7 splits
+    score                   rho           range  removed           range
+    raw r=0.90            +0.63                    +0.68                
+    adjusted r=0.90       +0.62                    +0.70                
+    exact own parts       +0.64                    +0.70                
+    top1_32               +0.38                    +0.46                
+    top1_all              +0.33                    +0.41                
+    gap_gauss_mi_gain     +0.24                    +0.27                
+
+  hide2: every split hiding 2, averaged over 21 splits
+    score                   rho           range  removed           range
+    raw r=0.90            +0.71                    +0.74                
+    adjusted r=0.90       +0.70                    +0.75                
+    exact own parts       +0.71                    +0.77                
+    top1_32               +0.44                    +0.53                
+    top1_all              +0.38                    +0.48                
+    gap_gauss_mi_gain     +0.26                    +0.33                
+
+  hide3: every split hiding 3, averaged over 35 splits
+    score                   rho           range  removed           range
+    raw r=0.90            +0.74                    +0.76                
+    adjusted r=0.90       +0.74                    +0.77                
+    exact own parts       +0.74                    +0.81                
+    top1_32               +0.48                    +0.57                
+    top1_all              +0.42                    +0.51                
+    gap_gauss_mi_gain     +0.29                    +0.36                
+
+rho: Spearman within groups, size-weighted, mean over noise draws (range over draws). removed: share of a random pick's shortfall on the hidden factors that the score's pick removes, mean over draws. raw / adjusted: noisy measured anchors as read from the code, adjusted for the other measured anchors or not.

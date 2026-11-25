@@ -79,7 +79,9 @@ def misses(m, ref):
         for factor, r2 in ref["own"][i].items():
             if m["own"][i][factor] < r2 - 0.10:
                 out.append(f"{factor} {view} {m['own'][i][factor]:.2f}")
-        if m["volume"][i] > ref["volume"][i] + 1:
+        if m["volume"][i] is None:  # the audit gives no error when the code reads no volume at all
+            out.append(f"volume {view} none")
+        elif m["volume"][i] > ref["volume"][i] + 1:
             out.append(f"volume {view} {m['volume'][i]:.1f}")
         if m["bias"][i] > ref["bias"][i] + 0.03:
             out.append(f"ATE bias {view} {m['bias'][i]:.3f}")
@@ -114,8 +116,9 @@ def main():
     order = sorted(rows, key=lambda label: (cell[label][0], arm_key(cell[label][1]), cell[label][2]))
     for label in order:
         m = rows[label]
+        volume = ["none" if v is None else f"{v:.1f}" for v in m["volume"]]
         print(f"{label:15} {m['last'][0]:5.2f}/{m['last'][1]:<5.2f} {m['worst'][0]:6.2f}/{m['worst'][1]:<5.2f}"
-              f" {m['volume'][0]:5.1f}/{m['volume'][1]:<5.1f} {m['bias'][0]:5.3f}/{m['bias'][1]:<5.3f}"
+              f" {volume[0]:>5}/{volume[1]:<5} {m['bias'][0]:5.3f}/{m['bias'][1]:<5.3f}"
               f" {m['graph'][0]:5.3f}/{m['graph'][1]:<5.3f} {m['top1']:6.3f}  {'yes' if m['holds'] else 'no ':5}"
               f"  {'yes' if not m['misses'] else 'no: ' + ', '.join(m['misses'])}")
 
