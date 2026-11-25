@@ -1594,6 +1594,168 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - More breakdowns (per bank, per factor, seed spread, and choosing by the measured factors' exact own
       parts) are in the status section's stage 66 entry, from the other session's reading.
 
+54. **The harmonic penalty makes 8 units less reliable, keeps the curves and costs discrimination (stage 60, read
+    24 Nov, `causal/stage60/holds.txt`).** Stage 64's from-scratch 8-unit arm (every 500) plus `--harmonic-weight 1`
+    at seeds 42, 2, 3, 4, 5, beside the from-scratch 8-unit and 10-unit codes of the same seeds. T1 / FLAIR.
+    - **Holds / matches the 10-unit code (stage 50, seed 42):** penalty 1/5 (seed 2) / 0/5 (seed 2 misses T1 volume
+      error, 13.6, as its from-scratch twin did at 12.6); from scratch 3/5 (2, 3, 5) / 2/5 (3, 5); 10 units 4/5 /
+      3/5.
+    - **Against the rules fixed before the results:**
+      - **Reliable: no.** Holds 1/5 against 3/5 (Fisher p .52), matches 0/5 against 2/5 (p .44). Both are 2 below
+        from scratch, outside the "no better" band of 1. The rules named no "worse" outcome; this is the mirror of
+        the "better" threshold, and five seeds do not make it significant.
+      - **Paired by seed:** no rescue. Seeds 42 and 4 still lose the seventh direction to the ventricle–burden
+        blend (last -.01 / -.01 and -.02 / -.02, worst .00 / .01 and .05 / .06). Two holders are lost: seed 3
+        drops sulcal (own R² .28 / .30, last -.01 / -.01; the weakest direction mixes sulcal, ventricle and
+        thickness), and seed 5 narrowly (last .35 / .41, worst .49 / .49). Seed 2 holds, lower than its twin
+        (last .47 / .50 against .56 / .56).
+      - **Against 10 units (described only):** 1/5 and 0/5 against 4/5 and 3/5.
+      - **Mechanism: fails.** Every code keeps a curve in both views (5/5; the rule's failure is 4/5). Counts T1 |
+        FLAIR at seeds 42, 2, 3, 4, 5: 1|2, 2|1, 1|2, 2|2, 2|3, against from scratch 2|2, 1|1, 1|1, 2|2, 1|1. Each
+        code keeps a direction at own R² .00 that boosting from the seven factors predicts at .84–.98, mostly from
+        brain size alone (.59–.83; split over two directions in FLAIR at seeds 42 and 4). Some of the extra curves
+        are weak own parts just under .5 (seed 2's T1 burden direction at .48, seed 5's at .36–.50); the rule
+        counts them.
+      - **Cost: yes.** Cross-view top-1 over all 1,000 subjects falls at every seed, by .084 to .318, mean .207
+        (the rule's cost is a mean drop above .05).
+      - **Style (read beside):** none in the code in any arm (linear R² at most .05, boosted below 0), except
+        seed 3's penalty code, which reads T1 gain at .13 linearly (boosted -.05).
+    - **The penalty is not being paid** (seen after the results, in the training logs). In all five arms it fell
+      from .12–.21 in the first 1,000 steps to .017–.024 at step 20,000. The critic's full fit ended within .01 of
+      its linear one (R² -.07 to +.05). So the online critic stopped finding the non-linear redundancy that
+      boosting from the true factors finds at .84–.98. The rule's gloss for a failure, "the loss keeps them and
+      pays the penalty", does not apply: the code keeps them and the critic does not see them. Either the encoder
+      escapes the critic, or the curves cannot be read from the other units at all, only from the factors. A
+      critic fitted afresh on the saved codes, with no training, would tell which.
+    - **Other measures:** volume error is worse at seeds 2, 3 and 5 (seed 5 15.0 / 14.1 against 11.0 / 9.5) and
+      better at seed 42. Seeds 3 and 5 about double their ATE bias (.15 / .14 and .16 / .15 against .07–.08), and
+      seed 3's decoded graph falls to .65 / .71 (.85 / .84 from scratch).
+    - **Expectation, written before:** wrong. The five-seed expectation said the penalty would remove most curves,
+      rescue seed 42 most likely, hold in 3 or 4 of 5 and cost up to .05 of top-1. It removed none, rescued none,
+      held in 1 of 5 and cost .21. The 20 Nov expectation's alternative, that the code keeps the curves or loses
+      discrimination, happened in both halves, but without paying the penalty.
+    - **Reading.** Charging what a small non-linear critic gets beyond a linear one, at weight 1, does not stop an
+      8-unit code spending directions on curves. The critic is satisfied while the curves stay, and the code loses
+      discrimination and two of three holders. Not a lever in this form. Whether any penalty on units predicting
+      units could work turns on the offline check above.
+
+55. **Measured anchors choose runs, noisy or not, where retrieval could not (stage 67, read 25 Nov,
+    `causal/stage67/anchor.txt`).** `anchor_check.py`: 154 runs exported (17 trained with labels skipped), 149 scored
+    (those in stage 66's `criterion.json` at the same step). Truth: the hidden factors' own parts on test subjects,
+    mean of the views; it equals stage 66's to 5e-5. Each score picks runs within each bank.
+    - **Pass rule (docstring, fixed before any result):** split 'adni' (lr and sulcal hidden; brain, ventricle,
+      thickness and temporal measured as their latents, burden as the lesion volume), anchors adjusted for each
+      other, reliability .9, grouping 'bank'. Usable if the bootstrap 95% interval of rho lies above 0 and the pick
+      removes at least half of a random pick's shortfall; preferred over retrieval if it also removes more than
+      top1_32.
+    - **Usable: yes.** rho +.77 [.64, .84], shortfall removed .89.
+    - **Preferred over retrieval: yes.** top1_32 removes .40 on the same runs. The rule named top1_32, which failed
+      stage 66; top1_all, which passed it, removes .66 here. The anchors beat both.
+    - **Noise costs nothing at these levels.** Adjusted anchors at reliability 1, .9, .75 and .5: rho .75–.77,
+      removed .85–.89. Raw anchors do as well (.80–.82, .85–.86), and so do the measured factors' exact own parts
+      (.80, .89). Adjusting for the other anchors is not needed to choose runs here.
+    - **Other hidden sets** (r = .9; every split hiding 1, 2 or 3 factors, averaged): rho .64 / .71 / .75, removed
+      .73 / .79 / .80, against .19 / .25 / .27 for top1_32 and .37 / .46 / .50 for top1_all. Under 'bank_width'
+      (11 groups, not the rule's grouping): rho .76, removed .81, against top1_32's .48, .69.
+    - **By bank** (rule cell, rho / removed; `causal/stage67/posthoc/by_bank_adni.txt`, which reproduces the pooled
+      values exactly; `by_bank_no_wmh.txt` for burden hidden):
+      - Fixed-position bank (47 runs: the 8-, 9- and 10-unit arms): .68 / .89. Retrieval removes -.43 there, worse
+        than a random pick.
+      - Current recipe's bank (32): .82 / 1.00; retrieval does well too (.91–.92).
+      - Drawn bank at T1 gain .4 (24): .88 / 1.00. bank_causal (19): .69 / .92, where retrieval removes -1.48.
+        T1 gain 0 (9): .93 / 1.00. No-gain (6): 1.00 / 1.00.
+      - The one failure is the 4-run nuisance bank (.36 / -.10; retrieval 1.00), whose hidden own parts are all low
+        (.08–.34).
+    - **Burden hidden ('no_wmh'): fails.** rho .27, removed .11; the exact own parts do no better (.29, .14).
+      - It works in the prediction-recipe banks: fixed-position .57 / .65, current recipe .66 / 1.00, no-gain
+        .93 / .88.
+      - It reverses in the older banks: bank_causal -.55 / -.40, T1 gain 0 -.75 / -.54, nuisance -.80 / -.32; T1
+        gain .4 .20 / .13. Stage 66 found burden's own part trading against the others there.
+      - ADNI measures the WMH volume, so the 'adni' split is the one that applies. A factor ADNI does not measure
+        is chosen for only if its quality moves with the measured ones'.
+    - **Within one cell (looked at after the reading, so post hoc).** The rule's score ranked the seeds of each
+      cell (units, arm) of stages 64, 65 and 60: 43 codes in 9 cells (`causal/stage67/posthoc/within_cell.txt`;
+      the scripts are beside it).
+      - The anchors' top seed holds in 9 of 9 cells; a random seed would in about 4.6.
+      - A holder outscores a failing code of its cell in 42 of 44 pairs.
+      - Stage 60's penalty cell was not in stage 66's set, so the score was never checked on it. Its one holder,
+        seed 2, comes first.
+      - Both misses are in the PCA cell. Its narrow holder (seed 5, last .46) scores below seed 3, which lost lr
+        (hidden), and seed 2, by .005.
+      - The top seed matches the 10-unit code in 4 of 9 cells; a random seed would in about 3. Among codes that
+        hold, the scores are mostly within .01, so they do not order the match criteria.
+      - The cells share seeds (seed 4 fails in 7 of 9), so these are not nine independent tests.
+      - Top-1 did not separate holders within a cell (items 51–53). The 8-unit failures sit in ventricle and
+        burden, which are measured.
+    - **What the check leaves out.** The noise is independent and Gaussian, with one draw per bank. FreeSurfer's
+      errors may follow scanner and contrast, which is what style holds. The latents stand in for FreeSurfer's
+      volumes, which are noisy functions of the anatomy rather than the generator's own factors. The check ranks
+      runs within a bank; it gives no threshold for a single run.
+    - No expectation was written before this stage.
+    - **Reading.**
+      - To choose among runs on ADNI, use the measured anchors. The run whose code best reads them (adjusted or
+        raw) is close to the best on the factors ADNI does not measure, nearly as close as choosing by the exact
+        own parts, and noise down to reliability .5 does not change that.
+      - Within one 8-unit cell the same score finds the seeds that hold, post hoc; top-1 could not.
+      - The user declined (25 Nov) using the anchors to choose seeds, so stage 69 does not score its children this
+        way.
+
+56. **A higher temperature makes 8 units worse: no code holds, and half of every code goes to curves (stage 70,
+    read 25 Nov, `causal/stage70/holds.txt`).** Stage 64's from-scratch 8-unit arm (every 500) with the global
+    InfoNCE at τ 1, scaled by 10 (`warm.py --tau 1`), seeds 42, 2, 3, 4, 5, beside the from-scratch 8-unit and
+    10-unit codes of the same seeds. T1 / FLAIR.
+    - **Holds / matches the 10-unit code (stage 50, seed 42):** τ 1 0/5 / 0/5; from scratch 3/5 / 2/5; 10 units 4/5 /
+      3/5.
+    - **Against the rules fixed before the results:**
+      - **Reliable: no; worse.** Holds 0/5 against 3/5 (Fisher p .17), matches 0/5 against 2/5 (p .44): 3 and 2
+        fewer, past the "worse" threshold of 2.
+      - **Paired by seed:** no rescue (42 and 4 still fail), and all three holders are lost (2, 3, 5).
+      - **Mechanism: fails.** Every code spends 4 directions on curves in each view, seed 4 five (from scratch 1 or
+        2). Each keeps 4 own directions (seed 4: 3); the spectrum's last value is −.04 to −.02 and the ventricle–
+        burden worst direction −.02 to −.01.
+      - **Cost: yes.** Cross-view top-1 over all 1,000 subjects falls at every seed, by .058 to .575, mean .277.
+        Style: none (linear R² at most .00).
+      - **Described:** volume error 52–226 voxels against 9.5–15.5. Seed 4's code reads no volume at all (own R²
+        below 0), so the audit gives no error; `holds.py` crashed on it at the end of the stage and now counts it as
+        a miss, the rule unchanged, rerun by hand. ATE bias .19–.26 against .07–.16. Decoded graph .47–.70 against
+        .76–.85.
+    - **What goes:** burden's own part at every seed (R² .05 or less), sulcal (.12–.20; seed 4 −.01), thickness
+      (.13–.43) and ventricle at three seeds (.00–.32). Brain (.90–.92), temporal (.80–.87) and lr (.72–.92) stay.
+      The step-14,000 evals already showed it (stage 70 entry, "Interim").
+    - **Expectation, written before:** wrong. It predicted fewer curves and most likely 4 of 5 holding; curves
+      doubled and none held. The stated risk, that the weak own parts lose room, happened in full, and to more
+      factors than burden and lr.
+    - **Reading.**
+      - The number of curves is the width less the own parts held, at every width and arm: 8 units 7+1 or 6+2, 9
+        units 7+2 or 6+3, 10 units 7+3, τ 1 4+4 or 3+5. Counting curves measures what was lost, not why.
+      - τ 1 lands where InfoNCE alone did. Stage 62's check found 4 own directions and 6 curves at 10 units with
+        uniform batches and no prediction term; with prediction 5 and 5; with code batches too 7 and 3.
+      - So the low temperature is what lets the code batches work. A soft loss barely separates neighbours that
+        agree on what the code holds, so the weak factors stop paying, and bent copies of the strong ones take their
+        units.
+      - The 1/τ argument was wrong about what the temperature does. The isotropy term left at τ 1 is met by bending
+        as well as by new factors.
+      - Not a lever. Section 11's hard-negative weighting (sharper) starved lr and temporal, so both directions of
+        the temperature are worse than the recipe's 0.1.
+    - **Why 8 units fail (synthesis, 25 Nov, from items 46–56 and stage 62's check):**
+      - InfoNCE reads the code through a fixed cosine on standardized units, so every unit counts alike, both in
+        spreading subjects and in the views' agreement, and no unit can sit idle (item 46).
+      - A unit holding a bent copy of a strong, cleanly seen factor (brain size, read at .94 in both views) spreads
+        subjects and costs no agreement. A unit holding the weakest own direction (the ventricle–burden difference,
+        9% of the pair's variance, burden the factor the views determine least exactly) costs agreement. It earns
+        only where the batch is not already told apart, and InfoNCE stops paying once it is (warm.py's prediction
+        docstring).
+      - InfoNCE alone therefore prefers bending (4 own directions of 7 at 10 units). Code batches, the prediction
+        term and the low temperature make information pay. At 8 units, 7 degrees of freedom under the cosine (section
+        8), the two pulls are nearly even, so the seed decides. A 9th unit buys a curve (item 51), more steps change
+        nothing (item 52), and every lever that adds weight on one side only moves which factor goes (items 49, 54,
+        56; section 11).
+      - So the curves are InfoNCE's preferred use of the code's capacity, not a side effect to charge (stage 60) or
+        soften away (stage 70). A fix has to stop that competition for the code's units. The direct one: a projector
+        head, so the bending and the weighting of noisy units happen after the code. If the head's output stays at
+        the matched width (8 cosine units), the theory applies to the whole encoder, and its guarantee, an output
+        that is a bijection of the content, needs the 8-unit code to carry all of it. Stage 71 tests it.
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -1744,6 +1906,235 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     - `bash -n` passes, and `DRY=1 bash out/burden_feasibility_20261102/run_pc.sh 46` prints the arm, the view and the
       four reports.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 46` (one training arm, then the reports).
+- **Stage 71 (built 25 Nov after item 56; the user asked to try it): does a projector head make 8 units
+  reliable?**
+  - **Why.**
+    - The cosine reads the code directly, so every standardized unit counts alike, and a curve costs one of the
+      code's units. A head between the code and the loss can bend factors and weight units itself, so the InfoNCE no
+      longer competes with the information for the code's units (item 56's synthesis).
+    - With the head's output at the code's width (8 cosine units: 7 degrees of freedom for 7 latents), code and head
+      are one matched-width encoder. Yao's guarantee is an output that is a bijection of the content. The output is
+      computed from the code, so the guarantee needs the 8-unit code to carry all of the content.
+    - This corrects the status note of 25 Nov ("asked 25 Nov, no anchors") that a projector leaves Yao's setup. Only a
+      head wider than the matched width would.
+  - **Arm** (`warm.py --projector 64`, new):
+    - The from-scratch 8-unit arm of stages 64, 60 and 70, at seeds 42, 2, 3, 4, 5: code batches of 31 neighbours
+      rebuilt every 500 steps, residual input, jitter, prediction weight 1, tails, 20,000 steps, fixed-position
+      causal bank. The global InfoNCE reads the code through one head shared by both views.
+    - The head takes each view's code in its own running population gauge (mean and second moment over training
+      batches, momentum .01). A batch gauge would lose each subject's absolute place under neighbourhood batches,
+      and the code's own curves are absolute.
+    - Then a linear map that starts as the identity, plus a one-hidden-layer MLP of width 64 (GELU) whose output
+      layer starts at zero, at the code's 8 units. The loss standardizes that output over the batch and takes cosines
+      as it does the code's, so at the first step it equals the recipe's.
+    - The head is shared, so the two views' codes must still agree for their outputs to agree. The prediction term
+      still reads the code directly through its linear map. Evals and exports read the code, never the head.
+    - Width 64 is one value, set before any run and not tuned. Every other flag matches the from-scratch codes of the
+      same seeds (checked against stage 70's recorded arguments). Names `..._abl_codebatch_predict1_proj64_c8_20k
+      [_sN]`. `PARALLEL=5`.
+    - Each eval logs the head's linearity: the mean over its output units of the 5-fold ridge R² of the head's
+      output from the code, on test subjects. It stays at 1 while the head stays linear.
+  - **Scored** (`causal/stage71/`, `holds.txt` first) beside the from-scratch 8-unit and 10-unit codes of the same
+    five seeds, whose report entries are reused from stage 70:
+    - precision, code and style audits; both discoveries; both tabular benchmarks; `own_directions.py`; and
+      `holds.py --compare c8_proj64:c8_e500`. Labels `c8_proj64_sN`, `c8_e500_sN` and `c10_e500_sN`.
+    - Reports run one at a time.
+  - **Baseline:** from scratch holds 3/5 (seeds 2, 3, 5) and matches 2/5 (3, 5). Its holders spend 1 direction on
+    curves in each view and its failures 2. The 10-unit codes hold 4/5 and match 3/5; seed 4 fails even at 10 units.
+  - **Reading rules, fixed before the results** (stages 60 and 70's, so the levers read alike):
+    - **The head makes 8 units reliable** if the arm holds in at least 4 of 5 codes and in at least 2 more than from
+      scratch (3 of 5), so 5 of 5. It is no better if they differ by at most 1, and worse if it holds in 2 or more
+      fewer (1 of 5 or none). The same thresholds apply to the match count (from scratch 2 of 5, so at least 4 of 5).
+      Five seeds cannot make any of these significant; the rule is a threshold read with the seeds paired.
+    - **Paired by seed:** name the from-scratch failures it rescues (seeds 42, 4) and the holders it loses (2, 3, 5).
+    - **Against 10 units** (4 of 5 hold, 3 of 5 match at these seeds): described only.
+    - **Mechanism** (`own_directions.txt`; a curve as in stage 60: a direction with own R² under .5 that boosting
+      from the seven factors predicts at .5 or more, counted in each view):
+      - The head takes the curves if at least 4 of 5 codes have at most one curve in each view (from scratch: 3 of
+        5).
+      - It takes them without helping if that happens but the hold count stays within 1 of from scratch. Then the
+        competition for units was not what decided, and the weakest direction's own worth to the loss is the problem
+        (item 56's named way to be wrong).
+      - It fails if 2 or more codes still spend two or more directions on curves in a view.
+      - Described: what each code's eighth direction holds (a curve, the lesion's shift, a weak own part, or style),
+        and the head's final linearity (1 means it never bent).
+    - **Costs:**
+      - Cross-view top-1 over all 1,000 subjects, paired by seed, is a cost if the mean drop exceeds .05.
+      - Style is a cost if any code reads a style variable at linear R² above .10 in either view. The from-scratch
+        codes read at most .05. This is the arm's main risk: a head can ignore a unit, and nothing then pays the code
+        to fill it with content.
+      - Volume error, ATE bias and the decoded graph are described against from scratch.
+  - **Expectation, written before the results:**
+    - Curves leave the code: most codes at one curve per view or none, and the head bends (linearity well under 1).
+    - Holds rise, most likely to 4 of 5, which the rule reads as no better. 5 of 5 needs seed 4, whose 10-unit code
+      also fails, so its failure may not be about units alone.
+    - Top-1 holds or rises, since holders read higher top-1 at 8 units. Style stays under .10, because a shared head
+      still needs the views' codes to agree.
+    - How it can fail: the head's output faces the same tie inside the loss, so the code holds the weakest direction
+      only if the prediction term pays for it. Holds then stay near 3 of 5 with fewer curves ("without helping").
+  - **Cost:** 100,000 steps, five at a time: about 3.7 hours at stage 70's pace (its training took 3 h 42 min). Then
+    about 1.5 hours of reports, one at a time. Stage 68, the other session's region bank, waits for the GPU again.
+  - **Checked locally (25 Nov):**
+    - `tests/test_warm_projector.py`, 7 tests. Unsupported options are refused and nothing is written. The head is
+      announced, and without it nothing is said. At the start the loss sees the recipe's code: the batch-standardized
+      output equals the batch-standardized code. Every part of the head gets a gradient, the zero output layer
+      included. The gauge tracks the population, and eval leaves it unchanged. The linearity measure reads 1 for a
+      linear head and less for a bent one.
+    - The other warm.py suites still pass (3 temperature, 5 bridge, 7 harmonic, 14 prediction, 3 prediction target).
+    - A 100-step run on the fixed bank trains end to end. Its InfoNCE is 12.17 / 11.27 at steps 50 / 100, against
+      the original run's 12.23 / 11.44, and its linearity 1.000 at step 100. `code_audit.load_run` loads its
+      checkpoint; the head is saved under its own key, which the audits ignore.
+    - `bash -n` passes. The dry run lists stage 70's flags with `--projector 64` in place of `--tau 1` for the five
+      arms, then the reports.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 71` under `monai_env` (log `run_pc_71.log`).
+- **Stage 70 (built 25 Nov; rules and the factor of 10 agreed by the user; started 25 Nov 05:48; read 25 Nov, item
+  56: worse, holds 0/5): does a higher
+  InfoNCE temperature make 8 units reliable?** On 25 Nov the user declined the anchors as a seed rule, asked for
+  another way to make seeds hold, and chose this lever.
+  - **Why.**
+    - In the five from-scratch 8-unit seeds, the codes that hold spend one direction on curves and those that fail
+      spend two (stage 60's baseline). Item 46 traced the curves to the cosine InfoNCE's push to spread subjects
+      over the sphere: bending the strongest factor spreads them most. Stage 60 charged the curves after they formed
+      and failed (item 54). The temperature sets the push itself.
+    - Expanded in 1/τ, InfoNCE is alignment, a centring term, and an isotropy term on the code's second moment
+      (weight 1/τ²). Full uniformity, the part that pays for bends, enters only at higher orders (1/τ³ and up). At
+      τ 0.1 those orders weigh heavily. At τ 1 mostly the isotropy term is left, which a straight code meets and
+      which values the ventricle–burden difference like any other direction.
+    - Section 11 points the same way: hard-negative weighting, which sharpens the loss, starved lr and temporal.
+    - The theory's optimum (aligned and uniform) does not depend on τ, so the arm stays inside Yao's setup.
+  - **Arm** (`warm.py --tau 1`, new):
+    - The from-scratch 8-unit arm of stages 56, 64 and 60 (code batches of 31 neighbours rebuilt every 500 steps,
+      residual input, jitter, prediction weight 1, tails, 20,000 steps, fixed-position causal bank), with the global
+      InfoNCE at τ 1 in place of 0.1, at seeds 42, 2, 3, 4 and 5.
+    - The term is multiplied by τ over the recipe's (10), SupCon's convention, so its gradient keeps the recipe's
+      scale against the prediction term. The arm changes the loss's shape, not its weight. Without the factor it
+      would also make the prediction term about ten times heavier.
+    - τ 1 is the general trainer's default (`training/encoder_args.py`), not a tuned value.
+    - Every other flag matches the from-scratch codes of the same seeds (checked against their `report.json`). Names
+      `..._abl_codebatch_predict1_tau1_c8_20k[_sN]`. `PARALLEL=5`.
+  - **Scored** (`causal/stage70/`, `holds.txt` first) beside the from-scratch 8-unit and 10-unit codes of the same
+    five seeds, whose report entries are reused from stage 60:
+    - precision, code and style audits; both discoveries; both tabular benchmarks; `own_directions.py`; and
+      `holds.py --compare c8_tau1:c8_e500`. Labels `c8_tau1_sN`, `c8_e500_sN` and `c10_e500_sN`.
+    - The own variation audit is left out: no rule reads it. Reports run one at a time.
+  - **Baseline** (stage 60's, recorded before its results): from-scratch 8-unit codes spend 1 direction on curves in
+    each view where they hold (seeds 2, 3, 5) and 2 where they fail (4, 42). The 10-unit codes spend 3 or 4.
+  - **Reading rules, fixed before the results.** Holds and matches as in stage 64 (reference stage 50, seed 42). The
+    rules are stage 60's, so the two levers read alike.
+    - **The temperature makes 8 units reliable** if the arm holds in at least 4 of 5 codes and in at least 2 more
+      than from scratch (3 of 5), so 5 of 5. It is no better if they differ by at most 1, and worse if it holds in 2
+      or more fewer (1 of 5 or none). The same thresholds apply to the match count (from scratch 2 of 5, so at least
+      4 of 5). Five seeds cannot make any of these significant; the rule is a threshold read with the seeds paired.
+    - **Paired by seed:** name the from-scratch failures it rescues (seeds 42, 4) and the holders it loses (2, 3, 5).
+    - **Against 10 units** (4 of 5 hold, 3 of 5 match at these seeds): described only.
+    - **Mechanism** (`own_directions.txt`; a curve as in stage 60: a direction with own R² under .5 that boosting
+      from the seven factors predicts at .5 or more, counted in each view):
+      - The temperature cuts the curves if at least 4 of 5 codes have at most one curve in each view (from scratch:
+        3 of 5).
+      - It cuts them without helping if that happens but the hold count stays within 1 of from scratch: the curves
+        were not what decided which own part went.
+      - It fails if 2 or more codes still spend two or more directions on curves in a view.
+    - **Costs:**
+      - Cross-view top-1 over all 1,000 subjects, paired by seed, is a cost if the mean drop exceeds .05.
+      - Style is a cost if any code reads a style variable at linear R² above .10 in either view. The from-scratch
+        codes read at most .05.
+      - Volume error, ATE bias and the decoded graph are described against from scratch.
+  - **Expectation, written before the results:**
+    - Fewer curves, most codes at one per view.
+    - Seed 42, item 46's crowding case, is the likeliest rescue. Seed 4 is the hard case: its 10-unit code fails with
+      four units on curves, so a shortage of units is not all of its failure.
+    - Most likely 4 of 5 hold, which the rule reads as no better; 5 of 5 needs both rescues and no loss.
+    - A softer loss tells near neighbours apart less sharply, so top-1 falls, probably by more than .05.
+    - The risk on the other side: with less spreading pressure the weak own parts (burden, lr) get less room, and the
+      arm holds no more often.
+  - **Cost:** 100,000 steps, five at a time: about 4.5 hours at stage 65's pace. Then about 1.5–2 hours of reports,
+    one at a time. Stage 68, the other session's region bank, also needs the GPU, so the order is the user's call.
+  - **Checked locally (25 Nov):**
+    - `tests/test_warm_tau.py`, 3 tests: unsupported options are refused and nothing is written; the term is scaled
+      by τ over the recipe's (10 at τ 1); without the option nothing is said or scaled. The other warm.py suites still
+      pass (7 harmonic, 22 bridge and prediction).
+    - A 40-step run on the fixed bank trains end to end on the GPU and logs "global InfoNCE temperature 1.0 scaled
+      by 10.0".
+    - `bash -n` passes. The dry run lists stage 56's flags plus `--tau 1` for the five arms, then the reports.
+  - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 70` under `monai_env` (log `run_pc_70.log`). Started
+    25 Nov 05:48, all five arms at once (GPU at 100%, 15 GB). Each logs "global InfoNCE temperature 1.0 scaled by
+    10.0". At step 50 the global term (both directions, unscaled) is 6.66–6.80 against 6.93 at chance.
+  - **Interim, step 14,000 of 20,000** (read 25 Nov 08:40 from the runs' `report.json` evals; the verdict reads the
+    final codes): the softer loss is dropping weak factors, not straightening them.
+    - Sulcal's linear readout (mean of the two views) is .21–.42, against .69–.77 for the same seeds at τ 0.1 at the
+      same step. It has gained under .10 at every seed since step 8,000.
+    - Ventricle is .66–.84 against .81–.89, flat since step 8,000 except at seed 3 (.76 to .84).
+    - Brain sits .02–.04 under the reference and thickness up to .09 under. Temporal is at or above it except at
+      seed 5 (.76). Lr is above it at seed 4 (.90 against .60) and below it at seed 5 (.65 against .90). Cross-view
+      code r is .96–.995.
+    - This is the risk the expectation named, but it lands on sulcal and ventricle, not burden and lr.
+    - The spectrum's last value cannot exceed any single own part's R². So wherever sulcal's own part stays under
+      .40, the code fails the hold rule whatever its curve count.
+- **Stage 69 (proposed 25 Nov; rules for the user to check; not built, nothing trained): is a clean compression a
+  label-free accept rule for 8 units?** On 25 Nov, after item 54, the user agreed to test stage 65's after-the-fact
+  pattern on new seeds, with the rules written first.
+  - **Why.** At 8 units the seed decides whether the seventh own part is held, about half the time. No training lever
+    changed that: rebuild interval, prediction weight, compressed start, longer training, harmonic penalty (items
+    50–54). In stage 65, the three redundancy compressions whose removed directions were predicted at held-out R²
+    .986–.997 held and matched. The two at .848 and .650 did not: one came from a parent that fails, one cut lr. That
+    was seen after the results, on 5 seeds. If it holds on new seeds, it certifies an 8-unit code without labels,
+    which top-1 cannot do within a recipe (items 51–53).
+  - **Arms**, stage 65's exactly, at new seeds 6–15 (none used on this bank before):
+    - 10-unit parents, `..._abl_codebatch_predict1_c10_20k_sN`: stage 56's recipe (code batches of 31 neighbours
+      rebuilt every 500 steps, residual input, jitter, prediction weight 1, tails, 20,000 steps, fixed-position
+      causal bank).
+    - Each parent compressed to 8 units by redundancy (`compress_code.py --units 8 --method redundancy`, fitted on
+      its training codes without labels, as in stage 65), then 10,000 steps at 8 units,
+      `..._abl_from10red_predict1_c8_10k_sN`. Every child is trained, accepted or not, so the rule can be judged.
+  - **The accept rule, fixed before any result:** accept a child if both removed directions have held-out R² of at
+    least .98 in its compression log (the value written in the status section on 24 Nov). Right after each
+    compression the stage reads the log and labels the child `c8_acc_sN` or `c8_rej_sN`. It writes the list to its
+    log before any report runs. Parents are labelled `c10_e500_sN`.
+  - **Scored** (`causal/stage69/`, `holds.txt` first): precision and code audits, both discoveries, both tabular
+    benchmarks, `own_directions.py` and `holds.py --compare c8_acc:c8_rej`. Holds and matches as in stage 64
+    (reference stage 50, seed 42). The own variation and style audits are left out: no rule reads them, and dropping
+    them saves about 2 hours. Reports run one at a time.
+  - **Reading rules, fixed before the results:**
+    - **The rule works** if accepted codes hold all seven own parts in at least 80% (for example 4 of 5 or 5 of 6),
+      and in a share at least .4 above the rejected codes'.
+    - **It fails** if accepted codes hold in at most 60%, the from-scratch 8-unit rate (3 of 5 at every 500, stages
+      64–65). Between the two: unresolved.
+    - **The cut does not matter** if accepted codes hold in at least 80% but rejected ones come within .4. Then read
+      the redundancy arm's overall rate instead.
+    - The same thresholds apply to the match count.
+    - The rule is judged only with at least 4 children accepted and 2 rejected. Otherwise the counts are only
+      described. If every child is accepted, the redundancy arm's hold rate is read against stage 65's 3 of 5.
+    - **Why rejections happen** (described): for each rejected child, whether its parent holds, and which own part
+      fell more than .10 below the parent's. For each accepted child that fails, whether its parent held.
+    - **Yield** (described): codes accepted and holding per seed, beside the from-scratch 8-unit hold rate. The
+      rule's value is the certificate (how often an accepted code holds), not the yield.
+    - **Pooled with stage 65** (described only, marked as including the seeds that suggested the rule): accepted
+      against rejected over all 15 seeds.
+  - **Expectation, written before the results:**
+    - The rule accepts 5–7 of 10.
+    - A clean cut keeps what the parent holds (stage 65), and parents hold in about 4 of 5, so accepted codes hold
+      in about 80%: the rule passes narrowly or lands between.
+    - The likeliest accepted failure is a parent that fails yet cuts cleanly.
+    - Rejected codes hold in at most half.
+  - **Cost:** 300,000 steps, five arms at a time: about 13 hours at stage 65's pace (210,000 steps in 9.3 hours).
+    Then about 3 hours of reports, one at a time. Five seeds would halve the cost, but would leave about 3 accepted
+    and 2 rejected codes, too few to judge the rule.
+  - **Option, added 25 Nov after item 55, declined by the user the same day (no anchors for choosing seeds): the
+    measured-anchor score as a second rule on the same codes.** Kept for the record; not part of stage 69. After the fact, item 55 found that stage 67's score ranks the seeds of a cell
+    by whether they hold (the top seed holds in 9 of 9 cells; holders come first in 42 of 44 pairs).
+    - **Score:** stage 67's rule score for every child and parent: split 'adni', anchors adjusted for each other,
+      reliability .9, mean of 10 draws. It uses `anchor_check.py`'s functions on codes the stage exports.
+    - **Reading rules, fixed now:**
+      - The score works if, among the 10 children, the holder scores higher in at least .8 of (holder, failing
+        child) pairs. It fails at .6 or below (chance is .5). It is judged only with at least 2 holders and 2
+        failures.
+      - Described only: the top-scoring child of seeds 6–10 and of seeds 11–15 (two picks are too few to judge),
+        and the parents' pairs.
+    - **Expectation:** works. Its likeliest miss is a child that loses lr or sulcal, which the anchors do not
+      measure, as in item 55's two misses.
+  - **To build once the rules are agreed:** the stage block, with a dry run. It covers parents, compressions,
+    labels from the logs, children with `--init-run`, reports and `holds.py`. Stage 68, the other session's region
+    bank, also needs the GPU, so the order is the user's call.
 - **Stage 65 (built 23 Nov; read 24 Nov, item 52): an 8-unit code started from a compressed 10-unit
   code.** The user asked for a way to stop 8-unit seeds failing. Stage 64's early own parts (23 Nov, before its
   verdicts) suggested that about half of from-scratch 8-unit seeds hold. Failing codes spend the eighth unit on a
@@ -1915,7 +2306,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     reports, the bundles, both discoveries, both tabular benchmarks and `own_directions.py`.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 62` under `monai_env` (two training arms in parallel,
     then the reports; about 2–2.5 hours).
-- **Stage 60 (built 20 Nov as one seed, five seeds since 24 Nov; running, started 24 Nov 09:46): a non-linear
+- **Stage 60 (built 20 Nov as one seed, five seeds since 24 Nov; read 24 Nov, item 54): a non-linear
   redundancy penalty at 8 units.** The user asked how to stop the curves of item 46, then for this arm. On 24 Nov,
   after items 51–53, the user agreed to run it over five seeds.
   - **Why.** The 8-unit code spends 2 of its 8 directions on harmonics, curved copies of factors it already holds,
@@ -1982,6 +2373,17 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 60` under `monai_env`: five 20,000-step arms at once,
     then about 1.5 hours of reports (the reference codes' entries are reused). Started 24 Nov 09:46; with all five
     running each takes 1.13–1.15 s a step (GPU at 99%, 15 GB), so about 6.5 hours of training.
+    Reports in parallel (the user's request, 24 Nov 13:36): the stage's bash is paused (SIGSTOP) and
+    `run_pc_60_reports.sh` waits for the arms, then runs the same 25 report commands (checked against the stage's dry
+    run) with the four audits and the causal tables side by side, and ends the paused bash (log
+    `run_pc_60_reports.log`): about 40 minutes of reports instead of 1.5 hours.
+    That backfired. The arms finished at 15:53, but each audit uses every CPU (16 here, about 27 threads each), so
+    side by side they thrashed: 30–70 minutes a code against 2–5 run alone in stages 64–65. Run one after another,
+    the reports would have ended about 17:25. The causal tables and `own_directions` finished at 17:08. From 18:12 the
+    audits ran one at a time (precision, code, style, own variation; the waiting ones paused with SIGSTOP by a scratch
+    script). Alone, each took 1–15 minutes for its remaining codes. All finished at 18:44, when `holds.txt` was
+    written (identical to an early `holds.py` run at 18:28) and the stage ended. On this machine, run the audits one
+    after another.
 - **Stage 61 (built 20 Nov; not run): counterfactual images from tabular data.** The user asked to find the causal
   relationships from tabular data to the image latents, change the tabular data and see how the decoding does.
   - **Setup** (`counterfactual_images.py`). A tabular cause of one image factor, by the tabular benchmark's rule (T =
@@ -2948,7 +3350,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 
 ## 10. Recent stages and next steps
 
-**Status on 24 Nov (stages 46–67; read this first).**
+**Status on 25 Nov (stages 46–70; read this first).**
 - **The bridge:** its first loss collapsed (item 37); the fixed form, the theory's own version, holds the weak factors
   no better than matched width (item 38). The recipe's 24-unit advantage lies outside Yao's theorem.
 - **The lesion's position was the benchmark's fingerprint:** it took about half a narrow code and crowded out the weak
@@ -3010,10 +3412,12 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   seventh own direction .45 / .36 (stage 56 .01) and leave one curve. Ventricle .62, burden .54. The causal outputs
   match the 10-unit code (decoded graph .86 / .85), and label-free discovery is the best yet (F1 .71). Prediction
   weight 3 does nothing and costs discrimination. One seed; replicate next.
-- **Running (started 24 Nov 09:46):** stage 60, the harmonic penalty (`warm.py --harmonic-weight 1`, a critic
-  charging units the others predict non-linearly, i.e. curves) on the from-scratch 8-unit arm at seeds 42, 2, 3, 4
-  and 5, paired with the from-scratch codes of those seeds. Rules fixed 24 Nov before the results (section 9).
-  Training until about 16:15, then about 1.5 hours of reports.
+- **Stage 60 is read (item 54):** the harmonic penalty (`warm.py --harmonic-weight 1`, a critic charging units the
+  others predict non-linearly, i.e. curves) on the from-scratch 8-unit arm at seeds 42, 2, 3, 4 and 5 holds in 1/5
+  against 3/5 from scratch, and matches in 0/5 against 2/5. It rescues neither failure, loses seeds 3 and 5, keeps
+  a curve in every code (brain size's in all five) and costs .21 of cross-view top-1. The penalty fell to about .02
+  while the curves stayed: the critic stopped seeing them. Not a lever in this form. A critic fitted afresh on the
+  saved codes would say whether any penalty on units predicting units can see them.
 - **Built, not run:** stage 61, no encoder training: counterfactual images from tabular data. A tabular cause of an
   image factor is raised, the code moves by its estimated effect, a decoder rebuilds the image, and the result is
   scored against the generator's own counterfactual render of each subject (section 9).
@@ -3032,12 +3436,41 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   - Choosing by the measured factors' exact own parts carries over to hidden factors (hide 1-3: rho .64-.74, 70-81%
     of the shortfall removed; lr and sulcal hidden: .78, 79%), far better than retrieval (.38-.48, 46-57%). Hiding
     burden alone: .27, 12%. Stage 67 repeats this with noisy measurements, as ADNI gives them.
-- **Built, not run (24 Nov):** stage 67, no training: can measured anchors choose runs? `anchor_check.py` exports
-  every finished run's test codes once (`causal/codes/`), then, with no torch, picks runs by how well their codes read
-  the anchors as ADNI would measure them: latent values, burden as the lesion volume, plus measurement noise at
-  reliability 1, .9, .75 and .5, raw or adjusted for the other anchors (the stand-in for an own part). Judged on the
-  hidden factors' own parts beside the exact own parts and stage 66's retrieval. The pass rule was fixed before any
-  result (docstring). Tests: `tests/test_anchor_check.py`.
+- **Proposed (25 Nov), not built:** stage 69 tests stage 65's clean-compression pattern as a label-free accept rule
+  on ten new seeds (6–15). The rules are in section 9, for the user to check before anything is built or trained.
+  The user declined a second rule from item 55 that would have scored the same children by measured anchors.
+- **Asked 25 Nov, no anchors:** another way to make 8-unit seeds hold. In the five from-scratch seeds, the codes that
+  hold spend one direction on curves (1|1 at seeds 2, 3, 5) and those that fail spend two (2|2 at 42, 4; item 54).
+  Item 46 traced the curves to the cosine InfoNCE's push to spread subjects over the sphere. Two untried levers aim
+  at that push:
+  - Raise the temperature from τ 0.1 to 1 (the trainer's own default). Expanded in 1/τ, InfoNCE is alignment plus
+    an isotropy term on the code's second moment, with the higher moments (full uniformity, which bends a factor
+    into a second direction) entering at higher orders. A high temperature leaves mostly the isotropy term, which a
+    straight code meets and which values the ventricle–burden difference like any other direction. Consistent with
+    section 11: hard-negative weighting, which sharpens the loss, starved lr and temporal. Inside Yao's setup.
+  - A projector head between the 8 units and the loss (`--contrastive-proj-dim` exists in the general trainer, not
+    yet in `warm.py`), so the head can make the bends. This leaves Yao's setup, since the loss no longer acts on the
+    matched-width code, and the spare unit could take up style.
+  - The user chose the temperature and agreed its rules and the factor of 10.
+- **Stage 70 is read (item 56): temperature 1 makes 8 units worse.** Holds 0/5 and matches 0/5, against 3/5 and 2/5
+  from scratch. Every code spends 4–5 directions on curves and loses burden, and top-1 falls .28 on average. Not a
+  lever. Training ended 09:30 and the GPU is free, so stage 68 can start.
+  - Item 56's synthesis answers the user's question (25 Nov) of why 8 units fail. InfoNCE prefers bending strong
+    factors to holding weak ones, and at 8 units the recipe's counter-pressure only about evens it. Its proposed fix,
+    a matched-width projector head, is stage 71 (below).
+- **Running:** stage 71, the from-scratch 8-unit arm with a projector head shared by both views (`warm.py
+  --projector 64`, output at the code's 8 units), seeds 42, 2, 3, 4, 5, then the reports one at a time (section 9;
+  rules fixed there before the run). The user asked to try it after item 56. A matched-width head keeps Yao's setup;
+  this corrects the bullet above that says a projector leaves it. Stage 68 waits for the GPU.
+- **Stage 67 is read (item 55):** measured anchors choose runs (`causal/stage67/`; `anchor_check.py`, no training).
+  - With lr and sulcal hidden, as on ADNI, the run whose code best reads the measured anchors comes close to the
+    best on the hidden factors. Anchors adjusted for each other at reliability .9: rho .77 [.64, .84], 89% of a
+    random pick's shortfall removed, against 40% for top1_32 and 66% for top1_all.
+  - Noise down to reliability .5 costs nothing, and raw anchors do as well.
+  - It works in the fixed-position bank, where retrieval is worse than random. With burden hidden it fails outside
+    the prediction-recipe banks.
+  - After the fact, the same score finds the 8-unit seeds that hold within a cell, which top-1 could not: the top
+    seed holds in 9 of 9 cells, and holders come first in 42 of 44 pairs. They match in 4 of 9.
 - **Paper (discussed with the user 18 Nov):** one frozen recipe, three claims, an ADNI validation, and reading rules
   fixed before each result. The user is wary of anything that looks like fine-tuning; keep new levers to what a claim
   needs.
