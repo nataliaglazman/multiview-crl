@@ -67,6 +67,24 @@ def ssl(name, report):
     return True
 
 
+def real(name, report):
+    """A warm.py --real (ADNI) run: label-free readouts on validation subjects; the step-0 row is the untrained floor."""
+    print(name)
+    for row in report["history"]:
+        h = row.get("heldout")
+        if not h:
+            continue
+        loss = row["loss"].get("global")
+        predict = f" predict {row['loss']['predict']:.3f}" if "predict" in row["loss"] else ""
+        print(
+            f"  s{row['step']:5d} top-1 val {h['top1']['mean']:.3f} train {h['train_top1']['mean']:.3f} "
+            f"@32 {h['top1_32']:.3f} | GAP {h['gap_top1']:.3f} | held-out {h['heldout_loss']:.3f} | rank "
+            f"{h['effective_rank']['t1']:.1f} {h['effective_rank']['flair']:.1f} | unit r {h['cross_view_code_r']:.2f} | "
+            f"modality {h['modality_probe']['normalized_linear']:.2f} {h['modality_probe']['normalized_rbf']:.2f} | "
+            f"global {'' if loss is None else format(loss, '.3f')}{predict}"
+        )
+
+
 def dense(path):
     report = load(path)
     if report is None:
@@ -97,6 +115,17 @@ def main():
     for name, report in reports.items():
         if name.startswith("ssl"):
             ssl(name, report)
+    adni = sorted(glob.glob(f"{HERE}/adni/runs/*/report.json"))
+    if adni:
+        print(
+            "\n== ADNI (warm.py --real), validation subjects: T1<->FLAIR top-1 among all, on as many training subjects"
+            " and in sets of 32; backbone GAP top-1; held-out loss; effective rank T1 FLAIR; matching-unit r; modality"
+            " probe linear, RBF (chance .5)"
+        )
+        for path in adni:
+            report = load(path)
+            if report:
+                real(os.path.basename(os.path.dirname(path)), report)
     report = load(f"{HERE}/bank_nuisance/residual.json")
     if report:
         print("\n== fixed filter on the normative residual, nuisance fields on: R2, then cross-view r with FLAIR")

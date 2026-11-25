@@ -86,6 +86,27 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Where results live.** Results stay on the PC: `runs/`, `logs/`, `causal/`, `audit.json`/`audit.txt`,
   `summary.txt`. `*.json` is git-ignored.
 
+### On Run:ai (ADNI, stage 68)
+
+The ADNI scans live on the cluster's NFS. From the Run:ai host (`h2`), once the checkout at
+`/nfs/home/nglazman/crl-2/multiview-crl` holds this branch:
+
+```bash
+bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
+```
+
+- **`runai_submit.sh [STAGE...]`** (default 68) submits one A100 job that runs `runai_job.sh` in the training image.
+  Without `--dry-run` it submits. Set `ADNI_*`, `WHEELS` or `PYTHONUSERBASE` to pass them to the job.
+- **`runai_job.sh`** covers what the image lacks:
+  - no git: `run_pc.sh` gets a stand-in for its one git call (`rev-parse --show-toplevel`);
+  - no SimpleITK: it is installed once into `PYTHONUSERBASE` on /nfs (default `/nfs/home/nglazman/.pyuser/py312`),
+    from a wheel in `WHEELS` if one is there, else from PyPI. If the pod has no internet, the job stops and prints
+    the `pip download` line to run where pip works.
+  - The ADNI paths default to `experiments/cluster/runai.yaml`'s. The October run's split.json is the split check
+    when it exists in the checkout.
+- **Progress:** `adni/runai.log`, then `adni/bank_n4_64.log`, `adni/bank_n4_64.residual.log` and
+  `adni/logs/<run>.log`. A resubmit skips finished steps, but restarts an unfinished training run from step 0.
+
 ### Locally (Mac)
 
 - **Python:** `/opt/miniconda3/envs/adni-analysis/bin/python` with
@@ -136,6 +157,17 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     drawn position. The drawn position is still drawn, so the subjects, anatomy, lesion sizes and style match
     `bank_causal_nofield` (checked bit for bit on small banks). The centre moves only with the anatomy: total SD 2.7
     voxels against 12.1, and 56% of subjects get the voxel itself. The shared block is then the 7 SCM factors.
+- **`adni_bank.py`** (24 Nov) writes ADNI in the same layout, with no latents, for `warm.py --real`:
+  `{split}_t1.npy` and `{split}_flair.npy` (64³ float16), `{split}_ids.npy`, `manifest.csv` (split, row, QC,
+  exclusion, and the image ID, series ID and date where a file name carries them) and `bank_meta.json`.
+  - Each scan: N4 inside its brain mask (`--bias-correction n4`, needs SimpleITK), 3 mm block means over brain voxels
+    only, the centre 64³ box (the MNI brain fits), z-scored over the brain.
+  - The split is the encoder ADNI recipe's (seed 0, 0.2 / 0.1; `--check-split` compares with a run's split.json; the
+    October run's has 1,157 / 289 / 160). Pairs are then dropped within their split by the rule fixed on 24 Nov,
+    before any ADNI result of this recipe: T1/FLAIR mask Dice < .9 or a mask < 300 mL. `--qc-only` stops after the
+    manifest. Tests: `tests/test_adni_bank.py`.
+  - The `ADNI_stripped_masks` tree looks uncorrected for bias: in `mri_preproc/scripts_preproc`, skull stripping reads
+    `ADNI_registered`, and `bias_correction.py` (FSL FAST) wrote FLAIR only, into a separate tree. Hence N4 here.
 - **`residual_bank.py`** writes each view's normative residual: the scan z-scored over its brain, minus the
   training mean, minus its first 16 principal components, scaled to unit SD. Each modality uses only its own basis.
   - `--components K` removes K components (at most 64, what the stored basis holds).
@@ -182,6 +214,11 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
     (1 − cosine) / τ, on the rest. Stage 46 ran an earlier, degenerate form (item 37). `bridge_view.py` writes those
     N units out as a run of their own.
   - `--hard-negatives G`, `--seed S`.
+  - `--real` (24 Nov): an `adni_bank.py` bank (`--t1key t1`). Training is unchanged. Each eval reads only images, on
+    validation subjects (the test split stays unread): cross-view top-1 among all of them, on as many training
+    subjects (the gap is memorisation) and in sets of 32, the held-out loss, effective rank, matching-unit r, the
+    backbone GAP's top-1 and `eval.adni.encoder_modality_gap`'s modality probes. The step-0 row is the floor. Needs
+    `--uniform` or `--code-batches`. `summarize.py` prints these runs from `adni/runs/`.
   - Older levers: `--queue`, `--gauge running`, `--group-dropout`, `--decorrelate`, `--shared-jitter`, `--uniform`.
   - Each option refuses combinations it can't handle.
 - **`sup.py`** trains the same backbone with lesion labels. It was used early as a ceiling.
@@ -208,6 +245,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 | `intrinsic_dimension.py` | no training, and no labels in the estimate: TwoNN (with decimation to N/2, N/4, N/8) and Levina–Bickel on each code, the code on the unit sphere, the backbone GAP and the twin's, beside the true latents, random non-linear embeddings of them with reading noise, and Gaussian noise of each width. Tests: `tests/test_intrinsic_dimension.py`. Stage 54 |
 | `criterion_check.py` | no training: label-free signals of every finished run (canonical correlations held out, their mutual information and gain over the twin, retrieval, memorisation, neighbour agreement, spectrum, TwoNN, the GAP's, final loss) against its own parts; per bank, Spearman with a bootstrap interval and the share of a random pick's regret removed, with a pass rule fixed beforehand. `--self-test`. Stage 66 |
 | `anchor_check.py` | no training: `export` writes each run's test codes, latents, lesion volumes and own parts to `causal/codes/<run>.npz` (GPU, once); `score` (no torch) picks runs within each bank by how well their codes read noisy measured anchors (raw, or adjusted for the other anchors) and judges the pick on the hidden factors' own parts, beside the exact own parts and stage 66's label-free signals. `--self-test`. Stage 67 |
+| `adni_bank.py` | no training: ADNI's paired scans as a bank for `warm.py --real`, with per-subject QC, the exclusion rule and scan identifiers in `manifest.csv` (section 4). Stage 68 |
 | `remainder_price.py`, `batch_price.py` | InfoNCE's reward for adding a unit, priced on true latents with no training |
 | `normative_components.py` | no training, no network: the image filter's reading of burden's own part from the residual with 0 to 128 principal components removed (exact PCA), per view, with the leftover spread, the lesion's contrast over it, and the views' agreement. Stage 37 |
 | `eval.causal.tabular_benchmark` | synthetic tabular tasks on the bank's test subjects: the share of image-driven confounding a vector removes (AIPW), and PC's recovery of edges out of the image factors (MRI→tab) and into them (tab→MRI), with orientation. Takes `causal_bundle.py` bundles, which carry each factor's own noise (`z_own`). `--proximal` (with `--view each`) adds both views in one AIPW and proximal two-stage least squares with one view instrumenting the other. `--counterfactual` adds tasks whose effect varies with the hidden image score (and, with `--counterfactual-modifiers score own`, one task per factor whose effect varies with its own part), and scores each arm's per-subject effects (DR- and T-learner): R² of the individual effects, PEHE, policy regret and the counterfactual outcome's error. Section 7, items 24 and 37; stage 55 |
@@ -3456,6 +3494,15 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
   The baseline is about 20 voxels of error in the backbone and 22–23 in the code.
 
 ## 10. Recent stages and next steps
+
+**Built, not run (24 Nov): stage 68, the recipe's first ADNI run** (the plan's step 3). `adni_bank.py` exports the
+scans (section 4), then the residuals, then stage 33's 24-unit prediction arm with `--real`, 20,000 steps, seed 42.
+Set `ADNI_DATA` (the folder of subject folders) and `ADNI_LABELS`, optionally `ADNI_MASKS` and `ADNI_SPLIT`. Bank,
+runs and logs live in `adni/`, so stages 66 and 67 never meet a run without latents. It runs on Run:ai, where the
+scans are (`runai_submit.sh`, section 3). Read first: the train–validation
+top-1 gap (1,157 training subjects against the bank's 2,000), and the modality probe against October's .96. Next, not
+built: anchor scoring (FreeSurfer 7 from `data_local/freesurfer.csv`, 1,543 / 1,620 subjects; UC Davis WMH, 941, almost
+no ADNI4), matched to scans through the manifest's IDs and dates.
 
 **Status on 25 Nov (stages 46–70; read this first).**
 - **The bridge:** its first loss collapsed (item 37); the fixed form, the theory's own version, holds the weak factors

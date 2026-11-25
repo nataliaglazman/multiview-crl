@@ -20,6 +20,9 @@ class PredictionBank:
         self.vox = np.zeros(subjects)
         self.images_by_view = torch.randn(2, subjects, 1, 4, 4, 4)
 
+    def __len__(self):  # warm.Bank counts its subjects this way since --real
+        return len(self.vox)
+
     def images(self, indices, device):
         return torch.cat([view[indices] for view in self.images_by_view]).to(device)
 

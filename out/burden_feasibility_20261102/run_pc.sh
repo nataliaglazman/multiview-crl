@@ -346,6 +346,14 @@
 # adjusted for the other anchors), judged on the hidden factors' own parts, beside the exact own parts and stage 66's
 # retrieval (causal/stage67/). Splits: lr and sulcal hidden (as on ADNI), burden hidden, and every split hiding one to
 # three. The pass rule is in the script's docstring. About 20 s a run to export, then minutes to score.
+# Stage 68 (opt-in) The recipe's first ADNI run. adni_bank.py exports the paired T1/FLAIR scans, N4-corrected, as 3 mm
+# block means in a 64^3 box, z-scored, on the encoder ADNI recipe's split (seed 0, 0.2 / 0.1), dropping pairs by the
+# rule fixed on 24 Nov (T1/FLAIR mask Dice < .9 or a mask < 300 mL); then each view's normative residual; then stage
+# 33's 24-unit prediction arm with --real, 20,000 steps, seed 42. Its evals read validation subjects only (the step-0
+# row is the untrained floor); the test split stays unread. Set ADNI_DATA (the folder of subject folders) and
+# ADNI_LABELS (the labels CSV), and optionally ADNI_MASKS (masks elsewhere) and ADNI_SPLIT (a conv_mlp run's split.json
+# the split must reproduce). The bank (about 3.5 GB), runs and logs live in adni/, apart from runs/, so stages 66 and
+# 67 never meet a run without latents. N4 needs SimpleITK; it took about 2 s a scan on an MNI-sized phantom.
 # Stage 70 (opt-in) Does a higher InfoNCE temperature make 8 units reliable? The from-scratch 8-unit arm (code batches
 # rebuilt every 500, 20,000 steps) with warm.py --tau 1 in place of the recipe's 0.1, the term scaled by 10 so it keeps
 # its weight against the prediction term, at seeds 42, 2, 3, 4 and 5, paired with the from-scratch codes of the same
@@ -2870,6 +2878,46 @@ if wants 67; then
         echo "$(date +%H:%M) anchor check into $OUT"
         "${SCORE[@]}" > "$OUT/anchor.txt" 2>&1 || { echo "Stage 67 failed, see $OUT/anchor.txt"; exit 1; }
         echo "Stage 67 reports in $OUT: anchor.txt"
+    fi
+fi
+
+if wants 68; then
+    : "${ADNI_DATA:?Stage 68 needs ADNI_DATA, the folder of subject folders (e.g. .../ADNI_stripped_masks)}"
+    : "${ADNI_LABELS:?Stage 68 needs ADNI_LABELS, the labels CSV (Subject, Group)}"
+    if [ "$DRY" = 0 ]; then
+        "$PY" -c "import SimpleITK" 2> /dev/null || { echo "Stage 68's N4 needs SimpleITK: $PY -m pip install SimpleITK"; exit 1; }
+    fi
+    A=$D/adni
+    ADNI=$A/bank_n4_64
+    PILOT=adni_predict1_c24_20k
+    PILOT_ARGS=(--pool tail --t1key t1 --real --uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42
+        --content-units 24 --contrastive-loss-type infonce --predict-weight 1)
+    if [ "$DRY" = 1 ]; then
+        echo "$PY $D/adni_bank.py $ADNI --data-dir $ADNI_DATA --labels $ADNI_LABELS --bias-correction n4" \
+            "${ADNI_MASKS:+--masks-dir $ADNI_MASKS} ${ADNI_SPLIT:+--check-split $ADNI_SPLIT}"
+        echo "$PY $D/residual_bank.py $ADNI t1 flair"
+        echo "$PY $D/warm.py $ADNI $A/runs/$PILOT cold 20000 2000 ${PILOT_ARGS[*]} > $A/logs/$PILOT.log"
+    else
+        mkdir -p "$A/logs" "$A/runs" || exit 1
+        if ! grep -q "BANK DONE" "$ADNI.log" 2> /dev/null; then
+            echo "$(date +%H:%M) ADNI export into $ADNI"
+            "$PY" "$D/adni_bank.py" "$ADNI" --data-dir "$ADNI_DATA" --labels "$ADNI_LABELS" --bias-correction n4 \
+                ${ADNI_MASKS:+--masks-dir "$ADNI_MASKS"} ${ADNI_SPLIT:+--check-split "$ADNI_SPLIT"} > "$ADNI.log" 2>&1 \
+                || { echo "ADNI export failed, see $ADNI.log"; exit 1; }
+        fi
+        residual_bank "$ADNI" t1 flair
+        if grep -qE '^(TEST|DONE)' "$A/logs/$PILOT.log" 2> /dev/null; then
+            echo "skip $PILOT"
+        elif pgrep -f -- "$A/runs/$PILOT " > /dev/null; then
+            echo "skip $PILOT, already running"
+        else
+            rm -rf "${A:?}/runs/$PILOT"
+            echo "$(date +%H:%M) start $PILOT"
+            "$PY" "$D/warm.py" "$ADNI" "$A/runs/$PILOT" cold 20000 2000 "${PILOT_ARGS[@]}" > "$A/logs/$PILOT.log" 2>&1
+        fi
+        grep -qE '^(TEST|DONE)' "$A/logs/$PILOT.log" || echo "NOT FINISHED: $PILOT (see $A/logs/$PILOT.log)"
+        "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+        echo "$(date +%H:%M) Stage 68: $PILOT in $A/runs; summary updated: $D/summary.txt"
     fi
 fi
 
