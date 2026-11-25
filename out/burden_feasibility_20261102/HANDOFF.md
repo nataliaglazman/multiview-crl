@@ -2144,6 +2144,15 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     on the code at every seed, but the head's linearity is still 1.000 in both views. So far it reweights or mixes
     units through its linear part and does not bend. If it stays linear, the arm tests a learned reweighting, not
     bending after the code.
+  - **A100 replicate** (25 Nov, the user's request; fixed before any of its results):
+    - The same five seeds and flags as five separate Run:ai jobs, one A100 each, alongside the PC (`runai_warm.sh`).
+      Names `..._abl_codebatch_predict1_proj64_c8_20k_a100[_sN]`, labels `c8_proj64a_sN`.
+    - The same seed reproduces on the same GPU, but a different GPU changes the trajectory the way a new seed does
+      (timing job). So these are five more draws of the arm, not copies of the PC's.
+    - How they are read: the stage's verdict stays on the PC's five, paired with the PC's from-scratch codes. The
+      replicate's hold and match counts are reported beside them, and the ten codes pooled, described only. Its
+      curve counts and costs are read as for the PC's arm, also described.
+    - Its runs are copied back for the same reports once both sets finish.
 - **Stage 70 (built 25 Nov; rules and the factor of 10 agreed by the user; started 25 Nov 05:48; read 25 Nov, item
   56: worse, holds 0/5): does a higher
   InfoNCE temperature make 8 units reliable?** On 25 Nov the user declined the anchors as a seed rule, asked for
@@ -3659,6 +3668,34 @@ to scans through the manifest's IDs and dates.
   --projector 64`, output at the code's 8 units), seeds 42, 2, 3, 4, 5, then the reports one at a time (section 9;
   rules fixed there before the run). The user asked to try it after item 56. A matched-width head keeps Yao's setup;
   this corrects the bullet above that says a projector leaves it. Stage 68 waits for the GPU.
+- **Code and Run:ai, 25 Nov (the user asked to commit and to set up Run:ai for these stages):**
+  - Committed `4896045` (stages 70–72). The remote branch had 4 commits from another machine (stage 68's ADNI export,
+    `warm.py --real`, `runai_submit.sh` and `runai_job.sh`, the paper plan). They were merged in a scratch worktree, so
+    the running stage 71 never saw a rewritten `run_pc.sh`: `d3f7d74`, pushed.
+  - The merge kept both sides of each conflict. `tests/test_warm_prediction.py`'s fake bank gained `__len__`, which
+    `draw_prediction_batch` has used since `--real`; three of its tests failed on the incoming branch without it.
+  - The local checkout stays at `4896045` until stage 71's `run_pc.sh` exits. Then fast-forward it to `sync-25nov`
+    (the merge, plus this note) and remove the scratch worktree.
+  - The cluster checkout (`/nfs/home/nglazman/crl-2/multiview-crl`) is at `d3f7d74`. Its `summary.txt` from the
+    stage 68 job is kept in `git stash` (`stash@{0}`). `bank_causal_nofield_fixedpos` was copied there (6.8 GB, 24
+    files, sizes checked).
+  - Stage 68 ran there, despite the "built, not run" paragraph at the top of this section: Run:ai lists
+    `burden-s68-1124-1206` as completed on 24 Nov. Not read here.
+  - `runai_submit.sh STAGE` runs a whole `run_pc.sh` stage as one A100 job, all of its arms on one GPU. One GPU per
+    seed needs a seed subset per job and one report job at the end; not built.
+  - Timing job `burden-timing-a100-1125`, submitted 11:54 on node dgxa100-a. It runs stage 71's recipe for 600 steps,
+    one arm alone and then five at once (`timing/timing_a100.sh`, log `timing/timing.log` on the cluster; runs in
+    `timing/runs`, apart from `runs/`). Results (A100-SXM4-40GB; steady rate between steps 300 and 500):
+    - One seed alone: 0.295 s a step (0.39 averaged over the first 600 steps, start-up and one neighbourhood rebuild
+      included). A 20,000-step run comes to about 2 hours.
+    - Five seeds on the one GPU: 0.335–0.35 s a step each, only about 15% slower. All five together come to about
+      2.1 hours, against about 3.7 on the PC's 3090 at 0.65–0.66 s a step.
+    - One seed leaves an A100 mostly idle, so its pace is set off the GPU. One job per stage (`runai_submit.sh` as it
+      is) is nearly as fast as one job per seed and uses a fifth of the GPUs. An A100 may well take more than five
+      seeds; not measured.
+    - The same seed reproduced on the same GPU: the alone run and five-at-once seed 42 log identical losses at step
+      600 (10.102 / 10.215 / .399). So the PC's runs are probably reproducible on the PC too, and a move to A100s
+      changes trajectories the way a new seed would.
 - **Stage 67 is read (item 55):** measured anchors choose runs (`causal/stage67/`; `anchor_check.py`, no training).
   - With lr and sulcal hidden, as on ADNI, the run whose code best reads the measured anchors comes close to the
     best on the hidden factors. Anchors adjusted for each other at reliability .9: rho .77 [.64, .84], 89% of a
