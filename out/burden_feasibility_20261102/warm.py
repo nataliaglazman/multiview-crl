@@ -124,7 +124,10 @@ The pilot control's recipe and objective (global + patch InfoNCE, neighbourhood 
                 cross-view top-1 among all of them and in random sets of 32, the train - validation top-1 gap
                 (memorisation), the held-out loss in batches of 32, each view's effective rank, the matching units'
                 cross-view r, the backbone GAP's top-1, and eval.adni.encoder_modality_gap's modality probes. The step-0
-                eval is the untrained floor. Needs --uniform or --code-batches, and not --supervise.
+                eval is the untrained floor. Needs --uniform or --code-batches, and not --supervise. With TailCode the
+                evals add readouts that each change one way the evaluated code differs from the loss's (gauge
+                statistics, jitter; gauge_readouts). --init-run RUN/model.pt with 0 steps evaluates a finished run.
+  --keep-checkpoints  keep each eval's checkpoint as model_STEP.pt beside model.pt.
   INIT          cold, or start both backbones from a sup.py checkpoint.
 
 Batches: by default an anchor and 31 of its 50 nearest training subjects on the six anatomy factors (the recipe's
@@ -287,6 +290,20 @@ class TailCode(nn.Module):
         ``visible`` (B, D, H, W) bool, for an image that shows part of the volume, pools over those cells only (the
         tails over those that are also interior). ``update=False`` leaves the view's running statistics alone and, in
         training, gauges with the batch's own statistics without storing them."""
+        features = self.ungauged(part, view, visible, update)
+        if self.training and not update:
+            gauged = F.batch_norm(features, None, None, training=True, eps=self.gauges[view].eps)
+        else:
+            gauged = self.gauges[view](features)
+        if self.training and self.drop:
+            kept = torch.ones(gauged.shape[1], device=gauged.device)
+            kept[: self.average_width] = float(self.drop != "gap")
+            kept[self.average_width :] = float(self.drop != "tails")
+            gauged = gauged * kept
+        return gauged
+
+    def ungauged(self, part, view, visible=None, update=True):
+        """The pooled vector of one view's maps before the gauge: averages, then tails. Arguments as ``pooled_view``."""
         if visible is not None and self.regional:
             raise ValueError("Half-view pooling requires --pool tail or gapnorm")
         rows = part.flatten(2)[:, :, self.keep]
@@ -314,17 +331,7 @@ class TailCode(nn.Module):
             for t in self.thresholds:
                 for tail in (F.relu(z - t), F.relu(-z - t)):
                     parts.append(torch.log1p(100 * (tail * inside).sum(2) / inside.sum(2).clamp_min(1)))
-        features = torch.cat(parts, 1)
-        if self.training and not update:
-            gauged = F.batch_norm(features, None, None, training=True, eps=self.gauges[view].eps)
-        else:
-            gauged = self.gauges[view](features)
-        if self.training and self.drop:
-            kept = torch.ones(gauged.shape[1], device=gauged.device)
-            kept[: self.average_width] = float(self.drop != "gap")
-            kept[self.average_width :] = float(self.drop != "tails")
-            gauged = gauged * kept
-        return gauged
+        return torch.cat(parts, 1)
 
     def forward(self, h):
         return torch.cat([self.head(part) for part in self.pooled(h)], 0)
@@ -795,13 +802,16 @@ def half_masks(root, axes, size, device):
 
 
 @torch.no_grad()
-def features(model, bank, device, batch=32, pool=None):
+def features(model, bank, device, batch=32, pool=None, move=None):
+    """``move``, if given, transforms each batch of images first (the --real readouts' jitter)."""
     states = [(m, m.training) for m in (model, pool) if m is not None]
     for m, _ in states:
         m.eval()
     rows = {"code": [[], []], "gap": [[], []], "pooled": [[], []]}
     for start in range(0, len(bank), batch):
         x = bank.images(np.arange(start, min(start + batch, len(bank))), device)
+        if move is not None:
+            x = move(x)
         h = model._encode(x, 2, None)
         gap = h.mean((2, 3, 4)).cpu().numpy()
         if pool is None:
@@ -856,10 +866,108 @@ def cross_view_top1(z1, z2):
     return {"t1_to_flair": forward, "flair_to_t1": backward, "mean": (forward + backward) / 2}
 
 
+READOUT_SEED = 1  # --real readouts: every evaluation jitters the same way, so evaluations stay comparable
+PROBES = ("normalized_linear", "normalized_rbf", "mean_centered_rbf")
+
+
+def jittered(shift, degrees, shared):
+    """Training's jitter as a function of each batch of images, drawn from a fresh READOUT_SEED stream."""
+    rng = np.random.default_rng(READOUT_SEED)
+    return lambda x: jitter(x, shift, degrees, rng, shared)
+
+
 @torch.no_grad()
-def evaluate_real(model, held, seen, device, pool, args):
+def batch_gauge_top1(model, pool, bank, sets, device, move=None):
+    """Mean top-1 within each subject set, the codes gauged by that set's own statistics as the BatchNorm gauge
+    standardizes a training batch. Neither the gauge's nor TailCode's running statistics change."""
+    states, drop = [(m, m.training) for m in (model, pool)], pool.drop
+    model.eval()
+    pool.train()
+    pool.drop = None
+    try:
+        top1 = []
+        for rows in sets:
+            x = bank.images(rows, device)
+            maps = model._encode(x if move is None else move(x), 2, None)
+            t1, flair = (
+                pool.head(pool.pooled_view(part, view, update=False))[:, : pool.units].cpu().numpy()
+                for view, part in enumerate(maps.chunk(2))
+            )
+            top1.append(cross_view_top1(t1, flair)["mean"])
+    finally:
+        for m, flag in states:
+            m.train(flag)
+        pool.drop = drop
+    return float(np.mean(top1))
+
+
+@torch.no_grad()
+def recalibrated_pool(model, pool, bank, device, batch=32):
+    """A copy of ``pool`` whose gauges standardize by the mean and variance of each view's pooled features over all of
+    ``bank``'s clean images, the network frozen, in place of the running statistics training left."""
+    states = [(m, m.training) for m in (model, pool)]
+    model.eval()
+    pool.eval()
+    total, squares = [0.0, 0.0], [0.0, 0.0]
+    try:
+        for start in range(0, len(bank), batch):
+            maps = model._encode(bank.images(np.arange(start, min(start + batch, len(bank))), device), 2, None)
+            for view, part in enumerate(maps.chunk(2)):
+                pooled = pool.ungauged(part, view, update=False).double()
+                total[view] = total[view] + pooled.sum(0)
+                squares[view] = squares[view] + pooled.square().sum(0)
+    finally:
+        for m, flag in states:
+            m.train(flag)
+    fresh = copy.deepcopy(pool).eval()
+    for view, gauge in enumerate(fresh.gauges):
+        mean = total[view] / len(bank)
+        var = (squares[view] / len(bank) - mean.square()).clamp_min(0)
+        kept_mean, kept_var = (
+            (gauge.running_mean, gauge.running_var) if isinstance(gauge, nn.BatchNorm1d) else (gauge.mean, gauge.var)
+        )
+        kept_mean.copy_(mean.to(kept_mean.dtype))
+        kept_var.copy_(var.to(kept_var.dtype))
+    return fresh
+
+
+def gauge_readouts(model, pool, held, device, sets, train, shift, degrees, shared):
+    """--real: where the evaluated code parts from the code the loss sees. The evaluation gauges clean images with
+    running statistics; training gauges jittered images, with each batch's own statistics (the BatchNorm gauge) or
+    running ones (--gauge running, whose as-trained readout is therefore running_jittered). Each readout changes one
+    of the two: batch statistics on clean and on jittered images (top-1 in the evaluation's sets; BatchNorm gauge
+    only), running statistics on jittered images, and the gauge recomputed on the clean training images."""
+    import eval.adni.encoder_modality_gap as modality_gap
+
+    def scored(feats):
+        t1, flair = feats["code"]
+        probe, _ = modality_gap.diagnose(t1, flair, np.arange(len(t1)).astype(str))
+        return {
+            "top1": cross_view_top1(t1, flair),
+            "top1_32": float(np.mean([cross_view_top1(t1[s], flair[s])["mean"] for s in sets])),
+            "modality_probe": {k: probe["probes"][k]["accuracy"] for k in PROBES},
+        }
+
+    moving = bool(shift or degrees)
+    out = {}
+    if isinstance(pool.gauges[0], nn.BatchNorm1d):
+        out["batch_clean"] = {"top1_32": batch_gauge_top1(model, pool, held, sets, device)}
+        if moving:
+            move = jittered(shift, degrees, shared)
+            out["batch_jittered"] = {"top1_32": batch_gauge_top1(model, pool, held, sets, device, move)}
+    if moving:
+        out["running_jittered"] = scored(
+            features(model, held, device, pool=pool, move=jittered(shift, degrees, shared))
+        )
+    out["recalibrated"] = scored(features(model, held, device, pool=recalibrated_pool(model, pool, train, device)))
+    return out
+
+
+@torch.no_grad()
+def evaluate_real(model, held, seen, device, pool, args, readouts=None):
     """--real: label-free readouts of the exported code on held-out subjects ``held`` and as many training subjects
-    ``seen``. The held-out loss is the training objective on consecutive batches of the held-out codes."""
+    ``seen``. The held-out loss is the training objective on consecutive batches of the held-out codes. ``readouts``
+    (the training bank and jitter) adds gauge_readouts for TailCode pooling."""
     import eval.adni.encoder_modality_gap as modality_gap
 
     feats, train = features(model, held, device, pool=pool), features(model, seen, device, pool=pool)
@@ -884,7 +992,7 @@ def evaluate_real(model, held, seen, device, pool, args):
     ]
     width = t1.shape[1]
     probe, _ = modality_gap.diagnose(t1, flair, np.arange(n).astype(str))
-    return {
+    result = {
         "subjects": n,
         "top1": top1,
         "top1_32": float(np.mean([cross_view_top1(t1[s], flair[s])["mean"] for s in sets])),
@@ -897,10 +1005,11 @@ def evaluate_real(model, held, seen, device, pool, args):
         },
         "cross_view_code_r": float(np.nanmean(np.abs(np.diag(np.corrcoef(t1.T, flair.T)[:width, width:])))),
         "gap_top1": cross_view_top1(*feats["gap"])["mean"],
-        "modality_probe": {
-            k: probe["probes"][k]["accuracy"] for k in ("normalized_linear", "normalized_rbf", "mean_centered_rbf")
-        },
+        "modality_probe": {k: probe["probes"][k]["accuracy"] for k in PROBES},
     }
+    if readouts is not None and pool is not None:
+        result["readouts"] = gauge_readouts(model, pool, held, device, sets, **readouts)
+    return result
 
 
 def main():
@@ -1010,6 +1119,11 @@ def main():
         "--real",
         action="store_true",
         help="A bank with no latents (adni_bank.py); evals read only images, on validation subjects",
+    )
+    p.add_argument(
+        "--keep-checkpoints",
+        action="store_true",
+        help="Also keep each evaluation's checkpoint as model_STEP.pt (model.pt is always the latest)",
     )
     p.add_argument("--device", default=pick_device())
     p.add_argument("--test-subjects", type=int, default=1000)
@@ -1571,7 +1685,8 @@ def main():
     def record(step, terms):
         row = {"step": step, "loss": terms}
         if a.real:
-            row["heldout"] = evaluate_real(model, test, seen, a.device, pool, args)
+            readouts = {"train": train, "shift": a.jitter, "degrees": a.rotate, "shared": a.shared_jitter}
+            row["heldout"] = evaluate_real(model, test, seen, a.device, pool, args, readouts=readouts)
         else:
             row["test"] = evaluate(model, test, a.device, pool)
         row["spread"] = batching["spread"]
@@ -1594,9 +1709,19 @@ def main():
                 f"top-1@{args.batch_size} {h['top1_32']:.3f} | GAP top-1 {h['gap_top1']:.3f} | held-out loss "
                 f"{h['heldout_loss']:.3f} | rank T1 {h['effective_rank']['t1']:.1f} FLAIR "
                 f"{h['effective_rank']['flair']:.1f} | unit r {h['cross_view_code_r']:.2f} | modality linear "
-                f"{h['modality_probe']['normalized_linear']:.2f} rbf {h['modality_probe']['normalized_rbf']:.2f} | {terms}",
+                f"{h['modality_probe']['normalized_linear']:.2f} rbf {h['modality_probe']['normalized_rbf']:.2f} "
+                f"centred {h['modality_probe']['mean_centered_rbf']:.2f} | {terms}",
                 flush=True,
             )
+            if "readouts" in h:
+                parts = []
+                for name, r in h["readouts"].items():
+                    among = f"top-1 {r['top1']['mean']:.3f} " if "top1" in r else ""
+                    centred = (
+                        f" centred {r['modality_probe']['mean_centered_rbf']:.2f}" if "modality_probe" in r else ""
+                    )
+                    parts.append(f"{name} {among}@{args.batch_size} {r['top1_32']:.3f}{centred}")
+                print(f"step {step:5d} readouts: " + " | ".join(parts), flush=True)
         else:
             t = row["test"]
             print(
@@ -1790,6 +1915,8 @@ def main():
             if projector is not None:
                 state["projector"] = {"head": projector.state_dict(), "hidden": a.projector}
             torch.save(state, a.out / "model.pt")
+            if a.keep_checkpoints:
+                torch.save(state, a.out / f"model_{step:05d}.pt")
     print("DONE", flush=True)
 
 

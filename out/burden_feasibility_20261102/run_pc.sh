@@ -368,6 +368,13 @@
 # discoveries, the tabular benchmarks, own_directions.py and holds.py, beside the five seeds' 8-unit and 10-unit codes,
 # whose reports come from stage 70 (causal/stage71/). Reading rules: HANDOFF section 9.
 
+# Stage 73 (opt-in, after 68) Why stage 68's evaluated code dipped at 6,000-16,000 steps while its training loss kept
+# falling. The evaluated code differs from the loss's in its gauge statistics (running, not the batch's own) and its
+# images (clean, not jittered); warm.py's readouts undo one at a time, and recompute the gauge on clean training
+# images. First, with no training, the readouts on stage 68's 20,000-step checkpoint. Then two 20,000-step runs that
+# carry the readouts at every eval and keep every eval's checkpoint: stage 68's recipe at seed 1 (does the dip recur?)
+# and at seed 42 with --gauge running (one normalization in training and at test). Three at a time share the GPU
+# (PARALLEL). Needs stage 68's bank and finished pilot; runs and logs in adni/.
 # Stage 74 (opt-in) Does the content-size sweep (Daunhawer et al. 2023, App. B.2) find the fixed bank's width? Stage
 # 56's recipe (code batches rebuilt every 500, residual input, jitter, prediction weight 1, tails, 20,000 steps,
 # fixed-position causal bank, 7 shared latents) at WIDTH_UNITS (default 4 5 6 7 8 9 10 12 16) units and seeds
@@ -2892,17 +2899,20 @@ if wants 67; then
     fi
 fi
 
+# Stages 68 and 73: the ADNI bank, runs and logs, and stage 33's 24-unit prediction arm for it, seed apart.
+A=$D/adni
+ADNI=$A/bank_n4_64
+PILOT=adni_predict1_c24_20k
+ADNI_RECIPE=(--pool tail --t1key t1 --real --uniform --residual --jitter 2 --rotate 3 --patch-weight 0
+    --content-units 24 --contrastive-loss-type infonce --predict-weight 1)
+
 if wants 68; then
     : "${ADNI_DATA:?Stage 68 needs ADNI_DATA, the folder of subject folders (e.g. .../ADNI_stripped_masks)}"
     : "${ADNI_LABELS:?Stage 68 needs ADNI_LABELS, the labels CSV (Subject, Group)}"
     if [ "$DRY" = 0 ]; then
         "$PY" -c "import SimpleITK" 2> /dev/null || { echo "Stage 68's N4 needs SimpleITK: $PY -m pip install SimpleITK"; exit 1; }
     fi
-    A=$D/adni
-    ADNI=$A/bank_n4_64
-    PILOT=adni_predict1_c24_20k
-    PILOT_ARGS=(--pool tail --t1key t1 --real --uniform --residual --jitter 2 --rotate 3 --patch-weight 0 --seed 42
-        --content-units 24 --contrastive-loss-type infonce --predict-weight 1)
+    PILOT_ARGS=("${ADNI_RECIPE[@]}" --seed 42)
     if [ "$DRY" = 1 ]; then
         echo "$PY $D/adni_bank.py $ADNI --data-dir $ADNI_DATA --labels $ADNI_LABELS --bias-correction n4" \
             "${ADNI_MASKS:+--masks-dir $ADNI_MASKS} ${ADNI_SPLIT:+--check-split $ADNI_SPLIT}"
@@ -3031,6 +3041,40 @@ if wants 71; then
             || { echo "Stage 71's own_directions failed, see $OUT/own_directions.txt"; exit 1; }
         "${HOLDS[@]}" > "$OUT/holds.txt" 2>&1 || { echo "Stage 71's holds.py failed, see $OUT/holds.txt"; exit 1; }
         echo "Stage 71 reports in $OUT: holds.txt first, then own_directions.txt"
+    fi
+fi
+
+if wants 73; then
+    CHECK=${PILOT}_at20k
+    REPLICATE=${PILOT}_s1
+    RUNNING=${PILOT}_running
+    adni_arm() { # adni_arm NAME COMMAND...: arm's rules, in adni/runs and adni/logs
+        local name=$1; shift
+        if [ "$DRY" = 1 ]; then echo "$* > $A/logs/$name.log"; return; fi
+        if grep -qE '^(TEST|DONE)' "$A/logs/$name.log" 2> /dev/null; then echo "skip $name"; return; fi
+        if pgrep -f -- "$A/runs/$name " > /dev/null; then echo "skip $name, already running"; return; fi
+        rm -rf "${A:?}/runs/$name"
+        while [ "$(jobs -rp | wc -l)" -ge "$PARALLEL" ]; do sleep 5; done
+        echo "$(date +%H:%M) start $name"
+        "$@" > "$A/logs/$name.log" 2>&1 &
+    }
+    if [ "$DRY" = 0 ]; then
+        grep -q "RESIDUAL DONE" "$ADNI.residual.log" 2> /dev/null || { echo "Stage 73 needs stage 68's bank in $ADNI"; exit 1; }
+        grep -qE '^DONE' "$A/logs/$PILOT.log" 2> /dev/null || { echo "Stage 73 needs stage 68's finished $PILOT"; exit 1; }
+    fi
+    adni_arm "$CHECK" "$PY" "$D/warm.py" "$ADNI" "$A/runs/$CHECK" cold 0 1 "${ADNI_RECIPE[@]}" --seed 42 \
+        --init-run "$A/runs/$PILOT/model.pt"
+    adni_arm "$REPLICATE" "$PY" "$D/warm.py" "$ADNI" "$A/runs/$REPLICATE" cold 20000 2000 "${ADNI_RECIPE[@]}" \
+        --seed 1 --keep-checkpoints
+    adni_arm "$RUNNING" "$PY" "$D/warm.py" "$ADNI" "$A/runs/$RUNNING" cold 20000 2000 "${ADNI_RECIPE[@]}" \
+        --seed 42 --gauge running --keep-checkpoints
+    if [ "$DRY" = 0 ]; then
+        wait
+        for name in "$CHECK" "$REPLICATE" "$RUNNING"; do
+            grep -qE '^(TEST|DONE)' "$A/logs/$name.log" 2> /dev/null || echo "NOT FINISHED: $name (see $A/logs/$name.log)"
+        done
+        "$PY" "$D/summarize.py" > "$D/summary.txt" 2>&1
+        echo "$(date +%H:%M) Stage 73: $CHECK, $REPLICATE and $RUNNING in $A/runs; summary updated: $D/summary.txt"
     fi
 fi
 

@@ -86,7 +86,7 @@ PARALLEL=3 nohup bash out/burden_feasibility_20261102/run_pc.sh 20 > out/burden_
 - **Where results live.** Results stay on the PC: `runs/`, `logs/`, `causal/`, `audit.json`/`audit.txt`,
   `summary.txt`. `*.json` is git-ignored.
 
-### On Run:ai (ADNI, stage 68)
+### On Run:ai (ADNI, stages 68 and 73)
 
 The ADNI scans live on the cluster's NFS. From the Run:ai host (`h2`), once the checkout at
 `/nfs/home/nglazman/crl-2/multiview-crl` holds this branch:
@@ -106,6 +106,9 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     when it exists in the checkout.
 - **Progress:** `adni/runai.log`, then `adni/bank_n4_64.log`, `adni/bank_n4_64.residual.log` and
   `adni/logs/<run>.log`. A resubmit skips finished steps, but restarts an unfinished training run from step 0.
+- **Stage 73** (once stage 68 has finished): `bash out/burden_feasibility_20261102/runai_submit.sh 73`, after a
+  `--dry-run`. It needs no ADNI paths and no SimpleITK. Its three runs share the A100; expect about 3 hours (one
+  20,000-step run alone took 2).
 
 ### Locally (Mac)
 
@@ -219,6 +222,15 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     subjects (the gap is memorisation) and in sets of 32, the held-out loss, effective rank, matching-unit r, the
     backbone GAP's top-1 and `eval.adni.encoder_modality_gap`'s modality probes. The step-0 row is the floor. Needs
     `--uniform` or `--code-batches`. `summarize.py` prints these runs from `adni/runs/`.
+  - `--real` readouts (25 Nov, `gauge_readouts`; TailCode pooling only). The evaluated code gauges clean images with
+    the gauge's running statistics; the loss's code gauges jittered images with each batch's own (BatchNorm gauge) or
+    running ones (`--gauge running`). Each readout undoes one difference: `batch_clean` and `batch_jittered` (each
+    evaluation set gauged by its own statistics, top-1 in the sets of 32; BatchNorm gauge only; `batch_jittered` is
+    the loss's code), `running_jittered`, and `recalibrated` (a copy of the pool whose gauge is recomputed from all
+    clean training images, the network frozen). The last two also give top-1 among all and the modality probes. None
+    changes the run: `tests/test_warm_readouts.py`. The jitter repeats exactly at every eval.
+  - `--keep-checkpoints` keeps `model_STEP.pt` at every eval. `--init-run RUN/model.pt` with 0 steps evaluates a
+    finished run once (its row is labelled with the checkpoint in `summarize.py`).
   - Older levers: `--queue`, `--gauge running`, `--group-dropout`, `--decorrelate`, `--shared-jitter`, `--uniform`.
   - Each option refuses combinations it can't handle.
 - **`sup.py`** trains the same backbone with lesion labels. It was used early as a ceiling.
@@ -3495,14 +3507,42 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
 
 ## 10. Recent stages and next steps
 
-**Built, not run (24 Nov): stage 68, the recipe's first ADNI run** (the plan's step 3). `adni_bank.py` exports the
+**Built, not run (25 Nov): stage 73, why stage 68's evaluated code dipped** (built as stage 70; renumbered when
+merged with the temperature arm's stage 70). Every `--real` eval now carries the
+readouts of section 5, each undoing one difference between the evaluated code and the loss's. Stage 73 first reads
+them on stage 68's 20,000-step checkpoint with no training (`adni_predict1_c24_20k_at20k`; its plain row must repeat
+stage 68's last one, .831, or the checkpoint did not load as trained). Then stage 68's recipe at seed 1 (does the dip
+recur?) and at seed 42 with `--gauge running` (one normalization in training and at test), 20,000 steps each, keeping
+every eval's checkpoint. Reading, at @32: `batch_jittered` is the loss's code and the plain row the evaluated one;
+the gap between them is what needs explaining. `batch_clean` closing it blames the gauge's statistics,
+`running_jittered` closing it blames the clean images. If `recalibrated` closes it too (top-1 up, centred probe
+down), recomputing the gauge before export fixes the code without retraining. Run it on Run:ai (section 3).
+
+**Ran 24 Nov: stage 68, the recipe's first ADNI run** (the plan's step 3). `adni_bank.py` exports the
 scans (section 4), then the residuals, then stage 33's 24-unit prediction arm with `--real`, 20,000 steps, seed 42.
 Set `ADNI_DATA` (the folder of subject folders) and `ADNI_LABELS`, optionally `ADNI_MASKS` and `ADNI_SPLIT`. Bank,
 runs and logs live in `adni/`, so stages 66 and 67 never meet a run without latents. It runs on Run:ai, where the
-scans are (`runai_submit.sh`, section 3). Read first: the train–validation
-top-1 gap (1,157 training subjects against the bank's 2,000), and the modality probe against October's .96. Next, not
-built: anchor scoring (FreeSurfer 7 from `data_local/freesurfer.csv`, 1,543 / 1,620 subjects; UC Davis WMH, 941, almost
-no ADNI4), matched to scans through the manifest's IDs and dates.
+scans are (`runai_submit.sh`, section 3). First job `burden-s68-1124-1206` (commit 1ec5f0c): the split matched
+October's split.json. 14 label subjects have no FLAIR (one no T1 either). The rule excluded 54 of 1,606 (36 / 14 / 4),
+all for Dice; the 6 small masks are among them. Training plus validation is 50, as October's 50 bad-mask subjects. Kept
+1,121 / 275 / 156. 0.36 s/step on an A100 (20,000 steps ≈ 2 h). The 1 mm grid is 181 × 217 × 181, so the 64³ box at
+3 mm crops 12 mm off each end in y; it cuts at most 0.9 / 1.4 mL of brain (one FLAIR scan over 1 mL, of 1,552).
+Validation subjects, step 0 → 20,000: cross-view top-1 among all 275 .042 → .831 (training subjects
+.938, a memorisation gap of .11, as at 6,000 steps); top-1 in sets of 32 .178 → .951; backbone GAP top-1 .109 → .935;
+effective rank 6.7 / 6.4 → 16.3 / 15.9 of 24 units; matching-unit r .36 → .76; L2-normalised modality probe .82 → .93
+(October .96). The mean-centred RBF, which a constant per-view offset cannot raise, is .864 at 20,000 (October .70),
+so the views' codes differ by more than an offset, and training put it there: .555 untrained, .996 at 2,000 steps. It
+moves against matching: .96 / .94 / .98 in the dip, .89 and .86 as matching recovered (r −.76 with top-1 from 6,000
+steps on; the offset-sensitive probe does not track, r .22). So the dip is the two views' evaluated codes pulling apart
+in shape.
+**Not stable:** from 6,000 to 16,000 steps the code's top-1 fell .489 → .278 (training subjects .595 → .362) while
+the training loss fell .175 → .053 and backbone GAP top-1 rose .775 → .900; it jumped back to .713 and .831 by 20,000.
+Not overfitting (training subjects fell as far) and not the backbone (GroupNorm, the same in training and at test).
+The loss's code and the evaluated code differ in two ways only: TailCode's BatchNorm gauge (batch statistics in
+training, running ones at test) and the jitter (evaluation images are clean). Only the 20,000-step checkpoint exists
+(`model.pt` is overwritten at each evaluation). Stage 73 (above) separates the two. Then anchor scoring, not built:
+FreeSurfer 7 from `data_local/freesurfer.csv` (1,543 / 1,620 subjects) and UC Davis WMH (941, almost no ADNI4), matched
+to scans through the manifest's IDs and dates.
 
 **Status on 25 Nov (stages 46–70; read this first).**
 - **The bridge:** its first loss collapsed (item 37); the fixed form, the theory's own version, holds the weak factors
