@@ -368,6 +368,17 @@
 # discoveries, the tabular benchmarks, own_directions.py and holds.py, beside the five seeds' 8-unit and 10-unit codes,
 # whose reports come from stage 70 (causal/stage71/). Reading rules: HANDOFF section 9.
 
+# Stage 74 (opt-in) Does the content-size sweep (Daunhawer et al. 2023, App. B.2) find the fixed bank's width? Stage
+# 56's recipe (code batches rebuilt every 500, residual input, jitter, prediction weight 1, tails, 20,000 steps,
+# fixed-position causal bank, 7 shared latents) at WIDTH_UNITS (default 4 5 6 7 8 9 10 12 16) units and seeds
+# WIDTH_SEEDS (default 42 3 4), WIDTH_PARALLEL (default 5) at a time; finished runs are skipped, so the PC reuses the
+# 8-, 9- and 10-unit codes of stages 50-64 and Run:ai (runai_submit.sh 74) trains them. On Run:ai, one job per seed
+# (WIDTH_SEEDS=42, then 3 and 4 with WIDTH_WAIT_BANK=1 so only the first renders the bank), each writing reports tagged
+# with its seed; then one job with the defaults, which finds every run finished and scores them together.
+# width_sweep.py: each code's held-out InfoNCE on the test subjects and its seven own parts, the elbow of the loss over
+# width against |C| + 1 = 8 (pass: within one unit; rule in its docstring), and the width where the own parts
+# saturate; then the style audit over every width (do spare units take style, as in the numerical check?)
+# (causal/stage74/).
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 1
 D=out/burden_feasibility_20261102
@@ -3021,6 +3032,69 @@ if wants 71; then
         "${HOLDS[@]}" > "$OUT/holds.txt" 2>&1 || { echo "Stage 71's holds.py failed, see $OUT/holds.txt"; exit 1; }
         echo "Stage 71 reports in $OUT: holds.txt first, then own_directions.txt"
     fi
+fi
+
+if wants 74; then
+    FIXED=$D/bank_causal_nofield_fixedpos
+    P=ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos
+    OUT=$D/causal/stage74
+    sfx() { [ "$1" = 42 ] && echo "" || echo "_s$1"; }  # seed 42's runs carry no suffix
+    read -r -a SEEDS <<< "${WIDTH_SEEDS:-42 3 4}"
+    read -r -a WIDTHS <<< "${WIDTH_UNITS:-4 5 6 7 8 9 10 12 16}"
+    # reports of a non-default subset (one Run:ai job per seed) carry its seeds and widths, so jobs never share a file
+    TAG=""
+    [ "${SEEDS[*]} | ${WIDTHS[*]}" = "42 3 4 | 4 5 6 7 8 9 10 12 16" ] || TAG=_s$(IFS=-; echo "${SEEDS[*]}")_c$(IFS=-; echo "${WIDTHS[*]}")
+    ALL=() NAMES=()
+    for seed in "${SEEDS[@]}"; do
+        for units in "${WIDTHS[@]}"; do
+            ALL+=(c${units}_s$seed=${P}_abl_codebatch_predict1_c${units}_20k$(sfx "$seed"))
+        done
+    done
+    for pair in "${ALL[@]}"; do NAMES+=("${pair#*=}"); done
+    [ "$DRY" = 0 ] && { mkdir -p "$OUT" || exit 1; }
+    if [ "${WIDTH_WAIT_BANK:-0}" = 1 ] && [ "$DRY" = 0 ]; then  # a later per-seed job: another job renders the bank
+        echo "$(date +%H:%M) waiting for $FIXED.residual.log to say RESIDUAL DONE"
+        waited=0
+        until grep -q "RESIDUAL DONE" "$FIXED.residual.log" 2> /dev/null; do
+            sleep 60
+            waited=$((waited + 1))
+            [ "$waited" -ge 240 ] && { echo "Stage 74: no rendered bank after 4 hours"; exit 1; }
+        done
+    fi
+    bank "$FIXED" --t1-values 0.4 --causal --field off --lesion-position fixed
+    residual_bank "$FIXED" t1_04 flair
+    PARALLEL=${WIDTH_PARALLEL:-5}
+    # arm() skips finished runs: on the PC the 8-, 9- and 10-unit codes of stages 50-64 are reused, elsewhere trained
+    for pair in "${ALL[@]}"; do
+        units=${pair%%_s*}
+        units=${units#c}
+        seed=${pair%%=*}
+        seed=${seed##*_s}
+        EVERY=2000 ssl "${pair#*=}" "$FIXED" tail t1_04 20000 \
+            --code-batches 500 --code-neighbours 31 --residual --jitter 2 --rotate 3 --seed "$seed" \
+            --patch-weight 0 --content-units "$units" --contrastive-loss-type infonce --predict-weight 1
+    done
+    finish "${NAMES[@]}"
+    needs_done 74 "${NAMES[@]}"
+    RUNS=() PAIRS=()
+    for pair in "${ALL[@]}"; do
+        RUNS+=("$D/runs/${pair#*=}")
+        PAIRS+=("${pair%%=*}=$D/runs/${pair#*=}")
+    done
+    MEASURE=("$PY" "$D/width_sweep.py" measure "$OUT/width_sweep$TAG.json" "$D/causal/codes" "${PAIRS[@]}")
+    SCORE=("$PY" "$D/width_sweep.py" score "$OUT/width_sweep$TAG.json" --latents 7 --figure "$OUT/width_sweep$TAG.png")
+    if [ "$DRY" = 1 ]; then
+        echo "${MEASURE[*]} > $OUT/width_measure$TAG.log"
+        echo "${SCORE[*]} > $OUT/width_sweep$TAG.txt"
+    else
+        echo "$(date +%H:%M) width_sweep into $OUT"
+        "${MEASURE[@]}" > "$OUT/width_measure$TAG.log" 2>&1 \
+            || { echo "Stage 74's width_sweep measure failed, see $OUT/width_measure$TAG.log"; exit 1; }
+        "${SCORE[@]}" > "$OUT/width_sweep$TAG.txt" 2>&1 \
+            || { echo "Stage 74's width_sweep score failed, see $OUT/width_sweep$TAG.txt"; exit 1; }
+    fi
+    [ -z "$TAG" ] && stage_report "$OUT" style_audit "${RUNS[@]}"  # once, over every width and seed
+    [ "$DRY" = 0 ] && echo "Stage 74 reports in $OUT: width_sweep$TAG.txt and .png first, then style_audit.txt"
 fi
 
 echo "$(date +%H:%M) all requested stages done"

@@ -3,7 +3,8 @@
 # runai_job.sh in the training image on the cluster checkout (REPO_PATH), so pull this commit there first.
 #   bash out/burden_feasibility_20261102/runai_submit.sh --dry-run [STAGE...]
 #   bash out/burden_feasibility_20261102/runai_submit.sh [STAGE...]
-# Set any of ADNI_DATA, ADNI_LABELS, ADNI_MASKS, ADNI_SPLIT, WHEELS and PYTHONUSERBASE to pass them to the job.
+# Set any of ADNI_DATA, ADNI_LABELS, ADNI_MASKS, ADNI_SPLIT, WHEELS and PYTHONUSERBASE (stage 68) or WIDTH_SEEDS,
+# WIDTH_UNITS, WIDTH_PARALLEL and WIDTH_WAIT_BANK (stage 74) to pass them to the job.
 # Resources: RUNAI_PROJECT, RUNAI_IMAGE, RUNAI_NODE_TYPE, RUNAI_CPU, RUNAI_CPU_LIMIT, RUNAI_MEMORY, RUNAI_MEMORY_LIMIT.
 # Progress: out/burden_feasibility_20261102/adni/runai.log in the checkout, then the stage's own logs.
 set -euo pipefail
@@ -29,7 +30,7 @@ if [[ ! "$JOB_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ || ${#JOB_NAME} -gt 63 ]]
 fi
 
 PASS=""
-for name in ADNI_DATA ADNI_LABELS ADNI_MASKS ADNI_SPLIT WHEELS PYTHONUSERBASE; do
+for name in ADNI_DATA ADNI_LABELS ADNI_MASKS ADNI_SPLIT WHEELS PYTHONUSERBASE WIDTH_SEEDS WIDTH_UNITS WIDTH_PARALLEL WIDTH_WAIT_BANK; do
     if [[ -n "${!name:-}" ]]; then
         PASS+="$name=$(printf '%q' "${!name}") "
     fi
