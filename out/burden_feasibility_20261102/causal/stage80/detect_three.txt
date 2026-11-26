@@ -1,0 +1,24 @@
+  c8_src_s42       fails  last 0.01/0.01  worst 0.05/0.06  rho1 0.59 rho2 0.46
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_refit80_control.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_ctrl_s42      fails  last 0.17/0.15  worst 0.22/0.19  rho1 0.49 rho2 0.49
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_refit80_suff.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_suff_s42      fails  last 0.13/0.08  worst 0.19/0.14  rho1 0.39 rho2 0.20
+  c8_src_s4        fails  last 0.01/-0.01  worst 0.22/0.19  rho1 0.62 rho2 0.39
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s4_refit80_control.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_ctrl_s4       fails  last -0.00/-0.01  worst 0.26/0.25  rho1 0.66 rho2 0.55
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_s4_refit80_suff.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_suff_s4       fails  last 0.07/0.01  worst 0.20/0.16  rho1 0.41 rho2 0.37
+  c8_src_s7        fails  last -0.00/-0.00  worst 0.03/0.03  rho1 0.68 rho2 0.50
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_a100_s7_refit80_control.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_ctrl_s7       fails  last 0.16/0.13  worst 0.20/0.17  rho1 0.62 rho2 0.47
+EXPORT ssl_uni_jitter_nopatch_restail_t104_causal_nofield_fixedpos_abl_codebatch_predict1_c8_20k_a100_s7_refit80_suff.npz {'code_train': (2, 2000, 8), 'gap_train': (2, 2000, 64), 'code_test': (2, 1000, 8), 'gap_test': (2, 1000, 64), 'zc_test': (1000, 9)} step 20000
+  c8_suff_s7       fails  last 0.13/0.07  worst 0.15/0.08  rho1 0.26 rho2 0.29
+
+  c8_ctrl      rho1 by rank (h holds, f fails): 0.49f < 0.62f < 0.66f; pairs right 0/0
+  c8_src       rho1 by rank (h holds, f fails): 0.59f < 0.62f < 0.68f; pairs right 0/0
+  c8_suff      rho1 by rank (h holds, f fails): 0.26f < 0.39f < 0.41f; pairs right 0/0
+
+  DETECTOR: AUC nan over 9 failures and 0 holders; within-cell pairs right 0/0 (needed 80%): described only (fewer than 2 holders or 2 failures)
+  stage 75's ranges as a cut: holders at or under .56 0/0, failures at or over .45 6/9; a cut at .50 classifies 5/9
+
+Saved out/burden_feasibility_20261102/causal/stage80/detect_three.json

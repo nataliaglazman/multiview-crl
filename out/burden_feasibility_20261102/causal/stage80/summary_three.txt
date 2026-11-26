@@ -1,0 +1,22 @@
+seed  source verdict (stage 75/76 | rescored)   control              suff
+   2  holds | -                      -                    -
+   3  holds | -                      -                    -
+   4  fails | fails rho1 0.62        fails rho1 0.66      fails rho1 0.41
+   5  holds | -                      -                    -
+   6  holds | -                      -                    -
+   7  fails | fails rho1 0.68        fails rho1 0.62      fails rho1 0.26
+   8  fails | -                      -                    -
+   9  fails | -                      -                    -
+  10  holds | -                      -                    -
+  11  holds | -                      -                    -
+  12  holds | -                      -                    -
+  13  holds | -                      -                    -
+  14  fails | -                      -                    -
+  15  fails | -                      -                    -
+  42  fails | fails rho1 0.59        fails rho1 0.49      fails rho1 0.39
+ctrl: holds in 0 of 7 failing codes and 0 of 8 holding codes
+suff: holds in 0 of 7 failing codes and 0 of 8 holding codes
+R1 repair (suff >= 4 of 7 failures): fail
+R2 no harm (suff >= 7 of 8 holders): fail
+R3 the term (suff - control >= 2 of 15): fail
+STAGE 80: incomplete: missing ctrl_s2, ctrl_s3, ctrl_s5, ctrl_s6, ctrl_s8, ctrl_s9, ctrl_s10, ctrl_s11, ctrl_s12, ctrl_s13, ctrl_s14, ctrl_s15, suff_s2, suff_s3, suff_s5, suff_s6, suff_s8, suff_s9, suff_s10, suff_s11, suff_s12, suff_s13, suff_s14, suff_s15

@@ -257,6 +257,7 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
 | `width_sweep.py` | stage 74: `measure` (GPU) each run's held-out InfoNCE on test subjects and own-part R² from its exported code; `score` (no torch) the elbow of the mean loss over widths against \|C\| + 1, own-part saturation width, figure (skipped without matplotlib). Item 63 |
 | `spare_units.py` | no torch: where a code's whitened directions go as width grows (own parts linearly, curves of the factors by boosting, shared outside the factors, view-private), and which factors the directions past the seventh are curves of. Item 63 |
 | `width_rules.py` | no torch: E-W's rules 2 (TwoNN of the widest code plus the bank's offset from its true latents) and 3 (smallest width with top-1 among all within 5% of the range below the widest's) on a width sweep's exports, with the rules' numbers in its docstring. `--self-test`. Item 64 |
+| `head_refit.py` | stage 80: fresh heads on a frozen run's cached pooled features, the recipe's objective (control) or with `warm.Sufficiency` on frozen targets (suff), code batches from the head's own code; saves a run any report reads; `summary` reads stage 80's rules from `pool_check.py detect`'s JSON |
 | `precision_audit.py` | the lesion-volume reading error in voxels at each stage (image filter on the residual, backbone map, GAP, pooled features, code), with the anatomy part handed to the readout; error by lesion size, error shared by the views, and the loss's reward for a sharper reading, also with lesion position and/or anatomy removed from the code. `--jitter-draws K` reads test scans moved by the run's training jitter (mean over K moves), `--split train` reads training subjects, and `precision_compare.py` puts conditions side by side. Two "weighted" price rows refit the critic to each code (one weight per unit inside the cosine; as trained, and with position and anatomy removed); rerunning the audit on a stored JSON adds them without redoing the rest |
 | `cca_readout.py` | CCA codes (top 14 or 24 canonical directions between T1 and FLAIR features, fitted on training subjects) from the pooled features and GAP, scored the same way; writes bundles |
 | `causal_bundle.py` + `causal()` | label-free (`eval.causal.latent_causal_discovery`) and decoded (`eval.protocol.compare_bundles --with-graph`) discovery against the true graph |
@@ -2081,6 +2082,57 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
       - Both rules read the code through the gauge's stored statistics (stage 78's question). TailCode's head is
         non-linear, so recomputing the gauge is not a per-unit rescaling and could move both.
 
+65. **Refitting the head of a failed 8-unit run on its frozen backbone does not repair it, with or without the
+    sufficiency term, and training on the leftover still pulls ρ1 into the holders' range (stage 80 on three failing
+    backbones, read 26 Nov 14:20, `causal/stage80/readouts_three.txt`, `detect_three.txt`; `head_refit.py`; no
+    backbone training).**
+    - **Why it was run.** Stage 77's term takes its targets from a momentum copy of the run's own backbone, so a run
+      can lower it by carrying less shared content as well as by explaining more; its training logs point that way
+      (section 10, stage 77 interim). A frozen backbone removes that route: the targets cannot move, so the term can
+      only fall by the head explaining more. In the failing codes the pooled features still read ventricle's and
+      burden's own parts better than the code (stage 64's own_variation, item 59), so a better head exists there.
+    - **What.** Three failing frozen-recipe codes: stage 64's seeds 42 and 4, stage 76 B's seed 7. Backbone and
+      pooling frozen (the gauge's stored statistics); the head replaced by a fresh one (head seed 0, both arms from the
+      same start) and trained 20,000 steps on cached frozen features (8 jitter draws per subject, the run's own
+      jitter), code batches every 500 steps from the head's own code (31 neighbours), batch 32, AdamW 1e-4, clip 2.
+      - control: the recipe's InfoNCE plus the prediction term (weight 1).
+      - suff: the same plus `warm.Sufficiency` (weight 1), its targets each view's whitened GAP, frozen.
+      - About 3 minutes a control head and 5 (alone) to 14 (two at once) a suff head on the PC.
+    - **Rules** (`head_refit.py`'s docstring, written before any result) cover all 15 frozen-recipe backbones: R1 suff
+      holds in at least 4 of the 7 failures, R2 in at least 7 of the 8 holders, R3 suff holds in at least 2 more than
+      control. The user asked for three failing backbones only, so this is described, not judged. Suff repaired 0 of
+      3, so R1 now needs all four unrun failures to hold.
+    - **Results, T1 / FLAIR** (holds: the own-parts spectrum's last value and the ventricle–burden worst direction
+      each at least .40 in both views; every code fails):
+
+      | code | ventricle own | burden own | last value | ventricle–burden worst | ρ1 |
+      |---|---|---|---|---|---|
+      | s42 original | .43 / .41 | .30 / .32 | .01 / .01 | .05 / .06 | .59 |
+      | s42 control | .50 / .46 | .42 / .44 | .17 / .15 | .22 / .19 | .49 |
+      | s42 suff | .43 / .40 | .37 / .37 | .13 / .08 | .19 / .14 | .39 |
+      | s4 original | .59 / .52 | .38 / .39 | .01 / −.01 | .22 / .19 | .62 |
+      | s4 control | .56 / .54 | .38 / .40 | .00 / −.01 | .26 / .25 | .66 |
+      | s4 suff | .56 / .52 | .36 / .34 | .07 / .01 | .20 / .16 | .41 |
+      | s7 original | .46 / .42 | .28 / .30 | .00 / .00 | .03 / .03 | .68 |
+      | s7 control | .56 / .52 | .36 / .36 | .16 / .13 | .20 / .17 | .62 |
+      | s7 suff | .54 / .48 | .34 / .32 | .13 / .07 | .15 / .08 | .26 |
+    - **Reading.**
+      - No head holds. A fresh head helps a little at seeds 42 and 7 (burden's own part +.06 to +.12, the last value
+        from 0 to .13–.17), never near .40: the best ventricle–burden direction is .26. Seed 4 does not move.
+      - The sufficiency term adds nothing on ventricle–burden beyond the control. What it adds is the strong factors
+        the control heads lost at seeds 4 and 7: whole factors, brain .76 / .77 and .84 / .85 and thickness .64 / .67
+        and .69 / .71 in the control against .93–.94 and .88–.90 with suff (`readouts_three.txt`).
+      - **ρ1 cannot be trained on.** Every suff head reads ρ1 .26–.41, inside the holders' range (.19–.56, items
+        59–61), and fails. The term explains what the views' GAP shares, mostly strong factors and their curves,
+        without splitting ventricle from burden: item 59's finding that the top shared leftover is not the lost own
+        part. Use ρ1 only on codes not trained on it, to rank seeds of one recipe.
+      - Why the control heads lost strong factors at seeds 4 and 7 is untested. A likely cause: code batches built
+        from a fresh head on a finished backbone match subjects on the strong factors from the first step, so InfoNCE
+        never pays for them, and the prediction term alone did not keep them.
+    - **Not run:** the other 12 backbones (4 failures, 8 holders). `causal/stage80/run_stage80.sh` runs them
+      (`SEEDS`, `TRAIN_ONLY`, `TAG`). `head_refit.py` needs `warm.Sufficiency` and `run_stage80.sh` needs
+      `pool_check.py`, both still uncommitted in the PC's checkout (stages 75–77).
+
 ## 8. Theory status (Yao et al. 2024; von Kügelgen et al. 2021)
 
 - **Inside the theory:** scan + residual input, separate encoders, independent jitter (a view-specific pose
@@ -3234,7 +3286,8 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
     seed 42), the four reports, the intrinsic dimension, the bundle exports, both discoveries, both tabular
     benchmarks and the factoriser.
   - **Run:** `bash out/burden_feasibility_20261102/run_pc.sh 56` (one training arm, then the reports).
-- **Stage 55 (built 19 Nov; not run; no training): individual effects and counterfactual outcomes.** The user asked
+- **Stage 55 (built 19 Nov; ran 19 Nov, recorded in section 10 on 26 Nov; no training): individual effects and
+  counterfactual outcomes.** The user asked
   for counterfactuals with the tabular data.
   - **Why.** The ATE (item 24) is an average. A counterfactual asks what one subject's outcome would have been under
     the treatment they did not get, so it needs the subject's own effect. The simulator stores both potential outcomes,
@@ -4081,6 +4134,50 @@ bash out/burden_feasibility_20261102/runai_submit.sh --dry-run
 
 ## 10. Recent stages and next steps
 
+**Read 26 Nov 14:20 (parallel session): stage 80 on three failing backbones (item 65).** A fresh head on a failed
+run's frozen backbone does not repair it, with or without the sufficiency term (0 of 3); the suff heads still read ρ1
+.26–.41, inside the holders' range. Do not train on ρ1. The other 12 backbones were not run (the user stopped after
+three).
+
+**Stage 77, interim from the cluster logs (26 Nov 13:17; described only; the rule waits for `run_pc.sh 77b`).**
+- 10 of 20 runs had finished: arm a seeds 16, 17, 18, 20, 25; arm b seeds 16, 17, 18, 24, 25. The rest were due by
+  about 15:30; then copy `runs/` and `logs/` back and run 77b. The Run:ai CLI token had expired (`runai login` on the
+  head node); the logs were read over ssh.
+- At step 20,000, warm.py's own evaluation reads every finished code worse than every stage 76 recipe run, failures
+  included, T1 / FLAIR where two: ventricle .66–.78 (a) and .56–.71 (b) against .82–.92; lesion volume .69–.81 /
+  .68–.85 (a) and .69–.78 / .71–.81 (b) against .83–.90 / .82–.90; temporal .67–.87 and .74–.83 against .88–.94.
+- The backbone's GAP reads the volume worse too: a .86–.90 / .84–.89, b .82–.85 / .84–.88, against .89–.94 /
+  .91–.95. The GAP bypasses the gauge, so the cost reaches the backbone: the term's targets come from the run's own
+  backbone, so a run can lower it by forgetting (item 65 froze the backbone to test the head alone).
+
+**Next, discussed with the user 26 Nov (neither adopted yet).**
+- **Selection:** the frozen recipe at five seeds, keep the code with the lowest ρ1. Label-free. On runs it never saw,
+  the lowest ρ1 among any five of stage 76's ten held in all 251 subsets with a holder; at a hold rate of one half,
+  five seeds all fail about 3% of the time; five seeds share one A100 job of about 2 hours. Rank seeds of one recipe
+  on one bank only; never compare recipes by ρ1, and never train on it (item 65).
+- **Identify wide, chart narrow:** train wide, where codes hold, then reach 8 units with a nonlinear autoencoder on
+  the part both views share, whitened. Item 63's spare units are curves of the factors and item 64's 16-unit codes
+  have the factors' intrinsic dimension, so a wide code is already close to an embedding of the content; a nonlinear
+  encoder can keep a factor once and let the decoder rebuild its curves, and a whitened weak direction counts as much
+  as a strong one. Every compression so far was linear (stage 65's redundancy and PCA, stage 75's merge). First test,
+  no image training: the fixed bank's five 10-unit codes against stage 65's linear compressions of the same parents.
+  Not built.
+
+**Recorded late (parallel session, 25–26 Nov).**
+- **Stage 55 ran on 19 Nov** (`causal/stage55/counterfactual{,_rbf}.{json,log}`; the 25 Nov status below said "built,
+  not run"). Individual effects, DR-learner R² on the image-score task, mean over views and seeds: fixed-bank 10-unit code
+  batches .70, 24-unit recipe .45, true factors .92. Burden's own part is the hardest modifier in every code (.27–.45
+  against .80 for the true factors).
+- **Omission gap** (`omission_gap.py`, `causal/omission/`; rules in its docstring, written before the results;
+  uncommitted on the PC): what one view's pooled features predict about the other view beyond the code. It is 0.4–1.9%
+  of the target's variance, largest in the failing 8-unit seeds, and there it carries ventricle's and burden's own
+  parts. It fails its own flag rule (2 of 4 cells): a per-view relative of ρ1, and weaker. About 80% of its estimate
+  is noise, so the training target built on it (an outside suggestion) was not built.
+- **Block–tabular discovery** for the supervisor's slides (`block_tabular.py`, `causal/supervisor_20261125/`;
+  uncommitted on the PC): the code minus its fit on the measured anchors, cut to the directions both views share, as
+  nodes in PC with the tabular variables. Block–tabular edge F1 .87–.89 (fixed-bank 10-unit code batches, the best
+  8-unit seed), .70 (24-unit recipe), .98 for the true own parts, 0 for untrained codes.
+
 **Ran 25 Nov, read 26 Nov: stage 73, why stage 68's evaluated code dipped. Answer: the gauge's stored statistics.
 Recomputed on clean training images, the code matches as well as the loss's own and the dip is gone** (built as stage
 70; renumbered when merged with the temperature arm's stage 70). Every `--real` eval now carries the
@@ -4189,7 +4286,7 @@ to scans through the manifest's IDs and dates.
   (temporal atrophy in most codes, burden at the fixed lesion site) and none of the brain-wide ones. The rotation
   passes its rule on the 24-unit codes and fails on the code-batch arm in FLAIR. Its discovery reports and the
   intrinsic dimension are not recorded here yet.
-- **Built, not run:** stage 55, no training: individual effects and counterfactual outcomes in the tabular benchmark
+- **Ran 19 Nov (recorded 26 Nov):** stage 55, no training: individual effects and counterfactual outcomes in the tabular benchmark
   (`--counterfactual`), on the same codes (section 9). Run it after stage 53, with stage 54 or alone.
 - **Stage 56 is read (item 46):** at 8 units, the cosine's matched width, the code-batch recipe gives up most of
   ventricle's and burden's own parts (.43 and .30 against .78 and .60) and 4 voxels of volume precision; the other
