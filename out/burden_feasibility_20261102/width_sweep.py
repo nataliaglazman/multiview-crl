@@ -194,8 +194,11 @@ def score(out_json, frac, latents, figure_path):
         f"k_own {summary['k_own']}; target |C| + 1 = {summary['target']}: " + ("PASS" if summary["passes"] else "FAIL")
     )
     if figure_path:
-        figure(summary, figure_path)
-        print(f"figure {figure_path} and its .csv")
+        try:
+            figure(summary, figure_path)
+            print(f"figure {figure_path} and its .csv")
+        except ModuleNotFoundError as e:  # the Run:ai image has no matplotlib: draw it elsewhere from OUT_JSON
+            print(f"no figure ({e}): rerun score with --figure where matplotlib is installed")
 
 
 def self_test():
